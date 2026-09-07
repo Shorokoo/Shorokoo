@@ -152,6 +152,7 @@ public class MemoryPassBenchmarkTests
     private const double ComputeRegressionFactor = 1.25;
     private const double RealPeakRegressionFactor = 1.10;
     private const long RealPeakNoiseFloorBytes = 1L << 20;
+    private const string BaselineStrategy = "Baseline";
 
     private const string MallocEnvironment =
         "MALLOC_MMAP_THRESHOLD_=16384 MALLOC_TRIM_THRESHOLD_=0 MALLOC_TOP_PAD_=0";
@@ -192,6 +193,17 @@ public class MemoryPassBenchmarkTests
             var was = baseline.Families[family];
             Assert.True(now.PeakBytes <= was.PeakBytes * PeakRegressionFactor);
             Assert.True(now.ComputeTime <= was.ComputeTime * ComputeRegressionFactor);
+
+            // A family the pass used to act on must still be acted on. The factors above are
+            // one-sided with slack, so a change that switches the pass off entirely on one
+            // family reads as a couple of percent and slips through; that is exactly how a
+            // premature stop in the rematerializer's candidate walk once disabled the pass on
+            // the one-layer encoder.
+            if (was.Strategy != BaselineStrategy)
+            {
+                Assert.NotEqual(BaselineStrategy, now.Strategy);
+                Assert.True(now.PeakBytes < now.UnoptimizedPeakBytes);
+            }
             if (was.RealPeakBytes is long wasReal && now.RealPeakBytes is long nowReal)
                 Assert.True(nowReal <= wasReal * RealPeakRegressionFactor + RealPeakNoiseFloorBytes);
         }

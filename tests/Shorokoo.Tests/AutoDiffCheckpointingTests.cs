@@ -389,14 +389,50 @@ public class AutoDiffCheckpointingCoverageTests
     }
 
     [Fact]
-    public void TestDrawsAreNeverRecomputedCoverage()
+    public void TestAnUnknownDimIsNeverPricedCoverage()
     {
+        Assert.True(new Shape(-1L, 1024L).Count < 0);
+        Assert.Equal(128L, new Shape(-1L, -1L, 128L).Count);
+        Assert.All((Shape[])[new Shape(-1L, 1024L), new Shape(-1L, -1L, 128L)],
+            s => Assert.Null(ShapeInferenceInterpreter.ShapeInfoForTest(s, DType.Float32)));
+        Assert.NotNull(ShapeInferenceInterpreter.ShapeInfoForTest(new Shape(2L, 4L), DType.Float32));
+    }
+
+    [Fact]
+    public void TestLivenessPeakMatchesTheEvaluatorsPeakCoverage()
+    {
+        var x = InputTensor<float32>("x", rank: 2);
+        var wide = OnnxOp.Concat([OnnxOp.Exp(x), x], axis: 0);
+        var graph = new InternalComputationGraph([x], [OnnxOp.Add(OnnxOp.ReduceSum(wide), OnnxOp.ReduceSum(x))]);
+        var shapeInfo = Infer(graph, [512, 512]);
+        var eval = new GraphEvaluator().Evaluate(graph, shapeInfo);
+
+        Assert.Equal(eval.PeakMemoryBytes, Rematerializer.LivenessPeakFor(graph, eval, shapeInfo));
+    }
+
+    [Fact]
+    public void TestDrawsAreNeverRecomputedAndOtherOpsAreCoverage()
+    {
+        string[] notRecomputable =
+        [
+            OpCodes.RANDOM_UNIFORM, OpCodes.RANDOM_NORMAL, OpCodes.RANDOM_UNIFORM_LIKE, OpCodes.RANDOM_NORMAL_LIKE,
+            OpCodes.BERNOULLI, OpCodes.MULTINOMIAL, OpCodes.DROPOUT,
+            InternalOpCodes.SHRK_RANDOM_UNIFORM, InternalOpCodes.SHRK_RANDOM_NORMAL, InternalOpCodes.SHRK_RANDOM_BITS,
+        ];
+        string[] recomputable =
+        [
+            OpCodes.RELU, OpCodes.MATMUL, OpCodes.EXP, OpCodes.CONV,
+            OpCodes.TOPK, OpCodes.ARG_MAX, OpCodes.UNIQUE,
+            InternalOpCodes.SHRK_RNG_UNIFORM, InternalOpCodes.SHRK_RNG_NORMAL, InternalOpCodes.SHRK_RNG_BITS,
+        ];
+        Assert.All(notRecomputable, op => Assert.False(Rematerializer.IsDeterministicOpCode(op)));
+        Assert.All(recomputable, op => Assert.True(Rematerializer.IsDeterministicOpCode(op)));
+
         var x = InputTensor<float32>("x", rank: 2);
         Assert.True(Recomputable(x, OnnxOp.Relu(x)));
         Assert.False(Recomputable(x, OnnxOp.RandomUniformLike(x, seed: 3f)));
         Assert.False(Recomputable(x, OnnxOp.RandomNormalLike(x, seed: 3f)));
         Assert.False(Recomputable(x, OnnxOp.Bernoulli(x, dtype: null, seed: 3f)));
-        Assert.False(Recomputable(x, OnnxOp.Dropout(x, null, null, seed: 3L).output));
     }
 
     [Fact]

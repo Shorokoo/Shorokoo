@@ -79,8 +79,11 @@ internal class GraphEvaluator
         var tensorLastUse = BuildTensorLastUse(nodes, walk);
         var consumerOpCodes = BuildConsumerOpCodes(nodes);
         var graphOutputs = new HashSet<FastTensorKey>(graph.Outputs);
-        // Resident for the whole run, never recycled and never written in place: the fed inputs,
-        // and the initializers ORT keeps (constants, parameter data).
+        // Never recycled into and never written in place: the fed inputs, and the initializers
+        // ORT keeps (constants, parameter data). Their buffers are still released at their last
+        // read, so the model charges them only while they are read, not for the whole run as ORT
+        // in fact does; that understates a step whose initializers are large next to its
+        // activations, and is the next fidelity gap to close after the two the benchmark names.
         var graphInputs = new HashSet<FastTensorKey>(graph.Inputs);
         foreach (var node in nodes)
             if (node.IsModelInput() || node.IsModelParamData() || node.OpCode == Shorokoo.Core.Nodes.NodeDefinitions.OpCodes.CONSTANT)
@@ -305,7 +308,6 @@ internal class GraphEvaluator
             var buffer = _buffers[id];
             if (aliasBytes > buffer.Bytes) buffer.Bytes = aliasBytes;
             buffer.Aliases++;
-            if (_graphOutputs.Contains(alias)) buffer.IsGraphOutput = true;
             _bufferOf[alias] = id;
         }
 

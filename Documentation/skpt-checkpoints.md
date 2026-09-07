@@ -191,7 +191,7 @@ Persistence.SaveTrainingCheckpointToSkpt(checkpoint, "run.skpt");
 // Resume in a fresh process: rebuild the rig from the same graphs, then load.
 var rig     = TrainingRig.FromScratch(modelGraph, lossGraph, optimizerGraph, sample, hypers);
 var resumed = rig.LoadCheckpointFromSkpt("run.skpt");
-var next    = rig.TrainStep(resumed, inputBatch, targetBatch);   // trainstep compiled once internally
+var next    = rig.TrainStep(resumed, inputBatch, targetBatch);   // trainstep compiled internally, cached per fed shape
 ```
 
 Or resume from the file **alone**, with no model/loss/optimizer graphs in hand — the static

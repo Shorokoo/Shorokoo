@@ -205,17 +205,19 @@ internal class Rematerializer
                 batchPhase = false;
             }
 
-            // The ranking is by estimated relief, so once the first few singles measure worse
-            // the rest will too; spending the whole budget on them buys nothing (encoder2:
-            // 48 evaluations, zero commits, two seconds per call).
+            // Every ranked single is worth an evaluation: the ranking is by ESTIMATED relief,
+            // and the estimate is wrong often enough that the committed candidate can sit well
+            // down the list. An earlier version stopped after twelve rejections in a row to save
+            // the evaluations a family like encoder2 spends without committing; that stop also
+            // walked past the one candidate the one-layer encoder had, turning the pass off on
+            // it entirely. The budget is the only stop.
             var accepted = false;
-            var rejections = 0;
             foreach (var candidate in candidates)
             {
-                if (evaluations >= MaxEvaluationsPerCall || rejections >= MaxConsecutiveSingleRejections) break;
+                if (evaluations >= MaxEvaluationsPerCall) break;
                 tried.Add(candidate.Identity);
                 var trial = Trial([candidate], Placement.AfterProducer);
-                if (!Better(trial)) { rejections++; continue; }
+                if (!Better(trial)) continue;
                 Commit(trial!, [candidate], Placement.AfterProducer);
                 accepted = true;
                 break;
@@ -309,9 +311,6 @@ internal class Rematerializer
     /// </summary>
     internal const int MaxEvaluationsPerCall = 48;
 
-    /// <summary>How many ranked single candidates may measure worse in a row before the round gives up.</summary>
-    internal const int MaxConsecutiveSingleRejections = 12;
-
     /// <summary>A schedule position is in the peak region when its live bytes are at least
     /// this fraction of the peak. Freeing memory at one position exposes the next-highest,
     /// so targets are ranked over the whole region rather than the single peak node.</summary>
@@ -322,6 +321,14 @@ internal class Rematerializer
     /// walk (<see cref="NodeEvaluationInfo.NodeIndex"/> maps a position to its node).
     /// Positions are for analysis only; every rewrite is keyed by node identity.
     /// </summary>
+    /// <summary>
+    /// The peak <see cref="Liveness"/> reads out of an evaluation. It must equal the evaluator's
+    /// own peak: the liveness profile is what the candidate search targets, and a profile that
+    /// disagrees puts the peak region on the wrong nodes.
+    /// </summary>
+    internal static long LivenessPeakFor(InternalComputationGraph graph, GraphEvaluationResult eval, ShapeInferenceResult shapeInfo)
+        => Liveness.Build(graph, eval, shapeInfo).Peak;
+
     private sealed class Liveness
     {
         public required IList<FastNode> Nodes { get; init; }
@@ -620,7 +627,7 @@ internal class Rematerializer
         {
             if (!live.Producer.TryGetValue(key, out var producer)) return false;
             if (visited.Contains(producer.Key)) return true;
-            if (!CanClone(producer) || live.ScopeDepth[live.PosOf[producer.Key]] != 0) return false;
+            if (!IsRecomputable(producer) || live.ScopeDepth[live.PosOf[producer.Key]] != 0) return false;
             if (shapeInfo.GetTensorInfo(key) is null) return false;
             if (maxNodes is int max && order.Count >= max) return false;
             visited.Add(producer.Key);
@@ -659,7 +666,7 @@ internal class Rematerializer
         bool Recomputable(FastTensorKey key)
             => interior.Contains(key)
             && live.Producer.TryGetValue(key, out var p)
-            && CanClone(p)
+            && IsRecomputable(p)
             && live.ScopeDepth[live.PosOf[p.Key]] == 0
             && shapeInfo.GetTensorInfo(key) is not null;
 
@@ -784,8 +791,6 @@ internal class Rematerializer
         return (copy, newToOriginal);
     }
 
-    private static bool CanClone(FastNode producer) => IsRecomputable(producer);
-
     /// <summary>
     /// Whether a second instance of <paramref name="producer"/> computes the same value: a
     /// single-output executable op that is not a scope, function or input, and not a draw. A
@@ -797,8 +802,22 @@ internal class Rematerializer
     internal static bool IsRecomputable(FastNode producer)
         => !(producer.IsOpenNode() || producer.IsCloseNode() || producer.IsFunction()
              || producer.IsModelInput() || producer.IsModelParamData())
-        && !NonDeterministicOps.Contains(producer.OpCode)
+        && IsDeterministicOpCode(producer.OpCode)
         && producer.FullOutputs.Values.Sum(s => s.Count(k => k is not null)) == 1;
+
+    /// <summary>
+    /// Whether a second instance of <paramref name="opCode"/> on the same inputs computes the
+    /// same value. False for the draws, whose clone is a second sample. An op whose result on a
+    /// tie is implementation-defined is fine: the clone runs the same kernel on the same inputs
+    /// and breaks the tie the same way. The hazard is a value that depends on state other than
+    /// the node's inputs.
+    ///
+    /// <para>Denial is by op code, which is coarser than it could be: a training step's dropout
+    /// draw reaches the pass as a <b>keyed</b> <c>shrk_RandomUniform</c>, whose verbatim clone
+    /// would be value-identical, and keyed and unkeyed draws share the op code. So this gives up
+    /// a rematerialization at every dropout layer to stay safe on the unkeyed ones.</para>
+    /// </summary>
+    internal static bool IsDeterministicOpCode(string opCode) => !NonDeterministicOps.Contains(opCode);
 
     private static readonly HashSet<string> NonDeterministicOps =
     [
@@ -814,7 +833,7 @@ internal class Rematerializer
     /// </summary>
     private static FastNode? CloneProducerForRecompute(FastNode producer)
     {
-        if (!CanClone(producer)) return null;
+        if (!IsRecomputable(producer)) return null;
 
         var freshKey = FastNodeKey.New();
 

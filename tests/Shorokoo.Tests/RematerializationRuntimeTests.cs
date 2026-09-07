@@ -51,22 +51,23 @@ public class RematerializationRuntimeTests
         Assert.True(survivingKept * 2 >= clones.Length);
     }
 
+    /// <summary>
+    /// The training step's own sessions get the profile that keeps its recomputation; a graph
+    /// compiled through the ordinary entry point does not. (Whether that profile leaves the
+    /// calling thread's denormals alone can only be asked of the first ORT session in a process,
+    /// so it is asked in <c>DenormalTrainingSessionTests</c>, which gets one of its own.)
+    /// </summary>
     [Fact]
-    public void TestTrainingStepSessionLeavesTheCallingThreadsDenormalsAlone()
+    public void TestOnlyTheRigsOwnSessionsGetTheTrainingStepProfile()
     {
-        var values = new float[8 * 3 * 64 * 64];
-        NamedModelParam[] sample = [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([8L, 3L, 64L, 64L], values))];
-        var rig = TrainingRig.FromScratch(MemoryPassConv.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, sample, 0.01f);
-        var ckpt = rig.CreateInitialCheckpoint();
-        rig.TrainStep(ckpt, rig.InputDef.FromOrderedData(TensorData([8L, 3L, 64L, 64L], values)), rig.TargetDef.FromOrderedData(TensorData([8L, 32L], new float[256])));
+        var x = InputTensor<float32>("x", rank: 2);
+        var graph = new InternalComputationGraph([x], [OnnxOp.Relu(x)]);
 
-        Assert.Equal(BitConverter.SingleToInt32Bits(1e-40f), BitConverter.SingleToInt32Bits(TimesOne(1e-40f)));
-        Assert.Equal(ShorokooGraphOptimization.TrainingStep, ComputeContext.Default.Compile(rig.TrainingStepPureGraph.ToInternal(), null, trainingStep: true).Optimization);
-        Assert.Equal(ShorokooGraphOptimization.EnableAll, ComputeContext.Default.Compile(rig.TrainingStepPureGraph).Optimization);
+        Assert.Equal(ShorokooGraphOptimization.TrainingStep,
+            ComputeContext.Default.Compile(graph, inputDims: null, trainingStep: true).Optimization);
+        Assert.Equal(ShorokooGraphOptimization.EnableAll,
+            ComputeContext.Default.Compile(graph, inputDims: null, trainingStep: false).Optimization);
     }
-
-    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
-    private static float TimesOne(float x) => x * 1f;
 
     private static Dictionary<FastNodeKey, string> EmittedNames(InternalComputationGraph graph)
     {

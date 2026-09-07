@@ -63,7 +63,7 @@ namespace Shorokoo
         /// <see cref="ComputeContext.Compile(ComputationGraph)"/> runs ONNX Runtime's
         /// common-subexpression pass over it, which merges every recomputation back into the
         /// tensor it exists to free — the rig's own sessions therefore use
-        /// <see cref="ShorokooGraphOptimization.TrainingStep"/>. A caller compiling this graph
+        /// <see cref="Shorokoo.Core.Inference.Abstractions.ShorokooGraphOptimization.TrainingStep"/>. A caller compiling this graph
         /// to observe what the rig runs must ask for that profile too.</para>
         /// </summary>
         public ComputationGraph TrainingStepPureGraph { get; private set; } = null!;

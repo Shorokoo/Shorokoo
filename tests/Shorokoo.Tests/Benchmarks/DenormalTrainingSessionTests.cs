@@ -26,6 +26,33 @@ namespace Shorokoo.Tests.Benchmarks;
 [Collection(SerialMeasurement.Name)]
 public class DenormalTrainingSessionTests
 {
+    /// <summary>
+    /// A session built under the rig's profile must not flush the calling thread's denormals.
+    /// ONNX Runtime applies <c>session.set_denormal_as_zero</c> to the constructing thread once
+    /// per process, under a <c>call_once</c>, so this can only be asked of the process's FIRST
+    /// session — which is what this class's own <c>dotnet test</c> invocation provides, and why
+    /// the assertion cannot live in the parallel coverage suite. Keep it the first test to build
+    /// a session in this class.
+    /// </summary>
+    [Fact]
+    public void TestTheTrainingProfilesFirstSessionLeavesTheCallingThreadsDenormalsAlone()
+    {
+        var x = InputTensor<float32>("x", rank: 2);
+        var proto = FastOnnxModelBuilder.BuildInternalOnnxModel(
+            new InternalComputationGraph([x], [OnnxOp.Relu(x)]), prepForOnnx: true);
+        var stream = new MemoryStream();
+        ProtoBuf.Serializer.Serialize(stream, proto);
+
+        using var options = new SessionOptions();
+        OrtSessionFactory.Configure(options, ShorokooGraphOptimization.TrainingStep, ShorokooLogSeverity.Fatal);
+        using (new InferenceSession(stream.ToArray(), options)) { }
+
+        Assert.Equal(BitConverter.SingleToInt32Bits(1e-40f), BitConverter.SingleToInt32Bits(TimesOne(1e-40f)));
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static float TimesOne(float x) => x * 1f;
+
     [Fact(Skip = "Shorokoo/Shorokoo#252: attention gradients are denormal and MLAS GEMM runs ~7× slower; set_denormal_as_zero leaks FTZ/DAZ into the calling thread")]
     public void TestAttentionMatMulsDoNotPayForDenormalsInTheTrainingSession()
     {

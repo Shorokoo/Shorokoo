@@ -77,12 +77,14 @@ what gets allocated; the framework's own memory benchmark records the resident p
 of one training step next to the modelled one, and the two agree to within about
 10% on every graph in it except a conv stack, whose im2col workspace the model does
 not see, and the LSTM step, whose Loop body the model walks once. Measured that
-way, unoptimized to optimized: an MLP 5.6 to 4.3 MiB, a conv stack 28.7 to 24.6, a
-one-layer transformer encoder 19.6 to 19.0, a two-layer one 37.3 to 35.8, dense
-attention unchanged, chunked attention 5.9 to 5.0 — for at most a few percent more
+way, unoptimized to optimized: an MLP 5.5 to 4.2 MiB, a conv stack 28.6 to 24.7, a
+one-layer transformer encoder 19.5 to 19.0, a two-layer one 37.2 to 35.7, dense
+attention unchanged, chunked attention 5.8 to 5.0 — for at most a few percent more
 kernel time. The pass leaves a graph whose backward pass runs through
-a recurrent op untouched: its evaluator walks a Loop body once where ORT runs it per
-iteration, and on the LSTM step acting on that model made the real peak worse.
+a recurrent op untouched — and not a recurrent one only: any graph carrying a scope at all, a
+forward `If` included, comes back as it went in, because the evaluator walks a
+scope body once where ORT runs it per iteration, and on the LSTM step acting on
+that model made the real peak worse.
 
 Two things the rig does around that pass matter more than the pass itself for a
 step's memory. The training-step session is compiled for the shapes it is fed, so

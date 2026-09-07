@@ -272,7 +272,7 @@ internal class MemoryAwareScheduler
             scheduled.Add(best);
 
             // Decrement consumer counts for inputs
-            foreach (var input in best.Inputs)
+            foreach (var input in inputsOf[best])
             {
                 if (input is null) continue;
                 if (remainingConsumers.ContainsKey(input.Value))

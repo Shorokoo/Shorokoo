@@ -926,14 +926,16 @@ negligible at long sequences and very much not at short ones:
 
 | attention calls | `d` | peak | in score blocks |
 |---|---|---|---|
-| 1 | 32 | 6.9 MiB | 3.5 |
-| 1 | 64 | 8.5 MiB | 4.3 |
-| 1 | 128 | 11.6 MiB | 5.8 |
-| 2 | 32 | 12.0 MiB | 6.0 |
-| 2 | 64 | 14.6 MiB | 7.3 |
+| 1 | 32 | 6.9 MiB | 3.4 |
+| 1 | 64 | 8.6 MiB | 4.3 |
+| 1 | 128 | 11.8 MiB | 5.9 |
+| 2 | 32 | 11.9 MiB | 6.0 |
+| 2 | 64 | 14.4 MiB | 7.2 |
 
 and it scales the way the formula says: doubling the batch (`N = 4`, a 4 MiB block) gives
-14.5 MiB, doubling the sequence (`L = 512`, an 8 MiB block) gives 26.5 MiB.
+14.2 MiB, doubling the sequence (`L = 512`, an 8 MiB block) gives 26.3 MiB. Read these to about
+±0.3 MiB: they are single readings of a resident high-water mark, and the allocator moves that
+much between runs.
 
 A rule that fits every one of those from above, so it over-budgets rather than under-:
 
@@ -962,15 +964,15 @@ chunk gets a `queryOffset` causal mask, so it still masks absolute positions).
 
 **Measure it before you rely on it, and expect to pay compute for it.** It shrinks the
 score-sized tensors by `c`, and what it saves depends on how much of the peak they are;
-what it costs is `c` MatMul and Softmax launches instead of one, and the CPU kernel time of
-the step shows it. On the model above at `c = 4` (peak measured as above, kernel time from
-ONNX Runtime's profiler, same step):
+what it costs is `c` MatMul and Softmax launches instead of one. On the model above at `c = 4`,
+with peak measured as above and compute as the pass's own model of the step, which unlike a
+kernel-time reading is reproducible:
 
-| `d` | `L` | dense | chunked | peak | kernel time |
+| `d` | `L` | dense | chunked | peak | modelled compute |
 |---|---|---|---|---|---|
-| 32 | 256 | 6.9 MiB | 5.0 MiB | **29% better** | +54% |
-| 64 | 256 | 8.5 MiB | 7.1 MiB | **17% better** | +34% |
-| 32 | 512 | 26.5 MiB | 16.7 MiB | **37% better** | +23% |
+| 32 | 256 | 6.9 MiB | 5.1 MiB | **26% better** | +41% |
+| 64 | 256 | 8.6 MiB | 7.1 MiB | **18% better** | +37% |
+| 32 | 512 | 26.3 MiB | 16.5 MiB | **37% better** | +22% |
 
 So it is worth trying when a run is close to fitting, and it pays best where the score
 block dominates — long sequences, small head dims — which is exactly where you need it;
@@ -1608,7 +1610,7 @@ var targetBatch = MakeBatch("targets", "Target", targetData);
 var ckpt = rig.CreateInitialCheckpoint();
 for (int i = 0; i < 15; i++)
 {
-    ckpt = rig.TrainStep(ckpt, inputBatch, targetBatch);  // compiled once internally, then reused
+    ckpt = rig.TrainStep(ckpt, inputBatch, targetBatch);  // compiled internally, cached per fed input shape
     Console.WriteLine($"step {i}: loss {ckpt.Loss}");
 }
 ```

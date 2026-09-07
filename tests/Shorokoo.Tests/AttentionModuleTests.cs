@@ -107,10 +107,12 @@ public class AttentionModuleTests
         return TensorData([8L], vals);
     }
 
-    // Shorokoo/Shorokoo#245: an invalid Slice (axis -2 of a rank-1 tensor) raises cleanly
-    // on its own but SIGSEGVs inside a larger graph, taking the whole run down rather than
-    // failing one test. Unskip when #245 is fixed; the expectation below is already right.
-    [Fact(Skip = "Shorokoo/Shorokoo#245: crashes the test host instead of raising")]
+    // Shorokoo/Shorokoo#245, closed won't fix as an ONNX Runtime bug: an invalid Slice
+    // (axis -2 of a rank-1 tensor) SIGSEGVs inside ORT's GatherSliceToSplitFusion whenever
+    // the operand's rank is not statically resolvable, taking the whole run down rather than
+    // failing one test. The skip is permanent, not pending a fix: what it asserts is the
+    // behaviour we want and do not get.
+    [Fact(Skip = "Shorokoo/Shorokoo#245: won't fix — ORT crashes the test host instead of raising")]
     public void TestSliceOnAbsentAxisRaisesRatherThanCrashing()
     {
         Assert.Throws<Microsoft.ML.OnnxRuntime.OnnxRuntimeException>(() =>

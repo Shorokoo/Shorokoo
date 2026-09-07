@@ -182,11 +182,12 @@ public partial class AttnChunkedGradientMatchesDense
 }
 
 /// <summary>
-/// Pin for Shorokoo/Shorokoo#245: a Slice on an axis the tensor does not have is caught
-/// cleanly on its own, but segfaults the process once the graph around it is big enough.
-/// The mask here is rank-1, sliced on axis -2, inside a two-block Concat. Nothing in-tree
-/// builds this any more — SliceMaskQueryAxis leaves a query-broadcasting mask alone — so
-/// this exists only to hold the backend fault.
+/// Pin for Shorokoo/Shorokoo#245, closed won't fix as an ONNX Runtime bug: a Slice on an
+/// axis the tensor does not have segfaults ORT's GatherSliceToSplitFusion whenever the
+/// operand's rank is not statically resolvable — which it is not here, since the session
+/// compiles with symbolic input dims. The mask is rank-1, sliced on axis -2, inside a
+/// two-block Concat. Nothing in-tree builds this any more — SliceMaskQueryAxis leaves a
+/// query-broadcasting mask alone — so this exists only to hold the backend fault.
 /// </summary>
 [Module]
 public partial class AttnSliceOnAbsentAxisInConcat

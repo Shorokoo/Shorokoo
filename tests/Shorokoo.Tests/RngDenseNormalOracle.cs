@@ -29,7 +29,7 @@ namespace Shorokoo.Tests;
 /// <para><b>What this oracle does and does not check.</b> It pins the <i>decode</i>. It does not
 /// re-derive <see cref="DenseNormalTable"/>, which needs a 320-bit <c>erf</c> and is generated
 /// offline; the table's own correctness — that every entry code is the exact ideal breakpoint, that
-/// no float that earns a code is starved — is established by the census in the ShorokooDev harness,
+/// no float that earns a code is starved — is established offline by the generator's own census,
 /// not here. So oracle and graph share the table, and a fault in the table would be invisible to
 /// both.</para>
 /// </summary>

@@ -114,7 +114,7 @@ public partial class MemoryPassLstm
 /// 0.2 MB; the largest of five is kept, since the process can only mask a peak, never inflate
 /// one); without it, <c>RealPeakBytes</c> is recorded
 /// as <c>null</c>, the JSON carries a note saying why, and only the modelled columns are gated.
-/// The gate command in <c>CLAUDE.md</c> sets the variables. <c>KernelTimeMs</c> — the summed
+/// The gate invocation that runs this class sets the variables. <c>KernelTimeMs</c> — the summed
 /// kernel time of one step from ORT's profiler, nested subgraph kernels not double counted — and
 /// the execution-order figures need no environment and are always recorded; they use a second
 /// session with the rig's default arena, run after both memory readings, since the profiler's

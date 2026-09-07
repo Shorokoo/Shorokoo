@@ -34,20 +34,33 @@ var concreteArchitecture = graph.ToConcreteArchitecture(inputHints, computeConte
 
 ## Available Debug Points
 
-The `GraphCreationPoint` enum declares 13 values, but only these five are actually written today:
+Every `GraphCreationPoint` names a pass that runs, so every point you request writes its file. The
+points are listed here in the order the pipeline reaches them — they do not cover every stage, so to
+see that a stage with no point of its own has been reached, watch the build instead
+([below](#watching-a-build-while-it-runs-buildprogress)).
 
-- `AfterInlineAllModulesAndFunctions` - After inlining all modules and functions
-- `AfterProcessTrainableParameters` - After processing trainable parameters
-- `AfterFirstSimplify` - After the first simplification pass
-- `AfterExpandAutoGrad` - After autodiff expansion
-- `FinalGraph` - The final concrete architecture graph
+- `AfterApplyIdentifierTemplates` — After local `ModelId`s are assigned. A graph built from modules
+  already carries them, so this snapshot is normally the graph you passed in: the baseline to diff
+  the later points against
+- `AfterInlineAllModulesAndFunctions` — After every sub-module and function is inlined
+- `AfterInjectRngExecutionCounter` — After the model-global RNG execution counter
+  (`RngExecutionCounter`, see [rng-configuration.md](rng-configuration.md)) is wired into every
+  runtime random feed
+- `AfterConvertToIdRefModelParams` — After parameter references become id-refs
+- `AfterUnpackModelStruct` — After model structs, model hyperparameters and model ids are unpacked
+- `AfterUnpackTensorStructs` — After tensor structs are unpacked into their individual tensors
+- `AfterProcessTrainableParameters` — After those id-refs are resolved into the trainable parameters
+  themselves
+- `AfterFirstSimplify` — After the first simplification pass: constant folding, loop unrolling and
+  branch selection
+- `AfterLowerAttributeTensorOps` — After Shorokoo's operator variants (e.g. `SHRK_CONV`) are lowered
+  to their standard ONNX counterparts
+- `AfterExpandAutoGrad` — After autodiff expansion
+- `FinalGraph` — The final concrete architecture graph, as returned
 
-The remaining eight — `AfterProcessAllModelHyperparamRefs`, `AfterProcessModelSequences`,
-`AfterProcessAccessibleModuleSetHyperparams`, `AfterUnrollModuleLoop`, `AfterSimplify`,
-`AfterSimplifyTrainableParamInitializers`, `AfterLowerStateUpdateNodes`, `AfterSecondSimplify` —
-are **silent no-ops**: requesting one writes no file and reports nothing
-([#224](https://github.com/Shorokoo/Shorokoo/issues/224)). To see that a stage of the pipeline the
-enum does not cover has been reached, watch the build instead (next section).
+The names are historical, so they do not always match the stage names a progress sink reports:
+`AfterFirstSimplify` follows the stage reported as `Simplify`, and `AfterProcessTrainableParameters`
+the one reported as `ConvertModelParamIdRefToModelParam`.
 
 ## Alternative Construction
 

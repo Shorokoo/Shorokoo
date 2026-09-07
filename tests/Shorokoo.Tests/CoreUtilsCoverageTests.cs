@@ -17,8 +17,10 @@ namespace Shorokoo.Tests;
 /// <see cref="InferenceBackend"/> deployment-folder discovery and selection policy, the typed
 /// value-handle conversions, <c>ShapeUtils</c>' argument validation for <c>Reshape</c>'s
 /// <c>keepAxes</c>, the <see cref="AtomicFileWriter"/> temp-and-rename commit protocol
-/// (crash-window fault injection, stale-temp sweep, retain-last-N rotation), and the
-/// public-API shape guard against a <c>params</c> array sitting behind an optional parameter.
+/// (crash-window fault injection, stale-temp sweep, retain-last-N rotation), the
+/// <see cref="DebugRequests"/> snapshot hook firing at every <see cref="GraphCreationPoint"/>,
+/// and the public-API shape guard against a <c>params</c> array sitting behind an optional
+/// parameter.
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
@@ -654,9 +656,7 @@ public class CoreUtilsCoverageTests
         finally { Directory.Delete(clean, recursive: true); }
     }
 
-    // Shorokoo/Shorokoo#224: 8 of the 13 GraphCreationPoint values are never passed to
-    // DebugRequests.PrintDebug, so requesting one writes no snapshot and says nothing.
-    [Fact(Skip = "Shorokoo/Shorokoo#224: most GraphCreationPoint values are silent no-ops")]
+    [Fact]
     public void TestEveryDebugRequestPointProducesItsSnapshot()
     {
         var dir = Path.Combine(Path.GetTempPath(), $"shrk_debugpoints_{Guid.NewGuid():N}");
@@ -672,7 +672,9 @@ public class CoreUtilsCoverageTests
             model.ToConcreteArchitecture(hints, new ComputeContext(),
                 new DebugRequests(points.Select(p => (p, Path.Combine(dir, $"{p}.cs")))));
 
-            Assert.Equal(points, points.Where(p => File.Exists(Path.Combine(dir, $"{p}.cs"))).ToArray());
+            bool Written(GraphCreationPoint p) => new FileInfo(Path.Combine(dir, $"{p}.cs")) is { Exists: true, Length: > 0 };
+
+            Assert.Equal(points, points.Where(Written).ToArray());
         }
         finally { if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true); }
     }

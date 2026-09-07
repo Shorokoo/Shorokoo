@@ -158,8 +158,8 @@ namespace Shorokoo.Graph
             // FastSimplify above has already constant-folded and unrolled loops, so the geometry
             // inputs are resolvable here. inputHints supplies sample values for the QEE/ORT
             // resolution fallbacks; the following FastSimplify folds the lowered ops. Geometry that
-            // survives the unroll still varying per iteration cannot become a static attribute and
-            // is refused here rather than resolved to one iteration's value.
+            // still varies per iteration after the unroll cannot become a static attribute and is
+            // refused here rather than resolved to one iteration's value.
             Stage("LowerAttributeTensorOps");
             FastLowerAttributeTensorOps.Process(fastGraph, inputHints, computeContext);
             DebugPrintFast(fastGraph, debugRequests, GraphCreationPoint.AfterLowerAttributeTensorOps);

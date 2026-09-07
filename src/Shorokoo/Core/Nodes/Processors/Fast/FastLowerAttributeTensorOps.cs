@@ -35,9 +35,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// every iteration with the one value the resolution cascade happened to produce. Such geometry
     /// — an attribute-source tensor that <see cref="FastScopeHelper.BuildPerIterationTensors"/>
     /// reports as varying across the iterations of a loop the unroll left rolled — is therefore a
-    /// hard build error, matching the contract on <c>ToConcreteArchitecture</c>. Only geometry that
-    /// varies is refused: a rolled loop is otherwise lowered as usual, as is a variant op reading a
-    /// rolled loop's result, which is computed once.</para>
+    /// hard build error, matching the contract on <c>ToConcreteArchitecture</c>. Only geometry
+    /// reached from a loop's index, trip count or carries is refused: a rolled loop is otherwise
+    /// lowered as usual, as is a variant op reading a rolled loop's result, which is computed
+    /// once.</para>
     ///
     /// <para>Variant ops can appear in the main graph and inside <see cref="Function"/> bodies;
     /// both are lowered (function bodies use strategy 1 only, since top-level sample inputs do not
@@ -69,7 +70,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // Lower variant nodes in the main graph by mutating them in place. Geometry that still
             // differs per iteration here sits in a loop the unroll could not flatten, so it cannot
             // become a static attribute — LowerNode refuses it.
-            var perIteration = FastScopeHelper.BuildPerIterationTensors(graph);
+            var perIteration = HasVariantOps(graph)
+                ? FastScopeHelper.BuildPerIterationTensors(graph)
+                : [];
             foreach (var node in graph.Nodes)
                 if (AttributeTensorOpRegistry.Specs.TryGetValue(node.OpCode, out var spec))
                     LowerNode(node, spec, graph, sampleInputs, compute, perIteration);

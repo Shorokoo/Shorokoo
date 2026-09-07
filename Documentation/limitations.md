@@ -32,24 +32,25 @@ everywhere except one place: geometry that differs from one iteration of a loop
 to the next, in a loop that stays rolled. There the whole loop is a single Conv
 node, and no single attribute value is right for all of its iterations.
 
-A loop stays rolled when its trip count is not a compile-time constant. Such a
-graph is refused when the architecture is concretized, naming the geometry that
-varies:
+A loop stays rolled whenever the unroll declines it — most often because its
+trip count is not a compile-time constant, though a handful of body shapes
+decline too. Such a graph is refused when the architecture is concretized,
+naming the geometry that varies:
 
 ```
 the 'pads' geometry of 'shrk_Conv' varies per iteration of a loop that was not
 unrolled, so it cannot be lowered to the static 'pads' attribute of 'Conv' ...
 ```
 
-Either give the loop a constant trip count — `LoopAPI.Iterate(Scalar(3L))`,
-which unrolls, so each iteration becomes its own Conv node with its own
-geometry — or compute the geometry from something other than the loop's index
-and carries: a literal, a `[Hyper]` value, or an input's shape.
+Either give the loop a compile-time-constant trip count, which normally unrolls
+it — `LoopAPI.Iterate(Scalar(3L))` — so each iteration becomes its own Conv node
+with its own geometry; or compute the geometry from something that does not
+track the iteration: a literal, a `[Hyper]` value, or an input's shape.
 
 Constant and input-derived geometry inside a dynamic loop is fine, and so is
 geometry computed *from* a dynamic loop's result — that value is computed once,
-and the Conv reading it runs once. What is refused is geometry reached from
-`ctx.IterationIndex` or a loop carry, whether or not the value it ends up
+and the Conv reading it runs once. What is refused is geometry that still
+follows a loop's iteration where it is used, whether or not the value it ends up
 holding happens to repeat: the check is on where the geometry comes from, since
 a carry's value is not knowable at build time.
 

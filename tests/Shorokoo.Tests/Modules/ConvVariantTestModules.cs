@@ -159,12 +159,10 @@ namespace Shorokoo.Tests.Modules
     }
 
     /// <summary>
-    /// <see cref="ConvVariantDynamicTripLoopGeometry"/> with the index-derived geometry passed
-    /// through a nested rolled loop as a carry before it reaches the conv. The value still differs
-    /// on every outer iteration, so it must still be refused: the outer loop's variation enters the
-    /// inner loop through the inner LOOP_OPEN's carry initializers, and an analysis that reads only
-    /// a LOOP_CLOSE's own inputs when shedding the inner loop's variation loses it and bakes
-    /// iteration 0's geometry again.
+    /// <see cref="ConvVariantDynamicTripLoopGeometry"/>'s per-iteration geometry carried through a
+    /// nested rolled loop before it reaches the conv: an outer loop's variation must survive a
+    /// nested one. Refused rather than self-checking, so it carries no reference —
+    /// <see cref="ConvVariantDynamicTripLoopGeometry"/> holds the one reference for this family.
     /// </summary>
     [Module]
     public partial class ConvVariantNestedRolledLoopGeometry
@@ -173,10 +171,6 @@ namespace Shorokoo.Tests.Modules
         {
             var w = InitSimple.Init([Scalar(3L), Scalar(3L), Scalar(3L), Scalar(3L)]);
             var b = InitSimple.Init([Scalar(3L)]).Vec();
-
-            var reference = ConvVariantRefs.StdConvScalar(x, w, b, 1L)
-                          + ConvVariantRefs.StdConvScalar(x, w, b, 2L)
-                          + ConvVariantRefs.StdConvScalar(x, w, b, 3L);
 
             var acc = Scalar(0f);
             foreach (var outer in LoopAPI.Iterate(trips))
@@ -189,6 +183,84 @@ namespace Shorokoo.Tests.Modules
                     pads: [d, d, d, d], strides: Vector(1L, 1L), dilations: [d, d],
                     kernelShape: [Scalar(3L), Scalar(3L)], group: Scalar(1L));
                 acc = acc + conv.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            }
+
+            return acc < Scalar(float.PositiveInfinity);
+        }
+    }
+
+    /// <summary>
+    /// The geometry a nested rolled loop returns when it runs zero times: its carry initializer,
+    /// which varies with the outer index, while the body's carry value does not. Nothing the inner
+    /// LOOP_CLOSE consumes varies, so shedding the inner loop's variation from the close's own
+    /// inputs alone loses it and bakes the first iteration's geometry. Refused; no reference, as
+    /// <see cref="ConvVariantNestedRolledLoopGeometry"/>.
+    /// </summary>
+    [Module]
+    public partial class ConvVariantNestedZeroTripCarryGeometry
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x, Scalar<int64> trips)
+        {
+            var w = InitSimple.Init([Scalar(3L), Scalar(3L), Scalar(3L), Scalar(3L)]);
+            var b = InitSimple.Init([Scalar(3L)]).Vec();
+
+            var outside = Scalar(0L);
+            foreach (var counted in LoopAPI.Iterate(trips))
+                outside = outside + Scalar(1L);
+
+            var acc = Scalar(0f);
+            foreach (var outer in LoopAPI.Iterate(trips))
+            {
+                var d = outer.IterationIndex + Scalar(1L);
+                foreach (var inner in LoopAPI.Iterate(outer.IterationIndex))
+                {
+                    LoopAPI.Init(d);
+                    d = outside + Scalar(1L);
+                }
+
+                var conv = NN.Conv(x, w, b, AutoPad.NotSet,
+                    pads: [d, d, d, d], strides: Vector(1L, 1L), dilations: [d, d],
+                    kernelShape: [Scalar(3L), Scalar(3L)], group: Scalar(1L));
+                acc = acc + conv.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            }
+
+            return acc < Scalar(float.PositiveInfinity);
+        }
+    }
+
+    /// <summary>
+    /// <see cref="ConvVariantNestedRolledLoopGeometry"/>'s shape with the geometry reading a
+    /// <em>second</em> carry of the nested loop, one that counts to the same value on every outer
+    /// iteration. Only the sibling carry varies with the outer index, and the conv never reads it,
+    /// so this must still lower: an analysis that stamps one depth across all of a loop node's
+    /// slots lets the varying carry contaminate the invariant one and refuses a valid graph.
+    /// </summary>
+    [Module]
+    public partial class ConvVariantNestedRolledLoopSiblingCarryGeometry
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x, Scalar<int64> trips)
+        {
+            var w = InitSimple.Init([Scalar(3L), Scalar(3L), Scalar(3L), Scalar(3L)]);
+            var b = InitSimple.Init([Scalar(3L)]).Vec();
+
+            var reference = ConvVariantRefs.StdConvScalar(x, w, b, 3L) * Scalar(3f);
+
+            var acc = Scalar(0f);
+            foreach (var outer in LoopAPI.Iterate(trips))
+            {
+                var varying = outer.IterationIndex + Scalar(1L);
+                var k = Scalar(0L);
+                foreach (var inner in LoopAPI.Iterate(trips))
+                {
+                    varying = varying + Scalar(1L);
+                    k = k + Scalar(1L);
+                }
+
+                var conv = NN.Conv(x, w, b, AutoPad.NotSet,
+                    pads: [k, k, k, k], strides: Vector(1L, 1L), dilations: [k, k],
+                    kernelShape: [Scalar(3L), Scalar(3L)], group: Scalar(1L));
+                acc = acc + conv.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar()
+                          + varying.Cast<float32>() * Scalar(0f);
             }
 
             return (reference - acc).Abs() < Scalar(1e-3f) * (reference.Abs() + Scalar(1f));

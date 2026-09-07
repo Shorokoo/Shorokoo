@@ -880,12 +880,16 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     nodeByKey[subNode.Key] = subNode;
                 }
 
-                // Map invoke node's outputs → subgraph's outputs
+                // Map invoke node's outputs → subgraph's outputs, by the same rule
+                // FastReplay.ReplayInto states: a pass-through output names a formal
+                // parameter, so it travels inputRemap like every other callee reference.
                 var invokeOutputs = fastNode.Outputs;
                 for (int i = 0; i < invokeOutputs.Count && i < subFastGraph.Outputs.Count; i++)
                 {
                     if (invokeOutputs[i] is FastTensorKey invokeOutKey)
-                        outputRemap[invokeOutKey] = subFastGraph.Outputs[i];
+                        outputRemap[invokeOutKey] = inputRemap.TryGetValue(subFastGraph.Outputs[i], out var remapped)
+                            ? remapped
+                            : subFastGraph.Outputs[i];
                 }
 
                 // Don't add the invoke node itself — it's been replaced by the subgraph.
@@ -4987,7 +4991,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 {
                     var closeBodyIn = closeNode.Inputs[1 + k];
                     if (closeBodyIn is not FastTensorKey ckey || ckey.IsEmpty) { iterCandidateLoopVarKey[k] = null; continue; }
-                    iterCandidateLoopVarKey[k] = curBodyOutputMap.TryGetValue(ckey, out var mappedK) ? mappedK : ckey;
+                    // A body that carries its loop variable through unchanged updates the carry
+                    // with the carry itself, so the close's input is the OPEN's output rather
+                    // than any body node's — curBodyOutputMap misses it and curTensorMap, which
+                    // holds this iteration's source for every OPEN output, has it.
+                    iterCandidateLoopVarKey[k] =
+                        curBodyOutputMap.TryGetValue(ckey, out var mappedK) ? mappedK
+                        : curTensorMap.TryGetValue(ckey, out var mappedT) ? mappedT
+                        : ckey;
                 }
 
                 if (hasCondChain)

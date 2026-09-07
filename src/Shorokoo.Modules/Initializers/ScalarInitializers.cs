@@ -70,13 +70,9 @@ public static partial class ScalarOnes
 /// <code>
 /// var temperature = ScalarConstant.Init(Scalar(0.125f));
 /// </code>
-/// The body scales a rank-0 <c>1.0</c> by the runtime <c>value</c> — the same fill-times-scalar
-/// shape <see cref="Constant"/> uses, minus the fill — rather than handing the input straight
-/// back: an initializer whose output IS its input exports as a nameless ONNX function output.
 /// </summary>
 [TrainableParamInitializer]
 public static partial class ScalarConstant
 {
-    public static Scalar<float32> Inline(Scalar<float32> value)
-        => Globals.Scalar(1.0f) * value;
+    public static Scalar<float32> Inline(Scalar<float32> value) => value;
 }

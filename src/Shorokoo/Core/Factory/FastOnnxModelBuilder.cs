@@ -1126,6 +1126,8 @@ namespace Shorokoo.Core.Factory
             // so the per-graph counter inside FastUseUniqueNames restarts at 1
             // for each function — matches how ONNX FunctionProtos are scoped.
             var fnFast = function.OriginalFastGraph.Clone();
+            // Before the pre-passes, so the inserted Identity is renamed with the rest of the body.
+            FastIdentityWrapping.WrapAliasedOutputs(fnFast);
             RunPrePasses(fnFast, prepForOnnx, applyExecutionLowerings);
             fnFast.ConfigureScopes(ScopeSize.Maximal, ScopeSize.Maximal, ScopePriority.Loop);
 

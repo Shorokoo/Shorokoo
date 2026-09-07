@@ -419,7 +419,7 @@ public partial class ShapelessInitModel
         => input * InitShapelessZeros.Init();
 }
 
-/// <summary>An initializer whose Inline hands its input straight back (Shorokoo/Shorokoo#237).</summary>
+/// <summary>An initializer whose Inline hands its input straight back.</summary>
 [TrainableParamInitializer]
 public static partial class InitIdentityScalar
 {
@@ -431,6 +431,20 @@ public partial class IdentityInitModel
 {
     public static Tensor<float32> Inline(Tensor<float32> input)
         => input * InitIdentityScalar.Init(Scalar(2f));
+}
+
+/// <summary>The shape-first form of <see cref="InitIdentityScalar"/>'s pass-through body.</summary>
+[TrainableParamInitializer]
+public static partial class InitIdentityShaped
+{
+    public static Tensor<float32> Inline(Vector<int64> shape, Tensor<float32> seed) => seed;
+}
+
+[Module]
+public partial class IdentityShapedInitModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+        => input * InitIdentityShaped.Init(Vector(2L), Globals.TensorFill(Vector(2L), 2.0f));
 }
 
 [Module]
@@ -465,3 +479,4 @@ public partial class ScalarMultiplyWithBatchNormModel
         return normalized * weight;
     }
 }
+

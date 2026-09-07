@@ -1073,4 +1073,91 @@ namespace Shorokoo.Tests.Modules
                  + (blind < Scalar(1L)).IfElse(Scalar(1L), Scalar(0L)) > Scalar(1L);
         }
     }
+
+    /// <summary>A body that hands its argument straight back.</summary>
+    [Module]
+    public partial class PassThroughSub
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input) => input;
+    }
+
+    /// <summary>Calls <see cref="PassThroughSub"/>: the callee's output is one of its own inputs.</summary>
+    [Module]
+    public partial class CallerOfPassThroughSub
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input) => PassThroughSub.Call(input) * Scalar(2f);
+    }
+
+    /// <summary>Two arguments handed back swapped.</summary>
+    [Module]
+    public partial class SwapSub
+    {
+        public static (Tensor<float32>, Tensor<float32>) Inline(Tensor<float32> a, Tensor<float32> b) => (b, a);
+    }
+
+    /// <summary>Calls <see cref="SwapSub"/>: both outputs alias inputs, crosswise.</summary>
+    [Module]
+    public partial class CallerOfSwapSub
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+        {
+            var (first, second) = SwapSub.Call(input, input * Scalar(2f));
+            return first - second;
+        }
+    }
+
+    /// <summary>One interior value returned twice — a body whose second output repeats its first.</summary>
+    [Module]
+    public partial class RepeatedOutputSub
+    {
+        public static (Tensor<float32>, Tensor<float32>) Inline(Tensor<float32> a)
+        {
+            var t = a * Scalar(3f);
+            return (t, t);
+        }
+    }
+
+    /// <summary>Calls <see cref="RepeatedOutputSub"/>.</summary>
+    [Module]
+    public partial class CallerOfRepeatedOutputSub
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+        {
+            var (first, second) = RepeatedOutputSub.Call(input);
+            return first + second;
+        }
+    }
+
+    /// <summary>A pass-through call carrying the loop variable: the loop's carry updater is the
+    /// carry itself.</summary>
+    [Module]
+    public partial class LoopCarriedPassThrough
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+        {
+            var x = input;
+            foreach (var ctx in LoopAPI.Iterate(Scalar(2L)))
+                x = PassThroughSub.Call(x);
+            return x;
+        }
+    }
+
+    /// <summary>An initializer whose body calls a module (Shorokoo/Shorokoo#276).</summary>
+    [Module]
+    public partial class DoublerSub
+    {
+        public static Tensor<float32> Inline(Tensor<float32> v) => v * Scalar(2f);
+    }
+
+    [TrainableParamInitializer]
+    public static partial class InitCallingAModule
+    {
+        public static Tensor<float32> Inline(Vector<int64> shape) => DoublerSub.Call(Globals.TensorFill(shape, 1.0f));
+    }
+
+    [Module]
+    public partial class UsesInitCallingAModule
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input) => input * InitCallingAModule.Init(Vector(2L));
+    }
 }

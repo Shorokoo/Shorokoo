@@ -11,11 +11,13 @@ using Shorokoo.Core.Nodes.Processors.AutoGrad;
 namespace Shorokoo.Core.Nodes.Processors.Fast
 {
     /// <summary>
-    /// Shared helper used by <see cref="FastAddIdentityForOuterScopeValues"/> and
-    /// <see cref="FastPrepForOnnx"/>: wraps every input slot of every IF_CLOSE
-    /// and LOOP_CLOSE node in a freshly-inserted Identity. The Identity nodes
-    /// are placed just before their close in the topological order, and the
-    /// close's input slots are rewritten to reference the Identity outputs.
+    /// The two places a freshly-inserted Identity buys a name that ONNX needs and the
+    /// graph does not otherwise have. <see cref="WrapCloseInputs"/> wraps every input
+    /// slot of every IF_CLOSE and LOOP_CLOSE node, for
+    /// <see cref="FastAddIdentityForOuterScopeValues"/> and <see cref="FastPrepForOnnx"/>;
+    /// <see cref="WrapAliasedOutputs"/> wraps a graph output that names something no node
+    /// of its own produces, for function emission in
+    /// <see cref="Shorokoo.Core.Factory.FastOnnxModelBuilder"/>.
     /// </summary>
     internal static class FastIdentityWrapping
     {
@@ -77,6 +79,55 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             {
                 var (closeIndex, identities) = inserts[idx];
                 graph.Nodes.InsertRange(closeIndex, identities);
+            }
+        }
+
+        /// <summary>
+        /// Ensures every graph output is produced by a node of its own, rewiring through a
+        /// freshly appended Identity any output that instead names one of the graph's own
+        /// inputs. An <c>Inline</c> body that hands an argument straight back
+        /// (<c>Inline(Scalar&lt;float32&gt; value) =&gt; value</c>) produces exactly that shape,
+        /// and ONNX has no way to express it: a FunctionProto whose output name is one of its
+        /// input names has no node producing the output, and ORT rejects the model when it
+        /// builds the function's schema. An output repeating an earlier one is wrapped by the
+        /// same rule: a multi-output module function returning one value twice.
+        /// Only function bodies need this — ORT accepts a main-graph output that names a graph
+        /// input, and it is only the function-schema builder that rejects one.
+        /// </summary>
+        public static void WrapAliasedOutputs(InternalComputationGraph graph)
+        {
+            var claimed = new HashSet<FastTensorKey>(graph.Inputs);
+            var identityAttrDefs = Definitions.NodeDefinitions[OpCodes.IDENTITY].AttributeDefs;
+
+            for (int i = 0; i < graph.Outputs.Count; i++)
+            {
+                var output = graph.Outputs[i];
+                if (output.IsEmpty || claimed.Add(output)) continue;
+
+                var idKey = FastNodeKey.New();
+                var idOutputKey = new FastTensorKey(idKey, 0);
+                // Appended at the very end, where every scope is closed, so the linear order
+                // stays valid. The value being wrapped is a formal parameter (or an output
+                // already emitted), so it is in scope there.
+                graph.Nodes.Add(new FastNode
+                {
+                    Key = idKey,
+                    OpCode = OpCodes.IDENTITY,
+                    Attributes = OnnxCSharpAttributes.FromCSharpVals(
+                        new Dictionary<string, object?>(),
+                        identityAttrDefs),
+                    FriendlyName = null,
+                    FullInputs = new Dictionary<string, List<FastTensorKey?>>
+                    {
+                        [""] = new List<FastTensorKey?> { output },
+                    },
+                    FullOutputs = new Dictionary<string, List<FastTensorKey?>>
+                    {
+                        [""] = new List<FastTensorKey?> { idOutputKey },
+                    },
+                });
+                graph.Outputs[i] = idOutputKey;
+                claimed.Add(idOutputKey);
             }
         }
     }

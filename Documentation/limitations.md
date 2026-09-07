@@ -74,24 +74,27 @@ one it would not. Its model of memory is ONNX Runtime's own allocation plan for 
 step (the order ORT actually runs, and ORT's habit of handing a dead buffer to the
 next tensor of the same shape rather than returning it), so what it optimizes is
 what gets allocated; the framework's own memory benchmark records the resident peak
-of one training step next to the modelled one, and the two agree to within about
-10% on every graph in it except a conv stack, whose im2col workspace the model does
-not see, and the LSTM step, whose Loop body the model walks once. Measured that
+of one training step next to the modelled one, and on the graph the pass returns the
+two agree to within about 10% everywhere except a conv stack, whose im2col workspace
+the model does not see, and the LSTM step, whose Loop body the model walks once. On
+the graph before the pass the model runs up to 13% high on attention. Measured that
 way, unoptimized to optimized: an MLP 5.5 to 4.2 MiB, a conv stack 28.6 to 24.7, a
 one-layer transformer encoder 19.5 to 19.0, a two-layer one 37.2 to 35.7, dense
 attention unchanged, chunked attention 5.8 to 5.0 — for at most a few percent more
 kernel time. The pass leaves a graph whose backward pass runs through
 a recurrent op untouched — and not a recurrent one only: any graph carrying a scope at all, a
-forward `If` included, comes back as it went in, because the evaluator walks a
-scope body once where ORT runs it per iteration, and on the LSTM step acting on
-that model made the real peak worse.
+forward `If` included, comes back with nothing but its checkpoint hints applied,
+because the evaluator walks a scope body once where ORT runs it per iteration, and
+on the LSTM step acting on that model made the real peak worse. The attribute above
+is still honoured there: it is applied before this bail-out, being what you asked
+for rather than what the objective chose.
 
 Two things the rig does around that pass matter more than the pass itself for a
 step's memory. The training-step session is compiled for the shapes it is fed, so
 ORT resolves every intermediate shape at session build and folds the shape
 arithmetic — most of a step's kernels, and outputs that pinned activations alive —
-out of the executed graph (the encoder steps above dropped from 28.7 and 53.1 MiB to
-19.6 and 37.3 before the pass touched them). And the session runs ORT's full
+out of the executed graph (the encoder steps above dropped from 27.4 and 50.6 MiB to
+19.5 and 37.2 before the pass touched them). And the session runs ORT's full
 optimization level minus the common-subexpression pass, which would otherwise merge
 every recomputation the pass emits back into the tensor it exists to free.
 

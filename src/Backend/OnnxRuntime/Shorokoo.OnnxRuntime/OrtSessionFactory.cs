@@ -26,6 +26,15 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
 {
     private readonly Action<SessionOptions> _configureExecutionProvider;
 
+    private static int _sessionsCreated;
+
+    /// <summary>
+    /// How many sessions this process has built through a factory. ONNX Runtime applies some
+    /// session settings to the constructing thread once per process, so a test asking what such a
+    /// setting did can only be believed when this is still zero.
+    /// </summary>
+    public static int SessionsCreated => System.Threading.Volatile.Read(ref _sessionsCreated);
+
     /// <param name="configureExecutionProvider">
     /// Applied to the <see cref="SessionOptions"/> of every session this factory creates,
     /// after the log-severity and graph-optimization settings and before the session is
@@ -58,6 +67,7 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
         // session creation frees them while ORT is still walking sess_options->provider_factories
         // (core/session/utils.cc, InitializeSession) -- a use-after-free that segfaults the
         // process. Disposing in a finally keeps them rooted across the constructor.
+        System.Threading.Interlocked.Increment(ref _sessionsCreated);
         using var options = new SessionOptions();
         Configure(options, graphOptimization, logSeverity);
         _configureExecutionProvider(options);

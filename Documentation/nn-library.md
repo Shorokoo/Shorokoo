@@ -934,8 +934,8 @@ negligible at long sequences and very much not at short ones:
 
 and it scales the way the formula says: doubling the batch (`N = 4`, a 4 MiB block) gives
 14.2 MiB, doubling the sequence (`L = 512`, an 8 MiB block) gives 26.3 MiB. Read these to about
-±0.3 MiB: they are single readings of a resident high-water mark, and the allocator moves that
-much between runs.
+±0.3 MiB: each is the largest of five readings of a resident high-water mark, and the allocator
+moves about that much between recordings.
 
 A rule that fits every one of those from above, so it over-budgets rather than under-:
 
@@ -970,7 +970,7 @@ kernel-time reading is reproducible:
 
 | `d` | `L` | dense | chunked | peak | modelled compute |
 |---|---|---|---|---|---|
-| 32 | 256 | 6.9 MiB | 5.1 MiB | **26% better** | +41% |
+| 32 | 256 | 6.9 MiB | 5.0 MiB | **28% better** | +41% |
 | 64 | 256 | 8.6 MiB | 7.1 MiB | **18% better** | +37% |
 | 32 | 512 | 26.3 MiB | 16.5 MiB | **37% better** | +22% |
 

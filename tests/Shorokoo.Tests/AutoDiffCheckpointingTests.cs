@@ -433,6 +433,7 @@ public class AutoDiffCheckpointingCoverageTests
         Assert.False(Recomputable(x, OnnxOp.RandomUniformLike(x, seed: 3f)));
         Assert.False(Recomputable(x, OnnxOp.RandomNormalLike(x, seed: 3f)));
         Assert.False(Recomputable(x, OnnxOp.Bernoulli(x, dtype: null, seed: 3f)));
+        Assert.False(Recomputable(x, OnnxOp.Dropout(x, null, null, seed: 3L).output));
     }
 
     [Fact]

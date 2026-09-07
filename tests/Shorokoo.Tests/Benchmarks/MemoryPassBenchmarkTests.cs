@@ -153,6 +153,11 @@ public class MemoryPassBenchmarkTests
     private const double RealPeakRegressionFactor = 1.10;
     private const long RealPeakNoiseFloorBytes = 1L << 20;
     private const string BaselineStrategy = "Baseline";
+    private const double ReliefRetentionFactor = 0.85;
+
+    /// <summary>The share of the unoptimized peak the pass removed.</summary>
+    private static double Relief(FamilyMeasurement m)
+        => m.UnoptimizedPeakBytes == 0 ? 0 : 1.0 - (double)m.PeakBytes / m.UnoptimizedPeakBytes;
 
     private const string MallocEnvironment =
         "MALLOC_MMAP_THRESHOLD_=16384 MALLOC_TRIM_THRESHOLD_=0 MALLOC_TOP_PAD_=0";
@@ -194,15 +199,16 @@ public class MemoryPassBenchmarkTests
             Assert.True(now.PeakBytes <= was.PeakBytes * PeakRegressionFactor);
             Assert.True(now.ComputeTime <= was.ComputeTime * ComputeRegressionFactor);
 
-            // A family the pass used to act on must still be acted on. The factors above are
-            // one-sided with slack, so a change that switches the pass off entirely on one
-            // family reads as a couple of percent and slips through; that is exactly how a
-            // premature stop in the rematerializer's candidate walk once disabled the pass on
-            // the one-layer encoder.
+            // A family the pass used to act on must still get most of the relief it got. The
+            // factors above are one-sided with slack, so a change that switches the pass off on
+            // one family reads as a couple of percent and slips through; that is how a premature
+            // stop in the rematerializer's candidate walk once disabled the pass on the one-layer
+            // encoder, and the same stop quietly cost chunked attention part of its relief while
+            // leaving the strategy name intact.
             if (was.Strategy != BaselineStrategy)
             {
                 Assert.NotEqual(BaselineStrategy, now.Strategy);
-                Assert.True(now.PeakBytes < now.UnoptimizedPeakBytes);
+                Assert.True(Relief(now) >= Relief(was) * ReliefRetentionFactor);
             }
             if (was.RealPeakBytes is long wasReal && now.RealPeakBytes is long nowReal)
                 Assert.True(nowReal <= wasReal * RealPeakRegressionFactor + RealPeakNoiseFloorBytes);

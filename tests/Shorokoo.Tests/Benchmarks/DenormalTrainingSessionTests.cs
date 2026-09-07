@@ -31,12 +31,19 @@ public class DenormalTrainingSessionTests
     /// ONNX Runtime applies <c>session.set_denormal_as_zero</c> to the constructing thread once
     /// per process, under a <c>call_once</c>, so this can only be asked of the process's FIRST
     /// session — which is what this class's own <c>dotnet test</c> invocation provides, and why
-    /// the assertion cannot live in the parallel coverage suite. Keep it the first test to build
-    /// a session in this class.
+    /// the assertion cannot live in the parallel coverage suite.
+    ///
+    /// <para>Run in a process that has already built one, the flag would never reach this thread
+    /// and the assertion would hold for the wrong reason, reporting green while guarding nothing.
+    /// So it first requires that no session has been built yet: in a shared process this test
+    /// fails rather than passing vacuously, which is the whole point of giving the class an
+    /// invocation of its own.</para>
     /// </summary>
     [Fact]
     public void TestTheTrainingProfilesFirstSessionLeavesTheCallingThreadsDenormalsAlone()
     {
+        Assert.Equal(0, OrtSessionFactory.SessionsCreated);
+
         var x = InputTensor<float32>("x", rank: 2);
         var proto = FastOnnxModelBuilder.BuildInternalOnnxModel(
             new InternalComputationGraph([x], [OnnxOp.Relu(x)]), prepForOnnx: true);

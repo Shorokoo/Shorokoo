@@ -122,6 +122,18 @@ namespace Shorokoo
     }
 
     /// <summary>
+    /// Exception thrown when a loop body assigns a loop variable in a way the loop cannot carry.
+    /// </summary>
+    public class UnsupportedLoopVariableAssignmentException : ShorokooException
+    {
+        /// <summary>Creates the exception for an assignment the loop cannot carry.</summary>
+        public UnsupportedLoopVariableAssignmentException(string errorCode, string reason)
+            : base(errorCode, $"Unsupported loop variable assignment: {reason}")
+        {
+        }
+    }
+
+    /// <summary>
     /// Exception thrown when computation context operations fail
     /// </summary>
     public class ComputeContextException : ShorokooException

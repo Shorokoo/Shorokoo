@@ -175,8 +175,8 @@ public class FastProcessorsCoverageTests
     /// <summary>LoopAPI binds a scan input on the third of its four body-tracing passes, and the
     /// caller's local has by then been advanced by the two earlier passes into the outer graph, so
     /// scanning a carry before the body updates it stacks a loop-invariant outer value — x + 2,
-    /// whatever the trip count. Rolled that is silent; unrolled the unroller finds no body-produced
-    /// key and dies. The expected values are supplied because every engine executes the same wrong
+    /// whatever the trip count, on the rolled and unrolled paths alike. The expected values are
+    /// supplied because every engine executes the same wrong
     /// graph, so an engine comparison alone passes. Tracked as Shorokoo/Shorokoo#232.</summary>
     [Fact(Skip = "Shorokoo/Shorokoo#232: a scan input read before the body's update binds outside the loop body")]
     public void TestScanningACarryBeforeTheBodyUpdatesItStacksThePerIterationValues()

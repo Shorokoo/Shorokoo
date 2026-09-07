@@ -21,6 +21,39 @@ In practice: give convolution weights a concrete shape (the usual case — e.g.
 shapes derived from `[Hyper]` values are resolved when the architecture is
 concretized via `ToConcreteArchitecture`), and backprop works normally.
 
+### Per-iteration convolution geometry in a dynamic loop
+
+`NN.Conv` lets you compute a convolution's geometry — `pads`, `strides`,
+`dilations`, `kernel_shape`, `group` — in the graph rather than writing it as a
+literal, and resolves it to a static ONNX attribute when the architecture is
+concretized. (Conv is currently the only operator with that overload.) A static
+attribute holds one value for every execution of its node, which is fine
+everywhere except one place: geometry that differs from one iteration of a loop
+to the next, in a loop that stays rolled. There the whole loop is a single Conv
+node, and no single attribute value is right for all of its iterations.
+
+A loop stays rolled whenever the unroll declines it — most often because its
+trip count is not a compile-time constant, though a handful of body shapes
+decline too. Such a graph is refused when the architecture is concretized,
+naming the geometry that varies:
+
+```
+the 'pads' geometry of 'shrk_Conv' varies per iteration of a loop that was not
+unrolled, so it cannot be lowered to the static 'pads' attribute of 'Conv' ...
+```
+
+Either give the loop a compile-time-constant trip count, which normally unrolls
+it — `LoopAPI.Iterate(Scalar(3L))` — so each iteration becomes its own Conv node
+with its own geometry; or compute the geometry from something that does not
+track the iteration: a literal, a `[Hyper]` value, or an input's shape.
+
+Constant and input-derived geometry inside a dynamic loop is fine, and so is
+geometry computed *from* a dynamic loop's result — that value is computed once,
+and the Conv reading it runs once. What is refused is geometry that still
+follows a loop's iteration where it is used, whether or not the value it ends up
+holding happens to repeat: the check is on where the geometry comes from, since
+a carry's value is not knowable at build time.
+
 ### Variables first assigned inside a loop body
 
 A variable that is assigned inside a loop *before ever being read in that same
@@ -29,6 +62,36 @@ initial value (needed for the zero-iteration case) and conservatively rejects
 the graph. Initialize the variable explicitly inside the loop body with
 `LoopAPI.Init(x)` (or read it once, e.g. `OnnxOp.Identity(x)`) before the first
 assignment.
+
+### Carrying a value computed outside the loop body
+
+A loop hands its result back by re-tracing the node that produced the body's
+value and pointing the variable at the loop's output instead. A bare assignment
+of a value computed *outside* the loop creates no node in the body, so there is
+nothing to re-trace — and after the loop the variable is simply that outside
+value, indistinguishable from every other use of it. Shorokoo rejects that shape
+rather than silently returning the body's value even when the loop ran zero
+times.
+
+Wrap the value with `LoopAPI.Carry` so the body produces it:
+
+```csharp
+var carry = n + Scalar(5L);
+foreach (var ctx in LoopAPI.Iterate(trips))
+{
+    LoopAPI.Init(carry);
+    carry = LoopAPI.Carry(n);   // not `carry = n;`
+}
+return carry;                   // the loop's result, or n + 5 after zero iterations
+```
+
+A value the body already computes — `carry = carry + Scalar(1L)`, or anything
+built from the iteration index — needs no wrapping. `LoopAPI.Carry` has
+overloads for `Scalar<T>`, `Vector<T>` and `Tensor<T>`; for any other carry
+type, move the assignment out of the loop.
+
+The build reports this as the **MSG005** warning on the offending line, and
+concretizing the graph raises `FW023` if it is left unfixed.
 
 ## Current limitations (could be lifted)
 

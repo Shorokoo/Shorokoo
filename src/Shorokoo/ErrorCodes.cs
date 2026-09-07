@@ -589,6 +589,9 @@ namespace Shorokoo
         /// <summary>Loop iteration processing failed</summary>
         public const string FW022 = "FW022";
 
+        /// <summary>A loop body assigned a LoopAPI.Init-declared variable a value computed outside the loop</summary>
+        public const string FW023 = "FW023";
+
         /// <summary>If-else node input count mismatch</summary>
         public const string FW024 = "FW024";
         

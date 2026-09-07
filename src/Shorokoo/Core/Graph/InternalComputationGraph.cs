@@ -156,7 +156,8 @@ namespace Shorokoo.Graph
             foreach (var node in this.Nodes)
                 copy.Nodes.Add(CloneNode(node));
 
-            System.Diagnostics.Debug.Assert(copy.IsLinearOrderValid(), "copy.IsLinearOrderValid()");
+            System.Diagnostics.Debug.Assert(copy.TryValidateLinearOrder(out var cloneOrderError),
+                "copy.IsLinearOrderValid(): " + cloneOrderError);
             return copy;
         }
 

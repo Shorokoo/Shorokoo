@@ -127,8 +127,10 @@ namespace Shorokoo.Tests.Modules
     /// <see cref="ConvVariantLoopShapeAndIndexAttrs"/> with the trip count taken from a graph
     /// input instead of a constant, so the loop is never eligible for the native unroll and
     /// FastLowerAttributeTensorOps meets the index-dependent geometry still inside a rolled loop.
-    /// Self-checks against a hand-unrolled reference; unlike its sibling the kernel shape is
-    /// literal, so the only variable geometry is the loop index. Tracked as Shorokoo/Shorokoo#231.
+    /// Unlike its sibling the kernel shape is literal, so the only variable geometry is the loop
+    /// index. Concretizing this module is a hard build error — a static attribute cannot carry
+    /// per-iteration geometry — so the hand-unrolled self-check below is never reached; it stands
+    /// as the reference the refused lowering would have had to match.
     /// </summary>
     [Module]
     public partial class ConvVariantDynamicTripLoopGeometry
@@ -157,11 +159,212 @@ namespace Shorokoo.Tests.Modules
     }
 
     /// <summary>
+    /// <see cref="ConvVariantDynamicTripLoopGeometry"/>'s per-iteration geometry carried through a
+    /// nested rolled loop before it reaches the conv: an outer loop's variation must survive a
+    /// nested one. Refused rather than self-checking, so it carries no reference —
+    /// <see cref="ConvVariantDynamicTripLoopGeometry"/> holds the one reference for this family.
+    /// </summary>
+    [Module]
+    public partial class ConvVariantNestedRolledLoopGeometry
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x, Scalar<int64> trips)
+        {
+            var w = InitSimple.Init([Scalar(3L), Scalar(3L), Scalar(3L), Scalar(3L)]);
+            var b = InitSimple.Init([Scalar(3L)]).Vec();
+
+            var acc = Scalar(0f);
+            foreach (var outer in LoopAPI.Iterate(trips))
+            {
+                var d = outer.IterationIndex + Scalar(1L);
+                foreach (var inner in LoopAPI.Iterate(trips))
+                    d = d + Scalar(0L);
+
+                var conv = NN.Conv(x, w, b, AutoPad.NotSet,
+                    pads: [d, d, d, d], strides: Vector(1L, 1L), dilations: [d, d],
+                    kernelShape: [Scalar(3L), Scalar(3L)], group: Scalar(1L));
+                acc = acc + conv.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            }
+
+            return acc < Scalar(float.PositiveInfinity);
+        }
+    }
+
+    /// <summary>
+    /// The geometry a nested rolled loop returns when it runs zero times: its carry initializer,
+    /// which varies with the outer index, while the body's carry value does not. Nothing the inner
+    /// LOOP_CLOSE consumes varies, so shedding the inner loop's variation from the close's own
+    /// inputs alone loses it and bakes the first iteration's geometry. Refused; no reference, as
+    /// <see cref="ConvVariantNestedRolledLoopGeometry"/>.
+    /// </summary>
+    [Module]
+    public partial class ConvVariantNestedZeroTripCarryGeometry
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x, Scalar<int64> trips)
+        {
+            var w = InitSimple.Init([Scalar(3L), Scalar(3L), Scalar(3L), Scalar(3L)]);
+            var b = InitSimple.Init([Scalar(3L)]).Vec();
+
+            var outside = Scalar(0L);
+            foreach (var counted in LoopAPI.Iterate(trips))
+                outside = outside + Scalar(1L);
+
+            var acc = Scalar(0f);
+            foreach (var outer in LoopAPI.Iterate(trips))
+            {
+                var d = outer.IterationIndex + Scalar(1L);
+                foreach (var inner in LoopAPI.Iterate(outer.IterationIndex))
+                {
+                    LoopAPI.Init(d);
+                    d = outside + Scalar(1L);
+                }
+
+                var conv = NN.Conv(x, w, b, AutoPad.NotSet,
+                    pads: [d, d, d, d], strides: Vector(1L, 1L), dilations: [d, d],
+                    kernelShape: [Scalar(3L), Scalar(3L)], group: Scalar(1L));
+                acc = acc + conv.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            }
+
+            return acc < Scalar(float.PositiveInfinity);
+        }
+    }
+
+    /// <summary>
+    /// <see cref="ConvVariantNestedRolledLoopGeometry"/>'s shape with the geometry reading a
+    /// <em>second</em> carry of the nested loop, one that counts to the same value on every outer
+    /// iteration. Only the sibling carry varies with the outer index, and the conv never reads it,
+    /// so this must still lower: an analysis that stamps one depth across all of a loop node's
+    /// slots lets the varying carry contaminate the invariant one and refuses a valid graph.
+    /// </summary>
+    [Module]
+    public partial class ConvVariantNestedRolledLoopSiblingCarryGeometry
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x, Scalar<int64> trips)
+        {
+            var w = InitSimple.Init([Scalar(3L), Scalar(3L), Scalar(3L), Scalar(3L)]);
+            var b = InitSimple.Init([Scalar(3L)]).Vec();
+
+            var reference = ConvVariantRefs.StdConvScalar(x, w, b, 3L) * Scalar(3f);
+
+            var acc = Scalar(0f);
+            foreach (var outer in LoopAPI.Iterate(trips))
+            {
+                var varying = outer.IterationIndex + Scalar(1L);
+                var k = Scalar(0L);
+                foreach (var inner in LoopAPI.Iterate(trips))
+                {
+                    varying = varying + Scalar(1L);
+                    k = k + Scalar(1L);
+                }
+
+                var conv = NN.Conv(x, w, b, AutoPad.NotSet,
+                    pads: [k, k, k, k], strides: Vector(1L, 1L), dilations: [k, k],
+                    kernelShape: [Scalar(3L), Scalar(3L)], group: Scalar(1L));
+                acc = acc + conv.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar()
+                          + varying.Cast<float32>() * Scalar(0f);
+            }
+
+            return (reference - acc).Abs() < Scalar(1e-3f) * (reference.Abs() + Scalar(1f));
+        }
+    }
+
+    /// <summary>
+    /// Per-iteration geometry that reaches the conv through an <c>IfElse</c>'s <em>condition</em>
+    /// rather than its branch values: both branches are literal, so nothing the IF_CLOSE consumes
+    /// varies, and only the condition tracks the iteration. Still one value per iteration, so still
+    /// refused — an analysis that reads a close node's own inputs alone misses it, since an IF_OPEN
+    /// holds the condition and has no outputs at all.
+    /// </summary>
+    [Module]
+    public partial class ConvVariantGeometryFromALoopDependentIfCondition
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x, Scalar<int64> trips)
+        {
+            var w = InitSimple.Init([Scalar(3L), Scalar(3L), Scalar(3L), Scalar(3L)]);
+            var b = InitSimple.Init([Scalar(3L)]).Vec();
+
+            var acc = Scalar(0f);
+            foreach (var outer in LoopAPI.Iterate(trips))
+            {
+                var d = (outer.IterationIndex < Scalar(1L)).IfElse(Scalar(1L), Scalar(2L));
+                var conv = NN.Conv(x, w, b, AutoPad.NotSet,
+                    pads: [d, d, d, d], strides: Vector(1L, 1L), dilations: [d, d],
+                    kernelShape: [Scalar(3L), Scalar(3L)], group: Scalar(1L));
+                acc = acc + conv.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            }
+
+            return acc < Scalar(float.PositiveInfinity);
+        }
+    }
+
+    /// <summary>
+    /// Variant Conv whose geometry is loop-invariant (literal) inside the same never-unrollable
+    /// dynamic-trip loop as <see cref="ConvVariantDynamicTripLoopGeometry"/>: the lowering has one
+    /// value that is right for every iteration, so it must still lower rather than being refused
+    /// along with the per-iteration case. Self-checking against the same conv summed <c>trips</c>
+    /// times.
+    /// </summary>
+    [Module]
+    public partial class ConvVariantDynamicTripLoopInvariantGeometry
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x, Scalar<int64> trips)
+        {
+            var w = InitSimple.Init([Scalar(3L), Scalar(3L), Scalar(3L), Scalar(3L)]);
+            var b = InitSimple.Init([Scalar(3L)]).Vec();
+
+            var reference = ConvVariantRefs.StdConvScalar(x, w, b, 1L) * Scalar(3f);
+
+            var acc = Scalar(0f);
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                var conv = NN.Conv(x, w, b, AutoPad.NotSet,
+                    pads: Vector(1L, 1L, 1L, 1L), strides: Vector(1L, 1L),
+                    dilations: Vector(1L, 1L), kernelShape: Vector(3L, 3L), group: Scalar(1L));
+                acc = acc + conv.Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            }
+
+            return (reference - acc).Abs() < Scalar(1e-3f) * (reference.Abs() + Scalar(1f));
+        }
+    }
+
+    /// <summary>
+    /// Variant Conv placed <em>after</em> a never-unrollable dynamic-trip loop, with its
+    /// <c>kernel_shape</c> derived from that loop's result. The conv executes once and its
+    /// geometry has exactly one value, so it must lower normally: a loop-scope test that merely
+    /// asks whether a geometry input descends from a LOOP_OPEN would refuse it, since a
+    /// LOOP_CLOSE's outputs descend from one. Self-checking (returns Scalar&lt;bit&gt;).
+    /// </summary>
+    [Module]
+    public partial class ConvVariantGeometryFromARolledLoopResult
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x, Scalar<int64> trips)
+        {
+            var w = InitSimple.Init([Scalar(2L), Scalar(3L), Scalar(3L), Scalar(3L)]);
+            var b = InitSimple.Init([Scalar(2L)]).Vec();
+
+            // 0 + 1 + 1 + 1 = 3 for trips = 3, so the kernel resolves to [3,3].
+            var k = Scalar(0L);
+            foreach (var ctx in LoopAPI.Iterate(trips))
+                k = k + Scalar(1L);
+
+            var standard = NN.Conv(x, w, b, AutoPad.NotSet,
+                dilations: [1L, 1L], group: 1L, kernelShape: [3L, 3L],
+                pads: [0L, 0L, 0L, 0L], strides: [1L, 1L]);
+
+            var variant = NN.Conv(x, w, b, AutoPad.NotSet,
+                pads: Vector(0L, 0L, 0L, 0L), strides: Vector(1L, 1L),
+                dilations: Vector(1L, 1L), kernelShape: [k, k], group: Scalar(1L));
+
+            var diff = (standard - variant).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            return diff < Scalar(1e-4f);
+        }
+    }
+
+    /// <summary>
     /// <see cref="ConvVariantLoopShapeAndIndexAttrs"/> with an AUTO_GRAD node added to the loop
     /// body, which puts a member of <c>InternalOpCodes.ModuleStageOps</c> inside a constant-trip
     /// loop at the first FastSimplify. That loop must still be unrolled: leaving it rolled makes
-    /// FastLowerAttributeTensorOps resolve the index-dependent geometry once and bake iteration 0's
-    /// dilation into all three, silently returning 3x the d=1 conv instead of the d=1,2,3 sum.
+    /// FastLowerAttributeTensorOps refuse the index-dependent geometry, since one static attribute
+    /// cannot carry the d=1,2,3 dilations, so the module fails to concretize at all.
     /// </summary>
     [Module]
     public partial class ConvVariantLoopWithAutoGradInBody

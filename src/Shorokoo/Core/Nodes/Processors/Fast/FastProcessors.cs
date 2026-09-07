@@ -4178,9 +4178,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// Scope. A loop is only unrolled natively when every one of these holds; otherwise
     /// <see cref="FastSimplify"/> leaves the loop in place. Every pass downstream accepts
     /// a rolled loop, but declining is not free — see the <see cref="Process"/> docstring
-    /// for the two that would rather not see one, one of which is today an open
-    /// silent-wrong-answer bug (Shorokoo/Shorokoo#231). Decline only where cloning would
-    /// actually be wrong.
+    /// for the two that can turn a declined loop into a build error. Decline only where
+    /// cloning would actually be wrong.
     /// <list type="bullet">
     ///   <item>The <c>maxIter</c> producer is a <c>CONSTANT</c> with a non-negative
     ///     int64 scalar value.</item>
@@ -4228,11 +4227,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// only unroller — the CG round-trip that used to back it up is gone (see
         /// <see cref="FastSimplify"/>) — so a loop it declines stays rolled for the rest of
         /// the pipeline. Two later passes in that pipeline are the reason to decline
-        /// sparingly: <c>FastLowerAttributeTensorOps</c> resolves variant-op geometry it
-        /// assumes is loop-free, and today it does so silently and wrongly on a rolled loop
-        /// rather than failing (Shorokoo/Shorokoo#231); and autograd has no gradient rule
-        /// for <c>Loop</c>, so a rolled one reaching it is a build error. Decline only
-        /// where cloning would be wrong, never merely awkward.
+        /// sparingly: <c>FastLowerAttributeTensorOps</c> refuses variant-op geometry that
+        /// differs per iteration of a rolled loop (it cannot become a static attribute), and
+        /// autograd has no gradient rule for <c>Loop</c>, so a rolled one on the differentiation
+        /// path is a build error too. A declined loop is otherwise lowered as usual — but decline
+        /// only where cloning would be wrong, never merely awkward.
         ///
         /// <para>
         /// One such place is Stage-F model-parameter machinery in the body — see
@@ -5053,10 +5052,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     }
                 }
 
-                // Record per-scan-var the cloned FastTensorKey this iteration produced for
-                // CLOSE.Inputs[1 + nLoop + k]. LoopAPI's third pass binds every scan
-                // output to a body-produced value, so each scan input is a non-empty
-                // FastTensorKey that resolves through curBodyOutputMap.
+                // Record per-scan-var the value this iteration contributes to
+                // CLOSE.Inputs[1 + nLoop + k]. Resolve it through curTensorMap rather than
+                // curBodyOutputMap: a scan input need not be a body node's output. Scanning an
+                // OPEN output directly — `ctx.Scan(ctx.IterationIndex)` — is ordinary user code,
+                // and that key lives in curTensorMap (mapped to this iteration's index), as does
+                // a loop-invariant body value (mapped to itself). Anything from outside the loop
+                // is in neither and stands for itself.
                 for (int k = 0; k < nScan; k++)
                 {
                     var scanInKey = closeNode.Inputs[1 + nLoop + k];
@@ -5064,11 +5066,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         "FastFoldConstantIterationLoops.UnrollOne: scan input is null/empty. "
                         + "LoopAPI binds every scan output to a body value by construction.");
                     var sk = (FastTensorKey)scanInKey!;
-                    var hasMapped = curBodyOutputMap.TryGetValue(sk, out var mapped);
-                    Debug.Assert(hasMapped,
-                        "FastFoldConstantIterationLoops.UnrollOne: scan input is not body-produced. "
-                        + "LoopAPI's third pass maps every scan output to a body node's output.");
-                    scanIterationKeys[k].Add(mapped);
+                    scanIterationKeys[k].Add(curTensorMap.TryGetValue(sk, out var mapped) ? mapped : sk);
                 }
             }
 

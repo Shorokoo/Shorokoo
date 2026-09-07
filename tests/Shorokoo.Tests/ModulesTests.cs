@@ -911,6 +911,21 @@ public class ModulesCoverageTests
                 .Any(k => k is FastTensorKey t && !t.IsEmpty && !t.FastNodeKey.Equals(n.Key)))
             .Select(n => n.OpCode.ToString())];
 
+    /// <summary>A node the loop body creates with no inputs is not tracked by the looper, so its
+    /// consumers resolve it through the outer-scope case to the first pass's node — emitted before
+    /// LOOP_OPEN. The draw is hoisted out of the loop and every iteration reads the same one. The
+    /// position is asserted rather than a value because the fault is in the graph, so every engine
+    /// agrees on the wrong answer. Tracked as Shorokoo/Shorokoo#262.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#262: a zero-input op created in a loop body is emitted outside the loop")]
+    public void TestAZeroInputOpInALoopBodyStaysInTheLoopBody()
+    {
+        string[] codes = [.. ZeroInputOpInLoopBody.ComputationGraph.ToInternal().Nodes.Select(n => n.OpCode)];
+        Assert.InRange(
+            Array.IndexOf(codes, OpCodes.RANDOM_UNIFORM),
+            Array.IndexOf(codes, OpCodes.LOOP_OPEN) + 1,
+            Array.IndexOf(codes, OpCodes.LOOP_CLOSE) - 1);
+    }
+
     [Fact]
     public void TestEveryNodeOwnsTheTensorKeysItProduces()
     {

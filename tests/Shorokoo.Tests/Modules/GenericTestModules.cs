@@ -972,6 +972,64 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+
+    /// <summary>
+    /// Constant-iter loop whose body break is dynamic (<c>ctx.ContinueWhile</c>
+    /// fed by a runtime-bool input). <c>LoopAPI</c> emits the <c>LOOP_OPEN</c>
+    /// with <c>condition: null</c>, so OPEN.Inputs[1] is absent and the unroller
+    /// has to seed the AND-chain with a fresh <c>CONSTANT(true)</c> node
+    /// (~L3907-3929) and emit per-loop-var <c>WHERE</c> + per-iter <c>AND</c>
+    /// gating (~L4210-4247).
+    /// </summary>
+    [Module]
+    public partial class ConstLoopWithDynamicBreak
+    {
+        public static Scalar<float32> Inline(Scalar<float32> x, Scalar<bit> keepGoing)
+        {
+            var acc = x;
+            foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
+            {
+                acc = acc + Scalar(1.0f);
+                ctx.ContinueWhile(keepGoing);
+            }
+            return acc;
+        }
+    }
+
+    /// <summary>
+    /// Constant-iter loop whose body contains a nested <c>IfElse</c> with a
+    /// loop-dependent condition (compares the iteration index against a
+    /// constant) and constant-only branches (no <c>acc</c> in either side, so
+    /// the resulting <c>IF_CLOSE</c> takes only constant inputs and is NOT
+    /// directly loop-dependent). Drives the scope-pair propagation arm of
+    /// <c>FastFoldConstantIterationLoops.UnrollOne</c> (~L3710-3719 of
+    /// <c>FastProcessors.cs</c>): the unroller's loop-dep analyzer sees a body
+    /// <c>IF_CLOSE</c> with no direct loop-dep input but its paired
+    /// <c>IF_OPEN</c>'s inputs are loop-dep (via the iter-index cond), so it
+    /// must walk back through <c>GraphOpenNodeKey</c> to mark the CLOSE for
+    /// cloning. Both <c>acc</c>-dependent branches (the typical pattern) hit
+    /// the direct-loop-dep path and skip this walk-back.
+    /// </summary>
+    [Module]
+    public partial class ConstLoopWithNestedIterDependentIf
+    {
+        public static Scalar<float32> Inline(Scalar<float32> x)
+        {
+            var acc = x;
+            foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
+            {
+                var isFirst = ctx.IterationIndex < Scalar(1L);
+                var bump = isFirst.IfElse(Scalar(10.0f), Scalar(1.0f));
+                acc = acc + bump;
+            }
+            return acc;
+        }
+    }
+
+    #endregion
+
+    #region LoopAPI body-value binding (scan inputs and zero-input body ops)
+
     /// <summary>
     /// Scans a loop carry read <em>before</em> the body updates it, so the scan input is the
     /// carry's value at the top of the iteration — the loop-open node's output rather than a
@@ -1117,7 +1175,10 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
-    /// <summary><see cref="ScanIterationIndex"/> with a constant trip count.</summary>
+    /// <summary>
+    /// <see cref="ScanIterationIndex"/> with a constant trip count, and a runtime input added
+    /// afterwards so the graph is not wholly constant.
+    /// </summary>
     [Module]
     public partial class ScanIterationIndexConstTrip
     {
@@ -1145,7 +1206,7 @@ namespace Shorokoo.Tests.Modules
                     acc = acc + Scalar(1.0f);
                     scanned = (Variable)ctx1.Scan(acc);
                 }
-                acc = (Scalar<float32>)(Variable)OnnxOp.ReduceSum(scanned!, Vector(0L), keepdims: false, noopWithEmptyAxes: null);
+                acc = ((Tensor<float32>)scanned!).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
             }
             return acc;
         }
@@ -1197,55 +1258,19 @@ namespace Shorokoo.Tests.Modules
     }
 
     /// <summary>
-    /// Constant-iter loop whose body break is dynamic (<c>ctx.ContinueWhile</c>
-    /// fed by a runtime-bool input). <c>LoopAPI</c> emits the <c>LOOP_OPEN</c>
-    /// with <c>condition: null</c>, so OPEN.Inputs[1] is absent and the unroller
-    /// has to seed the AND-chain with a fresh <c>CONSTANT(true)</c> node
-    /// (~L3907-3929) and emit per-loop-var <c>WHERE</c> + per-iter <c>AND</c>
-    /// gating (~L4210-4247).
+    /// Draws inside the loop body with a zero-input op. <c>LoopAPI.ProcessNode</c> declines to
+    /// track any node with no inputs, so the draw is emitted before the loop-open node and every
+    /// iteration reads the same one. Tracked as Shorokoo/Shorokoo#262.
     /// </summary>
     [Module]
-    public partial class ConstLoopWithDynamicBreak
+    public partial class ZeroInputOpInLoopBody
     {
-        public static Scalar<float32> Inline(Scalar<float32> x, Scalar<bit> keepGoing)
+        public static Tensor<float32> Inline(Scalar<int64> trips)
         {
-            var acc = x;
-            foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
-            {
-                acc = acc + Scalar(1.0f);
-                ctx.ContinueWhile(keepGoing);
-            }
-            return acc;
-        }
-    }
-
-    /// <summary>
-    /// Constant-iter loop whose body contains a nested <c>IfElse</c> with a
-    /// loop-dependent condition (compares the iteration index against a
-    /// constant) and constant-only branches (no <c>acc</c> in either side, so
-    /// the resulting <c>IF_CLOSE</c> takes only constant inputs and is NOT
-    /// directly loop-dependent). Drives the scope-pair propagation arm of
-    /// <c>FastFoldConstantIterationLoops.UnrollOne</c> (~L3710-3719 of
-    /// <c>FastProcessors.cs</c>): the unroller's loop-dep analyzer sees a body
-    /// <c>IF_CLOSE</c> with no direct loop-dep input but its paired
-    /// <c>IF_OPEN</c>'s inputs are loop-dep (via the iter-index cond), so it
-    /// must walk back through <c>GraphOpenNodeKey</c> to mark the CLOSE for
-    /// cloning. Both <c>acc</c>-dependent branches (the typical pattern) hit
-    /// the direct-loop-dep path and skip this walk-back.
-    /// </summary>
-    [Module]
-    public partial class ConstLoopWithNestedIterDependentIf
-    {
-        public static Scalar<float32> Inline(Scalar<float32> x)
-        {
-            var acc = x;
-            foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
-            {
-                var isFirst = ctx.IterationIndex < Scalar(1L);
-                var bump = isFirst.IfElse(Scalar(10.0f), Scalar(1.0f));
-                acc = acc + bump;
-            }
-            return acc;
+            var acc = Scalar(0.0f);
+            foreach (var ctx in LoopAPI.Iterate(trips))
+                acc = acc + (Scalar<float32>)(Variable)OnnxOp.RandomUniform([], high: 1f, low: 0f, dtype: DType.Float32);
+            return (Tensor<float32>)acc;
         }
     }
 

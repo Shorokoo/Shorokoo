@@ -134,15 +134,22 @@ namespace Shorokoo
                 var loopVariableForScanVariable = thirdPassOutputs[retVal];
                 Debug.Assert(loopVariableForScanVariable.IsLocalScanVariable);
 
-                // Bind the scan to the value the BODY reads this iteration, not to the caller's
-                // C# local. The body is traced four times and the local is never rebound between
-                // passes, so by the third pass it holds whatever the first two passes advanced it
-                // to — nodes that live in the OUTER graph. The zombie node above went through
-                // ProcessNode like any other body node, which rewrote its input to the in-body
-                // value (an open-node output for a carry read before the body updates it, the
-                // iteration index, an earlier body node's output, or an unchanged outer value
-                // when the scanned tensor really is loop-invariant). Read it back from there.
-                loopVariableForScanVariable.SetLocalScanVariableInput(retVal.OwningNode.Inputs[0].AssertNotNull());
+                // Bind the scan to the value the BODY reads this iteration. For a carry read
+                // before the body updates it, that is NOT the caller's C# local: the body is
+                // traced four times and the local is never rebound between passes, so by the
+                // third pass it holds what the first two passes advanced it to — nodes that live
+                // in the OUTER graph. ProcessNode has already rewritten the zombie node's own
+                // input to the carry's open-node output, so take the rewrite from there.
+                //
+                // Only that rewrite. ProcessNode's other one is the outer-scope fallback, which
+                // resolves an input to the first pass's node; for a body value the looper does
+                // not track — anything built from a zero-input op, which node interception skips
+                // — that fallback names the pass-1 node outside the loop, and binding it would
+                // hoist e.g. a scanned RandomNormal out of the body and stack one draw N times.
+                // Every other case leaves the input alone, so the local is already right.
+                var inBodyScanInput = retVal.OwningNode.Inputs[0].AssertNotNull();
+                loopVariableForScanVariable.SetLocalScanVariableInput(
+                    this.openNodeOutputs.ContainsKey(inBodyScanInput) ? inBodyScanInput : toScan);
             }
 
             return retVal;

@@ -17,8 +17,10 @@ namespace Shorokoo.Tests;
 /// <see cref="InferenceBackend"/> deployment-folder discovery and selection policy, the typed
 /// value-handle conversions, <c>ShapeUtils</c>' argument validation for <c>Reshape</c>'s
 /// <c>keepAxes</c>, the <see cref="AtomicFileWriter"/> temp-and-rename commit protocol
-/// (crash-window fault injection, stale-temp sweep, retain-last-N rotation), and the
-/// public-API shape guard against a <c>params</c> array sitting behind an optional parameter.
+/// (crash-window fault injection, stale-temp sweep, retain-last-N rotation), the
+/// <see cref="DebugRequests"/> snapshot hook firing at every <see cref="GraphCreationPoint"/>,
+/// and the public-API shape guard against a <c>params</c> array sitting behind an optional
+/// parameter.
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
@@ -670,8 +672,7 @@ public class CoreUtilsCoverageTests
             model.ToConcreteArchitecture(hints, new ComputeContext(),
                 new DebugRequests(points.Select(p => (p, Path.Combine(dir, $"{p}.cs")))));
 
-            bool Written(GraphCreationPoint p) =>
-                File.Exists(Path.Combine(dir, $"{p}.cs")) && new FileInfo(Path.Combine(dir, $"{p}.cs")).Length > 0;
+            bool Written(GraphCreationPoint p) => new FileInfo(Path.Combine(dir, $"{p}.cs")) is { Exists: true, Length: > 0 };
 
             Assert.Equal(points, points.Where(Written).ToArray());
         }

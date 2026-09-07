@@ -102,12 +102,11 @@ namespace Shorokoo.Graph
             // state param rides the normal trainable/state param pipeline from here on.
             Stage("InjectRngDrawCounter");
             FastInjectRngDrawCounter.Process(fastGraph);
-            DebugPrintFast(fastGraph, debugRequests, GraphCreationPoint.AfterInjectRngDrawCounter);
+            DebugPrintFast(fastGraph, debugRequests, GraphCreationPoint.AfterInjectRngExecutionCounter);
             FastGraphCycleDetector.AssertAcyclic(fastGraph, "After FastInjectRngDrawCounter");
 
             Stage("ExtractIdentifierTemplates");
             var identifierTemplatesInfo = FastExtractIdentifierTemplates.Process(fastGraph);
-            DebugPrintFast(fastGraph, debugRequests, GraphCreationPoint.AfterExtractIdentifierTemplates);
             FastGraphCycleDetector.AssertAcyclic(fastGraph, "After FastExtractIdentifierTemplates");
 
             Stage("ConvertToIdRefModelParams");

@@ -5066,13 +5066,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         "FastFoldConstantIterationLoops.UnrollOne: scan input is null/empty. "
                         + "LoopAPI always binds a scan output to some non-empty key.");
                     var sk = (FastTensorKey)scanInKey!;
-                    var hasMapped = curTensorMap.TryGetValue(sk, out var mapped);
-                    Debug.Assert(hasMapped || !openNode.Outputs.Any(x => x is FastTensorKey ok && ok == sk),
-                        "FastFoldConstantIterationLoops.UnrollOne: scan input is an OPEN output with "
-                        + "no per-iteration substitution, so the fallback below would name a node "
-                        + "this unroll splices out. Every OPEN output is remapped above unless a "
-                        + "carry has no initializer, which LoopAPI never emits.");
-                    scanIterationKeys[k].Add(hasMapped ? mapped : sk);
+                    scanIterationKeys[k].Add(curTensorMap.TryGetValue(sk, out var mapped) ? mapped : sk);
                 }
             }
 

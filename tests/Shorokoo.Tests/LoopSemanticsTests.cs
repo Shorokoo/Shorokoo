@@ -107,9 +107,8 @@ public partial class RolledLoopWithOnlyAScanOutput
     }
 }
 
-/// <summary>A bit carry handed straight to <c>ctx.ContinueWhile</c> before the body updates it.
-/// <c>ContinueWhile</c> creates no node, so nothing rewrites the caller's local to the value the
-/// body reads and the condition binds outside the loop. Tracked as Shorokoo/Shorokoo#280.</summary>
+/// <summary>A bit carry handed straight to <c>ctx.ContinueWhile</c> before the body updates it,
+/// so the condition is a bare read of the caller's local with no node of its own to be rewritten.</summary>
 [Module]
 public partial class BreakOnCarryReadBeforeUpdate
 {
@@ -121,6 +120,25 @@ public partial class BreakOnCarryReadBeforeUpdate
         {
             ctx.ContinueWhile(flag);
             flag = acc < Scalar(3f);
+            acc = acc + Scalar(1f);
+        }
+        return acc;
+    }
+}
+
+/// <summary>The same shape through <c>ctx.Break</c>, whose negation already gave the condition a
+/// body node of its own.</summary>
+[Module]
+public partial class ExitLoopOnCarryReadBeforeUpdate
+{
+    public static Scalar<float32> Inline(Scalar<int64> trips)
+    {
+        var acc = Scalar(0f);
+        var stop = Scalar(false);
+        foreach (var ctx in LoopAPI.Iterate(trips))
+        {
+            ctx.Break(stop);
+            stop = acc >= Scalar(3f);
             acc = acc + Scalar(1f);
         }
         return acc;
@@ -192,12 +210,14 @@ public class LoopSemanticsTests
             runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f), TensorData(DType.Bool, [], true)],
             expected: [3d, 6d, 3d, 6d, 3d, 6d]));
 
-    /// <summary>A bit carry read before the body updates it binds outside the loop, so the break
-    /// never fires and the loop runs its full trip count. Tracked as Shorokoo/Shorokoo#280.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#280: ctx.ContinueWhile given a carry binds the pre-loop value")]
+    /// <summary>A ten-trip loop whose break condition is a carry read before the body updates it
+    /// stops at five, rather than binding the pre-loop value and running to the trip count.</summary>
+    [Fact]
     public void TestBreakingOnACarryReadBeforeTheBodyUpdatesIt()
-        => Assert.True(AutoTest.AdvancedTestGraph<BreakOnCarryReadBeforeUpdate>(
-            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Int64, [], 10L)], expected: [5d]));
+    {
+        Assert.True(Returns<BreakOnCarryReadBeforeUpdate>(10, 5d));
+        Assert.True(Returns<ExitLoopOnCarryReadBeforeUpdate>(10, 5d));
+    }
 
     [Fact]
     public void TestAScanOfTheIterationIndexStacksItsIterations()

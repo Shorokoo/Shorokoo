@@ -1096,9 +1096,21 @@ namespace Shorokoo
 
         public Vector<T> Scan<T>(Scalar<T> scalar) where T : IVarType => looper.Scan(scalar);
 
-        public void Break(Scalar<bit> exitLoopWhenTrue) => continueWhile(!exitLoopWhenTrue);
+        public void Break(Scalar<bit> exitLoopWhenTrue) => Continue(!exitLoopWhenTrue);
 
-        public void ContinueWhile(Scalar<bit> exitLoopWhenFalse) => continueWhile(exitLoopWhenFalse);
+        public void ContinueWhile(Scalar<bit> exitLoopWhenFalse) => Continue(exitLoopWhenFalse);
+
+        /// <summary>
+        /// Wraps the condition in a body node before handing it over. The body is traced four
+        /// times and the caller's C# local is never rebound between passes, so a bare local — a
+        /// bit carry read before the body updates it — holds an OUTER-graph node by the binding
+        /// pass, and the loop would test a value fixed before it started. Wrapping puts the read
+        /// at a node input, which ProcessNode rewrites to the carry's open-node output like any
+        /// other body read. The wrap runs on every pass, so the four traces stay aligned; where
+        /// the condition already came from a body node it is a redundant Identity.
+        /// </summary>
+        private void Continue(Scalar<bit> exitLoopWhenFalse)
+            => continueWhile((Scalar<bit>)OnnxOp.Identity(exitLoopWhenFalse, rank: 0));
     }
 
     public class LoopVariableInput

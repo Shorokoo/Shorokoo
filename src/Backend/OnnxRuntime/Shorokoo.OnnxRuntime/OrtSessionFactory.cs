@@ -26,15 +26,6 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
 {
     private readonly Action<SessionOptions> _configureExecutionProvider;
 
-    private static int _sessionsCreated;
-
-    /// <summary>
-    /// How many sessions this process has built through a factory. ONNX Runtime applies some
-    /// session settings to the constructing thread once per process, so a test asking what such a
-    /// setting did can only be believed when this is still zero.
-    /// </summary>
-    public static int SessionsCreated => System.Threading.Volatile.Read(ref _sessionsCreated);
-
     /// <param name="configureExecutionProvider">
     /// Applied to the <see cref="SessionOptions"/> of every session this factory creates,
     /// after the log-severity and graph-optimization settings and before the session is
@@ -67,7 +58,6 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
         // session creation frees them while ORT is still walking sess_options->provider_factories
         // (core/session/utils.cc, InitializeSession) -- a use-after-free that segfaults the
         // process. Disposing in a finally keeps them rooted across the constructor.
-        System.Threading.Interlocked.Increment(ref _sessionsCreated);
         using var options = new SessionOptions();
         Configure(options, graphOptimization, logSeverity);
         _configureExecutionProvider(options);
@@ -87,12 +77,15 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
     /// everything else in ORT_ENABLE_ALL — constant folding, the MatMul/Gelu/LayerNorm fusions,
     /// layout transforms — stays on.</para>
     ///
-    /// <para>Deliberately absent: <c>session.set_denormal_as_zero</c>. Attention gradients are
-    /// full of denormal floats and MLAS's GEMM runs roughly seven times slower on them, but ORT
-    /// applies that entry to the constructing thread once per process (first session wins) by
-    /// setting FTZ/DAZ in its MXCSR, which then flushes every later float operation on that
-    /// thread — managed code and every other session included. Tracked as Shorokoo/Shorokoo#252;
-    /// a session built here must leave the calling thread's denormals alone.</para>
+    /// <para>Deliberately absent: <c>session.set_denormal_as_zero</c>. ORT applies that entry to
+    /// the constructing thread once per process (first session wins) by setting FTZ/DAZ in its
+    /// MXCSR, which then flushes every later float and double operation on that thread — the
+    /// caller's own managed code included, for the life of the thread. It was weighed for a
+    /// measured speedup on denormal attention gradients; those gradients turned out to be an
+    /// artefact of a profiling harness that fed two weight tensors identical values, so there is
+    /// no speedup to set against the leak. Nothing asserts its absence: a guard on it was
+    /// deleted deliberately, having needed a <c>dotnet test</c> invocation of its own to observe
+    /// a process's first session.</para>
     /// </summary>
     public static void Configure(
         SessionOptions options,

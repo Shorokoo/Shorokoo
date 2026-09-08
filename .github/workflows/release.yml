@@ -81,6 +81,20 @@ jobs:
           --filter "FullyQualifiedName~RigConstructionScalingTests"
           -c Release --logger "console;verbosity=minimal" --no-build
 
+      # MALLOC_* must be in the environment before the process starts: this class reads a
+      # training step's real peak off VmHWM, which only moves when glibc returns freed
+      # tensors to the OS, and nothing in-process can set them after the fact. Without them
+      # the test still gates the modelled columns but records RealPeakBytes as null.
+      - name: Benchmark — memory-aware pass (own process)
+        env:
+          MALLOC_MMAP_THRESHOLD_: 16384
+          MALLOC_TRIM_THRESHOLD_: 0
+          MALLOC_TOP_PAD_: 0
+        run: >
+          dotnet test tests/Shorokoo.Tests/Shorokoo.Tests.csproj
+          --filter "FullyQualifiedName~MemoryPassBenchmarkTests"
+          -c Release --logger "console;verbosity=minimal" --no-build
+
       - name: Build-hygiene gate
         run: >
           dotnet test tests/Shorokoo.Tests/Shorokoo.Tests.csproj

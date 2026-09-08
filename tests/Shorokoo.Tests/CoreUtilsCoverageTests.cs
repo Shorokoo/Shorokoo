@@ -298,13 +298,48 @@ public class CoreUtilsCoverageTests
         Assert.Equal(cpu, InferenceBackend.SelectBackend([cpu, gpu], cudaAvailable: false)!.Value);
     }
 
-    private static string ProductSourceRoot()
+    /// <summary>
+    /// No filter in <c>release.yml</c> selects a <c>Purpose=Benchmark</c> class implicitly — each
+    /// needs a step naming it, and each must precede the <c>Purpose=Gate</c> step, whose MSBuild
+    /// workers wreck any measurement sharing the runner. Two classes were once added without one
+    /// and never ran at release (Shorokoo/Shorokoo#277).
+    /// </summary>
+    [Fact]
+    public void TestEveryBenchmarkClassHasItsOwnReleaseStepBeforeTheGate()
+    {
+        var workflow = File.ReadAllText(Path.Combine(RepoRoot(), ".github", "workflows", "release.yml"));
+        var benchmarks = typeof(Shorokoo.Tests.Benchmarks.MemoryPassBenchmarkTests).Assembly.GetTypes()
+            .Where(t => t.GetCustomAttributesData().Any(a =>
+                a.AttributeType == typeof(Xunit.TraitAttribute) &&
+                a.ConstructorArguments.Count == 2 &&
+                (string?)a.ConstructorArguments[0].Value == "Purpose" &&
+                (string?)a.ConstructorArguments[1].Value == "Benchmark"))
+            .Select(t => t.Name)
+            .ToArray();
+        Assert.NotEmpty(benchmarks);
+
+        var gate = workflow.IndexOf("\"Purpose=Gate\"", StringComparison.Ordinal);
+        Assert.True(gate > 0);
+        foreach (var name in benchmarks)
+        {
+            var step = workflow.IndexOf($"FullyQualifiedName~{name}\"", StringComparison.Ordinal);
+            Assert.True(step > 0);
+            Assert.True(step < gate);
+        }
+    }
+
+    private static string RepoRoot() => Ancestor(d => File.Exists(Path.Combine(d, "Shorokoo.sln")));
+
+    private static string ProductSourceRoot() =>
+        Path.Combine(Ancestor(d => Directory.Exists(Path.Combine(d, "src", "Shorokoo"))), "src");
+
+    private static string Ancestor(Func<string, bool> holds)
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir is not null && !Directory.Exists(Path.Combine(dir.FullName, "src", "Shorokoo")))
+        while (dir is not null && !holds(dir.FullName))
             dir = dir.Parent;
         Assert.NotNull(dir);
-        return Path.Combine(dir!.FullName, "src");
+        return dir!.FullName;
     }
 
     // Every way to come by one of ORT's SafeHandle types: the constructors, and the SessionOptions

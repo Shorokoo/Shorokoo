@@ -21,6 +21,10 @@ namespace Shorokoo.Tests;
 /// with <see cref="ShorokooGraphOptimization.TrainingStep"/> to stop that; this
 /// checks that clones ORT's plain ORT_ENABLE_ALL merges away survive under that level (fusions
 /// may still absorb a Conv or Relu clone into its neighbour, which is not a merge).
+///
+/// <para>Also the training step's runtime numerics, where a lowered step has to be built and run
+/// to ask the question at all — which is why the feed guard below lives here rather than beside
+/// the harnesses it guards.</para>
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
@@ -53,9 +57,7 @@ public class RematerializationRuntimeTests
 
     /// <summary>
     /// The training step's own sessions get the profile that keeps its recomputation; a graph
-    /// compiled through the ordinary entry point does not. (Whether that profile leaves the
-    /// calling thread's denormals alone can only be asked of the first ORT session in a process,
-    /// so it is asked in <c>DenormalTrainingSessionTests</c>, which gets one of its own.)
+    /// compiled through the ordinary entry point does not.
     /// </summary>
     [Fact]
     public void TestOnlyTheRigsOwnSessionsGetTheTrainingStepProfile()
@@ -67,6 +69,48 @@ public class RematerializationRuntimeTests
             ComputeContext.Default.Compile(graph, inputDims: null, trainingStep: true).Optimization);
         Assert.Equal(ShorokooGraphOptimization.EnableAll,
             ComputeContext.Default.Compile(graph, inputDims: null, trainingStep: false).Optimization);
+    }
+
+    /// <summary>
+    /// <see cref="SyntheticFeed"/> must keep a training step's attention probabilities normal:
+    /// what the profiling harnesses feed is what their kernel times measure.
+    /// </summary>
+    [Fact]
+    public void TestTheProfilingHarnessFeedKeepsAttentionOutOfTheDenormalRange()
+    {
+        long[] shape = [2L, 32L, 128L];
+        NamedModelParam[] sample =
+            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData(shape, new float[shape[0] * shape[1] * shape[2]]))];
+        var rig = TrainingRig.FromScratch(MemoryPassEncoder1.ComputationGraph, L2Loss.ComputationGraph,
+            SGDOptimizer.ComputationGraph, sample, 0.01f);
+        var inputs = rig.OptimizationInputShapes;
+        var proto = FastOnnxModelBuilder.BuildInternalOnnxModel(rig.TrainingStepPureGraph.ToInternal(), prepForOnnx: true,
+            inputDims: inputs.Select(s => s.Shape.Dims).ToArray());
+
+        var probability = proto.Graph.Nodes.First(n => n.OpType == "Softmax").Outputs[0];
+        proto.Graph.Outputs.Add(new ValueInfoProto { Name = probability });
+        var stream = new MemoryStream();
+        ProtoBuf.Serializer.Serialize(stream, proto);
+
+        using var options = new SessionOptions();
+        options.LogSeverityLevel = OrtLoggingLevel.ORT_LOGGING_LEVEL_FATAL;
+        options.GraphOptimizationLevel = GraphOptimizationLevel.ORT_DISABLE_ALL;
+        using var session = new InferenceSession(stream.ToArray(), options);
+        var feeds = new Dictionary<string, OrtValue>();
+        for (var i = 0; i < session.InputNames.Count; i++)
+            feeds[session.InputNames[i]] = SyntheticFeed.Tensor(inputs[i].Shape, inputs[i].DType, i);
+        using var runOptions = new RunOptions();
+        using var results = session.Run(runOptions, feeds, [probability]);
+        var probabilities = results[0].GetTensorDataAsSpan<float>();
+
+        int denormals = 0, zeros = 0;
+        foreach (var p in probabilities)
+            if (p == 0f) zeros++;
+            else if (MathF.Abs(p) < 1.17549435e-38f) denormals++;
+        GC.KeepAlive(feeds);
+
+        Assert.Equal(0, denormals);
+        Assert.Equal(0, zeros);
     }
 
     private static Dictionary<FastNodeKey, string> EmittedNames(InternalComputationGraph graph)

@@ -1271,6 +1271,25 @@ namespace Shorokoo.Tests.Modules
         public static Tensor<float32> Inline(Tensor<float32> v) => v * Scalar(2f);
     }
 
+    [Module]
+    public partial class HyperDoublerSub
+    {
+        public static Tensor<float32> Inline(Tensor<float32> v, [Hyper] Scalar<float32> k) => v * k;
+    }
+
+    [TrainableParamInitializer]
+    public static partial class InitCallingHyperModule
+    {
+        public static Tensor<float32> Inline(Vector<int64> shape)
+            => HyperDoublerSub.Call(Scalar(2f), Globals.TensorFill(shape, 1.0f));
+    }
+
+    [Module]
+    public partial class UsesInitCallingHyperModule
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input) => input * InitCallingHyperModule.Init(Vector(2L));
+    }
+
     [TrainableParamInitializer]
     public static partial class InitCallingAModule
     {

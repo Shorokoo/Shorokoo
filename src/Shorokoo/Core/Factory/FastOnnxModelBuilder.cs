@@ -1130,8 +1130,8 @@ namespace Shorokoo.Core.Factory
             Function function, OpSetVersion opset, bool prepForOnnx, bool applyExecutionLowerings,
             bool stripCheckpointStamp = true, bool flattenBody = true)
         {
-            // Clone the function's primary Fast body and run the same pre-passes
-            // on the copy. The function's body has its own ONNX-name namespace,
+            // Run the same pre-passes over the function's own body. That body has its own
+            // ONNX-name namespace,
             // so the per-graph counter inside FastUseUniqueNames restarts at 1
             // for each function — matches how ONNX FunctionProtos are scoped.
             // Flattened for the dialects that cannot express an inlinable MODEL_INVOKE /
@@ -1140,6 +1140,13 @@ namespace Shorokoo.Core.Factory
             // inference on (Shorokoo/Shorokoo#276). Both forms hand back a fresh mutable copy, so
             // there is nothing to clone.
             var fnFast = flattenBody ? function.GetFastFlattenedGraph() : function.OriginalFastGraph;
+
+            // Inlining a hyper-bearing callee leaves its MODEL_HYPERPARAM reads live, and with them
+            // the MODULE_SET_HYPERPARAMS / CREATE_MODULE chain they read from. The pipeline folds
+            // that chain in a later stage, which a body emitted from here never reaches — so fold
+            // it here, or the body still ships the machinery flattening was meant to remove.
+            if (flattenBody)
+                FastUnpackModelStruct.Process(fnFast);
             // Before the pre-passes, so the inserted Identity is renamed with the rest of the body.
             FastIdentityWrapping.WrapAliasedOutputs(fnFast);
             RunPrePasses(fnFast, prepForOnnx, applyExecutionLowerings);

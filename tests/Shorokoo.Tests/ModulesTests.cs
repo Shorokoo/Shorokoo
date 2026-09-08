@@ -26,8 +26,31 @@ public class ModulesCoverageTests
 
     [Fact]
     public void TestAnInitializerCallingAModuleFlattensThatCallInItsFunctionBody()
-        => Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitCallingAModule>(
-            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)], expected: [2.0, 4.0]));
+    {
+        TensorData[] x = [TensorData(DType.Float32, [2L], 1f, 2f)];
+        Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitCallingAModule>(
+            hyperparamInputs: [], runtimeInputs: x, expected: [2.0, 4.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitCallingHyperModule>(
+            hyperparamInputs: [], runtimeInputs: x, expected: [2.0, 4.0]));
+    }
+
+    [Fact]
+    public void TestTheNativeContainerKeepsASubModuleBoundaryThatOnnxExportFlattens()
+    {
+        var g = Modules.UsesInitCallingAModule.ComputationGraph;
+        var reloaded = CompressedFormatUtils.LoadFastGraphFromBinary(
+            CompressedFormatUtils.SaveFastGraphToBinary(g, compressed: false)).ToInternal();
+        var bodies = reloaded.LocalFunctions.SelectMany(f => f.Body.ToInternal().Nodes);
+        Assert.Contains(bodies, n => n.OpCode == InternalOpCodes.MODEL_INVOKE);
+    }
+
+    [Fact]
+    public void TestFromOrderedInputsRefusesMoreValuesThanTheGraphHasDataInputs()
+    {
+        var g = SimpleGenericLayer.ComputationGraph;
+        Assert.Throws<ModelException>(
+            () => g.FromOrderedInputs([TensorData([], 0f), TensorData([2L], 1f, 2f)]));
+    }
 
     [Fact]
     public void TestStateUpdateSurvivesNestedFirstUseModuleBuild()
@@ -1266,6 +1289,43 @@ public class ModulesCoverageTests
         Assert.Equal(3, arch.GetConcreteModelParamInfos().ModelIds.Distinct().Count());
     }
 
+    /// <summary>Specialization is seeded from the top-level graph's generic call sites only, so a
+    /// generic module reached through a non-generic body two levels down keeps its type
+    /// placeholders and the inliner splices a body it cannot match.
+    /// Tracked as Shorokoo/Shorokoo#286.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#286: generic erasure does not reach a call site nested in a non-generic body")]
+    public void TestAGenericModuleTwoCallsDeepConcretizes()
+    {
+        var input = TensorData([2L], 1f, 2f);
+        var g = WrapsNonGenericCallerOfGenericModule.ComputationGraph;
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
+        Assert.Equal([2f, 4f], RunFloats(arch.ToConcreteModel(), input));
+    }
+
+    [Fact]
+    public void TestACallSiteParameterNameIsNotShiftedByAnUnrelatedModuleWithASuffixName()
+    {
+        var input = TensorData([2L], 1f, 2f);
+        string[] Names(bool withDecoy)
+        {
+            var fn = ModuleFn((Func<Tensor<float32>, Tensor<float32>>)TimesOwnParam);
+            var x = InvokeInput("input");
+            var body = (Tensor<float32>)fn.Call(x)[0];
+            if (withDecoy)
+                body += ModuleFactory.FromFunc<Tensor<float32>, Tensor<float32>>(
+                    TimesOwnParamDecoy, "X" + nameof(ModulesCoverageTests)).SetHyperparams().Call(x);
+            var g = ComputationGraph.FromInternal(new InternalComputationGraph([x], [body]), GraphKind.Module);
+            return [.. g.ToConcreteArchitecture(g.FromOrderedInputs([input]))
+                .GetConcreteModelParamInfos().ParamInfos.Select(i => i.ToShorokooIdString())];
+        }
+
+        var callSite = $".{nameof(ModulesCoverageTests)}#0.";
+        Assert.Contains(Names(withDecoy: false), n => n.Contains(callSite));
+        Assert.Contains(Names(withDecoy: true), n => n.Contains(callSite));
+    }
+
+    private static Tensor<float32> TimesOwnParamDecoy(Tensor<float32> t) => t * InitSimple.Init([Scalar(2L)]);
+
     private static Tensor<float32> SizedByHyper(Tensor<float32> t, [Hyper] Scalar<int64> n)
         => InitSimple.Init([n]);
 
@@ -1305,6 +1365,10 @@ public class ModulesCoverageTests
         var gp = GenericLayerWithTrainableParams.ComputationGraph;
         var archP = gp.ToConcreteArchitecture(gp.FromOrderedInputs([shape, input]));
         Assert.Equal([1f, 2f], RunFloats(archP.ToConcreteModel(), shape, input));
+
+        var gw = NonGenericCallerOfGenericModule.ComputationGraph;
+        var archW = gw.ToConcreteArchitecture(gw.FromOrderedInputs([input]));
+        Assert.Equal([2f, 4f], RunFloats(archW.ToConcreteModel(), input));
     }
 
     /// <summary>A module body reachable as a delegate, for a module the source generator never saw.</summary>

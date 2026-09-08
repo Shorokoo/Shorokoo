@@ -81,7 +81,12 @@ namespace Shorokoo.Graph
             // op check refuses the leftover placeholder. Erasing it was reachable only from test
             // helpers, which is what left a generic module with no public route to a runnable
             // model (Shorokoo/Shorokoo#253). Do it here, ahead of the pipeline proper.
-            if (graph.Nodes.Any(n => n.OpCode == InternalOpCodes.GENERIC_TYPE_INPUT))
+            //
+            // The placeholders need not be in this graph: a non-generic module that calls a generic
+            // one carries none itself, and its callee's body supplies them at inlining time. Ask
+            // the same question the pass does — a call site is generic when it names type arguments
+            // — so the caller's route erases too instead of splicing a body it cannot match.
+            if (NeedsGenericErasure(graph))
                 graph = FastToConcreteDataType.Process(graph);
 
             Stage("Clone");
@@ -618,11 +623,11 @@ namespace Shorokoo.Graph
             // passing a value for a type placeholder, the shape this method used to expect.
             var names = dataInputNames.ToList();
             if (inputValues.Length > names.Count)
-                throw new System.InvalidOperationException(
-                    $"FromOrderedInputs: the graph has {names.Count} data input(s) " +
-                    $"({string.Join(", ", names)}) but {inputValues.Length} value(s) were supplied. " +
-                    "Pass at most one value per data input, in declaration order; a generic " +
-                    "[Module]'s type-placeholder slots are not data inputs and take no value.");
+                throw new ModelException(ErrorCodes.FW041, "FromOrderedInputs",
+                    $"the graph has {names.Count} data input(s) ({string.Join(", ", names)}) but " +
+                    $"{inputValues.Length} value(s) were supplied. Pass at most one value per data " +
+                    "input, in declaration order; a generic [Module]'s type-placeholder slots are " +
+                    "not data inputs and take no value.");
 
             return new ModelParamList(names.Zip(inputValues)
                 .Select(x => new TensorDataModelParam(x.First.AssertNotNull(), ModelParamType.InputParam, x.Second)));
@@ -722,6 +727,36 @@ namespace Shorokoo.Graph
                 + $"{moduleOps.Count} module-stage op(s) (e.g. {moduleOps[0].OpCode}). Its trainable parameters "
                 + "are not statically enumerable and would be missed. Call ToConcreteArchitecture(inputHints, ...) "
                 + "first, then run this on the returned graph.");
+        }
+
+        /// <summary>
+        /// True when <paramref name="graph"/> still has generic types to erase — a type placeholder
+        /// of its own, or a reachable callee body carrying one. The placeholders need not be in the
+        /// graph itself: a non-generic module that calls a generic one has none, and its callee
+        /// supplies them at inlining time.
+        ///
+        /// <para>Asking after the placeholders rather than after a call site's type-argument
+        /// attribute is what makes this idempotent: the attribute survives erasure, so keying off
+        /// it re-runs the pass on an already-erased graph — a reloaded one, say — and trips its
+        /// own placeholders-match-type-arguments assertion.</para>
+        /// </summary>
+        private static bool NeedsGenericErasure(InternalComputationGraph graph)
+        {
+            var seen = new HashSet<Function>();
+            var pending = new Queue<InternalComputationGraph>();
+            pending.Enqueue(graph);
+
+            while (pending.Count != 0)
+            {
+                var next = pending.Dequeue();
+                foreach (var node in next.Nodes)
+                {
+                    if (node.OpCode == InternalOpCodes.GENERIC_TYPE_INPUT) return true;
+                    if (node.TargetFunction is { } fn && seen.Add(fn))
+                        pending.Enqueue(fn.OriginalFastGraph);
+                }
+            }
+            return false;
         }
 
         private static void AssertFastGraphDoesNotContainOps(InternalComputationGraph fastGraph, string[] forbiddenOps, string stageName)

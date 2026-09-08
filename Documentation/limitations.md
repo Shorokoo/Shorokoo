@@ -95,20 +95,14 @@ concretizing the graph raises `FW023` if it is left unfixed.
 
 ## Current limitations (could be lifted)
 
-### A generic module's type argument cannot be chosen
+### A generic module reached through two levels of calls
 
-A generic `[Module]` — one whose `Inline<T>` is written against a type parameter — lowers
-and runs through the ordinary route:
-
-```csharp
-var g = MyGenericLayer.ComputationGraph;
-var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
-```
-
-Its type placeholders are not data inputs, so they take no value in `FromOrderedInputs`.
-What you cannot do is *pick* the type: concretization commits the module to the type it
-was built with, and nothing public selects another. Write the module against a concrete
-element type when you need a specific one.
+A generic `[Module]` lowers and runs through the ordinary route, and a non-generic module may
+call one — `GenericLayer.Call<float32>(x)` — and lower too. What does not yet work is a third
+level: wrapping that caller in another module leaves the generic call site unspecialized, and
+concretizing the wrapper fails
+([#286](https://github.com/Shorokoo/Shorokoo/issues/286)). Call the generic module from the
+module you concretize, rather than from one it calls.
 
 ### Random draws inside a loop body
 

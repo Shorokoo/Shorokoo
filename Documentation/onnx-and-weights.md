@@ -146,6 +146,12 @@ file that only fails later when a third-party runtime rejects the custom ops.
 Module-stage graphs are persisted with the `.srk`/`.zsrk` format below, which
 uses Shorokoo's internal dialect and is re-imported by Shorokoo only.
 
+The guarantee reaches inside function bodies too: a body that calls a module is
+written out lowered, so nothing in the file names an op a stock runtime lacks.
+The `.srk` format makes the opposite trade and keeps each body as authored, so a
+module reloaded from it still shows the sub-module it calls rather than a copy of
+that callee inlined into every caller.
+
 ### Graph input/output names and shapes
 
 Exported graph inputs and outputs are named from the model's signature — the

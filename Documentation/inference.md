@@ -98,12 +98,11 @@ values go in the graph's input order, `[Hyper]` parameters first. The same refus
 comes from `ComputeContext.Execute`/`Run`/`Compile` when the graph handed to them is
 a module — so the mistake reads the same whichever way you make it.
 
-A graph whose module machinery sits inside a function body no longer escapes this:
-those bodies are flattened on the way out, and a call to a module-typed function
-lowers like any other call. What still fails the old way, with OnnxRuntime rejecting
-the model for an op it has no kernel for (`No Op registered for ShrkCreateModule`),
-is a body carrying machinery that nothing can lower — the fix is the same, lower the
-graph first.
+A graph whose module machinery sits inside a function body used to slip past this and
+fail later, with OnnxRuntime rejecting the model for an op it has no kernel for
+(`No Op registered for ShrkCreateModule`). Those bodies are now lowered on the way out,
+so an initializer that calls a module — or a call to a module-typed function — exports
+and runs like any other.
 
 Concretize the module's `ComputationGraph` against the input first, then execute:
 

@@ -150,7 +150,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// Re-keys all nodes and tensor keys in a <see cref="InternalComputationGraph"/> so that
         /// every node and tensor key is globally unique. Necessary because
         /// <see cref="Function.GetFastFlattenedGraph"/> is cached and shared across call
-        /// sites, so cloning it multiple times produces subgraphs with identical keys.
+        /// sites, so thawing it once per call site produces subgraphs with identical keys.
         /// Without re-keying, inserting the same function's subgraph more than once causes
         /// key collisions.
         /// </summary>
@@ -1148,9 +1148,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             {
                 var template = node.IdentifierTemplate;
                 if (template is null) continue;
-                for (int at = template.IndexOf(needle, System.StringComparison.Ordinal); at >= 0;
-                     at = template.IndexOf(needle, at + 1, System.StringComparison.Ordinal))
+                for (int at = template.IndexOf(needle, StringComparison.Ordinal); at >= 0;
+                     at = template.IndexOf(needle, at + 1, StringComparison.Ordinal))
                 {
+                    // A part starts the template or follows a separator. Without that boundary the
+                    // scan matches any name ending in this one, and an unrelated 'XAlpha' would
+                    // push 'Alpha' from #0 to #1 — renaming a parameter, which is the user-visible
+                    // contract a checkpoint is saved under.
+                    if (at > 0 && template[at - 1] is not ('.' or ':')) continue;
+
                     int digits = at + needle.Length, end = digits;
                     while (end < template.Length && char.IsAsciiDigit(template[end])) end++;
                     if (end > digits && int.TryParse(template[digits..end], out var used))

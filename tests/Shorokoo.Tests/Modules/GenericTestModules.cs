@@ -376,6 +376,14 @@ namespace Shorokoo.Tests.Modules
     /// This validates that the shrk_generic_type_args attribute on MODEL_INVOKE is properly handled
     /// and that GENERIC_TYPE_INPUT nodes are created for the callee's generic type parameters.
     /// </summary>
+    /// <summary>Wraps the non-generic caller, so the generic call site sits two levels down.</summary>
+    [Module]
+    public partial class WrapsNonGenericCallerOfGenericModule
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => NonGenericCallerOfGenericModule.Call(input);
+    }
+
     [Module]
     public partial class NonGenericCallerOfGenericModule
     {
@@ -1422,7 +1430,7 @@ namespace Shorokoo.Tests.Modules
 
     /// <summary>
     /// Three-level module-on-module-on-hyperparam-module call. When the outer
-    /// module's <c>MODULE_INVOKE</c> for <see cref="CallsHypersLayer"/> is
+    /// module's <c>MODEL_INVOKE</c> for <see cref="CallsHypersLayer"/> is
     /// inlined, <c>FastReparentToCallSite</c> walks
     /// <see cref="CallsHypersLayer"/>'s flattened body, which contains a
     /// <c>MODULE_SET_HYPERPARAMS</c> node for the nested

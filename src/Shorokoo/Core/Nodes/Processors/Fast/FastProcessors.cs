@@ -1290,9 +1290,17 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// collapsing to one canonical name but is not what the parameter is called — only a
         /// definition names a parameter, so a reference contributes no template at all
         /// (Shorokoo/Shorokoo#238).
+        /// <para>
+        /// The op-code check is load-bearing, not an optimization: <c>GetBoolVal</c> throws rather
+        /// than returning null for an attribute the node's op does not declare, and only these
+        /// three declare this one.
+        /// </para>
         /// </summary>
         private static bool IsParamReference(FastNode fastNode)
-            => fastNode.Attributes.GetBoolVal(OnnxOpAttributeNames.ShrkAttrIsParamReference) ?? false;
+            => (fastNode.OpCode == InternalOpCodes.MODEL_PARAM_REF
+                || fastNode.OpCode == InternalOpCodes.MODEL_PARAM_MODEL_REF
+                || fastNode.OpCode == InternalOpCodes.MODEL_PARAM_ID_REF)
+               && (fastNode.Attributes.GetBoolVal(OnnxOpAttributeNames.ShrkAttrIsParamReference) ?? false);
     }
 
     /// <summary>

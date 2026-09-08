@@ -53,7 +53,7 @@ namespace Shorokoo.Core.Nodes.Processors.Training
         internal FastDiscoveredParamInfo(
             string name, FastTensorKey outputKey, bool isTrainable,
             DType dtype, int? rank, DataStructure structure, FastNode node,
-            ImmutableArray<(FastTensorKey OutputKey, FastNode Node)> aliases = default)
+            ImmutableArray<(FastTensorKey OutputKey, FastNode Node)> aliases)
         {
             Name = name;
             OutputKey = outputKey;

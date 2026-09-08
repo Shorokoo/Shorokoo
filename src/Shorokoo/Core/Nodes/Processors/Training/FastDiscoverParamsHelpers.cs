@@ -9,6 +9,7 @@ using Shorokoo.Modules;
 using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
+using System.Diagnostics;
 using System.Linq;
 
 namespace Shorokoo.Core.Nodes.Processors.Training
@@ -26,7 +27,7 @@ namespace Shorokoo.Core.Nodes.Processors.Training
         {
             var definitions = new List<(FastNode Node, FastTensorKey OutputKey, bool IsTrainable, DType DType, int? Rank)>();
             // Bare references (IModel.GetTrainableParam), keyed by the model id they point at.
-            var aliasesByModelId = new Dictionary<ModelId, List<(FastTensorKey, FastNode)>>();
+            var aliasesByModelId = new Dictionary<ModelId, List<(FastTensorKey OutputKey, FastNode Node)>>();
 
             foreach (var node in graph.Nodes)
             {
@@ -76,20 +77,26 @@ namespace Shorokoo.Core.Nodes.Processors.Training
                 definitions.Add((node, outputKey.Value, isTrainable.Value, dtype, rank));
             }
 
+            // Only the trainable pass consumes Aliases (FastReplaceTrainableParamsWithInputProcessor);
+            // the state struct is built separately and would silently leave a reference node behind.
+            // GetTrainableParam only ever mints a trainable reference, so this cannot fire today.
+            Debug.Assert(wantTrainable || aliasesByModelId.Count == 0,
+                "A non-trainable parameter reference has no consumer for its alias.");
+
             var results = ImmutableArray.CreateBuilder<FastDiscoveredParamInfo>(definitions.Count);
             foreach (var (node, outputKey, isTrainable, dtype, rank) in definitions)
             {
                 // The reference's template carries the id of the parameter it points at (composed
                 // from its model's base id and the relative path it was given), so the id is what
                 // pairs the two — never the name, which is exactly what differs.
-                List<(FastTensorKey, FastNode)>? aliases = null;
+                List<(FastTensorKey OutputKey, FastNode Node)>? aliases = null;
                 if (aliasesByModelId.Count > 0 && ModelIdOf(node) is { } modelId)
                     aliasesByModelId.Remove(modelId, out aliases);
 
                 var name = ResolveParamName(node, results.Count);
                 results.Add(new FastDiscoveredParamInfo(
                     name, outputKey, isTrainable, dtype, rank, DataStructure.Tensor, node,
-                    aliases is null ? [] : [.. aliases]));
+                    aliases is null ? default : [.. aliases]));
             }
 
             // Mirrors the concretized path's rule (FastConvertModelParamIdRefToModelParam's
@@ -102,7 +109,7 @@ namespace Shorokoo.Core.Nodes.Processors.Training
                     + "referenced (e.g. via IModel.GetTrainableParam) but has no parameter "
                     + "definition in the graph. A bare reference cannot stand in for the definition.");
 
-            return results.ToImmutable();
+            return results.MoveToImmutable();
         }
 
         /// <summary>

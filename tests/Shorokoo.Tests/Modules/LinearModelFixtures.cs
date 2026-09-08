@@ -459,6 +459,17 @@ public partial class MixedDepthGainWithRefsModel
     }
 }
 
+/// <summary>One model handle called twice — the two calls share the one weight.</summary>
+[Module]
+public partial class SharedModelCalledTwiceModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var m = Rank1GainSubModel.Model();
+        return m.Call(input) + m.Call(input);
+    }
+}
+
 /// <summary>A reference to a parameter of a model that is never called, so the graph holds the
 /// reference with no definition behind it.</summary>
 [Module]

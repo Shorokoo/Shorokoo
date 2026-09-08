@@ -322,28 +322,24 @@ public class CoreUtilsCoverageTests
         Assert.True(gate > 0);
         foreach (var name in benchmarks)
         {
-            var step = workflow.IndexOf("FullyQualifiedName~" + name, StringComparison.Ordinal);
+            var step = workflow.IndexOf($"FullyQualifiedName~{name}\"", StringComparison.Ordinal);
             Assert.True(step > 0);
             Assert.True(step < gate);
         }
     }
 
-    private static string RepoRoot()
+    private static string RepoRoot() => Ancestor(d => File.Exists(Path.Combine(d, "Shorokoo.sln")));
+
+    private static string ProductSourceRoot() =>
+        Path.Combine(Ancestor(d => Directory.Exists(Path.Combine(d, "src", "Shorokoo"))), "src");
+
+    private static string Ancestor(Func<string, bool> holds)
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "Shorokoo.sln")))
+        while (dir is not null && !holds(dir.FullName))
             dir = dir.Parent;
         Assert.NotNull(dir);
         return dir!.FullName;
-    }
-
-    private static string ProductSourceRoot()
-    {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir is not null && !Directory.Exists(Path.Combine(dir.FullName, "src", "Shorokoo")))
-            dir = dir.Parent;
-        Assert.NotNull(dir);
-        return Path.Combine(dir!.FullName, "src");
     }
 
     // Every way to come by one of ORT's SafeHandle types: the constructors, and the SessionOptions

@@ -73,7 +73,7 @@ public class OpsPerfCalibrationTests
         var count = 1L;
         foreach (var d in shape) count *= d;
         NamedModelParam[] sample =
-            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData(shape, SyntheticFeed.Floats(count, 0)))];
+            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData(shape, new float[count]))];
         var rig = TrainingRig.FromScratch(model, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, sample, 0.01f);
 
         var inputs = rig.OptimizationInputShapes
@@ -280,5 +280,4 @@ public class OpsPerfCalibrationTests
         var s = xs.OrderBy(x => x).ToArray();
         return s.Length % 2 == 1 ? s[s.Length / 2] : (s[s.Length / 2 - 1] + s[s.Length / 2]) / 2.0;
     }
-
 }

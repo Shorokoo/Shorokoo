@@ -1,7 +1,7 @@
 using Microsoft.ML.OnnxRuntime;
 using Shorokoo.Core.Inference.Abstractions;
 
-namespace Shorokoo.Tests.Benchmarks;
+namespace Shorokoo.Tests.Utils;
 
 /// <summary>
 /// The deterministic filler the profiling harnesses feed a training step with — the batch and

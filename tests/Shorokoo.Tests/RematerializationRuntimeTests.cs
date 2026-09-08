@@ -21,6 +21,10 @@ namespace Shorokoo.Tests;
 /// with <see cref="ShorokooGraphOptimization.TrainingStep"/> to stop that; this
 /// checks that clones ORT's plain ORT_ENABLE_ALL merges away survive under that level (fusions
 /// may still absorb a Conv or Relu clone into its neighbour, which is not a merge).
+///
+/// <para>Also the training step's runtime numerics, where a lowered step has to be built and run
+/// to ask the question at all — which is why the feed guard below lives here rather than beside
+/// the harnesses it guards.</para>
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
@@ -68,20 +72,16 @@ public class RematerializationRuntimeTests
     }
 
     /// <summary>
-    /// What the profiling harnesses feed is what their kernel times measure, and
-    /// <c>OpCostModel</c>'s constants are fitted from those times. A filler keyed on length
-    /// alone gave <c>Wq</c> and <c>Wk</c> identical content, and the attention logits that
-    /// produced put the softmax tail in the denormal range, where MLAS's GEMM runs about eight
-    /// times slower — so this asks <see cref="Benchmarks.SyntheticFeed"/> for the whole step and
-    /// checks the probabilities came out normal.
+    /// <see cref="SyntheticFeed"/> must keep a training step's attention probabilities normal:
+    /// what the profiling harnesses feed is what their kernel times measure.
     /// </summary>
     [Fact]
     public void TestTheProfilingHarnessFeedKeepsAttentionOutOfTheDenormalRange()
     {
         long[] shape = [2L, 32L, 128L];
         NamedModelParam[] sample =
-            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData(shape, Benchmarks.SyntheticFeed.Floats(shape[0] * shape[1] * shape[2], 0)))];
-        var rig = TrainingRig.FromScratch(Benchmarks.MemoryPassEncoder1.ComputationGraph, L2Loss.ComputationGraph,
+            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData(shape, new float[shape[0] * shape[1] * shape[2]]))];
+        var rig = TrainingRig.FromScratch(MemoryPassEncoder1.ComputationGraph, L2Loss.ComputationGraph,
             SGDOptimizer.ComputationGraph, sample, 0.01f);
         var inputs = rig.OptimizationInputShapes;
         var proto = FastOnnxModelBuilder.BuildInternalOnnxModel(rig.TrainingStepPureGraph.ToInternal(), prepForOnnx: true,
@@ -98,18 +98,19 @@ public class RematerializationRuntimeTests
         using var session = new InferenceSession(stream.ToArray(), options);
         var feeds = new Dictionary<string, OrtValue>();
         for (var i = 0; i < session.InputNames.Count; i++)
-            feeds[session.InputNames[i]] = Benchmarks.SyntheticFeed.Tensor(inputs[i].Shape, inputs[i].DType, i);
+            feeds[session.InputNames[i]] = SyntheticFeed.Tensor(inputs[i].Shape, inputs[i].DType, i);
         using var runOptions = new RunOptions();
-        var results = session.Run(runOptions, feeds, [probability]);
+        using var results = session.Run(runOptions, feeds, [probability]);
         var probabilities = results[0].GetTensorDataAsSpan<float>();
 
-        var denormals = 0;
+        int denormals = 0, zeros = 0;
         foreach (var p in probabilities)
-            if (p != 0f && MathF.Abs(p) < 1.17549435e-38f) denormals++;
-        foreach (var o in results) o.Dispose();
+            if (p == 0f) zeros++;
+            else if (MathF.Abs(p) < 1.17549435e-38f) denormals++;
         GC.KeepAlive(feeds);
 
         Assert.Equal(0, denormals);
+        Assert.Equal(0, zeros);
     }
 
     private static Dictionary<FastNodeKey, string> EmittedNames(InternalComputationGraph graph)

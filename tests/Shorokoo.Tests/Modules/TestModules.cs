@@ -1272,6 +1272,44 @@ namespace Shorokoo.Tests.Modules
     }
 
     [Module]
+    public partial class ParamOwningSub
+    {
+        public static Tensor<float32> Inline(Tensor<float32> v) => v * InitSimple.Init(v.ShapeTensor());
+    }
+
+    [TrainableParamInitializer]
+    public static partial class InitCallingAParamOwningModule
+    {
+        public static Tensor<float32> Inline(Vector<int64> shape)
+            => ParamOwningSub.Call(Globals.TensorFill(shape, 1.0f));
+    }
+
+    [Module]
+    public partial class UsesInitCallingAParamOwningModule
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => input * InitCallingAParamOwningModule.Init(Vector(2L));
+    }
+
+    [TrainableParamInitializer]
+    public static partial class InitCallingAModuleInALoop
+    {
+        public static Tensor<float32> Inline(Vector<int64> shape)
+        {
+            var v = Globals.TensorFill(shape, 1.0f);
+            foreach (var _ in LoopAPI.Iterate(Scalar(2L))) v = DoublerSub.Call(v);
+            return v;
+        }
+    }
+
+    [Module]
+    public partial class UsesInitCallingAModuleInALoop
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => input * InitCallingAModuleInALoop.Init(Vector(2L));
+    }
+
+    [Module]
     public partial class HyperDoublerSub
     {
         public static Tensor<float32> Inline(Tensor<float32> v, [Hyper] Scalar<float32> k) => v * k;

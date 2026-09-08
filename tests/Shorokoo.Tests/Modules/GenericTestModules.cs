@@ -376,14 +376,6 @@ namespace Shorokoo.Tests.Modules
     /// This validates that the shrk_generic_type_args attribute on MODEL_INVOKE is properly handled
     /// and that GENERIC_TYPE_INPUT nodes are created for the callee's generic type parameters.
     /// </summary>
-    /// <summary>Wraps the non-generic caller, so the generic call site sits two levels down.</summary>
-    [Module]
-    public partial class WrapsNonGenericCallerOfGenericModule
-    {
-        public static Tensor<float32> Inline(Tensor<float32> input)
-            => NonGenericCallerOfGenericModule.Call(input);
-    }
-
     [Module]
     public partial class NonGenericCallerOfGenericModule
     {
@@ -393,6 +385,14 @@ namespace Shorokoo.Tests.Modules
             var doubled = GenericTargetModule.Call<float32>(input);
             return doubled;
         }
+    }
+
+    /// <summary>Wraps the non-generic caller, so the generic call site sits one level deeper.</summary>
+    [Module]
+    public partial class WrapsNonGenericCallerOfGenericModule
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => NonGenericCallerOfGenericModule.Call(input);
     }
 
     /// <summary>

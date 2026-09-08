@@ -773,7 +773,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     if (CarriesOwnedIdentity(subFastGraph))
                     {
                         var callSiteId = new ModelId(nextCallSiteId++);
-                        var calleeName = targetFunction.DefaultName ?? targetFunction.FriendlyName;
+                        var calleeName = targetFunction.DefaultName;
                         // The dedupe index, not the model id, is what tells two same-named
                         // parameters apart in an export, and FastApplyIdentifierTemplates numbered
                         // this module's MODEL_INVOKE sites from 0 with a counter of its own. Start
@@ -1143,7 +1143,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         private static int NextFreeDedupeId(InternalComputationGraph graph, string moduleName)
         {
             int max = -1;
-            var needle = moduleName + "#";
+            // Templates store part names escaped, so the needle must be too: a raw name carrying
+            // '.', '#', ':' or '\\' matches nothing, the scan returns 0, and the call site reuses
+            // the index the model-variable site already holds — two parameters, one name.
+            var needle = ModelParamIdentifierTemplatePart.EscapePartName(moduleName) + "#";
             foreach (var node in graph.Nodes)
             {
                 var template = node.IdentifierTemplate;

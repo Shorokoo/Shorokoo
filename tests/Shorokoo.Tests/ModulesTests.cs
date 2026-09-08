@@ -2,6 +2,7 @@ using Shorokoo.Core.AutoDiffCheckpointing;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 using Shorokoo.Core.Inference;
 using Shorokoo.Core.Graph;
+using Shorokoo.Core.Factory.IR;
 using Shorokoo.Runtime;
 
 namespace Shorokoo.Tests;
@@ -33,6 +34,22 @@ public class ModulesCoverageTests
         Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitCallingHyperModule>(
             hyperparamInputs: [], runtimeInputs: x, expected: [2.0, 4.0]));
     }
+
+    /// <summary>Flattening moves the callee's MODEL_PARAM_REF into the body, but the parameter
+    /// lowering chain only ever runs over a whole graph, so the emitted body still names
+    /// #ModelParamRef#. Tracked as Shorokoo/Shorokoo#287.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#287: a flattened body keeps its callee's parameter ref unlowered")]
+    public void TestAnInitializerCallingAParamOwningModuleFlattensThatCallInItsFunctionBody()
+        => Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitCallingAParamOwningModule>(
+            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)], expected: [1.0, 2.0]));
+
+    /// <summary>The same body with its call wrapped in a loop emits a Shrk-free proto that ORT
+    /// still rejects for missing type information on the loop's carried input, while the identical
+    /// shape at module level lowers fine. Tracked as Shorokoo/Shorokoo#287.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#287: a flattened body wrapping its call in a loop loses type information")]
+    public void TestAnInitializerCallingAModuleInALoopFlattensThatCallInItsFunctionBody()
+        => Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitCallingAModuleInALoop>(
+            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)], expected: [4.0, 8.0]));
 
     [Fact]
     public void TestTheNativeContainerKeepsASubModuleBoundaryThatOnnxExportFlattens()
@@ -1213,6 +1230,8 @@ public class ModulesCoverageTests
         Assert.Contains("3 argument(s)", Arity(twoIn, 3));
         Assert.Contains("null argument", Assert.Throws<ModuleException>(
             () => ModuleFn(twoIn).Call(InvokeInput("a"), null)).Message);
+        Assert.Contains("0 argument(s)", Assert.Throws<ModuleException>(
+            () => ModuleFn(twoIn).Call(null!)).Message);
     }
 
     [Fact]
@@ -1222,7 +1241,7 @@ public class ModulesCoverageTests
         var onnx = SrkFileFormat.Read(CompressedFormatUtils.SaveFastGraphToBinary(g, compressed: false)).OnnxBytes;
 
         using var read = new MemoryStream(onnx);
-        var proto = ProtoBuf.Serializer.Deserialize<Shorokoo.Core.Factory.IR.ModelProto>(read);
+        var proto = ProtoBuf.Serializer.Deserialize<ModelProto>(read);
         var fnNames = proto.Functions.Select(f => f.Name).ToHashSet();
         proto.Graph.Nodes.Single(n => fnNames.Contains(n.OpType)).Inputs.Clear();
 
@@ -1236,22 +1255,25 @@ public class ModulesCoverageTests
     public void TestEachCallSiteOfAModuleTypedFunctionGetsItsOwnParameter()
     {
         var fn = ModuleFn((Func<Tensor<float32>, Scalar<int64>, Tensor<float32>>)SizedByHyper);
-        var x = InvokeInput("input");
-        var g = ComputationGraph.FromInternal(
-            new InternalComputationGraph(
-                [x],
-                [(Tensor<float32>)fn.Call(Scalar(2L), x)[0], (Tensor<float32>)fn.Call(Scalar(5L), x)[0]]),
-            GraphKind.Module);
-
-        var input = TensorData([2L], 1f, 2f);
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
+        var arch = ConcretizeInvokes(x =>
+            [(Tensor<float32>)fn.Call(Scalar(2L), x)[0], (Tensor<float32>)fn.Call(Scalar(5L), x)[0]]);
         var infos = arch.GetConcreteModelParamInfos();
         Assert.Equal(2, infos.ModelIds.Distinct().Count());
         Assert.Equal(2, infos.ParamInfos.Select(i => i.ToShorokooIdString()).Distinct().Count());
 
-        var run = ComputeContext.Default.Execute(arch.ToConcreteModel(), input);
+        var run = ComputeContext.Default.Execute(arch.ToConcreteModel(), TensorData([2L], 1f, 2f));
         Assert.Equal(2, run[0].ToTensorData().As<float32>().AccessMemory<float>().Length);
         Assert.Equal(5, run[1].ToTensorData().As<float32>().AccessMemory<float>().Length);
+    }
+
+    [Fact]
+    public void TestACallSiteIdNeverTakesTheSlotReservedForTheRngSeed()
+    {
+        var fn = ModuleFn((Func<Tensor<float32>, Tensor<float32>>)TimesOwnParam);
+        var ids = ConcretizeInvokes(x => [(Tensor<float32>)fn.Call(x)[0]])
+            .GetConcreteModelParamInfos().ModelIds;
+        Assert.NotEmpty(ids);
+        Assert.All(ids, id => Assert.NotEqual(0, id.Vals[0]));
     }
 
     [Fact]
@@ -1303,7 +1325,7 @@ public class ModulesCoverageTests
     }
 
     [Fact]
-    public void TestACallSiteParameterNameIsNotShiftedByAnUnrelatedModuleWithASuffixName()
+    public void TestACallSiteParameterNameIsNotShiftedByAModuleWhoseNameEndsWithTheCallSites()
     {
         var input = TensorData([2L], 1f, 2f);
         string[] Names(bool withDecoy)
@@ -1340,12 +1362,18 @@ public class ModulesCoverageTests
             DType.Float32, rank: 1, InputType.ModelInput, targetFunction: null, defaultName: name);
 
     private static float[] RunInvoke(Delegate body, Func<Tensor<float32>, Variable[]> callArgs, TensorData input)
+        => RunFloats(
+            ConcretizeInvokes(x => [(Tensor<float32>)ModuleFn(body).Call(callArgs(x))[0]], input).ToConcreteModel(),
+            input);
+
+    private static ComputationGraph ConcretizeInvokes(
+        Func<Tensor<float32>, Variable[]> outputs, TensorData? input = null)
     {
+        var hint = input ?? TensorData([2L], 1f, 2f);
         var x = InvokeInput("input");
         var g = ComputationGraph.FromInternal(
-            new InternalComputationGraph([x], [(Tensor<float32>)ModuleFn(body).Call(callArgs(x))[0]]),
-            GraphKind.Module);
-        return RunFloats(g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel(), input);
+            new InternalComputationGraph([x], [.. outputs(x)]), GraphKind.Module);
+        return g.ToConcreteArchitecture(g.FromOrderedInputs([hint]));
     }
 
     [Fact]
@@ -1483,12 +1511,9 @@ public class ModulesCoverageTests
             System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)!;
         var moduleGraph = ((ComputationGraph)prop.GetValue(null)!).ToInternal();
 
-        if (moduleGraph.Nodes.Any(n => n.OpCode == InternalOpCodes.GENERIC_TYPE_INPUT))
-        {
-            if (genericTypes is not null && genericTypes.Count > 0)
-                Shorokoo.Core.Nodes.Processors.Fast.FastChangeGenericTypeSpecialization.Process(moduleGraph, genericTypes);
-            moduleGraph = Shorokoo.Core.Nodes.Processors.Fast.FastToConcreteDataType.Process(moduleGraph);
-        }
+        if (genericTypes is not null && genericTypes.Count > 0
+            && moduleGraph.Nodes.Any(n => n.OpCode == InternalOpCodes.GENERIC_TYPE_INPUT))
+            Shorokoo.Core.Nodes.Processors.Fast.FastChangeGenericTypeSpecialization.Process(moduleGraph, genericTypes);
 
         var data = CompressedFormatUtils.SaveFastGraphToBinary(moduleGraph, compressed: true);
         moduleGraph = CompressedFormatUtils.LoadFastGraphCore(data, "<roundtrip>", null).Graph;

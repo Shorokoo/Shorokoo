@@ -147,7 +147,10 @@ Module-stage graphs are persisted with the `.srk`/`.zsrk` format below, which
 uses Shorokoo's internal dialect and is re-imported by Shorokoo only.
 
 The guarantee reaches inside function bodies too: a body that calls a module is
-written out lowered, so nothing in the file names an op a stock runtime lacks.
+written out lowered rather than carrying the call. Two shapes are not lowered yet
+— a callee that owns a trainable parameter, and a body that wraps its call in a
+loop — and both still fail at session creation
+([#287](https://github.com/Shorokoo/Shorokoo/issues/287)).
 The `.srk` format makes the opposite trade and keeps each body as authored, so a
 module reloaded from it still shows the sub-module it calls rather than a copy of
 that callee inlined into every caller.

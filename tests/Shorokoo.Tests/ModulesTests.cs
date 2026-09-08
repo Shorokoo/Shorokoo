@@ -1174,7 +1174,10 @@ public class ModulesCoverageTests
         Assert.Equal([2f, 4f], RunInvoke((Func<Tensor<float32>, Tensor<float32>>)DoubleScalar, x => [x], input));
         Assert.Equal([3f, 6f], RunInvoke((Func<Tensor<float32>, Scalar<float32>, Tensor<float32>>)ScaledByHyper, x => [Scalar(3f), x], input));
         Assert.Equal([1f, 2f], RunInvoke((Func<Tensor<float32>, Tensor<float32>>)TimesOwnParam, x => [x], input));
+        Assert.Equal([1f, 2f], RunInvoke((Func<Tensor<float32>, Tensor<float32>>)PassThrough, x => [x], input));
     }
+
+    private static Tensor<float32> PassThrough(Tensor<float32> t) => t;
 
     [Fact]
     public void TestAFunctionCallCountingArgumentsAgainstTheBodyRefusesEveryMismatch()

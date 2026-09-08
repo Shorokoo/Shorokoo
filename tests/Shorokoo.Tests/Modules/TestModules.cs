@@ -184,6 +184,89 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>A lazy <c>IfElse</c> in a loop body whose taken branch unwraps an optional —
+    /// loop-invariant, but only valid when the branch is taken.</summary>
+    [Module]
+    public partial class LoopLazyOptionalLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input, [Hyper] Scalar<int64> iters, OptionalTensor<float32> bias)
+        {
+            var x = input;
+            foreach (var ctx in LoopAPI.Iterate(iters))
+                x = bias.HasValue().IfElse(() => x + bias.TensorValue(), () => x * Scalar(2f));
+            return x;
+        }
+    }
+
+    /// <summary>The other nesting: a <c>LoopAPI.Iterate</c> inside a lazy <c>IfElse</c> branch,
+    /// with a loop-invariant node in the loop body.</summary>
+    [Module]
+    public partial class LazyIfLoopBodyLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input, [Hyper] Scalar<int64> iters, Scalar<bit> flag)
+            => flag.IfElse(
+                () =>
+                {
+                    var x = input;
+                    foreach (var ctx in LoopAPI.Iterate(iters))
+                        x = x + input * Scalar(3f);
+                    return x;
+                },
+                () => input);
+    }
+
+    /// <summary>A wholly loop-invariant <c>IfElse</c> in a loop body, consumed by an equally
+    /// loop-invariant node. Its <c>IF_CLOSE</c> is pinned in the body, so the consumer is not
+    /// hoistable however invariant its own data is.</summary>
+    [Module]
+    public partial class InvariantGateInLoopLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input, [Hyper] Scalar<int64> iters, Scalar<bit> flag)
+        {
+            var x = input;
+            foreach (var ctx in LoopAPI.Iterate(iters))
+                x = x + (flag.IfElse(input * Scalar(2f), input * Scalar(3f)) + input);
+            return x;
+        }
+    }
+
+    /// <summary>An <c>IfElse</c> around a loop around an <c>IfElse</c>. Concretizes cleanly;
+    /// <c>FastScopeConfigurator</c> then breaks the order at ONNX build. Shorokoo/Shorokoo#270.</summary>
+    [Module]
+    public partial class IfInLoopInIfLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input, [Hyper] Scalar<int64> iters, Scalar<bit> flag)
+            => flag.IfElse(
+                () =>
+                {
+                    var x = input;
+                    foreach (var o in LoopAPI.Iterate(iters))
+                        x = x + (flag.IfElse(input * Scalar(2f), input * Scalar(3f)) + input);
+                    return x;
+                },
+                () => input * Scalar(9f));
+    }
+
+    /// <summary>A loop inside a lazy <c>IfElse</c> branch inside a loop. Shorokoo/Shorokoo#270.</summary>
+    [Module]
+    public partial class LoopInLazyIfInLoopLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input, [Hyper] Scalar<int64> iters, Scalar<bit> flag)
+        {
+            var x = input;
+            foreach (var o in LoopAPI.Iterate(iters))
+            {
+                var b = flag.IfElse(
+                    () => { var y = input;
+                            foreach (var i in LoopAPI.Iterate(iters)) y = y + (input * Scalar(2f));
+                            return y; },
+                    () => input * Scalar(7f));
+                x = x + (b + input);
+            }
+            return x;
+        }
+    }
+
     /// <summary>One gate with a trainable param on <b>each</b> branch, both pruned by an
     /// enclosing gate. Whichever branch wins, the other is the one that unlocks the fold.</summary>
     [Module]

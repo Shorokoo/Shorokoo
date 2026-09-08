@@ -323,6 +323,71 @@ public class ModulesCoverageTests
     }
 
     [Fact]
+    public void TestLoopInvariantHoistingStaysInsideIfScopes()
+    {
+        static bool Ordered(ComputationGraph g, TensorData[] hints, params string[] ops)
+        {
+            var lowered = g.ToConcreteArchitecture(g.FromOrderedInputs([.. hints])).ToInternal();
+            var at = ops.Select(op => lowered.Nodes.FindIndex(n => n.OpCode == op)).ToList();
+            return lowered.IsLinearOrderValid()
+                && at.All(i => i >= 0)
+                && at.Zip(at.Skip(1)).All(p => p.First < p.Second);
+        }
+
+        var x = TensorData([2L], 1f, 2f);
+        TensorData[] gated = [TensorData([], 3L), TensorData([], true), x];
+
+        Assert.True(Ordered(Modules.LoopLazyOptionalLayer.ComputationGraph, [TensorData([], 3L), x, x],
+            OpCodes.OPTIONAL_HAS_ELEMENT, OpCodes.LOOP_OPEN, OpCodes.IF_OPEN, OpCodes.OPTIONAL_GET_ELEMENT, OpCodes.IF_CLOSE));
+        Assert.True(Ordered(Modules.LazyIfLoopBodyLayer.ComputationGraph, gated,
+            OpCodes.IF_OPEN, OpCodes.MUL, OpCodes.LOOP_OPEN, OpCodes.LOOP_CLOSE, OpCodes.IF_CLOSE));
+        Assert.True(Ordered(Modules.InvariantGateInLoopLayer.ComputationGraph, gated,
+            OpCodes.LOOP_OPEN, OpCodes.IF_OPEN, OpCodes.IF_CLOSE, OpCodes.ADD, OpCodes.LOOP_CLOSE));
+
+        var lazyOptional = Modules.LoopLazyOptionalLayer.ComputationGraph;
+        var lowered = lazyOptional.ToConcreteArchitecture(lazyOptional.FromOrderedInputs([TensorData([], 3L), x, x]))
+                                  .ToConcreteModel().ToInternal();
+        IData[] absent = [TensorData([], 3L), x, OptionalTensorData.None(DType.Float32)];
+        Assert.Equal([8f, 16f],
+            ((TensorData<float32>)new QuickExecutionEngine().Execute(lowered, absent)[0]).AccessMemory().ToArray());
+    }
+
+    /// <summary>A draw has no inputs to be loop-dependent on, but a second execution of one is a
+    /// second sample, so shrinking the loop must not lift it out — the wrong answer #262 describes,
+    /// reached through concretization rather than the module build.</summary>
+    [Fact]
+    public void TestLoopInvariantHoistingLeavesADrawInTheLoopBody()
+    {
+        var g = ScanZeroInputOpInLoopBody.ComputationGraph;
+        string[] ops = [.. g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([], 3L)]))
+                             .ToInternal().Nodes.Select(n => n.OpCode)];
+        Assert.InRange(
+            Array.IndexOf(ops, OpCodes.RANDOM_UNIFORM),
+            Array.IndexOf(ops, OpCodes.LOOP_OPEN) + 1,
+            Array.IndexOf(ops, OpCodes.LOOP_CLOSE) - 1);
+    }
+
+    /// <summary>Nesting an IF and a loop three deep survives concretization but not the ONNX
+    /// build. Tracked as Shorokoo/Shorokoo#270.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#270: FastScopeConfigurator breaks or refuses a three-deep IF/loop nesting")]
+    public void TestNestedIfAndLoopScopesLowerToOnnx()
+    {
+        var x = TensorData([2L], 1f, 2f);
+        IData[] runtime = [TensorData([], 3L), TensorData([], true), x];
+
+        var inner = Modules.IfInLoopInIfLayer.ComputationGraph;
+        var spec = inner.Specialize(inner.FromOrderedInputs([TensorData([], 3L)]));
+        var specModel = spec.ToConcreteArchitecture(spec.FromOrderedInputs([TensorData([], true), x]))
+                            .ToConcreteModel(RngConfig.Default);
+        Assert.Equal([10f, 20f], Floats(new ComputeContext().Execute(specModel, [TensorData([], true), x])[0]));
+
+        var outer = Modules.LoopInLazyIfInLoopLayer.ComputationGraph;
+        var outerModel = outer.ToConcreteArchitecture(outer.FromOrderedInputs([.. runtime.Cast<TensorData>()]))
+                              .ToConcreteModel(RngConfig.Default);
+        Assert.Equal([25f, 50f], Floats(new ComputeContext().Execute(outerModel, runtime)[0]));
+    }
+
+    [Fact]
     public void TestSimpleHyperparamLoopSequenceOptionalAndConditionalModulesCoverage()
     {
         Assert.True(AutoTest.AdvancedTestGraph<SimplestLayer>(

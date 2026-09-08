@@ -311,6 +311,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// condition is loop-invariant used to leave the graph in an order the pipeline
         /// rejects.</para>
         ///
+        /// <para>Two further things stay put, both because loop-invariant by dataflow does not
+        /// mean the same value every pass. A node inside an <c>IF</c> body runs only when its
+        /// branch is taken, so lifting one out runs it unconditionally — the lazy
+        /// <c>IfElse(cond, Func, Func)</c> overload exists precisely so a branch may hold an
+        /// operation that is invalid off-branch. And a draw has no inputs to be dependent on,
+        /// yet a second execution of one is a second sample: hoisting it out gives every
+        /// iteration the one value, which is the wrong answer #262 describes reached by another
+        /// route. Both hoists leave the node order valid, so only these refusals catch them.</para>
+        ///
         /// This is the Fast-pipeline equivalent of the legacy CG-side
         /// hoisting primitive that ran as part of ComputationGraph
         /// construction. QEE consumers benefit because
@@ -322,11 +331,19 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// </summary>
         public static void ShrinkAllScopes(InternalComputationGraph graph)
         {
+            // Asserted on entry as well as exit: this pass shrinks scopes, it does not fix
+            // invalid ones, so a violation introduced upstream must not read as one introduced
+            // here — the same contract FastScopeConfigurator.Configure states.
+            System.Diagnostics.Debug.Assert(graph.IsLinearOrderValid(), "graph.IsLinearOrderValid()");
+
             var loopDependent = BuildLoopDependentTensors(graph);
 
             var result = new List<FastNode>(graph.Nodes.Count);
             // FastNodeKey of each active (not-yet-closed) LOOP_OPEN → its position in result.
             var openPositions = new Dictionary<FastNodeKey, int>();
+            // Position of each active non-loop scope's OPEN, innermost last. A hoist may not
+            // cross one, so only a loop opened after the innermost of these is a target.
+            var barrierPositions = new List<int>();
 
             foreach (var node in graph.Nodes)
             {
@@ -339,38 +356,68 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
                 // A scope boundary never moves: hoisting an IF_OPEN out of an enclosing loop
                 // would strand its IF_CLOSE inside, and a close node's value belongs to the
-                // scope that produced it.
-                bool isScopeBoundary = node.OpCode == OpCodes.LOOP_CLOSE ||
-                                       node.OpCode == OpCodes.IF_CLOSE ||
-                                       node.OpCode == OpCodes.IF_OPEN;
-
-                if (!isScopeBoundary && openPositions.Count > 0)
+                // scope that produced it. Classified through FastOpsetResolver so that
+                // SEQUENCE_MAP, which the linear-order validator scopes too, is covered.
+                if (Shorokoo.Core.Factory.FastOpsetResolver.IsOpenOpCode(node.OpCode))
                 {
-                    bool loopDep = HasLoopDependentInput(node, loopDependent);
-                    if (!loopDep)
-                    {
-                        int earliestOpenPos = int.MaxValue;
-                        foreach (var p in openPositions.Values)
-                            if (p < earliestOpenPos) earliestOpenPos = p;
-
-                        result.Insert(earliestOpenPos, node);
-                        foreach (var k in openPositions.Keys.ToList())
-                            if (openPositions[k] >= earliestOpenPos)
-                                openPositions[k] = openPositions[k] + 1;
-                        continue;
-                    }
+                    barrierPositions.Add(result.Count);
+                    result.Add(node);
+                    continue;
                 }
 
-                if (node.OpCode == OpCodes.LOOP_CLOSE &&
-                    node.GraphOpenNodeKey is FastNodeKey openKey && !openKey.IsEmpty)
+                if (Shorokoo.Core.Factory.FastOpsetResolver.IsCloseOpCode(node.OpCode))
                 {
-                    openPositions.Remove(openKey);
+                    if (node.OpCode == OpCodes.LOOP_CLOSE &&
+                        node.GraphOpenNodeKey is FastNodeKey openKey && !openKey.IsEmpty)
+                        openPositions.Remove(openKey);
+                    else if (barrierPositions.Count > 0)
+                        barrierPositions.RemoveAt(barrierPositions.Count - 1);
+
+                    result.Add(node);
+                    continue;
+                }
+
+                if (Shorokoo.Core.AutoDiffCheckpointing.Rematerializer.IsDeterministicOpCode(node.OpCode) &&
+                    !HasLoopDependentInput(node, loopDependent) &&
+                    TryFindHoistPosition(openPositions, barrierPositions, out int hoistPos))
+                {
+                    result.Insert(hoistPos, node);
+                    foreach (var k in openPositions.Keys.ToList())
+                        if (openPositions[k] >= hoistPos)
+                            openPositions[k] = openPositions[k] + 1;
+                    for (int i = 0; i < barrierPositions.Count; i++)
+                        if (barrierPositions[i] >= hoistPos)
+                            barrierPositions[i] = barrierPositions[i] + 1;
+                    continue;
                 }
 
                 result.Add(node);
             }
 
             graph.Nodes = result;
+            System.Diagnostics.Debug.Assert(graph.IsLinearOrderValid(), "graph.IsLinearOrderValid()");
+        }
+
+        /// <summary>
+        /// Position a loop-invariant node hoists to: just before the outermost active
+        /// <c>LOOP_OPEN</c> that was opened inside the innermost active non-loop scope, so the
+        /// hoist shrinks every loop it can without leaving a branch. Returns false when no loop
+        /// scope is active, or when every active one encloses that barrier rather than sitting
+        /// inside it — a loop opened <em>inside</em> a branch still shrinks; the hoist just stops
+        /// at that branch's OPEN.
+        /// </summary>
+        private static bool TryFindHoistPosition(
+            Dictionary<FastNodeKey, int> openPositions, List<int> barrierPositions, out int position)
+        {
+            int innermostBarrier = barrierPositions.Count > 0 ? barrierPositions[^1] : -1;
+
+            position = int.MaxValue;
+            foreach (var p in openPositions.Values)
+                if (p > innermostBarrier && p < position) position = p;
+
+            if (position != int.MaxValue) return true;
+            position = -1;
+            return false;
         }
 
         private static bool HasLoopDependentInput(FastNode node, HashSet<FastTensorKey> loopDependent)

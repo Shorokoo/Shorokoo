@@ -86,6 +86,13 @@ internal static class FastReplaceTrainableParamsWithInputProcessor
         {
             remap[paramInfos[i].OutputKey] = fieldKeys[i];
             paramNodeKeys.Add(paramInfos[i].Node.Key);
+            // A bare reference reads this same parameter, so it resolves to this one field and
+            // its node leaves with the definition's rather than becoming a field of its own.
+            foreach (var (aliasKey, aliasNode) in paramInfos[i].Aliases)
+            {
+                remap[aliasKey] = fieldKeys[i];
+                paramNodeKeys.Add(aliasNode.Key);
+            }
         }
 
         // Rewire every input slot of every remaining node, replacing keys that match

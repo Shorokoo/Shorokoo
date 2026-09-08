@@ -459,6 +459,18 @@ public partial class MixedDepthGainWithRefsModel
     }
 }
 
+/// <summary>A reference to a parameter of a model that is never called, so the graph holds the
+/// reference with no definition behind it.</summary>
+[Module]
+public partial class RefWithoutDefinitionModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var m = Rank1GainSubModel.Model();
+        return input + m.GetTrainableParam<float32>([1], rank: 1) * Scalar(0f);
+    }
+}
+
 /// <summary>A model called inside a 3-trip loop body — its parameter's template carries the
 /// loop's generalized slot. The naming baseline for <see cref="Rank1GainRefInLoopModel"/>.</summary>
 [Module]

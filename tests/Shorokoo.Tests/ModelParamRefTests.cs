@@ -147,13 +147,24 @@ public class ModelParamRefTests
             .TrainableParamStructDef.Fields.Select(x => x.Name)];
     }
 
-    // Pins Shorokoo/Shorokoo#263: on the training path that does not go through
-    // ToConcreteArchitecture, a read-only reference is discovered as a second trainable
-    // parameter, so the reference reads its own fed tensor instead of the model's weight.
-    [Fact(Skip = "Shorokoo/Shorokoo#263: a param ref becomes a phantom second trainable parameter")]
+    [Fact]
     public void TestAParamRefAddsNoParameterOnTheNonConcretizedTrainingPath()
-        => Assert.Equal(TrainingParamNamesOf(Rank1GainNoRefModel.ComputationGraph),
-                        TrainingParamNamesOf(Rank1GainWithRefModel.ComputationGraph));
+    {
+        Assert.Equal(TrainingParamNamesOf(Rank1GainNoRefModel.ComputationGraph),
+                     TrainingParamNamesOf(Rank1GainWithRefModel.ComputationGraph));
+        Assert.Equal(TrainingParamNamesOf(MixedDepthGainNoRefModel.ComputationGraph),
+                     TrainingParamNamesOf(MixedDepthGainWithRefsModel.ComputationGraph));
+        Assert.Equal(TrainingParamNamesOf(Rank1GainInLoopNoRefModel.ComputationGraph),
+                     TrainingParamNamesOf(Rank1GainRefInLoopModel.ComputationGraph));
+    }
+
+    [Fact]
+    public void TestAParamRefWithNoDefinitionIsRejectedOnBothPaths()
+    {
+        var g = RefWithoutDefinitionModel.ComputationGraph;
+        Assert.Throws<InvalidOperationException>(() => ParamIdsOf(g));
+        Assert.Throws<InvalidOperationException>(() => TrainingParamNamesOf(g));
+    }
 
     // Pins Shorokoo/Shorokoo#264: a sub-model handed over as a [Hyper] Model<> contributes no
     // trainable parameters at all, so its multiply is dropped and the forward is wrong.

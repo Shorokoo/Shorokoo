@@ -298,6 +298,45 @@ public class CoreUtilsCoverageTests
         Assert.Equal(cpu, InferenceBackend.SelectBackend([cpu, gpu], cudaAvailable: false)!.Value);
     }
 
+    /// <summary>
+    /// No filter in <c>release.yml</c> selects a <c>Purpose=Benchmark</c> class implicitly — each
+    /// needs a step naming it, and each must precede the <c>Purpose=Gate</c> step, whose MSBuild
+    /// workers wreck any measurement sharing the runner. Two classes were once added without one
+    /// and never ran at release (Shorokoo/Shorokoo#277).
+    /// </summary>
+    [Fact]
+    public void TestEveryBenchmarkClassHasItsOwnReleaseStepBeforeTheGate()
+    {
+        var workflow = File.ReadAllText(Path.Combine(RepoRoot(), ".github", "workflows", "release.yml"));
+        var benchmarks = typeof(Shorokoo.Tests.Benchmarks.MemoryPassBenchmarkTests).Assembly.GetTypes()
+            .Where(t => t.GetCustomAttributesData().Any(a =>
+                a.AttributeType == typeof(Xunit.TraitAttribute) &&
+                a.ConstructorArguments.Count == 2 &&
+                (string?)a.ConstructorArguments[0].Value == "Purpose" &&
+                (string?)a.ConstructorArguments[1].Value == "Benchmark"))
+            .Select(t => t.Name)
+            .ToArray();
+        Assert.NotEmpty(benchmarks);
+
+        var gate = workflow.IndexOf("\"Purpose=Gate\"", StringComparison.Ordinal);
+        Assert.True(gate > 0);
+        foreach (var name in benchmarks)
+        {
+            var step = workflow.IndexOf("FullyQualifiedName~" + name, StringComparison.Ordinal);
+            Assert.True(step > 0);
+            Assert.True(step < gate);
+        }
+    }
+
+    private static string RepoRoot()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "Shorokoo.sln")))
+            dir = dir.Parent;
+        Assert.NotNull(dir);
+        return dir!.FullName;
+    }
+
     private static string ProductSourceRoot()
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);

@@ -1259,11 +1259,16 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 }
                 else if (fastNode.OpCode == InternalOpCodes.MODEL_PARAM_REF)
                 {
+                    // Symmetry: MODEL_PARAM_REF declares the flag, but nothing sets it on one
+                    // today — GetTrainableParam mints a MODEL_PARAM_MODEL_REF, and the only
+                    // rewrite between the two (FastReparentToModelVariable) goes the other way.
+                    if (IsParamReference(fastNode)) continue;
                     var idTemplate = new ModelParamIdentifierTemplate(fastNode.IdentifierTemplate).ToGeneralizedTemplate();
                     dctFullTemplates[idTemplate.ModelIdTemplate] = idTemplate;
                 }
                 else if (fastNode.OpCode == InternalOpCodes.MODEL_PARAM_MODEL_REF)
                 {
+                    if (IsParamReference(fastNode)) continue;
                     var idTemplate = new ModelParamIdentifierTemplate(fastNode.IdentifierTemplate).ToGeneralizedTemplate();
                     dctRelativeTemplates[idTemplate.ModelIdTemplate] = idTemplate;
                 }
@@ -1277,6 +1282,25 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 RelativeModuleTemplates = dctRelativeModuleTemplates.ToImmutableDictionary()
             };
         }
+
+        /// <summary>
+        /// Whether this node is a bare REFERENCE to a parameter (<c>IModel.GetTrainableParam</c>)
+        /// rather than the parameter's own definition. A reference is minted with the synthetic
+        /// <c>ParamRef_&lt;id path&gt;</c> placeholder name, which keeps distinct model ids from
+        /// collapsing to one canonical name but is not what the parameter is called — only a
+        /// definition names a parameter, so a reference contributes no template at all
+        /// (Shorokoo/Shorokoo#238).
+        /// <para>
+        /// The op-code check is load-bearing, not an optimization: <c>GetBoolVal</c> throws rather
+        /// than returning null for an attribute the node's op does not declare, and only these
+        /// three declare this one.
+        /// </para>
+        /// </summary>
+        private static bool IsParamReference(FastNode fastNode)
+            => (fastNode.OpCode == InternalOpCodes.MODEL_PARAM_REF
+                || fastNode.OpCode == InternalOpCodes.MODEL_PARAM_MODEL_REF
+                || fastNode.OpCode == InternalOpCodes.MODEL_PARAM_ID_REF)
+               && (fastNode.Attributes.GetBoolVal(OnnxOpAttributeNames.ShrkAttrIsParamReference) ?? false);
     }
 
     /// <summary>
@@ -2676,7 +2700,18 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             }
             if (!hasIdRef) return unresolvedSites;
 
-            // Template composition: purely structural, no CG needed.
+            // Template composition: purely structural, no CG needed. Every template here names a
+            // parameter definition — FastExtractIdentifierTemplates drops bare references, whose
+            // ParamRef_<id path> placeholder names nothing (Shorokoo/Shorokoo#238).
+            //
+            // Note the cross product below pairs every relative template with every base module,
+            // so it mints keys for model ids that own no such parameter. That is harmless only
+            // because such a key is either unreachable or re-written by the definition that does
+            // own the id. RelativeTemplates is empty on every graph today (its one remaining
+            // producer, the [Hyper] Model<> reparent path, is unreachable while
+            // Shorokoo/Shorokoo#264 stands); when #264 is fixed, definitions start flowing in
+            // here and a spurious key can again be a strict PREFIX of a real one, which
+            // IdTemplateInfos.ToGeneralModelId resolves to first. Re-check this then.
             var composedTemplates = new Dictionary<ModelId, ModelParamIdentifierTemplate>();
             foreach (var kvp in identifierTemplatesInfo.FullTemplates)
                 composedTemplates[kvp.Key] = kvp.Value;

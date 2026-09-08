@@ -401,6 +401,141 @@ public partial class Rank0GainWithRefModel
     }
 }
 
+/// <summary>Rank-1 counterpart of <see cref="Rank0GainSubModel"/>: a shaped initializer, so its
+/// definition carries a shape input a reference to it has not.</summary>
+[Module]
+public partial class Rank1GainSubModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+        => input * Ones.Init([Scalar(2L)]);
+}
+
+/// <summary><see cref="Rank1GainSubModel"/> called plainly — the naming baseline for
+/// <see cref="Rank1GainWithRefModel"/>.</summary>
+[Module]
+public partial class Rank1GainNoRefModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+        => Rank1GainSubModel.Call(input);
+}
+
+/// <summary><see cref="Rank1GainNoRefModel"/> plus a read-only reference to the sub-model's rank-1
+/// parameter, contributing nothing to the output.</summary>
+[Module]
+public partial class Rank1GainWithRefModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var m = Rank1GainSubModel.Model();
+        return m.Call(input) + m.GetTrainableParam<float32>([1], rank: 1) * Scalar(0f);
+    }
+}
+
+/// <summary>One nested and one flat parameter, called plainly — the naming baseline for
+/// <see cref="MixedDepthGainWithRefsModel"/>.</summary>
+[Module]
+public partial class MixedDepthGainNoRefModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+        => Rank1GainNoRefModel.Call(input) + Rank1GainSubModel.Call(input);
+}
+
+/// <summary>
+/// <see cref="MixedDepthGainNoRefModel"/> plus a read-only reference to each parameter. The two
+/// referenced models sit at different depths, so composing the shallow reference's relative id
+/// onto the deep model's base yields <c>[1, 1]</c> — a strict prefix of the nested parameter's
+/// own <c>[1, 1, 1]</c>, and the id a prefix-shortest template lookup would settle on first.
+/// </summary>
+[Module]
+public partial class MixedDepthGainWithRefsModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var deep = Rank1GainNoRefModel.Model();
+        var flat = Rank1GainSubModel.Model();
+        return deep.Call(input) + flat.Call(input)
+             + deep.GetTrainableParam<float32>([1, 1], rank: 1) * Scalar(0f)
+             + flat.GetTrainableParam<float32>([1], rank: 1) * Scalar(0f);
+    }
+}
+
+/// <summary>One model handle called twice — the two calls share the one weight.</summary>
+[Module]
+public partial class SharedModelCalledTwiceModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var m = Rank1GainSubModel.Model();
+        return m.Call(input) + m.Call(input);
+    }
+}
+
+/// <summary>A reference to a parameter of a model that is never called, so the graph holds the
+/// reference with no definition behind it.</summary>
+[Module]
+public partial class RefWithoutDefinitionModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var m = Rank1GainSubModel.Model();
+        return input + m.GetTrainableParam<float32>([1], rank: 1) * Scalar(0f);
+    }
+}
+
+/// <summary>A model called inside a 3-trip loop body — its parameter's template carries the
+/// loop's generalized slot. The naming baseline for <see cref="Rank1GainRefInLoopModel"/>.</summary>
+[Module]
+public partial class Rank1GainInLoopNoRefModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var m = Rank1GainSubModel.Model();
+        var x = input;
+        foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
+        {
+            x = m.Call(x);
+            ctx.ContinueWhile(Scalar(true));
+        }
+        return x;
+    }
+}
+
+/// <summary><see cref="Rank1GainInLoopNoRefModel"/> plus a read-only reference taken inside the
+/// loop body, contributing nothing to the output.</summary>
+[Module]
+public partial class Rank1GainRefInLoopModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var m = Rank1GainSubModel.Model();
+        var x = input;
+        foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
+        {
+            x = m.Call(x) + m.GetTrainableParam<float32>([1], rank: 1) * Scalar(0f);
+            ctx.ContinueWhile(Scalar(true));
+        }
+        return x;
+    }
+}
+
+/// <summary>Calls whatever model it is handed, so its callee's parameters arrive through a
+/// <c>[Hyper] Model&lt;&gt;</c> rather than being created in its own body.</summary>
+[Module]
+public partial class HyperModelHost
+{
+    public static Tensor<float32> Inline(Tensor<float32> input,
+        [Hyper] Model<Tensor<float32>, Tensor<float32>> inner) => inner.Call(input);
+}
+
+/// <summary><see cref="Rank1GainSubModel"/> reached through a <c>[Hyper] Model&lt;&gt;</c> — the
+/// same parameter and the same forward as calling it directly.</summary>
+[Module]
+public partial class HyperModelGainModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+        => HyperModelHost.Model(Rank1GainSubModel.Model()).Call(input);
+}
+
 /// <summary>
 /// An initializer that states its shape nowhere the pipeline can read it: it takes no input, so
 /// there is no shape vector, and returns <c>Tensor</c> rather than <c>Scalar</c>, so the declared

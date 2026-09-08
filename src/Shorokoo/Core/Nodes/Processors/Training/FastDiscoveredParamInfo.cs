@@ -6,6 +6,7 @@ using Shorokoo.Core.Nodes.OnnxNodes;
 using Shorokoo.Core.Nodes.AutoDiff;
 using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Modules;
+using System.Collections.Immutable;
 
 namespace Shorokoo.Core.Nodes.Processors.Training
 {
@@ -40,9 +41,19 @@ namespace Shorokoo.Core.Nodes.Processors.Training
         /// <summary>The Fast node producing this parameter.</summary>
         public FastNode Node { get; }
 
+        /// <summary>
+        /// Bare parameter REFERENCES (<c>IModel.GetTrainableParam</c>) that resolve to this same
+        /// parameter, as the key each produces and the node producing it. A reference reads the
+        /// parameter the model already owns rather than declaring one, so it contributes no
+        /// field of its own; its consumers are rewired to this parameter's and its node is
+        /// removed alongside <see cref="Node"/> (Shorokoo/Shorokoo#263).
+        /// </summary>
+        public ImmutableArray<(FastTensorKey OutputKey, FastNode Node)> Aliases { get; }
+
         internal FastDiscoveredParamInfo(
             string name, FastTensorKey outputKey, bool isTrainable,
-            DType dtype, int? rank, DataStructure structure, FastNode node)
+            DType dtype, int? rank, DataStructure structure, FastNode node,
+            ImmutableArray<(FastTensorKey OutputKey, FastNode Node)> aliases)
         {
             Name = name;
             OutputKey = outputKey;
@@ -51,6 +62,7 @@ namespace Shorokoo.Core.Nodes.Processors.Training
             Rank = rank;
             Structure = structure;
             Node = node;
+            Aliases = aliases.IsDefault ? [] : aliases;
         }
     }
 }

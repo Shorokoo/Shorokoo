@@ -1,5 +1,6 @@
 using Shorokoo.Modules.Initializers;
 using Shorokoo.Modules.Layers;
+using Shorokoo.Core.Graph;
 
 namespace Shorokoo.Tests;
 
@@ -111,17 +112,70 @@ public class ModelParamRefTests
             hyperparamInputs: [], runtimeInputs: [x], rngConfig: RngConfig.Default));
     }
 
-    private static string ParamIdOf(ComputationGraph g)
+    private static string[] ParamIdsOf(ComputationGraph g)
     {
         var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([2L], 1f, 2f)]));
-        return Assert.Single(arch.GetConcreteModelParamInfos().ParamInfos).ToShorokooIdString();
+        string[] ids = [.. arch.GetConcreteModelParamInfos().ParamInfos.Select(x => x.ToShorokooIdString())];
+        Assert.NotEmpty(ids);
+        return ids;
     }
 
-    // Pins Shorokoo/Shorokoo#238: adding a read-only GetTrainableParam reference renames the
-    // parameter it references (ParamRef_1 wins over the initializer-derived name), so a checkpoint
-    // written by a model carrying the reference cannot be loaded by the same model without it.
-    [Fact(Skip = "Shorokoo/Shorokoo#238: GetTrainableParam renames the parameter it references")]
+    private static void SameIds(ComputationGraph noRef, ComputationGraph withRef)
+        => Assert.Equal(ParamIdsOf(noRef), ParamIdsOf(withRef));
+
+    [Fact]
     public void TestAParamRefDoesNotRenameTheParameterItReferences()
-        => Assert.Equal(ParamIdOf(Rank0GainNoRefModel.ComputationGraph),
-                        ParamIdOf(Rank0GainWithRefModel.ComputationGraph));
+    {
+        SameIds(Rank0GainNoRefModel.ComputationGraph, Rank0GainWithRefModel.ComputationGraph);
+        SameIds(Rank1GainNoRefModel.ComputationGraph, Rank1GainWithRefModel.ComputationGraph);
+        SameIds(MixedDepthGainNoRefModel.ComputationGraph, MixedDepthGainWithRefsModel.ComputationGraph);
+        SameIds(Rank1GainInLoopNoRefModel.ComputationGraph, Rank1GainRefInLoopModel.ComputationGraph);
+    }
+
+    // Goes through the public entry point rather than re-listing the passes it runs, so the
+    // test cannot quietly stop guarding when that list changes.
+    private static string[] TrainingParamNamesOf(ComputationGraph g)
+    {
+        var training = TrainingGraphBuilder.PrepareForTrainingAsFast(
+            g.ToInternal(), SimpleSumSquaredLoss.ComputationGraph.ToInternal());
+        var paramsInput = training.Inputs[training.InputUniqueNames.IndexOf("trainable_params")];
+        var producer = training.Nodes.Single(n => n.FullOutputs.Values
+            .Any(slot => slot.Any(k => k is FastTensorKey key && key.Equals(paramsInput))));
+        var structDef = (TensorStructDef)producer.Attributes
+            .GetDTypeVal(OnnxOpAttributeNames.AttrDtype)!.TensorStructDef!;
+        return [.. structDef.Fields.Select(x => x.Name)];
+    }
+
+    private static void SameTrainingNames(ComputationGraph noRef, ComputationGraph withRef)
+        => Assert.Equal(TrainingParamNamesOf(noRef), TrainingParamNamesOf(withRef));
+
+    [Fact]
+    public void TestAParamRefAddsNoParameterOnTheNonConcretizedTrainingPath()
+    {
+        SameTrainingNames(Rank1GainNoRefModel.ComputationGraph, Rank1GainWithRefModel.ComputationGraph);
+        SameTrainingNames(MixedDepthGainNoRefModel.ComputationGraph, MixedDepthGainWithRefsModel.ComputationGraph);
+        SameTrainingNames(Rank1GainInLoopNoRefModel.ComputationGraph, Rank1GainRefInLoopModel.ComputationGraph);
+    }
+
+    [Fact]
+    public void TestAParamRefWithNoDefinitionIsRejectedOnBothPaths()
+    {
+        var g = RefWithoutDefinitionModel.ComputationGraph;
+        Assert.Throws<InvalidOperationException>(() => ParamIdsOf(g));
+        Assert.Throws<InvalidOperationException>(() => TrainingParamNamesOf(g));
+    }
+
+    // Pins Shorokoo/Shorokoo#284: discovery dedupes a reference against a definition but never
+    // two definitions against each other, so calling one model twice gives its single weight two
+    // identically-named struct fields — splitting its gradient and its checkpoint entry.
+    [Fact(Skip = "Shorokoo/Shorokoo#284: a model called twice becomes two identically-named fields")]
+    public void TestAModelCalledTwiceIsOneTrainableParameterOnTheNonConcretizedTrainingPath()
+        => Assert.Equal(TrainingParamNamesOf(Rank1GainNoRefModel.ComputationGraph),
+                        TrainingParamNamesOf(SharedModelCalledTwiceModel.ComputationGraph));
+
+    // Pins Shorokoo/Shorokoo#264: a sub-model handed over as a [Hyper] Model<> contributes no
+    // trainable parameters at all, so its multiply is dropped and the forward is wrong.
+    [Fact(Skip = "Shorokoo/Shorokoo#264: a [Hyper] Model<> loses every trainable parameter it owns")]
+    public void TestAModelPassedAsAHyperparameterKeepsItsTrainableParams()
+        => SameIds(Rank1GainNoRefModel.ComputationGraph, HyperModelGainModel.ComputationGraph);
 }

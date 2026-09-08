@@ -53,9 +53,7 @@ public class RematerializationRuntimeTests
 
     /// <summary>
     /// The training step's own sessions get the profile that keeps its recomputation; a graph
-    /// compiled through the ordinary entry point does not. (Whether that profile leaves the
-    /// calling thread's denormals alone can only be asked of the first ORT session in a process,
-    /// so it is asked in <c>DenormalTrainingSessionTests</c>, which gets one of its own.)
+    /// compiled through the ordinary entry point does not.
     /// </summary>
     [Fact]
     public void TestOnlyTheRigsOwnSessionsGetTheTrainingStepProfile()

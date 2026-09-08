@@ -57,6 +57,14 @@ public class CSharpModelBuilderCoverageTests
         Assert.Contains(body, x => x.EndsWith($"> {names[0]} = default;"));
     }
 
+    /// <summary>The attribute-value formatter has no branch for a DType-valued attribute — nor
+    /// for Bools, Strings, DTypes, Graph or TypeProto — so it substitutes the empty string and the
+    /// emitted argument list carries an empty element, <c>"dtype", ,</c>, which does not compile.
+    /// Tracked as Shorokoo/Shorokoo#282.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#282: a DType-valued attribute codegens as an empty collection element")]
+    public void TestADTypeValuedAttributeCodegensItsValue()
+        => AssertCodegens(ScanZeroInputOpInLoopBody.ComputationGraph.ToInternal(), "\"dtype\", DType.Float32");
+
     [Fact]
     public void TestLoopCodegenInlineInitRankMismatchAndHoisting()
     {

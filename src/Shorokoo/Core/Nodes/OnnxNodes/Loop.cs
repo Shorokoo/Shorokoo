@@ -161,10 +161,21 @@ namespace Shorokoo
             return (Variable)this.Scan<T>((Tensor<T>)toScan);
         }
 
-        public void ContinueWhile(Scalar<bit> breakWhenTensor)
+        /// <summary>
+        /// Binds the loop's exit condition to the value the BODY reads this iteration, the way
+        /// <see cref="Scan{T}(Tensor{T})"/> binds a scan input. <paramref name="wrapped"/> is an
+        /// Identity the iteration context put around <paramref name="asWritten"/> purely so the
+        /// read sits at a node input: a bare local — a bit carry read before the body updates it —
+        /// names an OUTER-graph node by this pass, and ProcessNode rewrites node inputs, not
+        /// locals. Only the loop-carry rewrite is taken, so a condition the body already produces
+        /// keeps its own node and the Identity is left dead for the graph to prune.
+        /// </summary>
+        public void ContinueWhile(Scalar<bit> wrapped, Scalar<bit> asWritten)
         {
             Debug.Assert(this.continueWhileTensor is null && this.CurrentPass == 3);
-            this.continueWhileTensor = breakWhenTensor;
+            var inBodyCondition = ((Variable)wrapped).OwningNode.Inputs[0].AssertNotNull();
+            this.continueWhileTensor =
+                this.openNodeOutputs.ContainsKey(inBodyCondition) ? inBodyCondition : asWritten;
         }
 
         private static ImmutableDictionary<string, Variable?[]> applyMapping(ImmutableDictionary<string, Variable?[]> original, List<(Variable from, Variable to)> mapping)
@@ -925,7 +936,7 @@ namespace Shorokoo
             return (retvalInputs, retvalOutputs);
         }
 
-        private static IEnumerable<(Action<Scalar<bit>> breakWhen, Looper looper, Scalar<int64> iterationIndex)> LoopFull(Scalar<int64>? maxNumIterations)
+        private static IEnumerable<(Action<Scalar<bit>, Scalar<bit>> breakWhen, Looper looper, Scalar<int64> iterationIndex)> LoopFull(Scalar<int64>? maxNumIterations)
         {
             // A loop traced inside a module build records into that build's trace. A standalone
             // trace (hand-built graphs, e.g. InternalComputationGraph construction in tests) gets its
@@ -943,19 +954,19 @@ namespace Shorokoo
                 // Do nothing if there is an outer loop that is in its first or second pass.
                 if (looper.LoopDepth != 0 && (looperStack[looper.LoopDepth - 1].CurrentPass < 3 || looperStack[looper.LoopDepth - 1].CurrentPass == 4))
                 {
-                    yield return ((x) => { }, looper, looper.GetLoopIndexVariable());
+                    yield return ((x, y) => { }, looper, looper.GetLoopIndexVariable());
                 }
                 else
                 {
                     // First pass, track the nodes that are part of the body of the loop.
                     looper.StartFirstPass();
                     looper.SetMaxNumIterations(maxNumIterations);
-                    yield return ((x) => { }, looper, looper.GetLoopIndexVariable());
+                    yield return ((x, y) => { }, looper, looper.GetLoopIndexVariable());
                     Debug.Assert(looperStack.Count == looper.LoopDepth + 1);
 
                     // Second pass, identify the loop variables
                     looper.StartSecondPass();
-                    yield return ((x) => { }, looper, looper.GetLoopIndexVariable());
+                    yield return ((x, y) => { }, looper, looper.GetLoopIndexVariable());
                     Debug.Assert(looperStack.Count == looper.LoopDepth + 1);
 
                     looper.BuildLoopOpenNode();
@@ -971,7 +982,7 @@ namespace Shorokoo
 
                     // Fourth pass, make loop output variables available to the caller.
                     looper.StartFourthPass();
-                    yield return ((x) => { }, looper, looper.GetLoopIndexVariable());
+                    yield return ((x, y) => { }, looper, looper.GetLoopIndexVariable());
                     Debug.Assert(looperStack.Count == looper.LoopDepth + 1);
 
                     looper.Terminate();
@@ -1080,11 +1091,11 @@ namespace Shorokoo
     public class IterationContext
     {
         private Looper looper;
-        private Action<Scalar<bit>> continueWhile;
+        private Action<Scalar<bit>, Scalar<bit>> continueWhile;
 
         public Scalar<int64> IterationIndex { get; private set; }
 
-        internal IterationContext(Action<Scalar<bit>> continueWhile, Looper looper, Scalar<int64> iterationIndex)
+        internal IterationContext(Action<Scalar<bit>, Scalar<bit>> continueWhile, Looper looper, Scalar<int64> iterationIndex)
         {
             this.continueWhile = continueWhile;
             this.looper = looper;
@@ -1101,16 +1112,13 @@ namespace Shorokoo
         public void ContinueWhile(Scalar<bit> exitLoopWhenFalse) => Continue(exitLoopWhenFalse);
 
         /// <summary>
-        /// Wraps the condition in a body node before handing it over. The body is traced four
-        /// times and the caller's C# local is never rebound between passes, so a bare local — a
-        /// bit carry read before the body updates it — holds an OUTER-graph node by the binding
-        /// pass, and the loop would test a value fixed before it started. Wrapping puts the read
-        /// at a node input, which ProcessNode rewrites to the carry's open-node output like any
-        /// other body read. The wrap runs on every pass, so the four traces stay aligned; where
-        /// the condition already came from a body node it is a redundant Identity.
+        /// Hands the looper the condition twice: once wrapped in an Identity, so the read sits at
+        /// a node input ProcessNode can rewrite, and once as written, for the cases where that
+        /// rewrite is not the one wanted. The wrap runs on every pass, so the four traces stay
+        /// aligned; the looper binds one of the two and the Identity is dead either way.
         /// </summary>
         private void Continue(Scalar<bit> exitLoopWhenFalse)
-            => continueWhile((Scalar<bit>)OnnxOp.Identity(exitLoopWhenFalse, rank: 0));
+            => continueWhile((Scalar<bit>)OnnxOp.Identity(exitLoopWhenFalse, rank: 0), exitLoopWhenFalse);
     }
 
     public class LoopVariableInput

@@ -1134,7 +1134,7 @@ namespace Shorokoo.Tests.Modules
     /// <summary>
     /// Scans a tensor defined entirely outside the loop. The scan input is an outer-scope value,
     /// and the loop carries nothing at all — so its ONNX <c>Loop</c> has no input past the
-    /// (absent) condition slot, which the exporter must still emit (Shorokoo/Shorokoo#279).
+    /// (absent) condition slot, which the exporter must still emit.
     /// </summary>
     [Module]
     public partial class ScanLoopInvariant
@@ -1301,6 +1301,22 @@ namespace Shorokoo.Tests.Modules
             Variable? scanned = null;
             foreach (var ctx in LoopAPI.Iterate(trips))
                 scanned = (Variable)ctx.Scan((Tensor<float32>)(Variable)OnnxOp.RandomUniform([2L], high: 1f, low: 0f, dtype: DType.Float32));
+            return (Tensor<float32>)scanned!;
+        }
+    }
+
+    /// <summary>
+    /// The keyed feed the #262 limitation points a user at: it takes <c>shape</c> as a graph
+    /// input, so the looper tracks it and the draw stays in the body.
+    /// </summary>
+    [Module]
+    public partial class ScanKeyedFeedInLoopBody
+    {
+        public static Tensor<float32> Inline(Scalar<int64> trips)
+        {
+            Variable? scanned = null;
+            foreach (var ctx in LoopAPI.Iterate(trips))
+                scanned = (Variable)ctx.Scan(RandomUniform(Vector(2L)));
             return (Tensor<float32>)scanned!;
         }
     }

@@ -174,8 +174,7 @@ public class FastProcessorsCoverageTests
 
     /// <summary>A scan input is the value the body reads that iteration, so scanning a carry
     /// before the body updates it stacks the state the recurrence passes through, starting from
-    /// the initial one. The expected values are supplied because every engine executes the same
-    /// graph, so an engine comparison alone cannot see a wrong one.</summary>
+    /// the initial one.</summary>
     [Fact]
     public void TestScanningACarryBeforeTheBodyUpdatesItStacksThePerIterationValues()
     {
@@ -188,9 +187,9 @@ public class FastProcessorsCoverageTests
     }
 
     /// <summary>Scan inputs a body node does not produce — the carry at the top of an iteration,
-    /// the iteration index, an outer-scope tensor — rolled and unrolled. A loop that only scans
-    /// also carries nothing, so its exported ONNX Loop has to keep the condition slot it never
-    /// fills.</summary>
+    /// the iteration index, an outer-scope tensor, an inner loop's scan read in the enclosing
+    /// body — rolled and unrolled. A loop that only scans also carries nothing, so its exported
+    /// ONNX Loop has to keep the condition slot it never fills.</summary>
     [Fact]
     public void TestScanInputsThatNoBodyNodeProduces()
     {
@@ -207,16 +206,10 @@ public class FastProcessorsCoverageTests
             hyperparamInputs: [], runtimeInputs: [Scalar32(10f)], expected: [10.0, 10.0, 10.0]));
         Assert.True(AutoTest.AdvancedTestGraph<ScanIterationIndexConstTrip>(
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Int64, [], 0L)], expected: [0.0, 1.0, 2.0]));
-    }
-
-    /// <summary>An inner loop's scan output consumed inside the enclosing loop's body — the
-    /// nesting that works, against the one that does not (Shorokoo/Shorokoo#255).</summary>
-    [Fact]
-    public void TestAnInnerLoopsScanIsUsableInTheEnclosingBody()
-        => Assert.True(AutoTest.AdvancedTestGraph<ScanInNestedLoopUsedInOuterBody>(
-            hyperparamInputs: [],
-            runtimeInputs: [Scalar32(10f), TensorData(DType.Int64, [], 2L), TensorData(DType.Int64, [], 3L)],
+        Assert.True(AutoTest.AdvancedTestGraph<ScanInNestedLoopUsedInOuterBody>(
+            hyperparamInputs: [], runtimeInputs: [Scalar32(10f), TensorData(DType.Int64, [], 2L), trips],
             expected: [114.0]));
+    }
 
     /// <summary>An inner loop's scan output read after the enclosing loop. The enclosing loop
     /// sees the inner scan's zombie as an output-only body value with no initializer, so it never

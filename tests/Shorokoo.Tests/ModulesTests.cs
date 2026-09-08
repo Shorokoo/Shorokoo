@@ -925,11 +925,11 @@ public class ModulesCoverageTests
         Assert.Empty(NodesNotOwningTheirOutputs(g.ToConcreteArchitecture(inputs)));
     }
 
-    private static void AssertDrawInsideLoopBody(ComputationGraph graph)
+    private static void AssertDrawInsideLoopBody(ComputationGraph graph, string drawOpCode = OpCodes.RANDOM_UNIFORM)
     {
         string[] codes = [.. graph.ToInternal().Nodes.Select(n => n.OpCode)];
         Assert.InRange(
-            Array.IndexOf(codes, OpCodes.RANDOM_UNIFORM),
+            Array.IndexOf(codes, drawOpCode),
             Array.IndexOf(codes, OpCodes.LOOP_OPEN) + 1,
             Array.IndexOf(codes, OpCodes.LOOP_CLOSE) - 1);
     }
@@ -940,7 +940,10 @@ public class ModulesCoverageTests
     /// only when it names a loop carry.</summary>
     [Fact]
     public void TestScanningAZeroInputOpKeepsTheDrawInsideTheLoopBody()
-        => AssertDrawInsideLoopBody(ScanZeroInputOpInLoopBody.ComputationGraph);
+    {
+        AssertDrawInsideLoopBody(ScanZeroInputOpInLoopBody.ComputationGraph);
+        AssertDrawInsideLoopBody(ScanKeyedFeedInLoopBody.ComputationGraph, InternalOpCodes.SHRK_RANDOM_UNIFORM);
+    }
 
     /// <summary>A node the loop body creates with no inputs is not tracked by the looper, so its
     /// consumers resolve it through the outer-scope case to the first pass's node — emitted before

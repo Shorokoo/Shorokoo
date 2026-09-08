@@ -973,50 +973,6 @@ namespace Shorokoo.Tests.Modules
     }
 
     /// <summary>
-    /// Scans a loop carry read <em>before</em> the body updates it. LoopAPI binds scan inputs on
-    /// the third of its four body-tracing passes, and this local has by then been advanced by the
-    /// two earlier passes into the outer graph, so the scan input is a loop-invariant outer value
-    /// (x + 2) rather than a body node's output. Tracked as Shorokoo/Shorokoo#232.
-    /// </summary>
-    [Module]
-    public partial class ScanCarryBeforeUpdate
-    {
-        public static Tensor<float32> Inline(Scalar<float32> x, Scalar<int64> trips)
-        {
-            var acc = x;
-            Variable? scanned = null;
-            foreach (var ctx in LoopAPI.Iterate(trips))
-            {
-                scanned = (Variable)ctx.Scan(acc);
-                acc = acc + Scalar(1.0f);
-            }
-            return (Tensor<float32>)scanned!;
-        }
-    }
-
-    /// <summary>
-    /// <see cref="ScanCarryBeforeUpdate"/> with a constant trip count, so the loop is unrolled
-    /// instead of left rolled. The unroller finds no body-produced key for the scan input and
-    /// dies where the rolled path merely returns the wrong values.
-    /// Tracked as Shorokoo/Shorokoo#232.
-    /// </summary>
-    [Module]
-    public partial class ScanCarryBeforeUpdateConstTrip
-    {
-        public static Tensor<float32> Inline(Scalar<float32> x)
-        {
-            var acc = x;
-            Variable? scanned = null;
-            foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
-            {
-                scanned = (Variable)ctx.Scan(acc);
-                acc = acc + Scalar(1.0f);
-            }
-            return (Tensor<float32>)scanned!;
-        }
-    }
-
-    /// <summary>
     /// Constant-iter loop whose body break is dynamic (<c>ctx.ContinueWhile</c>
     /// fed by a runtime-bool input). <c>LoopAPI</c> emits the <c>LOOP_OPEN</c>
     /// with <c>condition: null</c>, so OPEN.Inputs[1] is absent and the unroller
@@ -1071,6 +1027,318 @@ namespace Shorokoo.Tests.Modules
 
     #endregion
 
+    #region LoopAPI body-value binding (scan inputs, carries, zero-input body ops)
+
+    /// <summary>
+    /// Scans a loop carry read <em>before</em> the body updates it, so the scan input is the
+    /// carry's value at the top of the iteration — the loop-open node's output rather than a
+    /// body node's output. Correct stacking is <c>[x, x+1, x+2]</c>.
+    /// </summary>
+    [Module]
+    public partial class ScanCarryBeforeUpdate
+    {
+        public static Tensor<float32> Inline(Scalar<float32> x, Scalar<int64> trips)
+        {
+            var acc = x;
+            Variable? scanned = null;
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                scanned = (Variable)ctx.Scan(acc);
+                acc = acc + Scalar(1.0f);
+            }
+            return (Tensor<float32>)scanned!;
+        }
+    }
+
+    /// <summary>
+    /// <see cref="ScanCarryBeforeUpdate"/> with a constant trip count, so the loop is unrolled
+    /// instead of left rolled.
+    /// </summary>
+    [Module]
+    public partial class ScanCarryBeforeUpdateConstTrip
+    {
+        public static Tensor<float32> Inline(Scalar<float32> x)
+        {
+            var acc = x;
+            Variable? scanned = null;
+            foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
+            {
+                scanned = (Variable)ctx.Scan(acc);
+                acc = acc + Scalar(1.0f);
+            }
+            return (Tensor<float32>)scanned!;
+        }
+    }
+
+    /// <summary>
+    /// Scans the carry on both sides of the body's update, so one scan input is the loop-open
+    /// node's output and the other an ordinary body node's output.
+    /// </summary>
+    [Module]
+    public partial class ScanCarryBeforeAndAfterUpdate
+    {
+        public static Tensor<float32> Inline(Scalar<float32> x, Scalar<int64> trips)
+        {
+            var acc = x;
+            Variable? before = null;
+            Variable? after = null;
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                before = (Variable)ctx.Scan(acc);
+                acc = acc + Scalar(1.0f);
+                after = (Variable)ctx.Scan(acc);
+            }
+            return (Tensor<float32>)before! + (Tensor<float32>)after!;
+        }
+    }
+
+    /// <summary><see cref="ScanCarryBeforeAndAfterUpdate"/> with a constant trip count.</summary>
+    [Module]
+    public partial class ScanCarryBeforeAndAfterUpdateConstTrip
+    {
+        public static Tensor<float32> Inline(Scalar<float32> x)
+        {
+            var acc = x;
+            Variable? before = null;
+            Variable? after = null;
+            foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
+            {
+                before = (Variable)ctx.Scan(acc);
+                acc = acc + Scalar(1.0f);
+                after = (Variable)ctx.Scan(acc);
+            }
+            return (Tensor<float32>)before! + (Tensor<float32>)after!;
+        }
+    }
+
+    /// <summary>
+    /// Scans a carry read before the update and also reads the carry after the loop, so the
+    /// scan output and the carry's close-node output both have to survive.
+    /// </summary>
+    [Module]
+    public partial class ScanCarryBeforeUpdateAndReadCarryAfter
+    {
+        public static Tensor<float32> Inline(Scalar<float32> x, Scalar<int64> trips)
+        {
+            var acc = x;
+            Variable? scanned = null;
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                scanned = (Variable)ctx.Scan(acc);
+                acc = acc + Scalar(1.0f);
+            }
+            return (Tensor<float32>)scanned! * acc;
+        }
+    }
+
+    /// <summary>
+    /// Scans a tensor defined entirely outside the loop. The scan input is an outer-scope value,
+    /// and the loop carries nothing at all — so its ONNX <c>Loop</c> has no input past the
+    /// (absent) condition slot, which the exporter must still emit.
+    /// </summary>
+    [Module]
+    public partial class ScanLoopInvariant
+    {
+        public static Tensor<float32> Inline(Scalar<float32> x, Scalar<int64> trips)
+        {
+            Variable? scanned = null;
+            foreach (var ctx in LoopAPI.Iterate(trips))
+                scanned = (Variable)ctx.Scan(x);
+            return (Tensor<float32>)scanned!;
+        }
+    }
+
+    /// <summary><see cref="ScanLoopInvariant"/> with a constant trip count.</summary>
+    [Module]
+    public partial class ScanLoopInvariantConstTrip
+    {
+        public static Tensor<float32> Inline(Scalar<float32> x)
+        {
+            Variable? scanned = null;
+            foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
+                scanned = (Variable)ctx.Scan(x);
+            return (Tensor<float32>)scanned!;
+        }
+    }
+
+    /// <summary>
+    /// Scans the iteration index, which the loop-open node produces rather than the body, with a
+    /// constant trip count and a runtime input added afterwards so the graph is not wholly constant.
+    /// </summary>
+    [Module]
+    public partial class ScanIterationIndexConstTrip
+    {
+        public static Tensor<int64> Inline(Scalar<int64> start)
+        {
+            Variable? scanned = null;
+            foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
+                scanned = (Variable)ctx.Scan(ctx.IterationIndex);
+            return (Tensor<int64>)scanned! + start;
+        }
+    }
+
+    /// <summary>An inner loop's scan output consumed inside the enclosing loop's body.</summary>
+    [Module]
+    public partial class ScanInNestedLoopUsedInOuterBody
+    {
+        public static Scalar<float32> Inline(Scalar<float32> x, Scalar<int64> outerTrips, Scalar<int64> innerTrips)
+        {
+            var acc = x;
+            foreach (var ctx0 in LoopAPI.Iterate(outerTrips))
+            {
+                Variable? scanned = null;
+                foreach (var ctx1 in LoopAPI.Iterate(innerTrips))
+                {
+                    acc = acc + Scalar(1.0f);
+                    scanned = (Variable)ctx1.Scan(acc);
+                }
+                acc = ((Tensor<float32>)scanned!).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            }
+            return acc;
+        }
+    }
+
+    /// <summary>
+    /// An inner loop's scan output read <em>after</em> the enclosing loop. The enclosing loop
+    /// sees the inner scan's zombie as an output-only body value with no initializer, so it
+    /// never becomes one of its own carries and the un-lowered <c>#LoopScanVariable#</c> reaches
+    /// the emitted graph. Tracked as Shorokoo/Shorokoo#255.
+    /// </summary>
+    [Module]
+    public partial class ScanInNestedLoopReadAfterOuterLoop
+    {
+        public static Tensor<float32> Inline(Scalar<float32> x, Scalar<int64> outerTrips, Scalar<int64> innerTrips)
+        {
+            var acc = x;
+            Variable? scanned = null;
+            foreach (var ctx0 in LoopAPI.Iterate(outerTrips))
+                foreach (var ctx1 in LoopAPI.Iterate(innerTrips))
+                {
+                    acc = acc + Scalar(1.0f);
+                    scanned = (Variable)ctx1.Scan(acc);
+                }
+            return (Tensor<float32>)scanned!;
+        }
+    }
+
+    /// <summary>
+    /// <see cref="ScanInNestedLoopReadAfterOuterLoop"/> with the scan read before the inner
+    /// body's update, which fails earlier still — while the module graph is being built.
+    /// Tracked as Shorokoo/Shorokoo#255.
+    /// </summary>
+    [Module]
+    public partial class ScanInNestedLoopBeforeUpdateReadAfterOuterLoop
+    {
+        public static Tensor<float32> Inline(Scalar<float32> x, Scalar<int64> outerTrips, Scalar<int64> innerTrips)
+        {
+            var acc = x;
+            Variable? scanned = null;
+            foreach (var ctx0 in LoopAPI.Iterate(outerTrips))
+                foreach (var ctx1 in LoopAPI.Iterate(innerTrips))
+                {
+                    scanned = (Variable)ctx1.Scan(acc);
+                    acc = acc + Scalar(1.0f);
+                }
+            return (Tensor<float32>)scanned!;
+        }
+    }
+
+    /// <summary>
+    /// Carries the value <c>acc</c> held one iteration ago. Each tracing pass advances such a
+    /// local by only one lag step, so after two passes it still holds the pre-loop value and the
+    /// looper never identifies it as a carry. Tracked as Shorokoo/Shorokoo#274.
+    /// </summary>
+    [Module]
+    public partial class LagOneCarry
+    {
+        public static Scalar<float32> Inline(Scalar<float32> x, Scalar<int64> trips)
+        {
+            var acc = x;
+            var prev = x;
+            var sum = Scalar(0.0f);
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                sum = sum + prev;
+                prev = acc;
+                acc = acc + Scalar(1.0f);
+            }
+            return sum;
+        }
+    }
+
+    /// <summary>
+    /// Calls the OUTER loop's <c>ctx.Scan</c> from inside the inner loop's body. The outer looper
+    /// only processes the inner loop's first pass, so the zombie its scan creates on the later
+    /// passes is never registered. Tracked as Shorokoo/Shorokoo#275.
+    /// </summary>
+    [Module]
+    public partial class OuterScanFromInnerBody
+    {
+        public static Tensor<float32> Inline(Scalar<float32> x, Scalar<int64> outerTrips, Scalar<int64> innerTrips)
+        {
+            var acc = x;
+            Variable? scanned = null;
+            foreach (var ctx0 in LoopAPI.Iterate(outerTrips))
+                foreach (var ctx1 in LoopAPI.Iterate(innerTrips))
+                {
+                    acc = acc + Scalar(1.0f);
+                    scanned = (Variable)ctx0.Scan(acc);
+                }
+            return (Tensor<float32>)scanned!;
+        }
+    }
+
+    /// <summary>
+    /// Scans a zero-input op's output. The looper does not track such a node, so the scan input
+    /// resolves through <c>ProcessNode</c>'s outer-scope fallback to the first pass's draw,
+    /// outside the loop; binding that would stack one draw once per iteration.
+    /// </summary>
+    [Module]
+    public partial class ScanZeroInputOpInLoopBody
+    {
+        public static Tensor<float32> Inline(Scalar<int64> trips)
+        {
+            Variable? scanned = null;
+            foreach (var ctx in LoopAPI.Iterate(trips))
+                scanned = (Variable)ctx.Scan((Tensor<float32>)(Variable)OnnxOp.RandomUniform([2L], high: 1f, low: 0f, dtype: DType.Float32));
+            return (Tensor<float32>)scanned!;
+        }
+    }
+
+    /// <summary>
+    /// The keyed feed the #262 limitation points a user at: it takes <c>shape</c> as a graph
+    /// input, so the looper tracks it and the draw stays in the body.
+    /// </summary>
+    [Module]
+    public partial class ScanKeyedFeedInLoopBody
+    {
+        public static Tensor<float32> Inline(Scalar<int64> trips)
+        {
+            Variable? scanned = null;
+            foreach (var ctx in LoopAPI.Iterate(trips))
+                scanned = (Variable)ctx.Scan(RandomUniform(Vector(2L)));
+            return (Tensor<float32>)scanned!;
+        }
+    }
+
+    /// <summary>
+    /// Draws inside the loop body with a zero-input op. <c>LoopAPI.ProcessNode</c> declines to
+    /// track any node with no inputs, so the draw is emitted before the loop-open node and every
+    /// iteration reads the same one. Tracked as Shorokoo/Shorokoo#262.
+    /// </summary>
+    [Module]
+    public partial class ZeroInputOpInLoopBody
+    {
+        public static Tensor<float32> Inline(Scalar<int64> trips)
+        {
+            var acc = Scalar(0.0f);
+            foreach (var ctx in LoopAPI.Iterate(trips))
+                acc = acc + (Scalar<float32>)(Variable)OnnxOp.RandomUniform([], high: 1f, low: 0f, dtype: DType.Float32);
+            return (Tensor<float32>)acc;
+        }
+    }
+
+    #endregion
 
     #region Nested-loop submodule call (CombineIterationIndices flatten coverage)
 

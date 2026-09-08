@@ -95,6 +95,49 @@ concretizing the graph raises `FW023` if it is left unfixed.
 
 ## Current limitations (could be lifted)
 
+### Random draws inside a loop body
+
+`OnnxOp.RandomNormal` / `OnnxOp.RandomUniform` called inside a `LoopAPI.Iterate` body
+are emitted **outside** the loop, so every iteration reads the same draw rather than a
+fresh one ([#262](https://github.com/Shorokoo/Shorokoo/issues/262)). The result is
+wrong rather than rejected, and every engine agrees on it. Use the keyed feeds
+`RandomNormal(shape)` / `RandomUniform(shape)` instead — they take `shape` as a graph input
+and pick up the loop's iteration index, so each iteration draws its own — or draw outside the
+loop and index into the result.
+
+### Carrying a value from the previous iteration
+
+A local that holds what another local held **one iteration ago** is not recognised as a loop
+carry, and every read of it is silently pinned to its value from before the loop
+([#274](https://github.com/Shorokoo/Shorokoo/issues/274)):
+
+```csharp
+sum = sum + prev;   // prev is acc's value from the previous iteration — reads x every time
+prev = acc;
+acc  = acc + Scalar(1.0f);
+```
+
+The result is wrong rather than rejected, and every engine agrees on it. `LoopAPI.Init` does not
+help — this is a different shape from the one it addresses. Carry the lagged value explicitly
+(compute it inside the body from the carry itself) until this is fixed.
+
+### Calling an outer loop's ctx.Scan from an inner loop
+
+`ctx.Scan` on an **enclosing** loop's context, called from inside a nested loop's body, throws a
+`KeyNotFoundException` naming nothing
+([#275](https://github.com/Shorokoo/Shorokoo/issues/275)). Scan on the context of the loop whose
+body you are in.
+
+### Scanning inside a nested loop
+
+A value produced by `ctx.Scan` in an inner loop can be used inside the enclosing
+loop's body, but cannot be read after the enclosing loop: the enclosing loop does
+not carry it out, so the model fails to build or is rejected at execution instead
+of returning the stacked value
+([#255](https://github.com/Shorokoo/Shorokoo/issues/255)). Consume the inner
+loop's scan output inside the enclosing body, or move the scan out to the
+enclosing loop.
+
 ### Backprop through dynamic loops
 
 Reverse-mode autodiff through a `Loop` whose trip count is only known at run
@@ -223,9 +266,7 @@ import. Workaround: express the iteration as an explicit `Loop` — slice each
 per-iteration input inside the body with `Gather` on the iteration index, and
 let the `Loop` stack its scan outputs — or re-export the model from the source
 framework with the `Scan` already expressed that way. In Shorokoo, build the
-equivalent with `LoopAPI` and `ctx.Scan`, with one caveat: scan a value the
-body computes, not a loop carry read before the body updates it — that shape
-is currently mislowered ([#232](https://github.com/Shorokoo/Shorokoo/issues/232)).
+equivalent with `LoopAPI` and `ctx.Scan`.
 
 ### ONNX `SequenceMap` import
 

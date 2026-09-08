@@ -5064,7 +5064,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     var scanInKey = closeNode.Inputs[1 + nLoop + k];
                     Debug.Assert(scanInKey is FastTensorKey sk0 && !sk0.IsEmpty,
                         "FastFoldConstantIterationLoops.UnrollOne: scan input is null/empty. "
-                        + "LoopAPI binds every scan output to a body value by construction.");
+                        + "LoopAPI always binds a scan output to some non-empty key.");
                     var sk = (FastTensorKey)scanInKey!;
                     scanIterationKeys[k].Add(curTensorMap.TryGetValue(sk, out var mapped) ? mapped : sk);
                 }

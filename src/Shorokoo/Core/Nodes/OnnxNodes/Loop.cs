@@ -505,6 +505,8 @@ namespace Shorokoo
             if (this.CurrentPass != 2)
                 throw new InvalidTensorOperationException(ErrorCodes.FW022, "Loop Phase Validation", $"current pass: {this.CurrentPass}", "Cannot build loop open node - current pass must be 2");
 
+            using var loopNodeBuild = GraphTrace.Loopers.EnterLoopNodeBuild();
+
             // Building the loop open node is primarily about identifying all the loop variables.
 
             // There are five kinds of loop variables to watch out for to make sure we identify them all:
@@ -675,6 +677,8 @@ namespace Shorokoo
         {
             if (this.CurrentPass != 3)
                 throw new InvalidTensorOperationException(ErrorCodes.FW021, "Loop Phase Validation", $"current pass: {this.CurrentPass}", "Cannot build loop close node - current pass must be 3");
+
+            using var loopNodeBuild = GraphTrace.Loopers.EnterLoopNodeBuild();
 
             // Debug.Assert(this.IterationIndexLoopVariable is not null);
             // this.IterationIndexLoopVariable.SetThirdPassOutput(IterationIndexLoopVariable.OpenNodeOutput.AssertNotNull());
@@ -855,6 +859,35 @@ namespace Shorokoo
                 ? _loopers.Take(active.index + 1).ToImmutableList()
                 : ImmutableList<Looper>.Empty;
 
+        private int _loopNodeBuildDepth;
+
+        /// <summary>
+        /// Whether the loop's own construction is building nodes right now, rather than a body
+        /// being traced. Such a node belongs to no body: it exists once, on the pass that builds
+        /// it, so recording it would desync the pass-to-pass body comparison
+        /// (<c>Looper.checkMatch</c>) — most visibly the continue-condition constant
+        /// <see cref="Looper.BuildLoopCloseNode"/> creates on the third pass alone.
+        ///
+        /// <para>The loop index variable is machinery too, but it is a body value by
+        /// construction — every pass makes one, at the same position — so it is created outside
+        /// this scope and tracked like any other body node.</para>
+        /// </summary>
+        internal bool BuildingLoopNodes => _loopNodeBuildDepth > 0;
+
+        /// <summary>Marks its lifetime as <see cref="BuildingLoopNodes"/>.</summary>
+        internal LoopNodeBuildScope EnterLoopNodeBuild() => new(this);
+
+        internal readonly struct LoopNodeBuildScope : IDisposable
+        {
+            private readonly LooperStack _stack;
+            internal LoopNodeBuildScope(LooperStack stack)
+            {
+                _stack = stack;
+                stack._loopNodeBuildDepth++;
+            }
+            public void Dispose() => _stack._loopNodeBuildDepth--;
+        }
+
         /// <summary>Iteration-index variables of all in-progress loops, outermost first.</summary>
         internal ImmutableList<Scalar<int64>> IterationIndices
             => _loopers.Select(x => x.GetLoopIndexVariable()).ToImmutableList();
@@ -891,11 +924,14 @@ namespace Shorokoo
                 node.NodeDef.FullNodeOpName == OpCodes.LOOP_FAKE_INPUT)
                 return (node.FullInputs, node.FullOutputs);
 
-            // This node has no inputs, therefore it cannot be part of the loop body.
-            // This is important because constants are occasionally created during the creation of the loop that should
-            // not be processed as part of the loop body.
-            if (node.Inputs.Length == 0 &&
-                node.NodeDef.FullNodeOpName != OpCodes.LOOP_INDEX_VARIABLE)
+            // Nodes the loop's own construction creates are not body nodes. This used to be
+            // approximated by "no inputs, therefore not part of the body", which held for the
+            // constants that motivated it but not in general: a draw the body itself created has
+            // no inputs either, and went untracked, so its consumers resolved through the
+            // outer-scope case to the first pass's node — emitted before LOOP_OPEN, leaving every
+            // iteration reading the one draw (Shorokoo/Shorokoo#262). Ask which code is building
+            // instead of guessing from the node's shape.
+            if (looperStack.BuildingLoopNodes)
                 return (node.FullInputs, node.FullOutputs);
 
             FullInputs retvalInputs = node.FullInputs;

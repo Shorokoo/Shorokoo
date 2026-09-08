@@ -392,6 +392,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 }
 
                 result.Add(node);
+
+                // The node stays in the body, so its value is only available there and a later
+                // consumer must not overtake it — the same reason BuildLoopDependentTensors seeds
+                // the close nodes, now that a draw is pinned for a reason its inputs do not show.
+                if (openPositions.Count > 0)
+                    AddAllOutputs(node, loopDependent);
             }
 
             graph.Nodes = result;

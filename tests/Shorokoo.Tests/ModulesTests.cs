@@ -353,18 +353,24 @@ public class ModulesCoverageTests
     }
 
     /// <summary>A draw has no inputs to be loop-dependent on, but a second execution of one is a
-    /// second sample, so shrinking the loop must not lift it out — the wrong answer #262 describes,
-    /// reached through concretization rather than the module build.</summary>
+    /// second sample, so shrinking the loop must not lift it out either — the same wrong answer
+    /// <see cref="TestAZeroInputOpInALoopBodyStaysInTheLoopBody"/> guards, reached through
+    /// concretization rather than the module build.</summary>
     [Fact]
     public void TestLoopInvariantHoistingLeavesADrawInTheLoopBody()
     {
-        var g = ScanZeroInputOpInLoopBody.ComputationGraph;
-        string[] ops = [.. g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([], 3L)]))
-                             .ToInternal().Nodes.Select(n => n.OpCode)];
-        Assert.InRange(
-            Array.IndexOf(ops, OpCodes.RANDOM_UNIFORM),
-            Array.IndexOf(ops, OpCodes.LOOP_OPEN) + 1,
-            Array.IndexOf(ops, OpCodes.LOOP_CLOSE) - 1);
+        static void DrawStaysInBody(ComputationGraph g)
+        {
+            string[] ops = [.. g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([], 3L)]))
+                                 .ToInternal().Nodes.Select(n => n.OpCode)];
+            Assert.InRange(
+                Array.IndexOf(ops, OpCodes.RANDOM_UNIFORM),
+                Array.IndexOf(ops, OpCodes.LOOP_OPEN) + 1,
+                Array.IndexOf(ops, OpCodes.LOOP_CLOSE) - 1);
+        }
+
+        DrawStaysInBody(ScanZeroInputOpInLoopBody.ComputationGraph);
+        DrawStaysInBody(ZeroInputOpInLoopBody.ComputationGraph);
     }
 
     /// <summary>Nesting an IF and a loop three deep survives concretization but not the ONNX
@@ -1010,12 +1016,10 @@ public class ModulesCoverageTests
         AssertDrawInsideLoopBody(ScanKeyedFeedInLoopBody.ComputationGraph, InternalOpCodes.SHRK_RANDOM_UNIFORM);
     }
 
-    /// <summary>A node the loop body creates with no inputs is not tracked by the looper, so its
-    /// consumers resolve it through the outer-scope case to the first pass's node — emitted before
-    /// LOOP_OPEN. The draw is hoisted out of the loop and every iteration reads the same one. The
-    /// position is asserted rather than a value because the fault is in the graph, so every engine
-    /// agrees on the wrong answer. Tracked as Shorokoo/Shorokoo#262.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#262: a zero-input op created in a loop body is emitted outside the loop")]
+    /// <summary>A node the loop body creates stays in the body whether or not it has inputs. The
+    /// position is asserted rather than a value because the fault it guards is in the graph, so
+    /// every engine would agree on the wrong answer.</summary>
+    [Fact]
     public void TestAZeroInputOpInALoopBodyStaysInTheLoopBody()
         => AssertDrawInsideLoopBody(ZeroInputOpInLoopBody.ComputationGraph);
 

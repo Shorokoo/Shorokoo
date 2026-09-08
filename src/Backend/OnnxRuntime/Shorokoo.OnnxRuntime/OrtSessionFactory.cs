@@ -80,10 +80,10 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
     /// <para>Deliberately absent: <c>session.set_denormal_as_zero</c>. ORT applies that entry to
     /// the constructing thread once per process (first session wins) by setting FTZ/DAZ in its
     /// MXCSR, which then flushes every later float and double operation on that thread — the
-    /// caller's own managed code included, for the life of the thread. It was once set here for
-    /// a measured speedup on denormal attention gradients; those gradients turned out to be an
+    /// caller's own managed code included, for the life of the thread. It was weighed for a
+    /// measured speedup on denormal attention gradients; those gradients turned out to be an
     /// artefact of a profiling harness that fed two weight tensors identical values, so there is
-    /// no speedup to weigh against the leak. Nothing asserts its absence: a guard on it was
+    /// no speedup to set against the leak. Nothing asserts its absence: a guard on it was
     /// deleted deliberately, having needed a <c>dotnet test</c> invocation of its own to observe
     /// a process's first session.</para>
     /// </summary>

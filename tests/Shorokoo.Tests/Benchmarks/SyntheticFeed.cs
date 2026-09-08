@@ -7,7 +7,7 @@ namespace Shorokoo.Tests.Benchmarks;
 /// The deterministic filler the profiling harnesses feed a training step with — the batch and
 /// every weight tensor alike, since the step's pure graph takes its parameters as inputs.
 ///
-/// <para><paramref name="tensor"/>, the tensor's position in the feed, is hashed along with the
+/// <para><c>tensor</c>, the tensor's position in the feed, is hashed along with the
 /// element index, and that is the whole point. A filler keyed on length alone hands two weight
 /// tensors of the same shape identical content, so <c>MultiHeadAttention</c>'s <c>Wq</c> and
 /// <c>Wk</c> become one matrix, <c>Q·Kᵀ</c> becomes a Gram matrix of squared norms, and the

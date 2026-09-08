@@ -225,6 +225,8 @@ namespace Shorokoo.Core
         /// </summary>
         public Variable[] Call(params Variable?[] tensors)
         {
+            tensors ??= [];
+
             if (tensors.Any(t => t is null))
                 throw new ModuleException(ErrorCodes.FW005, this.FriendlyName,
                     "Call was passed a null argument. Every one of the body's inputs needs a value; " +

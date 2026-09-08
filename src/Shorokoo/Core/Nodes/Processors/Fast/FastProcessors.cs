@@ -760,7 +760,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 if (isFunction)
                 {
                     var targetFunction = fastNode.TargetFunction!;
-                    subFastGraph = targetFunction.GetFastFlattenedGraph().Clone();
+                    subFastGraph = targetFunction.GetFastFlattenedGraph();
                     FastProcessorHelper.RekeySubgraph(subFastGraph);
 
                     // A FUNCTION_INVOKE carries no model operand, so nothing distinguishes two
@@ -774,8 +774,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     {
                         var callSiteId = new ModelId(nextCallSiteId++);
                         var calleeName = targetFunction.DefaultName ?? targetFunction.FriendlyName;
+                        // The dedupe index, not the model id, is what tells two same-named
+                        // parameters apart in an export, and FastApplyIdentifierTemplates numbered
+                        // this module's MODEL_INVOKE sites from 0 with a counter of its own. Start
+                        // above whatever the graph already uses for the name, or a call site and a
+                        // model-variable site of one module collide on a single parameter name.
                         callSiteDedupeIds[calleeName] =
-                            callSiteDedupeIds.TryGetValue(calleeName, out var seen) ? seen + 1 : 0;
+                            callSiteDedupeIds.TryGetValue(calleeName, out var seen)
+                                ? seen + 1
+                                : NextFreeDedupeId(graph, calleeName);
                         var callSiteTemplate = ModelParamIdentifierTemplate.LocalModule(
                             callSiteId, calleeName, callSiteDedupeIds[calleeName], ImmutableArray<int>.Empty);
 
@@ -808,7 +815,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         }
                     }
 
-                    subFastGraph = moduleFn.GetFastFlattenedGraph().Clone();
+                    subFastGraph = moduleFn.GetFastFlattenedGraph();
                     FastProcessorHelper.RekeySubgraph(subFastGraph);
 
                     // Reparent the subgraph
@@ -1129,8 +1136,35 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 n.OpCode == InternalOpCodes.SHRK_RANDOM_BITS);
 
         /// <summary>
+        /// One past the largest deduplication index the graph's identifier templates already use
+        /// for <paramref name="moduleName"/>. Templates read <c>&lt;Name&gt;#&lt;index&gt;</c>, and that index is
+        /// the only part of a parameter's name that separates same-named siblings.
+        /// </summary>
+        private static int NextFreeDedupeId(InternalComputationGraph graph, string moduleName)
+        {
+            int max = -1;
+            var needle = moduleName + "#";
+            foreach (var node in graph.Nodes)
+            {
+                var template = node.IdentifierTemplate;
+                if (template is null) continue;
+                for (int at = template.IndexOf(needle, System.StringComparison.Ordinal); at >= 0;
+                     at = template.IndexOf(needle, at + 1, System.StringComparison.Ordinal))
+                {
+                    int digits = at + needle.Length, end = digits;
+                    while (end < template.Length && char.IsAsciiDigit(template[end])) end++;
+                    if (end > digits && int.TryParse(template[digits..end], out var used))
+                        max = Math.Max(max, used);
+                }
+            }
+            return max + 1;
+        }
+
+        /// <summary>
         /// One past the largest leading model-id component anywhere in the graph, so a freshly
         /// minted call-site id shares an address space with the allocated ones without colliding.
+        /// Never 0: that slot is reserved at every level for the RngSeed parameter, which is why
+        /// FindNextSpot counts from 1 and an explicit Rng.Pin of 0 is refused.
         /// </summary>
         private static int NextFreeTopLevelModelId(InternalComputationGraph graph)
         {
@@ -1140,9 +1174,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var vals = node.Attributes.IsAttributeDefined(OnnxOpAttributeNames.ShrkAttrLocalModelId)
                     ? node.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrLocalModelId)
                     : null;
-                if (vals is { Length: > 0 }) max = System.Math.Max(max, (int)vals[0]);
+                if (vals is { Length: > 0 }) max = Math.Max(max, (int)vals[0]);
             }
-            return max + 1;
+            return Math.Max(max + 1, 1);
         }
 
         /// <summary>
@@ -5481,7 +5515,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             opCode == InternalOpCodes.MODEL_TENSORSTRUCT_INPUT ||
             opCode == InternalOpCodes.GENERIC_TYPE_INPUT;
 
-        // Ops whose output is a DataStructure.Sequence. MODULE_INVOKE/FUNCTION_INVOKE and the
+        // Ops whose output is a DataStructure.Sequence. MODEL_INVOKE/FUNCTION_INVOKE and the
         // model-struct ops (MODEL_HYPERPARAM, MODULE_SET_HYPERPARAMS, GET_MODEL_ID) can also
         // carry sequence outputs but are guaranteed to be gone before FoldConstants runs (the
         // ComputationGraph → fast pipeline asserts them removed upstream). MODEL_SEQUENCE_INPUT

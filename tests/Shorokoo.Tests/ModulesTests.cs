@@ -24,10 +24,6 @@ public class ModulesCoverageTests
             hyperparamInputs: [], runtimeInputs: x, expected: [1.0, 2.0]));
     }
 
-    /// <summary>An initializer that calls a module exports that call un-flattened — the emitted
-    /// FunctionProto body still holds ShrkCreateModule / ShrkModuleSetHyperparams / ShrkModelInvoke,
-    /// and ORT fails type inference on the call site. The callee does no aliasing, so this is
-    /// independent of the pass-through defects. Tracked as Shorokoo/Shorokoo#276.</summary>
     [Fact]
     public void TestAnInitializerCallingAModuleFlattensThatCallInItsFunctionBody()
         => Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitCallingAModule>(
@@ -601,7 +597,7 @@ public class ModulesCoverageTests
 
         var direct = ComputeContext.Default.Execute(concrete, numOut, input)[0]
             .ToTensorData().AccessRawMemory().ToArray();
-        using var ms = new System.IO.MemoryStream();
+        using var ms = new MemoryStream();
         ProtoBuf.Serializer.Serialize(ms, proto);
         var reimported = OnnxModelImporter.FromOnnxModel(ms.ToArray());
         var reParams = reimported.ToInternal().Nodes
@@ -635,7 +631,7 @@ public class ModulesCoverageTests
             Assert.DoesNotMatch("^N[0-9]+(_T[0-9]+)?$", n);
         });
 
-        using var ms = new System.IO.MemoryStream();
+        using var ms = new MemoryStream();
         ProtoBuf.Serializer.Serialize(ms, proto);
         var bytes = ms.ToArray();
 
@@ -987,7 +983,7 @@ public class ModulesCoverageTests
         var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x])).ToConcreteModel();
         var direct = ComputeContext.Default.Execute(concrete, x)[0].ToTensorData().AccessRawMemory().ToArray();
         var proto = Shorokoo.Core.Factory.FastOnnxModelBuilder.BuildOnnxModel(concrete);
-        using var ms = new System.IO.MemoryStream();
+        using var ms = new MemoryStream();
         ProtoBuf.Serializer.Serialize(ms, proto);
         var reimported = OnnxModelImporter.FromOnnxModel(ms.ToArray());
         var roundtrip = ComputeContext.Default.Execute(reimported, x)[0].ToTensorData().AccessRawMemory().ToArray();
@@ -1192,6 +1188,8 @@ public class ModulesCoverageTests
         Assert.Contains("2 argument(s)", Arity(oneIn, 2));
         Assert.Contains("1 hyperparameter(s)", Arity(twoIn, 1));
         Assert.Contains("3 argument(s)", Arity(twoIn, 3));
+        Assert.Contains("null argument", Assert.Throws<ModuleException>(
+            () => ModuleFn(twoIn).Call(InvokeInput("a"), null)).Message);
     }
 
     [Fact]
@@ -1200,23 +1198,17 @@ public class ModulesCoverageTests
         var g = ComputationGraph.FromInternal(ModuleInvokeGraph(), GraphKind.Module);
         var onnx = SrkFileFormat.Read(CompressedFormatUtils.SaveFastGraphToBinary(g, compressed: false)).OnnxBytes;
 
-        using var read = new System.IO.MemoryStream(onnx);
+        using var read = new MemoryStream(onnx);
         var proto = ProtoBuf.Serializer.Deserialize<Shorokoo.Core.Factory.IR.ModelProto>(read);
         var fnNames = proto.Functions.Select(f => f.Name).ToHashSet();
         proto.Graph.Nodes.Single(n => fnNames.Contains(n.OpType)).Inputs.Clear();
 
-        using var ms = new System.IO.MemoryStream();
+        using var ms = new MemoryStream();
         ProtoBuf.Serializer.Serialize(ms, proto);
         var ex = Assert.Throws<ModuleException>(() => OnnxModelImporter.FromOnnxModel(ms.ToArray()));
         Assert.Contains("0 input(s)", ex.Message);
     }
 
-    /// <summary>The MODEL_INVOKE arm reparents the body it splices; the FUNCTION_INVOKE arm does
-    /// not, so every call site of one module-typed function keeps the body's own local model id and
-    /// collapses onto a single parameter identity. Tying is arguable on its own — there is no model
-    /// operand to tell call sites apart — but a parameter whose shape comes from a per-call-site
-    /// hyperparameter then silently takes the first site's shape, and the numbers are wrong with
-    /// nothing raised. Tracked as Shorokoo/Shorokoo#273.</summary>
     [Fact]
     public void TestEachCallSiteOfAModuleTypedFunctionGetsItsOwnParameter()
     {
@@ -1229,10 +1221,49 @@ public class ModulesCoverageTests
             GraphKind.Module);
 
         var input = TensorData([2L], 1f, 2f);
-        var run = ComputeContext.Default.Execute(
-            g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel(), input);
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
+        var infos = arch.GetConcreteModelParamInfos();
+        Assert.Equal(2, infos.ModelIds.Distinct().Count());
+        Assert.Equal(2, infos.ParamInfos.Select(i => i.ToShorokooIdString()).Distinct().Count());
+
+        var run = ComputeContext.Default.Execute(arch.ToConcreteModel(), input);
         Assert.Equal(2, run[0].ToTensorData().As<float32>().AccessMemory<float>().Length);
         Assert.Equal(5, run[1].ToTensorData().As<float32>().AccessMemory<float>().Length);
+    }
+
+    [Fact]
+    public void TestOneModuleReachedThroughBothInvokeFormsKeepsTwoParameterNames()
+    {
+        var fn = ModuleFn((Func<Tensor<float32>, Tensor<float32>>)TimesOwnParam);
+        var x = InvokeInput("input");
+        var viaModel = ModuleFactory
+            .FromFunc<Tensor<float32>, Tensor<float32>>(TimesOwnParam, "TimesOwnParam")
+            .SetHyperparams().Call(x);
+        var g = ComputationGraph.FromInternal(
+            new InternalComputationGraph([x], [(Tensor<float32>)fn.Call(x)[0] + viaModel]), GraphKind.Module);
+
+        var input = TensorData([2L], 1f, 2f);
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
+        var names = arch.GetConcreteModelParamInfos().ParamInfos
+            .Select(i => i.ToShorokooIdString()).ToList();
+        Assert.Equal(names.Count, names.Distinct().Count());
+        Assert.Equal([2f, 4f], RunFloats(arch.ToConcreteModel(), input));
+    }
+
+    /// <summary>A call site inside a loop body takes no iteration scope, so the callee's parameter
+    /// is shared across iterations where the MODEL_INVOKE route realizes one per iteration.
+    /// Tracked as Shorokoo/Shorokoo#285.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#285: a module-typed function invoked in a loop body takes no iteration scope")]
+    public void TestAModuleTypedFunctionInvokedInALoopRealizesAParameterPerIteration()
+    {
+        var fn = ModuleFn((Func<Tensor<float32>, Tensor<float32>>)TimesOwnParam);
+        var x = InvokeInput("input");
+        var acc = x;
+        foreach (var _ in LoopAPI.Iterate(Scalar(3L))) acc = (Tensor<float32>)fn.Call(acc)[0];
+        var g = ComputationGraph.FromInternal(new InternalComputationGraph([x], [acc]), GraphKind.Module);
+
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([2L], 1f, 2f)]));
+        Assert.Equal(3, arch.GetConcreteModelParamInfos().ModelIds.Distinct().Count());
     }
 
     private static Tensor<float32> SizedByHyper(Tensor<float32> t, [Hyper] Scalar<int64> n)
@@ -1264,6 +1295,16 @@ public class ModulesCoverageTests
         var g = SimpleGenericLayer.ComputationGraph;
         var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
         Assert.Equal([1f, 2f], RunFloats(arch.ToConcreteModel(), input));
+
+        var scale = TensorData([], 3f);
+        var gs = GenericScaleLayer.ComputationGraph;
+        var archS = gs.ToConcreteArchitecture(gs.FromOrderedInputs([scale, input]));
+        Assert.Equal([3f, 6f], RunFloats(archS.ToConcreteModel(), scale, input));
+
+        var shape = TensorData([1L], 2L);
+        var gp = GenericLayerWithTrainableParams.ComputationGraph;
+        var archP = gp.ToConcreteArchitecture(gp.FromOrderedInputs([shape, input]));
+        Assert.Equal([1f, 2f], RunFloats(archP.ToConcreteModel(), shape, input));
     }
 
     /// <summary>A module body reachable as a delegate, for a module the source generator never saw.</summary>

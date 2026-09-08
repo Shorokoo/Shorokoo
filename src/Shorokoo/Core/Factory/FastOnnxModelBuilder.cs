@@ -49,9 +49,10 @@ namespace Shorokoo.Core.Factory
     /// the Fast pre-passes (<see cref="FastLowerRandomOps"/>,
     /// <see cref="FastAddIdentityForOuterScopeValues"/>,
     /// <see cref="FastPrepForOnnx"/>, <see cref="FastStripCallStacks"/>,
-    /// <see cref="FastUseUniqueNames"/>), then walked. Each function's body is
-    /// taken from <see cref="Function.OriginalFastGraph"/> (cloned so the
-    /// per-function pre-passes don't mutate the cached canonical form).
+    /// <see cref="FastUseUniqueNames"/>), then walked. Each function's body is a
+    /// fresh copy of <see cref="Function.OriginalFastGraph"/>, or of its flattened
+    /// form for the dialects that cannot carry module machinery inside a body, so
+    /// the per-function pre-passes never touch the cached canonical form.
     /// </para>
     ///
     /// <para>
@@ -216,6 +217,13 @@ namespace Shorokoo.Core.Factory
             // vanilla) so a reloaded architecture still carries its [Module(Checkpoint = true)].
             bool stripCheckpointStamp = prepForOnnx || vanillaExport || applyExecutionLowerings;
 
+            // Same split for function bodies: the dialects ORT will run or a user will export
+            // cannot express module machinery hiding inside one (Shorokoo/Shorokoo#276), so those
+            // bodies go out flattened. The .srk dialect keeps the body as authored, so a reloaded
+            // module still shows its sub-module boundary instead of a copy of the callee inlined
+            // into every caller.
+            bool flattenFunctionBodies = prepForOnnx || vanillaExport || applyExecutionLowerings;
+
             // ----- 3. Build the main GraphProto by walking the Fast graph.
             var graphProto = BuildGraphProto(
                 graphName: "",
@@ -232,7 +240,7 @@ namespace Shorokoo.Core.Factory
             // a FunctionProto for each.
             var functions = CollectFunctionsPostOrder(prepFast);
             var functionProtos = functions
-                .Select(fn => BuildFunctionProto(fn, opset, prepForOnnx, applyExecutionLowerings, stripCheckpointStamp))
+                .Select(fn => BuildFunctionProto(fn, opset, prepForOnnx, applyExecutionLowerings, stripCheckpointStamp, flattenFunctionBodies))
                 .ToArray();
 
             var model = (ModelProto)OnnxIRFactory.CreateModel(graphProto, functionProtos, opset);
@@ -1119,18 +1127,19 @@ namespace Shorokoo.Core.Factory
         // ----------- function emission -----------
 
         private static FunctionProto BuildFunctionProto(
-            Function function, OpSetVersion opset, bool prepForOnnx, bool applyExecutionLowerings, bool stripCheckpointStamp = true)
+            Function function, OpSetVersion opset, bool prepForOnnx, bool applyExecutionLowerings,
+            bool stripCheckpointStamp = true, bool flattenBody = true)
         {
             // Clone the function's primary Fast body and run the same pre-passes
             // on the copy. The function's body has its own ONNX-name namespace,
             // so the per-graph counter inside FastUseUniqueNames restarts at 1
             // for each function — matches how ONNX FunctionProtos are scoped.
-            // Flattened, not the primary body: an inlinable MODEL_INVOKE / FUNCTION_INVOKE inside
-            // the body is machinery the vanilla ONNX dialect cannot express, and emitting it left
-            // ShrkCreateModule / ShrkModuleSetHyperparams / ShrkModelInvoke in the FunctionProto
-            // for ORT to fail type inference on (Shorokoo/Shorokoo#276). GetFastFlattenedGraph
-            // hands back a fresh mutable copy, so there is nothing left to clone.
-            var fnFast = function.GetFastFlattenedGraph();
+            // Flattened for the dialects that cannot express an inlinable MODEL_INVOKE /
+            // FUNCTION_INVOKE inside a body: emitting one left ShrkCreateModule /
+            // ShrkModuleSetHyperparams / ShrkModelInvoke in the FunctionProto for ORT to fail type
+            // inference on (Shorokoo/Shorokoo#276). Both forms hand back a fresh mutable copy, so
+            // there is nothing to clone.
+            var fnFast = flattenBody ? function.GetFastFlattenedGraph() : function.OriginalFastGraph;
             // Before the pre-passes, so the inserted Identity is renamed with the rest of the body.
             FastIdentityWrapping.WrapAliasedOutputs(fnFast);
             RunPrePasses(fnFast, prepForOnnx, applyExecutionLowerings);

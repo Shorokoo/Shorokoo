@@ -598,8 +598,9 @@ namespace Shorokoo.Graph
         /// <see cref="ModelParamList"/> of named inputs — the <c>inputHints</c> argument for
         /// <see cref="ToConcreteArchitecture"/>, or the inputs for an <c>Execute</c> call.
         /// </summary>
-        /// <param name="graph">The graph whose input names to pair with the values.</param>
-        /// <param name="inputValues">Input values in the same order as the graph's declared inputs.</param>
+        /// <param name="graph">The graph whose data-input names to pair with the values.</param>
+        /// <param name="inputValues">One value per data input, in declaration order. A generic
+        /// [Module]'s type-placeholder slots are not data inputs and take no value.</param>
         /// <returns>The inputs as a named <see cref="ModelParamList"/>.</returns>
         internal static ModelParamList FromOrderedInputs(this InternalComputationGraph graph, ImmutableArray<TensorData> inputValues)
         {
@@ -612,7 +613,18 @@ namespace Shorokoo.Graph
                 .Where(x => graph.FindNode(x.First.FastNodeKey) is not { OpCode: InternalOpCodes.GENERIC_TYPE_INPUT })
                 .Select(x => x.Second);
 
-            return new ModelParamList(dataInputNames.Zip(inputValues)
+            // Fewer values than inputs is the deliberate partial form Specialize takes (hyperparams
+            // only). More is always a mistake, and Zip would swallow it: notably a caller still
+            // passing a value for a type placeholder, the shape this method used to expect.
+            var names = dataInputNames.ToList();
+            if (inputValues.Length > names.Count)
+                throw new System.InvalidOperationException(
+                    $"FromOrderedInputs: the graph has {names.Count} data input(s) " +
+                    $"({string.Join(", ", names)}) but {inputValues.Length} value(s) were supplied. " +
+                    "Pass at most one value per data input, in declaration order; a generic " +
+                    "[Module]'s type-placeholder slots are not data inputs and take no value.");
+
+            return new ModelParamList(names.Zip(inputValues)
                 .Select(x => new TensorDataModelParam(x.First.AssertNotNull(), ModelParamType.InputParam, x.Second)));
         }
 

@@ -95,6 +95,21 @@ concretizing the graph raises `FW023` if it is left unfixed.
 
 ## Current limitations (could be lifted)
 
+### A generic module's type argument cannot be chosen
+
+A generic `[Module]` — one whose `Inline<T>` is written against a type parameter — lowers
+and runs through the ordinary route:
+
+```csharp
+var g = MyGenericLayer.ComputationGraph;
+var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
+```
+
+Its type placeholders are not data inputs, so they take no value in `FromOrderedInputs`.
+What you cannot do is *pick* the type: concretization commits the module to the type it
+was built with, and nothing public selects another. Write the module against a concrete
+element type when you need a specific one.
+
 ### Random draws inside a loop body
 
 `OnnxOp.RandomNormal` / `OnnxOp.RandomUniform` called inside a `LoopAPI.Iterate` body

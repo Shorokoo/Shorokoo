@@ -188,6 +188,11 @@ saved with. Foreign models have no tag and are classified by op-scanning. A tag
 that is structurally impossible for the model's content (a hand-edited or
 corrupt file) fails the import loudly.
 
+A node calling one of the model's own functions with a different number of inputs
+than that function's body declares is refused on import for the same reason: the
+call cannot be lowered against its body, and accepting it would produce a graph
+whose spliced inputs go nowhere.
+
 Models using ONNX external data (the standard layout for large third-party models)
 load transparently from a **file path** — `location` keys resolve against the model
 file's directory, honoring `offset`/`length` slicing. When importing from bytes or a

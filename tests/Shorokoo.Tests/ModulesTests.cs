@@ -359,19 +359,41 @@ public class ModulesCoverageTests
     [Fact]
     public void TestLoopInvariantHoistingLeavesADrawInTheLoopBody()
     {
-        static void DrawStaysInBody(ComputationGraph g)
+        static void BodyKeeps(ComputationGraph g, params string[] ops)
         {
-            string[] ops = [.. g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([], 3L)]))
-                                 .ToInternal().Nodes.Select(n => n.OpCode)];
-            Assert.InRange(
-                Array.IndexOf(ops, OpCodes.RANDOM_UNIFORM),
-                Array.IndexOf(ops, OpCodes.LOOP_OPEN) + 1,
-                Array.IndexOf(ops, OpCodes.LOOP_CLOSE) - 1);
+            string[] lowered = [.. g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([], 3L)]))
+                                     .ToInternal().Nodes.Select(n => n.OpCode)];
+            foreach (var op in ops)
+                Assert.InRange(
+                    Array.IndexOf(lowered, op),
+                    Array.IndexOf(lowered, OpCodes.LOOP_OPEN) + 1,
+                    Array.IndexOf(lowered, OpCodes.LOOP_CLOSE) - 1);
         }
 
-        DrawStaysInBody(ScanZeroInputOpInLoopBody.ComputationGraph);
-        DrawStaysInBody(ZeroInputOpInLoopBody.ComputationGraph);
+        BodyKeeps(ScanZeroInputOpInLoopBody.ComputationGraph, OpCodes.RANDOM_UNIFORM);
+        BodyKeeps(ZeroInputOpInLoopBody.ComputationGraph, OpCodes.RANDOM_UNIFORM, OpCodes.ADD);
     }
+
+    /// <summary>Unrolling a constant-trip loop clones the body per iteration. A draw is
+    /// loop-invariant by dataflow, so it would otherwise be shared — leaving every unrolled
+    /// iteration reading the one sample.</summary>
+    [Fact]
+    public void TestUnrollingALoopGivesEachIterationItsOwnDraw()
+    {
+        var g = Modules.ConstantTripDrawScanLayer.ComputationGraph;
+        var lowered = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([], 1f)])).ToInternal();
+        Assert.Equal(3, lowered.Nodes.Count(n => n.OpCode == OpCodes.RANDOM_UNIFORM));
+    }
+
+    /// <summary>A callee first used inside a loop body. Its Function is cached per method, so its
+    /// input markers reach the caller's trace on the first call only, and whether that call is the
+    /// one inside the loop depends on suite ordering — hence a callee this test alone uses.</summary>
+    [Fact]
+    public void TestAnInitializerFirstUsedInsideALoopBodyBuilds()
+        => Assert.True(AutoTest.AdvancedTestGraph<Modules.InitializerFirstUsedInLoopBodyLayer>(
+            hyperparamInputs: [TensorData([], 3L)],
+            runtimeInputs: [TensorData([2L], 1f, 2f)],
+            expected: [4.0, 5.0]));
 
     /// <summary>Nesting an IF and a loop three deep survives concretization but not the ONNX
     /// build. Tracked as Shorokoo/Shorokoo#270.</summary>

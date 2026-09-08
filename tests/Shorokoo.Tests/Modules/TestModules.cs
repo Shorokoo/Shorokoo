@@ -267,6 +267,45 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>A draw scanned over a loop whose trip count is a literal, so the loop unrolls.
+    /// Each unrolled iteration must get its own draw.</summary>
+    [Module]
+    public partial class ConstantTripDrawScanLayer
+    {
+        public static Tensor<float32> Inline(Scalar<float32> unused)
+        {
+            Variable? scanned = null;
+            foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
+                scanned = (Variable)ctx.Scan((Scalar<float32>)(Variable)
+                    OnnxOp.RandomUniform([], high: 1f, low: 0f, dtype: DType.Float32));
+            return (Tensor<float32>)scanned!;
+        }
+    }
+
+    /// <summary>Used only from <see cref="InitializerFirstUsedInLoopBodyLayer"/>, so the
+    /// process-wide Function cache is cold when that module is built however the suite is
+    /// ordered — which is what the pin over it needs.</summary>
+    [TrainableParamInitializer]
+    public static partial class InitOnlyUsedInALoopBody
+    {
+        public static Tensor<float32> Inline(Vector<int64> shape) => TensorFill(shape, 1.0f);
+    }
+
+    /// <summary>An initializer first used inside a loop body. Its input markers must be built in
+    /// its own trace, not the caller's, or the enclosing loop records them as body nodes on the
+    /// first pass alone and the pass-to-pass comparison rejects the body.</summary>
+    [Module]
+    public partial class InitializerFirstUsedInLoopBodyLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input, [Hyper] Scalar<int64> iters)
+        {
+            var x = input;
+            foreach (var ctx in LoopAPI.Iterate(iters))
+                x = x + InitOnlyUsedInALoopBody.Init(x.ShapeTensor());
+            return x;
+        }
+    }
+
     /// <summary>One gate with a trainable param on <b>each</b> branch, both pruned by an
     /// enclosing gate. Whichever branch wins, the other is the one that unlocks the fold.</summary>
     [Module]

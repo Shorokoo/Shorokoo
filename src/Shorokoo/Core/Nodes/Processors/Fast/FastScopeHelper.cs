@@ -334,7 +334,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // Asserted on entry as well as exit: this pass shrinks scopes, it does not fix
             // invalid ones, so a violation introduced upstream must not read as one introduced
             // here — the same contract FastScopeConfigurator.Configure states.
-            System.Diagnostics.Debug.Assert(graph.IsLinearOrderValid(), "graph.IsLinearOrderValid()");
+            System.Diagnostics.Debug.Assert(graph.IsLinearOrderValid(),
+                "FastScopeHelper.ShrinkAllScopes: graph must already be in valid linear order on " +
+                "entry. This pass shrinks scopes; it does not fix invalid ones.");
 
             var loopDependent = BuildLoopDependentTensors(graph);
 
@@ -367,9 +369,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
                 if (Shorokoo.Core.Factory.FastOpsetResolver.IsCloseOpCode(node.OpCode))
                 {
-                    if (node.OpCode == OpCodes.LOOP_CLOSE &&
-                        node.GraphOpenNodeKey is FastNodeKey openKey && !openKey.IsEmpty)
-                        openPositions.Remove(openKey);
+                    if (node.OpCode == OpCodes.LOOP_CLOSE)
+                    {
+                        // Keyed on the open, since only a loop's OPEN is in openPositions. A close
+                        // whose key is missing closes nothing here — it must still not pop a
+                        // barrier it never pushed.
+                        if (node.GraphOpenNodeKey is FastNodeKey openKey && !openKey.IsEmpty)
+                            openPositions.Remove(openKey);
+                    }
                     else if (barrierPositions.Count > 0)
                         barrierPositions.RemoveAt(barrierPositions.Count - 1);
 
@@ -401,7 +408,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             }
 
             graph.Nodes = result;
-            System.Diagnostics.Debug.Assert(graph.IsLinearOrderValid(), "graph.IsLinearOrderValid()");
+            System.Diagnostics.Debug.Assert(graph.IsLinearOrderValid(),
+                "FastScopeHelper.ShrinkAllScopes: hoisting left the graph in an invalid linear order.");
         }
 
         /// <summary>

@@ -164,16 +164,24 @@ namespace Shorokoo.Core
             // per-parameter inside CreateInputParams.)
             ModuleHelper.RejectVariableParam(methodInfo.ReturnType);
 
-            // Create input parameters based on the method signature
-            var fnInputs = ModuleHelper.CreateInputParams(methodInfo.GetParameters());
-
             // This method re-enters mid-trace whenever the body first-uses a sub-module or
             // initializer whose Function is not yet cached, so all per-trace ambient state —
             // the looper stack, the Rng.Pin recordings, and the StateUpdate registrations —
             // lives in one ambient trace entered per build and restored on exit (a
             // destructive clear here would wipe the OUTER body's records). Entering also
             // hands this build a fresh trace, so no records leak between builds.
+            //
+            // The input markers are built inside the scope, not before it: on a re-entrant
+            // build they would otherwise be created in the CALLER's trace, and a caller
+            // tracing a loop body would record this callee's markers as body nodes. Since
+            // the Function is cached per method, that happens on the first call only, so the
+            // first pass records them and the second does not — a pass-to-pass mismatch
+            // (FW013) whose appearance depends on whether some earlier test already warmed
+            // the cache outside a loop.
             using var buildScope = GraphTrace.EnterModuleBuild();
+
+            // Create input parameters based on the method signature
+            var fnInputs = ModuleHelper.CreateInputParams(methodInfo.GetParameters());
             var fnOutputs = ModuleHelper.InvokeAndFormat(methodInfo, fnInputs, invokeTarget);
 
             // Harvest only on success. A failed build needs no cleanup — its records die

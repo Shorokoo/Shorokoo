@@ -76,6 +76,14 @@ namespace Shorokoo.Graph
         {
             void Stage(string stage) => progress?.Report(BuildPhase.Concretize, stage);
 
+            // A generic [Module] builds its graph with IGenericType placeholder DTypes and leading
+            // GENERIC_TYPE_INPUT slots; every later stage expects concrete types, and the final
+            // op check refuses the leftover placeholder. Erasing it was reachable only from test
+            // helpers, which is what left a generic module with no public route to a runnable
+            // model (Shorokoo/Shorokoo#253). Do it here, ahead of the pipeline proper.
+            if (graph.Nodes.Any(n => n.OpCode == InternalOpCodes.GENERIC_TYPE_INPUT))
+                graph = FastToConcreteDataType.Process(graph);
+
             Stage("Clone");
             var fastGraph = graph.Clone();
             FastGraphCycleDetector.AssertAcyclic(fastGraph, "After Clone");
@@ -595,7 +603,16 @@ namespace Shorokoo.Graph
         /// <returns>The inputs as a named <see cref="ModelParamList"/>.</returns>
         internal static ModelParamList FromOrderedInputs(this InternalComputationGraph graph, ImmutableArray<TensorData> inputValues)
         {
-            return new ModelParamList(graph.InputUniqueNames.Zip(inputValues)
+            // A generic [Module]'s leading GENERIC_TYPE_INPUT slots are type placeholders, not data:
+            // they take no TensorData, so they take no hint either. GetSignatureStrings already
+            // reads the graph's inputs that way; zipping them here would spend the caller's first
+            // value on a placeholder and misname every hint after it (Shorokoo/Shorokoo#253).
+            var dataInputNames = graph.Inputs
+                .Zip(graph.InputUniqueNames)
+                .Where(x => graph.FindNode(x.First.FastNodeKey) is not { OpCode: InternalOpCodes.GENERIC_TYPE_INPUT })
+                .Select(x => x.Second);
+
+            return new ModelParamList(dataInputNames.Zip(inputValues)
                 .Select(x => new TensorDataModelParam(x.First.AssertNotNull(), ModelParamType.InputParam, x.Second)));
         }
 

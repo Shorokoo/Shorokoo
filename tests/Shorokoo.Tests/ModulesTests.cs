@@ -28,7 +28,7 @@ public class ModulesCoverageTests
     /// FunctionProto body still holds ShrkCreateModule / ShrkModuleSetHyperparams / ShrkModelInvoke,
     /// and ORT fails type inference on the call site. The callee does no aliasing, so this is
     /// independent of the pass-through defects. Tracked as Shorokoo/Shorokoo#276.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#276: an initializer body's module call is not flattened before export")]
+    [Fact]
     public void TestAnInitializerCallingAModuleFlattensThatCallInItsFunctionBody()
         => Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitCallingAModule>(
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)], expected: [2.0, 4.0]));
@@ -1217,7 +1217,7 @@ public class ModulesCoverageTests
     /// operand to tell call sites apart — but a parameter whose shape comes from a per-call-site
     /// hyperparameter then silently takes the first site's shape, and the numbers are wrong with
     /// nothing raised. Tracked as Shorokoo/Shorokoo#273.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#273: an inlined module-typed function shares one parameter identity across call sites")]
+    [Fact]
     public void TestEachCallSiteOfAModuleTypedFunctionGetsItsOwnParameter()
     {
         var fn = ModuleFn((Func<Tensor<float32>, Scalar<int64>, Tensor<float32>>)SizedByHyper);
@@ -1257,18 +1257,13 @@ public class ModulesCoverageTests
         return RunFloats(g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel(), input);
     }
 
-    /// <summary>The refusal tells a reader to lower their module's graph, which a generic module's
-    /// user cannot do: its first graph input is a type placeholder that takes no TensorData, and the
-    /// passes that resolve it are internal, so concretization refuses its own output.
-    /// Tracked as Shorokoo/Shorokoo#253.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#253: a generic [Module] has no public route from ComputationGraph to a runnable model")]
+    [Fact]
     public void TestAGenericModuleCanBeConcretizedThroughPublicApi()
     {
+        var input = TensorData([2L], 1f, 2f);
         var g = SimpleGenericLayer.ComputationGraph;
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([], 0f), TensorData([2L], 1f, 2f)]));
-        Assert.Equal([1f, 2f], ComputeContext.Default
-            .Execute(arch.ToConcreteModel(), TensorData([], 0f), TensorData([2L], 1f, 2f))[0]
-            .ToTensorData().As<float32>().AccessMemory<float>().ToArray());
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
+        Assert.Equal([1f, 2f], RunFloats(arch.ToConcreteModel(), input));
     }
 
     /// <summary>A module body reachable as a delegate, for a module the source generator never saw.</summary>

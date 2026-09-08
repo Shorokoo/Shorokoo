@@ -1125,7 +1125,12 @@ namespace Shorokoo.Core.Factory
             // on the copy. The function's body has its own ONNX-name namespace,
             // so the per-graph counter inside FastUseUniqueNames restarts at 1
             // for each function — matches how ONNX FunctionProtos are scoped.
-            var fnFast = function.OriginalFastGraph.Clone();
+            // Flattened, not the primary body: an inlinable MODEL_INVOKE / FUNCTION_INVOKE inside
+            // the body is machinery the vanilla ONNX dialect cannot express, and emitting it left
+            // ShrkCreateModule / ShrkModuleSetHyperparams / ShrkModelInvoke in the FunctionProto
+            // for ORT to fail type inference on (Shorokoo/Shorokoo#276). GetFastFlattenedGraph
+            // hands back a fresh mutable copy, so there is nothing left to clone.
+            var fnFast = function.GetFastFlattenedGraph();
             // Before the pre-passes, so the inserted Identity is renamed with the rest of the body.
             FastIdentityWrapping.WrapAliasedOutputs(fnFast);
             RunPrePasses(fnFast, prepForOnnx, applyExecutionLowerings);

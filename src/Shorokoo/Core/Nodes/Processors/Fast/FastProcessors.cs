@@ -728,6 +728,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var outputRemap = new Dictionary<FastTensorKey, FastTensorKey>();
             bool anyInlined = false;
 
+            // Call-site ids for module-typed FUNCTION_INVOKEs, allocated above every id already
+            // in the graph so they cannot collide with the ones FastApplyIdentifierTemplates
+            // handed out before this pass, nor with the ones an earlier sweep handed out here.
+            int nextCallSiteId = NextFreeTopLevelModelId(graph);
+            var callSiteDedupeIds = new Dictionary<string, int>();
+
             foreach (var fastNode in graph.Nodes)
             {
                 bool isFunction = fastNode.OpCode == InternalOpCodes.FUNCTION_INVOKE;
@@ -756,6 +762,25 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     var targetFunction = fastNode.TargetFunction!;
                     subFastGraph = targetFunction.GetFastFlattenedGraph().Clone();
                     FastProcessorHelper.RekeySubgraph(subFastGraph);
+
+                    // A FUNCTION_INVOKE carries no model operand, so nothing distinguishes two
+                    // call sites of one module-typed function. Left unreparented they keep the
+                    // body's own local model id and collapse onto a single parameter identity —
+                    // and a parameter whose shape comes from a per-call-site hyperparameter then
+                    // silently takes the first site's shape (Shorokoo/Shorokoo#273). Mint an id
+                    // for the call site and reparent under it, the way the MODEL_INVOKE arm
+                    // reparents under the id its model variable already carries.
+                    if (CarriesOwnedIdentity(subFastGraph))
+                    {
+                        var callSiteId = new ModelId(nextCallSiteId++);
+                        var calleeName = targetFunction.DefaultName ?? targetFunction.FriendlyName;
+                        callSiteDedupeIds[calleeName] =
+                            callSiteDedupeIds.TryGetValue(calleeName, out var seen) ? seen + 1 : 0;
+                        var callSiteTemplate = ModelParamIdentifierTemplate.LocalModule(
+                            callSiteId, calleeName, callSiteDedupeIds[calleeName], ImmutableArray<int>.Empty);
+
+                        FastReparentToCallSite(subFastGraph, callSiteTemplate, callSiteId, null, graph);
+                    }
                 }
                 else
                 {
@@ -1088,6 +1113,36 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 subGraph.Nodes.Insert(insertIdx + offset, newNode);
                 offset++;
             }
+        }
+
+        /// <summary>
+        /// True when the body owns something whose identity is per call site — a parameter, a
+        /// sub-module instantiation, or a runtime RNG feed. A body without any of these inlines
+        /// identically at every call site, so it needs no id of its own.
+        /// </summary>
+        private static bool CarriesOwnedIdentity(InternalComputationGraph subGraph)
+            => subGraph.Nodes.Any(n =>
+                n.OpCode == InternalOpCodes.MODEL_PARAM_REF ||
+                n.OpCode == InternalOpCodes.MODULE_SET_HYPERPARAMS ||
+                n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM ||
+                n.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL ||
+                n.OpCode == InternalOpCodes.SHRK_RANDOM_BITS);
+
+        /// <summary>
+        /// One past the largest leading model-id component anywhere in the graph, so a freshly
+        /// minted call-site id shares an address space with the allocated ones without colliding.
+        /// </summary>
+        private static int NextFreeTopLevelModelId(InternalComputationGraph graph)
+        {
+            int max = -1;
+            foreach (var node in graph.Nodes)
+            {
+                var vals = node.Attributes.IsAttributeDefined(OnnxOpAttributeNames.ShrkAttrLocalModelId)
+                    ? node.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrLocalModelId)
+                    : null;
+                if (vals is { Length: > 0 }) max = System.Math.Max(max, (int)vals[0]);
+            }
+            return max + 1;
         }
 
         /// <summary>

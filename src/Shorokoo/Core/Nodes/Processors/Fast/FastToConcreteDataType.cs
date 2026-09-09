@@ -45,9 +45,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// (Shorokoo/Shorokoo#286).</para>
     ///
     /// <para>A function with no generic material anywhere below it is left alone, keeping its
-    /// identity and its flattened-body cache. So is a generic function reached only by references
-    /// that name no type arguments and cannot be resolved to a single specialization — nothing
-    /// here can say which one such a reference meant.</para>
+    /// identity and its flattened-body cache.</para>
+    ///
+    /// <para>Not every reference names a specialization: a model sequence tags its
+    /// <c>SEQUENCE_CONSTRUCT</c> / <c>SEQUENCE_EMPTY</c> with the element module's own function
+    /// and no type arguments. Such a reference builds no body of its own; it is bound to the sole
+    /// specialization that the <em>typed</em> references built, since that is the only case where
+    /// it cannot mean anything else. Where they built several it is left as it was, and a generic
+    /// module held in a sequence alongside a second use at another type argument still fails to
+    /// lower (Shorokoo/Shorokoo#296).</para>
     ///
     /// Returns a fresh <see cref="InternalComputationGraph"/>; the input is not mutated. Because
     /// Fast tensors don't carry per-tensor types, no re-inference step is required — type
@@ -84,6 +90,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         friendlyName: fn.FriendlyName,
                         stateOwnership: fn.StateOwnership)
                     {
+                        // Defensive: an RNG algorithm function only ever reaches a graph after
+                        // this pass, or on reload of one already erased, so nothing here carries
+                        // the tags today. Dropping them would silently make such a function
+                        // inlinable, which is not a thing to leave to the pass ordering.
                         RngAlgorithm = fn.RngAlgorithm,
                         RngFunctionKind = fn.RngFunctionKind,
                     };
@@ -382,8 +392,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// off the callee rather than off the node: a generic callee is keyed by the type arguments
         /// the node names, a non-generic one by <see cref="NonGenericArgsKey"/> whatever the node
         /// names. So a node that merely carries a generic function along (<c>SUBMODEL</c> naming no
-        /// type arguments) selects nothing and is left as it was, rather than binding the callee to
-        /// an unspecialized body.
+        /// type arguments) selects nothing, rather than selecting an unspecialized body. What then
+        /// happens to it is <see cref="RewireTargetFunctionInPlace"/>'s to decide.
         /// </summary>
         private static (FastNode refNode, Function fn, string argsKey)? TryGetCallSiteKey(
             FastNode node, HashSet<Function> genericFunctions)

@@ -448,6 +448,43 @@ namespace Shorokoo.Tests.Modules
             => ModelSequence.Create(GenericTargetModule.Model<float32>())[Scalar(0L)].Call(input);
     }
 
+    /// <summary>Holds the generic module in a sequence while the graph also uses it at a second
+    /// type argument, so the sequence's untyped reference has two specializations to choose
+    /// between.</summary>
+    [Module]
+    public partial class HoldsOneOfTwoSpecializationsInAModelSequence
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => ModelSequence.Create(GenericTargetModule.Model<float32>())[Scalar(0L)].Call(input)
+             + GenericTargetModule.Call<float64>(input.Cast<float64>()).Cast<float32>();
+    }
+
+    /// <summary>Reaches the generic module through a sequence grown from an empty one, whose
+    /// SEQUENCE_EMPTY carries the function with no operand to read the type argument off.</summary>
+    [Module]
+    public partial class AppendsAGenericModuleToAnEmptyModelSequence
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => ModelSequence.Empty(GenericTargetModule.Model<float32>())
+                   .Append(GenericTargetModule.Model<float32>())[Scalar(0L)].Call(input);
+    }
+
+    /// <summary>A plain non-generic module, for checking that a subtree with no generic material
+    /// below it is not rebuilt.</summary>
+    [Module]
+    public partial class PlainNonGenericNeighbour
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input) => input + Scalar(1f);
+    }
+
+    /// <summary>Puts an unrelated non-generic module alongside a generic call site.</summary>
+    [Module]
+    public partial class CallsAGenericModuleAndAPlainNeighbour
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => GenericTargetModule.Call<float32>(input) + PlainNonGenericNeighbour.Call(input);
+    }
+
     /// <summary>Calls a generic trainable-parameter initializer with an explicit type argument
     /// from a non-generic body.</summary>
     [Module]

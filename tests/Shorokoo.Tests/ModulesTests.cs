@@ -1,5 +1,6 @@
 using Shorokoo.Core.AutoDiffCheckpointing;
 using Shorokoo.Core.Nodes.Processors.Helpers;
+using Shorokoo.Core.Nodes.Processors.Fast;
 using Shorokoo.Core.Inference;
 using Shorokoo.Core.Graph;
 using Shorokoo.Core.Factory.IR;
@@ -1323,8 +1324,35 @@ public class ModulesCoverageTests
         Assert.Equal([2f, 4f], ConcretizeAndRun(WrapsWrapperOfGenericModule.ComputationGraph, input));
         Assert.Equal([10f, 20f], ConcretizeAndRun(CallsGenericModulesSeveralWays.ComputationGraph, input));
         Assert.Equal([10f, 20f], ConcretizeAndRun(WrapsCallerOfGenericModulesSeveralWays.ComputationGraph, input));
+    }
+
+    [Fact]
+    public void TestAGenericModuleConcretizesThroughEveryKindOfReferenceThatNamesIt()
+    {
+        var input = TensorData([2L], 1f, 2f);
         Assert.Equal([2f, 4f], ConcretizeAndRun(PassesAGenericCallerAsAModelParameter.ComputationGraph, input));
         Assert.Equal([2f, 4f], ConcretizeAndRun(HoldsAGenericModuleInAModelSequence.ComputationGraph, input));
+        Assert.Equal([2f, 4f], ConcretizeAndRun(AppendsAGenericModuleToAnEmptyModelSequence.ComputationGraph, input));
+    }
+
+    [Fact]
+    public void TestErasureLeavesAFunctionWithNoGenericMaterialBelowItAlone()
+    {
+        var before = CallsAGenericModuleAndAPlainNeighbour.ComputationGraph.ToInternal();
+        Function Neighbour(InternalComputationGraph g) => g.Nodes.Select(n => n.TargetFunction).NotNulls()
+            .Single(f => f.DefaultName.Contains(nameof(PlainNonGenericNeighbour)));
+
+        Assert.Same(Neighbour(before), Neighbour(FastToConcreteDataType.Process(before)));
+    }
+
+    /// <summary>A model sequence's reference names no type arguments, so with the generic module
+    /// used at two of them nothing says which specialization the sequence holds and it keeps the
+    /// unspecialized one. Tracked as Shorokoo/Shorokoo#296.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#296: a generic module in a model sequence is left unspecialized when the graph uses two type arguments")]
+    public void TestAGenericModuleInASequenceConcretizesWhenTheGraphUsesTwoTypeArguments()
+    {
+        var input = TensorData([2L], 1f, 2f);
+        Assert.Equal([4f, 8f], ConcretizeAndRun(HoldsOneOfTwoSpecializationsInAModelSequence.ComputationGraph, input));
     }
 
     /// <summary>A generic parameter initializer called with an explicit type argument from a

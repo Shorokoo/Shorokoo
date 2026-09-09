@@ -137,6 +137,23 @@ namespace Shorokoo.Core
             if (methodInfo == null)
                 throw new ArgumentNullException(nameof(methodInfo));
 
+            // Entered first, before anything this build creates. This method re-enters mid-trace
+            // whenever a body first-uses a sub-module or initializer whose Function is not yet
+            // cached, so on that path the ambient trace is the CALLER's — and if the caller is
+            // tracing a loop body, everything built here that is not shielded is recorded as one
+            // of ITS body nodes. Because the Function is cached per method that happens on the
+            // first call only, so the first pass records those nodes and later passes do not,
+            // which the pass-to-pass body comparison rejects (FW013) — and whether it happens at
+            // all depends on whether something earlier in the process already built this callee
+            // outside a loop. The scope is therefore a precondition of the whole build rather
+            // than of the part of it that happens to sit below this line.
+            //
+            // Entering also hands this build a fresh trace, so all per-trace ambient state — the
+            // looper stack, the Rng.Pin recordings, the StateUpdate registrations — belongs to
+            // this build alone and is restored on exit (a destructive clear here would wipe the
+            // OUTER body's records), and no records leak between builds.
+            using var buildScope = GraphTrace.EnterModuleBuild();
+
             // Extract generic parameter information before instantiation
             MethodInfo originalGenericMethod = methodInfo;
             Dictionary<Type, string>? genericTypeToParamName = null;
@@ -163,22 +180,6 @@ namespace Shorokoo.Core
             // Modules speak in value handles, not the internal graph node type. (Inputs are validated
             // per-parameter inside CreateInputParams.)
             ModuleHelper.RejectVariableParam(methodInfo.ReturnType);
-
-            // This method re-enters mid-trace whenever the body first-uses a sub-module or
-            // initializer whose Function is not yet cached, so all per-trace ambient state —
-            // the looper stack, the Rng.Pin recordings, and the StateUpdate registrations —
-            // lives in one ambient trace entered per build and restored on exit (a
-            // destructive clear here would wipe the OUTER body's records). Entering also
-            // hands this build a fresh trace, so no records leak between builds.
-            //
-            // The input markers are built inside the scope, not before it: on a re-entrant
-            // build they would otherwise be created in the CALLER's trace, and a caller
-            // tracing a loop body would record this callee's markers as body nodes. Since
-            // the Function is cached per method, that happens on the first call only, so the
-            // first pass records them and the second does not — a pass-to-pass mismatch
-            // (FW013) whose appearance depends on whether some earlier test already warmed
-            // the cache outside a loop.
-            using var buildScope = GraphTrace.EnterModuleBuild();
 
             // Create input parameters based on the method signature
             var fnInputs = ModuleHelper.CreateInputParams(methodInfo.GetParameters());

@@ -934,6 +934,17 @@ namespace Shorokoo
             if (looperStack.BuildingLoopNodes)
                 return (node.FullInputs, node.FullOutputs);
 
+            // A module input marker names a graph input of the function being built, and a
+            // function's inputs are created before its body runs — so no looper of its own trace
+            // can be active for one. Reaching here means an ENCLOSING trace's looper is, i.e. the
+            // build was not shielded and is about to be recorded as that caller's loop body. The
+            // symptom is remote from the cause (a pass-to-pass mismatch four passes later, on the
+            // first call only), so say it here instead.
+            Debug.Assert(!Shorokoo.Core.Factory.FastOpsetResolver.IsModelInputOpCode(node.OpCode),
+                "LoopAPI.ProcessNode: a module input marker reached an enclosing loop body — the " +
+                "function build that created it was not shielded by GraphTrace.EnterModuleBuild " +
+                "or EnterIsolated.");
+
             FullInputs retvalInputs = node.FullInputs;
             FullOutputs retvalOutputs = node.FullOutputs;
 

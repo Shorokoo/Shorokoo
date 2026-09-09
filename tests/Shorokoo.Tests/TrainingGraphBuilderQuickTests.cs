@@ -26,6 +26,12 @@ public partial class SimpleSumSquaredLoss
 [Trait("Purpose", "Coverage")]
 public class TrainingGraphBuilderQuickTests
 {
+    private static InternalComputationGraph ConcreteSimplestLayer()
+    {
+        var g = SimplestLayer.ComputationGraph;
+        return g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([4L], 1f, 2f, 3f, 4f)])).ToInternal();
+    }
+
     private static void AssertTrainingGraphStructure(InternalComputationGraph trainingGraph)
     {
         Assert.True(trainingGraph.Inputs.Count >= 3);
@@ -36,15 +42,19 @@ public class TrainingGraphBuilderQuickTests
     [Fact]
     public void PrepareForTraining_ProducesCorrectStructure()
     {
-        // PrepareForTrainingAsFast is typed on the mutable internal graph; hand it deep copies
-        // of the shared cached module graphs.
+        // PrepareForTrainingAsFast composes an already-concrete architecture, and is typed on the
+        // mutable internal graph; hand it deep copies of the shared cached module graphs.
         AssertTrainingGraphStructure(TrainingGraphBuilder.PrepareForTrainingAsFast(
-            SimplestLayer.ComputationGraph.ToInternal(),
-            SimpleSumSquaredLoss.ComputationGraph.ToInternal()));
+            ConcreteSimplestLayer(), SimpleSumSquaredLoss.ComputationGraph.ToInternal()));
 
         Func<Tensor<float32>, Tensor<float32>, Scalar<float32>> lossFunc = SimpleSumSquaredLoss.Inline;
         AssertTrainingGraphStructure(TrainingGraphBuilder.PrepareForTrainingAsFast(
-            SimplestLayer.ComputationGraph.ToInternal(), lossFunc));
+            ConcreteSimplestLayer(), lossFunc));
+
+        // A module graph that was never lowered is refused rather than half-processed.
+        Assert.Throws<ArgumentException>(() => TrainingGraphBuilder.PrepareForTrainingAsFast(
+            SimplestLayer.ComputationGraph.ToInternal(),
+            SimpleSumSquaredLoss.ComputationGraph.ToInternal()));
     }
 
     [Fact]
@@ -62,7 +72,7 @@ public class TrainingGraphBuilderQuickTests
         Func<Tensor<float32>, Tensor<float32>, Scalar<float32>> notAModule =
             (pred, targ) => ((Tensor<float32>)OnnxOp.ReduceSum(pred - targ, keepdims: false)).Scalar();
         Assert.Throws<ArgumentException>(() =>
-            TrainingGraphBuilder.PrepareForTrainingAsFast(SimplestLayer.ComputationGraph.ToInternal(), notAModule));
+            TrainingGraphBuilder.PrepareForTrainingAsFast(ConcreteSimplestLayer(), notAModule));
     }
 
     [Fact]
@@ -71,9 +81,9 @@ public class TrainingGraphBuilderQuickTests
         Assert.Throws<ArgumentNullException>(() => TrainingGraphBuilder.PrepareForTrainingAsFast(
             null!, SimpleSumSquaredLoss.ComputationGraph.ToInternal()));
         Assert.Throws<ArgumentNullException>(() => TrainingGraphBuilder.PrepareForTrainingAsFast(
-            SimplestLayer.ComputationGraph.ToInternal(), (InternalComputationGraph)null!));
+            ConcreteSimplestLayer(), (InternalComputationGraph)null!));
         Assert.Throws<ArgumentNullException>(() =>
             TrainingGraphBuilder.PrepareForTrainingAsFast<Tensor<float32>, Scalar<float32>>(
-                SimplestLayer.ComputationGraph.ToInternal(), null!));
+                ConcreteSimplestLayer(), null!));
     }
 }

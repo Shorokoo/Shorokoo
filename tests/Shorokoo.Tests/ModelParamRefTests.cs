@@ -134,23 +134,27 @@ public class ModelParamRefTests
 
     // Goes through the public entry point rather than re-listing the passes it runs, so the
     // test cannot quietly stop guarding when that list changes.
-    private static string[] TrainingParamNamesOf(ComputationGraph g)
+    private static string[] TrainingStructNamesOf(ComputationGraph g, string inputName)
     {
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([2L], 1f, 2f)]));
         var training = TrainingGraphBuilder.PrepareForTrainingAsFast(
-            g.ToInternal(), SimpleSumSquaredLoss.ComputationGraph.ToInternal());
-        var paramsInput = training.Inputs[training.InputUniqueNames.IndexOf("trainable_params")];
+            arch.ToInternal(), SimpleSumSquaredLoss.ComputationGraph.ToInternal());
+        var input = training.Inputs[training.InputUniqueNames.IndexOf(inputName)];
         var producer = training.Nodes.Single(n => n.FullOutputs.Values
-            .Any(slot => slot.Any(k => k is FastTensorKey key && key.Equals(paramsInput))));
+            .Any(slot => slot.Any(k => k is FastTensorKey key && key.Equals(input))));
         var structDef = (TensorStructDef)producer.Attributes
             .GetDTypeVal(OnnxOpAttributeNames.AttrDtype)!.TensorStructDef!;
         return [.. structDef.Fields.Select(x => x.Name)];
     }
 
+    private static string[] TrainingParamNamesOf(ComputationGraph g)
+        => TrainingStructNamesOf(g, "trainable_params");
+
     private static void SameTrainingNames(ComputationGraph noRef, ComputationGraph withRef)
         => Assert.Equal(TrainingParamNamesOf(noRef), TrainingParamNamesOf(withRef));
 
     [Fact]
-    public void TestAParamRefAddsNoParameterOnTheNonConcretizedTrainingPath()
+    public void TestAParamRefAddsNoParameterOnTheTrainingPath()
     {
         SameTrainingNames(Rank1GainNoRefModel.ComputationGraph, Rank1GainWithRefModel.ComputationGraph);
         SameTrainingNames(MixedDepthGainNoRefModel.ComputationGraph, MixedDepthGainWithRefsModel.ComputationGraph);
@@ -158,48 +162,31 @@ public class ModelParamRefTests
     }
 
     [Fact]
-    public void TestAParamRefWithNoDefinitionIsRejectedOnBothPaths()
-    {
-        var g = RefWithoutDefinitionModel.ComputationGraph;
-        Assert.Throws<InvalidOperationException>(() => ParamIdsOf(g));
-        Assert.Throws<InvalidOperationException>(() => TrainingParamNamesOf(g));
-    }
+    public void TestAParamRefWithNoDefinitionIsRejected()
+        => Assert.Throws<InvalidOperationException>(() => ParamIdsOf(RefWithoutDefinitionModel.ComputationGraph));
 
     [Fact]
-    public void TestAModelCalledTwiceIsOneTrainableParameterOnTheNonConcretizedTrainingPath()
+    public void TestAModelCalledTwiceIsOneTrainableParameterOnTheTrainingPath()
         => Assert.Equal(TrainingParamNamesOf(Rank1GainNoRefModel.ComputationGraph),
                         TrainingParamNamesOf(SharedModelCalledTwiceModel.ComputationGraph));
 
-    private static string[] TrainingStateNamesOf(ComputationGraph g)
-    {
-        var training = TrainingGraphBuilder.PrepareForTrainingAsFast(
-            g.ToInternal(), SimpleSumSquaredLoss.ComputationGraph.ToInternal());
-        var stateInput = training.Inputs[training.InputUniqueNames.IndexOf("model_state")];
-        var producer = training.Nodes.Single(n => n.FullOutputs.Values
-            .Any(slot => slot.Any(k => k is FastTensorKey key && key.Equals(stateInput))));
-        var structDef = (TensorStructDef)producer.Attributes
-            .GetDTypeVal(OnnxOpAttributeNames.AttrDtype)!.TensorStructDef!;
-        return [.. structDef.Fields.Select(x => x.Name)];
-    }
-
     [Fact]
-    public void TestAStatefulModelCalledTwiceIsOneStateParameterOnTheNonConcretizedTrainingPath()
+    public void TestAStatefulModelCalledTwiceIsOneStateParameterOnTheTrainingPath()
     {
-        Assert.Equal(TrainingStateNamesOf(StatefulGainNoRefModel.ComputationGraph),
-                     TrainingStateNamesOf(StatefulGainCalledTwiceModel.ComputationGraph));
+        Assert.Equal(TrainingStructNamesOf(StatefulGainNoRefModel.ComputationGraph, "model_state"),
+                     TrainingStructNamesOf(StatefulGainCalledTwiceModel.ComputationGraph, "model_state"));
         Assert.Equal(TrainingParamNamesOf(StatefulGainNoRefModel.ComputationGraph),
                      TrainingParamNamesOf(StatefulGainCalledTwiceModel.ComputationGraph));
     }
 
-    // A loop body's per-iteration parameters share one generalized identifier template and differ
-    // only in its loop indices, so collapsing repeat sites must key on the specific id.
+    // A loop body's per-iteration parameters are separate parameters that share one generalized
+    // identifier template, so each must keep its own struct field.
     [Fact]
-    public void TestALoopsPerIterationParamsStayDistinctOnTheConcretizedTrainingPath()
+    public void TestALoopsPerIterationParamsStayDistinctOnTheTrainingPath()
     {
-        var g = Rank0ParamsInLoopModel.ComputationGraph;
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([2L], 1f, 2f)]));
-        Assert.Equal(6, TrainingParamNamesOf(arch).Length);
-        Assert.Equal(6, TrainingParamNamesOf(arch).Distinct().Count());
+        var names = TrainingParamNamesOf(Rank0ParamsInLoopModel.ComputationGraph);
+        Assert.Equal(6, names.Length);
+        Assert.Equal(6, names.Distinct().Count());
     }
 
     [Fact]

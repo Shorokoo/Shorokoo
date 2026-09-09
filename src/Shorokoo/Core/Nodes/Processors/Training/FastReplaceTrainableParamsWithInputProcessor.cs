@@ -14,8 +14,8 @@ namespace Shorokoo.Core.Nodes.Processors.Training;
 
 /// <summary>
 /// Fast-native processor that replaces every trainable-parameter producer node
-/// (<c>MODEL_PARAM</c>, <c>MODEL_PARAM_DATA</c>, <c>MODEL_PARAM_ID_REF</c> with
-/// <c>shrk_is_trainable=true</c>) with a per-field <c>TENSOR_STRUCT_GETFIELD</c> consumer
+/// (<c>MODEL_PARAM</c>, <c>MODEL_PARAM_DATA</c> with <c>shrk_is_trainable=true</c>)
+/// with a per-field <c>TENSOR_STRUCT_GETFIELD</c> consumer
 /// of a single new <c>MODEL_TENSORSTRUCT_INPUT</c>, so the model's baked-in parameters
 /// become an external TensorStruct input suitable for training.
 ///
@@ -86,13 +86,6 @@ internal static class FastReplaceTrainableParamsWithInputProcessor
         {
             remap[paramInfos[i].OutputKey] = fieldKeys[i];
             paramNodeKeys.Add(paramInfos[i].Node.Key);
-            // A bare reference reads this same parameter, so it resolves to this one field and
-            // its node leaves with the definition's rather than becoming a field of its own.
-            foreach (var (aliasKey, aliasNode) in paramInfos[i].Aliases)
-            {
-                remap[aliasKey] = fieldKeys[i];
-                paramNodeKeys.Add(aliasNode.Key);
-            }
         }
 
         // Rewire every input slot of every remaining node, replacing keys that match

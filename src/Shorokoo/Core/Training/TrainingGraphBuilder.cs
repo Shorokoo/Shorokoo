@@ -60,13 +60,11 @@ public static class TrainingGraphBuilder
     /// state_struct?] and outputs [loss, gradient_struct, state_struct].
     ///
     /// <para>
-    /// <paramref name="modelGraph"/> may be in raw or already-concrete form. When raw, the
-    /// legacy minimal-processing path runs (no input-aware liveness filter). When the caller
-    /// has pre-routed the graph through
-    /// <see cref="Shorokoo.Graph.InternalComputationGraphExtensions.ToConcreteArchitecture"/>
-    /// — which TrainingRig.FromScratch does — those minimal passes are no-ops on the already-
-    /// concrete graph, and downstream trainable-param discovery picks up exactly the live
-    /// (post-liveness-filter) MODEL_PARAM nodes.
+    /// <paramref name="modelGraph"/> must already be a concrete architecture from
+    /// <see cref="Shorokoo.Graph.InternalComputationGraphExtensions.ToConcreteArchitecture"/> —
+    /// this is composition, not lowering, and anything else is refused (see
+    /// <see cref="RequireConcreteArchitecture"/>). Trainable-param discovery then picks up exactly
+    /// the live (post-liveness-filter) MODEL_PARAM nodes that lowering left.
     /// </para>
     /// </summary>
     public static InternalComputationGraph PrepareForTrainingAsFast(
@@ -86,16 +84,10 @@ public static class TrainingGraphBuilder
                 $"Loss graph must have exactly 1 output (loss), but has {lossGraph.Outputs.Count}.",
                 nameof(lossGraph));
 
-        // Step 1+2: Process model graph for training and replace trainable params with a
-        // TensorStruct input — both passes happen on a single InternalComputationGraph that
-        // becomes the host graph for the rest of this function. If the caller has already
-        // routed the graph through ToConcreteArchitecture (TrainingRig.FromScratch does
-        // this so it can run input-aware liveness filtering once for the whole pipeline),
-        // skip ProcessGraphForTrainingOnFast — its first pass, FastApplyIdentifierTemplates,
-        // asserts on the MODEL_PARAM nodes that the concrete-arch pipeline produces.
+        // Step 1+2: Replace the model's trainable params with a TensorStruct input, on a single
+        // InternalComputationGraph that becomes the host graph for the rest of this function.
         var fastGraph = modelGraph.Clone();
-        if (!IsAlreadyConcretized(fastGraph))
-            ProcessGraphForTrainingOnFast(fastGraph);
+        RequireConcreteArchitecture(fastGraph);
         var fastReplaceResult = Nodes.Processors.Training.FastReplaceTrainableParamsWithInputProcessor.Process(fastGraph);
 
         var trainableParamStructInputKey = fastReplaceResult.TrainableParamStructInputKey;
@@ -205,24 +197,6 @@ public static class TrainingGraphBuilder
             modelInputFieldKeys[i] = new FastTensorKey(getField.Key, 0);
         }
 
-        // A state parameter reached from more than one site — a stateful sub-model called twice —
-        // is still one field, so every one of its sites rewires to that field rather than only the
-        // one that defined it (Shorokoo/Shorokoo#284).
-        var stateSiteNodeKeyList = new List<FastNodeKey>(stateParamInfos.Length);
-        var stateSiteFieldKeyList = new List<FastTensorKey>(stateParamInfos.Length);
-        for (int i = 0; i < stateParamInfos.Length; i++)
-        {
-            stateSiteNodeKeyList.Add(stateParamInfos[i].Node.Key);
-            stateSiteFieldKeyList.Add(stateFieldKeys[i]);
-            foreach (var (_, aliasNode) in stateParamInfos[i].Aliases)
-            {
-                stateSiteNodeKeyList.Add(aliasNode.Key);
-                stateSiteFieldKeyList.Add(stateFieldKeys[i]);
-            }
-        }
-        FastNodeKey[] stateSiteNodeKeys = [.. stateSiteNodeKeyList];
-        FastTensorKey[] stateSiteFieldKeys = [.. stateSiteFieldKeyList];
-
         // Step 7 (was step 6): Rewire model-input and state-param nodes through the new
         // struct inputs. Mutates fastGraph in place; struct inputs replace the original
         // model inputs in fastGraph.Inputs.
@@ -231,8 +205,8 @@ public static class TrainingGraphBuilder
             originalModelInputNodeKeys: originalModelInputKeys.Select(k => k.FastNodeKey).ToArray(),
             modelInputFieldKeys: modelInputFieldKeys,
             modelInputStructInputKey: modelInputStructInputKey,
-            stateParamNodeKeys: stateSiteNodeKeys,
-            stateFieldKeys: stateSiteFieldKeys,
+            stateParamNodeKeys: stateParamInfos.Select(p => p.Node.Key).ToArray(),
+            stateFieldKeys: stateFieldKeys,
             stateStructInputKey: stateStructInputKey,
             trainableParamStructInputKey: trainableParamStructInputKey,
             paramFieldKeys: paramFieldKeys,
@@ -340,60 +314,31 @@ public static class TrainingGraphBuilder
     }
 
     /// <summary>
-    /// A graph is "concretized" (already through
-    /// <see cref="Shorokoo.Graph.InternalComputationGraphExtensions.ToConcreteArchitecture"/>)
-    /// iff it has no high-level forms left: no MODEL_INVOKE, FUNCTION_INVOKE,
-    /// MODEL_PARAM_REF, or MODEL_PARAM_MODEL_REF nodes. Used to decide whether
-    /// <see cref="ProcessGraphForTrainingOnFast"/> needs to run.
-    /// </summary>
-    private static bool IsAlreadyConcretized(InternalComputationGraph graph)
-    {
-        foreach (var node in graph.Nodes)
-        {
-            if (node.OpCode == InternalOpCodes.MODEL_INVOKE
-                || node.OpCode == InternalOpCodes.FUNCTION_INVOKE
-                || node.OpCode == InternalOpCodes.MODEL_PARAM_REF
-                || node.OpCode == InternalOpCodes.MODEL_PARAM_MODEL_REF
-                || node.OpCode == InternalOpCodes.MODEL_PARAM_ID_REF)
-                return false;
-        }
-        return true;
-    }
-
-    /// <summary>
-    /// Processes a raw module graph for training in place — the route taken when the caller has
-    /// <em>not</em> pre-concretized. It runs the same pipeline steps as
-    /// <see cref="Shorokoo.Graph.InternalComputationGraphExtensions.ToConcreteArchitecture"/> but
-    /// stops before ConvertModelParamIdRefToModelParam.
+    /// Refuses anything but a concrete architecture. Training needs one: the parameter count and
+    /// every parameter's shape and initial value have to be statically known, and they are known
+    /// only from the MODEL_PARAM nodes
+    /// <see cref="Shorokoo.Graph.InternalComputationGraphExtensions.ToConcreteArchitecture"/>
+    /// produces — the trainable-param struct this builder emits carries a rank per field, never a
+    /// shape, so it cannot supply them and neither can anything downstream. TrainingRig reads those
+    /// nodes for the initial values and pairs them against this builder's fields by position.
     ///
-    /// <para><b>Why this exists rather than just calling ToConcreteArchitecture.</b> That step
-    /// resolves each parameter's definition by <em>executing</em> the graph under sample inputs, so
-    /// concretizing at all requires input hints — and this entry point takes none. It does not need
-    /// them either: every trainable parameter is about to become a field of an external struct
-    /// input, so the composition below wants the parameter's name, dtype and rank, never its value
-    /// or its resolved shape. Stopping short leaves the MODEL_PARAM_ID_REF nodes in place and
-    /// <see cref="Nodes.Processors.Training.FastReplaceTrainableParamsWithInputProcessor"/> reads
-    /// those directly.
-    ///
-    /// The cost is that parameter identity is settled from each site's static identifier template
-    /// instead of a QEE-resolved ModelId, and the two must agree on which sites are one parameter
-    /// — the concretized path collapses repeat sites by ModelId, so discovery collapses them by the
-    /// id their templates name (Shorokoo/Shorokoo#263, Shorokoo/Shorokoo#284). Callers that do have
-    /// sample inputs should concretize first and get the input-aware liveness filter with it;
-    /// TrainingRig.FromScratch does, which is why this route is not on the production path.</para>
+    /// <para>The test is the canonical one: none of the module-stage ops
+    /// (<see cref="InternalOpCodes.ModuleStageOps"/>) that
+    /// <c>ToConcreteArchitecture</c> asserts absent on its own output and that
+    /// <c>SrkFileFormat.DetectStage</c> classifies a module graph by. It applies to this method's
+    /// INPUT only — the struct inputs and AUTO_GRAD node it goes on to build are themselves
+    /// module-stage ops.</para>
     /// </summary>
-    private static void ProcessGraphForTrainingOnFast(InternalComputationGraph fastGraph)
+    private static void RequireConcreteArchitecture(InternalComputationGraph graph)
     {
-        Nodes.Processors.Fast.FastApplyIdentifierTemplates.Process(fastGraph);
-        Nodes.Processors.Fast.FastInlineModulesAndFunctions.Process(fastGraph);
-        Nodes.Processors.Fast.FastProcessorHelper.RemoveUnreachableNodes(fastGraph);
-        Nodes.Processors.Fast.FastConvertToIdRefModelParams.Process(fastGraph);
-        Nodes.Processors.Fast.FastUnpackModelStruct.Process(fastGraph);
-        Nodes.Processors.Fast.FastUnpackTensorStructs.Process(fastGraph);
+        var moduleStageNode = graph.Nodes.FirstOrDefault(n => InternalOpCodes.IsModuleStageOp(n.OpCode));
+        if (moduleStageNode is null) return;
 
-        // We intentionally skip ConvertTrainableParamIdRefToTrainableParam (requires execution)
-        // and Simplify (can't handle MODEL_PARAM_ID_REF nodes).
-        // FastReplaceTrainableParamsWithInputProcessor handles MODEL_PARAM_ID_REF directly.
+        throw new ArgumentException(
+            $"Model graph is not a concrete architecture: it still contains {moduleStageNode.OpCode}. "
+            + "Lower it with ToConcreteArchitecture(inputHints, ...) first — training needs every "
+            + "parameter's shape and initial value, which only that lowering resolves.",
+            nameof(graph));
     }
 
     /// <summary>

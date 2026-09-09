@@ -666,14 +666,22 @@ public class TrainingRigCompositionCoverageTests
     [Fact]
     public void TestTrainingGraphLoweringBuilderOverloadsAndParamDiscoveryCoverage()
     {
+        var scalarMultiply = ScalarMultiplyModel.ComputationGraph;
+        InternalComputationGraph ConcreteScalarMultiply() => scalarMultiply.ToConcreteArchitecture(
+            scalarMultiply.FromOrderedInputs([TensorData([4L], [1f, 2f, 3f, 4f])])).ToInternal();
+
         var trainingGraph = TrainingGraphBuilder.PrepareForTrainingAsFast(
-            ScalarMultiplyModel.ComputationGraph.ToInternal(),
-            L2Loss.ComputationGraph.ToInternal());
+            ConcreteScalarMultiply(), L2Loss.ComputationGraph.ToInternal());
         var lowered = TrainingLoop.LowerTrainingGraph(trainingGraph);
         Assert.NotNull(lowered);
         Assert.NotEmpty(lowered.Nodes);
 
-        var modelGraph = ScalarMultiplyModel.ComputationGraph.ToInternal();
+        // A model graph that was never lowered is refused: training needs the parameter shapes and
+        // initial values only ToConcreteArchitecture resolves.
+        Assert.Throws<ArgumentException>(() => TrainingGraphBuilder.PrepareForTrainingAsFast(
+            ScalarMultiplyModel.ComputationGraph.ToInternal(), L2Loss.ComputationGraph.ToInternal()));
+
+        var modelGraph = ConcreteScalarMultiply();
         Func<Tensor<float32>, Tensor<float32>, Scalar<float32>> lossFunc = L2Loss.Inline;
         var funcTrainingGraph = TrainingGraphBuilder.PrepareForTrainingAsFast(modelGraph, lossFunc);
         Assert.True(funcTrainingGraph.Inputs.Count >= 3);

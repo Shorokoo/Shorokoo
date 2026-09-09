@@ -41,21 +41,9 @@ namespace Shorokoo.Core.Nodes.Processors.Training
         /// <summary>The Fast node producing this parameter.</summary>
         public FastNode Node { get; }
 
-        /// <summary>
-        /// The FURTHER sites that resolve to this same parameter, as the key each produces and the
-        /// node producing it: bare references to it (<c>IModel.GetTrainableParam</c>, which reads
-        /// the parameter the model already owns rather than declaring one — Shorokoo/Shorokoo#263)
-        /// and repeat definitions of it (one model handle called twice leaves one definition site
-        /// per call — Shorokoo/Shorokoo#284). Neither contributes a field of its own: its consumers
-        /// are rewired to this parameter's field and its node is removed alongside
-        /// <see cref="Node"/>.
-        /// </summary>
-        public ImmutableArray<(FastTensorKey OutputKey, FastNode Node)> Aliases { get; }
-
         internal FastDiscoveredParamInfo(
             string name, FastTensorKey outputKey, bool isTrainable,
-            DType dtype, int? rank, DataStructure structure, FastNode node,
-            ImmutableArray<(FastTensorKey OutputKey, FastNode Node)> aliases)
+            DType dtype, int? rank, DataStructure structure, FastNode node)
         {
             Name = name;
             OutputKey = outputKey;
@@ -64,7 +52,6 @@ namespace Shorokoo.Core.Nodes.Processors.Training
             Rank = rank;
             Structure = structure;
             Node = node;
-            Aliases = aliases.IsDefault ? [] : aliases;
         }
     }
 }

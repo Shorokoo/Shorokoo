@@ -1291,7 +1291,8 @@ public class ModulesCoverageTests
         var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
         var names = arch.GetConcreteModelParamInfos().ParamInfos
             .Select(i => i.ToShorokooIdString()).ToList();
-        Assert.Equal(names.Count, names.Distinct().Count());
+        Assert.Equal(2, names.Count);
+        Assert.Equal(2, names.Distinct().Count());
         Assert.Equal([2f, 4f], RunFloats(arch.ToConcreteModel(), input));
     }
 
@@ -1350,6 +1351,57 @@ public class ModulesCoverageTests
 
     private static Tensor<float32> SizedByHyper(Tensor<float32> t, [Hyper] Scalar<int64> n)
         => InitSimple.Init([n]);
+
+    [Fact]
+    public void TestAModuleNameCarryingATemplateSeparatorStillGetsOneNamePerCallSite()
+    {
+        // The name is registered dotted first, so both routes below share it; templates store part
+        // names escaped, so a raw-name scan would find nothing and hand both sites index 0.
+        var viaModel = ModuleFactory
+            .FromFunc<Tensor<float32>, Tensor<float32>>(DottedNameBody, "Dotted.Layer").SetHyperparams();
+        var fn = ModuleFn((Func<Tensor<float32>, Tensor<float32>>)DottedNameBody);
+        var arch = ConcretizeInvokes(x => [(Tensor<float32>)fn.Call(x)[0] + viaModel.Call(x)]);
+        var names = arch.GetConcreteModelParamInfos().ParamInfos.Select(i => i.ToShorokooIdString()).ToList();
+        Assert.Equal(2, names.Count);
+        Assert.Equal(2, names.Distinct().Count());
+    }
+
+    [Fact]
+    public void TestTwoCallSitesOfADrawingBodyGetSeparateRngStreams()
+    {
+        var fn = ModuleFn((Func<Tensor<float32>, Tensor<float32>>)DrawsOnce);
+        var arch = ConcretizeInvokes(x => [(Tensor<float32>)fn.Call(x)[0] - (Tensor<float32>)fn.Call(x)[0]]);
+        var zero = TensorData([2L], 0f, 0f);
+        Assert.All(
+            RunFloats(arch.ToConcreteModel(RngConfig.Default), zero),
+            v => Assert.NotEqual(0f, v));
+    }
+
+    /// <summary>A draw inside a module invoked from a loop re-derives one stream key, so every
+    /// iteration returns the same sample. The iteration scope comes from the model's creation site
+    /// rather than the invoke site, and a module-typed function has no creation site at all.
+    /// Tracked as Shorokoo/Shorokoo#289.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#289: a module invoked in a loop reuses one RNG sample for every iteration")]
+    public void TestAModuleInvokedInALoopDrawsAFreshSamplePerIteration()
+    {
+        var zero = TensorData([2L], 0f, 0f);
+        var fn = ModuleFn((Func<Tensor<float32>, Tensor<float32>>)DrawsOnce);
+        var arch = ConcretizeInvokes(x =>
+        {
+            var acc = x;
+            foreach (var _ in LoopAPI.Iterate(Scalar(3L))) acc = (Tensor<float32>)fn.Call(acc)[0];
+            return [acc];
+        }, zero);
+        var three = RunFloats(arch.ToConcreteModel(RngConfig.Default), zero);
+
+        var once = ConcretizeInvokes(x => [(Tensor<float32>)fn.Call(x)[0]], zero);
+        var one = RunFloats(once.ToConcreteModel(RngConfig.Default), zero);
+        Assert.All(three.Zip(one, (t, o) => Math.Abs(t - 3 * o)), d => Assert.True(d > 1e-5f));
+    }
+
+    private static Tensor<float32> DottedNameBody(Tensor<float32> t) => t * InitSimple.Init([Scalar(2L)]);
+
+    private static Tensor<float32> DrawsOnce(Tensor<float32> t) => t + RandomUniform([Scalar(2L)], 0f, 1f);
 
     private static Tensor<float32> ScaledByHyper(Tensor<float32> t, [Hyper] Scalar<float32> h) => t * h;
 

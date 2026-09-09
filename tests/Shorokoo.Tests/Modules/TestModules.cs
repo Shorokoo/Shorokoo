@@ -1264,26 +1264,22 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
-    /// <summary>An initializer whose body calls a module (Shorokoo/Shorokoo#276).</summary>
+    /// <summary>Machinery-free callee for the initializer-calls-a-module fixtures below.</summary>
     [Module]
     public partial class DoublerSub
     {
         public static Tensor<float32> Inline(Tensor<float32> v) => v * Scalar(2f);
     }
 
-    [Module]
-    public partial class ParamOwningSub
-    {
-        public static Tensor<float32> Inline(Tensor<float32> v) => v * InitSimple.Init(v.ShapeTensor());
-    }
-
+    /// <summary>An initializer whose body calls a module that owns a trainable parameter.</summary>
     [TrainableParamInitializer]
     public static partial class InitCallingAParamOwningModule
     {
         public static Tensor<float32> Inline(Vector<int64> shape)
-            => ParamOwningSub.Call(Globals.TensorFill(shape, 1.0f));
+            => SimplestLayer.Call(Globals.TensorFill(shape, 1.0f));
     }
 
+    /// <summary>Drives InitCallingAParamOwningModule; pins Shorokoo/Shorokoo#287.</summary>
     [Module]
     public partial class UsesInitCallingAParamOwningModule
     {
@@ -1291,6 +1287,7 @@ namespace Shorokoo.Tests.Modules
             => input * InitCallingAParamOwningModule.Init(Vector(2L));
     }
 
+    /// <summary>An initializer whose body calls a module from inside a loop — the export shape of Shorokoo/Shorokoo#287, distinct from the first-use-in-a-loop fixtures above.</summary>
     [TrainableParamInitializer]
     public static partial class InitCallingAModuleInALoop
     {
@@ -1302,6 +1299,7 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>Drives InitCallingAModuleInALoop; pins Shorokoo/Shorokoo#287.</summary>
     [Module]
     public partial class UsesInitCallingAModuleInALoop
     {
@@ -1309,12 +1307,14 @@ namespace Shorokoo.Tests.Modules
             => input * InitCallingAModuleInALoop.Init(Vector(2L));
     }
 
+    /// <summary>Callee with a [Hyper], so inlining it into a body leaves a MODEL_HYPERPARAM read behind.</summary>
     [Module]
     public partial class HyperDoublerSub
     {
         public static Tensor<float32> Inline(Tensor<float32> v, [Hyper] Scalar<float32> k) => v * k;
     }
 
+    /// <summary>An initializer whose body calls a hyperparameter-bearing module.</summary>
     [TrainableParamInitializer]
     public static partial class InitCallingHyperModule
     {
@@ -1322,6 +1322,7 @@ namespace Shorokoo.Tests.Modules
             => HyperDoublerSub.Call(Scalar(2f), Globals.TensorFill(shape, 1.0f));
     }
 
+    /// <summary>Drives InitCallingHyperModule through a module, for the flattened-export path.</summary>
     [Module]
     public partial class UsesInitCallingHyperModule
     {

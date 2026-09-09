@@ -106,16 +106,6 @@ fails later at session creation with an opaque `Node input '…' is not a graph 
 or output of a previous node`. Call the generic module from the module you concretize, rather
 than from one it calls.
 
-### Random draws inside a loop body
-
-`OnnxOp.RandomNormal` / `OnnxOp.RandomUniform` called inside a `LoopAPI.Iterate` body
-are emitted **outside** the loop, so every iteration reads the same draw rather than a
-fresh one ([#262](https://github.com/Shorokoo/Shorokoo/issues/262)). The result is
-wrong rather than rejected, and every engine agrees on it. Use the keyed feeds
-`RandomNormal(shape)` / `RandomUniform(shape)` instead — they take `shape` as a graph input
-and pick up the loop's iteration index, so each iteration draws its own — or draw outside the
-loop and index into the result.
-
 ### Carrying a value from the previous iteration
 
 A local that holds what another local held **one iteration ago** is not recognised as a loop

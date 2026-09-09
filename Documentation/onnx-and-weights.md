@@ -146,11 +146,13 @@ file that only fails later when a third-party runtime rejects the custom ops.
 Module-stage graphs are persisted with the `.srk`/`.zsrk` format below, which
 uses Shorokoo's internal dialect and is re-imported by Shorokoo only.
 
-The guarantee reaches inside function bodies too: a body that calls a module is
-written out lowered rather than carrying the call. Two shapes are not lowered yet
-— a callee that owns a trainable parameter, and a body that wraps its call in a
-loop — and both still fail at session creation
-([#287](https://github.com/Shorokoo/Shorokoo/issues/287)).
+Inside a function body the guarantee is not yet complete. A body that calls a
+module is written out lowered rather than carrying the call, which covers the
+common shapes — but a callee owning a trainable parameter still leaves
+`#ModelParamRef#` in the emitted body, so that one file *does* name an op no
+stock runtime has, and the export does not catch it. A body wrapping its call in
+a loop stays vanilla but is rejected for missing type information. Both are
+[#287](https://github.com/Shorokoo/Shorokoo/issues/287).
 The `.srk` format makes the opposite trade and keeps each body as authored, so a
 module reloaded from it still shows the sub-module it calls rather than a copy of
 that callee inlined into every caller.

@@ -1541,6 +1541,23 @@ public class ModulesCoverageTests
                      LoopSlotOf((Func<Tensor<float32>, Tensor<float32>>)DrawsTwice));
     }
 
+    // Pins Shorokoo/Shorokoo#303: reached out of a ModelSequence, two models that each draw share
+    // one feed stream whose path names no model at all, so neither can be pinned apart.
+    [Fact(Skip = "Shorokoo/Shorokoo#303: a model out of a ModelSequence loses its identity in its RNG feeds")]
+    public void TestAModelReachedOutOfASequenceKeepsItsOwnRngStream()
+    {
+        string[] FeedPathsOf(ComputationGraph g)
+        {
+            var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([2L], 1f, 2f)]));
+            return [.. arch.GetRngStreamReport().Streams
+                .Where(s => s.Kind == RngStreamKind.UniformFeed)
+                .Select(s => string.Join(",", s.ModelIdPath)).Order()];
+        }
+
+        Assert.Equal(FeedPathsOf(DrawTwoDirect.ComputationGraph),
+                     FeedPathsOf(DrawTwoFromSequence.ComputationGraph));
+    }
+
     private static Tensor<float32> DrawsTwice(Tensor<float32> t)
         => t + RandomUniform([Scalar(2L)], 0f, 1f) + RandomUniform([Scalar(2L)], 0f, 1f);
 

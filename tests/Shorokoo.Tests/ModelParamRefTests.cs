@@ -173,9 +173,17 @@ public class ModelParamRefTests
         => Assert.Equal(TrainingParamNamesOf(Rank1GainNoRefModel.ComputationGraph),
                         TrainingParamNamesOf(SharedModelCalledTwiceModel.ComputationGraph));
 
-    // Pins Shorokoo/Shorokoo#264: a sub-model handed over as a [Hyper] Model<> contributes no
-    // trainable parameters at all, so its multiply is dropped and the forward is wrong.
-    [Fact(Skip = "Shorokoo/Shorokoo#264: a [Hyper] Model<> loses every trainable parameter it owns")]
+    [Fact]
     public void TestAModelPassedAsAHyperparameterKeepsItsTrainableParams()
         => SameIds(Rank1GainNoRefModel.ComputationGraph, HyperModelGainModel.ComputationGraph);
+
+    [Fact]
+    public void TestAModelPassedAsAHyperparameterSurvivesItsHostComingOutOfASequence()
+        => SameIds(Rank1GainNoRefModel.ComputationGraph,
+                   HyperModelGainFromSequenceModel.ComputationGraph);
+
+    [Fact]
+    public void TestAModelPassedAsAHyperparameterSurvivesItsHostComingOutOfADynamicallyIndexedSequence()
+        => SameIds(GainFromDynamicSequenceModel.ComputationGraph,
+                   HyperModelGainFromDynamicSequenceModel.ComputationGraph);
 }

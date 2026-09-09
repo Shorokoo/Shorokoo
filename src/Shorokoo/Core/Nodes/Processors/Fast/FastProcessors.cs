@@ -817,22 +817,43 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     // Find the direct MODULE_SET_HYPERPARAMS node producing the model
                     FastNode? directModelCreation = FindDirectModuleCreation(modelKey, nodeByKey);
 
-                    // Get the module function from the tensor info
-                    var moduleFn = tensorInfos[modelKey].ModuleFn!;
+                    // Get the module function from the tensor info. Every model variable names
+                    // the module it holds, or at least the signature of one; a null here is a
+                    // graph the Node constructor's own assert refuses, so say which producer
+                    // built the operand rather than dereferencing null (Shorokoo/Shorokoo#300).
+                    var moduleFn = tensorInfos[modelKey].ModuleFn
+                        ?? throw new InvalidOperationException(
+                            "FastInlineModulesAndFunctions: the model operand of a MODEL_INVOKE names " +
+                            "no module, so there is no body to inline. It is produced by " +
+                            $"{(nodeByKey.TryGetValue(modelKey.FastNodeKey, out var operandProducer) ? operandProducer.OpCode : "no node in this graph")} " +
+                            $"(Key={modelKey.FastNodeKey}).");
 
-                    // Skip inlining for non-hyper model-type parameters that only have a type
-                    // signature. These MODEL_INVOKE nodes will be resolved later when the
-                    // concrete model is substituted during the caller's inlining pass.
+                    // A model variable that carries only a type signature names no body. What to
+                    // splice is the module the model actually bound to it was built from, so look
+                    // for that binding: through the MODEL_HYPERPARAM that carries a
+                    // [Hyper] Model<>, and through the sequence ops when the model was taken out
+                    // of a ModelSequence. Splicing the signature's own marker graph instead is
+                    // what dropped every parameter the passed model owned
+                    // (Shorokoo/Shorokoo#264, #294, #300).
                     if (directModelCreation is null && moduleFn.FunctionType == FunctionType.ModuleSignature)
                     {
-                        var producingNode = nodeByKey[modelKey.FastNodeKey];
-                        bool isHyperModelParam = IsModelInputNode(producingNode) &&
-                            producingNode.Attributes.GetEnumVal<InputType>(OnnxOpAttributeNames.ShrkAttrInputType) == InputType.Hyperparam;
-                        if (!isHyperModelParam)
+                        var bound = FindBoundModuleCreations(modelKey, nodeByKey, tensorInfos);
+                        if (bound.Function is null)
                         {
+                            // Nothing is bound to it here: a signature-only model variable whose
+                            // binding this graph does not contain — a module being flattened on
+                            // its own, or a non-hyper Model<> formal. Leave the invoke standing;
+                            // the caller's pass resolves it once the concrete model is
+                            // substituted.
                             newNodes.Add(fastNode);
                             continue;
                         }
+                        moduleFn = bound.Function;
+                        // Null when the binding is dynamic — one of several models, picked at
+                        // run time. The body is the same either way; only the identity differs,
+                        // and FastReparentToModelVariable below reads that off the model variable
+                        // rather than off a creation site.
+                        directModelCreation = bound.Creation;
                     }
 
                     subFastGraph = moduleFn.GetFastFlattenedGraph();
@@ -874,6 +895,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         var hyperparamNode = FastNodeCreationHelpers.CreateFastNode(
                             hyperparamNodeKey, InternalOpCodes.MODEL_HYPERPARAM,
                             attrVals, new FastTensorKey?[] { modelKey });
+                        // A model-typed hyperparameter reads out as a model variable, and every
+                        // model variable must name the module it can hold — the declared
+                        // signature here, since the concrete model is bound at the call site.
+                        // Without it the read is a Model with no ModuleFn, which no consumer of
+                        // it can do anything with.
+                        hyperparamNode.TargetFunction = hyperparam.ModuleFn;
 
                         newNodes.Add(hyperparamNode);
                         nodeByKey[hyperparamNodeKey] = hyperparamNode;
@@ -1031,13 +1058,103 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             return null;
         }
 
-        private static bool IsModelInputNode(FastNode node)
+        /// <summary>
+        /// What a model variable that carries only a type signature is actually bound to:
+        /// <c>Function</c> is the module every model it can hold was built from (null when the
+        /// binding is not in this graph, or when the candidates disagree), and <c>Creation</c> is
+        /// the one <c>MODULE_SET_HYPERPARAMS</c> that built it, or null when the choice is made at
+        /// run time and there is more than one.
+        /// </summary>
+        private readonly record struct BoundModule(Function? Function, FastNode? Creation);
+
+        /// <summary>
+        /// Follows a model variable back to the <c>MODULE_SET_HYPERPARAMS</c> nodes that could have
+        /// produced it: through <c>IDENTITY</c>, through the <c>MODEL_HYPERPARAM</c> that reads a
+        /// model-typed hyperparameter off its host, and through
+        /// <c>SEQUENCE_AT(SEQUENCE_CONSTRUCT, ...)</c>. A position the walk cannot fold to one
+        /// element yields every element instead, which still names the body to splice.
+        /// </summary>
+        private static BoundModule FindBoundModuleCreations(
+            FastTensorKey modelKey,
+            Dictionary<FastNodeKey, FastNode> nodeByKey,
+            Dictionary<FastTensorKey, FastTensorInfo> tensorInfos)
         {
-            return node.OpCode == InternalOpCodes.MODEL_TENSOR_INPUT ||
-                   node.OpCode == InternalOpCodes.MODEL_OPTIONAL_INPUT ||
-                   node.OpCode == InternalOpCodes.MODEL_SEQUENCE_INPUT ||
-                   node.OpCode == InternalOpCodes.MODEL_TENSORSTRUCT_INPUT ||
-                   node.OpCode == InternalOpCodes.GENERIC_TYPE_INPUT;
+            var creations = new List<FastNode>();
+            bool complete = Collect(modelKey, nodeByKey, creations, new HashSet<FastTensorKey>());
+            if (!complete || creations.Count == 0) return new BoundModule(null, null);
+
+            Function? shared = null;
+            foreach (var creation in creations)
+            {
+                var fn = tensorInfos.TryGetValue(creation.Outputs[0]!.Value, out var info) ? info.ModuleFn : null;
+                if (fn is null) return new BoundModule(null, null);
+                if (shared is null) shared = fn;
+                else if (!ReferenceEquals(shared, fn)) return new BoundModule(null, null);
+            }
+
+            return new BoundModule(shared, creations.Count == 1 ? creations[0] : null);
+        }
+
+        /// <summary>
+        /// Appends every creation <paramref name="key"/> can resolve to. Returns false as soon as
+        /// one branch of the walk dead-ends, because a body chosen from an incomplete set of
+        /// candidates is a guess. <paramref name="visited"/> belongs to
+        /// <paramref name="creations"/> and travels only with it — a key already collected into
+        /// one list has still not been collected into another.
+        /// </summary>
+        private static bool Collect(
+            FastTensorKey key,
+            Dictionary<FastNodeKey, FastNode> nodeByKey,
+            List<FastNode> creations,
+            HashSet<FastTensorKey> visited)
+        {
+            if (!visited.Add(key)) return true;
+            if (!nodeByKey.TryGetValue(key.FastNodeKey, out var node)) return false;
+
+            switch (node.OpCode)
+            {
+                case InternalOpCodes.MODULE_SET_HYPERPARAMS:
+                    creations.Add(node);
+                    return true;
+
+                case OpCodes.IDENTITY:
+                    return node.Inputs[0] is FastTensorKey aliased
+                        && Collect(aliased, nodeByKey, creations, visited);
+
+                case InternalOpCodes.MODEL_HYPERPARAM:
+                {
+                    // The host's own creations carry the models bound to their hyperparameters;
+                    // MODULE_SET_HYPERPARAMS inputs are [inputModule, iterationIndices, ...hps].
+                    if (node.Inputs[0] is not FastTensorKey hostKey) return false;
+                    var index = (int)node.Attributes.GetLongVal(
+                        OnnxOpAttributeNames.ShrkAttrHyperparamIndex)!.Value;
+                    var hosts = new List<FastNode>();
+                    if (!Collect(hostKey, nodeByKey, hosts, new HashSet<FastTensorKey>())) return false;
+                    foreach (var host in hosts)
+                    {
+                        if (host.Inputs.Count <= 2 + index) return false;
+                        if (host.Inputs[2 + index] is not FastTensorKey bound) return false;
+                        if (!Collect(bound, nodeByKey, creations, visited)) return false;
+                    }
+                    return hosts.Count > 0;
+                }
+
+                case OpCodes.SEQUENCE_AT:
+                {
+                    if (node.Inputs[0] is not FastTensorKey seqKey) return false;
+                    if (!nodeByKey.TryGetValue(seqKey.FastNodeKey, out var seqNode)) return false;
+                    if (seqNode.OpCode != OpCodes.SEQUENCE_CONSTRUCT) return false;
+                    foreach (var element in seqNode.Inputs)
+                    {
+                        if (element is not FastTensorKey elementKey) return false;
+                        if (!Collect(elementKey, nodeByKey, creations, visited)) return false;
+                    }
+                    return seqNode.Inputs.Count > 0;
+                }
+
+                default:
+                    return false;
+            }
         }
 
         /// <summary>
@@ -1847,6 +1964,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 {
                     var outputKey = fastNode.Outputs[0]!.Value;
                     ctx.Remap[outputKey] = fieldKey.Value;
+                    // A model-typed hyperparameter reads out as a Model, not a tensor, so the
+                    // read has to carry the field's unpacked bundle forward the way an IDENTITY
+                    // does — GET_MODEL_ID on it has no tensor to remap to.
+                    if (ctx.UnpackedStructs.TryGetValue(fieldKey.Value, out var nestedFields))
+                        ctx.UnpackedStructs[outputKey] = nestedFields;
+                    else if (ctx.UnpackedStructSequences.TryGetValue(fieldKey.Value, out var nestedSeqs))
+                        ctx.UnpackedStructSequences[outputKey] = nestedSeqs;
                     ctx.NodesToRemove.Add(fastNode.Key);
                 }
             }
@@ -2917,11 +3041,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // Note the cross product below pairs every relative template with every base module,
             // so it mints keys for model ids that own no such parameter. That is harmless only
             // because such a key is either unreachable or re-written by the definition that does
-            // own the id. RelativeTemplates is empty on every graph today (its one remaining
-            // producer, the [Hyper] Model<> reparent path, is unreachable while
-            // Shorokoo/Shorokoo#264 stands); when #264 is fixed, definitions start flowing in
-            // here and a spurious key can again be a strict PREFIX of a real one, which
-            // IdTemplateInfos.ToGeneralModelId resolves to first. Re-check this then.
+            // own the id. The way it would stop being harmless is a spurious key that is a strict
+            // PREFIX of a real one, since IdTemplateInfos.ToGeneralModelId walks up from the
+            // shortest prefix and takes the first key it finds. Every graph the coverage suite
+            // lowers was checked for that pair and none has one — including the graphs that do
+            // populate RelativeTemplates, which is every lowering that reparents a body to a model
+            // variable rather than to a creation site: a model taken out of a ModelSequence, and a
+            // model arriving as a [Hyper] Model<> whose binding is picked at run time.
             var composedTemplates = new Dictionary<ModelId, ModelParamIdentifierTemplate>();
             foreach (var kvp in identifierTemplatesInfo.FullTemplates)
                 composedTemplates[kvp.Key] = kvp.Value;

@@ -536,6 +536,84 @@ public partial class HyperModelGainModel
         => HyperModelHost.Model(Rank1GainSubModel.Model()).Call(input);
 }
 
+/// <summary><see cref="Rank1GainSubModel"/> reached through a <c>[Hyper] Model&lt;&gt;</c> of a host
+/// taken out of a <c>ModelSequence</c> at a constant position.</summary>
+[Module]
+public partial class HyperModelGainFromSequenceModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var seq = ModelSequence.Create(HyperModelHost.Model(Rank1GainSubModel.Model()));
+        return seq[Scalar(0L)].Call(input);
+    }
+}
+
+/// <summary>Two <see cref="Rank1GainSubModel"/>s reached out of a <c>ModelSequence</c> indexed by
+/// the loop's iteration index — the baseline for <see cref="HyperModelGainFromDynamicSequenceModel"/>,
+/// with no host indirection.</summary>
+[Module]
+public partial class GainFromDynamicSequenceModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var seq = ModelSequence.Create(Rank1GainSubModel.Model(), Rank1GainSubModel.Model());
+        var x = input;
+        foreach (var ctx in LoopAPI.Iterate(Scalar(2L)))
+            x = seq[ctx.IterationIndex].Call(x);
+        return x;
+    }
+}
+
+/// <summary><see cref="GainFromDynamicSequenceModel"/> with each element wrapped in a
+/// <see cref="HyperModelHost"/>, so the sub-model arrives through a <c>[Hyper] Model&lt;&gt;</c> of
+/// a host the loop index picks out of the sequence.</summary>
+[Module]
+public partial class HyperModelGainFromDynamicSequenceModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var seq = ModelSequence.Create(HyperModelHost.Model(Rank1GainSubModel.Model()),
+                                       HyperModelHost.Model(Rank1GainSubModel.Model()));
+        var x = input;
+        foreach (var ctx in LoopAPI.Iterate(Scalar(2L)))
+            x = seq[ctx.IterationIndex].Call(x);
+        return x;
+    }
+}
+
+/// <summary>Draws one uniform sample of its own, so every model built from it owns an RNG
+/// feed.</summary>
+[Module]
+public partial class DrawingSub
+{
+    public static Tensor<float32> Inline(Tensor<float32> t) => t + Globals.RandomUniform(Vector(2L));
+}
+
+/// <summary>Two <see cref="DrawingSub"/> models called one after the other — one RNG stream
+/// each.</summary>
+[Module]
+public partial class DrawTwoDirect
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var a = DrawingSub.Model();
+        var b = DrawingSub.Model();
+        return b.Call(a.Call(t));
+    }
+}
+
+/// <summary><see cref="DrawTwoDirect"/> with the two models reached out of a
+/// <c>ModelSequence</c>.</summary>
+[Module]
+public partial class DrawTwoFromSequence
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var seq = ModelSequence.Create(DrawingSub.Model(), DrawingSub.Model());
+        return seq[Scalar(1L)].Call(seq[Scalar(0L)].Call(t));
+    }
+}
+
 /// <summary>
 /// An initializer that states its shape nowhere the pipeline can read it: it takes no input, so
 /// there is no shape vector, and returns <c>Tensor</c> rather than <c>Scalar</c>, so the declared

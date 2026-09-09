@@ -283,6 +283,7 @@ namespace Shorokoo.Core.Nodes
             var targetFnIsModuleFn = this.OpCode == OpCodes.SEQUENCE_CONSTRUCT || this.OpCode == OpCodes.SEQUENCE_EMPTY ||
                                      this.OpCode == InternalOpCodes.CREATE_MODULE ||
                                      this.OpCode == InternalOpCodes.MODEL_TENSOR_INPUT ||
+                                     this.OpCode == InternalOpCodes.MODEL_HYPERPARAM ||
                                      this.OpCode == InternalOpCodes.SUBMODEL;
 
             var moduleFnOverride = targetFnIsModuleFn ? targetFunction : null;

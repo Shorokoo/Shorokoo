@@ -181,10 +181,12 @@ identity does not already account for — a model created inside a loop already 
 loop's slot, and takes no second one. The `-2` marks a call site's loop scope: it is neither a
 slot (those count from 1, with 0 reserved for `RngSeed`) nor the `-1` an iteration fills, so it
 cannot collide with anything the callee owns, and being a constant it does not move when the
-callee gains or loses a consumer. (The one
-route this does not reach is a model arriving as a `[Hyper]` model parameter, which is
-substituted rather than reparented — that route has its own open defect,
-[#264](https://github.com/Shorokoo/Shorokoo/issues/264).)
+callee gains or loses a consumer. A model handed over as a `[Hyper]` model parameter takes the
+same route, since the model bound to the parameter is what gets reparented. (The one route this
+does not reach is a model whose identity is read off a model *variable* rather than a creation
+site — one taken out of a `ModelSequence`, or a `[Hyper]` model parameter whose binding is
+picked at run time — which has its own open defect,
+[#303](https://github.com/Shorokoo/Shorokoo/issues/303).)
 
 Note what the slot separates and what it does not. It separates the **iterations** of one
 call site. Two call sites reaching one and the same model *object* still share its id, and

@@ -77,12 +77,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             var fieldSeqKeys = new List<FastTensorKey>(numFields);
             for (int fieldIdx = 0; fieldIdx < numFields; fieldIdx++)
-            {
-                var elements = elementFields.Select(e => e[fieldIdx]).ToList();
-                var seqKey = FastNodeKey.New();
-                ctx.RecordNewNode(FastNodeConstructionUtils.CreateSequenceConstruct(seqKey, elements));
-                fieldSeqKeys.Add(new FastTensorKey(seqKey, 0));
-            }
+                fieldSeqKeys.Add(BuildParallelSequence(
+                    elementFields.Select(e => e[fieldIdx]).ToList(), ctx));
 
             ctx.UnpackedStructSequences[outputKey] = fieldSeqKeys;
             ctx.NodesToRemove.Add(fastNode.Key);
@@ -106,11 +102,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var fieldSeqKeys = ctx.UnpackedStructSequences[resolved];
             var fieldKeys = new List<FastTensorKey?>(fieldSeqKeys.Count);
             foreach (var fieldSeqKey in fieldSeqKeys)
-            {
-                var atKey = FastNodeKey.New();
-                ctx.RecordNewNode(FastNodeConstructionUtils.CreateSequenceAt(atKey, fieldSeqKey, positionKey));
-                fieldKeys.Add(new FastTensorKey(atKey, 0));
-            }
+                fieldKeys.Add(TakeFieldAt(fieldSeqKey, positionKey, ctx));
 
             ctx.UnpackedStructs[outputKey] = fieldKeys;
             ctx.NodesToRemove.Add(fastNode.Key);
@@ -132,11 +124,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var fieldSeqKeys = ctx.UnpackedStructSequences[resolved];
             var newFieldSeqKeys = new List<FastTensorKey>(fieldSeqKeys.Count);
             foreach (var fieldSeqKey in fieldSeqKeys)
-            {
-                var eraseKey = FastNodeKey.New();
-                ctx.RecordNewNode(FastNodeConstructionUtils.CreateSequenceErase(eraseKey, fieldSeqKey, positionKey));
-                newFieldSeqKeys.Add(new FastTensorKey(eraseKey, 0));
-            }
+                newFieldSeqKeys.Add(EraseFieldAt(fieldSeqKey, positionKey, ctx));
 
             ctx.UnpackedStructSequences[outputKey] = newFieldSeqKeys;
             ctx.NodesToRemove.Add(fastNode.Key);
@@ -168,17 +156,116 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             var newFieldSeqKeys = new List<FastTensorKey>(fieldSeqKeys.Count);
             for (int i = 0; i < fieldSeqKeys.Count; i++)
-            {
-                var fieldSeqKey = fieldSeqKeys[i];
-                var elementField = elementFields[i]!.Value;
-                var insertKey = FastNodeKey.New();
-                ctx.RecordNewNode(FastNodeConstructionUtils.CreateSequenceInsert(
-                    insertKey, fieldSeqKey, elementField, positionKey));
-                newFieldSeqKeys.Add(new FastTensorKey(insertKey, 0));
-            }
+                newFieldSeqKeys.Add(InsertFieldInto(
+                    fieldSeqKeys[i], elementFields[i]!.Value, positionKey, ctx));
 
             ctx.UnpackedStructSequences[outputKey] = newFieldSeqKeys;
             ctx.NodesToRemove.Add(fastNode.Key);
+        }
+
+        /// <summary>
+        /// The parallel sequence for one struct field, over the elements' values for it. A field
+        /// that is itself a Model — a <c>[Hyper] Model&lt;&gt;</c> — has no tensor to put in a
+        /// sequence, so its own fields get the sequences instead, and the key returned names that
+        /// bundle in <see cref="FastModelStructContext.UnpackedStructSequences"/>. That is what
+        /// lets a sequence of such hosts be indexed by a value known only at run time: every
+        /// tensor the elements own, however deep, ends up in a sequence the index reaches
+        /// (Shorokoo/Shorokoo#300).
+        /// </summary>
+        private static FastTensorKey BuildParallelSequence(
+            List<FastTensorKey?> elements, FastModelStructContext ctx)
+        {
+            var nested = elements
+                .Select(e => e is null ? null : ctx.TryGetStruct(e.Value)).ToList();
+            if (nested.Any(n => n is not null))
+            {
+                Debug.Assert(nested.All(n => n is not null),
+                    "A struct field is a Model in some sequence elements and a tensor in others.");
+                int subFieldCount = nested[0]!.Count;
+                Debug.Assert(nested.All(n => n!.Count == subFieldCount),
+                    "SEQUENCE_CONSTRUCT nested-element field counts must match.");
+
+                var subSeqKeys = new List<FastTensorKey>(subFieldCount);
+                for (int i = 0; i < subFieldCount; i++)
+                    subSeqKeys.Add(BuildParallelSequence(
+                        nested.Select(n => n![i]).ToList(), ctx));
+
+                var bundleKey = ctx.NewNestedModelField();
+                ctx.UnpackedStructSequences[bundleKey] = subSeqKeys;
+                return bundleKey;
+            }
+
+            var seqKey = FastNodeKey.New();
+            ctx.RecordNewNode(FastNodeConstructionUtils.CreateSequenceConstruct(seqKey, elements));
+            return new FastTensorKey(seqKey, 0);
+        }
+
+        /// <summary>Reads one field's value at <paramref name="positionKey"/>, recursing into a
+        /// nested Model field's own parallel sequences.</summary>
+        private static FastTensorKey TakeFieldAt(
+            FastTensorKey fieldSeqKey, FastTensorKey positionKey, FastModelStructContext ctx)
+        {
+            if (ctx.NestedModelFields.Contains(fieldSeqKey))
+            {
+                var subKeys = ctx.UnpackedStructSequences[fieldSeqKey]
+                    .Select(k => (FastTensorKey?)TakeFieldAt(k, positionKey, ctx)).ToList();
+                var structKey = ctx.NewNestedModelField();
+                ctx.UnpackedStructs[structKey] = subKeys;
+                return structKey;
+            }
+
+            var atKey = FastNodeKey.New();
+            ctx.RecordNewNode(FastNodeConstructionUtils.CreateSequenceAt(atKey, fieldSeqKey, positionKey));
+            return new FastTensorKey(atKey, 0);
+        }
+
+        /// <summary>Erases one field's element at <paramref name="positionKey"/>, recursing into a
+        /// nested Model field's own parallel sequences.</summary>
+        private static FastTensorKey EraseFieldAt(
+            FastTensorKey fieldSeqKey, FastTensorKey positionKey, FastModelStructContext ctx)
+        {
+            if (ctx.NestedModelFields.Contains(fieldSeqKey))
+            {
+                var erased = ctx.UnpackedStructSequences[fieldSeqKey]
+                    .Select(k => EraseFieldAt(k, positionKey, ctx)).ToList();
+                var bundleKey = ctx.NewNestedModelField();
+                ctx.UnpackedStructSequences[bundleKey] = erased;
+                return bundleKey;
+            }
+
+            var eraseKey = FastNodeKey.New();
+            ctx.RecordNewNode(FastNodeConstructionUtils.CreateSequenceErase(eraseKey, fieldSeqKey, positionKey));
+            return new FastTensorKey(eraseKey, 0);
+        }
+
+        /// <summary>Inserts one field's value at <paramref name="positionKey"/> (null appends),
+        /// recursing into a nested Model field's own parallel sequences.</summary>
+        private static FastTensorKey InsertFieldInto(
+            FastTensorKey fieldSeqKey, FastTensorKey elementField, FastTensorKey? positionKey,
+            FastModelStructContext ctx)
+        {
+            if (ctx.NestedModelFields.Contains(fieldSeqKey))
+            {
+                var subSeqKeys = ctx.UnpackedStructSequences[fieldSeqKey];
+                var elementFields = ctx.TryGetStruct(elementField)
+                    ?? throw new System.InvalidOperationException(
+                        "SEQUENCE_INSERT: a Model-typed field's inserted element is not an unpacked Model struct.");
+                Debug.Assert(subSeqKeys.Count == elementFields.Count,
+                    "SEQUENCE_INSERT nested sequence-field count must equal element-field count.");
+
+                var inserted = new List<FastTensorKey>(subSeqKeys.Count);
+                for (int i = 0; i < subSeqKeys.Count; i++)
+                    inserted.Add(InsertFieldInto(subSeqKeys[i], elementFields[i]!.Value, positionKey, ctx));
+
+                var bundleKey = ctx.NewNestedModelField();
+                ctx.UnpackedStructSequences[bundleKey] = inserted;
+                return bundleKey;
+            }
+
+            var insertKey = FastNodeKey.New();
+            ctx.RecordNewNode(FastNodeConstructionUtils.CreateSequenceInsert(
+                insertKey, fieldSeqKey, elementField, positionKey));
+            return new FastTensorKey(insertKey, 0);
         }
 
         /// <summary>

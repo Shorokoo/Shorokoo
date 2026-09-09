@@ -1500,6 +1500,99 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>A lag carry whose lagged local and trailed carry are both created inside the
+    /// enclosing loop's body — a nested recurrence. Nothing crosses the enclosing loop's boundary,
+    /// so it needs no wrapping.</summary>
+    [Module]
+    public partial class NestedLocalLagCarry
+    {
+        public static Scalar<float32> Inline(Scalar<int64> outerTrips, Scalar<int64> innerTrips)
+        {
+            var total = Scalar(0.0f);
+            foreach (var ctx0 in LoopAPI.Iterate(outerTrips))
+            {
+                var a = Scalar(1.0f);
+                var b = Scalar(1.0f);
+                var s = Scalar(0.0f);
+                foreach (var ctx1 in LoopAPI.Iterate(innerTrips))
+                {
+                    var next = a + b;
+                    s = s + next;
+                    a = b;
+                    b = next;
+                }
+                total = total + s;
+            }
+            return total;
+        }
+    }
+
+    /// <summary>A local given a carry's value by a bare assignment and read after the loop — the
+    /// lag carry's shape without the lag.</summary>
+    [Module]
+    public partial class CarryAliasReadAfterLoop
+    {
+        public static Scalar<float32> Inline(Scalar<float32> x, Scalar<int64> trips)
+        {
+            var acc = x;
+            var alias = x;
+            var sum = Scalar(0.0f);
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                sum = sum + acc;
+                alias = acc;
+                acc = acc + Scalar(1.0f);
+            }
+            return alias;
+        }
+    }
+
+    /// <summary>An alias chain whose first link is computed outside the loop: on the first
+    /// iteration the local really is assigned that outside value, however the later passes read.
+    /// </summary>
+    [Module]
+    public partial class AliasChainFromOutsideTheLoop
+    {
+        public static Scalar<float32> Inline(Scalar<float32> x, Scalar<int64> trips)
+        {
+            var acc = x;
+            var z = x * Scalar(10.0f);
+            var v = Scalar(0.0f);
+            var sum = Scalar(0.0f);
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                LoopAPI.Init(v);
+                sum = sum + v;
+                v = z;
+                acc = acc + Scalar(1.0f);
+                z = acc;
+            }
+            return sum;
+        }
+    }
+
+    /// <summary><see cref="AliasChainFromOutsideTheLoop"/> without the declaration, so no guard
+    /// covers it and only the lag identification itself can tell it from a lagged carry.</summary>
+    [Module]
+    public partial class AliasChainFromOutsideTheLoopUndeclared
+    {
+        public static Scalar<float32> Inline(Scalar<float32> x, Scalar<int64> trips)
+        {
+            var acc = x;
+            var z = x * Scalar(10.0f);
+            var v = Scalar(0.0f);
+            var sum = Scalar(0.0f);
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                sum = sum + v;
+                v = z;
+                acc = acc + Scalar(1.0f);
+                z = acc;
+            }
+            return sum;
+        }
+    }
+
     /// <summary><see cref="NestedLagCarry"/> with the lagged assignment wrapped, giving it a body
     /// node of its own so the enclosing loop can carry it out.</summary>
     [Module]

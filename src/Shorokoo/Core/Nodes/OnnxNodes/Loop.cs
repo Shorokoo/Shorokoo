@@ -19,7 +19,8 @@ namespace Shorokoo
     using FullOutputs = ImmutableDictionary<string, Variable?[]>;
 
     /// <summary>
-    /// The body of the loop executes four times.
+    /// The body of the loop is traced five times: four numbered passes, of which the second is
+    /// traced twice.
     /// First Pass:
     /// We build out the graph structure to be able to locate where variables from before the loop are used.
     /// 
@@ -47,8 +48,9 @@ namespace Shorokoo
     /// We override all returned variables during the execution of the loop body to be the corresponding output variable of the close loop node
     /// instead of the original output that was used as input to the close loop node.
     /// 
-    /// For inner loops, nothing is tracked or modified during the first two passes of the outer loop.
-    /// Then all four passes are executed on the outer loops' THIRD pass.
+    /// For inner loops, nothing is tracked or modified during the outer loop's non-tracking traces
+    /// (its first pass, second pass and lag pass). Then all of an inner loop's traces are executed
+    /// on the outer loop's THIRD pass.
     /// On the outer loop's fourth's pass, the inner loop's fourth pass is executed again.
     /// 
     /// </summary>
@@ -166,8 +168,8 @@ namespace Shorokoo
 
                 // Bind the scan to the value the BODY reads this iteration. For a carry read
                 // before the body updates it, that is NOT the caller's C# local: the body is
-                // traced four times and the local is never rebound between passes, so by the
-                // third pass it holds what the first two passes advanced it to — nodes that live
+                // traced five times and the local is never rebound between passes, so by the
+                // third pass it holds what the preceding passes advanced it to — nodes that live
                 // in the OUTER graph. ProcessNode has already rewritten the zombie node's own
                 // input to the carry's open-node output, so take the rewrite from there.
                 //
@@ -565,7 +567,11 @@ namespace Shorokoo
             this.traceRound++;
         }
 
-        public void BuildLoopOpenNode()
+        /// <summary>Whether <paramref name="v"/> is one of this loop's open-node outputs, i.e. a
+        /// carry this loop hands its body at the start of each iteration.</summary>
+        internal bool IsOwnOpenNodeOutput(Variable v) => this.openNodeOutputs.ContainsKey(v);
+
+        public void BuildLoopOpenNode(Looper? enclosing = null)
         {
             if (this.CurrentPass != 2 || this.secondPassRound != 1)
                 throw new InvalidTensorOperationException(ErrorCodes.FW022, "Loop Phase Validation", $"current pass: {this.CurrentPass}", "Cannot build loop open node - current pass must be the lag pass");
@@ -597,6 +603,25 @@ namespace Shorokoo
 
             // The VariableInput.Key splits off initialization value for each place they are used. This helps to address Case 3,
             // but causes duplication for Case 2.
+            // A lagged local trails a carry from the carry's OWN pre-loop value: the assignment
+            // ran on the first pass, while the trailed carry still held it. That is what tells a
+            // lag carry from an alias chain whose first link comes from outside the loop —
+            // v = z; ... z = <body value>; — whose read moves onto a body output by the lag pass
+            // in exactly the same way, but which really is assigned that outside value on its
+            // first iteration.
+            //
+            // It is used to hold back the FW023 refusal below, not to identify lag carries:
+            // applied to identification it also rejects a lagged local an ENCLOSING loop carries,
+            // whose reads reach this looper already rewritten to that loop's open-node outputs.
+            // Shorokoo/Shorokoo#299 tracks the undeclared alias chain that therefore stays
+            // mis-identified.
+            bool TrailsCarryFromItsPreLoopValue(LoopVariableInput x) =>
+                x.LagPassInput is not null
+                && this.firstPassVariableOutputs.ContainsKey(x.LagPassInput)
+                && this.variableInputs.Values.Any(
+                    y => Object.ReferenceEquals(y.SecondPassInput, x.LagPassInput)
+                         && Object.ReferenceEquals(y.FirstPassInput, x.SecondPassInput));
+
             var loopVariableInputs = this.variableInputs.Values.Where(x =>
                                         x.SecondPassInput is not null &&
                                         this.firstPassVariableOutputs.ContainsKey(x.SecondPassInput));
@@ -620,13 +645,20 @@ namespace Shorokoo
             // body output. Without that exclusion a lagged local declared with LoopAPI.Init was
             // refused as an outside assignment, and pointed at LoopAPI.Carry for a shape that
             // needs no wrapping at all.
+            //
+            // "The lag pass moved the read onto a body output" is NOT on its own enough to mean
+            // that: an alias chain whose first link is a value computed outside the loop —
+            // v = z; ... z = <body value>; — reads that way too, and really is assigned from
+            // outside on its first iteration. So require the second-pass read to be the pre-loop
+            // value of the very carry the lag pass says the local trails. For a genuine lag carry
+            // the assignment happened on the first pass, while the trailed carry still held that
+            // value, so the two line up by construction; for the alias chain they do not.
             var reassignedFromOutsideTheBody = this.variableInputs.Values
                 .FirstOrDefault(x => this.initDeclarationInputs.Contains(x.Key)
                                      && x.SecondPassInput is not null
                                      && !this.firstPassVariableOutputs.ContainsKey(x.SecondPassInput)
                                      && !Object.ReferenceEquals(x.SecondPassInput, x.FirstPassInput)
-                                     && !(x.LagPassInput is not null
-                                          && this.firstPassVariableOutputs.ContainsKey(x.LagPassInput)));
+                                     && !TrailsCarryFromItsPreLoopValue(x));
             if (reassignedFromOutsideTheBody is not null)
                 throw new UnsupportedLoopVariableAssignmentException(
                     ErrorCodes.FW023, CarryAssignedFromOutsideGuidance);
@@ -680,13 +712,22 @@ namespace Shorokoo
                 lagLoopVariables.Add(LoopVariable.Lag(
                     lagInitializer, trailedCarry, trailedFirstPassOutput, lagGroup.Select(x => x.Key).ToList()));
             }
-            // A nested loop cannot hand a lag carry on to its enclosing loop. Every other carry
-            // travels out through the close node and is matched to the enclosing loop's own
-            // variable by the body output that produced it (MapInnerLoopCloseNodeOutputs...); a
-            // lag carry has no body output of its own — it shares the trailed carry's — so there
-            // is nothing to match it by, and the enclosing loop re-derives it as a lag carry of
-            // its OWN trailed carry, resetting it at every enclosing iteration.
-            if (this.LoopDepth > 0 && lagLoopVariables.Count > 0)
+            // A lag carry the ENCLOSING loop also has to hand back cannot be expressed. Every
+            // other carry travels out through the close node and is matched to the enclosing
+            // loop's own variable by the body output that produced it
+            // (MapInnerLoopCloseNodeOutputs...); a lag carry has no body output of its own — it
+            // shares the trailed carry's — so there is nothing to match it by, and the enclosing
+            // loop re-derives it as a lag carry of its OWN trailed carry, resetting it at every
+            // enclosing iteration.
+            //
+            // Only a lagged local the enclosing loop carries is in that position, and its
+            // initializer says so: it is that loop's open-node output for the same local. A
+            // lagged local created inside the enclosing body — the common case, and the whole of
+            // a nested recurrence like Fibonacci — crosses no boundary and is fine. Testing loop
+            // depth alone refused all of those too.
+            if (enclosing is not null &&
+                lagLoopVariables.FirstOrDefault(x =>
+                    enclosing.IsOwnOpenNodeOutput(x.OpenNodeInputInitializer.AssertNotNull())) is not null)
                 throw new UnsupportedLoopVariableAssignmentException(
                     ErrorCodes.FW048, LagCarryInNestedLoopGuidance);
 
@@ -752,22 +793,24 @@ namespace Shorokoo
         }
 
         internal const string InnerScanReadAfterEnclosingLoopGuidance =
-            "an inner loop's ctx.Scan output was read after the ENCLOSING loop."
+            "a ctx.Scan output was read outside the loop that produces it."
             + "\n"
-            + "\nThe stacked tensor is produced once per iteration of the enclosing loop, and that "
-            + "loop has no initial value to return for it when it runs zero times, so it cannot "
-            + "carry it out."
+            + "\nA scan stacks one entry per iteration of the loop whose context it belongs to, so "
+            + "the stacked tensor exists only once THAT loop has finished, and only that loop can "
+            + "hand it out. Reading it before that loop ends does not work, and nor does carrying "
+            + "it further out: an enclosing loop produces a whole stack per iteration and has no "
+            + "value to return for one when it runs zero times."
             + "\n"
-            + "\nConsume the inner loop's scan output inside the enclosing loop's body, or scan on "
-            + "the enclosing loop's own context instead.";
+            + "\nRead the stack after the loop you scanned on, and inside any loop enclosing that "
+            + "one.";
 
-        internal const string LagCarryReadAfterLoopGuidance =
-            "a variable holding the previous iteration's value of a loop carry was read after the "
-            + "loop."
+        internal const string CarryAliasReadAfterLoopGuidance =
+            "a variable given a loop carry's value by a bare assignment was read after the loop."
             + "\n"
             + "\nThe loop computes that value, but a bare assignment creates no node in the body, so "
             + "there is nothing for the loop to point the variable at afterwards — it still names "
-            + "the value the body was working on."
+            + "the value the body was working on. This covers a plain alias and a lagged carry "
+            + "alike, since neither leaves a trace the loop can re-take."
             + "\n"
             + "\nWrap the assignment so the body produces it:"
             + "\n"
@@ -778,7 +821,7 @@ namespace Shorokoo
             + "\n        acc  = acc + Scalar(1.0f);"
             + "\n    }"
             + "\n"
-            + "\nReading the lagged value only inside the body needs no wrapping.";
+            + "\nReading such a variable only inside the body needs no wrapping.";
 
         internal const string BodyValueReadAfterLoopGuidance =
             "a value produced inside a loop body is used after the loop but is not one of the "
@@ -837,7 +880,7 @@ namespace Shorokoo
 
         private const string LagCarryInNestedLoopGuidance =
             "a nested loop body assigned a variable the previous iteration's value of one of that "
-            + "loop's carries."
+            + "loop's carries, where the ENCLOSING loop carries that variable too."
             + "\n"
             + "\nA lagged variable shares the body node of the carry it trails, so the enclosing "
             + "loop has nothing to carry it out by, and would reset it at every one of its own "
@@ -847,7 +890,8 @@ namespace Shorokoo
             + "\n"
             + "\n    prev = LoopAPI.Carry(acc);   // not `prev = acc;`"
             + "\n"
-            + "\nLag without wrapping is supported in an outermost loop only.";
+            + "\nA lagged local created inside the enclosing loop's body needs no wrapping; this "
+            + "is only about one the enclosing loop itself carries.";
 
         private const string LagCarryOfUncarriedValueGuidance =
             "the loop body assigned a variable the previous iteration's value of another variable "
@@ -855,8 +899,8 @@ namespace Shorokoo
             + "\n"
             + "\nA lagged variable hands back the value the variable it trails held at the start of "
             + "the iteration, so that variable has to be a loop carry — read in the body before it "
-            + "is assigned. Declare it with LoopAPI.Init, or compute the lagged value in the body "
-            + "from a carry instead.";
+            + "is assigned. Declare it with LoopAPI.Init, or wrap the lagged assignment as "
+            + "prev = LoopAPI.Carry(t) so it gets a body node of its own.";
 
         private const string CarryAssignedFromOutsideGuidance =
             "the loop body assigned a variable declared with LoopAPI.Init a value computed outside "
@@ -1022,18 +1066,19 @@ namespace Shorokoo
                 };
             }
 
-            // A lag carry's own value is handed back by the close node, but the user's local does
-            // not name it: a bare assignment produces no body node, so the fourth pass has nothing
-            // to remap and the local still names the trailed carry's body value. That value must
-            // not leave the loop — the same limitation LoopAPI.Carry exists for, and the same
-            // remedy.
-            foreach (var lagVariable in this.loopVariableByNodeInputLocation.Values.Where(x => x.IsLagCarry).Distinct())
+            // A carry's own value is handed back by the close node, and the fourth pass points the
+            // user's local at it. A SECOND local given that carry's value by a bare assignment —
+            // alias = acc, or the lagged prev = acc — gets no such remap: the assignment produces
+            // no body node for the fourth pass to re-trace, so the local still names the carry's
+            // in-body value. That value must not leave the loop, and naming it is the only way to
+            // say so, since the assignment itself left no trace to name.
+            foreach (var carry in this.closeNodeOutputs.Values.Where(x => !x.IsLocalScanVariable))
             {
-                var trailedBodyValue = lagVariable.TrailedCarry.AssertNotNull().ThirdPassOutput;
-                if (trailedBodyValue is not null)
+                var bodyValue = carry.ThirdPassOutput;
+                if (bodyValue is not null)
                 {
-                    trailedBodyValue.IsValid = false;
-                    trailedBodyValue.InvalidReason = LagCarryReadAfterLoopGuidance;
+                    bodyValue.IsValid = false;
+                    bodyValue.InvalidReason = CarryAliasReadAfterLoopGuidance;
                 }
             }
         }
@@ -1132,7 +1177,7 @@ namespace Shorokoo
         /// (e.g. <see cref="Shorokoo.Rng.Pin(object[])"/>) should record right now. A loop body
         /// is executed once per construction pass — first (track), second (identify loop vars),
         /// third (build the real body), fourth (expose outputs) — so a naive record inside a
-        /// loop body would fire up to four times, three of them against throwaway nodes. Only
+        /// loop body would fire five times, four of them against throwaway nodes. Only
         /// the pass that builds the surviving body nodes (the active looper's third pass) is
         /// canonical; at module level (no active loop) recording is always canonical. This is
         /// THE canonical-pass query: every recorder asks here, rather than re-deriving the
@@ -1316,7 +1361,8 @@ namespace Shorokoo
                     yield return ((x, y) => { }, looper, looper.GetLoopIndexVariable());
                     Debug.Assert(looperStack.Count == looper.LoopDepth + 1);
 
-                    looper.BuildLoopOpenNode();
+                    looper.BuildLoopOpenNode(
+                        looper.LoopDepth > 0 ? looperStack[looper.LoopDepth - 1] : null);
 
                     // Third pass, build the actual loop body
                     looper.StartThirdPass();
@@ -1387,7 +1433,7 @@ namespace Shorokoo
             {
                 // The declaration belongs to the innermost loop enclosing this call — the deepest
                 // looper on the stack, which is not necessarily the *active* one. An enclosing loop
-                // traces the inner loop's body inline during its own first two passes (the inner
+                // traces the inner loop's body inline during its own non-tracking passes (the inner
                 // looper is still on pass 0 then), and the variable it sees at this site changes
                 // between those passes because the inner loop rebinds it, which is not a user
                 // reassignment. Marking only the innermost looper keeps the declaration where the
@@ -1461,7 +1507,7 @@ namespace Shorokoo
         /// <summary>
         /// Hands the looper the condition twice: once wrapped in an Identity, so the read sits at
         /// a node input ProcessNode can rewrite, and once as written, for the cases where that
-        /// rewrite is not the one wanted. The wrap runs on every pass, so the four traces stay
+        /// rewrite is not the one wanted. The wrap runs on every pass, so the five traces stay
         /// aligned; the looper binds one of the two and the Identity is dead either way.
         /// </summary>
         private void Continue(Scalar<bit> exitLoopWhenFalse)

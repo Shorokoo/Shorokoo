@@ -176,7 +176,9 @@ A feed reached by **calling a module from inside a loop** takes that slot too, w
 model was created inside the body or outside it, and by either call form — a model call or a
 module-typed `Function`: the draw is executed once per iteration, and a second execution of a
 draw is a second sample. The call site's own position supplies the scope, so the feed lands
-under the call site's id extended with one `(slot, -1)` pair per enclosing loop. (The one
+under the call site's id extended with one `(slot, -1)` pair per enclosing loop the callee's
+identity does not already account for — a model created inside a loop already carries that
+loop's slot, and takes no second one. (The one
 route this does not reach is a model arriving as a `[Hyper]` model parameter, which is
 substituted rather than reparented.)
 

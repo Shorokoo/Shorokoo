@@ -58,8 +58,9 @@ a carry's value is not knowable at build time.
 
 A variable that is assigned inside a loop *before ever being read in that same
 loop* cannot be used after the loop. Shorokoo cannot recover the variable's
-initial value (needed for the zero-iteration case) and rejects the graph as
-**FW046**, whether the value is returned from the graph or feeds another node.
+initial value (needed for the zero-iteration case) and rejects the graph: as
+**FW046** when the value is returned from the graph, and as the node's own
+**NOD001** when it feeds another node. Both carry the same guidance.
 Initialize the variable explicitly inside the loop body with `LoopAPI.Init(x)`
 (or read it once, e.g. `OnnxOp.Identity(x)`) before the first assignment.
 
@@ -118,11 +119,17 @@ answered wrongly:
 | shape | code |
 |---|---|
 | reading the lagged value after the loop | **FW046** |
-| lagging inside a **nested** loop (the enclosing loop has nothing to carry it out by) | **FW048** |
+| lagging a local the **enclosing** loop also carries (it has nothing to carry it out by) | **FW048** |
 | trailing a variable the loop does not carry at all | **FW047** |
 
+Lagging inside a nested loop is otherwise fine: a lagged local created inside the
+enclosing loop's body — a nested recurrence, say — crosses no boundary and needs
+no wrapping.
+
 A chain deeper than one step — `prev2 = prev; prev = acc;` — is not identified
-either, and is refused as **FW049**. Wrapping every step of the chain works:
+either, and is refused as **FW049**; one extra identification pass sees one lag
+step, so this is a limit of the passes rather than a structural one. Wrapping
+every step of the chain works:
 
 ```csharp
 sum   = sum + prev2;

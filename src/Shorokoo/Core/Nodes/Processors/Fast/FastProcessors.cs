@@ -952,6 +952,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 anyInlined = true;
             }
 
+            // A desync here would hand a later call site a phantom (slot, -1) reading a LOOP_OPEN
+            // index from a scope it is not in — a wrong RNG stream with no error anywhere.
+            Debug.Assert(enclosingLoops.Count == 0,
+                "FastInlineModulesAndFunctions: unbalanced LOOP_OPEN/LOOP_CLOSE across the sweep.");
+
             graph.Nodes = newNodes;
 
             // Apply output remaps to all node inputs and graph outputs

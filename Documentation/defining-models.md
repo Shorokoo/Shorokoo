@@ -231,9 +231,10 @@ How a hyper value gets supplied depends on the route:
       acc  = acc + Scalar(1.0f);
   }
   ```
-  Written bare like that, a lagged local works in an **outermost** loop, read inside the
-  body or scanned. Everything else — reading it after the loop, lagging inside a nested
-  loop, trailing a variable the loop does not carry, or chaining two lag steps — is
+  Written bare like that, a lagged local works read inside the body or scanned, including
+  inside a nested loop when the lagged local is created in that loop's enclosing body.
+  Everything else — reading it after the loop, lagging a local the enclosing loop also
+  carries, trailing a variable the loop does not carry, or chaining two lag steps — is
   refused, naming the shape, and wrapping the assignment as `prev = LoopAPI.Carry(acc)`
   answers all four. See [limitations.md](limitations.md).
 

@@ -395,6 +395,124 @@ namespace Shorokoo.Tests.Modules
             => NonGenericCallerOfGenericModule.Call(input);
     }
 
+    /// <summary>Wraps the wrapper, putting the generic call site two non-generic bodies down.</summary>
+    [Module]
+    public partial class WrapsWrapperOfGenericModule
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => WrapsNonGenericCallerOfGenericModule.Call(input);
+    }
+
+    /// <summary>Reaches generics two ways from one non-generic body: the same module at two
+    /// different type arguments, and a generic module that composes generic modules.</summary>
+    [Module]
+    public partial class CallsGenericModulesSeveralWays
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => GenericTargetModule.Call<float32>(input)
+             + GenericTargetModule.Call<float64>(input.Cast<float64>()).Cast<float32>()
+             + GenericComposedLayer.Model<float32>(Scalar(3f)).Call(input);
+    }
+
+    /// <summary>Wraps it, putting every one of those call sites below a non-generic body.</summary>
+    [Module]
+    public partial class WrapsCallerOfGenericModulesSeveralWays
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => CallsGenericModulesSeveralWays.Call(input);
+    }
+
+    /// <summary>Takes the module to call as a model-typed parameter.</summary>
+    [Module]
+    public partial class CallsAModelParameter
+    {
+        public static Tensor<float32> Inline(Model<Tensor<float32>, Tensor<float32>> inner, Tensor<float32> input)
+            => inner.Call(input);
+    }
+
+    /// <summary>Reaches the generic call site through a model-typed parameter rather than a
+    /// direct call, so the callee is bound by the model value instead of the call node.</summary>
+    [Module]
+    public partial class PassesAGenericCallerAsAModelParameter
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => CallsAModelParameter.Call(NonGenericCallerOfGenericModule.Model(), input);
+    }
+
+    /// <summary>Reaches the generic module through a model sequence, whose SEQUENCE_CONSTRUCT
+    /// carries the element module's function but names no type arguments.</summary>
+    [Module]
+    public partial class HoldsAGenericModuleInAModelSequence
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => ModelSequence.Create(GenericTargetModule.Model<float32>())[Scalar(0L)].Call(input);
+    }
+
+    /// <summary>Holds the generic module in a sequence while the graph also uses it at a second
+    /// type argument, so the sequence's untyped reference has two specializations to choose
+    /// between.</summary>
+    [Module]
+    public partial class HoldsOneOfTwoSpecializationsInAModelSequence
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => ModelSequence.Create(GenericTargetModule.Model<float32>())[Scalar(0L)].Call(input)
+             + GenericTargetModule.Call<float64>(input.Cast<float64>()).Cast<float32>();
+    }
+
+    /// <summary>A generic module that holds its own type argument in a sequence, so the
+    /// sequence's untyped reference is only resolvable from inside the specialized body.</summary>
+    [Module]
+    public partial class GenericModuleHoldingItsOwnTypeArgumentInASequence
+    {
+        public static Tensor<T> Inline<T>(Tensor<T> input) where T : FloatLike
+            => ModelSequence.Create(GenericTargetModule.Model<T>())[Scalar(0L)].Call(input);
+    }
+
+    /// <summary>Uses that holder at two type arguments, so a global count cannot tell the two
+    /// sequences apart while each specialized body names its own.</summary>
+    [Module]
+    public partial class UsesTheSequenceHoldingGenericAtTwoTypeArguments
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => GenericModuleHoldingItsOwnTypeArgumentInASequence.Call<float32>(input)
+             + GenericModuleHoldingItsOwnTypeArgumentInASequence.Call<float64>(input.Cast<float64>()).Cast<float32>();
+    }
+
+    /// <summary>Reaches the generic module through a sequence grown from an empty one, whose
+    /// SEQUENCE_EMPTY carries the function with no operand to read the type argument off.</summary>
+    [Module]
+    public partial class AppendsAGenericModuleToAnEmptyModelSequence
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => ModelSequence.Empty(GenericTargetModule.Model<float32>())
+                   .Append(GenericTargetModule.Model<float32>())[Scalar(0L)].Call(input);
+    }
+
+    /// <summary>A plain non-generic module, for checking that a subtree with no generic material
+    /// below it is not rebuilt.</summary>
+    [Module]
+    public partial class PlainNonGenericNeighbour
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input) => input + Scalar(1f);
+    }
+
+    /// <summary>Puts an unrelated non-generic module alongside a generic call site.</summary>
+    [Module]
+    public partial class CallsAGenericModuleAndAPlainNeighbour
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => GenericTargetModule.Call<float32>(input) + PlainNonGenericNeighbour.Call(input);
+    }
+
+    /// <summary>Calls a generic trainable-parameter initializer with an explicit type argument
+    /// from a non-generic body.</summary>
+    [Module]
+    public partial class NonGenericCallerOfGenericParamInitializer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input, [Hyper] Vector<int64> shape)
+            => input + GenericTrainableParamInitializers.Init<float32>(shape).Vec();
+    }
+
     /// <summary>
     /// Nested generic module that performs type casting and simple operations.
     /// Uses three generic type parameters: A (hyperparam), B (input), C (internal only).

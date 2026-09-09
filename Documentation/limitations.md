@@ -95,17 +95,6 @@ concretizing the graph raises `FW023` if it is left unfixed.
 
 ## Current limitations (could be lifted)
 
-### A generic module called from a module that is itself called
-
-A generic `[Module]` lowers and runs through the ordinary route, and a non-generic module may
-call one — `GenericLayer.Call<float32>(x)` — and lower too. What does not yet work is putting a
-third module on top: the generic call site is then left unspecialized
-([#286](https://github.com/Shorokoo/Shorokoo/issues/286)). `ToConcreteArchitecture` does not
-refuse it — it returns an architecture whose spliced inputs are wired to nothing, and the model
-fails later at session creation with an opaque `Node input '…' is not a graph input, initializer,
-or output of a previous node`. Call the generic module from the module you concretize, rather
-than from one it calls.
-
 ### Carrying a value from the previous iteration
 
 A local that holds what another local held **one iteration ago** is not recognised as a loop

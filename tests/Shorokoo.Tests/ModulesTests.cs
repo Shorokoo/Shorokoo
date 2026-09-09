@@ -1,5 +1,6 @@
 using Shorokoo.Core.AutoDiffCheckpointing;
 using Shorokoo.Core.Nodes.Processors.Helpers;
+using Shorokoo.Core.Nodes.Processors.Fast;
 using Shorokoo.Core.Inference;
 using Shorokoo.Core.Graph;
 using Shorokoo.Core.Factory.IR;
@@ -940,6 +941,9 @@ public class ModulesCoverageTests
         Assert.Equal(fcExpected, fcActual);
     }
 
+    private static float[] ConcretizeAndRun(ComputationGraph g, params TensorData[] inputs) =>
+        RunFloats(g.ToConcreteArchitecture(g.FromOrderedInputs([.. inputs])).ToConcreteModel(), inputs);
+
     private static float[] RunFloats(ComputationGraph model, params TensorData[] inputs)
         => ComputeContext.Default.Execute(model, inputs)[0].ToTensorData().As<float32>().AccessMemory<float>().ToArray();
 
@@ -1312,17 +1316,51 @@ public class ModulesCoverageTests
         Assert.Equal(3, arch.GetConcreteModelParamInfos().ModelIds.Distinct().Count());
     }
 
-    /// <summary>Specialization is seeded from the top-level graph's generic call sites only, so a
-    /// generic module reached through a non-generic body two levels down keeps its type
-    /// placeholders and the inliner splices a body it cannot match.
-    /// Tracked as Shorokoo/Shorokoo#286.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#286: generic erasure does not reach a call site nested in a non-generic body")]
-    public void TestAGenericModuleTwoCallsDeepConcretizes()
+    [Fact]
+    public void TestAGenericModuleConcretizesThroughAnyDepthOfNonGenericCallers()
     {
         var input = TensorData([2L], 1f, 2f);
-        var g = WrapsNonGenericCallerOfGenericModule.ComputationGraph;
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
-        Assert.Equal([2f, 4f], RunFloats(arch.ToConcreteModel(), input));
+        Assert.Equal([2f, 4f], ConcretizeAndRun(WrapsNonGenericCallerOfGenericModule.ComputationGraph, input));
+        Assert.Equal([2f, 4f], ConcretizeAndRun(WrapsWrapperOfGenericModule.ComputationGraph, input));
+        Assert.Equal([10f, 20f], ConcretizeAndRun(CallsGenericModulesSeveralWays.ComputationGraph, input));
+        Assert.Equal([10f, 20f], ConcretizeAndRun(WrapsCallerOfGenericModulesSeveralWays.ComputationGraph, input));
+    }
+
+    [Fact]
+    public void TestAGenericModuleConcretizesThroughEveryKindOfReferenceThatNamesIt()
+    {
+        var input = TensorData([2L], 1f, 2f);
+        Assert.Equal([2f, 4f], ConcretizeAndRun(PassesAGenericCallerAsAModelParameter.ComputationGraph, input));
+        Assert.Equal([2f, 4f], ConcretizeAndRun(HoldsAGenericModuleInAModelSequence.ComputationGraph, input));
+        Assert.Equal([2f, 4f], ConcretizeAndRun(AppendsAGenericModuleToAnEmptyModelSequence.ComputationGraph, input));
+    }
+
+    [Fact]
+    public void TestErasureLeavesAFunctionWithNoGenericMaterialBelowItAlone()
+    {
+        var before = CallsAGenericModuleAndAPlainNeighbour.ComputationGraph.ToInternal();
+        Function Neighbour(InternalComputationGraph g) => g.Nodes.Select(n => n.TargetFunction).NotNulls()
+            .Single(f => f.DefaultName.Contains(nameof(PlainNonGenericNeighbour)));
+
+        Assert.Same(Neighbour(before), Neighbour(FastToConcreteDataType.Process(before)));
+    }
+
+    [Fact]
+    public void TestAGenericModuleInASequenceConcretizesWhenTheGraphUsesTwoTypeArguments()
+    {
+        var input = TensorData([2L], 1f, 2f);
+        Assert.Equal([4f, 8f], ConcretizeAndRun(HoldsOneOfTwoSpecializationsInAModelSequence.ComputationGraph, input));
+        Assert.Equal([4f, 8f], ConcretizeAndRun(UsesTheSequenceHoldingGenericAtTwoTypeArguments.ComputationGraph, input));
+    }
+
+    /// <summary>A generic parameter initializer called with an explicit type argument from a
+    /// non-generic body is spliced with its shape input wired to nothing.
+    /// Tracked as Shorokoo/Shorokoo#295.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#295: a generic param initializer called from a non-generic body loses its shape input")]
+    public void TestAGenericParamInitializerCalledFromANonGenericBodyConcretizes()
+    {
+        var g = NonGenericCallerOfGenericParamInitializer.ComputationGraph;
+        Assert.Equal([1f, 2f], ConcretizeAndRun(g, TensorData([1L], 2L), TensorData([2L], 1f, 2f)));
     }
 
     [Fact]
@@ -1432,23 +1470,10 @@ public class ModulesCoverageTests
     public void TestAGenericModuleCanBeConcretizedThroughPublicApi()
     {
         var input = TensorData([2L], 1f, 2f);
-        var g = SimpleGenericLayer.ComputationGraph;
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
-        Assert.Equal([1f, 2f], RunFloats(arch.ToConcreteModel(), input));
-
-        var scale = TensorData([], 3f);
-        var gs = GenericScaleLayer.ComputationGraph;
-        var archS = gs.ToConcreteArchitecture(gs.FromOrderedInputs([scale, input]));
-        Assert.Equal([3f, 6f], RunFloats(archS.ToConcreteModel(), scale, input));
-
-        var shape = TensorData([1L], 2L);
-        var gp = GenericLayerWithTrainableParams.ComputationGraph;
-        var archP = gp.ToConcreteArchitecture(gp.FromOrderedInputs([shape, input]));
-        Assert.Equal([1f, 2f], RunFloats(archP.ToConcreteModel(), shape, input));
-
-        var gw = NonGenericCallerOfGenericModule.ComputationGraph;
-        var archW = gw.ToConcreteArchitecture(gw.FromOrderedInputs([input]));
-        Assert.Equal([2f, 4f], RunFloats(archW.ToConcreteModel(), input));
+        Assert.Equal([1f, 2f], ConcretizeAndRun(SimpleGenericLayer.ComputationGraph, input));
+        Assert.Equal([3f, 6f], ConcretizeAndRun(GenericScaleLayer.ComputationGraph, TensorData([], 3f), input));
+        Assert.Equal([1f, 2f], ConcretizeAndRun(GenericLayerWithTrainableParams.ComputationGraph, TensorData([1L], 2L), input));
+        Assert.Equal([2f, 4f], ConcretizeAndRun(NonGenericCallerOfGenericModule.ComputationGraph, input));
     }
 
     /// <summary>A module body reachable as a delegate, for a module the source generator never saw.</summary>

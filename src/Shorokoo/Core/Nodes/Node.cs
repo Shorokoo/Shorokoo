@@ -240,8 +240,13 @@ namespace Shorokoo.Core.Nodes
             {
                 var invalidInputs = inputs.SelectMany(x => x.Value).NotNulls().Where(x => !x.IsValid).ToArray();
                 var inputNames = string.Join(", ", invalidInputs.Select(x => x.GetType().Name));
+                // A loop records why it could not hand a value back, in the terms the user wrote.
+                // Prefer it: the generic text below names one shape, and the value reaching here is
+                // as often a scan the enclosing loop cannot carry out or an iteration index, whose
+                // remedies are different ones.
+                var explained = invalidInputs.Select(x => x.InvalidReason).FirstOrDefault(x => x is not null);
                 throw new OnnxNodeException(ErrorCodes.NOD001, nodeDef.OpName, defaultName ?? "Unknown",
-                    $"Invalid input variables detected: {inputNames}. {ErrorMessage}");
+                    $"Invalid input variables detected: {inputNames}. {explained ?? ErrorMessage}");
             }
 
             this.OrderingHintNumber = existingOrderingHint ?? Interlocked.Increment(ref NextOrderingHintNumber);

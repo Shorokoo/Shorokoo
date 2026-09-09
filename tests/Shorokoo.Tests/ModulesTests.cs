@@ -1083,39 +1083,78 @@ public class ModulesCoverageTests
         => AssertDrawInsideLoopBody(ZeroInputOpInLoopBody.ComputationGraph);
 
     /// <summary>A local carrying the value another held one iteration ago reads that value, not
-    /// the one from before the loop — accumulated, and scanned.</summary>
+    /// the one from before the loop — accumulated, scanned, declared with an initializer of its
+    /// own, and with the assignment wrapped so the loop can hand it back after, out of a nested
+    /// loop, and one lag step deeper.</summary>
     [Fact]
     public void TestALagOneLoopCarryCarriesThePreviousIterationsValue()
     {
-        TensorData[] inputs = [TensorData(DType.Float32, [], 10f), TensorData(DType.Int64, [], 3L)];
+        TensorData Scalar32(float v) => TensorData(DType.Float32, [], v);
+        TensorData Trips(long n) => TensorData(DType.Int64, [], n);
+
         Assert.True(AutoTest.AdvancedTestGraph<LagOneCarry>(
-            hyperparamInputs: [], runtimeInputs: inputs, expected: [31.0]));
+            hyperparamInputs: [], runtimeInputs: [Scalar32(10f), Trips(3)], expected: [31.0]));
         Assert.True(AutoTest.AdvancedTestGraph<LagOneCarryScanned>(
-            hyperparamInputs: [], runtimeInputs: inputs, expected: [10.0, 10.0, 11.0]));
+            hyperparamInputs: [], runtimeInputs: [Scalar32(10f), Trips(3)], expected: [10.0, 10.0, 11.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<LagOneCarryInitDeclared>(
+            hyperparamInputs: [], runtimeInputs: [Scalar32(10f), Trips(3)], expected: [131.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<LagOneCarryWrappedReadAfterLoop>(
+            hyperparamInputs: [], runtimeInputs: [Scalar32(10f), Trips(3)], expected: [43.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<NestedLagCarryWrapped>(
+            hyperparamInputs: [], runtimeInputs: [Scalar32(10f), Trips(2), Trips(3)], expected: [70.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<LagTwoCarryWrapped>(
+            hyperparamInputs: [], runtimeInputs: [Scalar32(10f), Trips(5)], expected: [53.0]));
     }
 
-    /// <summary>Reading a lag carry after the loop needs the assignment wrapped, exactly as
-    /// carrying a value computed outside the body does: a bare assignment produces no body node
-    /// for the loop to point the variable at, and is refused naming the wrapper rather than
-    /// asserting in Debug and exporting a broken scope in Release.</summary>
+    /// <summary>Every lagged shape the loop cannot hand back is refused by its own code, naming
+    /// the call that answers it, rather than pinning the local to its pre-loop value.</summary>
     [Fact]
-    public void TestALagOneCarryIsReadAfterTheLoopThroughLoopApiCarry()
+    public void TestALagCarryTheLoopCannotHandBackIsRefused()
     {
-        TensorData[] inputs = [TensorData(DType.Float32, [], 10f), TensorData(DType.Int64, [], 3L)];
-        Assert.True(AutoTest.AdvancedTestGraph<LagOneCarryWrappedReadAfterLoop>(
-            hyperparamInputs: [], runtimeInputs: inputs, expected: [43.0]));
-        Assert.Contains("LoopAPI.Carry", Assert.Throws<UnsupportedLoopVariableAssignmentException>(
-            () => LagOneCarryReadAfterLoop.ComputationGraph).Message);
+        (string Code, string Remedy, Func<ComputationGraph> Build)[] cases =
+        [
+            (ErrorCodes.FW046, "LoopAPI.Carry", () => LagOneCarryReadAfterLoop.ComputationGraph),
+            (ErrorCodes.FW047, "LoopAPI.Init", () => LagCarryOfUncarriedValue.ComputationGraph),
+            (ErrorCodes.FW048, "LoopAPI.Carry", () => NestedLagCarry.ComputationGraph),
+            (ErrorCodes.FW049, "LoopAPI.Carry", () => LagTwoCarry.ComputationGraph),
+        ];
+
+        Assert.All(cases, c =>
+        {
+            var message = Assert.Throws<UnsupportedLoopVariableAssignmentException>(() => c.Build()).Message;
+            Assert.Contains(c.Code, message);
+            Assert.Contains(c.Remedy, message);
+        });
+    }
+
+    /// <summary>A body value the loop never outputs is refused whether it is returned from the
+    /// graph or fed to another node, and the refusal names the shape the user wrote rather than
+    /// the one generic answer.</summary>
+    [Fact]
+    public void TestABodyValueTheLoopCannotHandBackIsRefusedWhereverItIsUsed()
+    {
+        Assert.Contains("ctx.IterationIndex", Assert.Throws<UnsupportedLoopVariableAssignmentException>(
+            () => IterationIndexReadAfterLoop.ComputationGraph).Message);
+        Assert.Contains("LoopAPI.Init", Assert.Throws<UnsupportedLoopVariableAssignmentException>(
+            () => BodyValueAssignedBeforeReadReturned.ComputationGraph).Message);
+        Assert.Contains("LoopAPI.Init", Assert.Throws<OnnxNodeException>(
+            () => BodyValueAssignedBeforeReadConsumed.ComputationGraph).Message);
     }
 
     /// <summary>An enclosing loop's ctx.Scan called from inside a nested loop's body records the
     /// value the outer body ends each of its iterations with.</summary>
     [Fact]
     public void TestTheOuterLoopsScanCanBeCalledFromAnInnerLoopBody()
-        => Assert.True(AutoTest.AdvancedTestGraph<OuterScanFromInnerBody>(
-            hyperparamInputs: [],
-            runtimeInputs: [TensorData(DType.Float32, [], 10f), TensorData(DType.Int64, [], 2L), TensorData(DType.Int64, [], 3L)],
-            expected: [13.0, 16.0]));
+    {
+        TensorData[] inputs = [TensorData(DType.Float32, [], 10f),
+                               TensorData(DType.Int64, [], 2L), TensorData(DType.Int64, [], 3L)];
+        Assert.True(AutoTest.AdvancedTestGraph<OuterScanFromInnerBody>(
+            hyperparamInputs: [], runtimeInputs: inputs, expected: [13.0, 16.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<OuterScanOfInitDeclaredInnerBodyLocal>(
+            hyperparamInputs: [], runtimeInputs: inputs, expected: [26.0, 32.0]));
+        Assert.Contains(ErrorCodes.FW050, Assert.Throws<UnsupportedLoopVariableAssignmentException>(
+            () => OuterScanOfUncarriedInnerBodyLocal.ComputationGraph).Message);
+    }
 
     private static Tensor<float32> MachineryFreeBody(Tensor<float32> x) => x + x;
 
@@ -1440,39 +1479,44 @@ public class ModulesCoverageTests
     }
 
     /// <summary>A draw inside a module invoked from a loop is re-executed per iteration, and a
-    /// second execution of a draw is a second sample: the invoke site's loop scope reaches the
-    /// spliced feed even though the model was created outside the loop.</summary>
+    /// second execution of a draw is a second sample: three trips do not give three times what one
+    /// trip gives. Compared against the same call site at one trip rather than against a call site
+    /// outside a loop, which differs by its scope alone and would agree either way.</summary>
     [Fact]
     public void TestAModuleInvokedInALoopDrawsAFreshSamplePerIteration()
     {
         var zero = TensorData([2L], 0f, 0f);
         var fn = ModuleFn((Func<Tensor<float32>, Tensor<float32>>)DrawsOnce);
-        var arch = ConcretizeInvokes(x =>
-        {
-            var acc = x;
-            foreach (var _ in LoopAPI.Iterate(Scalar(3L))) acc = (Tensor<float32>)fn.Call(acc)[0];
-            return [acc];
-        }, zero);
-        var three = RunFloats(arch.ToConcreteModel(RngConfig.Default), zero);
+        var model = ModuleFactory
+            .FromFunc<Tensor<float32>, Tensor<float32>>(DrawsOnce, "DrawsOnce").SetHyperparams();
 
-        var once = ConcretizeInvokes(x => [(Tensor<float32>)fn.Call(x)[0]], zero);
-        var one = RunFloats(once.ToConcreteModel(RngConfig.Default), zero);
-        Assert.All(three.Zip(one, (t, o) => Math.Abs(t - 3 * o)), d => Assert.True(d > 1e-5f));
+        float[] Accumulate(Func<Tensor<float32>, Tensor<float32>> call, long trips)
+            => RunFloats(ConcretizeInvokes(x =>
+            {
+                var acc = x;
+                foreach (var _ in LoopAPI.Iterate(Scalar(trips))) acc = call(acc);
+                return [acc];
+            }, zero).ToConcreteModel(RngConfig.Default), zero);
 
-        // The MODEL_INVOKE route, with the model created OUTSIDE the loop, took its scope from
-        // that creation site and reused one sample the same way.
-        var model = ModuleFactory.FromFunc<Tensor<float32>, Tensor<float32>>(DrawsOnce, "DrawsOnce")
-            .SetHyperparams();
-        var viaModel = ConcretizeInvokes(x =>
-        {
-            var acc = x;
-            foreach (var _ in LoopAPI.Iterate(Scalar(3L))) acc = model.Call(acc);
-            return [acc];
-        }, zero);
-        var modelThree = RunFloats(viaModel.ToConcreteModel(RngConfig.Default), zero);
-        var modelOnce = ConcretizeInvokes(x => [model.Call(x)], zero);
-        var modelOne = RunFloats(modelOnce.ToConcreteModel(RngConfig.Default), zero);
-        Assert.All(modelThree.Zip(modelOne, (t, o) => Math.Abs(t - 3 * o)), d => Assert.True(d > 1e-5f));
+        Func<Tensor<float32>, Tensor<float32>>[] routes =
+            [t => (Tensor<float32>)fn.Call(t)[0], model.Call];
+
+        Assert.All(routes, call => Assert.All(
+            Accumulate(call, 3).Zip(Accumulate(call, 1), (three, one) => Math.Abs(three - 3 * one)),
+            d => Assert.True(d > 1e-5f)));
+    }
+
+    /// <summary>Two call sites of one model object fold the same stream key, because the id they
+    /// reparent under is the model's rather than the site's — where two call sites of a
+    /// module-typed function each mint their own. Tracked as Shorokoo/Shorokoo#298.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#298: two call sites of one model object share an RNG stream")]
+    public void TestTwoCallSitesOfOneModelObjectGetSeparateRngStreams()
+    {
+        var model = ModuleFactory
+            .FromFunc<Tensor<float32>, Tensor<float32>>(DrawsOnce, "DrawsOnce").SetHyperparams();
+        var arch = ConcretizeInvokes(x => [model.Call(x) - model.Call(x)]);
+        var zero = TensorData([2L], 0f, 0f);
+        Assert.All(RunFloats(arch.ToConcreteModel(RngConfig.Default), zero), v => Assert.NotEqual(0f, v));
     }
 
     private static Tensor<float32> DottedNameBody(Tensor<float32> t) => t * InitSimple.Init([Scalar(2L)]);

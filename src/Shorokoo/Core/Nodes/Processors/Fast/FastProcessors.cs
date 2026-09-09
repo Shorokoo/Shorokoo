@@ -1159,9 +1159,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// outside a loop already gives; sharing a draw is not.</para>
         ///
         /// <para>Each added level takes a <c>(slot, -1)</c> pair, the shape
-        /// <see cref="FastApplyIdentifierTemplates"/> gives an in-loop member: the slot is one past
-        /// every leading id component the callee body uses, so a realized iteration index can never
-        /// land on one of the callee's own members.</para>
+        /// <see cref="FastApplyIdentifierTemplates"/> gives an in-loop member. The slot is one past
+        /// every leading id component the callee body uses, so it cannot collide with one of the
+        /// callee's own members at that position; the realized iteration index sits one place
+        /// further in, where nothing else of the callee's ever lands. One slot serves every added
+        /// level, since each level opens a scope of its own — the same restart the identifier
+        /// pass's loop-id allocation makes for each loop it enters.</para>
         /// </summary>
         private static (ModelId feedParentId, IReadOnlyList<FastTensorKey?> extraIterElements) ExtendScopeToCallSite(
             ModelId parentModelId,
@@ -1172,6 +1175,16 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             int accountedFor = parentModelId.Vals.Count(v => v == -1);
             int extra = enclosingLoops.Count - accountedFor;
             if (extra <= 0) return (parentModelId, []);
+
+            // Only a feed reads these. A callee that draws nothing would otherwise take three dead
+            // nodes per level per call site, and they cannot be hoisted out of the loop (they read
+            // its iteration index) nor pruned from a function body, which is cached flattened and
+            // re-spliced at every caller.
+            if (!subGraph.Nodes.Any(n =>
+                    n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM ||
+                    n.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL ||
+                    n.OpCode == InternalOpCodes.SHRK_RANDOM_BITS))
+                return (parentModelId, []);
 
             int loopSlot = 1;
             foreach (var n in subGraph.Nodes)

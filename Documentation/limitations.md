@@ -58,10 +58,14 @@ a carry's value is not knowable at build time.
 
 A variable that is assigned inside a loop *before ever being read in that same
 loop* cannot be used after the loop. Shorokoo cannot recover the variable's
-initial value (needed for the zero-iteration case) and conservatively rejects
-the graph. Initialize the
-variable explicitly inside the loop body with `LoopAPI.Init(x)` (or read it once,
-e.g. `OnnxOp.Identity(x)`) before the first assignment.
+initial value (needed for the zero-iteration case) and rejects the graph as
+**FW046**, whether the value is returned from the graph or feeds another node.
+Initialize the variable explicitly inside the loop body with `LoopAPI.Init(x)`
+(or read it once, e.g. `OnnxOp.Identity(x)`) before the first assignment.
+
+`ctx.IterationIndex` is refused the same way, and for the same reason: it is the
+loop's own per-iteration counter and has no value once the loop has exited.
+`LoopAPI.Init` a local and assign the index to it to carry one out.
 
 ### Carrying a value computed outside the loop body
 
@@ -93,23 +97,39 @@ type, move the assignment out of the loop.
 The build reports this as the **MSG005** warning on the offending line, and
 concretizing the graph raises `FW023` if it is left unfixed.
 
-The same wrapper is what lets a **lagged** carry — a local holding what another
-carry held one iteration ago — be read after the loop. The loop computes that
-value either way, and reading it inside the body (or scanning it) needs no
-wrapping; but `prev = acc` is a bare assignment like any other, so there is no
-body node for the loop to point `prev` at afterwards:
+The same wrapper is what a **lagged** carry — a local holding what another carry
+held one iteration ago — needs in every case but one. Reading the lagged value
+inside an outermost loop's body, or scanning it, works unwrapped:
 
 ```csharp
 foreach (var ctx in LoopAPI.Iterate(trips))
 {
-    sum  = sum + prev;
-    prev = LoopAPI.Carry(acc);   // not `prev = acc;` — needed only to read prev after the loop
+    sum  = sum + prev;   // acc's value from the previous iteration
+    prev = acc;
     acc  = acc + Scalar(1.0f);
 }
 ```
 
-Left unwrapped and read after the loop, the graph is refused as **FW046**, naming
-the wrapper.
+Wrap the assignment as `prev = LoopAPI.Carry(acc)` to do anything more than that.
+A bare assignment gives the lagged local no body node of its own — it shares the
+node of the carry it trails — and three things follow, each refused rather than
+answered wrongly:
+
+| shape | code |
+|---|---|
+| reading the lagged value after the loop | **FW046** |
+| lagging inside a **nested** loop (the enclosing loop has nothing to carry it out by) | **FW048** |
+| trailing a variable the loop does not carry at all | **FW047** |
+
+A chain deeper than one step — `prev2 = prev; prev = acc;` — is not identified
+either, and is refused as **FW049**. Wrapping every step of the chain works:
+
+```csharp
+sum   = sum + prev2;
+prev2 = LoopAPI.Carry(prev);
+prev  = LoopAPI.Carry(acc);
+acc   = acc + Scalar(1.0f);
+```
 
 ### Scanning inside a nested loop, read after the enclosing loop
 
@@ -122,6 +142,7 @@ and unlike an ordinary local, a stack has no pre-loop value to declare with
 returning something for a trip count it cannot honour:
 
 ```csharp
+var acc = x;
 Variable? scanned = null;
 foreach (var ctx0 in LoopAPI.Iterate(outerTrips))
     foreach (var ctx1 in LoopAPI.Iterate(innerTrips))
@@ -133,8 +154,13 @@ return (Tensor<float32>)scanned!;   // refused: FW046
 ```
 
 Consume the inner loop's scan output inside the enclosing loop's body, or scan on
-the enclosing loop's own context — `ctx0.Scan(acc)` works from an inner body and
+the enclosing loop's own context — `ctx0.Scan(v)` works from an inner body and
 records one entry per *outer* iteration.
+
+That last route needs `v` to survive the nested loop, since the enclosing loop
+records the value that loop ends with. A body-local the nested loop assigns
+before ever reading does not, and is refused as **FW050**; `LoopAPI.Init` it in
+the nested body, as above, and the scan records it.
 
 ## Current limitations (could be lifted)
 

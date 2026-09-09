@@ -231,11 +231,11 @@ How a hyper value gets supplied depends on the route:
       acc  = acc + Scalar(1.0f);
   }
   ```
-  The variable being trailed has to be a carry itself — read in the body before it is
-  assigned. Trailing one that is not raises `FW047`, naming the shape. To read the lagged
-  value *after* the loop, wrap the assignment — `prev = LoopAPI.Carry(acc)` — for the same
-  reason any bare assignment needs it (see [limitations.md](limitations.md)); reading it
-  inside the body, or scanning it, needs no wrapping.
+  Written bare like that, a lagged local works in an **outermost** loop, read inside the
+  body or scanned. Everything else — reading it after the loop, lagging inside a nested
+  loop, trailing a variable the loop does not carry, or chaining two lag steps — is
+  refused, naming the shape, and wrapping the assignment as `prev = LoopAPI.Carry(acc)`
+  answers all four. See [limitations.md](limitations.md).
 
 ## Omittable parameters (defaulted hypers & optional inputs)
 

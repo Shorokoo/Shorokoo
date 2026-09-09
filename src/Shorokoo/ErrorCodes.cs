@@ -664,6 +664,15 @@ namespace Shorokoo
         /// <summary>A loop body trailed the previous iteration's value of a variable the loop does not carry</summary>
         public const string FW047 = "FW047";
 
+        /// <summary>A nested loop body trailed the previous iteration's value of one of its carries</summary>
+        public const string FW048 = "FW048";
+
+        /// <summary>A loop body read a value it holds from more than one iteration ago</summary>
+        public const string FW049 = "FW049";
+
+        /// <summary>An enclosing loop's ctx.Scan was given a value the nested loop does not carry out</summary>
+        public const string FW050 = "FW050";
+
         #endregion
 
         #region Utility Error Codes (UT001-UT010)

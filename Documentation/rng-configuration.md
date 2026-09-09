@@ -173,15 +173,27 @@ whether the loop survives to runtime or is unrolled at concretization (each copy
 to the very same key, bit-for-bit).
 
 A feed reached by **calling a module from inside a loop** takes that slot too, whether the
-model was created inside the body or outside it and whether the call is a model call or a
-module-typed `Function`: the draw is executed once per iteration, and a second execution of
-a draw is a second sample. The call site's own position supplies the scope, so the feed
-lands under the call site's id extended with one `(slot, -1)` pair per enclosing loop.
+model was created inside the body or outside it, and by either call form — a model call or a
+module-typed `Function`: the draw is executed once per iteration, and a second execution of a
+draw is a second sample. The call site's own position supplies the scope, so the feed lands
+under the call site's id extended with one `(slot, -1)` pair per enclosing loop. (The one
+route this does not reach is a model arriving as a `[Hyper]` model parameter, which is
+substituted rather than reparented.)
 
-The callee's **parameters** deliberately do not take that slot. One call site reading one
-parameter on every iteration is weight sharing, and is what a model created outside the loop
-already gives; creating the model inside the body is how you ask for a parameter per
+Note what the slot separates and what it does not. It separates the **iterations** of one
+call site. Two call sites reaching one and the same model *object* still share its id, and
+therefore its stream, exactly as they do outside a loop — see
+[#298](https://github.com/Shorokoo/Shorokoo/issues/298). Two call sites of a module-typed
+`Function` each mint their own id and do not.
+
+The callee's **parameters** deliberately do not take the iteration slot. One call site reading
+one parameter on every iteration is weight sharing, and is what a model created outside the
+loop already gives; creating the model inside the body is how you ask for a parameter per
 iteration.
+
+Because a feed's id is what keys its stream, a module called inside a loop keys differently
+than it did before this scope existed. A `Rng.Pin` path or a per-stream `Override` written
+against such a model needs re-reading off the stream report.
 
 ## Per-stream overrides
 

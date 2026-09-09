@@ -288,13 +288,14 @@ public class CSharpModelBuilderCoverageTests
     private static InternalComputationGraph BuildLoopBodyHoistingGraph()
     {
         Tensor<float32>? scanned = null;
-        Scalar<int64>? finalIdx = null;
+        var finalIdx = Scalar(-1L);
         foreach (var ctx in LoopAPI.Iterate(Scalar(2L)))
         {
+            LoopAPI.Init(finalIdx);
             scanned = ctx.Scan(Vector(1.0f, 2.0f));
-            finalIdx = ctx.IterationIndex;
+            finalIdx = ctx.IterationIndex + Scalar(0L);
             ctx.Break(ctx.IterationIndex >= Scalar(0L));
         }
-        return new InternalComputationGraph([], ImmutableArray.Create<Variable>(scanned!, finalIdx!));
+        return new InternalComputationGraph([], ImmutableArray.Create<Variable>(scanned!, finalIdx));
     }
 }

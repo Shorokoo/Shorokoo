@@ -504,6 +504,15 @@ public partial class StatefulGainCalledTwiceModel
     }
 }
 
+/// <summary>A trainable parameter plus a runtime random draw, so the graph carries an RNG feed
+/// whose key chain needs the model's RngSeed parameter.</summary>
+[Module]
+public partial class RngGainModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+        => input * Ones.Init([Scalar(2L)]) + Globals.RandomUniform(input.ShapeTensor(), 0f, 1f);
+}
+
 /// <summary>A reference to a parameter of a model that is never called, so the graph holds the
 /// reference with no definition behind it.</summary>
 [Module]

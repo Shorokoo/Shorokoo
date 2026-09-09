@@ -309,4 +309,21 @@ public class RngPinTests
             AssertFailsWith<InvalidOperationException>(() => Rng.Pin(new object()), "inside a module body");
         }
     }
+    // Pins Shorokoo/Shorokoo#292: the non-concretized training path never runs InjectRngDrawCounter
+    // or the key-derivation wiring, so a model with a runtime draw loses the RngSeed parameter its
+    // feeds' key chains read — and with it any effect an RngConfig could have.
+    [Fact(Skip = "Shorokoo/Shorokoo#292: the non-concretized training path drops the RngSeed parameter")]
+    public void TestARuntimeDrawKeepsItsRngSeedOnTheNonConcretizedTrainingPath()
+    {
+        var g = RngGainModel.ComputationGraph;
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([2L], 1f, 2f)])).ToInternal();
+        var training = TrainingGraphBuilder.PrepareForTrainingAsFast(
+            g.ToInternal(), SimpleSumSquaredLoss.ComputationGraph.ToInternal());
+        Assert.Equal(RngSeedNodeCount(arch), RngSeedNodeCount(training));
+    }
+
+    private static int RngSeedNodeCount(InternalComputationGraph g)
+        => g.Nodes.Count(n => n.IdentifierTemplate
+            == Shorokoo.Core.Nodes.Processors.Fast.FastWireRngKeyDerivation.RngSeedIdentifierTemplate);
+
 }

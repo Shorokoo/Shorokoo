@@ -93,7 +93,6 @@ namespace Shorokoo.Tests.Utils
             {
                 if (genericTypes is { Count: > 0 })
                     FastChangeGenericTypeSpecialization.Process(moduleGraph, genericTypes);
-                moduleGraph = FastToConcreteDataType.Process(moduleGraph);
             }
 
             var concreteArch = moduleGraph.ToConcreteArchitecture(moduleGraph.FromOrderedInputs([.. allInputs]));

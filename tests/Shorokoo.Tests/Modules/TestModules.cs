@@ -1264,11 +1264,69 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
-    /// <summary>An initializer whose body calls a module (Shorokoo/Shorokoo#276).</summary>
+    /// <summary>Machinery-free callee for the initializer-calls-a-module fixtures below.</summary>
     [Module]
     public partial class DoublerSub
     {
         public static Tensor<float32> Inline(Tensor<float32> v) => v * Scalar(2f);
+    }
+
+    /// <summary>An initializer whose body calls a module that owns a trainable parameter.</summary>
+    [TrainableParamInitializer]
+    public static partial class InitCallingAParamOwningModule
+    {
+        public static Tensor<float32> Inline(Vector<int64> shape)
+            => SimplestLayer.Call(Globals.TensorFill(shape, 1.0f));
+    }
+
+    /// <summary>Drives InitCallingAParamOwningModule; pins Shorokoo/Shorokoo#287.</summary>
+    [Module]
+    public partial class UsesInitCallingAParamOwningModule
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => input * InitCallingAParamOwningModule.Init(Vector(2L));
+    }
+
+    /// <summary>An initializer whose body calls a module from inside a loop — the export shape of Shorokoo/Shorokoo#287, distinct from the first-use-in-a-loop fixtures above.</summary>
+    [TrainableParamInitializer]
+    public static partial class InitCallingAModuleInALoop
+    {
+        public static Tensor<float32> Inline(Vector<int64> shape)
+        {
+            var v = Globals.TensorFill(shape, 1.0f);
+            foreach (var _ in LoopAPI.Iterate(Scalar(2L))) v = DoublerSub.Call(v);
+            return v;
+        }
+    }
+
+    /// <summary>Drives InitCallingAModuleInALoop; pins Shorokoo/Shorokoo#287.</summary>
+    [Module]
+    public partial class UsesInitCallingAModuleInALoop
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => input * InitCallingAModuleInALoop.Init(Vector(2L));
+    }
+
+    /// <summary>Callee with a [Hyper], so inlining it into a body leaves a MODEL_HYPERPARAM read behind.</summary>
+    [Module]
+    public partial class HyperDoublerSub
+    {
+        public static Tensor<float32> Inline(Tensor<float32> v, [Hyper] Scalar<float32> k) => v * k;
+    }
+
+    /// <summary>An initializer whose body calls a hyperparameter-bearing module.</summary>
+    [TrainableParamInitializer]
+    public static partial class InitCallingHyperModule
+    {
+        public static Tensor<float32> Inline(Vector<int64> shape)
+            => HyperDoublerSub.Call(Scalar(2f), Globals.TensorFill(shape, 1.0f));
+    }
+
+    /// <summary>Drives InitCallingHyperModule through a module, for the flattened-export path.</summary>
+    [Module]
+    public partial class UsesInitCallingHyperModule
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input) => input * InitCallingHyperModule.Init(Vector(2L));
     }
 
     [TrainableParamInitializer]

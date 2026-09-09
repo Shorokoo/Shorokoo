@@ -387,6 +387,14 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>Wraps the non-generic caller, so the generic call site sits one level deeper.</summary>
+    [Module]
+    public partial class WrapsNonGenericCallerOfGenericModule
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => NonGenericCallerOfGenericModule.Call(input);
+    }
+
     /// <summary>
     /// Nested generic module that performs type casting and simple operations.
     /// Uses three generic type parameters: A (hyperparam), B (input), C (internal only).
@@ -1422,7 +1430,7 @@ namespace Shorokoo.Tests.Modules
 
     /// <summary>
     /// Three-level module-on-module-on-hyperparam-module call. When the outer
-    /// module's <c>MODULE_INVOKE</c> for <see cref="CallsHypersLayer"/> is
+    /// module's <c>MODEL_INVOKE</c> for <see cref="CallsHypersLayer"/> is
     /// inlined, <c>FastReparentToCallSite</c> walks
     /// <see cref="CallsHypersLayer"/>'s flattened body, which contains a
     /// <c>MODULE_SET_HYPERPARAMS</c> node for the nested

@@ -146,6 +146,17 @@ file that only fails later when a third-party runtime rejects the custom ops.
 Module-stage graphs are persisted with the `.srk`/`.zsrk` format below, which
 uses Shorokoo's internal dialect and is re-imported by Shorokoo only.
 
+Inside a function body the guarantee is not yet complete. A body that calls a
+module is written out lowered rather than carrying the call, which covers the
+common shapes — but a callee owning a trainable parameter still leaves
+`#ModelParamRef#` in the emitted body, so that one file *does* name an op no
+stock runtime has, and the export does not catch it. A body wrapping its call in
+a loop stays vanilla but is rejected for missing type information. Both are
+[#287](https://github.com/Shorokoo/Shorokoo/issues/287).
+The `.srk` format makes the opposite trade and keeps each body as authored, so a
+module reloaded from it still shows the sub-module it calls rather than a copy of
+that callee inlined into every caller.
+
 ### Graph input/output names and shapes
 
 Exported graph inputs and outputs are named from the model's signature — the
@@ -187,6 +198,11 @@ the model's metadata props), so an imported graph's `Kind` is the kind it was
 saved with. Foreign models have no tag and are classified by op-scanning. A tag
 that is structurally impossible for the model's content (a hand-edited or
 corrupt file) fails the import loudly.
+
+A node calling one of the model's own functions with a different number of inputs
+than that function's body declares is refused on import for the same reason: the
+call cannot be lowered against its body, and accepting it would produce a graph
+whose spliced inputs go nowhere.
 
 Models using ONNX external data (the standard layout for large third-party models)
 load transparently from a **file path** — `location` keys resolve against the model

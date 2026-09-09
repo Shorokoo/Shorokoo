@@ -150,7 +150,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// Re-keys all nodes and tensor keys in a <see cref="InternalComputationGraph"/> so that
         /// every node and tensor key is globally unique. Necessary because
         /// <see cref="Function.GetFastFlattenedGraph"/> is cached and shared across call
-        /// sites, so cloning it multiple times produces subgraphs with identical keys.
+        /// sites, so thawing it once per call site produces subgraphs with identical keys.
         /// Without re-keying, inserting the same function's subgraph more than once causes
         /// key collisions.
         /// </summary>
@@ -728,6 +728,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var outputRemap = new Dictionary<FastTensorKey, FastTensorKey>();
             bool anyInlined = false;
 
+            // Call-site ids for module-typed FUNCTION_INVOKEs, allocated above every id already
+            // in the graph so they cannot collide with the ones FastApplyIdentifierTemplates
+            // handed out before this pass, nor with the ones an earlier sweep handed out here.
+            int nextCallSiteId = NextFreeTopLevelModelId(graph);
+            var callSiteDedupeIds = new Dictionary<string, int>();
+
             foreach (var fastNode in graph.Nodes)
             {
                 bool isFunction = fastNode.OpCode == InternalOpCodes.FUNCTION_INVOKE;
@@ -754,12 +760,38 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 if (isFunction)
                 {
                     var targetFunction = fastNode.TargetFunction!;
-                    subFastGraph = targetFunction.GetFastFlattenedGraph().Clone();
+                    subFastGraph = targetFunction.GetFastFlattenedGraph();
                     FastProcessorHelper.RekeySubgraph(subFastGraph);
+
+                    // A FUNCTION_INVOKE carries no model operand, so nothing distinguishes two
+                    // call sites of one module-typed function. Left unreparented they keep the
+                    // body's own local model id and collapse onto a single parameter identity —
+                    // and a parameter whose shape comes from a per-call-site hyperparameter then
+                    // silently takes the first site's shape (Shorokoo/Shorokoo#273). Mint an id
+                    // for the call site and reparent under it, the way the MODEL_INVOKE arm
+                    // reparents under the id its model variable already carries.
+                    if (CarriesOwnedIdentity(subFastGraph))
+                    {
+                        var callSiteId = new ModelId(nextCallSiteId++);
+                        var calleeName = targetFunction.DefaultName;
+                        // The dedupe index, not the model id, is what tells two same-named
+                        // parameters apart in an export, and FastApplyIdentifierTemplates numbered
+                        // this module's MODEL_INVOKE sites from 0 with a counter of its own. Start
+                        // above whatever the graph already uses for the name, or a call site and a
+                        // model-variable site of one module collide on a single parameter name.
+                        callSiteDedupeIds[calleeName] =
+                            callSiteDedupeIds.TryGetValue(calleeName, out var seen)
+                                ? seen + 1
+                                : NextFreeDedupeId(graph, calleeName);
+                        var callSiteTemplate = ModelParamIdentifierTemplate.LocalModule(
+                            callSiteId, calleeName, callSiteDedupeIds[calleeName], ImmutableArray<int>.Empty);
+
+                        FastReparentToCallSite(subFastGraph, callSiteTemplate, callSiteId, null, graph);
+                    }
                 }
                 else
                 {
-                    // MODULE_INVOKE: inputs[0] = model, inputs[1:] = function args
+                    // MODEL_INVOKE: inputs[0] = model, inputs[1:] = function args
                     var modelKey = fastNode.Inputs[0]!.Value;
 
                     // Find the direct MODULE_SET_HYPERPARAMS node producing the model
@@ -783,7 +815,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         }
                     }
 
-                    subFastGraph = moduleFn.GetFastFlattenedGraph().Clone();
+                    subFastGraph = moduleFn.GetFastFlattenedGraph();
                     FastProcessorHelper.RekeySubgraph(subFastGraph);
 
                     // Reparent the subgraph
@@ -825,12 +857,22 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     }
                 }
 
-                // Build caller input keys: [hyperparamKeys..., node.Inputs.Skip(1)...]
-                // Skip(1) skips the model variable for MODULE_INVOKE, and matches
-                // the non-fast InlineModulesAndFunctions behaviour for FUNCTION_INVOKE.
+                // Both arms must line up with the callee body's inputs, which are
+                // [hyperparams..., args...]. The two ops carry their operands differently:
+                //
+                //   MODEL_INVOKE    [model, args...]  — the model is dropped, and the body's
+                //                                       hyperparams come from MODEL_HYPERPARAM
+                //                                       nodes read off that model above.
+                //   FUNCTION_INVOKE [args...]         — no model operand, so nothing is dropped
+                //                                       and hyperparams (a module-typed callee
+                //                                       has them) are supplied positionally by
+                //                                       the caller, ahead of the runtime args.
+                //
+                // Skipping the first input for a FUNCTION_INVOKE ate the callee's first
+                // argument (Shorokoo/Shorokoo#251).
                 var callerInputKeys = new List<FastTensorKey?>();
                 callerInputKeys.AddRange(hyperparamNodeKeys);
-                callerInputKeys.AddRange(fastNode.Inputs.Skip(1).ToList());
+                callerInputKeys.AddRange(isFunction ? fastNode.Inputs : fastNode.Inputs.Skip(1));
 
                 Debug.Assert(callerInputKeys.Count == subFastGraph.Inputs.Count,
                     $"FastInlineModulesAndFunctions: caller inputs ({callerInputKeys.Count}) != " +
@@ -1078,6 +1120,72 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 subGraph.Nodes.Insert(insertIdx + offset, newNode);
                 offset++;
             }
+        }
+
+        /// <summary>
+        /// True when the body owns something whose identity is per call site — a parameter, a
+        /// sub-module instantiation, or a runtime RNG feed. A body without any of these inlines
+        /// identically at every call site, so it needs no id of its own.
+        /// </summary>
+        private static bool CarriesOwnedIdentity(InternalComputationGraph subGraph)
+            => subGraph.Nodes.Any(n =>
+                n.OpCode == InternalOpCodes.MODEL_PARAM_REF ||
+                n.OpCode == InternalOpCodes.MODULE_SET_HYPERPARAMS ||
+                n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM ||
+                n.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL ||
+                n.OpCode == InternalOpCodes.SHRK_RANDOM_BITS);
+
+        /// <summary>
+        /// One past the largest deduplication index the graph's identifier templates already use
+        /// for <paramref name="moduleName"/>. Templates read <c>&lt;Name&gt;#&lt;index&gt;</c>, and that index is
+        /// the only part of a parameter's name that separates same-named siblings.
+        /// </summary>
+        private static int NextFreeDedupeId(InternalComputationGraph graph, string moduleName)
+        {
+            int max = -1;
+            // Templates store part names escaped, so the needle must be too: a raw name carrying
+            // '.', '#', ':' or '\\' matches nothing, the scan returns 0, and the call site reuses
+            // the index the model-variable site already holds — two parameters, one name.
+            var needle = ModelParamIdentifierTemplatePart.EscapePartName(moduleName) + "#";
+            foreach (var node in graph.Nodes)
+            {
+                var template = node.IdentifierTemplate;
+                if (template is null) continue;
+                for (int at = template.IndexOf(needle, StringComparison.Ordinal); at >= 0;
+                     at = template.IndexOf(needle, at + 1, StringComparison.Ordinal))
+                {
+                    // A part starts the template or follows a separator. Without that boundary the
+                    // scan matches any name ending in this one, and an unrelated 'XAlpha' would
+                    // push 'Alpha' from #0 to #1 — renaming a parameter, which is the user-visible
+                    // contract a checkpoint is saved under.
+                    if (at > 0 && template[at - 1] is not ('.' or ':')) continue;
+
+                    int digits = at + needle.Length, end = digits;
+                    while (end < template.Length && char.IsAsciiDigit(template[end])) end++;
+                    if (end > digits && int.TryParse(template[digits..end], out var used))
+                        max = Math.Max(max, used);
+                }
+            }
+            return max + 1;
+        }
+
+        /// <summary>
+        /// One past the largest leading model-id component anywhere in the graph, so a freshly
+        /// minted call-site id shares an address space with the allocated ones without colliding.
+        /// Never 0: that slot is reserved at every level for the RngSeed parameter, which is why
+        /// FindNextSpot counts from 1 and an explicit Rng.Pin of 0 is refused.
+        /// </summary>
+        private static int NextFreeTopLevelModelId(InternalComputationGraph graph)
+        {
+            int max = -1;
+            foreach (var node in graph.Nodes)
+            {
+                var vals = node.Attributes.IsAttributeDefined(OnnxOpAttributeNames.ShrkAttrLocalModelId)
+                    ? node.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrLocalModelId)
+                    : null;
+                if (vals is { Length: > 0 }) max = Math.Max(max, (int)vals[0]);
+            }
+            return Math.Max(max + 1, 1);
         }
 
         /// <summary>
@@ -5416,7 +5524,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             opCode == InternalOpCodes.MODEL_TENSORSTRUCT_INPUT ||
             opCode == InternalOpCodes.GENERIC_TYPE_INPUT;
 
-        // Ops whose output is a DataStructure.Sequence. MODULE_INVOKE/FUNCTION_INVOKE and the
+        // Ops whose output is a DataStructure.Sequence. MODEL_INVOKE/FUNCTION_INVOKE and the
         // model-struct ops (MODEL_HYPERPARAM, MODULE_SET_HYPERPARAMS, GET_MODEL_ID) can also
         // carry sequence outputs but are guaranteed to be gone before FoldConstants runs (the
         // ComputationGraph → fast pipeline asserts them removed upstream). MODEL_SEQUENCE_INPUT

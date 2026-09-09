@@ -262,16 +262,12 @@ namespace Shorokoo.Tests.Utils
             double tolerance = Tolerance)
         {
             // Generic-method modules build their ComputationGraph with IGenericType placeholder
-            // DTypes + leading GENERIC_TYPE_INPUT inputs. Apply the caller-supplied type
-            // specialization (if any) via FastChangeGenericTypeSpecialization, then concretize
-            // via FastToConcreteDataType — the latter removes the generic input slots and strips
-            // the param-name tags from DType attributes.
-            if (moduleGraph.Nodes.Any(n => n.OpCode == InternalOpCodes.GENERIC_TYPE_INPUT))
-            {
-                if (genericTypes is not null && genericTypes.Count > 0)
-                    Shorokoo.Core.Nodes.Processors.Fast.FastChangeGenericTypeSpecialization.Process(moduleGraph, genericTypes);
-                moduleGraph = Shorokoo.Core.Nodes.Processors.Fast.FastToConcreteDataType.Process(moduleGraph);
-            }
+            // DTypes + leading GENERIC_TYPE_INPUT inputs. Only the caller-supplied type
+            // specialization is applied here; erasing the placeholders is ToConcreteArchitecture's
+            // job, so leaving it to the product is what puts this corpus through the public route.
+            if (genericTypes is not null && genericTypes.Count > 0
+                && moduleGraph.Nodes.Any(n => n.OpCode == InternalOpCodes.GENERIC_TYPE_INPUT))
+                Shorokoo.Core.Nodes.Processors.Fast.FastChangeGenericTypeSpecialization.Process(moduleGraph, genericTypes);
 
             var allInputs = new TensorData[hyperparamInputs.Length + runtimeInputs.Length];
             Array.Copy(hyperparamInputs, 0, allInputs, 0, hyperparamInputs.Length);
@@ -325,12 +321,9 @@ namespace Shorokoo.Tests.Utils
                     $"{typeof(TModule).FullName} has no public static ComputationGraph property");
             var moduleGraph = ((ComputationGraph)prop.GetValue(null)!).ToInternal();
 
-            if (moduleGraph.Nodes.Any(n => n.OpCode == InternalOpCodes.GENERIC_TYPE_INPUT))
-            {
-                if (genericTypes is not null && genericTypes.Count > 0)
-                    Shorokoo.Core.Nodes.Processors.Fast.FastChangeGenericTypeSpecialization.Process(moduleGraph, genericTypes);
-                moduleGraph = Shorokoo.Core.Nodes.Processors.Fast.FastToConcreteDataType.Process(moduleGraph);
-            }
+            if (genericTypes is not null && genericTypes.Count > 0
+                && moduleGraph.Nodes.Any(n => n.OpCode == InternalOpCodes.GENERIC_TYPE_INPUT))
+                Shorokoo.Core.Nodes.Processors.Fast.FastChangeGenericTypeSpecialization.Process(moduleGraph, genericTypes);
 
             var data = CompressedFormatUtils.SaveFastGraphToBinary(moduleGraph, compressed: true);
             moduleGraph = CompressedFormatUtils.LoadFastGraphCore(data, "<roundtrip>", null).Graph;

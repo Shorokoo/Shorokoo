@@ -306,11 +306,17 @@ namespace Shorokoo.Graph
         }
 
         /// <summary>
-        /// Pairs the graph's input names (in declaration order) with the supplied values to produce a
+        /// Pairs the graph's data inputs (in declaration order) with the supplied values to produce a
         /// <see cref="ModelParamList"/> of named inputs — the <c>inputHints</c> argument for
         /// <see cref="ToConcreteArchitecture"/>, or the inputs for an <c>Execute</c> call.
+        /// <para>A generic <c>[Module]</c>'s leading type-placeholder slots are not data inputs and
+        /// take no value here, so a generic module's graph expects one value per real input just
+        /// like any other.</para>
         /// </summary>
-        /// <param name="inputValues">Input values in the same order as the graph's declared inputs.</param>
+        /// <param name="inputValues">Values in the graph's declaration order, at most one per data
+        /// input. A leading subset is allowed — that is the form <see cref="Specialize"/> takes when
+        /// binding hyperparameters only — but supplying more values than the graph has data inputs
+        /// is refused rather than silently truncated.</param>
         public ModelParamList FromOrderedInputs(ImmutableArray<TensorData> inputValues)
             => ToInternal().FromOrderedInputs(inputValues);
 

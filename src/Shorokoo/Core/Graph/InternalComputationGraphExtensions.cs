@@ -76,6 +76,19 @@ namespace Shorokoo.Graph
         {
             void Stage(string stage) => progress?.Report(BuildPhase.Concretize, stage);
 
+            // A generic [Module] builds its graph with IGenericType placeholder DTypes and leading
+            // GENERIC_TYPE_INPUT slots; every later stage expects concrete types, and the final
+            // op check refuses the leftover placeholder. Erasing it was reachable only from test
+            // helpers, which is what left a generic module with no public route to a runnable
+            // model (Shorokoo/Shorokoo#253). Do it here, ahead of the pipeline proper.
+            //
+            // The placeholders need not be in this graph: a non-generic module that calls a generic
+            // one carries none itself, and its callee's body supplies them at inlining time. Ask
+            // the same question the pass does — a call site is generic when it names type arguments
+            // — so the caller's route erases too instead of splicing a body it cannot match.
+            if (NeedsGenericErasure(graph))
+                graph = FastToConcreteDataType.Process(graph);
+
             Stage("Clone");
             var fastGraph = graph.Clone();
             FastGraphCycleDetector.AssertAcyclic(fastGraph, "After Clone");
@@ -590,12 +603,33 @@ namespace Shorokoo.Graph
         /// <see cref="ModelParamList"/> of named inputs — the <c>inputHints</c> argument for
         /// <see cref="ToConcreteArchitecture"/>, or the inputs for an <c>Execute</c> call.
         /// </summary>
-        /// <param name="graph">The graph whose input names to pair with the values.</param>
-        /// <param name="inputValues">Input values in the same order as the graph's declared inputs.</param>
+        /// <param name="graph">The graph whose data-input names to pair with the values.</param>
+        /// <param name="inputValues">One value per data input, in declaration order. A generic
+        /// [Module]'s type-placeholder slots are not data inputs and take no value.</param>
         /// <returns>The inputs as a named <see cref="ModelParamList"/>.</returns>
         internal static ModelParamList FromOrderedInputs(this InternalComputationGraph graph, ImmutableArray<TensorData> inputValues)
         {
-            return new ModelParamList(graph.InputUniqueNames.Zip(inputValues)
+            // A generic [Module]'s leading GENERIC_TYPE_INPUT slots are type placeholders, not data:
+            // they take no TensorData, so they take no hint either. GetSignatureStrings already
+            // reads the graph's inputs that way; zipping them here would spend the caller's first
+            // value on a placeholder and misname every hint after it (Shorokoo/Shorokoo#253).
+            var dataInputNames = graph.Inputs
+                .Zip(graph.InputUniqueNames)
+                .Where(x => graph.FindNode(x.First.FastNodeKey) is not { OpCode: InternalOpCodes.GENERIC_TYPE_INPUT })
+                .Select(x => x.Second);
+
+            // Fewer values than inputs is the deliberate partial form Specialize takes (hyperparams
+            // only). More is always a mistake, and Zip would swallow it: notably a caller still
+            // passing a value for a type placeholder, the shape this method used to expect.
+            var names = dataInputNames.ToList();
+            if (inputValues.Length > names.Count)
+                throw new ModelException(ErrorCodes.FW041, "FromOrderedInputs",
+                    $"the graph has {names.Count} data input(s) ({string.Join(", ", names)}) but " +
+                    $"{inputValues.Length} value(s) were supplied. Pass at most one value per data " +
+                    "input, in declaration order; a generic [Module]'s type-placeholder slots are " +
+                    "not data inputs and take no value.");
+
+            return new ModelParamList(names.Zip(inputValues)
                 .Select(x => new TensorDataModelParam(x.First.AssertNotNull(), ModelParamType.InputParam, x.Second)));
         }
 
@@ -693,6 +727,36 @@ namespace Shorokoo.Graph
                 + $"{moduleOps.Count} module-stage op(s) (e.g. {moduleOps[0].OpCode}). Its trainable parameters "
                 + "are not statically enumerable and would be missed. Call ToConcreteArchitecture(inputHints, ...) "
                 + "first, then run this on the returned graph.");
+        }
+
+        /// <summary>
+        /// True when <paramref name="graph"/> still has generic types to erase — a type placeholder
+        /// of its own, or a reachable callee body carrying one. The placeholders need not be in the
+        /// graph itself: a non-generic module that calls a generic one has none, and its callee
+        /// supplies them at inlining time.
+        ///
+        /// <para>Asking after the placeholders rather than after a call site's type-argument
+        /// attribute is what makes this idempotent: the attribute survives erasure, so keying off
+        /// it re-runs the pass on an already-erased graph — a reloaded one, say — and trips its
+        /// own placeholders-match-type-arguments assertion.</para>
+        /// </summary>
+        private static bool NeedsGenericErasure(InternalComputationGraph graph)
+        {
+            var seen = new HashSet<Function>();
+            var pending = new Queue<InternalComputationGraph>();
+            pending.Enqueue(graph);
+
+            while (pending.Count != 0)
+            {
+                var next = pending.Dequeue();
+                foreach (var node in next.Nodes)
+                {
+                    if (node.OpCode == InternalOpCodes.GENERIC_TYPE_INPUT) return true;
+                    if (node.TargetFunction is { } fn && seen.Add(fn))
+                        pending.Enqueue(fn.OriginalFastGraph);
+                }
+            }
+            return false;
         }
 
         private static void AssertFastGraphDoesNotContainOps(InternalComputationGraph fastGraph, string[] forbiddenOps, string stageName)

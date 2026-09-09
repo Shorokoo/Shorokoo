@@ -2,6 +2,7 @@ using Shorokoo.Core.AutoDiffCheckpointing;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 using Shorokoo.Core.Inference;
 using Shorokoo.Core.Graph;
+using Shorokoo.Core.Factory.IR;
 using Shorokoo.Runtime;
 
 namespace Shorokoo.Tests;
@@ -24,14 +25,49 @@ public class ModulesCoverageTests
             hyperparamInputs: [], runtimeInputs: x, expected: [1.0, 2.0]));
     }
 
-    /// <summary>An initializer that calls a module exports that call un-flattened — the emitted
-    /// FunctionProto body still holds ShrkCreateModule / ShrkModuleSetHyperparams / ShrkModelInvoke,
-    /// and ORT fails type inference on the call site. The callee does no aliasing, so this is
-    /// independent of the pass-through defects. Tracked as Shorokoo/Shorokoo#276.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#276: an initializer body's module call is not flattened before export")]
+    [Fact]
     public void TestAnInitializerCallingAModuleFlattensThatCallInItsFunctionBody()
-        => Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitCallingAModule>(
-            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)], expected: [2.0, 4.0]));
+    {
+        TensorData[] x = [TensorData(DType.Float32, [2L], 1f, 2f)];
+        Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitCallingAModule>(
+            hyperparamInputs: [], runtimeInputs: x, expected: [2.0, 4.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitCallingHyperModule>(
+            hyperparamInputs: [], runtimeInputs: x, expected: [2.0, 4.0]));
+    }
+
+    /// <summary>Flattening moves the callee's MODEL_PARAM_REF into the body, but the parameter
+    /// lowering chain only ever runs over a whole graph, so the emitted body still names
+    /// #ModelParamRef#. Tracked as Shorokoo/Shorokoo#287.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#287: a flattened body keeps its callee's parameter ref unlowered")]
+    public void TestAnInitializerCallingAParamOwningModuleFlattensThatCallInItsFunctionBody()
+        => Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitCallingAParamOwningModule>(
+            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)], expected: [1.0, 2.0]));
+
+    /// <summary>The same body with its call wrapped in a loop emits a Shrk-free proto that ORT
+    /// still rejects for missing type information on the loop's carried input, while the identical
+    /// shape at module level lowers fine. Tracked as Shorokoo/Shorokoo#287.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#287: a flattened body wrapping its call in a loop loses type information")]
+    public void TestAnInitializerCallingAModuleInALoopFlattensThatCallInItsFunctionBody()
+        => Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitCallingAModuleInALoop>(
+            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)], expected: [4.0, 8.0]));
+
+    [Fact]
+    public void TestTheNativeContainerKeepsASubModuleBoundaryThatOnnxExportFlattens()
+    {
+        var g = Modules.UsesInitCallingAModule.ComputationGraph;
+        var reloaded = CompressedFormatUtils.LoadFastGraphFromBinary(
+            CompressedFormatUtils.SaveFastGraphToBinary(g, compressed: false)).ToInternal();
+        var bodies = reloaded.LocalFunctions.SelectMany(f => f.Body.ToInternal().Nodes);
+        Assert.Contains(bodies, n => n.OpCode == InternalOpCodes.MODEL_INVOKE);
+    }
+
+    [Fact]
+    public void TestFromOrderedInputsRefusesMoreValuesThanTheGraphHasDataInputs()
+    {
+        var g = SimpleGenericLayer.ComputationGraph;
+        Assert.Throws<ModelException>(
+            () => g.FromOrderedInputs([TensorData([], 0f), TensorData([2L], 1f, 2f)]));
+    }
 
     [Fact]
     public void TestStateUpdateSurvivesNestedFirstUseModuleBuild()
@@ -601,7 +637,7 @@ public class ModulesCoverageTests
 
         var direct = ComputeContext.Default.Execute(concrete, numOut, input)[0]
             .ToTensorData().AccessRawMemory().ToArray();
-        using var ms = new System.IO.MemoryStream();
+        using var ms = new MemoryStream();
         ProtoBuf.Serializer.Serialize(ms, proto);
         var reimported = OnnxModelImporter.FromOnnxModel(ms.ToArray());
         var reParams = reimported.ToInternal().Nodes
@@ -635,7 +671,7 @@ public class ModulesCoverageTests
             Assert.DoesNotMatch("^N[0-9]+(_T[0-9]+)?$", n);
         });
 
-        using var ms = new System.IO.MemoryStream();
+        using var ms = new MemoryStream();
         ProtoBuf.Serializer.Serialize(ms, proto);
         var bytes = ms.ToArray();
 
@@ -730,13 +766,10 @@ public class ModulesCoverageTests
     [Fact]
     public void TestFastFunctionInvokeNodeReload()
     {
-        System.Func<Tensor<float32>, Tensor<float32>> impl = DoubleScalar;
-        var fn = Shorokoo.Core.ModuleHelper.CreateTargetFunction(impl);
-        Assert.Equal(Shorokoo.Core.Nodes.OnnxNodes.FunctionType.Module, fn.FunctionType);
+        var fn = ModuleFn((Func<Tensor<float32>, Tensor<float32>>)DoubleScalar);
+        Assert.Equal(FunctionType.Module, fn.FunctionType);
 
-        var input = (Tensor<float32>)Shorokoo.Core.Nodes.NodeDefinitions.InternalOp.ModuleTensorInput(
-            DType.Float32, rank: 1, Shorokoo.Core.Nodes.NodeDefinitions.InputType.ModelInput,
-            targetFunction: null, defaultName: "input");
+        var input = InvokeInput("input");
         var callResult = fn.Call(input);
         var output = (Tensor<float32>)callResult[0];
 
@@ -990,7 +1023,7 @@ public class ModulesCoverageTests
         var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x])).ToConcreteModel();
         var direct = ComputeContext.Default.Execute(concrete, x)[0].ToTensorData().AccessRawMemory().ToArray();
         var proto = Shorokoo.Core.Factory.FastOnnxModelBuilder.BuildOnnxModel(concrete);
-        using var ms = new System.IO.MemoryStream();
+        using var ms = new MemoryStream();
         ProtoBuf.Serializer.Serialize(ms, proto);
         var reimported = OnnxModelImporter.FromOnnxModel(ms.ToArray());
         var roundtrip = ComputeContext.Default.Execute(reimported, x)[0].ToTensorData().AccessRawMemory().ToArray();
@@ -1170,30 +1203,252 @@ public class ModulesCoverageTests
         Assert.Equal(5f, OnnxEngine.Eval(Scalar(2f) + Scalar(3f)).As<float32>().AccessMemory()[0]);
     }
 
-    /// <summary>A module-typed invoke is the one machinery shape the concretization refusal points at
-    /// that cannot take the advice: inlining it hits <c>Debug.Fail</c> ("caller inputs (0) != subgraph
-    /// inputs (1)"), which outside a test host kills the process, rather than the product's own
-    /// catchable exception. Tracked as Shorokoo/Shorokoo#251.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#251: a Debug.Fail on a user-reachable path fires instead of the product's own exception")]
-    public void TestConcretizingAModuleTypedInvokeFailsWithACatchableExceptionNotAnAssertion()
+    [Fact]
+    public void TestModuleTypedFunctionInvokesInlineTheirArgsHyperparamsAndParams()
     {
-        var g = ComputationGraph.FromInternal(ModuleInvokeGraph(), GraphKind.Module);
-        var ex = Record.Exception(() => g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([2L], 1f, 2f)])));
-        Assert.True(ex is null or InvalidOperationException or ShorokooException);
+        var input = TensorData([2L], 1f, 2f);
+        Assert.Equal([2f, 4f], RunInvoke((Func<Tensor<float32>, Tensor<float32>>)DoubleScalar, x => [x], input));
+        Assert.Equal([3f, 6f], RunInvoke((Func<Tensor<float32>, Scalar<float32>, Tensor<float32>>)ScaledByHyper, x => [Scalar(3f), x], input));
+        Assert.Equal([1f, 2f], RunInvoke((Func<Tensor<float32>, Tensor<float32>>)TimesOwnParam, x => [x], input));
+        Assert.Equal([1f, 2f], RunInvoke((Func<Tensor<float32>, Tensor<float32>>)PassThrough, x => [x], input));
     }
 
-    /// <summary>The refusal tells a reader to lower their module's graph, which a generic module's
-    /// user cannot do: its first graph input is a type placeholder that takes no TensorData, and the
-    /// passes that resolve it are internal, so concretization refuses its own output.
-    /// Tracked as Shorokoo/Shorokoo#253.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#253: a generic [Module] has no public route from ComputationGraph to a runnable model")]
+    private static Tensor<float32> PassThrough(Tensor<float32> t) => t;
+
+    [Fact]
+    public void TestAFunctionCallCountingArgumentsAgainstTheBodyRefusesEveryMismatch()
+    {
+        string Arity(Delegate body, int argCount) => Assert.Throws<ModuleException>(
+            () => ModuleFn(body).Call([.. Enumerable.Range(0, argCount).Select(i => InvokeInput($"a{i}"))])).Message;
+
+        var oneIn = (Func<Tensor<float32>, Tensor<float32>>)DoubleScalar;
+        var twoIn = (Func<Tensor<float32>, Scalar<float32>, Tensor<float32>>)ScaledByHyper;
+
+        Assert.Contains("0 argument(s)", Arity(oneIn, 0));
+        Assert.Contains("2 argument(s)", Arity(oneIn, 2));
+        Assert.Contains("1 hyperparameter(s)", Arity(twoIn, 1));
+        Assert.Contains("3 argument(s)", Arity(twoIn, 3));
+        Assert.Contains("null argument", Assert.Throws<ModuleException>(
+            () => ModuleFn(twoIn).Call(InvokeInput("a"), null)).Message);
+        Assert.Contains("0 argument(s)", Assert.Throws<ModuleException>(
+            () => ModuleFn(twoIn).Call(null!)).Message);
+    }
+
+    [Fact]
+    public void TestImportingAModelWhoseFunctionCallMiscountsItsInputsIsRefused()
+    {
+        var g = ComputationGraph.FromInternal(ModuleInvokeGraph(), GraphKind.Module);
+        var onnx = SrkFileFormat.Read(CompressedFormatUtils.SaveFastGraphToBinary(g, compressed: false)).OnnxBytes;
+
+        using var read = new MemoryStream(onnx);
+        var proto = ProtoBuf.Serializer.Deserialize<ModelProto>(read);
+        var fnNames = proto.Functions.Select(f => f.Name).ToHashSet();
+        proto.Graph.Nodes.Single(n => fnNames.Contains(n.OpType)).Inputs.Clear();
+
+        using var ms = new MemoryStream();
+        ProtoBuf.Serializer.Serialize(ms, proto);
+        var ex = Assert.Throws<ModuleException>(() => OnnxModelImporter.FromOnnxModel(ms.ToArray()));
+        Assert.Contains("0 input(s)", ex.Message);
+    }
+
+    [Fact]
+    public void TestEachCallSiteOfAModuleTypedFunctionGetsItsOwnParameter()
+    {
+        var fn = ModuleFn((Func<Tensor<float32>, Scalar<int64>, Tensor<float32>>)SizedByHyper);
+        var arch = ConcretizeInvokes(x =>
+            [(Tensor<float32>)fn.Call(Scalar(2L), x)[0], (Tensor<float32>)fn.Call(Scalar(5L), x)[0]]);
+        var infos = arch.GetConcreteModelParamInfos();
+        Assert.Equal(2, infos.ModelIds.Distinct().Count());
+        Assert.Equal(2, infos.ParamInfos.Select(i => i.ToShorokooIdString()).Distinct().Count());
+
+        var run = ComputeContext.Default.Execute(arch.ToConcreteModel(), TensorData([2L], 1f, 2f));
+        Assert.Equal(2, run[0].ToTensorData().As<float32>().AccessMemory<float>().Length);
+        Assert.Equal(5, run[1].ToTensorData().As<float32>().AccessMemory<float>().Length);
+    }
+
+    [Fact]
+    public void TestACallSiteIdNeverTakesTheSlotReservedForTheRngSeed()
+    {
+        var fn = ModuleFn((Func<Tensor<float32>, Tensor<float32>>)TimesOwnParam);
+        var ids = ConcretizeInvokes(x => [(Tensor<float32>)fn.Call(x)[0]])
+            .GetConcreteModelParamInfos().ModelIds;
+        Assert.NotEmpty(ids);
+        Assert.All(ids, id => Assert.NotEqual(0, id.Vals[0]));
+    }
+
+    [Fact]
+    public void TestOneModuleReachedThroughBothInvokeFormsKeepsTwoParameterNames()
+    {
+        var fn = ModuleFn((Func<Tensor<float32>, Tensor<float32>>)TimesOwnParam);
+        var x = InvokeInput("input");
+        var viaModel = ModuleFactory
+            .FromFunc<Tensor<float32>, Tensor<float32>>(TimesOwnParam, "TimesOwnParam")
+            .SetHyperparams().Call(x);
+        var g = ComputationGraph.FromInternal(
+            new InternalComputationGraph([x], [(Tensor<float32>)fn.Call(x)[0] + viaModel]), GraphKind.Module);
+
+        var input = TensorData([2L], 1f, 2f);
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
+        var names = arch.GetConcreteModelParamInfos().ParamInfos
+            .Select(i => i.ToShorokooIdString()).ToList();
+        Assert.Equal(2, names.Count);
+        Assert.Equal(2, names.Distinct().Count());
+        Assert.Equal([2f, 4f], RunFloats(arch.ToConcreteModel(), input));
+    }
+
+    /// <summary>A call site inside a loop body takes no iteration scope, so the callee's parameter
+    /// is shared across iterations where the MODEL_INVOKE route realizes one per iteration.
+    /// Tracked as Shorokoo/Shorokoo#285.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#285: a module-typed function invoked in a loop body takes no iteration scope")]
+    public void TestAModuleTypedFunctionInvokedInALoopRealizesAParameterPerIteration()
+    {
+        var fn = ModuleFn((Func<Tensor<float32>, Tensor<float32>>)TimesOwnParam);
+        var x = InvokeInput("input");
+        var acc = x;
+        foreach (var _ in LoopAPI.Iterate(Scalar(3L))) acc = (Tensor<float32>)fn.Call(acc)[0];
+        var g = ComputationGraph.FromInternal(new InternalComputationGraph([x], [acc]), GraphKind.Module);
+
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([2L], 1f, 2f)]));
+        Assert.Equal(3, arch.GetConcreteModelParamInfos().ModelIds.Distinct().Count());
+    }
+
+    /// <summary>Specialization is seeded from the top-level graph's generic call sites only, so a
+    /// generic module reached through a non-generic body two levels down keeps its type
+    /// placeholders and the inliner splices a body it cannot match.
+    /// Tracked as Shorokoo/Shorokoo#286.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#286: generic erasure does not reach a call site nested in a non-generic body")]
+    public void TestAGenericModuleTwoCallsDeepConcretizes()
+    {
+        var input = TensorData([2L], 1f, 2f);
+        var g = WrapsNonGenericCallerOfGenericModule.ComputationGraph;
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
+        Assert.Equal([2f, 4f], RunFloats(arch.ToConcreteModel(), input));
+    }
+
+    [Fact]
+    public void TestACallSiteParameterNameIsNotShiftedByAModuleWhoseNameEndsWithTheCallSites()
+    {
+        var input = TensorData([2L], 1f, 2f);
+        string[] Names(bool withDecoy)
+        {
+            var fn = ModuleFn((Func<Tensor<float32>, Tensor<float32>>)TimesOwnParam);
+            var x = InvokeInput("input");
+            var body = (Tensor<float32>)fn.Call(x)[0];
+            if (withDecoy)
+                body += ModuleFactory.FromFunc<Tensor<float32>, Tensor<float32>>(
+                    TimesOwnParamDecoy, "X" + nameof(ModulesCoverageTests)).SetHyperparams().Call(x);
+            var g = ComputationGraph.FromInternal(new InternalComputationGraph([x], [body]), GraphKind.Module);
+            return [.. g.ToConcreteArchitecture(g.FromOrderedInputs([input]))
+                .GetConcreteModelParamInfos().ParamInfos.Select(i => i.ToShorokooIdString())];
+        }
+
+        var callSite = $".{nameof(ModulesCoverageTests)}#0.";
+        Assert.Contains(Names(withDecoy: false), n => n.Contains(callSite));
+        Assert.Contains(Names(withDecoy: true), n => n.Contains(callSite));
+    }
+
+    private static Tensor<float32> TimesOwnParamDecoy(Tensor<float32> t) => t * InitSimple.Init([Scalar(2L)]);
+
+    private static Tensor<float32> SizedByHyper(Tensor<float32> t, [Hyper] Scalar<int64> n)
+        => InitSimple.Init([n]);
+
+    [Fact]
+    public void TestAModuleNameCarryingATemplateSeparatorStillGetsOneNamePerCallSite()
+    {
+        // The name is registered dotted first, so both routes below share it; templates store part
+        // names escaped, so a raw-name scan would find nothing and hand both sites index 0.
+        var viaModel = ModuleFactory
+            .FromFunc<Tensor<float32>, Tensor<float32>>(DottedNameBody, "Dotted.Layer").SetHyperparams();
+        var fn = ModuleFn((Func<Tensor<float32>, Tensor<float32>>)DottedNameBody);
+        var arch = ConcretizeInvokes(x => [(Tensor<float32>)fn.Call(x)[0] + viaModel.Call(x)]);
+        var names = arch.GetConcreteModelParamInfos().ParamInfos.Select(i => i.ToShorokooIdString()).ToList();
+        Assert.Equal(2, names.Count);
+        Assert.Equal(2, names.Distinct().Count());
+    }
+
+    [Fact]
+    public void TestTwoCallSitesOfADrawingBodyGetSeparateRngStreams()
+    {
+        var fn = ModuleFn((Func<Tensor<float32>, Tensor<float32>>)DrawsOnce);
+        var arch = ConcretizeInvokes(x => [(Tensor<float32>)fn.Call(x)[0] - (Tensor<float32>)fn.Call(x)[0]]);
+        var zero = TensorData([2L], 0f, 0f);
+        Assert.All(
+            RunFloats(arch.ToConcreteModel(RngConfig.Default), zero),
+            v => Assert.NotEqual(0f, v));
+    }
+
+    /// <summary>A draw inside a module invoked from a loop re-derives one stream key, so every
+    /// iteration returns the same sample. The iteration scope comes from the model's creation site
+    /// rather than the invoke site, and a module-typed function has no creation site at all.
+    /// Tracked as Shorokoo/Shorokoo#289.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#289: a module invoked in a loop reuses one RNG sample for every iteration")]
+    public void TestAModuleInvokedInALoopDrawsAFreshSamplePerIteration()
+    {
+        var zero = TensorData([2L], 0f, 0f);
+        var fn = ModuleFn((Func<Tensor<float32>, Tensor<float32>>)DrawsOnce);
+        var arch = ConcretizeInvokes(x =>
+        {
+            var acc = x;
+            foreach (var _ in LoopAPI.Iterate(Scalar(3L))) acc = (Tensor<float32>)fn.Call(acc)[0];
+            return [acc];
+        }, zero);
+        var three = RunFloats(arch.ToConcreteModel(RngConfig.Default), zero);
+
+        var once = ConcretizeInvokes(x => [(Tensor<float32>)fn.Call(x)[0]], zero);
+        var one = RunFloats(once.ToConcreteModel(RngConfig.Default), zero);
+        Assert.All(three.Zip(one, (t, o) => Math.Abs(t - 3 * o)), d => Assert.True(d > 1e-5f));
+    }
+
+    private static Tensor<float32> DottedNameBody(Tensor<float32> t) => t * InitSimple.Init([Scalar(2L)]);
+
+    private static Tensor<float32> DrawsOnce(Tensor<float32> t) => t + RandomUniform([Scalar(2L)], 0f, 1f);
+
+    private static Tensor<float32> ScaledByHyper(Tensor<float32> t, [Hyper] Scalar<float32> h) => t * h;
+
+    private static Tensor<float32> TimesOwnParam(Tensor<float32> t) => t * InitSimple.Init([Scalar(2L)]);
+
+    private static Function ModuleFn(Delegate body) => ModuleHelper.CreateTargetFunction(body);
+
+    private static Tensor<float32> InvokeInput(string name)
+        => (Tensor<float32>)InternalOp.ModuleTensorInput(
+            DType.Float32, rank: 1, InputType.ModelInput, targetFunction: null, defaultName: name);
+
+    private static float[] RunInvoke(Delegate body, Func<Tensor<float32>, Variable[]> callArgs, TensorData input)
+        => RunFloats(
+            ConcretizeInvokes(x => [(Tensor<float32>)ModuleFn(body).Call(callArgs(x))[0]], input).ToConcreteModel(),
+            input);
+
+    private static ComputationGraph ConcretizeInvokes(
+        Func<Tensor<float32>, Variable[]> outputs, TensorData? input = null)
+    {
+        var hint = input ?? TensorData([2L], 1f, 2f);
+        var x = InvokeInput("input");
+        var g = ComputationGraph.FromInternal(
+            new InternalComputationGraph([x], [.. outputs(x)]), GraphKind.Module);
+        return g.ToConcreteArchitecture(g.FromOrderedInputs([hint]));
+    }
+
+    [Fact]
     public void TestAGenericModuleCanBeConcretizedThroughPublicApi()
     {
+        var input = TensorData([2L], 1f, 2f);
         var g = SimpleGenericLayer.ComputationGraph;
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([], 0f), TensorData([2L], 1f, 2f)]));
-        Assert.Equal([1f, 2f], ComputeContext.Default
-            .Execute(arch.ToConcreteModel(), TensorData([], 0f), TensorData([2L], 1f, 2f))[0]
-            .ToTensorData().As<float32>().AccessMemory<float>().ToArray());
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
+        Assert.Equal([1f, 2f], RunFloats(arch.ToConcreteModel(), input));
+
+        var scale = TensorData([], 3f);
+        var gs = GenericScaleLayer.ComputationGraph;
+        var archS = gs.ToConcreteArchitecture(gs.FromOrderedInputs([scale, input]));
+        Assert.Equal([3f, 6f], RunFloats(archS.ToConcreteModel(), scale, input));
+
+        var shape = TensorData([1L], 2L);
+        var gp = GenericLayerWithTrainableParams.ComputationGraph;
+        var archP = gp.ToConcreteArchitecture(gp.FromOrderedInputs([shape, input]));
+        Assert.Equal([1f, 2f], RunFloats(archP.ToConcreteModel(), shape, input));
+
+        var gw = NonGenericCallerOfGenericModule.ComputationGraph;
+        var archW = gw.ToConcreteArchitecture(gw.FromOrderedInputs([input]));
+        Assert.Equal([2f, 4f], RunFloats(archW.ToConcreteModel(), input));
     }
 
     /// <summary>A module body reachable as a delegate, for a module the source generator never saw.</summary>
@@ -1205,12 +1460,9 @@ public class ModulesCoverageTests
     /// <summary>A bare module-typed function invoke over a machinery-free body.</summary>
     private static InternalComputationGraph ModuleInvokeGraph()
     {
-        var fn = Shorokoo.Core.ModuleHelper.CreateTargetFunction(
-            (Func<Tensor<float32>, Tensor<float32>>)DoubleScalar);
-        var input = (Tensor<float32>)Shorokoo.Core.Nodes.NodeDefinitions.InternalOp.ModuleTensorInput(
-            DType.Float32, rank: 1, Shorokoo.Core.Nodes.NodeDefinitions.InputType.ModelInput,
-            targetFunction: null, defaultName: "input");
-        return new InternalComputationGraph([input], [(Tensor<float32>)fn.Call(input)[0]]);
+        var input = InvokeInput("input");
+        return new InternalComputationGraph(
+            [input], [(Tensor<float32>)ModuleFn((Func<Tensor<float32>, Tensor<float32>>)DoubleScalar).Call(input)[0]]);
     }
 
     [Fact]
@@ -1311,12 +1563,9 @@ public class ModulesCoverageTests
             System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)!;
         var moduleGraph = ((ComputationGraph)prop.GetValue(null)!).ToInternal();
 
-        if (moduleGraph.Nodes.Any(n => n.OpCode == InternalOpCodes.GENERIC_TYPE_INPUT))
-        {
-            if (genericTypes is not null && genericTypes.Count > 0)
-                Shorokoo.Core.Nodes.Processors.Fast.FastChangeGenericTypeSpecialization.Process(moduleGraph, genericTypes);
-            moduleGraph = Shorokoo.Core.Nodes.Processors.Fast.FastToConcreteDataType.Process(moduleGraph);
-        }
+        if (genericTypes is not null && genericTypes.Count > 0
+            && moduleGraph.Nodes.Any(n => n.OpCode == InternalOpCodes.GENERIC_TYPE_INPUT))
+            Shorokoo.Core.Nodes.Processors.Fast.FastChangeGenericTypeSpecialization.Process(moduleGraph, genericTypes);
 
         var data = CompressedFormatUtils.SaveFastGraphToBinary(moduleGraph, compressed: true);
         moduleGraph = CompressedFormatUtils.LoadFastGraphCore(data, "<roundtrip>", null).Graph;

@@ -1033,6 +1033,15 @@ namespace Shorokoo.Core.Factory.IR
             var inputKeys = LookupInputKeys(nodeProto.Inputs, tensorKeys);
             var outputKeys = AllocateAndRecordOutputs(nodeKey, nodeProto.Outputs, tensorKeys, baseIndex: 0);
 
+            // The inliner splices the body by matching the call's inputs to the body's inputs
+            // one-for-one, so a proto that calls a function with the wrong arity has to be
+            // rejected here: reaching the inliner with it asserts, and in Release concretizes
+            // to a graph whose spliced inputs are wired to nothing (Shorokoo/Shorokoo#251).
+            if (inputKeys.Length != fastFnGraph.Inputs.Count)
+                throw new ModuleException(ErrorCodes.FW006, function.FriendlyName,
+                    $"the imported model calls it with {inputKeys.Length} input(s) but its body " +
+                    $"declares {fastFnGraph.Inputs.Count}.");
+
             return new FastNode
             {
                 Key = nodeKey,

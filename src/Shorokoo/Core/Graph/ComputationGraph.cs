@@ -145,8 +145,9 @@ namespace Shorokoo.Graph
         }
 
         /// <summary>
-        /// Original <c>UniqueName</c> of each graph input, in declaration order —
-        /// the names <c>FromOrderedInputs</c> pairs values with.
+        /// Original <c>UniqueName</c> of each graph input, in declaration order. A generic
+        /// <c>[Module]</c>'s type-placeholder slots are listed here but take no value, so this is
+        /// one entry longer than <c>FromOrderedInputs</c> accepts for such a graph.
         /// </summary>
         public IReadOnlyList<string?> InputNames => _inputNames;
 

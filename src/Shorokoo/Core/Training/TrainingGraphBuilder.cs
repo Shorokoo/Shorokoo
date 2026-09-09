@@ -28,15 +28,17 @@ namespace Shorokoo.Core.Training;
 public static class TrainingGraphBuilder
 {
     /// <summary>
-    /// Prepares a model for training by composing it with a loss function (provided as a
-    /// module's Inline method reference) and automatic differentiation.
+    /// Composes a concrete architecture with a loss function (provided as a module's Inline method
+    /// reference) and automatic differentiation.
     ///
     /// The loss function Func must reference the Inline method of a [Module]-annotated class.
     /// The module class's ComputationGraph property is used to obtain the loss computation graph.
     /// </summary>
     /// <typeparam name="TOut">The model output / loss input type (e.g., Tensor&lt;float32&gt;)</typeparam>
     /// <typeparam name="TLoss">The loss output type (e.g., Scalar&lt;float32&gt;)</typeparam>
-    /// <param name="modelGraph">The computation graph for the model (from a module's ComputationGraph property)</param>
+    /// <param name="modelGraph">The model's concrete architecture, from
+    /// <see cref="Shorokoo.Graph.InternalComputationGraphExtensions.ToConcreteArchitecture"/>; a raw
+    /// module graph is refused (see <see cref="RequireConcreteArchitecture"/>)</param>
     /// <param name="lossFunction">A Func referencing a loss module's Inline method (2 inputs → 1 output)</param>
     /// <returns>A high-level <see cref="InternalComputationGraph"/> containing AutoGrad nodes, with inputs
     /// [model_inputs..., targets, param_struct] and outputs [loss, gradient_struct]</returns>
@@ -329,16 +331,16 @@ public static class TrainingGraphBuilder
     /// INPUT only — the struct inputs and AUTO_GRAD node it goes on to build are themselves
     /// module-stage ops.</para>
     /// </summary>
-    private static void RequireConcreteArchitecture(InternalComputationGraph graph)
+    private static void RequireConcreteArchitecture(InternalComputationGraph modelGraph)
     {
-        var moduleStageNode = graph.Nodes.FirstOrDefault(n => InternalOpCodes.IsModuleStageOp(n.OpCode));
+        var moduleStageNode = modelGraph.Nodes.FirstOrDefault(n => InternalOpCodes.IsModuleStageOp(n.OpCode));
         if (moduleStageNode is null) return;
 
         throw new ArgumentException(
             $"Model graph is not a concrete architecture: it still contains {moduleStageNode.OpCode}. "
             + "Lower it with ToConcreteArchitecture(inputHints, ...) first — training needs every "
             + "parameter's shape and initial value, which only that lowering resolves.",
-            nameof(graph));
+            nameof(modelGraph));
     }
 
     /// <summary>

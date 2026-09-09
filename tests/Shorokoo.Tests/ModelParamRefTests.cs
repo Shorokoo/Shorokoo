@@ -1,6 +1,7 @@
 using Shorokoo.Modules.Initializers;
 using Shorokoo.Modules.Layers;
 using Shorokoo.Core.Graph;
+using Shorokoo.Core.Nodes.Processors.Training;
 
 namespace Shorokoo.Tests;
 
@@ -187,6 +188,28 @@ public class ModelParamRefTests
         var names = TrainingParamNamesOf(Rank0ParamsInLoopModel.ComputationGraph);
         Assert.Equal(6, names.Length);
         Assert.Equal(6, names.Distinct().Count());
+    }
+
+    private static FastDiscoveredParamInfo NamedParam(string name)
+    {
+        var key = FastNodeKey.New();
+        var node = new FastNode
+        {
+            Key = key,
+            OpCode = InternalOpCodes.MODEL_PARAM,
+            FullOutputs = { [""] = [new FastTensorKey(key, 0)] },
+        };
+        return new FastDiscoveredParamInfo(
+            name, new FastTensorKey(key, 0), true, DType.Float32, 1, DataStructure.Tensor, node);
+    }
+
+    [Fact]
+    public void TestTwoParametersCannotShareAStructFieldName()
+    {
+        Assert.Throws<InvalidOperationException>(() => FastBuildTrainableParamStructDefProcessor.Process(
+            [NamedParam("Gain"), NamedParam("Gain")]));
+        Assert.Equal(2, FastBuildTrainableParamStructDefProcessor.Process(
+            [NamedParam("Gain"), NamedParam("Bias")]).Fields.Length);
     }
 
     [Fact]

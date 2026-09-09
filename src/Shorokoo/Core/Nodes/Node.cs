@@ -246,7 +246,10 @@ namespace Shorokoo.Core.Nodes
                 // remedies are different ones.
                 var explained = invalidInputs.Select(x => x.InvalidReason).FirstOrDefault(x => x is not null);
                 throw new OnnxNodeException(ErrorCodes.NOD001, nodeDef.OpName, defaultName ?? "Unknown",
-                    $"Invalid input variables detected: {inputNames}. {explained ?? ErrorMessage}");
+                    explained is null
+                        ? $"Invalid input variables detected: {inputNames}. {ErrorMessage}"
+                        : $"Invalid input variables detected: {inputNames}." +
+                          $"\n\nThe value cannot leave the loop that produced it: {explained}");
             }
 
             this.OrderingHintNumber = existingOrderingHint ?? Interlocked.Increment(ref NextOrderingHintNumber);

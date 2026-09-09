@@ -95,12 +95,14 @@ built from the iteration index — needs no wrapping. `LoopAPI.Carry` has
 overloads for `Scalar<T>`, `Vector<T>` and `Tensor<T>`; for any other carry
 type, move the assignment out of the loop.
 
-The build reports this as the **MSG005** warning on the offending line, and
-concretizing the graph raises `FW023` if it is left unfixed.
+The build reports the bare-assignment form as the **MSG005** warning on the
+offending line, and concretizing the graph raises `FW023` if it is left unfixed.
+`FW023` also catches shapes MSG005 does not see, such as an alias whose first
+link is computed outside the loop.
 
 The same wrapper is what a **lagged** carry — a local holding what another carry
 held one iteration ago — needs in every case but one. Reading the lagged value
-inside an outermost loop's body, or scanning it, works unwrapped:
+inside the body, or scanning it, works unwrapped:
 
 ```csharp
 foreach (var ctx in LoopAPI.Iterate(trips))
@@ -113,13 +115,14 @@ foreach (var ctx in LoopAPI.Iterate(trips))
 
 Wrap the assignment as `prev = LoopAPI.Carry(acc)` to do anything more than that.
 A bare assignment gives the lagged local no body node of its own — it shares the
-node of the carry it trails — and three things follow, each refused rather than
+node of the carry it trails — and several things follow, each refused rather than
 answered wrongly:
 
 | shape | code |
 |---|---|
 | reading the lagged value after the loop | **FW046** |
 | lagging a local the **enclosing** loop also carries (it has nothing to carry it out by) | **FW048** |
+| two carries ending on one body value from different pre-loop values | **FW051** |
 
 Lagging inside a nested loop is otherwise fine: a lagged local created inside the
 enclosing loop's body — a nested recurrence, say — crosses no boundary and needs
@@ -128,9 +131,12 @@ no wrapping.
 What the loop identifies is a local trailing **one of its own carries** by one
 iteration. A chain deeper than that — `prev2 = prev; prev = acc;` — is not, and
 neither is a local trailing a body value the loop does not carry, nor one whose
-first link comes from outside the loop. All three are refused as **FW049**; one
-extra identification pass sees one lag step, so this is a limit of the passes
-rather than a structural one. Wrapping every link works:
+first link comes from outside the loop. Those are refused as **FW049**, except
+that the last shape *declared* with `LoopAPI.Init` is caught earlier, as
+**FW023**. One extra identification pass sees one lag step, so the depth limit is
+a limit of the passes rather than a structural one, and could be lifted. Wrapping
+every link works — every one of them, since wrapping only some leaves the rest
+sharing a body value:
 
 ```csharp
 sum   = sum + prev2;

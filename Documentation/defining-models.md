@@ -234,9 +234,10 @@ How a hyper value gets supplied depends on the route:
   Written bare like that, a lagged local works read inside the body or scanned, including
   inside a nested loop when the lagged local is created in that loop's enclosing body.
   Everything else — reading it after the loop, lagging a local the enclosing loop also
-  carries, trailing something the loop does not carry, or chaining two lag steps — is
-  refused, naming the shape, and wrapping the assignment as `prev = LoopAPI.Carry(acc)`
-  answers all of them. See [limitations.md](limitations.md).
+  carries, trailing something the loop does not carry, chaining two lag steps, or an alias
+  seeded from outside the loop — is refused, naming the shape. Wrapping every such
+  assignment as `prev = LoopAPI.Carry(acc)` answers them, and a local the body only writes
+  needs `LoopAPI.Init` as well. See [limitations.md](limitations.md).
 
 ## Omittable parameters (defaulted hypers & optional inputs)
 

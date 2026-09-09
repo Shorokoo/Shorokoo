@@ -114,14 +114,19 @@ the remaining free slots in creation order. Two consequences:
 
 - Pinning items to their **current** slots — what the stream report's skeleton emits — leaves
   every unlisted consumer's slot, hence stream, unchanged. This is the freeze workflow, and
-  the reason the skeleton uses this form.
+  the reason the skeleton uses this form. One path is **not** freezable this way: a consumer
+  inside a module called from a loop sits under a slot the call site injects for that loop,
+  which no pin addresses and which moves when the callee gains a consumer
+  ([#302](https://github.com/Shorokoo/Shorokoo/issues/302)). Re-read such a path off the
+  stream report after changing the callee.
 - Pinning an item to a **different** slot perturbs the free-slot sequence: an unlisted
   consumer whose slot was taken (or vacated) can move and silently re-key — e.g. with `a`
   and `b` at slots 1 and 2, `Rng.Pin(([2], a))` displaces the unlisted `b` to slot 1. To
   relocate streams, list every consumer the move disturbs; an intentional swap is
   `Rng.Pin(([2], a), ([1], b))`.
 
-The path is a single 1-based local slot; the scope is the module body, or the loop body the
+The path is a single 1-based local slot; the scope is the module body, the loop body, or the
+body of a module reached from a loop — the
 pin is written in (to pin a loop's consumer, write the sparse pin inside that loop). Pinning
 two items to one slot, or one item to two slots, fails the module build — as does adding a
 sparse pin to a scope that already carries a positional one (see [Contract](#contract)).

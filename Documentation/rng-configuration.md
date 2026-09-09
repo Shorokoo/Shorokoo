@@ -180,7 +180,8 @@ under the call site's id extended with one `(slot, -1)` pair per enclosing loop 
 identity does not already account for — a model created inside a loop already carries that
 loop's slot, and takes no second one. (The one
 route this does not reach is a model arriving as a `[Hyper]` model parameter, which is
-substituted rather than reparented.)
+substituted rather than reparented — that route has its own open defect,
+[#264](https://github.com/Shorokoo/Shorokoo/issues/264).)
 
 Note what the slot separates and what it does not. It separates the **iterations** of one
 call site. Two call sites reaching one and the same model *object* still share its id, and

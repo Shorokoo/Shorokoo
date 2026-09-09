@@ -222,7 +222,12 @@ public class FastProcessorsCoverageTests
         static string Refusal(Func<ComputationGraph> build)
             => Assert.Throws<UnsupportedLoopVariableAssignmentException>(() => build()).Message;
 
-        Assert.Contains(ErrorCodes.FW046, Refusal(() => ScanInNestedLoopReadAfterOuterLoop.ComputationGraph));
-        Assert.Contains(ErrorCodes.FW046, Refusal(() => ScanInNestedLoopBeforeUpdateReadAfterOuterLoop.ComputationGraph));
+        Assert.All([Refusal(() => ScanInNestedLoopReadAfterOuterLoop.ComputationGraph),
+                    Refusal(() => ScanInNestedLoopBeforeUpdateReadAfterOuterLoop.ComputationGraph)],
+            message =>
+            {
+                Assert.Contains(ErrorCodes.FW046, message);
+                Assert.Contains("ctx.Scan output was read", message);
+            });
     }
 }

@@ -252,7 +252,7 @@ public class RngPinTests
         // The skeleton groups the feed under its loop SCOPE [1, -1] at its local slot — pins
         // address sites, not iterations — and lists it once.
         var feedSkeleton = feedArch.GetRngStreamReport().EmitPinSkeleton();
-        Assert.Contains("// in the scope at ModelId path [1, -1] — a loop body, or a module called from one:", feedSkeleton);
+        Assert.Contains("// in the scope at ModelId path [1, -1] — a loop body, or a module reached from one:", feedSkeleton);
         Assert.Contains("([1], /* uniform feed */ ?)", feedSkeleton);
 
         // A param AND a feed inside ONE runtime loop: both consumer kinds carry the same site
@@ -272,7 +272,7 @@ public class RngPinTests
         // Module scope has no author-pinnable consumer — the framework-owned
         // RngExecutionCounter is excluded — so no module block is emitted.
         var bothSkeleton = bothReport.EmitPinSkeleton();
-        Assert.Contains("// in the scope at ModelId path [1, -1] — a loop body, or a module called from one:", bothSkeleton);
+        Assert.Contains("// in the scope at ModelId path [1, -1] — a loop body, or a module reached from one:", bothSkeleton);
         Assert.Contains("([1], /*", bothSkeleton);
         Assert.Contains("InitSimple", bothSkeleton);
         Assert.Contains("([2], /* uniform feed */ ?)", bothSkeleton);

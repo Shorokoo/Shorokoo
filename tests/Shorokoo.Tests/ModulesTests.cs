@@ -1106,6 +1106,12 @@ public class ModulesCoverageTests
             hyperparamInputs: [], runtimeInputs: [Scalar32(10f), Trips(5)], expected: [53.0]));
         Assert.True(AutoTest.AdvancedTestGraph<NestedLocalLagCarry>(
             hyperparamInputs: [], runtimeInputs: [Trips(2), Trips(5)], expected: [62.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<TwoCarriesSharingOneBodyValueWrapped>(
+            hyperparamInputs: [], runtimeInputs: [Scalar32(10f), Scalar32(100f), Trips(3)], expected: [123.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<NestedLagCarryOfAnEnclosingCarry>(
+            hyperparamInputs: [], runtimeInputs: [Scalar32(10f), Trips(2), Trips(3)], expected: [48.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<CarryAliasReadAfterLoopFixed>(
+            hyperparamInputs: [], runtimeInputs: [Scalar32(10f), Trips(3)], expected: [12.0]));
     }
 
     /// <summary>Every lagged shape the loop cannot hand back is refused by its own code, naming
@@ -1122,6 +1128,7 @@ public class ModulesCoverageTests
             (ErrorCodes.FW049, "LoopAPI.Carry", () => LagTwoCarry.ComputationGraph),
             (ErrorCodes.FW049, "LoopAPI.Carry", () => AliasChainFromOutsideTheLoopUndeclared.ComputationGraph),
             (ErrorCodes.FW023, "LoopAPI.Carry", () => AliasChainFromOutsideTheLoop.ComputationGraph),
+            (ErrorCodes.FW051, "LoopAPI.Carry", () => TwoCarriesSharingOneBodyValue.ComputationGraph),
         ];
 
         Assert.All(cases, c =>
@@ -1510,6 +1517,33 @@ public class ModulesCoverageTests
             Accumulate(call, 3).Zip(Accumulate(call, 1), (three, one) => Math.Abs(three - 3 * one)),
             d => Assert.True(d > 1e-5f)));
     }
+
+    /// <summary>The loop slot a call site injects sits between the parent id and the callee's own
+    /// slots, and is derived from the callee's highest local slot — so it moves when the callee
+    /// gains a consumer, and no pin addresses it, leaving an Override path through such a site
+    /// unfreezable. Tracked as Shorokoo/Shorokoo#302.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#302: a call site's injected loop slot is not pinnable")]
+    public void TestACallSiteLoopSlotIsStableWhenTheCalleeGainsAConsumer()
+    {
+        int LoopSlotOf(Delegate body)
+        {
+            var fn = ModuleFn(body);
+            var arch = ConcretizeInvokes(x =>
+            {
+                var acc = x;
+                foreach (var _ in LoopAPI.Iterate(Scalar(3L))) acc = (Tensor<float32>)fn.Call(acc)[0];
+                return [acc];
+            }, TensorData([2L], 0f, 0f));
+            return arch.GetRngStreamReport().Streams
+                .First(s => s.Kind == RngStreamKind.UniformFeed).ModelIdPath[1];
+        }
+
+        Assert.Equal(LoopSlotOf((Func<Tensor<float32>, Tensor<float32>>)DrawsOnce),
+                     LoopSlotOf((Func<Tensor<float32>, Tensor<float32>>)DrawsTwice));
+    }
+
+    private static Tensor<float32> DrawsTwice(Tensor<float32> t)
+        => t + RandomUniform([Scalar(2L)], 0f, 1f) + RandomUniform([Scalar(2L)], 0f, 1f);
 
     /// <summary>Two call sites of one model object fold the same stream key, because the id they
     /// reparent under is the model's rather than the site's — where two call sites of a

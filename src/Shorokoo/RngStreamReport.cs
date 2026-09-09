@@ -148,7 +148,7 @@ public sealed class RngStreamReport
                 // called from a loop takes the call site's scope, and its consumers are declared
                 // in its own Inline, which has no loop of its own.
                 : $"// in the scope at ModelId path [{string.Join(", ", scope)}] — a loop body, or "
-                  + "a module called from one:\n");
+                  + "a module reached from one:\n");
             sb.Append("Rng.Pin(");
             bool firstItem = true;
             foreach (var (slot, s) in bySlot)

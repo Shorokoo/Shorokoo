@@ -1527,6 +1527,91 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>A lag carry inside a nested loop whose lagged local is created in the enclosing
+    /// body while the carry it trails is one the enclosing loop carries — so the trailed carry's
+    /// reads reach the nested looper rewritten and the lagged local's do not.</summary>
+    [Module]
+    public partial class NestedLagCarryOfAnEnclosingCarry
+    {
+        public static Scalar<float32> Inline(Scalar<float32> x, Scalar<int64> outerTrips, Scalar<int64> innerTrips)
+        {
+            var acc = x;
+            var total = Scalar(0.0f);
+            foreach (var ctx0 in LoopAPI.Iterate(outerTrips))
+            {
+                var prev = Scalar(0.0f);
+                foreach (var ctx1 in LoopAPI.Iterate(innerTrips))
+                {
+                    total = total + prev;
+                    prev = acc;
+                    acc = acc + Scalar(1.0f);
+                }
+            }
+            return total;
+        }
+    }
+
+    /// <summary><see cref="CarryAliasReadAfterLoop"/> with both remedies the refusal names — the
+    /// alias declared, and the assignment wrapped.</summary>
+    [Module]
+    public partial class CarryAliasReadAfterLoopFixed
+    {
+        public static Scalar<float32> Inline(Scalar<float32> x, Scalar<int64> trips)
+        {
+            var acc = x;
+            var alias = x;
+            var sum = Scalar(0.0f);
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                LoopAPI.Init(alias);
+                sum = sum + acc;
+                alias = LoopAPI.Carry(acc);
+                acc = acc + Scalar(1.0f);
+            }
+            return alias;
+        }
+    }
+
+    /// <summary>Two carries whose bodies end on the same node output but whose pre-loop values
+    /// differ — the loop cannot hand both back from one body node.</summary>
+    [Module]
+    public partial class TwoCarriesSharingOneBodyValue
+    {
+        public static Scalar<float32> Inline(Scalar<float32> x, Scalar<float32> y, Scalar<int64> trips)
+        {
+            var acc = x;
+            var z = y;
+            var sum = Scalar(0.0f);
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                sum = sum + z;
+                acc = acc + Scalar(1.0f);
+                z = acc;
+            }
+            return sum;
+        }
+    }
+
+    /// <summary><see cref="TwoCarriesSharingOneBodyValue"/> with the second carry's assignment
+    /// wrapped, giving it a body node of its own.</summary>
+    [Module]
+    public partial class TwoCarriesSharingOneBodyValueWrapped
+    {
+        public static Scalar<float32> Inline(Scalar<float32> x, Scalar<float32> y, Scalar<int64> trips)
+        {
+            var acc = x;
+            var z = y;
+            var sum = Scalar(0.0f);
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                sum = sum + z;
+                acc = acc + Scalar(1.0f);
+                z = LoopAPI.Carry(acc);
+            }
+            return sum;
+        }
+    }
+
     /// <summary>A local given a carry's value by a bare assignment and read after the loop — the
     /// lag carry's shape without the lag.</summary>
     [Module]

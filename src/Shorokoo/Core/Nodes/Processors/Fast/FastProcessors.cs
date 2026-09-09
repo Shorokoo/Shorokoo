@@ -748,8 +748,16 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 {
                     if (fastNode.OpCode == OpCodes.LOOP_OPEN)
                         enclosingLoops.Add(fastNode);
-                    else if (fastNode.OpCode == OpCodes.LOOP_CLOSE && enclosingLoops.Count > 0)
-                        enclosingLoops.RemoveAt(enclosingLoops.Count - 1);
+                    else if (fastNode.OpCode == OpCodes.LOOP_CLOSE)
+                    {
+                        // Swallowing an underflow here would leave the stack shifted for every
+                        // later call site — the phantom scope the end-of-sweep assert exists to
+                        // catch — and still end at zero, so it would report nothing.
+                        Debug.Assert(enclosingLoops.Count > 0,
+                            "FastInlineModulesAndFunctions: LOOP_CLOSE before its LOOP_OPEN.");
+                        if (enclosingLoops.Count > 0)
+                            enclosingLoops.RemoveAt(enclosingLoops.Count - 1);
+                    }
                     newNodes.Add(fastNode);
                     continue;
                 }

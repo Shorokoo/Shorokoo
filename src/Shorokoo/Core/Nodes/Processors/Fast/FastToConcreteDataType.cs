@@ -25,9 +25,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// graph by:
     /// <list type="number">
     /// <item>Building a specialized body for every reachable <see cref="Function"/> that carries
-    /// generic material or calls one that does — for a generic function one body per unique set of
-    /// type arguments (via <see cref="FastChangeGenericTypeSpecialization"/>), for a non-generic
-    /// caller a single body, since there only its callees change.</item>
+    /// generic material or calls one that does, and is reached by a call site naming which
+    /// specialization it wants — for a generic function one body per unique set of type arguments
+    /// (via <see cref="FastChangeGenericTypeSpecialization"/>), for a non-generic caller a single
+    /// body, since there only its callees change.</item>
     /// <item>For each body, producing a concrete <see cref="Function"/> by stripping
     /// generic metadata from DType / DTypes / Tensor attributes, removing
     /// <see cref="InternalOpCodes.GENERIC_TYPE_INPUT"/> input nodes, and rewiring call-site
@@ -44,7 +45,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// (Shorokoo/Shorokoo#286).</para>
     ///
     /// <para>A function with no generic material anywhere below it is left alone, keeping its
-    /// identity and its flattened-body cache.</para>
+    /// identity and its flattened-body cache. So is a generic function reached only by references
+    /// that name no type arguments and cannot be resolved to a single specialization — nothing
+    /// here can say which one such a reference meant.</para>
     ///
     /// Returns a fresh <see cref="InternalComputationGraph"/>; the input is not mutated. Because
     /// Fast tensors don't carry per-tensor types, no re-inference step is required — type
@@ -59,12 +62,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
-            var functionsPostOrder = EnumerateFunctionsPostOrder(graph);
+            var bodyFacts = new Dictionary<Function, BodyFacts>();
+            var functionsPostOrder = EnumerateFunctionsPostOrder(graph, bodyFacts);
             var genericFunctions = new HashSet<Function>();
-            var needsErasure = FunctionsNeedingErasure(functionsPostOrder, genericFunctions);
+            var needsErasure = FunctionsNeedingErasure(functionsPostOrder, bodyFacts, genericFunctions);
             var specializedBodies = SpecializedBodies(graph, needsErasure, genericFunctions);
 
             var concreteFunctions = new Dictionary<(Function fn, string argsKey), Function>();
+            var soleSpecialization = new Dictionary<Function, Function?>();
 
             foreach (var fn in functionsPostOrder)
             {
@@ -73,8 +78,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
                 foreach (var (argsKey, specializedBody) in perArgs)
                 {
-                    var concreteFast = ConcretizeInPlace(specializedBody, concreteFunctions, genericFunctions);
-                    concreteFunctions[(fn, argsKey)] = new Function(concreteFast, fn.FunctionType,
+                    var concreteFast = ConcretizeInPlace(specializedBody, concreteFunctions, soleSpecialization, genericFunctions);
+                    var concrete = new Function(concreteFast, fn.FunctionType,
                         defaultName: fn.DefaultName,
                         friendlyName: fn.FriendlyName,
                         stateOwnership: fn.StateOwnership)
@@ -82,29 +87,38 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         RngAlgorithm = fn.RngAlgorithm,
                         RngFunctionKind = fn.RngFunctionKind,
                     };
+                    concreteFunctions[(fn, argsKey)] = concrete;
+                    soleSpecialization[fn] = soleSpecialization.ContainsKey(fn) ? null : concrete;
                 }
             }
 
-            return ConcretizeInPlace(graph.Clone(), concreteFunctions, genericFunctions);
+            return ConcretizeInPlace(graph.Clone(), concreteFunctions, soleSpecialization, genericFunctions);
         }
+
+        /// <summary>What one thaw of a function's body tells us about it. Read once and reused,
+        /// because <see cref="Function.OriginalFastGraph"/> deep-thaws on every access.</summary>
+        private readonly record struct BodyFacts(
+            HashSet<Function> Callees, bool CarriesGenerics, bool DeclaresGenericParams);
 
         /// <summary>
         /// The reachable functions that have to be rebuilt: those whose own body carries generic
         /// material, and — transitively — their callers, whose call sites have to be repointed at
         /// the rebuilt callee. Callees precede callers in <paramref name="functionsPostOrder"/>,
         /// so one forward sweep reaches the fixpoint. Fills <paramref name="genericFunctions"/>
-        /// with those that declare generic parameters, on the same single thaw of each body.
+        /// with those that declare generic parameters.
         /// </summary>
         private static HashSet<Function> FunctionsNeedingErasure(
-            IReadOnlyList<Function> functionsPostOrder, HashSet<Function> genericFunctions)
+            IReadOnlyList<Function> functionsPostOrder,
+            Dictionary<Function, BodyFacts> bodyFacts,
+            HashSet<Function> genericFunctions)
         {
             var needsErasure = new HashSet<Function>();
             foreach (var fn in functionsPostOrder)
             {
-                var body = fn.OriginalFastGraph;
-                if (body.Nodes.Any(n => n.OpCode == InternalOpCodes.GENERIC_TYPE_INPUT))
+                var facts = bodyFacts[fn];
+                if (facts.DeclaresGenericParams)
                     genericFunctions.Add(fn);
-                if (body.Nodes.Any(CarriesGenerics) || LocalFunctions(body).Any(needsErasure.Contains))
+                if (facts.CarriesGenerics || facts.Callees.Any(needsErasure.Contains))
                     needsErasure.Add(fn);
             }
             return needsErasure;
@@ -181,6 +195,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         private static InternalComputationGraph ConcretizeInPlace(
             InternalComputationGraph graph,
             Dictionary<(Function fn, string argsKey), Function> concreteFunctions,
+            Dictionary<Function, Function?> soleSpecialization,
             HashSet<Function> genericFunctions)
         {
             // Identify GENERIC_TYPE_INPUT nodes (and the input keys they produce) so they
@@ -200,7 +215,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             {
                 if (nodesToRemove.Contains(node.Key)) continue;
                 StripGenericsFromAttributesInPlace(node);
-                RewireTargetFunctionInPlace(node, concreteFunctions, genericFunctions);
+                RewireTargetFunctionInPlace(node, concreteFunctions, soleSpecialization, genericFunctions);
                 newNodes.Add(node);
             }
             graph.Nodes = newNodes;
@@ -285,18 +300,34 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         private static void RewireTargetFunctionInPlace(
             FastNode node,
             Dictionary<(Function fn, string argsKey), Function> concreteFunctions,
+            Dictionary<Function, Function?> soleSpecialization,
             HashSet<Function> genericFunctions)
         {
-            var site = TryGetCallSiteKey(node, genericFunctions);
-            if (site is null) return;
-            if (concreteFunctions.TryGetValue((site.Value.fn, site.Value.argsKey), out var concrete))
-                node.TargetFunction = concrete;
+            if (TryGetCallSiteKey(node, genericFunctions) is { } site)
+            {
+                if (concreteFunctions.TryGetValue((site.fn, site.argsKey), out var concrete))
+                    node.TargetFunction = concrete;
+                return;
+            }
+
+            // A node that carries a generic function without naming type arguments: a model
+            // sequence tags its SEQUENCE_CONSTRUCT / SEQUENCE_EMPTY with the element module's
+            // own Function, and that is where the sequence's models get their ModuleFn back
+            // from. It cannot say which specialization it means, so bind it only when the graph
+            // built exactly one — then there is nothing else it could be. Left alone, it keeps
+            // the unspecialized function and the inliner splices a body still declaring type
+            // slots against a call site supplying none.
+            if (node.TargetFunction is { } fn
+                    && soleSpecialization.TryGetValue(fn, out var only) && only is not null)
+                node.TargetFunction = only;
         }
 
-        private static IReadOnlyList<Function> EnumerateFunctionsPostOrder(InternalComputationGraph graph)
+        private static IReadOnlyList<Function> EnumerateFunctionsPostOrder(
+            InternalComputationGraph graph, Dictionary<Function, BodyFacts> bodyFacts)
         {
             // Mirrors ComputationGraph.FunctionsPostOrlder but walks via FastCG. Each function's
-            // dependencies are the distinct TargetFunctions in its OriginalFastGraph nodes.
+            // dependencies are the distinct TargetFunctions in its OriginalFastGraph nodes. This
+            // is the one thaw of each body the analysis gets: everything later reads bodyFacts.
             var fnDependencies = new Dictionary<Function, HashSet<Function>>();
             var toVisit = new Queue<Function>(LocalFunctions(graph));
 
@@ -304,8 +335,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             {
                 var fn = toVisit.Dequeue();
                 if (fnDependencies.ContainsKey(fn)) continue;
-                var deps = LocalFunctions(fn.OriginalFastGraph).ToHashSet();
-                fnDependencies[fn] = deps;
+                var body = fn.OriginalFastGraph;
+                var deps = LocalFunctions(body).ToHashSet();
+                bodyFacts[fn] = new BodyFacts(deps,
+                    body.Nodes.Any(CarriesGenerics),
+                    body.Nodes.Any(n => n.OpCode == InternalOpCodes.GENERIC_TYPE_INPUT));
+
+                // The topological sort below drains its own copy; bodyFacts keeps the callee set.
+                fnDependencies[fn] = [.. deps];
                 foreach (var d in deps)
                     if (!fnDependencies.ContainsKey(d))
                         toVisit.Enqueue(d);

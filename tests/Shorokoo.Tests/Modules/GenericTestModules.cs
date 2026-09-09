@@ -403,6 +403,60 @@ namespace Shorokoo.Tests.Modules
             => WrapsNonGenericCallerOfGenericModule.Call(input);
     }
 
+    /// <summary>Reaches generics two ways from one non-generic body: the same module at two
+    /// different type arguments, and a generic module that composes generic modules.</summary>
+    [Module]
+    public partial class CallsGenericModulesSeveralWays
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => GenericTargetModule.Call<float32>(input)
+             + GenericTargetModule.Call<float64>(input.Cast<float64>()).Cast<float32>()
+             + GenericComposedLayer.Model<float32>(Scalar(3f)).Call(input);
+    }
+
+    /// <summary>Wraps it, putting every one of those call sites below a non-generic body.</summary>
+    [Module]
+    public partial class WrapsCallerOfGenericModulesSeveralWays
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => CallsGenericModulesSeveralWays.Call(input);
+    }
+
+    /// <summary>Takes the module to call as a model-typed parameter.</summary>
+    [Module]
+    public partial class CallsAModelParameter
+    {
+        public static Tensor<float32> Inline(Model<Tensor<float32>, Tensor<float32>> inner, Tensor<float32> input)
+            => inner.Call(input);
+    }
+
+    /// <summary>Reaches the generic call site through a model-typed parameter rather than a
+    /// direct call, so the callee is bound by the model value instead of the call node.</summary>
+    [Module]
+    public partial class PassesAGenericCallerAsAModelParameter
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => CallsAModelParameter.Call(NonGenericCallerOfGenericModule.Model(), input);
+    }
+
+    /// <summary>Reaches the generic module through a model sequence, whose SEQUENCE_CONSTRUCT
+    /// carries the element module's function but names no type arguments.</summary>
+    [Module]
+    public partial class HoldsAGenericModuleInAModelSequence
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => ModelSequence.Create(GenericTargetModule.Model<float32>())[Scalar(0L)].Call(input);
+    }
+
+    /// <summary>Calls a generic trainable-parameter initializer with an explicit type argument
+    /// from a non-generic body.</summary>
+    [Module]
+    public partial class NonGenericCallerOfGenericParamInitializer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input, [Hyper] Vector<int64> shape)
+            => input + GenericTrainableParamInitializers.Init<float32>(shape).Vec();
+    }
+
     /// <summary>
     /// Nested generic module that performs type casting and simple operations.
     /// Uses three generic type parameters: A (hyperparam), B (input), C (internal only).

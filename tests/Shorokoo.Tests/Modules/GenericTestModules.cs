@@ -1289,9 +1289,9 @@ namespace Shorokoo.Tests.Modules
     }
 
     /// <summary>
-    /// Scans a zero-input op's output. The looper does not track such a node, so the scan input
-    /// resolves through <c>ProcessNode</c>'s outer-scope fallback to the first pass's draw,
-    /// outside the loop; binding that would stack one draw once per iteration.
+    /// Scans a zero-input op's output. The looper tracks it like any other body node, so the scan
+    /// input names the body's own draw rather than resolving through <c>ProcessNode</c>'s
+    /// outer-scope fallback to a draw sitting before the loop.
     /// </summary>
     [Module]
     public partial class ScanZeroInputOpInLoopBody
@@ -1306,8 +1306,8 @@ namespace Shorokoo.Tests.Modules
     }
 
     /// <summary>
-    /// The keyed feed the #262 limitation points a user at: it takes <c>shape</c> as a graph
-    /// input, so the looper tracks it and the draw stays in the body.
+    /// The keyed feed: it takes <c>shape</c> as a graph input, so it was tracked even under the
+    /// old zero-input rule and its draw always stayed in the body.
     /// </summary>
     [Module]
     public partial class ScanKeyedFeedInLoopBody
@@ -1322,9 +1322,9 @@ namespace Shorokoo.Tests.Modules
     }
 
     /// <summary>
-    /// Draws inside the loop body with a zero-input op. <c>LoopAPI.ProcessNode</c> declines to
-    /// track any node with no inputs, so the draw is emitted before the loop-open node and every
-    /// iteration reads the same one. Tracked as Shorokoo/Shorokoo#262.
+    /// Draws inside the loop body with a zero-input op. <c>LoopAPI.ProcessNode</c> tracks it by
+    /// asking whether the loop's own construction is building, not whether the node has inputs,
+    /// so the draw stays in the body and each iteration draws its own.
     /// </summary>
     [Module]
     public partial class ZeroInputOpInLoopBody

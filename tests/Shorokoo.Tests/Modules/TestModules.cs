@@ -184,6 +184,128 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>A lazy <c>IfElse</c> in a loop body whose taken branch unwraps an optional —
+    /// loop-invariant, but only valid when the branch is taken.</summary>
+    [Module]
+    public partial class LoopLazyOptionalLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input, [Hyper] Scalar<int64> iters, OptionalTensor<float32> bias)
+        {
+            var x = input;
+            foreach (var ctx in LoopAPI.Iterate(iters))
+                x = bias.HasValue().IfElse(() => x + bias.TensorValue(), () => x * Scalar(2f));
+            return x;
+        }
+    }
+
+    /// <summary>The other nesting: a <c>LoopAPI.Iterate</c> inside a lazy <c>IfElse</c> branch,
+    /// with a loop-invariant node in the loop body.</summary>
+    [Module]
+    public partial class LazyIfLoopBodyLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input, [Hyper] Scalar<int64> iters, Scalar<bit> flag)
+            => flag.IfElse(
+                () =>
+                {
+                    var x = input;
+                    foreach (var ctx in LoopAPI.Iterate(iters))
+                        x = x + input * Scalar(3f);
+                    return x;
+                },
+                () => input);
+    }
+
+    /// <summary>A wholly loop-invariant <c>IfElse</c> in a loop body, consumed by an equally
+    /// loop-invariant node. Its <c>IF_CLOSE</c> is pinned in the body, so the consumer is not
+    /// hoistable however invariant its own data is.</summary>
+    [Module]
+    public partial class InvariantGateInLoopLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input, [Hyper] Scalar<int64> iters, Scalar<bit> flag)
+        {
+            var x = input;
+            foreach (var ctx in LoopAPI.Iterate(iters))
+                x = x + (flag.IfElse(input * Scalar(2f), input * Scalar(3f)) + input);
+            return x;
+        }
+    }
+
+    /// <summary>An <c>IfElse</c> around a loop around an <c>IfElse</c>. Concretizes cleanly;
+    /// <c>FastScopeConfigurator</c> then breaks the order at ONNX build. Shorokoo/Shorokoo#270.</summary>
+    [Module]
+    public partial class IfInLoopInIfLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input, [Hyper] Scalar<int64> iters, Scalar<bit> flag)
+            => flag.IfElse(
+                () =>
+                {
+                    var x = input;
+                    foreach (var o in LoopAPI.Iterate(iters))
+                        x = x + (flag.IfElse(input * Scalar(2f), input * Scalar(3f)) + input);
+                    return x;
+                },
+                () => input * Scalar(9f));
+    }
+
+    /// <summary>A loop inside a lazy <c>IfElse</c> branch inside a loop. Shorokoo/Shorokoo#270.</summary>
+    [Module]
+    public partial class LoopInLazyIfInLoopLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input, [Hyper] Scalar<int64> iters, Scalar<bit> flag)
+        {
+            var x = input;
+            foreach (var o in LoopAPI.Iterate(iters))
+            {
+                var b = flag.IfElse(
+                    () => { var y = input;
+                            foreach (var i in LoopAPI.Iterate(iters)) y = y + (input * Scalar(2f));
+                            return y; },
+                    () => input * Scalar(7f));
+                x = x + (b + input);
+            }
+            return x;
+        }
+    }
+
+    /// <summary>A draw scanned over a loop whose trip count is a literal, so the loop unrolls.
+    /// Each unrolled iteration must get its own draw.</summary>
+    [Module]
+    public partial class ConstantTripDrawScanLayer
+    {
+        public static Tensor<float32> Inline(Scalar<float32> unused)
+        {
+            Variable? scanned = null;
+            foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
+                scanned = (Variable)ctx.Scan((Scalar<float32>)(Variable)
+                    OnnxOp.RandomUniform([], high: 1f, low: 0f, dtype: DType.Float32));
+            return (Tensor<float32>)scanned!;
+        }
+    }
+
+    /// <summary>Used only from <see cref="InitializerFirstUsedInLoopBodyLayer"/>, so the
+    /// process-wide Function cache is cold when that module is built however the suite is
+    /// ordered — which is what the pin over it needs.</summary>
+    [TrainableParamInitializer]
+    public static partial class InitOnlyUsedInALoopBody
+    {
+        public static Tensor<float32> Inline(Vector<int64> shape) => TensorFill(shape, 1.0f);
+    }
+
+    /// <summary>An initializer first used inside a loop body. Its input markers must be built in
+    /// its own trace, not the caller's, or the enclosing loop records them as body nodes on the
+    /// first pass alone and the pass-to-pass comparison rejects the body.</summary>
+    [Module]
+    public partial class InitializerFirstUsedInLoopBodyLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input, [Hyper] Scalar<int64> iters)
+        {
+            var x = input;
+            foreach (var ctx in LoopAPI.Iterate(iters))
+                x = x + InitOnlyUsedInALoopBody.Init(x.ShapeTensor());
+            return x;
+        }
+    }
+
     /// <summary>One gate with a trainable param on <b>each</b> branch, both pruned by an
     /// enclosing gate. Whichever branch wins, the other is the one that unlocks the fold.</summary>
     [Module]

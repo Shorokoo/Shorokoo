@@ -4639,7 +4639,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var mustCloneBodyKeys = new HashSet<FastNodeKey>();
             foreach (var b in bodyNodes)
             {
-                bool anyLoopDepIn = false;
+                // A draw has no loop-dependent input, so dataflow calls it invariant and the
+                // unrolled iterations would share the one node — every iteration reading the one
+                // sample, which is Shorokoo/Shorokoo#262's wrong answer on the unrolled path.
+                // Its value does vary per iteration, so it clones like anything else that does.
+                // Same predicate the rematerializer uses to refuse cloning a draw, read the other
+                // way round: there a clone would be a second sample, here that is the point.
+                bool anyLoopDepIn =
+                    !Shorokoo.Core.AutoDiffCheckpointing.Rematerializer.IsDeterministicOpCode(b.OpCode);
                 foreach (var kvp in b.FullInputs)
                     foreach (var ik in kvp.Value)
                         if (ik is FastTensorKey ikt && loopDependentTensors.Contains(ikt)) { anyLoopDepIn = true; break; }

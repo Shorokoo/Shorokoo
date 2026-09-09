@@ -202,6 +202,12 @@ namespace Shorokoo.Core
             if (cachedFunction is not null)
                 return cachedFunction;
 
+            // The signature's marker nodes are built in a trace of their own. This runs from a
+            // Module<> constructor, so on a cache miss the ambient trace is whatever the caller
+            // was in — and a caller tracing a loop body would otherwise record these as its own
+            // body nodes, on the first miss only, since the signature is cached from then on.
+            using var shield = GraphTrace.EnterIsolated();
+
             var hyperparamInputs = FlattenTuples(hyperparams).Select((x, i) => ModuleParamInputBasedOn(x, InputType.Hyperparam, $"h{i}").ToVariable()).ToArray();
             var inputInputs = FlattenTuples(inputs).Select((x, i) => ModuleParamInputBasedOn(x, InputType.ReadyInput, $"h{i}").ToVariable()).ToArray();
 

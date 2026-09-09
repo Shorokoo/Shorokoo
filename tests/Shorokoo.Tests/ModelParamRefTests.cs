@@ -165,13 +165,42 @@ public class ModelParamRefTests
         Assert.Throws<InvalidOperationException>(() => TrainingParamNamesOf(g));
     }
 
-    // Pins Shorokoo/Shorokoo#284: discovery dedupes a reference against a definition but never
-    // two definitions against each other, so calling one model twice gives its single weight two
-    // identically-named struct fields — splitting its gradient and its checkpoint entry.
-    [Fact(Skip = "Shorokoo/Shorokoo#284: a model called twice becomes two identically-named fields")]
+    [Fact]
     public void TestAModelCalledTwiceIsOneTrainableParameterOnTheNonConcretizedTrainingPath()
         => Assert.Equal(TrainingParamNamesOf(Rank1GainNoRefModel.ComputationGraph),
                         TrainingParamNamesOf(SharedModelCalledTwiceModel.ComputationGraph));
+
+    private static string[] TrainingStateNamesOf(ComputationGraph g)
+    {
+        var training = TrainingGraphBuilder.PrepareForTrainingAsFast(
+            g.ToInternal(), SimpleSumSquaredLoss.ComputationGraph.ToInternal());
+        var stateInput = training.Inputs[training.InputUniqueNames.IndexOf("model_state")];
+        var producer = training.Nodes.Single(n => n.FullOutputs.Values
+            .Any(slot => slot.Any(k => k is FastTensorKey key && key.Equals(stateInput))));
+        var structDef = (TensorStructDef)producer.Attributes
+            .GetDTypeVal(OnnxOpAttributeNames.AttrDtype)!.TensorStructDef!;
+        return [.. structDef.Fields.Select(x => x.Name)];
+    }
+
+    [Fact]
+    public void TestAStatefulModelCalledTwiceIsOneStateParameterOnTheNonConcretizedTrainingPath()
+    {
+        Assert.Equal(TrainingStateNamesOf(StatefulGainNoRefModel.ComputationGraph),
+                     TrainingStateNamesOf(StatefulGainCalledTwiceModel.ComputationGraph));
+        Assert.Equal(TrainingParamNamesOf(StatefulGainNoRefModel.ComputationGraph),
+                     TrainingParamNamesOf(StatefulGainCalledTwiceModel.ComputationGraph));
+    }
+
+    // A loop body's per-iteration parameters share one generalized identifier template and differ
+    // only in its loop indices, so collapsing repeat sites must key on the specific id.
+    [Fact]
+    public void TestALoopsPerIterationParamsStayDistinctOnTheConcretizedTrainingPath()
+    {
+        var g = Rank0ParamsInLoopModel.ComputationGraph;
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([2L], 1f, 2f)]));
+        Assert.Equal(6, TrainingParamNamesOf(arch).Length);
+        Assert.Equal(6, TrainingParamNamesOf(arch).Distinct().Count());
+    }
 
     [Fact]
     public void TestAModelPassedAsAHyperparameterKeepsItsTrainableParams()

@@ -42,11 +42,13 @@ namespace Shorokoo.Core.Nodes.Processors.Training
         public FastNode Node { get; }
 
         /// <summary>
-        /// Bare parameter REFERENCES (<c>IModel.GetTrainableParam</c>) that resolve to this same
-        /// parameter, as the key each produces and the node producing it. A reference reads the
-        /// parameter the model already owns rather than declaring one, so it contributes no
-        /// field of its own; its consumers are rewired to this parameter's and its node is
-        /// removed alongside <see cref="Node"/> (Shorokoo/Shorokoo#263).
+        /// The FURTHER sites that resolve to this same parameter, as the key each produces and the
+        /// node producing it: bare references to it (<c>IModel.GetTrainableParam</c>, which reads
+        /// the parameter the model already owns rather than declaring one — Shorokoo/Shorokoo#263)
+        /// and repeat definitions of it (one model handle called twice leaves one definition site
+        /// per call — Shorokoo/Shorokoo#284). Neither contributes a field of its own: its consumers
+        /// are rewired to this parameter's field and its node is removed alongside
+        /// <see cref="Node"/>.
         /// </summary>
         public ImmutableArray<(FastTensorKey OutputKey, FastNode Node)> Aliases { get; }
 

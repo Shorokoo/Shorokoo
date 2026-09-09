@@ -205,6 +205,24 @@ public static class TrainingGraphBuilder
             modelInputFieldKeys[i] = new FastTensorKey(getField.Key, 0);
         }
 
+        // A state parameter reached from more than one site — a stateful sub-model called twice —
+        // is still one field, so every one of its sites rewires to that field rather than only the
+        // one that defined it (Shorokoo/Shorokoo#284).
+        var stateSiteNodeKeyList = new List<FastNodeKey>(stateParamInfos.Length);
+        var stateSiteFieldKeyList = new List<FastTensorKey>(stateParamInfos.Length);
+        for (int i = 0; i < stateParamInfos.Length; i++)
+        {
+            stateSiteNodeKeyList.Add(stateParamInfos[i].Node.Key);
+            stateSiteFieldKeyList.Add(stateFieldKeys[i]);
+            foreach (var (_, aliasNode) in stateParamInfos[i].Aliases)
+            {
+                stateSiteNodeKeyList.Add(aliasNode.Key);
+                stateSiteFieldKeyList.Add(stateFieldKeys[i]);
+            }
+        }
+        FastNodeKey[] stateSiteNodeKeys = [.. stateSiteNodeKeyList];
+        FastTensorKey[] stateSiteFieldKeys = [.. stateSiteFieldKeyList];
+
         // Step 7 (was step 6): Rewire model-input and state-param nodes through the new
         // struct inputs. Mutates fastGraph in place; struct inputs replace the original
         // model inputs in fastGraph.Inputs.
@@ -213,8 +231,8 @@ public static class TrainingGraphBuilder
             originalModelInputNodeKeys: originalModelInputKeys.Select(k => k.FastNodeKey).ToArray(),
             modelInputFieldKeys: modelInputFieldKeys,
             modelInputStructInputKey: modelInputStructInputKey,
-            stateParamNodeKeys: stateParamInfos.Select(p => p.Node.Key).ToArray(),
-            stateFieldKeys: stateFieldKeys,
+            stateParamNodeKeys: stateSiteNodeKeys,
+            stateFieldKeys: stateSiteFieldKeys,
             stateStructInputKey: stateStructInputKey,
             trainableParamStructInputKey: trainableParamStructInputKey,
             paramFieldKeys: paramFieldKeys,
@@ -322,11 +340,6 @@ public static class TrainingGraphBuilder
     }
 
     /// <summary>
-    /// Processes a module's computation graph for training in place. Runs the same pipeline
-    /// steps as ToConcreteArchitecture but stops before the ConvertTrainableParamIdRefToTrainableParam
-    /// step (which requires graph execution and fails with symbolic model inputs).
-    /// </summary>
-    /// <summary>
     /// A graph is "concretized" (already through
     /// <see cref="Shorokoo.Graph.InternalComputationGraphExtensions.ToConcreteArchitecture"/>)
     /// iff it has no high-level forms left: no MODEL_INVOKE, FUNCTION_INVOKE,
@@ -347,6 +360,28 @@ public static class TrainingGraphBuilder
         return true;
     }
 
+    /// <summary>
+    /// Processes a raw module graph for training in place — the route taken when the caller has
+    /// <em>not</em> pre-concretized. It runs the same pipeline steps as
+    /// <see cref="Shorokoo.Graph.InternalComputationGraphExtensions.ToConcreteArchitecture"/> but
+    /// stops before ConvertModelParamIdRefToModelParam.
+    ///
+    /// <para><b>Why this exists rather than just calling ToConcreteArchitecture.</b> That step
+    /// resolves each parameter's definition by <em>executing</em> the graph under sample inputs, so
+    /// concretizing at all requires input hints — and this entry point takes none. It does not need
+    /// them either: every trainable parameter is about to become a field of an external struct
+    /// input, so the composition below wants the parameter's name, dtype and rank, never its value
+    /// or its resolved shape. Stopping short leaves the MODEL_PARAM_ID_REF nodes in place and
+    /// <see cref="Nodes.Processors.Training.FastReplaceTrainableParamsWithInputProcessor"/> reads
+    /// those directly.
+    ///
+    /// The cost is that parameter identity is settled from each site's static identifier template
+    /// instead of a QEE-resolved ModelId, and the two must agree on which sites are one parameter
+    /// — the concretized path collapses repeat sites by ModelId, so discovery collapses them by the
+    /// id their templates name (Shorokoo/Shorokoo#263, Shorokoo/Shorokoo#284). Callers that do have
+    /// sample inputs should concretize first and get the input-aware liveness filter with it;
+    /// TrainingRig.FromScratch does, which is why this route is not on the production path.</para>
+    /// </summary>
     private static void ProcessGraphForTrainingOnFast(InternalComputationGraph fastGraph)
     {
         Nodes.Processors.Fast.FastApplyIdentifierTemplates.Process(fastGraph);

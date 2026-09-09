@@ -120,16 +120,17 @@ answered wrongly:
 |---|---|
 | reading the lagged value after the loop | **FW046** |
 | lagging a local the **enclosing** loop also carries (it has nothing to carry it out by) | **FW048** |
-| trailing a variable the loop does not carry at all | **FW047** |
 
 Lagging inside a nested loop is otherwise fine: a lagged local created inside the
 enclosing loop's body — a nested recurrence, say — crosses no boundary and needs
 no wrapping.
 
-A chain deeper than one step — `prev2 = prev; prev = acc;` — is not identified
-either, and is refused as **FW049**; one extra identification pass sees one lag
-step, so this is a limit of the passes rather than a structural one. Wrapping
-every step of the chain works:
+What the loop identifies is a local trailing **one of its own carries** by one
+iteration. A chain deeper than that — `prev2 = prev; prev = acc;` — is not, and
+neither is a local trailing a body value the loop does not carry, nor one whose
+first link comes from outside the loop. All three are refused as **FW049**; one
+extra identification pass sees one lag step, so this is a limit of the passes
+rather than a structural one. Wrapping every link works:
 
 ```csharp
 sum   = sum + prev2;

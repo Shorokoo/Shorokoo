@@ -1117,9 +1117,10 @@ public class ModulesCoverageTests
         [
             (ErrorCodes.FW046, "LoopAPI.Carry", () => LagOneCarryReadAfterLoop.ComputationGraph),
             (ErrorCodes.FW046, "LoopAPI.Carry", () => CarryAliasReadAfterLoop.ComputationGraph),
-            (ErrorCodes.FW047, "LoopAPI.Init", () => LagCarryOfUncarriedValue.ComputationGraph),
+            (ErrorCodes.FW049, "LoopAPI.Init", () => LagCarryOfUncarriedValue.ComputationGraph),
             (ErrorCodes.FW048, "LoopAPI.Carry", () => NestedLagCarry.ComputationGraph),
             (ErrorCodes.FW049, "LoopAPI.Carry", () => LagTwoCarry.ComputationGraph),
+            (ErrorCodes.FW049, "LoopAPI.Carry", () => AliasChainFromOutsideTheLoopUndeclared.ComputationGraph),
             (ErrorCodes.FW023, "LoopAPI.Carry", () => AliasChainFromOutsideTheLoop.ComputationGraph),
         ];
 
@@ -1130,17 +1131,6 @@ public class ModulesCoverageTests
             Assert.Contains(c.Remedy, message);
         });
     }
-
-    /// <summary>An alias chain seeded from outside the loop reads across the passes the way a
-    /// lagged carry does, and is identified as one — so its first iteration silently reads the
-    /// trailed carry's pre-loop value where the source reads the alias's.
-    /// Tracked as Shorokoo/Shorokoo#299.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#299: an alias chain from outside the loop is taken for a lag carry")]
-    public void TestAnAliasChainFromOutsideTheLoopIsNotTakenForALagCarry()
-        => Assert.True(AutoTest.AdvancedTestGraph<AliasChainFromOutsideTheLoopUndeclared>(
-            hyperparamInputs: [],
-            runtimeInputs: [TensorData(DType.Float32, [], 10f), TensorData(DType.Int64, [], 3L)],
-            expected: [111.0]));
 
     /// <summary>A body value the loop never outputs is refused whether it is returned from the
     /// graph or fed to another node, and the refusal names the shape the user wrote rather than

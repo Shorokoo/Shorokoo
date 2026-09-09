@@ -661,9 +661,6 @@ namespace Shorokoo
         /// <summary>A loop body value that cannot leave the loop was returned from the graph</summary>
         public const string FW046 = "FW046";
 
-        /// <summary>A loop body trailed the previous iteration's value of a variable the loop does not carry</summary>
-        public const string FW047 = "FW047";
-
         /// <summary>A nested loop body trailed the previous iteration's value of one of its carries</summary>
         public const string FW048 = "FW048";
 

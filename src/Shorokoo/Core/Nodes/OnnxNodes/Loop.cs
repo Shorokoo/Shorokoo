@@ -27,7 +27,13 @@ namespace Shorokoo
     /// We follow the graph structure to locate where first pass "zombie" variables are used.
     /// This indicates the use of a loop variable.
     /// The corresponding variable from the first pass is the open loop node input.
-    /// At the end of the second pass we build the Open Loop Node.
+    /// 
+    /// Lag Pass (the second pass traced a second time):
+    /// A local holding what another local held one iteration ago advances by only one lag step
+    /// per pass, so after two passes it still reads its pre-loop value and looks like nothing.
+    /// One more tracking pass moves it onto a first-pass body output, one pass behind the carry
+    /// it trails, which is what identifies it. At the end of the lag pass we build the Open Loop
+    /// Node.
     /// 
     /// Third Pass:
     /// Here we build out the proper contents of the loop body.
@@ -53,11 +59,20 @@ namespace Shorokoo
 
         private List<Node> firstPassLoopBody = new List<Node>();
         private List<Node> secondPassLoopBody = new List<Node>();
+        private List<Node> lagPassLoopBody = new List<Node>();
         private List<Node> thirdPassLoopBody = new List<Node>();
         private List<Node> fourthPassLoopBody = new List<Node>();
 
         public int LoopDepth { get; private set; }
         public int CurrentPass { get; private set; }
+
+        /// <summary>Which of the two traces of pass 2 is running: 0 for the second pass proper,
+        /// 1 for the lag pass that follows it. Meaningless outside pass 2.</summary>
+        private int secondPassRound;
+
+        /// <summary>Counts every trace of the body, so per-trace caches cannot collide across
+        /// the two traces of pass 2.</summary>
+        private int traceRound;
 
         private Scalar<bit>? continueWhileTensor;
         private Scalar<int64>? maxNumIterations;
@@ -91,6 +106,10 @@ namespace Shorokoo
         /// loop's third, so plain inequality between the passes means nothing on its own).
         /// </summary>
         private HashSet<(int NodeIndex, int InputIndex)> initDeclarationInputs = new HashSet<(int NodeIndex, int InputIndex)>();
+
+        /// <summary>How many of the open node's loop variables are lag carries. They own no body
+        /// node output, so they are absent from <see cref="thirdPassOutputs"/>.</summary>
+        private int lagCarryCount;
 
 
         /// <summary>Set by <see cref="LoopAPI.Init"/> immediately before it emits its
@@ -131,7 +150,13 @@ namespace Shorokoo
 
             if (this.CurrentPass == 3)
             {
-                var loopVariableForScanVariable = thirdPassOutputs[retVal];
+                // An ENCLOSING loop's ctx.Scan called from inside a nested loop's body reaches
+                // here once per pass of that inner loop, but this looper only records nodes on
+                // the inner loop's first pass (LoopAPI.ProcessNode). The zombie the later inner
+                // passes create was never registered here, and those passes are throwaway: bind
+                // on the one that was recorded and let the rest fall through untouched.
+                if (!thirdPassOutputs.TryGetValue(retVal, out var loopVariableForScanVariable))
+                    return retVal;
                 Debug.Assert(loopVariableForScanVariable.IsLocalScanVariable);
 
                 // Bind the scan to the value the BODY reads this iteration. For a carry read
@@ -209,11 +234,11 @@ namespace Shorokoo
 
         private void checkMatch(int nodeIndex, Node nextPass)
         {
-            var prevPassLoopBody = this.CurrentPass == 2 ? firstPassLoopBody :
-                                   this.CurrentPass == 3 ? secondPassLoopBody :
+            var prevPassLoopBody = this.CurrentPass == 2 ? (this.secondPassRound == 0 ? firstPassLoopBody : secondPassLoopBody) :
+                                   this.CurrentPass == 3 ? lagPassLoopBody :
                                    thirdPassLoopBody;
 
-            var curPassLoopBody = this.CurrentPass == 2 ? secondPassLoopBody :
+            var curPassLoopBody = this.CurrentPass == 2 ? (this.secondPassRound == 0 ? secondPassLoopBody : lagPassLoopBody) :
                                   this.CurrentPass == 3 ? thirdPassLoopBody :
                                   fourthPassLoopBody;
 
@@ -263,11 +288,13 @@ namespace Shorokoo
         private Dictionary<int, Scalar<int64>> dctLoopIndexVariables = new();
         public Scalar<int64> GetLoopIndexVariable()
         {
-            if (dctLoopIndexVariables.ContainsKey(CurrentPass))
-                return dctLoopIndexVariables[CurrentPass];
+            // Keyed by trace round rather than pass: pass 2 is traced twice, and returning the
+            // first trace's variable on the second would skip a body node the other passes have.
+            if (dctLoopIndexVariables.ContainsKey(traceRound))
+                return dctLoopIndexVariables[traceRound];
 
             Scalar<int64> indexVariable = OnnxOp.LoopIndexVariable();
-            dctLoopIndexVariables[CurrentPass] = indexVariable;
+            dctLoopIndexVariables[traceRound] = indexVariable;
             return indexVariable;
         }
 
@@ -321,9 +348,11 @@ namespace Shorokoo
                 // if (nodeInputs.Any(x => this.zombieScanVariableOutputs.Contains(x)))
                 //     throw new InvalidOperationException("Cannot use output of scan variables inside the loop.");
 
-                var nodeIndex = this.secondPassLoopBody.Count;
+                var isLagPass = this.secondPassRound == 1;
+
+                var nodeIndex = isLagPass ? this.lagPassLoopBody.Count : this.secondPassLoopBody.Count;
                 checkMatch(nodeIndex, node);
-                this.secondPassLoopBody.Add(node);
+                (isLagPass ? this.lagPassLoopBody : this.secondPassLoopBody).Add(node);
 
                 for (int inputIndex = 0; inputIndex < nodeInputs.Length; inputIndex++)
                 {
@@ -331,23 +360,29 @@ namespace Shorokoo
                     if (input is null) continue;
 
                     var loopInputVariable = this.variableInputs[(nodeIndex, inputIndex)];
-                    loopInputVariable.SetSecondPassInput(input);
-                }
-
-                for (int outputIndex = 0; outputIndex < nodeOutputs.Length; outputIndex++)
-                {
-                    if (this.variableOutputs.ContainsKey((nodeIndex, outputIndex)))
-                    {
-                        var output = nodeOutputs[outputIndex];
-                        Debug.Assert(output is not null);
-
-                        var outputVariable = this.variableOutputs[(nodeIndex, outputIndex)];
-                        outputVariable.SetSecondPassZombieOutput(output);
-                        this.secondPassOuputZombieVariables[outputVariable.Key] = output;
-                    }
+                    if (isLagPass)
+                        loopInputVariable.SetLagPassInput(input);
                     else
-                        Debug.Assert(nodeOutputs[outputIndex] is null);
+                        loopInputVariable.SetSecondPassInput(input);
                 }
+
+                // The lag pass keeps the second pass's zombie outputs: they are what the open
+                // node's loop variables are built from, and the lag pass only adds input reads.
+                if (!isLagPass)
+                    for (int outputIndex = 0; outputIndex < nodeOutputs.Length; outputIndex++)
+                    {
+                        if (this.variableOutputs.ContainsKey((nodeIndex, outputIndex)))
+                        {
+                            var output = nodeOutputs[outputIndex];
+                            Debug.Assert(output is not null);
+
+                            var outputVariable = this.variableOutputs[(nodeIndex, outputIndex)];
+                            outputVariable.SetSecondPassZombieOutput(output);
+                            this.secondPassOuputZombieVariables[outputVariable.Key] = output;
+                        }
+                        else
+                            Debug.Assert(nodeOutputs[outputIndex] is null);
+                    }
 
                 // Keep everything as is. All outputs here are unused and unneeded.
                 return (originalInputs, originalOutputs);
@@ -490,6 +525,7 @@ namespace Shorokoo
                 throw new InvalidTensorOperationException(ErrorCodes.FW020, "Loop Phase Validation", $"current pass: {this.CurrentPass}", "Cannot start first pass - current pass must be 0");
 
             this.CurrentPass = 1;
+            this.traceRound++;
         }
 
         public void StartSecondPass()
@@ -498,12 +534,22 @@ namespace Shorokoo
                 throw new InvalidTensorOperationException(ErrorCodes.FW021, "Loop Phase Validation", $"current pass: {this.CurrentPass}", "Cannot start second pass - current pass must be 1");
 
             this.CurrentPass = 2;
+            this.traceRound++;
+        }
+
+        public void StartLagPass()
+        {
+            if (this.CurrentPass != 2 || this.secondPassRound != 0)
+                throw new InvalidTensorOperationException(ErrorCodes.FW021, "Loop Phase Validation", $"current pass: {this.CurrentPass}", "Cannot start lag pass - current pass must be the first trace of pass 2");
+
+            this.secondPassRound = 1;
+            this.traceRound++;
         }
 
         public void BuildLoopOpenNode()
         {
-            if (this.CurrentPass != 2)
-                throw new InvalidTensorOperationException(ErrorCodes.FW022, "Loop Phase Validation", $"current pass: {this.CurrentPass}", "Cannot build loop open node - current pass must be 2");
+            if (this.CurrentPass != 2 || this.secondPassRound != 1)
+                throw new InvalidTensorOperationException(ErrorCodes.FW022, "Loop Phase Validation", $"current pass: {this.CurrentPass}", "Cannot build loop open node - current pass must be the lag pass");
 
             using var loopNodeBuild = GraphTrace.Loopers.EnterLoopNodeBuild();
 
@@ -572,7 +618,45 @@ namespace Shorokoo
                 loopVariablesWithInitializers.Add(loopVariable);
             }
 
-            // This addresses Cases 1, 2 and 3. Cases 4 and 5 do not have any loop variable inputs.
+            // 6. The lag-1 carry: a local holding what another carry held one iteration ago. Its
+            //    read does not move between the first two passes — each pass advances such a local
+            //    by a single lag step, so it still holds the pre-loop value and the filter above
+            //    never fires — and the lag pass is what exposes it: by then the read has landed on
+            //    a FIRST-pass body output, one pass behind the carry it trails. Left unidentified,
+            //    every read of it resolved through ProcessNode's outer-scope case to the value it
+            //    held before the loop.
+            var lagVariableInputs = this.variableInputs.Values.Where(x =>
+                                        x.LagPassInput is not null &&
+                                        x.SecondPassInput is not null &&
+                                        !this.firstPassVariableOutputs.ContainsKey(x.SecondPassInput) &&
+                                        this.firstPassVariableOutputs.ContainsKey(x.LagPassInput));
+
+            var carryByOutputKey = new Dictionary<(int NodeIndex, int OutputIndex), LoopVariable>();
+            foreach (var carry in loopVariablesWithInitializers)
+                carryByOutputKey[carry.OutputKey] = carry;
+
+            var lagLoopVariables = new List<LoopVariable>();
+            foreach (var lagGroup in lagVariableInputs.GroupBy(x => (x.FirstPassInput, x.LagPassInput.AssertNotNull())))
+            {
+                (var lagInitializer, var trailedFirstPassOutput) = lagGroup.Key;
+
+                // The value assigned is the trailed local's value at the point of the assignment,
+                // which precedes that local's own update — otherwise the second pass would already
+                // have seen the read move and identified an ordinary carry. So it is the trailed
+                // carry's value at the START of the iteration: its open-node output. A local that
+                // is not carried has no such value to hand back, and cannot be trailed.
+                var trailedOutputKey = this.firstPassVariableOutputs[trailedFirstPassOutput].Key;
+                if (!carryByOutputKey.TryGetValue(trailedOutputKey, out var trailedCarry))
+                    throw new UnsupportedLoopVariableAssignmentException(
+                        ErrorCodes.FW047, LagCarryOfUncarriedValueGuidance);
+
+                lagLoopVariables.Add(LoopVariable.Lag(
+                    lagInitializer, trailedCarry, trailedFirstPassOutput, lagGroup.Select(x => x.Key).ToList()));
+            }
+            loopVariablesWithInitializers.AddRange(lagLoopVariables);
+            this.lagCarryCount = lagLoopVariables.Count;
+
+            // This addresses Cases 1, 2, 3 and 6. Cases 4 and 5 do not have any loop variable inputs.
             this.loopVariableByNodeInputLocation = loopVariablesWithInitializers.SelectMany(loopVariable =>
                                                         loopVariable.InputKeys.Select(inputKey => (inputKey, loopVariable)))
                                                         .ToDictionary(x => x.inputKey, x => x.loopVariable);
@@ -597,7 +681,8 @@ namespace Shorokoo
             // var iterationIndexLoopVariable = new LoopVariable(null, this.IterationIndexFirstPassZombie.AssertNotNull(), this.IterationIndexSecondPassZombie.AssertNotNull(), [], (-1, -1));
             // this.IterationIndexLoopVariable = iterationIndexLoopVariable;
 
-            var allNonScanLoopVariables = loopVariablesWithInitializers.Concat(outputOnlyLoopVariables).ToList();
+            var allNonScanLoopVariables = loopVariablesWithInitializers.Where(x => !x.IsLagCarry)
+                                                .Concat(outputOnlyLoopVariables).ToList();
             var allLoopVariables = allNonScanLoopVariables.Concat(scanLoopVariables).ToList();
             this.loopVariableByNodeOutputLocation = allLoopVariables.ToDictionary(x => x.OutputKey);
 
@@ -619,12 +704,53 @@ namespace Shorokoo
                 this.openNodeOutputs[output] = loopVariable;
             }
 
+            foreach (var lagVariable in lagLoopVariables)
+                lagVariable.BindLagSource();
+
             var nonLoopExternalInputs = this.allExternalInputs.ToHashSet();
             foreach (var loopVariable in loopVariablesWithInitializers)
                 nonLoopExternalInputs.Remove(loopVariable.OpenNodeInputInitializer.AssertNotNull());
 
             this.allExternalInputExceptLoopVariables = nonLoopExternalInputs;
         }
+
+        internal const string InnerScanReadAfterEnclosingLoopGuidance =
+            "an inner loop's ctx.Scan output was read after the ENCLOSING loop."
+            + "\n"
+            + "\nThe stacked tensor is produced once per iteration of the enclosing loop, and that "
+            + "loop has no initial value to return for it when it runs zero times, so it cannot "
+            + "carry it out."
+            + "\n"
+            + "\nConsume the inner loop's scan output inside the enclosing loop's body, or scan on "
+            + "the enclosing loop's own context instead.";
+
+        internal const string LagCarryReadAfterLoopGuidance =
+            "a variable holding the previous iteration's value of a loop carry was read after the "
+            + "loop."
+            + "\n"
+            + "\nThe loop computes that value, but a bare assignment creates no node in the body, so "
+            + "there is nothing for the loop to point the variable at afterwards — it still names "
+            + "the value the body was working on."
+            + "\n"
+            + "\nWrap the assignment so the body produces it:"
+            + "\n"
+            + "\n    foreach (var ctx in LoopAPI.Iterate(trips))"
+            + "\n    {"
+            + "\n        sum  = sum + prev;"
+            + "\n        prev = LoopAPI.Carry(acc);   // not `prev = acc;`"
+            + "\n        acc  = acc + Scalar(1.0f);"
+            + "\n    }"
+            + "\n"
+            + "\nReading the lagged value only inside the body needs no wrapping.";
+
+        private const string LagCarryOfUncarriedValueGuidance =
+            "the loop body assigned a variable the previous iteration's value of another variable "
+            + "that the loop does not itself carry."
+            + "\n"
+            + "\nA lagged variable hands back the value the variable it trails held at the start of "
+            + "the iteration, so that variable has to be a loop carry — read in the body before it "
+            + "is assigned. Declare it with LoopAPI.Init, or compute the lagged value in the body "
+            + "from a carry instead.";
 
         private const string CarryAssignedFromOutsideGuidance =
             "the loop body assigned a variable declared with LoopAPI.Init a value computed outside "
@@ -654,10 +780,11 @@ namespace Shorokoo
 
         public void StartThirdPass()
         {
-            if (this.CurrentPass != 2)
-                throw new InvalidTensorOperationException(ErrorCodes.FW020, "Loop Phase Validation", $"current pass: {this.CurrentPass}", "Cannot start third pass - current pass must be 2");
+            if (this.CurrentPass != 2 || this.secondPassRound != 1)
+                throw new InvalidTensorOperationException(ErrorCodes.FW020, "Loop Phase Validation", $"current pass: {this.CurrentPass}", "Cannot start third pass - current pass must be the lag pass");
 
             this.CurrentPass = 3;
+            this.traceRound++;
         }
 
         public void MapInnerLoopCloseNodeOutputsToOuterLoopThirdPassOutputs(ImmutableList<(Variable outerThirdPassOuput, Variable innerCloseNodeOutput)> mappings)
@@ -687,7 +814,20 @@ namespace Shorokoo
 
             var closeNodeLoopVariables = this.OpenLoopNode.AssertNotNull().Outputs.Skip(2).AssertNotNulls().Select(x => this.openNodeOutputs[x].AssertNotNull()).ToArray();
             var closeNodeLoopInputs = closeNodeLoopVariables.Select(x => x.CloseNodeInput.AssertNotNull()).ToArray();
-            Debug.Assert(thirdPassOutputs.Values.Where(x => !x.IsLocalScanVariable && x.OpenNodeInputInitializer is not null).Count() == closeNodeLoopInputs.Length);
+            Debug.Assert(thirdPassOutputs.Values.Where(x => !x.IsLocalScanVariable && x.OpenNodeInputInitializer is not null).Count()
+                            + this.lagCarryCount == closeNodeLoopInputs.Length);
+
+            // A scan bound to a value a NESTED loop's body produces — this loop's ctx.Scan called
+            // from inside an inner loop — records the value this body ends the iteration with,
+            // which is the inner loop's close-node output. The binding was taken while the inner
+            // loop was still on its own first pass, so it names the body value the inner loop
+            // later carries out; follow that mapping now the inner loop has closed. A scan of a
+            // value this body produces itself has no such mapping and keeps its binding.
+            foreach (var scanVariable in thirdPassOutputs.Values.Where(x => x.IsLocalScanVariable))
+                if (scanVariable.ScanVariableThirdPassInput is { } scanned &&
+                    this.thirdPassOutputs.TryGetValue(scanned, out var producer) &&
+                    producer.InnerLoopCloseNodeOutput is { } innerClose)
+                    scanVariable.RebindLocalScanVariableInput(innerClose);
 
             var closeNodeScanLoopVariables = thirdPassOutputs.Values.Where(x => x.IsLocalScanVariable).ToArray();
             var closeNodeScanInputs = closeNodeScanLoopVariables.Select(x => x.CloseNodeInput.AssertNotNull()).ToArray();
@@ -722,7 +862,10 @@ namespace Shorokoo
 
             this.CloseLoopNode = loopCloseNode;
 
-            return this.closeNodeOutputs.Values.Select(x => (x.FirstPassOutput, x.CloseNodeOutput.AssertNotNull())).ToImmutableList();
+            // A lag carry's FirstPassOutput is the trailed carry's, which already appears in this
+            // mapping under its own close output; leaving it in would overwrite that entry.
+            return this.closeNodeOutputs.Values.Where(x => !x.IsLagCarry)
+                        .Select(x => (x.FirstPassOutput, x.CloseNodeOutput.AssertNotNull())).ToImmutableList();
         }
 
         public void StartFourthPass()
@@ -731,6 +874,7 @@ namespace Shorokoo
                 throw new InvalidTensorOperationException(ErrorCodes.FW020, "Loop Phase Validation", $"current pass: {this.CurrentPass}", "Cannot start fourth pass - current pass must be 3");
 
             this.CurrentPass = 4;
+            this.traceRound++;
         }
 
         public void Terminate()
@@ -741,7 +885,31 @@ namespace Shorokoo
             this.CurrentPass = 5;
 
             foreach (var loopVariable in this.loopVariableByNodeOutputLocation.Values.Where(x => x.OpenNodeInputInitializer is null))
-                loopVariable.InvalidFourthPassOutput.AssertNotNull().IsValid = false;
+            {
+                var invalid = loopVariable.InvalidFourthPassOutput.AssertNotNull();
+                invalid.IsValid = false;
+
+                // A nested loop's scan output is one of these: the enclosing loop sees the scan
+                // zombie as an ordinary output-only body value. Say so, since the generic answer
+                // (LoopAPI.Init) cannot apply — a stack has no pre-loop value to declare.
+                if (loopVariable.FirstPassOutput.OwningNode.OpCode == OpCodes.LOOP_SCAN_VARIABLE)
+                    invalid.InvalidReason = InnerScanReadAfterEnclosingLoopGuidance;
+            }
+
+            // A lag carry's own value is handed back by the close node, but the user's local does
+            // not name it: a bare assignment produces no body node, so the fourth pass has nothing
+            // to remap and the local still names the trailed carry's body value. That value must
+            // not leave the loop — the same limitation LoopAPI.Carry exists for, and the same
+            // remedy.
+            foreach (var lagVariable in this.loopVariableByNodeInputLocation.Values.Where(x => x.IsLagCarry).Distinct())
+            {
+                var trailedBodyValue = lagVariable.TrailedCarry.AssertNotNull().ThirdPassOutput;
+                if (trailedBodyValue is not null)
+                {
+                    trailedBodyValue.IsValid = false;
+                    trailedBodyValue.InvalidReason = LagCarryReadAfterLoopGuidance;
+                }
+            }
         }
 
         /// <summary>
@@ -1016,6 +1184,11 @@ namespace Shorokoo
                     yield return ((x, y) => { }, looper, looper.GetLoopIndexVariable());
                     Debug.Assert(looperStack.Count == looper.LoopDepth + 1);
 
+                    // Lag pass, identify the carries that trail another carry by one iteration.
+                    looper.StartLagPass();
+                    yield return ((x, y) => { }, looper, looper.GetLoopIndexVariable());
+                    Debug.Assert(looperStack.Count == looper.LoopDepth + 1);
+
                     looper.BuildLoopOpenNode();
 
                     // Third pass, build the actual loop body
@@ -1180,12 +1353,21 @@ namespace Shorokoo
         public Variable FirstPassInput { get; private set; }
         public Variable? SecondPassInput { get; private set; }
 
+        /// <summary>The value read here on the lag pass — the second pass traced once more.</summary>
+        public Variable? LagPassInput { get; private set; }
+
         public LoopVariableOutput? LoopVariableConnection { get; private set; }
 
         public void SetSecondPassInput(Variable input)
         {
             Debug.Assert(this.SecondPassInput is null);
             this.SecondPassInput = input;
+        }
+
+        public void SetLagPassInput(Variable input)
+        {
+            Debug.Assert(this.LagPassInput is null);
+            this.LagPassInput = input;
         }
     }
 
@@ -1234,6 +1416,33 @@ namespace Shorokoo
             this.IsLocalScanVariable = isLocalScanVariable;
         }
 
+        /// <summary>
+        /// A carry that trails another carry by one iteration. It owns no body node output of its
+        /// own: its value at the end of each iteration is the trailed carry's value at the
+        /// <em>start</em> of that iteration, which is that carry's open-node output.
+        /// </summary>
+        public static LoopVariable Lag(
+            Variable initializer, LoopVariable trailed, Variable trailedFirstPassOutput,
+            List<(int NodeIndex, int InputIndex)> inputKeys)
+            => new LoopVariable(initializer, trailedFirstPassOutput, trailed.SecondPassZombie.AssertNotNull(),
+                                isLocalScanVariable: false, inputKeys, trailed.OutputKey)
+            { IsLagCarry = true, TrailedCarry = trailed };
+
+        /// <summary>The carry this one trails, for a lag carry; null otherwise. See <see cref="Lag"/>.</summary>
+        public LoopVariable? TrailedCarry { get; private init; }
+
+        /// <summary>See <see cref="Lag"/>.</summary>
+        public bool IsLagCarry { get; private init; }
+
+        /// <summary>The trailed carry's open-node output, bound once the open node exists.</summary>
+        public Variable? LagSourceOpenNodeOutput { get; private set; }
+
+        public void BindLagSource()
+        {
+            Debug.Assert(this.IsLagCarry && this.LagSourceOpenNodeOutput is null);
+            this.LagSourceOpenNodeOutput = this.TrailedCarry.AssertNotNull().OpenNodeOutput.AssertNotNull();
+        }
+
         public bool IsLocalScanVariable { get; private set; }
 
         public ImmutableList<(int NodeIndex, int InputIndex)> InputKeys { get; private set; }
@@ -1258,7 +1467,7 @@ namespace Shorokoo
         /// If this is the output of a node that belong to a nested inner loop (at any level), then this
         /// will correspond to the CloseNode output variable of the outermost of these nested inner loops.
         /// </summary>
-        public Variable? CloseNodeInput => InnerLoopCloseNodeOutput ?? this.ScanVariableThirdPassInput ?? ThirdPassOutput;
+        public Variable? CloseNodeInput => LagSourceOpenNodeOutput ?? InnerLoopCloseNodeOutput ?? this.ScanVariableThirdPassInput ?? ThirdPassOutput;
 
         /// <summary>
         /// The final value after the loop exits.
@@ -1319,6 +1528,16 @@ namespace Shorokoo
         public void SetLocalScanVariableInput(Variable toScan)
         {
             Debug.Assert(this.IsLocalScanVariable && this.ScanVariableThirdPassInput is null);
+            this.ScanVariableThirdPassInput = toScan;
+        }
+
+        /// <summary>
+        /// Replaces the bound scan input once a nested loop has closed and its close-node output
+        /// is known. See <see cref="Looper.BuildLoopCloseNode"/>.
+        /// </summary>
+        public void RebindLocalScanVariableInput(Variable toScan)
+        {
+            Debug.Assert(this.IsLocalScanVariable && this.ScanVariableThirdPassInput is not null);
             this.ScanVariableThirdPassInput = toScan;
         }
 

@@ -658,6 +658,12 @@ namespace Shorokoo
         /// <summary>ONNX export rejected: the graph carries Shorokoo-internal ops and cannot be expressed in the vanilla ONNX dialect</summary>
         public const string FW045 = "FW045";
 
+        /// <summary>A loop body value that cannot leave the loop was returned from the graph</summary>
+        public const string FW046 = "FW046";
+
+        /// <summary>A loop body trailed the previous iteration's value of a variable the loop does not carry</summary>
+        public const string FW047 = "FW047";
+
         #endregion
 
         #region Utility Error Codes (UT001-UT010)

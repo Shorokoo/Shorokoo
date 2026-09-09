@@ -59,9 +59,9 @@ a carry's value is not knowable at build time.
 A variable that is assigned inside a loop *before ever being read in that same
 loop* cannot be used after the loop. Shorokoo cannot recover the variable's
 initial value (needed for the zero-iteration case) and conservatively rejects
-the graph. Initialize the variable explicitly inside the loop body with
-`LoopAPI.Init(x)` (or read it once, e.g. `OnnxOp.Identity(x)`) before the first
-assignment.
+the graph. Initialize the
+variable explicitly inside the loop body with `LoopAPI.Init(x)` (or read it once,
+e.g. `OnnxOp.Identity(x)`) before the first assignment.
 
 ### Carrying a value computed outside the loop body
 
@@ -93,40 +93,50 @@ type, move the assignment out of the loop.
 The build reports this as the **MSG005** warning on the offending line, and
 concretizing the graph raises `FW023` if it is left unfixed.
 
-## Current limitations (could be lifted)
-
-### Carrying a value from the previous iteration
-
-A local that holds what another local held **one iteration ago** is not recognised as a loop
-carry, and every read of it is silently pinned to its value from before the loop
-([#274](https://github.com/Shorokoo/Shorokoo/issues/274)):
+The same wrapper is what lets a **lagged** carry — a local holding what another
+carry held one iteration ago — be read after the loop. The loop computes that
+value either way, and reading it inside the body (or scanning it) needs no
+wrapping; but `prev = acc` is a bare assignment like any other, so there is no
+body node for the loop to point `prev` at afterwards:
 
 ```csharp
-sum = sum + prev;   // prev is acc's value from the previous iteration — reads x every time
-prev = acc;
-acc  = acc + Scalar(1.0f);
+foreach (var ctx in LoopAPI.Iterate(trips))
+{
+    sum  = sum + prev;
+    prev = LoopAPI.Carry(acc);   // not `prev = acc;` — needed only to read prev after the loop
+    acc  = acc + Scalar(1.0f);
+}
 ```
 
-The result is wrong rather than rejected, and every engine agrees on it. `LoopAPI.Init` does not
-help — this is a different shape from the one it addresses. Carry the lagged value explicitly
-(compute it inside the body from the carry itself) until this is fixed.
+Left unwrapped and read after the loop, the graph is refused as **FW046**, naming
+the wrapper.
 
-### Calling an outer loop's ctx.Scan from an inner loop
+### Scanning inside a nested loop, read after the enclosing loop
 
-`ctx.Scan` on an **enclosing** loop's context, called from inside a nested loop's body, throws a
-`KeyNotFoundException` naming nothing
-([#275](https://github.com/Shorokoo/Shorokoo/issues/275)). Scan on the context of the loop whose
-body you are in.
+`ctx.Scan` in an inner loop produces a stacked tensor once per iteration of the
+*enclosing* loop. The enclosing loop can hand that tensor to its own body freely,
+but it cannot hand it back after the loop: as with any value the body assigns
+before ever reading it, there is no value to return for the zero-iteration case —
+and unlike an ordinary local, a stack has no pre-loop value to declare with
+`LoopAPI.Init`. Shorokoo refuses the graph, naming the scan, rather than
+returning something for a trip count it cannot honour:
 
-### Scanning inside a nested loop
+```csharp
+Variable? scanned = null;
+foreach (var ctx0 in LoopAPI.Iterate(outerTrips))
+    foreach (var ctx1 in LoopAPI.Iterate(innerTrips))
+    {
+        acc = acc + Scalar(1.0f);
+        scanned = (Variable)ctx1.Scan(acc);
+    }
+return (Tensor<float32>)scanned!;   // refused: FW046
+```
 
-A value produced by `ctx.Scan` in an inner loop can be used inside the enclosing
-loop's body, but cannot be read after the enclosing loop: the enclosing loop does
-not carry it out, so the model fails to build or is rejected at execution instead
-of returning the stacked value
-([#255](https://github.com/Shorokoo/Shorokoo/issues/255)). Consume the inner
-loop's scan output inside the enclosing body, or move the scan out to the
-enclosing loop.
+Consume the inner loop's scan output inside the enclosing loop's body, or scan on
+the enclosing loop's own context — `ctx0.Scan(acc)` works from an inner body and
+records one entry per *outer* iteration.
+
+## Current limitations (could be lifted)
 
 ### Backprop through dynamic loops
 

@@ -172,6 +172,17 @@ the draw itself), and the streams need no enumeration up front. This works ident
 whether the loop survives to runtime or is unrolled at concretization (each copy resolves
 to the very same key, bit-for-bit).
 
+A feed reached by **calling a module from inside a loop** takes that slot too, whether the
+model was created inside the body or outside it and whether the call is a model call or a
+module-typed `Function`: the draw is executed once per iteration, and a second execution of
+a draw is a second sample. The call site's own position supplies the scope, so the feed
+lands under the call site's id extended with one `(slot, -1)` pair per enclosing loop.
+
+The callee's **parameters** deliberately do not take that slot. One call site reading one
+parameter on every iteration is weight sharing, and is what a model created outside the loop
+already gives; creating the model inside the body is how you ask for a parameter per
+iteration.
+
 ## Per-stream overrides
 
 `config.Override(RngCollection.Params, [1, 1], seed)` returns a **copy** of the config with

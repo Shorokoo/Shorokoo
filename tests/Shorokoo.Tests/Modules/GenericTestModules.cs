@@ -1325,10 +1325,8 @@ namespace Shorokoo.Tests.Modules
     }
 
     /// <summary>
-    /// An inner loop's scan output read <em>after</em> the enclosing loop. The enclosing loop
-    /// sees the inner scan's zombie as an output-only body value with no initializer, so it
-    /// never becomes one of its own carries and the un-lowered <c>#LoopScanVariable#</c> reaches
-    /// the emitted graph. Tracked as Shorokoo/Shorokoo#255.
+    /// An inner loop's scan output read <em>after</em> the enclosing loop — a shape the enclosing
+    /// loop has no zero-iteration value for, and refuses.
     /// </summary>
     [Module]
     public partial class ScanInNestedLoopReadAfterOuterLoop
@@ -1349,8 +1347,7 @@ namespace Shorokoo.Tests.Modules
 
     /// <summary>
     /// <see cref="ScanInNestedLoopReadAfterOuterLoop"/> with the scan read before the inner
-    /// body's update, which fails earlier still — while the module graph is being built.
-    /// Tracked as Shorokoo/Shorokoo#255.
+    /// body's update — the same refusal on the other ordering.
     /// </summary>
     [Module]
     public partial class ScanInNestedLoopBeforeUpdateReadAfterOuterLoop
@@ -1370,9 +1367,9 @@ namespace Shorokoo.Tests.Modules
     }
 
     /// <summary>
-    /// Carries the value <c>acc</c> held one iteration ago. Each tracing pass advances such a
-    /// local by only one lag step, so after two passes it still holds the pre-loop value and the
-    /// looper never identifies it as a carry. Tracked as Shorokoo/Shorokoo#274.
+    /// Carries the value <c>acc</c> held one iteration ago. Such a local advances by only one lag
+    /// step per tracing pass, so the lag pass is what moves its read onto a first-pass body output
+    /// and identifies it.
     /// </summary>
     [Module]
     public partial class LagOneCarry
@@ -1392,10 +1389,72 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary><see cref="LagOneCarry"/> scanned rather than accumulated: the recordings are the
+    /// trailed carry's value at the start of each iteration.</summary>
+    [Module]
+    public partial class LagOneCarryScanned
+    {
+        public static Vector<float32> Inline(Scalar<float32> x, Scalar<int64> trips)
+        {
+            var acc = x;
+            var prev = x;
+            Variable? scanned = null;
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                scanned = (Variable)ctx.Scan(prev);
+                prev = acc;
+                acc = acc + Scalar(1.0f);
+            }
+            return (Vector<float32>)scanned!;
+        }
+    }
+
+    /// <summary><see cref="LagOneCarry"/> with the lagged assignment wrapped, so the body produces
+    /// it and the loop can hand it back: the returned sum adds the value the trailed carry held at
+    /// the start of the last iteration.</summary>
+    [Module]
+    public partial class LagOneCarryWrappedReadAfterLoop
+    {
+        public static Scalar<float32> Inline(Scalar<float32> x, Scalar<int64> trips)
+        {
+            var acc = x;
+            var prev = x;
+            var sum = Scalar(0.0f);
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                sum = sum + prev;
+                prev = LoopAPI.Carry(acc);
+                acc = acc + Scalar(1.0f);
+            }
+            return sum + prev;
+        }
+    }
+
     /// <summary>
-    /// Calls the OUTER loop's <c>ctx.Scan</c> from inside the inner loop's body. The outer looper
-    /// only processes the inner loop's first pass, so the zombie its scan creates on the later
-    /// passes is never registered. Tracked as Shorokoo/Shorokoo#275.
+    /// <see cref="LagOneCarry"/> read after the loop without wrapping the assignment. The bare
+    /// assignment produces no body node, so the local still names the trailed carry's body value —
+    /// refused, naming <c>LoopAPI.Carry</c>.
+    /// </summary>
+    [Module]
+    public partial class LagOneCarryReadAfterLoop
+    {
+        public static Scalar<float32> Inline(Scalar<float32> x, Scalar<int64> trips)
+        {
+            var acc = x;
+            var prev = x;
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                LoopAPI.Init(prev);
+                prev = acc;
+                acc = acc + Scalar(1.0f);
+            }
+            return prev;
+        }
+    }
+
+    /// <summary>
+    /// Calls the OUTER loop's <c>ctx.Scan</c> from inside the inner loop's body, recording the
+    /// value the outer body ends each of its iterations with.
     /// </summary>
     [Module]
     public partial class OuterScanFromInnerBody

@@ -211,21 +211,18 @@ public class FastProcessorsCoverageTests
             expected: [114.0]));
     }
 
-    /// <summary>An inner loop's scan output read after the enclosing loop. The enclosing loop
-    /// sees the inner scan's zombie as an output-only body value with no initializer, so it never
-    /// becomes one of the enclosing loop's carries: read-after-update leaves an un-lowered
-    /// #LoopScanVariable# in the emitted graph, and read-before-update fails while the module
-    /// graph is still being built. Tracked as Shorokoo/Shorokoo#255.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#255: an inner loop's scan output does not survive the enclosing loop")]
-    public void TestScanningInsideANestedLoopSurvivesTheEnclosingLoop()
+    /// <summary>An inner loop's scan output cannot be read after the enclosing loop: that loop
+    /// produces a whole stacked tensor per iteration and has no value to return for it when it
+    /// runs zero times. Refused where the shape the user wrote is still nameable, on both
+    /// orderings — one used to leave an un-lowered #LoopScanVariable# in the emitted graph, the
+    /// other to fail an assertion while the module graph was being built.</summary>
+    [Fact]
+    public void TestScanningInsideANestedLoopIsRefusedAfterTheEnclosingLoop()
     {
-        var outer = TensorData(DType.Int64, [], 2L);
-        var inner = TensorData(DType.Int64, [], 3L);
-        Assert.True(AutoTest.AdvancedTestGraph<ScanInNestedLoopReadAfterOuterLoop>(
-            hyperparamInputs: [], runtimeInputs: [Scalar32(10f), outer, inner],
-            expected: [14.0, 15.0, 16.0]));
-        Assert.True(AutoTest.AdvancedTestGraph<ScanInNestedLoopBeforeUpdateReadAfterOuterLoop>(
-            hyperparamInputs: [], runtimeInputs: [Scalar32(10f), outer, inner],
-            expected: [13.0, 14.0, 15.0]));
+        static string Refusal(Func<ComputationGraph> build)
+            => Assert.Throws<UnsupportedLoopVariableAssignmentException>(() => build()).Message;
+
+        Assert.Contains("ctx.Scan", Refusal(() => ScanInNestedLoopReadAfterOuterLoop.ComputationGraph));
+        Assert.Contains("ctx.Scan", Refusal(() => ScanInNestedLoopBeforeUpdateReadAfterOuterLoop.ComputationGraph));
     }
 }

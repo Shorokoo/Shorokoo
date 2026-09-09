@@ -734,6 +734,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             int nextCallSiteId = NextFreeTopLevelModelId(graph);
             var callSiteDedupeIds = new Dictionary<string, int>();
 
+            // The loops enclosing the node being visited, outermost first. Scope membership in
+            // the Fast pipeline is positional, and an invoke node carries no iteration-indices
+            // input of its own, so this is what tells us the call site's loop scope.
+            var enclosingLoops = new List<FastNode>();
+
             foreach (var fastNode in graph.Nodes)
             {
                 bool isFunction = fastNode.OpCode == InternalOpCodes.FUNCTION_INVOKE;
@@ -741,6 +746,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
                 if (!isFunction && !isModuleCall)
                 {
+                    if (fastNode.OpCode == OpCodes.LOOP_OPEN)
+                        enclosingLoops.Add(fastNode);
+                    else if (fastNode.OpCode == OpCodes.LOOP_CLOSE && enclosingLoops.Count > 0)
+                        enclosingLoops.RemoveAt(enclosingLoops.Count - 1);
                     newNodes.Add(fastNode);
                     continue;
                 }
@@ -786,7 +795,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         var callSiteTemplate = ModelParamIdentifierTemplate.LocalModule(
                             callSiteId, calleeName, callSiteDedupeIds[calleeName], ImmutableArray<int>.Empty);
 
-                        FastReparentToCallSite(subFastGraph, callSiteTemplate, callSiteId, null, graph);
+                        var (feedId, feedExtraIter) = ExtendScopeToCallSite(
+                            callSiteId, enclosingLoops, subFastGraph, newNodes);
+                        FastReparentToCallSite(
+                            subFastGraph, callSiteTemplate, callSiteId, null, graph, feedId, feedExtraIter);
                     }
                 }
                 else
@@ -826,7 +838,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         var parentModelId = new ModelId(parentModelIdVals);
                         var parentIterIndicesKey = directModelCreation.Inputs[1]; // FastTensorKey in main graph
 
-                        FastReparentToCallSite(subFastGraph, parentIdTemplate, parentModelId, parentIterIndicesKey, graph);
+                        var (feedId, feedExtraIter) = ExtendScopeToCallSite(
+                            parentModelId, enclosingLoops, subFastGraph, newNodes);
+                        FastReparentToCallSite(
+                            subFastGraph, parentIdTemplate, parentModelId, parentIterIndicesKey, graph,
+                            feedId, feedExtraIter);
                     }
                     else
                     {
@@ -1021,7 +1037,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             ModelParamIdentifierTemplate parentIdTemplate,
             ModelId parentModelId,
             FastTensorKey? parentIterIndicesKey,
-            InternalComputationGraph mainGraph)
+            InternalComputationGraph mainGraph,
+            ModelId? feedParentModelId = null,
+            IReadOnlyList<FastTensorKey?>? feedExtraIterElements = null)
         {
             var subNodeByKey = new Dictionary<FastNodeKey, FastNode>(subGraph.Nodes.Count);
             foreach (var n in subGraph.Nodes) subNodeByKey[n.Key] = n;
@@ -1045,11 +1063,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     var childFeedIterKey = node.Inputs.Count > 2 ? node.Inputs[2] : null;
                     var combinedFeedIterKey = CombineIterationIndices(
                         parentIterIndicesKey, childFeedIterKey,
-                        subGraph, mainGraph, subNodeByKey, nodesToInsert, i);
+                        subGraph, mainGraph, subNodeByKey, nodesToInsert, i, feedExtraIterElements);
 
                     var dctFeedAttributes = node.Attributes.GetAttributeVals().ToDictionary();
                     var feedIdVals = (long[])dctFeedAttributes[OnnxOpAttributeNames.ShrkAttrLocalModelId]!;
-                    var combinedFeedId = new ModelId(parentModelId, ModelId.FromLongVals(feedIdVals));
+                    var combinedFeedId = new ModelId(
+                        feedParentModelId ?? parentModelId, ModelId.FromLongVals(feedIdVals));
                     dctFeedAttributes[OnnxOpAttributeNames.ShrkAttrLocalModelId] =
                         combinedFeedId.Vals.Select(x => (long)x).ToArray();
                     node.Attributes = OnnxCSharpAttributes.FromCSharpVals(
@@ -1120,6 +1139,63 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 subGraph.Nodes.Insert(insertIdx + offset, newNode);
                 offset++;
             }
+        }
+
+        /// <summary>
+        /// Extends a call site's identity with the loops that enclose the <em>invoke</em> site but
+        /// that the callee's identity does not already account for, and builds the runtime
+        /// iteration-index elements those slots read.
+        ///
+        /// <para>The identity a spliced body is reparented under comes from where the callee was
+        /// <em>created</em> — the <c>MODULE_SET_HYPERPARAMS</c> node for a <c>MODEL_INVOKE</c>, and
+        /// nothing at all for a module-typed <c>FUNCTION_INVOKE</c>, which has no creation site. A
+        /// model created outside a loop and called inside one therefore carries a scope-free id, so
+        /// every iteration derives the same RNG stream key and a draw in the body returns one
+        /// sample for all of them. Re-executing a draw is a second sample, so the invoke site's
+        /// scope has to reach the feeds (Shorokoo/Shorokoo#289).</para>
+        ///
+        /// <para>This is deliberately applied to the feeds only. Sharing a <em>parameter</em>
+        /// across the iterations of one call site is weight sharing, and is what a model created
+        /// outside a loop already gives; sharing a draw is not.</para>
+        ///
+        /// <para>Each added level takes a <c>(slot, -1)</c> pair, the shape
+        /// <see cref="FastApplyIdentifierTemplates"/> gives an in-loop member: the slot is one past
+        /// every leading id component the callee body uses, so a realized iteration index can never
+        /// land on one of the callee's own members.</para>
+        /// </summary>
+        private static (ModelId feedParentId, IReadOnlyList<FastTensorKey?> extraIterElements) ExtendScopeToCallSite(
+            ModelId parentModelId,
+            List<FastNode> enclosingLoops,
+            InternalComputationGraph subGraph,
+            List<FastNode> newNodes)
+        {
+            int accountedFor = parentModelId.Vals.Count(v => v == -1);
+            int extra = enclosingLoops.Count - accountedFor;
+            if (extra <= 0) return (parentModelId, []);
+
+            int loopSlot = 1;
+            foreach (var n in subGraph.Nodes)
+            {
+                var vals = n.Attributes.IsAttributeDefined(OnnxOpAttributeNames.ShrkAttrLocalModelId)
+                    ? n.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrLocalModelId)
+                    : null;
+                if (vals is { Length: > 0 }) loopSlot = Math.Max(loopSlot, (int)vals[0] + 1);
+            }
+
+            var idVals = new List<int>(parentModelId.Vals);
+            var elements = new List<FastTensorKey?>();
+            foreach (var loopOpen in enclosingLoops.Skip(accountedFor))
+            {
+                idVals.Add(loopSlot);
+                idVals.Add(-1);
+                // LOOP_OPEN's output 0 is the iteration index. Unsqueeze it to a one-element
+                // vector the way the trace-time chain does, so GetIterationIndexScalars walks
+                // IDENTITY → UNSQUEEZE → LOOP_OPEN back to it.
+                elements.Add(FastNodeCreationHelpers.BuildIterationIndexElement(
+                    loopOpen.Outputs[0]!.Value, newNodes));
+            }
+
+            return (new ModelId(idVals.ToArray()), elements);
         }
 
         /// <summary>
@@ -1242,16 +1318,21 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             FastTensorKey? parentKey, FastTensorKey? childKey,
             InternalComputationGraph subGraph, InternalComputationGraph mainGraph,
             Dictionary<FastNodeKey, FastNode> subNodeByKey,
-            List<(int, FastNode)> nodesToInsert, int currentIndex)
+            List<(int, FastNode)> nodesToInsert, int currentIndex,
+            IReadOnlyList<FastTensorKey?>? extraParentElements = null)
         {
             bool parentIsEmpty = parentKey is null || IsEmptyConstantVector(parentKey.Value, mainGraph);
             bool childIsEmpty = childKey is null || IsEmptyConstantVector(childKey.Value, subGraph, subNodeByKey);
+            bool noExtra = extraParentElements is null || extraParentElements.Count == 0;
 
-            if (parentIsEmpty && childIsEmpty)
-                return childKey ?? parentKey;
+            if (noExtra)
+            {
+                if (parentIsEmpty && childIsEmpty)
+                    return childKey ?? parentKey;
 
-            if (parentIsEmpty) return childKey;
-            if (childIsEmpty) return parentKey;
+                if (parentIsEmpty) return childKey;
+                if (childIsEmpty) return parentKey;
+            }
 
             // Build a flat CONCAT whose inputs are the union of parent's and child's
             // scalar inputs (in that order). Both halves are themselves CONCATs by the
@@ -1259,9 +1340,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // that walker. After splicing the subgraph into the main graph, every
             // referenced scalar input becomes accessible — parent's inputs are upstream
             // of the splice point, child's are inside the spliced section.
+            //
+            // The extra elements sit between the two halves: they realize the iteration
+            // slots ExtendScopeToCallSite appended to the parent id, which come after the
+            // parent's own slots and before the child's.
             var combinedInputs = new List<FastTensorKey?>();
-            AppendIterIndexInputs(parentKey!.Value, mainGraph, combinedInputs);
-            AppendIterIndexInputs(childKey!.Value, subGraph, subNodeByKey, combinedInputs);
+            if (!parentIsEmpty) AppendIterIndexInputs(parentKey!.Value, mainGraph, combinedInputs);
+            if (!noExtra) combinedInputs.AddRange(extraParentElements!);
+            if (!childIsEmpty) AppendIterIndexInputs(childKey!.Value, subGraph, subNodeByKey, combinedInputs);
 
             var concatNodeKey = FastNodeKey.New();
             var concatTensorKey = new FastTensorKey(concatNodeKey, 0);
@@ -5667,6 +5753,29 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 unsqueezedKeys.Select(k => (FastTensorKey?)k).ToArray()));
 
             return concatTensorKey;
+        }
+
+        /// <summary>
+        /// Unsqueezes an iteration-index scalar into the one-element vector an iteration-indices
+        /// CONCAT takes as an input, matching the trace-time chain
+        /// <see cref="GetIterationIndexScalars"/> walks back through.
+        /// </summary>
+        public static FastTensorKey BuildIterationIndexElement(
+            FastTensorKey scalarKey, List<FastNode> newNodes)
+        {
+            var axesNodeKey = FastNodeKey.New();
+            newNodes.Add(CreateConstantNode(axesNodeKey, [1], -1L));
+
+            var unsqueezeNodeKey = FastNodeKey.New();
+            newNodes.Add(CreateFastNode(unsqueezeNodeKey, OpCodes.UNSQUEEZE,
+                new Dictionary<string, object?>(),
+                [scalarKey, new FastTensorKey(axesNodeKey, 0)]));
+
+            var vecNodeKey = FastNodeKey.New();
+            newNodes.Add(CreateFastNode(vecNodeKey, OpCodes.IDENTITY,
+                new Dictionary<string, object?>(),
+                [new FastTensorKey(unsqueezeNodeKey, 0)]));
+            return new FastTensorKey(vecNodeKey, 0);
         }
 
         /// <summary>Creates a CONSTANT FastNode producing a scalar or vector int64 tensor.</summary>

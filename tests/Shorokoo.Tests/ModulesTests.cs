@@ -1082,21 +1082,35 @@ public class ModulesCoverageTests
     public void TestAZeroInputOpInALoopBodyStaysInTheLoopBody()
         => AssertDrawInsideLoopBody(ZeroInputOpInLoopBody.ComputationGraph);
 
-    /// <summary>A local carrying the value another held one iteration ago is not identified as a
-    /// carry — each tracing pass advances it by one lag step, so after two passes it still holds
-    /// the pre-loop value — and every read of it is pinned to that value.
-    /// Tracked as Shorokoo/Shorokoo#274.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#274: a lag-1 loop carry is pinned to its pre-loop value")]
+    /// <summary>A local carrying the value another held one iteration ago reads that value, not
+    /// the one from before the loop — accumulated, and scanned.</summary>
+    [Fact]
     public void TestALagOneLoopCarryCarriesThePreviousIterationsValue()
-        => Assert.True(AutoTest.AdvancedTestGraph<LagOneCarry>(
-            hyperparamInputs: [],
-            runtimeInputs: [TensorData(DType.Float32, [], 10f), TensorData(DType.Int64, [], 3L)],
-            expected: [31.0]));
+    {
+        TensorData[] inputs = [TensorData(DType.Float32, [], 10f), TensorData(DType.Int64, [], 3L)];
+        Assert.True(AutoTest.AdvancedTestGraph<LagOneCarry>(
+            hyperparamInputs: [], runtimeInputs: inputs, expected: [31.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<LagOneCarryScanned>(
+            hyperparamInputs: [], runtimeInputs: inputs, expected: [10.0, 10.0, 11.0]));
+    }
 
-    /// <summary>The outer looper only processes an inner loop's first pass, so a zombie the outer
-    /// loop's scan creates on the inner's later passes is never registered and the lookup throws a
-    /// raw KeyNotFoundException. Tracked as Shorokoo/Shorokoo#275.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#275: the outer loop's ctx.Scan throws when called from an inner body")]
+    /// <summary>Reading a lag carry after the loop needs the assignment wrapped, exactly as
+    /// carrying a value computed outside the body does: a bare assignment produces no body node
+    /// for the loop to point the variable at, and is refused naming the wrapper rather than
+    /// asserting in Debug and exporting a broken scope in Release.</summary>
+    [Fact]
+    public void TestALagOneCarryIsReadAfterTheLoopThroughLoopApiCarry()
+    {
+        TensorData[] inputs = [TensorData(DType.Float32, [], 10f), TensorData(DType.Int64, [], 3L)];
+        Assert.True(AutoTest.AdvancedTestGraph<LagOneCarryWrappedReadAfterLoop>(
+            hyperparamInputs: [], runtimeInputs: inputs, expected: [43.0]));
+        Assert.Contains("LoopAPI.Carry", Assert.Throws<UnsupportedLoopVariableAssignmentException>(
+            () => LagOneCarryReadAfterLoop.ComputationGraph).Message);
+    }
+
+    /// <summary>An enclosing loop's ctx.Scan called from inside a nested loop's body records the
+    /// value the outer body ends each of its iterations with.</summary>
+    [Fact]
     public void TestTheOuterLoopsScanCanBeCalledFromAnInnerLoopBody()
         => Assert.True(AutoTest.AdvancedTestGraph<OuterScanFromInnerBody>(
             hyperparamInputs: [],
@@ -1300,20 +1314,30 @@ public class ModulesCoverageTests
         Assert.Equal([2f, 4f], RunFloats(arch.ToConcreteModel(), input));
     }
 
-    /// <summary>A call site inside a loop body takes no iteration scope, so the callee's parameter
-    /// is shared across iterations where the MODEL_INVOKE route realizes one per iteration.
-    /// Tracked as Shorokoo/Shorokoo#285.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#285: a module-typed function invoked in a loop body takes no iteration scope")]
-    public void TestAModuleTypedFunctionInvokedInALoopRealizesAParameterPerIteration()
+    /// <summary>What a call site realizes per iteration is decided by where the callee is
+    /// CREATED, not by which invoke form reaches it: one call site of one callee shares its
+    /// parameter across the loop's iterations — weight sharing — and only creating the model
+    /// inside the body makes a parameter per iteration.</summary>
+    [Fact]
+    public void TestAModuleInvokedInALoopSharesOneParameterAcrossIterations()
     {
-        var fn = ModuleFn((Func<Tensor<float32>, Tensor<float32>>)TimesOwnParam);
-        var x = InvokeInput("input");
-        var acc = x;
-        foreach (var _ in LoopAPI.Iterate(Scalar(3L))) acc = (Tensor<float32>)fn.Call(acc)[0];
-        var g = ComputationGraph.FromInternal(new InternalComputationGraph([x], [acc]), GraphKind.Module);
+        int ParamIdentities(Func<Tensor<float32>, Tensor<float32>> callOnce)
+        {
+            var x = InvokeInput("input");
+            var acc = x;
+            foreach (var _ in LoopAPI.Iterate(Scalar(3L))) acc = callOnce(acc);
+            var g = ComputationGraph.FromInternal(new InternalComputationGraph([x], [acc]), GraphKind.Module);
+            var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([2L], 1f, 2f)]));
+            return arch.GetConcreteModelParamInfos().ModelIds.Distinct().Count();
+        }
+        static Model<Tensor<float32>, Tensor<float32>> NewModel() => ModuleFactory
+            .FromFunc<Tensor<float32>, Tensor<float32>>(TimesOwnParam, "TimesOwnParam").SetHyperparams();
 
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([2L], 1f, 2f)]));
-        Assert.Equal(3, arch.GetConcreteModelParamInfos().ModelIds.Distinct().Count());
+        var fn = ModuleFn((Func<Tensor<float32>, Tensor<float32>>)TimesOwnParam);
+        var createdOutside = NewModel();
+        Assert.Equal(1, ParamIdentities(t => (Tensor<float32>)fn.Call(t)[0]));
+        Assert.Equal(1, ParamIdentities(createdOutside.Call));
+        Assert.Equal(3, ParamIdentities(t => NewModel().Call(t)));
     }
 
     [Fact]
@@ -1415,11 +1439,10 @@ public class ModulesCoverageTests
             v => Assert.NotEqual(0f, v));
     }
 
-    /// <summary>A draw inside a module invoked from a loop re-derives one stream key, so every
-    /// iteration returns the same sample. The iteration scope comes from the model's creation site
-    /// rather than the invoke site, and a module-typed function has no creation site at all.
-    /// Tracked as Shorokoo/Shorokoo#289.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#289: a module invoked in a loop reuses one RNG sample for every iteration")]
+    /// <summary>A draw inside a module invoked from a loop is re-executed per iteration, and a
+    /// second execution of a draw is a second sample: the invoke site's loop scope reaches the
+    /// spliced feed even though the model was created outside the loop.</summary>
+    [Fact]
     public void TestAModuleInvokedInALoopDrawsAFreshSamplePerIteration()
     {
         var zero = TensorData([2L], 0f, 0f);
@@ -1435,6 +1458,21 @@ public class ModulesCoverageTests
         var once = ConcretizeInvokes(x => [(Tensor<float32>)fn.Call(x)[0]], zero);
         var one = RunFloats(once.ToConcreteModel(RngConfig.Default), zero);
         Assert.All(three.Zip(one, (t, o) => Math.Abs(t - 3 * o)), d => Assert.True(d > 1e-5f));
+
+        // The MODEL_INVOKE route, with the model created OUTSIDE the loop, took its scope from
+        // that creation site and reused one sample the same way.
+        var model = ModuleFactory.FromFunc<Tensor<float32>, Tensor<float32>>(DrawsOnce, "DrawsOnce")
+            .SetHyperparams();
+        var viaModel = ConcretizeInvokes(x =>
+        {
+            var acc = x;
+            foreach (var _ in LoopAPI.Iterate(Scalar(3L))) acc = model.Call(acc);
+            return [acc];
+        }, zero);
+        var modelThree = RunFloats(viaModel.ToConcreteModel(RngConfig.Default), zero);
+        var modelOnce = ConcretizeInvokes(x => [model.Call(x)], zero);
+        var modelOne = RunFloats(modelOnce.ToConcreteModel(RngConfig.Default), zero);
+        Assert.All(modelThree.Zip(modelOne, (t, o) => Math.Abs(t - 3 * o)), d => Assert.True(d > 1e-5f));
     }
 
     private static Tensor<float32> DottedNameBody(Tensor<float32> t) => t * InitSimple.Init([Scalar(2L)]);

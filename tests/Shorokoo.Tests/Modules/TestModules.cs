@@ -1282,7 +1282,7 @@ namespace Shorokoo.Tests.Modules
             => SimplestLayer.Call(Globals.TensorFill(shape, 1.0f));
     }
 
-    /// <summary>Drives InitCallingAParamOwningModule; pins Shorokoo/Shorokoo#287.</summary>
+    /// <summary>Drives InitCallingAParamOwningModule.</summary>
     [Module]
     public partial class UsesInitCallingAParamOwningModule
     {
@@ -1290,7 +1290,7 @@ namespace Shorokoo.Tests.Modules
             => input * InitCallingAParamOwningModule.Init(Vector(2L));
     }
 
-    /// <summary>An initializer whose body calls a module from inside a loop — the export shape of Shorokoo/Shorokoo#287, distinct from the first-use-in-a-loop fixtures above.</summary>
+    /// <summary>An initializer whose body calls a module from inside a loop, distinct from the first-use-in-a-loop fixtures above.</summary>
     [TrainableParamInitializer]
     public static partial class InitCallingAModuleInALoop
     {
@@ -1302,12 +1302,32 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
-    /// <summary>Drives InitCallingAModuleInALoop; pins Shorokoo/Shorokoo#287.</summary>
+    /// <summary>Drives InitCallingAModuleInALoop.</summary>
     [Module]
     public partial class UsesInitCallingAModuleInALoop
     {
         public static Tensor<float32> Inline(Tensor<float32> input)
             => input * InitCallingAModuleInALoop.Init(Vector(2L));
+    }
+
+    /// <summary>An initializer whose body loops without calling anything: its loop's subgraph inputs
+    /// still need types in the emitted body, with no flattening in the picture.</summary>
+    [TrainableParamInitializer]
+    public static partial class InitLoopingWithoutACall
+    {
+        public static Tensor<float32> Inline(Vector<int64> shape)
+        {
+            var v = Globals.TensorFill(shape, 1.0f);
+            foreach (var _ in LoopAPI.Iterate(Scalar(2L))) v = v * Scalar(2f);
+            return v;
+        }
+    }
+
+    /// <summary>Drives InitLoopingWithoutACall.</summary>
+    [Module]
+    public partial class UsesInitLoopingWithoutACall
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input) => input * InitLoopingWithoutACall.Init(Vector(2L));
     }
 
     /// <summary>Callee with a [Hyper], so inlining it into a body leaves a MODEL_HYPERPARAM read behind.</summary>

@@ -102,12 +102,14 @@ A graph whose module machinery sits inside a function body used to slip past thi
 fail later, with OnnxRuntime rejecting the model for an op it has no kernel for
 (`No Op registered for ShrkCreateModule`). Those bodies are now lowered on the way out,
 so an initializer that calls a module — or a call to a module-typed function — exports
-and runs like any other. Two shapes still lower incompletely and fail at session
-creation ([#287](https://github.com/Shorokoo/Shorokoo/issues/287)): a callee that owns
-a trainable parameter, which fails the old way on an op with no kernel
-(`No Op registered for #ModelParamRef#`), and a body that wraps its call in a loop,
-whose emitted body carries no Shorokoo op at all but is rejected for missing type
-information on the loop's carried input.
+and runs like any other, including when the call sits inside a loop.
+
+A callee that owns a trainable parameter lowers too, with one thing worth knowing: a
+function body is not a model, and nothing will ever feed a weight into one, so a
+parameter such a callee owns is written as the value its own initializer computes
+rather than as a trainable weight of the model. An initializer that calls a layer
+therefore initializes from that layer's *initial* weights; the layer contributes no
+parameter of its own to the model it is called from.
 
 Concretize the module's `ComputationGraph` against the input first, then execute:
 

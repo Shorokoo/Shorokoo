@@ -1518,12 +1518,11 @@ public class ModulesCoverageTests
             d => Assert.True(d > 1e-5f)));
     }
 
-    /// <summary>The loop slot a call site injects sits between the parent id and the callee's own
-    /// slots, and is derived from the callee's highest local slot — so it moves when the callee
-    /// gains a consumer, and no pin addresses it, leaving an Override path through such a site
-    /// unfreezable. Tracked as Shorokoo/Shorokoo#302.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#302: a call site's injected loop slot is not pinnable")]
-    public void TestACallSiteLoopSlotIsStableWhenTheCalleeGainsAConsumer()
+    /// <summary>The scope a call site injects for an enclosing loop is a marker rather than a
+    /// slot, so it does not move when the callee gains a consumer and an Override path recorded
+    /// through such a site survives editing the callee.</summary>
+    [Fact]
+    public void TestACallSiteLoopScopeIsStableWhenTheCalleeGainsAConsumer()
     {
         int LoopSlotOf(Delegate body)
         {

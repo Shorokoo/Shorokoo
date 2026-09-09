@@ -176,9 +176,12 @@ A feed reached by **calling a module from inside a loop** takes that slot too, w
 model was created inside the body or outside it, and by either call form — a model call or a
 module-typed `Function`: the draw is executed once per iteration, and a second execution of a
 draw is a second sample. The call site's own position supplies the scope, so the feed lands
-under the call site's id extended with one `(slot, -1)` pair per enclosing loop the callee's
+under the call site's id extended with one `(-2, -1)` pair per enclosing loop the callee's
 identity does not already account for — a model created inside a loop already carries that
-loop's slot, and takes no second one. (The one
+loop's slot, and takes no second one. The `-2` marks a call site's loop scope: it is neither a
+slot (those count from 1, with 0 reserved for `RngSeed`) nor the `-1` an iteration fills, so it
+cannot collide with anything the callee owns, and being a constant it does not move when the
+callee gains or loses a consumer. (The one
 route this does not reach is a model arriving as a `[Hyper]` model parameter, which is
 substituted rather than reparented — that route has its own open defect,
 [#264](https://github.com/Shorokoo/Shorokoo/issues/264).)

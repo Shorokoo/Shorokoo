@@ -1171,13 +1171,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// across the iterations of one call site is weight sharing, and is what a model created
         /// outside a loop already gives; sharing a draw is not.</para>
         ///
-        /// <para>Each added level takes a <c>(slot, -1)</c> pair, the shape
-        /// <see cref="FastApplyIdentifierTemplates"/> gives an in-loop member. The slot is one past
-        /// every leading id component the callee body uses, so it cannot collide with one of the
-        /// callee's own members at that position; the realized iteration index sits one place
-        /// further in, where nothing else of the callee's ever lands. One slot serves every added
-        /// level, since each level opens a scope of its own — the same restart the identifier
-        /// pass's loop-id allocation makes for each loop it enters.</para>
+        /// <para>Each added level takes a <see cref="ModelId.CallSiteLoopScope"/>, <c>-1</c> pair.
+        /// That marker is not a slot, so it cannot collide with any member of the callee it is
+        /// spliced ahead of — and because it needs no knowledge of those members, it is a constant.
+        /// Deriving it from them instead (one past the callee's highest leading slot) also avoided
+        /// collisions, but moved the scope whenever the callee gained a consumer, which no pin
+        /// could hold still (Shorokoo/Shorokoo#302).</para>
         /// </summary>
         private static (ModelId feedParentId, IReadOnlyList<FastTensorKey?> extraIterElements) ExtendScopeToCallSite(
             ModelId parentModelId,
@@ -1199,20 +1198,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     n.OpCode == InternalOpCodes.SHRK_RANDOM_BITS))
                 return (parentModelId, []);
 
-            int loopSlot = 1;
-            foreach (var n in subGraph.Nodes)
-            {
-                var vals = n.Attributes.IsAttributeDefined(OnnxOpAttributeNames.ShrkAttrLocalModelId)
-                    ? n.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrLocalModelId)
-                    : null;
-                if (vals is { Length: > 0 }) loopSlot = Math.Max(loopSlot, (int)vals[0] + 1);
-            }
-
             var idVals = new List<int>(parentModelId.Vals);
             var elements = new List<FastTensorKey?>();
             foreach (var loopOpen in enclosingLoops.Skip(accountedFor))
             {
-                idVals.Add(loopSlot);
+                idVals.Add(ModelId.CallSiteLoopScope);
                 idVals.Add(-1);
                 // LOOP_OPEN's output 0 is the iteration index. Unsqueeze it to a one-element
                 // vector the way the trace-time chain does, so GetIterationIndexScalars walks

@@ -1312,17 +1312,15 @@ public class ModulesCoverageTests
         Assert.Equal(3, arch.GetConcreteModelParamInfos().ModelIds.Distinct().Count());
     }
 
-    /// <summary>Specialization is seeded from the top-level graph's generic call sites only, so a
-    /// generic module reached through a non-generic body two levels down keeps its type
-    /// placeholders and the inliner splices a body it cannot match.
-    /// Tracked as Shorokoo/Shorokoo#286.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#286: generic erasure does not reach a call site nested in a non-generic body")]
-    public void TestAGenericModuleTwoCallsDeepConcretizes()
+    [Fact]
+    public void TestAGenericModuleConcretizesThroughAnyDepthOfNonGenericCallers()
     {
         var input = TensorData([2L], 1f, 2f);
-        var g = WrapsNonGenericCallerOfGenericModule.ComputationGraph;
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
-        Assert.Equal([2f, 4f], RunFloats(arch.ToConcreteModel(), input));
+        float[] Run(ComputationGraph g) =>
+            RunFloats(g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel(), input);
+
+        Assert.Equal([2f, 4f], Run(WrapsNonGenericCallerOfGenericModule.ComputationGraph));
+        Assert.Equal([2f, 4f], Run(WrapsWrapperOfGenericModule.ComputationGraph));
     }
 
     [Fact]

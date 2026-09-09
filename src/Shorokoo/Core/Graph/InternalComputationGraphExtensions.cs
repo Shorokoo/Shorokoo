@@ -82,10 +82,12 @@ namespace Shorokoo.Graph
             // helpers, which is what left a generic module with no public route to a runnable
             // model (Shorokoo/Shorokoo#253). Do it here, ahead of the pipeline proper.
             //
-            // The placeholders need not be in this graph: a non-generic module that calls a generic
-            // one carries none itself, and its callee's body supplies them at inlining time. Ask
-            // the same question the pass does — a call site is generic when it names type arguments
-            // — so the caller's route erases too instead of splicing a body it cannot match.
+            // The placeholders need not be in this graph, nor one call away: a non-generic module
+            // that calls a generic one carries none itself, and neither does anything wrapping it,
+            // yet the callee's body supplies them at inlining time. So the test is over the whole
+            // reachable function closure, at any depth, and the pass itself then erases over that
+            // same closure — otherwise the caller's route splices a body it cannot match
+            // (Shorokoo/Shorokoo#286).
             if (NeedsGenericErasure(graph))
                 graph = FastToConcreteDataType.Process(graph);
 

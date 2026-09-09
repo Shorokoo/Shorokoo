@@ -395,6 +395,14 @@ namespace Shorokoo.Tests.Modules
             => NonGenericCallerOfGenericModule.Call(input);
     }
 
+    /// <summary>Wraps the wrapper, putting the generic call site two non-generic bodies down.</summary>
+    [Module]
+    public partial class WrapsWrapperOfGenericModule
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => WrapsNonGenericCallerOfGenericModule.Call(input);
+    }
+
     /// <summary>
     /// Nested generic module that performs type casting and simple operations.
     /// Uses three generic type parameters: A (hyperparam), B (input), C (internal only).

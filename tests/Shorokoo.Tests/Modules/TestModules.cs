@@ -184,35 +184,45 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
-    /// <summary>A lazy <c>IfElse</c> in a loop body whose taken branch unwraps an optional —
+    /// <summary>An <c>IfElse</c> in a loop body whose taken branch unwraps an optional —
     /// loop-invariant, but only valid when the branch is taken.</summary>
     [Module]
-    public partial class LoopLazyOptionalLayer
+    public partial class LoopOptionalLayer
     {
         public static Tensor<float32> Inline(Tensor<float32> input, [Hyper] Scalar<int64> iters, OptionalTensor<float32> bias)
         {
             var x = input;
             foreach (var ctx in LoopAPI.Iterate(iters))
-                x = bias.HasValue().IfElse(() => x + bias.TensorValue(), () => x * Scalar(2f));
+                x = bias.HasValue().IfElse(x + bias.TensorValue(), x * Scalar(2f));
             return x;
         }
     }
 
-    /// <summary>The other nesting: a <c>LoopAPI.Iterate</c> inside a lazy <c>IfElse</c> branch,
+    /// <summary>The other nesting: a <c>LoopAPI.Iterate</c> inside an <c>IfElse</c> branch,
     /// with a loop-invariant node in the loop body.</summary>
     [Module]
-    public partial class LazyIfLoopBodyLayer
+    public partial class IfLoopBodyLayer
     {
         public static Tensor<float32> Inline(Tensor<float32> input, [Hyper] Scalar<int64> iters, Scalar<bit> flag)
-            => flag.IfElse(
-                () =>
-                {
-                    var x = input;
-                    foreach (var ctx in LoopAPI.Iterate(iters))
-                        x = x + input * Scalar(3f);
-                    return x;
-                },
-                () => input);
+        {
+            var x = input;
+            foreach (var ctx in LoopAPI.Iterate(iters))
+                x = x + input * Scalar(3f);
+            return flag.IfElse(x, input);
+        }
+    }
+
+    /// <summary>Three things an <c>IfElse</c>'s branch scoping must leave outside it: a value both
+    /// branches read, one a branch reads that is read again afterwards, and the condition.</summary>
+    [Module]
+    public partial class SharedWorkAroundAnIfLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input, Scalar<float32> gate)
+        {
+            var shared = input * Scalar(2f);
+            var reused = input.Relu();
+            return (gate > Scalar(1f)).IfElse(shared + reused, shared) / reused;
+        }
     }
 
     /// <summary>A wholly loop-invariant <c>IfElse</c> in a loop body, consumed by an equally
@@ -230,38 +240,31 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
-    /// <summary>An <c>IfElse</c> around a loop around an <c>IfElse</c>. Concretizes cleanly;
-    /// <c>FastScopeConfigurator</c> then breaks the order at ONNX build. Shorokoo/Shorokoo#270.</summary>
+    /// <summary>An <c>IfElse</c> around a loop around an <c>IfElse</c>. Shorokoo/Shorokoo#270.</summary>
     [Module]
     public partial class IfInLoopInIfLayer
     {
         public static Tensor<float32> Inline(Tensor<float32> input, [Hyper] Scalar<int64> iters, Scalar<bit> flag)
-            => flag.IfElse(
-                () =>
-                {
-                    var x = input;
-                    foreach (var o in LoopAPI.Iterate(iters))
-                        x = x + (flag.IfElse(input * Scalar(2f), input * Scalar(3f)) + input);
-                    return x;
-                },
-                () => input * Scalar(9f));
+        {
+            var x = input;
+            foreach (var o in LoopAPI.Iterate(iters))
+                x = x + (flag.IfElse(input * Scalar(2f), input * Scalar(3f)) + input);
+            return flag.IfElse(x, input * Scalar(9f));
+        }
     }
 
-    /// <summary>A loop inside a lazy <c>IfElse</c> branch inside a loop. Shorokoo/Shorokoo#270.</summary>
+    /// <summary>A loop inside an <c>IfElse</c> branch inside a loop. Shorokoo/Shorokoo#270.</summary>
     [Module]
-    public partial class LoopInLazyIfInLoopLayer
+    public partial class LoopInIfInLoopLayer
     {
         public static Tensor<float32> Inline(Tensor<float32> input, [Hyper] Scalar<int64> iters, Scalar<bit> flag)
         {
             var x = input;
             foreach (var o in LoopAPI.Iterate(iters))
             {
-                var b = flag.IfElse(
-                    () => { var y = input;
-                            foreach (var i in LoopAPI.Iterate(iters)) y = y + (input * Scalar(2f));
-                            return y; },
-                    () => input * Scalar(7f));
-                x = x + (b + input);
+                var y = input;
+                foreach (var i in LoopAPI.Iterate(iters)) y = y + (input * Scalar(2f));
+                x = x + (flag.IfElse(y, input * Scalar(7f)) + input);
             }
             return x;
         }

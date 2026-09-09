@@ -145,8 +145,21 @@ How a hyper value gets supplied depends on the route:
 ## Control flow inside `Inline`
 
 - Conditional (data-dependent): `condition.IfElse(whenTrue, whenFalse)` where
-  `condition` is `Scalar<bit>`. Both branches are built; the value is selected at
-  runtime. Tuples are supported.
+  `condition` is `Scalar<bit>`. Tuples are supported.
+
+  Both branches are *built*, but only the selected one *runs*. The branch
+  expressions are ordinary C# arguments, so they are traced before the `IfElse`
+  they belong to; Shorokoo then moves everything that serves one branch, and
+  nothing else, inside that branch — so it lowers into the `If` node's own
+  subgraph and executes only when the condition picks it. That covers whole
+  loops and nested `IfElse`s, not just single ops. Work that feeds *both*
+  branches, or that is read after the `IfElse` as well, stays outside and is
+  computed once, as it must be.
+
+  So a branch may hold an operation that would be invalid on the other path —
+  unwrapping an `OptionalTensor` that is absent there is the usual case (see
+  [Optional tensor inputs](#optional-tensor-inputs)) — and an expensive branch
+  costs nothing when it is not taken.
 
   One exception, and it is about parameters rather than control flow: the
   parameter space of a concrete architecture is static, so it cannot depend on a
@@ -168,7 +181,7 @@ How a hyper value gets supplied depends on the route:
   graph to begin with.
 
   ```csharp
-  // Apply bias only when useBias is true — both branches are always built.
+  // Apply bias only when useBias is true — both branches are built, one runs.
   // (But b exists in the concrete architecture only if useBias was baked true.)
   var b = ConstInit.Init([outFeatures]).Vec();
   return useBias.IfElse(y + b, y);
@@ -257,8 +270,10 @@ module is serialized — a round-trip through ONNX or C# emission keeps `[Hyper(
 ### Optional tensor inputs
 
 Declare the parameter as an `OptionalTensor<T>` and branch on its presence with the
-optional API. Use the **lazy** (`() => …`) form of `IfElse` so the value is only
-unwrapped on the present branch — eagerly unwrapping an absent optional is invalid:
+optional API. Unwrapping is only valid on the present branch, and that is where it
+runs: Shorokoo puts each branch inside the `If` that selects it (see
+[Control flow](#control-flow)), so `TensorValue()` is never reached when the optional
+is absent.
 
 ```csharp
 [Module]
@@ -266,8 +281,8 @@ public partial class DenseWithOptionalBias
 {
     public static Tensor<float32> Inline(Tensor<float32> x, OptionalTensor<float32> bias)
     {
-        var b = bias.HasValue().IfElse(() => bias.TensorValue(),         // present
-                                       () => TensorFill(x.ShapeTensor(), 0f));  // absent default
+        var b = bias.HasValue().IfElse(bias.TensorValue(),                // present
+                                       TensorFill(x.ShapeTensor(), 0f));  // absent default
         return x + b;
     }
 }
@@ -479,8 +494,6 @@ new Module<Scalar<float32>, (Tensor<float32>, Tensor<float32>), Tensor<float32>>
   `OptionalTensor<T>` (or a `[Hyper(default)]` scalar) and let the generator expose the
   omittable `Tensor<T>?` / nullable form to callers (see
   [Omittable parameters](#omittable-parameters-defaulted-hypers--optional-inputs)).
-- When unwrapping an optional inside a branch, use the lazy `IfElse(() => …, () => …)`
-  form so an absent optional is never eagerly unwrapped.
 - Do not name a `[TrainableParamInitializer]`/`[StateInitializer]` class `Init`;
   the generated `Init(...)` member would collide with the type name (generator
   error `MSG003`).

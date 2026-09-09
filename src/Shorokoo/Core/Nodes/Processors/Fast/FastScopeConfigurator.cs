@@ -446,26 +446,46 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         if (st[s] == NodeStatus.Free) dec[s] = inSet;
                 }
 
-                // Nesting consistency: a node placed inside S must also be inside
-                // every ancestor of S. This may force ancestors that were Free→out
-                // back to in. If an ancestor is MustOut, the graph is invalid.
+                // Nesting consistency: a node placed inside S must also be inside every
+                // ancestor of S. So a MustOut anywhere up the chain settles it — the node
+                // stays out of S as well, however much the size preference wanted it in.
+                // Only a node the scope genuinely requires (MustIn) contradicts, and that is
+                // a graph that leaks a body value rather than a preference to overrule; a
+                // size preference resolved by throwing refused nestings that were merely
+                // deeper than two (Shorokoo/Shorokoo#270).
+                for (int s = 0; s < scopes.Count; s++)
+                {
+                    if (!dec[s] || !AnyAncestorForcesOut(scopes, st, s)) continue;
+                    if (st[s] == NodeStatus.MustIn)
+                        throw new InvalidOperationException(
+                            $"Node {node.OpCode} (Key={node.Key}) is required inside " +
+                            $"{scopes[s].Kind} scope #{s} but forced out of an enclosing scope.");
+                    dec[s] = false;
+                }
+
+                // What survives pulls its ancestors in with it: they were Free→out at most,
+                // since a MustOut ancestor has just taken its whole subtree out.
                 for (int s = 0; s < scopes.Count; s++)
                 {
                     if (!dec[s]) continue;
                     int? p = scopes[s].Parent;
-                    while (p is int pid)
-                    {
-                        if (st[pid] == NodeStatus.MustOut)
-                            throw new InvalidOperationException(
-                                "Node is required inside a scope but forced out of its parent scope.");
-                        dec[pid] = true;
-                        p = scopes[pid].Parent;
-                    }
+                    while (p is int pid) { dec[pid] = true; p = scopes[pid].Parent; }
                 }
 
                 decision[node.Key] = dec;
             }
             return decision;
+        }
+
+        private static bool AnyAncestorForcesOut(List<Scope> scopes, NodeStatus[] st, int s)
+        {
+            int? p = scopes[s].Parent;
+            while (p is int pid)
+            {
+                if (st[pid] == NodeStatus.MustOut) return true;
+                p = scopes[pid].Parent;
+            }
+            return false;
         }
 
         // -- Step 7 -----------------------------------------------------------
@@ -534,10 +554,16 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         // -- Step 8 — Pass 2: branch ordering inside IF scopes ---------------
-        // Within each IF scope's positional range, reorder body nodes so that
-        // every node belonging to the then-branch precedes every node belonging
+        // Within each IF scope's positional range, reorder the body so that
+        // everything belonging to the then-branch precedes everything belonging
         // to the else-branch. Topological order within each branch is preserved
         // by stable partitioning.
+        //
+        // The unit of movement is a whole nested OPEN…CLOSE band, never its
+        // individual nodes. Reordering node by node tore a nested scope apart,
+        // because a nested OPEN produces no tensor and so is reached from
+        // neither branch: it sorted into the leftover bucket and landed after
+        // the body and CLOSE it opens (Shorokoo/Shorokoo#270).
         private static List<FastNode> ReorderIfBranches(
             InternalComputationGraph graph, List<Scope> scopes,
             Dictionary<int, HashSet<FastNodeKey>> thenReach,
@@ -564,14 +590,17 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var elseBody = new List<FastNode>();
                 var neither = new List<FastNode>();
 
-                for (int i = openIdx + 1; i < closeIdx; i++)
+                foreach (var band in BandsWithin(nodes, openIdx, closeIdx))
                 {
-                    var n = nodes[i];
-                    bool inThen = thenSet.Contains(n.Key);
-                    bool inElse = elseSet.Contains(n.Key);
-                    if (inThen && !inElse) thenBody.Add(n);
-                    else if (inElse && !inThen) elseBody.Add(n);
-                    else neither.Add(n);
+                    bool inThen = false, inElse = false;
+                    foreach (var n in band)
+                    {
+                        if (thenSet.Contains(n.Key)) inThen = true;
+                        if (elseSet.Contains(n.Key)) inElse = true;
+                    }
+                    if (inThen && !inElse) thenBody.AddRange(band);
+                    else if (inElse && !inThen) elseBody.AddRange(band);
+                    else neither.AddRange(band);
                 }
 
                 nodes.RemoveRange(openIdx + 1, closeIdx - openIdx - 1);
@@ -581,6 +610,36 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 foreach (var n in neither) nodes.Insert(insertAt++, n);
             }
             return nodes;
+        }
+
+        /// <summary>
+        /// The direct contents of <c>(openIdx, closeIdx)</c>, each a single node or a whole
+        /// nested OPEN…CLOSE band, in order.
+        /// </summary>
+        private static List<List<FastNode>> BandsWithin(List<FastNode> nodes, int openIdx, int closeIdx)
+        {
+            var bands = new List<List<FastNode>>();
+            int i = openIdx + 1;
+            while (i < closeIdx)
+            {
+                if (!FastOpsetResolver.IsOpenOpCode(nodes[i].OpCode))
+                {
+                    bands.Add([nodes[i]]);
+                    i++;
+                    continue;
+                }
+
+                int depth = 0;
+                int j = i;
+                for (; j < closeIdx; j++)
+                {
+                    if (FastOpsetResolver.IsOpenOpCode(nodes[j].OpCode)) depth++;
+                    else if (FastOpsetResolver.IsCloseOpCode(nodes[j].OpCode) && --depth == 0) break;
+                }
+                bands.Add(nodes.GetRange(i, Math.Min(j, closeIdx - 1) - i + 1));
+                i = j + 1;
+            }
+            return bands;
         }
 
         private static int ScopeDepth(List<Scope> scopes, int id)

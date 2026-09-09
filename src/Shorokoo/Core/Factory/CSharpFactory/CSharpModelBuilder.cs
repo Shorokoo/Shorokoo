@@ -1150,7 +1150,7 @@ public static class " + modelName + @"
 
             var variableInputPlaceHolders = string.Join(", ", Enumerable.Range(1, node.Inputs.Length).Select(x => "{" + x + ":}"));
             var attributeInputPlaceHolders = string.Join(", ", Enumerable.Range(0, nodeDef.AttributeDefs.Count)
-                    .Select(x => '"' + nodeDef.AttributeDefs[x].AttributeName + '"' + ", " + "{" + (char)('a' + (char)x) + ":}"));
+                    .Select(x => '"' + nodeDef.AttributeDefs[x].AttributeName + '"' + ", " + "{" + (char)('a' + (char)x) + ":boxed}"));
 
             var methodParams = $"(\"{nodeDef.OpName}\", [{variableInputPlaceHolders}], [{attributeInputPlaceHolders}])";
             return methodCore + methodParams;
@@ -1168,6 +1168,21 @@ public static class " + modelName + @"
             return $"{methodName}({paramsList})";
         }
         
+
+        /// <summary>
+        /// The C# expression for <paramref name="dtype"/>, i.e. the <see cref="DType"/> static it is
+        /// named by. Only the standard dtypes have one: a TensorStruct dtype or a generic type carrying
+        /// a parameter tag is constructed at runtime and cannot be written as a literal.
+        /// </summary>
+        private static string DTypeLiteral(DType dtype, string attrName)
+        {
+            var name = dtype.ToString();
+            if (!Equals(DType.FromName(name), dtype))
+                throw new UnsupportedDTypeException(ErrorCodes.FW053, name, attrName,
+                    $"DType '{name}' has no code generator");
+
+            return $"DType.{name}";
+        }
 
         private static string EscapeString(string input)
         {
@@ -1314,7 +1329,20 @@ public static class " + modelName + @"
                     var attrDef = attributeDefs[i];
                     var attrName = attributeDefs[i].AttributeName;
                     var attrType = attributeDefs[i].Type;
-                    string attrValue = "";
+
+                    // A list-valued attribute reaches three kinds of argument position: a `params`
+                    // list takes the elements bare, a normal argument target-types a collection
+                    // expression, and the `object?[]` of a CallCustomOperator call (keyword "boxed")
+                    // types nothing, so there the element type has to be spelled out.
+                    string listOf(IEnumerable<string> elements, string elementType)
+                    {
+                        var joined = string.Join(", ", elements);
+                        return keyword == "params" ? joined
+                             : keyword == "boxed" ? $"new {elementType}[] {{ {joined} }}"
+                             : $"[{joined}]";
+                    }
+
+                    string attrValue;
                     if (attributes.IsDefaultValue(attrName))
                         attrValue = "null";
                     else if (attrType is AttributeType.Long)
@@ -1349,23 +1377,28 @@ public static class " + modelName + @"
                     {
                         var enumDef = attrDef.EnumDef.AssertNotNull();
                         var enumsVal = attributes.GetEnumsVal(attrName).AssertNotNull();
-                        var attrValues = enumsVal.Select(enumVal => enumDef.ToCSharpFullName(enumVal)).ToArray();
-                        attrValue = $"{string.Join(", ", attrValues)}";
+                        attrValue = listOf(enumsVal.Select(enumDef.ToCSharpFullName), enumDef.EnumType.Name);
                     }
                     else if (attrType is AttributeType.Longs)
-                    {
-                        var attrValues = attributes.GetLongsVal(attrName).AssertNotNull();
-                        attrValue = $"{string.Join(", ", attrValues.Select(x => $"{x}L"))}";
-                        if (keyword != "params")
-                            attrValue = $"[{attrValue}]";
-                    }
+                        attrValue = listOf(attributes.GetLongsVal(attrName).AssertNotNull().Select(x => $"{x}L"), "long");
                     else if (attrType is AttributeType.Floats)
+                        attrValue = listOf(attributes.GetFloatsVal(attrName).AssertNotNull().Select(x => $"{x}f"), "float");
+                    else if (attrType is AttributeType.Bools)
+                        attrValue = listOf(attributes.GetBoolsVal(attrName).AssertNotNull().Select(x => x ? "true" : "false"), "bool");
+                    else if (attrType is AttributeType.Strings)
+                        attrValue = listOf(attributes.GetStringsVal(attrName).AssertNotNull().Select(x => '"' + EscapeString(x) + '"'), "string");
+                    else if (attrType is AttributeType.DType)
+                        attrValue = DTypeLiteral(attributes.GetDTypeVal(attrName).AssertNotNull(), attrName);
+                    else if (attrType is AttributeType.DTypes)
+                        attrValue = listOf(attributes.GetDTypesVal(attrName).AssertNotNull().Select(x => DTypeLiteral(x, attrName)), "DType");
+                    else if (attrType is AttributeType.TypeProto)
                     {
-                        var attrValues = attributes.GetFloatsVal(attrName).AssertNotNull();
-                        attrValue = $"{string.Join(", ", attrValues.Select(x => $"{x}f"))}";
-                        if (keyword != "params")
-                            attrValue = $"[{attrValue}]";
+                        var (structure, dtype) = attributes.GetTypeProtoVal(attrName).AssertNotNull();
+                        attrValue = $"(DataStructure.{structure}, {DTypeLiteral(dtype, attrName)})";
                     }
+                    else
+                        throw new UnsupportedDTypeException(ErrorCodes.FW053, attrType.ToString(), attrName,
+                            $"Attribute type '{attrType}' has no code generator");
 
                     if (keyword.StartsWith("param"))
                         attrValue += ", ";

@@ -1,3 +1,5 @@
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 using Shorokoo.Core.Factory.CSharpFactory;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 using System.Collections.Immutable;
@@ -57,13 +59,28 @@ public class CSharpModelBuilderCoverageTests
         Assert.Contains(body, x => x.EndsWith($"> {names[0]} = default;"));
     }
 
-    /// <summary>The attribute-value formatter has no branch for a DType-valued attribute — nor
-    /// for Bools, Strings, DTypes, Graph or TypeProto — so it substitutes the empty string and the
-    /// emitted argument list carries an empty element, <c>"dtype", ,</c>, which does not compile.
-    /// Tracked as Shorokoo/Shorokoo#282.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#282: a DType-valued attribute codegens as an empty collection element")]
+    [Fact]
     public void TestADTypeValuedAttributeCodegensItsValue()
-        => AssertCodegens(ScanZeroInputOpInLoopBody.ComputationGraph.ToInternal(), "\"dtype\", DType.Float32");
+    {
+        var graph = ScanZeroInputOpInLoopBody.ComputationGraph.ToInternal();
+        AssertCodegens(graph, "\"dtype\", DType.Float32", "\"shape\", new long[] { 2L }");
+        AssertCompiles(graph);
+    }
+
+    /// <summary>Codegen emits source that does not compile for five more shapes: an internal
+    /// <c>InternalOp</c> and a <c>throw</c> in argument position from a TensorStruct build, a
+    /// sequence <c>.Count</c>, a <c>[StateInitializer]</c> on a method, an unqualified <c>Ops</c>,
+    /// and a graph input referenced by its variable id rather than the parameter name.
+    /// Tracked as Shorokoo/Shorokoo#290.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#290: BuildFullGraph emits source that does not compile")]
+    public void TestEveryCodegenedGraphCompiles()
+    {
+        AssertCompiles(TensorStructLoopCarry.ComputationGraph.ToInternal());
+        AssertCompiles(SequenceOpsOnStructs.ComputationGraph.ToInternal());
+        AssertCompiles(BatchNormWithStateUpdate.ComputationGraph.ToInternal());
+        AssertCompiles(BuildIfElseManyOutputsGraph());
+        AssertCompiles(BuildDeepSequenceRankChainGraph());
+    }
 
     [Fact]
     public void TestLoopCodegenInlineInitRankMismatchAndHoisting()
@@ -117,6 +134,26 @@ public class CSharpModelBuilderCoverageTests
         Assert.NotNull(code);
         foreach (var s in containsAll)
             Assert.Contains(s, code);
+    }
+
+    private static void AssertCompiles(InternalComputationGraph graph)
+    {
+        var tree = CSharpSyntaxTree.ParseText(new CSharpModelBuilder().BuildFullGraph(graph, "CovTest"));
+        MetadataReference[] references =
+        [
+            MetadataReference.CreateFromFile(typeof(object).Assembly.Location),
+            MetadataReference.CreateFromFile(typeof(Enumerable).Assembly.Location),
+            MetadataReference.CreateFromFile(typeof(Variable).Assembly.Location),
+            MetadataReference.CreateFromFile(typeof(ImmutableArray).Assembly.Location),
+            MetadataReference.CreateFromFile(Path.Combine(
+                Path.GetDirectoryName(typeof(object).Assembly.Location)!, "System.Runtime.dll")),
+        ];
+        var compilation = CSharpCompilation.Create("CovTest", [tree], references,
+            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+
+        using var ms = new MemoryStream();
+        Assert.Empty(compilation.Emit(ms).Diagnostics
+            .Where(x => x.Severity == DiagnosticSeverity.Error).Select(x => x.ToString()));
     }
 
     private static InternalComputationGraph BuildConstantBranchesGraph()

@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using static Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames;
 using static Shorokoo.Core.Nodes.NodeDefinitions.OpCodes;
 
@@ -55,5 +56,23 @@ public class NodeBuilderCoverageTests
             SPLIT, [sData, null], splitAttrs);
         Assert.Equal(2, pieces.Length);
         Assert.All(pieces, p => Assert.NotNull(p));
+    }
+
+    [Fact]
+    public void TestListValuedAttributesSurviveTheProtoRoundTrip()
+    {
+        Assert.Equal<bool>([true, false, true], RoundTrip(AttributeType.Bools, (bool[])[true, false, true]).GetBoolsVal("v").AssertNotNull());
+        Assert.Equal<long>([1L, -2L], RoundTrip(AttributeType.Longs, (long[])[1L, -2L]).GetLongsVal("v").AssertNotNull());
+        Assert.Equal<float>([1.5f, -2.5f], RoundTrip(AttributeType.Floats, (float[])[1.5f, -2.5f]).GetFloatsVal("v").AssertNotNull());
+        Assert.Equal<string>(["a", "b"], RoundTrip(AttributeType.Strings, (string[])["a", "b"]).GetStringsVal("v").AssertNotNull());
+        Assert.Equal<DType>([DType.Float32, DType.Int64], RoundTrip(AttributeType.DTypes, (DType[])[DType.Float32, DType.Int64]).GetDTypesVal("v").AssertNotNull());
+        Assert.True(RoundTrip(AttributeType.Bool, true).GetBoolVal("v"));
+    }
+
+    private static OnnxCSharpAttributes RoundTrip(AttributeType type, object value)
+    {
+        ImmutableList<NodeDefAttributeDef> defs =
+            [new NodeDefAttributeDef { AttributeName = "v", Type = type, DefaultValue = null }];
+        return OnnxCSharpAttributes.FromCSharpVals(new() { ["v"] = value }, defs).ToProto().ToCSharp();
     }
 }

@@ -28,6 +28,15 @@ namespace Shorokoo.Graph
         ///   <paramref name="priority"/>.</item>
         /// </list>
         /// </para>
+        ///
+        /// <para>
+        /// Before any of that,
+        /// <see cref="Shorokoo.Core.Nodes.Processors.Fast.FastIfBranchScoper"/> moves each
+        /// <c>IF</c> branch inside the <c>IF</c> that selects it. That is a correctness step
+        /// rather than a size preference — a branch left outside runs whatever the condition
+        /// says — so it is not governed by <paramref name="ifSize"/>, which decides only where
+        /// the genuinely free nodes go.
+        /// </para>
         /// </summary>
         /// <exception cref="System.InvalidOperationException">
         /// Thrown if open/close pairs overlap rather than nest, an open or close
@@ -39,6 +48,7 @@ namespace Shorokoo.Graph
         /// </exception>
         public void ConfigureScopes(ScopeSize loopSize, ScopeSize ifSize, ScopePriority priority)
         {
+            FastIfBranchScoper.ScopeAllIfBranches(this);
             FastScopeConfigurator.Configure(this, loopSize, ifSize, priority);
         }
     }

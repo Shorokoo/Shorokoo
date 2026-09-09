@@ -313,12 +313,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         ///
         /// <para>Two further things stay put, both because loop-invariant by dataflow does not
         /// mean the same value every pass. A node inside an <c>IF</c> body runs only when its
-        /// branch is taken, so lifting one out runs it unconditionally — the lazy
-        /// <c>IfElse(cond, Func, Func)</c> overload exists precisely so a branch may hold an
-        /// operation that is invalid off-branch. And a draw has no inputs to be dependent on,
-        /// yet a second execution of one is a second sample: hoisting it out gives every
-        /// iteration the one value, which is the wrong answer #262 describes reached by another
-        /// route. Both hoists leave the node order valid, so only these refusals catch them.</para>
+        /// branch is taken, so lifting one out runs it unconditionally — and a branch may hold an
+        /// operation that is invalid off-branch, which is why
+        /// <see cref="FastIfBranchScoper"/> runs first and puts each branch inside its <c>IF</c>
+        /// before this pass judges what is loop-invariant. And a draw has no inputs to be
+        /// dependent on, yet a second execution of one is a second sample: hoisting it out gives
+        /// every iteration the one value, which is the wrong answer #262 describes reached by
+        /// another route. Both hoists leave the node order valid, so only these refusals catch
+        /// them.</para>
         ///
         /// This is the Fast-pipeline equivalent of the legacy CG-side
         /// hoisting primitive that ran as part of ComputationGraph

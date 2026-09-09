@@ -30,25 +30,6 @@ namespace Shorokoo.Core.Nodes
             return OnnxOp.IfClose([aWhenTrue], [aWhenFalse], ifOpen)[0];
         }
 
-        /// <summary>
-        /// Lazy <c>IfElse</c>: each branch expression is built <b>inside</b> the If scope (the
-        /// delegate runs between the open and close), so it lowers to an ONNX <c>If</c> subgraph and
-        /// is only evaluated when its branch is taken. Use this when a branch contains an operation
-        /// that is invalid off-branch — most importantly <c>OptionalGetElement</c> on an optional
-        /// that may be absent (eagerly unwrapping an absent optional is a runtime error).
-        /// </summary>
-        public static A IfElse<A>(Scalar<bit> condition, System.Func<A> whenTrue, System.Func<A> whenFalse) where A : IValue
-        {
-            var ifOpen = OnnxOp.IfOpen(condition);
-            Variable t, f;
-            using (var branch = GraphTrace.EnterBranchBody())
-            {
-                t = branch.ArmValueWithItsEffects(whenTrue().ToVariable());
-                f = branch.ArmValueWithItsEffects(whenFalse().ToVariable());
-            }
-            return OnnxOp.IfClose([t], [f], ifOpen)[0].ToValue<A>();
-        }
-
         public static (A, B) IfElse<A, B>(Scalar<bit> condition, (A a, B b) whenTrue, (A a, B b) whenFalse)
             where A : IValue
             where B : IValue

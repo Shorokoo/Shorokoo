@@ -13,19 +13,20 @@ namespace Shorokoo
     /// forwards to the corresponding non-extension overload on
     /// <c>Shorokoo.Core.Nodes.Ops</c>, which holds the implementation. Lives in
     /// <see cref="Shorokoo"/> so user-facing code only needs <c>using Shorokoo;</c>.
+    ///
+    /// <para>A branch expression is an ordinary argument, so it is traced before the
+    /// <c>IfElse</c> that selects it. Lowering then moves everything that serves one branch
+    /// and nothing else inside that branch, so it runs only when the condition picks it —
+    /// see
+    /// <see cref="Shorokoo.Core.Nodes.Processors.Fast.FastIfBranchScoper"/>. Callers
+    /// therefore write both branches as plain expressions, whatever they contain: a whole
+    /// loop, a nested <c>IfElse</c>, or an operation only valid on its own path, such as
+    /// unwrapping an <c>OptionalTensor</c> that is absent on the other.</para>
     /// </summary>
     public static class IfElseExtensions
     {
         public static A IfElse<A>(this Scalar<bit> condition, A aWhenTrue, A aWhenFalse) where A : IValue
             => Ops.IfElse(condition, aWhenTrue, aWhenFalse);
-
-        /// <summary>
-        /// Lazy <c>IfElse</c>: each branch is built inside the If scope (lowering to an ONNX <c>If</c>
-        /// subgraph), so a branch may safely contain an op that is invalid off-branch — e.g.
-        /// <c>optional.TensorValue()</c> when the optional may be absent.
-        /// </summary>
-        public static A IfElse<A>(this Scalar<bit> condition, System.Func<A> whenTrue, System.Func<A> whenFalse) where A : IValue
-            => Ops.IfElse(condition, whenTrue, whenFalse);
 
         public static (A, B) IfElse<A, B>(this Scalar<bit> condition, (A a, B b) whenTrue, (A a, B b) whenFalse)
             where A : IValue

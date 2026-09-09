@@ -11,7 +11,7 @@ namespace Shorokoo.Tests.Modules
     {
         public static Tensor<float32> Inline(Tensor<float32> x, OptionalTensor<float32> bias)
         {
-            var b = bias.HasValue().IfElse(() => bias.TensorValue(), () => TensorFill(x.ShapeTensor(), 0f));
+            var b = bias.HasValue().IfElse(bias.TensorValue(), TensorFill(x.ShapeTensor(), 0f));
             return x + b;
         }
     }
@@ -25,8 +25,8 @@ namespace Shorokoo.Tests.Modules
             OptionalTensor<float32> bias,
             OptionalTensor<float32> scale)
         {
-            var b = bias.HasValue().IfElse(() => bias.TensorValue(), () => TensorFill(x.ShapeTensor(), 0f));
-            var s = scale.HasValue().IfElse(() => scale.TensorValue(), () => TensorFill(x.ShapeTensor(), 1f));
+            var b = bias.HasValue().IfElse(bias.TensorValue(), TensorFill(x.ShapeTensor(), 0f));
+            var s = scale.HasValue().IfElse(scale.TensorValue(), TensorFill(x.ShapeTensor(), 1f));
             return x * s + b;
         }
     }
@@ -38,7 +38,7 @@ namespace Shorokoo.Tests.Modules
         public static Tensor<float32> Inline(Tensor<float32> x, OptionalTensor<float32> bias)
         {
             var w = InitSimple.Init(x.ShapeTensor());
-            var b = bias.HasValue().IfElse(() => bias.TensorValue(), () => TensorFill(x.ShapeTensor(), 0f));
+            var b = bias.HasValue().IfElse(bias.TensorValue(), TensorFill(x.ShapeTensor(), 0f));
             return x * w + b;
         }
     }

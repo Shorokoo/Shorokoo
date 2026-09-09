@@ -2434,6 +2434,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // keys as their element type. (Formerly gated to the CG round-trip as "B1a"; see
             // TestOptionalHypersSequenceCalled / TestSeqHypersSequenceCalled for coverage.)
 
+            // Scope every IF branch before shrinking, and the order is load-bearing. A branch
+            // expression is an ordinary argument, so its nodes are appended before the IF_OPEN
+            // that selects them; until they are moved inside, an op that belongs to one branch
+            // looks to the shrink like any other loop-invariant node and is hoisted clear of the
+            // loop — where it runs unconditionally, which is the one thing an IF body may never
+            // do. Scoped first, they sit inside the IF, and the shrink's own barrier keeps them
+            // there.
+            FastIfBranchScoper.ScopeAllIfBranches(graph);
+
             // Shrink every loop scope before the native pass. Any node that is
             // positionally between a LOOP_OPEN/LOOP_CLOSE pair but does not transitively
             // depend on the loop's body outputs is hoisted to just before the OPEN. This

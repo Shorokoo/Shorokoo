@@ -14,6 +14,7 @@ using Shorokoo.Core.Nodes.AutoDiff;
 using Shorokoo.Core.Training;
 using Shorokoo.Core.Utils;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Collections.ObjectModel;
@@ -195,29 +196,45 @@ namespace Shorokoo.Core.Factory.CSharpFactory
             return GetTypeDefString(tensor);
         }
 
+        // Reading an assembly's metadata off disk is the expensive half of compiling a model, and
+        // the same assemblies come back on every call, so each file is read once per process.
+        private static readonly ConcurrentDictionary<string, MetadataReference> referenceCache = new();
+
+        /// <summary>
+        /// What generated source is compiled against: the framework and the BCL, plus every other
+        /// assembly already loaded. The generated source names the user's own types — the IStruct
+        /// interface behind a TensorStruct among them — so the model's own assembly has to be in
+        /// there, and the loaded set is the only handle we have on it.
+        /// </summary>
+        internal static MetadataReference[] CompilationReferences()
+        {
+            string[] locations =
+            [
+                typeof(object).Assembly.Location,
+                typeof(Enumerable).Assembly.Location,
+                typeof(Shorokoo.Core.Variable).Assembly.Location,
+                typeof(System.Collections.Immutable.ImmutableArray).Assembly.Location,
+                Path.Combine(Path.GetDirectoryName(typeof(object).Assembly.Location)!, "System.Runtime.dll"),
+                .. AppDomain.CurrentDomain.GetAssemblies()
+                    .Where(x => !x.IsDynamic && !string.IsNullOrEmpty(x.Location))
+                    .Select(x => x.Location),
+            ];
+
+            return [.. locations.Distinct()
+                .Select(x => referenceCache.GetOrAdd(x, static path => MetadataReference.CreateFromFile(path)))];
+        }
+
         public MethodInfo BuildMethod(InternalComputationGraph fastGraph, string modelName)
         {
             var code = BuildFullGraph(fastGraph, modelName);
             // Create a syntax tree from the generated code
             var syntaxTree = CSharpSyntaxTree.ParseText(code);
 
-            // Define references to necessary assemblies
-            var references = new List<MetadataReference>
-            {
-                MetadataReference.CreateFromFile(typeof(object).Assembly.Location),
-                MetadataReference.CreateFromFile(typeof(Enumerable).Assembly.Location),
-                MetadataReference.CreateFromFile(typeof(Shorokoo.Core.Variable).Assembly.Location),
-                MetadataReference.CreateFromFile(typeof(Float16).Assembly.Location),
-                MetadataReference.CreateFromFile(typeof(System.Collections.Immutable.ImmutableArray).Assembly.Location),
-                MetadataReference.CreateFromFile(Path.Combine(Path.GetDirectoryName(typeof(object).Assembly.Location)!, "System.Runtime.dll")), // Add System.Runtime
-                // Add other necessary references here
-            };
-
             // Compile the syntax tree into an assembly
             var compilation = CSharpCompilation.Create(
                 modelName,
                 new[] { syntaxTree },
-                references,
+                CompilationReferences(),
                 new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
 
             using (var ms = new MemoryStream())
@@ -482,8 +499,9 @@ public static class " + modelName + @"
         public static {outputParamList} {methodName}({paramsDeclarationString})
             => ({outputParamList})Globals.CallTrainableParamInitializer(_{methodName}, defaultName: {'"' + methodName + '"'}, isTrainable: false, {paramsRefString});";
 
-                    fullScript = "[StateInitializer]\r\n" + fullScript;
-
+                    // No [StateInitializer] marker on the emitted method: the attribute is declared
+                    // AttributeTargets.Class, and isTrainable: false above already carries what it
+                    // would say.
                     fullScript = createStateParamInitializerCode + "\r\n" + fullScript;
                 }
             }
@@ -542,6 +560,8 @@ public static class " + modelName + @"
                 codeTemplateOverride = MakeCallFunctionCodeTemplate(node, nodeCodeGenerators, currentNames, functionNames);
                 useTuplesForMultiOutputs = true;
             }
+            else
+                codeTemplateOverride = MakeStructSequenceCodeTemplate(node);
 
 
             var nodeDef = node.NodeDef;
@@ -938,7 +958,7 @@ public static class " + modelName + @"
                 if (numItems > 8)
                 {
                     var arrayResultName = SanitizeVariableName(closeNode.DefaultName) + "_arr";
-                    lines.Add(new CodeLine(0, $"var {arrayResultName} = Ops.IfElse({condName}, [{string.Join(", ", whenTrueNames)}], [{string.Join(", ", whenFalseNames)}]);"));
+                    lines.Add(new CodeLine(0, $"var {arrayResultName} = Shorokoo.Core.Nodes.Ops.IfElse({condName}, [{string.Join(", ", whenTrueNames)}], [{string.Join(", ", whenFalseNames)}]);"));
 
                     for (var i = 0; i < numItems; i++)
                     {
@@ -950,9 +970,9 @@ public static class " + modelName + @"
                 else
                 {
                     if (numItems == 1)
-                        lines.Add(new CodeLine(0, $"var {outNames[0]} = Ops.IfElse({condName}, {whenTrueNames[0]}, {whenFalseNames[0]});"));
+                        lines.Add(new CodeLine(0, $"var {outNames[0]} = Shorokoo.Core.Nodes.Ops.IfElse({condName}, {whenTrueNames[0]}, {whenFalseNames[0]});"));
                     else // if (numItems <= 8)
-                        lines.Add(new CodeLine(0, $"var ({string.Join(", ", outNames)}) = Ops.IfElse({condName}, ({string.Join(", ", whenTrueNames)}), ({string.Join(", ", whenFalseNames)}));"));
+                        lines.Add(new CodeLine(0, $"var ({string.Join(", ", outNames)}) = Shorokoo.Core.Nodes.Ops.IfElse({condName}, ({string.Join(", ", whenTrueNames)}), ({string.Join(", ", whenFalseNames)}));"));
 
                     for (var i = 0; i < numItems; i++)
                         newVariables[outVariables[i]!] = outNames[i];
@@ -1010,7 +1030,7 @@ public static class " + modelName + @"
             var fieldStructure = outputVariable.Structure();
             var fieldCastTypeDef = GetTypeDefString(outputVariable, outputVariable.Rank);
             var inlineExpression =
-                $"({fieldCastTypeDef})Shorokoo.Core.Nodes.NodeDefinitions.InternalOp.TensorStructGetField(" +
+                $"({fieldCastTypeDef})Shorokoo.Globals.TensorStructGetField(" +
                 $"{structInputName}, \"{fieldName}\", " +
                 $"Shorokoo.DType.{fieldDType}, {fieldRank}, " +
                 $"Shorokoo.Core.Nodes.NodeDefinitions.DataStructure.{fieldStructure})";
@@ -1030,38 +1050,14 @@ public static class " + modelName + @"
 
             var structDType = node.Attributes.GetDTypeVal(OnnxOpAttributeNames.AttrDtype).AssertNotNull();
             var structDef = structDType.TensorStructDef.AssertNotNull();
-            var structTypeName = structDef.TypeName;
 
-            // Positional field references in TensorStructDef order — InternalOp.TensorStructCreate
-            // takes an ordered Variable[] (no field-name labels) and the inputs to the graph node
-            // are already in that order.
+            // Positional field references in TensorStructDef order — TensorStructCreate takes an
+            // ordered Variable[] (no field-name labels) and the inputs to the graph node are
+            // already in that order.
             var fieldRefs = node.Inputs.Select(input => currentNames[input!]).ToList();
-            var fieldsArrayLiteral = $"new Shorokoo.Core.Variable[] {{ {string.Join(", ", fieldRefs)} }}";
-
-            // Build the dtype expression. Prefer the static struct-type path
-            // (StructDefExtractor.ExtractFromType<T>) when we have a simple, unqualified IStruct
-            // type name — that matches the canonical Module-level pattern. For DTypeStruct or
-            // fully-qualified names we can't safely emit a reflectable type literal, so fall
-            // back to looking the def up by name on the global registry.
-            string dtypeExpression;
-            if (structTypeName != null && !structTypeName.Contains('.'))
-            {
-                dtypeExpression =
-                    $"Shorokoo.DType.GetOrCreateForTensorStruct(" +
-                    $"Shorokoo.Core.StructDefExtractor.ExtractFromType<{structTypeName}>())";
-            }
-            else
-            {
-                // Codegen for DTypeStruct / fully-qualified-name structs is not supported —
-                // we don't have a reflectable IStruct type to emit. Generate a throw so the
-                // compiled lambda fails loudly if anyone ever reaches this path.
-                dtypeExpression =
-                    $"throw new System.NotSupportedException(" +
-                    $"\"TensorStructCreate codegen for dynamic/dotted TypeName '{structDef.TypeName}' is not supported\")";
-            }
 
             var createExpression =
-                $"Shorokoo.Core.Nodes.NodeDefinitions.InternalOp.TensorStructCreate({dtypeExpression}, {fieldsArrayLiteral})";
+                $"Shorokoo.Globals.TensorStructCreate<{StructTypeName(structDef)}>({string.Join(", ", fieldRefs)})";
 
             var outputTensor = node.Outputs[0]!;
             var outputTensorName = GetSanitizedVariableName(outputTensor);
@@ -1156,6 +1152,36 @@ public static class " + modelName + @"
             return methodCore + methodParams;
         }
 
+        /// <summary>
+        /// The code template for a sequence op whose elements are TensorStructs, or <c>null</c> when
+        /// the node is not one. A tensor sequence codegens through the typed
+        /// <see cref="TensorSequence{T}"/> handle, which converts every element through
+        /// <see cref="Tensor{T}"/> — a conversion a struct-shaped value is rejected by. So a struct
+        /// sequence goes through the <see cref="Variable"/> surface instead, which is the shape a
+        /// hand-written module uses for the same ops. The ops the handle and the Variable share
+        /// (<c>InsertAt</c>, <c>RemoveAt</c>, <c>Count</c>, <c>Concat</c>) need no override.
+        /// </summary>
+        private static string? MakeStructSequenceCodeTemplate(Node node)
+        {
+            if (!node.Inputs.Concat(node.Outputs).NotNulls().Any(x => x.Type.IsTensorStructType))
+                return null;
+
+            if (node.OpName == OpCodes.SEQUENCE_CONSTRUCT)
+                return "OnnxOp.SequenceConstruct({#:param})";
+
+            if (node.OpName == OpCodes.SEQUENCE_AT)
+                return "{1:this}.At({2:param})";
+
+            if (node.OpName == OpCodes.SEQUENCE_EMPTY)
+            {
+                var structDef = node.Attributes.GetDTypeVal(OnnxOpAttributeNames.AttrDtype)
+                    .AssertNotNull().TensorStructDef.AssertNotNull();
+                return $"OnnxOp.SequenceEmpty(Shorokoo.Globals.StructDType<{StructTypeName(structDef)}>())";
+            }
+
+            return null;
+        }
+
         private string MakeCallFunctionCodeTemplate(Node node, ImmutableDictionary<Node, NodeGenerationInfo> nodeCodeGenerators, ImmutableDictionary<Variable, string> currentNames, ImmutableDictionary<Function, string> functionNames)
         {
             var methodName = functionNames[(node.TargetFunction).AssertNotNull()];
@@ -1168,6 +1194,21 @@ public static class " + modelName + @"
             return $"{methodName}({paramsList})";
         }
         
+
+        /// <summary>
+        /// The struct's IStruct interface as it is written in C#. A struct built at runtime carries
+        /// no such type and there is nothing to emit, so codegen fails here rather than writing
+        /// source that does not compile. A nested type reaches us with the runtime's <c>+</c>
+        /// separator, which source spells as a dot.
+        /// </summary>
+        private static string StructTypeName(TensorStructDef structDef)
+        {
+            if (structDef.TypeName is null)
+                throw new UnsupportedDTypeException(ErrorCodes.FW053, "TensorStruct", "code template",
+                    "A TensorStruct with no IStruct type name has no code generator");
+
+            return structDef.TypeName.Replace('+', '.');
+        }
 
         /// <summary>
         /// The C# expression for <paramref name="dtype"/>, i.e. the <see cref="DType"/> static it is

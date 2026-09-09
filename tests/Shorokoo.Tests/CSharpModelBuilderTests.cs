@@ -10,6 +10,7 @@ namespace Shorokoo.Tests;
 /// <summary>
 /// Drives <see cref="CSharpModelBuilder"/> over graph shapes that reach the
 /// per-op / per-attribute / per-DType / per-keyword branches of the codegen dispatch.
+/// Every emitted source is compiled, not just substring-matched.
 /// </summary>
 [Trait("Domain", "Factory")]
 [Trait("Purpose", "Coverage")]
@@ -20,12 +21,12 @@ public class CSharpModelBuilderCoverageTests
     {
         AssertCodegens(CallsHypersLayer.ComputationGraph.ToInternal(), "HypersLayer");
         AssertCodegens(TensorStructLoopCarry.ComputationGraph.ToInternal(),
-            "InternalOp.TensorStructCreate", "InternalOp.TensorStructGetField");
+            "Globals.TensorStructCreate<Shorokoo.Tests.Modules.GenericPairStruct>",
+            "Globals.TensorStructGetField");
         AssertCodegens(SequenceOpsOnStructs.ComputationGraph.ToInternal());
         AssertCodegens(BuildConstantBranchesGraph(),
             "1.5d", "6UL", "true", "(short[])", "(ushort[])", "(uint[])", "EmptyVector<int32>");
-        AssertCodegens(BatchNormWithStateUpdate.ComputationGraph.ToInternal(),
-            "[StateInitializer]", "isTrainable: false");
+        AssertCodegens(BatchNormWithStateUpdate.ComputationGraph.ToInternal(), "isTrainable: false");
         AssertCodegens(BuildLowOpInlinedGraph(), "(", ")");
         AssertCodegens(BuildBigConstantGraph(), "MakeTensor<");
         AssertCodegens(BuildSequenceRankInferGraph());
@@ -61,25 +62,16 @@ public class CSharpModelBuilderCoverageTests
 
     [Fact]
     public void TestADTypeValuedAttributeCodegensItsValue()
-    {
-        var graph = ScanZeroInputOpInLoopBody.ComputationGraph.ToInternal();
-        AssertCodegens(graph, "\"dtype\", DType.Float32", "\"shape\", new long[] { 2L }");
-        AssertCompiles(graph);
-    }
+        => AssertCodegens(ScanZeroInputOpInLoopBody.ComputationGraph.ToInternal(),
+            "\"dtype\", DType.Float32", "\"shape\", new long[] { 2L }");
 
-    /// <summary>Codegen emits source that does not compile for five more shapes: an internal
-    /// <c>InternalOp</c> and a <c>throw</c> in argument position from a TensorStruct build, a
-    /// sequence <c>.Count</c>, a <c>[StateInitializer]</c> on a method, an unqualified <c>Ops</c>,
-    /// and a graph input referenced by its variable id rather than the parameter name.
-    /// Tracked as Shorokoo/Shorokoo#290.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#290: BuildFullGraph emits source that does not compile")]
-    public void TestEveryCodegenedGraphCompiles()
+    [Fact]
+    public void TestCodegenedSourceRebuildsTheGraphItCameFrom()
     {
-        AssertCompiles(TensorStructLoopCarry.ComputationGraph.ToInternal());
-        AssertCompiles(SequenceOpsOnStructs.ComputationGraph.ToInternal());
-        AssertCompiles(BatchNormWithStateUpdate.ComputationGraph.ToInternal());
-        AssertCompiles(BuildIfElseManyOutputsGraph());
-        AssertCompiles(BuildDeepSequenceRankChainGraph());
+        TensorData[] two = [TensorData([], 1f), TensorData([], 2f)];
+        AssertRoundTrips(TensorStructLoopCarry.ComputationGraph.ToInternal(), two);
+        AssertRoundTrips(SequenceOpsOnStructs.ComputationGraph.ToInternal(),
+            [.. two, TensorData([], 3f), TensorData([], 4f)]);
     }
 
     [Fact]
@@ -134,26 +126,39 @@ public class CSharpModelBuilderCoverageTests
         Assert.NotNull(code);
         foreach (var s in containsAll)
             Assert.Contains(s, code);
-    }
 
-    private static void AssertCompiles(InternalComputationGraph graph)
-    {
-        var tree = CSharpSyntaxTree.ParseText(new CSharpModelBuilder().BuildFullGraph(graph, "CovTest"));
-        MetadataReference[] references =
-        [
-            MetadataReference.CreateFromFile(typeof(object).Assembly.Location),
-            MetadataReference.CreateFromFile(typeof(Enumerable).Assembly.Location),
-            MetadataReference.CreateFromFile(typeof(Variable).Assembly.Location),
-            MetadataReference.CreateFromFile(typeof(ImmutableArray).Assembly.Location),
-            MetadataReference.CreateFromFile(Path.Combine(
-                Path.GetDirectoryName(typeof(object).Assembly.Location)!, "System.Runtime.dll")),
-        ];
-        var compilation = CSharpCompilation.Create("CovTest", [tree], references,
+        var compilation = CSharpCompilation.Create("CovTest", [CSharpSyntaxTree.ParseText(code)],
+            CSharpModelBuilder.CompilationReferences(),
             new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
 
         using var ms = new MemoryStream();
         Assert.Empty(compilation.Emit(ms).Diagnostics
             .Where(x => x.Severity == DiagnosticSeverity.Error).Select(x => x.ToString()));
+    }
+
+    /// <summary>
+    /// Compiles the emitted source, runs its builder over the graph's own inputs and checks the
+    /// graph it rebuilds computes what the original does. <see cref="AutoTest"/> only executes
+    /// generated source for a graph with no inputs, so this is the one place the emitted code for
+    /// a graph that takes them is run at all.
+    /// </summary>
+    private static void AssertRoundTrips(InternalComputationGraph graph, TensorData[] inputs)
+    {
+        var method = new CSharpModelBuilder().BuildMethod(graph, "CovTest");
+        var graphInputs = InternalComputationGraphConverter.BuildNodes(graph).inputs;
+        object?[] args = [.. method.GetParameters().Zip(graphInputs).Select(x =>
+            x.First.ParameterType.GetMethod("op_Implicit", [typeof(Variable)])!.Invoke(null, [x.Second]))];
+        var rebuilt = new InternalComputationGraph(
+            graphInputs, [((IValue)method.Invoke(null, args)!).ToVariable()]);
+
+        Assert.Equal(Run(graph, inputs), Run(rebuilt, inputs));
+    }
+
+    private static byte[][] Run(InternalComputationGraph graph, TensorData[] inputs)
+    {
+        var model = graph.ToConcreteArchitecture(graph.FromOrderedInputs([.. inputs])).ToConcreteModel();
+        return [.. Shorokoo.Runtime.ComputeContext.Default.Execute(model, [.. inputs.Cast<IData>()])
+            .Select(x => x.ToTensorData().AccessRawMemory().ToArray())];
     }
 
     private static InternalComputationGraph BuildConstantBranchesGraph()
@@ -288,8 +293,8 @@ public class CSharpModelBuilderCoverageTests
 
     private static InternalComputationGraph BuildDeepSequenceRankChainGraph()
     {
-        var unrankedElem = (Tensor<float32>)OnnxOp.Identity(
-            InputTensor<float32>("eltIn", rank: 2), rank: null);
+        var eltIn = InputTensor<float32>("eltIn", rank: 2);
+        var unrankedElem = (Tensor<float32>)OnnxOp.Identity(eltIn, rank: null);
 
         var s0 = OnnxOp.SequenceConstruct(unrankedElem);
         var s1 = OnnxOp.Identity(s0, rank: null);
@@ -297,7 +302,7 @@ public class CSharpModelBuilderCoverageTests
         var s3 = OnnxOp.Identity(s2, rank: null);
         var deepAt = OnnxOp.SequenceAt(s3, Scalar(0L));
 
-        return new InternalComputationGraph([InputTensor<float32>("eltIn", rank: 2)], [deepAt]);
+        return new InternalComputationGraph([eltIn], [deepAt]);
     }
 
     private static InternalComputationGraph BuildLoopInlineAndInitGraph()

@@ -996,6 +996,34 @@ namespace Shorokoo
         }
 
         /// <summary>
+        /// The <see cref="Variable"/> form of <see cref="TensorStruct{T}"/>: builds a struct-shaped
+        /// graph value from positional field values, in the order <typeparamref name="T"/> declares
+        /// them, and hands back the value itself rather than a field-access proxy. This is the shape
+        /// <c>CSharpModelBuilder</c> emits, since generated source consumes the struct as a
+        /// <see cref="Variable"/> and cannot reach the internal op the proxy path uses.
+        /// </summary>
+        /// <typeparam name="T">The IStruct interface type defining the struct fields</typeparam>
+        /// <param name="fields">Field values, positional in IStruct declaration order</param>
+        public static Variable TensorStructCreate<T>(params Variable[] fields) where T : IStruct
+            => InternalOp.TensorStructCreate(StructDType<T>(), fields);
+
+        /// <summary>
+        /// The <see cref="DType"/> for the struct <typeparamref name="T"/> describes, reflected off the
+        /// interface's property declarations. The dtype a struct-shaped value or a sequence of them
+        /// carries.
+        /// </summary>
+        public static DType StructDType<T>() where T : IStruct
+            => DType.GetOrCreateForTensorStruct(StructDefExtractor.ExtractFromType<T>());
+
+        /// <summary>
+        /// Reads one field off a struct-shaped <see cref="Variable"/>. The counterpart of
+        /// <see cref="TensorStructCreate{T}"/> for callers holding the value rather than a proxy.
+        /// </summary>
+        public static Variable TensorStructGetField(
+            Variable structInput, string fieldName, DType fieldDType, int? fieldRank, DataStructure fieldStructure)
+            => InternalOp.TensorStructGetField(structInput, fieldName, fieldDType, fieldRank, fieldStructure);
+
+        /// <summary>
         /// Wraps an existing struct-shaped Variable (e.g. the result of <c>IfElse</c> or
         /// <c>SequenceAt</c> over a struct sequence) in a DispatchProxy implementing the given
         /// IStruct interface, so callers can read fields via property access (e.g.

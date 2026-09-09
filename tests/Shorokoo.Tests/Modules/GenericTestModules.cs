@@ -459,6 +459,25 @@ namespace Shorokoo.Tests.Modules
              + GenericTargetModule.Call<float64>(input.Cast<float64>()).Cast<float32>();
     }
 
+    /// <summary>A generic module that holds its own type argument in a sequence, so the
+    /// sequence's untyped reference is only resolvable from inside the specialized body.</summary>
+    [Module]
+    public partial class GenericModuleHoldingItsOwnTypeArgumentInASequence
+    {
+        public static Tensor<T> Inline<T>(Tensor<T> input) where T : FloatLike
+            => ModelSequence.Create(GenericTargetModule.Model<T>())[Scalar(0L)].Call(input);
+    }
+
+    /// <summary>Uses that holder at two type arguments, so a global count cannot tell the two
+    /// sequences apart while each specialized body names its own.</summary>
+    [Module]
+    public partial class UsesTheSequenceHoldingGenericAtTwoTypeArguments
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => GenericModuleHoldingItsOwnTypeArgumentInASequence.Call<float32>(input)
+             + GenericModuleHoldingItsOwnTypeArgumentInASequence.Call<float64>(input.Cast<float64>()).Cast<float32>();
+    }
+
     /// <summary>Reaches the generic module through a sequence grown from an empty one, whose
     /// SEQUENCE_EMPTY carries the function with no operand to read the type argument off.</summary>
     [Module]

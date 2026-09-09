@@ -95,18 +95,6 @@ concretizing the graph raises `FW023` if it is left unfixed.
 
 ## Current limitations (could be lifted)
 
-### A generic module in a model sequence, used at two type arguments
-
-A model sequence records which module its elements are, but not which type arguments they were
-built with. So a generic `[Module]` held in a `ModelSequence` lowers only while the graph uses
-that module at a single type argument — the sequence's own reference then has just one
-specialization it could mean. Use the same module at a second type argument anywhere in the
-model and the sequence's copy is left unspecialized
-([#296](https://github.com/Shorokoo/Shorokoo/issues/296)); `ToConcreteArchitecture` does not
-refuse it, and the model fails later at session creation with an opaque `Node input '…' is not a
-graph input, initializer, or output of a previous node`. Call the module directly, rather than
-through a sequence, for the type arguments beyond the first.
-
 ### Carrying a value from the previous iteration
 
 A local that holds what another local held **one iteration ago** is not recognised as a loop

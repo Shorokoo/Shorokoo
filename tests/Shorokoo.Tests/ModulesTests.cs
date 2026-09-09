@@ -1345,14 +1345,12 @@ public class ModulesCoverageTests
         Assert.Same(Neighbour(before), Neighbour(FastToConcreteDataType.Process(before)));
     }
 
-    /// <summary>A model sequence's reference names no type arguments, so with the generic module
-    /// used at two of them nothing says which specialization the sequence holds and it keeps the
-    /// unspecialized one. Tracked as Shorokoo/Shorokoo#296.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#296: a generic module in a model sequence is left unspecialized when the graph uses two type arguments")]
+    [Fact]
     public void TestAGenericModuleInASequenceConcretizesWhenTheGraphUsesTwoTypeArguments()
     {
         var input = TensorData([2L], 1f, 2f);
         Assert.Equal([4f, 8f], ConcretizeAndRun(HoldsOneOfTwoSpecializationsInAModelSequence.ComputationGraph, input));
+        Assert.Equal([4f, 8f], ConcretizeAndRun(UsesTheSequenceHoldingGenericAtTwoTypeArguments.ComputationGraph, input));
     }
 
     /// <summary>A generic parameter initializer called with an explicit type argument from a

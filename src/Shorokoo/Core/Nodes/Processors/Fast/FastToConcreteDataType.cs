@@ -49,11 +49,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     ///
     /// <para>Not every reference names a specialization: a model sequence tags its
     /// <c>SEQUENCE_CONSTRUCT</c> / <c>SEQUENCE_EMPTY</c> with the element module's own function
-    /// and no type arguments. Such a reference builds no body of its own; it is bound to the sole
-    /// specialization that the <em>typed</em> references built, since that is the only case where
-    /// it cannot mean anything else. Where they built several it is left as it was, and a generic
-    /// module held in a sequence alongside a second use at another type argument still fails to
-    /// lower (Shorokoo/Shorokoo#296).</para>
+    /// and no type arguments. Such a reference builds no body of its own, and it is bound by
+    /// reading the type arguments off the <c>CREATE_MODULE</c> that produced its model operands
+    /// rather than by guessing — so a generic module held in a sequence lowers even where the
+    /// graph uses it at another type argument elsewhere. Only a reference with no model operand
+    /// at all (a sequence from <c>ModelSequence.Empty</c>) falls back to the sole specialization,
+    /// and is left alone when there is more than one.</para>
     ///
     /// Returns a fresh <see cref="InternalComputationGraph"/>; the input is not mutated. Because
     /// Fast tensors don't carry per-tensor types, no re-inference step is required — type
@@ -220,15 +221,28 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     genericInputKeys.Add(k);
             }
 
+            var nodeByKey = FastProcessorHelper.BuildNodeByKey(graph);
+
             var newNodes = new List<FastNode>(graph.Nodes.Count);
             foreach (var node in graph.Nodes)
             {
                 if (nodesToRemove.Contains(node.Key)) continue;
                 StripGenericsFromAttributesInPlace(node);
-                RewireTargetFunctionInPlace(node, concreteFunctions, soleSpecialization, genericFunctions);
                 newNodes.Add(node);
             }
             graph.Nodes = newNodes;
+
+            // Resolving a reference that names no type arguments reads the TargetFunction of the
+            // node that produced its operands, so every rebinding is computed against the
+            // original wiring and only then applied — otherwise the answer depends on whether
+            // the producer happened to be rewired first.
+            var rebindings = new List<(FastNode node, Function concrete)>();
+            foreach (var node in newNodes)
+                if (ResolveTargetFunction(node, nodeByKey, concreteFunctions, soleSpecialization, genericFunctions)
+                        is { } concrete)
+                    rebindings.Add((node, concrete));
+            foreach (var (node, concrete) in rebindings)
+                node.TargetFunction = concrete;
 
             // Drop generic-typed entries from Inputs / InputUniqueNames in lockstep so they
             // stay positionally aligned.
@@ -307,29 +321,72 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             node.Attributes = OnnxCSharpAttributes.FromCSharpVals(rebuilt, attrs.AttributeDefs);
         }
 
-        private static void RewireTargetFunctionInPlace(
+        /// <summary>The concrete function <paramref name="node"/> should point at, or <c>null</c>
+        /// to leave it as it is.</summary>
+        private static Function? ResolveTargetFunction(
             FastNode node,
+            Dictionary<FastNodeKey, FastNode> nodeByKey,
             Dictionary<(Function fn, string argsKey), Function> concreteFunctions,
             Dictionary<Function, Function?> soleSpecialization,
             HashSet<Function> genericFunctions)
         {
             if (TryGetCallSiteKey(node, genericFunctions) is { } site)
-            {
-                if (concreteFunctions.TryGetValue((site.fn, site.argsKey), out var concrete))
-                    node.TargetFunction = concrete;
-                return;
-            }
+                return concreteFunctions.TryGetValue((site.fn, site.argsKey), out var concrete) ? concrete : null;
 
             // A node that carries a generic function without naming type arguments: a model
-            // sequence tags its SEQUENCE_CONSTRUCT / SEQUENCE_EMPTY with the element module's
-            // own Function, and that is where the sequence's models get their ModuleFn back
-            // from. It cannot say which specialization it means, so bind it only when the graph
-            // built exactly one — then there is nothing else it could be. Left alone, it keeps
-            // the unspecialized function and the inliner splices a body still declaring type
-            // slots against a call site supplying none.
-            if (node.TargetFunction is { } fn
-                    && soleSpecialization.TryGetValue(fn, out var only) && only is not null)
-                node.TargetFunction = only;
+            // sequence tags its SEQUENCE_CONSTRUCT / SEQUENCE_EMPTY with the element module's own
+            // Function, and that is where the sequence's models get their ModuleFn back from.
+            // Left as it is, it keeps the unspecialized function and the inliner splices a body
+            // still declaring type slots against a call site supplying none.
+            if (node.TargetFunction is not { } fn) return null;
+
+            // The node does not name the specialization, but its operands do: the models it
+            // carries were made by a CREATE_MODULE that named the type arguments, in this same
+            // body. Read it off there rather than guessing.
+            if (TryResolveFromOperands(node, fn, nodeByKey, concreteFunctions) is { } fromOperand)
+                return fromOperand;
+
+            // No operand to read: a sequence built by ModelSequence.Empty carries the function
+            // and nothing else. Fall back to the sole specialization, which is unambiguous when
+            // the graph built exactly one.
+            return soleSpecialization.TryGetValue(fn, out var only) ? only : null;
+        }
+
+        /// <summary>
+        /// The specialization of <paramref name="fn"/> that <paramref name="node"/>'s model
+        /// operands were built with, or <c>null</c> when none of them leads to one. Walks back
+        /// through the nodes that pass a model value along — MODULE_SET_HYPERPARAMS wraps the
+        /// CREATE_MODULE that names the type arguments, and a sequence grown by Append is a chain
+        /// of SEQUENCE_* nodes over the same models.
+        /// </summary>
+        private static Function? TryResolveFromOperands(
+            FastNode node, Function fn,
+            Dictionary<FastNodeKey, FastNode> nodeByKey,
+            Dictionary<(Function fn, string argsKey), Function> concreteFunctions)
+        {
+            var seen = new HashSet<FastNodeKey>();
+            var pending = new Queue<FastNode>();
+            pending.Enqueue(node);
+
+            while (pending.Count != 0)
+            {
+                foreach (var input in pending.Dequeue().Inputs.NotNulls())
+                {
+                    if (!nodeByKey.TryGetValue(input.FastNodeKey, out var producer)) continue;
+                    if (!seen.Add(producer.Key)) continue;
+
+                    if (ReferenceEquals(producer.TargetFunction, fn))
+                    {
+                        var typeArgs = TypeArgs(producer);
+                        if (typeArgs.Length != 0
+                                && concreteFunctions.TryGetValue((fn, ArgsKey(typeArgs)), out var concrete))
+                            return concrete;
+                    }
+
+                    pending.Enqueue(producer);
+                }
+            }
+            return null;
         }
 
         private static IReadOnlyList<Function> EnumerateFunctionsPostOrder(
@@ -337,7 +394,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         {
             // Mirrors ComputationGraph.FunctionsPostOrlder but walks via FastCG. Each function's
             // dependencies are the distinct TargetFunctions in its OriginalFastGraph nodes. This
-            // is the one thaw of each body the analysis gets: everything later reads bodyFacts.
+            // is the analysis's one thaw of each body — the rebuild set reads bodyFacts rather
+            // than thawing again; building the specialized bodies necessarily thaws once more.
             var fnDependencies = new Dictionary<Function, HashSet<Function>>();
             var toVisit = new Queue<Function>(LocalFunctions(graph));
 
@@ -393,7 +451,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// the node names, a non-generic one by <see cref="NonGenericArgsKey"/> whatever the node
         /// names. So a node that merely carries a generic function along (<c>SUBMODEL</c> naming no
         /// type arguments) selects nothing, rather than selecting an unspecialized body. What then
-        /// happens to it is <see cref="RewireTargetFunctionInPlace"/>'s to decide.
+        /// happens to it is <see cref="ResolveTargetFunction"/>'s to decide.
         /// </summary>
         private static (FastNode refNode, Function fn, string argsKey)? TryGetCallSiteKey(
             FastNode node, HashSet<Function> genericFunctions)
@@ -403,8 +461,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             var typeArgs = TypeArgs(node);
             if (typeArgs.Length == 0) return null;
-            return (node, fn, string.Join(",", typeArgs.Select(t => t.ToNonGenericType().ToString())));
+            return (node, fn, ArgsKey(typeArgs));
         }
+
+        private static string ArgsKey(ImmutableArray<DType> typeArgs) =>
+            string.Join(",", typeArgs.Select(t => t.ToNonGenericType().ToString()));
 
         private static ImmutableArray<DType> TypeArgs(FastNode node)
         {

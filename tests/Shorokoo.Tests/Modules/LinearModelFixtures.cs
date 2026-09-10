@@ -614,6 +614,59 @@ public partial class DrawTwoFromSequence
     }
 }
 
+/// <summary><see cref="DrawTwoDirect"/> with the two models appended to a <c>ModelSequence</c>
+/// rather than constructed into one.</summary>
+[Module]
+public partial class DrawTwoFromAppendedSequence
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var seq = ModelSequence.Empty(DrawingSub.Model())
+            .Append(DrawingSub.Model()).Append(DrawingSub.Model());
+        return seq[Scalar(1L)].Call(seq[Scalar(0L)].Call(t));
+    }
+}
+
+/// <summary><see cref="DrawTwoFromAppendedSequence"/> with the appending done inside a loop, so
+/// the sequence itself is a loop variable rather than a value this graph lays out.</summary>
+[Module]
+public partial class DrawTwoFromSequenceAppendedInLoop
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var seq = ModelSequence.Empty(DrawingSub.Model());
+        foreach (var ctx in LoopAPI.Iterate(Scalar(2L))) seq = seq.Append(DrawingSub.Model());
+        return seq[Scalar(1L)].Call(seq[Scalar(0L)].Call(t));
+    }
+}
+
+/// <summary>One <see cref="DrawingSub"/> model called on every trip of a loop.</summary>
+[Module]
+public partial class DrawInLoopDirect
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = DrawingSub.Model();
+        var x = t;
+        foreach (var ctx in LoopAPI.Iterate(Scalar(2L))) x = m.Call(x);
+        return x;
+    }
+}
+
+/// <summary><see cref="DrawInLoopDirect"/> with the model picked out of a <c>ModelSequence</c> by
+/// the loop's iteration index, so its identity is only known at run time.</summary>
+[Module]
+public partial class DrawInLoopFromSequence
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var seq = ModelSequence.Create(DrawingSub.Model(), DrawingSub.Model());
+        var x = t;
+        foreach (var ctx in LoopAPI.Iterate(Scalar(2L))) x = seq[ctx.IterationIndex].Call(x);
+        return x;
+    }
+}
+
 /// <summary>
 /// An initializer that states its shape nowhere the pipeline can read it: it takes no input, so
 /// there is no shape vector, and returns <c>Tensor</c> rather than <c>Scalar</c>, so the declared

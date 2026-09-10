@@ -1541,21 +1541,47 @@ public class ModulesCoverageTests
                      LoopSlotOf((Func<Tensor<float32>, Tensor<float32>>)DrawsTwice));
     }
 
-    // Pins Shorokoo/Shorokoo#303: reached out of a ModelSequence, two models that each draw share
-    // one feed stream whose path names no model at all, so neither can be pinned apart.
-    [Fact(Skip = "Shorokoo/Shorokoo#303: a model out of a ModelSequence loses its identity in its RNG feeds")]
+    [Fact]
     public void TestAModelReachedOutOfASequenceKeepsItsOwnRngStream()
     {
-        string[] FeedPathsOf(ComputationGraph g)
+        int[][] FeedPathsOf(ComputationGraph g)
         {
             var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([2L], 1f, 2f)]));
             return [.. arch.GetRngStreamReport().Streams
                 .Where(s => s.Kind == RngStreamKind.UniformFeed)
-                .Select(s => string.Join(",", s.ModelIdPath)).Order()];
+                .Select(s => s.ModelIdPath.ToArray())
+                .OrderBy(p => string.Join(",", p))];
         }
 
         Assert.Equal(FeedPathsOf(DrawTwoDirect.ComputationGraph),
                      FeedPathsOf(DrawTwoFromSequence.ComputationGraph));
+        Assert.Equal(FeedPathsOf(DrawTwoDirect.ComputationGraph),
+                     FeedPathsOf(DrawTwoFromAppendedSequence.ComputationGraph));
+
+        // Picked by the loop index the model's id is a run-time value, so the path carries a slot
+        // for each of its components rather than the components themselves — as many split
+        // counters as the same model called directly, and none of them the feed's own id alone.
+        Assert.Equal(FeedPathsOf(DrawInLoopDirect.ComputationGraph).Select(p => p.Length),
+                     FeedPathsOf(DrawInLoopFromSequence.ComputationGraph).Select(p => p.Length));
+    }
+
+    // Pins Shorokoo/Shorokoo#303: the models a sequence assembled inside a loop holds are reached
+    // through the loop variable carrying it, which the inline pass cannot lay out, so their feeds
+    // fall back to one stream whose path names no model.
+    [Fact(Skip = "Shorokoo/Shorokoo#303: a sequence assembled in a loop loses its models' RNG identity")]
+    public void TestAModelReachedOutOfASequenceAppendedInALoopKeepsItsOwnRngStream()
+    {
+        int[][] FeedPathsOf(ComputationGraph g)
+        {
+            var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([2L], 1f, 2f)]));
+            return [.. arch.GetRngStreamReport().Streams
+                .Where(s => s.Kind == RngStreamKind.UniformFeed)
+                .Select(s => s.ModelIdPath.ToArray())
+                .OrderBy(p => string.Join(",", p))];
+        }
+
+        Assert.Equal(FeedPathsOf(DrawTwoDirect.ComputationGraph).Select(p => p.Length),
+                     FeedPathsOf(DrawTwoFromSequenceAppendedInLoop.ComputationGraph).Select(p => p.Length));
     }
 
     private static Tensor<float32> DrawsTwice(Tensor<float32> t)

@@ -687,6 +687,35 @@ public partial class HyperModelGainFromAppendedSequenceModel
     }
 }
 
+/// <summary>A rank-1 gain plus a second, zero-valued parameter, so which of two bodies a call
+/// reached shows in the parameter ids and not only in the name they are filed under.</summary>
+[Module]
+public partial class TwoParamGainSubModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+        => input * Ones.Init([Scalar(2L)]) + Zeros.Init([Scalar(2L)]);
+}
+
+/// <summary><see cref="TwoParamGainSubModel"/> called plainly — what indexing element 1 of
+/// <see cref="HeterogeneousSequenceAtOneModel"/> should reach.</summary>
+[Module]
+public partial class TwoParamGainNoRefModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+        => TwoParamGainSubModel.Call(input);
+}
+
+/// <summary>Two different modules of one <c>Model&lt;&gt;</c> signature in a sequence, indexed at
+/// the second. A <c>ModelSequence</c> names element 0's module, so the element indexed and the
+/// module named disagree.</summary>
+[Module]
+public partial class HeterogeneousSequenceAtOneModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+        => ModelSequence.Create<Model<Tensor<float32>, Tensor<float32>>>(
+               Rank1GainSubModel.Model(), TwoParamGainSubModel.Model())[Scalar(1L)].Call(input);
+}
+
 /// <summary>Draws one uniform sample of its own, so every model built from it owns an RNG
 /// feed.</summary>
 [Module]

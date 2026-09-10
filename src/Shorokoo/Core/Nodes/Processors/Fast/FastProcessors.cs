@@ -840,19 +840,35 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     {
                         var bound = FindBoundModuleCreations(modelKey, nodeByKey, tensorInfos);
                         boundModel = bound;
-                        if (moduleFn.FunctionType == FunctionType.ModuleSignature)
+
+                        // The walk reached models built from different modules and nothing says
+                        // which one this call takes. Any body spliced here would be one of them
+                        // guessed, so refuse rather than pick (Shorokoo/Shorokoo#301).
+                        if (bound.Ambiguous)
+                            throw new InvalidOperationException(
+                                "FastInlineModulesAndFunctions: the model operand of a MODEL_INVOKE can hold "
+                                + "models built from different modules, and which one it holds is decided at "
+                                + "run time, so there is no single body to inline. A ModelSequence holding "
+                                + "more than one kind of module can only be indexed by a constant.");
+
+                        if (bound.Function is not null)
                         {
-                            if (bound.Function is null)
-                            {
-                                // Nothing is bound to it here: a signature-only model variable
-                                // whose binding this graph does not contain — a module being
-                                // flattened on its own, or a non-hyper Model<> formal. Leave the
-                                // invoke standing; the caller's pass resolves it once the
-                                // concrete model is substituted.
-                                newNodes.Add(fastNode);
-                                continue;
-                            }
+                            // Prefer what the model variable is actually bound to over what it
+                            // merely names. A signature names no body at all, and a ModelSequence
+                            // names element 0's module whichever element was indexed — splicing
+                            // that one filed another module's body under this one's id and
+                            // parameter names (Shorokoo/Shorokoo#301).
                             moduleFn = bound.Function;
+                        }
+                        else if (moduleFn.FunctionType == FunctionType.ModuleSignature)
+                        {
+                            // Nothing is bound to it here: a signature-only model variable
+                            // whose binding this graph does not contain — a module being
+                            // flattened on its own, or a non-hyper Model<> formal. Leave the
+                            // invoke standing; the caller's pass resolves it once the
+                            // concrete model is substituted.
+                            newNodes.Add(fastNode);
+                            continue;
                         }
                         // Null when the binding is dynamic — one of several models, picked at run
                         // time. The body is the same either way; only the identity differs, and
@@ -1079,8 +1095,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// variable as runtime split counters, and there have to be a statically known number of
         /// them. Null when the candidates disagree, which leaves such a feed unidentified.</para>
         /// </summary>
+        /// <para><c>Ambiguous</c> is set when the walk did reach creations but they were built from
+        /// different modules, which is a variable whose body is decided at run time — as opposed to
+        /// a walk that reached nothing at all, where the binding simply is not in this graph.</para>
         private readonly record struct BoundModule(
-            Function? Function, FastNode? Creation, int? IdLength, int? IdLoopSlots);
+            Function? Function, FastNode? Creation, int? IdLength, int? IdLoopSlots, bool Ambiguous = false);
 
         /// <summary>
         /// Follows a model variable back to the <c>MODULE_SET_HYPERPARAMS</c> nodes that could have
@@ -1106,7 +1125,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var fn = tensorInfos.TryGetValue(creation.Outputs[0]!.Value, out var info) ? info.ModuleFn : null;
                 if (fn is null) return default;
                 if (shared is null) shared = fn;
-                else if (!ReferenceEquals(shared, fn)) return default;
+                else if (!ReferenceEquals(shared, fn))
+                    return new BoundModule(null, null, null, null, Ambiguous: true);
 
                 var idVals = creation.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrLocalModelId);
                 if (idVals is not { Length: > 0 }) { idShapeAgrees = false; continue; }

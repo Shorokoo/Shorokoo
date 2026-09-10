@@ -239,6 +239,13 @@ public class ModelParamRefTests
         => SameIds(GainFromDynamicSequenceModel.ComputationGraph,
                    HyperModelGainFromAppendedSequenceModel.ComputationGraph);
 
+    // A ModelSequence names element 0's module whichever element is indexed, so the element
+    // indexed and the module named disagree; the body spliced must be the one indexed.
+    [Fact]
+    public void TestAHeterogeneousModelSequenceCallsTheElementItIndexed()
+        => SameIds(TwoParamGainNoRefModel.ComputationGraph,
+                   HeterogeneousSequenceAtOneModel.ComputationGraph);
+
     [Fact]
     public void TestAModelPassedAsAHyperparameterSurvivesItsHostOutlivingAnErasedSibling()
         => SameIds(GainFromErasedSequenceModel.ComputationGraph,

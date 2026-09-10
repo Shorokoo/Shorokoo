@@ -20,8 +20,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// is "in scope S" iff its index in <see cref="InternalComputationGraph.Nodes"/>
     /// falls between S's <c>OPEN</c> and <c>CLOSE</c>. This class assigns each
     /// node a per-scope MustIn / MustOut / Free status from the graph's data
-    /// flow, applies caller-supplied size preferences to the Free entries,
-    /// resolves cross-kind nested-scope size disagreements via priority, then
+    /// flow, places it inside every scope that does not force it out, then
     /// rewrites <see cref="InternalComputationGraph.Nodes"/> to honor the decisions
     /// while preserving topological order.
     /// </summary>
@@ -41,11 +40,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             public int? Parent;
         }
 
-        public static void Configure(
-            InternalComputationGraph graph,
-            ScopeSize loopSize,
-            ScopeSize ifSize,
-            ScopePriority priority)
+        public static void Configure(InternalComputationGraph graph)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
@@ -56,15 +51,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var scopes = CollectScopes(graph);
             if (scopes.Count == 0) return;
 
-            ValidatePriority(scopes, loopSize, ifSize, priority);
-
             var (forwardReach, backwardReach) = BuildReachSets(graph, scopes);
             var (thenReach, elseReach) = BuildIfBranchReachSets(graph, scopes);
             var inAByStructure = BuildContainmentTable(scopes);
 
             var status = ClassifyNodes(
                 graph, scopes, forwardReach, backwardReach, thenReach, elseReach, inAByStructure);
-            var decision = ApplySizeAndPriority(graph, scopes, status, loopSize, ifSize, priority);
+            var decision = DecidePlacement(graph, scopes, status);
 
             graph.Nodes = Reorder(graph, scopes, decision);
             graph.Nodes = ReorderIfBranches(graph, scopes, thenReach, elseReach);
@@ -113,20 +106,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         // -- Step 2 -----------------------------------------------------------
-
-        private static void ValidatePriority(
-            List<Scope> scopes, ScopeSize loopSize, ScopeSize ifSize, ScopePriority priority)
-        {
-            if (priority != ScopePriority.None) return;
-            if (loopSize == ifSize) return;
-            foreach (var s in scopes)
-                if (s.Parent is int pid && scopes[pid].Kind != s.Kind)
-                    throw new InvalidOperationException(
-                        "ScopePriority.None requires nested scopes to share their kind " +
-                        "when loopSize and ifSize differ.");
-        }
-
-        // -- Step 3 -----------------------------------------------------------
 
         private static (Dictionary<int, HashSet<FastNodeKey>> fwd,
                         Dictionary<int, HashSet<FastNodeKey>> bwd)
@@ -232,7 +211,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             return visited;
         }
 
-        // -- Step 3b ----------------------------------------------------------
+        // -- Step 2b ----------------------------------------------------------
         // For each IF scope, a separate backward-reach set per branch. A node is
         // in thenReach[S] iff its data flows into one of close_S's then-branch
         // input slots; elseReach[S] similarly. LOOP scopes get empty sets here.
@@ -301,7 +280,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             return visited;
         }
 
-        // -- Step 4 -----------------------------------------------------------
+        // -- Step 3 -----------------------------------------------------------
 
         // inAByStructure[a, b] = scope b is structurally nested inside scope a.
         private static bool[,] BuildContainmentTable(List<Scope> scopes)
@@ -315,7 +294,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             return t;
         }
 
-        // -- Step 5 -----------------------------------------------------------
+        // -- Step 4 -----------------------------------------------------------
 
         private static Dictionary<FastNodeKey, NodeStatus[]> ClassifyNodes(
             InternalComputationGraph graph,
@@ -390,15 +369,26 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         private static bool IsScopeBoundary(FastNode n) =>
             FastOpsetResolver.IsOpenOpCode(n.OpCode) || FastOpsetResolver.IsCloseOpCode(n.OpCode);
 
-        // -- Step 6 -----------------------------------------------------------
+        // -- Step 5 -----------------------------------------------------------
 
-        private static Dictionary<FastNodeKey, bool[]> ApplySizeAndPriority(
+        /// <summary>
+        /// Turns the per-scope statuses into a per-scope in/out decision. A node goes inside
+        /// every scope that does not force it out — the widest placement its data flow allows,
+        /// and the only one an emitter can use: a node left outside a scope it could have been
+        /// in is a node that runs when that scope does not.
+        ///
+        /// <para>Nesting consistency then needs one direction only. A node inside S must also be
+        /// inside every ancestor of S, so a MustOut anywhere up the chain takes it out of S too,
+        /// however deep the nesting. The converse needs no pass: an ancestor that does not force
+        /// the node out is already in by the rule above. Only a scope that genuinely requires the
+        /// node (MustIn) can contradict an enclosing MustOut, and that is a graph leaking a body
+        /// value rather than a placement to settle — settling it by throwing is what refused
+        /// nestings that were merely deeper than two (Shorokoo/Shorokoo#270).</para>
+        /// </summary>
+        private static Dictionary<FastNodeKey, bool[]> DecidePlacement(
             InternalComputationGraph graph,
             List<Scope> scopes,
-            Dictionary<FastNodeKey, NodeStatus[]> status,
-            ScopeSize loopSize,
-            ScopeSize ifSize,
-            ScopePriority priority)
+            Dictionary<FastNodeKey, NodeStatus[]> status)
         {
             var decision = new Dictionary<FastNodeKey, bool[]>();
             foreach (var node in graph.Nodes)
@@ -408,51 +398,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var st = status[node.Key];
                 var dec = new bool[scopes.Count];
                 for (int s = 0; s < scopes.Count; s++)
-                    dec[s] = (st[s] == NodeStatus.MustIn);
+                    dec[s] = st[s] != NodeStatus.MustOut;
 
-                // Compute the single "winning" size preference for every Free scope
-                // of this node. With per-kind uniform sizes, scopes of the same kind
-                // never conflict; cross-kind chains are resolved by priority and the
-                // winner applies uniformly to all the node's Free scopes.
-                bool hasFreeLoop = false, hasFreeIf = false;
-                for (int s = 0; s < scopes.Count; s++)
-                {
-                    if (st[s] != NodeStatus.Free) continue;
-                    if (scopes[s].Kind == ScopeKind.Loop) hasFreeLoop = true;
-                    else hasFreeIf = true;
-                }
-
-                ScopeSize? winningSize = null;
-                if (hasFreeLoop && !hasFreeIf) winningSize = loopSize;
-                else if (!hasFreeLoop && hasFreeIf) winningSize = ifSize;
-                else if (hasFreeLoop && hasFreeIf)
-                {
-                    if (loopSize == ifSize) winningSize = loopSize;
-                    else
-                        winningSize = priority switch
-                        {
-                            ScopePriority.Loop => loopSize,
-                            ScopePriority.If => ifSize,
-                            ScopePriority.None => throw new InvalidOperationException(
-                                "ScopePriority.None met a cross-kind nested conflict."),
-                            _ => throw new InvalidOperationException("Unknown priority."),
-                        };
-                }
-
-                if (winningSize is ScopeSize w)
-                {
-                    bool inSet = w == ScopeSize.Maximal;
-                    for (int s = 0; s < scopes.Count; s++)
-                        if (st[s] == NodeStatus.Free) dec[s] = inSet;
-                }
-
-                // Nesting consistency: a node placed inside S must also be inside every
-                // ancestor of S. So a MustOut anywhere up the chain settles it — the node
-                // stays out of S as well, however much the size preference wanted it in.
-                // Only a node the scope genuinely requires (MustIn) contradicts, and that is
-                // a graph that leaks a body value rather than a preference to overrule; a
-                // size preference resolved by throwing refused nestings that were merely
-                // deeper than two (Shorokoo/Shorokoo#270).
                 for (int s = 0; s < scopes.Count; s++)
                 {
                     if (!dec[s] || !AnyAncestorForcesOut(scopes, st, s)) continue;
@@ -461,15 +408,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                             $"Node {node.OpCode} (Key={node.Key}) is required inside " +
                             $"{scopes[s].Kind} scope #{s} but forced out of an enclosing scope.");
                     dec[s] = false;
-                }
-
-                // What survives pulls its ancestors in with it: they were Free→out at most,
-                // since a MustOut ancestor has just taken its whole subtree out.
-                for (int s = 0; s < scopes.Count; s++)
-                {
-                    if (!dec[s]) continue;
-                    int? p = scopes[s].Parent;
-                    while (p is int pid) { dec[pid] = true; p = scopes[pid].Parent; }
                 }
 
                 decision[node.Key] = dec;
@@ -488,7 +426,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             return false;
         }
 
-        // -- Step 7 -----------------------------------------------------------
+        // -- Step 6 -----------------------------------------------------------
 
         private static List<FastNode> Reorder(
             InternalComputationGraph graph, List<Scope> scopes,
@@ -553,7 +491,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 $"Boundary node {n.OpCode} not associated with any scope.");
         }
 
-        // -- Step 8 — Pass 2: branch ordering inside IF scopes ---------------
+        // -- Step 7 — Pass 2: branch ordering inside IF scopes ---------------
         // Within each IF scope's positional range, reorder the body so that
         // everything belonging to the then-branch precedes everything belonging
         // to the else-branch. Topological order within each branch is preserved

@@ -379,7 +379,7 @@ public class ModulesCoverageTests
     private static bool Ordered(ComputationGraph g, TensorData[] hints, bool scoped, params string[] ops)
     {
         var lowered = g.ToConcreteArchitecture(g.FromOrderedInputs([.. hints])).ToInternal();
-        if (scoped) lowered.ConfigureScopes(ScopeSize.Maximal, ScopeSize.Maximal, ScopePriority.Loop);
+        if (scoped) lowered.ConfigureScopes();
         if (!lowered.IsLinearOrderValid()) return false;
         int at = 0;
         foreach (var op in ops)
@@ -421,7 +421,7 @@ public class ModulesCoverageTests
         var g = Modules.SharedWorkAroundAnIfLayer.ComputationGraph;
         var lowered = g.ToConcreteArchitecture(g.FromOrderedInputs(
             [TensorData([2L], 1f, 2f), TensorData([], 2f)])).ToInternal();
-        lowered.ConfigureScopes(ScopeSize.Maximal, ScopeSize.Maximal, ScopePriority.Loop);
+        lowered.ConfigureScopes();
 
         int open = lowered.Nodes.FindIndex(n => n.OpCode == OpCodes.IF_OPEN);
         int close = lowered.Nodes.FindIndex(n => n.OpCode == OpCodes.IF_CLOSE);

@@ -86,7 +86,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// when this was a Kahn re-sort.
         /// </summary>
         public static void EnsureTopologicalOrder(InternalComputationGraph graph)
-            => System.Diagnostics.Debug.Assert(graph.IsLinearOrderValid(), "graph.IsLinearOrderValid()");
+        {
+            System.Diagnostics.Debug.Assert(graph.TryValidateLinearOrder(out var orderError),
+                "graph.IsLinearOrderValid(): " + orderError);
+        }
 
         /// <summary>
         /// Removes nodes from <see cref="InternalComputationGraph.Nodes"/> that are not

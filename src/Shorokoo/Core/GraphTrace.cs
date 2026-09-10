@@ -104,11 +104,12 @@ namespace Shorokoo.Core
             : null;
 
         /// <summary>
-        /// Marks the delegates of a lazy <c>IfElse</c> as running inside the If scope, for
-        /// recordings that may only name a module-scope value. A branch's nodes are not module
-        /// scope: naming one from an output the whole graph reads crosses the scope boundary, and
-        /// the graph is refused for it. The eager <c>IfElse</c> overloads need no marker — their
-        /// arguments are built before the scope opens.
+        /// Marks the delegates of a lazy <c>IfElse</c> as running inside the If scope, and collects
+        /// the stateful calls each arm makes so the arm can keep them itself. A branch's nodes are
+        /// not module scope: naming one from an output the whole graph reads crosses the scope
+        /// boundary, and the graph is refused for it — so an arm's calls hang off the arm's own
+        /// value instead. The eager <c>IfElse</c> overloads need no scope: their arguments are
+        /// built before the If opens.
         /// </summary>
         internal static BranchScope EnterBranchBody() => new BranchScope(TraceContext.Current);
 
@@ -124,6 +125,20 @@ namespace Shorokoo.Core
             {
                 _trace = trace;
                 if (_trace is not null) _trace.BranchDepth++;
+            }
+
+            /// <summary>
+            /// The arm's value, made to depend on the stateful calls this arm made since the last
+            /// arm was taken off. Takes them off the trace: a call inside the branch is the
+            /// branch's to keep, not the module's.
+            /// </summary>
+            internal Variable ArmValueWithItsEffects(Variable armValue)
+            {
+                var effects = _trace?.CallEffects;
+                if (effects is null || effects.Count == 0) return armValue;
+                var taken = effects.ToArray();
+                effects.Clear();
+                return Shorokoo.Core.Nodes.NodeDefinitions.InternalOp.WithStateDeps(armValue, taken);
             }
 
             public void Dispose()

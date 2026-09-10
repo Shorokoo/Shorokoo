@@ -86,7 +86,12 @@ namespace Shorokoo.Core.Nodes.Processors.Training
             // last value is what the field carries out. Chaining has already pointed a later call's
             // link at the earlier call's, so the final value carries every update in call order.
             var currentByField = new FastTensorKey[stateFieldKeys.Length];
-            for (int i = 0; i < stateFieldKeys.Length; i++) currentByField[i] = stateFieldKeys[i];
+            var heldByField = new HashSet<FastTensorKey>[stateFieldKeys.Length];
+            for (int i = 0; i < stateFieldKeys.Length; i++)
+            {
+                currentByField[i] = stateFieldKeys[i];
+                heldByField[i] = [stateFieldKeys[i]];
+            }
             var nodeByKeyForState = new Dictionary<FastNodeKey, FastNode>(graph.Nodes.Count);
             foreach (var n in graph.Nodes) nodeByKeyForState[n.Key] = n;
 
@@ -116,19 +121,22 @@ namespace Shorokoo.Core.Nodes.Processors.Training
                     var updatedStateInput = inputs[1].AssertNotNull();
                     var resolvedUpdatedState = ResolveRemap(remap, updatedStateInput);
 
-                    // Which field this advances is what its original-state input currently holds:
-                    // the field itself for the first call, the previous call's updated value after.
-                    // Inlining wraps that value in Identity, so the walk has to see through them —
-                    // a remap lookup alone finds nothing and the field goes unidentified.
+                    // Which field this advances is what its original-state input names: the field
+                    // itself for the first call, an earlier call's updated value after. Any value
+                    // the field has held counts, not only the latest — the arms of an IfElse each
+                    // read the value the field held entering the branch. Inlining wraps that value
+                    // in Identity, so the walk has to see through them; a remap lookup alone finds
+                    // nothing and the field goes unidentified.
                     var resolvedOriginalState = ResolveStateValue(
                         inputs[0].AssertNotNull(), remap, nodeByKeyForState);
-                    int field = System.Array.IndexOf(currentByField, resolvedOriginalState);
+                    int field = System.Array.FindIndex(heldByField, held => held.Contains(resolvedOriginalState));
                     if (field < 0)
                         throw new InvalidOperationException(
                             "FastRebuildModelInputsForTrainingProcessor: a state update reads a value that is "
-                            + "not the current value of any state field, so the field it updates cannot be "
+                            + "not one this state field has held, so the field it updates cannot be "
                             + "identified and its update would be dropped.");
                     currentByField[field] = resolvedUpdatedState;
+                    heldByField[field].Add(resolvedUpdatedState);
 
                     var outputKey = GetSingleOutputKey(node);
                     remap[outputKey] = resolvedUpdatedState;

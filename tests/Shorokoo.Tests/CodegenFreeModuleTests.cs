@@ -449,6 +449,46 @@ public class CodegenFreeModuleTests
     }
 
     /// <summary>
+    /// The state after one execution, then the output — one row per case. Concretized on a true
+    /// condition and run on the asked-for one: the branch stays in the graph, but a parameter only
+    /// the untaken arm reads is pruned as dead, so concretizing per case would answer a different
+    /// model each time.
+    /// </summary>
+    private static float[] StateThenOutput(ComputationGraph cg, bool cond)
+    {
+        var input = TensorData([2L], 1f, 2f);
+        var concrete = cg.ToConcreteArchitecture(
+            cg.FromOrderedInputs([input, TensorData(DType.Bool, [], true)])).ToConcreteModel();
+        var (outputs, updated) = ComputeContext.Default.ExecuteWithState(
+            concrete, input, TensorData(DType.Bool, [], cond));
+        return [StateValue(updated), .. Floats(outputs[0].ToTensorData().AccessRawMemory().ToArray())];
+    }
+
+    /// <summary>
+    /// Only the arm that runs updates the state, and calls within one arm compose with each other
+    /// and with a call made before the branch. The condition stays a runtime value, so one
+    /// concrete model answers for both arms.
+    /// </summary>
+    [Fact]
+    public void TestOnlyTheIfElseArmThatRunsAppliesItsStateUpdates()
+    {
+        Assert.Equal<float>([1f, 1f, 2f], StateThenOutput(StatefulCalledFromBothIfArmsModel.ComputationGraph, true));
+        Assert.Equal<float>([1f, 2f, 4f], StateThenOutput(StatefulCalledFromBothIfArmsModel.ComputationGraph, false));
+
+        Assert.Equal<float>([1f, 1f, 2f], StateThenOutput(StatefulCalledFromOneIfArmModel.ComputationGraph, true));
+        Assert.Equal<float>([0f, 3f, 6f], StateThenOutput(StatefulCalledFromOneIfArmModel.ComputationGraph, false));
+
+        Assert.Equal<float>([2f, 3f, 5f], StateThenOutput(StatefulCalledTwiceInOneIfArmModel.ComputationGraph, true));
+        Assert.Equal<float>([0f, 3f, 6f], StateThenOutput(StatefulCalledTwiceInOneIfArmModel.ComputationGraph, false));
+
+        Assert.Equal<float>([2f, 2f, 3f], StateThenOutput(StatefulCalledBeforeAndInsideAnIfModel.ComputationGraph, true));
+        Assert.Equal<float>([1f, 3f, 6f], StateThenOutput(StatefulCalledBeforeAndInsideAnIfModel.ComputationGraph, false));
+
+        Assert.Equal<float>([2f, 1f, 2f], StateThenOutput(StatefulCallDiscardedInsideAnIfArmModel.ComputationGraph, true));
+        Assert.Equal<float>([0f, 3f, 6f], StateThenOutput(StatefulCallDiscardedInsideAnIfArmModel.ComputationGraph, false));
+    }
+
+    /// <summary>
     /// <see cref="Globals.StateUpdate{T}(T, T)"/> only accepts state variables — tensors created by
     /// a [StateInitializer] class's Init method — and only inside a module build in progress.
     /// Targeting a runtime input or a trainable parameter throws at graph-build time with

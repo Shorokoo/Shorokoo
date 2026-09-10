@@ -1190,13 +1190,6 @@ public class TrainingRigTrainingLoopCoverageTests
         Assert.Equal([2f, 200f], StateFieldsAfterOneStep(TwoStateFieldsCalledTwiceModel.ComputationGraph));
     }
 
-    // Shorokoo/Shorokoo#308: exclusive arms are not a running order, so the calls are refused
-    // rather than composed.
-    [Fact]
-    public void TestAStatefulModelCalledFromBothIfElseArmsIsRefused()
-        => Assert.Contains("cannot be ordered", Assert.Throws<InvalidOperationException>(
-            () => StateFieldsAfterOneStep(StatefulCalledFromBothIfArmsModel.ComputationGraph)).Message);
-
     // A loop body is one call site however many trips it runs, so there is nothing to chain and the
     // in-loop update still registers once for the step.
     [Fact]
@@ -1208,6 +1201,15 @@ public class TrainingRigTrainingLoopCoverageTests
     [Fact]
     public void TestAStatefulCallWhoseOutputIsDiscardedStillUpdatesItsState()
         => Assert.Equal([2f], StateFieldsAfterOneStep(StatefulCallDiscardedModel.ComputationGraph));
+
+    // Each arm creating its own parameter trains; one parameter created before the IfElse and used
+    // inside both arms builds a backward pass that names branch-scoped tensors from module scope.
+    [Fact(Skip = "Shorokoo/Shorokoo#312: a parameter shared by both IfElse arms builds a backward pass out of scope")]
+    public void TestAParameterSharedByBothIfElseArmsTrains()
+    {
+        Assert.Equal(2.5f, LossAfterOneStep(GainInBothIfArmsOnARuntimeConditionModel.ComputationGraph), 1e-4f);
+        Assert.Equal(2.5f, LossAfterOneStep(SharedGainInBothIfArmsModel.ComputationGraph), 1e-4f);
+    }
 
     // Training differentiates a loop by unrolling it, so one whose trip count is not a constant
     // has no backward pass. A constant count is unrolled and trains, which is why every other

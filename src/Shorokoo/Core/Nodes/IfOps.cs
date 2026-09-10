@@ -40,13 +40,13 @@ namespace Shorokoo.Core.Nodes
         public static A IfElse<A>(Scalar<bit> condition, System.Func<A> whenTrue, System.Func<A> whenFalse) where A : IValue
         {
             var ifOpen = OnnxOp.IfOpen(condition);
-            A t, f;
-            using (GraphTrace.EnterBranchBody())
+            Variable t, f;
+            using (var branch = GraphTrace.EnterBranchBody())
             {
-                t = whenTrue();
-                f = whenFalse();
+                t = branch.ArmValueWithItsEffects(whenTrue().ToVariable());
+                f = branch.ArmValueWithItsEffects(whenFalse().ToVariable());
             }
-            return OnnxOp.IfClose([t.ToVariable()], [f.ToVariable()], ifOpen)[0].ToValue<A>();
+            return OnnxOp.IfClose([t], [f], ifOpen)[0].ToValue<A>();
         }
 
         public static (A, B) IfElse<A, B>(Scalar<bit> condition, (A a, B b) whenTrue, (A a, B b) whenFalse)

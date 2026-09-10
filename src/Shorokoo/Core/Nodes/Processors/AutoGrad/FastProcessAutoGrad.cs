@@ -81,7 +81,8 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
             graph.Nodes.RemoveAll(n => n.OpCode == InternalOpCodes.AUTO_GRAD);
             FastProcessorHelper.RemoveUnreachableNodes(graph);
 
-            System.Diagnostics.Debug.Assert(graph.IsLinearOrderValid(), "graph.IsLinearOrderValid()");
+            System.Diagnostics.Debug.Assert(graph.TryValidateLinearOrder(out var orderError),
+                "graph.IsLinearOrderValid(): " + orderError);
         }
 
         private static void ProcessOne(InternalComputationGraph graph, FastNode autoGradNode)

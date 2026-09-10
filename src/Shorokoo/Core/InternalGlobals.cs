@@ -151,16 +151,19 @@ namespace Shorokoo.Core
         /// (Shorokoo/Shorokoo#310). Calling for the update alone is the one thing module-owned
         /// state is for, so the call is an effect and not only a value.
         ///
-        /// <para>Silently a no-op where the call is not at module scope: outside a module build
-        /// there is nothing to wrap, and a call inside a <c>LoopAPI.Iterate</c> body or a lazy
-        /// <c>IfElse</c> branch produces a scoped value the module's outputs may not name. A
-        /// discarded call there still loses its update, as it did everywhere before.</para>
+        /// <para>A call inside a lazy <c>IfElse</c> branch is kept by the branch instead: its value
+        /// is scoped, and an output the whole graph reads may not name it (see
+        /// <see cref="GraphTrace.BranchScope.ArmValueWithItsEffects"/>). Silently a no-op where
+        /// there is no harvest to reach at all: outside a module build, and inside a
+        /// <c>LoopAPI.Iterate</c> body, where the value is a per-iteration node with no post-loop
+        /// translation of its own — the deferral <c>Globals.StateUpdate</c> gets there has no
+        /// counterpart for a whole call.</para>
         /// </summary>
         internal static void RegisterCallEffect(Variable modelVariable, Variable?[] callOutputs)
         {
             if (modelVariable.ModuleFn?.CallIsAnEffect != true) return;
             if (GraphTrace.CallEffects is not List<Variable> effects) return;
-            if (GraphTrace.Loopers.InLoopBody || GraphTrace.InBranchBody) return;
+            if (GraphTrace.Loopers.InLoopBody) return;
             if (callOutputs.NotNulls().FirstOrDefault() is Variable output) effects.Add(output);
         }
 

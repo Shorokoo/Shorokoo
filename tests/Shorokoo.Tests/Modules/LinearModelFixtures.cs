@@ -782,17 +782,65 @@ public partial class TwoStateFieldsCalledTwiceModel
     }
 }
 
-/// <summary>A stateful model called from both arms of an <c>IfElse</c>, on a condition derived at
-/// runtime so neither arm folds away. Only one arm runs, so the two updates are alternatives
-/// rather than a sequence and cannot be composed.</summary>
+/// <summary>A stateful model called from both arms of an <c>IfElse</c>. Only one arm runs, so only
+/// its update takes effect.</summary>
 [Module]
 public partial class StatefulCalledFromBothIfArmsModel
 {
-    public static Tensor<float32> Inline(Tensor<float32> t)
+    public static Tensor<float32> Inline(Tensor<float32> t, Scalar<bit> cond)
     {
         var m = StatefulGainSubModel.Model();
-        return (t.ShapeTensor()[0] > Scalar(0L))
-            .IfElse(() => m.Call(t), () => m.Call(t) * Scalar(2f));
+        return cond.IfElse(() => m.Call(t), () => m.Call(t) * Scalar(2f));
+    }
+}
+
+/// <summary>A stateful model called from one arm of an <c>IfElse</c> only, so the state moves on
+/// the trips that take that arm and stands still on the others.</summary>
+[Module]
+public partial class StatefulCalledFromOneIfArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t, Scalar<bit> cond)
+    {
+        var m = StatefulGainSubModel.Model();
+        return cond.IfElse(() => m.Call(t), () => t * Scalar(3f));
+    }
+}
+
+/// <summary>Two calls of one stateful model inside one arm, which compose with each other but
+/// only when that arm runs.</summary>
+[Module]
+public partial class StatefulCalledTwiceInOneIfArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t, Scalar<bit> cond)
+    {
+        var m = StatefulGainSubModel.Model();
+        return cond.IfElse(() => m.Call(t) + m.Call(t), () => t * Scalar(3f));
+    }
+}
+
+/// <summary>A call inside an arm whose result the arm discards, so the arm keeps it for the
+/// update alone.</summary>
+[Module]
+public partial class StatefulCallDiscardedInsideAnIfArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t, Scalar<bit> cond)
+    {
+        var m = StatefulGainSubModel.Model();
+        return cond.IfElse(() => { var used = m.Call(t); _ = m.Call(t); return used; },
+                           () => t * Scalar(3f));
+    }
+}
+
+/// <summary>A call at module scope and another inside an arm, so the arm's call composes with one
+/// that always ran.</summary>
+[Module]
+public partial class StatefulCalledBeforeAndInsideAnIfModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t, Scalar<bit> cond)
+    {
+        var m = StatefulGainSubModel.Model();
+        var first = m.Call(t);
+        return cond.IfElse(() => m.Call(first), () => first * Scalar(3f));
     }
 }
 
@@ -856,6 +904,29 @@ public partial class StatefulGainInRolledLoopModel
             ctx.ContinueWhile(Scalar(true));
         }
         return x;
+    }
+}
+
+/// <summary>The same, on a condition the graph works out at run time, so the branch survives to
+/// the backward pass instead of being folded away, and with each arm creating its own
+/// parameter.</summary>
+[Module]
+public partial class GainInBothIfArmsOnARuntimeConditionModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+        => (t.ShapeTensor()[0] > Scalar(0L))
+            .IfElse(() => t * Ones.Init([Scalar(2L)]), () => t * Ones.Init([Scalar(2L)]) * Scalar(2f));
+}
+
+/// <summary>One parameter created before an <c>IfElse</c> and used inside both arms, so the
+/// gradient the branch produces belongs to a value the branch does not own.</summary>
+[Module]
+public partial class SharedGainInBothIfArmsModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var w = Ones.Init([Scalar(2L)]);
+        return (t.ShapeTensor()[0] > Scalar(0L)).IfElse(() => t * w, () => t * w * Scalar(2f));
     }
 }
 

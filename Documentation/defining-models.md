@@ -33,9 +33,10 @@ Related: [core-types.md](core-types.md) · [inference.md](inference.md) ·
     value to be a carried loop variable, and the body still registers exactly one
     update however many trips it runs. A module body registers one update per
     **call**: calling one model object twice applies both, in call order, with the
-    second call reading what the first wrote. Calls from inside control flow are the
-    exception — two calls in the two arms of an `IfElse`, or in a loop body, are
-    refused rather than composed, since only one arm runs and a body repeats.
+    second call reading what the first wrote — including a call whose result the body
+    discards, which is how you call for the update alone. Across the arms of an
+    `IfElse` only the arm that runs updates the state, and calls within one arm
+    compose with each other and with any call made before the branch.
 - `Inline` may return a single value or a tuple (multiple outputs).
 - The class must be `partial` so the generator can extend it.
 - The generator is a convenience, not a requirement — see

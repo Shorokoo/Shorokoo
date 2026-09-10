@@ -168,6 +168,14 @@ namespace Shorokoo.Graph
             DebugPrintFast(fastGraph, debugRequests, GraphCreationPoint.AfterFirstSimplify);
             FastGraphCycleDetector.AssertAcyclic(fastGraph, "After FastSimplify #1");
 
+            // A model owning updateable state, called more than once, shares one state parameter
+            // across its calls but keeps one update per call. Point each later call's reads at the
+            // earlier call's link so the updates compose (Shorokoo/Shorokoo#306). Ahead of autograd,
+            // so the backward differentiates the forward the model actually has; and ahead of both
+            // state lowerings, so training and inference each read the link their own way.
+            FastChainStateUpdatesAcrossCallSites.Process(fastGraph);
+            FastGraphCycleDetector.AssertAcyclic(fastGraph, "After FastChainStateUpdatesAcrossCallSites");
+
             // Lower attribute-tensorized variant ops (e.g. SHRK_CONV) to their standard ONNX
             // counterparts before autograd: the variant ops have no gradient rule, and the first
             // FastSimplify above has already constant-folded and unrolled loops, so the geometry

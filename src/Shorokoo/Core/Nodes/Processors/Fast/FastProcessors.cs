@@ -728,6 +728,20 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var outputRemap = new Dictionary<FastTensorKey, FastTensorKey>();
             bool anyInlined = false;
 
+            // Call sites per creation, in node order. Two calls on one model share its parameters,
+            // so its id stays collapsed — but they must not share a draw, and a feed's path is the
+            // only place that can say which call it belongs to (Shorokoo/Shorokoo#298).
+            var callSitesByCreation = new Dictionary<FastNodeKey, List<FastNodeKey>>();
+            foreach (var candidate in graph.Nodes)
+            {
+                if (candidate.OpCode != InternalOpCodes.MODEL_INVOKE) continue;
+                if (candidate.Inputs.Count == 0 || candidate.Inputs[0] is not FastTensorKey candidateModel) continue;
+                if (FindDirectModuleCreation(candidateModel, nodeByKey) is not FastNode candidateCreation) continue;
+                if (!callSitesByCreation.TryGetValue(candidateCreation.Key, out var siteList))
+                    callSitesByCreation[candidateCreation.Key] = siteList = [];
+                siteList.Add(candidate.Key);
+            }
+
             // Call-site ids for module-typed FUNCTION_INVOKEs, allocated above every id already
             // in the graph so they cannot collide with the ones FastApplyIdentifierTemplates
             // handed out before this pass, nor with the ones an earlier sweep handed out here.
@@ -894,6 +908,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
                         var (feedId, feedExtraIter) = ExtendScopeToCallSite(
                             parentModelId, enclosingLoops, subFastGraph, newNodes);
+                        feedId = WithCallSiteComponent(
+                            feedId, directModelCreation, fastNode, callSitesByCreation, subFastGraph);
                         FastReparentToCallSite(
                             subFastGraph, parentIdTemplate, parentModelId, parentIterIndicesKey, graph,
                             feedId, feedExtraIter);
@@ -1686,6 +1702,35 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 subGraph.Nodes.Insert(insertIdx + offset, newNode);
                 offset++;
             }
+        }
+
+        /// <summary>
+        /// The feed path with this call site named on it, when the model it calls is called more
+        /// than once. A single-call model keeps the path it already had, so existing streams — and
+        /// any <c>Rng.Pin</c> recorded against them — do not move; adding a second call is what
+        /// splits them, and it necessarily names both, since one stream cannot become two while
+        /// either keeps the old name.
+        /// </summary>
+        private static ModelId WithCallSiteComponent(
+            ModelId feedId,
+            FastNode creation,
+            FastNode invoke,
+            Dictionary<FastNodeKey, List<FastNodeKey>> callSitesByCreation,
+            InternalComputationGraph subGraph)
+        {
+            if (!callSitesByCreation.TryGetValue(creation.Key, out var sites) || sites.Count < 2)
+                return feedId;
+
+            // Only a feed reads this path; a callee that draws nothing would carry a longer dead one.
+            if (!subGraph.Nodes.Any(n =>
+                    n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM ||
+                    n.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL ||
+                    n.OpCode == InternalOpCodes.SHRK_RANDOM_BITS))
+                return feedId;
+
+            int ordinal = sites.IndexOf(invoke.Key);
+            if (ordinal < 0) return feedId;
+            return new ModelId([.. feedId.Vals, ModelId.CallSiteIndex, ordinal]);
         }
 
         /// <summary>

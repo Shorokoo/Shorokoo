@@ -422,6 +422,33 @@ public class CodegenFreeModuleTests
     }
 
     /// <summary>
+    /// One model handle called twice updates its state once per call, and the executor still takes
+    /// one value per state parameter. The same architecture executed without state — the pure
+    /// inference conversion — shows both calls the value it was given and persists nothing.
+    /// </summary>
+    [Fact]
+    public void TestAStatefulModelCalledTwiceUpdatesOncePerCall()
+    {
+        var input = TensorData([2L], 1f, 2f);
+        var g = StatefulGainCalledTwiceModel.ComputationGraph;
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
+
+        Assert.Equal(1, concrete.ToInternal().GetStateUpdateOutputCount());
+        Assert.Equal(0f, StateValue(concrete));
+
+        var (outputs1, updated1) = ComputeContext.Default.ExecuteWithState(concrete, input);
+        Assert.Equal<float>([3f, 5f], Floats(outputs1[0].ToTensorData().AccessRawMemory().ToArray()));
+        Assert.Equal(2f, StateValue(updated1));
+
+        var (outputs2, updated2) = ComputeContext.Default.ExecuteWithState(updated1, input);
+        Assert.Equal<float>([7f, 9f], Floats(outputs2[0].ToTensorData().AccessRawMemory().ToArray()));
+        Assert.Equal(4f, StateValue(updated2));
+
+        Assert.Equal<float>([2f, 4f], Floats(ComputeContext.Default
+            .Execute(concrete, (IData[])[input])[0].ToTensorData().AccessRawMemory().ToArray()));
+    }
+
+    /// <summary>
     /// <see cref="Globals.StateUpdate{T}(T, T)"/> only accepts state variables — tensors created by
     /// a [StateInitializer] class's Init method — and only inside a module build in progress.
     /// Targeting a runtime input or a trainable parameter throws at graph-build time with

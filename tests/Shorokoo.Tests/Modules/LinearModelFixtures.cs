@@ -731,6 +731,116 @@ public partial class HeterogeneousSequenceAtOneModel
                Rank1GainSubModel.Model(), TwoParamGainSubModel.Model())[Scalar(1L)].Call(input);
 }
 
+/// <summary>A stateful module whose own body calls another stateful module, so a call to it
+/// closes two nested state scopes rather than one.</summary>
+[Module]
+public partial class NestedStatefulSubModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var mine = InitRunningMean.Init(t.ShapeTensor());
+        Globals.StateUpdate(mine, mine + Scalar(10f));
+        return StatefulGainSubModel.Call(t) + mine;
+    }
+}
+
+/// <summary><see cref="NestedStatefulSubModel"/> called twice — the inner module's own call-site
+/// markers must not be mistaken for the outer parameter's.</summary>
+[Module]
+public partial class NestedStatefulCalledTwiceModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = NestedStatefulSubModel.Model();
+        return m.Call(t) + m.Call(t);
+    }
+}
+
+/// <summary>Two state parameters owned by one module, so one call site closes two updates at
+/// once and each has to be tracked against its own field.</summary>
+[Module]
+public partial class TwoStateFieldsSubModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var a = InitRunningMean.Init(t.ShapeTensor());
+        var b = InitRunningMean.Init(t.ShapeTensor());
+        Globals.StateUpdate(a, a + Scalar(1f));
+        Globals.StateUpdate(b, b + Scalar(100f));
+        return t * Ones.Init([Scalar(2L)]) + a + b;
+    }
+}
+
+/// <summary><see cref="TwoStateFieldsSubModel"/> called twice.</summary>
+[Module]
+public partial class TwoStateFieldsCalledTwiceModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = TwoStateFieldsSubModel.Model();
+        return m.Call(t) + m.Call(t);
+    }
+}
+
+/// <summary>A stateful model called from both arms of an <c>IfElse</c>, on a condition derived at
+/// runtime so neither arm folds away. Only one arm runs, so the two updates are alternatives
+/// rather than a sequence and cannot be composed.</summary>
+[Module]
+public partial class StatefulCalledFromBothIfArmsModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = StatefulGainSubModel.Model();
+        return (t.ShapeTensor()[0] > Scalar(0L))
+            .IfElse(() => m.Call(t), () => m.Call(t) * Scalar(2f));
+    }
+}
+
+/// <summary>One stateful model handle called twice with the second call's output discarded, so the
+/// call reaches the graph through nothing but the state update it registers.</summary>
+[Module]
+public partial class StatefulCallDiscardedModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = StatefulGainSubModel.Model();
+        var used = m.Call(t);
+        _ = m.Call(t);
+        return used;
+    }
+}
+
+/// <summary>A stateful model called once inside a loop body, so its one call site is the loop's
+/// and its update registers once for the step, whatever the trip count.</summary>
+[Module]
+public partial class StatefulCalledOnceInALoopModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = StatefulGainSubModel.Model();
+        var x = t;
+        foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
+        {
+            x = m.Call(x);
+            ctx.ContinueWhile(Scalar(true));
+        }
+        return x;
+    }
+}
+
+/// <summary>A trainable parameter inside a loop whose trip count is not a compile-time constant, so
+/// the loop is not unrolled before the training graph is built.</summary>
+[Module]
+public partial class GainInRolledLoopModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var x = t;
+        foreach (var ctx in LoopAPI.Iterate(t.ShapeTensor()[0])) x = x * Ones.Init([Scalar(2L)]);
+        return x;
+    }
+}
+
 /// <summary>Draws one uniform sample of its own, so every model built from it owns an RNG
 /// feed.</summary>
 [Module]

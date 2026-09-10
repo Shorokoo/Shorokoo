@@ -1161,12 +1161,59 @@ public class TrainingRigTrainingLoopCoverageTests
     public void TestAStateReadAfterItsUpdateStillSeesTheValueFedInForThisStep()
         => Assert.Equal(2.5f, LossAfterOneStep(StatefulGainNoRefModel.ComputationGraph), 1e-4f);
 
-    // Pins Shorokoo/Shorokoo#306: the updated-state struct is built per state parameter but filled
-    // per STATE_UPDATE_LINK, so one handle called twice keeps only the first site's update.
-    [Fact(Skip = "Shorokoo/Shorokoo#306: a stateful model called twice drops all but the first StateUpdate")]
+    // Both calls update, in call order, so the second sees the first's result.
+    [Fact]
     public void TestAStatefulModelCalledTwiceAppliesBothItsStateUpdates()
         => Assert.Equal(2f * StateAfterOneStep(StatefulGainNoRefModel.ComputationGraph),
                         StateAfterOneStep(StatefulGainCalledTwiceModel.ComputationGraph));
+
+    private static float[] StateFieldsAfterOneStep(ComputationGraph modelGraph)
+    {
+        var x = TensorData([2L], 1f, 2f);
+        var rig = TrainingRig.FromScratch(modelGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [new TensorDataModelParam("input", ModelParamType.InputParam, x)], 0.1f);
+        var step = rig.TrainStep(rig.CreateInitialCheckpoint(),
+            NNLibraryTrainingFixtures.MakeBatch("input", "ModelInput", x),
+            NNLibraryTrainingFixtures.MakeBatch("targets", "Target", TensorData([2L], 0f, 0f)));
+        float[] values = [.. rig.ModelStateDef.Fields.Select(f =>
+            NNLibraryTrainingFixtures.Floats(step.ModelState.Fields[f.Name])[0])];
+        Array.Sort(values);
+        return values;
+    }
+
+    // A call closes as many state scopes as the modules nested at it own, and one scope can close
+    // several fields at once; each field's own sequence of calls has to compose separately.
+    [Fact]
+    public void TestNestedAndMultiFieldStateBothComposeAcrossTwoCalls()
+    {
+        Assert.Equal([2f, 20f], StateFieldsAfterOneStep(NestedStatefulCalledTwiceModel.ComputationGraph));
+        Assert.Equal([2f, 200f], StateFieldsAfterOneStep(TwoStateFieldsCalledTwiceModel.ComputationGraph));
+    }
+
+    // Shorokoo/Shorokoo#308: exclusive arms are not a running order, so the calls are refused
+    // rather than composed.
+    [Fact]
+    public void TestAStatefulModelCalledFromBothIfElseArmsIsRefused()
+        => Assert.Contains("cannot be ordered", Assert.Throws<InvalidOperationException>(
+            () => StateFieldsAfterOneStep(StatefulCalledFromBothIfArmsModel.ComputationGraph)).Message);
+
+    // A loop body is one call site however many trips it runs, so there is nothing to chain and the
+    // in-loop update still registers once for the step.
+    [Fact]
+    public void TestAStatefulModelCalledOnceInALoopKeepsItsSingleUpdate()
+        => Assert.Equal([1f], StateFieldsAfterOneStep(StatefulCalledOnceInALoopModel.ComputationGraph));
+
+    // Calling for the state update alone is what module-owned state is for, so the call must reach
+    // the graph through more than its output.
+    [Fact(Skip = "Shorokoo/Shorokoo#310")]
+    public void TestAStatefulCallWhoseOutputIsDiscardedStillUpdatesItsState()
+        => Assert.Equal([2f], StateFieldsAfterOneStep(StatefulCallDiscardedModel.ComputationGraph));
+
+    // A constant trip count is unrolled before the training graph is built, which is why every
+    // other in-loop training test passes; a rolled one builds a graph ORT rejects.
+    [Fact(Skip = "Shorokoo/Shorokoo#309")]
+    public void TestATrainableParameterInsideARolledLoopTrains()
+        => Assert.Equal(2.5f, LossAfterOneStep(GainInRolledLoopModel.ComputationGraph), 1e-4f);
 
     [Fact]
     public void TestTrainStepAndTrainLoopCoverage()

@@ -1598,10 +1598,10 @@ public class ModulesCoverageTests
     private static Tensor<float32> DrawsTwice(Tensor<float32> t)
         => t + RandomUniform([Scalar(2L)], 0f, 1f) + RandomUniform([Scalar(2L)], 0f, 1f);
 
-    /// <summary>Two call sites of one model object fold the same stream key, because the id they
-    /// reparent under is the model's rather than the site's — where two call sites of a
-    /// module-typed function each mint their own. Tracked as Shorokoo/Shorokoo#298.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#298: two call sites of one model object share an RNG stream")]
+    /// <summary>Two call sites of one model object draw apart: they share the model's id, and so
+    /// its parameters, but a draw is an execution rather than a value, so each site's feed carries
+    /// its own call-site component.</summary>
+    [Fact]
     public void TestTwoCallSitesOfOneModelObjectGetSeparateRngStreams()
     {
         var model = ModuleFactory

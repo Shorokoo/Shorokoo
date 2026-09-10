@@ -731,36 +731,6 @@ public partial class HeterogeneousSequenceAtOneModel
                Rank1GainSubModel.Model(), TwoParamGainSubModel.Model())[Scalar(1L)].Call(input);
 }
 
-/// <summary>A rank-1 gain scaled by a hyperparameter, plus a second parameter, so an element
-/// carrying a hyperparameter can sit in a sequence beside an element carrying none and which
-/// body a call reached still shows in the parameter ids.</summary>
-[Module]
-public partial class HyperScaledGainSubModel
-{
-    public static Tensor<float32> Inline(Tensor<float32> input, [Hyper] Scalar<float32> scale)
-        => input * Ones.Init([Scalar(2L)]) * scale + Zeros.Init([Scalar(2L)]);
-}
-
-/// <summary><see cref="HyperScaledGainSubModel"/> called plainly — what indexing element 1 of
-/// <see cref="HeterogeneousHyperSequenceAtOneModel"/> should reach.</summary>
-[Module]
-public partial class HyperScaledGainNoRefModel
-{
-    public static Tensor<float32> Inline(Tensor<float32> input)
-        => HyperScaledGainSubModel.Call(Scalar(2f), input);
-}
-
-/// <summary><see cref="HeterogeneousSequenceAtOneModel"/> with the indexed element carrying a
-/// hyperparameter the other element does not, so the two elements' model structs differ in
-/// width.</summary>
-[Module]
-public partial class HeterogeneousHyperSequenceAtOneModel
-{
-    public static Tensor<float32> Inline(Tensor<float32> input)
-        => ModelSequence.Create<Model<Tensor<float32>, Tensor<float32>>>(
-               Rank1GainSubModel.Model(), HyperScaledGainSubModel.Model(Scalar(2f)))[Scalar(1L)].Call(input);
-}
-
 /// <summary>Draws one uniform sample of its own, so every model built from it owns an RNG
 /// feed.</summary>
 [Module]

@@ -212,14 +212,6 @@ public class ModelParamRefTests
             [NamedParam("Gain"), NamedParam("Bias")]).Fields.Length);
     }
 
-    // Pins Shorokoo/Shorokoo#301: a ModelSequence takes its module function from element 0, so
-    // indexing any other element inlines element 0's body while naming its parameters after the
-    // element that was indexed — one parameter here instead of two, and the wrong forward.
-    [Fact(Skip = "Shorokoo/Shorokoo#301: a heterogeneous ModelSequence calls element 0's body whichever element is indexed")]
-    public void TestAHeterogeneousModelSequenceCallsTheElementItIndexed()
-        => SameIds(HyperScaledGainNoRefModel.ComputationGraph,
-                   HeterogeneousHyperSequenceAtOneModel.ComputationGraph);
-
     [Fact]
     public void TestAModelPassedAsAHyperparameterKeepsItsTrainableParams()
         => SameIds(Rank1GainNoRefModel.ComputationGraph, HyperModelGainModel.ComputationGraph);

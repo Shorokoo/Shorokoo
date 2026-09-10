@@ -293,8 +293,7 @@ namespace Shorokoo.Core.Nodes.Processors.Training
             {
                 if (!nodeByKey.TryGetValue(current.FastNodeKey, out var node)) return current;
                 if (node.OpCode != OpCodes.IDENTITY) return current;
-                if (node.FullInputs[""].Count == 0 || node.FullInputs[""][0] is not FastTensorKey inner)
-                    return current;
+                if (node.Inputs.Count == 0 || node.Inputs[0] is not FastTensorKey inner) return current;
                 current = ResolveRemap(remap, inner);
             }
             return current;

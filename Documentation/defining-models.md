@@ -30,8 +30,12 @@ Related: [core-types.md](core-types.md) · [inference.md](inference.md) ·
     also only valid inside a module body — it throws otherwise. Inside a
     `LoopAPI.Iterate` loop body it registers the post-loop value of the updated
     tensor — the value it holds once the loop finishes — which requires the updated
-    value to be a carried loop variable; each state still gets exactly one update
-    per step.
+    value to be a carried loop variable, and the body still registers exactly one
+    update however many trips it runs. A module body registers one update per
+    **call**: calling one model object twice applies both, in call order, with the
+    second call reading what the first wrote. Calls from inside control flow are the
+    exception — two calls in the two arms of an `IfElse`, or in a loop body, are
+    refused rather than composed, since only one arm runs and a body repeats.
 - `Inline` may return a single value or a tuple (multiple outputs).
 - The class must be `partial` so the generator can extend it.
 - The generator is a convenience, not a requirement — see

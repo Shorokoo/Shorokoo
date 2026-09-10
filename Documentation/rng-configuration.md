@@ -213,10 +213,8 @@ named for the feed alone. A `Rng.Pin` path or a per-stream `Override` written ag
 reached that way needs re-reading off the stream report.
 
 Note what the slot separates and what it does not. It separates the **iterations** of one
-call site. Two call sites reaching one and the same model *object* still share its id, and
-therefore its stream, exactly as they do outside a loop — see
-[#298](https://github.com/Shorokoo/Shorokoo/issues/298). Two call sites of a module-typed
-`Function` each mint their own id and do not.
+call site. Separating the **call sites** is the job of the call-site component described below,
+which applies inside a loop and outside it alike.
 
 The callee's **parameters** deliberately do not take the iteration slot. One call site reading
 one parameter on every iteration is weight sharing, and is what a model created outside the
@@ -226,6 +224,24 @@ iteration.
 Because a feed's id is what keys its stream, a module called inside a loop keys differently
 than it did before this scope existed. A `Rng.Pin` path or a per-stream `Override` written
 against such a model needs re-reading off the stream report.
+
+## Calling one model twice
+
+Calling one and the same model *object* at two sites shares its id, and so its parameters —
+that is what calling it twice is for. A draw is not a value it holds, though: each execution of
+a draw is a fresh sample, so the two sites must not share a stream. A feed of a model called
+more than once therefore carries a **call-site component** at the end of its path: `-3`,
+followed by the call's ordinal among that model's calls, counting from 0. Like the `-2` above,
+`-3` is negative and so cannot collide with a slot (those count from 1, with 0 reserved for
+`RngSeed`) nor with an iteration's `-1`.
+
+Only the feeds take it. The model's **parameter** ids stay collapsed, since sharing the weights
+across the calls is the point. And only a model that is actually called more than once takes
+it, so a single-call model keeps the path it already had and any `Rng.Pin` recorded against it
+stays valid; adding a second call is what splits the stream, and it names both halves, because
+one stream cannot become two while either keeps the old name.
+
+Two call sites of a module-typed `Function` need none of this: each mints its own id already.
 
 ## Per-stream overrides
 

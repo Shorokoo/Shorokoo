@@ -1205,13 +1205,13 @@ public class TrainingRigTrainingLoopCoverageTests
 
     // Calling for the state update alone is what module-owned state is for, so the call must reach
     // the graph through more than its output.
-    [Fact(Skip = "Shorokoo/Shorokoo#310")]
+    [Fact(Skip = "Shorokoo/Shorokoo#310: a stateful call whose output is discarded is pruned, losing its update")]
     public void TestAStatefulCallWhoseOutputIsDiscardedStillUpdatesItsState()
         => Assert.Equal([2f], StateFieldsAfterOneStep(StatefulCallDiscardedModel.ComputationGraph));
 
     // A constant trip count is unrolled before the training graph is built, which is why every
     // other in-loop training test passes; a rolled one builds a graph ORT rejects.
-    [Fact(Skip = "Shorokoo/Shorokoo#309")]
+    [Fact(Skip = "Shorokoo/Shorokoo#309: a trainable parameter inside a rolled loop builds a training graph ORT rejects")]
     public void TestATrainableParameterInsideARolledLoopTrains()
         => Assert.Equal(2.5f, LossAfterOneStep(GainInRolledLoopModel.ComputationGraph), 1e-4f);
 

@@ -88,7 +88,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     .Where(n => n.OpCode == InternalOpCodes.WITH_STATE_DEPS
                                 && n.Inputs.Skip(1).Any(k => k is FastTensorKey dep && linkKeys.Contains(dep)))
                     .ToList();
-                if (markers.Count != links.Count) continue;   // not one marker per call; leave it alone
+                if (markers.Count != links.Count)
+                    throw new InvalidOperationException(
+                        "FastChainStateUpdatesAcrossCallSites: a state parameter has " + links.Count
+                        + " updates but " + markers.Count + " call sites carrying them, so which call "
+                        + "each update belongs to cannot be read off the graph. Leaving them unchained "
+                        + "would drop all but one, which is the defect this pass exists to fix.");
 
                 for (int k = 1; k < links.Count; k++)
                 {
@@ -114,8 +119,16 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         {
                             var inputs = kvp.Value;
                             for (int j = 0; j < inputs.Count; j++)
-                                if (inputs[j] is FastTensorKey k && k.Equals(paramOutput))
+                            {
+                                // Through the Identity chain, as the link walk above: a read
+                                // wrapped in one that was spliced ahead of this call is still a
+                                // read of the parameter, and missing it leaves this call on the
+                                // stale value with nothing to show for it.
+                                if (inputs[j] is not FastTensorKey k) continue;
+                                if (ResolveThroughIdentities(k, nodeByKey) is FastTensorKey read
+                                    && read.Equals(paramOutput))
                                     inputs[j] = replacement;
+                            }
                         }
                     }
             }
@@ -132,9 +145,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var visited = new HashSet<FastTensorKey>();
             while (visited.Add(current))
             {
-                if (!nodeByKey.TryGetValue(current.FastNodeKey, out var node)) return null;
+                if (!nodeByKey.TryGetValue(current.FastNodeKey, out var node)) return current;
                 if (node.OpCode != OpCodes.IDENTITY) return current;
-                if (node.Inputs.Count == 0 || node.Inputs[0] is not FastTensorKey inner) return null;
+                if (node.Inputs.Count == 0 || node.Inputs[0] is not FastTensorKey inner) return current;
                 current = inner;
             }
             return null;

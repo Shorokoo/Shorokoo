@@ -849,6 +849,28 @@ public partial class DrawingSub
     public static Tensor<float32> Inline(Tensor<float32> t) => t + Globals.RandomUniform(Vector(2L));
 }
 
+/// <summary>Calls the model handed to it as a hyperparameter, so that call site only enters the
+/// graph when this body is spliced.</summary>
+[Module]
+public partial class DrawViaHyperModel
+{
+    public static Tensor<float32> Inline(
+        Tensor<float32> t, [Hyper] Model<Tensor<float32>, Tensor<float32>> m)
+        => m.Call(t);
+}
+
+/// <summary>One <see cref="DrawingSub"/> model called twice, once directly and once from inside
+/// <see cref="DrawViaHyperModel"/>, so the two call sites are inlined a pass apart.</summary>
+[Module]
+public partial class DrawTwiceOneCallThroughHyperModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = DrawingSub.Model();
+        return DrawViaHyperModel.Call(m, t) - m.Call(t);
+    }
+}
+
 /// <summary>Two <see cref="DrawingSub"/> models called one after the other — one RNG stream
 /// each.</summary>
 [Module]

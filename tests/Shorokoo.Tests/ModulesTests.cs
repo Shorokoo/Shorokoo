@@ -1611,6 +1611,18 @@ public class ModulesCoverageTests
         Assert.All(RunFloats(arch.ToConcreteModel(RngConfig.Default), zero), v => Assert.NotEqual(0f, v));
     }
 
+    /// <summary>The call-site ordinal is read off the call sites one inlining pass can see, so a
+    /// call reached through a <c>[Hyper] Model&lt;&gt;</c> — spliced a pass later — never meets the
+    /// direct one and both keep the undivided path.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#311: a call site arriving through a [Hyper] Model<> shares the direct call's RNG stream")]
+    public void TestTwoCallSitesOfOneModelDrawApartWhenOneArrivesThroughAHyperModel()
+    {
+        var g = DrawTwiceOneCallThroughHyperModel.ComputationGraph;
+        var zero = TensorData([2L], 0f, 0f);
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([zero]));
+        Assert.All(RunFloats(arch.ToConcreteModel(RngConfig.Default), zero), v => Assert.NotEqual(0f, v));
+    }
+
     private static Tensor<float32> DottedNameBody(Tensor<float32> t) => t * InitSimple.Init([Scalar(2L)]);
 
     private static Tensor<float32> DrawsOnce(Tensor<float32> t) => t + RandomUniform([Scalar(2L)], 0f, 1f);

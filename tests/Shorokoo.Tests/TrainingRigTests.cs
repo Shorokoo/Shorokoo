@@ -1144,9 +1144,7 @@ public class TrainingRigTrainingLoopCoverageTests
         return NNLibraryTrainingFixtures.Floats(step.ModelState.Fields[rig.ModelStateDef.Fields.Single().Name])[0];
     }
 
-    // Pins Shorokoo/Shorokoo#306: the updated-state struct is built per state parameter but filled
-    // per STATE_UPDATE_LINK, so one handle called twice keeps only the first site's update.
-    [Fact(Skip = "Shorokoo/Shorokoo#306: a stateful model called twice drops all but the first StateUpdate")]
+    [Fact]
     public void TestAStatefulModelCalledTwiceAppliesBothItsStateUpdates()
         => Assert.Equal(2f * StateAfterOneStep(StatefulGainNoRefModel.ComputationGraph),
                         StateAfterOneStep(StatefulGainCalledTwiceModel.ComputationGraph));

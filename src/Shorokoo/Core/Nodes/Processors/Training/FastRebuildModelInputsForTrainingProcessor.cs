@@ -77,68 +77,110 @@ namespace Shorokoo.Core.Nodes.Processors.Training
                 stateReplacementByNodeKey[stateParamNodeKeys[i]] = stateFieldKeys[i];
 
             var remap = new Dictionary<FastTensorKey, FastTensorKey>();
-            var stateUpdateOutputs = new List<FastTensorKey>();
             var nodesToRemove = new HashSet<FastNodeKey>();
+            // The value each state field currently holds, keyed by that field's GETFIELD output.
+            // It starts as the field itself — the value fed in for this step — and each
+            // STATE_UPDATE_LINK for that field advances it. A state parameter reached from several
+            // call sites is one field with several links (one model handle called twice inlines its
+            // body, and its update, once per call), so the updates have to chain: the second body's
+            // read must see the first's result, and the struct gets the LAST value, not the first
+            // (Shorokoo/Shorokoo#306).
+            var currentByStateField = new Dictionary<FastTensorKey, FastTensorKey>(stateFieldKeys.Length);
+            foreach (var fieldKey in stateFieldKeys) currentByStateField[fieldKey] = fieldKey;
 
-            // Walk in stored (topological) order so STATE_UPDATE_LINK / WITH_STATE_DEPS
-            // can resolve their inputs through any remap entries already added by upstream nodes.
+            // The key a slot should now read: the remap chain's terminus, then that state field's
+            // current value if it is one.
+            FastTensorKey CurrentValueOf(FastTensorKey key)
+            {
+                var resolved = remap.ContainsKey(key) ? ResolveRemap(remap, key) : key;
+                return currentByStateField.TryGetValue(resolved, out var current) ? current : resolved;
+            }
+
+            // Which state field each link updates, resolved BEFORE any rewiring so the keys are
+            // still the ones the graph was built with. StateUpdate validates that its original-state
+            // argument is produced by the parameter node itself, but inlining wraps values in
+            // Identity, so the link's input reaches the parameter through a chain of those.
+            var fieldByStateUpdateLink = new Dictionary<FastNodeKey, FastTensorKey>();
+            if (stateFieldKeys.Length > 0)
+            {
+                var nodeByOutput = new Dictionary<FastTensorKey, FastNode>();
+                foreach (var node in graph.Nodes)
+                    foreach (var (_, outs) in node.FullOutputs)
+                        foreach (var outKey in outs)
+                            if (outKey is FastTensorKey ok && !ok.IsEmpty) nodeByOutput[ok] = node;
+
+                foreach (var node in graph.Nodes)
+                {
+                    if (node.OpCode != InternalOpCodes.STATE_UPDATE_LINK) continue;
+                    var cursor = node.FullInputs[""][0];
+                    while (cursor is FastTensorKey step && nodeByOutput.TryGetValue(step, out var producer))
+                    {
+                        if (stateReplacementByNodeKey.TryGetValue(producer.Key, out var field))
+                        {
+                            fieldByStateUpdateLink[node.Key] = field;
+                            break;
+                        }
+                        if (producer.OpCode != OpCodes.IDENTITY) break;
+                        var producerInputs = producer.FullInputs[""];
+                        if (producerInputs.Count != 1) break;
+                        cursor = producerInputs[0];
+                    }
+                }
+            }
+
+            // One ordered walk, rewiring each node's inputs AT ITS OWN POSITION rather than in a
+            // second uniform pass. Position is what makes chaining work: the same rewrite applied
+            // to the whole graph at once would give every read of a state parameter the same key,
+            // so a read after an update could not differ from one before it.
             foreach (var node in graph.Nodes)
             {
                 if (modelInputReplacementByNodeKey.TryGetValue(node.Key, out var modelInputFieldKey))
                 {
-                    var outputKey = GetSingleOutputKey(node);
-                    remap[outputKey] = modelInputFieldKey;
+                    remap[GetSingleOutputKey(node)] = modelInputFieldKey;
                     nodesToRemove.Add(node.Key);
                     continue;
                 }
 
                 if (stateReplacementByNodeKey.TryGetValue(node.Key, out var stateFieldKey))
                 {
-                    var outputKey = GetSingleOutputKey(node);
-                    remap[outputKey] = stateFieldKey;
+                    remap[GetSingleOutputKey(node)] = stateFieldKey;
                     nodesToRemove.Add(node.Key);
                     continue;
                 }
 
+                foreach (var (_, slots) in node.FullInputs)
+                {
+                    for (int i = 0; i < slots.Count; i++)
+                    {
+                        if (slots[i] is not FastTensorKey tk) continue;
+                        var rewired = CurrentValueOf(tk);
+                        if (rewired != tk) slots[i] = rewired;
+                    }
+                }
+
                 if (node.OpCode == InternalOpCodes.STATE_UPDATE_LINK)
                 {
-                    var inputs = node.FullInputs[""];
-                    var updatedStateInput = inputs[1].AssertNotNull();
-                    var resolvedUpdatedState = ResolveRemap(remap, updatedStateInput);
-                    stateUpdateOutputs.Add(resolvedUpdatedState);
-                    var outputKey = GetSingleOutputKey(node);
-                    remap[outputKey] = resolvedUpdatedState;
+                    var resolvedUpdatedState = node.FullInputs[""][1].AssertNotNull();
+                    if (fieldByStateUpdateLink.TryGetValue(node.Key, out var field))
+                        currentByStateField[field] = resolvedUpdatedState;
+                    remap[GetSingleOutputKey(node)] = resolvedUpdatedState;
                     nodesToRemove.Add(node.Key);
                     continue;
                 }
 
                 if (node.OpCode == InternalOpCodes.WITH_STATE_DEPS)
                 {
-                    var inputs = node.FullInputs[""];
-                    var mainInput = inputs[0].AssertNotNull();
-                    var resolvedMain = ResolveRemap(remap, mainInput);
-                    var outputKey = GetSingleOutputKey(node);
-                    remap[outputKey] = resolvedMain;
+                    remap[GetSingleOutputKey(node)] = node.FullInputs[""][0].AssertNotNull();
                     nodesToRemove.Add(node.Key);
                     continue;
                 }
             }
 
-            // Rewire every input slot of every surviving node, replacing keys that match
-            // a remap entry with the chain's terminus.
-            foreach (var node in graph.Nodes)
-            {
-                if (nodesToRemove.Contains(node.Key)) continue;
-                foreach (var (groupName, slots) in node.FullInputs)
-                {
-                    for (int i = 0; i < slots.Count; i++)
-                    {
-                        var k = slots[i];
-                        if (k is FastTensorKey tk && remap.ContainsKey(tk))
-                            slots[i] = ResolveRemap(remap, tk);
-                    }
-                }
-            }
+            // One output per state FIELD, in field order, so the updated-state struct lines up with
+            // the struct def the caller built from the same order. A field nobody updated keeps the
+            // value it was fed, which is what pass-through state means.
+            var stateUpdateOutputs = new List<FastTensorKey>(stateFieldKeys.Length);
+            foreach (var fieldKey in stateFieldKeys) stateUpdateOutputs.Add(currentByStateField[fieldKey]);
 
             // Rewire graph outputs.
             for (int i = 0; i < graph.Outputs.Count; i++)

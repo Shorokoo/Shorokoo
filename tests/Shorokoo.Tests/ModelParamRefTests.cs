@@ -231,10 +231,9 @@ public class ModelParamRefTests
         => SameIds(GainFromDynamicSequenceModel.ComputationGraph,
                    HyperModelGainFromAppendedSequenceModel.ComputationGraph);
 
-    // Pins Shorokoo/Shorokoo#307: laying a sequence out in order is what narrows a constant
-    // position to one element, and a sequence carried out of a loop has no layout, so the call is
-    // refused rather than answered with a guess.
-    [Fact(Skip = "Shorokoo/Shorokoo#307: a heterogeneous ModelSequence through a loop cannot be laid out")]
+    // A fixed-trip loop that only appends has an order: the initializer, then what one trip adds,
+    // per trip. That is what narrows the constant position to one element.
+    [Fact]
     public void TestAHeterogeneousModelSequenceThroughALoopCallsTheElementItIndexed()
         => SameIds(TwoParamGainNoRefModel.ComputationGraph,
                    HeterogeneousThroughLoopSequenceModel.ComputationGraph);

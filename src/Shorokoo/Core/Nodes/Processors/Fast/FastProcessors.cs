@@ -1210,7 +1210,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     // hold — enough for the body to splice, but not for the identity, which the
                     // call site then reads off the model variable instead.
                     if (TryFoldSequencePosition(node, nodeByKey) is int position
-                        && TryLayOutSequence(seqKey, nodeByKey) is List<FastTensorKey> laidOut)
+                        && TryLayOutSequence(seqKey, nodeByKey, walk: walk) is List<FastTensorKey> laidOut)
                     {
                         // ONNX SequenceAt counts a negative position from the end.
                         if (position < 0) position += laidOut.Count;
@@ -1233,7 +1233,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// </summary>
         private static List<FastTensorKey>? TryLayOutSequence(
             FastTensorKey key, Dictionary<FastNodeKey, FastNode> nodeByKey,
-            HashSet<FastTensorKey>? visited = null)
+            HashSet<FastTensorKey>? visited = null, ModelSourceWalk? walk = null)
         {
             visited ??= [];
             if (!visited.Add(key)) return null;
@@ -1243,7 +1243,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             {
                 case OpCodes.IDENTITY:
                     return node.Inputs[0] is FastTensorKey aliased
-                        ? TryLayOutSequence(aliased, nodeByKey, visited) : null;
+                        ? TryLayOutSequence(aliased, nodeByKey, visited, walk) : null;
 
                 case OpCodes.SEQUENCE_EMPTY:
                     return [];
@@ -1265,7 +1265,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     if (node.Inputs.Count < 2) return null;
                     if (node.Inputs[0] is not FastTensorKey intoKey) return null;
                     if (node.Inputs[1] is not FastTensorKey insertedKey) return null;
-                    if (TryLayOutSequence(intoKey, nodeByKey, visited) is not List<FastTensorKey> into)
+                    if (TryLayOutSequence(intoKey, nodeByKey, visited, walk) is not List<FastTensorKey> into)
                         return null;
 
                     int at = into.Count;
@@ -1284,7 +1284,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 case OpCodes.SEQUENCE_ERASE:
                 {
                     if (node.Inputs[0] is not FastTensorKey fromKey) return null;
-                    if (TryLayOutSequence(fromKey, nodeByKey, visited) is not List<FastTensorKey> from)
+                    if (TryLayOutSequence(fromKey, nodeByKey, visited, walk) is not List<FastTensorKey> from)
                         return null;
                     if (from.Count == 0) return null;
 
@@ -1299,9 +1299,120 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     return from;
                 }
 
+                // A sequence a loop carried out. Its order is the initializer's followed by
+                // whatever one trip appends, repeated per trip — knowable only for a loop with a
+                // fixed number of trips that cannot stop early, and only while the body appends,
+                // since an insert whose position moves per trip has no such order at all
+                // (Shorokoo/Shorokoo#307).
+                case OpCodes.LOOP_CLOSE:
+                {
+                    if (LoopBodyValueOf(node, key, nodeByKey) is not FastTensorKey bodyValue) return null;
+                    if (node.GraphOpenNodeKey is not FastNodeKey openKey
+                        || !nodeByKey.TryGetValue(openKey, out var open)) return null;
+
+                    // LOOP_OPEN inputs are [maxIterations, cond, ...loopVariables], and the body's
+                    // own continue-when output is LOOP_CLOSE's first input — the two together are
+                    // what say the trip count is the one written.
+                    if (open.Inputs.Count == 0
+                        || TryFoldConstantLong(open.Inputs[0], nodeByKey) is not long trips
+                        || trips < 0 || trips > int.MaxValue) return null;
+                    if (node.Inputs.Count == 0 || !IsStaticTrueScalar(node.Inputs[0], nodeByKey)) return null;
+
+                    // Laid out against the sequence the body started the trip with, the body's
+                    // value says what that trip added. Fresh visited sets: the two walks cross the
+                    // same keys, and one shared set would make the second look like a cycle.
+                    if (TryLayOutSequence(bodyValue, nodeByKey, [], walk) is not List<FastTensorKey> after
+                        || LoopInitializerOf(open, LoopVariableOutputOf(open, key)) is not FastTensorKey seed
+                        || TryLayOutSequence(seed, nodeByKey, [], walk) is not List<FastTensorKey> before)
+                        return null;
+
+                    if (after.Count < before.Count) return null;
+                    for (int i = 0; i < before.Count; i++)
+                        if (!after[i].Equals(before[i])) return null;
+
+                    var added = after.GetRange(before.Count, after.Count - before.Count);
+                    var result = new List<FastTensorKey>(before);
+                    for (long t = 0; t < trips; t++) result.AddRange(added);
+
+                    // One creation node in the body stands for one model per trip, so the caller
+                    // must not take it as THE creation — that is what gives every trip's model one
+                    // id (Shorokoo/Shorokoo#303). Same reason an insert sets it.
+                    if (walk is not null) walk.ViaInsertion = true;
+                    return result;
+                }
+
+                // The loop variable as the body sees it at the top of a trip: on the first trip
+                // that is the initializer, and the layout above only asks about the first.
+                case OpCodes.LOOP_OPEN:
+                    return LoopInitializerOf(node, key) is FastTensorKey initializer
+                        ? TryLayOutSequence(initializer, nodeByKey, visited, walk) : null;
+
                 default:
                     return null;
             }
+        }
+
+        /// <summary>
+        /// The <c>LOOP_OPEN</c> output that carries the same loop variable a <c>LOOP_CLOSE</c>
+        /// output does. Both sides list the loop variables in one order, behind two leading
+        /// outputs on the open (the iteration index and the vestigial condition) and none on the
+        /// close, so slot <c>i</c> is close output <c>i</c> and open output <c>2 + i</c>.
+        /// </summary>
+        private static FastTensorKey LoopVariableOutputOf(FastNode open, FastTensorKey closeOutputKey)
+            => new(open.Key, closeOutputKey.OutputIndex + 2);
+
+        /// <summary>The value of a rank-0 int64 <c>CONSTANT</c>, seen through Identity, or null.</summary>
+        private static long? TryFoldConstantLong(
+            FastTensorKey? key, Dictionary<FastNodeKey, FastNode> nodeByKey)
+        {
+            if (key is not FastTensorKey start || start.IsEmpty) return null;
+            var current = start;
+            var visited = new HashSet<FastTensorKey>();
+            while (visited.Add(current))
+            {
+                if (!nodeByKey.TryGetValue(current.FastNodeKey, out var producer)) return null;
+                if (producer.OpCode == OpCodes.IDENTITY)
+                {
+                    if (producer.Inputs[0] is not FastTensorKey aliased) return null;
+                    current = aliased;
+                    continue;
+                }
+                if (producer.OpCode != OpCodes.CONSTANT) return null;
+                var tensorVal = producer.Attributes.GetTensorVal(OnnxOpAttributeNames.AttrValue);
+                if (tensorVal is null || tensorVal.DType != DType.Int64) return null;
+                var vals = tensorVal.As<int64>().AccessMemory();
+                return vals.Length == 1 ? vals[0] : null;
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Whether a loop's body-side continue-when output is a constant <c>true</c> — the loop
+        /// runs every trip it was asked for. An absent input says the same; anything dynamic says
+        /// the trip count is not the one written.
+        /// </summary>
+        private static bool IsStaticTrueScalar(
+            FastTensorKey? key, Dictionary<FastNodeKey, FastNode> nodeByKey)
+        {
+            if (key is not FastTensorKey start || start.IsEmpty) return true;
+            var current = start;
+            var visited = new HashSet<FastTensorKey>();
+            while (visited.Add(current))
+            {
+                if (!nodeByKey.TryGetValue(current.FastNodeKey, out var producer)) return false;
+                if (producer.OpCode == OpCodes.IDENTITY)
+                {
+                    if (producer.Inputs[0] is not FastTensorKey aliased) return false;
+                    current = aliased;
+                    continue;
+                }
+                if (producer.OpCode != OpCodes.CONSTANT) return false;
+                var tensorVal = producer.Attributes.GetTensorVal(OnnxOpAttributeNames.AttrValue);
+                if (tensorVal is null || tensorVal.DType != DType.Bool) return false;
+                var vals = tensorVal.As<bit>().AccessMemory();
+                return vals.Length == 1 && vals[0];
+            }
+            return false;
         }
 
         /// <summary>

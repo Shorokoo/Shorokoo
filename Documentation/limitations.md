@@ -211,6 +211,26 @@ does a `[Hyper]`, which is a constant by the time the model is concretized.
 The rejection covers module-owned state inside such a loop as well: an update
 registered there has no value the training graph can carry out of the body.
 
+### Conditional execution in a training graph
+
+An `IfElse` branch runs only when its condition selects it — in an inference model.
+A training graph runs both arms: reverse-mode autodiff reads the forward's
+intermediates, and a value computed only on a branch that may not run cannot be
+read unconditionally by a backward pass that always runs. The branches are
+therefore flattened before the backward is built and only the parts the backward
+does not read go back inside.
+
+The values are unaffected — the `If` still selects, and the arm that did not run
+receives a zero gradient — so this costs work rather than correctness, with one
+exception: an operation that is *invalid* off its branch (unwrapping an
+`OptionalTensor` that is absent on the other path is the usual case) runs
+unconditionally in a training graph if it is on the differentiated path. Keep such
+an operation out of the differentiated path, or off the training graph.
+
+Lifting this means emitting the backward for a branch's nodes inside a mirrored
+`If` on the same condition, tracked as
+[#313](https://github.com/Shorokoo/Shorokoo/issues/313).
+
 ### Gradient (activation) checkpointing
 
 Activation checkpointing is a per-module attribute: `[Module(Checkpoint = true)]`

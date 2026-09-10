@@ -3,6 +3,7 @@ using Shorokoo.Core.Graph;
 using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Graph;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace Shorokoo.Core.Nodes.Processors.Fast
 {
@@ -55,6 +56,52 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             System.Diagnostics.Debug.Assert(graph.IsLinearOrderValid(),
                 "FastIfBranchScoper.ScopeAllIfBranches: scoping left the graph in an invalid linear order.");
+        }
+
+        /// <summary>
+        /// Puts every <c>IF</c> branch back where it was traced — immediately before the
+        /// <c>IF_OPEN</c> that selects it — undoing <see cref="ScopeAllIfBranches"/>.
+        ///
+        /// <para>A backward pass reads the forward's intermediates, and cannot read one the
+        /// forward computes only on a branch it may not take. Autograd therefore flattens the
+        /// branches first and emits at module scope; the simplify that follows it scopes what is
+        /// left, now with the gradient nodes among the consumers, so a value the backward reads
+        /// stays out and the rest goes back in (Shorokoo/Shorokoo#312). Scoping before the
+        /// backward exists instead moved those values inside and then read them from outside,
+        /// which is not a graph.</para>
+        /// </summary>
+        public static void UnscopeAllIfBranches(InternalComputationGraph graph)
+        {
+            if (graph is null) throw new System.ArgumentNullException(nameof(graph));
+
+            // One band at a time, restarting: moving an outer branch out carries any scope nested
+            // in it along whole, still scoped, for the next pass to reach.
+            while (TryUnscopeOneIf(graph.Nodes)) { }
+
+            System.Diagnostics.Debug.Assert(graph.TryValidateLinearOrder(out var orderError),
+                "FastIfBranchScoper.UnscopeAllIfBranches: " + orderError);
+        }
+
+        private static bool TryUnscopeOneIf(List<FastNode> nodes)
+        {
+            for (int open = 0; open < nodes.Count; open++)
+            {
+                if (nodes[open].OpCode != OpCodes.IF_OPEN) continue;
+
+                int depth = 0, close = -1;
+                for (int i = open; i < nodes.Count; i++)
+                {
+                    if (FastOpsetResolver.IsOpenOpCode(nodes[i].OpCode)) depth++;
+                    else if (FastOpsetResolver.IsCloseOpCode(nodes[i].OpCode) && --depth == 0) { close = i; break; }
+                }
+                if (close < 0 || close == open + 1) continue;   // unmatched, or already empty
+
+                var body = nodes.GetRange(open + 1, close - open - 1);
+                nodes.RemoveRange(open + 1, close - open - 1);
+                nodes.InsertRange(open, body);
+                return true;
+            }
+            return false;
         }
 
         /// <summary>Graph-wide lookups the cone analysis reads; built once per pass.</summary>

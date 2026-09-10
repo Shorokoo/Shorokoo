@@ -1202,13 +1202,25 @@ public class TrainingRigTrainingLoopCoverageTests
     public void TestAStatefulCallWhoseOutputIsDiscardedStillUpdatesItsState()
         => Assert.Equal([2f], StateFieldsAfterOneStep(StatefulCallDiscardedModel.ComputationGraph));
 
-    // Each arm creating its own parameter trains; one parameter created before the IfElse and used
-    // inside both arms builds a backward pass that names branch-scoped tensors from module scope.
-    [Fact(Skip = "Shorokoo/Shorokoo#312: a parameter shared by both IfElse arms builds a backward pass out of scope")]
+    /// <summary>The ops an inference model computes inside its <c>If</c>, rather than before it.</summary>
+    private static string[] IfBodyOps(ComputationGraph modelGraph)
+    {
+        var f = modelGraph.ToConcreteArchitecture(
+            modelGraph.FromOrderedInputs([TensorData([2L], 1f, 2f)])).ToConcreteModel().ToInternal();
+        int open = f.Nodes.FindIndex(n => n.OpCode == OpCodes.IF_OPEN);
+        int close = f.Nodes.FindIndex(n => n.OpCode == OpCodes.IF_CLOSE);
+        return [.. f.Nodes.GetRange(open + 1, close - open - 1).Select(n => n.OpCode)];
+    }
+
+    // A backward pass reads the forward's intermediates, so a branch that computes one cannot keep
+    // it to itself and the training graph runs both arms. Both shapes train — each arm owning its
+    // parameter, and both sharing one — and inference, which has no backward, keeps its branch.
+    [Fact]
     public void TestAParameterSharedByBothIfElseArmsTrains()
     {
         Assert.Equal(2.5f, LossAfterOneStep(GainInBothIfArmsOnARuntimeConditionModel.ComputationGraph), 1e-4f);
         Assert.Equal(2.5f, LossAfterOneStep(SharedGainInBothIfArmsModel.ComputationGraph), 1e-4f);
+        Assert.NotEmpty(IfBodyOps(SharedGainInBothIfArmsModel.ComputationGraph));
     }
 
     // Training differentiates a loop by unrolling it, so one whose trip count is not a constant

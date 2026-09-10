@@ -75,6 +75,12 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
                 .ToList();
             if (autoGradNodes.Count == 0) return;
 
+            // The backward reads what the forward computed, so it cannot leave those values on a
+            // branch that may not run. Flatten the branches, emit at module scope, and let the
+            // simplify after this pass scope them again with the gradient nodes among the
+            // consumers (see FastIfBranchScoper.UnscopeAllIfBranches).
+            Fast.FastIfBranchScoper.UnscopeAllIfBranches(graph);
+
             foreach (var autoGradNode in autoGradNodes)
                 ProcessOne(graph, autoGradNode);
 

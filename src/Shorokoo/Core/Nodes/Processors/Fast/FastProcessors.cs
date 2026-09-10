@@ -847,9 +847,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         if (bound.Ambiguous)
                             throw new InvalidOperationException(
                                 "FastInlineModulesAndFunctions: the model operand of a MODEL_INVOKE can hold "
-                                + "models built from different modules, and which one it holds is decided at "
-                                + "run time, so there is no single body to inline. A ModelSequence holding "
-                                + "more than one kind of module can only be indexed by a constant.");
+                                + "models built from different modules, and this position does not say which, "
+                                + "so there is no single body to inline. A ModelSequence holding more than one "
+                                + "kind of module has to be indexed by a position that folds to a constant.");
 
                         if (bound.Function is not null)
                         {
@@ -1094,10 +1094,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// are what lets a feed name a model chosen at run time: the components come off the model
         /// variable as runtime split counters, and there have to be a statically known number of
         /// them. Null when the candidates disagree, which leaves such a feed unidentified.</para>
-        /// </summary>
+        ///
         /// <para><c>Ambiguous</c> is set when the walk did reach creations but they were built from
-        /// different modules, which is a variable whose body is decided at run time — as opposed to
-        /// a walk that reached nothing at all, where the binding simply is not in this graph.</para>
+        /// different modules, so which body a call takes is not decided here — as opposed to a walk
+        /// that reached nothing at all, where the binding simply is not in this graph.</para>
+        /// </summary>
         private readonly record struct BoundModule(
             Function? Function, FastNode? Creation, int? IdLength, int? IdLoopSlots, bool Ambiguous = false);
 

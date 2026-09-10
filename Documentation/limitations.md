@@ -201,6 +201,16 @@ rejected with `AutoDiffNotSupportedException`. Loops with a statically known
 trip count can be unrolled (iterate with `LoopAPI.Iterate(n)` where `n` is a
 compile-time constant) and then differentiate normally.
 
+"Statically known" means known when the training graph is built, not when it
+runs, so a count read off an input's shape does not qualify: the rig compiles
+one trainstep for all input shapes and specializes only the ONNX session per
+shape. A count computed from constants does qualify however it is written —
+`LoopAPI.Iterate(Scalar(3L) * Scalar(2L))` is folded before the unroll — and so
+does a `[Hyper]`, which is a constant by the time the model is concretized.
+
+The rejection covers module-owned state inside such a loop as well: an update
+registered there has no value the training graph can carry out of the body.
+
 ### Gradient (activation) checkpointing
 
 Activation checkpointing is a per-module attribute: `[Module(Checkpoint = true)]`

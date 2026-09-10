@@ -1209,11 +1209,18 @@ public class TrainingRigTrainingLoopCoverageTests
     public void TestAStatefulCallWhoseOutputIsDiscardedStillUpdatesItsState()
         => Assert.Equal([2f], StateFieldsAfterOneStep(StatefulCallDiscardedModel.ComputationGraph));
 
-    // A constant trip count is unrolled before the training graph is built, which is why every
-    // other in-loop training test passes; a rolled one builds a graph ORT rejects.
-    [Fact(Skip = "Shorokoo/Shorokoo#309: a trainable parameter inside a rolled loop builds a training graph ORT rejects")]
-    public void TestATrainableParameterInsideARolledLoopTrains()
-        => Assert.Equal(2.5f, LossAfterOneStep(GainInRolledLoopModel.ComputationGraph), 1e-4f);
+    // Training differentiates a loop by unrolling it, so one whose trip count is not a constant
+    // has no backward pass. A constant count is unrolled and trains, which is why every other
+    // in-loop training test passes.
+    [Fact]
+    public void TestATrainableParameterInsideARolledLoopIsRefused()
+    {
+        Assert.Equal(2.5f, LossAfterOneStep(GainInConstantTripLoopModel.ComputationGraph), 1e-4f);
+        Assert.Contains("unroll it first", Assert.Throws<AutoDiffNotSupportedException>(
+            () => LossAfterOneStep(GainInRolledLoopModel.ComputationGraph)).Message);
+        Assert.Contains("unroll it first", Assert.Throws<AutoDiffNotSupportedException>(
+            () => LossAfterOneStep(StatefulGainInRolledLoopModel.ComputationGraph)).Message);
+    }
 
     [Fact]
     public void TestTrainStepAndTrainLoopCoverage()

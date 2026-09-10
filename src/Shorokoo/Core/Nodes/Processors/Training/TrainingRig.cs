@@ -1849,6 +1849,10 @@ namespace Shorokoo
             Stage("UnrollLoops");
             Shorokoo.Core.Nodes.Processors.Fast.FastSimplify.Process(fast);
 
+            // Every loop that feeds the loss had to be unrolled by now; one that could not be is a
+            // limitation to name, not a backward pass to attempt (Shorokoo/Shorokoo#309).
+            FastRejectRolledLoopsInTraining.Process(fast);
+
             // Lower attribute-tensorized variant ops (e.g. SHRK_CONV) to standard ONNX ops before
             // autograd — they have no gradient rule. Loops are unrolled by this point, so their
             // geometry inputs are constant-foldable.

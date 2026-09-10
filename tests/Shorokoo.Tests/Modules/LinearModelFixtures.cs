@@ -841,6 +841,36 @@ public partial class GainInRolledLoopModel
     }
 }
 
+/// <summary>Module-owned state updated inside a loop whose trip count is not a compile-time
+/// constant, so the update's value stays inside the body the training graph cannot unroll.</summary>
+[Module]
+public partial class StatefulGainInRolledLoopModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = StatefulGainSubModel.Model();
+        var x = t;
+        foreach (var ctx in LoopAPI.Iterate(t.ShapeTensor()[0]))
+        {
+            x = m.Call(x);
+            ctx.ContinueWhile(Scalar(true));
+        }
+        return x;
+    }
+}
+
+/// <summary>The same loop with a constant trip count, which unrolls and trains.</summary>
+[Module]
+public partial class GainInConstantTripLoopModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var x = t;
+        foreach (var ctx in LoopAPI.Iterate(Scalar(2L))) x = x * Ones.Init([Scalar(2L)]);
+        return x;
+    }
+}
+
 /// <summary>Draws one uniform sample of its own, so every model built from it owns an RNG
 /// feed.</summary>
 [Module]

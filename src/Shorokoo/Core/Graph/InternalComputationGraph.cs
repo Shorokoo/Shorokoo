@@ -249,7 +249,7 @@ namespace Shorokoo.Graph
         /// </summary>
         public bool IsLinearOrderValid() => TryValidateLinearOrder(out _);
 
-        private bool TryValidateLinearOrder(out string? error)
+        internal bool TryValidateLinearOrder(out string? error)
         {
             var n = Nodes.Count;
             var outputToNode = new System.Collections.Generic.Dictionary<FastTensorKey, int>(n * 2);

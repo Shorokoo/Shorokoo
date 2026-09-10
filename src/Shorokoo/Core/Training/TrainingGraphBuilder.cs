@@ -73,6 +73,12 @@ public static class TrainingGraphBuilder
         InternalComputationGraph modelGraph,
         InternalComputationGraph lossGraph)
     {
+        // A loop counting its trips from an input will not be unrolled by anything downstream, so
+        // name it before composing on top of it: a state update spliced into such a body becomes a
+        // graph output naming a body-scoped tensor, which is a malformed graph rather than a
+        // message (Shorokoo/Shorokoo#309). A count computed from constants still gets its fold.
+        Nodes.Processors.Training.FastRejectRolledLoopsInTraining.Process(modelGraph, unfoldableOnly: true);
+
         if (modelGraph is null) throw new ArgumentNullException(nameof(modelGraph));
         if (lossGraph is null) throw new ArgumentNullException(nameof(lossGraph));
 
@@ -285,7 +291,8 @@ public static class TrainingGraphBuilder
         foreach (var n in fastGraph.Nodes)
             if (!headKeys.Contains(n.Key)) rebuilt.Add(n);
         fastGraph.Nodes = rebuilt;
-        System.Diagnostics.Debug.Assert(fastGraph.IsLinearOrderValid(), "fastGraph.IsLinearOrderValid()");
+        System.Diagnostics.Debug.Assert(fastGraph.TryValidateLinearOrder(out var orderError),
+            "fastGraph.IsLinearOrderValid(): " + orderError);
 
         return fastGraph;
     }

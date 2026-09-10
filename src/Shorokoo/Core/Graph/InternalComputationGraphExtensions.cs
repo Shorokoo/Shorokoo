@@ -500,6 +500,41 @@ namespace Shorokoo.Graph
             => ModelIdNamingScheme.CreateShorokooNamingScheme(graph.GetConcreteModelParamInfos());
 
         /// <summary>
+        /// The realized stream a feed is, or <c>null</c> when its site is already realized or the
+        /// slots cannot be read. A feed's <c>-1</c> slots are filled, in order, from its
+        /// iteration-indices input — the same elements, in the same order,
+        /// <see cref="FastWireRngKeyDerivation"/> builds the key chain's splits from, so this
+        /// names the stream the chain already derives rather than inventing one. Only a folded
+        /// CONSTANT input answers: a slot still dynamic at this point belongs to a consumer whose
+        /// realized set is unbounded, and keeps its placeholder.
+        /// </summary>
+        private static int[]? RealizeFeedPath(
+            int[] idVals, FastNode node, Dictionary<FastNodeKey, FastNode> nodeByKey)
+        {
+            int depth = 0;
+            foreach (var v in idVals) if (v == -1) depth++;
+            if (depth == 0) return null;
+
+            if (node.Inputs.Count <= 2 || node.Inputs[2] is not FastTensorKey iterKey) return null;
+            if (!nodeByKey.TryGetValue(iterKey.FastNodeKey, out var producer)) return null;
+            if (producer.OpCode != OpCodes.CONSTANT) return null;
+            if (producer.Attributes.GetTensorVal(OnnxOpAttributeNames.AttrValue) is not { } data
+                || data.DType != DType.Int64) return null;
+
+            var iterVals = data.As<int64>().AccessMemory().ToArray();
+            // One element per slot, every one a real index. Anything else is not the pairing the
+            // chain made, and naming a stream the chain does not derive is worse than not naming.
+            if (iterVals.Length != depth) return null;
+            foreach (var v in iterVals) if (v < 0) return null;
+
+            var realized = new int[idVals.Length];
+            int at = 0;
+            for (int i = 0; i < idVals.Length; i++)
+                realized[i] = idVals[i] == -1 ? (int)iterVals[at++] : idVals[i];
+            return realized;
+        }
+
+        /// <summary>
         /// Builds the RNG stream inventory of a <b>concrete architecture</b>: one entry per
         /// stream — every parameter's init stream and every runtime random feed — with its
         /// ModelId path, consumer kind, parameter name/shape where known, and (when
@@ -559,6 +594,7 @@ namespace Shorokoo.Graph
             // contract), so an id-bearing feed without its chain means the graph is not a
             // concrete architecture.
             var seenFeedPaths = new HashSet<string>();
+            var nodeByKey = graph.Nodes.ToDictionary(n => n.Key);
             foreach (var node in graph.Nodes)
             {
                 bool isUniform = node.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM;
@@ -577,16 +613,25 @@ namespace Shorokoo.Graph
                         $"[{string.Join(", ", idVals)}] carries no key derivation chain — " +
                         "the report requires a concrete architecture (ToConcreteArchitecture).");
 
-                if (!seenFeedPaths.Add(string.Join(",", idVals))) continue;
-                bool isRealized = System.Array.IndexOf(idVals, -1) < 0;
-                var feedIdVals = idVals;
+                // Once the loops are unrolled and the indices folded, a feed's iteration-indices
+                // input names the very slots its id leaves at -1, so the stream it is can be read
+                // off it. Doing that here rather than on the node is deliberate: the node's id is
+                // the SITE the key chain was built from, and FastWireRngKeyDerivation.PathMatchesSite
+                // matches an override's realized path against exactly that. Realizing in place
+                // would leave both without a site — a feed a loop realizes would then report as
+                // module-scoped and its pin skeleton name the wrong scope (Shorokoo/Shorokoo#303).
+                var pathVals = RealizeFeedPath(idVals, node, nodeByKey) ?? idVals;
+                if (!seenFeedPaths.Add(string.Join(",", pathVals))) continue;
+                bool isRealized = System.Array.IndexOf(pathVals, -1) < 0;
+                var feedIdVals = pathVals;
+                var feedSiteVals = ReferenceEquals(pathVals, idVals) ? null : idVals;
                 var feedKind = kind;
-                AddRow(rngConfig is null || !isRealized ? null : rngConfig.RunKeySpec(idVals),
+                AddRow(rngConfig is null || !isRealized ? null : rngConfig.RunKeySpec(pathVals),
                     key => new RngStreamInfo
                     {
                         Collection = RngCollection.Runtime,
                         ModelIdPath = feedIdVals,
-                        SitePath = null,
+                        SitePath = feedSiteVals,
                         Kind = feedKind,
                         Key = key,
                     });

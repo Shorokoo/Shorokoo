@@ -847,9 +847,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         if (bound.Ambiguous)
                             throw new InvalidOperationException(
                                 "FastInlineModulesAndFunctions: the model operand of a MODEL_INVOKE can hold "
-                                + "models built from different modules, and this position does not say which, "
-                                + "so there is no single body to inline. A ModelSequence holding more than one "
-                                + "kind of module has to be indexed by a position that folds to a constant.");
+                                + "models built from different modules, and this pass could not narrow it to "
+                                + "one, so there is no single body to inline. That takes both a position it can "
+                                + "fold to a constant and a sequence it can lay out in order — a sequence "
+                                + "assembled inside a loop it cannot lay out, whatever the position.");
 
                         if (bound.Function is not null)
                         {
@@ -1356,9 +1357,58 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     return node.Inputs[0] is FastTensorKey erasedFromKey
                         && CollectSequenceElements(erasedFromKey, nodeByKey, walk);
 
+                // A sequence assembled inside a loop leaves it as a loop variable, and the models
+                // put into it are in the body. Reading the loop's final value back to the body's
+                // is what puts them back under their own ids (Shorokoo/Shorokoo#303); a model
+                // created per trip is one creation node standing for however many trips ran, which
+                // is what ViaInsertion already says about anything reached through an insert.
+                case OpCodes.LOOP_CLOSE:
+                    return LoopBodyValueOf(node, key, nodeByKey) is FastTensorKey bodyValue
+                        && CollectSequenceElements(bodyValue, nodeByKey, walk);
+
+                // The loop variable as the body sees it at the top of a trip: the initializer on
+                // the first trip, the previous trip's value on the rest. Every later trip appends
+                // the same creation node this one does, so the initializer's own contents complete
+                // the set.
+                case OpCodes.LOOP_OPEN:
+                    return LoopInitializerOf(node, key) is FastTensorKey initializer
+                        && CollectSequenceElements(initializer, nodeByKey, walk);
+
                 default:
                     return false;
             }
+        }
+
+        /// <summary>
+        /// The body-side value a <c>LOOP_CLOSE</c> output carries out of the loop. Its inputs are
+        /// <c>[break, ...loopVariables, ...scanVariables]</c> and its outputs
+        /// <c>[...loopedVariables, ...scannedVariables]</c>, so loop variable <c>i</c> leaves at
+        /// output <c>i</c> and is written at input <c>1 + i</c>. Null for a scan output, which
+        /// stacks a value per trip rather than carrying one.
+        /// </summary>
+        private static FastTensorKey? LoopBodyValueOf(
+            FastNode close, FastTensorKey outputKey, Dictionary<FastNodeKey, FastNode> nodeByKey)
+        {
+            if (close.GraphOpenNodeKey is not FastNodeKey openKey
+                || !nodeByKey.TryGetValue(openKey, out var open)) return null;
+
+            // LOOP_OPEN inputs are [maxIterations, cond, ...loopVariables].
+            int loopVarCount = open.Inputs.Count - 2;
+            int slot = outputKey.OutputIndex;
+            if (slot < 0 || slot >= loopVarCount) return null;
+            return close.Inputs.Count > 1 + slot ? close.Inputs[1 + slot] : null;
+        }
+
+        /// <summary>
+        /// The value a <c>LOOP_OPEN</c> loop variable is seeded with. Both its inputs and its
+        /// outputs carry the loop variables after two leading slots, so the output's own index
+        /// reads the initializer directly. Null for the iteration index or the vestigial
+        /// condition, which seed nothing.
+        /// </summary>
+        private static FastTensorKey? LoopInitializerOf(FastNode open, FastTensorKey outputKey)
+        {
+            int slot = outputKey.OutputIndex;
+            return slot >= 2 && open.Inputs.Count > slot ? open.Inputs[slot] : null;
         }
 
         /// <summary>

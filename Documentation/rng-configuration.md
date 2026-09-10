@@ -196,9 +196,16 @@ the pin skeleton's scope comment names both. The stream is still per-model; it i
 cannot enumerate the models, since it lists what the graph says statically. Two consequences
 follow: `Rng.Pin` cannot name such a model, and an `Override` addressing that path must give a
 concrete value for the `-1` (the reported path with the `-1` still in it is not itself an
-address). The one route that reaches none of this is a sequence assembled *inside* a loop,
-which has its own open defect,
-[#303](https://github.com/Shorokoo/Shorokoo/issues/303).
+address).
+
+Where concretization *does* settle the components — an unrolled loop leaves its indices as
+constants, so a model created on a trip of one and reached outside it is a model the graph can
+name — the report says which stream each feed is rather than which site it sits at. Such a feed
+carries both: its `ModelIdPath` is the realized stream, and its `SitePath` the `-1`-bearing site
+the key chain was built from and an `Override` matches against. A slot still open when the graph
+runs keeps its `-1` and its row stands for the whole unbounded set, as above. This is the route a
+sequence assembled *inside* a loop takes: the models it holds are created per trip, so their feeds
+name a realized trip each rather than collapsing onto one stream that names no model at all.
 
 Reaching a model out of a `ModelSequence` therefore keys its feeds the way calling that model
 directly does. That is a change: before it, every model in a sequence drew from one stream
@@ -318,10 +325,12 @@ supported way to read it.
 
 `arch.GetRngStreamReport(config)` inventories every stream of a concrete architecture — the
 init stream of each parameter (ModelId path, name, shape, resolved key) and one row per
-runtime feed site (path with `-1` marking an iteration slot; static sites carry their exact
-resolved key, in-loop sites derive per-iteration keys at runtime) — and can emit the sparse
-`Rng.Pin` skeleton for freezing streams before a refactor (see
-[Pinning RNG streams](rng-pinning.md)).
+runtime feed stream — its path, plus the `-1`-bearing `SitePath` it derives from when the two
+differ. A path with a `-1` left in it stands for a set the graph cannot enumerate and carries no
+resolved key; one the graph can name carries its exact key, whether it was static all along or an
+unrolled loop settled its indices. The report can also emit the sparse `Rng.Pin` skeleton for
+freezing streams before a refactor (see [Pinning RNG streams](rng-pinning.md)); the skeleton
+groups by site, so realized streams of one site stay one entry.
 
 Resolving the keys **executes** each stream's in-graph derivation — Shorokoo computes no
 randomness on the host — so asking for a report *with* a config is a deliberately expensive

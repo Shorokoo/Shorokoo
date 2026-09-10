@@ -239,6 +239,14 @@ public class ModelParamRefTests
         => SameIds(GainFromDynamicSequenceModel.ComputationGraph,
                    HyperModelGainFromAppendedSequenceModel.ComputationGraph);
 
+    // Pins Shorokoo/Shorokoo#307: laying a sequence out in order is what narrows a constant
+    // position to one element, and a sequence carried out of a loop has no layout, so the call is
+    // refused rather than answered with a guess.
+    [Fact(Skip = "Shorokoo/Shorokoo#307: a heterogeneous ModelSequence through a loop cannot be laid out")]
+    public void TestAHeterogeneousModelSequenceThroughALoopCallsTheElementItIndexed()
+        => SameIds(TwoParamGainNoRefModel.ComputationGraph,
+                   HeterogeneousThroughLoopSequenceModel.ComputationGraph);
+
     // A ModelSequence names element 0's module whichever element is indexed, so the element
     // indexed and the module named disagree; the body spliced must be the one indexed.
     [Fact]

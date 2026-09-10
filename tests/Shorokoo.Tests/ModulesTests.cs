@@ -1587,13 +1587,13 @@ public class ModulesCoverageTests
         Assert.All(DifferenceOf(DrawTwoAtRuntimePositionsNested.ComputationGraph), v => Assert.NotEqual(0f, v));
     }
 
-    // Pins Shorokoo/Shorokoo#303: the models a sequence assembled inside a loop holds are reached
-    // through the loop variable carrying it, which the inline pass cannot lay out, so their feeds
-    // fall back to one stream whose path names no model.
-    [Fact(Skip = "Shorokoo/Shorokoo#303: a sequence assembled in a loop loses its models' RNG identity")]
+    // Both models are created on trips of one loop, so each carries that loop's realized slot and
+    // the two differ only there — the same ids the parameters of a model built this way resolve to,
+    // and longer by that slot than a model created at the top level.
+    [Fact]
     public void TestAModelReachedOutOfASequenceAppendedInALoopKeepsItsOwnRngStream()
-        => Assert.Equal(FeedPathsOf(DrawTwoDirect.ComputationGraph).Select(p => p.Length),
-                        FeedPathsOf(DrawTwoFromSequenceAppendedInLoop.ComputationGraph).Select(p => p.Length));
+        => Assert.Equal([[1, 0, 1, 1], [1, 1, 1, 1]],
+                        FeedPathsOf(DrawTwoFromSequenceAppendedInLoop.ComputationGraph));
 
     private static Tensor<float32> DrawsTwice(Tensor<float32> t)
         => t + RandomUniform([Scalar(2L)], 0f, 1f) + RandomUniform([Scalar(2L)], 0f, 1f);

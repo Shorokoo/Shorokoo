@@ -687,6 +687,21 @@ public partial class HyperModelGainFromAppendedSequenceModel
     }
 }
 
+/// <summary><see cref="HeterogeneousSequenceAtOneModel"/> extended inside a loop, so the sequence
+/// leaves the loop as a loop variable and cannot be laid out in order — the position is a constant
+/// but the element it names is not reachable.</summary>
+[Module]
+public partial class HeterogeneousThroughLoopSequenceModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var seq = ModelSequence.Create<Model<Tensor<float32>, Tensor<float32>>>(
+            Rank1GainSubModel.Model(), TwoParamGainSubModel.Model());
+        foreach (var ctx in LoopAPI.Iterate(Scalar(2L))) seq = seq.Append(Rank1GainSubModel.Model());
+        return seq[Scalar(1L)].Call(input);
+    }
+}
+
 /// <summary>A rank-1 gain plus a second, zero-valued parameter, so which of two bodies a call
 /// reached shows in the parameter ids and not only in the name they are filed under.</summary>
 [Module]

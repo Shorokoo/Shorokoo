@@ -122,7 +122,11 @@ answered wrongly:
 |---|---|
 | reading the lagged value after the loop | **FW046** |
 | lagging a local the **enclosing** loop also carries (it has nothing to carry it out by) | **FW048** |
-| two carries ending on one body value from different pre-loop values | **FW051** |
+
+One shape sharing a body value needs no lag at all: two ordinary carries that end
+on one value, having started from different pre-loop ones. The loop has one node
+to hand back and two variables wanting it, so it is refused as **FW051** — wrap
+each assignment and each gets a node of its own.
 
 Lagging inside a nested loop is otherwise fine: a lagged local created inside the
 enclosing loop's body — a nested recurrence, say — crosses no boundary and needs
@@ -133,8 +137,8 @@ iteration. A chain deeper than that — `prev2 = prev; prev = acc;` — is not, 
 neither is a local trailing a body value the loop does not carry, nor one whose
 first link comes from outside the loop. Those are refused as **FW049**, except
 that the last shape *declared* with `LoopAPI.Init` is caught earlier, as
-**FW023**. One extra identification pass sees one lag step, so the depth limit is
-a limit of the passes rather than a structural one, and could be lifted. Wrapping
+**FW023**. One extra identification pass sees one lag step, so the depth
+limit follows from the number of passes rather than from anything about the loop. Wrapping
 every link works — every one of them, since wrapping only some leaves the rest
 sharing a body value:
 
@@ -175,6 +179,15 @@ That last route needs `v` to survive the nested loop, since the enclosing loop
 records the value that loop ends with. A body-local the nested loop assigns
 before ever reading does not, and is refused as **FW050**; `LoopAPI.Init` it in
 the nested body, as above, and the scan records it.
+
+### Two exit conditions in one loop body
+
+A loop carries **one** exit condition, evaluated once at the end of the
+iteration, so a second `ctx.Break` or `ctx.ContinueWhile` in the same body would
+replace the first rather than adding to it. Two of them is refused as **FW052**:
+combine them into the single call that says what you mean, and express a
+condition that has to be tested part-way through the body as an `IfElse` over the
+rest of it.
 
 ## Current limitations (could be lifted)
 

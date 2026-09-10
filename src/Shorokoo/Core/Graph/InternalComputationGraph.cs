@@ -108,7 +108,7 @@ namespace Shorokoo.Graph
         {
             Debug.Assert(inputs.All(x => x.OwningNode.IsModelInput));
 
-            // A loop marks every body value it cannot leave the loop invalid at termination, and
+            // A loop marks every body value that cannot leave it invalid at termination, and
             // the node constructor refuses such a variable as an input. Returning one straight out
             // of the graph takes neither route, and what reaches the exporter is unusable — an
             // internal op no lowering can remove, or a node the loop's scope owns. Refuse the

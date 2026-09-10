@@ -521,7 +521,7 @@ namespace Shorokoo
 
         #endregion
 
-        #region Framework Error Codes (FW001-FW051)
+        #region Framework Error Codes (FW001-FW052)
         
         /// <summary>Loop operation not implemented</summary>
         public const string FW001 = "FW001";
@@ -675,6 +675,9 @@ namespace Shorokoo
 
         /// <summary>Two loop carries end on one body node output but start from different values</summary>
         public const string FW051 = "FW051";
+
+        /// <summary>A loop body set its exit condition more than once</summary>
+        public const string FW052 = "FW052";
 
         #endregion
 

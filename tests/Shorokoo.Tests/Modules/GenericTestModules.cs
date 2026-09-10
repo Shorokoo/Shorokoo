@@ -1500,6 +1500,85 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary><see cref="NestedLagCarryOfAnEnclosingCarry"/> with the lagged local re-seeded
+    /// each enclosing iteration from a carry of the enclosing loop rather than from a constant.
+    /// It is still created inside that loop's body, so the loop carries nothing for it.</summary>
+    [Module]
+    public partial class NestedLagCarryReseededFromAnEnclosingCarry
+    {
+        public static Scalar<float32> Inline(Scalar<float32> x, Scalar<int64> outerTrips, Scalar<int64> innerTrips)
+        {
+            var acc = x;
+            var total = Scalar(0.0f);
+            foreach (var ctx0 in LoopAPI.Iterate(outerTrips))
+            {
+                var prev = acc;
+                foreach (var ctx1 in LoopAPI.Iterate(innerTrips))
+                {
+                    total = total + prev;
+                    prev = acc;
+                    acc = acc + Scalar(1.0f);
+                }
+            }
+            return total;
+        }
+    }
+
+    /// <summary>A local the body assigns a loop-invariant value computed outside the loop. The
+    /// assignment gives it no body node, so the loop has nothing to hand back.</summary>
+    [Module]
+    public partial class CarryAssignedAnOutsideValue
+    {
+        public static Scalar<float32> Inline(Scalar<float32> x, Scalar<int64> trips)
+        {
+            var z = x * Scalar(10.0f);
+            var v = Scalar(0.0f);
+            var sum = Scalar(0.0f);
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                sum = sum + v;
+                v = z;
+            }
+            return sum;
+        }
+    }
+
+    /// <summary><see cref="CarryAssignedAnOutsideValue"/> with the remedy its refusal names.</summary>
+    [Module]
+    public partial class CarryAssignedAnOutsideValueWrapped
+    {
+        public static Scalar<float32> Inline(Scalar<float32> x, Scalar<int64> trips)
+        {
+            var z = x * Scalar(10.0f);
+            var v = Scalar(0.0f);
+            var sum = Scalar(0.0f);
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                sum = sum + v;
+                v = LoopAPI.Carry(z);
+            }
+            return sum;
+        }
+    }
+
+    /// <summary>A loop body that sets its exit condition twice. The loop carries one, so the
+    /// second would replace the first.</summary>
+    [Module]
+    public partial class LoopWithTwoExitConditions
+    {
+        public static Scalar<float32> Inline(Scalar<float32> x, Scalar<int64> trips)
+        {
+            var acc = x;
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                ctx.Break(acc > Scalar(12.0f));
+                acc = acc + Scalar(1.0f);
+                ctx.Break(acc > Scalar(20.0f));
+            }
+            return acc;
+        }
+    }
+
     /// <summary>A lag carry whose lagged local and trailed carry are both created inside the
     /// enclosing loop's body — a nested recurrence. Nothing crosses the enclosing loop's boundary,
     /// so it needs no wrapping.</summary>

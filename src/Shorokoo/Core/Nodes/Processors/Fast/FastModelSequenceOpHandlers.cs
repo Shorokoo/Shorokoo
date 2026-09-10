@@ -37,19 +37,41 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 ?? throw new System.InvalidOperationException(
                     "FastUnpackModelStruct: SEQUENCE_EMPTY with Model dtype is missing TargetFunction.");
 
-            var fieldSeqKeys = new List<FastTensorKey>(targetFn.HyperparamInputs.Length + 2);
+            ctx.UnpackedStructSequences[outputKey] = EmptyFieldSequences(targetFn, ctx);
+            ctx.NodesToRemove.Add(fastNode.Key);
+        }
 
-            // iterationIndices sequence at the front.
-            fieldSeqKeys.Add(EmitSequenceEmpty(ctx, DType.Int64));
+        /// <summary>
+        /// One empty sequence per field of <paramref name="targetFn"/>'s Model struct:
+        /// iterationIndices at the front, the hyperparameters, then the modelId. A hyperparameter
+        /// that is itself a Model gets an empty nested bundle rather than a sequence of its own,
+        /// so that inserting into it recurses the way inserting into a constructed one does —
+        /// left flat, the insert wrote a whole struct into a tensor slot and the model id it
+        /// carried was never resolved (Shorokoo/Shorokoo#303).
+        /// </summary>
+        private static List<FastTensorKey> EmptyFieldSequences(Function targetFn, FastModelStructContext ctx)
+        {
+            var fieldSeqKeys = new List<FastTensorKey>(targetFn.HyperparamInputs.Length + 2)
+            {
+                EmitSequenceEmpty(ctx, DType.Int64),
+            };
 
             foreach (var hp in targetFn.HyperparamInputs)
-                fieldSeqKeys.Add(EmitSequenceEmpty(ctx, hp.DType));
+            {
+                if (hp.DType == DType.Model && hp.ModuleFn is Function nested)
+                {
+                    var bundleKey = ctx.NewNestedModelField();
+                    ctx.UnpackedStructSequences[bundleKey] = EmptyFieldSequences(nested, ctx);
+                    fieldSeqKeys.Add(bundleKey);
+                }
+                else
+                {
+                    fieldSeqKeys.Add(EmitSequenceEmpty(ctx, hp.DType));
+                }
+            }
 
-            // modelId sequence at the back.
             fieldSeqKeys.Add(EmitSequenceEmpty(ctx, DType.Int64));
-
-            ctx.UnpackedStructSequences[outputKey] = fieldSeqKeys;
-            ctx.NodesToRemove.Add(fastNode.Key);
+            return fieldSeqKeys;
         }
 
         /// <summary>

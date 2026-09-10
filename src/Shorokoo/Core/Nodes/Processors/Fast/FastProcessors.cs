@@ -1258,6 +1258,25 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     return into;
                 }
 
+                // SEQUENCE_ERASE inputs: [sequence, position?]; no position removes the last.
+                case OpCodes.SEQUENCE_ERASE:
+                {
+                    if (node.Inputs[0] is not FastTensorKey fromKey) return null;
+                    if (TryLayOutSequence(fromKey, nodeByKey, visited) is not List<FastTensorKey> from)
+                        return null;
+                    if (from.Count == 0) return null;
+
+                    int removeAt = from.Count - 1;
+                    if (node.Inputs.Count > 1 && node.Inputs[1] is not null)
+                    {
+                        if (TryFoldSequencePosition(node, nodeByKey) is not int given) return null;
+                        removeAt = given < 0 ? given + from.Count : given;
+                        if (removeAt < 0 || removeAt >= from.Count) return null;
+                    }
+                    from.RemoveAt(removeAt);
+                    return from;
+                }
+
                 default:
                     return null;
             }
@@ -1307,6 +1326,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         && CollectSequenceElements(intoKey, nodeByKey, walk)
                         && Collect(insertedKey, nodeByKey, walk);
                 }
+
+                // SEQUENCE_ERASE takes one out. Which one is a question only the layout answers,
+                // so collect them all: a superset still names the body to splice, and it is only
+                // ever a superset, so the agreement checks it feeds stay sound.
+                case OpCodes.SEQUENCE_ERASE:
+                    walk.ViaInsertion = true;
+                    return node.Inputs[0] is FastTensorKey erasedFromKey
+                        && CollectSequenceElements(erasedFromKey, nodeByKey, walk);
 
                 default:
                     return false;
@@ -1691,13 +1718,30 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             InternalComputationGraph subGraph, FastTensorKey modelKey,
             BoundModule bound, List<FastNode>? enclosingLoops, List<FastNode>? mainGraphNewNodes)
         {
-            if (mainGraphNewNodes is null || bound.IdLength is not int idLength || idLength <= 0)
-                return null;
+            if (mainGraphNewNodes is null) return null;
             if (!subGraph.Nodes.Any(n =>
                     n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM ||
                     n.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL ||
                     n.OpCode == InternalOpCodes.SHRK_RANDOM_BITS))
                 return null;
+
+            if (bound.IdLength is not int idLength || idLength <= 0)
+            {
+                // Nothing bound: the walk could not reach the models at all, which today means a
+                // sequence assembled inside a loop. Those feeds keep their own local id and share
+                // a stream — Shorokoo/Shorokoo#303, pinned and open.
+                if (bound.Function is null) return null;
+
+                // Reached them but they disagree on the shape of their ids. There is no count of
+                // components to lay out, so the feeds would silently fall back to sharing one
+                // stream that names no model. Nothing constructs this today; say so rather than
+                // answer with a collision if something ever does.
+                throw new InvalidOperationException(
+                    "FastInlineModulesAndFunctions: the models a run-time sequence position can " +
+                    $"pick from disagree on the shape of their ids, so the {bound.Function.DefaultName} " +
+                    "bodies spliced for them have no way to name which one drew. Give them ids of " +
+                    "one shape, or read the sequence at a position known at build time.");
+            }
 
             var getModelIdKey = FastNodeKey.New();
             mainGraphNewNodes.Add(FastNodeCreationHelpers.CreateFastNode(
@@ -1710,8 +1754,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             for (int i = 0; i < idLength; i++)
             {
                 idVals.Add(-1);
+                // Counted from the END. idLength is the creation's id where this body was
+                // flattened, but GET_MODEL_ID resolves to the id it ends up with, which every
+                // caller this body is spliced into prepends its own path to. The components that
+                // tell the sequence's elements apart are the last ones — the leading ones are the
+                // prefix they share, so gathering from the front handed every element one key and
+                // one stream (Shorokoo/Shorokoo#303).
                 elements.Add(FastNodeCreationHelpers.BuildIterationIndexElement(
-                    FastNodeCreationHelpers.AppendGatherScalar(modelIdVectorKey, i, mainGraphNewNodes),
+                    FastNodeCreationHelpers.AppendGatherScalar(
+                        modelIdVectorKey, i - idLength, mainGraphNewNodes),
                     mainGraphNewNodes));
             }
 

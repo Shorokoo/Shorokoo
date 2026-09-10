@@ -186,4 +186,14 @@ public class ModelParamRefTests
     public void TestAModelPassedAsAHyperparameterSurvivesItsHostComingOutOfADynamicallyIndexedSequence()
         => SameIds(GainFromDynamicSequenceModel.ComputationGraph,
                    HyperModelGainFromDynamicSequenceModel.ComputationGraph);
+
+    [Fact]
+    public void TestAModelPassedAsAHyperparameterSurvivesItsHostBeingAppendedToAnEmptySequence()
+        => SameIds(GainFromDynamicSequenceModel.ComputationGraph,
+                   HyperModelGainFromAppendedSequenceModel.ComputationGraph);
+
+    [Fact]
+    public void TestAModelPassedAsAHyperparameterSurvivesItsHostOutlivingAnErasedSibling()
+        => SameIds(GainFromErasedSequenceModel.ComputationGraph,
+                   HyperModelGainFromErasedSequenceModel.ComputationGraph);
 }

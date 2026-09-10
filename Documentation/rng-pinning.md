@@ -115,18 +115,20 @@ the remaining free slots in creation order. Two consequences:
 - Pinning items to their **current** slots — what the stream report's skeleton emits — leaves
   every unlisted consumer's slot, hence stream, unchanged. This is the freeze workflow, and
   the reason the skeleton uses this form. A path through a module called from a loop carries
-  one extra component per enclosing loop — a `-2` marking the call site's loop scope, followed
+  two extra components per enclosing loop — a `-2` marking the call site's loop scope, followed
   by that loop's iteration slot. Neither is a consumer, so neither is pinned; both are stable,
-  so pinning the consumers still freezes the whole path.
+  so pinning the consumers still freezes the whole path. A model a `ModelSequence` position
+  picks at run time adds a `-1` per component of its own id, which no pin can name — see
+  [rng-configuration.md](rng-configuration.md).
 - Pinning an item to a **different** slot perturbs the free-slot sequence: an unlisted
   consumer whose slot was taken (or vacated) can move and silently re-key — e.g. with `a`
   and `b` at slots 1 and 2, `Rng.Pin(([2], a))` displaces the unlisted `b` to slot 1. To
   relocate streams, list every consumer the move disturbs; an intentional swap is
   `Rng.Pin(([2], a), ([1], b))`.
 
-The path is a single 1-based local slot; the scope is the module body, the loop body, or the
-body of a module reached from a loop — the
-pin is written in (to pin a loop's consumer, write the sparse pin inside that loop). Pinning
+The path is a single 1-based local slot; the scope — the module body, the loop body, or the body
+of a module reached from a loop — is the one the pin is written in (to pin a loop's consumer,
+write the sparse pin inside that loop). Pinning
 two items to one slot, or one item to two slots, fails the module build — as does adding a
 sparse pin to a scope that already carries a positional one (see [Contract](#contract)).
 

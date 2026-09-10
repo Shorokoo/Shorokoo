@@ -548,6 +548,33 @@ public partial class HyperModelGainFromSequenceModel
     }
 }
 
+/// <summary>The one <see cref="Rank1GainSubModel"/> left in a <c>ModelSequence</c> after the
+/// other is removed — the baseline for <see cref="HyperModelGainFromErasedSequenceModel"/>.</summary>
+[Module]
+public partial class GainFromErasedSequenceModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var seq = ModelSequence.Create(Rank1GainSubModel.Model(), Rank1GainSubModel.Model())
+            .RemoveAt(Scalar(0L));
+        return seq[Scalar(0L)].Call(input);
+    }
+}
+
+/// <summary><see cref="Rank1GainSubModel"/> reached through a <c>[Hyper] Model&lt;&gt;</c> of the
+/// one host left in a <c>ModelSequence</c> after the other is removed.</summary>
+[Module]
+public partial class HyperModelGainFromErasedSequenceModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var seq = ModelSequence.Create(HyperModelHost.Model(Rank1GainSubModel.Model()),
+                                       HyperModelHost.Model(Rank1GainSubModel.Model()))
+            .RemoveAt(Scalar(0L));
+        return seq[Scalar(0L)].Call(input);
+    }
+}
+
 /// <summary>Two <see cref="Rank1GainSubModel"/>s reached out of a <c>ModelSequence</c> indexed by
 /// the loop's iteration index — the baseline for <see cref="HyperModelGainFromDynamicSequenceModel"/>,
 /// with no host indirection.</summary>
@@ -574,6 +601,23 @@ public partial class HyperModelGainFromDynamicSequenceModel
     {
         var seq = ModelSequence.Create(HyperModelHost.Model(Rank1GainSubModel.Model()),
                                        HyperModelHost.Model(Rank1GainSubModel.Model()));
+        var x = input;
+        foreach (var ctx in LoopAPI.Iterate(Scalar(2L)))
+            x = seq[ctx.IterationIndex].Call(x);
+        return x;
+    }
+}
+
+/// <summary><see cref="HyperModelGainFromDynamicSequenceModel"/> with the hosts appended to an
+/// empty <c>ModelSequence</c> rather than constructed into one.</summary>
+[Module]
+public partial class HyperModelGainFromAppendedSequenceModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var seq = ModelSequence.Empty(HyperModelHost.Model(Rank1GainSubModel.Model()))
+            .Append(HyperModelHost.Model(Rank1GainSubModel.Model()))
+            .Append(HyperModelHost.Model(Rank1GainSubModel.Model()));
         var x = input;
         foreach (var ctx in LoopAPI.Iterate(Scalar(2L)))
             x = seq[ctx.IterationIndex].Call(x);
@@ -665,6 +709,65 @@ public partial class DrawInLoopFromSequence
         foreach (var ctx in LoopAPI.Iterate(Scalar(2L))) x = seq[ctx.IterationIndex].Call(x);
         return x;
     }
+}
+
+/// <summary>The last <see cref="DrawingSub"/> model of a <c>ModelSequence</c>, named by counting
+/// back from the end.</summary>
+[Module]
+public partial class DrawFromSequenceAtNegativeIndex
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var seq = ModelSequence.Create(DrawingSub.Model(), DrawingSub.Model());
+        return seq[Scalar(-1L)].Call(t);
+    }
+}
+
+/// <summary>A <see cref="DrawingSub"/> model inserted at the front of a <c>ModelSequence</c> and
+/// read back from there — the third created, at the first position.</summary>
+[Module]
+public partial class DrawFromSequenceAfterInsertAt
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var seq = ModelSequence.Create(DrawingSub.Model(), DrawingSub.Model())
+            .InsertAt(DrawingSub.Model(), Scalar(0L));
+        return seq[Scalar(0L)].Call(t);
+    }
+}
+
+/// <summary>Two <see cref="DrawingSub"/> models left in a <c>ModelSequence</c> after one is
+/// removed.</summary>
+[Module]
+public partial class DrawTwoFromErasedSequence
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var seq = ModelSequence.Create(DrawingSub.Model(), DrawingSub.Model(), DrawingSub.Model())
+            .RemoveAt(Scalar(0L));
+        return seq[Scalar(1L)].Call(seq[Scalar(0L)].Call(t));
+    }
+}
+
+/// <summary>Two <see cref="DrawingSub"/> models picked out of a <c>ModelSequence</c> at positions
+/// only known at run time — different models on the two calls, whichever way round.</summary>
+[Module]
+public partial class DrawTwoAtRuntimePositions
+{
+    public static Tensor<float32> Inline(Tensor<float32> t, Scalar<int64> i)
+    {
+        var seq = ModelSequence.Create(DrawingSub.Model(), DrawingSub.Model());
+        return seq[i].Call(t) - seq[Scalar(1L) - i].Call(t);
+    }
+}
+
+/// <summary><see cref="DrawTwoAtRuntimePositions"/> reached through another module, so the models'
+/// ids carry that module's prefix.</summary>
+[Module]
+public partial class DrawTwoAtRuntimePositionsNested
+{
+    public static Tensor<float32> Inline(Tensor<float32> t, Scalar<int64> i)
+        => DrawTwoAtRuntimePositions.Model().Call(t, i);
 }
 
 /// <summary>

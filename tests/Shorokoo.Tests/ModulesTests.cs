@@ -1110,6 +1110,10 @@ public class ModulesCoverageTests
             hyperparamInputs: [], runtimeInputs: [Scalar32(10f), Scalar32(100f), Trips(3)], expected: [123.0]));
         Assert.True(AutoTest.AdvancedTestGraph<NestedLagCarryOfAnEnclosingCarry>(
             hyperparamInputs: [], runtimeInputs: [Scalar32(10f), Trips(2), Trips(3)], expected: [48.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<NestedLagCarryReseededFromAnEnclosingCarry>(
+            hyperparamInputs: [], runtimeInputs: [Scalar32(10f), Trips(2), Trips(3)], expected: [71.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<CarryAssignedAnOutsideValueWrapped>(
+            hyperparamInputs: [], runtimeInputs: [Scalar32(10f), Trips(3)], expected: [200.0]));
         Assert.True(AutoTest.AdvancedTestGraph<CarryAliasReadAfterLoopFixed>(
             hyperparamInputs: [], runtimeInputs: [Scalar32(10f), Trips(3)], expected: [12.0]));
     }
@@ -1123,6 +1127,8 @@ public class ModulesCoverageTests
         [
             (ErrorCodes.FW046, "LoopAPI.Carry", () => LagOneCarryReadAfterLoop.ComputationGraph),
             (ErrorCodes.FW046, "LoopAPI.Carry", () => CarryAliasReadAfterLoop.ComputationGraph),
+            (ErrorCodes.FW023, "LoopAPI.Carry", () => CarryAssignedAnOutsideValue.ComputationGraph),
+            (ErrorCodes.FW052, "ctx.Break", () => LoopWithTwoExitConditions.ComputationGraph),
             (ErrorCodes.FW049, "LoopAPI.Init", () => LagCarryOfUncarriedValue.ComputationGraph),
             (ErrorCodes.FW048, "LoopAPI.Carry", () => NestedLagCarry.ComputationGraph),
             (ErrorCodes.FW049, "LoopAPI.Carry", () => LagTwoCarry.ComputationGraph),
@@ -1541,28 +1547,44 @@ public class ModulesCoverageTests
                      LoopSlotOf((Func<Tensor<float32>, Tensor<float32>>)DrawsTwice));
     }
 
+    private static int[][] FeedPathsOf(ComputationGraph g)
+    {
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([2L], 1f, 2f)]));
+        return [.. arch.GetRngStreamReport().Streams
+            .Where(s => s.Kind == RngStreamKind.UniformFeed)
+            .Select(s => s.ModelIdPath.ToArray())
+            .OrderBy(p => string.Join(",", p))];
+    }
+
     [Fact]
     public void TestAModelReachedOutOfASequenceKeepsItsOwnRngStream()
     {
-        int[][] FeedPathsOf(ComputationGraph g)
-        {
-            var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([2L], 1f, 2f)]));
-            return [.. arch.GetRngStreamReport().Streams
-                .Where(s => s.Kind == RngStreamKind.UniformFeed)
-                .Select(s => s.ModelIdPath.ToArray())
-                .OrderBy(p => string.Join(",", p))];
-        }
-
         Assert.Equal(FeedPathsOf(DrawTwoDirect.ComputationGraph),
                      FeedPathsOf(DrawTwoFromSequence.ComputationGraph));
         Assert.Equal(FeedPathsOf(DrawTwoDirect.ComputationGraph),
                      FeedPathsOf(DrawTwoFromAppendedSequence.ComputationGraph));
+        Assert.Equal(2, FeedPathsOf(DrawTwoFromErasedSequence.ComputationGraph).Length);
+        Assert.Equal([[2, 1]], FeedPathsOf(DrawFromSequenceAtNegativeIndex.ComputationGraph));
+        Assert.Equal([[3, 1]], FeedPathsOf(DrawFromSequenceAfterInsertAt.ComputationGraph));
 
-        // Picked by the loop index the model's id is a run-time value, so the path carries a slot
-        // for each of its components rather than the components themselves — as many split
-        // counters as the same model called directly, and none of them the feed's own id alone.
-        Assert.Equal(FeedPathsOf(DrawInLoopDirect.ComputationGraph).Select(p => p.Length),
-                     FeedPathsOf(DrawInLoopFromSequence.ComputationGraph).Select(p => p.Length));
+        // Picked by the loop index the model's id becomes a slot; the rest of the path is what
+        // the same model called directly in that loop derives from.
+        Assert.Equal(FeedPathsOf(DrawInLoopDirect.ComputationGraph).Select(p => p[1..]),
+                     FeedPathsOf(DrawInLoopFromSequence.ComputationGraph).Select(p => p[1..]));
+    }
+
+    [Fact]
+    public void TestModelsPickedOutOfASequenceAtRunTimeDrawApartHoweverDeepTheReaderSits()
+    {
+        float[] DifferenceOf(ComputationGraph g)
+        {
+            var zero = TensorData([2L], 0f, 0f);
+            var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([zero, TensorData(DType.Int64, [], 0L)]));
+            return RunFloats(arch.ToConcreteModel(RngConfig.Default), zero, TensorData(DType.Int64, [], 0L));
+        }
+
+        Assert.All(DifferenceOf(DrawTwoAtRuntimePositions.ComputationGraph), v => Assert.NotEqual(0f, v));
+        Assert.All(DifferenceOf(DrawTwoAtRuntimePositionsNested.ComputationGraph), v => Assert.NotEqual(0f, v));
     }
 
     // Pins Shorokoo/Shorokoo#303: the models a sequence assembled inside a loop holds are reached
@@ -1570,19 +1592,8 @@ public class ModulesCoverageTests
     // fall back to one stream whose path names no model.
     [Fact(Skip = "Shorokoo/Shorokoo#303: a sequence assembled in a loop loses its models' RNG identity")]
     public void TestAModelReachedOutOfASequenceAppendedInALoopKeepsItsOwnRngStream()
-    {
-        int[][] FeedPathsOf(ComputationGraph g)
-        {
-            var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([2L], 1f, 2f)]));
-            return [.. arch.GetRngStreamReport().Streams
-                .Where(s => s.Kind == RngStreamKind.UniformFeed)
-                .Select(s => s.ModelIdPath.ToArray())
-                .OrderBy(p => string.Join(",", p))];
-        }
-
-        Assert.Equal(FeedPathsOf(DrawTwoDirect.ComputationGraph).Select(p => p.Length),
-                     FeedPathsOf(DrawTwoFromSequenceAppendedInLoop.ComputationGraph).Select(p => p.Length));
-    }
+        => Assert.Equal(FeedPathsOf(DrawTwoDirect.ComputationGraph).Select(p => p.Length),
+                        FeedPathsOf(DrawTwoFromSequenceAppendedInLoop.ComputationGraph).Select(p => p.Length));
 
     private static Tensor<float32> DrawsTwice(Tensor<float32> t)
         => t + RandomUniform([Scalar(2L)], 0f, 1f) + RandomUniform([Scalar(2L)], 0f, 1f);

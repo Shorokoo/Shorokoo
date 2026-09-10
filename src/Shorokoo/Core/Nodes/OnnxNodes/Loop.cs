@@ -208,7 +208,14 @@ namespace Shorokoo
         /// </summary>
         public void ContinueWhile(Scalar<bit> wrapped, Scalar<bit> asWritten)
         {
-            Debug.Assert(this.continueWhileTensor is null && this.CurrentPass == 3);
+            Debug.Assert(this.CurrentPass == 3);
+
+            // A loop has one exit condition. A second call used to overwrite the first — an
+            // assert in Debug, and in Release the later condition silently replacing the earlier
+            // one, which is a different loop than the one written.
+            if (this.continueWhileTensor is not null)
+                throw new UnsupportedLoopVariableAssignmentException(
+                    ErrorCodes.FW052, ExitConditionSetTwiceGuidance);
             var inBodyCondition = ((Variable)wrapped).OwningNode.Inputs[0].AssertNotNull();
             this.continueWhileTensor =
                 this.openNodeOutputs.ContainsKey(inBodyCondition) ? inBodyCondition : asWritten;
@@ -482,6 +489,19 @@ namespace Shorokoo
 
                         // Case 5: The real value we want to use here was captured during the first pass.
                         var originalInput = this.variableInputs[(nodeIndex, inputIndex)].FirstPassInput;
+
+                        // A read that has NOT moved since the first pass is an ordinary read of
+                        // something the loop does not touch — a loop-invariant value, a graph
+                        // input — and pinning it to that value is what it means. One that HAS
+                        // moved, and still names a value from outside, is a local the body
+                        // rebound to such a value by bare assignment: the loop has no node to
+                        // hand it back by, so pinning it silently answers with the value it held
+                        // before the loop. The same fault as the lag chain above, one assignment
+                        // shorter, and it needs the same wrapping.
+                        if (!ReferenceEquals(originalInput, inputVariable))
+                            throw new UnsupportedLoopVariableAssignmentException(
+                                ErrorCodes.FW023, CarryAssignedFromOutsideGuidance);
+
                         mapping.Add((inputVariable, originalInput));
                     }
                 }
@@ -744,14 +764,23 @@ namespace Shorokoo
             // loop re-derives it as a lag carry of its OWN trailed carry, resetting it at every
             // enclosing iteration.
             //
-            // Only a lagged local the enclosing loop carries is in that position, and its
-            // initializer says so: it is that loop's open-node output for the same local. A
-            // lagged local created inside the enclosing body — the common case, and the whole of
-            // a nested recurrence like Fibonacci — crosses no boundary and is fine. Testing loop
-            // depth alone refused all of those too.
+            // Only a lagged local the enclosing loop carries is in that position: one created
+            // inside the enclosing body — the common case, and the whole of a nested recurrence
+            // like Fibonacci — crosses no boundary and is fine. Testing loop depth alone refused
+            // all of those too.
+            //
+            // "The enclosing loop carries it" is not the same as "it was seeded from something
+            // the enclosing loop carries", and only the first breaks. Both make the lagged
+            // local's initializer an enclosing open-node output, so what separates them is WHICH
+            // local that output belongs to: for a lagged local the enclosing loop carries, it is
+            // that local's own; for one re-seeded inside the body from the trailed carry, it is
+            // the trailed carry's, the very value entering the inner loop as that carry. Testing
+            // membership alone refused the re-seeded shape, which computes correctly.
             if (enclosing is not null &&
                 lagLoopVariables.FirstOrDefault(x =>
-                    enclosing.IsOwnOpenNodeOutput(x.OpenNodeInputInitializer.AssertNotNull())) is not null)
+                    enclosing.IsOwnOpenNodeOutput(x.OpenNodeInputInitializer.AssertNotNull()) &&
+                    !ReferenceEquals(x.OpenNodeInputInitializer,
+                                     x.TrailedCarry.AssertNotNull().OpenNodeInputInitializer)) is not null)
                 throw new UnsupportedLoopVariableAssignmentException(
                     ErrorCodes.FW048, LagCarryInNestedLoopGuidance);
 
@@ -912,9 +941,9 @@ namespace Shorokoo
             "a loop body read a variable whose value the loop cannot follow."
             + "\n"
             + "\nA local trailing ONE of the loop's own carries by one iteration is identified. A "
-            + "longer chain — prev2 = prev; prev = acc; — is not, and neither is a local trailing "
-            + "something the loop does not carry at all. Either would read its pre-loop value on "
-            + "every iteration."
+            + "longer chain — prev2 = prev; prev = acc; — is not, nor is a local trailing "
+            + "something the loop does not carry at all, nor one whose chain starts outside the "
+            + "loop. Any of them would read its pre-loop value on every iteration."
             + "\n"
             + "\nGive each link a body node of its own:"
             + "\n"
@@ -930,8 +959,8 @@ namespace Shorokoo
             "two variables the loop carries end each iteration on the same body value, but started "
             + "from different values before the loop."
             + "\n"
-            + "\nThe loop hands a carry back by re-taking the node that produced it, and one node "
-            + "cannot stand for two variables that a zero-iteration loop still has to tell apart."
+            + "\nThe loop hands a carry back by re-taking the node that produced it, and it "
+            + "addresses those nodes one per carry, so two carries cannot name the same one."
             + "\n"
             + "\nGive the second one a body node of its own:"
             + "\n"
@@ -958,8 +987,25 @@ namespace Shorokoo
             + "\nA lagged local created inside the enclosing loop's body needs no wrapping; this "
             + "is only about one the enclosing loop itself carries.";
 
+        private const string ExitConditionSetTwiceGuidance =
+            "a loop body set its exit condition more than once — two ctx.Break or ctx.ContinueWhile "
+            + "calls, or one of each."
+            + "\n"
+            + "\nA loop carries one condition, evaluated once at the end of the iteration, so a "
+            + "second call would silently replace the first rather than adding to it."
+            + "\n"
+            + "\nCombine them into the single call that says what you mean:"
+            + "\n"
+            + "\n    ctx.Break(acc > Scalar(12.0f) | acc > Scalar(20.0f));"
+            + "\n"
+            + "\nA condition that has to be tested part-way through the body is an IfElse over the "
+            + "rest of it, not a second exit.";
+
         private const string CarryAssignedFromOutsideGuidance =
-            "the loop body assigned a variable declared with LoopAPI.Init a value computed outside "
+            "the loop body assigned a variable a value computed outside the loop."
+            + "\n"
+            + "\nA bare assignment gives the variable no node inside the body, so the loop has "
+            + "nothing to hand it back by and every iteration would read the value it held before "
             + "the loop."
             + "\n"
             + "\nInstead of:"
@@ -967,7 +1013,7 @@ namespace Shorokoo
             + "\n    var carry = n + Scalar(5L);"
             + "\n    foreach (var ctx in LoopAPI.Iterate(trips))"
             + "\n    {"
-            + "\n        LoopAPI.Init(carry);"
+            + "\n        LoopAPI.Init(carry);   // only needed when the body just writes it"
             + "\n        carry = n;"
             + "\n    }"
             + "\n    return carry;"
@@ -982,7 +1028,10 @@ namespace Shorokoo
             + "\n    }"
             + "\n    return carry;"
             + "\n"
-            + "\nOr move the assignment out of the loop.";
+            + "\nOr move the assignment out of the loop."
+            + "\n"
+            + "\nWrap every assignment in a chain, not just this one: leaving a later link bare "
+            + "makes two carries end on one body value, which is refused in its own right.";
 
         public void StartThirdPass()
         {
@@ -1231,8 +1280,9 @@ namespace Shorokoo
         /// <summary>
         /// Whether trace-time actions that must fire <b>exactly once per source occurrence</b>
         /// (e.g. <see cref="Shorokoo.Rng.Pin(object[])"/>) should record right now. A loop body
-        /// is executed once per construction pass — first (track), second (identify loop vars),
-        /// third (build the real body), fourth (expose outputs) — so a naive record inside a
+        /// is executed once per trace — first (track), second (identify loop vars), the lag pass
+        /// (the second traced again, to see a lag step), third (build the real body), fourth
+        /// (expose outputs) — so a naive record inside a
         /// loop body would fire five times, four of them against throwaway nodes. Only
         /// the pass that builds the surviving body nodes (the active looper's third pass) is
         /// canonical; at module level (no active loop) recording is always canonical. This is

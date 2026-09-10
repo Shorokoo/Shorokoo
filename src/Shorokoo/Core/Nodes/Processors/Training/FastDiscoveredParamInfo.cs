@@ -35,7 +35,7 @@ namespace Shorokoo.Core.Nodes.Processors.Training
         public int? Rank { get; }
 
         /// <summary>Top-level data-structure category — always <see cref="DataStructure.Tensor"/>
-        /// for the three handled op codes after the Fast lowering pipeline.</summary>
+        /// for both handled op codes after the Fast lowering pipeline.</summary>
         public DataStructure Structure { get; }
 
         /// <summary>The Fast node producing this parameter.</summary>

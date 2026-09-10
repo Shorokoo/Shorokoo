@@ -71,9 +71,8 @@ namespace Shorokoo.Core.Nodes.Processors.Training
         }
 
         /// <summary>
-        /// Reads dtype and rank from the producing node's attributes. All three handled op
-        /// codes produce a single tensor whose dtype/rank are recoverable without rich CG
-        /// metadata.
+        /// Reads dtype and rank from the producing node's attributes. Both handled op codes
+        /// produce a single tensor whose dtype/rank are recoverable without rich CG metadata.
         /// </summary>
         private static (DType? dtype, int? rank) ExtractDTypeAndRank(FastNode node)
         {

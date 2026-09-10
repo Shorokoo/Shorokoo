@@ -1133,6 +1133,24 @@ public class TrainingRigScheduleCoverageTests
 [Trait("Purpose", "Coverage")]
 public class TrainingRigTrainingLoopCoverageTests
 {
+    private static float StateAfterOneStep(ComputationGraph modelGraph)
+    {
+        var x = TensorData([2L], 1f, 2f);
+        var rig = TrainingRig.FromScratch(modelGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [new TensorDataModelParam("input", ModelParamType.InputParam, x)], 0.1f);
+        var step = rig.TrainStep(rig.CreateInitialCheckpoint(),
+            NNLibraryTrainingFixtures.MakeBatch("input", "ModelInput", x),
+            NNLibraryTrainingFixtures.MakeBatch("targets", "Target", TensorData([2L], 0f, 0f)));
+        return NNLibraryTrainingFixtures.Floats(step.ModelState.Fields[rig.ModelStateDef.Fields.Single().Name])[0];
+    }
+
+    // Pins Shorokoo/Shorokoo#306: the updated-state struct is built per state parameter but filled
+    // per STATE_UPDATE_LINK, so one handle called twice keeps only the first site's update.
+    [Fact(Skip = "Shorokoo/Shorokoo#306: a stateful model called twice drops all but the first StateUpdate")]
+    public void TestAStatefulModelCalledTwiceAppliesBothItsStateUpdates()
+        => Assert.Equal(2f * StateAfterOneStep(StatefulGainNoRefModel.ComputationGraph),
+                        StateAfterOneStep(StatefulGainCalledTwiceModel.ComputationGraph));
+
     [Fact]
     public void TestTrainStepAndTrainLoopCoverage()
     {

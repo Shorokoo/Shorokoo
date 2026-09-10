@@ -194,12 +194,19 @@ namespace Shorokoo.Core
             var stateUpdates = GraphTrace.StateUpdates.Take();
             var rngPins = GraphTrace.Pins.Take();
 
+            // The body's own updates, plus the calls it made to models that update state. A call
+            // whose result the body discards reaches the graph through nothing else, so without
+            // this its updates are built and then dropped with it (Shorokoo/Shorokoo#310); a call
+            // whose result is used is already reachable and the extra dep is redundant, which the
+            // pruning of a wrapper that names an already-live tensor costs nothing.
+            Variable[] deps = [.. stateUpdates, .. GraphTrace.CallEffects ?? []];
+
             // Check for registered state updates and wrap outputs with WithStateDeps if any exist
             // This ensures state update tensors are included in the graph when outputs are used
-            if (stateUpdates.Length > 0)
+            if (deps.Length > 0)
             {
                 // Wrap each output with WithStateDeps to create dependencies on state update tensors
-                fnOutputs = WrapOutputsWithStateDeps(fnOutputs, stateUpdates);
+                fnOutputs = WrapOutputsWithStateDeps(fnOutputs, deps);
             }
 
             // For generic methods, prepend GENERIC_TYPE_INPUT nodes for each generic type parameter

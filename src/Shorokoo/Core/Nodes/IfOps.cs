@@ -40,8 +40,12 @@ namespace Shorokoo.Core.Nodes
         public static A IfElse<A>(Scalar<bit> condition, System.Func<A> whenTrue, System.Func<A> whenFalse) where A : IValue
         {
             var ifOpen = OnnxOp.IfOpen(condition);
-            var t = whenTrue();
-            var f = whenFalse();
+            A t, f;
+            using (GraphTrace.EnterBranchBody())
+            {
+                t = whenTrue();
+                f = whenFalse();
+            }
             return OnnxOp.IfClose([t.ToVariable()], [f.ToVariable()], ifOpen)[0].ToValue<A>();
         }
 

@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
+using Shorokoo.Core.Nodes;
 
 namespace Shorokoo.Core
 {
@@ -91,6 +93,45 @@ namespace Shorokoo.Core
         /// </summary>
         internal static RngPinRegistry Pins => RequireModuleBuild("Rng.Pin").Pins;
 
+        /// <summary>
+        /// The calls of this module build whose callee updates state, so that the call has to
+        /// survive even where its result is discarded (Shorokoo/Shorokoo#310). Recorded by the
+        /// call itself and harvested alongside <see cref="StateUpdates"/>; null when no module
+        /// build is in progress, since a call outside one has no harvest to reach.
+        /// </summary>
+        internal static List<Variable>? CallEffects => TraceContext.Current?.IsModuleBuild == true
+            ? TraceContext.Current.CallEffects
+            : null;
+
+        /// <summary>
+        /// Marks the delegates of a lazy <c>IfElse</c> as running inside the If scope, for
+        /// recordings that may only name a module-scope value. A branch's nodes are not module
+        /// scope: naming one from an output the whole graph reads crosses the scope boundary, and
+        /// the graph is refused for it. The eager <c>IfElse</c> overloads need no marker — their
+        /// arguments are built before the scope opens.
+        /// </summary>
+        internal static BranchScope EnterBranchBody() => new BranchScope(TraceContext.Current);
+
+        /// <summary>Whether node creation is currently inside a lazy <c>IfElse</c> branch.</summary>
+        internal static bool InBranchBody => TraceContext.Current?.BranchDepth > 0;
+
+        /// <summary>Disposable handle for <see cref="EnterBranchBody"/>.</summary>
+        internal readonly struct BranchScope : IDisposable
+        {
+            private readonly TraceContext? _trace;
+
+            internal BranchScope(TraceContext? trace)
+            {
+                _trace = trace;
+                if (_trace is not null) _trace.BranchDepth++;
+            }
+
+            public void Dispose()
+            {
+                if (_trace is not null) _trace.BranchDepth--;
+            }
+        }
+
         // ────────────────────────────── internals ──────────────────────────────
 
         private static TraceContext RequireModuleBuild(string api)
@@ -140,6 +181,13 @@ namespace Shorokoo.Core
 
         /// <summary>The Rng.Pin recordings of this trace.</summary>
         internal RngPinRegistry Pins { get; } = new RngPinRegistry();
+
+        /// <summary>The stateful calls of this trace (see <see cref="GraphTrace.CallEffects"/>).</summary>
+        internal List<Variable> CallEffects { get; } = new List<Variable>();
+
+        /// <summary>How many lazy <c>IfElse</c> branches are open (see
+        /// <see cref="GraphTrace.EnterBranchBody"/>).</summary>
+        internal int BranchDepth { get; set; }
 
         protected override void OnExiting()
             => Debug.Assert(Loopers.Count == 0,

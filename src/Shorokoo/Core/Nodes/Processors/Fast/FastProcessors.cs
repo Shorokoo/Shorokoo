@@ -715,10 +715,20 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         public static void Process(InternalComputationGraph graph)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
-            while (ProcessOnePass(graph)) { }
+
+            // The model and the call site each spliced feed came from. Collected across every pass
+            // because a model's call sites need not share one: a call reached through a
+            // [Hyper] Model<> only enters the graph when the enclosing body is spliced, a pass
+            // after a direct call was (Shorokoo/Shorokoo#311). Splitting the streams therefore
+            // waits until inlining is done and every call site is in hand.
+            var feedSites = new Dictionary<FastNodeKey, (FastNodeKey creation, FastNodeKey invoke)>();
+            while (ProcessOnePass(graph, feedSites)) { }
+            SplitFeedStreamsPerCallSite(graph, feedSites);
         }
 
-        private static bool ProcessOnePass(InternalComputationGraph graph)
+        private static bool ProcessOnePass(
+            InternalComputationGraph graph,
+            Dictionary<FastNodeKey, (FastNodeKey creation, FastNodeKey invoke)> feedSites)
         {
             var nodeByKey = FastProcessorHelper.BuildNodeByKey(graph);
 
@@ -727,20 +737,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var newNodes = new List<FastNode>(graph.Nodes.Count);
             var outputRemap = new Dictionary<FastTensorKey, FastTensorKey>();
             bool anyInlined = false;
-
-            // Call sites per creation, in node order. Two calls on one model share its parameters,
-            // so its id stays collapsed — but they must not share a draw, and a feed's path is the
-            // only place that can say which call it belongs to (Shorokoo/Shorokoo#298).
-            var callSitesByCreation = new Dictionary<FastNodeKey, List<FastNodeKey>>();
-            foreach (var candidate in graph.Nodes)
-            {
-                if (candidate.OpCode != InternalOpCodes.MODEL_INVOKE) continue;
-                if (candidate.Inputs.Count == 0 || candidate.Inputs[0] is not FastTensorKey candidateModel) continue;
-                if (FindDirectModuleCreation(candidateModel, nodeByKey) is not FastNode candidateCreation) continue;
-                if (!callSitesByCreation.TryGetValue(candidateCreation.Key, out var siteList))
-                    callSitesByCreation[candidateCreation.Key] = siteList = [];
-                siteList.Add(candidate.Key);
-            }
 
             // Call-site ids for module-typed FUNCTION_INVOKEs, allocated above every id already
             // in the graph so they cannot collide with the ones FastApplyIdentifierTemplates
@@ -908,11 +904,17 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
                         var (feedId, feedExtraIter) = ExtendScopeToCallSite(
                             parentModelId, enclosingLoops, subFastGraph, newNodes);
-                        feedId = WithCallSiteComponent(
-                            feedId, directModelCreation, fastNode, callSitesByCreation, subFastGraph);
                         FastReparentToCallSite(
                             subFastGraph, parentIdTemplate, parentModelId, parentIterIndicesKey, graph,
                             feedId, feedExtraIter);
+
+                        // Only a call site whose model the walk named can collide with another:
+                        // the model-variable route below keys off the variable, whose path carries
+                        // a runtime component per id element and so already separates the models a
+                        // position picks between.
+                        foreach (var subNode in subFastGraph.Nodes)
+                            if (IsRngFeed(subNode))
+                                feedSites[subNode.Key] = (directModelCreation.Key, fastNode.Key);
                     }
                     else
                     {
@@ -1704,33 +1706,63 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             }
         }
 
+        /// <summary>True for the three keyed draw sites, whose ModelId names an RNG stream.</summary>
+        private static bool IsRngFeed(FastNode node)
+            => node.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM
+            || node.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL
+            || node.OpCode == InternalOpCodes.SHRK_RANDOM_BITS;
+
         /// <summary>
-        /// The feed path with this call site named on it, when the model it calls is called more
-        /// than once. A single-call model keeps the path it already had, so existing streams — and
-        /// any <c>Rng.Pin</c> recorded against them — do not move; adding a second call is what
-        /// splits them, and it necessarily names both, since one stream cannot become two while
-        /// either keeps the old name.
+        /// Gives each call site of a model called more than once its own RNG streams.
+        ///
+        /// <para>Calling one model object twice shares its id, and so its parameters — that is what
+        /// calling it twice is for. A draw is not a value it holds: each execution of a draw is a
+        /// fresh sample, so two call sites must not share a stream (Shorokoo/Shorokoo#298). Feeds
+        /// that come out of inlining with the same ModelId are exactly the ones that would, so each
+        /// call site's copy takes a <see cref="ModelId.CallSiteIndex"/> component naming its
+        /// ordinal.</para>
+        ///
+        /// <para>Only the feeds take it: the model's parameter ids stay collapsed, since sharing
+        /// the weights across the calls is the point. And only a model actually called more than
+        /// once takes it, so a single-call model keeps the path it already had and any
+        /// <c>Rng.Pin</c> against it stays valid — adding a second call is what splits the stream,
+        /// and it names both halves, because one stream cannot become two while either keeps the
+        /// old name.</para>
         /// </summary>
-        private static ModelId WithCallSiteComponent(
-            ModelId feedId,
-            FastNode creation,
-            FastNode invoke,
-            Dictionary<FastNodeKey, List<FastNodeKey>> callSitesByCreation,
-            InternalComputationGraph subGraph)
+        private static void SplitFeedStreamsPerCallSite(
+            InternalComputationGraph graph,
+            Dictionary<FastNodeKey, (FastNodeKey creation, FastNodeKey invoke)> feedSites)
         {
-            if (!callSitesByCreation.TryGetValue(creation.Key, out var sites) || sites.Count < 2)
-                return feedId;
+            // Feeds by the model they were spliced from, in node order.
+            var byCreation = new Dictionary<FastNodeKey, List<FastNode>>();
+            foreach (var node in graph.Nodes)
+            {
+                if (!IsRngFeed(node)) continue;
+                if (!feedSites.TryGetValue(node.Key, out var site)) continue;
+                if (!byCreation.TryGetValue(site.creation, out var list))
+                    byCreation[site.creation] = list = [];
+                list.Add(node);
+            }
 
-            // Only a feed reads this path; a callee that draws nothing would carry a longer dead one.
-            if (!subGraph.Nodes.Any(n =>
-                    n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM ||
-                    n.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL ||
-                    n.OpCode == InternalOpCodes.SHRK_RANDOM_BITS))
-                return feedId;
+            foreach (var (_, feeds) in byCreation)
+            {
+                var ordinalOfSite = new Dictionary<FastNodeKey, int>();
+                foreach (var feed in feeds)
+                {
+                    var invoke = feedSites[feed.Key].invoke;
+                    if (!ordinalOfSite.ContainsKey(invoke)) ordinalOfSite[invoke] = ordinalOfSite.Count;
+                }
+                if (ordinalOfSite.Count < 2) continue;   // called once; its path does not move
 
-            int ordinal = sites.IndexOf(invoke.Key);
-            if (ordinal < 0) return feedId;
-            return new ModelId([.. feedId.Vals, ModelId.CallSiteIndex, ordinal]);
+                foreach (var feed in feeds)
+                {
+                    var attrs = feed.Attributes.GetAttributeVals().ToDictionary();
+                    var idVals = (long[])attrs[OnnxOpAttributeNames.ShrkAttrLocalModelId]!;
+                    attrs[OnnxOpAttributeNames.ShrkAttrLocalModelId] =
+                        (long[])[.. idVals, ModelId.CallSiteIndex, ordinalOfSite[feedSites[feed.Key].invoke]];
+                    feed.Attributes = OnnxCSharpAttributes.FromCSharpVals(attrs, feed.Attributes.AttributeDefs);
+                }
+            }
         }
 
         /// <summary>

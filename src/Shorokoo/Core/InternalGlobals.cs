@@ -145,6 +145,26 @@ namespace Shorokoo.Core
     internal static class InternalGlobals
     {
         /// <summary>
+        /// Records a call whose callee updates state, so the caller keeps it even where the
+        /// result is discarded. A module's graph is built back from its outputs, so a call
+        /// nothing reads is not in it at all — and the update the callee registered goes with it
+        /// (Shorokoo/Shorokoo#310). Calling for the update alone is the one thing module-owned
+        /// state is for, so the call is an effect and not only a value.
+        ///
+        /// <para>Silently a no-op where the call is not at module scope: outside a module build
+        /// there is nothing to wrap, and a call inside a <c>LoopAPI.Iterate</c> body or a lazy
+        /// <c>IfElse</c> branch produces a scoped value the module's outputs may not name. A
+        /// discarded call there still loses its update, as it did everywhere before.</para>
+        /// </summary>
+        internal static void RegisterCallEffect(Variable modelVariable, Variable?[] callOutputs)
+        {
+            if (modelVariable.ModuleFn?.CallIsAnEffect != true) return;
+            if (GraphTrace.CallEffects is not List<Variable> effects) return;
+            if (GraphTrace.Loopers.InLoopBody || GraphTrace.InBranchBody) return;
+            if (callOutputs.NotNulls().FirstOrDefault() is Variable output) effects.Add(output);
+        }
+
+        /// <summary>
         /// Registers a state update relationship between an original state tensor and its updated value.
         /// Called by Globals.StateUpdate to track state updates during module execution. The pair is
         /// recorded on the current module build (see <see cref="GraphTrace"/>), where the graph builder

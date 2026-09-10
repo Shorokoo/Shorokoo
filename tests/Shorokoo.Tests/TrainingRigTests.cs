@@ -1205,7 +1205,7 @@ public class TrainingRigTrainingLoopCoverageTests
 
     // Calling for the state update alone is what module-owned state is for, so the call must reach
     // the graph through more than its output.
-    [Fact(Skip = "Shorokoo/Shorokoo#310: a stateful call whose output is discarded is pruned, losing its update")]
+    [Fact]
     public void TestAStatefulCallWhoseOutputIsDiscardedStillUpdatesItsState()
         => Assert.Equal([2f], StateFieldsAfterOneStep(StatefulCallDiscardedModel.ComputationGraph));
 

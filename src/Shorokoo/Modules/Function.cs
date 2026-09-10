@@ -199,9 +199,21 @@ namespace Shorokoo.Core
             _convertedSnapshotComputed = true;
         }
 
+        /// <summary>
+        /// Whether calling this function is an effect as well as a value: its body registers a
+        /// state update, or carries a call that does. Read at the call site, where a discarded
+        /// result would otherwise take the whole call — its updates with it — out of the caller's
+        /// graph (Shorokoo/Shorokoo#310). Both markers count: a body that only *calls* something
+        /// stateful carries the callee's <c>WITH_STATE_DEPS</c> on its own outputs.
+        /// </summary>
+        internal bool CallIsAnEffect { get; }
+
         internal Function(InternalComputationGraph fastGraph, FunctionType functionType, string? defaultName, string? friendlyName,
             StateOwnership? stateOwnership = null)
         {
+            this.CallIsAnEffect = fastGraph.Nodes.Any(n =>
+                n.OpCode == InternalOpCodes.STATE_UPDATE_LINK || n.OpCode == InternalOpCodes.WITH_STATE_DEPS);
+
             // Freeze the body immediately: the builder keeps ownership of its mutable
             // graph, and this Function never holds a mutable reference to it.
             this.Body = new Shorokoo.Graph.ComputationGraph(fastGraph, Shorokoo.Graph.GraphKind.Module);

@@ -1614,7 +1614,7 @@ public class ModulesCoverageTests
     /// <summary>The call-site ordinal is read off the call sites one inlining pass can see, so a
     /// call reached through a <c>[Hyper] Model&lt;&gt;</c> — spliced a pass later — never meets the
     /// direct one and both keep the undivided path.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#311: a call site arriving through a [Hyper] Model<> shares the direct call's RNG stream")]
+    [Fact]
     public void TestTwoCallSitesOfOneModelDrawApartWhenOneArrivesThroughAHyperModel()
     {
         var g = DrawTwiceOneCallThroughHyperModel.ComputationGraph;

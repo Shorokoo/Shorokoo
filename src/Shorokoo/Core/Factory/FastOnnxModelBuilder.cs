@@ -202,7 +202,7 @@ namespace Shorokoo.Core.Factory
             // Reorder so each IF body has then-block nodes positionally first
             // and else-block nodes positionally second. The Fast back-walk used
             // during subgraph extraction relies on this invariant.
-            prepFast.ConfigureScopes(ScopeSize.Maximal, ScopeSize.Maximal, ScopePriority.Loop);
+            prepFast.ConfigureScopes();
 
             // Raise the opset stamp just enough to cover post-opset-21 ops anywhere in
             // the model (main graph or function bodies); see FastOpsetResolver.RaiseToRequired.
@@ -1150,7 +1150,7 @@ namespace Shorokoo.Core.Factory
             // Before the pre-passes, so the inserted Identity is renamed with the rest of the body.
             FastIdentityWrapping.WrapAliasedOutputs(fnFast);
             RunPrePasses(fnFast, prepForOnnx, applyExecutionLowerings);
-            fnFast.ConfigureScopes(ScopeSize.Maximal, ScopeSize.Maximal, ScopePriority.Loop);
+            fnFast.ConfigureScopes();
 
             var fnGraphProto = BuildGraphProto(
                 graphName: function.DefaultName,

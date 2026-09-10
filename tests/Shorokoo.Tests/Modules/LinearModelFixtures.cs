@@ -470,6 +470,68 @@ public partial class SharedModelCalledTwiceModel
     }
 }
 
+/// <summary><see cref="Rank1GainSubModel"/> plus module-owned state, so a call site contributes a
+/// state parameter as well as a trainable one.</summary>
+[Module]
+public partial class StatefulGainSubModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var seen = InitRunningMean.Init(input.ShapeTensor());
+        Globals.StateUpdate(seen, seen + Scalar(1f));
+        return input * Ones.Init([Scalar(2L)]) + seen;
+    }
+}
+
+/// <summary><see cref="StatefulGainSubModel"/> called once — the naming baseline for
+/// <see cref="StatefulGainCalledTwiceModel"/>.</summary>
+[Module]
+public partial class StatefulGainNoRefModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+        => StatefulGainSubModel.Call(input);
+}
+
+/// <summary>One stateful model handle called twice — the two calls share its one weight and its
+/// one piece of state.</summary>
+[Module]
+public partial class StatefulGainCalledTwiceModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var m = StatefulGainSubModel.Model();
+        return m.Call(input) + m.Call(input);
+    }
+}
+
+/// <summary>A gain module taking a hyperparameter, so its model struct is wider than
+/// <see cref="Rank1GainSubModel"/>'s and it owns two parameters rather than one.</summary>
+[Module]
+public partial class HyperScaledGainSubModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input, [Hyper] Scalar<float32> scale)
+        => input * Ones.Init([Scalar(2L)]) * scale + Zeros.Init([Scalar(2L)]);
+}
+
+/// <summary><see cref="HyperScaledGainSubModel"/> called directly — the baseline for what
+/// indexing it out of a sequence must produce.</summary>
+[Module]
+public partial class HyperScaledGainNoRefModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+        => HyperScaledGainSubModel.Model(Scalar(2f)).Call(input);
+}
+
+/// <summary>A sequence of two different modules, indexed at the second one — which owns two
+/// parameters where the first owns one.</summary>
+[Module]
+public partial class HeterogeneousHyperSequenceAtOneModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+        => ModelSequence.Create<Model<Tensor<float32>, Tensor<float32>>>(
+               Rank1GainSubModel.Model(), HyperScaledGainSubModel.Model(Scalar(2f)))[Scalar(1L)].Call(input);
+}
+
 /// <summary>A reference to a parameter of a model that is never called, so the graph holds the
 /// reference with no definition behind it.</summary>
 [Module]

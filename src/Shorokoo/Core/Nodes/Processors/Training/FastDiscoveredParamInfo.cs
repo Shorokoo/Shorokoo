@@ -35,25 +35,15 @@ namespace Shorokoo.Core.Nodes.Processors.Training
         public int? Rank { get; }
 
         /// <summary>Top-level data-structure category — always <see cref="DataStructure.Tensor"/>
-        /// for the three handled op codes after the Fast lowering pipeline.</summary>
+        /// for both handled op codes after the Fast lowering pipeline.</summary>
         public DataStructure Structure { get; }
 
         /// <summary>The Fast node producing this parameter.</summary>
         public FastNode Node { get; }
 
-        /// <summary>
-        /// Bare parameter REFERENCES (<c>IModel.GetTrainableParam</c>) that resolve to this same
-        /// parameter, as the key each produces and the node producing it. A reference reads the
-        /// parameter the model already owns rather than declaring one, so it contributes no
-        /// field of its own; its consumers are rewired to this parameter's and its node is
-        /// removed alongside <see cref="Node"/> (Shorokoo/Shorokoo#263).
-        /// </summary>
-        public ImmutableArray<(FastTensorKey OutputKey, FastNode Node)> Aliases { get; }
-
         internal FastDiscoveredParamInfo(
             string name, FastTensorKey outputKey, bool isTrainable,
-            DType dtype, int? rank, DataStructure structure, FastNode node,
-            ImmutableArray<(FastTensorKey OutputKey, FastNode Node)> aliases)
+            DType dtype, int? rank, DataStructure structure, FastNode node)
         {
             Name = name;
             OutputKey = outputKey;
@@ -62,7 +52,6 @@ namespace Shorokoo.Core.Nodes.Processors.Training
             Rank = rank;
             Structure = structure;
             Node = node;
-            Aliases = aliases.IsDefault ? [] : aliases;
         }
     }
 }

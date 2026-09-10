@@ -28,15 +28,17 @@ namespace Shorokoo.Core.Training;
 public static class TrainingGraphBuilder
 {
     /// <summary>
-    /// Prepares a model for training by composing it with a loss function (provided as a
-    /// module's Inline method reference) and automatic differentiation.
+    /// Composes a concrete architecture with a loss function (provided as a module's Inline method
+    /// reference) and automatic differentiation.
     ///
     /// The loss function Func must reference the Inline method of a [Module]-annotated class.
     /// The module class's ComputationGraph property is used to obtain the loss computation graph.
     /// </summary>
     /// <typeparam name="TOut">The model output / loss input type (e.g., Tensor&lt;float32&gt;)</typeparam>
     /// <typeparam name="TLoss">The loss output type (e.g., Scalar&lt;float32&gt;)</typeparam>
-    /// <param name="modelGraph">The computation graph for the model (from a module's ComputationGraph property)</param>
+    /// <param name="modelGraph">The model's concrete architecture, from
+    /// <see cref="Shorokoo.Graph.InternalComputationGraphExtensions.ToConcreteArchitecture"/>; a raw
+    /// module graph is refused (see <see cref="RequireConcreteArchitecture"/>)</param>
     /// <param name="lossFunction">A Func referencing a loss module's Inline method (2 inputs → 1 output)</param>
     /// <returns>A high-level <see cref="InternalComputationGraph"/> containing AutoGrad nodes, with inputs
     /// [model_inputs..., targets, param_struct] and outputs [loss, gradient_struct]</returns>
@@ -60,13 +62,11 @@ public static class TrainingGraphBuilder
     /// state_struct?] and outputs [loss, gradient_struct, state_struct].
     ///
     /// <para>
-    /// <paramref name="modelGraph"/> may be in raw or already-concrete form. When raw, the
-    /// legacy minimal-processing path runs (no input-aware liveness filter). When the caller
-    /// has pre-routed the graph through
-    /// <see cref="Shorokoo.Graph.InternalComputationGraphExtensions.ToConcreteArchitecture"/>
-    /// — which TrainingRig.FromScratch does — those minimal passes are no-ops on the already-
-    /// concrete graph, and downstream trainable-param discovery picks up exactly the live
-    /// (post-liveness-filter) MODEL_PARAM nodes.
+    /// <paramref name="modelGraph"/> must already be a concrete architecture from
+    /// <see cref="Shorokoo.Graph.InternalComputationGraphExtensions.ToConcreteArchitecture"/> —
+    /// this is composition, not lowering, and anything else is refused (see
+    /// <see cref="RequireConcreteArchitecture"/>). Trainable-param discovery then picks up exactly
+    /// the live (post-liveness-filter) MODEL_PARAM nodes that lowering left.
     /// </para>
     /// </summary>
     public static InternalComputationGraph PrepareForTrainingAsFast(
@@ -86,16 +86,10 @@ public static class TrainingGraphBuilder
                 $"Loss graph must have exactly 1 output (loss), but has {lossGraph.Outputs.Count}.",
                 nameof(lossGraph));
 
-        // Step 1+2: Process model graph for training and replace trainable params with a
-        // TensorStruct input — both passes happen on a single InternalComputationGraph that
-        // becomes the host graph for the rest of this function. If the caller has already
-        // routed the graph through ToConcreteArchitecture (TrainingRig.FromScratch does
-        // this so it can run input-aware liveness filtering once for the whole pipeline),
-        // skip ProcessGraphForTrainingOnFast — its first pass, FastApplyIdentifierTemplates,
-        // asserts on the MODEL_PARAM nodes that the concrete-arch pipeline produces.
+        // Step 1+2: Replace the model's trainable params with a TensorStruct input, on a single
+        // InternalComputationGraph that becomes the host graph for the rest of this function.
         var fastGraph = modelGraph.Clone();
-        if (!IsAlreadyConcretized(fastGraph))
-            ProcessGraphForTrainingOnFast(fastGraph);
+        RequireConcreteArchitecture(fastGraph);
         var fastReplaceResult = Nodes.Processors.Training.FastReplaceTrainableParamsWithInputProcessor.Process(fastGraph);
 
         var trainableParamStructInputKey = fastReplaceResult.TrainableParamStructInputKey;
@@ -322,43 +316,31 @@ public static class TrainingGraphBuilder
     }
 
     /// <summary>
-    /// Processes a module's computation graph for training in place. Runs the same pipeline
-    /// steps as ToConcreteArchitecture but stops before the ConvertTrainableParamIdRefToTrainableParam
-    /// step (which requires graph execution and fails with symbolic model inputs).
+    /// Refuses anything but a concrete architecture. Training needs one: the parameter count and
+    /// every parameter's shape and initial value have to be statically known, and they are known
+    /// only from the MODEL_PARAM nodes
+    /// <see cref="Shorokoo.Graph.InternalComputationGraphExtensions.ToConcreteArchitecture"/>
+    /// produces — the trainable-param struct this builder emits carries a rank per field, never a
+    /// shape, so it cannot supply them and neither can anything downstream. TrainingRig reads those
+    /// nodes for the initial values and pairs them against this builder's fields by position.
+    ///
+    /// <para>The test is the canonical one: none of the module-stage ops
+    /// (<see cref="InternalOpCodes.ModuleStageOps"/>) that
+    /// <c>ToConcreteArchitecture</c> asserts absent on its own output and that
+    /// <c>SrkFileFormat.DetectStage</c> classifies a module graph by. It applies to this method's
+    /// INPUT only — the struct inputs and AUTO_GRAD node it goes on to build are themselves
+    /// module-stage ops.</para>
     /// </summary>
-    /// <summary>
-    /// A graph is "concretized" (already through
-    /// <see cref="Shorokoo.Graph.InternalComputationGraphExtensions.ToConcreteArchitecture"/>)
-    /// iff it has no high-level forms left: no MODEL_INVOKE, FUNCTION_INVOKE,
-    /// MODEL_PARAM_REF, or MODEL_PARAM_MODEL_REF nodes. Used to decide whether
-    /// <see cref="ProcessGraphForTrainingOnFast"/> needs to run.
-    /// </summary>
-    private static bool IsAlreadyConcretized(InternalComputationGraph graph)
+    private static void RequireConcreteArchitecture(InternalComputationGraph modelGraph)
     {
-        foreach (var node in graph.Nodes)
-        {
-            if (node.OpCode == InternalOpCodes.MODEL_INVOKE
-                || node.OpCode == InternalOpCodes.FUNCTION_INVOKE
-                || node.OpCode == InternalOpCodes.MODEL_PARAM_REF
-                || node.OpCode == InternalOpCodes.MODEL_PARAM_MODEL_REF
-                || node.OpCode == InternalOpCodes.MODEL_PARAM_ID_REF)
-                return false;
-        }
-        return true;
-    }
+        var moduleStageNode = modelGraph.Nodes.FirstOrDefault(n => InternalOpCodes.IsModuleStageOp(n.OpCode));
+        if (moduleStageNode is null) return;
 
-    private static void ProcessGraphForTrainingOnFast(InternalComputationGraph fastGraph)
-    {
-        Nodes.Processors.Fast.FastApplyIdentifierTemplates.Process(fastGraph);
-        Nodes.Processors.Fast.FastInlineModulesAndFunctions.Process(fastGraph);
-        Nodes.Processors.Fast.FastProcessorHelper.RemoveUnreachableNodes(fastGraph);
-        Nodes.Processors.Fast.FastConvertToIdRefModelParams.Process(fastGraph);
-        Nodes.Processors.Fast.FastUnpackModelStruct.Process(fastGraph);
-        Nodes.Processors.Fast.FastUnpackTensorStructs.Process(fastGraph);
-
-        // We intentionally skip ConvertTrainableParamIdRefToTrainableParam (requires execution)
-        // and Simplify (can't handle MODEL_PARAM_ID_REF nodes).
-        // FastReplaceTrainableParamsWithInputProcessor handles MODEL_PARAM_ID_REF directly.
+        throw new ArgumentException(
+            $"Model graph is not a concrete architecture: it still contains {moduleStageNode.OpCode}. "
+            + "Lower it with ToConcreteArchitecture(inputHints, ...) first — training needs every "
+            + "parameter's shape and initial value, which only that lowering resolves.",
+            nameof(modelGraph));
     }
 
     /// <summary>

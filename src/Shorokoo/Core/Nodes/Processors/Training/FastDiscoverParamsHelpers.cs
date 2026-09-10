@@ -9,7 +9,6 @@ using Shorokoo.Modules;
 using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
-using System.Diagnostics;
 using System.Linq;
 
 namespace Shorokoo.Core.Nodes.Processors.Training
@@ -17,23 +16,22 @@ namespace Shorokoo.Core.Nodes.Processors.Training
     /// <summary>
     /// Shared helpers for the Fast-native trainable / state param discovery processors.
     /// Walks <see cref="InternalComputationGraph.Nodes"/> in stored (topological) order, filters
-    /// to param-producer ops (<c>MODEL_PARAM</c>, <c>MODEL_PARAM_DATA</c>,
-    /// <c>MODEL_PARAM_ID_REF</c>), and reads dtype / rank / sanitized field name straight
-    /// off each node's attributes — no round-trip to <c>ComputationGraph</c>.
+    /// to param-producer ops (<c>MODEL_PARAM</c>, <c>MODEL_PARAM_DATA</c>), and reads dtype /
+    /// rank / sanitized field name straight off each node's attributes — no round-trip to
+    /// <c>ComputationGraph</c>.
     /// </summary>
     internal static class FastDiscoverParamsHelpers
     {
         public static ImmutableArray<FastDiscoveredParamInfo> Discover(InternalComputationGraph graph, bool wantTrainable)
         {
-            var definitions = new List<(FastNode Node, FastTensorKey OutputKey, bool IsTrainable, DType DType, int? Rank)>();
-            // Bare references (IModel.GetTrainableParam), keyed by the model id they point at.
-            var aliasesByModelId = new Dictionary<ModelId, List<(FastTensorKey OutputKey, FastNode Node)>>();
+            var results = ImmutableArray.CreateBuilder<FastDiscoveredParamInfo>();
 
             foreach (var node in graph.Nodes)
             {
+                // MODEL_PARAM_ID_REF is module-stage machinery, so a concrete architecture — all
+                // this runs on — carries none; its definitions have already become MODEL_PARAM.
                 if (node.OpCode != InternalOpCodes.MODEL_PARAM &&
-                    node.OpCode != InternalOpCodes.MODEL_PARAM_DATA &&
-                    node.OpCode != InternalOpCodes.MODEL_PARAM_ID_REF)
+                    node.OpCode != InternalOpCodes.MODEL_PARAM_DATA)
                     continue;
 
                 // The RngSeed parameter at reserved ModelId [0] is the model's RNG identity —
@@ -57,82 +55,24 @@ namespace Shorokoo.Core.Nodes.Processors.Training
                 var (dtype, rank) = ExtractDTypeAndRank(node);
                 if (dtype is null) continue;
 
-                // A bare reference reads a parameter the model already owns — it declares none of
-                // its own, and its ParamRef_<id path> name is a placeholder, not the parameter's.
-                // Counting it as a parameter gives one weight two struct fields, and the reference
-                // then reads its own fed tensor instead of the model's (Shorokoo/Shorokoo#263).
-                if (IsParamReference(node))
-                {
-                    var referencedId = ModelIdOf(node)
-                        ?? throw new InvalidOperationException(
-                            "Trainable-param discovery: a parameter reference (e.g. via "
-                            + "IModel.GetTrainableParam) carries no identifier template, so the "
-                            + "parameter it points at cannot be determined.");
-                    if (!aliasesByModelId.TryGetValue(referencedId, out var aliases))
-                        aliasesByModelId[referencedId] = aliases = [];
-                    aliases.Add((outputKey.Value, node));
-                    continue;
-                }
-
-                definitions.Add((node, outputKey.Value, isTrainable.Value, dtype, rank));
-            }
-
-            // Only the trainable pass consumes Aliases (FastReplaceTrainableParamsWithInputProcessor);
-            // the state struct is built separately and would silently leave a reference node behind.
-            // GetTrainableParam only ever mints a trainable reference, so this cannot fire today.
-            Debug.Assert(wantTrainable || aliasesByModelId.Count == 0,
-                "A non-trainable parameter reference has no consumer for its alias.");
-
-            var results = ImmutableArray.CreateBuilder<FastDiscoveredParamInfo>(definitions.Count);
-            foreach (var (node, outputKey, isTrainable, dtype, rank) in definitions)
-            {
-                // The reference's template carries the id of the parameter it points at (composed
-                // from its model's base id and the relative path it was given), so the id is what
-                // pairs the two — never the name, which is exactly what differs.
-                List<(FastTensorKey OutputKey, FastNode Node)>? aliases = null;
-                if (aliasesByModelId.Count > 0 && ModelIdOf(node) is { } modelId)
-                    aliasesByModelId.Remove(modelId, out aliases);
-
-                var name = ResolveParamName(node, results.Count);
+                // One node per parameter, so one field per node: concretization has already
+                // collapsed every site that names a given ModelId — a model handle called twice,
+                // a bare IModel.GetTrainableParam reference — onto a single MODEL_PARAM
+                // (FastConvertModelParamIdRefToModelParam's ExtractModelIdInfosFromStore keys its
+                // results by ModelId). No second collapse is needed or wanted here: a loop body's
+                // per-iteration parameters are separate nodes sharing one generalized identifier
+                // template, and each is its own parameter.
                 results.Add(new FastDiscoveredParamInfo(
-                    name, outputKey, isTrainable, dtype, rank, DataStructure.Tensor, node,
-                    aliases is null ? default : [.. aliases]));
+                    ResolveParamName(node, results.Count), outputKey.Value, isTrainable.Value,
+                    dtype, rank, DataStructure.Tensor, node));
             }
 
-            // Mirrors the concretized path's rule (FastConvertModelParamIdRefToModelParam's
-            // ExtractModelIdInfosFromStore): a reference is not a definition and cannot stand in
-            // for one, so a model id that only ever appears referenced is an error, not a
-            // parameter to invent.
-            if (aliasesByModelId.Count > 0)
-                throw new InvalidOperationException(
-                    $"Trainable-param discovery: model id {aliasesByModelId.Keys.First()} is "
-                    + "referenced (e.g. via IModel.GetTrainableParam) but has no parameter "
-                    + "definition in the graph. A bare reference cannot stand in for the definition.");
-
-            return results.MoveToImmutable();
+            return results.ToImmutable();
         }
 
         /// <summary>
-        /// Whether this node is a bare REFERENCE to a parameter (<c>IModel.GetTrainableParam</c>)
-        /// rather than the parameter's own definition. Only <c>MODEL_PARAM_ID_REF</c> can be one,
-        /// and only it declares the attribute — <c>GetBoolVal</c> throws rather than returning
-        /// null for an attribute the node's op does not declare, so the op check is load-bearing,
-        /// not an optimization. <c>MODEL_PARAM</c> and <c>MODEL_PARAM_DATA</c> are definitions.
-        /// </summary>
-        private static bool IsParamReference(FastNode node)
-            => node.OpCode == InternalOpCodes.MODEL_PARAM_ID_REF
-               && (node.Attributes.GetBoolVal(OnnxOpAttributeNames.ShrkAttrIsParamReference) ?? false);
-
-        /// <summary>The model id in this node's identifier template, if it carries one.</summary>
-        private static ModelId? ModelIdOf(FastNode node)
-            => string.IsNullOrEmpty(node.IdentifierTemplate)
-                ? null
-                : new ModelParamIdentifierTemplate(node.IdentifierTemplate).ModelIdTemplate;
-
-        /// <summary>
-        /// Reads dtype and rank from the producing node's attributes. All three handled op
-        /// codes produce a single tensor whose dtype/rank are recoverable without rich CG
-        /// metadata.
+        /// Reads dtype and rank from the producing node's attributes. Both handled op codes
+        /// produce a single tensor whose dtype/rank are recoverable without rich CG metadata.
         /// </summary>
         private static (DType? dtype, int? rank) ExtractDTypeAndRank(FastNode node)
         {

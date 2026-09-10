@@ -904,9 +904,26 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                             subFastGraph, modelKey, boundModel, enclosingLoops, newNodes);
                     }
 
+                    // When the creation is known, its own inputs ARE the hyperparameters, so bind
+                    // the body's formals straight to them. Reading them back off the model variable
+                    // instead keeps whatever produced it alive to be unpacked, and a ModelSequence
+                    // kept alive that way has to lay its elements out as parallel per-field
+                    // sequences — which elements of differing hyperparameter arity have no single
+                    // width for (Shorokoo/Shorokoo#305). MODULE_SET_HYPERPARAMS carries them behind
+                    // [inputModule, iterationIndices], so slot i is input 2 + i.
+                    bool bindFromCreation =
+                        directModelCreation is not null &&
+                        directModelCreation.Inputs.Count == moduleFn.HyperparamInputs.Length + 2;
+
                     // Create MODEL_HYPERPARAM fast nodes for each hyperparam input
                     for (int i = 0; i < moduleFn.HyperparamInputs.Length; i++)
                     {
+                        if (bindFromCreation)
+                        {
+                            hyperparamNodeKeys.Add(directModelCreation!.Inputs[2 + i]);
+                            continue;
+                        }
+
                         var hyperparam = moduleFn.HyperparamInputs[i];
                         var hyperparamNodeKey = FastNodeKey.New();
                         var hyperparamTensorKey = new FastTensorKey(hyperparamNodeKey, 0);

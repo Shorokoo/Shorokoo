@@ -484,8 +484,6 @@ public class CodegenFreeModuleTests
         Assert.Equal<float>([2f, 2f, 3f], StateThenOutput(StatefulCalledBeforeAndInsideAnIfModel.ComputationGraph, true));
         Assert.Equal<float>([1f, 3f, 6f], StateThenOutput(StatefulCalledBeforeAndInsideAnIfModel.ComputationGraph, false));
 
-        Assert.Equal<float>([2f, 1f, 2f], StateThenOutput(StatefulCallDiscardedInsideAnIfArmModel.ComputationGraph, true));
-        Assert.Equal<float>([0f, 3f, 6f], StateThenOutput(StatefulCallDiscardedInsideAnIfArmModel.ComputationGraph, false));
     }
 
     /// <summary>

@@ -36,7 +36,9 @@ Related: [core-types.md](core-types.md) · [inference.md](inference.md) ·
     second call reading what the first wrote — including a call whose result the body
     discards, which is how you call for the update alone. Across the arms of an
     `IfElse` only the arm that runs updates the state, and calls within one arm
-    compose with each other and with any call made before the branch.
+    compose with each other and with any call made before the branch. A call the
+    branch does not choose between has to be made before the ones it does: the
+    parameter cannot carry the branch's answer before the branch produces it.
 - `Inline` may return a single value or a tuple (multiple outputs).
 - The class must be `partial` so the generator can extend it.
 - The generator is a convenience, not a requirement — see

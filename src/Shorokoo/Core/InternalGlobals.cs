@@ -151,13 +151,10 @@ namespace Shorokoo.Core
         /// (Shorokoo/Shorokoo#310). Calling for the update alone is the one thing module-owned
         /// state is for, so the call is an effect and not only a value.
         ///
-        /// <para>A call inside a lazy <c>IfElse</c> branch is kept by the branch instead: its value
-        /// is scoped, and an output the whole graph reads may not name it (see
-        /// <see cref="GraphTrace.BranchScope.ArmValueWithItsEffects"/>). Silently a no-op where
-        /// there is no harvest to reach at all: outside a module build, and inside a
-        /// <c>LoopAPI.Iterate</c> body, where the value is a per-iteration node with no post-loop
-        /// translation of its own — the deferral <c>Globals.StateUpdate</c> gets there has no
-        /// counterpart for a whole call.</para>
+        /// <para>Silently a no-op where there is no harvest to reach: outside a module build, and
+        /// inside a <c>LoopAPI.Iterate</c> body, where the value is a per-iteration node with no
+        /// post-loop translation of its own — the deferral <c>Globals.StateUpdate</c> gets there
+        /// has no counterpart for a whole call.</para>
         /// </summary>
         internal static void RegisterCallEffect(Variable modelVariable, Variable?[] callOutputs)
         {

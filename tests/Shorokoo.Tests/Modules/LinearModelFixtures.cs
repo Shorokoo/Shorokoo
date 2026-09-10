@@ -790,7 +790,7 @@ public partial class StatefulCalledFromBothIfArmsModel
     public static Tensor<float32> Inline(Tensor<float32> t, Scalar<bit> cond)
     {
         var m = StatefulGainSubModel.Model();
-        return cond.IfElse(() => m.Call(t), () => m.Call(t) * Scalar(2f));
+        return cond.IfElse(m.Call(t), m.Call(t) * Scalar(2f));
     }
 }
 
@@ -802,7 +802,7 @@ public partial class StatefulCalledFromOneIfArmModel
     public static Tensor<float32> Inline(Tensor<float32> t, Scalar<bit> cond)
     {
         var m = StatefulGainSubModel.Model();
-        return cond.IfElse(() => m.Call(t), () => t * Scalar(3f));
+        return cond.IfElse(m.Call(t), t * Scalar(3f));
     }
 }
 
@@ -814,20 +814,7 @@ public partial class StatefulCalledTwiceInOneIfArmModel
     public static Tensor<float32> Inline(Tensor<float32> t, Scalar<bit> cond)
     {
         var m = StatefulGainSubModel.Model();
-        return cond.IfElse(() => m.Call(t) + m.Call(t), () => t * Scalar(3f));
-    }
-}
-
-/// <summary>A call inside an arm whose result the arm discards, so the arm keeps it for the
-/// update alone.</summary>
-[Module]
-public partial class StatefulCallDiscardedInsideAnIfArmModel
-{
-    public static Tensor<float32> Inline(Tensor<float32> t, Scalar<bit> cond)
-    {
-        var m = StatefulGainSubModel.Model();
-        return cond.IfElse(() => { var used = m.Call(t); _ = m.Call(t); return used; },
-                           () => t * Scalar(3f));
+        return cond.IfElse(m.Call(t) + m.Call(t), t * Scalar(3f));
     }
 }
 
@@ -840,7 +827,7 @@ public partial class StatefulCalledBeforeAndInsideAnIfModel
     {
         var m = StatefulGainSubModel.Model();
         var first = m.Call(t);
-        return cond.IfElse(() => m.Call(first), () => first * Scalar(3f));
+        return cond.IfElse(m.Call(first), first * Scalar(3f));
     }
 }
 
@@ -915,7 +902,7 @@ public partial class GainInBothIfArmsOnARuntimeConditionModel
 {
     public static Tensor<float32> Inline(Tensor<float32> t)
         => (t.ShapeTensor()[0] > Scalar(0L))
-            .IfElse(() => t * Ones.Init([Scalar(2L)]), () => t * Ones.Init([Scalar(2L)]) * Scalar(2f));
+            .IfElse(t * Ones.Init([Scalar(2L)]), t * Ones.Init([Scalar(2L)]) * Scalar(2f));
 }
 
 /// <summary>One parameter created before an <c>IfElse</c> and used inside both arms, so the
@@ -926,7 +913,7 @@ public partial class SharedGainInBothIfArmsModel
     public static Tensor<float32> Inline(Tensor<float32> t)
     {
         var w = Ones.Init([Scalar(2L)]);
-        return (t.ShapeTensor()[0] > Scalar(0L)).IfElse(() => t * w, () => t * w * Scalar(2f));
+        return (t.ShapeTensor()[0] > Scalar(0L)).IfElse(t * w, t * w * Scalar(2f));
     }
 }
 

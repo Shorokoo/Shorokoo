@@ -33,13 +33,19 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// annotation, not an assignment — so a read is attributed to a call by which marker it falls
     /// under, never by whether it follows a link.</para>
     ///
-    /// <para><b>Calls in the arms of an IfElse.</b> Node order is not a running order there: the
-    /// arms are alternatives, so composing across them would credit an update that never happened.
-    /// Each arm is chained on its own from the value the parameter held entering the branch, both
-    /// arms' results are threaded out through the <c>IF_CLOSE</c> as one more output pair, and a
-    /// module-scope link takes whichever arm ran (Shorokoo/Shorokoo#308). An arm that does not call
-    /// the model hands the incoming value straight back, so a call in one arm alone updates the
-    /// state only when that arm runs.</para>
+    /// <para><b>Calls in the arms of an IfElse.</b> The arms are alternatives, so composing across
+    /// them would credit an update that never happened. Each arm is chained on its own from the
+    /// value the parameter held entering the branch, both arms' results are threaded out through
+    /// the <c>IF_CLOSE</c> as one more output pair, and a link at the branch's own scope takes
+    /// whichever arm ran (Shorokoo/Shorokoo#308). An arm that does not call the model hands the
+    /// incoming value straight back, so a call in one arm alone updates the state only when that
+    /// arm runs.</para>
+    ///
+    /// <para>A branch expression is an ordinary argument, so its nodes are traced <em>before</em>
+    /// the <c>IF_OPEN</c> that selects them and only move inside it at ONNX build time (see
+    /// <see cref="FastIfBranchScoper"/>). Which arm a call belongs to is therefore read off what
+    /// the <c>IF_CLOSE</c>'s branch inputs reach, not off where the call sits: a value both arms
+    /// read belongs to neither and is the parameter's ordinary, unconditional history.</para>
     /// </summary>
     internal static class FastChainStateUpdatesAcrossCallSites
     {
@@ -75,7 +81,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             if (linksByParam.Count == 0) return;
 
             var enclosingScope = ComputeEnclosingScope(graph);
-            var armOfNode = ClassifyBranches(graph, positionOf);
+            var armsOfNode = ClassifyBranches(graph);
 
             // Range rewrites and node insertions are collected first and applied after, so every
             // position taken here stays the one the node still has.
@@ -85,7 +91,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             foreach (var (paramNodeKey, links) in linksByParam)
             {
-                var sites = CallSitesOf(graph, links, positionOf, enclosingScope, armOfNode, nodeByKey);
+                var sites = CallSitesOf(graph, links, enclosingScope, armsOfNode, nodeByKey);
                 if (sites is null) continue;                        // shape this pass does not order
                 if (sites.Count < 2 && sites.All(s => s.Arm is null)) continue;   // nothing to compose
 
@@ -140,16 +146,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
         /// <summary>
         /// This parameter's call sites in node order, or null when the shape is one this pass does
-        /// not order: a call inside a loop body (the body repeats, so its calls are not a sequence
-        /// — and a rolled loop carrying state is refused where it matters, when the graph is
-        /// prepared for training), or an IfElse nested inside another scope.
+        /// not order: a call inside a loop body, whose calls repeat rather than run in sequence —
+        /// and a rolled loop carrying state is refused where it matters, when the graph is prepared
+        /// for training.
         /// </summary>
         private static List<CallSite>? CallSitesOf(
             InternalComputationGraph graph,
             List<FastNode> links,
-            Dictionary<FastNodeKey, int> positionOf,
             Dictionary<FastNodeKey, FastNodeKey?> enclosingScope,
-            Dictionary<FastNodeKey, ArmKey> armOfNode,
+            Dictionary<FastNodeKey, List<ArmKey>> armsOfNode,
             Dictionary<FastNodeKey, FastNode> nodeByKey)
         {
             var linkKeys = links.Select(l => l.Outputs[0]!.Value).ToHashSet();
@@ -166,15 +171,20 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             foreach (var link in links)
             {
                 if (!markerByLink.TryGetValue(link.Key, out var marker)) return null;
+                if (enclosingScope[link.Key] is not null) return null;   // inside a loop body
 
-                var scope = enclosingScope[link.Key];
-                if (scope is null) { sites.Add(new CallSite(link, marker, null)); continue; }
-
-                // Inside a scope: only an IfElse arm whose branch is itself at module scope.
-                if (!armOfNode.TryGetValue(link.Key, out var arm)) return null;
-                if (!nodeByKey.TryGetValue(arm.IfClose, out var close)) return null;
-                if (enclosingScope[close.Key] is not null) return null;
-                sites.Add(new CallSite(link, marker, arm));
+                var arms = armsOfNode.TryGetValue(link.Key, out var found) ? found : [];
+                if (arms.Count == 0) { sites.Add(new CallSite(link, marker, null)); continue; }
+                if (arms.Count > 1)
+                    throw new InvalidOperationException(
+                        "FastChainStateUpdatesAcrossCallSites: a state update sits inside nested IfElse "
+                        + "branches, so which of them decides whether it happened takes reasoning this "
+                        + "pass does not do. Chaining it as an ordinary call would apply an update the "
+                        + "condition did not select. Call the model once outside the branches, or give "
+                        + "each branch its own model.");
+                if (!nodeByKey.TryGetValue(arms[0].IfClose, out var close)) return null;
+                if (enclosingScope[close.Key] is not null) return null;   // the IfElse is inside a loop
+                sites.Add(new CallSite(link, marker, arms[0]));
             }
             return sites;
         }
@@ -196,6 +206,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var current = param;
             var armValue = new Dictionary<ArmKey, FastTensorKey>();
             var armsOfClose = new Dictionary<FastNodeKey, FastTensorKey>();   // the value entering each branch
+            FastNodeKey? pendingClose = null;                                 // a branch still being read
             int previousMarker = -1;
 
             for (int i = 0; i < sites.Count; i++)
@@ -205,12 +216,21 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 if (site.Arm is ArmKey arm)
                 {
                     if (!armsOfClose.ContainsKey(arm.IfClose)) armsOfClose[arm.IfClose] = current;
+                    pendingClose = arm.IfClose;
                     var incoming = armValue.TryGetValue(arm, out var held) ? held : armsOfClose[arm.IfClose];
                     rewrites.Add((previousMarker + 1, positionOf[site.Marker.Key], param, incoming));
                     armValue[arm] = site.Link.Outputs[0]!.Value;
                 }
                 else
                 {
+                    // A call no branch chooses between, made after one a branch does, would have to
+                    // take its turn before a value that only exists at the IF_CLOSE following it.
+                    if (pendingClose is not null)
+                        throw new InvalidOperationException(
+                            "FastChainStateUpdatesAcrossCallSites: a call this IfElse does not choose "
+                            + "between is made after one it does, so the parameter would have to carry "
+                            + "the branch's answer before the branch produces it. Make the calls the "
+                            + "branch does not choose between before the ones it does.");
                     rewrites.Add((previousMarker + 1, positionOf[site.Marker.Key], param, current));
                     current = site.Link.Outputs[0]!.Value;
                 }
@@ -225,6 +245,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 current = CloseBranch(graph, ifClose, armsOfClose[ifClose.Key], armValue,
                                       positionOf, insertions);
                 branchLinks.Add(current);
+                pendingClose = null;
             }
         }
 
@@ -301,11 +322,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         /// <summary>
-        /// Which arm of which IfElse each node belongs to. The arms share one scope — node order
-        /// does not separate them — so membership is read off what each branch's own inputs reach.
+        /// The arms each node belongs to: those whose branch inputs reach it and whose sibling arm
+        /// does not. A node both arms reach is not a branch's — it is the parameter's ordinary
+        /// history — and one reached from nested IfElses lands in several, which the caller refuses.
         /// </summary>
-        private static Dictionary<FastNodeKey, ArmKey> ClassifyBranches(
-            InternalComputationGraph graph, Dictionary<FastNodeKey, int> positionOf)
+        private static Dictionary<FastNodeKey, List<ArmKey>> ClassifyBranches(InternalComputationGraph graph)
         {
             var producerOf = new Dictionary<FastTensorKey, FastNode>();
             foreach (var node in graph.Nodes)
@@ -313,38 +334,50 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     foreach (var ok in outs)
                         if (ok is not null && !ok.Value.IsEmpty) producerOf[ok.Value] = node;
 
-            var armOf = new Dictionary<FastNodeKey, ArmKey>();
+            HashSet<FastNodeKey> ReachedFrom(IEnumerable<FastTensorKey?> roots)
+            {
+                var seen = new HashSet<FastNodeKey>();
+                var worklist = new Stack<FastNode>();
+                foreach (var root in roots)
+                    if (root is FastTensorKey k && producerOf.TryGetValue(k, out var producer)
+                        && seen.Add(producer.Key))
+                        worklist.Push(producer);
+                while (worklist.Count > 0)
+                    foreach (var (_, ins) in worklist.Pop().FullInputs)
+                        foreach (var ik in ins)
+                            if (ik is FastTensorKey k && producerOf.TryGetValue(k, out var producer)
+                                && seen.Add(producer.Key))
+                                worklist.Push(producer);
+                return seen;
+            }
+
+            var armsOf = new Dictionary<FastNodeKey, List<ArmKey>>();
             foreach (var close in graph.Nodes)
             {
                 if (close.OpCode != OpCodes.IF_CLOSE) continue;
-                int openPos = close.GraphOpenNodeKey is FastNodeKey openKey && positionOf.TryGetValue(openKey, out var op)
-                    ? op : -1;
-                foreach (var branch in (string[])[OnnxOpAttributeNames.AttrThenBranch, OnnxOpAttributeNames.AttrElseBranch])
-                {
-                    if (!close.FullInputs.TryGetValue(branch, out var roots)) continue;
-                    var seen = new HashSet<FastNodeKey>();
-                    var worklist = new Stack<FastNode>();
-                    foreach (var root in roots)
-                        if (root is FastTensorKey k && producerOf.TryGetValue(k, out var producer)
-                            && seen.Add(producer.Key))
-                            worklist.Push(producer);
+                var reached = new Dictionary<string, HashSet<FastNodeKey>>();
+                foreach (var branch in Branches)
+                    reached[branch] = close.FullInputs.TryGetValue(branch, out var roots)
+                        ? ReachedFrom(roots) : [];
 
-                    while (worklist.Count > 0)
+                foreach (var branch in Branches)
+                    foreach (var nodeKey in reached[branch])
                     {
-                        var node = worklist.Pop();
-                        // Stop at the branch's edge: a node from before the If belongs to neither arm.
-                        if (positionOf[node.Key] <= openPos) continue;
-                        armOf[node.Key] = new ArmKey(close.Key, branch);
-                        foreach (var (_, ins) in node.FullInputs)
-                            foreach (var ik in ins)
-                                if (ik is FastTensorKey k && producerOf.TryGetValue(k, out var producer)
-                                    && seen.Add(producer.Key))
-                                    worklist.Push(producer);
+                        if (reached[Other(branch)].Contains(nodeKey)) continue;
+                        if (!armsOf.TryGetValue(nodeKey, out var list)) armsOf[nodeKey] = list = [];
+                        list.Add(new ArmKey(close.Key, branch));
                     }
-                }
             }
-            return armOf;
+            return armsOf;
         }
+
+        private static readonly string[] Branches =
+            [OnnxOpAttributeNames.AttrThenBranch, OnnxOpAttributeNames.AttrElseBranch];
+
+        private static string Other(string branch)
+            => branch == OnnxOpAttributeNames.AttrThenBranch
+                ? OnnxOpAttributeNames.AttrElseBranch
+                : OnnxOpAttributeNames.AttrThenBranch;
 
         /// <summary>
         /// The value behind an Identity chain. Inlining wraps a parameter in one at every splice,

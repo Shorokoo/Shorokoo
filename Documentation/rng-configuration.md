@@ -172,6 +172,54 @@ the draw itself), and the streams need no enumeration up front. This works ident
 whether the loop survives to runtime or is unrolled at concretization (each copy resolves
 to the very same key, bit-for-bit).
 
+A feed reached by **calling a module from inside a loop** takes that slot too, whether the
+model was created inside the body or outside it, and by either call form — a model call or a
+module-typed `Function`: the draw is executed once per iteration, and a second execution of a
+draw is a second sample. The call site's own position supplies the scope, so the feed lands
+under the call site's id extended with one `(-2, -1)` pair per enclosing loop the callee's
+identity does not already account for — a model created inside a loop already carries that
+loop's slot, and takes no second one. The `-2` marks a call site's loop scope: it is neither a
+slot (those count from 1, with 0 reserved for `RngSeed`) nor the `-1` an iteration fills, so it
+cannot collide with anything the callee owns, and being a constant it does not move when the
+callee gains or loses a consumer. A model handed over as a `[Hyper]` model parameter takes the
+same route, since the model bound to the parameter is what gets reparented, and so does one
+taken out of a `ModelSequence`.
+
+A model the sequence position picks at **run time** cannot have its own id written into the
+path, because which model it is is not known until the graph runs. Its id arrives as split
+counters instead: the path carries one `-1` per component of it, filled from the model at run
+time exactly as a loop's `-1` is filled from the iteration index. So a `-1` in a reported path
+always means "a component resolved while the graph runs": an iteration index — following the
+loop's own slot, or the `-2` where the scope came from a call site — or one component of a
+picked model's id. Which of the two a given `-1` is does not follow from the path, which is why
+the pin skeleton's scope comment names both. The stream is still per-model; it is the *report* that
+cannot enumerate the models, since it lists what the graph says statically. Two consequences
+follow: `Rng.Pin` cannot name such a model, and an `Override` addressing that path must give a
+concrete value for the `-1` (the reported path with the `-1` still in it is not itself an
+address). The one route that reaches none of this is a sequence assembled *inside* a loop,
+which has its own open defect,
+[#303](https://github.com/Shorokoo/Shorokoo/issues/303).
+
+Reaching a model out of a `ModelSequence` therefore keys its feeds the way calling that model
+directly does. That is a change: before it, every model in a sequence drew from one stream
+named for the feed alone. A `Rng.Pin` path or a per-stream `Override` written against a model
+reached that way needs re-reading off the stream report.
+
+Note what the slot separates and what it does not. It separates the **iterations** of one
+call site. Two call sites reaching one and the same model *object* still share its id, and
+therefore its stream, exactly as they do outside a loop — see
+[#298](https://github.com/Shorokoo/Shorokoo/issues/298). Two call sites of a module-typed
+`Function` each mint their own id and do not.
+
+The callee's **parameters** deliberately do not take the iteration slot. One call site reading
+one parameter on every iteration is weight sharing, and is what a model created outside the
+loop already gives; creating the model inside the body is how you ask for a parameter per
+iteration.
+
+Because a feed's id is what keys its stream, a module called inside a loop keys differently
+than it did before this scope existed. A `Rng.Pin` path or a per-stream `Override` written
+against such a model needs re-reading off the stream report.
+
 ## Per-stream overrides
 
 `config.Override(RngCollection.Params, [1, 1], seed)` returns a **copy** of the config with
@@ -192,9 +240,15 @@ Every stream is a valid override address, including the per-iteration streams of
 feed (e.g. `[1, 2, 1]` = iteration 2 of the feed at loop slot 1) — overriding one iteration
 re-seeds that iteration only; sibling iterations keep their derived keys. An override that
 addresses no stream throws: a `Runtime` override at bind (`WithRngConfig`), a `Params`
-override at parameter initialization. A loop feed's override addresses the site pattern —
-static slots exactly, the iteration slot by index — and routes structurally in the feed's
-derivation chain, so it works for any iteration the loop actually executes.
+override at parameter initialization.
+
+What it is matched against is the **site pattern**, not a realized stream: static components
+exactly, and each `-1` by the concrete value to select. It then routes structurally in the
+feed's derivation chain, so it works for any value that position actually takes — any iteration
+the loop executes, any model the sequence position picks. The corollary is that a value the
+graph never realizes still matches the pattern, and so is accepted and simply never fires; only
+an address matching no *pattern* throws. Give `-1` positions values you have read off the
+stream report or the model ids in the architecture, not guesses.
 
 Note that changing an override's **value** (or the master seed) on an already-built model
 is a pure parameter write, while changing the override **set** re-wires the derivation
@@ -249,7 +303,7 @@ model = model.WithRngOverride(RngCollection.Runtime, [2, 0, 1], 5678);
 The override is applied on top of the model's *bound identity*, so nothing else moves — where
 rebuilding an `RngConfig` from scratch and calling `WithRngConfig` would replace the whole
 identity and silently re-key every other stream. `RngCollection.Params` is rejected (there is
-no recorded init tier to override); and an address that matches no runtime stream throws,
+no recorded init tier to override); and an address matching no runtime site pattern throws,
 exactly as it does through `RngConfig.Override`. It works on a loaded model too — the saved
 feed ops are what let the override set change — with the one exception noted above: a graph
 whose draws are already lowered can re-key a stream it *already* overrides, but cannot gain a

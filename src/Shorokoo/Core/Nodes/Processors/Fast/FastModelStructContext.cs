@@ -57,6 +57,33 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             NodeByKey = FastProcessorHelper.BuildNodeByKey(graph);
         }
 
+        /// <summary>
+        /// The keys minted by <see cref="NewNestedModelField"/>, and only those. A key being in
+        /// <see cref="UnpackedStructSequences"/> does not mean it stands for a nested field: a
+        /// LOOP_OPEN registers the bundle for a Model-sequence loop variable under the same key
+        /// as the bundle's own first field sequence, so membership alone would take a plain
+        /// sequence for a nested one.
+        /// </summary>
+        public HashSet<FastTensorKey> NestedModelFields { get; } = new();
+
+        /// <summary>
+        /// Mints the key for a struct field that is itself a Model — a <c>[Hyper] Model&lt;&gt;</c>
+        /// — and so has no tensor of its own to name. The fields (or parallel field sequences) it
+        /// stands for go in <see cref="UnpackedStructs"/> / <see cref="UnpackedStructSequences"/>
+        /// under the returned key.
+        /// </summary>
+        public FastTensorKey NewNestedModelField()
+        {
+            var key = new FastTensorKey(FastNodeKey.New(), 0);
+            NestedModelFields.Add(key);
+            return key;
+        }
+
+        /// <summary>The struct fields <paramref name="key"/> unpacks to, or null if it is a
+        /// plain tensor rather than a Model.</summary>
+        public List<FastTensorKey?>? TryGetStruct(FastTensorKey key)
+            => UnpackedStructs.TryGetValue(ResolveModelKey(key), out var fields) ? fields : null;
+
         public void RecordNewNode(FastNode node)
         {
             NewNodes.Add(node);

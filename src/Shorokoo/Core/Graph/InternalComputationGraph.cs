@@ -108,6 +108,16 @@ namespace Shorokoo.Graph
         {
             Debug.Assert(inputs.All(x => x.OwningNode.IsModelInput));
 
+            // A loop marks every body value that cannot leave it invalid at termination, and
+            // the node constructor refuses such a variable as an input. Returning one straight out
+            // of the graph takes neither route, and what reaches the exporter is unusable — an
+            // internal op no lowering can remove, or a node the loop's scope owns. Refuse the
+            // shapes the loop names here, where what the user wrote is still nameable.
+            foreach (var output in outputs)
+                if (!output.IsValid)
+                    throw new UnsupportedLoopVariableAssignmentException(
+                        ErrorCodes.FW046, output.InvalidReason ?? Looper.BodyValueReadAfterLoopGuidance);
+
             var tensors = Visitors.ReversePreOrder(ImmutableArray<Variable>.Empty, outputs).ToHashSet();
             var orderedNodes = tensors.Select(x => x.OwningNode)
                                       .Concat(inputs.Select(x => x.OwningNode))

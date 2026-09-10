@@ -114,6 +114,16 @@ namespace Shorokoo.Core.Graph
     {
         public ImmutableArray<int> Vals = ImmutableArray<int>.Empty;
 
+        /// <summary>
+        /// The component that marks a call site's loop scope, immediately before that scope's
+        /// <c>-1</c> iteration placeholder. It is deliberately neither a slot (those are numbered
+        /// from 1, with 0 reserved for <c>RngSeed</c>) nor the iteration placeholder itself, so it
+        /// cannot collide with any member of the callee it is spliced ahead of — which is what lets
+        /// it be a constant, and therefore stable when that callee gains or loses a consumer.
+        /// Nothing can be pinned to it: it addresses a scope, not a consumer.
+        /// </summary>
+        public const int CallSiteLoopScope = -2;
+
         public bool IsIterationModelId => this.Vals.Contains(-1);
         public int NumIterationIds => this.Vals.Count(x => x == -1);
         public int[] IterationIdLocations =>

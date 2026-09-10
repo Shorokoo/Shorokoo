@@ -734,6 +734,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             int nextCallSiteId = NextFreeTopLevelModelId(graph);
             var callSiteDedupeIds = new Dictionary<string, int>();
 
+            // The loops enclosing the node being visited, outermost first. Scope membership in
+            // the Fast pipeline is positional, and an invoke node carries no iteration-indices
+            // input of its own, so this is what tells us the call site's loop scope.
+            var enclosingLoops = new List<FastNode>();
+
             foreach (var fastNode in graph.Nodes)
             {
                 bool isFunction = fastNode.OpCode == InternalOpCodes.FUNCTION_INVOKE;
@@ -741,6 +746,18 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
                 if (!isFunction && !isModuleCall)
                 {
+                    if (fastNode.OpCode == OpCodes.LOOP_OPEN)
+                        enclosingLoops.Add(fastNode);
+                    else if (fastNode.OpCode == OpCodes.LOOP_CLOSE)
+                    {
+                        // Swallowing an underflow here would leave the stack shifted for every
+                        // later call site — the phantom scope the end-of-sweep assert exists to
+                        // catch — and still end at zero, so it would report nothing.
+                        Debug.Assert(enclosingLoops.Count > 0,
+                            "FastInlineModulesAndFunctions: LOOP_CLOSE before its LOOP_OPEN.");
+                        if (enclosingLoops.Count > 0)
+                            enclosingLoops.RemoveAt(enclosingLoops.Count - 1);
+                    }
                     newNodes.Add(fastNode);
                     continue;
                 }
@@ -786,7 +803,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         var callSiteTemplate = ModelParamIdentifierTemplate.LocalModule(
                             callSiteId, calleeName, callSiteDedupeIds[calleeName], ImmutableArray<int>.Empty);
 
-                        FastReparentToCallSite(subFastGraph, callSiteTemplate, callSiteId, null, graph);
+                        var (feedId, feedExtraIter) = ExtendScopeToCallSite(
+                            callSiteId, enclosingLoops, subFastGraph, newNodes);
+                        FastReparentToCallSite(
+                            subFastGraph, callSiteTemplate, callSiteId, null, graph, feedId, feedExtraIter);
                     }
                 }
                 else
@@ -797,22 +817,51 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     // Find the direct MODULE_SET_HYPERPARAMS node producing the model
                     FastNode? directModelCreation = FindDirectModuleCreation(modelKey, nodeByKey);
 
-                    // Get the module function from the tensor info
-                    var moduleFn = tensorInfos[modelKey].ModuleFn!;
+                    // Get the module function from the tensor info. Every model variable names
+                    // the module it holds, or at least the signature of one; a null here is a
+                    // graph the Node constructor's own assert refuses, so say which producer
+                    // built the operand rather than dereferencing null (Shorokoo/Shorokoo#300).
+                    var moduleFn = tensorInfos[modelKey].ModuleFn
+                        ?? throw new InvalidOperationException(
+                            "FastInlineModulesAndFunctions: the model operand of a MODEL_INVOKE names " +
+                            "no module, so there is no body to inline. It is produced by " +
+                            $"{(nodeByKey.TryGetValue(modelKey.FastNodeKey, out var operandProducer) ? operandProducer.OpCode : "no node in this graph")} " +
+                            $"(Key={modelKey.FastNodeKey}).");
 
-                    // Skip inlining for non-hyper model-type parameters that only have a type
-                    // signature. These MODEL_INVOKE nodes will be resolved later when the
-                    // concrete model is substituted during the caller's inlining pass.
-                    if (directModelCreation is null && moduleFn.FunctionType == FunctionType.ModuleSignature)
+                    // A model variable that carries only a type signature names no body. What to
+                    // splice is the module the model actually bound to it was built from, so look
+                    // for that binding: through the MODEL_HYPERPARAM that carries a
+                    // [Hyper] Model<>, and through the sequence ops when the model was taken out
+                    // of a ModelSequence. Splicing the signature's own marker graph instead is
+                    // what dropped every parameter the passed model owned
+                    // (Shorokoo/Shorokoo#264, #294, #300).
+                    var boundModel = default(BoundModule);
+                    if (directModelCreation is null)
                     {
-                        var producingNode = nodeByKey[modelKey.FastNodeKey];
-                        bool isHyperModelParam = IsModelInputNode(producingNode) &&
-                            producingNode.Attributes.GetEnumVal<InputType>(OnnxOpAttributeNames.ShrkAttrInputType) == InputType.Hyperparam;
-                        if (!isHyperModelParam)
+                        var bound = FindBoundModuleCreations(modelKey, nodeByKey, tensorInfos);
+                        boundModel = bound;
+                        if (moduleFn.FunctionType == FunctionType.ModuleSignature)
                         {
-                            newNodes.Add(fastNode);
-                            continue;
+                            if (bound.Function is null)
+                            {
+                                // Nothing is bound to it here: a signature-only model variable
+                                // whose binding this graph does not contain — a module being
+                                // flattened on its own, or a non-hyper Model<> formal. Leave the
+                                // invoke standing; the caller's pass resolves it once the
+                                // concrete model is substituted.
+                                newNodes.Add(fastNode);
+                                continue;
+                            }
+                            moduleFn = bound.Function;
                         }
+                        // Null when the binding is dynamic — one of several models, picked at run
+                        // time. The body is the same either way; only the identity differs, and
+                        // FastReparentToModelVariable below reads that off the model variable
+                        // rather than off a creation site. Taking the creation whenever the walk
+                        // names exactly one is what puts a model reached out of a ModelSequence
+                        // back under its own id, feeds included (Shorokoo/Shorokoo#303) — the
+                        // model-variable route rewrites parameter references only.
+                        directModelCreation = bound.Creation;
                     }
 
                     subFastGraph = moduleFn.GetFastFlattenedGraph();
@@ -826,11 +875,16 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         var parentModelId = new ModelId(parentModelIdVals);
                         var parentIterIndicesKey = directModelCreation.Inputs[1]; // FastTensorKey in main graph
 
-                        FastReparentToCallSite(subFastGraph, parentIdTemplate, parentModelId, parentIterIndicesKey, graph);
+                        var (feedId, feedExtraIter) = ExtendScopeToCallSite(
+                            parentModelId, enclosingLoops, subFastGraph, newNodes);
+                        FastReparentToCallSite(
+                            subFastGraph, parentIdTemplate, parentModelId, parentIterIndicesKey, graph,
+                            feedId, feedExtraIter);
                     }
                     else
                     {
-                        FastReparentToModelVariable(subFastGraph, modelKey);
+                        FastReparentToModelVariable(
+                            subFastGraph, modelKey, boundModel, enclosingLoops, newNodes);
                     }
 
                     // Create MODEL_HYPERPARAM fast nodes for each hyperparam input
@@ -850,6 +904,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         var hyperparamNode = FastNodeCreationHelpers.CreateFastNode(
                             hyperparamNodeKey, InternalOpCodes.MODEL_HYPERPARAM,
                             attrVals, new FastTensorKey?[] { modelKey });
+                        // A model-typed hyperparameter reads out as a model variable, and every
+                        // model variable must name the module it can hold — the declared
+                        // signature here, since the concrete model is bound at the call site.
+                        // Without it the read is a Model with no ModuleFn, which no consumer of
+                        // it can do anything with.
+                        hyperparamNode.TargetFunction = hyperparam.ModuleFn;
 
                         newNodes.Add(hyperparamNode);
                         nodeByKey[hyperparamNodeKey] = hyperparamNode;
@@ -936,6 +996,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 anyInlined = true;
             }
 
+            // A desync here would hand a later call site a phantom (slot, -1) reading a LOOP_OPEN
+            // index from a scope it is not in — a wrong RNG stream with no error anywhere.
+            Debug.Assert(enclosingLoops.Count == 0,
+                "FastInlineModulesAndFunctions: unbalanced LOOP_OPEN/LOOP_CLOSE across the sweep.");
+
             graph.Nodes = newNodes;
 
             // Apply output remaps to all node inputs and graph outputs
@@ -1002,13 +1067,312 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             return null;
         }
 
-        private static bool IsModelInputNode(FastNode node)
+        /// <summary>
+        /// What a model variable is actually bound to: <c>Function</c> is the module every model
+        /// it can hold was built from (null when the binding is not in this graph, or when the
+        /// candidates disagree), and <c>Creation</c> is the one <c>MODULE_SET_HYPERPARAMS</c> that
+        /// built it, or null when the choice is made at run time and there is more than one.
+        ///
+        /// <para><c>IdLength</c> and <c>IdLoopSlots</c> describe the shape every candidate's model
+        /// id has — how many components it spans, and how many of those are iteration slots. They
+        /// are what lets a feed name a model chosen at run time: the components come off the model
+        /// variable as runtime split counters, and there have to be a statically known number of
+        /// them. Null when the candidates disagree, which leaves such a feed unidentified.</para>
+        /// </summary>
+        private readonly record struct BoundModule(
+            Function? Function, FastNode? Creation, int? IdLength, int? IdLoopSlots);
+
+        /// <summary>
+        /// Follows a model variable back to the <c>MODULE_SET_HYPERPARAMS</c> nodes that could have
+        /// produced it: through <c>IDENTITY</c>, through the <c>MODEL_HYPERPARAM</c> that reads a
+        /// model-typed hyperparameter off its host, and through
+        /// <c>SEQUENCE_AT(SEQUENCE_CONSTRUCT, ...)</c>. A position the walk cannot fold to one
+        /// element yields every element instead, which still names the body to splice.
+        /// </summary>
+        private static BoundModule FindBoundModuleCreations(
+            FastTensorKey modelKey,
+            Dictionary<FastNodeKey, FastNode> nodeByKey,
+            Dictionary<FastTensorKey, FastTensorInfo> tensorInfos)
         {
-            return node.OpCode == InternalOpCodes.MODEL_TENSOR_INPUT ||
-                   node.OpCode == InternalOpCodes.MODEL_OPTIONAL_INPUT ||
-                   node.OpCode == InternalOpCodes.MODEL_SEQUENCE_INPUT ||
-                   node.OpCode == InternalOpCodes.MODEL_TENSORSTRUCT_INPUT ||
-                   node.OpCode == InternalOpCodes.GENERIC_TYPE_INPUT;
+            var walk = new ModelSourceWalk();
+            if (!Collect(modelKey, nodeByKey, walk) || walk.Creations.Count == 0) return default;
+            var creations = walk.Creations;
+
+            Function? shared = null;
+            (int length, int loopSlots)? idShape = null;
+            bool idShapeAgrees = true;
+            foreach (var creation in creations)
+            {
+                var fn = tensorInfos.TryGetValue(creation.Outputs[0]!.Value, out var info) ? info.ModuleFn : null;
+                if (fn is null) return default;
+                if (shared is null) shared = fn;
+                else if (!ReferenceEquals(shared, fn)) return default;
+
+                var idVals = creation.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrLocalModelId);
+                if (idVals is not { Length: > 0 }) { idShapeAgrees = false; continue; }
+                var shape = (idVals.Length, idVals.Count(v => v == -1));
+                if (idShape is null) idShape = shape;
+                else if (idShape.Value != shape) idShapeAgrees = false;
+            }
+
+            // One creation node is one model only if the walk reached it positionally. Reached
+            // through an insertion it stands for however many the insertion ran — a model created
+            // in a loop and appended is a fresh model per trip — and its own creation-site
+            // iteration indices belong to that loop, not to the use. Such a model still has an id
+            // of a known shape, which is all a feed needs to read it off the model variable.
+            return new BoundModule(
+                shared, creations.Count == 1 && !walk.ViaInsertion ? creations[0] : null,
+                idShapeAgrees ? idShape?.length : null,
+                idShapeAgrees ? idShape?.loopSlots : null);
+        }
+
+        /// <summary>The creations one walk has reached, and whether it crossed a sequence
+        /// insertion on the way — which makes a creation stand for a whole run of models rather
+        /// than one. <c>Visited</c> belongs to <c>Creations</c> and travels only with it: a key
+        /// already collected into one walk has still not been collected into another.</summary>
+        private sealed class ModelSourceWalk
+        {
+            public List<FastNode> Creations { get; } = [];
+            public HashSet<FastTensorKey> Visited { get; } = [];
+            public bool ViaInsertion { get; set; }
+        }
+
+        /// <summary>
+        /// Appends every creation <paramref name="key"/> can resolve to. Returns false as soon as
+        /// one branch of the walk dead-ends, because a body chosen from an incomplete set of
+        /// candidates is a guess.
+        /// </summary>
+        private static bool Collect(
+            FastTensorKey key,
+            Dictionary<FastNodeKey, FastNode> nodeByKey,
+            ModelSourceWalk walk)
+        {
+            if (!walk.Visited.Add(key)) return true;
+            if (!nodeByKey.TryGetValue(key.FastNodeKey, out var node)) return false;
+
+            switch (node.OpCode)
+            {
+                case InternalOpCodes.MODULE_SET_HYPERPARAMS:
+                    walk.Creations.Add(node);
+                    return true;
+
+                case OpCodes.IDENTITY:
+                    return node.Inputs[0] is FastTensorKey aliased
+                        && Collect(aliased, nodeByKey, walk);
+
+                case InternalOpCodes.MODEL_HYPERPARAM:
+                {
+                    // The host's own creations carry the models bound to their hyperparameters;
+                    // MODULE_SET_HYPERPARAMS inputs are [inputModule, iterationIndices, ...hps].
+                    if (node.Inputs[0] is not FastTensorKey hostKey) return false;
+                    var index = (int)node.Attributes.GetLongVal(
+                        OnnxOpAttributeNames.ShrkAttrHyperparamIndex)!.Value;
+                    var hostWalk = new ModelSourceWalk();
+                    if (!Collect(hostKey, nodeByKey, hostWalk)) return false;
+                    walk.ViaInsertion |= hostWalk.ViaInsertion;
+                    foreach (var host in hostWalk.Creations)
+                    {
+                        if (host.Inputs.Count <= 2 + index) return false;
+                        if (host.Inputs[2 + index] is not FastTensorKey bound) return false;
+                        if (!Collect(bound, nodeByKey, walk)) return false;
+                    }
+                    return hostWalk.Creations.Count > 0;
+                }
+
+                case OpCodes.SEQUENCE_AT:
+                {
+                    if (node.Inputs[0] is not FastTensorKey seqKey) return false;
+
+                    // A position the walk can fold, in a sequence whose elements it can lay out in
+                    // order, names one model. Anything else names every model the sequence can
+                    // hold — enough for the body to splice, but not for the identity, which the
+                    // call site then reads off the model variable instead.
+                    if (TryFoldSequencePosition(node, nodeByKey) is int position
+                        && TryLayOutSequence(seqKey, nodeByKey) is List<FastTensorKey> laidOut)
+                    {
+                        // ONNX SequenceAt counts a negative position from the end.
+                        if (position < 0) position += laidOut.Count;
+                        if (position < 0 || position >= laidOut.Count) return false;
+                        return Collect(laidOut[position], nodeByKey, walk);
+                    }
+
+                    return CollectSequenceElements(seqKey, nodeByKey, walk);
+                }
+
+                default:
+                    return false;
+            }
+        }
+
+        /// <summary>
+        /// The models a sequence holds, in order, when every step that built it says where its
+        /// element went; null when one does not, which leaves the sequence's contents known only
+        /// as a set.
+        /// </summary>
+        private static List<FastTensorKey>? TryLayOutSequence(
+            FastTensorKey key, Dictionary<FastNodeKey, FastNode> nodeByKey,
+            HashSet<FastTensorKey>? visited = null)
+        {
+            visited ??= [];
+            if (!visited.Add(key)) return null;
+            if (!nodeByKey.TryGetValue(key.FastNodeKey, out var node)) return null;
+
+            switch (node.OpCode)
+            {
+                case OpCodes.IDENTITY:
+                    return node.Inputs[0] is FastTensorKey aliased
+                        ? TryLayOutSequence(aliased, nodeByKey, visited) : null;
+
+                case OpCodes.SEQUENCE_EMPTY:
+                    return [];
+
+                case OpCodes.SEQUENCE_CONSTRUCT:
+                {
+                    var elements = new List<FastTensorKey>(node.Inputs.Count);
+                    foreach (var input in node.Inputs)
+                    {
+                        if (input is not FastTensorKey elementKey) return null;
+                        elements.Add(elementKey);
+                    }
+                    return elements;
+                }
+
+                // SEQUENCE_INSERT inputs: [sequence, element, position?]; no position appends.
+                case OpCodes.SEQUENCE_INSERT:
+                {
+                    if (node.Inputs.Count < 2) return null;
+                    if (node.Inputs[0] is not FastTensorKey intoKey) return null;
+                    if (node.Inputs[1] is not FastTensorKey insertedKey) return null;
+                    if (TryLayOutSequence(intoKey, nodeByKey, visited) is not List<FastTensorKey> into)
+                        return null;
+
+                    int at = into.Count;
+                    if (node.Inputs.Count > 2 && node.Inputs[2] is not null)
+                    {
+                        if (TryFoldSequencePosition(node, nodeByKey, positionSlot: 2) is not int given)
+                            return null;
+                        at = given < 0 ? given + into.Count : given;
+                        if (at < 0 || at > into.Count) return null;
+                    }
+                    into.Insert(at, insertedKey);
+                    return into;
+                }
+
+                // SEQUENCE_ERASE inputs: [sequence, position?]; no position removes the last.
+                case OpCodes.SEQUENCE_ERASE:
+                {
+                    if (node.Inputs[0] is not FastTensorKey fromKey) return null;
+                    if (TryLayOutSequence(fromKey, nodeByKey, visited) is not List<FastTensorKey> from)
+                        return null;
+                    if (from.Count == 0) return null;
+
+                    int removeAt = from.Count - 1;
+                    if (node.Inputs.Count > 1 && node.Inputs[1] is not null)
+                    {
+                        if (TryFoldSequencePosition(node, nodeByKey) is not int given) return null;
+                        removeAt = given < 0 ? given + from.Count : given;
+                        if (removeAt < 0 || removeAt >= from.Count) return null;
+                    }
+                    from.RemoveAt(removeAt);
+                    return from;
+                }
+
+                default:
+                    return null;
+            }
+        }
+
+        /// <summary>
+        /// Appends every creation the models in the sequence <paramref name="key"/> holds can
+        /// resolve to — through the ops that build one out of models this graph contains. A
+        /// sequence assembled some other way (carried out of a loop, say) is a dead end, and says
+        /// so, since a body picked from an incomplete set of candidates is a guess.
+        /// </summary>
+        private static bool CollectSequenceElements(
+            FastTensorKey key,
+            Dictionary<FastNodeKey, FastNode> nodeByKey,
+            ModelSourceWalk walk)
+        {
+            if (!walk.Visited.Add(key)) return true;
+            if (!nodeByKey.TryGetValue(key.FastNodeKey, out var node)) return false;
+
+            switch (node.OpCode)
+            {
+                case OpCodes.IDENTITY:
+                    return node.Inputs[0] is FastTensorKey aliased
+                        && CollectSequenceElements(aliased, nodeByKey, walk);
+
+                // Holds nothing, so it contributes no creation — which is not a dead end.
+                case OpCodes.SEQUENCE_EMPTY:
+                    return true;
+
+                case OpCodes.SEQUENCE_CONSTRUCT:
+                {
+                    if (node.Inputs.Count == 0) return false;
+                    foreach (var element in node.Inputs)
+                        if (element is not FastTensorKey elementKey
+                            || !Collect(elementKey, nodeByKey, walk))
+                            return false;
+                    return true;
+                }
+
+                // SEQUENCE_INSERT inputs: [sequence, element, position?].
+                case OpCodes.SEQUENCE_INSERT:
+                {
+                    walk.ViaInsertion = true;
+                    if (node.Inputs.Count < 2) return false;
+                    return node.Inputs[0] is FastTensorKey intoKey
+                        && node.Inputs[1] is FastTensorKey insertedKey
+                        && CollectSequenceElements(intoKey, nodeByKey, walk)
+                        && Collect(insertedKey, nodeByKey, walk);
+                }
+
+                // SEQUENCE_ERASE takes one out. Which one is a question only the layout answers,
+                // so collect them all: a superset still names the body to splice, and it is only
+                // ever a superset, so the agreement checks it feeds stay sound.
+                case OpCodes.SEQUENCE_ERASE:
+                    walk.ViaInsertion = true;
+                    return node.Inputs[0] is FastTensorKey erasedFromKey
+                        && CollectSequenceElements(erasedFromKey, nodeByKey, walk);
+
+                default:
+                    return false;
+            }
+        }
+
+        /// <summary>
+        /// The position a <c>SEQUENCE_AT</c> reads, when it is a constant this pass can see
+        /// through, or null when it is decided at run time. Negative positions index from the end,
+        /// the way ONNX's SequenceAt does, and are returned unresolved — the caller knows the
+        /// sequence's length and adds it.
+        /// </summary>
+        private static int? TryFoldSequencePosition(
+            FastNode node, Dictionary<FastNodeKey, FastNode> nodeByKey, int positionSlot = 1)
+        {
+            if (node.Inputs.Count <= positionSlot
+                || node.Inputs[positionSlot] is not FastTensorKey positionKey) return null;
+
+            var key = positionKey;
+            var visited = new HashSet<FastTensorKey>();
+            while (visited.Add(key))
+            {
+                if (!nodeByKey.TryGetValue(key.FastNodeKey, out var producer)) return null;
+                if (producer.OpCode == OpCodes.IDENTITY)
+                {
+                    if (producer.Inputs[0] is not FastTensorKey aliased) return null;
+                    key = aliased;
+                    continue;
+                }
+                if (producer.OpCode != OpCodes.CONSTANT) return null;
+
+                var tensorVal = producer.Attributes.GetTensorVal(OnnxOpAttributeNames.AttrValue);
+                if (tensorVal is null || tensorVal.DType != DType.Int64) return null;
+                var vals = tensorVal.As<int64>().AccessMemory();
+                if (vals.Length != 1) return null;
+                var position = vals[0];
+                return position is >= int.MinValue and <= int.MaxValue ? (int)position : null;
+            }
+            return null;
         }
 
         /// <summary>
@@ -1021,7 +1385,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             ModelParamIdentifierTemplate parentIdTemplate,
             ModelId parentModelId,
             FastTensorKey? parentIterIndicesKey,
-            InternalComputationGraph mainGraph)
+            InternalComputationGraph mainGraph,
+            ModelId? feedParentModelId = null,
+            IReadOnlyList<FastTensorKey?>? feedExtraIterElements = null)
         {
             var subNodeByKey = new Dictionary<FastNodeKey, FastNode>(subGraph.Nodes.Count);
             foreach (var n in subGraph.Nodes) subNodeByKey[n.Key] = n;
@@ -1045,11 +1411,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     var childFeedIterKey = node.Inputs.Count > 2 ? node.Inputs[2] : null;
                     var combinedFeedIterKey = CombineIterationIndices(
                         parentIterIndicesKey, childFeedIterKey,
-                        subGraph, mainGraph, subNodeByKey, nodesToInsert, i);
+                        subGraph, mainGraph, subNodeByKey, nodesToInsert, i, feedExtraIterElements);
 
                     var dctFeedAttributes = node.Attributes.GetAttributeVals().ToDictionary();
                     var feedIdVals = (long[])dctFeedAttributes[OnnxOpAttributeNames.ShrkAttrLocalModelId]!;
-                    var combinedFeedId = new ModelId(parentModelId, ModelId.FromLongVals(feedIdVals));
+                    var combinedFeedId = new ModelId(
+                        feedParentModelId ?? parentModelId, ModelId.FromLongVals(feedIdVals));
                     dctFeedAttributes[OnnxOpAttributeNames.ShrkAttrLocalModelId] =
                         combinedFeedId.Vals.Select(x => (long)x).ToArray();
                     node.Attributes = OnnxCSharpAttributes.FromCSharpVals(
@@ -1123,6 +1490,66 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         /// <summary>
+        /// Extends a call site's identity with the loops that enclose the <em>invoke</em> site but
+        /// that the callee's identity does not already account for, and builds the runtime
+        /// iteration-index elements those slots read.
+        ///
+        /// <para>The identity a spliced body is reparented under comes from where the callee was
+        /// <em>created</em> — the <c>MODULE_SET_HYPERPARAMS</c> node for a <c>MODEL_INVOKE</c>, and
+        /// nothing at all for a module-typed <c>FUNCTION_INVOKE</c>, which has no creation site. A
+        /// model created outside a loop and called inside one therefore carries a scope-free id, so
+        /// every iteration derives the same RNG stream key and a draw in the body returns one
+        /// sample for all of them. Re-executing a draw is a second sample, so the invoke site's
+        /// scope has to reach the feeds (Shorokoo/Shorokoo#289).</para>
+        ///
+        /// <para>This is deliberately applied to the feeds only. Sharing a <em>parameter</em>
+        /// across the iterations of one call site is weight sharing, and is what a model created
+        /// outside a loop already gives; sharing a draw is not.</para>
+        ///
+        /// <para>Each added level takes a <see cref="ModelId.CallSiteLoopScope"/>, <c>-1</c> pair.
+        /// That marker is not a slot, so it cannot collide with any member of the callee it is
+        /// spliced ahead of — and because it needs no knowledge of those members, it is a constant.
+        /// Deriving it from them instead (one past the callee's highest leading slot) also avoided
+        /// collisions, but moved the scope whenever the callee gained a consumer, which no pin
+        /// could hold still (Shorokoo/Shorokoo#302).</para>
+        /// </summary>
+        private static (ModelId feedParentId, IReadOnlyList<FastTensorKey?> extraIterElements) ExtendScopeToCallSite(
+            ModelId parentModelId,
+            List<FastNode> enclosingLoops,
+            InternalComputationGraph subGraph,
+            List<FastNode> newNodes)
+        {
+            int accountedFor = parentModelId.Vals.Count(v => v == -1);
+            int extra = enclosingLoops.Count - accountedFor;
+            if (extra <= 0) return (parentModelId, []);
+
+            // Only a feed reads these. A callee that draws nothing would otherwise take three dead
+            // nodes per level per call site, and they cannot be hoisted out of the loop (they read
+            // its iteration index) nor pruned from a function body, which is cached flattened and
+            // re-spliced at every caller.
+            if (!subGraph.Nodes.Any(n =>
+                    n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM ||
+                    n.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL ||
+                    n.OpCode == InternalOpCodes.SHRK_RANDOM_BITS))
+                return (parentModelId, []);
+
+            var idVals = new List<int>(parentModelId.Vals);
+            var elements = new List<FastTensorKey?>();
+            foreach (var loopOpen in enclosingLoops.Skip(accountedFor))
+            {
+                idVals.Add(ModelId.CallSiteLoopScope);
+                idVals.Add(-1);
+                // LOOP_OPEN's output 0 is the iteration index. Unsqueeze it to a one-element
+                // vector the way the trace-time chain does, so GetIterationIndexScalars walks
+                // IDENTITY → UNSQUEEZE → LOOP_OPEN back to it.
+                elements.Add(FastNodeCreationHelpers.BuildIterationIndexElement(
+                    loopOpen.Outputs[0]!.Value, newNodes));
+            }
+
+            return (new ModelId(idVals.ToArray()), elements);
+        }
+
+        /// <summary>
         /// True when the body owns something whose identity is per call site — a parameter, a
         /// sub-module instantiation, or a runtime RNG feed. A body without any of these inlines
         /// identically at every call site, so it needs no id of its own.
@@ -1189,15 +1616,59 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         /// <summary>
-        /// Native reparenting to a model variable. Converts MODEL_PARAM_REF nodes
-        /// to MODEL_PARAM_MODEL_REF by prepending the model variable as the first input.
+        /// Native reparenting to a model variable — the route for a model whose identity is only
+        /// known at run time, because the position it was taken from a <c>ModelSequence</c> at is.
+        /// Converts MODEL_PARAM_REF nodes to MODEL_PARAM_MODEL_REF by prepending the model
+        /// variable as the first input, which is what defers a parameter's identity to run time.
+        ///
+        /// <para>A feed has no such indirection to hand its id to: its stream key is derived from
+        /// a path of split counters, and a counter is just a scalar. So the model's id comes off
+        /// the model variable as runtime counters — one <c>-1</c> component per element of
+        /// <c>GET_MODEL_ID</c>, realized through the feed's iteration-indices input the same way a
+        /// loop index is. Without them a feed reached out of a sequence carried nothing but its
+        /// own local id, so every element of the sequence drew from one stream that named no model
+        /// (Shorokoo/Shorokoo#303). The call site's enclosing loops are appended after, exactly as
+        /// for a creation-site reparent, so the iterations of one call site separate too.</para>
         /// </summary>
         private static void FastReparentToModelVariable(
-            InternalComputationGraph subGraph, FastTensorKey modelKey)
+            InternalComputationGraph subGraph, FastTensorKey modelKey,
+            BoundModule bound = default,
+            List<FastNode>? enclosingLoops = null,
+            List<FastNode>? mainGraphNewNodes = null)
         {
+            var feedScope = BuildModelVariableFeedScope(
+                subGraph, modelKey, bound, enclosingLoops, mainGraphNewNodes);
+            var nodesToInsert = new List<(int insertBeforeIndex, FastNode node)>();
+            var subNodeByKey = new Dictionary<FastNodeKey, FastNode>(subGraph.Nodes.Count);
+            foreach (var n in subGraph.Nodes) subNodeByKey[n.Key] = n;
+
             for (int i = 0; i < subGraph.Nodes.Count; i++)
             {
                 var node = subGraph.Nodes[i];
+
+                if (feedScope is not null && (
+                        node.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM ||
+                        node.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL ||
+                        node.OpCode == InternalOpCodes.SHRK_RANDOM_BITS))
+                {
+                    var (scopeIdVals, scopeElements) = feedScope.Value;
+
+                    var dctFeedAttributes = node.Attributes.GetAttributeVals().ToDictionary();
+                    var feedIdVals = (long[])dctFeedAttributes[OnnxOpAttributeNames.ShrkAttrLocalModelId]!;
+                    dctFeedAttributes[OnnxOpAttributeNames.ShrkAttrLocalModelId] =
+                        scopeIdVals.Select(x => (long)x).Concat(feedIdVals).ToArray();
+                    node.Attributes = OnnxCSharpAttributes.FromCSharpVals(
+                        dctFeedAttributes, node.Attributes.AttributeDefs);
+
+                    // Feed inputs: [shape, substreamIndex, iterationIndices].
+                    var childFeedIterKey = node.Inputs.Count > 2 ? node.Inputs[2] : null;
+                    var feedInputs = node.FullInputs[""];
+                    while (feedInputs.Count < 3) feedInputs.Add(null);
+                    feedInputs[2] = CombineIterationIndices(
+                        null, childFeedIterKey, subGraph, subGraph, subNodeByKey,
+                        nodesToInsert, i, scopeElements);
+                    continue;
+                }
 
                 if (node.OpCode == InternalOpCodes.MODEL_PARAM_REF)
                 {
@@ -1225,6 +1696,86 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         "FastReparentToModelVariable: MODULE_SET_HYPERPARAMS not supported (matches non-fast behaviour).");
                 }
             }
+
+            int offset = 0;
+            foreach (var (insertIdx, newNode) in nodesToInsert.OrderBy(x => x.insertBeforeIndex))
+            {
+                subGraph.Nodes.Insert(insertIdx + offset, newNode);
+                offset++;
+            }
+        }
+
+        /// <summary>
+        /// The id components and the runtime elements realizing them that every feed in
+        /// <paramref name="subGraph"/> takes when the body is reparented to a model variable: one
+        /// <c>-1</c> per component of the model's own id, read off <c>GET_MODEL_ID</c>, then a
+        /// <see cref="ModelId.CallSiteLoopScope"/>, <c>-1</c> pair per enclosing loop the model's
+        /// id does not already account for. Null when the body draws nothing (the nodes would be
+        /// dead), or when the shape of the model's id is not statically known — the components
+        /// have to be counted at build time even though their values are not.
+        /// </summary>
+        private static (int[] idVals, IReadOnlyList<FastTensorKey?> elements)? BuildModelVariableFeedScope(
+            InternalComputationGraph subGraph, FastTensorKey modelKey,
+            BoundModule bound, List<FastNode>? enclosingLoops, List<FastNode>? mainGraphNewNodes)
+        {
+            if (mainGraphNewNodes is null) return null;
+            if (!subGraph.Nodes.Any(n =>
+                    n.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM ||
+                    n.OpCode == InternalOpCodes.SHRK_RANDOM_NORMAL ||
+                    n.OpCode == InternalOpCodes.SHRK_RANDOM_BITS))
+                return null;
+
+            if (bound.IdLength is not int idLength || idLength <= 0)
+            {
+                // Nothing bound: the walk could not reach the models at all, which today means a
+                // sequence assembled inside a loop. Those feeds keep their own local id and share
+                // a stream — Shorokoo/Shorokoo#303, pinned and open.
+                if (bound.Function is null) return null;
+
+                // Reached them but they disagree on the shape of their ids. There is no count of
+                // components to lay out, so the feeds would silently fall back to sharing one
+                // stream that names no model. Nothing constructs this today; say so rather than
+                // answer with a collision if something ever does.
+                throw new InvalidOperationException(
+                    "FastInlineModulesAndFunctions: the models a run-time sequence position can " +
+                    $"pick from disagree on the shape of their ids, so the {bound.Function.DefaultName} " +
+                    "bodies spliced for them have no way to name which one drew. Give them ids of " +
+                    "one shape, or read the sequence at a position known at build time.");
+            }
+
+            var getModelIdKey = FastNodeKey.New();
+            mainGraphNewNodes.Add(FastNodeCreationHelpers.CreateFastNode(
+                getModelIdKey, InternalOpCodes.GET_MODEL_ID,
+                new Dictionary<string, object?>(), [modelKey]));
+            var modelIdVectorKey = new FastTensorKey(getModelIdKey, 0);
+
+            var idVals = new List<int>();
+            var elements = new List<FastTensorKey?>();
+            for (int i = 0; i < idLength; i++)
+            {
+                idVals.Add(-1);
+                // Counted from the END. idLength is the creation's id where this body was
+                // flattened, but GET_MODEL_ID resolves to the id it ends up with, which every
+                // caller this body is spliced into prepends its own path to. The components that
+                // tell the sequence's elements apart are the last ones — the leading ones are the
+                // prefix they share, so gathering from the front handed every element one key and
+                // one stream (Shorokoo/Shorokoo#303).
+                elements.Add(FastNodeCreationHelpers.BuildIterationIndexElement(
+                    FastNodeCreationHelpers.AppendGatherScalar(
+                        modelIdVectorKey, i - idLength, mainGraphNewNodes),
+                    mainGraphNewNodes));
+            }
+
+            int accountedFor = bound.IdLoopSlots ?? 0;
+            foreach (var loopOpen in (enclosingLoops ?? []).Skip(accountedFor))
+            {
+                idVals.Add(ModelId.CallSiteLoopScope);
+                idVals.Add(-1);
+                elements.Add(FastNodeCreationHelpers.BuildIterationIndexElement(
+                    loopOpen.Outputs[0]!.Value, mainGraphNewNodes));
+            }
+
+            return (idVals.ToArray(), elements);
         }
 
         /// <summary>
@@ -1242,16 +1793,21 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             FastTensorKey? parentKey, FastTensorKey? childKey,
             InternalComputationGraph subGraph, InternalComputationGraph mainGraph,
             Dictionary<FastNodeKey, FastNode> subNodeByKey,
-            List<(int, FastNode)> nodesToInsert, int currentIndex)
+            List<(int, FastNode)> nodesToInsert, int currentIndex,
+            IReadOnlyList<FastTensorKey?>? extraParentElements = null)
         {
             bool parentIsEmpty = parentKey is null || IsEmptyConstantVector(parentKey.Value, mainGraph);
             bool childIsEmpty = childKey is null || IsEmptyConstantVector(childKey.Value, subGraph, subNodeByKey);
+            bool noExtra = extraParentElements is null || extraParentElements.Count == 0;
 
-            if (parentIsEmpty && childIsEmpty)
-                return childKey ?? parentKey;
+            if (noExtra)
+            {
+                if (parentIsEmpty && childIsEmpty)
+                    return childKey ?? parentKey;
 
-            if (parentIsEmpty) return childKey;
-            if (childIsEmpty) return parentKey;
+                if (parentIsEmpty) return childKey;
+                if (childIsEmpty) return parentKey;
+            }
 
             // Build a flat CONCAT whose inputs are the union of parent's and child's
             // scalar inputs (in that order). Both halves are themselves CONCATs by the
@@ -1259,9 +1815,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // that walker. After splicing the subgraph into the main graph, every
             // referenced scalar input becomes accessible — parent's inputs are upstream
             // of the splice point, child's are inside the spliced section.
+            //
+            // The extra elements sit between the two halves: they realize the iteration
+            // slots ExtendScopeToCallSite appended to the parent id, which come after the
+            // parent's own slots and before the child's.
             var combinedInputs = new List<FastTensorKey?>();
-            AppendIterIndexInputs(parentKey!.Value, mainGraph, combinedInputs);
-            AppendIterIndexInputs(childKey!.Value, subGraph, subNodeByKey, combinedInputs);
+            if (!parentIsEmpty) AppendIterIndexInputs(parentKey!.Value, mainGraph, combinedInputs);
+            if (!noExtra) combinedInputs.AddRange(extraParentElements!);
+            if (!childIsEmpty) AppendIterIndexInputs(childKey!.Value, subGraph, subNodeByKey, combinedInputs);
 
             var concatNodeKey = FastNodeKey.New();
             var concatTensorKey = new FastTensorKey(concatNodeKey, 0);
@@ -1745,6 +2306,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 {
                     var outputKey = fastNode.Outputs[0]!.Value;
                     ctx.Remap[outputKey] = fieldKey.Value;
+                    // A model-typed hyperparameter reads out as a Model, not a tensor, so the
+                    // read has to carry the field's unpacked bundle forward the way an IDENTITY
+                    // does — GET_MODEL_ID on it has no tensor to remap to.
+                    if (ctx.UnpackedStructs.TryGetValue(fieldKey.Value, out var nestedFields))
+                        ctx.UnpackedStructs[outputKey] = nestedFields;
+                    else if (ctx.UnpackedStructSequences.TryGetValue(fieldKey.Value, out var nestedSeqs))
+                        ctx.UnpackedStructSequences[outputKey] = nestedSeqs;
                     ctx.NodesToRemove.Add(fastNode.Key);
                 }
             }
@@ -2815,11 +3383,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // Note the cross product below pairs every relative template with every base module,
             // so it mints keys for model ids that own no such parameter. That is harmless only
             // because such a key is either unreachable or re-written by the definition that does
-            // own the id. RelativeTemplates is empty on every graph today (its one remaining
-            // producer, the [Hyper] Model<> reparent path, is unreachable while
-            // Shorokoo/Shorokoo#264 stands); when #264 is fixed, definitions start flowing in
-            // here and a spurious key can again be a strict PREFIX of a real one, which
-            // IdTemplateInfos.ToGeneralModelId resolves to first. Re-check this then.
+            // own the id. The way it would stop being harmless is a spurious key that is a strict
+            // PREFIX of a real one, since IdTemplateInfos.ToGeneralModelId walks up from the
+            // shortest prefix and takes the first key it finds. Every graph the coverage suite
+            // lowers was checked for that pair and none has one — including the graphs that do
+            // populate RelativeTemplates, which is every lowering that reparents a body to a model
+            // variable rather than to a creation site: a model taken out of a ModelSequence, and a
+            // model arriving as a [Hyper] Model<> whose binding is picked at run time.
             var composedTemplates = new Dictionary<ModelId, ModelParamIdentifierTemplate>();
             foreach (var kvp in identifierTemplatesInfo.FullTemplates)
                 composedTemplates[kvp.Key] = kvp.Value;
@@ -5667,6 +6237,45 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 unsqueezedKeys.Select(k => (FastTensorKey?)k).ToArray()));
 
             return concatTensorKey;
+        }
+
+        /// <summary>
+        /// Reads one element of an int64 vector as a scalar.
+        /// </summary>
+        public static FastTensorKey AppendGatherScalar(
+            FastTensorKey vector, int index, List<FastNode> newNodes)
+        {
+            var indexNodeKey = FastNodeKey.New();
+            newNodes.Add(CreateConstantNode(indexNodeKey, [], (long)index));
+
+            var gatherNodeKey = FastNodeKey.New();
+            newNodes.Add(CreateFastNode(gatherNodeKey, OpCodes.GATHER,
+                new Dictionary<string, object?> { [OnnxOpAttributeNames.AttrAxis] = 0L },
+                [vector, new FastTensorKey(indexNodeKey, 0)]));
+            return new FastTensorKey(gatherNodeKey, 0);
+        }
+
+        /// <summary>
+        /// Unsqueezes an iteration-index scalar into the one-element vector an iteration-indices
+        /// CONCAT takes as an input, matching the trace-time chain
+        /// <see cref="GetIterationIndexScalars"/> walks back through.
+        /// </summary>
+        public static FastTensorKey BuildIterationIndexElement(
+            FastTensorKey scalarKey, List<FastNode> newNodes)
+        {
+            var axesNodeKey = FastNodeKey.New();
+            newNodes.Add(CreateConstantNode(axesNodeKey, [1], -1L));
+
+            var unsqueezeNodeKey = FastNodeKey.New();
+            newNodes.Add(CreateFastNode(unsqueezeNodeKey, OpCodes.UNSQUEEZE,
+                new Dictionary<string, object?>(),
+                [scalarKey, new FastTensorKey(axesNodeKey, 0)]));
+
+            var vecNodeKey = FastNodeKey.New();
+            newNodes.Add(CreateFastNode(vecNodeKey, OpCodes.IDENTITY,
+                new Dictionary<string, object?>(),
+                [new FastTensorKey(unsqueezeNodeKey, 0)]));
+            return new FastTensorKey(vecNodeKey, 0);
         }
 
         /// <summary>Creates a CONSTANT FastNode producing a scalar or vector int64 tensor.</summary>

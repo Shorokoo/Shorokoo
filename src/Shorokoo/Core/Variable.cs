@@ -54,6 +54,13 @@ namespace Shorokoo.Core
 
         public bool IsValid { get; set; } = true;
 
+        /// <summary>
+        /// Why this value cannot leave the loop that produced it, in the terms the user wrote, for
+        /// the shapes a <see cref="Looper"/> can explain. Set alongside <see cref="IsValid"/> at
+        /// loop termination; null for a value invalidated without a shape-specific explanation.
+        /// </summary>
+        internal string? InvalidReason { get; set; }
+
         /// <summary>The structural kind of this graph value (tensor / optional / sequence / struct).
         /// Tensor/vector/scalar all share <see cref="DataStructure.Tensor"/> and are distinguished by
         /// <see cref="Rank"/>.</summary>

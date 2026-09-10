@@ -58,10 +58,15 @@ a carry's value is not knowable at build time.
 
 A variable that is assigned inside a loop *before ever being read in that same
 loop* cannot be used after the loop. Shorokoo cannot recover the variable's
-initial value (needed for the zero-iteration case) and conservatively rejects
-the graph. Initialize the variable explicitly inside the loop body with
-`LoopAPI.Init(x)` (or read it once, e.g. `OnnxOp.Identity(x)`) before the first
-assignment.
+initial value (needed for the zero-iteration case) and rejects the graph: as
+**FW046** when the value is returned from the graph, and as the node's own
+**NOD001** when it feeds another node. Both carry the same guidance.
+Initialize the variable explicitly inside the loop body with `LoopAPI.Init(x)`
+(or read it once, e.g. `OnnxOp.Identity(x)`) before the first assignment.
+
+`ctx.IterationIndex` is refused the same way, and for the same reason: it is the
+loop's own per-iteration counter and has no value once the loop has exited.
+`LoopAPI.Init` a local and assign the index to it to carry one out.
 
 ### Carrying a value computed outside the loop body
 
@@ -90,43 +95,101 @@ built from the iteration index — needs no wrapping. `LoopAPI.Carry` has
 overloads for `Scalar<T>`, `Vector<T>` and `Tensor<T>`; for any other carry
 type, move the assignment out of the loop.
 
-The build reports this as the **MSG005** warning on the offending line, and
-concretizing the graph raises `FW023` if it is left unfixed.
+The build reports the bare-assignment form as the **MSG005** warning on the
+offending line, and concretizing the graph raises `FW023` if it is left unfixed.
+`FW023` also catches shapes MSG005 does not see, such as an alias whose first
+link is computed outside the loop.
 
-## Current limitations (could be lifted)
-
-### Carrying a value from the previous iteration
-
-A local that holds what another local held **one iteration ago** is not recognised as a loop
-carry, and every read of it is silently pinned to its value from before the loop
-([#274](https://github.com/Shorokoo/Shorokoo/issues/274)):
+The same wrapper is what a **lagged** carry — a local holding what another carry
+held one iteration ago — needs in every case but one. Reading the lagged value
+inside the body, or scanning it, works unwrapped:
 
 ```csharp
-sum = sum + prev;   // prev is acc's value from the previous iteration — reads x every time
-prev = acc;
-acc  = acc + Scalar(1.0f);
+foreach (var ctx in LoopAPI.Iterate(trips))
+{
+    sum  = sum + prev;   // acc's value from the previous iteration
+    prev = acc;
+    acc  = acc + Scalar(1.0f);
+}
 ```
 
-The result is wrong rather than rejected, and every engine agrees on it. `LoopAPI.Init` does not
-help — this is a different shape from the one it addresses. Carry the lagged value explicitly
-(compute it inside the body from the carry itself) until this is fixed.
+Wrap the assignment as `prev = LoopAPI.Carry(acc)` to do anything more than that.
+A bare assignment gives the lagged local no body node of its own — it shares the
+node of the carry it trails — and several things follow, each refused rather than
+answered wrongly:
 
-### Calling an outer loop's ctx.Scan from an inner loop
+| shape | code |
+|---|---|
+| reading the lagged value after the loop | **FW046** |
+| lagging a local the **enclosing** loop also carries (it has nothing to carry it out by) | **FW048** |
 
-`ctx.Scan` on an **enclosing** loop's context, called from inside a nested loop's body, throws a
-`KeyNotFoundException` naming nothing
-([#275](https://github.com/Shorokoo/Shorokoo/issues/275)). Scan on the context of the loop whose
-body you are in.
+One shape sharing a body value needs no lag at all: two ordinary carries that end
+on one value, having started from different pre-loop ones. The loop has one node
+to hand back and two variables wanting it, so it is refused as **FW051** — wrap
+each assignment and each gets a node of its own.
 
-### Scanning inside a nested loop
+Lagging inside a nested loop is otherwise fine: a lagged local created inside the
+enclosing loop's body — a nested recurrence, say — crosses no boundary and needs
+no wrapping.
 
-A value produced by `ctx.Scan` in an inner loop can be used inside the enclosing
-loop's body, but cannot be read after the enclosing loop: the enclosing loop does
-not carry it out, so the model fails to build or is rejected at execution instead
-of returning the stacked value
-([#255](https://github.com/Shorokoo/Shorokoo/issues/255)). Consume the inner
-loop's scan output inside the enclosing body, or move the scan out to the
-enclosing loop.
+What the loop identifies is a local trailing **one of its own carries** by one
+iteration. A chain deeper than that — `prev2 = prev; prev = acc;` — is not, and
+neither is a local trailing a body value the loop does not carry, nor one whose
+first link comes from outside the loop. Those are refused as **FW049**, except
+that the last shape *declared* with `LoopAPI.Init` is caught earlier, as
+**FW023**. One extra identification pass sees one lag step, so the depth
+limit follows from the number of passes rather than from anything about the loop. Wrapping
+every link works — every one of them, since wrapping only some leaves the rest
+sharing a body value:
+
+```csharp
+sum   = sum + prev2;
+prev2 = LoopAPI.Carry(prev);
+prev  = LoopAPI.Carry(acc);
+acc   = acc + Scalar(1.0f);
+```
+
+### Scanning inside a nested loop, read after the enclosing loop
+
+`ctx.Scan` in an inner loop produces a stacked tensor once per iteration of the
+*enclosing* loop. The enclosing loop can hand that tensor to its own body freely,
+but it cannot hand it back after the loop: as with any value the body assigns
+before ever reading it, there is no value to return for the zero-iteration case —
+and unlike an ordinary local, a stack has no pre-loop value to declare with
+`LoopAPI.Init`. Shorokoo refuses the graph, naming the scan, rather than
+returning something for a trip count it cannot honour:
+
+```csharp
+var acc = x;
+Variable? scanned = null;
+foreach (var ctx0 in LoopAPI.Iterate(outerTrips))
+    foreach (var ctx1 in LoopAPI.Iterate(innerTrips))
+    {
+        acc = acc + Scalar(1.0f);
+        scanned = (Variable)ctx1.Scan(acc);
+    }
+return (Tensor<float32>)scanned!;   // refused: FW046
+```
+
+Consume the inner loop's scan output inside the enclosing loop's body, or scan on
+the enclosing loop's own context — `ctx0.Scan(v)` works from an inner body and
+records one entry per *outer* iteration.
+
+That last route needs `v` to survive the nested loop, since the enclosing loop
+records the value that loop ends with. A body-local the nested loop assigns
+before ever reading does not, and is refused as **FW050**; `LoopAPI.Init` it in
+the nested body, as above, and the scan records it.
+
+### Two exit conditions in one loop body
+
+A loop carries **one** exit condition, evaluated once at the end of the
+iteration, so a second `ctx.Break` or `ctx.ContinueWhile` in the same body would
+replace the first rather than adding to it. Two of them is refused as **FW052**:
+combine them into the single call that says what you mean, and express a
+condition that has to be tested part-way through the body as an `IfElse` over the
+rest of it.
+
+## Current limitations (could be lifted)
 
 ### Backprop through dynamic loops
 

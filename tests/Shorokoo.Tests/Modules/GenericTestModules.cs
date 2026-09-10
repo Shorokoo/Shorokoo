@@ -1325,10 +1325,8 @@ namespace Shorokoo.Tests.Modules
     }
 
     /// <summary>
-    /// An inner loop's scan output read <em>after</em> the enclosing loop. The enclosing loop
-    /// sees the inner scan's zombie as an output-only body value with no initializer, so it
-    /// never becomes one of its own carries and the un-lowered <c>#LoopScanVariable#</c> reaches
-    /// the emitted graph. Tracked as Shorokoo/Shorokoo#255.
+    /// An inner loop's scan output read <em>after</em> the enclosing loop — a shape the enclosing
+    /// loop has no zero-iteration value for, and refuses.
     /// </summary>
     [Module]
     public partial class ScanInNestedLoopReadAfterOuterLoop
@@ -1349,8 +1347,7 @@ namespace Shorokoo.Tests.Modules
 
     /// <summary>
     /// <see cref="ScanInNestedLoopReadAfterOuterLoop"/> with the scan read before the inner
-    /// body's update, which fails earlier still — while the module graph is being built.
-    /// Tracked as Shorokoo/Shorokoo#255.
+    /// body's update — the same refusal on the other ordering.
     /// </summary>
     [Module]
     public partial class ScanInNestedLoopBeforeUpdateReadAfterOuterLoop
@@ -1370,9 +1367,9 @@ namespace Shorokoo.Tests.Modules
     }
 
     /// <summary>
-    /// Carries the value <c>acc</c> held one iteration ago. Each tracing pass advances such a
-    /// local by only one lag step, so after two passes it still holds the pre-loop value and the
-    /// looper never identifies it as a carry. Tracked as Shorokoo/Shorokoo#274.
+    /// Carries the value <c>acc</c> held one iteration ago. Such a local advances by only one lag
+    /// step per tracing pass, so the lag pass is what moves its read onto a first-pass body output
+    /// and identifies it.
     /// </summary>
     [Module]
     public partial class LagOneCarry
@@ -1392,10 +1389,547 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>A loop's iteration index read after the loop — scoped to one iteration, so the
+    /// loop has no value to hand back for it.</summary>
+    [Module]
+    public partial class IterationIndexReadAfterLoop
+    {
+        public static Scalar<int64> Inline(Scalar<int64> trips)
+        {
+            Scalar<int64> last = Scalar(0L);
+            foreach (var ctx in LoopAPI.Iterate(trips)) last = ctx.IterationIndex;
+            return last;
+        }
+    }
+
+    /// <summary>A body value assigned before it is ever read, returned from the graph.</summary>
+    [Module]
+    public partial class BodyValueAssignedBeforeReadReturned
+    {
+        public static Scalar<float32> Inline(Scalar<float32> x, Scalar<int64> trips)
+        {
+            var acc = x;
+            var y = Scalar(0.0f);
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                y = acc * Scalar(2.0f);
+                acc = acc + Scalar(1.0f);
+            }
+            return y;
+        }
+    }
+
+    /// <summary><see cref="BodyValueAssignedBeforeReadReturned"/> consumed by a node rather than
+    /// returned, so the refusal has to reach the node constructor.</summary>
+    [Module]
+    public partial class BodyValueAssignedBeforeReadConsumed
+    {
+        public static Scalar<float32> Inline(Scalar<float32> x, Scalar<int64> trips)
+        {
+            var acc = x;
+            var y = Scalar(0.0f);
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                y = acc * Scalar(2.0f);
+                acc = acc + Scalar(1.0f);
+            }
+            return y + acc;
+        }
+    }
+
+    /// <summary>A lagged local trailing a body value the loop does not carry, so there is no
+    /// start-of-iteration value to hand back.</summary>
+    [Module]
+    public partial class LagCarryOfUncarriedValue
+    {
+        public static Scalar<float32> Inline(Scalar<float32> x, Scalar<int64> trips)
+        {
+            var acc = x;
+            var prev = x;
+            var t = x;
+            var sum = Scalar(0.0f);
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                sum = sum + prev;
+                prev = t;
+                t = acc * Scalar(2.0f);
+                acc = acc + Scalar(1.0f);
+            }
+            return sum;
+        }
+    }
+
+    /// <summary><see cref="LagOneCarry"/> with the lagged local declared and given an initializer
+    /// of its own, so its pre-loop read differs from the trailed carry's.</summary>
+    [Module]
+    public partial class LagOneCarryInitDeclared
+    {
+        public static Scalar<float32> Inline(Scalar<float32> x, Scalar<int64> trips)
+        {
+            var acc = x;
+            var prev = x + Scalar(100.0f);
+            var sum = Scalar(0.0f);
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                LoopAPI.Init(prev);
+                sum = sum + prev;
+                prev = acc;
+                acc = acc + Scalar(1.0f);
+            }
+            return sum;
+        }
+    }
+
+    /// <summary><see cref="LagOneCarry"/> inside a nested loop.</summary>
+    [Module]
+    public partial class NestedLagCarry
+    {
+        public static Scalar<float32> Inline(Scalar<float32> x, Scalar<int64> outerTrips, Scalar<int64> innerTrips)
+        {
+            var acc = x;
+            var prev = x;
+            var sum = Scalar(0.0f);
+            foreach (var ctx0 in LoopAPI.Iterate(outerTrips))
+                foreach (var ctx1 in LoopAPI.Iterate(innerTrips))
+                {
+                    sum = sum + prev;
+                    prev = acc;
+                    acc = acc + Scalar(1.0f);
+                }
+            return sum;
+        }
+    }
+
+    /// <summary><see cref="NestedLagCarryOfAnEnclosingCarry"/> with the lagged local re-seeded
+    /// each enclosing iteration from a carry of the enclosing loop rather than from a constant.
+    /// It is still created inside that loop's body, so the loop carries nothing for it.</summary>
+    [Module]
+    public partial class NestedLagCarryReseededFromAnEnclosingCarry
+    {
+        public static Scalar<float32> Inline(Scalar<float32> x, Scalar<int64> outerTrips, Scalar<int64> innerTrips)
+        {
+            var acc = x;
+            var total = Scalar(0.0f);
+            foreach (var ctx0 in LoopAPI.Iterate(outerTrips))
+            {
+                var prev = acc;
+                foreach (var ctx1 in LoopAPI.Iterate(innerTrips))
+                {
+                    total = total + prev;
+                    prev = acc;
+                    acc = acc + Scalar(1.0f);
+                }
+            }
+            return total;
+        }
+    }
+
+    /// <summary>A local the body assigns a loop-invariant value computed outside the loop. The
+    /// assignment gives it no body node, so the loop has nothing to hand back.</summary>
+    [Module]
+    public partial class CarryAssignedAnOutsideValue
+    {
+        public static Scalar<float32> Inline(Scalar<float32> x, Scalar<int64> trips)
+        {
+            var z = x * Scalar(10.0f);
+            var v = Scalar(0.0f);
+            var sum = Scalar(0.0f);
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                sum = sum + v;
+                v = z;
+            }
+            return sum;
+        }
+    }
+
+    /// <summary><see cref="CarryAssignedAnOutsideValue"/> with the remedy its refusal names.</summary>
+    [Module]
+    public partial class CarryAssignedAnOutsideValueWrapped
+    {
+        public static Scalar<float32> Inline(Scalar<float32> x, Scalar<int64> trips)
+        {
+            var z = x * Scalar(10.0f);
+            var v = Scalar(0.0f);
+            var sum = Scalar(0.0f);
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                sum = sum + v;
+                v = LoopAPI.Carry(z);
+            }
+            return sum;
+        }
+    }
+
+    /// <summary>A loop body that sets its exit condition twice. The loop carries one, so the
+    /// second would replace the first.</summary>
+    [Module]
+    public partial class LoopWithTwoExitConditions
+    {
+        public static Scalar<float32> Inline(Scalar<float32> x, Scalar<int64> trips)
+        {
+            var acc = x;
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                ctx.Break(acc > Scalar(12.0f));
+                acc = acc + Scalar(1.0f);
+                ctx.Break(acc > Scalar(20.0f));
+            }
+            return acc;
+        }
+    }
+
+    /// <summary>A lag carry whose lagged local and trailed carry are both created inside the
+    /// enclosing loop's body — a nested recurrence. Nothing crosses the enclosing loop's boundary,
+    /// so it needs no wrapping.</summary>
+    [Module]
+    public partial class NestedLocalLagCarry
+    {
+        public static Scalar<float32> Inline(Scalar<int64> outerTrips, Scalar<int64> innerTrips)
+        {
+            var total = Scalar(0.0f);
+            foreach (var ctx0 in LoopAPI.Iterate(outerTrips))
+            {
+                var a = Scalar(1.0f);
+                var b = Scalar(1.0f);
+                var s = Scalar(0.0f);
+                foreach (var ctx1 in LoopAPI.Iterate(innerTrips))
+                {
+                    var next = a + b;
+                    s = s + next;
+                    a = b;
+                    b = next;
+                }
+                total = total + s;
+            }
+            return total;
+        }
+    }
+
+    /// <summary>A lag carry inside a nested loop whose lagged local is created in the enclosing
+    /// body while the carry it trails is one the enclosing loop carries — so the trailed carry's
+    /// reads reach the nested looper rewritten and the lagged local's do not.</summary>
+    [Module]
+    public partial class NestedLagCarryOfAnEnclosingCarry
+    {
+        public static Scalar<float32> Inline(Scalar<float32> x, Scalar<int64> outerTrips, Scalar<int64> innerTrips)
+        {
+            var acc = x;
+            var total = Scalar(0.0f);
+            foreach (var ctx0 in LoopAPI.Iterate(outerTrips))
+            {
+                var prev = Scalar(0.0f);
+                foreach (var ctx1 in LoopAPI.Iterate(innerTrips))
+                {
+                    total = total + prev;
+                    prev = acc;
+                    acc = acc + Scalar(1.0f);
+                }
+            }
+            return total;
+        }
+    }
+
+    /// <summary><see cref="CarryAliasReadAfterLoop"/> with both remedies the refusal names — the
+    /// alias declared, and the assignment wrapped.</summary>
+    [Module]
+    public partial class CarryAliasReadAfterLoopFixed
+    {
+        public static Scalar<float32> Inline(Scalar<float32> x, Scalar<int64> trips)
+        {
+            var acc = x;
+            var alias = x;
+            var sum = Scalar(0.0f);
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                LoopAPI.Init(alias);
+                sum = sum + acc;
+                alias = LoopAPI.Carry(acc);
+                acc = acc + Scalar(1.0f);
+            }
+            return alias;
+        }
+    }
+
+    /// <summary>Two carries whose bodies end on the same node output but whose pre-loop values
+    /// differ — the loop cannot hand both back from one body node.</summary>
+    [Module]
+    public partial class TwoCarriesSharingOneBodyValue
+    {
+        public static Scalar<float32> Inline(Scalar<float32> x, Scalar<float32> y, Scalar<int64> trips)
+        {
+            var acc = x;
+            var z = y;
+            var sum = Scalar(0.0f);
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                sum = sum + z;
+                acc = acc + Scalar(1.0f);
+                z = acc;
+            }
+            return sum;
+        }
+    }
+
+    /// <summary><see cref="TwoCarriesSharingOneBodyValue"/> with the second carry's assignment
+    /// wrapped, giving it a body node of its own.</summary>
+    [Module]
+    public partial class TwoCarriesSharingOneBodyValueWrapped
+    {
+        public static Scalar<float32> Inline(Scalar<float32> x, Scalar<float32> y, Scalar<int64> trips)
+        {
+            var acc = x;
+            var z = y;
+            var sum = Scalar(0.0f);
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                sum = sum + z;
+                acc = acc + Scalar(1.0f);
+                z = LoopAPI.Carry(acc);
+            }
+            return sum;
+        }
+    }
+
+    /// <summary>A local given a carry's value by a bare assignment and read after the loop — the
+    /// lag carry's shape without the lag.</summary>
+    [Module]
+    public partial class CarryAliasReadAfterLoop
+    {
+        public static Scalar<float32> Inline(Scalar<float32> x, Scalar<int64> trips)
+        {
+            var acc = x;
+            var alias = x;
+            var sum = Scalar(0.0f);
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                sum = sum + acc;
+                alias = acc;
+                acc = acc + Scalar(1.0f);
+            }
+            return alias;
+        }
+    }
+
+    /// <summary>An alias chain whose first link is computed outside the loop: on the first
+    /// iteration the local really is assigned that outside value, however the later passes read.
+    /// </summary>
+    [Module]
+    public partial class AliasChainFromOutsideTheLoop
+    {
+        public static Scalar<float32> Inline(Scalar<float32> x, Scalar<int64> trips)
+        {
+            var acc = x;
+            var z = x * Scalar(10.0f);
+            var v = Scalar(0.0f);
+            var sum = Scalar(0.0f);
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                LoopAPI.Init(v);
+                sum = sum + v;
+                v = z;
+                acc = acc + Scalar(1.0f);
+                z = acc;
+            }
+            return sum;
+        }
+    }
+
+    /// <summary><see cref="AliasChainFromOutsideTheLoop"/> without the declaration, so no guard
+    /// covers it and only the lag identification itself can tell it from a lagged carry.</summary>
+    [Module]
+    public partial class AliasChainFromOutsideTheLoopUndeclared
+    {
+        public static Scalar<float32> Inline(Scalar<float32> x, Scalar<int64> trips)
+        {
+            var acc = x;
+            var z = x * Scalar(10.0f);
+            var v = Scalar(0.0f);
+            var sum = Scalar(0.0f);
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                sum = sum + v;
+                v = z;
+                acc = acc + Scalar(1.0f);
+                z = acc;
+            }
+            return sum;
+        }
+    }
+
+    /// <summary><see cref="NestedLagCarry"/> with the lagged assignment wrapped, giving it a body
+    /// node of its own so the enclosing loop can carry it out.</summary>
+    [Module]
+    public partial class NestedLagCarryWrapped
+    {
+        public static Scalar<float32> Inline(Scalar<float32> x, Scalar<int64> outerTrips, Scalar<int64> innerTrips)
+        {
+            var acc = x;
+            var prev = x;
+            var sum = Scalar(0.0f);
+            foreach (var ctx0 in LoopAPI.Iterate(outerTrips))
+                foreach (var ctx1 in LoopAPI.Iterate(innerTrips))
+                {
+                    sum = sum + prev;
+                    prev = LoopAPI.Carry(acc);
+                    acc = acc + Scalar(1.0f);
+                }
+            return sum;
+        }
+    }
+
+    /// <summary>A carry trailing another by TWO iterations — one lag step deeper than the lag
+    /// pass can see.</summary>
+    [Module]
+    public partial class LagTwoCarry
+    {
+        public static Scalar<float32> Inline(Scalar<float32> x, Scalar<int64> trips)
+        {
+            var acc = x;
+            var prev = x;
+            var prev2 = x;
+            var sum = Scalar(0.0f);
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                sum = sum + prev2;
+                prev2 = prev;
+                prev = acc;
+                acc = acc + Scalar(1.0f);
+            }
+            return sum;
+        }
+    }
+
+    /// <summary><see cref="LagTwoCarry"/> with each step of the chain wrapped, giving every
+    /// lagged variable a body node of its own.</summary>
+    [Module]
+    public partial class LagTwoCarryWrapped
+    {
+        public static Scalar<float32> Inline(Scalar<float32> x, Scalar<int64> trips)
+        {
+            var acc = x;
+            var prev = x;
+            var prev2 = x;
+            var sum = Scalar(0.0f);
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                sum = sum + prev2;
+                prev2 = LoopAPI.Carry(prev);
+                prev = LoopAPI.Carry(acc);
+                acc = acc + Scalar(1.0f);
+            }
+            return sum;
+        }
+    }
+
+    /// <summary>The enclosing loop's ctx.Scan given a value the nested loop does not carry
+    /// out — a body-local assigned before it is ever read there.</summary>
+    [Module]
+    public partial class OuterScanOfUncarriedInnerBodyLocal
+    {
+        public static Tensor<float32> Inline(Scalar<float32> x, Scalar<int64> outerTrips, Scalar<int64> innerTrips)
+        {
+            var acc = x;
+            Variable? scanned = null;
+            foreach (var ctx0 in LoopAPI.Iterate(outerTrips))
+                foreach (var ctx1 in LoopAPI.Iterate(innerTrips))
+                {
+                    acc = acc + Scalar(1.0f);
+                    var t = acc * Scalar(2.0f);
+                    scanned = (Variable)ctx0.Scan(t);
+                }
+            return (Tensor<float32>)scanned!;
+        }
+    }
+
+    /// <summary><see cref="OuterScanOfUncarriedInnerBodyLocal"/> with the body-local declared,
+    /// so the nested loop carries it out and the enclosing scan has a value to record.</summary>
+    [Module]
+    public partial class OuterScanOfInitDeclaredInnerBodyLocal
+    {
+        public static Tensor<float32> Inline(Scalar<float32> x, Scalar<int64> outerTrips, Scalar<int64> innerTrips)
+        {
+            var acc = x;
+            var t = x;
+            Variable? scanned = null;
+            foreach (var ctx0 in LoopAPI.Iterate(outerTrips))
+                foreach (var ctx1 in LoopAPI.Iterate(innerTrips))
+                {
+                    LoopAPI.Init(t);
+                    acc = acc + Scalar(1.0f);
+                    t = acc * Scalar(2.0f);
+                    scanned = (Variable)ctx0.Scan(t);
+                }
+            return (Tensor<float32>)scanned!;
+        }
+    }
+
+    /// <summary><see cref="LagOneCarry"/> scanned rather than accumulated: each recording is the
+    /// lagged local's own value that iteration.</summary>
+    [Module]
+    public partial class LagOneCarryScanned
+    {
+        public static Vector<float32> Inline(Scalar<float32> x, Scalar<int64> trips)
+        {
+            var acc = x;
+            var prev = x;
+            Variable? scanned = null;
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                scanned = (Variable)ctx.Scan(prev);
+                prev = acc;
+                acc = acc + Scalar(1.0f);
+            }
+            return (Vector<float32>)scanned!;
+        }
+    }
+
+    /// <summary><see cref="LagOneCarry"/> with the lagged assignment wrapped, so the body produces
+    /// it and the loop can hand it back: the returned sum adds the value the trailed carry held at
+    /// the start of the last iteration.</summary>
+    [Module]
+    public partial class LagOneCarryWrappedReadAfterLoop
+    {
+        public static Scalar<float32> Inline(Scalar<float32> x, Scalar<int64> trips)
+        {
+            var acc = x;
+            var prev = x;
+            var sum = Scalar(0.0f);
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                sum = sum + prev;
+                prev = LoopAPI.Carry(acc);
+                acc = acc + Scalar(1.0f);
+            }
+            return sum + prev;
+        }
+    }
+
     /// <summary>
-    /// Calls the OUTER loop's <c>ctx.Scan</c> from inside the inner loop's body. The outer looper
-    /// only processes the inner loop's first pass, so the zombie its scan creates on the later
-    /// passes is never registered. Tracked as Shorokoo/Shorokoo#275.
+    /// <see cref="LagOneCarry"/> read after the loop without wrapping the assignment. The bare
+    /// assignment produces no body node, so the local still names the trailed carry's body value —
+    /// refused, naming <c>LoopAPI.Carry</c>.
+    /// </summary>
+    [Module]
+    public partial class LagOneCarryReadAfterLoop
+    {
+        public static Scalar<float32> Inline(Scalar<float32> x, Scalar<int64> trips)
+        {
+            var acc = x;
+            var prev = x;
+            foreach (var ctx in LoopAPI.Iterate(trips))
+            {
+                LoopAPI.Init(prev);
+                prev = acc;
+                acc = acc + Scalar(1.0f);
+            }
+            return prev;
+        }
+    }
+
+    /// <summary>
+    /// Calls the OUTER loop's <c>ctx.Scan</c> from inside the inner loop's body, recording the
+    /// value the outer body ends each of its iterations with.
     /// </summary>
     [Module]
     public partial class OuterScanFromInnerBody

@@ -521,7 +521,7 @@ namespace Shorokoo
 
         #endregion
 
-        #region Framework Error Codes (FW001-FW050)
+        #region Framework Error Codes (FW001-FW052)
         
         /// <summary>Loop operation not implemented</summary>
         public const string FW001 = "FW001";
@@ -657,6 +657,27 @@ namespace Shorokoo
 
         /// <summary>ONNX export rejected: the graph carries Shorokoo-internal ops and cannot be expressed in the vanilla ONNX dialect</summary>
         public const string FW045 = "FW045";
+
+        /// <summary>A loop body value that cannot leave the loop was returned from the graph</summary>
+        public const string FW046 = "FW046";
+
+        // FW047 retired: its precondition became unreachable once lag identification required the
+        // trailed carry's own pre-loop value, and its remedy moved into FW049's guidance.
+
+        /// <summary>A nested loop body trailed the previous iteration's value of one of its carries</summary>
+        public const string FW048 = "FW048";
+
+        /// <summary>A loop body read a value it holds from more than one iteration ago</summary>
+        public const string FW049 = "FW049";
+
+        /// <summary>An enclosing loop's ctx.Scan was given a value the nested loop does not carry out</summary>
+        public const string FW050 = "FW050";
+
+        /// <summary>Two loop carries end on one body node output but start from different values</summary>
+        public const string FW051 = "FW051";
+
+        /// <summary>A loop body set its exit condition more than once</summary>
+        public const string FW052 = "FW052";
 
         #endregion
 

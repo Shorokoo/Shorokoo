@@ -1082,26 +1082,97 @@ public class ModulesCoverageTests
     public void TestAZeroInputOpInALoopBodyStaysInTheLoopBody()
         => AssertDrawInsideLoopBody(ZeroInputOpInLoopBody.ComputationGraph);
 
-    /// <summary>A local carrying the value another held one iteration ago is not identified as a
-    /// carry — each tracing pass advances it by one lag step, so after two passes it still holds
-    /// the pre-loop value — and every read of it is pinned to that value.
-    /// Tracked as Shorokoo/Shorokoo#274.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#274: a lag-1 loop carry is pinned to its pre-loop value")]
+    /// <summary>A local carrying the value another held one iteration ago reads that value, not
+    /// the one from before the loop — accumulated, scanned, declared with an initializer of its
+    /// own, and with the assignment wrapped so the loop can hand it back after, out of a nested
+    /// loop, and one lag step deeper.</summary>
+    [Fact]
     public void TestALagOneLoopCarryCarriesThePreviousIterationsValue()
-        => Assert.True(AutoTest.AdvancedTestGraph<LagOneCarry>(
-            hyperparamInputs: [],
-            runtimeInputs: [TensorData(DType.Float32, [], 10f), TensorData(DType.Int64, [], 3L)],
-            expected: [31.0]));
+    {
+        TensorData Scalar32(float v) => TensorData(DType.Float32, [], v);
+        TensorData Trips(long n) => TensorData(DType.Int64, [], n);
 
-    /// <summary>The outer looper only processes an inner loop's first pass, so a zombie the outer
-    /// loop's scan creates on the inner's later passes is never registered and the lookup throws a
-    /// raw KeyNotFoundException. Tracked as Shorokoo/Shorokoo#275.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#275: the outer loop's ctx.Scan throws when called from an inner body")]
+        Assert.True(AutoTest.AdvancedTestGraph<LagOneCarry>(
+            hyperparamInputs: [], runtimeInputs: [Scalar32(10f), Trips(3)], expected: [31.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<LagOneCarryScanned>(
+            hyperparamInputs: [], runtimeInputs: [Scalar32(10f), Trips(3)], expected: [10.0, 10.0, 11.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<LagOneCarryInitDeclared>(
+            hyperparamInputs: [], runtimeInputs: [Scalar32(10f), Trips(3)], expected: [131.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<LagOneCarryWrappedReadAfterLoop>(
+            hyperparamInputs: [], runtimeInputs: [Scalar32(10f), Trips(3)], expected: [43.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<NestedLagCarryWrapped>(
+            hyperparamInputs: [], runtimeInputs: [Scalar32(10f), Trips(2), Trips(3)], expected: [70.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<LagTwoCarryWrapped>(
+            hyperparamInputs: [], runtimeInputs: [Scalar32(10f), Trips(5)], expected: [53.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<NestedLocalLagCarry>(
+            hyperparamInputs: [], runtimeInputs: [Trips(2), Trips(5)], expected: [62.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<TwoCarriesSharingOneBodyValueWrapped>(
+            hyperparamInputs: [], runtimeInputs: [Scalar32(10f), Scalar32(100f), Trips(3)], expected: [123.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<NestedLagCarryOfAnEnclosingCarry>(
+            hyperparamInputs: [], runtimeInputs: [Scalar32(10f), Trips(2), Trips(3)], expected: [48.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<NestedLagCarryReseededFromAnEnclosingCarry>(
+            hyperparamInputs: [], runtimeInputs: [Scalar32(10f), Trips(2), Trips(3)], expected: [71.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<CarryAssignedAnOutsideValueWrapped>(
+            hyperparamInputs: [], runtimeInputs: [Scalar32(10f), Trips(3)], expected: [200.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<CarryAliasReadAfterLoopFixed>(
+            hyperparamInputs: [], runtimeInputs: [Scalar32(10f), Trips(3)], expected: [12.0]));
+    }
+
+    /// <summary>Every lagged shape the loop cannot hand back is refused by its own code, naming
+    /// the call that answers it, rather than pinning the local to its pre-loop value.</summary>
+    [Fact]
+    public void TestALagCarryTheLoopCannotHandBackIsRefused()
+    {
+        (string Code, string Remedy, Func<ComputationGraph> Build)[] cases =
+        [
+            (ErrorCodes.FW046, "LoopAPI.Carry", () => LagOneCarryReadAfterLoop.ComputationGraph),
+            (ErrorCodes.FW046, "LoopAPI.Carry", () => CarryAliasReadAfterLoop.ComputationGraph),
+            (ErrorCodes.FW023, "LoopAPI.Carry", () => CarryAssignedAnOutsideValue.ComputationGraph),
+            (ErrorCodes.FW052, "ctx.Break", () => LoopWithTwoExitConditions.ComputationGraph),
+            (ErrorCodes.FW049, "LoopAPI.Init", () => LagCarryOfUncarriedValue.ComputationGraph),
+            (ErrorCodes.FW048, "LoopAPI.Carry", () => NestedLagCarry.ComputationGraph),
+            (ErrorCodes.FW049, "LoopAPI.Carry", () => LagTwoCarry.ComputationGraph),
+            (ErrorCodes.FW049, "LoopAPI.Carry", () => AliasChainFromOutsideTheLoopUndeclared.ComputationGraph),
+            (ErrorCodes.FW023, "LoopAPI.Carry", () => AliasChainFromOutsideTheLoop.ComputationGraph),
+            (ErrorCodes.FW051, "LoopAPI.Carry", () => TwoCarriesSharingOneBodyValue.ComputationGraph),
+        ];
+
+        Assert.All(cases, c =>
+        {
+            var message = Assert.Throws<UnsupportedLoopVariableAssignmentException>(() => c.Build()).Message;
+            Assert.Contains(c.Code, message);
+            Assert.Contains(c.Remedy, message);
+        });
+    }
+
+    /// <summary>A body value the loop never outputs is refused whether it is returned from the
+    /// graph or fed to another node, and the refusal names the shape the user wrote rather than
+    /// the one generic answer.</summary>
+    [Fact]
+    public void TestABodyValueTheLoopCannotHandBackIsRefusedWhereverItIsUsed()
+    {
+        Assert.Contains("ctx.IterationIndex", Assert.Throws<UnsupportedLoopVariableAssignmentException>(
+            () => IterationIndexReadAfterLoop.ComputationGraph).Message);
+        Assert.Contains(ErrorCodes.FW046, Assert.Throws<UnsupportedLoopVariableAssignmentException>(
+            () => BodyValueAssignedBeforeReadReturned.ComputationGraph).Message);
+        Assert.Contains("LoopAPI.Init", Assert.Throws<OnnxNodeException>(
+            () => BodyValueAssignedBeforeReadConsumed.ComputationGraph).Message);
+    }
+
+    /// <summary>An enclosing loop's ctx.Scan called from inside a nested loop's body records the
+    /// value the outer body ends each of its iterations with.</summary>
+    [Fact]
     public void TestTheOuterLoopsScanCanBeCalledFromAnInnerLoopBody()
-        => Assert.True(AutoTest.AdvancedTestGraph<OuterScanFromInnerBody>(
-            hyperparamInputs: [],
-            runtimeInputs: [TensorData(DType.Float32, [], 10f), TensorData(DType.Int64, [], 2L), TensorData(DType.Int64, [], 3L)],
-            expected: [13.0, 16.0]));
+    {
+        TensorData[] inputs = [TensorData(DType.Float32, [], 10f),
+                               TensorData(DType.Int64, [], 2L), TensorData(DType.Int64, [], 3L)];
+        Assert.True(AutoTest.AdvancedTestGraph<OuterScanFromInnerBody>(
+            hyperparamInputs: [], runtimeInputs: inputs, expected: [13.0, 16.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<OuterScanOfInitDeclaredInnerBodyLocal>(
+            hyperparamInputs: [], runtimeInputs: inputs, expected: [26.0, 32.0]));
+        Assert.Contains(ErrorCodes.FW050, Assert.Throws<UnsupportedLoopVariableAssignmentException>(
+            () => OuterScanOfUncarriedInnerBodyLocal.ComputationGraph).Message);
+    }
 
     private static Tensor<float32> MachineryFreeBody(Tensor<float32> x) => x + x;
 
@@ -1300,20 +1371,30 @@ public class ModulesCoverageTests
         Assert.Equal([2f, 4f], RunFloats(arch.ToConcreteModel(), input));
     }
 
-    /// <summary>A call site inside a loop body takes no iteration scope, so the callee's parameter
-    /// is shared across iterations where the MODEL_INVOKE route realizes one per iteration.
-    /// Tracked as Shorokoo/Shorokoo#285.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#285: a module-typed function invoked in a loop body takes no iteration scope")]
-    public void TestAModuleTypedFunctionInvokedInALoopRealizesAParameterPerIteration()
+    /// <summary>What a call site realizes per iteration is decided by where the callee is
+    /// CREATED, not by which invoke form reaches it: one call site of one callee shares its
+    /// parameter across the loop's iterations — weight sharing — and only creating the model
+    /// inside the body makes a parameter per iteration.</summary>
+    [Fact]
+    public void TestAModuleInvokedInALoopSharesOneParameterAcrossIterations()
     {
-        var fn = ModuleFn((Func<Tensor<float32>, Tensor<float32>>)TimesOwnParam);
-        var x = InvokeInput("input");
-        var acc = x;
-        foreach (var _ in LoopAPI.Iterate(Scalar(3L))) acc = (Tensor<float32>)fn.Call(acc)[0];
-        var g = ComputationGraph.FromInternal(new InternalComputationGraph([x], [acc]), GraphKind.Module);
+        int ParamIdentities(Func<Tensor<float32>, Tensor<float32>> callOnce)
+        {
+            var x = InvokeInput("input");
+            var acc = x;
+            foreach (var _ in LoopAPI.Iterate(Scalar(3L))) acc = callOnce(acc);
+            var g = ComputationGraph.FromInternal(new InternalComputationGraph([x], [acc]), GraphKind.Module);
+            var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([2L], 1f, 2f)]));
+            return arch.GetConcreteModelParamInfos().ModelIds.Distinct().Count();
+        }
+        static Model<Tensor<float32>, Tensor<float32>> NewModel() => ModuleFactory
+            .FromFunc<Tensor<float32>, Tensor<float32>>(TimesOwnParam, "TimesOwnParam").SetHyperparams();
 
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([2L], 1f, 2f)]));
-        Assert.Equal(3, arch.GetConcreteModelParamInfos().ModelIds.Distinct().Count());
+        var fn = ModuleFn((Func<Tensor<float32>, Tensor<float32>>)TimesOwnParam);
+        var createdOutside = NewModel();
+        Assert.Equal(1, ParamIdentities(t => (Tensor<float32>)fn.Call(t)[0]));
+        Assert.Equal(1, ParamIdentities(createdOutside.Call));
+        Assert.Equal(3, ParamIdentities(t => NewModel().Call(t)));
     }
 
     [Fact]
@@ -1415,26 +1496,119 @@ public class ModulesCoverageTests
             v => Assert.NotEqual(0f, v));
     }
 
-    /// <summary>A draw inside a module invoked from a loop re-derives one stream key, so every
-    /// iteration returns the same sample. The iteration scope comes from the model's creation site
-    /// rather than the invoke site, and a module-typed function has no creation site at all.
-    /// Tracked as Shorokoo/Shorokoo#289.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#289: a module invoked in a loop reuses one RNG sample for every iteration")]
+    /// <summary>A draw inside a module invoked from a loop is re-executed per iteration, and a
+    /// second execution of a draw is a second sample: three trips do not give three times what one
+    /// trip gives. Compared against the same call site at one trip rather than against a call site
+    /// outside a loop, which differs by its scope alone and would agree either way.</summary>
+    [Fact]
     public void TestAModuleInvokedInALoopDrawsAFreshSamplePerIteration()
     {
         var zero = TensorData([2L], 0f, 0f);
         var fn = ModuleFn((Func<Tensor<float32>, Tensor<float32>>)DrawsOnce);
-        var arch = ConcretizeInvokes(x =>
-        {
-            var acc = x;
-            foreach (var _ in LoopAPI.Iterate(Scalar(3L))) acc = (Tensor<float32>)fn.Call(acc)[0];
-            return [acc];
-        }, zero);
-        var three = RunFloats(arch.ToConcreteModel(RngConfig.Default), zero);
+        var model = ModuleFactory
+            .FromFunc<Tensor<float32>, Tensor<float32>>(DrawsOnce, "DrawsOnce").SetHyperparams();
 
-        var once = ConcretizeInvokes(x => [(Tensor<float32>)fn.Call(x)[0]], zero);
-        var one = RunFloats(once.ToConcreteModel(RngConfig.Default), zero);
-        Assert.All(three.Zip(one, (t, o) => Math.Abs(t - 3 * o)), d => Assert.True(d > 1e-5f));
+        float[] Accumulate(Func<Tensor<float32>, Tensor<float32>> call, long trips)
+            => RunFloats(ConcretizeInvokes(x =>
+            {
+                var acc = x;
+                foreach (var _ in LoopAPI.Iterate(Scalar(trips))) acc = call(acc);
+                return [acc];
+            }, zero).ToConcreteModel(RngConfig.Default), zero);
+
+        Func<Tensor<float32>, Tensor<float32>>[] routes =
+            [t => (Tensor<float32>)fn.Call(t)[0], model.Call];
+
+        Assert.All(routes, call => Assert.All(
+            Accumulate(call, 3).Zip(Accumulate(call, 1), (three, one) => Math.Abs(three - 3 * one)),
+            d => Assert.True(d > 1e-5f)));
+    }
+
+    /// <summary>The scope a call site injects for an enclosing loop is a marker rather than a
+    /// slot, so it does not move when the callee gains a consumer and an Override path recorded
+    /// through such a site survives editing the callee.</summary>
+    [Fact]
+    public void TestACallSiteLoopScopeIsStableWhenTheCalleeGainsAConsumer()
+    {
+        int LoopSlotOf(Delegate body)
+        {
+            var fn = ModuleFn(body);
+            var arch = ConcretizeInvokes(x =>
+            {
+                var acc = x;
+                foreach (var _ in LoopAPI.Iterate(Scalar(3L))) acc = (Tensor<float32>)fn.Call(acc)[0];
+                return [acc];
+            }, TensorData([2L], 0f, 0f));
+            return arch.GetRngStreamReport().Streams
+                .First(s => s.Kind == RngStreamKind.UniformFeed).ModelIdPath[1];
+        }
+
+        Assert.Equal(LoopSlotOf((Func<Tensor<float32>, Tensor<float32>>)DrawsOnce),
+                     LoopSlotOf((Func<Tensor<float32>, Tensor<float32>>)DrawsTwice));
+    }
+
+    private static int[][] FeedPathsOf(ComputationGraph g)
+    {
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([2L], 1f, 2f)]));
+        return [.. arch.GetRngStreamReport().Streams
+            .Where(s => s.Kind == RngStreamKind.UniformFeed)
+            .Select(s => s.ModelIdPath.ToArray())
+            .OrderBy(p => string.Join(",", p))];
+    }
+
+    [Fact]
+    public void TestAModelReachedOutOfASequenceKeepsItsOwnRngStream()
+    {
+        Assert.Equal(FeedPathsOf(DrawTwoDirect.ComputationGraph),
+                     FeedPathsOf(DrawTwoFromSequence.ComputationGraph));
+        Assert.Equal(FeedPathsOf(DrawTwoDirect.ComputationGraph),
+                     FeedPathsOf(DrawTwoFromAppendedSequence.ComputationGraph));
+        Assert.Equal(2, FeedPathsOf(DrawTwoFromErasedSequence.ComputationGraph).Length);
+        Assert.Equal([[2, 1]], FeedPathsOf(DrawFromSequenceAtNegativeIndex.ComputationGraph));
+        Assert.Equal([[3, 1]], FeedPathsOf(DrawFromSequenceAfterInsertAt.ComputationGraph));
+
+        // Picked by the loop index the model's id becomes a slot; the rest of the path is what
+        // the same model called directly in that loop derives from.
+        Assert.Equal(FeedPathsOf(DrawInLoopDirect.ComputationGraph).Select(p => p[1..]),
+                     FeedPathsOf(DrawInLoopFromSequence.ComputationGraph).Select(p => p[1..]));
+    }
+
+    [Fact]
+    public void TestModelsPickedOutOfASequenceAtRunTimeDrawApartHoweverDeepTheReaderSits()
+    {
+        float[] DifferenceOf(ComputationGraph g)
+        {
+            var zero = TensorData([2L], 0f, 0f);
+            var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([zero, TensorData(DType.Int64, [], 0L)]));
+            return RunFloats(arch.ToConcreteModel(RngConfig.Default), zero, TensorData(DType.Int64, [], 0L));
+        }
+
+        Assert.All(DifferenceOf(DrawTwoAtRuntimePositions.ComputationGraph), v => Assert.NotEqual(0f, v));
+        Assert.All(DifferenceOf(DrawTwoAtRuntimePositionsNested.ComputationGraph), v => Assert.NotEqual(0f, v));
+    }
+
+    // Pins Shorokoo/Shorokoo#303: the models a sequence assembled inside a loop holds are reached
+    // through the loop variable carrying it, which the inline pass cannot lay out, so their feeds
+    // fall back to one stream whose path names no model.
+    [Fact(Skip = "Shorokoo/Shorokoo#303: a sequence assembled in a loop loses its models' RNG identity")]
+    public void TestAModelReachedOutOfASequenceAppendedInALoopKeepsItsOwnRngStream()
+        => Assert.Equal(FeedPathsOf(DrawTwoDirect.ComputationGraph).Select(p => p.Length),
+                        FeedPathsOf(DrawTwoFromSequenceAppendedInLoop.ComputationGraph).Select(p => p.Length));
+
+    private static Tensor<float32> DrawsTwice(Tensor<float32> t)
+        => t + RandomUniform([Scalar(2L)], 0f, 1f) + RandomUniform([Scalar(2L)], 0f, 1f);
+
+    /// <summary>Two call sites of one model object fold the same stream key, because the id they
+    /// reparent under is the model's rather than the site's — where two call sites of a
+    /// module-typed function each mint their own. Tracked as Shorokoo/Shorokoo#298.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#298: two call sites of one model object share an RNG stream")]
+    public void TestTwoCallSitesOfOneModelObjectGetSeparateRngStreams()
+    {
+        var model = ModuleFactory
+            .FromFunc<Tensor<float32>, Tensor<float32>>(DrawsOnce, "DrawsOnce").SetHyperparams();
+        var arch = ConcretizeInvokes(x => [model.Call(x) - model.Call(x)]);
+        var zero = TensorData([2L], 0f, 0f);
+        Assert.All(RunFloats(arch.ToConcreteModel(RngConfig.Default), zero), v => Assert.NotEqual(0f, v));
     }
 
     private static Tensor<float32> DottedNameBody(Tensor<float32> t) => t * InitSimple.Init([Scalar(2L)]);

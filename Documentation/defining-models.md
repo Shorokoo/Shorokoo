@@ -201,8 +201,7 @@ How a hyper value gets supplied depends on the route:
   ```
 
   `ctx.Scan(v)` records `v` once per iteration and stacks the recordings into a
-  single tensor with a new leading axis of length `count`, available after that loop
-  (but see [limitations.md](limitations.md) for a scan inside a *nested* loop).
+  single tensor with a new leading axis of length `count`, available after that loop.
   Scan whatever the body reads at that point — the carry before the body updates it,
   the carry after, the iteration index, a value from outside the loop:
   ```csharp
@@ -215,6 +214,30 @@ How a hyper value gets supplied depends on the route:
   }
   return (Tensor<float32>)scanned!;   // [x, x+1, …, x+n-1]
   ```
+
+  Nested loops scan on either context. An **enclosing** loop's `ctx.Scan`, called from
+  inside a nested body, records once per *enclosing* iteration — the value that body ends
+  the iteration with. What an inner loop's own scan cannot do is escape the enclosing loop;
+  see [limitations.md](limitations.md).
+
+  A local may also carry what another carry held **one iteration ago**. The loop identifies
+  it and hands back the trailed carry's value from the start of the previous iteration:
+  ```csharp
+  var acc = x, prev = x, sum = Scalar(0.0f);
+  foreach (var ctx in LoopAPI.Iterate(trips))
+  {
+      sum  = sum + prev;          // acc's value from the previous iteration
+      prev = acc;
+      acc  = acc + Scalar(1.0f);
+  }
+  ```
+  Written bare like that, a lagged local works read inside the body or scanned, including
+  inside a nested loop when the lagged local is created in that loop's enclosing body.
+  Everything else — reading it after the loop, lagging a local the enclosing loop also
+  carries, trailing something the loop does not carry, chaining two lag steps, or an alias
+  seeded from outside the loop — is refused, naming the shape. Wrapping every such
+  assignment as `prev = LoopAPI.Carry(acc)` answers them, and a local the body only writes
+  needs `LoopAPI.Init` as well. See [limitations.md](limitations.md).
 
 ## Omittable parameters (defaulted hypers & optional inputs)
 

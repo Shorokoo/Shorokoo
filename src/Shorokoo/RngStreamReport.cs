@@ -144,7 +144,13 @@ public sealed class RngStreamReport
             firstScope = false;
             sb.Append(scope.Count == 0
                 ? "// at the end of Inline:\n"
-                : $"// inside the loop body at ModelId path [{string.Join(", ", scope)}]:\n");
+                // A -1 in the path need not mean the pin goes in a loop body: a module called
+                // from a loop takes the call site's scope, and its consumers are declared in its
+                // own Inline, which has no loop of its own; and a model a ModelSequence position
+                // picks at run time contributes a -1 of its own, with no loop involved at all.
+                // The three are indistinguishable from the path, so name them all.
+                : $"// in the scope at ModelId path [{string.Join(", ", scope)}] — a loop body, a "
+                  + "module reached from one, or a model a ModelSequence position picks at run time:\n");
             sb.Append("Rng.Pin(");
             bool firstItem = true;
             foreach (var (slot, s) in bySlot)

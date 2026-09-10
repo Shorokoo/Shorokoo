@@ -247,6 +247,11 @@ public class ModelParamRefTests
                    HeterogeneousSequenceAtOneModel.ComputationGraph);
 
     [Fact]
+    public void TestAHeterogeneousModelSequenceCallsTheElementItIndexedWhenThatElementHasAHyperparameter()
+        => SameIds(HyperScaledGainNoRefModel.ComputationGraph,
+                   HeterogeneousHyperSequenceAtOneModel.ComputationGraph);
+
+    [Fact]
     public void TestAModelPassedAsAHyperparameterSurvivesItsHostOutlivingAnErasedSibling()
         => SameIds(GainFromErasedSequenceModel.ComputationGraph,
                    HyperModelGainFromErasedSequenceModel.ComputationGraph);

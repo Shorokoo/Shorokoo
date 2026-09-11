@@ -152,7 +152,7 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
 
             // Which IfElse arm each forward node belongs to, so a gradient leaving one can be
             // zeroed when that arm did not run.
-            var armOf = ComputeArmMembership(graph, producerByOutput);
+            var armOf = FastIfArms.Classify(graph);
             var armConditions = new Dictionary<FastTensorKey, Scalar<bit>>();
 
             for (int i = topoOrder.Count - 1; i >= 0; i--)
@@ -212,9 +212,6 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
             RewireConsumers(graph, keyMappings);
         }
 
-        /// <summary>One <c>IfElse</c> arm: the condition that selects it, and which side it is.</summary>
-        private readonly record struct Arm(FastTensorKey Condition, bool IsThen);
-
         /// <summary>
         /// Zeroes a gradient on its way out of an <c>IfElse</c> arm that did not run.
         ///
@@ -235,7 +232,7 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
             Variable grad,
             FastNode node,
             FastTensorKey destination,
-            Dictionary<FastNodeKey, List<Arm>> armOf,
+            Dictionary<FastNodeKey, List<IfArm>> armOf,
             Dictionary<FastTensorKey, Scalar<bit>> armConditions,
             Dictionary<Variable, FastTensorKey> freshInputBacking,
             Dictionary<FastTensorKey, FastNode> producerByOutput)
@@ -256,76 +253,14 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
                     armConditions[arm.Condition] = cond = fresh.ToValue<Scalar<bit>>();
                 }
 
-                // Zeros of the gradient's own shape. Sub(g, g) would carry the NaN through.
+                // Zeros of the gradient's own shape, at the dtype every gradient here carries (see
+                // the loss seed above). Sub(g, g) would carry the NaN through.
                 var zeros = OnnxOp.ConstantOfShape(
                     OnnxOp.Shape(grad), Globals.TensorData(DType.Float32, [1L], 0f), grad.Rank);
                 grad = arm.IsThen ? Ops.IfElse(cond, grad, zeros) : Ops.IfElse(cond, zeros, grad);
             }
             return grad;
         }
-
-        /// <summary>
-        /// The <c>IfElse</c> arms each node belongs to: those whose branch inputs reach it and
-        /// whose sibling arm does not. A node both arms reach runs whatever the condition says and
-        /// is nobody's arm; so are the inputs and parameters a branch merely reads, which is what
-        /// makes a gradient heading for one a gradient leaving the arm.
-        /// </summary>
-        private static Dictionary<FastNodeKey, List<Arm>> ComputeArmMembership(
-            InternalComputationGraph graph, Dictionary<FastTensorKey, FastNode> producerByOutput)
-        {
-            var armOf = new Dictionary<FastNodeKey, List<Arm>>();
-
-            HashSet<FastNodeKey> ReachedFrom(IEnumerable<FastTensorKey?> roots)
-            {
-                var seen = new HashSet<FastNodeKey>();
-                var worklist = new Stack<FastNode>();
-                foreach (var root in roots)
-                    if (root is FastTensorKey k && producerByOutput.TryGetValue(k, out var producer)
-                        && seen.Add(producer.Key))
-                        worklist.Push(producer);
-                while (worklist.Count > 0)
-                    foreach (var (_, ins) in worklist.Pop().FullInputs)
-                        foreach (var ik in ins)
-                            if (ik is FastTensorKey k && producerByOutput.TryGetValue(k, out var producer)
-                                && seen.Add(producer.Key))
-                                worklist.Push(producer);
-                return seen;
-            }
-
-            foreach (var close in graph.Nodes)
-            {
-                if (close.OpCode != OpCodes.IF_CLOSE) continue;
-                if (close.GraphOpenNodeKey is not FastNodeKey openKey) continue;
-                var open = graph.Nodes.FirstOrDefault(n => n.Key.Equals(openKey));
-                if (open is null || open.Inputs.Count == 0 || open.Inputs[0] is not FastTensorKey condition)
-                    continue;
-
-                var reached = new Dictionary<bool, HashSet<FastNodeKey>>();
-                foreach (var isThen in (bool[])[true, false])
-                    reached[isThen] = close.FullInputs.TryGetValue(BranchAttr(isThen), out var roots)
-                        ? ReachedFrom(roots) : [];
-
-                foreach (var isThen in (bool[])[true, false])
-                    foreach (var nodeKey in reached[isThen])
-                    {
-                        if (reached[!isThen].Contains(nodeKey)) continue;
-                        var owner = producerByOutput.Values.FirstOrDefault(n => n.Key.Equals(nodeKey));
-                        if (owner is not null && IsNobodysArm(owner)) continue;
-                        if (!armOf.TryGetValue(nodeKey, out var list)) armOf[nodeKey] = list = [];
-                        list.Add(new Arm(condition, isThen));
-                    }
-            }
-            return armOf;
-        }
-
-        /// <summary>An input or a parameter is read by a branch, never owned by it.</summary>
-        private static bool IsNobodysArm(FastNode node)
-            => Shorokoo.Core.Factory.FastOpsetResolver.IsModelInputOpCode(node.OpCode)
-            || node.OpCode == InternalOpCodes.MODEL_PARAM
-            || node.OpCode == InternalOpCodes.MODEL_PARAM_DATA;
-
-        private static string BranchAttr(bool isThen)
-            => isThen ? OnnxOpAttributeNames.AttrThenBranch : OnnxOpAttributeNames.AttrElseBranch;
 
         // ------------------------------------------------------------------------------------
         // Walk: forward topological order from leaves (paramKeys) up to the loss producer.
@@ -431,7 +366,7 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
             Dictionary<string, Func<Variable?[], Variable?[], OnnxCSharpAttributes, Variable?[]>> gradOpsMap,
             Dictionary<FastNodeKey, FastNode> nodesByKey,
             Dictionary<FastTensorKey, FastTensorInfo> tensorInfo,
-            Dictionary<FastNodeKey, List<Arm>> armOf,
+            Dictionary<FastNodeKey, List<IfArm>> armOf,
             Dictionary<FastTensorKey, Scalar<bit>> armConditions,
             Dictionary<FastTensorKey, FastNode> producerByOutput)
         {

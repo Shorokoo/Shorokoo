@@ -37,21 +37,24 @@ namespace Shorokoo.Core.Nodes.Processors.Training
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
+            // Every training graph is checked, and almost none has a loop; settle that before
+            // building anything.
+            bool anyLoop = false;
+            foreach (var node in graph.Nodes) if (node.OpCode == OpCodes.LOOP_OPEN) { anyLoop = true; break; }
+            if (!anyLoop) return;
+
             var nodesByKey = new Dictionary<FastNodeKey, FastNode>(graph.Nodes.Count);
             foreach (var n in graph.Nodes) nodesByKey[n.Key] = n;
 
             var producerOf = new Dictionary<FastTensorKey, FastNode>();
             var roots = new List<FastNode>();
-            bool anyLoop = false;
             foreach (var node in graph.Nodes)
             {
-                anyLoop |= node.OpCode == OpCodes.LOOP_OPEN;
                 if (node.OpCode == InternalOpCodes.AUTO_GRAD) roots.Add(node);
                 foreach (var (_, outs) in node.FullOutputs)
                     foreach (var ok in outs)
                         if (ok is not null && !ok.Value.IsEmpty) producerOf[ok.Value] = node;
             }
-            if (!anyLoop) return;
 
             if (roots.Count == 0)
                 foreach (var outputKey in graph.Outputs)

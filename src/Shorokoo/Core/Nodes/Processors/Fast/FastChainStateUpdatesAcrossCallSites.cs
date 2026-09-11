@@ -51,10 +51,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     {
         /// <summary>One call site of a state parameter: its link, the marker that closes it, and
         /// the arm it belongs to (null at module scope).</summary>
-        private readonly record struct CallSite(FastNode Link, FastNode Marker, ArmKey? Arm);
-
-        /// <summary>An IfElse arm: the branch node and which side of it.</summary>
-        private readonly record struct ArmKey(FastNodeKey IfClose, string Branch);
+        private readonly record struct CallSite(FastNode Link, FastNode Marker, IfArm? Arm);
 
         public static void Process(InternalComputationGraph graph)
         {
@@ -81,7 +78,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             if (linksByParam.Count == 0) return;
 
             var enclosingScope = ComputeEnclosingScope(graph);
-            var armsOfNode = ClassifyBranches(graph);
+            var armsOfNode = FastIfArms.Classify(graph);
 
             // Range rewrites and node insertions are collected first and applied after, so every
             // position taken here stays the one the node still has.
@@ -154,7 +151,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             InternalComputationGraph graph,
             List<FastNode> links,
             Dictionary<FastNodeKey, FastNodeKey?> enclosingScope,
-            Dictionary<FastNodeKey, List<ArmKey>> armsOfNode,
+            Dictionary<FastNodeKey, List<IfArm>> armsOfNode,
             Dictionary<FastNodeKey, FastNode> nodeByKey)
         {
             var linkKeys = links.Select(l => l.Outputs[0]!.Value).ToHashSet();
@@ -204,7 +201,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             List<FastTensorKey> branchLinks)
         {
             var current = param;
-            var armValue = new Dictionary<ArmKey, FastTensorKey>();
+            var armValue = new Dictionary<IfArm, FastTensorKey>();
             var armsOfClose = new Dictionary<FastNodeKey, FastTensorKey>();   // the value entering each branch
             FastNodeKey? pendingClose = null;                                 // a branch still being read
             int previousMarker = -1;
@@ -213,7 +210,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             {
                 var site = sites[i];
 
-                if (site.Arm is ArmKey arm)
+                if (site.Arm is IfArm arm)
                 {
                     if (!armsOfClose.ContainsKey(arm.IfClose)) armsOfClose[arm.IfClose] = current;
                     pendingClose = arm.IfClose;
@@ -237,13 +234,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 previousMarker = positionOf[site.Marker.Key];
 
                 // Close out a branch once its last call site is behind us.
-                bool lastOfThisClose = site.Arm is ArmKey a
+                bool lastOfThisClose = site.Arm is IfArm a
                     && (i + 1 == sites.Count || sites[i + 1].Arm?.IfClose != a.IfClose);
                 if (!lastOfThisClose) continue;
 
-                var ifClose = nodeByKey[((ArmKey)site.Arm!).IfClose];
-                current = CloseBranch(graph, ifClose, armsOfClose[ifClose.Key], armValue,
-                                      positionOf, insertions);
+                var closing = (IfArm)site.Arm!;
+                var ifClose = nodeByKey[closing.IfClose];
+                current = CloseBranch(graph, ifClose, closing.Condition, armsOfClose[ifClose.Key],
+                                      armValue, positionOf, insertions);
                 branchLinks.Add(current);
                 pendingClose = null;
             }
@@ -258,8 +256,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         private static FastTensorKey CloseBranch(
             InternalComputationGraph graph,
             FastNode ifClose,
+            FastTensorKey condition,
             FastTensorKey incoming,
-            Dictionary<ArmKey, FastTensorKey> armValue,
+            Dictionary<IfArm, FastTensorKey> armValue,
             Dictionary<FastNodeKey, int> positionOf,
             List<(int atPos, FastNode node)> insertions)
         {
@@ -267,9 +266,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var identityAttrs = OnnxCSharpAttributes.FromCSharpVals(
                 new Dictionary<string, object?>(), Definitions.NodeDefinitions[OpCodes.IDENTITY].AttributeDefs);
 
-            FastTensorKey ArmFinal(string branch)
+            FastTensorKey ArmFinal(bool isThen)
             {
-                if (armValue.TryGetValue(new ArmKey(ifClose.Key, branch), out var v)) return v;
+                if (armValue.TryGetValue(new IfArm(ifClose.Key, condition, isThen), out var v)) return v;
                 var key = FastNodeKey.New();
                 var output = new FastTensorKey(key, 0);
                 insertions.Add((closePos, new FastNode
@@ -283,8 +282,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 return output;
             }
 
-            var thenFinal = ArmFinal(OnnxOpAttributeNames.AttrThenBranch);
-            var elseFinal = ArmFinal(OnnxOpAttributeNames.AttrElseBranch);
+            var thenFinal = ArmFinal(isThen: true);
+            var elseFinal = ArmFinal(isThen: false);
 
             ifClose.FullInputs[OnnxOpAttributeNames.AttrThenBranch].Add(thenFinal);
             ifClose.FullInputs[OnnxOpAttributeNames.AttrElseBranch].Add(elseFinal);
@@ -320,64 +319,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             }
             return enclosing;
         }
-
-        /// <summary>
-        /// The arms each node belongs to: those whose branch inputs reach it and whose sibling arm
-        /// does not. A node both arms reach is not a branch's — it is the parameter's ordinary
-        /// history — and one reached from nested IfElses lands in several, which the caller refuses.
-        /// </summary>
-        private static Dictionary<FastNodeKey, List<ArmKey>> ClassifyBranches(InternalComputationGraph graph)
-        {
-            var producerOf = new Dictionary<FastTensorKey, FastNode>();
-            foreach (var node in graph.Nodes)
-                foreach (var (_, outs) in node.FullOutputs)
-                    foreach (var ok in outs)
-                        if (ok is not null && !ok.Value.IsEmpty) producerOf[ok.Value] = node;
-
-            HashSet<FastNodeKey> ReachedFrom(IEnumerable<FastTensorKey?> roots)
-            {
-                var seen = new HashSet<FastNodeKey>();
-                var worklist = new Stack<FastNode>();
-                foreach (var root in roots)
-                    if (root is FastTensorKey k && producerOf.TryGetValue(k, out var producer)
-                        && seen.Add(producer.Key))
-                        worklist.Push(producer);
-                while (worklist.Count > 0)
-                    foreach (var (_, ins) in worklist.Pop().FullInputs)
-                        foreach (var ik in ins)
-                            if (ik is FastTensorKey k && producerOf.TryGetValue(k, out var producer)
-                                && seen.Add(producer.Key))
-                                worklist.Push(producer);
-                return seen;
-            }
-
-            var armsOf = new Dictionary<FastNodeKey, List<ArmKey>>();
-            foreach (var close in graph.Nodes)
-            {
-                if (close.OpCode != OpCodes.IF_CLOSE) continue;
-                var reached = new Dictionary<string, HashSet<FastNodeKey>>();
-                foreach (var branch in Branches)
-                    reached[branch] = close.FullInputs.TryGetValue(branch, out var roots)
-                        ? ReachedFrom(roots) : [];
-
-                foreach (var branch in Branches)
-                    foreach (var nodeKey in reached[branch])
-                    {
-                        if (reached[Other(branch)].Contains(nodeKey)) continue;
-                        if (!armsOf.TryGetValue(nodeKey, out var list)) armsOf[nodeKey] = list = [];
-                        list.Add(new ArmKey(close.Key, branch));
-                    }
-            }
-            return armsOf;
-        }
-
-        private static readonly string[] Branches =
-            [OnnxOpAttributeNames.AttrThenBranch, OnnxOpAttributeNames.AttrElseBranch];
-
-        private static string Other(string branch)
-            => branch == OnnxOpAttributeNames.AttrThenBranch
-                ? OnnxOpAttributeNames.AttrElseBranch
-                : OnnxOpAttributeNames.AttrThenBranch;
 
         /// <summary>
         /// The value behind an Identity chain. Inlining wraps a parameter in one at every splice,

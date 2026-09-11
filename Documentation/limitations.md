@@ -222,11 +222,9 @@ branch and computed on every step.
 Gradients are unaffected — the arm that did not run contributes exactly zero, and
 that zero is *selected* rather than arrived at by multiplication, so an arm whose
 derivative is not a number (`sqrt` of what is negative on that path, a division by
-what is zero there) cannot poison the weights. What remains is the work, plus one
-corner: an operation that would *fail* off its branch rather than merely return a
-non-finite number — unwrapping an `OptionalTensor` that is absent on the other
-path — still runs if it is one of the hoisted values. Keep such an operation off
-the differentiated path.
+what is zero there) cannot poison the weights. What remains is the work, and the
+rule that an operation which would *fail* off its branch, rather than merely
+return a non-finite number, has to stay off the differentiated path.
 
 ### Gradient (activation) checkpointing
 

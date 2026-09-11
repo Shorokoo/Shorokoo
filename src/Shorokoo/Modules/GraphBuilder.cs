@@ -196,10 +196,10 @@ namespace Shorokoo.Core
 
             // The body's own updates, plus the calls it made to models that update state. A call
             // whose result the body discards reaches the graph through nothing else, so without
-            // this its updates are built and then dropped with it (Shorokoo/Shorokoo#310); a call
-            // whose result is used is already reachable and the extra dep is redundant, which the
-            // pruning of a wrapper that names an already-live tensor costs nothing.
-            Variable[] deps = [.. stateUpdates, .. GraphTrace.CallEffects ?? []];
+            // this its updates are built and then dropped with it (Shorokoo/Shorokoo#310). Naming
+            // a call whose result is used costs nothing: the dep is redundant and the wrapper
+            // around an already-live tensor prunes away.
+            Variable[] deps = [.. stateUpdates, .. GraphTrace.TakeCallEffects()];
 
             // Check for registered state updates and wrap outputs with WithStateDeps if any exist
             // This ensures state update tensors are included in the graph when outputs are used

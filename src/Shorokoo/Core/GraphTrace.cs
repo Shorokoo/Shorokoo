@@ -103,6 +103,16 @@ namespace Shorokoo.Core
             ? TraceContext.Current.CallEffects
             : null;
 
+        /// <summary>Hands the recorded calls to the harvest and clears them, as
+        /// <see cref="StateUpdates"/> and <see cref="Pins"/> are taken.</summary>
+        internal static Variable[] TakeCallEffects()
+        {
+            if (CallEffects is not List<Variable> effects) return [];
+            var taken = effects.ToArray();
+            effects.Clear();
+            return taken;
+        }
+
         // ────────────────────────────── internals ──────────────────────────────
 
         private static TraceContext RequireModuleBuild(string api)

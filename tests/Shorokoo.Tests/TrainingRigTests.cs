@@ -1247,6 +1247,24 @@ public class TrainingRigTrainingLoopCoverageTests
         Assert.Equal<float>([0.95f, 0.8f], TrainedParams(SqrtInOneIfArmModel.ComputationGraph, true, 1f, 4f));
     }
 
+    // An OptionalTensor input is a supported model input and covered end to end on the inference
+    // path; supplying one to a rig fails whether it is present or absent, and the absent case is
+    // the arrangement the feature exists for.
+    [Fact(Skip = "Shorokoo/Shorokoo#314: an OptionalTensor input cannot be supplied to a TrainingRig")]
+    public void TestAModelWithAnOptionalInputTrains()
+    {
+        var x = TensorData([3L], 1f, 2f, 3f);
+        foreach (var bias in (OptionalTensorData[])[
+            OptionalTensorData.Some(TensorData([3L], 0f, 0f, 0f)), OptionalTensorData.None<float32>()])
+        {
+            var rig = TrainingRig.FromScratch(NullableTrainableBiasLayer.ComputationGraph,
+                L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+                [new TensorDataModelParam("x", ModelParamType.InputParam, x),
+                 new OptionalTensorDataModelParam("bias", ModelParamType.InputParam, bias)], 0.1f);
+            Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
+        }
+    }
+
     // Training differentiates a loop by unrolling it, so one whose trip count is not a constant
     // has no backward pass. A constant count is unrolled and trains, which is why every other
     // in-loop training test passes.

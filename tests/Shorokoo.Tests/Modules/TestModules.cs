@@ -1335,6 +1335,30 @@ namespace Shorokoo.Tests.Modules
             => input * InitCallingANestedParamOwningModule.Init(Vector(2L));
     }
 
+    /// <summary>An initializer whose body calls a param-owning module taken out of a
+    /// <c>ModelSequence</c> at a run-time position. Inlining reparents the callee's
+    /// <c>MODEL_PARAM_REF</c> onto the model variable, and the emitted body keeps the resulting
+    /// <c>MODEL_PARAM_MODEL_REF</c>.</summary>
+    [TrainableParamInitializer]
+    public static partial class InitCallingAParamOwningModuleFromASequence
+    {
+        public static Tensor<float32> Inline(Vector<int64> shape)
+        {
+            var seq = ModelSequence.Create(SimplestLayer.Model(), SimplestLayer.Model());
+            var x = Globals.TensorFill(shape, 1.0f);
+            foreach (var ctx in LoopAPI.Iterate(Scalar(2L))) x = seq[ctx.IterationIndex].Call(x);
+            return x;
+        }
+    }
+
+    /// <summary>Drives InitCallingAParamOwningModuleFromASequence.</summary>
+    [Module]
+    public partial class UsesInitCallingAParamOwningModuleFromASequence
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => input * InitCallingAParamOwningModuleFromASequence.Init(Vector(2L));
+    }
+
     /// <summary>An initializer whose body loops without calling anything: its loop's subgraph inputs
     /// still need types in the emitted body, with no flattening in the picture.</summary>
     [TrainableParamInitializer]

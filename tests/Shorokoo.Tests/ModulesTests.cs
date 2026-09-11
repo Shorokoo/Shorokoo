@@ -57,6 +57,11 @@ public class ModulesCoverageTests
         => Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitCallingANestedParamOwningModule>(
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)], expected: [1.0, 2.0]));
 
+    [Fact]
+    public void TestAParamOwningCalleeReachedThroughAModelSequenceLowersToo()
+        => Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitCallingAParamOwningModuleFromASequence>(
+            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)], expected: [1.0, 2.0]));
+
     private static string[] EmittedFunctions(InternalComputationGraph g, bool nativeDialect = false)
         => [.. (nativeDialect
                 ? FastOnnxModelBuilder.BuildInternalOnnxModel(g, applyExecutionLowerings: false, emitInputsAsNodes: true)

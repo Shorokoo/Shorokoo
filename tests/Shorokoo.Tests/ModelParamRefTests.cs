@@ -212,14 +212,6 @@ public class ModelParamRefTests
             [NamedParam("Gain"), NamedParam("Bias")]).Fields.Length);
     }
 
-    // Pins Shorokoo/Shorokoo#301: a ModelSequence takes its module function from element 0, so
-    // indexing any other element inlines element 0's body while naming its parameters after the
-    // element that was indexed — one parameter here instead of two, and the wrong forward.
-    [Fact(Skip = "Shorokoo/Shorokoo#301: a heterogeneous ModelSequence calls element 0's body whichever element is indexed")]
-    public void TestAHeterogeneousModelSequenceCallsTheElementItIndexed()
-        => SameIds(HyperScaledGainNoRefModel.ComputationGraph,
-                   HeterogeneousHyperSequenceAtOneModel.ComputationGraph);
-
     [Fact]
     public void TestAModelPassedAsAHyperparameterKeepsItsTrainableParams()
         => SameIds(Rank1GainNoRefModel.ComputationGraph, HyperModelGainModel.ComputationGraph);
@@ -238,6 +230,28 @@ public class ModelParamRefTests
     public void TestAModelPassedAsAHyperparameterSurvivesItsHostBeingAppendedToAnEmptySequence()
         => SameIds(GainFromDynamicSequenceModel.ComputationGraph,
                    HyperModelGainFromAppendedSequenceModel.ComputationGraph);
+
+    // A fixed-trip loop that only appends has an order: the initializer, then what one trip adds,
+    // per trip. That is what narrows the constant position to one element.
+    [Fact]
+    public void TestAHeterogeneousModelSequenceThroughALoopCallsTheElementItIndexed()
+        => SameIds(TwoParamGainNoRefModel.ComputationGraph,
+                   HeterogeneousThroughLoopSequenceModel.ComputationGraph);
+
+    // A ModelSequence names element 0's module whichever element is indexed, so the element
+    // indexed and the module named disagree; the body spliced must be the one indexed.
+    [Fact]
+    public void TestAHeterogeneousModelSequenceCallsTheElementItIndexed()
+        => SameIds(TwoParamGainNoRefModel.ComputationGraph,
+                   HeterogeneousSequenceAtOneModel.ComputationGraph);
+
+    // Elements of differing hyperparameter arity have no single struct width, so this only works
+    // while nothing needs the sequence unpacked — the call site binds the hyperparameters it
+    // already knows rather than reading them back off the sequence.
+    [Fact]
+    public void TestAHeterogeneousModelSequenceCallsTheElementItIndexedWhenThatElementHasAHyperparameter()
+        => SameIds(HyperScaledGainNoRefModel.ComputationGraph,
+                   HeterogeneousHyperSequenceAtOneModel.ComputationGraph);
 
     [Fact]
     public void TestAModelPassedAsAHyperparameterSurvivesItsHostOutlivingAnErasedSibling()

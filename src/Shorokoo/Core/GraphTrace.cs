@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
+using Shorokoo.Core.Nodes;
 
 namespace Shorokoo.Core
 {
@@ -91,6 +93,26 @@ namespace Shorokoo.Core
         /// </summary>
         internal static RngPinRegistry Pins => RequireModuleBuild("Rng.Pin").Pins;
 
+        /// <summary>
+        /// The calls of this module build whose callee updates state, so that the call has to
+        /// survive even where its result is discarded (Shorokoo/Shorokoo#310). Recorded by the
+        /// call itself and harvested alongside <see cref="StateUpdates"/>; null when no module
+        /// build is in progress, since a call outside one has no harvest to reach.
+        /// </summary>
+        internal static List<Variable>? CallEffects => TraceContext.Current?.IsModuleBuild == true
+            ? TraceContext.Current.CallEffects
+            : null;
+
+        /// <summary>Hands the recorded calls to the harvest and clears them, as
+        /// <see cref="StateUpdates"/> and <see cref="Pins"/> are taken.</summary>
+        internal static Variable[] TakeCallEffects()
+        {
+            if (CallEffects is not List<Variable> effects) return [];
+            var taken = effects.ToArray();
+            effects.Clear();
+            return taken;
+        }
+
         // ────────────────────────────── internals ──────────────────────────────
 
         private static TraceContext RequireModuleBuild(string api)
@@ -140,6 +162,9 @@ namespace Shorokoo.Core
 
         /// <summary>The Rng.Pin recordings of this trace.</summary>
         internal RngPinRegistry Pins { get; } = new RngPinRegistry();
+
+        /// <summary>The stateful calls of this trace (see <see cref="GraphTrace.CallEffects"/>).</summary>
+        internal List<Variable> CallEffects { get; } = new List<Variable>();
 
         protected override void OnExiting()
             => Debug.Assert(Loopers.Count == 0,

@@ -687,12 +687,289 @@ public partial class HyperModelGainFromAppendedSequenceModel
     }
 }
 
+/// <summary><see cref="HeterogeneousSequenceAtOneModel"/> extended inside a loop, so the sequence
+/// leaves the loop as a loop variable and cannot be laid out in order — the position is a constant
+/// but the element it names is not reachable.</summary>
+[Module]
+public partial class HeterogeneousThroughLoopSequenceModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var seq = ModelSequence.Create<Model<Tensor<float32>, Tensor<float32>>>(
+            Rank1GainSubModel.Model(), TwoParamGainSubModel.Model());
+        foreach (var ctx in LoopAPI.Iterate(Scalar(2L))) seq = seq.Append(Rank1GainSubModel.Model());
+        return seq[Scalar(1L)].Call(input);
+    }
+}
+
+/// <summary>A rank-1 gain plus a second, zero-valued parameter, so which of two bodies a call
+/// reached shows in the parameter ids and not only in the name they are filed under.</summary>
+[Module]
+public partial class TwoParamGainSubModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+        => input * Ones.Init([Scalar(2L)]) + Zeros.Init([Scalar(2L)]);
+}
+
+/// <summary><see cref="TwoParamGainSubModel"/> called plainly — what indexing element 1 of
+/// <see cref="HeterogeneousSequenceAtOneModel"/> should reach.</summary>
+[Module]
+public partial class TwoParamGainNoRefModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+        => TwoParamGainSubModel.Call(input);
+}
+
+/// <summary>Two different modules of one <c>Model&lt;&gt;</c> signature in a sequence, indexed at
+/// the second. A <c>ModelSequence</c> names element 0's module, so the element indexed and the
+/// module named disagree.</summary>
+[Module]
+public partial class HeterogeneousSequenceAtOneModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+        => ModelSequence.Create<Model<Tensor<float32>, Tensor<float32>>>(
+               Rank1GainSubModel.Model(), TwoParamGainSubModel.Model())[Scalar(1L)].Call(input);
+}
+
+/// <summary>A stateful module whose own body calls another stateful module, so a call to it
+/// closes two nested state scopes rather than one.</summary>
+[Module]
+public partial class NestedStatefulSubModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var mine = InitRunningMean.Init(t.ShapeTensor());
+        Globals.StateUpdate(mine, mine + Scalar(10f));
+        return StatefulGainSubModel.Call(t) + mine;
+    }
+}
+
+/// <summary><see cref="NestedStatefulSubModel"/> called twice — the inner module's own call-site
+/// markers must not be mistaken for the outer parameter's.</summary>
+[Module]
+public partial class NestedStatefulCalledTwiceModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = NestedStatefulSubModel.Model();
+        return m.Call(t) + m.Call(t);
+    }
+}
+
+/// <summary>Two state parameters owned by one module, so one call site closes two updates at
+/// once and each has to be tracked against its own field.</summary>
+[Module]
+public partial class TwoStateFieldsSubModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var a = InitRunningMean.Init(t.ShapeTensor());
+        var b = InitRunningMean.Init(t.ShapeTensor());
+        Globals.StateUpdate(a, a + Scalar(1f));
+        Globals.StateUpdate(b, b + Scalar(100f));
+        return t * Ones.Init([Scalar(2L)]) + a + b;
+    }
+}
+
+/// <summary><see cref="TwoStateFieldsSubModel"/> called twice.</summary>
+[Module]
+public partial class TwoStateFieldsCalledTwiceModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = TwoStateFieldsSubModel.Model();
+        return m.Call(t) + m.Call(t);
+    }
+}
+
+/// <summary>A stateful model called from both arms of an <c>IfElse</c>. Only one arm runs, so only
+/// its update takes effect.</summary>
+[Module]
+public partial class StatefulCalledFromBothIfArmsModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t, Scalar<bit> cond)
+    {
+        var m = StatefulGainSubModel.Model();
+        return cond.IfElse(m.Call(t), m.Call(t) * Scalar(2f));
+    }
+}
+
+/// <summary>A stateful model called from one arm of an <c>IfElse</c> only, so the state moves on
+/// the trips that take that arm and stands still on the others.</summary>
+[Module]
+public partial class StatefulCalledFromOneIfArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t, Scalar<bit> cond)
+    {
+        var m = StatefulGainSubModel.Model();
+        return cond.IfElse(m.Call(t), t * Scalar(3f));
+    }
+}
+
+/// <summary>Two calls of one stateful model inside one arm, which compose with each other but
+/// only when that arm runs.</summary>
+[Module]
+public partial class StatefulCalledTwiceInOneIfArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t, Scalar<bit> cond)
+    {
+        var m = StatefulGainSubModel.Model();
+        return cond.IfElse(m.Call(t) + m.Call(t), t * Scalar(3f));
+    }
+}
+
+/// <summary>A call at module scope and another inside an arm, so the arm's call composes with one
+/// that always ran.</summary>
+[Module]
+public partial class StatefulCalledBeforeAndInsideAnIfModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t, Scalar<bit> cond)
+    {
+        var m = StatefulGainSubModel.Model();
+        var first = m.Call(t);
+        return cond.IfElse(m.Call(first), first * Scalar(3f));
+    }
+}
+
+/// <summary>One stateful model handle called twice with the second call's output discarded, so the
+/// call reaches the graph through nothing but the state update it registers.</summary>
+[Module]
+public partial class StatefulCallDiscardedModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = StatefulGainSubModel.Model();
+        var used = m.Call(t);
+        _ = m.Call(t);
+        return used;
+    }
+}
+
+/// <summary>A stateful model called once inside a loop body, so its one call site is the loop's
+/// and its update registers once for the step, whatever the trip count.</summary>
+[Module]
+public partial class StatefulCalledOnceInALoopModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = StatefulGainSubModel.Model();
+        var x = t;
+        foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
+        {
+            x = m.Call(x);
+            ctx.ContinueWhile(Scalar(true));
+        }
+        return x;
+    }
+}
+
+/// <summary>A trainable parameter inside a loop whose trip count is not a compile-time constant, so
+/// the loop is not unrolled before the training graph is built.</summary>
+[Module]
+public partial class GainInRolledLoopModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var x = t;
+        foreach (var ctx in LoopAPI.Iterate(t.ShapeTensor()[0])) x = x * Ones.Init([Scalar(2L)]);
+        return x;
+    }
+}
+
+/// <summary>Module-owned state updated inside a loop whose trip count is not a compile-time
+/// constant, so the update's value stays inside the body the training graph cannot unroll.</summary>
+[Module]
+public partial class StatefulGainInRolledLoopModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = StatefulGainSubModel.Model();
+        var x = t;
+        foreach (var ctx in LoopAPI.Iterate(t.ShapeTensor()[0]))
+        {
+            x = m.Call(x);
+            ctx.ContinueWhile(Scalar(true));
+        }
+        return x;
+    }
+}
+
+/// <summary>The same, on a condition the graph works out at run time, so the branch survives to
+/// the backward pass instead of being folded away, and with each arm creating its own
+/// parameter.</summary>
+[Module]
+public partial class GainInBothIfArmsOnARuntimeConditionModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+        => (t.ShapeTensor()[0] > Scalar(0L))
+            .IfElse(t * Ones.Init([Scalar(2L)]), t * Ones.Init([Scalar(2L)]) * Scalar(2f));
+}
+
+/// <summary>Both arms are a function of one parameter, and the arm not taken is non-finite on a
+/// negative input — so its derivative is NaN, which no multiplication by the zero gradient it is
+/// handed can clear.</summary>
+[Module]
+public partial class SqrtInOneIfArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t, Scalar<bit> cond)
+    {
+        var w = Ones.Init([Scalar(2L)]);
+        return cond.IfElse((t * w).Sqrt(), t * w);
+    }
+}
+
+/// <summary>One parameter created before an <c>IfElse</c> and used inside both arms, so the
+/// gradient the branch produces belongs to a value the branch does not own.</summary>
+[Module]
+public partial class SharedGainInBothIfArmsModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var w = Ones.Init([Scalar(2L)]);
+        return (t.ShapeTensor()[0] > Scalar(0L)).IfElse(t * w, t * w * Scalar(2f));
+    }
+}
+
+/// <summary>The same loop with a constant trip count, which unrolls and trains.</summary>
+[Module]
+public partial class GainInConstantTripLoopModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var x = t;
+        foreach (var ctx in LoopAPI.Iterate(Scalar(2L))) x = x * Ones.Init([Scalar(2L)]);
+        return x;
+    }
+}
+
 /// <summary>Draws one uniform sample of its own, so every model built from it owns an RNG
 /// feed.</summary>
 [Module]
 public partial class DrawingSub
 {
     public static Tensor<float32> Inline(Tensor<float32> t) => t + Globals.RandomUniform(Vector(2L));
+}
+
+/// <summary>Calls the model handed to it as a hyperparameter, so that call site only enters the
+/// graph when this body is spliced.</summary>
+[Module]
+public partial class DrawViaHyperModel
+{
+    public static Tensor<float32> Inline(
+        Tensor<float32> t, [Hyper] Model<Tensor<float32>, Tensor<float32>> m)
+        => m.Call(t);
+}
+
+/// <summary>One <see cref="DrawingSub"/> model called twice, once directly and once from inside
+/// <see cref="DrawViaHyperModel"/>, so the two call sites are inlined a pass apart.</summary>
+[Module]
+public partial class DrawTwiceOneCallThroughHyperModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t)
+    {
+        var m = DrawingSub.Model();
+        return DrawViaHyperModel.Call(m, t) - m.Call(t);
+    }
 }
 
 /// <summary>Two <see cref="DrawingSub"/> models called one after the other — one RNG stream

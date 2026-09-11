@@ -196,9 +196,16 @@ the pin skeleton's scope comment names both. The stream is still per-model; it i
 cannot enumerate the models, since it lists what the graph says statically. Two consequences
 follow: `Rng.Pin` cannot name such a model, and an `Override` addressing that path must give a
 concrete value for the `-1` (the reported path with the `-1` still in it is not itself an
-address). The one route that reaches none of this is a sequence assembled *inside* a loop,
-which has its own open defect,
-[#303](https://github.com/Shorokoo/Shorokoo/issues/303).
+address).
+
+Where concretization *does* settle the components — an unrolled loop leaves its indices as
+constants, so a model created on a trip of one and reached outside it is a model the graph can
+name — the report says which stream each feed is rather than which site it sits at. Such a feed
+carries both: its `ModelIdPath` is the realized stream, and its `SitePath` the `-1`-bearing site
+the key chain was built from and an `Override` matches against. A slot still open when the graph
+runs keeps its `-1` and its row stands for the whole unbounded set, as above. This is the route a
+sequence assembled *inside* a loop takes: the models it holds are created per trip, so their feeds
+name a realized trip each rather than collapsing onto one stream that names no model at all.
 
 Reaching a model out of a `ModelSequence` therefore keys its feeds the way calling that model
 directly does. That is a change: before it, every model in a sequence drew from one stream
@@ -206,10 +213,8 @@ named for the feed alone. A `Rng.Pin` path or a per-stream `Override` written ag
 reached that way needs re-reading off the stream report.
 
 Note what the slot separates and what it does not. It separates the **iterations** of one
-call site. Two call sites reaching one and the same model *object* still share its id, and
-therefore its stream, exactly as they do outside a loop — see
-[#298](https://github.com/Shorokoo/Shorokoo/issues/298). Two call sites of a module-typed
-`Function` each mint their own id and do not.
+call site. Separating the **call sites** is the job of the call-site component described below,
+which applies inside a loop and outside it alike.
 
 The callee's **parameters** deliberately do not take the iteration slot. One call site reading
 one parameter on every iteration is weight sharing, and is what a model created outside the
@@ -219,6 +224,24 @@ iteration.
 Because a feed's id is what keys its stream, a module called inside a loop keys differently
 than it did before this scope existed. A `Rng.Pin` path or a per-stream `Override` written
 against such a model needs re-reading off the stream report.
+
+## Calling one model twice
+
+Calling one and the same model *object* at two sites shares its id, and so its parameters —
+that is what calling it twice is for. A draw is not a value it holds, though: each execution of
+a draw is a fresh sample, so the two sites must not share a stream. A feed of a model called
+more than once therefore carries a **call-site component** at the end of its path: `-3`,
+followed by the call's ordinal among that model's calls, counting from 0. Like the `-2` above,
+`-3` is negative and so cannot collide with a slot (those count from 1, with 0 reserved for
+`RngSeed`) nor with an iteration's `-1`.
+
+Only the feeds take it. The model's **parameter** ids stay collapsed, since sharing the weights
+across the calls is the point. And only a model that is actually called more than once takes
+it, so a single-call model keeps the path it already had and any `Rng.Pin` recorded against it
+stays valid; adding a second call is what splits the stream, and it names both halves, because
+one stream cannot become two while either keeps the old name.
+
+Two call sites of a module-typed `Function` need none of this: each mints its own id already.
 
 ## Per-stream overrides
 
@@ -318,10 +341,12 @@ supported way to read it.
 
 `arch.GetRngStreamReport(config)` inventories every stream of a concrete architecture — the
 init stream of each parameter (ModelId path, name, shape, resolved key) and one row per
-runtime feed site (path with `-1` marking an iteration slot; static sites carry their exact
-resolved key, in-loop sites derive per-iteration keys at runtime) — and can emit the sparse
-`Rng.Pin` skeleton for freezing streams before a refactor (see
-[Pinning RNG streams](rng-pinning.md)).
+runtime feed stream — its path, plus the `-1`-bearing `SitePath` it derives from when the two
+differ. A path with a `-1` left in it stands for a set the graph cannot enumerate and carries no
+resolved key; one the graph can name carries its exact key, whether it was static all along or an
+unrolled loop settled its indices. The report can also emit the sparse `Rng.Pin` skeleton for
+freezing streams before a refactor (see [Pinning RNG streams](rng-pinning.md)); the skeleton
+groups by site, so realized streams of one site stay one entry.
 
 Resolving the keys **executes** each stream's in-graph derivation — Shorokoo computes no
 randomness on the host — so asking for a report *with* a config is a deliberately expensive

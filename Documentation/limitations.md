@@ -201,6 +201,31 @@ rejected with `AutoDiffNotSupportedException`. Loops with a statically known
 trip count can be unrolled (iterate with `LoopAPI.Iterate(n)` where `n` is a
 compile-time constant) and then differentiate normally.
 
+"Statically known" means known when the training graph is built, not when it
+runs, so a count read off an input's shape does not qualify: the rig compiles
+one trainstep for all input shapes and specializes only the ONNX session per
+shape. A count computed from constants does qualify however it is written —
+`LoopAPI.Iterate(Scalar(3L) * Scalar(2L))` is folded before the unroll — and so
+does a `[Hyper]`, which is a constant by the time the model is concretized.
+
+The rejection covers module-owned state inside such a loop as well: an update
+registered there has no value the training graph can carry out of the body.
+
+### Conditional execution in a training graph
+
+An `IfElse` branch runs only when its condition selects it. A training graph keeps
+that for the branch as a whole, but not for the forward values the backward pass
+reads: reverse-mode autodiff needs the forward's intermediates, and a value read
+unconditionally cannot be computed conditionally, so those are hoisted out of the
+branch and computed on every step.
+
+Gradients are unaffected — the arm that did not run contributes exactly zero, and
+that zero is *selected* rather than arrived at by multiplication, so an arm whose
+derivative is not a number (`sqrt` of what is negative on that path, a division by
+what is zero there) cannot poison the weights. What remains is the work, and the
+rule that an operation which would *fail* off its branch, rather than merely
+return a non-finite number, has to stay off the differentiated path.
+
 ### Gradient (activation) checkpointing
 
 Activation checkpointing is a per-module attribute: `[Module(Checkpoint = true)]`

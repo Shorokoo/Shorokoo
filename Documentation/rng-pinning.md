@@ -60,9 +60,11 @@ graph-side tool can substitute for it, because names exist only in source.
   move behind the pinned ones).
 - Pinning also stabilizes the pinned items' identifier names (`Linear#0` vs `Linear#1` follow
   slot order), so checkpoint parameter names for pinned items are refactor-stable too.
-- Same model object = same slot = same stream: calling one model object twice draws from one
-  stream (a weight-sharing-like coupling); independent streams need distinct
-  objects.
+- Same model object = same slot, and so the same parameters — but not the same stream: each
+  call site of a model called more than once draws from its own, since a draw is an execution
+  rather than a value the model holds. The pin addresses the slot, and each call's stream hangs
+  off it under a call-site component; see
+  [rng-configuration.md](rng-configuration.md#calling-one-model-twice).
 
 ## Tooling, and the division of labor
 

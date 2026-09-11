@@ -77,8 +77,23 @@ namespace Shorokoo.Core.Nodes.Processors.Training
                 stateReplacementByNodeKey[stateParamNodeKeys[i]] = stateFieldKeys[i];
 
             var remap = new Dictionary<FastTensorKey, FastTensorKey>();
-            var stateUpdateOutputs = new List<FastTensorKey>();
             var nodesToRemove = new HashSet<FastNodeKey>();
+
+            // One updated value per state FIELD, not per link. A model called twice keeps one
+            // state parameter and one update per call, so appending per link hands the struct more
+            // values than it has fields and the surplus is dropped (Shorokoo/Shorokoo#306). Track
+            // what each field currently holds instead: a link updating a field advances it, and the
+            // last value is what the field carries out. Chaining has already pointed a later call's
+            // link at the earlier call's, so the final value carries every update in call order.
+            var currentByField = new FastTensorKey[stateFieldKeys.Length];
+            var heldByField = new HashSet<FastTensorKey>[stateFieldKeys.Length];
+            for (int i = 0; i < stateFieldKeys.Length; i++)
+            {
+                currentByField[i] = stateFieldKeys[i];
+                heldByField[i] = [stateFieldKeys[i]];
+            }
+            var nodeByKeyForState = new Dictionary<FastNodeKey, FastNode>(graph.Nodes.Count);
+            foreach (var n in graph.Nodes) nodeByKeyForState[n.Key] = n;
 
             // Walk in stored (topological) order so STATE_UPDATE_LINK / WITH_STATE_DEPS
             // can resolve their inputs through any remap entries already added by upstream nodes.
@@ -105,7 +120,24 @@ namespace Shorokoo.Core.Nodes.Processors.Training
                     var inputs = node.FullInputs[""];
                     var updatedStateInput = inputs[1].AssertNotNull();
                     var resolvedUpdatedState = ResolveRemap(remap, updatedStateInput);
-                    stateUpdateOutputs.Add(resolvedUpdatedState);
+
+                    // Which field this advances is what its original-state input names: the field
+                    // itself for the first call, an earlier call's updated value after. Any value
+                    // the field has held counts, not only the latest — the arms of an IfElse each
+                    // read the value the field held entering the branch. Inlining wraps that value
+                    // in Identity, so the walk has to see through them; a remap lookup alone finds
+                    // nothing and the field goes unidentified.
+                    var resolvedOriginalState = ResolveStateValue(
+                        inputs[0].AssertNotNull(), remap, nodeByKeyForState);
+                    int field = System.Array.FindIndex(heldByField, held => held.Contains(resolvedOriginalState));
+                    if (field < 0)
+                        throw new InvalidOperationException(
+                            "FastRebuildModelInputsForTrainingProcessor: a state update reads a value that is "
+                            + "not one this state field has held, so the field it updates cannot be "
+                            + "identified and its update would be dropped.");
+                    currentByField[field] = resolvedUpdatedState;
+                    heldByField[field].Add(resolvedUpdatedState);
+
                     var outputKey = GetSingleOutputKey(node);
                     remap[outputKey] = resolvedUpdatedState;
                     nodesToRemove.Add(node.Key);
@@ -212,8 +244,8 @@ namespace Shorokoo.Core.Nodes.Processors.Training
             graph.Inputs = newInputs;
             graph.InputUniqueNames = newNames;
 
-            // Append state-update outputs to the graph outputs, mirroring the CG version.
-            foreach (var su in stateUpdateOutputs)
+            // Append one state output per field — the value that field ends the forward holding.
+            foreach (var su in currentByField)
                 graph.Outputs.Add(su);
 
             FastProcessorHelper.RemoveUnreachableNodes(graph);
@@ -226,7 +258,7 @@ namespace Shorokoo.Core.Nodes.Processors.Training
                 rebuiltModelOutput,
                 rebuiltParamFieldKeys,
                 rebuiltTrainableParamStructInput,
-                stateUpdateOutputs.ToImmutableArray());
+                currentByField.ToImmutableArray());
         }
 
         private static void AppendInOrder(
@@ -251,6 +283,28 @@ namespace Shorokoo.Core.Nodes.Processors.Training
                         return tk;
             throw new InvalidOperationException(
                 $"FastRebuildModelInputsForTrainingProcessor: node '{node.OpCode}' (Key={node.Key}) has no non-empty output key.");
+        }
+
+        /// <summary>
+        /// What a state-update's original-state input actually names, seeing through both the remap
+        /// this pass builds and the Identity wrappers inlining leaves between a link and the
+        /// parameter it updates.
+        /// </summary>
+        private static FastTensorKey ResolveStateValue(
+            FastTensorKey key,
+            Dictionary<FastTensorKey, FastTensorKey> remap,
+            Dictionary<FastNodeKey, FastNode> nodeByKey)
+        {
+            var current = ResolveRemap(remap, key);
+            var visited = new HashSet<FastTensorKey>();
+            while (visited.Add(current))
+            {
+                if (!nodeByKey.TryGetValue(current.FastNodeKey, out var node)) return current;
+                if (node.OpCode != OpCodes.IDENTITY) return current;
+                if (node.Inputs.Count == 0 || node.Inputs[0] is not FastTensorKey inner) return current;
+                current = ResolveRemap(remap, inner);
+            }
+            return current;
         }
 
         private static FastTensorKey ResolveRemap(Dictionary<FastTensorKey, FastTensorKey> remap, FastTensorKey key)

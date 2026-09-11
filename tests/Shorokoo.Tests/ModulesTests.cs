@@ -362,31 +362,70 @@ public class ModulesCoverageTests
     [Fact]
     public void TestLoopInvariantHoistingStaysInsideIfScopes()
     {
-        static bool Ordered(ComputationGraph g, TensorData[] hints, params string[] ops)
-        {
-            var lowered = g.ToConcreteArchitecture(g.FromOrderedInputs([.. hints])).ToInternal();
-            var at = ops.Select(op => lowered.Nodes.FindIndex(n => n.OpCode == op)).ToList();
-            return lowered.IsLinearOrderValid()
-                && at.All(i => i >= 0)
-                && at.Zip(at.Skip(1)).All(p => p.First < p.Second);
-        }
-
         var x = TensorData([2L], 1f, 2f);
         TensorData[] gated = [TensorData([], 3L), TensorData([], true), x];
 
-        Assert.True(Ordered(Modules.LoopLazyOptionalLayer.ComputationGraph, [TensorData([], 3L), x, x],
-            OpCodes.OPTIONAL_HAS_ELEMENT, OpCodes.LOOP_OPEN, OpCodes.IF_OPEN, OpCodes.OPTIONAL_GET_ELEMENT, OpCodes.IF_CLOSE));
-        Assert.True(Ordered(Modules.LazyIfLoopBodyLayer.ComputationGraph, gated,
-            OpCodes.IF_OPEN, OpCodes.MUL, OpCodes.LOOP_OPEN, OpCodes.LOOP_CLOSE, OpCodes.IF_CLOSE));
-        Assert.True(Ordered(Modules.InvariantGateInLoopLayer.ComputationGraph, gated,
+        Assert.True(Ordered(Modules.InvariantGateInLoopLayer.ComputationGraph, gated, scoped: false,
             OpCodes.LOOP_OPEN, OpCodes.IF_OPEN, OpCodes.IF_CLOSE, OpCodes.ADD, OpCodes.LOOP_CLOSE));
 
-        var lazyOptional = Modules.LoopLazyOptionalLayer.ComputationGraph;
-        var lowered = lazyOptional.ToConcreteArchitecture(lazyOptional.FromOrderedInputs([TensorData([], 3L), x, x]))
-                                  .ToConcreteModel().ToInternal();
+        var optional = Modules.LoopOptionalLayer.ComputationGraph;
+        var lowered = optional.ToConcreteArchitecture(optional.FromOrderedInputs([TensorData([], 3L), x, x]))
+                              .ToConcreteModel().ToInternal();
         IData[] absent = [TensorData([], 3L), x, OptionalTensorData.None(DType.Float32)];
         Assert.Equal([8f, 16f],
             ((TensorData<float32>)new QuickExecutionEngine().Execute(lowered, absent)[0]).AccessMemory().ToArray());
+    }
+
+    private static bool Ordered(ComputationGraph g, TensorData[] hints, bool scoped, params string[] ops)
+    {
+        var lowered = g.ToConcreteArchitecture(g.FromOrderedInputs([.. hints])).ToInternal();
+        if (scoped) lowered.ConfigureScopes();
+        if (!lowered.IsLinearOrderValid()) return false;
+        int at = 0;
+        foreach (var op in ops)
+        {
+            at = lowered.Nodes.FindIndex(at, n => n.OpCode == op);
+            if (at < 0) return false;
+            at++;
+        }
+        return true;
+    }
+
+    /// <summary>A branch expression is an ordinary argument, so its nodes are appended before the
+    /// <c>IF_OPEN</c> that selects them. Scope configuration moves the ones that serve one branch
+    /// and nothing else inside the <c>IF</c>, whatever they are — an optional unwrap that is only
+    /// valid on its branch, a whole loop, or a nested <c>IF</c> with a loop of its own.</summary>
+    [Fact]
+    public void TestAnIfElsesBranchesAreScopedIntoTheIfThatSelectsThem()
+    {
+        var x = TensorData([2L], 1f, 2f);
+        TensorData[] gated = [TensorData([], 3L), TensorData([], true), x];
+
+        Assert.True(Ordered(Modules.LoopOptionalLayer.ComputationGraph, [TensorData([], 3L), x, x], scoped: true,
+            OpCodes.OPTIONAL_HAS_ELEMENT, OpCodes.LOOP_OPEN, OpCodes.IF_OPEN, OpCodes.OPTIONAL_GET_ELEMENT, OpCodes.IF_CLOSE));
+        Assert.True(Ordered(Modules.IfLoopBodyLayer.ComputationGraph, gated, scoped: true,
+            OpCodes.IF_OPEN, OpCodes.MUL, OpCodes.LOOP_OPEN, OpCodes.LOOP_CLOSE, OpCodes.IF_CLOSE));
+        Assert.True(Ordered(Modules.IfInLoopInIfLayer.ComputationGraph, gated, scoped: true,
+            OpCodes.IF_OPEN, OpCodes.LOOP_OPEN, OpCodes.IF_OPEN, OpCodes.IF_CLOSE, OpCodes.LOOP_CLOSE, OpCodes.IF_CLOSE));
+        Assert.True(Ordered(Modules.NestedBigGatedParamLayer.ComputationGraph,
+            [TensorData([], true), TensorData([], true), x], scoped: true,
+            OpCodes.IF_OPEN, OpCodes.IF_OPEN, OpCodes.REDUCE_SUM, OpCodes.IF_CLOSE, OpCodes.IF_CLOSE));
+    }
+
+    /// <summary>Only what serves one branch and nothing else moves inside the <c>IF</c>. A value
+    /// both branches read, one a branch reads that is read again after the <c>IfElse</c>, and the
+    /// condition all stay outside and are computed once.</summary>
+    [Fact]
+    public void TestSharedWorkStaysOutsideTheIfThatOneBranchReadsIt()
+    {
+        var g = Modules.SharedWorkAroundAnIfLayer.ComputationGraph;
+        var lowered = g.ToConcreteArchitecture(g.FromOrderedInputs(
+            [TensorData([2L], 1f, 2f), TensorData([], 2f)])).ToInternal();
+        lowered.ConfigureScopes();
+
+        int open = lowered.Nodes.FindIndex(n => n.OpCode == OpCodes.IF_OPEN);
+        int close = lowered.Nodes.FindIndex(n => n.OpCode == OpCodes.IF_CLOSE);
+        Assert.Equal(["Add"], lowered.Nodes.GetRange(open + 1, close - open - 1).Select(n => n.OpCode));
     }
 
     /// <summary>A draw has no inputs to be loop-dependent on, but a second execution of one is a
@@ -432,21 +471,21 @@ public class ModulesCoverageTests
             runtimeInputs: [TensorData([2L], 1f, 2f)],
             expected: [4.0, 5.0]));
 
-    /// <summary>Nesting an IF and a loop three deep survives concretization but not the ONNX
-    /// build. Tracked as Shorokoo/Shorokoo#270.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#270: FastScopeConfigurator breaks or refuses a three-deep IF/loop nesting")]
+    /// <summary>Nesting an IF and a loop three deep lowers to ONNX and runs (#270).</summary>
+    [Fact]
     public void TestNestedIfAndLoopScopesLowerToOnnx()
     {
         var x = TensorData([2L], 1f, 2f);
-        IData[] runtime = [TensorData([], 3L), TensorData([], true), x];
+        IData[] runtime = [TensorData([], 3L), x, TensorData([], true)];
 
         var inner = Modules.IfInLoopInIfLayer.ComputationGraph;
         var spec = inner.Specialize(inner.FromOrderedInputs([TensorData([], 3L)]));
-        var specModel = spec.ToConcreteArchitecture(spec.FromOrderedInputs([TensorData([], true), x]))
+        IData[] specRuntime = [x, TensorData([], true)];
+        var specModel = spec.ToConcreteArchitecture(spec.FromOrderedInputs([x, TensorData([], true)]))
                             .ToConcreteModel(RngConfig.Default);
-        Assert.Equal([10f, 20f], Floats(new ComputeContext().Execute(specModel, [TensorData([], true), x])[0]));
+        Assert.Equal([10f, 20f], Floats(new ComputeContext().Execute(specModel, specRuntime)[0]));
 
-        var outer = Modules.LoopInLazyIfInLoopLayer.ComputationGraph;
+        var outer = Modules.LoopInIfInLoopLayer.ComputationGraph;
         var outerModel = outer.ToConcreteArchitecture(outer.FromOrderedInputs([.. runtime.Cast<TensorData>()]))
                               .ToConcreteModel(RngConfig.Default);
         Assert.Equal([25f, 50f], Floats(new ComputeContext().Execute(outerModel, runtime)[0]));
@@ -1587,27 +1626,39 @@ public class ModulesCoverageTests
         Assert.All(DifferenceOf(DrawTwoAtRuntimePositionsNested.ComputationGraph), v => Assert.NotEqual(0f, v));
     }
 
-    // Pins Shorokoo/Shorokoo#303: the models a sequence assembled inside a loop holds are reached
-    // through the loop variable carrying it, which the inline pass cannot lay out, so their feeds
-    // fall back to one stream whose path names no model.
-    [Fact(Skip = "Shorokoo/Shorokoo#303: a sequence assembled in a loop loses its models' RNG identity")]
+    // Both models are created on trips of one loop, so each carries that loop's realized slot and
+    // the two differ only there — the same ids the parameters of a model built this way resolve to,
+    // and longer by that slot than a model created at the top level.
+    [Fact]
     public void TestAModelReachedOutOfASequenceAppendedInALoopKeepsItsOwnRngStream()
-        => Assert.Equal(FeedPathsOf(DrawTwoDirect.ComputationGraph).Select(p => p.Length),
-                        FeedPathsOf(DrawTwoFromSequenceAppendedInLoop.ComputationGraph).Select(p => p.Length));
+        => Assert.Equal([[1, 0, 1, 1], [1, 1, 1, 1]],
+                        FeedPathsOf(DrawTwoFromSequenceAppendedInLoop.ComputationGraph));
 
     private static Tensor<float32> DrawsTwice(Tensor<float32> t)
         => t + RandomUniform([Scalar(2L)], 0f, 1f) + RandomUniform([Scalar(2L)], 0f, 1f);
 
-    /// <summary>Two call sites of one model object fold the same stream key, because the id they
-    /// reparent under is the model's rather than the site's — where two call sites of a
-    /// module-typed function each mint their own. Tracked as Shorokoo/Shorokoo#298.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#298: two call sites of one model object share an RNG stream")]
+    /// <summary>Two call sites of one model object draw apart: they share the model's id, and so
+    /// its parameters, but a draw is an execution rather than a value, so each site's feed carries
+    /// its own call-site component.</summary>
+    [Fact]
     public void TestTwoCallSitesOfOneModelObjectGetSeparateRngStreams()
     {
         var model = ModuleFactory
             .FromFunc<Tensor<float32>, Tensor<float32>>(DrawsOnce, "DrawsOnce").SetHyperparams();
         var arch = ConcretizeInvokes(x => [model.Call(x) - model.Call(x)]);
         var zero = TensorData([2L], 0f, 0f);
+        Assert.All(RunFloats(arch.ToConcreteModel(RngConfig.Default), zero), v => Assert.NotEqual(0f, v));
+    }
+
+    /// <summary>The call-site ordinal is read off the call sites one inlining pass can see, so a
+    /// call reached through a <c>[Hyper] Model&lt;&gt;</c> — spliced a pass later — never meets the
+    /// direct one and both keep the undivided path.</summary>
+    [Fact]
+    public void TestTwoCallSitesOfOneModelDrawApartWhenOneArrivesThroughAHyperModel()
+    {
+        var g = DrawTwiceOneCallThroughHyperModel.ComputationGraph;
+        var zero = TensorData([2L], 0f, 0f);
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([zero]));
         Assert.All(RunFloats(arch.ToConcreteModel(RngConfig.Default), zero), v => Assert.NotEqual(0f, v));
     }
 

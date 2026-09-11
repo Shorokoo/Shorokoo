@@ -422,6 +422,71 @@ public class CodegenFreeModuleTests
     }
 
     /// <summary>
+    /// One model handle called twice updates its state once per call, and the executor still takes
+    /// one value per state parameter. The same architecture executed without state — the pure
+    /// inference conversion — shows both calls the value it was given and persists nothing.
+    /// </summary>
+    [Fact]
+    public void TestAStatefulModelCalledTwiceUpdatesOncePerCall()
+    {
+        var input = TensorData([2L], 1f, 2f);
+        var g = StatefulGainCalledTwiceModel.ComputationGraph;
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
+
+        Assert.Equal(1, concrete.ToInternal().GetStateUpdateOutputCount());
+        Assert.Equal(0f, StateValue(concrete));
+
+        var (outputs1, updated1) = ComputeContext.Default.ExecuteWithState(concrete, input);
+        Assert.Equal<float>([3f, 5f], Floats(outputs1[0].ToTensorData().AccessRawMemory().ToArray()));
+        Assert.Equal(2f, StateValue(updated1));
+
+        var (outputs2, updated2) = ComputeContext.Default.ExecuteWithState(updated1, input);
+        Assert.Equal<float>([7f, 9f], Floats(outputs2[0].ToTensorData().AccessRawMemory().ToArray()));
+        Assert.Equal(4f, StateValue(updated2));
+
+        Assert.Equal<float>([2f, 4f], Floats(ComputeContext.Default
+            .Execute(concrete, (IData[])[input])[0].ToTensorData().AccessRawMemory().ToArray()));
+    }
+
+    /// <summary>
+    /// The state after one execution, then the output — one row per case. Concretized on a true
+    /// condition and run on the asked-for one: the branch stays in the graph, but a parameter only
+    /// the untaken arm reads is pruned as dead, so concretizing per case would answer a different
+    /// model each time.
+    /// </summary>
+    private static float[] StateThenOutput(ComputationGraph cg, bool cond)
+    {
+        var input = TensorData([2L], 1f, 2f);
+        var concrete = cg.ToConcreteArchitecture(
+            cg.FromOrderedInputs([input, TensorData(DType.Bool, [], true)])).ToConcreteModel();
+        var (outputs, updated) = ComputeContext.Default.ExecuteWithState(
+            concrete, input, TensorData(DType.Bool, [], cond));
+        return [StateValue(updated), .. Floats(outputs[0].ToTensorData().AccessRawMemory().ToArray())];
+    }
+
+    /// <summary>
+    /// Only the arm that runs updates the state, and calls within one arm compose with each other
+    /// and with a call made before the branch. The condition stays a runtime value, so one
+    /// concrete model answers for both arms.
+    /// </summary>
+    [Fact]
+    public void TestOnlyTheIfElseArmThatRunsAppliesItsStateUpdates()
+    {
+        Assert.Equal<float>([1f, 1f, 2f], StateThenOutput(StatefulCalledFromBothIfArmsModel.ComputationGraph, true));
+        Assert.Equal<float>([1f, 2f, 4f], StateThenOutput(StatefulCalledFromBothIfArmsModel.ComputationGraph, false));
+
+        Assert.Equal<float>([1f, 1f, 2f], StateThenOutput(StatefulCalledFromOneIfArmModel.ComputationGraph, true));
+        Assert.Equal<float>([0f, 3f, 6f], StateThenOutput(StatefulCalledFromOneIfArmModel.ComputationGraph, false));
+
+        Assert.Equal<float>([2f, 3f, 5f], StateThenOutput(StatefulCalledTwiceInOneIfArmModel.ComputationGraph, true));
+        Assert.Equal<float>([0f, 3f, 6f], StateThenOutput(StatefulCalledTwiceInOneIfArmModel.ComputationGraph, false));
+
+        Assert.Equal<float>([2f, 2f, 3f], StateThenOutput(StatefulCalledBeforeAndInsideAnIfModel.ComputationGraph, true));
+        Assert.Equal<float>([1f, 3f, 6f], StateThenOutput(StatefulCalledBeforeAndInsideAnIfModel.ComputationGraph, false));
+
+    }
+
+    /// <summary>
     /// <see cref="Globals.StateUpdate{T}(T, T)"/> only accepts state variables — tensors created by
     /// a [StateInitializer] class's Init method — and only inside a module build in progress.
     /// Targeting a runtime input or a trainable parameter throws at graph-build time with

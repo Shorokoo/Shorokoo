@@ -124,6 +124,17 @@ namespace Shorokoo.Core.Graph
         /// </summary>
         public const int CallSiteLoopScope = -2;
 
+        /// <summary>
+        /// Marks the call-site component of a runtime feed's path, followed by the call's ordinal
+        /// among the calls on one model. Two call sites of one model object share its id — they
+        /// share its weights, which is the point — but a draw is not shared: each execution of a
+        /// draw is a fresh sample, so each call site needs its own stream
+        /// (Shorokoo/Shorokoo#298). Only a feed path carries this; parameter ids stay collapsed.
+        /// Like <see cref="CallSiteLoopScope"/> it is negative and so cannot collide with a slot,
+        /// which counts from 1 with 0 reserved for RngSeed, nor with the -1 an iteration fills.
+        /// </summary>
+        public const int CallSiteIndex = -3;
+
         public bool IsIterationModelId => this.Vals.Contains(-1);
         public int NumIterationIds => this.Vals.Count(x => x == -1);
         public int[] IterationIdLocations =>

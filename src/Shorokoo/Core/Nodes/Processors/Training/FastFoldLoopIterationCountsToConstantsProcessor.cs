@@ -52,6 +52,13 @@ namespace Shorokoo.Core.Nodes.Processors.Training
                     iterCountKeys.Add(iterCountKey.Value);
             }
 
+            // An iter-count expression that reads a graph input is not a constant computation, and
+            // the resolver below has no value to give it: dropping the inputs and handing the graph
+            // to ORT anyway is what turned "this loop cannot be unrolled" into an invalid-model
+            // error (Shorokoo/Shorokoo#309). Leave such a count alone; the loop then stays rolled
+            // and FastRejectLoopsReachingAutoGrad names the limitation.
+            iterCountKeys.RemoveAll(k => ReadsAGraphInput(k, graph, nodesByKey));
+
             if (iterCountKeys.Count == 0)
                 return;
 
@@ -117,6 +124,34 @@ namespace Shorokoo.Core.Nodes.Processors.Training
             graph.Nodes.InsertRange(0, newConstantNodes);
 
             FastProcessorHelper.RemoveUnreachableNodes(graph);
+        }
+
+        /// <summary>
+        /// Whether computing <paramref name="key"/> reads any of the graph's inputs — the test for
+        /// an iteration count this pass cannot fold, since it resolves a count by executing it with
+        /// no inputs bound.
+        /// </summary>
+        internal static bool ReadsAGraphInput(
+            FastTensorKey key,
+            InternalComputationGraph graph,
+            Dictionary<FastNodeKey, FastNode> nodesByKey)
+        {
+            var graphInputs = new HashSet<FastTensorKey>(graph.Inputs);
+            var seen = new HashSet<FastTensorKey>();
+            var worklist = new Stack<FastTensorKey>();
+            worklist.Push(key);
+            while (worklist.Count > 0)
+            {
+                var current = worklist.Pop();
+                if (current.IsEmpty || !seen.Add(current)) continue;
+                if (graphInputs.Contains(current)) return true;
+                if (!nodesByKey.TryGetValue(current.FastNodeKey, out var producer)) continue;
+                if (Shorokoo.Core.Factory.FastOpsetResolver.IsModelInputOpCode(producer.OpCode)) return true;
+                foreach (var (_, ins) in producer.FullInputs)
+                    foreach (var ik in ins)
+                        if (ik is FastTensorKey k) worklist.Push(k);
+            }
+            return false;
         }
 
         /// <summary>

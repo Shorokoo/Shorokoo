@@ -119,6 +119,7 @@ namespace Shorokoo.Core
         {
             (var structures, var dtypes, var ranks) = ModuleHelper.InfosFromTouts<Tout>();
             var retvals = InternalOp.ModelInvoke(this.ModelVariable, [], structures, dtypes, ranks, this.GenericTypeArgs, checkpoint: this.Checkpoint);
+            InternalGlobals.RegisterCallEffect(this.ModelVariable, retvals);
             return ModuleHelper.Reformat<Tout>(retvals);
         }
     }
@@ -150,6 +151,7 @@ namespace Shorokoo.Core
             var inputVariables = ModuleHelper.Format(inputs);
             (var structures, var dtypes, var ranks) = ModuleHelper.InfosFromTouts<Tout>();
             var retvals = InternalOp.ModelInvoke(this.ModelVariable, inputVariables, structures, dtypes, ranks, this.GenericTypeArgs, checkpoint: this.Checkpoint);
+            InternalGlobals.RegisterCallEffect(this.ModelVariable, retvals);
             return ModuleHelper.Reformat<Tout>(retvals);
         }
     }

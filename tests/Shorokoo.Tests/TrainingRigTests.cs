@@ -1161,12 +1161,122 @@ public class TrainingRigTrainingLoopCoverageTests
     public void TestAStateReadAfterItsUpdateStillSeesTheValueFedInForThisStep()
         => Assert.Equal(2.5f, LossAfterOneStep(StatefulGainNoRefModel.ComputationGraph), 1e-4f);
 
-    // Pins Shorokoo/Shorokoo#306: the updated-state struct is built per state parameter but filled
-    // per STATE_UPDATE_LINK, so one handle called twice keeps only the first site's update.
-    [Fact(Skip = "Shorokoo/Shorokoo#306: a stateful model called twice drops all but the first StateUpdate")]
+    // Both calls update, in call order, so the second sees the first's result.
+    [Fact]
     public void TestAStatefulModelCalledTwiceAppliesBothItsStateUpdates()
         => Assert.Equal(2f * StateAfterOneStep(StatefulGainNoRefModel.ComputationGraph),
                         StateAfterOneStep(StatefulGainCalledTwiceModel.ComputationGraph));
+
+    private static float[] StateFieldsAfterOneStep(ComputationGraph modelGraph)
+    {
+        var x = TensorData([2L], 1f, 2f);
+        var rig = TrainingRig.FromScratch(modelGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [new TensorDataModelParam("input", ModelParamType.InputParam, x)], 0.1f);
+        var step = rig.TrainStep(rig.CreateInitialCheckpoint(),
+            NNLibraryTrainingFixtures.MakeBatch("input", "ModelInput", x),
+            NNLibraryTrainingFixtures.MakeBatch("targets", "Target", TensorData([2L], 0f, 0f)));
+        float[] values = [.. rig.ModelStateDef.Fields.Select(f =>
+            NNLibraryTrainingFixtures.Floats(step.ModelState.Fields[f.Name])[0])];
+        Array.Sort(values);
+        return values;
+    }
+
+    // A call closes as many state scopes as the modules nested at it own, and one scope can close
+    // several fields at once; each field's own sequence of calls has to compose separately.
+    [Fact]
+    public void TestNestedAndMultiFieldStateBothComposeAcrossTwoCalls()
+    {
+        Assert.Equal([2f, 20f], StateFieldsAfterOneStep(NestedStatefulCalledTwiceModel.ComputationGraph));
+        Assert.Equal([2f, 200f], StateFieldsAfterOneStep(TwoStateFieldsCalledTwiceModel.ComputationGraph));
+    }
+
+    // A loop body is one call site however many trips it runs, so there is nothing to chain and the
+    // in-loop update still registers once for the step.
+    [Fact]
+    public void TestAStatefulModelCalledOnceInALoopKeepsItsSingleUpdate()
+        => Assert.Equal([1f], StateFieldsAfterOneStep(StatefulCalledOnceInALoopModel.ComputationGraph));
+
+    // Calling for the state update alone is what module-owned state is for, so the call must reach
+    // the graph through more than its output.
+    [Fact]
+    public void TestAStatefulCallWhoseOutputIsDiscardedStillUpdatesItsState()
+        => Assert.Equal([2f], StateFieldsAfterOneStep(StatefulCallDiscardedModel.ComputationGraph));
+
+    /// <summary>The ops an inference model computes inside its <c>If</c>, rather than before it.</summary>
+    private static string[] IfBodyOps(ComputationGraph modelGraph)
+    {
+        var f = modelGraph.ToConcreteArchitecture(
+            modelGraph.FromOrderedInputs([TensorData([2L], 1f, 2f)])).ToConcreteModel().ToInternal();
+        int open = f.Nodes.FindIndex(n => n.OpCode == OpCodes.IF_OPEN);
+        int close = f.Nodes.FindIndex(n => n.OpCode == OpCodes.IF_CLOSE);
+        return [.. f.Nodes.GetRange(open + 1, close - open - 1).Select(n => n.OpCode)];
+    }
+
+    // A backward pass reads the forward's intermediates, so a branch that computes one cannot keep
+    // it to itself; the rest of the branch stays inside it, and inference keeps all of it. Both
+    // shapes train: each arm owning its parameter, and both sharing one.
+    [Fact]
+    public void TestAParameterSharedByBothIfElseArmsTrains()
+    {
+        Assert.Equal(2.5f, LossAfterOneStep(GainInBothIfArmsOnARuntimeConditionModel.ComputationGraph), 1e-4f);
+        Assert.Equal(2.5f, LossAfterOneStep(SharedGainInBothIfArmsModel.ComputationGraph), 1e-4f);
+        Assert.NotEmpty(IfBodyOps(SharedGainInBothIfArmsModel.ComputationGraph));
+    }
+
+    private static float[] TrainedParams(ComputationGraph modelGraph, bool cond, params float[] xs)
+    {
+        object[] values = [.. xs.Select(v => (object)v)];
+        var x = TensorData(DType.Float32, [(long)xs.Length], values);
+        var c = TensorData(DType.Bool, [], cond);
+        var rig = TrainingRig.FromScratch(modelGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [new TensorDataModelParam("t", ModelParamType.InputParam, x),
+             new TensorDataModelParam("cond", ModelParamType.InputParam, c)], 0.1f);
+        var step = rig.TrainStep(rig.CreateInitialCheckpoint(), rig.InputDef.FromOrderedData(x, c),
+            rig.TargetDef.FromOrderedData(TensorData([(long)xs.Length], new float[xs.Length])));
+        return NNLibraryTrainingFixtures.Floats(
+            step.TrainableParams.Fields[rig.TrainableParamStructDef.Fields[0].Name]);
+    }
+
+    // The arm that did not run contributes exactly zero, whether or not its own derivative is a
+    // number: the same input trains to the same weights with the other arm finite and non-finite.
+    [Fact]
+    public void TestTheIfElseArmThatDidNotRunLeavesTheGradientAlone()
+    {
+        Assert.Equal<float>([0.9f, -0.6f], TrainedParams(SqrtInOneIfArmModel.ComputationGraph, false, -1f, -4f));
+        Assert.Equal<float>([0.9f, -0.6f], TrainedParams(SqrtInOneIfArmModel.ComputationGraph, false, 1f, 4f));
+        Assert.Equal<float>([0.95f, 0.8f], TrainedParams(SqrtInOneIfArmModel.ComputationGraph, true, 1f, 4f));
+    }
+
+    // An OptionalTensor input is a supported model input and covered end to end on the inference
+    // path; supplying one to a rig fails whether it is present or absent, and the absent case is
+    // the arrangement the feature exists for.
+    [Fact(Skip = "Shorokoo/Shorokoo#314: an OptionalTensor input cannot be supplied to a TrainingRig")]
+    public void TestAModelWithAnOptionalInputTrains()
+    {
+        var x = TensorData([3L], 1f, 2f, 3f);
+        foreach (var bias in (OptionalTensorData[])[
+            OptionalTensorData.Some(TensorData([3L], 0f, 0f, 0f)), OptionalTensorData.None<float32>()])
+        {
+            var rig = TrainingRig.FromScratch(NullableTrainableBiasLayer.ComputationGraph,
+                L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+                [new TensorDataModelParam("x", ModelParamType.InputParam, x),
+                 new OptionalTensorDataModelParam("bias", ModelParamType.InputParam, bias)], 0.1f);
+            Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
+        }
+    }
+
+    // Training differentiates a loop by unrolling it, so one whose trip count is not a constant
+    // has no backward pass. A constant count is unrolled and trains, which is why every other
+    // in-loop training test passes.
+    [Fact]
+    public void TestATrainableParameterInsideARolledLoopIsRefused()
+    {
+        Assert.Equal(2.5f, LossAfterOneStep(GainInConstantTripLoopModel.ComputationGraph), 1e-4f);
+        Assert.Contains("unroll it first", Assert.Throws<AutoDiffNotSupportedException>(
+            () => LossAfterOneStep(GainInRolledLoopModel.ComputationGraph)).Message);
+        Assert.Contains("unroll it first", Assert.Throws<AutoDiffNotSupportedException>(
+            () => LossAfterOneStep(StatefulGainInRolledLoopModel.ComputationGraph)).Message);
+    }
 
     [Fact]
     public void TestTrainStepAndTrainLoopCoverage()

@@ -640,9 +640,12 @@ idiom as `LayerNorm`), so the `[N, C, L]` rank-3 form is supported.
   Shorokoo `momentum = 1 − p` (the default `0.9` ≡ PyTorch `0.1`). The running
   variance EMA uses the **biased** estimator (ONNX/Keras/Flax), a minor numeric
   divergence from PyTorch's Bessel-corrected `running_var`.
-- **Rig pipeline required**: graphs containing `StateUpdate` links execute
-  through the training pipeline (`TrainingRig`), not the plain inference
-  executor — run BatchNorm models via a rig even for eval-mode passes.
+- **Run eval passes through the rig**: the plain inference executor does run a
+  graph carrying `StateUpdate` links, but state does not persist across a one-shot
+  execution — every run sees the running stats as the initializer left them, and
+  the update is dropped. So an eval-mode BatchNorm executed that way normalizes
+  with the initial statistics rather than the trained ones. Use a `TrainingRig`,
+  or `ComputeContext.ExecuteWithState`, whenever the running stats matter.
 
 ```csharp
 // Thin aliases over BatchNorm, preserving the 4-arg (momentum, epsilon,
@@ -1623,8 +1626,9 @@ for (int i = 0; i < 15; i++)
 
 - Do not hand `HuberLoss.ComputationGraph` to `TrainingRig` (3-input graph);
   use `SmoothL1Loss` or wrap it in a 2-input module.
-- Do not run a BatchNorm-containing graph through the plain inference
-  executor; its `StateUpdate` links require the training pipeline.
+- Do not run a BatchNorm-containing graph through the plain inference executor
+  when the running stats matter: it executes, but on a one-shot run the stats
+  stay as the initializer left them and the update is dropped.
 - Do not expect different stride/padding from `ConvTranspose2d`'s hypers — its
   geometry is fixed at the ONNX defaults; use `NN.ConvTranspose` for the rest.
 - Do not use `XavierUniform`/`KaimingUniform` (etc.) for rank-1 biases; they

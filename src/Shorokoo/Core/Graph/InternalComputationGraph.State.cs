@@ -40,16 +40,13 @@ namespace Shorokoo.Graph
         }
 
         /// <summary>
-        /// Number of STATE_UPDATE_LINK nodes in the graph.
+        /// Number of state-update outputs the state lowering appends: one per state parameter that
+        /// is updated, not one per <c>STATE_UPDATE_LINK</c>. A parameter whose model is called at
+        /// several sites has one link per call, and only the last carries the value the step ends
+        /// with — see <see cref="Core.Nodes.Processors.Fast.FastLowerStateUpdateNodes"/>.
         /// </summary>
         public int GetStateUpdateOutputCount()
-        {
-            int count = 0;
-            foreach (var node in this.Nodes)
-                if (node.OpCode == InternalOpCodes.STATE_UPDATE_LINK)
-                    count++;
-            return count;
-        }
+            => Core.Nodes.Processors.Fast.FastLowerStateUpdateNodes.FinalLinkPerStateParam(this).Count;
 
         /// <summary>
         /// Returns a new <see cref="InternalComputationGraph"/> with each state-param node's

@@ -3,6 +3,7 @@ using Shorokoo.Core.Nodes.Processors.Helpers;
 using Shorokoo.Core.Nodes.Processors.Fast;
 using Shorokoo.Core.Inference;
 using Shorokoo.Core.Graph;
+using Shorokoo.Core.Factory;
 using Shorokoo.Core.Factory.IR;
 using Shorokoo.Runtime;
 
@@ -36,21 +37,63 @@ public class ModulesCoverageTests
             hyperparamInputs: [], runtimeInputs: x, expected: [2.0, 4.0]));
     }
 
-    /// <summary>Flattening moves the callee's MODEL_PARAM_REF into the body, but the parameter
-    /// lowering chain only ever runs over a whole graph, so the emitted body still names
-    /// #ModelParamRef#. Tracked as Shorokoo/Shorokoo#287.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#287: a flattened body keeps its callee's parameter ref unlowered")]
+    [Fact]
     public void TestAnInitializerCallingAParamOwningModuleFlattensThatCallInItsFunctionBody()
         => Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitCallingAParamOwningModule>(
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)], expected: [1.0, 2.0]));
 
-    /// <summary>The same body with its call wrapped in a loop emits a Shrk-free proto that ORT
-    /// still rejects for missing type information on the loop's carried input, while the identical
-    /// shape at module level lowers fine. Tracked as Shorokoo/Shorokoo#287.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#287: a flattened body wrapping its call in a loop loses type information")]
+    [Fact]
     public void TestAnInitializerCallingAModuleInALoopFlattensThatCallInItsFunctionBody()
         => Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitCallingAModuleInALoop>(
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)], expected: [4.0, 8.0]));
+
+    [Fact]
+    public void TestAnInitializerWhoseBodyLoopsRunsWithNothingToFlatten()
+        => Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitLoopingWithoutACall>(
+            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)], expected: [4.0, 8.0]));
+
+    [Fact]
+    public void TestAParamOwningCalleeReachedThroughANestedInitializerLowersToo()
+        => Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitCallingANestedParamOwningModule>(
+            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)], expected: [1.0, 2.0]));
+
+    [Fact]
+    public void TestAParamOwningCalleeReachedThroughAModelSequenceLowersToo()
+        => Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitCallingAParamOwningModuleFromASequence>(
+            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)], expected: [1.0, 2.0]));
+
+    /// <summary>A bare GetTrainableParam reference keeps naming the model variable that
+    /// FastUnpackModelStruct removes from the emitted body, so the body ships an operand nothing
+    /// produces. Tracked as Shorokoo/Shorokoo#318.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#318: an emitted body cannot resolve a bare parameter reference")]
+    public void TestAnInitializerTakingABareParamReferenceLowersIt()
+        => Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitWithBareParamRef>(
+            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)], expected: [1.0, 2.0]));
+
+    private static string[] EmittedFunctions(InternalComputationGraph g, bool nativeDialect = false)
+        => [.. (nativeDialect
+                ? FastOnnxModelBuilder.BuildInternalOnnxModel(g, applyExecutionLowerings: false, emitInputsAsNodes: true)
+                : FastOnnxModelBuilder.BuildInternalOnnxModel(g))
+            .Functions.Select(f => f.Name).Order()];
+
+    private static InternalComputationGraph ArchOf(ComputationGraph module)
+    {
+        var g = module.ToInternal();
+        return g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData(DType.Float32, [2L], 1f, 2f)]));
+    }
+
+    [Fact]
+    public void TestOnlyTheFunctionProtosTheEmittedModelStillReachesAreWritten()
+    {
+        var namedByAttribute = Modules.UsesInitCallingAModule.ComputationGraph.ToInternal();
+        var namedByOpType = ArchOf(Modules.UsesInitCallingAParamOwningModule.ComputationGraph);
+        Assert.Equal(["InitCallingAModule"], EmittedFunctions(namedByAttribute));
+        Assert.Equal(["InitCallingAParamOwningModule"], EmittedFunctions(namedByOpType));
+        Assert.Equal(["DoublerSub", "InitCallingAModule"], EmittedFunctions(namedByAttribute, nativeDialect: true));
+        Assert.Equal(
+            ["InitCallingAParamOwningModule", "InitSimple", "SimplestLayer"],
+            EmittedFunctions(namedByOpType, nativeDialect: true));
+    }
 
     [Fact]
     public void TestTheNativeContainerKeepsASubModuleBoundaryThatOnnxExportFlattens()

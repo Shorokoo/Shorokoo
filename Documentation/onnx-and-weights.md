@@ -146,16 +146,19 @@ file that only fails later when a third-party runtime rejects the custom ops.
 Module-stage graphs are persisted with the `.srk`/`.zsrk` format below, which
 uses Shorokoo's internal dialect and is re-imported by Shorokoo only.
 
-Inside a function body the guarantee is not yet complete. A body that calls a
-module is written out lowered rather than carrying the call, which covers the
-common shapes — but a callee owning a trainable parameter still leaves
-`#ModelParamRef#` in the emitted body, so that one file *does* name an op no
-stock runtime has, and the export does not catch it. A body wrapping its call in
-a loop stays vanilla but is rejected for missing type information. Both are
-[#287](https://github.com/Shorokoo/Shorokoo/issues/287).
+The guarantee reaches inside a function body too. A body that calls a module is
+written out lowered rather than carrying the call, and the callee's own machinery
+is lowered with it — including a trainable parameter the callee owns, which a body
+cannot carry as a weight (nothing feeds weights into a function body) and which is
+therefore written as the value its initializer computes. The exception is a bare
+`IModel.GetTrainableParam` reference, which names a parameter defined elsewhere
+rather than carrying an initializer of its own: a body holding one does not export
+([#318](https://github.com/Shorokoo/Shorokoo/issues/318)). Only the `FunctionProto`s
+the emitted model still reaches are written, so a callee whose only call was
+lowered away leaves no dead function behind in the file.
 The `.srk` format makes the opposite trade and keeps each body as authored, so a
 module reloaded from it still shows the sub-module it calls rather than a copy of
-that callee inlined into every caller.
+that callee inlined into every caller — and keeps every function that body names.
 
 ### Graph input/output names and shapes
 

@@ -245,6 +245,15 @@ namespace Shorokoo.Core.Factory
 
             var model = (ModelProto)OnnxIRFactory.CreateModel(graphProto, functionProtos, opset);
 
+            // ----- 4b. Drop the FunctionProtos nothing in the emitted model reaches. The list
+            // above comes from walking each function's un-flattened body, so a callee whose only
+            // call flattening spliced away would ship with nothing left to call it
+            // (Shorokoo/Shorokoo#288). Only the flattening dialects can orphan one — the .srk
+            // body keeps its call — so only they prune, and the graph the loader reads back is
+            // never trimmed on a guess.
+            if (flattenFunctionBodies)
+                RemoveUnreferencedFunctions(model);
+
             // ----- 5. Lower deprecated Upsample nodes to Resize nodes so that
             // ONNX Runtime (opset 21) can execute them.
             LowerUpsampleToResize(model.Graph);
@@ -318,6 +327,89 @@ namespace Shorokoo.Core.Factory
             }
 
             return model;
+        }
+
+        // ----------- function pruning -----------
+
+        /// <summary>
+        /// Removes every <see cref="FunctionProto"/> the emitted <paramref name="model"/> cannot
+        /// reach, transitively, from its main graph.
+        ///
+        /// <para>A proto is referenced in exactly three ways, and this walk honours all three —
+        /// they are the three <see cref="Shorokoo.Onnx.OnnxModelImporter"/> resolves on the way
+        /// back in, so anything it can bind, this keeps:</para>
+        /// <list type="number">
+        ///   <item>a node's <c>op_type</c>, in the <c>Functions</c> domain — a call site;</item>
+        ///   <item>a node's <see cref="OnnxOpAttributeNames.ShrkAttrFunctionName"/> attribute — how
+        ///     a node whose op type is its own (ShrkCreateModule, ShrkModelInvoke, the sequence ops)
+        ///     names the function it carries;</item>
+        ///   <item>a ValueInfo's <c>Signature</c> metadata prop — a module-typed value naming the
+        ///     signature function it is typed by.</item>
+        /// </list>
+        ///
+        /// <para>The walk descends into every graph-valued attribute, so a call inside an
+        /// <c>If</c> or <c>Loop</c> body counts as a reference like any other.</para>
+        /// </summary>
+        private static void RemoveUnreferencedFunctions(ModelProto model)
+        {
+            if (model.Functions.Count == 0) return;
+
+            var byName = new Dictionary<string, FunctionProto>(model.Functions.Count);
+            foreach (var fn in model.Functions) byName[fn.Name] = fn;
+
+            var reached = new HashSet<string>();
+            var pending = new Queue<string>();
+
+            void Reference(string? name)
+            {
+                if (string.IsNullOrEmpty(name)) return;
+                if (!byName.ContainsKey(name!)) return;
+                if (reached.Add(name!)) pending.Enqueue(name!);
+            }
+
+            void ScanNodes(IEnumerable<NodeProto> nodes)
+            {
+                foreach (var node in nodes)
+                {
+                    if (node.Domain == "Functions") Reference(node.OpType);
+                    foreach (var attr in node.Attributes)
+                    {
+                        if (attr.Name == OnnxOpAttributeNames.ShrkAttrFunctionName && attr.S is { } bytes)
+                            Reference(System.Text.Encoding.UTF8.GetString(bytes));
+                        if (attr.G is { } g) ScanGraph(g);
+                        foreach (var sub in attr.Graphs) ScanGraph(sub);
+                    }
+                }
+            }
+
+            void ScanValueInfos(IEnumerable<ValueInfoProto> infos)
+            {
+                foreach (var info in infos)
+                    foreach (var prop in info.MetadataProps)
+                        if (prop.Key == Function.IRFunctionSignatureParamName)
+                            Reference(prop.Value);
+            }
+
+            void ScanGraph(GraphProto graph)
+            {
+                ScanNodes(graph.Nodes);
+                ScanValueInfos(graph.Inputs);
+                ScanValueInfos(graph.Outputs);
+                ScanValueInfos(graph.ValueInfoes);
+            }
+
+            ScanGraph(model.Graph);
+            while (pending.Count > 0)
+            {
+                var fn = byName[pending.Dequeue()];
+                ScanNodes(fn.Nodes);
+                ScanValueInfos(fn.ValueInfoes);
+            }
+
+            if (reached.Count == model.Functions.Count) return;
+            var kept = model.Functions.Where(fn => reached.Contains(fn.Name)).ToArray();
+            model.Functions.Clear();
+            model.Functions.AddAll(kept);
         }
 
         // ----------- vanilla-dialect guarantee -----------
@@ -1146,10 +1238,39 @@ namespace Shorokoo.Core.Factory
             // that chain in a later stage, which a body emitted from here never reaches — so fold
             // it here, or the body still ships the machinery flattening was meant to remove.
             if (flattenBody)
+            {
+                // Flattening also moves a callee's MODEL_PARAM_REF into the body. The parameter
+                // chain that would turn one into a model weight only runs over a whole graph, and
+                // this body is not one — the model's parameter inventory never saw this reference,
+                // so nothing will ever be fed for it. Lower it to its own initializer's value
+                // (Shorokoo/Shorokoo#287), then inline the invokes that produces.
+                // To fixpoint, not once: the initializer just spliced in can own parameters of its
+                // own, and a single round leaves those refs in the body for ORT to reject. The
+                // initializer call graph is finite and acyclic — flattening itself would not
+                // terminate otherwise — so this settles, at the nesting depth of the deepest chain.
+                while (FastLowerBodyParamRefs.Process(fnFast))
+                    FastInlineModulesAndFunctions.Process(fnFast);
                 FastUnpackModelStruct.Process(fnFast);
+                // Inlining leaves the callee's own input ops and hyperparameter chain behind,
+                // unreferenced. The pipeline prunes them right after its inline stage; a body
+                // emitted from here never reaches that, and an orphaned model-input op becomes a
+                // function input with nothing to type it.
+                FastProcessorHelper.RemoveUnreachableNodes(fnFast);
+            }
             // Before the pre-passes, so the inserted Identity is renamed with the rest of the body.
             FastIdentityWrapping.WrapAliasedOutputs(fnFast);
-            RunPrePasses(fnFast, prepForOnnx, applyExecutionLowerings);
+            // A body carrying a Loop or an If needs a tensor-info lookup: it is what types that
+            // subgraph's inputs, and without one they go out untyped and ORT refuses the model
+            // ("does not have type information") — for every dialect, not just a flattened body.
+            // Building it costs a round-trip conversion of the body, so a body with no subgraph in
+            // it — most of them, and every body on the training hot path — skips it and runs the
+            // pre-passes alone, as before. Asking before the pre-passes is safe: none of them
+            // introduces control flow (FastIdentityWrapping only wraps the close nodes it finds).
+            Dictionary<FastTensorKey, FastTensorInfo>? fnTensorInfoLookup = null;
+            if (fnFast.Nodes.Any(n => n.OpCode == OpCodes.LOOP_CLOSE || n.OpCode == OpCodes.IF_CLOSE))
+                fnTensorInfoLookup = RunPrePassesAndBuildLookup(fnFast, prepForOnnx, applyExecutionLowerings);
+            else
+                RunPrePasses(fnFast, prepForOnnx, applyExecutionLowerings);
             fnFast.ConfigureScopes();
 
             var fnGraphProto = BuildGraphProto(
@@ -1157,6 +1278,7 @@ namespace Shorokoo.Core.Factory
                 fastGraph: fnFast,
                 opset: opset,
                 isFunction: true,
+                tensorInfoLookup: fnTensorInfoLookup,
                 stripCheckpointStamp: stripCheckpointStamp);
 
             var fnProto = new FunctionProto();

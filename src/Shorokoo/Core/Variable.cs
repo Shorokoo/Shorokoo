@@ -321,8 +321,10 @@ namespace Shorokoo.Core
         public Scalar<int64> Count => OnnxOp.SequenceLength(this);
         public Variable Concat(long axis, bool newAxis = false) => OnnxOp.ConcatFromSequence(this, axis, newAxis);
         public Variable At(Scalar<int64> index) => OnnxOp.SequenceAt(this, index);
-        public Variable RemoveAt(Scalar<int64> index) => OnnxOp.SequenceErase(this, index);
-        public Variable InsertAt(Variable tensor, Scalar<int64> index) => OnnxOp.SequenceInsert(this, tensor, index);
+        // Both positions are optional, as on TensorSequence<T>: an absent one erases the last
+        // element / appends, which is ONNX's own default for the operand.
+        public Variable RemoveAt(Scalar<int64>? index = null) => OnnxOp.SequenceErase(this, index);
+        public Variable InsertAt(Variable tensor, Scalar<int64>? index = null) => OnnxOp.SequenceInsert(this, tensor, index);
 
         // ── Struct surface (meaningful for DataStructure.TensorStruct values) ──
         public TensorStructDef Definition => this.structDef!;

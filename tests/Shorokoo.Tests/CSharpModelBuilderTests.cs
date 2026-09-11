@@ -1,3 +1,5 @@
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 using Shorokoo.Core.Factory.CSharpFactory;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 using System.Collections.Immutable;
@@ -8,6 +10,7 @@ namespace Shorokoo.Tests;
 /// <summary>
 /// Drives <see cref="CSharpModelBuilder"/> over graph shapes that reach the
 /// per-op / per-attribute / per-DType / per-keyword branches of the codegen dispatch.
+/// Every emitted source is compiled, not just substring-matched.
 /// </summary>
 [Trait("Domain", "Factory")]
 [Trait("Purpose", "Coverage")]
@@ -17,13 +20,14 @@ public class CSharpModelBuilderCoverageTests
     public void TestBuildFullGraphModuleTensorStructSequenceAndConstantCodegen()
     {
         AssertCodegens(CallsHypersLayer.ComputationGraph.ToInternal(), "HypersLayer");
+        // Not the struct's name: DType.GetOrCreateForTensorStruct keys on structure alone, so which
+        // of several structurally identical IStructs is named depends on registration order.
         AssertCodegens(TensorStructLoopCarry.ComputationGraph.ToInternal(),
-            "InternalOp.TensorStructCreate", "InternalOp.TensorStructGetField");
+            "Globals.TensorStructCreate<", "Globals.TensorStructGetField");
         AssertCodegens(SequenceOpsOnStructs.ComputationGraph.ToInternal());
         AssertCodegens(BuildConstantBranchesGraph(),
             "1.5d", "6UL", "true", "(short[])", "(ushort[])", "(uint[])", "EmptyVector<int32>");
-        AssertCodegens(BatchNormWithStateUpdate.ComputationGraph.ToInternal(),
-            "[StateInitializer]", "isTrainable: false");
+        AssertCodegens(BatchNormWithStateUpdate.ComputationGraph.ToInternal(), "isTrainable: false");
         AssertCodegens(BuildLowOpInlinedGraph(), "(", ")");
         AssertCodegens(BuildBigConstantGraph(), "MakeTensor<");
         AssertCodegens(BuildSequenceRankInferGraph());
@@ -57,13 +61,57 @@ public class CSharpModelBuilderCoverageTests
         Assert.Contains(body, x => x.EndsWith($"> {names[0]} = default;"));
     }
 
-    /// <summary>The attribute-value formatter has no branch for a DType-valued attribute — nor
-    /// for Bools, Strings, DTypes, Graph or TypeProto — so it substitutes the empty string and the
-    /// emitted argument list carries an empty element, <c>"dtype", ,</c>, which does not compile.
-    /// Tracked as Shorokoo/Shorokoo#282.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#282: a DType-valued attribute codegens as an empty collection element")]
+    [Fact]
     public void TestADTypeValuedAttributeCodegensItsValue()
-        => AssertCodegens(ScanZeroInputOpInLoopBody.ComputationGraph.ToInternal(), "\"dtype\", DType.Float32");
+        => AssertCodegens(ScanZeroInputOpInLoopBody.ComputationGraph.ToInternal(),
+            "\"dtype\", DType.Float32", "\"shape\", new long[] { 2L }");
+
+    /// <summary>A concrete dtype carrying a generic-parameter tag writes as the plain dtype static;
+    /// the tag is metadata the literal does not carry. Fails: DTypeLiteral compares the tagged dtype
+    /// to DType.FromName, whose result is untagged, so every tagged dtype is rejected as unwritable.</summary>
+    [Fact]
+    public void TestATaggedConcreteDTypeCodegensItsBaseDType()
+        => AssertCodegens(new InternalComputationGraph([],
+                [OnnxOp.RandomNormal([2L], dtype: DType.CreateWithGenericParam(DType.Float32, "T"))]),
+            "\"dtype\", DType.Float32");
+
+    /// <summary>Fails: StructTypeName writes TensorStructDef.TypeName, which is Type.FullName, so a
+    /// generic IStruct emits a backtick-arity assembly-qualified name that is not C#.</summary>
+    [Fact]
+    public void TestAGenericIStructCodegensAWritableTypeName()
+        => AssertCodegens(BuildGenericStructGraph());
+
+    /// <summary>Fails: an absent optional input emits "null, " whatever the placeholder asked for,
+    /// so a custom-operator call — whose template supplies its own separators — gets a doubled one
+    /// and an empty argument, "null, , null".</summary>
+    [Fact]
+    public void TestAnAbsentOptionalInputCodegensOneArgument()
+        => AssertCodegens(BuildCustomOpNullInputGraph(), "null, null");
+
+    /// <summary>Fails: a state initializer's StateOwnership is not emitted at all, so an
+    /// optimizer-owned one codegens as the ModuleOwned default the 3-argument
+    /// CallTrainableParamInitializer overload hardcodes.</summary>
+    [Fact]
+    public void TestAStateInitializerCodegensItsOwnership()
+        => AssertCodegens(OptimizerOwnedStateModel.ComputationGraph.ToInternal(),
+            "stateOwnership: StateOwnership.OptimizerOwned");
+
+    /// <summary>Fails: a string-valued Constant emits Vector(["a", "b"]), and Globals.Vector has an
+    /// overload for every element type but string.</summary>
+    [Fact]
+    public void TestAStringConstantCodegensAVectorItCanBind()
+        => AssertCodegens(new InternalComputationGraph([],
+                [OnnxOp.Constant((string[])["cova", "covb"]), OnnxOp.Constant("covc")]),
+            "Vector(", "Scalar(");
+
+    [Fact]
+    public void TestCodegenedSourceRebuildsTheGraphItCameFrom()
+    {
+        TensorData[] two = [TensorData([], 1f), TensorData([], 2f)];
+        AssertRoundTrips(TensorStructLoopCarry.ComputationGraph.ToInternal(), two);
+        AssertRoundTrips(SequenceOpsOnStructs.ComputationGraph.ToInternal(),
+            [.. two, TensorData([], 3f), TensorData([], 4f)]);
+    }
 
     [Fact]
     public void TestLoopCodegenInlineInitRankMismatchAndHoisting()
@@ -107,6 +155,13 @@ public class CSharpModelBuilderCoverageTests
 
         Assert.Contains("float32",
             CSharpModelBuilder.GetTypeDefString(OnnxOp.SequenceEmpty(DType.Float32), null));
+
+        TensorStructFieldDef[] namelessFields =
+            [new TensorStructFieldDef("CovField_Nameless_A", DataStructure.Tensor, rank: 1, DType.Int32)];
+        var namelessStruct = InternalOp.TensorStructCreate(
+            DType.GetOrCreateForTensorStruct(new TensorStructDef(namelessFields)), [Vector(1, 2)]);
+        Assert.Throws<UnsupportedDTypeException>(() => new CSharpModelBuilder()
+            .BuildFullGraph(new InternalComputationGraph([], [namelessStruct]), "CovTest"));
     }
 
     // ---- helpers ----
@@ -117,6 +172,34 @@ public class CSharpModelBuilderCoverageTests
         Assert.NotNull(code);
         foreach (var s in containsAll)
             Assert.Contains(s, code);
+
+        var compilation = CSharpCompilation.Create("CovTest", [CSharpSyntaxTree.ParseText(code)],
+            CSharpModelBuilder.CompilationReferences(),
+            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+
+        using var ms = new MemoryStream();
+        Assert.Empty(compilation.Emit(ms).Diagnostics.Where(x => x.Severity == DiagnosticSeverity.Error));
+    }
+
+    /// <summary><see cref="AutoTest"/> executes generated source only for a graph with no inputs,
+    /// so this is the one place the emitted code for a graph that takes them runs at all.</summary>
+    private static void AssertRoundTrips(InternalComputationGraph graph, TensorData[] inputs)
+    {
+        var method = new CSharpModelBuilder().BuildMethod(graph, "CovTest");
+        var graphInputs = InternalComputationGraphConverter.BuildNodes(graph).inputs;
+        object?[] args = [.. method.GetParameters().Zip(graphInputs).Select(x =>
+            x.First.ParameterType.GetMethod("op_Implicit", [typeof(Variable)])!.Invoke(null, [x.Second]))];
+        var rebuilt = new InternalComputationGraph(
+            graphInputs, [((IValue)method.Invoke(null, args)!).ToVariable()]);
+
+        Assert.Equal(Run(graph, inputs), Run(rebuilt, inputs));
+    }
+
+    private static byte[][] Run(InternalComputationGraph graph, TensorData[] inputs)
+    {
+        var model = graph.ToConcreteArchitecture(graph.FromOrderedInputs([.. inputs])).ToConcreteModel();
+        return [.. Shorokoo.Runtime.ComputeContext.Default.Execute(model, [.. inputs.Cast<IData>()])
+            .Select(x => x.ToTensorData().AccessRawMemory().ToArray())];
     }
 
     private static InternalComputationGraph BuildConstantBranchesGraph()
@@ -251,8 +334,8 @@ public class CSharpModelBuilderCoverageTests
 
     private static InternalComputationGraph BuildDeepSequenceRankChainGraph()
     {
-        var unrankedElem = (Tensor<float32>)OnnxOp.Identity(
-            InputTensor<float32>("eltIn", rank: 2), rank: null);
+        var eltIn = InputTensor<float32>("eltIn", rank: 2);
+        var unrankedElem = (Tensor<float32>)OnnxOp.Identity(eltIn, rank: null);
 
         var s0 = OnnxOp.SequenceConstruct(unrankedElem);
         var s1 = OnnxOp.Identity(s0, rank: null);
@@ -260,7 +343,7 @@ public class CSharpModelBuilderCoverageTests
         var s3 = OnnxOp.Identity(s2, rank: null);
         var deepAt = OnnxOp.SequenceAt(s3, Scalar(0L));
 
-        return new InternalComputationGraph([InputTensor<float32>("eltIn", rank: 2)], [deepAt]);
+        return new InternalComputationGraph([eltIn], [deepAt]);
     }
 
     private static InternalComputationGraph BuildLoopInlineAndInitGraph()
@@ -285,6 +368,22 @@ public class CSharpModelBuilderCoverageTests
         return new InternalComputationGraph([], [accum]);
     }
 
+    private static InternalComputationGraph BuildCustomOpNullInputGraph()
+    {
+        var x = InputTensor<float32>("lx", rank: 3);
+        var w = InputTensor<float32>("lw", rank: 3);
+        var r = InputTensor<float32>("lr", rank: 3);
+        var (y, _, _) = OnnxOp.Lstm(x, w, r, null, null, null, null, null,
+            null, null, null, null, LSTMDirection.Forward, 4L, null, null);
+        return new InternalComputationGraph([x, w, r], [y]);
+    }
+
+    private static InternalComputationGraph BuildGenericStructGraph()
+    {
+        var pair = TensorStruct<CovGenericPair<float32>>(Scalar(1.0f), Scalar(2.0f));
+        return new InternalComputationGraph([], [pair.CovGenericPairFieldA + pair.CovGenericPairFieldB]);
+    }
+
     private static InternalComputationGraph BuildLoopBodyHoistingGraph()
     {
         Tensor<float32>? scanned = null;
@@ -298,4 +397,12 @@ public class CSharpModelBuilderCoverageTests
         }
         return new InternalComputationGraph([], ImmutableArray.Create<Variable>(scanned!, finalIdx));
     }
+}
+
+/// <summary>A generic IStruct, whose field names are unique to this file so its structural
+/// registration cannot collide with another fixture's.</summary>
+public interface CovGenericPair<T> : IStruct where T : IVarType
+{
+    Scalar<T> CovGenericPairFieldA { get; }
+    Scalar<T> CovGenericPairFieldB { get; }
 }

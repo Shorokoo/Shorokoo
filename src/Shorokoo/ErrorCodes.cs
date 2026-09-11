@@ -521,7 +521,7 @@ namespace Shorokoo
 
         #endregion
 
-        #region Framework Error Codes (FW001-FW052)
+        #region Framework Error Codes (FW001-FW053)
         
         /// <summary>Loop operation not implemented</summary>
         public const string FW001 = "FW001";
@@ -678,6 +678,9 @@ namespace Shorokoo
 
         /// <summary>A loop body set its exit condition more than once</summary>
         public const string FW052 = "FW052";
+
+        /// <summary>C# code generation reached an attribute type or DType it has no way to write as a literal</summary>
+        public const string FW053 = "FW053";
 
         #endregion
 

@@ -62,9 +62,11 @@ namespace Shorokoo
                     return Scalar(floatVal);
                 case double doubleVal: 
                     return Scalar(doubleVal);
+                case string stringVal:
+                    return Scalar(stringVal);
                 default: 
                     throw new UnsupportedDTypeException(ErrorCodes.GC001, val?.GetType()?.Name ?? "null", "Scalar", 
-                        $"Unsupported type for scalar creation. Supported types: bool, sbyte, short, int, long, byte, ushort, uint, ulong, BFloat16, Float16, float, double. Received: {val?.GetType()?.FullName ?? "null"}");
+                        $"Unsupported type for scalar creation. Supported types: bool, sbyte, short, int, long, byte, ushort, uint, ulong, BFloat16, Float16, float, double, string. Received: {val?.GetType()?.FullName ?? "null"}");
             }
         }
 
@@ -154,6 +156,8 @@ namespace Shorokoo
         public static Scalar<float32> Scalar(float val) => OnnxOp.Constant(TensorData([], val));
         /// <summary>Creates a constant scalar holding the given value.</summary>
         public static Scalar<float64> Scalar(double val) => OnnxOp.Constant(TensorData([], val));
+        /// <summary>Creates a constant scalar holding the given value.</summary>
+        public static Scalar<@string> Scalar(string val) => OnnxOp.Constant(TensorData([], val));
 
         /// <summary>Creates a constant scalar holding the default value of T (zero / false).</summary>
         public static Scalar<T> DefaultScalar<T>() where T : IVarType => OnnxOp.Constant(TensorDataWithDefaultVals(OnnxUtils.GetDType<T>(), []));
@@ -207,6 +211,8 @@ namespace Shorokoo
         public static Vector<float32> Vector(params float[] val) => OnnxOp.Constant(OnnxTensorData(val.Length, val));
         /// <summary>Creates a constant vector from the given values.</summary>
         public static Vector<float64> Vector(params double[] val) => OnnxOp.Constant(OnnxTensorData(val.Length, val));
+        /// <summary>Creates a constant vector holding the given values.</summary>
+        public static Vector<@string> Vector(params string[] val) => OnnxOp.Constant(TensorData(val.Length, val));
 
         /// <summary>Creates a constant-filled vector of the given length.</summary>
         public static Vector<bit> VectorFill(long length, bool val) => OnnxOp.ConstantOfShape(Vector(length), OnnxTensorData(1, val), rank: 1);
@@ -994,6 +1000,35 @@ namespace Shorokoo
             var structVar = InternalOp.TensorStructCreate(dtype, fields);
             return (T)TensorStructProxyFactory.Create(typeof(T), structVar, def);
         }
+
+        /// <summary>
+        /// The <see cref="Variable"/> form of <see cref="TensorStruct{T}"/>: builds a struct-shaped
+        /// graph value from positional field values, in the order <typeparamref name="T"/> declares
+        /// them, and hands back the value itself rather than a field-access proxy. Reach for it when
+        /// you want to pass the struct on to an op — into a sequence, say — rather than read its
+        /// fields; <see cref="AsTensorStruct{T}"/> wraps the value back into a proxy when you do.
+        /// </summary>
+        /// <typeparam name="T">The IStruct interface type defining the struct fields</typeparam>
+        /// <param name="fields">Field values, positional in IStruct declaration order</param>
+        public static Variable TensorStructCreate<T>(params Variable[] fields) where T : IStruct
+            => InternalOp.TensorStructCreate(StructDType<T>(), fields);
+
+        /// <summary>
+        /// The <see cref="DType"/> for the struct <typeparamref name="T"/> describes, reflected off the
+        /// interface's property declarations. The dtype a struct-shaped value or a sequence of them
+        /// carries.
+        /// </summary>
+        public static DType StructDType<T>() where T : IStruct
+            => DType.GetOrCreateForTensorStruct(StructDefExtractor.ExtractFromType<T>());
+
+        /// <summary>
+        /// Reads one field off a struct-shaped <see cref="Variable"/>, naming the field's shape
+        /// explicitly. The counterpart of <see cref="TensorStructCreate{T}"/> for a caller holding
+        /// the value rather than a proxy; <see cref="AsTensorStruct{T}"/> is the typed alternative.
+        /// </summary>
+        public static Variable TensorStructGetField(
+            Variable structInput, string fieldName, DType fieldDType, int? fieldRank, DataStructure fieldStructure)
+            => InternalOp.TensorStructGetField(structInput, fieldName, fieldDType, fieldRank, fieldStructure);
 
         /// <summary>
         /// Wraps an existing struct-shaped Variable (e.g. the result of <c>IfElse</c> or

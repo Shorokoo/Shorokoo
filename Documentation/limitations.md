@@ -358,6 +358,17 @@ error. Workaround: express the mapping as an explicit `Loop` over
 `SequenceLength` using `SequenceAt`/`SequenceInsert` (in Shorokoo, build it
 with `LoopAPI`) — that form is fully supported.
 
+### C# emission of a runtime-built TensorStruct
+
+`SaveToCSharp()` — and so the `DebugRequests` snapshots built on it — names a
+TensorStruct by the `IStruct` interface it was reflected from, since that is what
+the emitted source has to write. A struct assembled at runtime from a
+`TensorStructDef` carries no such interface, so there is nothing to name and
+emission is refused with **FW053**. Every other graph emits; a struct built with
+`Globals.TensorStruct<T>` / `TensorStructCreate<T>`, generic interfaces included,
+carries its type and is unaffected. Workaround: declare the struct as an `IStruct`
+interface rather than building its definition by hand.
+
 ### ONNX opset range and export stamping
 
 Import accepts standard-domain (`ai.onnx`) models from opset 7 through

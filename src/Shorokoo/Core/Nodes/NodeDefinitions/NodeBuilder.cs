@@ -356,7 +356,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                             protoVals[def.AttributeName] = ((bool)attrVal) ? 1L : 0L;
                             break;
                         case AttributeType.Bools:
-                            protoVals[def.AttributeName] = ((bool[])attrVal).Select(x => x ? 0L : 1L).ToArray();
+                            protoVals[def.AttributeName] = ((bool[])attrVal).Select(x => x ? 1L : 0L).ToArray();
                             break;
                         case AttributeType.Enum:
                             Debug.Assert(def.EnumDef is not null);
@@ -393,6 +393,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
         public T? GetEnumVal<T>(string name) where T : struct => (T?)this.attributeVals[name];
         public T[]? GetEnumsVal<T>(string name) where T : struct => ((object[]?)this.attributeVals[name])?.Cast<T>().ToArray();
         public bool? GetBoolVal(string name) => (bool?)this.attributeVals[name];
+        public bool[]? GetBoolsVal(string name) => (bool[]?)this.attributeVals[name];
         public DType? GetDTypeVal(string name) => (DType?)this.attributeVals[name];
         public DType[]? GetDTypesVal(string name) => (DType[]?)this.attributeVals[name];
         public float? GetFloatVal(string name) => (float?)this.attributeVals[name];

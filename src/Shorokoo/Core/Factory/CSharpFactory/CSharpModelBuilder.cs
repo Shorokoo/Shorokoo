@@ -14,6 +14,7 @@ using Shorokoo.Core.Nodes.AutoDiff;
 using Shorokoo.Core.Training;
 using Shorokoo.Core.Utils;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Collections.ObjectModel;
@@ -125,7 +126,12 @@ namespace Shorokoo.Core.Factory.CSharpFactory
                 }
             }
 
+            // @string is the only IVarType whose name is also a C# keyword, so source has to escape
+            // it or the emitted Vector<string> would mean System.String.
             var typeName = variable.Type.ToIVarType().Name;
+            if (typeName == "string")
+                typeName = "@string";
+
             if (rank == 0)
                 return $"Scalar<{typeName}>";
             else if (rank == 1)
@@ -195,29 +201,45 @@ namespace Shorokoo.Core.Factory.CSharpFactory
             return GetTypeDefString(tensor);
         }
 
+        // Reading an assembly's metadata off disk is the expensive half of compiling a model, and
+        // the same assemblies come back on every call, so each file is read once per process.
+        private static readonly ConcurrentDictionary<string, MetadataReference> referenceCache = new();
+
+        /// <summary>
+        /// What generated source is compiled against: the framework and the BCL, plus every other
+        /// assembly already loaded. The generated source names the user's own types — the IStruct
+        /// interface behind a TensorStruct among them — so the model's own assembly has to be in
+        /// there, and the loaded set is the only handle we have on it.
+        /// </summary>
+        internal static MetadataReference[] CompilationReferences()
+        {
+            string[] locations =
+            [
+                typeof(object).Assembly.Location,
+                typeof(Enumerable).Assembly.Location,
+                typeof(Shorokoo.Core.Variable).Assembly.Location,
+                typeof(System.Collections.Immutable.ImmutableArray).Assembly.Location,
+                Path.Combine(Path.GetDirectoryName(typeof(object).Assembly.Location)!, "System.Runtime.dll"),
+                .. AppDomain.CurrentDomain.GetAssemblies()
+                    .Where(x => !x.IsDynamic && !string.IsNullOrEmpty(x.Location))
+                    .Select(x => x.Location),
+            ];
+
+            return [.. locations.Distinct()
+                .Select(x => referenceCache.GetOrAdd(x, static path => MetadataReference.CreateFromFile(path)))];
+        }
+
         public MethodInfo BuildMethod(InternalComputationGraph fastGraph, string modelName)
         {
             var code = BuildFullGraph(fastGraph, modelName);
             // Create a syntax tree from the generated code
             var syntaxTree = CSharpSyntaxTree.ParseText(code);
 
-            // Define references to necessary assemblies
-            var references = new List<MetadataReference>
-            {
-                MetadataReference.CreateFromFile(typeof(object).Assembly.Location),
-                MetadataReference.CreateFromFile(typeof(Enumerable).Assembly.Location),
-                MetadataReference.CreateFromFile(typeof(Shorokoo.Core.Variable).Assembly.Location),
-                MetadataReference.CreateFromFile(typeof(Float16).Assembly.Location),
-                MetadataReference.CreateFromFile(typeof(System.Collections.Immutable.ImmutableArray).Assembly.Location),
-                MetadataReference.CreateFromFile(Path.Combine(Path.GetDirectoryName(typeof(object).Assembly.Location)!, "System.Runtime.dll")), // Add System.Runtime
-                // Add other necessary references here
-            };
-
             // Compile the syntax tree into an assembly
             var compilation = CSharpCompilation.Create(
                 modelName,
-                new[] { syntaxTree },
-                references,
+                [syntaxTree],
+                CompilationReferences(),
                 new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
 
             using (var ms = new MemoryStream())
@@ -478,11 +500,14 @@ public static class " + modelName + @"
                     var paramsDeclarationString = string.Join(", ", paramTypes.Zip(paramNames).Select(x => $"{x.First} {x.Second}"));
                     var paramsRefString = string.Join(", ", paramNames);
 
+                    // Ownership decides which graph the state may live in, so it is emitted rather
+                    // than left to the 3-argument overload's ModuleOwned default. No
+                    // [StateInitializer] marker goes on the emitted method: the attribute is
+                    // declared AttributeTargets.Class, and it is this call that carries what it says.
+                    var stateOwnership = targetFunction.StateOwnership ?? StateOwnership.ModuleOwned;
                     var createStateParamInitializerCode = $@"
         public static {outputParamList} {methodName}({paramsDeclarationString})
-            => ({outputParamList})Globals.CallTrainableParamInitializer(_{methodName}, defaultName: {'"' + methodName + '"'}, isTrainable: false, {paramsRefString});";
-
-                    fullScript = "[StateInitializer]\r\n" + fullScript;
+            => ({outputParamList})Globals.CallTrainableParamInitializer(_{methodName}, defaultName: {'"' + methodName + '"'}, isTrainable: false, stateOwnership: StateOwnership.{stateOwnership}, {paramsRefString});";
 
                     fullScript = createStateParamInitializerCode + "\r\n" + fullScript;
                 }
@@ -542,6 +567,8 @@ public static class " + modelName + @"
                 codeTemplateOverride = MakeCallFunctionCodeTemplate(node, nodeCodeGenerators, currentNames, functionNames);
                 useTuplesForMultiOutputs = true;
             }
+            else
+                codeTemplateOverride = MakeStructSequenceCodeTemplate(node);
 
 
             var nodeDef = node.NodeDef;
@@ -938,7 +965,7 @@ public static class " + modelName + @"
                 if (numItems > 8)
                 {
                     var arrayResultName = SanitizeVariableName(closeNode.DefaultName) + "_arr";
-                    lines.Add(new CodeLine(0, $"var {arrayResultName} = Ops.IfElse({condName}, [{string.Join(", ", whenTrueNames)}], [{string.Join(", ", whenFalseNames)}]);"));
+                    lines.Add(new CodeLine(0, $"var {arrayResultName} = Shorokoo.Core.Nodes.Ops.IfElse({condName}, [{string.Join(", ", whenTrueNames)}], [{string.Join(", ", whenFalseNames)}]);"));
 
                     for (var i = 0; i < numItems; i++)
                     {
@@ -950,9 +977,9 @@ public static class " + modelName + @"
                 else
                 {
                     if (numItems == 1)
-                        lines.Add(new CodeLine(0, $"var {outNames[0]} = Ops.IfElse({condName}, {whenTrueNames[0]}, {whenFalseNames[0]});"));
+                        lines.Add(new CodeLine(0, $"var {outNames[0]} = Shorokoo.Core.Nodes.Ops.IfElse({condName}, {whenTrueNames[0]}, {whenFalseNames[0]});"));
                     else // if (numItems <= 8)
-                        lines.Add(new CodeLine(0, $"var ({string.Join(", ", outNames)}) = Ops.IfElse({condName}, ({string.Join(", ", whenTrueNames)}), ({string.Join(", ", whenFalseNames)}));"));
+                        lines.Add(new CodeLine(0, $"var ({string.Join(", ", outNames)}) = Shorokoo.Core.Nodes.Ops.IfElse({condName}, ({string.Join(", ", whenTrueNames)}), ({string.Join(", ", whenFalseNames)}));"));
 
                     for (var i = 0; i < numItems; i++)
                         newVariables[outVariables[i]!] = outNames[i];
@@ -1010,7 +1037,7 @@ public static class " + modelName + @"
             var fieldStructure = outputVariable.Structure();
             var fieldCastTypeDef = GetTypeDefString(outputVariable, outputVariable.Rank);
             var inlineExpression =
-                $"({fieldCastTypeDef})Shorokoo.Core.Nodes.NodeDefinitions.InternalOp.TensorStructGetField(" +
+                $"({fieldCastTypeDef})Shorokoo.Globals.TensorStructGetField(" +
                 $"{structInputName}, \"{fieldName}\", " +
                 $"Shorokoo.DType.{fieldDType}, {fieldRank}, " +
                 $"Shorokoo.Core.Nodes.NodeDefinitions.DataStructure.{fieldStructure})";
@@ -1030,38 +1057,14 @@ public static class " + modelName + @"
 
             var structDType = node.Attributes.GetDTypeVal(OnnxOpAttributeNames.AttrDtype).AssertNotNull();
             var structDef = structDType.TensorStructDef.AssertNotNull();
-            var structTypeName = structDef.TypeName;
 
-            // Positional field references in TensorStructDef order — InternalOp.TensorStructCreate
-            // takes an ordered Variable[] (no field-name labels) and the inputs to the graph node
-            // are already in that order.
+            // Positional field references in TensorStructDef order — TensorStructCreate takes an
+            // ordered Variable[] (no field-name labels) and the inputs to the graph node are
+            // already in that order.
             var fieldRefs = node.Inputs.Select(input => currentNames[input!]).ToList();
-            var fieldsArrayLiteral = $"new Shorokoo.Core.Variable[] {{ {string.Join(", ", fieldRefs)} }}";
-
-            // Build the dtype expression. Prefer the static struct-type path
-            // (StructDefExtractor.ExtractFromType<T>) when we have a simple, unqualified IStruct
-            // type name — that matches the canonical Module-level pattern. For DTypeStruct or
-            // fully-qualified names we can't safely emit a reflectable type literal, so fall
-            // back to looking the def up by name on the global registry.
-            string dtypeExpression;
-            if (structTypeName != null && !structTypeName.Contains('.'))
-            {
-                dtypeExpression =
-                    $"Shorokoo.DType.GetOrCreateForTensorStruct(" +
-                    $"Shorokoo.Core.StructDefExtractor.ExtractFromType<{structTypeName}>())";
-            }
-            else
-            {
-                // Codegen for DTypeStruct / fully-qualified-name structs is not supported —
-                // we don't have a reflectable IStruct type to emit. Generate a throw so the
-                // compiled lambda fails loudly if anyone ever reaches this path.
-                dtypeExpression =
-                    $"throw new System.NotSupportedException(" +
-                    $"\"TensorStructCreate codegen for dynamic/dotted TypeName '{structDef.TypeName}' is not supported\")";
-            }
 
             var createExpression =
-                $"Shorokoo.Core.Nodes.NodeDefinitions.InternalOp.TensorStructCreate({dtypeExpression}, {fieldsArrayLiteral})";
+                $"Shorokoo.Globals.TensorStructCreate<{StructTypeName(structDef)}>({string.Join(", ", fieldRefs)})";
 
             var outputTensor = node.Outputs[0]!;
             var outputTensorName = GetSanitizedVariableName(outputTensor);
@@ -1150,10 +1153,40 @@ public static class " + modelName + @"
 
             var variableInputPlaceHolders = string.Join(", ", Enumerable.Range(1, node.Inputs.Length).Select(x => "{" + x + ":}"));
             var attributeInputPlaceHolders = string.Join(", ", Enumerable.Range(0, nodeDef.AttributeDefs.Count)
-                    .Select(x => '"' + nodeDef.AttributeDefs[x].AttributeName + '"' + ", " + "{" + (char)('a' + (char)x) + ":}"));
+                    .Select(x => '"' + nodeDef.AttributeDefs[x].AttributeName + '"' + ", " + "{" + (char)('a' + (char)x) + ":boxed}"));
 
             var methodParams = $"(\"{nodeDef.OpName}\", [{variableInputPlaceHolders}], [{attributeInputPlaceHolders}])";
             return methodCore + methodParams;
+        }
+
+        /// <summary>
+        /// The code template for a sequence op whose elements are TensorStructs, or <c>null</c> when
+        /// the node is not one. A tensor sequence codegens through the typed
+        /// <see cref="TensorSequence{T}"/> handle, which converts every element through
+        /// <see cref="Tensor{T}"/> — a conversion a struct-shaped value is rejected by. So a struct
+        /// sequence goes through the <see cref="Variable"/> surface instead, which is the shape a
+        /// hand-written module uses for the same ops. The ops the handle and the Variable share
+        /// (<c>InsertAt</c>, <c>RemoveAt</c>, <c>Count</c>, <c>Concat</c>) need no override.
+        /// </summary>
+        private static string? MakeStructSequenceCodeTemplate(Node node)
+        {
+            if (!node.Inputs.Concat(node.Outputs).NotNulls().Any(x => x.Type.IsTensorStructType))
+                return null;
+
+            if (node.OpName == OpCodes.SEQUENCE_CONSTRUCT)
+                return "OnnxOp.SequenceConstruct({#:param})";
+
+            if (node.OpName == OpCodes.SEQUENCE_AT)
+                return "{1:this}.At({2:param})";
+
+            if (node.OpName == OpCodes.SEQUENCE_EMPTY)
+            {
+                var structDef = node.Attributes.GetDTypeVal(OnnxOpAttributeNames.AttrDtype)
+                    .AssertNotNull().TensorStructDef.AssertNotNull();
+                return $"OnnxOp.SequenceEmpty(Shorokoo.Globals.StructDType<{StructTypeName(structDef)}>())";
+            }
+
+            return null;
         }
 
         private string MakeCallFunctionCodeTemplate(Node node, ImmutableDictionary<Node, NodeGenerationInfo> nodeCodeGenerators, ImmutableDictionary<Variable, string> currentNames, ImmutableDictionary<Function, string> functionNames)
@@ -1168,6 +1201,87 @@ public static class " + modelName + @"
             return $"{methodName}({paramsList})";
         }
         
+
+        /// <summary>
+        /// The struct's IStruct interface as it is written in C#. A struct built at runtime carries
+        /// no such type and there is nothing to emit, so codegen fails here rather than writing
+        /// source that does not compile.
+        /// </summary>
+        private static string StructTypeName(TensorStructDef structDef)
+        {
+            if (structDef.TypeName is null)
+                throw new UnsupportedDTypeException(ErrorCodes.FW053, "TensorStruct", "code template",
+                    "A TensorStruct with no IStruct type name has no code generator");
+
+            var name = CSharpTypeName(structDef.TypeName);
+            if (name.Contains('`'))
+                throw new UnsupportedDTypeException(ErrorCodes.FW053, structDef.TypeName, "code template",
+                    "A TensorStruct whose IStruct type has no C# spelling has no code generator");
+
+            return name;
+        }
+
+        /// <summary>
+        /// A reflected type name as source spells it. The runtime writes a nested type with <c>+</c>
+        /// and a constructed generic as <c>Pair`2[[A, Asm, …],[B, Asm, …]]</c>; C# wants a dot and
+        /// <c>Pair&lt;A, B&gt;</c>. An open generic — the arity with no argument list — has no C#
+        /// spelling at all and keeps its arity, for the caller to reject.
+        /// </summary>
+        private static string CSharpTypeName(string reflectedName)
+        {
+            var arity = reflectedName.IndexOf('`');
+            var args = arity < 0 ? -1 : reflectedName.IndexOf('[', arity);
+            if (args < 0)
+                return reflectedName.Replace('+', '.');
+
+            var name = reflectedName[..arity].Replace('+', '.');
+            var arguments = SplitTypeArguments(reflectedName[(args + 1)..reflectedName.LastIndexOf(']')]);
+            return $"{name}<{string.Join(", ", arguments.Select(CSharpTypeName))}>";
+        }
+
+        /// <summary>
+        /// The type arguments of a constructed generic's reflected name, each stripped of the
+        /// brackets around it and of the assembly qualification after its own name. Splits at
+        /// bracket depth zero, so an argument that is itself generic stays in one piece.
+        /// </summary>
+        private static List<string> SplitTypeArguments(string arguments)
+        {
+            var split = new List<string>();
+            var depth = 0;
+            var start = 0;
+            for (var i = 0; i < arguments.Length; i++)
+            {
+                if (arguments[i] == '[') depth++;
+                else if (arguments[i] == ']') depth--;
+                else if (arguments[i] == ',' && depth == 0)
+                {
+                    split.Add(arguments[start..i]);
+                    start = i + 1;
+                }
+            }
+            split.Add(arguments[start..]);
+
+            // Each piece is "[TypeName, Assembly, Version=…, …]": the brackets and everything from
+            // the assembly name on are the runtime's, not the type's.
+            return [.. split.Select(x => x.Trim().Trim('[', ']').Split(',')[0].Trim())];
+        }
+
+        /// <summary>
+        /// The C# expression for <paramref name="dtype"/>, i.e. the <see cref="DType"/> static it is
+        /// named by. A generic-parameter tag is metadata no literal carries, so it is dropped — the
+        /// dtype under it still has a static. A TensorStruct dtype has none and cannot be written.
+        /// </summary>
+        private static string DTypeLiteral(DType dtype, string attrName)
+        {
+            // ToString() appends the tag only for the GenericTypeN placeholders, but a tag rides on
+            // any dtype, so the name is taken apart rather than compared to the untagged instance.
+            var name = dtype.ToString().Split('<')[0];
+            if (DType.FromName(name) is null)
+                throw new UnsupportedDTypeException(ErrorCodes.FW053, dtype.ToString(), attrName,
+                    $"DType '{dtype}' has no code generator");
+
+            return $"DType.{name}";
+        }
 
         private static string EscapeString(string input)
         {
@@ -1278,19 +1392,13 @@ public static class " + modelName + @"
                     var fullPlaceholder = result[startIdx..(endIdx + 1)];
                     var keyword = result[(startIdx + placeholder.Length)..endIdx];
 
-                    string replacement;
-                    if (input is null)
-                        replacement = "null, ";
-                    else
-                    {
-                        // Per-input inlining is disabled (see MakeNode), so the
-                        // low_op / high_op precedence-paren wrap that fires only
-                        // for inlined inputs never fires either.
-                        var expression = currentNames[input];
-                        replacement = expression;
-                        if (keyword.StartsWith("param"))
-                            replacement += ", ";
-                    }
+                    // Per-input inlining is disabled (see MakeNode), so the low_op / high_op
+                    // precedence-paren wrap that fires only for inlined inputs never fires either.
+                    // An absent input is still an argument, so it takes the placeholder's own
+                    // separator: a template that writes its own would otherwise get two.
+                    var replacement = input is null ? "null" : currentNames[input];
+                    if (keyword.StartsWith("param"))
+                        replacement += ", ";
 
                     result = result.Replace(fullPlaceholder, replacement);
                 }
@@ -1314,7 +1422,20 @@ public static class " + modelName + @"
                     var attrDef = attributeDefs[i];
                     var attrName = attributeDefs[i].AttributeName;
                     var attrType = attributeDefs[i].Type;
-                    string attrValue = "";
+
+                    // A list-valued attribute reaches three kinds of argument position: a `params`
+                    // list takes the elements bare, a normal argument target-types a collection
+                    // expression, and the `object?[]` of a CallCustomOperator call (keyword "boxed")
+                    // types nothing, so there the element type has to be spelled out.
+                    string listOf(IEnumerable<string> elements, string elementType)
+                    {
+                        var joined = string.Join(", ", elements);
+                        return keyword == "params" ? joined
+                             : keyword == "boxed" ? $"new {elementType}[] {{ {joined} }}"
+                             : $"[{joined}]";
+                    }
+
+                    string attrValue;
                     if (attributes.IsDefaultValue(attrName))
                         attrValue = "null";
                     else if (attrType is AttributeType.Long)
@@ -1349,23 +1470,28 @@ public static class " + modelName + @"
                     {
                         var enumDef = attrDef.EnumDef.AssertNotNull();
                         var enumsVal = attributes.GetEnumsVal(attrName).AssertNotNull();
-                        var attrValues = enumsVal.Select(enumVal => enumDef.ToCSharpFullName(enumVal)).ToArray();
-                        attrValue = $"{string.Join(", ", attrValues)}";
+                        attrValue = listOf(enumsVal.Select(enumDef.ToCSharpFullName), enumDef.EnumType.Name);
                     }
                     else if (attrType is AttributeType.Longs)
-                    {
-                        var attrValues = attributes.GetLongsVal(attrName).AssertNotNull();
-                        attrValue = $"{string.Join(", ", attrValues.Select(x => $"{x}L"))}";
-                        if (keyword != "params")
-                            attrValue = $"[{attrValue}]";
-                    }
+                        attrValue = listOf(attributes.GetLongsVal(attrName).AssertNotNull().Select(x => $"{x}L"), "long");
                     else if (attrType is AttributeType.Floats)
+                        attrValue = listOf(attributes.GetFloatsVal(attrName).AssertNotNull().Select(x => $"{x}f"), "float");
+                    else if (attrType is AttributeType.Bools)
+                        attrValue = listOf(attributes.GetBoolsVal(attrName).AssertNotNull().Select(x => x ? "true" : "false"), "bool");
+                    else if (attrType is AttributeType.Strings)
+                        attrValue = listOf(attributes.GetStringsVal(attrName).AssertNotNull().Select(x => '"' + EscapeString(x) + '"'), "string");
+                    else if (attrType is AttributeType.DType)
+                        attrValue = DTypeLiteral(attributes.GetDTypeVal(attrName).AssertNotNull(), attrName);
+                    else if (attrType is AttributeType.DTypes)
+                        attrValue = listOf(attributes.GetDTypesVal(attrName).AssertNotNull().Select(x => DTypeLiteral(x, attrName)), "DType");
+                    else if (attrType is AttributeType.TypeProto)
                     {
-                        var attrValues = attributes.GetFloatsVal(attrName).AssertNotNull();
-                        attrValue = $"{string.Join(", ", attrValues.Select(x => $"{x}f"))}";
-                        if (keyword != "params")
-                            attrValue = $"[{attrValue}]";
+                        var (structure, dtype) = attributes.GetTypeProtoVal(attrName).AssertNotNull();
+                        attrValue = $"(DataStructure.{structure}, {DTypeLiteral(dtype, attrName)})";
                     }
+                    else
+                        throw new UnsupportedDTypeException(ErrorCodes.FW053, attrType.ToString(), attrName,
+                            $"Attribute type '{attrType}' has no code generator");
 
                     if (keyword.StartsWith("param"))
                         attrValue += ", ";

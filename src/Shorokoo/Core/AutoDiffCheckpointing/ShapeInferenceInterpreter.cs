@@ -67,6 +67,13 @@ internal class ShapeInferenceInterpreter
         => Infer(graph, requiredKeys: null, sampleInputs);
 
     /// <summary>
+    /// <see cref="IData"/>-shaped overload: a graph whose inputs are not all tensors — one taking an
+    /// <c>OptionalTensor</c>, say — is inferred from the same exemplars its runtime would be fed.
+    /// </summary>
+    public ShapeInferenceResult Infer(InternalComputationGraph graph, params IData[] sampleInputs)
+        => Infer(graph, requiredKeys: null, sampleInputs);
+
+    /// <summary>
     /// Runs shape inference on a concrete <see cref="InternalComputationGraph"/> using the
     /// provided sample inputs.
     /// </summary>
@@ -82,6 +89,16 @@ internal class ShapeInferenceInterpreter
         InternalComputationGraph graph,
         IReadOnlyCollection<FastTensorKey>? requiredKeys,
         params TensorData[] sampleInputs)
+        => Infer(graph, requiredKeys, (IData[])sampleInputs);
+
+    /// <summary>
+    /// <see cref="IData"/>-shaped overload of
+    /// <see cref="Infer(InternalComputationGraph, IReadOnlyCollection{FastTensorKey}, TensorData[])"/>.
+    /// </summary>
+    public ShapeInferenceResult Infer(
+        InternalComputationGraph graph,
+        IReadOnlyCollection<FastTensorKey>? requiredKeys,
+        params IData[] sampleInputs)
     {
         var graphInputs = graph.Inputs;
         if (sampleInputs.Length != graphInputs.Count)

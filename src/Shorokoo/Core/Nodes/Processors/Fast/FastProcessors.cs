@@ -28,6 +28,16 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     internal static class FastProcessorHelper
     {
         /// <summary>
+        /// The value an input hint carries, as the kind of value it is: an <c>OptionalTensor</c>
+        /// input's hint is an optional — present or absent — and every other supported hint a
+        /// tensor. Asking every hint for a tensor threw on an absent optional, so a model taking
+        /// one could not be lowered with the arrangement the input exists for
+        /// (Shorokoo/Shorokoo#314).
+        /// </summary>
+        internal static IData? HintValue(NamedModelParam hint) =>
+            hint is OptionalTensorDataModelParam optional ? optional.ToOptionalTensorData() : hint.ToTensorData();
+
+        /// <summary>
         /// Copies a freshly computed result onto storage of its own, then releases the backend
         /// tensor it came out of. For a caller that runs many one-shot sessions and RETAINS their
         /// outputs; a caller that reads a result and drops it wants the zero-copy path instead.
@@ -2244,7 +2254,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// three declare this one.
         /// </para>
         /// </summary>
-        private static bool IsParamReference(FastNode fastNode)
+        internal static bool IsParamReference(FastNode fastNode)
             => (fastNode.OpCode == InternalOpCodes.MODEL_PARAM_REF
                 || fastNode.OpCode == InternalOpCodes.MODEL_PARAM_MODEL_REF
                 || fastNode.OpCode == InternalOpCodes.MODEL_PARAM_ID_REF)
@@ -3705,11 +3715,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var graphInputKeys = graph.Inputs;
                 for (int i = 0; i < Math.Min(graphInputKeys.Count, inputHints.ModelParams.Length); i++)
                 {
-                    var td = inputHints.ModelParams[i].ToTensorData();
-                    if (td is not null)
+                    var data = FastProcessorHelper.HintValue(inputHints.ModelParams[i]);
+                    if (data is not null)
                     {
-                        initialInputs[graphInputKeys[i]] = TensorDataConverter.ToRuntimeTensor(
-                            td, engine.MaxDataElements);
+                        initialInputs[graphInputKeys[i]] = TensorDataConverter.ToRuntimeInput(
+                            data, engine.MaxDataElements);
                     }
                 }
             }
@@ -3874,7 +3884,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         private static bool IsHinted(ModelParamList inputHints, int inputIndex)
             => inputHints is not null
                && inputIndex < inputHints.ModelParams.Length
-               && inputHints.ModelParams[inputIndex].ToTensorData() is not null;
+               && FastProcessorHelper.HintValue(inputHints.ModelParams[inputIndex]) is not null;
 
         private static string DescribeInputs(InternalComputationGraph graph, List<int> inputIndices)
             => string.Join(", ", inputIndices.Select(i =>
@@ -3941,10 +3951,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var graphInputKeys = graph.Inputs;
                 for (int i = 0; i < Math.Min(graphInputKeys.Count, inputHints.ModelParams.Length); i++)
                 {
-                    var td = inputHints.ModelParams[i].ToTensorData();
-                    if (td is not null)
+                    var data = FastProcessorHelper.HintValue(inputHints.ModelParams[i]);
+                    if (data is not null)
                     {
-                        initialInputs[graphInputKeys[i]] = TensorDataConverter.ToRuntimeTensor(td, engine.MaxDataElements);
+                        initialInputs[graphInputKeys[i]] = TensorDataConverter.ToRuntimeInput(data, engine.MaxDataElements);
                     }
                 }
             }

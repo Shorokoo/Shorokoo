@@ -183,9 +183,17 @@ public static class TrainingGraphBuilder
             var dtype = inputProducer.Attributes.GetDTypeVal(OnnxOpAttributeNames.AttrDtype)
                 ?? throw new InvalidOperationException(
                     $"Model input node {inputProducer.OpCode} (Key={inputProducer.Key}) has no AttrDtype attribute.");
-            var rank = (int?)inputProducer.Attributes.GetLongVal(OnnxOpAttributeNames.ShrkAttrRank);
+            // A model input is not always a tensor: an OptionalTensor<T> or a TensorSequence<T>
+            // parameter is one too, and the field the rig feeds it through has to carry the
+            // structure it actually has — reading it as a tensor gave a struct whose field was a
+            // tensor the runtime then had no optional to put in (Shorokoo/Shorokoo#314). Only a
+            // tensor input declares a rank; the other input ops have no such attribute.
+            var structure = ModelInputStructure(inputProducer);
+            var rank = structure == DataStructure.Tensor
+                ? (int?)inputProducer.Attributes.GetLongVal(OnnxOpAttributeNames.ShrkAttrRank)
+                : null;
             var name = originalModelInputNames[i] ?? $"input_{i}";
-            modelInputFields[i] = new TensorStructFieldDef(name, DataStructure.Tensor, rank, dtype);
+            modelInputFields[i] = new TensorStructFieldDef(name, structure, rank, dtype);
         }
         var modelInputStructDef = new TensorStructDef(modelInputFields, "ModelInputs");
         var modelInputStructDType = DType.GetOrCreateForTensorStruct(modelInputStructDef);
@@ -296,6 +304,22 @@ public static class TrainingGraphBuilder
 
         return fastGraph;
     }
+
+    /// <summary>
+    /// The data structure <paramref name="inputProducer"/> hands the model, read off the input op
+    /// itself — a tensor, an optional or a sequence. Every input op the lowering can leave in a
+    /// concrete architecture is named; anything else is a lowering fault, not an input the rig can
+    /// guess a structure for.
+    /// </summary>
+    private static DataStructure ModelInputStructure(FastNode inputProducer) => inputProducer.OpCode switch
+    {
+        InternalOpCodes.MODEL_TENSOR_INPUT => DataStructure.Tensor,
+        InternalOpCodes.MODEL_OPTIONAL_INPUT => DataStructure.Optional,
+        InternalOpCodes.MODEL_SEQUENCE_INPUT => DataStructure.Sequence,
+        InternalOpCodes.MODEL_TENSORSTRUCT_INPUT => DataStructure.TensorStruct,
+        _ => throw new InvalidOperationException(
+            $"Model input node {inputProducer.OpCode} (Key={inputProducer.Key}) is not a model input op."),
+    };
 
     private static Dictionary<FastTensorKey, FastNode> BuildProducerByOutputMap(InternalComputationGraph graph)
     {

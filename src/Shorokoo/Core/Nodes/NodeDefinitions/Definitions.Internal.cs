@@ -24,6 +24,12 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Optional<AnyLike>("T")
                 .AttributeDType(AttrDtype, "T")
                 .AttributeEnum<InputType>(ShrkAttrInputType, ["Hyperparam", "ReadyInput", "ModelInput", "GenericType"], defaultValue: "ReadyInput")
+                // Optional, and read as presence: the dims of the element the model was
+                // concretized at when the optional was supplied present, and absent from the node
+                // altogether when it was supplied absent. That makes a concrete architecture with
+                // an optional input as self-describing for training shape inference as a tensor
+                // one, which is what a TrainingRig derived from a reloaded arch reads.
+                .AttributeLongs(ShrkAttrRepresentativeInputShape)
                 .Output("modelInput", "T", rank: "R"),
 
             Op(MODEL_TENSOR_INPUT)

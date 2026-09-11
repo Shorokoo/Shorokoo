@@ -37,9 +37,15 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             }
             else if (a.Structure() == DataStructure.Optional)
             {
+                // Both arms hand back an optional, as the accumulated gradient itself is one: an
+                // If whose arms disagree on structure infers none, so summing into a bare tensor
+                // failed the moment a model read its optional input twice and gave the backward
+                // pass two gradients to accumulate (Shorokoo/Shorokoo#314).
                 var isNotNull = ((Tensor<bit>)OnnxOp.OptionalHasElement(a)).Scalar();
                 var sum = OnnxOp.Add(OnnxOp.OptionalGetElement(a), OnnxOp.OptionalGetElement(b));
-                return Shorokoo.Core.Nodes.Ops.IfElse(isNotNull, sum, OnnxOp.Optional(null, DataStructure.Tensor, a.Type));
+                return Shorokoo.Core.Nodes.Ops.IfElse(isNotNull,
+                    OnnxOp.Optional(sum, DataStructure.Tensor, a.Type),
+                    OnnxOp.Optional(null, DataStructure.Tensor, a.Type));
             }
 
             throw new AutoDiffNotSupportedException(ErrorCodes.AD002, "GradientAccumulation",

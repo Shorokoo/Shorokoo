@@ -931,10 +931,10 @@ internal static partial class FastListAllSpecificModelIdsUsed
         int limit = System.Math.Min(graphInputKeys.Count, inputHints.ModelParams.Length);
         for (int i = 0; i < limit; i++)
         {
-            var td = inputHints.ModelParams[i].ToTensorData();
-            if (td is null) continue;
-            dict[graphInputKeys[i]] = Shorokoo.Core.Inference.Helpers.TensorDataConverter.ToRuntimeTensor(
-                td, engine.MaxDataElements);
+            var data = FastProcessorHelper.HintValue(inputHints.ModelParams[i]);
+            if (data is null) continue;
+            dict[graphInputKeys[i]] = Shorokoo.Core.Inference.Helpers.TensorDataConverter.ToRuntimeInput(
+                data, engine.MaxDataElements);
         }
         return dict.Count == 0 ? null : dict;
     }

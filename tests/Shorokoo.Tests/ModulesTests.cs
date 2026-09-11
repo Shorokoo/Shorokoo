@@ -62,13 +62,34 @@ public class ModulesCoverageTests
         => Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitCallingAParamOwningModuleFromASequence>(
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)], expected: [1.0, 2.0]));
 
-    /// <summary>A bare GetTrainableParam reference keeps naming the model variable that
-    /// FastUnpackModelStruct removes from the emitted body, so the body ships an operand nothing
-    /// produces. Tracked as Shorokoo/Shorokoo#318.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#318: an emitted body cannot resolve a bare parameter reference")]
+    [Fact]
     public void TestAnInitializerTakingABareParamReferenceLowersIt()
         => Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitWithBareParamRef>(
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)], expected: [1.0, 2.0]));
+
+    // The referenced parameter is the second of two at different values, so neither the other
+    // parameter nor a value fabricated from the initializer the reference borrows as metadata
+    // (always the first one the module reaches) produces 2.
+    [Fact]
+    public void TestABareParamReferenceResolvesToTheParameterItNamesAndNowhereElse()
+        => Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitWithBareParamRefToTheSecondParam>(
+            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)],
+            expected: [2.0, 4.0]));
+
+    /// <summary>A bare reference whose definition is not already in hand where it stands — built
+    /// before the defining call, outside the loop holding it, or addressed against a model out of a
+    /// ModelSequence — is left unresolved. Tracked as Shorokoo/Shorokoo#320.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#320: an emitted body resolves a bare parameter reference only against a definition already in hand")]
+    public void TestABareParamReferenceResolvesWhereItsDefinitionIsNotAlreadyInHand()
+    {
+        TensorData[] x = [TensorData(DType.Float32, [2L], 1f, 2f)];
+        Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitWithBareParamRefBeforeItsDefinition>(
+            hyperparamInputs: [], runtimeInputs: x, expected: [1.0, 2.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitWithBareParamRefOutsideTheLoopDefiningIt>(
+            hyperparamInputs: [], runtimeInputs: x, expected: [1.0, 2.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitWithBareParamRefThroughASequence>(
+            hyperparamInputs: [], runtimeInputs: x, expected: [1.0, 2.0]));
+    }
 
     private static string[] EmittedFunctions(InternalComputationGraph g, bool nativeDialect = false)
         => [.. (nativeDialect
@@ -1516,14 +1537,14 @@ public class ModulesCoverageTests
         Assert.Equal([4f, 8f], ConcretizeAndRun(UsesTheSequenceHoldingGenericAtTwoTypeArguments.ComputationGraph, input));
     }
 
-    /// <summary>A generic parameter initializer called with an explicit type argument from a
-    /// non-generic body is spliced with its shape input wired to nothing.
-    /// Tracked as Shorokoo/Shorokoo#295.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#295: a generic param initializer called from a non-generic body loses its shape input")]
+    [Fact]
     public void TestAGenericParamInitializerCalledFromANonGenericBodyConcretizes()
     {
         var g = NonGenericCallerOfGenericParamInitializer.ComputationGraph;
         Assert.Equal([1f, 2f], ConcretizeAndRun(g, TensorData([1L], 2L), TensorData([2L], 1f, 2f)));
+
+        var two = NonGenericCallerOfTwoTypeArgParamInitializer.ComputationGraph;
+        Assert.Equal([4f, 5f], ConcretizeAndRun(two, TensorData([1L], 2L), TensorData([2L], 1f, 2f)));
     }
 
     [Fact]

@@ -142,6 +142,14 @@ namespace Shorokoo.Core
         /// </code>
         /// </example>
         public TensorDataStruct FromOrderedData(params TensorData[] data)
+            => FromOrderedData((IData[]?)data!);
+
+        /// <summary>
+        /// <see cref="IData"/>-shaped overload of <see cref="FromOrderedData(TensorData[])"/>, for a
+        /// definition whose fields are not all tensors — a model taking an <c>OptionalTensor</c>
+        /// input, whose value is an <see cref="OptionalTensorData"/>, present or absent.
+        /// </summary>
+        public TensorDataStruct FromOrderedData(params IData[] data)
         {
             if (data is null) throw new ArgumentNullException(nameof(data));
             if (data.Length != _fields.Length)
@@ -149,7 +157,7 @@ namespace Shorokoo.Core
                     $"Expected {_fields.Length} data value(s) to match the field count, " +
                     $"but received {data.Length}.", nameof(data));
             var fields = _fields.Zip(data,
-                (field, tensor) => new KeyValuePair<string, IData>(field.Name, tensor));
+                (field, value) => new KeyValuePair<string, IData>(field.Name, value));
             return new TensorDataStruct(this, fields);
         }
 

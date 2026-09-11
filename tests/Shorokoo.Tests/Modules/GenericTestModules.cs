@@ -504,6 +504,25 @@ namespace Shorokoo.Tests.Modules
             => GenericTargetModule.Call<float32>(input) + PlainNonGenericNeighbour.Call(input);
     }
 
+    /// <summary>A generic trainable-parameter initializer with two type parameters, at two
+    /// different dtype families.</summary>
+    [TrainableParamInitializer]
+    public static partial class TwoTypeArgTrainableParamInitializers
+    {
+        // U is filled at 2.5 and truncates to 2 at int32, so its dtype shows in the value.
+        public static Tensor<T> Inline<T, U>(Vector<int64> shape) where T : FloatLike where U : IntLike
+            => Globals.TensorFill<T>(shape, 1.0f) + Globals.TensorFill<U>(shape, 2.5f).Cast<T>();
+    }
+
+    /// <summary>Calls a two-type-parameter generic parameter initializer with explicit concrete
+    /// type arguments from a non-generic body.</summary>
+    [Module]
+    public partial class NonGenericCallerOfTwoTypeArgParamInitializer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input, [Hyper] Vector<int64> shape)
+            => input + TwoTypeArgTrainableParamInitializers.Init<float32, int32>(shape).Vec();
+    }
+
     /// <summary>Calls a generic trainable-parameter initializer with an explicit type argument
     /// from a non-generic body.</summary>
     [Module]

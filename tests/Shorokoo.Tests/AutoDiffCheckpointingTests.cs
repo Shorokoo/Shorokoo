@@ -683,10 +683,11 @@ public class AutoDiffCheckpointingCoverageTests
     {
         var rig = TrainingRig.FromScratch(MemoryPassMlp.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
             [new TensorDataModelParam("input", ModelParamType.InputParam, Pattern([64L, 256L], 1f))], 0.01f);
+        var inputShapes = rig.OptimizationInputShapes;
         var model = ProtoBuf.Serializer.Deserialize<Shorokoo.Core.Factory.IR.ModelProto>(
-            new MemoryStream(Benchmarks.MemoryPassBenchmarkTests.RigModelBytes(rig.TrainingStepPureGraph, rig.OptimizationInputShapes)));
-        Assert.Equal(rig.OptimizationInputShapes.Length, model.Graph.Inputs.Count);
+            new MemoryStream(Benchmarks.MemoryPassBenchmarkTests.RigModelBytes(rig.TrainingStepPureGraph, inputShapes)));
+        Assert.Equal(inputShapes.Length, model.Graph.Inputs.Count);
         for (var i = 0; i < model.Graph.Inputs.Count; i++)
-            Assert.Equal(rig.OptimizationInputShapes[i].Shape.Dims.Select(d => (long)d), model.Graph.Inputs[i].Type.TensorType.Shape.Dims.Select(d => d.DimValue));
+            Assert.Equal(inputShapes[i].Shape.Dims.Select(d => (long)d), model.Graph.Inputs[i].Type.TensorType.Shape.Dims.Select(d => d.DimValue));
     }
 }

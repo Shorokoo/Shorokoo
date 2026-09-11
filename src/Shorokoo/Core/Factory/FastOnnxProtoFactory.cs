@@ -99,7 +99,8 @@ namespace Shorokoo.Core.Factory
                 defaultValue: defaultValue);
 
             if (emitRepresentativeMetadata
-                && inputNode.OpCode == InternalOpCodes.MODEL_TENSOR_INPUT
+                && inputNode.OpCode is InternalOpCodes.MODEL_TENSOR_INPUT
+                                    or InternalOpCodes.MODEL_OPTIONAL_INPUT
                 && RepresentativeInputMetadata.Encode(inputNode) is { } encoded)
             {
                 valueInfo.MetadataProps.Add(new StringStringEntryProto

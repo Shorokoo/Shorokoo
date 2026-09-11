@@ -1310,6 +1310,31 @@ namespace Shorokoo.Tests.Modules
             => input * InitCallingAModuleInALoop.Init(Vector(2L));
     }
 
+    /// <summary>A module whose own parameter is initialized by an initializer that itself calls a
+    /// param-owning module: one more level of nesting than InitCallingAParamOwningModule.</summary>
+    [Module]
+    public partial class LayerWithANestedParamOwningInit
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => input * InitCallingAParamOwningModule.Init(input.ShapeTensor());
+    }
+
+    /// <summary>An initializer whose body calls the module above.</summary>
+    [TrainableParamInitializer]
+    public static partial class InitCallingANestedParamOwningModule
+    {
+        public static Tensor<float32> Inline(Vector<int64> shape)
+            => LayerWithANestedParamOwningInit.Call(Globals.TensorFill(shape, 1.0f));
+    }
+
+    /// <summary>Drives InitCallingANestedParamOwningModule.</summary>
+    [Module]
+    public partial class UsesInitCallingANestedParamOwningModule
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => input * InitCallingANestedParamOwningModule.Init(Vector(2L));
+    }
+
     /// <summary>An initializer whose body loops without calling anything: its loop's subgraph inputs
     /// still need types in the emitted body, with no flattening in the picture.</summary>
     [TrainableParamInitializer]

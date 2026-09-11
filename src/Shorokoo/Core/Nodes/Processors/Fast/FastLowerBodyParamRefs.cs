@@ -27,8 +27,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// does not.</para>
     ///
     /// <para>Each reference gets its own invoke, so two references to one parameter within a single
-    /// body evaluate that parameter's initializer twice. They agree for every deterministic
-    /// initializer; a random one draws once per reference.</para>
+    /// body evaluate that parameter's initializer twice — the same value for a deterministic
+    /// initializer. A drawing one does not reach here under a bound <c>RngConfig</c>:
+    /// <see cref="FastInitKeyedDraws.BuildKeyedDraws"/> refuses a parameter reference whose
+    /// initializer draws, ahead of emission, rather than let it draw unkeyed.</para>
     /// </summary>
     internal static class FastLowerBodyParamRefs
     {

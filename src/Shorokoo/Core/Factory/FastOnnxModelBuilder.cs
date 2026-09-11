@@ -1244,7 +1244,11 @@ namespace Shorokoo.Core.Factory
                 // this body is not one — the model's parameter inventory never saw this reference,
                 // so nothing will ever be fed for it. Lower it to its own initializer's value
                 // (Shorokoo/Shorokoo#287), then inline the invokes that produces.
-                if (FastLowerBodyParamRefs.Process(fnFast))
+                // To fixpoint, not once: the initializer just spliced in can own parameters of its
+                // own, and a single round leaves those refs in the body for ORT to reject. The
+                // initializer call graph is finite and acyclic — flattening itself would not
+                // terminate otherwise — so this settles, at the nesting depth of the deepest chain.
+                while (FastLowerBodyParamRefs.Process(fnFast))
                     FastInlineModulesAndFunctions.Process(fnFast);
                 FastUnpackModelStruct.Process(fnFast);
                 // Inlining leaves the callee's own input ops and hyperparameter chain behind,

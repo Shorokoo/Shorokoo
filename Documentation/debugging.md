@@ -12,7 +12,8 @@ When `ToConcreteArchitecture` doesn't produce the graph you expect, the
 `DebugRequests` class (namespace `Shorokoo.Graph`) saves snapshots of the
 graph at chosen points of the lowering pipeline, as compilable C# (the same
 `SaveToCSharp()` form used elsewhere), so you can diff stages and find where
-things go wrong. For inspecting *values* rather than graph structure, see the
+things go wrong. One graph shape cannot be written out — see
+[limitations.md](limitations.md#c-emission-of-a-runtime-built-tensorstruct). For inspecting *values* rather than graph structure, see the
 QuickExecutionEngine debugging engine in [inference.md](inference.md).
 
 ## Basic Usage

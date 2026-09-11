@@ -126,7 +126,12 @@ namespace Shorokoo.Core.Factory.CSharpFactory
                 }
             }
 
+            // @string is the only IVarType whose name is also a C# keyword, so source has to escape
+            // it or the emitted Vector<string> would mean System.String.
             var typeName = variable.Type.ToIVarType().Name;
+            if (typeName == "string")
+                typeName = "@string";
+
             if (rank == 0)
                 return $"Scalar<{typeName}>";
             else if (rank == 1)
@@ -233,7 +238,7 @@ namespace Shorokoo.Core.Factory.CSharpFactory
             // Compile the syntax tree into an assembly
             var compilation = CSharpCompilation.Create(
                 modelName,
-                new[] { syntaxTree },
+                [syntaxTree],
                 CompilationReferences(),
                 new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
 
@@ -495,13 +500,15 @@ public static class " + modelName + @"
                     var paramsDeclarationString = string.Join(", ", paramTypes.Zip(paramNames).Select(x => $"{x.First} {x.Second}"));
                     var paramsRefString = string.Join(", ", paramNames);
 
+                    // Ownership decides which graph the state may live in, so it is emitted rather
+                    // than left to the 3-argument overload's ModuleOwned default. No
+                    // [StateInitializer] marker goes on the emitted method: the attribute is
+                    // declared AttributeTargets.Class, and it is this call that carries what it says.
+                    var stateOwnership = targetFunction.StateOwnership ?? StateOwnership.ModuleOwned;
                     var createStateParamInitializerCode = $@"
         public static {outputParamList} {methodName}({paramsDeclarationString})
-            => ({outputParamList})Globals.CallTrainableParamInitializer(_{methodName}, defaultName: {'"' + methodName + '"'}, isTrainable: false, {paramsRefString});";
+            => ({outputParamList})Globals.CallTrainableParamInitializer(_{methodName}, defaultName: {'"' + methodName + '"'}, isTrainable: false, stateOwnership: StateOwnership.{stateOwnership}, {paramsRefString});";
 
-                    // No [StateInitializer] marker on the emitted method: the attribute is declared
-                    // AttributeTargets.Class, and isTrainable: false above already carries what it
-                    // would say.
                     fullScript = createStateParamInitializerCode + "\r\n" + fullScript;
                 }
             }
@@ -1198,8 +1205,7 @@ public static class " + modelName + @"
         /// <summary>
         /// The struct's IStruct interface as it is written in C#. A struct built at runtime carries
         /// no such type and there is nothing to emit, so codegen fails here rather than writing
-        /// source that does not compile. A nested type reaches us with the runtime's <c>+</c>
-        /// separator, which source spells as a dot.
+        /// source that does not compile.
         /// </summary>
         private static string StructTypeName(TensorStructDef structDef)
         {
@@ -1207,20 +1213,72 @@ public static class " + modelName + @"
                 throw new UnsupportedDTypeException(ErrorCodes.FW053, "TensorStruct", "code template",
                     "A TensorStruct with no IStruct type name has no code generator");
 
-            return structDef.TypeName.Replace('+', '.');
+            var name = CSharpTypeName(structDef.TypeName);
+            if (name.Contains('`'))
+                throw new UnsupportedDTypeException(ErrorCodes.FW053, structDef.TypeName, "code template",
+                    "A TensorStruct whose IStruct type has no C# spelling has no code generator");
+
+            return name;
+        }
+
+        /// <summary>
+        /// A reflected type name as source spells it. The runtime writes a nested type with <c>+</c>
+        /// and a constructed generic as <c>Pair`2[[A, Asm, …],[B, Asm, …]]</c>; C# wants a dot and
+        /// <c>Pair&lt;A, B&gt;</c>. An open generic — the arity with no argument list — has no C#
+        /// spelling at all and keeps its arity, for the caller to reject.
+        /// </summary>
+        private static string CSharpTypeName(string reflectedName)
+        {
+            var arity = reflectedName.IndexOf('`');
+            var args = arity < 0 ? -1 : reflectedName.IndexOf('[', arity);
+            if (args < 0)
+                return reflectedName.Replace('+', '.');
+
+            var name = reflectedName[..arity].Replace('+', '.');
+            var arguments = SplitTypeArguments(reflectedName[(args + 1)..reflectedName.LastIndexOf(']')]);
+            return $"{name}<{string.Join(", ", arguments.Select(CSharpTypeName))}>";
+        }
+
+        /// <summary>
+        /// The type arguments of a constructed generic's reflected name, each stripped of the
+        /// brackets around it and of the assembly qualification after its own name. Splits at
+        /// bracket depth zero, so an argument that is itself generic stays in one piece.
+        /// </summary>
+        private static List<string> SplitTypeArguments(string arguments)
+        {
+            var split = new List<string>();
+            var depth = 0;
+            var start = 0;
+            for (var i = 0; i < arguments.Length; i++)
+            {
+                if (arguments[i] == '[') depth++;
+                else if (arguments[i] == ']') depth--;
+                else if (arguments[i] == ',' && depth == 0)
+                {
+                    split.Add(arguments[start..i]);
+                    start = i + 1;
+                }
+            }
+            split.Add(arguments[start..]);
+
+            // Each piece is "[TypeName, Assembly, Version=…, …]": the brackets and everything from
+            // the assembly name on are the runtime's, not the type's.
+            return [.. split.Select(x => x.Trim().Trim('[', ']').Split(',')[0].Trim())];
         }
 
         /// <summary>
         /// The C# expression for <paramref name="dtype"/>, i.e. the <see cref="DType"/> static it is
-        /// named by. Only the standard dtypes have one: a TensorStruct dtype or a generic type carrying
-        /// a parameter tag is constructed at runtime and cannot be written as a literal.
+        /// named by. A generic-parameter tag is metadata no literal carries, so it is dropped — the
+        /// dtype under it still has a static. A TensorStruct dtype has none and cannot be written.
         /// </summary>
         private static string DTypeLiteral(DType dtype, string attrName)
         {
-            var name = dtype.ToString();
-            if (!Equals(DType.FromName(name), dtype))
-                throw new UnsupportedDTypeException(ErrorCodes.FW053, name, attrName,
-                    $"DType '{name}' has no code generator");
+            // ToString() appends the tag only for the GenericTypeN placeholders, but a tag rides on
+            // any dtype, so the name is taken apart rather than compared to the untagged instance.
+            var name = dtype.ToString().Split('<')[0];
+            if (DType.FromName(name) is null)
+                throw new UnsupportedDTypeException(ErrorCodes.FW053, dtype.ToString(), attrName,
+                    $"DType '{dtype}' has no code generator");
 
             return $"DType.{name}";
         }
@@ -1334,19 +1392,13 @@ public static class " + modelName + @"
                     var fullPlaceholder = result[startIdx..(endIdx + 1)];
                     var keyword = result[(startIdx + placeholder.Length)..endIdx];
 
-                    string replacement;
-                    if (input is null)
-                        replacement = "null, ";
-                    else
-                    {
-                        // Per-input inlining is disabled (see MakeNode), so the
-                        // low_op / high_op precedence-paren wrap that fires only
-                        // for inlined inputs never fires either.
-                        var expression = currentNames[input];
-                        replacement = expression;
-                        if (keyword.StartsWith("param"))
-                            replacement += ", ";
-                    }
+                    // Per-input inlining is disabled (see MakeNode), so the low_op / high_op
+                    // precedence-paren wrap that fires only for inlined inputs never fires either.
+                    // An absent input is still an argument, so it takes the placeholder's own
+                    // separator: a template that writes its own would otherwise get two.
+                    var replacement = input is null ? "null" : currentNames[input];
+                    if (keyword.StartsWith("param"))
+                        replacement += ", ";
 
                     result = result.Replace(fullPlaceholder, replacement);
                 }

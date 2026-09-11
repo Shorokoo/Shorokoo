@@ -2254,7 +2254,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// three declare this one.
         /// </para>
         /// </summary>
-        private static bool IsParamReference(FastNode fastNode)
+        internal static bool IsParamReference(FastNode fastNode)
             => (fastNode.OpCode == InternalOpCodes.MODEL_PARAM_REF
                 || fastNode.OpCode == InternalOpCodes.MODEL_PARAM_MODEL_REF
                 || fastNode.OpCode == InternalOpCodes.MODEL_PARAM_ID_REF)

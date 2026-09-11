@@ -745,11 +745,15 @@ namespace Shorokoo.Core.Factory.IR
                     }
                 }
 
-                // Vanilla ONNX carries a MODEL_TENSOR_INPUT's representative-input info in this input's own
-                // ValueInfoProto metadata (a graph input has no attribute bag). Re-attach it here, where the
+                // Vanilla ONNX carries an input's representative-input info in its own ValueInfoProto
+                // metadata (a graph input has no attribute bag). Re-attach it here, where the
                 // ValueInfoProto and the FastNode built for it are both in hand — no cross-graph pairing. A
                 // foreign ONNX has no such prop (no-op); a malformed value is skipped by the decoder.
-                if (fastNode.OpCode == InternalOpCodes.MODEL_TENSOR_INPUT
+                // An optional input carries one too: its recorded shape is what says whether the model was
+                // concretized with the optional present, so dropping it on export would turn a present
+                // optional into an absent one on the way back (Shorokoo/Shorokoo#314).
+                if (fastNode.OpCode is InternalOpCodes.MODEL_TENSOR_INPUT
+                                    or InternalOpCodes.MODEL_OPTIONAL_INPUT
                     && inputProto.MetadataProps.FirstOrDefault(p => p.Key == RepresentativeInputMetadata.Key)
                         is { } reprProp)
                     RepresentativeInputMetadata.Apply(fastNode, reprProp.Value);

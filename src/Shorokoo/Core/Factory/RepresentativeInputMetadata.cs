@@ -25,7 +25,8 @@ namespace Shorokoo.Core.Factory
 
         /// <summary>
         /// Encodes the representative-input shape attribute currently set on <paramref name="node"/> (a
-        /// <c>MODEL_TENSOR_INPUT</c>), or <c>null</c> when the attribute is not set.
+        /// <c>MODEL_TENSOR_INPUT</c> or a <c>MODEL_OPTIONAL_INPUT</c>), or <c>null</c> when the
+        /// attribute is not set.
         /// </summary>
         public static string? Encode(FastNode node)
         {

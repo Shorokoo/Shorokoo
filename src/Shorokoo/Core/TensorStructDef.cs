@@ -142,7 +142,7 @@ namespace Shorokoo.Core
         /// </code>
         /// </example>
         public TensorDataStruct FromOrderedData(params TensorData[] data)
-            => FromOrderedData((IData[])(data ?? throw new ArgumentNullException(nameof(data))));
+            => FromOrderedData((IData[]?)data!);
 
         /// <summary>
         /// <see cref="IData"/>-shaped overload of <see cref="FromOrderedData(TensorData[])"/>, for a

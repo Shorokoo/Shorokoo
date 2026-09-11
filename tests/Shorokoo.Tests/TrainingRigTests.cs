@@ -452,6 +452,48 @@ public class TrainingRigRepresentativeInputCoverageTests
         Shorokoo.Graph.InternalComputationGraph g, Shorokoo.Core.Graph.FastTensorKey key)
         => g.Nodes.First(n => n.Outputs.Any(o => o.HasValue && o.Value.Equals(key)));
 
+    private static TrainingRig OptionalRig(OptionalTensorData bias)
+        => TrainingRig.FromScratch(
+            NullableTrainableBiasLayer.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [new TensorDataModelParam("x", ModelParamType.InputParam, TensorData([3L], 1f, 2f, 3f)),
+             new OptionalTensorDataModelParam("bias", ModelParamType.InputParam, bias)], 0.1f);
+
+    private static long[]? OptionalInputShape(ComputationGraph graph)
+        => graph.ToInternal().Nodes
+            .First(n => n.OpCode == Shorokoo.Core.Nodes.NodeDefinitions.InternalOpCodes.MODEL_OPTIONAL_INPUT)
+            .Attributes.GetLongsVal(ReprShapeAttr);
+
+    // An optional input records the arrangement it was concretized at as a value, never as a
+    // missing attribute, and keeps it through both serialization dialects — so a reloaded arch
+    // cannot read a present optional back as an absent one.
+    [Fact]
+    public void TestAnOptionalInputRecordsItsArrangementAndKeepsItThroughSerializationCoverage()
+    {
+        Assert.Equal((long[])[3L], OptionalInputShape(
+            OptionalRig(OptionalTensorData.Some(TensorData([3L], 0f, 0f, 0f))).ConcreteArchConstituent));
+        Assert.Equal((long[])[-1L], OptionalInputShape(
+            OptionalRig(OptionalTensorData.None<float32>()).ConcreteArchConstituent));
+
+        foreach (var bias in (OptionalTensorData[])[
+            OptionalTensorData.Some(TensorData([3L], 0f, 0f, 0f)), OptionalTensorData.None<float32>()])
+        {
+            var arch = OptionalRig(bias).ConcreteArchConstituent;
+            var expected = OptionalInputShape(arch);
+
+            var srk = Shorokoo.Core.Utils.CompressedFormatUtils.LoadFastGraphFromBinary(
+                Shorokoo.Core.Utils.CompressedFormatUtils.SaveFastGraphToBinary(arch));
+            Assert.Equal(expected, OptionalInputShape(srk));
+
+            var onnxPath = TempPath("rep_opt_onnx") + ".onnx";
+            try
+            {
+                Persistence.ExportOnnx(OptionalRig(bias).CreateInitialCheckpoint().ToInferenceModel(), onnxPath);
+                Assert.Equal(expected, OptionalInputShape(Persistence.ImportOnnx(onnxPath)));
+            }
+            finally { if (File.Exists(onnxPath)) File.Delete(onnxPath); }
+        }
+    }
+
     [Fact]
     public void TestRepresentativeInputShapeIsAlwaysDimsOnlyCoverage()
     {
@@ -1260,15 +1302,31 @@ public class TrainingRigTrainingLoopCoverageTests
     public void TestAModelWithAnOptionalInputTrains()
     {
         var x = TensorData([3L], 1f, 2f, 3f);
-        var present = OptionalTensorData.Some(TensorData([3L], 0f, 0f, 0f));
+        var present = OptionalTensorData.Some(TensorData([3L], 1f, 1f, 1f));
         Assert.NotEmpty(OptionalBiasRig(OptionalTensorData.None<float32>(), x).TrainableParamStructDef.Fields);
 
         var rig = OptionalBiasRig(present, x);
         Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
-        var step = rig.TrainStep(rig.CreateInitialCheckpoint(),
-            rig.InputDef.FromOrderedData(x, present),
-            rig.TargetDef.FromOrderedData(TensorData([3L], 0f, 0f, 0f)));
-        Assert.True(float.IsFinite(step.Loss!.Value));
+        Assert.Equal(29f / 3f, StepLoss(rig, x, present), 1e-3f);
+    }
+
+    private static float StepLoss(TrainingRig rig, TensorData x, OptionalTensorData bias)
+        => rig.TrainStep(rig.CreateInitialCheckpoint(),
+            rig.InputDef.FromOrderedData(x, bias),
+            rig.TargetDef.FromOrderedData(TensorData([3L], 0f, 0f, 0f))).Loss!.Value;
+
+    // Two reads of one optional input give the backward pass two gradients to accumulate into a
+    // single optional-structured slot.
+    [Fact]
+    public void TestAModelReadingItsOptionalInputTwiceTrains()
+    {
+        var x = TensorData([3L], 1f, 2f, 3f);
+        var bias = OptionalTensorData.Some(TensorData([3L], 1f, 1f, 1f));
+        var rig = TrainingRig.FromScratch(NullableBiasReadTwiceLayer.ComputationGraph,
+            L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [new TensorDataModelParam("x", ModelParamType.InputParam, x),
+             new OptionalTensorDataModelParam("bias", ModelParamType.InputParam, bias)], 0.1f);
+        Assert.True(float.IsFinite(StepLoss(rig, x, bias)));
     }
 
     // Training differentiates a loop by unrolling it, so one whose trip count is not a constant

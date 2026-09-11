@@ -1379,6 +1379,110 @@ namespace Shorokoo.Tests.Modules
         public static Tensor<float32> Inline(Tensor<float32> input) => input * InitWithBareParamRef.Init(Vector(2L));
     }
 
+    /// <summary>Fills with 2, so a parameter initialized by it is told apart from an InitSimple one.</summary>
+    [TrainableParamInitializer]
+    public static partial class InitTwos
+    {
+        public static Tensor<float32> Inline(Vector<int64> shape) => Globals.TensorFill(shape, 2.0f);
+    }
+
+    /// <summary>Two parameters at different values, so a reference to the second is told apart both
+    /// from the first and from a value fabricated out of the initializer a bare reference borrows
+    /// as metadata — which is always the first one the module reaches.</summary>
+    [Module]
+    public partial class TwoDistinctParamsLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => input * InitSimple.Init(input.ShapeTensor()) * InitTwos.Init(input.ShapeTensor());
+    }
+
+    /// <summary>A bare reference to the second of two differently-valued parameters.</summary>
+    [TrainableParamInitializer]
+    public static partial class InitWithBareParamRefToTheSecondParam
+    {
+        public static Tensor<float32> Inline(Vector<int64> shape)
+        {
+            var m = TwoDistinctParamsLayer.Model();
+            var seed = m.Call(Globals.TensorFill(shape, 1.0f));
+            return seed * Scalar(0f) + m.GetTrainableParam<float32>([2], rank: 1);
+        }
+    }
+
+    /// <summary>Drives InitWithBareParamRefToTheSecondParam.</summary>
+    [Module]
+    public partial class UsesInitWithBareParamRefToTheSecondParam
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => input * InitWithBareParamRefToTheSecondParam.Init(Vector(2L));
+    }
+
+    /// <summary>The bare reference is built before the call that defines the parameter, so the
+    /// definition lands after it in the body's node order. Tracked as Shorokoo/Shorokoo#320.</summary>
+    [TrainableParamInitializer]
+    public static partial class InitWithBareParamRefBeforeItsDefinition
+    {
+        public static Tensor<float32> Inline(Vector<int64> shape)
+        {
+            var m = SimplestLayer.Model();
+            var p = m.GetTrainableParam<float32>([1], rank: 1);
+            var seed = m.Call(Globals.TensorFill(shape, 1.0f));
+            return seed * p;
+        }
+    }
+
+    /// <summary>Drives InitWithBareParamRefBeforeItsDefinition.</summary>
+    [Module]
+    public partial class UsesInitWithBareParamRefBeforeItsDefinition
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => input * InitWithBareParamRefBeforeItsDefinition.Init(Vector(2L));
+    }
+
+    /// <summary>The call that defines the parameter is inside a loop; the bare reference is outside
+    /// it, so the definition's value sits in a scope the reference is not in.
+    /// Tracked as Shorokoo/Shorokoo#320.</summary>
+    [TrainableParamInitializer]
+    public static partial class InitWithBareParamRefOutsideTheLoopDefiningIt
+    {
+        public static Tensor<float32> Inline(Vector<int64> shape)
+        {
+            var m = SimplestLayer.Model();
+            var x = Globals.TensorFill(shape, 1.0f);
+            foreach (var _ in LoopAPI.Iterate(Scalar(2L))) x = m.Call(x);
+            return x * m.GetTrainableParam<float32>([1], rank: 1);
+        }
+    }
+
+    /// <summary>Drives InitWithBareParamRefOutsideTheLoopDefiningIt.</summary>
+    [Module]
+    public partial class UsesInitWithBareParamRefOutsideTheLoopDefiningIt
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => input * InitWithBareParamRefOutsideTheLoopDefiningIt.Init(Vector(2L));
+    }
+
+    /// <summary>A bare reference against a model taken out of a ModelSequence, whose producing node
+    /// carries no identifier template — so the reference's own id is relative to nothing.
+    /// Tracked as Shorokoo/Shorokoo#320.</summary>
+    [TrainableParamInitializer]
+    public static partial class InitWithBareParamRefThroughASequence
+    {
+        public static Tensor<float32> Inline(Vector<int64> shape)
+        {
+            var m = ModelSequence.Create(SimplestLayer.Model(), SimplestLayer.Model())[Scalar(0L)];
+            var seed = m.Call(Globals.TensorFill(shape, 1.0f));
+            return seed * m.GetTrainableParam<float32>([1], rank: 1);
+        }
+    }
+
+    /// <summary>Drives InitWithBareParamRefThroughASequence.</summary>
+    [Module]
+    public partial class UsesInitWithBareParamRefThroughASequence
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => input * InitWithBareParamRefThroughASequence.Init(Vector(2L));
+    }
+
     /// <summary>An initializer whose body loops without calling anything: its loop's subgraph inputs
     /// still need types in the emitted body, with no flattening in the picture.</summary>
     [TrainableParamInitializer]

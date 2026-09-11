@@ -7,6 +7,7 @@ using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Core.Nodes.OnnxNodes;
 using Shorokoo.Core.Utils;
 using Shorokoo.Graph;
+using Shorokoo.Core.Factory;
 
 namespace Shorokoo.Core.Nodes.Processors.Fast
 {
@@ -44,9 +45,22 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// definition's is absolute within the body, a reference's relative to the model variable it is
     /// addressed against — so both are resolved to a body-absolute <see cref="ModelId"/> first, the
     /// same composition <c>FastConvertToIdRefModelParams</c> performs over a whole graph
-    /// (Shorokoo/Shorokoo#318). A reference with no definition beside it is left alone and fails
-    /// loudly at session creation, as before: its model variable is removed with the rest of the
-    /// model struct, so the operand it names is produced by nothing.</para>
+    /// (Shorokoo/Shorokoo#318).</para>
+    ///
+    /// <para>A reference is rewritten only against a definition the body <i>proves</i> is the right
+    /// one to read: a matching id is necessary and not sufficient. The definition must also already
+    /// be in hand where the reference stands — earlier in <see cref="InternalComputationGraph.Nodes"/>,
+    /// and inside no scope that does not also enclose the reference — which is the visibility rule
+    /// <see cref="InternalComputationGraph.IsLinearOrderValid"/> enforces on the body as a whole.
+    /// Matching on the id alone would wire an edge backwards when the reference is built before the
+    /// call that defines the parameter, out of a <c>Loop</c> when only the call is inside one, and
+    /// round a cycle when the defining call consumes the reference. Likewise a reference whose model
+    /// variable comes from a node carrying no identifier template of its own (a model taken out of a
+    /// <c>ModelSequence</c>) composes to no absolute id at all, and is not matched against one.
+    /// Every reference left unresolved keeps the old behaviour and fails loudly at session creation:
+    /// its model variable is removed with the rest of the model struct, so the operand it names is
+    /// produced by nothing. That is the honest outcome — silently reading a parameter the body never
+    /// proved is the right one would hand back plausible wrong numbers instead.</para>
     /// </summary>
     internal static class FastLowerBodyParamRefs
     {
@@ -122,30 +136,50 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// </summary>
         private static void ResolveBareParamReferences(InternalComputationGraph graph)
         {
-            var references = graph.Nodes.Where(IsBareParamReference).ToList();
-            if (references.Count == 0) return;
+            var nodes = graph.Nodes;
+            if (!nodes.Any(FastExtractIdentifierTemplates.IsParamReference)) return;
 
             var nodeByKey = FastProcessorHelper.BuildNodeByKey(graph);
+            var scopes = ScopeRanges(nodes);
 
-            // First definition wins: two definitions of one parameter — one model called twice —
-            // compute the same value, so either serves.
-            var definitionByModelId = new Dictionary<string, FastTensorKey>();
-            foreach (var node in graph.Nodes)
+            // Definitions by id, in node order, each with the position it stands at: which one a
+            // reference may read depends on where the reference stands, so the choice cannot be
+            // made here.
+            var definitionsByModelId = new Dictionary<string, List<(int Index, FastTensorKey Output)>>();
+            for (int i = 0; i < nodes.Count; i++)
             {
-                if (IsBareParamReference(node)) continue;
+                var node = nodes[i];
+                if (FastExtractIdentifierTemplates.IsParamReference(node)) continue;
                 if (AbsoluteModelId(node, nodeByKey) is not { } modelId) continue;
                 if (node.Outputs.FirstOrDefault() is not { } output) continue;
-                definitionByModelId.TryAdd(modelId, output);
+                if (!definitionsByModelId.TryGetValue(modelId, out var forId))
+                    definitionsByModelId[modelId] = forId = [];
+                forId.Add((i, output));
             }
 
             var identityAttrs = OnnxCSharpAttributes.FromCSharpVals(
                 new Dictionary<string, object?>(),
                 Definitions.NodeDefinitions[OpCodes.IDENTITY].AttributeDefs);
 
-            foreach (var reference in references)
+            for (int i = 0; i < nodes.Count; i++)
             {
+                var reference = nodes[i];
+                if (!FastExtractIdentifierTemplates.IsParamReference(reference)) continue;
                 if (AbsoluteModelId(reference, nodeByKey) is not { } modelId) continue;
-                if (!definitionByModelId.TryGetValue(modelId, out var definition)) continue;
+                if (!definitionsByModelId.TryGetValue(modelId, out var candidates)) continue;
+
+                // The first definition already in hand here. Two definitions of one parameter —
+                // one model called twice — compute the same value, so the earliest visible one
+                // serves; one that is not visible is not a candidate at all.
+                FastTensorKey? definition = null;
+                foreach (var candidate in candidates)
+                {
+                    if (candidate.Index >= i) break;
+                    if (!IsVisibleFrom(candidate.Index, i, scopes)) continue;
+                    definition = candidate.Output;
+                    break;
+                }
+                if (definition is null) continue;
 
                 reference.OpCode = OpCodes.IDENTITY;
                 reference.Attributes = identityAttrs;
@@ -158,10 +192,35 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             }
         }
 
-        private static bool IsBareParamReference(FastNode node) =>
-            (node.OpCode == InternalOpCodes.MODEL_PARAM_REF
-                || node.OpCode == InternalOpCodes.MODEL_PARAM_MODEL_REF)
-            && (node.Attributes.GetBoolVal(OnnxOpAttributeNames.ShrkAttrIsParamReference) ?? false);
+        /// <summary>The (open, close) index pair of every control-flow scope in
+        /// <paramref name="nodes"/>, which the body's linear-order invariant guarantees nest.</summary>
+        private static List<(int Open, int Close)> ScopeRanges(IReadOnlyList<FastNode> nodes)
+        {
+            var scopes = new List<(int Open, int Close)>();
+            var open = new Stack<int>();
+            for (int i = 0; i < nodes.Count; i++)
+            {
+                if (FastOpsetResolver.IsOpenOpCode(nodes[i].OpCode)) open.Push(i);
+                else if (FastOpsetResolver.IsCloseOpCode(nodes[i].OpCode) && open.Count != 0)
+                    scopes.Add((open.Pop(), i));
+            }
+            return scopes;
+        }
+
+        /// <summary>Whether the node at <paramref name="producerIndex"/> is readable from
+        /// <paramref name="consumerIndex"/>: no scope contains the producer without also containing
+        /// the consumer. The same rule <see cref="InternalComputationGraph.IsLinearOrderValid"/>
+        /// applies to the finished body, asked ahead of adding the edge rather than after.</summary>
+        private static bool IsVisibleFrom(int producerIndex, int consumerIndex, List<(int Open, int Close)> scopes)
+        {
+            foreach (var scope in scopes)
+            {
+                if (!(scope.Open < producerIndex && producerIndex < scope.Close)) continue;
+                if (scope.Open < consumerIndex && consumerIndex < scope.Close) continue;
+                return false;
+            }
+            return true;
+        }
 
         /// <summary>
         /// The <see cref="ModelId"/> <paramref name="node"/> addresses within its own body, or
@@ -181,7 +240,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             if (node.Inputs.FirstOrDefault() is not { } modelKey) return null;
             if (!nodeByKey.TryGetValue(modelKey.FastNodeKey, out var modelOwner)) return null;
-            if (modelOwner.IdentifierTemplate is not { } ownerTemplate) return relative.ModelIdTemplate.ToString();
+
+            // No template on the model variable's own node — a model taken out of a ModelSequence,
+            // whose SEQUENCE_AT is never stamped with one — leaves the relative id relative to
+            // nothing. FastConvertToIdRefModelParams carries the same shape through as a bare
+            // relative template, but there the template only NAMES the parameter and a GET_MODEL_ID
+            // resolves it at run time; here the string IS the resolution, so handing back a relative
+            // id would match it against absolute ones and read whichever parameter happens to sit
+            // at that id. There is nothing to compose, so there is no id.
+            if (modelOwner.IdentifierTemplate is not { } ownerTemplate) return null;
 
             return new ModelParamIdentifierTemplate(
                 new ModelParamIdentifierTemplate(ownerTemplate), relative).ModelIdTemplate.ToString();

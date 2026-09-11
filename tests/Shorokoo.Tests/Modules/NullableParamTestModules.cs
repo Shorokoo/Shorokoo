@@ -43,6 +43,20 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>Reads its optional input twice, so the backward pass has two gradients to
+    /// accumulate into one optional-structured slot.</summary>
+    [Module]
+    public partial class NullableBiasReadTwiceLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x, OptionalTensor<float32> bias)
+        {
+            var w = InitSimple.Init(x.ShapeTensor());
+            var b1 = bias.HasValue().IfElse(bias.TensorValue(), TensorFill(x.ShapeTensor(), 0f));
+            var b2 = bias.HasValue().IfElse(bias.TensorValue() * Scalar(2f), TensorFill(x.ShapeTensor(), 0f));
+            return x * w + b1 + b2;
+        }
+    }
+
     /// <summary>A single [Hyper(default)] scalar the caller may omit (falls back to 3.0).</summary>
     [Module]
     public partial class DefaultedHyperLayer

@@ -803,17 +803,26 @@ namespace Shorokoo
             => WriteRepresentativeInputs(concreteArch, sampleInputs.Select(RepresentativeShapeOf).ToArray());
 
         /// <summary>
-        /// The dims to record for one sample, or <c>null</c> when there are none to record — an
-        /// absent optional, which has no element to take a shape from, and every input kind whose
-        /// node carries no representative-shape attribute at all. Reading the shape off the sample
-        /// rather than converting the sample to a tensor is what lets an absent optional through:
-        /// it has no tensor value, and asking for one threw before the shape was ever needed
+        /// The single negative dim recorded for an optional input the rig was built with ABSENT. A
+        /// concretized shape never holds one, so it cannot be confused with a real shape — and
+        /// recording it rather than recording nothing keeps a MISSING attribute meaning what it
+        /// means on a tensor input: an arch that was not built self-describing, which
+        /// <see cref="ReadRepresentativeInputs"/> refuses rather than reading as some default.
+        /// </summary>
+        private static readonly long[] AbsentOptionalShape = [-1L];
+
+        /// <summary>
+        /// The dims to record for one sample, or <c>null</c> when the sample's input node carries no
+        /// representative-shape attribute to record them on. An absent optional records
+        /// <see cref="AbsentOptionalShape"/>, not nothing. Reading the shape off the sample rather
+        /// than converting the sample to a tensor is what lets an absent optional through at all: it
+        /// has no tensor value, and asking for one threw before the shape was ever needed
         /// (Shorokoo/Shorokoo#314).
         /// </summary>
         private static long[]? RepresentativeShapeOf(NamedModelParam sample) => sample switch
         {
             OptionalTensorDataModelParam optional =>
-                optional.Data is { HasValue: true, Value: { } value } ? value.Shape.Dims : null,
+                optional.Data is { HasValue: true, Value: { } value } ? value.Shape.Dims : AbsentOptionalShape,
             { Structure: DataStructure.Tensor } => sample.ToTensorData().Shape.Dims,
             _ => null,
         };
@@ -824,9 +833,10 @@ namespace Shorokoo
         /// records <see cref="OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape"/> — the dims,
         /// whatever the input's size — on each input node that carries the attribute (the node's own
         /// dtype attribute completes the pair), and records nothing for a <c>null</c> entry. An
-        /// optional input's node is left without the attribute exactly when the optional was
-        /// supplied absent, which is how <see cref="ReadRepresentativeInputs"/> reads its presence
-        /// back. The concrete arch's input ops serialize as NodeProtos in the native <c>.srk</c>
+        /// optional input records <see cref="AbsentOptionalShape"/> when the optional was supplied
+        /// absent, which is how <see cref="ReadRepresentativeInputs"/> reads its presence back — a
+        /// value, so that a MISSING attribute stays the loud error it already is on a tensor input.
+        /// The concrete arch's input ops serialize as NodeProtos in the native <c>.srk</c>
         /// dialect, so the attribute round-trips on disk verbatim and the saved arch is
         /// self-describing — no separate manifest input-shape field is needed.
         /// </summary>
@@ -877,26 +887,19 @@ namespace Shorokoo
                     ?? throw new InvalidOperationException(
                         "Concrete arch input node records a representative-input shape but no dtype; " +
                         "cannot re-materialize its representative input.");
-                var dims = node.Attributes.GetLongsVal(OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape);
-
-                // An optional input records no shape exactly when the rig was built with the
-                // optional absent; that is its representative value, not a missing attribute.
-                if (node.OpCode == InternalOpCodes.MODEL_OPTIONAL_INPUT)
-                {
-                    inputs[i] = dims is null
-                        ? OptionalTensorData.None(dtype)
-                        : OptionalTensorData.Some(RepresentativeInputFor(new Shape(dims), dtype));
-                    continue;
-                }
-
-                inputs[i] = RepresentativeInputFor(
-                    new Shape(dims ?? throw new InvalidOperationException(
+                var dims = node.Attributes.GetLongsVal(OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape)
+                    ?? throw new InvalidOperationException(
                         "Concrete arch input node carries no representative-input shape attribute: the rig " +
                         "was not built through BuildInitialRig (which records one on every model input), or " +
                         "the arch was saved by an older Shorokoo that recorded small inputs as an inline " +
                         "representative tensor instead of dims (there is no legacy read path; rebuild the " +
-                        "rig from its source graphs and re-save).")),
-                    dtype);
+                        "rig from its source graphs and re-save).");
+
+                inputs[i] = node.OpCode == InternalOpCodes.MODEL_OPTIONAL_INPUT
+                    ? (dims.AsSpan().SequenceEqual(AbsentOptionalShape)
+                        ? OptionalTensorData.None(dtype)
+                        : OptionalTensorData.Some(RepresentativeInputFor(new Shape(dims), dtype)))
+                    : RepresentativeInputFor(new Shape(dims), dtype);
             }
             return inputs;
         }
@@ -2970,12 +2973,12 @@ namespace Shorokoo
 
             // Remaining inputs are target fields (typically one Tensor target for L2/CE losses).
             // Synthesize zero tensors with the predicted output shape.
+            // Through RepresentativeInputFor, so a large target is a shape-only placeholder rather
+            // than a real zero buffer — the same threshold the model-input exemplars use. These
+            // exemplars outlive the pass on the rig (OptimizationInputs), so a multi-megabyte
+            // target would otherwise stay allocated for as long as the rig does.
             while (idx < graph.Inputs.Count)
-            {
-                var bytesPerElement = targetDType.EncodingBitCount / 8;
-                var zeroBytes = new byte[targetShape.Count * bytesPerElement];
-                allInputs[idx++] = TensorData.CreateFromRawBytes(targetShape, targetDType, zeroBytes);
-            }
+                allInputs[idx++] = RepresentativeInputFor(targetShape, targetDType);
 
             // Step 4: Shape inference + memory-aware graph optimization. The optimizer
             // alternates Rematerializer and MemoryAwareScheduler under a combined

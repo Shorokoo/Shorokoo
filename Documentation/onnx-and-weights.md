@@ -128,7 +128,10 @@ input shapes** — the dims each input was concretized at, recorded on the graph
 input nodes and always dims-only (no values). `Passthrough` (the default) leaves
 them out of the exported file; `VanillaMetadata` writes each input's
 representative shape into that input's own graph-input `ValueInfoProto` metadata
-(key `shrk_repr_input`), which `OnnxModelImporter` re-attaches on import. It is
+(key `shrk_repr_input`), which `OnnxModelImporter` re-attaches on import. An
+`OptionalTensor` input records one too — its element's dims when the model was
+concretized with the optional present, and a single `-1` when it was concretized
+absent, which is how the arrangement survives a round trip. It is
 plain metadata: the `ValueInfoProto`'s own dims stay symbolic either way, so no
 external consumer sees a frozen batch dimension. `Persistence.ExportOnnx` below
 passes `VanillaMetadata`.

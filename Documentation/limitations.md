@@ -213,23 +213,20 @@ registered there has no value the training graph can carry out of the body.
 
 ### Conditional execution in a training graph
 
-An `IfElse` branch runs only when its condition selects it — in an inference model.
-A training graph runs both arms: reverse-mode autodiff reads the forward's
-intermediates, and a value computed only on a branch that may not run cannot be
-read unconditionally by a backward pass that always runs. The branches are
-therefore flattened before the backward is built and only the parts the backward
-does not read go back inside.
+An `IfElse` branch runs only when its condition selects it. A training graph keeps
+that for the branch as a whole, but not for the forward values the backward pass
+reads: reverse-mode autodiff needs the forward's intermediates, and a value read
+unconditionally cannot be computed conditionally, so those are hoisted out of the
+branch and computed on every step.
 
-The values are unaffected — the `If` still selects, and the arm that did not run
-receives a zero gradient — so this costs work rather than correctness, with one
-exception: an operation that is *invalid* off its branch (unwrapping an
-`OptionalTensor` that is absent on the other path is the usual case) runs
-unconditionally in a training graph if it is on the differentiated path. Keep such
-an operation out of the differentiated path, or off the training graph.
-
-Lifting this means emitting the backward for a branch's nodes inside a mirrored
-`If` on the same condition, tracked as
-[#313](https://github.com/Shorokoo/Shorokoo/issues/313).
+Gradients are unaffected — the arm that did not run contributes exactly zero, and
+that zero is *selected* rather than arrived at by multiplication, so an arm whose
+derivative is not a number (`sqrt` of what is negative on that path, a division by
+what is zero there) cannot poison the weights. What remains is the work, plus one
+corner: an operation that would *fail* off its branch rather than merely return a
+non-finite number — unwrapping an `OptionalTensor` that is absent on the other
+path — still runs if it is one of the hoisted values. Keep such an operation off
+the differentiated path.
 
 ### Gradient (activation) checkpointing
 

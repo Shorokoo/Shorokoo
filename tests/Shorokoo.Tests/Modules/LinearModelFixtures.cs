@@ -905,6 +905,19 @@ public partial class GainInBothIfArmsOnARuntimeConditionModel
             .IfElse(t * Ones.Init([Scalar(2L)]), t * Ones.Init([Scalar(2L)]) * Scalar(2f));
 }
 
+/// <summary>Both arms are a function of one parameter, and the arm not taken is non-finite on a
+/// negative input — so its derivative is NaN, which no multiplication by the zero gradient it is
+/// handed can clear.</summary>
+[Module]
+public partial class SqrtInOneIfArmModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> t, Scalar<bit> cond)
+    {
+        var w = Ones.Init([Scalar(2L)]);
+        return cond.IfElse((t * w).Sqrt(), t * w);
+    }
+}
+
 /// <summary>One parameter created before an <c>IfElse</c> and used inside both arms, so the
 /// gradient the branch produces belongs to a value the branch does not own.</summary>
 [Module]

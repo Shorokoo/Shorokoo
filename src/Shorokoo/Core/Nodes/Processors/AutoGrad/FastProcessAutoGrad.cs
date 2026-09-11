@@ -150,9 +150,15 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
             // see class doc for the rationale.
             gradByKey[lossKey] = (Variable)Globals.Scalar(1.0f);
 
+            // Which IfElse arm each forward node belongs to, so a gradient leaving one can be
+            // zeroed when that arm did not run.
+            var armOf = ComputeArmMembership(graph, producerByOutput);
+            var armConditions = new Dictionary<FastTensorKey, Scalar<bit>>();
+
             for (int i = topoOrder.Count - 1; i >= 0; i--)
             {
-                ProcessNode(topoOrder[i], gradByKey, freshInputBacking, gradOpsMap, nodesByKey, tensorInfo);
+                ProcessNode(topoOrder[i], gradByKey, freshInputBacking, gradOpsMap, nodesByKey, tensorInfo,
+                            armOf, armConditions, producerByOutput);
             }
 
             // 3. Splice gradient Variable subgraphs into a temporary list. We maintain a
@@ -205,6 +211,121 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
             // 5. Rewire consumers of AUTO_GRAD outputs to point at the new gradient keys.
             RewireConsumers(graph, keyMappings);
         }
+
+        /// <summary>One <c>IfElse</c> arm: the condition that selects it, and which side it is.</summary>
+        private readonly record struct Arm(FastTensorKey Condition, bool IsThen);
+
+        /// <summary>
+        /// Zeroes a gradient on its way out of an <c>IfElse</c> arm that did not run.
+        ///
+        /// <para>An arm's forward is computed whether or not the condition picks it, and the arm
+        /// that did not run is handed a zero incoming gradient — so its contribution is
+        /// mathematically zero and arithmetic usually delivers that. Not always: an arm guarding a
+        /// computation that is invalid off its own path (<c>sqrt</c> of what is negative there,
+        /// a division by what is zero there) has a non-finite derivative, and NaN times zero is
+        /// NaN, not zero. That NaN then lands in the parameter's gradient and destroys the weight
+        /// on the very step the arm was not taken (Shorokoo/Shorokoo#313).</para>
+        ///
+        /// <para>Selecting is not arithmetic: an <c>If</c> hands back the branch it picks and never
+        /// reads the other, so the zero it returns is a zero. The gate goes where the gradient
+        /// crosses out of the arm — the arm's own chain may carry the NaN, and only what leaves it
+        /// can reach a parameter.</para>
+        /// </summary>
+        private static Variable GateOnLeavingAnArm(
+            Variable grad,
+            FastNode node,
+            FastTensorKey destination,
+            Dictionary<FastNodeKey, List<Arm>> armOf,
+            Dictionary<FastTensorKey, Scalar<bit>> armConditions,
+            Dictionary<Variable, FastTensorKey> freshInputBacking,
+            Dictionary<FastTensorKey, FastNode> producerByOutput)
+        {
+            if (!armOf.TryGetValue(node.Key, out var arms)) return grad;
+
+            var destinationArms = producerByOutput.TryGetValue(destination, out var producer)
+                && armOf.TryGetValue(producer.Key, out var found) ? found : [];
+
+            foreach (var arm in arms)
+            {
+                if (destinationArms.Contains(arm)) continue;   // stays inside the arm
+
+                if (!armConditions.TryGetValue(arm.Condition, out var cond))
+                {
+                    var fresh = InternalOp.RuntimeInput(DType.Bool, rank: 0);
+                    freshInputBacking[fresh] = arm.Condition;
+                    armConditions[arm.Condition] = cond = fresh.ToValue<Scalar<bit>>();
+                }
+
+                // Zeros of the gradient's own shape. Sub(g, g) would carry the NaN through.
+                var zeros = OnnxOp.ConstantOfShape(
+                    OnnxOp.Shape(grad), Globals.TensorData(DType.Float32, [1L], 0f), grad.Rank);
+                grad = arm.IsThen ? Ops.IfElse(cond, grad, zeros) : Ops.IfElse(cond, zeros, grad);
+            }
+            return grad;
+        }
+
+        /// <summary>
+        /// The <c>IfElse</c> arms each node belongs to: those whose branch inputs reach it and
+        /// whose sibling arm does not. A node both arms reach runs whatever the condition says and
+        /// is nobody's arm; so are the inputs and parameters a branch merely reads, which is what
+        /// makes a gradient heading for one a gradient leaving the arm.
+        /// </summary>
+        private static Dictionary<FastNodeKey, List<Arm>> ComputeArmMembership(
+            InternalComputationGraph graph, Dictionary<FastTensorKey, FastNode> producerByOutput)
+        {
+            var armOf = new Dictionary<FastNodeKey, List<Arm>>();
+
+            HashSet<FastNodeKey> ReachedFrom(IEnumerable<FastTensorKey?> roots)
+            {
+                var seen = new HashSet<FastNodeKey>();
+                var worklist = new Stack<FastNode>();
+                foreach (var root in roots)
+                    if (root is FastTensorKey k && producerByOutput.TryGetValue(k, out var producer)
+                        && seen.Add(producer.Key))
+                        worklist.Push(producer);
+                while (worklist.Count > 0)
+                    foreach (var (_, ins) in worklist.Pop().FullInputs)
+                        foreach (var ik in ins)
+                            if (ik is FastTensorKey k && producerByOutput.TryGetValue(k, out var producer)
+                                && seen.Add(producer.Key))
+                                worklist.Push(producer);
+                return seen;
+            }
+
+            foreach (var close in graph.Nodes)
+            {
+                if (close.OpCode != OpCodes.IF_CLOSE) continue;
+                if (close.GraphOpenNodeKey is not FastNodeKey openKey) continue;
+                var open = graph.Nodes.FirstOrDefault(n => n.Key.Equals(openKey));
+                if (open is null || open.Inputs.Count == 0 || open.Inputs[0] is not FastTensorKey condition)
+                    continue;
+
+                var reached = new Dictionary<bool, HashSet<FastNodeKey>>();
+                foreach (var isThen in (bool[])[true, false])
+                    reached[isThen] = close.FullInputs.TryGetValue(BranchAttr(isThen), out var roots)
+                        ? ReachedFrom(roots) : [];
+
+                foreach (var isThen in (bool[])[true, false])
+                    foreach (var nodeKey in reached[isThen])
+                    {
+                        if (reached[!isThen].Contains(nodeKey)) continue;
+                        var owner = producerByOutput.Values.FirstOrDefault(n => n.Key.Equals(nodeKey));
+                        if (owner is not null && IsNobodysArm(owner)) continue;
+                        if (!armOf.TryGetValue(nodeKey, out var list)) armOf[nodeKey] = list = [];
+                        list.Add(new Arm(condition, isThen));
+                    }
+            }
+            return armOf;
+        }
+
+        /// <summary>An input or a parameter is read by a branch, never owned by it.</summary>
+        private static bool IsNobodysArm(FastNode node)
+            => Shorokoo.Core.Factory.FastOpsetResolver.IsModelInputOpCode(node.OpCode)
+            || node.OpCode == InternalOpCodes.MODEL_PARAM
+            || node.OpCode == InternalOpCodes.MODEL_PARAM_DATA;
+
+        private static string BranchAttr(bool isThen)
+            => isThen ? OnnxOpAttributeNames.AttrThenBranch : OnnxOpAttributeNames.AttrElseBranch;
 
         // ------------------------------------------------------------------------------------
         // Walk: forward topological order from leaves (paramKeys) up to the loss producer.
@@ -309,7 +430,10 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
             Dictionary<Variable, FastTensorKey> freshInputBacking,
             Dictionary<string, Func<Variable?[], Variable?[], OnnxCSharpAttributes, Variable?[]>> gradOpsMap,
             Dictionary<FastNodeKey, FastNode> nodesByKey,
-            Dictionary<FastTensorKey, FastTensorInfo> tensorInfo)
+            Dictionary<FastTensorKey, FastTensorInfo> tensorInfo,
+            Dictionary<FastNodeKey, List<Arm>> armOf,
+            Dictionary<FastTensorKey, Scalar<bit>> armConditions,
+            Dictionary<FastTensorKey, FastNode> producerByOutput)
         {
             var outputs = node.Outputs;
             var outputGrads = new Variable?[outputs.Count];
@@ -436,7 +560,8 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
                 if (inputGrads[i] is null) continue;
 
                 // Gradient ops already return graph nodes.
-                var grad = inputGrads[i]!;
+                var grad = GateOnLeavingAnArm(
+                    inputGrads[i]!, node, k, armOf, armConditions, freshInputBacking, producerByOutput);
 
                 if (gradByKey.TryGetValue(k, out var existing))
                     gradByKey[k] = AutoDiffEngine.AccumulateGradients(existing, grad);

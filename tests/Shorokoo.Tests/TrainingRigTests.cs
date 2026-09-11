@@ -1213,14 +1213,38 @@ public class TrainingRigTrainingLoopCoverageTests
     }
 
     // A backward pass reads the forward's intermediates, so a branch that computes one cannot keep
-    // it to itself and the training graph runs both arms. Both shapes train — each arm owning its
-    // parameter, and both sharing one — and inference, which has no backward, keeps its branch.
+    // it to itself; the rest of the branch stays inside it, and inference keeps all of it. Both
+    // shapes train: each arm owning its parameter, and both sharing one.
     [Fact]
     public void TestAParameterSharedByBothIfElseArmsTrains()
     {
         Assert.Equal(2.5f, LossAfterOneStep(GainInBothIfArmsOnARuntimeConditionModel.ComputationGraph), 1e-4f);
         Assert.Equal(2.5f, LossAfterOneStep(SharedGainInBothIfArmsModel.ComputationGraph), 1e-4f);
         Assert.NotEmpty(IfBodyOps(SharedGainInBothIfArmsModel.ComputationGraph));
+    }
+
+    private static float[] TrainedParams(ComputationGraph modelGraph, bool cond, params float[] xs)
+    {
+        object[] values = [.. xs.Select(v => (object)v)];
+        var x = TensorData(DType.Float32, [(long)xs.Length], values);
+        var c = TensorData(DType.Bool, [], cond);
+        var rig = TrainingRig.FromScratch(modelGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [new TensorDataModelParam("t", ModelParamType.InputParam, x),
+             new TensorDataModelParam("cond", ModelParamType.InputParam, c)], 0.1f);
+        var step = rig.TrainStep(rig.CreateInitialCheckpoint(), rig.InputDef.FromOrderedData(x, c),
+            rig.TargetDef.FromOrderedData(TensorData([(long)xs.Length], new float[xs.Length])));
+        return NNLibraryTrainingFixtures.Floats(
+            step.TrainableParams.Fields[rig.TrainableParamStructDef.Fields[0].Name]);
+    }
+
+    // The arm that did not run contributes exactly zero, whether or not its own derivative is a
+    // number: the same input trains to the same weights with the other arm finite and non-finite.
+    [Fact]
+    public void TestTheIfElseArmThatDidNotRunLeavesTheGradientAlone()
+    {
+        Assert.Equal<float>([0.9f, -0.6f], TrainedParams(SqrtInOneIfArmModel.ComputationGraph, false, -1f, -4f));
+        Assert.Equal<float>([0.9f, -0.6f], TrainedParams(SqrtInOneIfArmModel.ComputationGraph, false, 1f, 4f));
+        Assert.Equal<float>([0.95f, 0.8f], TrainedParams(SqrtInOneIfArmModel.ComputationGraph, true, 1f, 4f));
     }
 
     // Training differentiates a loop by unrolling it, so one whose trip count is not a constant

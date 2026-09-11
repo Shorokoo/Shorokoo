@@ -150,7 +150,10 @@ The guarantee reaches inside a function body too. A body that calls a module is
 written out lowered rather than carrying the call, and the callee's own machinery
 is lowered with it — including a trainable parameter the callee owns, which a body
 cannot carry as a weight (nothing feeds weights into a function body) and which is
-therefore written as the value its initializer computes. Only the `FunctionProto`s
+therefore written as the value its initializer computes. The exception is a bare
+`IModel.GetTrainableParam` reference, which names a parameter defined elsewhere
+rather than carrying an initializer of its own: a body holding one does not export
+([#318](https://github.com/Shorokoo/Shorokoo/issues/318)). Only the `FunctionProto`s
 the emitted model still reaches are written, so a callee whose only call was
 lowered away leaves no dead function behind in the file.
 The `.srk` format makes the opposite trade and keeps each body as authored, so a

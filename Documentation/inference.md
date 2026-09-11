@@ -109,7 +109,15 @@ function body is not a model, and nothing will ever feed a weight into one, so a
 parameter such a callee owns is written as the value its own initializer computes
 rather than as a trainable weight of the model. An initializer that calls a layer
 therefore initializes from that layer's *initial* weights; the layer contributes no
-parameter of its own to the model it is called from.
+parameter of its own to the model it is called from. This holds however the callee
+was reached — a direct call, or a model taken out of a `ModelSequence`.
+
+Reading a parameter through `IModel.GetTrainableParam` from such a body is the one
+shape still left out, and it fails at session creation on an operand nothing
+produces ([#318](https://github.com/Shorokoo/Shorokoo/issues/318)). A bare reference
+like that names a parameter defined elsewhere instead of carrying its own
+initializer, and the emitted body has no way to match the two up; call the module
+and use its result instead.
 
 Concretize the module's `ComputationGraph` against the input first, then execute:
 

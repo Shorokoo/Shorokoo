@@ -1359,6 +1359,27 @@ namespace Shorokoo.Tests.Modules
             => input * InitCallingAParamOwningModuleFromASequence.Init(Vector(2L));
     }
 
+    /// <summary>An initializer whose body reads a parameter through IModel.GetTrainableParam — a
+    /// bare reference, which the emitted body cannot resolve to the definition beside it.
+    /// Tracked as Shorokoo/Shorokoo#318.</summary>
+    [TrainableParamInitializer]
+    public static partial class InitWithBareParamRef
+    {
+        public static Tensor<float32> Inline(Vector<int64> shape)
+        {
+            var m = SimplestLayer.Model();
+            var seed = m.Call(Globals.TensorFill(shape, 1.0f));
+            return seed * m.GetTrainableParam<float32>([1], rank: 1);
+        }
+    }
+
+    /// <summary>Drives InitWithBareParamRef.</summary>
+    [Module]
+    public partial class UsesInitWithBareParamRef
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input) => input * InitWithBareParamRef.Init(Vector(2L));
+    }
+
     /// <summary>An initializer whose body loops without calling anything: its loop's subgraph inputs
     /// still need types in the emitted body, with no flattening in the picture.</summary>
     [TrainableParamInitializer]

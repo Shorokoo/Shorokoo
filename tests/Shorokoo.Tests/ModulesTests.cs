@@ -62,6 +62,14 @@ public class ModulesCoverageTests
         => Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitCallingAParamOwningModuleFromASequence>(
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)], expected: [1.0, 2.0]));
 
+    /// <summary>A bare GetTrainableParam reference keeps naming the model variable that
+    /// FastUnpackModelStruct removes from the emitted body, so the body ships an operand nothing
+    /// produces. Tracked as Shorokoo/Shorokoo#318.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#318: an emitted body cannot resolve a bare parameter reference")]
+    public void TestAnInitializerTakingABareParamReferenceLowersIt()
+        => Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitWithBareParamRef>(
+            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)], expected: [1.0, 2.0]));
+
     private static string[] EmittedFunctions(InternalComputationGraph g, bool nativeDialect = false)
         => [.. (nativeDialect
                 ? FastOnnxModelBuilder.BuildInternalOnnxModel(g, applyExecutionLowerings: false, emitInputsAsNodes: true)

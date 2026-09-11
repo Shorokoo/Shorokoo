@@ -62,10 +62,7 @@ public class ModulesCoverageTests
         => Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitCallingAParamOwningModuleFromASequence>(
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)], expected: [1.0, 2.0]));
 
-    /// <summary>A bare GetTrainableParam reference keeps naming the model variable that
-    /// FastUnpackModelStruct removes from the emitted body, so the body ships an operand nothing
-    /// produces. Tracked as Shorokoo/Shorokoo#318.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#318: an emitted body cannot resolve a bare parameter reference")]
+    [Fact]
     public void TestAnInitializerTakingABareParamReferenceLowersIt()
         => Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitWithBareParamRef>(
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)], expected: [1.0, 2.0]));
@@ -1516,10 +1513,7 @@ public class ModulesCoverageTests
         Assert.Equal([4f, 8f], ConcretizeAndRun(UsesTheSequenceHoldingGenericAtTwoTypeArguments.ComputationGraph, input));
     }
 
-    /// <summary>A generic parameter initializer called with an explicit type argument from a
-    /// non-generic body is spliced with its shape input wired to nothing.
-    /// Tracked as Shorokoo/Shorokoo#295.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#295: a generic param initializer called from a non-generic body loses its shape input")]
+    [Fact]
     public void TestAGenericParamInitializerCalledFromANonGenericBodyConcretizes()
     {
         var g = NonGenericCallerOfGenericParamInitializer.ComputationGraph;

@@ -90,27 +90,20 @@ namespace Shorokoo
                 defaultName: defaultName,
                 stateOwnership: stateOwnership);
 
-            // Check if T is a generic standin type (IGenericType1, IGenericType2, etc.)
-            // When called from within a module with a generic type, T will be a standin.
-            // When called directly with a concrete type, T will be concrete (e.g., float32).
-            var typeOfT = typeof(T);
-            var isGenericStandin = typeOfT.IsAssignableTo(typeof(IGenericType));
-
             // For generic standins: use the target function's dtype (which is also a standin with GenericTypeParamName set)
             // For concrete types: use OnnxUtils.GetDType<T>() to get the concrete DType.
             // GetDType<T>() returns null for unknown types, so we fallback to targetFn's dtype.
             var dtype = OnnxUtils.GetDType<T>();
             var rank = targetFn.Outputs[0].Rank;
 
-
-            // Build generic type args array (mirrors MODEL_INVOKE behavior).
-            // When T is a generic standin, pass the dtype (which has GenericTypeParamName set)
-            // so ProcessGenericSpecialization can update it to concrete type during specialization.
-            DType[]? genericTypeArgs = null;
-            if (isGenericStandin)
-            {
-                genericTypeArgs = [dtype];
-            }
+            // Which specialization of the initializer this call selects (mirrors MODEL_INVOKE).
+            // Read off the closed generic method the call site built rather than off T: T is only
+            // the first of the initializer's type parameters, and a concrete argument binds one
+            // exactly as a standin does. Recording only the standin left a call naming a concrete
+            // type argument selecting no specialization at all, so the erasure pass kept the
+            // generic body and spliced its generic-type slots against operands that supply none
+            // (Shorokoo/Shorokoo#295).
+            var genericTypeArgs = GenericTypeArgsOf(trainableParamInitializerImplementation);
 
             // Create the trainable param ref with the appropriate dtype and generic type args
             var result = InternalOp.TrainableParamRef(inputs, iterationIndices, localModelId: null, dtype, rank, targetFn, isTrainable, genericTypeArgs);
@@ -119,6 +112,28 @@ namespace Shorokoo
             // Cast through Variable first (the interface), then to the concrete Tensor<T>.
             // This cast succeeds because TrainableParamRef creates a Variable with the correct dtype.
             return (Variable)result;
+        }
+
+        /// <summary>
+        /// The type arguments <paramref name="implementation"/> closes its generic parameters
+        /// with, in declaration order, or <c>null</c> when it declares none. A standin and a
+        /// concrete type are both arguments here; what a call site records is which
+        /// specialization it wants, and an initializer body has one generic-type slot per
+        /// parameter whichever kind of argument fills it.
+        /// </summary>
+        private static DType[]? GenericTypeArgsOf(Delegate implementation)
+        {
+            var method = implementation.Method;
+            if (!method.IsGenericMethod || method.IsGenericMethodDefinition) return null;
+
+            var typeArgs = method.GetGenericArguments();
+            var dtypes = new DType[typeArgs.Length];
+            for (int i = 0; i < typeArgs.Length; i++)
+            {
+                if (OnnxUtils.GetDType(typeArgs[i]) is not { } dtype) return null;
+                dtypes[i] = dtype;
+            }
+            return dtypes;
         }
 
         /// <summary>

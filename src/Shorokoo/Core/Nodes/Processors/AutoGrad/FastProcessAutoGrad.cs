@@ -227,6 +227,13 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
         /// reads the other, so the zero it returns is a zero. The gate goes where the gradient
         /// crosses out of the arm — the arm's own chain may carry the NaN, and only what leaves it
         /// can reach a parameter.</para>
+        ///
+        /// <para>A gradient bound for an <c>OptionalTensor</c> is optional-structured, and it is
+        /// the value inside that is gated: the destination takes an optional, so the gate has to
+        /// hand one back, and an absent optional is not this zero —
+        /// <see cref="AutoDiffEngine.AccumulateGradients"/> drops the other contribution when it
+        /// accumulates onto an absent optional rather than leaving it alone
+        /// (Shorokoo/Shorokoo#314).</para>
         /// </summary>
         private static Variable GateOnLeavingAnArm(
             Variable grad,
@@ -242,10 +249,15 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
             var destinationArms = producerByOutput.TryGetValue(destination, out var producer)
                 && armOf.TryGetValue(producer.Key, out var found) ? found : [];
 
-            foreach (var arm in arms)
-            {
-                if (destinationArms.Contains(arm)) continue;   // stays inside the arm
+            // The arms the gradient actually crosses out of; the rest it stays inside.
+            var crossed = arms.Where(arm => !destinationArms.Contains(arm)).ToList();
+            if (crossed.Count == 0) return grad;
 
+            var isOptional = grad.Structure() == DataStructure.Optional;
+            var gated = isOptional ? OnnxOp.OptionalGetElement(grad) : grad;
+
+            foreach (var arm in crossed)
+            {
                 if (!armConditions.TryGetValue(arm.Condition, out var cond))
                 {
                     var fresh = InternalOp.RuntimeInput(DType.Bool, rank: 0);
@@ -256,10 +268,11 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
                 // Zeros of the gradient's own shape, at the dtype every gradient here carries (see
                 // the loss seed above). Sub(g, g) would carry the NaN through.
                 var zeros = OnnxOp.ConstantOfShape(
-                    OnnxOp.Shape(grad), Globals.TensorData(DType.Float32, [1L], 0f), grad.Rank);
-                grad = arm.IsThen ? Ops.IfElse(cond, grad, zeros) : Ops.IfElse(cond, zeros, grad);
+                    OnnxOp.Shape(gated), Globals.TensorData(DType.Float32, [1L], 0f), gated.Rank);
+                gated = arm.IsThen ? Ops.IfElse(cond, gated, zeros) : Ops.IfElse(cond, zeros, gated);
             }
-            return grad;
+
+            return isOptional ? OnnxOp.Optional(gated, DataStructure.Tensor, gated.Type) : gated;
         }
 
         // ------------------------------------------------------------------------------------

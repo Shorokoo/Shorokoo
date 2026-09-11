@@ -335,6 +335,14 @@ an *absent* optional input — execute graphs that exercise the absent branch th
 `new QuickExecutionEngine().Execute(concreteModel, inputs…)`, which is optional-aware
 in pure managed code.
 
+A model with an optional input trains like any other: pass the sample input as an
+`OptionalTensorDataModelParam` to `TrainingRig.FromScratch`, and build each batch with
+`rig.InputDef.FromOrderedData(...)`, which takes an `OptionalTensorData` in that field's
+position. The rig is built at the arrangement the sample describes — the optional present
+or absent — so supply the one you mean to train with. A training *step* runs on ONNX
+Runtime and carries the same limit as inference above: it can feed a present optional,
+not an absent one.
+
 ## Project wiring (required for codegen)
 
 The source generator (`Shorokoo.CodeGen`) must be referenced from the consuming

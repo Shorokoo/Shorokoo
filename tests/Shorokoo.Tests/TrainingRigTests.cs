@@ -1247,22 +1247,28 @@ public class TrainingRigTrainingLoopCoverageTests
         Assert.Equal<float>([0.95f, 0.8f], TrainedParams(SqrtInOneIfArmModel.ComputationGraph, true, 1f, 4f));
     }
 
-    // An OptionalTensor input is a supported model input and covered end to end on the inference
-    // path; supplying one to a rig fails whether it is present or absent, and the absent case is
-    // the arrangement the feature exists for.
-    [Fact(Skip = "Shorokoo/Shorokoo#314: an OptionalTensor input cannot be supplied to a TrainingRig")]
+    private static TrainingRig OptionalBiasRig(OptionalTensorData bias, TensorData x)
+        => TrainingRig.FromScratch(NullableTrainableBiasLayer.ComputationGraph,
+            L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [new TensorDataModelParam("x", ModelParamType.InputParam, x),
+             new OptionalTensorDataModelParam("bias", ModelParamType.InputParam, bias)], 0.1f);
+
+    // An OptionalTensor input is a supported model input; a rig builds over one whether it is
+    // supplied present or absent, and the present arrangement takes a step. The absent one is not
+    // stepped here: ONNX Runtime has no absent optional to feed, the same limit inference carries.
+    [Fact]
     public void TestAModelWithAnOptionalInputTrains()
     {
         var x = TensorData([3L], 1f, 2f, 3f);
-        foreach (var bias in (OptionalTensorData[])[
-            OptionalTensorData.Some(TensorData([3L], 0f, 0f, 0f)), OptionalTensorData.None<float32>()])
-        {
-            var rig = TrainingRig.FromScratch(NullableTrainableBiasLayer.ComputationGraph,
-                L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
-                [new TensorDataModelParam("x", ModelParamType.InputParam, x),
-                 new OptionalTensorDataModelParam("bias", ModelParamType.InputParam, bias)], 0.1f);
-            Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
-        }
+        var present = OptionalTensorData.Some(TensorData([3L], 0f, 0f, 0f));
+        Assert.NotEmpty(OptionalBiasRig(OptionalTensorData.None<float32>(), x).TrainableParamStructDef.Fields);
+
+        var rig = OptionalBiasRig(present, x);
+        Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
+        var step = rig.TrainStep(rig.CreateInitialCheckpoint(),
+            rig.InputDef.FromOrderedData(x, present),
+            rig.TargetDef.FromOrderedData(TensorData([3L], 0f, 0f, 0f)));
+        Assert.True(float.IsFinite(step.Loss!.Value));
     }
 
     // Training differentiates a loop by unrolling it, so one whose trip count is not a constant

@@ -1360,8 +1360,7 @@ namespace Shorokoo.Tests.Modules
     }
 
     /// <summary>An initializer whose body reads a parameter through IModel.GetTrainableParam — a
-    /// bare reference, which the emitted body cannot resolve to the definition beside it.
-    /// Tracked as Shorokoo/Shorokoo#318.</summary>
+    /// bare reference, which an emitted body resolves to the definition beside it.</summary>
     [TrainableParamInitializer]
     public static partial class InitWithBareParamRef
     {

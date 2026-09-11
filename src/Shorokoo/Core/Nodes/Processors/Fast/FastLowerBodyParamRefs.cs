@@ -34,12 +34,19 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// <see cref="FastInitKeyedDraws.BuildKeyedDraws"/> refuses a parameter reference whose
     /// initializer draws, ahead of emission, rather than let it draw unkeyed.</para>
     ///
-    /// <para>A node flagged <see cref="OnnxOpAttributeNames.ShrkAttrIsParamReference"/> is left
-    /// alone. That flag marks a bare <c>IModel.GetTrainableParam</c> reference to a parameter
+    /// <para>A node flagged <see cref="OnnxOpAttributeNames.ShrkAttrIsParamReference"/> takes the
+    /// other route. That flag marks a bare <c>IModel.GetTrainableParam</c> reference to a parameter
     /// defined elsewhere: it carries no initializer inputs and only borrows an initializer function
     /// as metadata, so invoking that function would not recompute the parameter — it would
-    /// fabricate a different value and hand it over silently. Leaving the node is the honest
-    /// outcome; it fails loudly at session creation instead.</para>
+    /// fabricate a different value and hand it over silently. It is instead pointed at the
+    /// definition of the same parameter beside it in the body, whose lowered value is the one thing
+    /// that <i>is</i> the parameter. The two identities are not comparable as written — a
+    /// definition's is absolute within the body, a reference's relative to the model variable it is
+    /// addressed against — so both are resolved to a body-absolute <see cref="ModelId"/> first, the
+    /// same composition <c>FastConvertToIdRefModelParams</c> performs over a whole graph
+    /// (Shorokoo/Shorokoo#318). A reference with no definition beside it is left alone and fails
+    /// loudly at session creation, as before: its model variable is removed with the rest of the
+    /// model struct, so the operand it names is produced by nothing.</para>
     /// </summary>
     internal static class FastLowerBodyParamRefs
     {
@@ -54,6 +61,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             var invokeAttrDefs = Definitions.NodeDefinitions[InternalOpCodes.FUNCTION_INVOKE].AttributeDefs;
             bool any = false;
+
+            // Ahead of the rewrite below, which replaces every definition's node: a reference is
+            // resolved against the definitions as the body still spells them, and keeps working
+            // afterwards because the invoke that replaces one keeps its output key, and because
+            // inlining that invoke rewires every consumer of that key — the reference among them.
+            ResolveBareParamReferences(graph);
 
             foreach (var node in graph.Nodes)
             {
@@ -99,6 +112,79 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             }
 
             return any;
+        }
+
+        /// <summary>
+        /// Points every bare parameter reference in <paramref name="graph"/> at the definition of
+        /// the same parameter in the same body, as an <see cref="OpCodes.IDENTITY"/> of the
+        /// definition's value. Mutating in place keeps the reference's own output key, so its
+        /// consumers need no rewriting. A reference with no definition beside it is left as it is.
+        /// </summary>
+        private static void ResolveBareParamReferences(InternalComputationGraph graph)
+        {
+            var references = graph.Nodes.Where(IsBareParamReference).ToList();
+            if (references.Count == 0) return;
+
+            var nodeByKey = FastProcessorHelper.BuildNodeByKey(graph);
+
+            // First definition wins: two definitions of one parameter — one model called twice —
+            // compute the same value, so either serves.
+            var definitionByModelId = new Dictionary<string, FastTensorKey>();
+            foreach (var node in graph.Nodes)
+            {
+                if (IsBareParamReference(node)) continue;
+                if (AbsoluteModelId(node, nodeByKey) is not { } modelId) continue;
+                if (node.Outputs.FirstOrDefault() is not { } output) continue;
+                definitionByModelId.TryAdd(modelId, output);
+            }
+
+            var identityAttrs = OnnxCSharpAttributes.FromCSharpVals(
+                new Dictionary<string, object?>(),
+                Definitions.NodeDefinitions[OpCodes.IDENTITY].AttributeDefs);
+
+            foreach (var reference in references)
+            {
+                if (AbsoluteModelId(reference, nodeByKey) is not { } modelId) continue;
+                if (!definitionByModelId.TryGetValue(modelId, out var definition)) continue;
+
+                reference.OpCode = OpCodes.IDENTITY;
+                reference.Attributes = identityAttrs;
+                reference.TargetFunction = null;
+                reference.IdentifierTemplate = null;
+                reference.FullInputs = new Dictionary<string, List<FastTensorKey?>>
+                {
+                    [""] = [definition],
+                };
+            }
+        }
+
+        private static bool IsBareParamReference(FastNode node) =>
+            (node.OpCode == InternalOpCodes.MODEL_PARAM_REF
+                || node.OpCode == InternalOpCodes.MODEL_PARAM_MODEL_REF)
+            && (node.Attributes.GetBoolVal(OnnxOpAttributeNames.ShrkAttrIsParamReference) ?? false);
+
+        /// <summary>
+        /// The <see cref="ModelId"/> <paramref name="node"/> addresses within its own body, or
+        /// <c>null</c> when it addresses no parameter. A <c>MODEL_PARAM_REF</c> already carries a
+        /// body-absolute template; a <c>MODEL_PARAM_MODEL_REF</c> is relative to the model variable
+        /// it takes as its first operand, so its template is composed onto that model's own.
+        /// </summary>
+        private static string? AbsoluteModelId(FastNode node, Dictionary<FastNodeKey, FastNode> nodeByKey)
+        {
+            if (node.OpCode is not (InternalOpCodes.MODEL_PARAM_REF or InternalOpCodes.MODEL_PARAM_MODEL_REF))
+                return null;
+            if (node.IdentifierTemplate is not { } template) return null;
+            var relative = new ModelParamIdentifierTemplate(template);
+
+            if (node.OpCode == InternalOpCodes.MODEL_PARAM_REF)
+                return relative.ModelIdTemplate.ToString();
+
+            if (node.Inputs.FirstOrDefault() is not { } modelKey) return null;
+            if (!nodeByKey.TryGetValue(modelKey.FastNodeKey, out var modelOwner)) return null;
+            if (modelOwner.IdentifierTemplate is not { } ownerTemplate) return relative.ModelIdTemplate.ToString();
+
+            return new ModelParamIdentifierTemplate(
+                new ModelParamIdentifierTemplate(ownerTemplate), relative).ModelIdTemplate.ToString();
         }
     }
 }

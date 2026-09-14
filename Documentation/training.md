@@ -10,6 +10,9 @@ Related: [defining-models.md](defining-models.md) · [nn-library.md](nn-library.
   produces a trainable step.
 - Gradients are produced by automatic differentiation; you do not write backward
   passes.
+- `TrainStep` moves the whole training state through host memory every step. On a GPU that is what
+  sets the pace, so a long run belongs in a `rig.BeginResidentRun()` loop (or in `Fit` / `Train`,
+  which already use one) — see [Keeping training state on the device](#keeping-training-state-on-the-device).
 - State (optimizer moments, momentum velocity, BatchNorm running stats) is **created**
   by a `[StateInitializer]` class's `Init(...)` call inside a module's `Inline` (the
   state analog of trainable-parameter initializers) and its per-step update is
@@ -432,7 +435,81 @@ public TrainingResult Train(
     TensorDataStruct[] trainingInputs,
     TensorDataStruct[] trainingOutputs,
     int numEpochs);
+
+// A training loop that keeps its state where the execution provider produced it, instead of moving
+// the whole of it through host memory on every step — see "Keeping training state on the device".
+// The initial checkpoint stays yours; the run never frees it.
+public ResidentTrainingRun BeginResidentRun(TrainingCheckpoint? initialCheckpoint = null);
 ```
+
+```csharp
+public sealed class ResidentTrainingRun : IDisposable
+{
+    // Train on one batch; returns that step's loss and nothing else, so nothing is downloaded.
+    public float Step(TensorDataStruct trainingInput, TensorDataStruct trainingTarget);
+    public float Step(TensorDataStruct hyperparameters,                 // from MakeHyperparameters(...)
+                      TensorDataStruct trainingInput, TensorDataStruct trainingTarget);
+    public float Step(IDataLoader loader);                              // draws loader.Next()
+    public float Step(DataBatch batch);                                 // a batch you drew yourself
+
+    // The same step, with the updated state brought back to the host as an ordinary checkpoint you
+    // can read, save and resume from. This is the step that pays for the transfer.
+    public TrainingCheckpoint StepToCheckpoint(TensorDataStruct trainingInput, TensorDataStruct trainingTarget);
+    public TrainingCheckpoint StepToCheckpoint(TensorDataStruct hyperparameters,
+                                               TensorDataStruct trainingInput, TensorDataStruct trainingTarget);
+    public TrainingCheckpoint StepToCheckpoint(IDataLoader loader);
+    public TrainingCheckpoint StepToCheckpoint(DataBatch batch);
+
+    public long CurrentStep { get; }   // the Step the next checkpoint this run produces will carry
+
+    public void Dispose();             // releases state the run still holds; published checkpoints survive
+}
+```
+
+### Keeping training state on the device
+
+`TrainStep` is checkpoint-in / checkpoint-out: it hands back a host-readable copy of every
+trainable parameter, all model state and all optimizer state, and takes them all back on the next
+call. On a CPU backend that costs nothing — there is one memory. On a GPU it is the whole training
+state crossing the bus twice per step, so **step time tracks parameter count rather than
+arithmetic**: on one measured pair of transformers, tripling the parameters while slightly
+*reducing* the FLOPs more than doubled the time per step.
+
+`BeginResidentRun` is the loop that does not do that. The state stays where the execution provider
+produced it, and each step feeds the previous step's values straight back:
+
+```csharp
+using var run = rig.BeginResidentRun();
+for (int step = 0; step < 50_000; step++)
+{
+    float loss = run.Step(loader);                        // no transfer
+    if (step % 1_000 == 999)
+        run.StepToCheckpoint(loader).Save($"ckpt-{step}.safetensors");  // this step transfers
+}
+```
+
+Read it as a cost model:
+
+- **`Step` returns the loss and nothing else.** The loss is a scalar, so it always comes back; the
+  state does not.
+- **`StepToCheckpoint` runs the same step and brings the state home**, as an ordinary
+  `TrainingCheckpoint` — save it, resume from it, extract an inference model from it. Use it on the
+  steps you actually want a checkpoint at, including the last step whose state you want to keep.
+- **`Dispose` discards whatever the run still holds.** A checkpoint the run already published stays
+  valid: the run gives up the right to free that state when it hands it to you. So does the initial
+  checkpoint you passed in.
+
+`Train` and every `Fit` overload already drive a resident run internally and take their checkpoint
+on the final step — they return one checkpoint, so they only ever needed one transfer. A manual
+`TrainStep` loop is unchanged and still transfers every step; `BeginResidentRun` is how a manual
+loop opts out.
+
+On a backend whose provider has no memory of its own, a resident run is an ordinary step loop —
+same losses, same checkpoints, to the bit — that additionally releases each step's state as the
+next supersedes it.
+
+> A checkpoint's tensors are readable exactly when they are on the host. Reading one a run is still
+> holding on the device throws and says so; that state reaches you through `StepToCheckpoint`.
 
 ### What construction costs
 
@@ -944,6 +1021,11 @@ Constraints:
 - Do not implement backward passes manually; rely on autodiff.
 - Do not mutate `TrainingCheckpoint` in place across steps; thread the returned
   checkpoint forward.
+- Do not run a long GPU training loop on `TrainStep` when you only want the last checkpoint: every
+  step then pays a full download and upload of parameters and optimizer state. Use
+  `rig.BeginResidentRun()`, or `Fit` / `Train`.
+- Do not expect a resident run's state after disposing it — take it with `StepToCheckpoint` on the
+  last step you care about, before the run goes away.
 - Do not declare optimizer state as `Inline` parameters — state is created inside the body
   via an optimizer-owned `[StateInitializer]`'s `Init` and registered with `StateUpdate`.
 - Do not call `Globals.StateUpdate` on inputs, trainable parameters, or computed tensors;

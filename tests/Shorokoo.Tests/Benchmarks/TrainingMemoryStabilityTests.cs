@@ -141,9 +141,36 @@ public class TrainingMemoryStabilityTests
         Assert.True(NativeRssGrowth(collectEachStep: false) <= NativeRssGrowthBudgetBytes);
     }
 
-    /// <summary>Working-set growth across <see cref="NativeMeasuredSteps"/> steps of a rig whose
-    /// per-step state is 12 MiB, measured after a warm-up so the arena has settled.</summary>
-    private static long NativeRssGrowth(bool collectEachStep)
+    /// <summary>
+    /// A resident run (Shorokoo/Shorokoo#325) supersedes its own state every step and releases what
+    /// it superseded, rather than leaving it to a finalizer that a loop this light on managed
+    /// allocation never provokes. So the same scenario as the gate above, driven through a resident
+    /// run and forcing nothing, must hold the process flat. This is also the only place the release
+    /// can be seen on a host-only backend, where residency itself is a no-op.
+    /// </summary>
+    [Fact]
+    public void TestAResidentRunDoesNotGrowTheProcessWhenNothingForcesACollection()
+        => Assert.True(ResidentRssGrowth() <= NativeRssGrowthBudgetBytes);
+
+    /// <summary>Working-set growth across <see cref="NativeMeasuredSteps"/> resident steps of the
+    /// same 12 MiB-per-step rig, measured after a warm-up and with no forced collection.</summary>
+    private static long ResidentRssGrowth()
+    {
+        var (rig, inputBatch, targetBatch) = WideRig();
+        using var run = rig.BeginResidentRun();
+        for (int i = 0; i < NativeWarmupSteps; i++) run.Step(inputBatch, targetBatch);
+
+        long before = WorkingSetBytes();
+        for (int i = 0; i < NativeMeasuredSteps; i++) run.Step(inputBatch, targetBatch);
+        long after = WorkingSetBytes();
+
+        // Keep the run reachable past the measurement.
+        Assert.Equal(NativeWarmupSteps + NativeMeasuredSteps, run.CurrentStep);
+        return after - before;
+    }
+
+    /// <summary>The 12 MiB-per-step rig both native-growth measurements drive, and its batches.</summary>
+    private static (TrainingRig Rig, TensorDataStruct Input, TensorDataStruct Target) WideRig()
     {
         var graph = MemoryStabilityWideModel.ComputationGraph;
         var exampleInput = TensorData(WideInputShape, new float[4 * 1024]);
@@ -151,9 +178,16 @@ public class TrainingMemoryStabilityTests
             graph, Losses.L2Loss, Optimizers.Adam,
             graph.FromOrderedInputs([exampleInput]),
             new AdamOptimizerHyperparameters { LearningRate = 1e-3f });
+        return (rig,
+            rig.InputDef.FromOrderedData(TensorData(WideInputShape, new float[4 * 1024])),
+            rig.TargetDef.FromOrderedData(TensorData(WideInputShape, new float[4 * 1024])));
+    }
 
-        var inputBatch = rig.InputDef.FromOrderedData(TensorData(WideInputShape, new float[4 * 1024]));
-        var targetBatch = rig.TargetDef.FromOrderedData(TensorData(WideInputShape, new float[4 * 1024]));
+    /// <summary>Working-set growth across <see cref="NativeMeasuredSteps"/> steps of a rig whose
+    /// per-step state is 12 MiB, measured after a warm-up so the arena has settled.</summary>
+    private static long NativeRssGrowth(bool collectEachStep)
+    {
+        var (rig, inputBatch, targetBatch) = WideRig();
 
         var ckpt = rig.CreateInitialCheckpoint();
         for (int i = 0; i < NativeWarmupSteps; i++)

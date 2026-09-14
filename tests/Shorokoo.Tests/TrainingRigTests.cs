@@ -209,6 +209,29 @@ public partial class ParamOrderBModel
     }
 }
 
+/// <summary>One <c>[4, 2]</c> weight applied to the input.</summary>
+[Module]
+public partial class ParamShapeNarrowModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var w = NormalDist.Init(Vector(4L, 2L), Scalar(0f), Scalar(1f));
+        return x.MatMul(w);
+    }
+}
+
+/// <summary><see cref="ParamShapeNarrowModel"/> at a wider hidden size: the same parameter name
+/// and rank, shaped <c>[4, 8]</c>.</summary>
+[Module]
+public partial class ParamShapeWideModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var w = NormalDist.Init(Vector(4L, 8L), Scalar(0f), Scalar(1f));
+        return x.MatMul(w);
+    }
+}
+
 internal static class TrainingRigHelpers
 {
     // A fresh array per call: a static readonly long[] is still mutable, and this suite
@@ -1818,6 +1841,53 @@ public class TrainingRigCheckpointCoverageTests
             Assert.Throws<InvalidOperationException>(() => rigB.LoadCheckpoint(path));
         }
         finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
+    /// <summary>Every checkpoint load path compares a parameter's rank, never its dimensions, so a
+    /// checkpoint whose parameters are shaped differently is accepted: a <c>[4, 2]</c> weight loads
+    /// into a rig whose parameter is <c>[4, 8]</c> on all four routes, and the resulting inference
+    /// model returns a <c>[4, 2]</c> result where the architecture says <c>[4, 8]</c>. `training.md`
+    /// states the opposite ("Loading a checkpoint from a different model or optimizer throws").
+    /// Part of Shorokoo/Shorokoo#322.</summary>
+    [Fact]
+    public void TestACheckpointIsRefusedByAModelWhoseParametersAreShapedDifferently()
+    {
+        NamedModelParam[] sample =
+        [
+            new TensorDataModelParam("x", ModelParamType.InputParam,
+                TensorData([4L, 4L], [1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f, 11f, 12f, 13f, 14f, 15f, 16f])),
+        ];
+        TrainingRig Rig(ComputationGraph model) => TrainingRig.FromScratch(
+            model, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, sample, 0.1f);
+        static long[] ParamDims(TrainingCheckpoint c) =>
+            [.. ((TensorData)c.TrainableParams.Fields[c.TrainableParams.Definition.Fields[0].Name]).Shape.Dims];
+
+        var narrow = Rig(ParamShapeNarrowModel.ComputationGraph);
+        var wide = Rig(ParamShapeWideModel.ComputationGraph);
+        var flat = TempPath("ckpt_narrow") + ".safetensors";
+        var skpt = TempPath("ckpt_narrow") + ".skpt";
+        try
+        {
+            var narrowCkpt = narrow.CreateInitialCheckpoint();
+            narrowCkpt.Save(flat);
+            Persistence.SaveTrainingCheckpointToSkpt(narrowCkpt, skpt);
+
+            Assert.Equal([4L, 2L], ParamDims(narrowCkpt));
+            Assert.Equal([4L, 8L], ParamDims(wide.CreateInitialCheckpoint()));
+            Assert.Equal([4L, 2L], ParamDims(narrow.LoadCheckpoint(flat)));
+            Assert.Equal([4L, 2L], ParamDims(narrow.LoadCheckpointFromSkpt(skpt)));
+
+            Assert.ThrowsAny<Exception>(() => wide.LoadCheckpoint(flat));
+            Assert.ThrowsAny<Exception>(() => wide.LoadCheckpointFromSkpt(skpt));
+            Assert.ThrowsAny<Exception>(() => Persistence.LoadTrainingCheckpoint(
+                flat, wide.TrainableParamStructDef, wide.ModelStateDef, wide.OptimizerStateDef));
+            Assert.ThrowsAny<Exception>(() => wide.AdoptCheckpoint(narrowCkpt));
+        }
+        finally
+        {
+            if (File.Exists(flat)) File.Delete(flat);
+            if (File.Exists(skpt)) File.Delete(skpt);
+        }
     }
 
     [Fact]

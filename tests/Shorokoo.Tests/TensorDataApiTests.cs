@@ -1,3 +1,5 @@
+using System.Runtime.CompilerServices;
+
 namespace Shorokoo.Tests;
 
 /// <summary>
@@ -234,5 +236,30 @@ public class TensorDataApiCoverageTests
         var triple = OnnxEngine.Eval(sum, product, difference);
         Assert.Equal(3, triple.Length);
         Assert.Equal(8f, triple[2].As<float32>().AccessMemory()[0]);
+    }
+
+    [Fact]
+    public void TestTensorDataDoesNotKeepTheCallerSValuesAliveOnceItIsGone()
+    {
+        Assert.False(SourceArrayStillReachable<float>(a => TensorData([4L], a)));
+        Assert.False(SourceArrayStillReachable<byte>(
+            a => TensorData.CreateFromRawBytes(new Shape(1L), DType.Float32, a)));
+    }
+
+    private static bool SourceArrayStillReachable<T>(Func<T[], TensorData> build) where T : unmanaged
+    {
+        var probe = BuildAndDrop(build);
+        GC.Collect(2, GCCollectionMode.Forced, blocking: true);
+        GC.WaitForPendingFinalizers();
+        GC.Collect(2, GCCollectionMode.Forced, blocking: true);
+        return probe.IsAlive;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference BuildAndDrop<T>(Func<T[], TensorData> build) where T : unmanaged
+    {
+        var source = new T[4];
+        Assert.NotNull(build(source));
+        return new WeakReference(source);
     }
 }

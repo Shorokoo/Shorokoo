@@ -127,14 +127,13 @@ public class TrainingMemoryStabilityTests
 
     /// <summary>
     /// The gate above measures the live managed heap with a forced collection on both ends, which
-    /// is blind to the native buffers a checkpoint's tensors own: they are released only by their
-    /// finalizers, the managed wrappers exert almost no GC pressure, so a plain loop never
-    /// triggers a collection and the process grows by parameters + both optimizer moments every
-    /// step until it dies. This half therefore forces nothing and measures RSS. The control loop —
-    /// the same steps with an explicit collection each step — shows the measurement is sound and
-    /// the fault is the missing release, not the scenario. Tracked as Shorokoo/Shorokoo#321.
+    /// is blind to the native buffers a checkpoint's tensors own: they are released only when the
+    /// wrappers in front of them are collected, and the wrappers are far too small to prompt a
+    /// collection on their own. This half therefore forces nothing and measures RSS, so it fails
+    /// if the rig ever stops reclaiming state its own steps have superseded. The control loop —
+    /// the same steps with an explicit collection each step — is what the other one has to match.
     /// </summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#321: a TrainStep loop's checkpoint tensors are released only by finalizers, so the process grows by the whole parameter set every step")]
+    [Fact]
     public void TestATrainingLoopDoesNotGrowTheProcessWhenNothingForcesACollection()
     {
         Assert.True(NativeRssGrowth(collectEachStep: true) <= NativeRssGrowthBudgetBytes);

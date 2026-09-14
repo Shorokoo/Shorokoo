@@ -463,6 +463,15 @@ Neither phase is proportional to your dataset, and neither recurs during the loo
 `TrainStep` pays neither. If you are timing a run, expect the first step to be markedly slower
 than the rest — that is the compile, not a slow optimizer.
 
+Steady-state *memory* is flat, and the rig is what keeps it flat. A checkpoint holds the trainable
+parameters and every optimizer moment in backend buffers behind managed handles of a few dozen bytes
+each, so `cp = rig.TrainStep(cp, in, out);` makes far too little managed garbage to prompt a
+collection on its own; left to the runtime, each step's superseded state would accumulate until the
+process died. The rig therefore reclaims it itself, once a step has superseded more than 32 MiB of
+backend state. A model whose whole checkpoint is a few kilobytes never reaches that and pays
+nothing; a large one reclaims every few steps, which costs nothing measurable against the step
+itself. Collecting in your own loop is unnecessary and changes nothing but the timing.
+
 On a large model the build phase runs for minutes. To watch it stage by stage rather than wait
 blind, see [Watching a long build](#watching-a-long-build).
 

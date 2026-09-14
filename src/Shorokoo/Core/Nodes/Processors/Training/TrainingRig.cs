@@ -2158,6 +2158,82 @@ namespace Shorokoo
             _ => throw new InvalidOperationException($"Unknown scheduler counter input '{counter}'."),
         };
 
+        /// <summary>
+        /// Backend bytes of superseded checkpoint state produced since the last reclamation.
+        /// </summary>
+        private long _supersededStateBytes;
+
+        /// <summary>
+        /// How much superseded state may pile up before <see cref="ReclaimSupersededState"/> does
+        /// something about it. Small enough that a step's state is reclaimed within a few steps of
+        /// being superseded; large enough that a model whose whole checkpoint is a few kilobytes
+        /// never reclaims at all, and pays nothing.
+        /// </summary>
+        private const long SupersededStateBudgetBytes = 32L * 1024 * 1024;
+
+        /// <summary>
+        /// Releases the backend buffers of checkpoints the loop has already moved past, once more
+        /// than <see cref="SupersededStateBudgetBytes"/> of them have accumulated.
+        ///
+        /// <para>A step's checkpoint holds the trainable parameters and every optimizer moment in
+        /// runtime-owned buffers, behind managed wrappers of a few dozen bytes each. In
+        /// <c>cp = rig.TrainStep(cp, …)</c> — the loop the training guide documents — the previous
+        /// checkpoint becomes garbage on every step, but garbage so small that nothing prompts a
+        /// collection: the wrappers are never finalized, their buffers are never released, and the
+        /// process grows by the whole parameter set plus both moments every step until it dies
+        /// (Shorokoo/Shorokoo#321). At 49 M parameters that is ~565 MiB a step, and the run dies
+        /// around step 12 of 48,000.</para>
+        ///
+        /// <para>The rig knows what the runtime cannot infer from the managed heap: the step just
+        /// taken supersedes a known quantity of runtime memory. Collecting on that budget is the
+        /// same thing a caller would otherwise have to write by hand after every step, and costs
+        /// what that did — nothing measurable, since the collection is amortised over several
+        /// steps of work that each take far longer than it does. The alternative,
+        /// <see cref="GC.AddMemoryPressure"/>, is too slack at this ratio: it collects roughly
+        /// every ten steps, and the runtime's arena ratchets upward between collections instead of
+        /// settling.</para>
+        ///
+        /// <para>Nothing here decides who owns a checkpoint's tensors — the caller's checkpoints
+        /// are untouched, and only buffers already unreachable are released. It is the collection
+        /// that is scheduled, not the release (Shorokoo/Shorokoo#180 covers the ownership
+        /// question).</para>
+        /// </summary>
+        private void ReclaimSupersededState(long stepBytes)
+        {
+            if (System.Threading.Interlocked.Add(ref _supersededStateBytes, stepBytes) < SupersededStateBudgetBytes)
+                return;
+            System.Threading.Interlocked.Exchange(ref _supersededStateBytes, 0);
+            GC.Collect(2, GCCollectionMode.Forced, blocking: true);
+            GC.WaitForPendingFinalizers();
+        }
+
+        /// <summary>Backend bytes a checkpoint's tensor fields hold, counting only the dtypes with a
+        /// fixed byte stride — the rest contribute nothing and simply make the budget conservative.</summary>
+        private static long BackendBytes(params IEnumerable<IData>[] structs)
+        {
+            long total = 0;
+            foreach (var s in structs)
+                foreach (var field in s)
+                    total += field switch
+                    {
+                        TensorDataStruct nested => BackendBytes(nested),
+                        TensorData tensor when tensor.Shape.Count > 0 => tensor.Shape.Count * ElementBytes(tensor.DType),
+                        _ => 0,
+                    };
+            return total;
+        }
+
+        /// <summary>The fixed byte stride of one element of <paramref name="dtype"/>, or 0 if it has none.</summary>
+        private static long ElementBytes(DType dtype)
+        {
+            if (dtype == DType.Bool || dtype == DType.Int8 || dtype == DType.UInt8) return 1;
+            if (dtype == DType.Int16 || dtype == DType.UInt16
+                || dtype == DType.Float16 || dtype == DType.BFloat16) return 2;
+            if (dtype == DType.Int32 || dtype == DType.UInt32 || dtype == DType.Float32) return 4;
+            if (dtype == DType.Int64 || dtype == DType.UInt64 || dtype == DType.Float64) return 8;
+            return 0;
+        }
+
         private TrainingCheckpoint RunStep(
             TrainingCheckpoint checkpoint,
             TensorDataStruct? hyperparams,
@@ -2235,6 +2311,8 @@ namespace Shorokoo
                 checkpoint.BatchIndex,
                 this,
                 lossValue);
+
+            ReclaimSupersededState(BackendBytes(updatedParams, updatedModelState, updatedOptimizerState));
 
             return newCheckpoint;
         }

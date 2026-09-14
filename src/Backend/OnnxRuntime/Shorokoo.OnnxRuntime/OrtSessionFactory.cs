@@ -5,6 +5,7 @@ using OrtFloat16 = Microsoft.ML.OnnxRuntime.Float16;
 using OrtBFloat16 = Microsoft.ML.OnnxRuntime.BFloat16;
 using ShoFloat16 = Shorokoo.Core.Inference.Abstractions.Float16;
 using ShoBFloat16 = Shorokoo.Core.Inference.Abstractions.BFloat16;
+using TensorElementType = Microsoft.ML.OnnxRuntime.Tensors.TensorElementType;
 
 namespace Shorokoo.OnnxRuntime;
 
@@ -103,23 +104,17 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
     }
 
     /// <summary>
-    /// Wraps a flat managed array as an ORT tensor of the given shape. Shorokoo's
+    /// Copies a flat managed array into an ORT tensor of the given shape. Shorokoo's
     /// <c>Float16</c>/<c>BFloat16</c> are reinterpreted as ORT's own half types; every
-    /// other unmanaged element type is passed through as-is.
+    /// other unmanaged element type is copied through as-is.
     /// </summary>
     public IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged
     {
         if (typeof(T) == typeof(ShoFloat16))
-        {
-            var src = MemoryMarshal.Cast<T, OrtFloat16>(data.AsSpan()).ToArray();
-            return new OrtTensorValue(OrtValue.CreateTensorValueFromMemory(src, shape));
-        }
+            return Allocate(TensorElementType.Float16, MemoryMarshal.AsBytes(data.AsSpan()), shape);
         if (typeof(T) == typeof(ShoBFloat16))
-        {
-            var src = MemoryMarshal.Cast<T, OrtBFloat16>(data.AsSpan()).ToArray();
-            return new OrtTensorValue(OrtValue.CreateTensorValueFromMemory(src, shape));
-        }
-        return new OrtTensorValue(OrtValue.CreateTensorValueFromMemory(data, shape));
+            return Allocate(TensorElementType.BFloat16, MemoryMarshal.AsBytes(data.AsSpan()), shape);
+        return Allocate(ElementTypeOf<T>(), MemoryMarshal.AsBytes(data.AsSpan()), shape);
     }
 
     /// <summary>
@@ -138,19 +133,14 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
     {
         return elementType switch
         {
-            ShorokooTensorElementType.Float => MakeFromBytes<float>(data, shape),
-            ShorokooTensorElementType.UInt8 => MakeFromBytes<byte>(data, shape),
-            ShorokooTensorElementType.Int8 => MakeFromBytes<sbyte>(data, shape),
-            ShorokooTensorElementType.UInt16 => MakeFromBytes<ushort>(data, shape),
-            ShorokooTensorElementType.Int16 => MakeFromBytes<short>(data, shape),
-            ShorokooTensorElementType.Int32 => MakeFromBytes<int>(data, shape),
-            ShorokooTensorElementType.Int64 => MakeFromBytes<long>(data, shape),
-            ShorokooTensorElementType.Bool => MakeFromBytes<bool>(data, shape),
-            ShorokooTensorElementType.Float16 => MakeFromBytes<OrtFloat16>(data, shape),
-            ShorokooTensorElementType.Double => MakeFromBytes<double>(data, shape),
-            ShorokooTensorElementType.UInt32 => MakeFromBytes<uint>(data, shape),
-            ShorokooTensorElementType.UInt64 => MakeFromBytes<ulong>(data, shape),
-            ShorokooTensorElementType.BFloat16 => MakeFromBytes<OrtBFloat16>(data, shape),
+            ShorokooTensorElementType.Float or ShorokooTensorElementType.UInt8
+                or ShorokooTensorElementType.Int8 or ShorokooTensorElementType.UInt16
+                or ShorokooTensorElementType.Int16 or ShorokooTensorElementType.Int32
+                or ShorokooTensorElementType.Int64 or ShorokooTensorElementType.Bool
+                or ShorokooTensorElementType.Float16 or ShorokooTensorElementType.Double
+                or ShorokooTensorElementType.UInt32 or ShorokooTensorElementType.UInt64
+                or ShorokooTensorElementType.BFloat16
+                => Allocate((TensorElementType)(int)elementType, data.AsSpan(), shape),
             ShorokooTensorElementType.String => throw new NotSupportedException(
                 "String tensors are variable-length and not byte-stride; use CreateStringTensor instead."),
             _ => throw new NotSupportedException(
@@ -180,9 +170,51 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
         return new OrtTensorValue(OrtValue.CreateSequence(inner));
     }
 
-    private static OrtTensorValue MakeFromBytes<T>(byte[] data, long[] shape) where T : unmanaged
+    /// <summary>
+    /// Builds an ORT tensor on a buffer ORT itself allocates and copies <paramref name="bytes"/>
+    /// into it.
+    ///
+    /// <para>The obvious alternative — <c>OrtValue.CreateTensorValueFromMemory</c> over a managed
+    /// array — is why this is a copy. That API pins the array for the value's lifetime and releases
+    /// the pin only from <c>Dispose</c>: the release sits behind the <c>disposing</c> guard, so an
+    /// <c>OrtValue</c> reclaimed by its finalizer never runs it. Nothing in Shorokoo disposes a
+    /// tensor value, so every tensor built that way pinned its bytes for the life of the process —
+    /// a training loop that fed a fresh batch each step leaked one batch per step, permanently, and
+    /// no collection could ever get it back. An ORT-allocated buffer is released by the value's
+    /// finalizer along with the value, so it behaves like every other tensor the runtime hands
+    /// back.</para>
+    /// </summary>
+    private static OrtTensorValue Allocate(TensorElementType elementType, ReadOnlySpan<byte> bytes, long[] shape)
     {
-        var typed = MemoryMarshal.Cast<byte, T>(data.AsSpan()).ToArray();
-        return new OrtTensorValue(OrtValue.CreateTensorValueFromMemory(typed, shape));
+        var value = OrtValue.CreateAllocatedTensorValue(OrtAllocator.DefaultInstance, elementType, shape);
+        var destination = value.GetTensorMutableRawData();
+        if (bytes.Length < destination.Length)
+            throw new ArgumentException(
+                $"Supplied data of {bytes.Length} bytes is less than shape size {destination.Length} bytes.",
+                nameof(bytes));
+        // A caller may hand over a buffer longer than the shape covers — the node-definition tables
+        // do — in which case the surplus was never part of the tensor and the wrapped-memory path
+        // this replaced never read it either.
+        bytes.Slice(0, destination.Length).CopyTo(destination);
+        return new OrtTensorValue(value);
+    }
+
+    /// <summary>The ORT element type of the storage primitive <typeparamref name="T"/>.</summary>
+    private static TensorElementType ElementTypeOf<T>() where T : unmanaged
+    {
+        if (typeof(T) == typeof(float)) return TensorElementType.Float;
+        if (typeof(T) == typeof(double)) return TensorElementType.Double;
+        if (typeof(T) == typeof(bool)) return TensorElementType.Bool;
+        if (typeof(T) == typeof(sbyte)) return TensorElementType.Int8;
+        if (typeof(T) == typeof(byte)) return TensorElementType.UInt8;
+        if (typeof(T) == typeof(short)) return TensorElementType.Int16;
+        if (typeof(T) == typeof(ushort)) return TensorElementType.UInt16;
+        if (typeof(T) == typeof(int)) return TensorElementType.Int32;
+        if (typeof(T) == typeof(uint)) return TensorElementType.UInt32;
+        if (typeof(T) == typeof(long)) return TensorElementType.Int64;
+        if (typeof(T) == typeof(ulong)) return TensorElementType.UInt64;
+        if (typeof(T) == typeof(OrtFloat16)) return TensorElementType.Float16;
+        if (typeof(T) == typeof(OrtBFloat16)) return TensorElementType.BFloat16;
+        throw new NotSupportedException($"CreateTensor does not support element type {typeof(T).Name}.");
     }
 }

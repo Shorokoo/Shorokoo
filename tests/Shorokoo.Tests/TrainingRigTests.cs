@@ -1848,6 +1848,145 @@ public class TrainingRigTrainingLoopCoverageTests
         for (int i = 0; i < twoExpected.Length; i++)
             Assert.True(MathF.Abs(twoExpected[i] - twoOut[i]) < 1e-5f);
     }
+
+    // ---- Resident training runs (Shorokoo/Shorokoo#325) ----
+
+    private static TrainingRig AdamWScalarRig() => TrainingRig.FromScratch(
+        ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
+        [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([4L], [1f, 2f, 3f, 4f]))],
+        new AdamWOptimizerHyperparameters { LearningRate = 0.1f });
+
+    /// <summary>The losses and final checkpoint of <paramref name="steps"/> TrainStep calls.</summary>
+    private static (float[] Losses, TrainingCheckpoint Final) StepLoopRun(TrainingRig rig, int steps)
+    {
+        var (input, target) = (InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f));
+        var ckpt = rig.CreateInitialCheckpoint();
+        var losses = new float[steps];
+        for (int i = 0; i < steps; i++)
+        {
+            ckpt = rig.TrainStep(ckpt, input, target);
+            losses[i] = ckpt.Loss!.Value;
+        }
+        return (losses, ckpt);
+    }
+
+    /// <summary>The same run through a resident run, checkpointing on the last step only.</summary>
+    private static (float[] Losses, TrainingCheckpoint Final) ResidentRun(TrainingRig rig, int steps)
+    {
+        var (input, target) = (InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f));
+        using var run = rig.BeginResidentRun();
+        var losses = new float[steps];
+        TrainingCheckpoint final = null!;
+        for (int i = 0; i < steps; i++)
+        {
+            if (i == steps - 1) losses[i] = (final = run.StepToCheckpoint(input, target)).Loss!.Value;
+            else losses[i] = run.Step(input, target);
+        }
+        return (losses, final);
+    }
+
+    [Fact]
+    public void TestAResidentRunTrainsTheSameTrajectoryAsATrainStepLoop()
+    {
+        var (stepLosses, stepFinal) = StepLoopRun(AdamWScalarRig(), 5);
+        var (residentLosses, residentFinal) = ResidentRun(AdamWScalarRig(), 5);
+
+        Assert.Equal(stepLosses, residentLosses);
+        Assert.Equal(FlattenStruct(stepFinal.TrainableParams), FlattenStruct(residentFinal.TrainableParams));
+        Assert.Equal(FlattenStruct(stepFinal.OptimizerState), FlattenStruct(residentFinal.OptimizerState));
+        Assert.Equal(stepFinal.Step, residentFinal.Step);
+        Assert.Equal(stepFinal.Loss, residentFinal.Loss);
+    }
+
+    [Fact]
+    public void TestAResidentRunOverALoaderMatchesFitAndCarriesTheSameCounters()
+    {
+        const int features = 4;
+        var fitRig = LoaderRig(batchSize: 2, features);
+        var (fitIn, fitTgt) = IndexDataset(fitRig, n: 6, features);
+        var fit = fitRig.Fit(new InMemoryDataLoader(fitIn, fitTgt, batchSize: 2), numEpochs: 1);
+
+        var runRig = LoaderRig(batchSize: 2, features);
+        var (runIn, runTgt) = IndexDataset(runRig, n: 6, features);
+        var loader = new InMemoryDataLoader(runIn, runTgt, batchSize: 2);
+        using var run = runRig.BeginResidentRun();
+        run.Step(loader);
+        run.Step(loader);
+        var final = run.StepToCheckpoint(loader);
+
+        Assert.Equal(fit.FinalCheckpoint.Step, final.Step);
+        Assert.Equal(fit.FinalCheckpoint.Epoch, final.Epoch);
+        Assert.Equal(fit.FinalCheckpoint.BatchIndex, final.BatchIndex);
+        Assert.Equal(FlattenStruct(fit.FinalCheckpoint.TrainableParams), FlattenStruct(final.TrainableParams));
+        Assert.Same(runRig, final.Rig);
+        Assert.Equal(3, run.CurrentStep);
+    }
+
+    [Fact]
+    public void TestAResidentRunFreesOnlyTheStateNobodyElseHolds()
+    {
+        var rig = AdamWScalarRig();
+        var (input, target) = (InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f));
+        var initial = rig.CreateInitialCheckpoint();
+
+        var run = rig.BeginResidentRun(initial);
+        run.Step(input, target);
+        var published = run.StepToCheckpoint(input, target);
+        run.Step(input, target);
+        run.Dispose();
+
+        Assert.NotEmpty(FlattenStruct(initial.TrainableParams));
+        Assert.NotEmpty(FlattenStruct(published.TrainableParams));
+        Assert.Equal(2, published.Step);
+        Assert.Throws<ObjectDisposedException>(() => run.Step(input, target));
+        run.Dispose();
+    }
+
+    [Fact]
+    public void TestAResidentRunAppliesRuntimeHyperparametersAndRefusesThemMissing()
+    {
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([4L], [1f, 2f, 3f, 4f]))],
+            Hyperparameter.Runtime());
+        var (input, target) = (InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f));
+        var hypers = rig.MakeHyperparameters(0.1f);
+
+        var stepped = rig.TrainStep(rig.CreateInitialCheckpoint(), hypers, input, target);
+        using var run = rig.BeginResidentRun();
+        var resident = run.StepToCheckpoint(hypers, input, target);
+
+        Assert.Equal(FlattenStruct(stepped.TrainableParams), FlattenStruct(resident.TrainableParams));
+        Assert.Contains("MakeHyperparameters", Assert.Throws<InvalidOperationException>(
+            () => run.Step(input, target)).Message);
+    }
+
+    // Retention is a backend capability, and this one has no memory but the host's. A provider
+    // wrongly reported as having its own would leave every checkpoint tensor unreadable, so the
+    // discovery must not misfire — and asking to retain must stay a no-op when there is nowhere to
+    // retain to.
+    [Fact]
+    public void TestOnAHostOnlyBackendNothingIsRetainedAndEveryOutputStaysReadable()
+    {
+        var rig = AdamWScalarRig();
+        var (input, target) = (InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f));
+        var ckpt = rig.CreateInitialCheckpoint();
+        var compiled = rig.RuntimeContext.Compile(rig.TrainingStepPureGraph);
+        Assert.False(compiled.HasDeviceMemory);
+
+        IData[] inputs = [ckpt.TrainableParams, ckpt.ModelState, ckpt.OptimizerState, input, target];
+        var outputs = compiled.Execute(
+            ComputeContext.ExpandStructInputs(inputs),
+            [.. Enumerable.Repeat(true, rig.TrainingStepPureGraph.ToInternal().Outputs.Count)]);
+        Assert.All(outputs, o => Assert.True(o.ToTensorData().IsHostResident));
+
+        using var run = rig.BeginResidentRun(ckpt);
+        run.Step(input, target);
+        var stepped = run.StepToCheckpoint(input, target);
+        Assert.All(stepped.TrainableParams.Fields.Values, f => Assert.True(((TensorData)f).IsHostResident));
+        Assert.All(stepped.OptimizerState.Fields.Values, f => Assert.True(((TensorData)f).IsHostResident));
+        Assert.NotEmpty(FlattenStruct(stepped.TrainableParams));
+    }
 }
 
 [Trait("Domain", "Training")]

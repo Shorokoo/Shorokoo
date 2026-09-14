@@ -21,6 +21,19 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
 
     public long[] Shape => Inner.GetTensorTypeAndShape().Shape;
 
+    // ORT names the allocator a value was made by on its memory info, and "Cpu" is the one
+    // that names host memory -- every other name ("Cuda", "Hip", ...) is the provider's own.
+    // Pinned host memory ("CudaPinned") is readable too, but nothing here ever asks for it,
+    // so the narrow test is the safe one: an unrecognized allocator reads as device memory
+    // and is copied rather than dereferenced. A value never moves, so this is asked once.
+    public bool IsHostAccessible => _isHostAccessible ??= !Inner.IsTensor
+        || Inner.GetTensorMemoryInfo().Name == CpuAllocatorName;
+
+    private bool? _isHostAccessible;
+
+    /// <summary>ORT's name for the host allocator, on every execution provider.</summary>
+    internal const string CpuAllocatorName = "Cpu";
+
     public ReadOnlySpan<T> GetTensorDataAsSpan<T>() where T : unmanaged
     {
         if (typeof(T) == typeof(ShoFloat16))

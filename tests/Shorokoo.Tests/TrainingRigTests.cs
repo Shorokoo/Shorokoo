@@ -183,6 +183,32 @@ public partial class ThreeInputMixedModel
     }
 }
 
+/// <summary>Two same-shaped parameters drawn from their own streams, the first scaling the input
+/// and the second offsetting it.</summary>
+[Module]
+public partial class ParamOrderAModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var scale = NormalDist.Init(Vector(1L), Scalar(0f), Scalar(1f));
+        var offset = NormalDist.Init(Vector(1L), Scalar(0f), Scalar(1f));
+        return x * scale.Scalar() + offset.Scalar();
+    }
+}
+
+/// <summary><see cref="ParamOrderAModel"/> with the two initializer calls swapped: the same two
+/// parameter names and shapes, each attached to the other role.</summary>
+[Module]
+public partial class ParamOrderBModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var offset = NormalDist.Init(Vector(1L), Scalar(0f), Scalar(1f));
+        var scale = NormalDist.Init(Vector(1L), Scalar(0f), Scalar(1f));
+        return x * scale.Scalar() + offset.Scalar();
+    }
+}
+
 internal static class TrainingRigHelpers
 {
     // A fresh array per call: a static readonly long[] is still mutable, and this suite
@@ -1767,6 +1793,33 @@ public class TrainingRigTrainingLoopCoverageTests
 [Trait("Purpose", "Coverage")]
 public class TrainingRigCheckpointCoverageTests
 {
+    /// <summary>Parameter names are the initializer class plus a trace-order index, so two models
+    /// that differ only in the order of their initializer calls produce the same names for
+    /// different roles, and a checkpoint crosses from one into the other carrying every tensor to
+    /// the wrong parameter. `training.md` states the opposite ("Loading a checkpoint from a
+    /// different model or optimizer throws"); it does not. Tracked as Shorokoo/Shorokoo#322.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#322: a checkpoint loads into a model whose initializer calls were reordered, silently transposing the parameters")]
+    public void TestACheckpointIsRefusedByAModelWhoseParametersMeanSomethingElse()
+    {
+        NamedModelParam[] sample =
+        [
+            new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([4L], [1f, 2f, 3f, 4f])),
+        ];
+        var rigA = TrainingRig.FromScratch(ParamOrderAModel.ComputationGraph, L2Loss.ComputationGraph,
+            SGDOptimizer.ComputationGraph, sample, 0.1f);
+        var rigB = TrainingRig.FromScratch(ParamOrderBModel.ComputationGraph, L2Loss.ComputationGraph,
+            SGDOptimizer.ComputationGraph, sample, 0.1f);
+
+        var ckpt = rigA.CreateInitialCheckpoint();
+        var path = TempPath("ckpt_reordered") + ".safetensors";
+        try
+        {
+            ckpt.Save(path);
+            Assert.Throws<InvalidOperationException>(() => rigB.LoadCheckpoint(path));
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
     [Fact]
     public void TestCheckpointSaveLoadResumeAndAdamScalarStepCoverage()
     {

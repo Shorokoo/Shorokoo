@@ -303,6 +303,26 @@ public partial class OptimizerOwnedStateModel
     }
 }
 
+/// <summary>Triples another parameter's initialized value.</summary>
+[TrainableParamInitializer]
+public static partial class InitTripleOfParam
+{
+    public static Tensor<float32> Inline(Vector<int64> shape, Tensor<float32> source) => source * Scalar(3.0f);
+}
+
+/// <summary>A weight and a second weight initialized from it: both are ordinary trainable
+/// parameters once materialized, and both take gradient steps of their own.</summary>
+[Module]
+public partial class ScalarMultiplyParamFromParamModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var weight = InitScalarWeight.Init(Vector(1L));
+        var derived = InitTripleOfParam.Init(Vector(1L), weight);
+        return input * weight * derived;
+    }
+}
+
 [Module]
 public partial class ScalarMultiplyModel
 {

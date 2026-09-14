@@ -441,6 +441,13 @@ public class TrainingRigFromScratchCoverageTests
 
         CoverFromScratch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
             SGDMomentumOptimizer.ComputationGraph, [4L], 0.5f, 0.9f);
+        var (pfpRig, pfpCkpt) = CoverFromScratch(ScalarMultiplyParamFromParamModel.ComputationGraph,
+            L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, [4L], 0.01f);
+        Assert.Equal(2, pfpRig.TrainableParamStructDef.Fields.Length);
+        var pfpValues = pfpRig.TrainableParamStructDef.Fields
+            .Select(f => ((TensorData<float32>)pfpCkpt.TrainableParams.Fields[f.Name]).AccessMemory()[0])
+            .Order().ToArray();
+        Assert.Equal([1.0f, 3.0f], pfpValues);
         CoverFromScratch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
             AdamWOptimizer.ComputationGraph, [4L], 0.001f, 0.9f, 0.999f, 1e-8f, 0.01f);
         CoverFromScratch(ScalarMultiplyWithBatchNormModel.ComputationGraph, L2Loss.ComputationGraph,

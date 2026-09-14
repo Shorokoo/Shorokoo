@@ -3989,6 +3989,45 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             return true;
         }
 
+        /// <summary>
+        /// <paramref name="paramInfos"/> ordered so that a parameter whose initializer reads
+        /// another parameter's value comes after that one (Shorokoo/Shorokoo#324). Order is
+        /// otherwise the input order, so a graph with no such dependency is unchanged. A cycle —
+        /// two parameters each initialized from the other — has no order and is refused; every
+        /// other input order is a plain topological sort.
+        /// </summary>
+        private static List<TrainableParamInfo> OrderParamsBySourceDependency(
+            ImmutableArray<TrainableParamInfo> paramInfos)
+        {
+            if (paramInfos.All(x => !x.SourceParamIds.Any())) return [.. paramInfos];
+
+            var byId = new Dictionary<ModelId, TrainableParamInfo>();
+            foreach (var info in paramInfos) byId[info.SpecificModelId] = info;
+
+            var ordered = new List<TrainableParamInfo>(paramInfos.Length);
+            var placed = new HashSet<ModelId>();
+            var onPath = new HashSet<ModelId>();
+
+            void Place(TrainableParamInfo info)
+            {
+                if (placed.Contains(info.SpecificModelId)) return;
+                if (!onPath.Add(info.SpecificModelId))
+                    throw new InvalidOperationException(
+                        "Parameter initialization: the parameter at ModelId "
+                        + $"[{string.Join(", ", info.SpecificModelId.Vals)}] is initialized from a parameter "
+                        + "that is itself initialized (directly or not) from it. A cycle has no value to "
+                        + "start from, so one of the two has to be initialized on its own.");
+                foreach (var sourceId in info.SourceParamIds)
+                    if (byId.TryGetValue(sourceId, out var source)) Place(source);
+                onPath.Remove(info.SpecificModelId);
+                placed.Add(info.SpecificModelId);
+                ordered.Add(info);
+            }
+
+            foreach (var info in paramInfos) Place(info);
+            return ordered;
+        }
+
         private static void NativeConvertTrainableParamIdRef(
             InternalComputationGraph graph,
             ImmutableArray<TrainableParamInfo> liveParamInfos,
@@ -4014,8 +4053,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var newNodes = new List<FastNode>();
 
             // --- MODEL_PARAM nodes (one per live specific model id, deduped by identity) ---
+            // Emitted in dependency order: an initializer handed another parameter's value keeps
+            // that as an EDGE to the source MODEL_PARAM (Shorokoo/Shorokoo#324), and these nodes go
+            // at the front of the graph, so a source has to be laid down before its dependent.
             var liveParamKeyByModelId = new Dictionary<ModelId, FastTensorKey>();
-            foreach (var paramInfo in liveParamInfos)
+            foreach (var paramInfo in OrderParamsBySourceDependency(liveParamInfos))
             {
                 var modelId = paramInfo.SpecificModelId;
                 var dtype = paramInfo.TargetFn.Outputs[0].DType;
@@ -4023,10 +4065,25 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var idTemplateString = idTemplateInfos.GetSpecificIdentifierTemplate(modelId).ToString();
 
                 var initializerParamKeys = new List<FastTensorKey?>();
-                foreach (var td in paramInfo.TrainableParamInputParamValues)
+                for (int i = 0; i < paramInfo.TrainableParamInputParamValues.Length; i++)
                 {
+                    var sourceId = paramInfo.TrainableParamInputSourceIds.IsDefault
+                        ? null : paramInfo.TrainableParamInputSourceIds[i];
+                    if (sourceId is not null)
+                    {
+                        if (!liveParamKeyByModelId.TryGetValue(sourceId.Value, out var sourceKey))
+                            throw new InvalidOperationException(
+                                $"Parameter initializer '{paramInfo.TargetFn.DefaultName}' of the parameter at "
+                                + $"ModelId [{string.Join(", ", modelId.Vals)}] is passed the value of the "
+                                + $"parameter at ModelId [{string.Join(", ", sourceId.Value.Vals)}], which this "
+                                + "architecture does not carry — it was pruned as unreachable, or it is created "
+                                + "inside a branch this one is not.");
+                        initializerParamKeys.Add(sourceKey);
+                        continue;
+                    }
                     var constKey = FastNodeKey.New();
-                    newNodes.Add(CreateConstantTensorDataNode(constKey, td));
+                    newNodes.Add(CreateConstantTensorDataNode(
+                        constKey, paramInfo.TrainableParamInputParamValues[i]!));
                     initializerParamKeys.Add(new FastTensorKey(constKey, 0));
                 }
 
@@ -4585,6 +4642,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // Per resolved model id, whether the winning node is a bare reference rather than the
             // parameter's own definition (see the preference rule below).
             var isReferenceByModelId = new Dictionary<ModelId, bool>();
+            // An initializer input that IS another parameter never folds to a constant — the
+            // parameter has no value until materialization runs. Such an input is kept as a
+            // dependency on that parameter instead (Shorokoo/Shorokoo#324).
+            var paramIdByOutputKey = StaticParamIdByOutputKey(graph, store);
 
             foreach (var node in graph.Nodes)
             {
@@ -4602,8 +4663,16 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
                 // Gather all iterations for each initializer param (inputs[2+]).
                 var initParamIterations = new List<List<RuntimeTensor?>>();
+                // The parameter each initializer input names, where it names one. The SHAPE input
+                // (the first, at inputs[2]) is excluded: the shape has to be known before anything
+                // is initialized, so it must fold to a constant like every other id-determining
+                // value.
+                var initParamSources = new List<ModelId?>();
                 for (int i = 2; i < inputs.Count; i++)
                 {
+                    initParamSources.Add(
+                        i > 2 && inputs[i] is FastTensorKey sk && paramIdByOutputKey.TryGetValue(sk, out var srcId)
+                            ? srcId : null);
                     if (inputs[i] is null || !store.TryGetValue(inputs[i]!.Value, out var paramRaw))
                     {
                         initParamIterations.Add([]);
@@ -4618,10 +4687,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     if (filteredId.Length == 0) continue;
                     var modelId = ModelId.FromLongVals(filteredId);
 
-                    var paramValues = ImmutableArray.CreateBuilder<TensorData>(initParamIterations.Count);
+                    var paramValues = ImmutableArray.CreateBuilder<TensorData?>(initParamIterations.Count);
                     bool allAvailable = true;
-                    foreach (var paramList in initParamIterations)
+                    for (int p = 0; p < initParamIterations.Count; p++)
                     {
+                        if (initParamSources[p] is not null) { paramValues.Add(null); continue; }
+                        var paramList = initParamIterations[p];
                         // A param with Count==1 is a global constant (outside any loop); reuse it for
                         // every iteration rather than treating missing indices as unavailable.
                         RuntimeTensor? paramRt = iterIdx < paramList.Count ? paramList[iterIdx]
@@ -4659,6 +4730,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     {
                         SpecificModelId = modelId,
                         TrainableParamInputParamValues = paramValues.ToImmutable(),
+                        TrainableParamInputSourceIds = [.. initParamSources],
                         TargetFn = fn,
                     };
                 }
@@ -4676,6 +4748,40 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         "A bare reference cannot stand in for the definition.");
 
             return [.. result.Values];
+        }
+
+        /// <summary>
+        /// Output key → the parameter it carries, for every <c>MODEL_PARAM_ID_REF</c> site that
+        /// names exactly one. This is what lets one parameter's initializer be handed another
+        /// parameter's value: the input never folds to a constant, so it is recorded as a
+        /// dependency on that parameter instead (Shorokoo/Shorokoo#324). Only a site that realizes
+        /// a SINGLE id qualifies — an in-loop site stands for one parameter per iteration, which no
+        /// single edge can name.
+        /// </summary>
+        private static Dictionary<FastTensorKey, ModelId> StaticParamIdByOutputKey(
+            InternalComputationGraph graph, Dictionary<FastTensorKey, IRuntimeTensor> store)
+        {
+            var result = new Dictionary<FastTensorKey, ModelId>();
+            foreach (var node in graph.Nodes)
+            {
+                if (node.OpCode != InternalOpCodes.MODEL_PARAM_ID_REF) continue;
+                if (node.Outputs.Count == 0 || node.Outputs[0] is not FastTensorKey outKey) continue;
+                if (node.Inputs.Count == 0 || node.Inputs[0] is null) continue;
+                if (!store.TryGetValue(node.Inputs[0]!.Value, out var raw)) continue;
+                if (raw is not RuntimeTensor rt) continue;
+
+                ModelId? single = null;
+                bool many = false;
+                foreach (var (_, filteredId) in EnumerateIterationIntVectors(rt))
+                {
+                    if (filteredId.Length == 0) continue;
+                    var id = ModelId.FromLongVals(filteredId);
+                    if (single is null) single = id;
+                    else if (!single.Value.Equals(id)) { many = true; break; }
+                }
+                if (!many && single is not null) result[outKey] = single.Value;
+            }
+            return result;
         }
 
         private static List<RuntimeTensor?> CollectAllIterations(RuntimeTensor? rt)

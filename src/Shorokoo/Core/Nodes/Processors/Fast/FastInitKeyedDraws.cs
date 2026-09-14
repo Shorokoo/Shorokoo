@@ -32,7 +32,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// <para>The substitution runs on the initializer's <b>flattened</b> body
     /// (<see cref="Function.GetFastFlattenedGraph"/>), so a draw factored into a called
     /// function or sub-module is inlined to the top level and keyed like an inline draw —
-    /// each inlined call site becomes its own node and its own sub-stream ordinal. A draw
+    /// each inlined call site becomes its own node and its own sub-stream ordinal. That covers
+    /// a nested <c>Init</c> call too: inside an initializer body such a call is emitted as an
+    /// ordinary invoke of the called initializer's body rather than as a second parameter
+    /// definition, so the shipped parameterized initializers are reachable from a custom one
+    /// and draw on the parameter being created (Shorokoo/Shorokoo#323). A draw
     /// inside a call that survives flattening cannot be keyed and is rejected loudly
     /// rather than left to lower through the generic ONNX fallback into unkeyed,
     /// non-reproducible backend randomness.</para>
@@ -95,8 +99,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     $"Initializer '{fn.FriendlyName}' of parameter '{streamName}' draws randomness " +
                     $"inside the called function '{nested.FriendlyName}', which could not be inlined. " +
                     "The nested draw keeps no parameter key and would fall back to unkeyed, " +
-                    "non-reproducible backend randomness. Move the random draw " +
-                    "(RandomUniform/RandomNormal/RandomBits) directly into the initializer's body.");
+                    "non-reproducible backend randomness. Make the draw the initializer's own: " +
+                    "call another initializer's Init (whose body IS inlined and keyed on this " +
+                    "parameter), or move the draw (RandomUniform/RandomNormal/RandomBits) directly " +
+                    "into the initializer's body.");
 
 
             var newNodes = new List<FastNode>(body.Nodes.Count);

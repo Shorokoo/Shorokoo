@@ -1359,6 +1359,41 @@ namespace Shorokoo.Tests.Modules
             => input * InitCallingAParamOwningModuleFromASequence.Init(Vector(2L));
     }
 
+    /// <summary>An initializer written as a call of another initializer's body — the shape a
+    /// wrapper over one of the shipped parameterized initializers takes.</summary>
+    [TrainableParamInitializer]
+    public static partial class InitCallingAnotherInitializer
+    {
+        public static Tensor<float32> Inline(Vector<int64> shape) => InitTwos.Init(shape);
+    }
+
+    /// <summary>Drives InitCallingAnotherInitializer.</summary>
+    [Module]
+    public partial class UsesInitCallingAnotherInitializer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => input * InitCallingAnotherInitializer.Init(input.ShapeTensor());
+    }
+
+    /// <summary>An initializer handed another parameter's initialized value.</summary>
+    [TrainableParamInitializer]
+    public static partial class InitDoublingAnotherParam
+    {
+        public static Tensor<float32> Inline(Vector<int64> shape, Tensor<float32> source)
+            => source * Scalar(2.0f);
+    }
+
+    /// <summary>Drives InitDoublingAnotherParam: a parameter at 1, and beside it its double.</summary>
+    [Module]
+    public partial class UsesInitFromAnotherParam
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+        {
+            var source = InitSimple.Init(input.ShapeTensor());
+            return input * InitDoublingAnotherParam.Init(input.ShapeTensor(), source);
+        }
+    }
+
     /// <summary>An initializer whose body reads a parameter through IModel.GetTrainableParam — a
     /// bare reference, which an emitted body resolves to the definition beside it.</summary>
     [TrainableParamInitializer]

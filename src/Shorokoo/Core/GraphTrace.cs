@@ -42,8 +42,11 @@ namespace Shorokoo.Core
         }
 
         /// <summary>Enters the trace for one graph-builder body trace; the builder harvests
-        /// <see cref="StateUpdates"/> and <see cref="Pins"/> after the body returns.</summary>
-        internal static Scope EnterModuleBuild() => new Scope(TraceContext.Enter(isModuleBuild: true));
+        /// <see cref="StateUpdates"/> and <see cref="Pins"/> after the body returns.
+        /// <paramref name="isParamInitializerBody"/> marks the body as a parameter
+        /// initializer's (see <see cref="IsParamInitializerBodyTracing"/>).</summary>
+        internal static Scope EnterModuleBuild(bool isParamInitializerBody = false)
+            => new Scope(TraceContext.Enter(isModuleBuild: true, isParamInitializerBody));
 
         /// <summary>Enters an isolated trace — same loop tracking as any trace, but nothing
         /// records into it and nothing harvests it. Shields internal node rebuilds from an
@@ -65,6 +68,18 @@ namespace Shorokoo.Core
         /// build — for hooks that fire on every trace kind (loop termination) but must only
         /// touch module-build state such as <see cref="StateUpdates"/>.</summary>
         internal static bool IsModuleBuildTracing => TraceContext.Current?.IsModuleBuild == true;
+
+        /// <summary>
+        /// Whether the body being traced on the current thread is a parameter initializer's
+        /// (<c>[TrainableParamInitializer]</c> / <c>[StateInitializer]</c>). An initializer body
+        /// computes ONE parameter's value and owns no parameter space of its own, so a nested
+        /// <c>Init</c> call in it is an ordinary call of that initializer's body — a value — not
+        /// the definition of a second parameter (Shorokoo/Shorokoo#323). Each body build enters
+        /// its own trace, so a [Module] body first built from inside an initializer body still
+        /// defines its own parameters.
+        /// </summary>
+        internal static bool IsParamInitializerBodyTracing
+            => TraceContext.Current?.IsParamInitializerBody == true;
 
         /// <summary>
         /// The loop-tracing state of the current trace. Requires a trace in progress on the
@@ -145,14 +160,22 @@ namespace Shorokoo.Core
     /// </summary>
     internal sealed class TraceContext : AmbientScope<TraceContext>
     {
-        private TraceContext(bool isModuleBuild) => IsModuleBuild = isModuleBuild;
+        private TraceContext(bool isModuleBuild, bool isParamInitializerBody)
+        {
+            IsModuleBuild = isModuleBuild;
+            IsParamInitializerBody = isParamInitializerBody;
+        }
 
-        internal static TraceContext Enter(bool isModuleBuild)
-            => EnterScope(new TraceContext(isModuleBuild));
+        internal static TraceContext Enter(bool isModuleBuild, bool isParamInitializerBody = false)
+            => EnterScope(new TraceContext(isModuleBuild, isParamInitializerBody));
 
         /// <summary>Whether this trace is a graph-builder body trace, whose entry point
         /// harvests the registries at build exit (as opposed to an isolated trace).</summary>
         internal bool IsModuleBuild { get; }
+
+        /// <summary>Whether the body this trace is building is a parameter initializer's
+        /// (see <see cref="GraphTrace.IsParamInitializerBodyTracing"/>).</summary>
+        internal bool IsParamInitializerBody { get; }
 
         /// <summary>The loop-tracing state of this trace (see <see cref="LooperStack"/>).</summary>
         internal LooperStack Loopers { get; } = new LooperStack();

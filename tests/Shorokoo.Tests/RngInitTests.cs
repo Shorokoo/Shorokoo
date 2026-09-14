@@ -781,3 +781,159 @@ public class RngNormalFrozenDerivationTests
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Initializers written out of other initializers, and out of other parameters.
+// ---------------------------------------------------------------------------
+
+/// <summary>A custom initializer written as a thin wrapper over a shipped parameterized one —
+/// "one fixed distribution, reused for every parameter in the model".</summary>
+[TrainableParamInitializer]
+public static partial class RngInitWrapsNormalDist
+{
+    public static Tensor<float32> Inline(Vector<int64> shape)
+        => NormalDist.Init(shape, Scalar(0f), Scalar(0.02f));
+}
+
+[Module]
+public partial class RngInitWrapsNormalDistLayer
+{
+    public static Tensor<float32> Inline(Tensor<float32> x) => x * RngInitWrapsNormalDist.Init(x.ShapeTensor());
+}
+
+/// <summary>The wrapper's body written out by hand — NormalDist's own composition, which the
+/// wrapper must reproduce value for value.</summary>
+[TrainableParamInitializer]
+public static partial class RngInitHandWrittenNormalDist
+{
+    public static Tensor<float32> Inline(Vector<int64> shape)
+        => RandomNormal(shape, mean: 0.0f, scale: 1.0f) * Scalar(0.02f) + Scalar(0f);
+}
+
+[Module]
+public partial class RngInitHandWrittenNormalDistLayer
+{
+    public static Tensor<float32> Inline(Tensor<float32> x) => x * RngInitHandWrittenNormalDist.Init(x.ShapeTensor());
+}
+
+/// <summary>Two draws in one initializer, one inline and one reached through a nested Init call.
+/// Each gets its own sub-stream, so the difference is nowhere zero.</summary>
+[TrainableParamInitializer]
+public static partial class RngInitInlineMinusNestedDraw
+{
+    public static Tensor<float32> Inline(Vector<int64> shape)
+        => RandomUniform(shape, 0f, 1f) - Uniform.Init(shape);
+}
+
+[Module]
+public partial class RngInitInlineMinusNestedDrawLayer
+{
+    public static Tensor<float32> Inline(Tensor<float32> x) => x * RngInitInlineMinusNestedDraw.Init(x.ShapeTensor());
+}
+
+/// <summary>Doubles another parameter's initialized value.</summary>
+[TrainableParamInitializer]
+public static partial class RngInitDoubleOfParam
+{
+    public static Tensor<float32> Inline(Vector<int64> shape, Tensor<float32> source) => source * Scalar(2.0f);
+}
+
+/// <summary>The issue's own rule: a table that starts as one parameter times another.</summary>
+[TrainableParamInitializer]
+public static partial class RngInitProductOfParams
+{
+    public static Tensor<float32> Inline(Vector<int64> shape, Tensor<float32> a, Tensor<float32> b) => a.MatMul(b);
+}
+
+/// <summary>A drawn source, its double, and the double's double — a three-deep chain whose two
+/// derived parameters must both read the value the model actually starts from.</summary>
+[Module]
+public partial class RngInitParamFromParamChain
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var src = NormalDist.Init([Scalar(2L), Scalar(2L)], Scalar(0f), Scalar(1f));
+        var twice = RngInitDoubleOfParam.Init([Scalar(2L), Scalar(2L)], src);
+        var fourTimes = RngInitDoubleOfParam.Init([Scalar(2L), Scalar(2L)], twice);
+        return x.MatMul(src) + x.MatMul(twice) + x.MatMul(fourTimes);
+    }
+}
+
+/// <summary>An embedding, a value matrix, and the bank the two multiply out to.</summary>
+[Module]
+public partial class RngInitBankFromEmbedding
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var emb = NormalDist.Init([Scalar(2L), Scalar(2L)], Scalar(0f), Scalar(0.02f));
+        var wv = NormalDist.Init([Scalar(2L), Scalar(2L)], Scalar(0f), Scalar(0.02f));
+        var bank = RngInitProductOfParams.Init([Scalar(2L), Scalar(2L)], emb, wv);
+        return x.MatMul(emb) + x.MatMul(wv) + x.MatMul(bank);
+    }
+}
+
+/// <summary>
+/// The two ways an initializer is written out of something other than raw <c>Globals</c> draws:
+/// a nested <c>Init</c> call, which is that initializer's body inlined and keyed on the parameter
+/// being created (Shorokoo/Shorokoo#323); and another parameter passed in, which stays a graph edge
+/// so the dependent reads the value the model actually starts from (Shorokoo/Shorokoo#324).
+/// </summary>
+[Trait("Domain", "Core")]
+[Trait("Purpose", "Coverage")]
+public class RngInitComposedInitializerTests
+{
+    private static Dictionary<string, float[]> Init(ComputationGraph g, ulong seed = 7)
+    {
+        var sample = TensorData([2L, 2L], 1f, 1f, 1f, 1f);
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([sample]));
+        return arch.InitializeTrainableParams(rngConfig: new RngConfig { MasterSeed = seed })
+            .ModelParams
+            .Where(p => p.Type == DType.Float32)
+            .ToDictionary(p => p.ParamName, p => p.ToTensorData().As<float32>().AccessMemory().ToArray());
+    }
+
+    private static float[] Single(ComputationGraph g, ulong seed = 7) => Init(g, seed).Values.Single();
+
+    private static float[] Named(Dictionary<string, float[]> ps, string initializer)
+        => ps.Single(p => p.Key.Contains(initializer)).Value;
+
+    [Fact]
+    public void TestANestedInitCallIsTheCalledInitializersBodyKeyedOnTheParameterBeingCreated()
+    {
+        var wrapped = Single(RngInitWrapsNormalDistLayer.ComputationGraph);
+        Assert.Equal(4, wrapped.Length);
+        Assert.Equal(Single(RngInitHandWrittenNormalDistLayer.ComputationGraph), wrapped);
+        Assert.Equal(wrapped, Single(RngInitWrapsNormalDistLayer.ComputationGraph));
+        Assert.False(wrapped.SequenceEqual(Single(RngInitWrapsNormalDistLayer.ComputationGraph, seed: 8)));
+        Assert.All(Single(RngInitInlineMinusNestedDrawLayer.ComputationGraph), x => Assert.NotEqual(0f, x));
+    }
+
+    [Fact]
+    public void TestAParameterInitializedFromAnotherReadsTheValueTheModelStartsFrom()
+    {
+        var chain = Init(RngInitParamFromParamChain.ComputationGraph);
+        var src = Named(chain, "NormalDist");
+        var derived = chain.Where(p => p.Key.Contains("RngInitDoubleOfParam"))
+            .OrderBy(p => p.Key, StringComparer.Ordinal).Select(p => p.Value).ToArray();
+        Assert.Equal(2, derived.Length);
+        Assert.Equal([.. src.Select(v => v * 2f)], derived[0]);
+        Assert.Equal([.. src.Select(v => v * 4f)], derived[1]);
+    }
+
+    [Fact]
+    public void TestABankInitializesToTheProductOfTheTwoParametersItNames()
+    {
+        var ps = Init(RngInitBankFromEmbedding.ComputationGraph);
+        var drawn = ps.Where(p => p.Key.Contains("NormalDist"))
+            .OrderBy(p => p.Key, StringComparer.Ordinal).Select(p => p.Value).ToArray();
+        var (emb, wv) = (drawn[0], drawn[1]);
+        float[] expected =
+        [
+            emb[0] * wv[0] + emb[1] * wv[2], emb[0] * wv[1] + emb[1] * wv[3],
+            emb[2] * wv[0] + emb[3] * wv[2], emb[2] * wv[1] + emb[3] * wv[3],
+        ];
+        var bank = Named(ps, "RngInitProductOfParams");
+        for (int i = 0; i < 4; i++) Assert.Equal(expected[i], bank[i], 1e-7f);
+        Assert.False(bank.SequenceEqual(emb));
+    }
+}

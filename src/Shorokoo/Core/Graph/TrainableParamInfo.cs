@@ -21,7 +21,29 @@ namespace Shorokoo.Core.Graph
     /// </summary>
     internal struct TrainableParamInfo
     {
-        public readonly ImmutableArray<TensorData> TrainableParamInputParamValues { get; init; }
+        /// <summary>
+        /// Per initializer input, the constant value the call site folded to, or <c>null</c> where
+        /// <see cref="TrainableParamInputSourceIds"/> names another parameter instead.
+        /// </summary>
+        public readonly ImmutableArray<TensorData?> TrainableParamInputParamValues { get; init; }
+
+        /// <summary>
+        /// Per initializer input, the parameter whose initialized value fills it, or <c>null</c>
+        /// where <see cref="TrainableParamInputParamValues"/> carries a folded constant. An
+        /// initializer input that IS another parameter stays a graph edge all the way to
+        /// materialization, which runs the initializers in dependency order so the source's
+        /// own initialized value — the one the model starts from, not a redraw — is what the
+        /// dependent reads (Shorokoo/Shorokoo#324). Default (never set) means every input is a
+        /// constant.
+        /// </summary>
+        public readonly ImmutableArray<ModelId?> TrainableParamInputSourceIds { get; init; }
+
+        /// <summary>The parameters whose initialized values this one's initializer reads.</summary>
+        public IEnumerable<ModelId> SourceParamIds
+            => TrainableParamInputSourceIds.IsDefault
+                ? Enumerable.Empty<ModelId>()
+                : TrainableParamInputSourceIds.Where(x => x is not null).Select(x => x!.Value);
+
         public readonly ModelId SpecificModelId { get; init; }
         public readonly Function TargetFn { get; init; }
         /// <summary>
@@ -48,7 +70,10 @@ namespace Shorokoo.Core.Graph
                         + "take the parameter's shape as its first Inline parameter "
                         + "(Inline(Vector<int64> shape, ...)) or declare the scalar shape by returning "
                         + "Scalar<T>; a shape baked into the body of a no-input Inline is neither.");
-                var shapeTensorData = TrainableParamInputParamValues.First();
+                // Never null: the shape input is the one initializer input the extraction keeps
+                // required-constant, since a parameter's shape has to be known before anything is
+                // initialized (see TrainableParamInputSourceIds).
+                var shapeTensorData = TrainableParamInputParamValues.First().AssertNotNull();
                 var shapeLongs = shapeTensorData.As<int64>().AccessMemory().ToArray();
                 return new Shape(shapeLongs);
             }

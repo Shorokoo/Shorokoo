@@ -124,6 +124,53 @@ of two places: the shape vector it takes as its **first** `Inline` parameter, or
 one — its `Scalar<T>` return type. A shape baked into the body of a no-argument `Inline` is
 neither, and is rejected by name when the model is lowered.
 
+The body is an ordinary graph body; two things it can reach for are worth spelling out.
+
+**It can call the shipped initializers.** An `Init(...)` call inside an initializer body is that
+initializer's body evaluated as a value — not the definition of a second parameter, which an
+initializer has no room for. So the parameterized set composes, and the obvious way to say "one
+fixed distribution, reused for every parameter in the model" is to wrap one:
+
+```csharp
+[TrainableParamInitializer]
+public static partial class NormalDist02
+{
+    public static Tensor<float32> Inline(Vector<int64> shape)
+        => NormalDist.Init(shape, Scalar(0f), Scalar(0.02f));
+}
+```
+
+The wrapper draws what `NormalDist` draws — the same composition, value for value — keyed on the
+parameter *being created*. Each draw a body makes gets its own sub-stream of that parameter's
+stream, its own and a called initializer's alike, so two draws never repeat each other. What is
+still refused is a draw inside a **`[Module]`** the body calls that the lowering cannot inline:
+that module owns a parameter space of its own, so the draw belongs to a parameter there and
+carries no key here. The error names the module.
+
+**It can start from another parameter's value.** An initializer input typed `Tensor<T>` may be
+another trainable parameter, passed at the call site. It is not folded to a constant: the edge
+survives to materialization, which runs the initializers in dependency order, so what arrives is
+the value the model actually starts from. Re-drawing the source inside the dependent's own body
+would not do — it draws from the dependent's stream, giving the right distribution but a different
+matrix.
+
+```csharp
+[TrainableParamInitializer]
+public static partial class ProductOf
+{
+    public static Tensor<float32> Inline(Vector<int64> shape, Tensor<float32> a, Tensor<float32> b)
+        => a.MatMul(b);
+}
+
+var emb  = NormalDist02.Init([vocab, d]);
+var wv   = NormalDist02.Init([d, d]);
+var bank = ProductOf.Init([vocab, d], emb, wv);   // starts as emb · wv, for the emb the model has
+```
+
+The **shape** input is the one that must still fold to a constant at the call site: a parameter's
+shape is fixed when the architecture is concretized, before anything has a value. Two parameters
+each initialized from the other are refused — a cycle has no value to start from.
+
 ## Layers (`Shorokoo.Modules.Layers`)
 
 Layer hyperparameters are `[Hyper]` graph scalars; pass them as `Scalar(...)`

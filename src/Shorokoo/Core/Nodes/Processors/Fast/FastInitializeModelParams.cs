@@ -250,10 +250,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// output is <paramref name="outputKey"/>, swept down to the nodes that actually feed it.
         ///
         /// <para>Initialization runs ONE SESSION PER PARAMETER rather than one session for the
-        /// whole model. The parameters are mutually independent — each keyed draw hangs off its
-        /// own stream key and reads nothing another initializer produces — so slicing changes no
-        /// value; what it changes is the size of the graph any one session has to build. That
-        /// matters because the backend's session build is SUPERLINEAR in graph size. Measured on
+        /// whole model. Slicing changes no value: each keyed draw hangs off its own stream key,
+        /// and the one way one parameter's initializer reads another's — being handed that
+        /// parameter (Shorokoo/Shorokoo#324) — leaves the source's whole initializer in the slice,
+        /// where it recomputes the same deterministic value. What slicing changes is the size of
+        /// the graph any one session has to build (a shared source is built once per dependent,
+        /// not once). That matters because the backend's session build is SUPERLINEAR in graph
+        /// size. Measured on
         /// an N-layer stack of [384, 384] normal draws, with constant folding already off (see
         /// <c>ComputeContext.IsFullyConstant</c>, the other half of this fix), building the
         /// whole-model init graph cost 0.23 s at N=1, 0.88 s at N=2, 3.4 s at N=4, 13.4 s at N=8

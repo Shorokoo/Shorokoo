@@ -23,8 +23,8 @@ Related: [core-types.md](core-types.md) · [defining-models.md](defining-models.
   code. Only one backend is live per process. How it is discovered, and how to
   override the choice: [Backend selection](#backend-selection).
 - On a GPU backend the CUDA arena is configured through `DeviceMemory`, which also reports
-  how much of the card is gone. Its default extend strategy is deliberately not ORT's, so
-  that the arena cannot double itself onto the whole device:
+  how much of the card is gone. Its arena strategy is chosen per session rather than left at
+  ORT's default, so that a training loop does not end up holding twice what it uses:
   [Device memory](#device-memory-gpu-backends).
 
 ## Workflow: one-shot evaluation
@@ -431,51 +431,59 @@ If no backend is found, the first inference call throws `InvalidOperationExcepti
 
 ### Device memory (GPU backends)
 
-ONNX Runtime allocates device memory out of a BFC arena that extends in blocks and never gives them
-back. Under ORT's own extend strategy those blocks *double*: each extension is at least as large as
-everything the arena already holds, and when a doubled block does not fit, ORT clips it to all the
-device memory that is left rather than refusing it. So a run that needs 12.9 GiB reaches 24.6 GiB of
-a 24.6 GiB card in a single extension, settles at roughly **1.8x** what its steps actually use, and
-trains perfectly happily there — with nothing left for anything else on the machine.
+ONNX Runtime allocates device memory out of a BFC arena that extends in blocks and never gives
+them back. How big each new block is comes from the *extend strategy*, and the two ORT offers suit
+opposite situations:
 
-**Shorokoo therefore defaults to `SameAsRequested`, not to ORT's `NextPowerOfTwo`.** The arena then
-extends by what was asked for, so it tracks the run's real high-water mark instead of doubling past
-it, and no single extension can swallow the rest of the card. The cost is more device allocations —
-but only while the arena is still growing: a run reaches its steady state and stops extending under
-either strategy, so what it buys back is the whole of the 0.8x.
+- **`NextPowerOfTwo`** (ORT's default) makes each extension at least as large as everything the
+  arena already holds. The regions are big, splittable and get reused, which is what an
+  unpredictable series of allocation sizes needs — but once a run's sizes have settled, the
+  doubling is pure overshoot, and it is why a long training run ends up holding far more of the
+  card than its steps use.
+- **`SameAsRequested`** extends by exactly what was asked for, so a settled run's arena tracks it.
+  The catch is that an exactly-sized region cannot serve a later, larger request: a session whose
+  input shapes keep growing strands every region it outgrows and can need *more* memory this way.
 
-`DeviceMemory` is where that default lives, along with the rest of the device-memory surface. It is
-process-wide and static:
+Measured on the CPU arena — same allocator, same strategies — over four chained matmuls:
+
+| workload | `SameAsRequested` | `NextPowerOfTwo` |
+|---|---|---|
+| ten runs at one shape | **11 MiB** | 16 MiB |
+| four runs, each shape larger | 23 MiB | **15 MiB** |
+
+**So Shorokoo does not pick one. `ArenaExtend` defaults to `Auto`, which chooses per session:** a
+training step gets `SameAsRequested`, everything else keeps ORT's `NextPowerOfTwo`. A training
+step is the settled case by construction — the rig compiles one step per input shape and then
+feeds that shape for the life of the run — while an inference session may be handed a larger shape
+on any call. Setting `ArenaExtend` to either concrete strategy overrides the choice for every
+session in the process.
 
 ```csharp
 using Shorokoo.Core.Inference.Abstractions;
 
 DeviceMemory.LimitBytes = 16L * 1024 * 1024 * 1024;              // cap the arena at 16 GiB
 DeviceMemory.ShrinkArenaAfterRun = true;                          // hand unused blocks back each step
-DeviceMemory.ArenaExtend = ArenaExtendStrategy.NextPowerOfTwo;    // ORT's doubling, back again
+DeviceMemory.ArenaExtend = ArenaExtendStrategy.SameAsRequested;   // override the per-session choice
 ```
 
 | setting | ORT option | default | read |
 |---|---|---|---|
 | `LimitBytes` | `gpu_mem_limit` | `null` — no cap | when a session is created |
-| `ArenaExtend` | `arena_extend_strategy` | `SameAsRequested` — **not** ORT's default | when a session is created |
+| `ArenaExtend` | `arena_extend_strategy` | `Auto` — per session, as above | when a session is created |
 | `ShrinkArenaAfterRun` | `memory.enable_memory_arena_shrinkage` | `false` | on every run |
 
-The two that are not defaulted are the two that cost something on every step rather than only while
-the arena grows. `ShrinkArenaAfterRun` pays a synchronizing device allocation per step to re-take
-what it handed back; turn it on when the card is shared with something else that needs the room
-between steps. `LimitBytes` is a budget, not a hint: a step that needs more than it fails with ORT's
+The other two are off by default because they cost on every step rather than only while the arena
+grows. `ShrinkArenaAfterRun` pays a synchronizing device allocation per step to re-take what it
+handed back; turn it on when the card is shared with something that needs the room between steps.
+`LimitBytes` is a budget, not a hint: a step that needs more than it fails with ORT's
 `BFCArena ... Failed to allocate memory for requested buffer` rather than eating the rest of the
 device — which is what you want when a run must leave room for a second one, and not what you want
 otherwise.
 
-`NextPowerOfTwo` is still the faster strategy on a card with room to spare, and setting it back is
-one line.
-
 The first two settings are read **when a session is built** — the first inference call, or a
 training rig's first `TrainStep` for a given input shape — so set them at startup; changing them
-afterwards leaves already-compiled sessions as they were. `ShrinkArenaAfterRun` is read on every run
-and takes effect immediately, on sessions already compiled.
+afterwards leaves already-compiled sessions as they were. `ShrinkArenaAfterRun` is read on every
+run and takes effect immediately, on sessions already compiled.
 
 The same class reports what the card is doing:
 

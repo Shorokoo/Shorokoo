@@ -193,8 +193,8 @@ rest of it.
 
 ### Device memory is configured process-wide
 
-The GPU backends read their arena budget, extend strategy and per-run shrinkage off the static
-`DeviceMemory`, not off the `ComputeContext` that builds the session — see
+The GPU backends read their arena budget, extend-strategy override and per-run shrinkage off the
+static `DeviceMemory`, not off the `ComputeContext` that builds the session — see
 [Device memory](inference.md#device-memory-gpu-backends). So every session in the process shares one
 configuration, it applies to CUDA device 0, and a reading (`DeviceMemory.Read()`, `Sample()`) is the
 whole device's rather than this process's share of it. A training rig's two contexts cannot differ in

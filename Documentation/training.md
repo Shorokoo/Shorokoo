@@ -727,10 +727,12 @@ var more = rig.Fit(inputs, targets, numEpochs: 5, ckpt);  // continues where it 
   step** — not from step 0.
 - `rig.LoadCheckpoint(path)` delegates to `TrainingCheckpoint.Load(path, rig)` (and
   `rig.LoadCheckpointFromSkpt(path)` to `TrainingCheckpoint.LoadFromSkpt(path, rig)`), which
-  resolves the struct defs from the rig and sets `.Rig` on the result. The lower-level
-  `Persistence.LoadTrainingCheckpoint(path, trainableDef, modelStateDef, optimizerStateDef)`
-  (flat) / `Persistence.LoadTrainingCheckpointFromSkpt(...)` (`.skpt`) are the def-based forms
-  if you hold the struct defs without a rig (their results carry no rig).
+  resolves the struct defs from the rig and sets `.Rig` on the result. Without a rig,
+  `Persistence.LoadTrainingCheckpoint(path)` reads a flat checkpoint on its own — the file is
+  self-describing, so it needs no struct defs — and `TrainingRig.Load(path)` rebuilds rig and
+  checkpoint together from a `.skpt`. A checkpoint read without a rig carries no `.Rig` and has
+  been checked against nothing: only a rig knows what parameters to expect, so hand it to
+  `rig.AdoptCheckpoint(ckpt)` to have its fields and shapes validated against a model.
 - Both save and load take an optional `CheckpointComponents` flags value —
   `InferenceState` (trainable params + model state), `OptimizerState`, `Counters`, `Loss`, and
   `TrainingRig` — combined with `|`. On save, `null` writes every available component; on

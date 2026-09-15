@@ -1879,8 +1879,7 @@ public class TrainingRigCheckpointCoverageTests
 
             Assert.ThrowsAny<Exception>(() => wide.LoadCheckpoint(flat));
             Assert.ThrowsAny<Exception>(() => wide.LoadCheckpointFromSkpt(skpt));
-            Assert.ThrowsAny<Exception>(() => Persistence.LoadTrainingCheckpoint(
-                flat, wide.TrainableParamStructDef, wide.ModelStateDef, wide.OptimizerStateDef));
+            Assert.ThrowsAny<Exception>(() => wide.AdoptCheckpoint(Persistence.LoadTrainingCheckpoint(flat)));
             Assert.ThrowsAny<Exception>(() => wide.AdoptCheckpoint(narrowCkpt));
         }
         finally
@@ -1888,6 +1887,52 @@ public class TrainingRigCheckpointCoverageTests
             if (File.Exists(flat)) File.Delete(flat);
             if (File.Exists(skpt)) File.Delete(skpt);
         }
+    }
+
+    /// <summary>A flat checkpoint is self-describing, so it loads with no struct defs supplied: the
+    /// section prefixes give the kinds and the safetensors header gives each field's name, rank and
+    /// element type, in the order the file lays them out. The rig is what judges such a checkpoint —
+    /// adopting one re-labels it with the rig's own defs and refuses it if it does not match.</summary>
+    [Fact]
+    public void TestAFlatCheckpointLoadsWithNoStructDefsAndKeepsItsFieldOrder()
+    {
+        NamedModelParam[] sample =
+        [
+            new TensorDataModelParam("input", ModelParamType.InputParam,
+                TensorData([4L], [1f, 2f, 3f, 4f])),
+        ];
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            AdamWOptimizer.ComputationGraph, sample,
+            new AdamWOptimizerHyperparameters { LearningRate = 0.1f });
+        static string[] Names(TensorStructDef d) => [.. d.Fields.Select(f => f.Name)];
+        static int?[] Ranks(TensorStructDef d) => [.. d.Fields.Select(f => f.Rank)];
+        static DType[] Types(TensorStructDef d) => [.. d.Fields.Select(f => f.ElementType)];
+
+        var saved = rig.TrainStep(rig.CreateInitialCheckpoint(),
+            InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f));
+        var path = TempPath("ckpt_nodefs") + ".safetensors";
+        try
+        {
+            saved.Save(path);
+            var loaded = Persistence.LoadTrainingCheckpoint(path);
+
+            Assert.Equal(Names(rig.TrainableParamStructDef), Names(loaded.TrainableParams.Definition));
+            Assert.Equal(Types(rig.TrainableParamStructDef), Types(loaded.TrainableParams.Definition));
+            Assert.Equal(Names(rig.OptimizerStateDef), Names(loaded.OptimizerState.Definition));
+            Assert.Equal((int?[])[1], Ranks(loaded.TrainableParams.Definition));
+            Assert.Equal((int?[])[1, 1, 0], Ranks(loaded.OptimizerState.Definition));
+            Assert.Equal((int?[])[null], Ranks(rig.TrainableParamStructDef));
+            Assert.Equal(1, loaded.Step);
+            Assert.Null(loaded.Rig);
+
+            var adopted = rig.AdoptCheckpoint(loaded);
+            Assert.Same(rig.TrainableParamStructDef, adopted.TrainableParams.Definition);
+            Assert.Same(rig.OptimizerStateDef, adopted.OptimizerState.Definition);
+            Assert.Equal(
+                FlattenStruct(rig.LoadCheckpoint(path).TrainableParams), FlattenStruct(adopted.TrainableParams));
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
     }
 
     [Fact]
@@ -2693,9 +2738,7 @@ public class TrainingRigSkptCheckpointCoverageTests
             try
             {
                 Persistence.From(one.ToInferenceModel()).WithModel().WithWeights().Save(infPath);
-                var ex = Assert.Throws<System.IO.InvalidDataException>(() =>
-                    Persistence.LoadTrainingCheckpointFromSkpt(infPath,
-                        rig.TrainableParamStructDef, rig.ModelStateDef, rig.OptimizerStateDef));
+                var ex = Assert.Throws<System.IO.InvalidDataException>(() => TrainingRig.Load(infPath));
                 Assert.Contains("training", ex.Message);
             }
             finally { if (File.Exists(infPath)) File.Delete(infPath); }
@@ -2777,10 +2820,8 @@ public class TrainingRigSkptCheckpointCoverageTests
 
             Assert.Equal(1, reader.LoadCheckpoint(flatPath).Step);
             Assert.Equal(1, reader.LoadCheckpointFromSkpt(skptPath).Step);
-            Assert.Equal(1, Persistence.LoadTrainingCheckpoint(
-                flatPath, reader.TrainableParamStructDef, reader.ModelStateDef, reader.OptimizerStateDef).Step);
-            Assert.Equal(1, Persistence.LoadTrainingCheckpointFromSkpt(
-                skptPath, reader.TrainableParamStructDef, reader.ModelStateDef, reader.OptimizerStateDef).Step);
+            Assert.Equal(1, Persistence.LoadTrainingCheckpoint(flatPath).Step);
+            Assert.Equal(1, TrainingRig.Load(skptPath).Checkpoint.Step);
 
             var flatGotSkpt = Assert.Throws<System.IO.InvalidDataException>(
                 () => reader.LoadCheckpoint(skptPath));
@@ -2790,12 +2831,8 @@ public class TrainingRigSkptCheckpointCoverageTests
                 () => reader.LoadCheckpointFromSkpt(flatPath));
             Assert.Contains("safetensors", skptGotFlat.Message);
             Assert.Contains("LoadCheckpoint(path)", skptGotFlat.Message);
-            Assert.Contains("LoadTrainingCheckpointFromSkpt", Assert.Throws<System.IO.InvalidDataException>(
-                () => Persistence.LoadTrainingCheckpoint(
-                    skptPath, reader.TrainableParamStructDef, reader.ModelStateDef, reader.OptimizerStateDef)).Message);
-            Assert.Contains("Persistence.LoadTrainingCheckpoint", Assert.Throws<System.IO.InvalidDataException>(
-                () => Persistence.LoadTrainingCheckpointFromSkpt(
-                    flatPath, reader.TrainableParamStructDef, reader.ModelStateDef, reader.OptimizerStateDef)).Message);
+            Assert.Contains("TrainingRig.Load", Assert.Throws<System.IO.InvalidDataException>(
+                () => Persistence.LoadTrainingCheckpoint(skptPath)).Message);
             Assert.Contains("rig.LoadCheckpoint", Assert.Throws<System.IO.InvalidDataException>(
                 () => TrainingRig.Load(flatPath)).Message);
             Assert.Contains("neither", Assert.Throws<System.IO.InvalidDataException>(

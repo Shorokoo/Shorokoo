@@ -478,17 +478,23 @@ namespace Shorokoo
         /// </summary>
         internal static TrainingCheckpoint LoadFlat(
             string filePath,
-            TensorStructDef trainableParamDef,
-            TensorStructDef modelStateDef,
-            TensorStructDef optimizerStateDef,
+            TensorStructDef? trainableParamDef,
+            TensorStructDef? modelStateDef,
+            TensorStructDef? optimizerStateDef,
             CheckpointComponents? components,
             TrainingRig? rigForDefaults)
         {
-            if (trainableParamDef is null) throw new ArgumentNullException(nameof(trainableParamDef));
-            if (modelStateDef is null) throw new ArgumentNullException(nameof(modelStateDef));
-            if (optimizerStateDef is null) throw new ArgumentNullException(nameof(optimizerStateDef));
+            var tensors = SafeTensorLoader.LoadSafeTensors(filePath);
+            var byName = tensors.ToDictionary(t => t.Name, t => t.Data);
 
-            var byName = SafeTensorLoader.LoadSafeTensors(filePath).ToDictionary(t => t.Name, t => t.Data);
+            // A null def means "read what the file says it holds": the flat format is
+            // self-describing — the section prefix gives the kind and the safetensors header gives
+            // each tensor's name, element type and shape — so a rig-less load needs nothing from
+            // the caller. A load that must match a model supplies the rig's defs instead, and the
+            // rig checks the values it read against its own parameters when it adopts them.
+            trainableParamDef ??= InferSectionDef(tensors, TrainableSection, "TrainableParams");
+            modelStateDef ??= InferSectionDef(tensors, ModelStateSection, "ModelState");
+            optimizerStateDef ??= InferSectionDef(tensors, OptimizerStateSection, "OptimizerState");
 
             if (!byName.TryGetValue(CheckpointMarkerName, out var markerData))
                 throw new InvalidOperationException(
@@ -572,6 +578,27 @@ namespace Shorokoo
             }
 
             return new TrainingCheckpoint(trainable, modelState, optState, step, epoch, batchIndex, rig: null, loss: loss);
+        }
+
+        /// <summary>Reconstructs one section's struct def from the file itself: every tensor
+        /// namespaced into the section is a field, named by the remainder of its key, with the rank
+        /// and element type the safetensors header records. Fields keep the order the tensors are
+        /// laid out in the file's data region, which is the order they were written in — the writer
+        /// appends a section field by field — so a def read back this way matches the def that
+        /// wrote it, field for field and in the same order.</summary>
+        private static TensorStructDef InferSectionDef(
+            IEnumerable<SafeTensor> tensors, string section, string typeName)
+        {
+            var prefix = section + "/";
+            var fields = new List<TensorStructFieldDef>();
+            foreach (var tensor in tensors)
+            {
+                if (!tensor.Name.StartsWith(prefix, StringComparison.Ordinal)) continue;
+                fields.Add(new TensorStructFieldDef(
+                    tensor.Name.Substring(prefix.Length), Core.Nodes.NodeDefinitions.DataStructure.Tensor,
+                    tensor.Data.Shape.Dims.Length, tensor.Data.DType));
+            }
+            return new TensorStructDef([.. fields], typeName);
         }
 
         private static TensorDataStruct ReadSection(

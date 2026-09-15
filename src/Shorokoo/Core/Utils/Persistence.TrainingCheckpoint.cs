@@ -34,8 +34,7 @@ namespace Shorokoo
         /// through the manifest's tensor mappings, with the global step recorded in the manifest.
         /// The trainable weights double as the model's default weight set, so the file also loads
         /// as an inference checkpoint via <see cref="Load(string)"/>. Reload the training state
-        /// with <see cref="TrainingRig.LoadCheckpointFromSkpt"/> /
-        /// <see cref="LoadTrainingCheckpointFromSkpt(string, TensorStructDef, TensorStructDef, TensorStructDef)"/>,
+        /// with <see cref="TrainingRig.LoadCheckpointFromSkpt"/>,
         /// or rebuild the whole rig from the file alone with
         /// <see cref="TrainingRig.Load(string, ComputeContext?, ComputeContext?, IProgress{BuildProgress})"/>.
         ///
@@ -98,37 +97,6 @@ namespace Shorokoo
         // ---- Load ----
 
         /// <summary>
-        /// Loads a <see cref="TrainingCheckpoint"/> from a native <c>.skpt</c> container written by
-        /// <see cref="SaveTrainingCheckpointToSkpt"/> / <see cref="ForTrainingCheckpoint"/>. This
-        /// entry point reads that format only: handed a flat safetensors checkpoint it fails
-        /// immediately, naming <see cref="LoadTrainingCheckpoint"/> as the entry point for that
-        /// shape (a caller with a genuinely unknown file identifies it with <see cref="Inspect"/>
-        /// first). The checkpoint is reconstructed against the given struct defs, which pin each
-        /// field's name, rank and dtype — <b>not</b> its dimensions, which a field def does not carry,
-        /// so a checkpoint from a model of another width is accepted here; the rig-supplied loads check
-        /// the dimensions too, which is one more reason to prefer them. The
-        /// result carries no <see cref="TrainingCheckpoint.Rig"/>; to resume a whole rig, prefer
-        /// <see cref="TrainingRig.LoadCheckpointFromSkpt"/> (which supplies these defs from the
-        /// rig) or the from-file-alone
-        /// <see cref="TrainingRig.Load(string, ComputeContext?, ComputeContext?, IProgress{BuildProgress})"/>.
-        /// </summary>
-        public static TrainingCheckpoint LoadTrainingCheckpointFromSkpt(
-            string filePath,
-            TensorStructDef trainableParamDef,
-            TensorStructDef modelStateDef,
-            TensorStructDef optimizerStateDef)
-        {
-            if (string.IsNullOrWhiteSpace(filePath))
-                throw new ArgumentException("Checkpoint path cannot be null or empty.", nameof(filePath));
-
-            VerifySkptContainer(filePath,
-                "Load a flat safetensors training checkpoint with Persistence.LoadTrainingCheckpoint.");
-            return LoadTrainingCheckpointFromSkpt(
-                filePath, trainableParamDef, modelStateDef, optimizerStateDef,
-                components: null, rigForDefaults: null);
-        }
-
-        /// <summary>
         /// Reconstructs a <see cref="TrainingCheckpoint"/> from a native <c>.skpt</c> container
         /// written by <see cref="SaveTrainingCheckpointToSkpt"/>, resolving every state tensor
         /// individually through the manifest's tensor mappings (issue #184): trainable params and
@@ -137,10 +105,10 @@ namespace Shorokoo
         /// defs with the same fail-loud contract as <see cref="TrainingCheckpoint.Load"/>: every
         /// referenced entry's SHA-256 is verified, and the mapped tensors must cover each def
         /// field-for-field (a missing field, a rank mismatch, or a mapped tensor no def declares
-        /// fails loudly, naming the mismatch). Backs the public
-        /// <see cref="LoadTrainingCheckpointFromSkpt(string, TensorStructDef, TensorStructDef, TensorStructDef)"/>
-        /// and the rig-supplied <see cref="TrainingCheckpoint.LoadFromSkpt"/>; callers verify the
-        /// container shape first.
+        /// fails loudly, naming the mismatch). Backs the rig-supplied
+        /// <see cref="TrainingCheckpoint.LoadFromSkpt"/> and, through it,
+        /// <see cref="TrainingRig.Load(string, ComputeContext?, ComputeContext?, IProgress{BuildProgress})"/>;
+        /// callers verify the container shape first.
         ///
         /// <para><paramref name="components"/> selects which parts to load (<c>null</c> ⇒ everything
         /// present), exactly as the flat path (<see cref="TrainingCheckpoint.LoadFlat"/>) does: a

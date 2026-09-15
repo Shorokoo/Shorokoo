@@ -1102,8 +1102,15 @@ namespace Shorokoo
             AssertShapesCompatible(checkpoint.TrainableParams, _initialParamFields, "trainable-parameter");
             AssertShapesCompatible(checkpoint.ModelState, _initialStateFields, "model-state");
             AssertShapesCompatible(checkpoint.OptimizerState, _initialOptStateFields, "optimizer-state");
+            // Rebuilt against THIS rig's defs, not carried over: the checks above establish the two
+            // agree field for field, but a checkpoint read straight from a file carries a def
+            // reconstructed from that file, whose field ORDER is the file's. Everything that indexes
+            // a struct positionally (TensorDataStruct's indexer, FlattenedFieldsOfType) would then
+            // read the rig's order against the file's. Same values, rig's definition.
             return new TrainingCheckpoint(
-                checkpoint.TrainableParams, checkpoint.ModelState, checkpoint.OptimizerState,
+                new TensorDataStruct(TrainableParamStructDef, checkpoint.TrainableParams.Fields),
+                new TensorDataStruct(ModelStateDef, checkpoint.ModelState.Fields),
+                new TensorDataStruct(OptimizerStateDef, checkpoint.OptimizerState.Fields),
                 checkpoint.Step, checkpoint.Epoch, checkpoint.BatchIndex, this, checkpoint.Loss);
         }
 
@@ -1122,7 +1129,13 @@ namespace Shorokoo
                     ?? throw new ArgumentException(
                         $"Checkpoint's {kind} definition is missing field '{e.Name}' this rig expects. " +
                         "The checkpoint was produced by a different model/optimizer.");
-                if (a.Rank != e.Rank || a.ElementType != e.ElementType || a.Structure != e.Structure)
+                // An unknown rank on either side constrains nothing — a field def's Rank is null when
+                // the rank is unknown, which the rig's own defs often are, while a def read back from
+                // a file always knows it. Ranks that are both stated and differ are a mismatch; one
+                // stated against one unknown is not. The dimensions are checked separately, against
+                // the rig's actual parameters, which is the stronger check anyway.
+                if ((a.Rank is int actualRank && e.Rank is int expectedRank && actualRank != expectedRank)
+                    || a.ElementType != e.ElementType || a.Structure != e.Structure)
                     throw new ArgumentException(
                         $"Checkpoint's {kind} field '{e.Name}' (rank {a.Rank?.ToString() ?? "?"}, {a.ElementType}) " +
                         $"does not match this rig's (rank {e.Rank?.ToString() ?? "?"}, {e.ElementType}). " +

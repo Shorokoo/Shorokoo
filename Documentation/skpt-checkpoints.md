@@ -122,8 +122,7 @@ run17.skpt/
 
 Training checkpoints save the same way (`Persistence.ForTrainingCheckpoint(ckpt)
 .SaveAsDirectory(path)`), and every `.skpt` load entry point — `Persistence.Load`,
-`TrainingRig.Load`, `rig.LoadCheckpointFromSkpt`,
-`Persistence.LoadTrainingCheckpointFromSkpt` — accepts either form; a directory path
+`TrainingRig.Load`, `rig.LoadCheckpointFromSkpt` — accepts either form; a directory path
 is unambiguously the directory form (no content sniffing).
 
 When to use which:
@@ -270,19 +269,19 @@ contract as the flat format — a checkpoint from a different model or optimizer
 tensor mapped that the rig does not declare, or a declared one the checkpoint does not
 map — the mismatch is named), a rank mismatch, or a tampered entry (sha256) fails loudly.
 
-Reconstruct without a rig by supplying the struct defs directly:
+Reconstruct without a rig in hand by rebuilding the rig from the file itself — a training
+`.skpt` carries its own constituents, so nothing has to be supplied:
 
 ```csharp
-TrainingCheckpoint ckpt = Persistence.LoadTrainingCheckpointFromSkpt(
-    "run.skpt", trainableParamDef, modelStateDef, optimizerStateDef);
+var (rig, ckpt) = TrainingRig.Load("run.skpt");
 ```
 
 Each on-disk format has its own save/load pair. `Persistence.SaveTrainingCheckpoint` /
 `Persistence.LoadTrainingCheckpoint` (and `rig.LoadCheckpoint`) handle the **flat**
 [safetensors format](training.md); `SaveTrainingCheckpointToSkpt` /
-`ForTrainingCheckpoint` and `LoadTrainingCheckpointFromSkpt` (and
-`rig.LoadCheckpointFromSkpt`, and the static `TrainingRig.Load`, which rebuilds the rig
-from the file alone) handle the `.skpt` container. No load entry point sniffs
+`ForTrainingCheckpoint` and `rig.LoadCheckpointFromSkpt` (and the static
+`TrainingRig.Load`, which rebuilds the rig from the file alone) handle the `.skpt`
+container. No load entry point sniffs
 the file's bytes to pick a format: handing one the other format fails immediately with an
 error naming both formats and the entry point that reads the file's actual format. To
 identify a genuinely unknown file first, use `Persistence.Inspect`.

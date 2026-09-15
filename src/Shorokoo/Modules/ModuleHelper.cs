@@ -281,7 +281,9 @@ namespace Shorokoo.Core
             // Use the factored GraphBuilder code to build the function body in its
             // primary FastCG form. The Function ctor stores it directly; the legacy
             // CG view is materialized lazily on demand.
-            var fastGraph = GraphBuilder.BuildInternalComputationGraphFromMethod(methodToBuild, invokeTarget);
+            var fastGraph = GraphBuilder.BuildInternalComputationGraphFromMethod(
+                methodToBuild, invokeTarget,
+                isParamInitializerBody: isTrainableParamInitializer || isStateParamInitializer);
 
             var fnType = FunctionType.Module;
             if (isStateParamInitializer)

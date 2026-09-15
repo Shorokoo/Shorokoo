@@ -124,6 +124,69 @@ of two places: the shape vector it takes as its **first** `Inline` parameter, or
 one — its `Scalar<T>` return type. A shape baked into the body of a no-argument `Inline` is
 neither, and is rejected by name when the model is lowered.
 
+The body is an ordinary graph body; two things it can reach for are worth spelling out.
+
+**It can call the shipped initializers.** An `Init(...)` call inside an initializer body is that
+initializer's body evaluated as a value — not the definition of a second parameter, which an
+initializer has no room for. So the parameterized set composes, and the obvious way to say "one
+fixed distribution, reused for every parameter in the model" is to wrap one:
+
+```csharp
+[TrainableParamInitializer]
+public static partial class NormalDist02
+{
+    public static Tensor<float32> Inline(Vector<int64> shape)
+        => NormalDist.Init(shape, Scalar(0f), Scalar(0.02f));
+}
+```
+
+The wrapper draws what `NormalDist` draws — the same composition, value for value — keyed on the
+parameter *being created*. Each draw **site** in the body gets its own sub-stream of that
+parameter's stream, the body's own sites and a called initializer's alike, so no two sites repeat
+each other; and a site inside a `LoopAPI.Iterate` body folds each enclosing loop's iteration index
+into its key, so it draws a fresh sample on every trip rather than one sample re-used — the same
+rule a runtime draw in a loop follows. What is still refused is a draw inside a call the lowering
+cannot inline — in practice a `[Module]` that owns a parameter space of its own, so the draw
+belongs to a parameter there and carries no key here. The error names the called function.
+
+**It can start from another parameter's value.** An initializer input typed `Tensor<T>` may be
+another trainable parameter, passed at the call site. It is not folded to a constant: the edge
+survives to materialization, which runs the initializers in dependency order, so what arrives is
+the value the model actually starts from. Re-drawing the source inside the dependent's own body
+would not do — it draws from the dependent's stream, giving the right distribution but a different
+matrix.
+
+```csharp
+[TrainableParamInitializer]
+public static partial class ProductOf
+{
+    public static Tensor<float32> Inline(Vector<int64> shape, Tensor<float32> a, Tensor<float32> b)
+        => a.MatMul(b);
+}
+
+Scalar<int64> vocab = Scalar(50257L), d = Scalar(384L);
+
+var emb  = NormalDist02.Init([vocab, d]);
+var wv   = NormalDist02.Init([d, d]);
+var bank = ProductOf.Init([vocab, d], emb, wv);   // starts as emb · wv, for the emb the model has
+
+return x.MatMul(emb).MatMul(wv) + x.MatMul(bank);   // every one of the three is read by the model
+```
+
+The **shape** input is the one that must still fold to a constant at the call site: a parameter's
+shape is fixed when the architecture is concretized, before anything has a value. (A rank-0
+initializer states its shape in its `Scalar<T>` return type and takes no shape input at all, so
+*its* first input may be a parameter like any other.) The initializers run in dependency order, so
+a chain — one parameter from another, from a third — works too.
+
+Two shapes are refused by name rather than guessed at. A source the model reads **nowhere else**:
+a parameter no forward path reads gets no gradient, so it cannot be trained, and the stages after
+concretization drop it — the concrete model would end up carrying fewer parameters than the
+architecture and its checkpoints say it has. And a source created **inside a loop**, which stands
+for a different parameter on every trip, so no single edge names it. For either, create the source
+outside the loop and use it in the model, or fold what it computes into the initializer that reads
+it so no parameter is created for it.
+
 ## Layers (`Shorokoo.Modules.Layers`)
 
 Layer hyperparameters are `[Hyper]` graph scalars; pass them as `Scalar(...)`

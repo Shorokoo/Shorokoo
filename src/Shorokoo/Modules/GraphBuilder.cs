@@ -132,7 +132,8 @@ namespace Shorokoo.Core
         /// <paramref name="invokeTarget"/> is the reflection-invoke receiver: null for static
         /// methods, or the delegate's bound target for compiler-generated lambda methods.
         /// </summary>
-        internal static InternalComputationGraph BuildInternalComputationGraphFromMethod(MethodInfo methodInfo, object? invokeTarget = null)
+        internal static InternalComputationGraph BuildInternalComputationGraphFromMethod(
+            MethodInfo methodInfo, object? invokeTarget = null, bool isParamInitializerBody = false)
         {
             if (methodInfo == null)
                 throw new ArgumentNullException(nameof(methodInfo));
@@ -152,7 +153,7 @@ namespace Shorokoo.Core
             // looper stack, the Rng.Pin recordings, the StateUpdate registrations — belongs to
             // this build alone and is restored on exit (a destructive clear here would wipe the
             // OUTER body's records), and no records leak between builds.
-            using var buildScope = GraphTrace.EnterModuleBuild();
+            using var buildScope = GraphTrace.EnterModuleBuild(isParamInitializerBody);
 
             // Extract generic parameter information before instantiation
             MethodInfo originalGenericMethod = methodInfo;

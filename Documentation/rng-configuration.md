@@ -27,10 +27,17 @@ index, `child = Bijection(key: parent, counter: index)`. A key, a split index an
 position are each a whole 64-bit value — nothing is narrowed on the way in, so distinct
 indices give distinct children over the entire range.
 
+A consumer **inside a loop** folds one more index per enclosing loop: its trip number. For a
+runtime feed that index is part of the ModelId path itself (the `-1` slots below); for a
+parameter initializer's draw it is folded onto the parameter's key by the same bijection. Either
+way a draw executed N times is N samples, not one repeated — see
+[Feeds inside loops](#feeds-inside-loops) and [Init draws inside loops](#init-draws-inside-loops).
+
 Because the key tree *is* the ModelId tree:
 
 - distinct consumers get decorrelated streams for free;
-- a stream's key is reconstructible offline from its ModelId alone (no draw-order bookkeeping);
+- a stream's key is reconstructible offline from its ModelId alone — plus, for a consumer inside
+  a loop, the trip number (still no draw-order bookkeeping);
 - inserting or removing consumers only re-keys the streams whose ModelIds move — and
   [`Rng.Pin`](rng-pinning.md) can freeze those against refactoring;
 - changing `MasterSeed` re-randomizes everything at once, coherently.
@@ -243,6 +250,18 @@ one stream cannot become two while either keeps the old name.
 
 Two call sites of a module-typed `Function` need none of this: each mints its own id already.
 
+## Init draws inside loops
+
+A `[TrainableParamInitializer]` body may loop (`LoopAPI.Iterate`), and a draw inside that body is
+executed once per trip. Each trip folds its trip number onto the parameter's init key, so the trips
+are independent samples — the same rule a feed in a loop follows above, and the same one
+[nn-library.md](nn-library.md#initializers-shorokoomodulesinitializers) states for initializer
+authors. Every enclosing loop contributes an index, so a draw nested two deep varies with both.
+
+The per-trip keys hang off the parameter's own stream rather than off ModelId slots of their own.
+They are reproducible for a config like everything else; what they do not have is individual
+override addresses, as noted under [Per-stream overrides](#per-stream-overrides).
+
 ## Per-stream overrides
 
 `config.Override(RngCollection.Params, [1, 1], seed)` returns a **copy** of the config with
@@ -261,7 +280,10 @@ var config = new RngConfig { MasterSeed = 42 }
 
 Every stream is a valid override address, including the per-iteration streams of a loop
 feed (e.g. `[1, 2, 1]` = iteration 2 of the feed at loop slot 1) — overriding one iteration
-re-seeds that iteration only; sibling iterations keep their derived keys. An override that
+re-seeds that iteration only; sibling iterations keep their derived keys. An
+[init draw inside a loop](#init-draws-inside-loops) is the exception: its per-trip keys hang off
+the parameter's key rather than off ModelId slots of their own, so no address names one trip. A
+`Params` override on that parameter re-seeds all of its trips together, coherently. An override that
 addresses no stream throws: a `Runtime` override at bind (`WithRngConfig`), a `Params`
 override at parameter initialization.
 

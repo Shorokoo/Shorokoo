@@ -281,9 +281,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             return AppendConstant(data, newNodes);
         }
 
-        /// <summary>Casts a value to uint64 — used to bring an int64 runtime iteration index into
-        /// the key tree's whole-64-bit split-counter type.</summary>
-        private static FastTensorKey AppendCastToUInt64(FastTensorKey value, List<FastNode> newNodes)
+        /// <summary>Casts a value to uint64 — the width every key, split counter and draw
+        /// position is. Shared with <see cref="FastInitKeyedDraws"/>, which folds the same kind of
+        /// counter onto a parameter's init key.</summary>
+        internal static FastTensorKey AppendCastToUInt64(FastTensorKey value, List<FastNode> newNodes)
             => AppendCast(value, DType.UInt64, newNodes);
 
         private static FastTensorKey AppendCast(FastTensorKey value, DType to, List<FastNode> newNodes)
@@ -312,7 +313,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 new Dictionary<string, object?> { [AttrAxis] = 0L }, vector, indexConst, newNodes);
         }
 
-        private static FastTensorKey AppendSplit(
+        /// <summary>
+        /// <c>key ← split(key, counter)</c> — one Threefry bijection of the key tree. Shared with
+        /// <see cref="FastInitKeyedDraws"/>, so a parameter initializer's per-trip fold is the same
+        /// bijection a runtime feed's chain uses rather than a look-alike.
+        /// </summary>
+        internal static FastTensorKey AppendSplit(
             FastTensorKey key, FastTensorKey counter, List<FastNode> newNodes)
         {
             // The split (key-tree fold) is deliberately algorithm-independent — see

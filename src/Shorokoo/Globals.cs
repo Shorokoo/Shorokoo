@@ -9,6 +9,7 @@ using Shorokoo.Core.Utils;
 using Shorokoo.Onnx;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 
 namespace Shorokoo
@@ -56,6 +57,10 @@ namespace Shorokoo
                 isStateParamInitializer: !isTrainable,
                 defaultName: defaultName,
                 stateOwnership: stateOwnership);
+
+            if (GraphTrace.IsParamInitializerBodyTracing)
+                return InvokeInitializerBody(targetFn, inputs, genericTypeArgs: null,
+                    targetFn.Outputs[0].Type, targetFn.Outputs[0].Rank);
 
             return InternalOp.TrainableParamRef(inputs, iterationIndices, localModelId: null, targetFn.Outputs[0].Type, targetFn.Outputs[0].Rank, targetFn, isTrainable);
         }
@@ -106,12 +111,62 @@ namespace Shorokoo
             var genericTypeArgs = GenericTypeArgsOf(trainableParamInitializerImplementation);
 
             // Create the trainable param ref with the appropriate dtype and generic type args
-            var result = InternalOp.TrainableParamRef(inputs, iterationIndices, localModelId: null, dtype, rank, targetFn, isTrainable, genericTypeArgs);
+            var result = GraphTrace.IsParamInitializerBodyTracing
+                ? InvokeInitializerBody(targetFn, inputs, genericTypeArgs, dtype ?? targetFn.Outputs[0].Type, rank)
+                : InternalOp.TrainableParamRef(inputs, iterationIndices, localModelId: null, dtype, rank, targetFn, isTrainable, genericTypeArgs);
 
             // The result is Variable but we know it's a tensor with the specified dtype.
             // Cast through Variable first (the interface), then to the concrete Tensor<T>.
             // This cast succeeds because TrainableParamRef creates a Variable with the correct dtype.
             return (Variable)result;
+        }
+
+        /// <summary>
+        /// A nested <c>Init</c> call inside a parameter initializer's own body: an ordinary
+        /// call of the called initializer's body, returning its value.
+        ///
+        /// <para>An initializer body computes ONE parameter's value and owns no parameter space,
+        /// so there is nothing for a second parameter created inside it to be. Writing the
+        /// shipped parameterized initializers (<c>NormalDist</c>, <c>UniformRange</c>,
+        /// <c>XavierUniformGain</c>, …) as the body of a custom one is the obvious way to say
+        /// "one fixed distribution for every parameter in the model", and the call means exactly
+        /// what it reads as. As a <c>FUNCTION_INVOKE</c> the callee's body is flattened into the
+        /// initializer before the keyed-draw substitution, so a draw it makes is keyed on the
+        /// parameter being created, on its own sub-stream (Shorokoo/Shorokoo#323).</para>
+        /// </summary>
+        private static Variable InvokeInitializerBody(
+            Function targetFn, Variable[] inputs, DType[]? genericTypeArgs, DType dtype, int? rank)
+        {
+            // A generic body's leading type-placeholder slots are not arguments — the call site
+            // names its specialization in genericTypeArgs and erasure strips the slots when it
+            // builds that body — so the argument count is checked against the DATA inputs only.
+            int dataInputs = targetFn.Inputs.Count(
+                x => x.InputType != Core.Nodes.NodeDefinitions.InputType.GenericType);
+            if (inputs.Length != dataInputs)
+                throw new ModuleException(ErrorCodes.FW005, targetFn.FriendlyName,
+                    $"Init was called from inside a parameter initializer's body with {inputs.Length} " +
+                    $"argument(s), but the initializer body declares {dataInputs} input(s). " +
+                    "A nested Init call is an ordinary call of that initializer's body, so it needs a " +
+                    "value for every one of its Inline parameters.");
+
+            if (inputs.Any(x => x is null))
+                throw new ModuleException(ErrorCodes.FW005, targetFn.FriendlyName,
+                    "Init was called from inside a parameter initializer's body with a null argument. " +
+                    "Every one of the body's inputs needs a value; a null leaves the spliced body " +
+                    "input wired to nothing.");
+
+            // The output type comes from the CALL SITE, not from the body's declared output. A
+            // generic body declares its output at a type standin, and this call has already
+            // resolved which concrete type it wants; reading the body instead types the call at
+            // the standin, and the caller's next op then has no type to infer from. (That is why
+            // this is not Function.Call, which reads the body's own declared outputs.)
+            return InternalOp.FunctionInvoke(
+                inputs,
+                [targetFn.Outputs[0].Structure()],
+                [dtype],
+                [rank ?? -1],
+                targetFn,
+                genericTypeArgs)[0];
         }
 
         /// <summary>

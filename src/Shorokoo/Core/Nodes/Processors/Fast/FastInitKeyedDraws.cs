@@ -6,6 +6,7 @@ using Shorokoo.Core.Utils;
 using Shorokoo.Onnx;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using static Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames;
 
@@ -22,17 +23,25 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// ceiling and parallelizes on GPU).
     ///
     /// <para>The draw node is rewritten in place: its key input is the parameter's folded
-    /// init key as a uint64 scalar constant, its substreamIndex is the draw's ordinal within the
-    /// initializer (a distinct sub-stream per draw; every shipping initializer has exactly
-    /// one, so ordinal 0 in practice), and its shape input and declared distribution
-    /// bounds carry over — the initializer's downstream scaling math is unchanged.
+    /// init key as a uint64 scalar constant — split once per enclosing loop by that loop's
+    /// runtime iteration index, so a draw inside a loop body is a fresh sample on every trip
+    /// rather than one sample re-derived (Shorokoo/Shorokoo#343, the initialization-side twin of
+    /// the runtime defect #289; the split is the same <c>SHRK_RNG_SPLIT</c> a runtime feed's
+    /// chain folds with, on the same algorithm-independent default) — its substreamIndex is the
+    /// draw's ordinal within the initializer (a distinct sub-stream per draw SITE; every shipping
+    /// initializer has exactly one, so ordinal 0 in practice), and its shape input and declared
+    /// distribution bounds carry over — the initializer's downstream scaling math is unchanged.
     /// <see cref="FastLowerRandomOps"/> later lowers the keyed node to a call of the named
     /// algorithm's exported function, exactly as for a runtime feed.</para>
     ///
     /// <para>The substitution runs on the initializer's <b>flattened</b> body
     /// (<see cref="Function.GetFastFlattenedGraph"/>), so a draw factored into a called
     /// function or sub-module is inlined to the top level and keyed like an inline draw —
-    /// each inlined call site becomes its own node and its own sub-stream ordinal. A draw
+    /// each inlined call site becomes its own node and its own sub-stream ordinal. That covers
+    /// a nested <c>Init</c> call too: inside an initializer body such a call is emitted as an
+    /// ordinary invoke of the called initializer's body rather than as a second parameter
+    /// definition, so the shipped parameterized initializers are reachable from a custom one
+    /// and draw on the parameter being created (Shorokoo/Shorokoo#323). A draw
     /// inside a call that survives flattening cannot be keyed and is rejected loudly
     /// rather than left to lower through the generic ONNX fallback into unkeyed,
     /// non-reproducible backend randomness.</para>
@@ -95,12 +104,19 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     $"Initializer '{fn.FriendlyName}' of parameter '{streamName}' draws randomness " +
                     $"inside the called function '{nested.FriendlyName}', which could not be inlined. " +
                     "The nested draw keeps no parameter key and would fall back to unkeyed, " +
-                    "non-reproducible backend randomness. Move the random draw " +
-                    "(RandomUniform/RandomNormal/RandomBits) directly into the initializer's body.");
+                    "non-reproducible backend randomness. Make the draw the initializer's own: " +
+                    "call another initializer's Init (whose body IS inlined and keyed on this " +
+                    "parameter), or move the draw (RandomUniform/RandomNormal/RandomBits) directly " +
+                    "into the initializer's body.");
 
 
             var newNodes = new List<FastNode>(body.Nodes.Count);
             int randomOrdinal = 0;
+
+            // The loops enclosing the node being visited, outermost first. Scope membership in the
+            // Fast pipeline is positional, so this is what tells a draw which iteration indices
+            // its key has to fold in.
+            var enclosingLoops = new List<FastNode>();
 
             foreach (var node in body.Nodes)
             {
@@ -109,6 +125,17 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 bool isBits = node.OpCode == InternalOpCodes.SHRK_RANDOM_BITS;
                 if (!isUniform && !isNormal && !isBits)
                 {
+                    if (node.OpCode == OpCodes.LOOP_OPEN)
+                        enclosingLoops.Add(node);
+                    else if (node.OpCode == OpCodes.LOOP_CLOSE)
+                    {
+                        // Swallowing an underflow would leave the stack shifted for every later
+                        // draw and still end at zero, so it would report nothing.
+                        Debug.Assert(enclosingLoops.Count > 0,
+                            "FastInitKeyedDraws: LOOP_CLOSE before its LOOP_OPEN.");
+                        if (enclosingLoops.Count > 0)
+                            enclosingLoops.RemoveAt(enclosingLoops.Count - 1);
+                    }
                     newNodes.Add(node);
                     continue;
                 }
@@ -116,12 +143,36 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var shapeInput = node.Inputs[0]
                     ?? throw new InvalidOperationException("Random init node has null shape input.");
 
-                // The parameter's own stream key as a scalar constant, and a distinct sub-stream
-                // (substreamIndex = ordinal) per draw within one initializer. The constant is emitted
-                // per draw so it always sits in the draw's own control-flow scope.
+                // The parameter's own stream key as a scalar constant, folded once per enclosing
+                // loop by that loop's iteration index, and a distinct sub-stream
+                // (substreamIndex = ordinal) per draw within one initializer. Every node is emitted
+                // per draw so it always sits in the draw's own control-flow scope — the splits in
+                // particular MUST stay inside the loop body, since they read its iteration index.
                 var keyKey = AppendConstant(new OnnxTensorData<uint64>(
                     new Shape(System.Array.Empty<long>()),
                     OnnxUtils.CreateTensorValue(new Shape(System.Array.Empty<long>()), (ulong[])[streamKey])), newNodes);
+                // The fold is FastWireRngKeyDerivation's own split, not a look-alike: a per-trip
+                // init key is the same bijection of the key tree a runtime feed's chain applies.
+                //
+                // The one asymmetry with that chain is overrides. A feed's chain selects an
+                // override at runtime, per iteration, because its iteration slots are ModelId path
+                // elements an override can address. A parameter's override is applied when
+                // streamKey is resolved on the host, so it is already baked into the constant
+                // these splits fold — which re-seeds every trip together and leaves no way to
+                // address one trip (see Documentation/rng-configuration.md).
+                //
+                // Splitting by the index is exactly the key a parameter at ModelId
+                // `path ++ [index]` would get. No such parameter exists: parameter slots and
+                // sub-module slots are numbered from one counter per parent, so an id that names a
+                // parameter is a leaf and nothing extends it. That invariant is what keeps the two
+                // key spaces disjoint — an id-allocation change that let one parameter's path be a
+                // prefix of another's would alias their streams silently.
+                foreach (var loopOpen in enclosingLoops)
+                    keyKey = FastWireRngKeyDerivation.AppendSplit(
+                        keyKey,
+                        // LOOP_OPEN's output 0 is the iteration index.
+                        FastWireRngKeyDerivation.AppendCastToUInt64(loopOpen.Outputs[0]!.Value, newNodes),
+                        newNodes);
 
                 var substreamIndexKey = AppendConstant(new OnnxTensorData<uint64>(
                     new Shape(Array.Empty<long>()),
@@ -187,6 +238,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 newNodes.Add(node);
                 randomOrdinal++;
             }
+
+            // The per-node check above catches a SHIFTED stack; this catches a phantom one — a
+            // LOOP_OPEN the sweep never saw closed, which would have silently split every later
+            // draw's key by an index that is not in scope.
+            Debug.Assert(enclosingLoops.Count == 0,
+                "FastInitKeyedDraws: a LOOP_OPEN in the initializer body was never closed.");
 
             if (randomOrdinal == 0)
                 return null; // no random ops; caller keeps the shared original

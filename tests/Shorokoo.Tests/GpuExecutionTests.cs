@@ -32,6 +32,40 @@ public class GpuExecutionTests
         Assert.Equal(5.0f, result);
     }
 
+    /// <summary>
+    /// The device-memory surface end to end: a session built under a budget and the
+    /// same-as-requested arena strategy runs, with per-run arena shrinkage on, and the card
+    /// reports a reading.
+    /// </summary>
+    [CudaFact]
+    public void CudaProvider_RunsUnderADeviceMemoryBudgetAndReportsTheCardsUsage()
+    {
+        var limit = DeviceMemory.LimitBytes;
+        var arenaExtend = DeviceMemory.ArenaExtend;
+        var shrink = DeviceMemory.ShrinkArenaAfterRun;
+        try
+        {
+            DeviceMemory.LimitBytes = 2L * 1024 * 1024 * 1024;
+            DeviceMemory.ArenaExtend = ArenaExtendStrategy.SameAsRequested;
+            DeviceMemory.ShrinkArenaAfterRun = true;
+            DeviceMemory.ResetPeak();
+
+            Assert.Equal(5.0f, AddTwoScalars(2.0f, 3.0f));
+
+            var reading = DeviceMemory.Sample();
+            Assert.NotNull(reading);
+            Assert.Equal(reading!.Value.TotalBytes, reading.Value.UsedBytes + reading.Value.FreeBytes);
+            Assert.Equal(reading.Value.UsedBytes, DeviceMemory.PeakUsedBytes);
+        }
+        finally
+        {
+            DeviceMemory.LimitBytes = limit;
+            DeviceMemory.ArenaExtend = arenaExtend;
+            DeviceMemory.ShrinkArenaAfterRun = shrink;
+            DeviceMemory.ResetPeak();
+        }
+    }
+
     private static float AddTwoScalars(float left, float right)
     {
         var a = InputScalar<float32>();

@@ -22,6 +22,9 @@ Related: [core-types.md](core-types.md) · [defining-models.md](defining-models.
 - Reference one platform backend package and it is normally found for you — no setup
   code. Only one backend is live per process. How it is discovered, and how to
   override the choice: [Backend selection](#backend-selection).
+- On a GPU backend, `DeviceMemory` is what caps the CUDA arena, chooses how it extends,
+  and reports how much of the card is gone — the only public lever on device memory, and
+  a process-wide one: [Device memory](#device-memory-gpu-backends).
 
 ## Workflow: one-shot evaluation
 
@@ -424,6 +427,75 @@ If no backend is found, the first inference call throws `InvalidOperationExcepti
 > startup -- e.g. InferenceBackend.Factory = new LinuxCpuInferenceFactory(); (or the
 > factory from whichever Shorokoo.{WinCPU,WinGPU,LinuxCPU,LinuxGPU} package you
 > reference) -- or add such a package as a dependency.`
+
+### Device memory (GPU backends)
+
+ONNX Runtime allocates device memory out of a BFC arena that extends in large blocks and never
+gives them back. Left to itself it does not settle at what a step needs: it rounds each extension
+up to the next power of two, so a run settles at roughly **1.8x** its first step's figure and can
+end up holding the entire card while training perfectly happily — with no headroom for anything
+else, and no number anywhere saying how close to the edge the configuration is.
+
+`DeviceMemory` is the surface that changes both halves of that. It is process-wide and static:
+
+```csharp
+using Shorokoo.Core.Inference.Abstractions;
+
+DeviceMemory.LimitBytes = 16L * 1024 * 1024 * 1024;            // cap the arena at 16 GiB
+DeviceMemory.ArenaExtend = ArenaExtendStrategy.SameAsRequested; // stop rounding up to a power of two
+DeviceMemory.ShrinkArenaAfterRun = true;                        // hand unused blocks back each step
+```
+
+| setting | ORT option | default | read |
+|---|---|---|---|
+| `LimitBytes` | `gpu_mem_limit` | `null` — the whole card | when a session is created |
+| `ArenaExtend` | `arena_extend_strategy` | `NextPowerOfTwo` — ORT's own | when a session is created |
+| `ShrinkArenaAfterRun` | `memory.enable_memory_arena_shrinkage` | `false` | on every run |
+
+The defaults leave ORT exactly as it behaves without Shorokoo, because each setting trades
+throughput for room: `SameAsRequested` extends the arena more often, and `ShrinkArenaAfterRun` pays
+a synchronizing device allocation per step to re-take what it returned. Reach for them when a
+configuration is close to the card's limit — which is also when an arena that ratchets up decides
+whether it fits. `LimitBytes` is a budget, not a hint: a step that needs more than it fails with
+ORT's `BFCArena ... Failed to allocate memory for requested buffer` rather than eating the rest of
+the device.
+
+The first two are read **when a session is built** — the first inference call, or a training rig's
+first `TrainStep` for a given input shape — so set them at startup; changing them afterwards leaves
+already-compiled sessions as they were. `ShrinkArenaAfterRun` is read on every run and takes effect
+immediately, on sessions already compiled.
+
+The same class reports what the card is doing:
+
+```csharp
+for (int step = 0; step < steps; step++)
+{
+    checkpoint = rig.TrainStep(checkpoint, inputs);
+    DeviceMemory.Sample();
+}
+Console.WriteLine($"peak {DeviceMemory.PeakUsedBytes / (1024 * 1024)} MiB");
+```
+
+`Read()` returns a `DeviceMemoryReading` (`UsedBytes`, `FreeBytes`, `TotalBytes`), `Sample()` does
+the same and folds the reading into `PeakUsedBytes`, and `ResetPeak()` starts a fresh peak. Four
+things to know about the numbers:
+
+- They are the **device's**, not this process's — every other process on the card, a desktop
+  session included, is in `UsedBytes`.
+- Nothing samples on its own. `PeakUsedBytes` is exactly the largest figure your own `Sample()`
+  calls have seen, which is the point: a step lasting 0.2 s falls between the polls of a
+  half-second `nvidia-smi` sampler, and the "peak" such a sampler reports can be half the real one.
+  A `Sample()` per step costs about a microsecond and cannot miss the step it follows.
+- On a machine with no CUDA runtime installed both return `null` rather than throwing, so the call
+  can stay in code that also runs on a CPU backend.
+- The reading goes through the CUDA runtime directly, which initializes this process's context on
+  the device if it has none — itself a few hundred MiB. Take the first reading after the backend is
+  up, not before, or that cost lands inside your baseline.
+
+**This is a stopgap, deliberately.** One device (0), one setting for every session in the process,
+mutable at any time. Per-`ComputeContext` device configuration is what it should become
+([#344](https://github.com/Shorokoo/Shorokoo/issues/344)); until then do not expect two contexts to
+differ, and treat these as startup configuration.
 
 ## Debugging engine (no OnnxRuntime)
 

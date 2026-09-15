@@ -143,13 +143,9 @@ public static class InferenceBackend
 
     private static bool IsCudaAvailable()
     {
-        // CUDA Toolkit 12.x ships its runtime under an OS-specific name --
-        // cudart64_12.dll on Windows, libcudart.so.12 on Linux; presence implies
-        // the runtime libs ORT's CUDA EP DT_NEEDs are installed and resolvable.
-        var cudaRuntime = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-            ? "cudart64_12.dll"
-            : "libcudart.so.12";
-        if (NativeLibrary.TryLoad(cudaRuntime, out var h))
+        // Presence of the CUDA 12.x runtime implies the libs ORT's CUDA EP DT_NEEDs are
+        // installed and resolvable.
+        if (NativeLibrary.TryLoad(CudaRuntime.LibraryName, out var h))
         {
             NativeLibrary.Free(h);
             return true;

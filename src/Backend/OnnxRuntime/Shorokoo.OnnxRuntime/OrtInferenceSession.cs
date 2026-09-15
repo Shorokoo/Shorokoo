@@ -6,8 +6,13 @@ namespace Shorokoo.OnnxRuntime;
 internal sealed class OrtInferenceSession : IShorokooInferenceSession
 {
     private readonly InferenceSession _session;
+    private readonly int? _cudaDeviceId;
 
-    public OrtInferenceSession(InferenceSession session) { _session = session; }
+    public OrtInferenceSession(InferenceSession session, int? cudaDeviceId)
+    {
+        _session = session;
+        _cudaDeviceId = cudaDeviceId;
+    }
 
     public IReadOnlyList<string> InputNames => _session.InputNames;
     public IReadOnlyList<string> OutputNames => _session.OutputNames;
@@ -20,7 +25,12 @@ internal sealed class OrtInferenceSession : IShorokooInferenceSession
         foreach (var (k, v) in inputs)
             ortInputs[k] = ((OrtTensorValue)v).Inner;
 
+        // Read per run, not per session, so turning arena shrinkage on takes effect on sessions
+        // that are already compiled.
         using var runOptions = new RunOptions();
+        if (OrtSessionFactory.ArenaShrinkageRunConfig(_cudaDeviceId, DeviceMemory.ShrinkArenaAfterRun)
+            is { } arena)
+            runOptions.AddRunConfigEntry("memory.enable_memory_arena_shrinkage", arena);
         var results = _session.Run(runOptions, ortInputs, outputNames);
 
         // ORT snapshots each input's handle into an IntPtr[] and keeps no reference to the OrtValue

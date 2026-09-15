@@ -5,6 +5,7 @@ using System.Text.RegularExpressions;
 using Shorokoo.Core.Factory.OpsFactories;
 using Shorokoo.Core.Inference;
 using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.OnnxRuntime;
 using Shorokoo.Runtime;
 
 namespace Shorokoo.Tests;
@@ -14,7 +15,8 @@ namespace Shorokoo.Tests;
 /// internal LINQ-ish helpers in <c>Shorokoo.Core.Utils.Extensions</c>, the <see cref="NodeKey"/> /
 /// <see cref="TensorKey"/> identity structs, the <see cref="ShorokooException"/> hierarchy, the
 /// OpsFactories <see cref="Helpers"/> dtype sets and attribute-type mapping, the
-/// <see cref="InferenceBackend"/> deployment-folder discovery and selection policy, the typed
+/// <see cref="InferenceBackend"/> deployment-folder discovery and selection policy, the
+/// <see cref="DeviceMemory"/> settings the CUDA backends map onto ORT's arena options, the typed
 /// value-handle conversions, <c>ShapeUtils</c>' argument validation for <c>Reshape</c>'s
 /// <c>keepAxes</c>, the <see cref="AtomicFileWriter"/> temp-and-rename commit protocol
 /// (crash-window fault injection, stale-temp sweep, retain-last-N rotation), the
@@ -296,6 +298,58 @@ public class CoreUtilsCoverageTests
         Assert.Equal(gpu, InferenceBackend.SelectBackend([gpu], cudaAvailable: false)!.Value);
         Assert.Equal(gpu, InferenceBackend.SelectBackend([cpu, gpu], cudaAvailable: true)!.Value);
         Assert.Equal(cpu, InferenceBackend.SelectBackend([cpu, gpu], cudaAvailable: false)!.Value);
+    }
+
+    [Fact]
+    public void TestDeviceMemorySettingsMapOntoTheCudaArenaOptions()
+    {
+        var uncapped = OrtSessionFactory.CudaProviderOptions(0, null, ArenaExtendStrategy.NextPowerOfTwo);
+        Assert.Equal("0", uncapped["device_id"]);
+        Assert.Equal("kNextPowerOfTwo", uncapped["arena_extend_strategy"]);
+        Assert.False(uncapped.ContainsKey("gpu_mem_limit"));
+
+        var budgeted = OrtSessionFactory.CudaProviderOptions(
+            1, 16L * 1024 * 1024 * 1024, ArenaExtendStrategy.SameAsRequested);
+        Assert.Equal("1", budgeted["device_id"]);
+        Assert.Equal("kSameAsRequested", budgeted["arena_extend_strategy"]);
+        Assert.Equal("17179869184", budgeted["gpu_mem_limit"]);
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => OrtSessionFactory.CudaProviderOptions(0, null, (ArenaExtendStrategy)7));
+
+        Assert.Equal("gpu:0", OrtSessionFactory.ArenaShrinkageRunConfig(0, shrinkArenaAfterRun: true));
+        Assert.Equal("gpu:3", OrtSessionFactory.ArenaShrinkageRunConfig(3, shrinkArenaAfterRun: true));
+        Assert.Null(OrtSessionFactory.ArenaShrinkageRunConfig(0, shrinkArenaAfterRun: false));
+        Assert.Null(OrtSessionFactory.ArenaShrinkageRunConfig(null, shrinkArenaAfterRun: true));
+    }
+
+    [Fact]
+    public void TestDeviceMemoryDefaultsToOrtsOwnArenaBehaviourAndRejectsAnEmptyBudget()
+    {
+        Assert.Null(DeviceMemory.LimitBytes);
+        Assert.Equal(ArenaExtendStrategy.NextPowerOfTwo, DeviceMemory.ArenaExtend);
+        Assert.False(DeviceMemory.ShrinkArenaAfterRun);
+        Assert.Throws<ArgumentOutOfRangeException>(() => DeviceMemory.LimitBytes = 0);
+        Assert.Throws<ArgumentOutOfRangeException>(() => DeviceMemory.LimitBytes = -1);
+        Assert.Null(DeviceMemory.LimitBytes);
+    }
+
+    /// <summary>A reading is null on a machine with no CUDA runtime, and self-consistent on one
+    /// that has it, so this holds on the CPU sandbox and a GPU box alike.</summary>
+    [Fact]
+    public void TestDeviceMemoryReadsTheCardWhenThereIsOneAndTracksTheSampledPeak()
+    {
+        var reading = DeviceMemory.Read();
+        Assert.True(reading is null || reading.Value.TotalBytes > 0);
+        Assert.True(reading is null || reading.Value.UsedBytes + reading.Value.FreeBytes == reading.Value.TotalBytes);
+
+        DeviceMemory.ResetPeak();
+        Assert.Equal(0L, DeviceMemory.PeakUsedBytes);
+        Assert.Equal(4096L, DeviceMemory.ObservePeak(4096));
+        Assert.Equal(4096L, DeviceMemory.ObservePeak(512));
+        Assert.Equal(8192L, DeviceMemory.ObservePeak(8192));
+        Assert.Equal(8192L, DeviceMemory.PeakUsedBytes);
+        DeviceMemory.ResetPeak();
+        Assert.Equal(0L, DeviceMemory.PeakUsedBytes);
     }
 
     /// <summary>

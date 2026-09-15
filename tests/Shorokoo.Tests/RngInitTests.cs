@@ -950,6 +950,35 @@ public static partial class RngInitLoopDraw
     }
 }
 
+/// <summary>The same over nested loops: every enclosing loop's index has to enter the key, not
+/// just the innermost.</summary>
+[TrainableParamInitializer]
+public static partial class RngInitNestedLoopDraw
+{
+    public static Tensor<float32> Inline(Vector<int64> shape, Scalar<int64> outer, Scalar<int64> inner)
+    {
+        var acc = Globals.TensorFill(shape, 0.0f);
+        foreach (var _ in LoopAPI.Iterate(outer))
+            foreach (var __ in LoopAPI.Iterate(inner))
+                acc = acc + RandomUniform(shape, 0f, 1f);
+        return acc;
+    }
+}
+
+[Module]
+public partial class RngInitNestedLoopDraw2x2Layer
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+        => x * RngInitNestedLoopDraw.Init(x.ShapeTensor(), Scalar(2L), Scalar(2L));
+}
+
+[Module]
+public partial class RngInitNestedLoopDraw2x3Layer
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+        => x * RngInitNestedLoopDraw.Init(x.ShapeTensor(), Scalar(2L), Scalar(3L));
+}
+
 [Module]
 public partial class RngInitLoopDraw2Layer
 {
@@ -1057,14 +1086,22 @@ public class RngInitComposedInitializerTests
         Assert.False(bank.SequenceEqual(emb));
     }
 
-    // An initialization draw is keyed by its ordinal in the initializer and nothing else, so every
-    // trip of a loop re-derives one key and returns one sample: 5 trips sum to exactly 2.5x what 2
-    // trips do. Independent draws would not hold that ratio.
-    [Fact(Skip = "Shorokoo/Shorokoo#343: an initialization draw inside a loop re-derives one key per trip")]
+    // N trips of one reused sample sum to exactly N times one trip, elementwise; N independent
+    // draws do not.
+    private static bool SumsScaleWithTripCount(float[] fewer, float[] more, float ratio)
+        => fewer.Zip(more, (a, b) => b / a).All(r => Math.Abs(r - ratio) < 1e-3f);
+
+    [Fact]
     public void TestADrawInsideALoopInAnInitializerDrawsFreshPerIteration()
     {
         var two = Single(RngInitLoopDraw2Layer.ComputationGraph);
-        var five = Single(RngInitLoopDraw5Layer.ComputationGraph);
-        Assert.All(five.Zip(two, (a, b) => a / b), r => Assert.NotEqual(2.5f, r, 3));
+        Assert.False(SumsScaleWithTripCount(two, Single(RngInitLoopDraw5Layer.ComputationGraph), 2.5f));
+        Assert.False(two.SequenceEqual(Single(RngInitLoopDraw2Layer.ComputationGraph, seed: 8)));
     }
+
+    [Fact]
+    public void TestADrawInsideNestedLoopsFoldsEveryEnclosingIterationIndexIntoItsKey()
+        => Assert.False(SumsScaleWithTripCount(
+            Single(RngInitNestedLoopDraw2x2Layer.ComputationGraph),
+            Single(RngInitNestedLoopDraw2x3Layer.ComputationGraph), 1.5f));
 }

@@ -143,9 +143,11 @@ public static partial class NormalDist02
 The wrapper draws what `NormalDist` draws — the same composition, value for value — keyed on the
 parameter *being created*. Each draw **site** in the body gets its own sub-stream of that
 parameter's stream, the body's own sites and a called initializer's alike, so no two sites repeat
-each other. What is still refused is a draw inside a call the lowering cannot inline — in practice
-a `[Module]` that owns a parameter space of its own, so the draw belongs to a parameter there and
-carries no key here. The error names the called function.
+each other; and a site inside a `LoopAPI.Iterate` body folds each enclosing loop's iteration index
+into its key, so it draws a fresh sample on every trip rather than one sample re-used — the same
+rule a runtime draw in a loop follows. What is still refused is a draw inside a call the lowering
+cannot inline — in practice a `[Module]` that owns a parameter space of its own, so the draw
+belongs to a parameter there and carries no key here. The error names the called function.
 
 **It can start from another parameter's value.** An initializer input typed `Tensor<T>` may be
 another trainable parameter, passed at the call site. It is not folded to a constant: the edge

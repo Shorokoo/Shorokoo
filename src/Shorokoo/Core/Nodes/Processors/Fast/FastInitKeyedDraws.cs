@@ -22,10 +22,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// ceiling and parallelizes on GPU).
     ///
     /// <para>The draw node is rewritten in place: its key input is the parameter's folded
-    /// init key as a uint64 scalar constant, its substreamIndex is the draw's ordinal within the
-    /// initializer (a distinct sub-stream per draw; every shipping initializer has exactly
-    /// one, so ordinal 0 in practice), and its shape input and declared distribution
-    /// bounds carry over — the initializer's downstream scaling math is unchanged.
+    /// init key as a uint64 scalar constant — split once per enclosing loop by that loop's
+    /// runtime iteration index, so a draw inside a loop body is a fresh sample on every trip
+    /// rather than one sample re-derived (Shorokoo/Shorokoo#343, the initialization-side twin of
+    /// the runtime defect #289; the split is the same <c>SHRK_RNG_SPLIT</c> a runtime feed's
+    /// chain folds with, on the same algorithm-independent default) — its substreamIndex is the
+    /// draw's ordinal within the initializer (a distinct sub-stream per draw SITE; every shipping
+    /// initializer has exactly one, so ordinal 0 in practice), and its shape input and declared
+    /// distribution bounds carry over — the initializer's downstream scaling math is unchanged.
     /// <see cref="FastLowerRandomOps"/> later lowers the keyed node to a call of the named
     /// algorithm's exported function, exactly as for a runtime feed.</para>
     ///
@@ -108,6 +112,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var newNodes = new List<FastNode>(body.Nodes.Count);
             int randomOrdinal = 0;
 
+            // The loops enclosing the node being visited, outermost first. Scope membership in the
+            // Fast pipeline is positional, so this is what tells a draw which iteration indices
+            // its key has to fold in.
+            var enclosingLoops = new List<FastNode>();
+
             foreach (var node in body.Nodes)
             {
                 bool isUniform = node.OpCode == InternalOpCodes.SHRK_RANDOM_UNIFORM;
@@ -115,6 +124,17 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 bool isBits = node.OpCode == InternalOpCodes.SHRK_RANDOM_BITS;
                 if (!isUniform && !isNormal && !isBits)
                 {
+                    if (node.OpCode == OpCodes.LOOP_OPEN)
+                        enclosingLoops.Add(node);
+                    else if (node.OpCode == OpCodes.LOOP_CLOSE)
+                    {
+                        // Swallowing an underflow would leave the stack shifted for every later
+                        // draw and still end at zero, so it would report nothing.
+                        System.Diagnostics.Debug.Assert(enclosingLoops.Count > 0,
+                            "FastInitKeyedDraws: LOOP_CLOSE before its LOOP_OPEN.");
+                        if (enclosingLoops.Count > 0)
+                            enclosingLoops.RemoveAt(enclosingLoops.Count - 1);
+                    }
                     newNodes.Add(node);
                     continue;
                 }
@@ -122,12 +142,19 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var shapeInput = node.Inputs[0]
                     ?? throw new InvalidOperationException("Random init node has null shape input.");
 
-                // The parameter's own stream key as a scalar constant, and a distinct sub-stream
-                // (substreamIndex = ordinal) per draw within one initializer. The constant is emitted
-                // per draw so it always sits in the draw's own control-flow scope.
+                // The parameter's own stream key as a scalar constant, folded once per enclosing
+                // loop by that loop's iteration index, and a distinct sub-stream
+                // (substreamIndex = ordinal) per draw within one initializer. Every node is emitted
+                // per draw so it always sits in the draw's own control-flow scope — the splits in
+                // particular MUST stay inside the loop body, since they read its iteration index.
                 var keyKey = AppendConstant(new OnnxTensorData<uint64>(
                     new Shape(System.Array.Empty<long>()),
                     OnnxUtils.CreateTensorValue(new Shape(System.Array.Empty<long>()), (ulong[])[streamKey])), newNodes);
+                foreach (var loopOpen in enclosingLoops)
+                    keyKey = AppendSplit(
+                        keyKey,
+                        AppendCastToUInt64(loopOpen.Outputs[0]!.Value, newNodes),   // LOOP_OPEN out 0 = iteration index
+                        newNodes);
 
                 var substreamIndexKey = AppendConstant(new OnnxTensorData<uint64>(
                     new Shape(Array.Empty<long>()),
@@ -216,6 +243,48 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 defaultName: fn.DefaultName + "__rng__" + suffix,
                 friendlyName: fn.FriendlyName + "__rng__" + suffix,
                 fn.StateOwnership);
+        }
+
+        /// <summary>
+        /// <c>key ← split(key, counter)</c> — the key-tree fold, on the DEFAULT algorithm. The
+        /// split is deliberately algorithm-independent (see <c>RngAlgorithms.GetFunction</c>), so
+        /// the key tree stays the same tree whichever algorithm the draw itself runs under; that
+        /// is the same choice <see cref="FastWireRngKeyDerivation"/> makes for a runtime feed's
+        /// chain, and the same one the init master fold is resolved under.
+        /// </summary>
+        private static FastTensorKey AppendSplit(
+            FastTensorKey key, FastTensorKey counter, List<FastNode> newNodes)
+        {
+            var nodeKey = FastNodeKey.New();
+            var outKey = new FastTensorKey(nodeKey, 0);
+            newNodes.Add(new FastNode
+            {
+                Key = nodeKey,
+                OpCode = InternalOpCodes.SHRK_RNG_SPLIT,
+                Attributes = OnnxCSharpAttributes.FromCSharpVals(
+                    new Dictionary<string, object?> { [ShrkAttrRngAlgorithm] = Core.Rng.RngAlgorithms.Default },
+                    Definitions.NodeDefinitions[InternalOpCodes.SHRK_RNG_SPLIT].AttributeDefs),
+                FullInputs = { [""] = new List<FastTensorKey?> { key, counter } },
+                FullOutputs = { [""] = new List<FastTensorKey?> { outKey } },
+            });
+            return outKey;
+        }
+
+        private static FastTensorKey AppendCastToUInt64(FastTensorKey value, List<FastNode> newNodes)
+        {
+            var nodeKey = FastNodeKey.New();
+            var outKey = new FastTensorKey(nodeKey, 0);
+            newNodes.Add(new FastNode
+            {
+                Key = nodeKey,
+                OpCode = OpCodes.CAST,
+                Attributes = OnnxCSharpAttributes.FromCSharpVals(
+                    new Dictionary<string, object?> { [AttrTo] = DType.UInt64 },
+                    Definitions.NodeDefinitions[OpCodes.CAST].AttributeDefs),
+                FullInputs = { [""] = new List<FastTensorKey?> { value } },
+                FullOutputs = { [""] = new List<FastTensorKey?> { outKey } },
+            });
+            return outKey;
         }
 
         private static FastTensorKey AppendConstant(TensorData data, List<FastNode> newNodes)

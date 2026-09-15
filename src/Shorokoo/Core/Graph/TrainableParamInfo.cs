@@ -33,16 +33,14 @@ namespace Shorokoo.Core.Graph
         /// initializer input that IS another parameter stays a graph edge all the way to
         /// materialization, which runs the initializers in dependency order so the source's
         /// own initialized value — the one the model starts from, not a redraw — is what the
-        /// dependent reads (Shorokoo/Shorokoo#324). Default (never set) means every input is a
-        /// constant.
+        /// dependent reads (Shorokoo/Shorokoo#324). Always set alongside
+        /// <see cref="TrainableParamInputParamValues"/>, and the same length as it.
         /// </summary>
         public readonly ImmutableArray<ModelId?> TrainableParamInputSourceIds { get; init; }
 
         /// <summary>The parameters whose initialized values this one's initializer reads.</summary>
         public IEnumerable<ModelId> SourceParamIds
-            => TrainableParamInputSourceIds.IsDefault
-                ? Enumerable.Empty<ModelId>()
-                : TrainableParamInputSourceIds.Where(x => x is not null).Select(x => x!.Value);
+            => TrainableParamInputSourceIds.Where(x => x is not null).Select(x => x!.Value);
 
         public readonly ModelId SpecificModelId { get; init; }
         public readonly Function TargetFn { get; init; }

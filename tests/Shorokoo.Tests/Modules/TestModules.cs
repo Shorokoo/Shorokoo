@@ -1375,6 +1375,22 @@ namespace Shorokoo.Tests.Modules
             => input * InitCallingAnotherInitializer.Init(input.ShapeTensor());
     }
 
+    /// <summary>A STATE initializer written as a call of a trainable initializer's body: the same
+    /// rule, on the other half of the attribute pair.</summary>
+    [StateInitializer(Ownership = StateOwnership.ModuleOwned)]
+    public static partial class StateInitCallingAnotherInitializer
+    {
+        public static Tensor<float32> Inline(Vector<int64> shape) => InitTwos.Init(shape);
+    }
+
+    /// <summary>Drives StateInitCallingAnotherInitializer.</summary>
+    [Module]
+    public partial class UsesStateInitCallingAnotherInitializer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => input * StateInitCallingAnotherInitializer.Init(input.ShapeTensor());
+    }
+
     /// <summary>An initializer handed another parameter's initialized value.</summary>
     [TrainableParamInitializer]
     public static partial class InitDoublingAnotherParam
@@ -1390,7 +1406,7 @@ namespace Shorokoo.Tests.Modules
         public static Tensor<float32> Inline(Tensor<float32> input)
         {
             var source = InitSimple.Init(input.ShapeTensor());
-            return input * InitDoublingAnotherParam.Init(input.ShapeTensor(), source);
+            return input * source * InitDoublingAnotherParam.Init(input.ShapeTensor(), source);
         }
     }
 

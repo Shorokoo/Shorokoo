@@ -141,11 +141,11 @@ public static partial class NormalDist02
 ```
 
 The wrapper draws what `NormalDist` draws — the same composition, value for value — keyed on the
-parameter *being created*. Each draw a body makes gets its own sub-stream of that parameter's
-stream, its own and a called initializer's alike, so two draws never repeat each other. What is
-still refused is a draw inside a **`[Module]`** the body calls that the lowering cannot inline:
-that module owns a parameter space of its own, so the draw belongs to a parameter there and
-carries no key here. The error names the module.
+parameter *being created*. Each draw **site** in the body gets its own sub-stream of that
+parameter's stream, the body's own sites and a called initializer's alike, so no two sites repeat
+each other. What is still refused is a draw inside a call the lowering cannot inline — in practice
+a `[Module]` that owns a parameter space of its own, so the draw belongs to a parameter there and
+carries no key here. The error names the called function.
 
 **It can start from another parameter's value.** An initializer input typed `Tensor<T>` may be
 another trainable parameter, passed at the call site. It is not folded to a constant: the edge
@@ -162,14 +162,26 @@ public static partial class ProductOf
         => a.MatMul(b);
 }
 
+Scalar<int64> vocab = Scalar(50257L), d = Scalar(384L);
+
 var emb  = NormalDist02.Init([vocab, d]);
 var wv   = NormalDist02.Init([d, d]);
 var bank = ProductOf.Init([vocab, d], emb, wv);   // starts as emb · wv, for the emb the model has
 ```
 
 The **shape** input is the one that must still fold to a constant at the call site: a parameter's
-shape is fixed when the architecture is concretized, before anything has a value. Two parameters
-each initialized from the other are refused — a cycle has no value to start from.
+shape is fixed when the architecture is concretized, before anything has a value. (A rank-0
+initializer states its shape in its `Scalar<T>` return type and takes no shape input at all, so
+*its* first input may be a parameter like any other.) The initializers run in dependency order, so
+a chain — one parameter from another, from a third — works too.
+
+Two shapes are refused by name rather than guessed at. A source the model reads **nowhere else**:
+a parameter no forward path reads gets no gradient, so it cannot be trained, and the stages after
+concretization drop it — the concrete model would end up carrying fewer parameters than the
+architecture and its checkpoints say it has. And a source created **inside a loop**, which stands
+for a different parameter on every trip, so no single edge names it. For either, create the source
+outside the loop and use it in the model, or fold what it computes into the initializer that reads
+it so no parameter is created for it.
 
 ## Layers (`Shorokoo.Modules.Layers`)
 

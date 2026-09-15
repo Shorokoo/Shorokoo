@@ -935,8 +935,20 @@ namespace Shorokoo.Core.Factory.IR
                 FastNode fastNode;
                 if (functionsMap.TryGetValue(opCode, out var function))
                 {
+                    // An initializer-typed function is called two ways, and both serialize to the
+                    // same op type — the FunctionProto's name. A module body's `Init(...)` DEFINES
+                    // a parameter (MODEL_PARAM); the same call from inside another initializer's
+                    // body is an ordinary call of that initializer's body, returning a value
+                    // (FUNCTION_INVOKE — Shorokoo/Shorokoo#323). Only the first is a parameter, so
+                    // the function's type alone cannot decide: what separates them is the
+                    // attributes the writer emitted. FUNCTION_INVOKE carries shrk_structure, which
+                    // MODEL_PARAM has no slot for; rebuilding the call as a MODEL_PARAM parses its
+                    // attributes against the wrong schema and throws on the first mismatched one.
+                    bool isFunctionInvoke = nodeProto.Attributes.Any(a => a.Name == ShrkAttrStructure);
+
                     if ((function.FunctionType == FunctionType.TrainableParamInitializer ||
                          function.FunctionType == FunctionType.StateParamInitializer) &&
+                        !isFunctionInvoke &&
                         definitions.ContainsKey(InternalOpCodes.MODEL_PARAM))
                     {
                         fastNode = BuildFastTrainableParamNodeFromProto(nodeProto, function, tensorKeys, definitions);
@@ -1006,8 +1018,11 @@ namespace Shorokoo.Core.Factory.IR
 
         /// <summary>
         /// Builds a FUNCTION_INVOKE <see cref="FastNode"/> for an ordinary function-call
-        /// proto node. Output structure / dtype / rank are read from the target Function's
-        /// declared outputs (matching <see cref="Function.Call"/>).
+        /// proto node. Output structure / dtype / rank are taken from the node's own attributes
+        /// where it carries them, and otherwise from the target Function's declared outputs
+        /// (matching <see cref="Function.Call"/>). The node's own attributes have to win: a call
+        /// of a GENERIC body is typed at the CALL SITE's concrete type, which the body — whose
+        /// outputs are declared at a type standin — cannot give back.
         /// </summary>
         private static FastNode BuildFastFunctionInvokeNodeFromProto(
             NodeProto nodeProto,
@@ -1021,15 +1036,17 @@ namespace Shorokoo.Core.Factory.IR
                 ? fnOutputs.Select(x => (int?)x.Rank).ToImmutableArray()
                 : fastFnGraph.OutputRankOverrides.ToImmutableArray();
 
-            var attrs = OnnxCSharpAttributes.FromCSharpVals(
-                new Dictionary<string, object?>
-                {
-                    [ShrkAttrStructure] = fnOutputs.Select(x => x.Structure()).ToArray(),
-                    [ShrkAttrDtype] = fnOutputs.Select(x => x.DType).ToArray(),
-                    [ShrkAttrRank] = fnRankOverrides.Select(x => (long)(x ?? -1)).ToArray(),
-                    [ShrkAttrGenericTypeArgs] = (DType[]?)null,
-                },
-                attrDefs);
+            var attrs = nodeProto.Attributes.Any(a => a.Name == ShrkAttrStructure)
+                ? ParseAttributes(nodeProto, Definitions.NodeDefinitions[InternalOpCodes.FUNCTION_INVOKE]).Item1
+                : OnnxCSharpAttributes.FromCSharpVals(
+                    new Dictionary<string, object?>
+                    {
+                        [ShrkAttrStructure] = fnOutputs.Select(x => x.Structure()).ToArray(),
+                        [ShrkAttrDtype] = fnOutputs.Select(x => x.DType).ToArray(),
+                        [ShrkAttrRank] = fnRankOverrides.Select(x => (long)(x ?? -1)).ToArray(),
+                        [ShrkAttrGenericTypeArgs] = (DType[]?)null,
+                    },
+                    attrDefs);
 
             var stackTrace = nodeProto.MetadataProps.FirstOrDefault(x => x.Key == "StackTrace")?.Value;
             var nodeKey = ParseFastNodeKey(nodeProto);
@@ -1041,10 +1058,15 @@ namespace Shorokoo.Core.Factory.IR
             // one-for-one, so a proto that calls a function with the wrong arity has to be
             // rejected here: reaching the inliner with it asserts, and in Release concretizes
             // to a graph whose spliced inputs are wired to nothing (Shorokoo/Shorokoo#251).
-            if (inputKeys.Length != fastFnGraph.Inputs.Count)
+            // A generic body's leading type-placeholder slots take no argument — the call names its
+            // specialization in shrk_generic_type_args and erasure strips them — so they are not
+            // counted here either.
+            int dataInputCount = fastFnGraph.Inputs.Count(
+                k => fastFnGraph.FindNode(k.FastNodeKey) is not { OpCode: InternalOpCodes.GENERIC_TYPE_INPUT });
+            if (inputKeys.Length != dataInputCount)
                 throw new ModuleException(ErrorCodes.FW006, function.FriendlyName,
                     $"the imported model calls it with {inputKeys.Length} input(s) but its body " +
-                    $"declares {fastFnGraph.Inputs.Count}.");
+                    $"declares {dataInputCount}.");
 
             return new FastNode
             {

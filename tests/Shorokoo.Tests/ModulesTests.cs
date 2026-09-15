@@ -63,17 +63,26 @@ public class ModulesCoverageTests
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)], expected: [1.0, 2.0]));
 
     // An Init call inside an initializer body is that initializer's body, not a second parameter:
-    // the graph carries one parameter, at the called initializer's value.
+    // the graph carries one parameter, at the called initializer's value. The roundtrip overload is
+    // the one that matters here — a call and a definition serialize to the same op type, so only a
+    // module/architecture reload tells them apart.
     [Fact]
     public void TestAnInitializerCallingAnotherInitializerIsThatInitializersBody()
-        => Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitCallingAnotherInitializer>(
-            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)], expected: [2.0, 4.0]));
+    {
+        TensorData[] x = [TensorData(DType.Float32, [2L], 1f, 2f)];
+        Assert.True(AutoTest.AdvancedTestGraphWithModuleGraphRoundtrip<Modules.UsesInitCallingAnotherInitializer>(
+            hyperparamInputs: [], runtimeInputs: x, expected: [2.0, 4.0]));
+        Assert.True(AutoTest.AdvancedTestGraphWithModuleGraphRoundtrip<Modules.UsesStateInitCallingAnotherInitializer>(
+            hyperparamInputs: [], runtimeInputs: x, expected: [2.0, 4.0]));
+        Assert.True(AutoTest.AdvancedTestGraphWithModuleGraphRoundtrip<Modules.UsesInitCallingAGenericInitializer>(
+            hyperparamInputs: [], runtimeInputs: x, expected: [3.0, 6.0]));
+    }
 
     // A parameter passed to another parameter's initializer stays a graph edge through lowering,
     // both round-trips and materialization, so the dependent starts at twice the source.
     [Fact]
     public void TestAnInitializerTakingAnotherParametersValueLowersIt()
-        => Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitFromAnotherParam>(
+        => Assert.True(AutoTest.AdvancedTestGraphWithModuleGraphRoundtrip<Modules.UsesInitFromAnotherParam>(
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)], expected: [2.0, 4.0]));
 
     [Fact]

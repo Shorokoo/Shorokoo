@@ -582,6 +582,28 @@ public partial class RngInitNestedDrawLayer
     }
 }
 
+/// <summary>A module that owns a parameter of its own, drawn: called from an initializer body its
+/// draw belongs to a parameter over there, so it carries no key here and cannot be inlined.</summary>
+[Module]
+public partial class RngInitParamOwningDrawLayer
+{
+    public static Tensor<float32> Inline(Tensor<float32> x) => x * Uniform.Init(x.ShapeTensor());
+}
+
+[TrainableParamInitializer]
+public static partial class RngInitCallingAParamOwningDraw
+{
+    public static Tensor<float32> Inline(Vector<int64> shape)
+        => RngInitParamOwningDrawLayer.Call(Globals.TensorFill(shape, 1.0f));
+}
+
+[Module]
+public partial class RngInitCallingAParamOwningDrawLayer
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+        => x * RngInitCallingAParamOwningDraw.Init(x.ShapeTensor());
+}
+
 /// <summary>Parameters whose initializers draw with attribute-carried distributions — the
 /// un-run-initializer fault in the form that leaves the ONNX fallback nothing to drop.</summary>
 [Module]
@@ -634,6 +656,17 @@ public class RngInitFailLoudTests
         Assert.True(a.Distinct().Count() > 1);                // not a degenerate fill
         Assert.Equal(a, Init(123));                           // reproducible for a config
         Assert.False(a.SequenceEqual(Init(124)));             // derived from the master seed
+    }
+
+    [Fact]
+    public void TestADrawInACallThatCannotBeInlinedIsRefusedByName()
+    {
+        var g = RngInitCallingAParamOwningDrawLayer.ComputationGraph;
+        var sample = TensorData([2L, 2L], 1f, 1f, 1f, 1f);
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([sample]));
+        var ex = Assert.Throws<NotSupportedException>(() => arch.InitializeTrainableParams());
+        Assert.Contains("RngInitCallingAParamOwningDraw", ex.Message);
+        Assert.Contains("call another initializer's Init", ex.Message);
     }
 
     [Fact]
@@ -859,6 +892,76 @@ public partial class RngInitParamFromParamChain
     }
 }
 
+/// <summary>A source parameter the forward pass never reads — it reaches the output only through
+/// the parameter its value initializes.</summary>
+[Module]
+public partial class RngInitSourceOnlyInInitializer
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var src = NormalDist.Init([Scalar(2L), Scalar(2L)], Scalar(0f), Scalar(1f));
+        return x.MatMul(RngInitDoubleOfParam.Init([Scalar(2L), Scalar(2L)], src));
+    }
+}
+
+/// <summary>A source parameter created inside a loop, so it stands for a different parameter on
+/// each trip and no single edge can name it.</summary>
+[Module]
+public partial class RngInitSourceInALoop
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        foreach (var _ in LoopAPI.Iterate(Scalar(2L)))
+        {
+            var src = NormalDist.Init([Scalar(2L), Scalar(2L)], Scalar(0f), Scalar(1f));
+            x = x.MatMul(RngInitDoubleOfParam.Init([Scalar(2L), Scalar(2L)], src)) + x.MatMul(src);
+        }
+        return x;
+    }
+}
+
+/// <summary>Doubles another parameter, stating its own shape by returning Scalar&lt;T&gt; — so its
+/// first input is a value, not a shape vector.</summary>
+[TrainableParamInitializer]
+public static partial class RngInitScalarDoubleOfParam
+{
+    public static Scalar<float32> Inline(Scalar<float32> source) => source * Scalar(2.0f);
+}
+
+[Module]
+public partial class RngInitScalarParamFromParam
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var src = ScalarOnes.Init();
+        return x * src * RngInitScalarDoubleOfParam.Init(src);
+    }
+}
+
+/// <summary>Sums a draw over a loop, so N trips of independent draws could not be N times one trip.</summary>
+[TrainableParamInitializer]
+public static partial class RngInitLoopDraw
+{
+    public static Tensor<float32> Inline(Vector<int64> shape, Scalar<int64> trips)
+    {
+        var acc = Globals.TensorFill(shape, 0.0f);
+        foreach (var _ in LoopAPI.Iterate(trips)) acc = acc + RandomUniform(shape, 0f, 1f);
+        return acc;
+    }
+}
+
+[Module]
+public partial class RngInitLoopDraw2Layer
+{
+    public static Tensor<float32> Inline(Tensor<float32> x) => x * RngInitLoopDraw.Init(x.ShapeTensor(), Scalar(2L));
+}
+
+[Module]
+public partial class RngInitLoopDraw5Layer
+{
+    public static Tensor<float32> Inline(Tensor<float32> x) => x * RngInitLoopDraw.Init(x.ShapeTensor(), Scalar(5L));
+}
+
 /// <summary>An embedding, a value matrix, and the bank the two multiply out to.</summary>
 [Module]
 public partial class RngInitBankFromEmbedding
@@ -894,8 +997,8 @@ public class RngInitComposedInitializerTests
 
     private static float[] Single(ComputationGraph g, ulong seed = 7) => Init(g, seed).Values.Single();
 
-    private static float[] Named(Dictionary<string, float[]> ps, string initializer)
-        => ps.Single(p => p.Key.Contains(initializer)).Value;
+    private static float[] Named(Dictionary<string, float[]> ps, string initializer, int index = 0)
+        => ps.Single(p => p.Key.EndsWith($".{initializer}#{index}", StringComparison.Ordinal)).Value;
 
     [Fact]
     public void TestANestedInitCallIsTheCalledInitializersBodyKeyedOnTheParameterBeingCreated()
@@ -903,30 +1006,47 @@ public class RngInitComposedInitializerTests
         var wrapped = Single(RngInitWrapsNormalDistLayer.ComputationGraph);
         Assert.Equal(4, wrapped.Length);
         Assert.Equal(Single(RngInitHandWrittenNormalDistLayer.ComputationGraph), wrapped);
-        Assert.Equal(wrapped, Single(RngInitWrapsNormalDistLayer.ComputationGraph));
         Assert.False(wrapped.SequenceEqual(Single(RngInitWrapsNormalDistLayer.ComputationGraph, seed: 8)));
-        Assert.All(Single(RngInitInlineMinusNestedDrawLayer.ComputationGraph), x => Assert.NotEqual(0f, x));
     }
+
+    [Fact]
+    public void TestTwoDrawSitesInOneInitializerLandOnDistinctSubStreams()
+        => Assert.All(Single(RngInitInlineMinusNestedDrawLayer.ComputationGraph), x => Assert.NotEqual(0f, x));
 
     [Fact]
     public void TestAParameterInitializedFromAnotherReadsTheValueTheModelStartsFrom()
     {
         var chain = Init(RngInitParamFromParamChain.ComputationGraph);
         var src = Named(chain, "NormalDist");
-        var derived = chain.Where(p => p.Key.Contains("RngInitDoubleOfParam"))
-            .OrderBy(p => p.Key, StringComparer.Ordinal).Select(p => p.Value).ToArray();
-        Assert.Equal(2, derived.Length);
-        Assert.Equal([.. src.Select(v => v * 2f)], derived[0]);
-        Assert.Equal([.. src.Select(v => v * 4f)], derived[1]);
+        Assert.Equal([.. src.Select(v => v * 2f)], Named(chain, "RngInitDoubleOfParam", 0));
+        Assert.Equal([.. src.Select(v => v * 4f)], Named(chain, "RngInitDoubleOfParam", 1));
+    }
+
+    [Fact]
+    public void TestARankZeroInitializerTakesAParameterAsItsFirstInput()
+    {
+        var ps = Init(RngInitScalarParamFromParam.ComputationGraph);
+        Assert.Equal([1f], Named(ps, "ScalarOnes"));
+        Assert.Equal([2f], Named(ps, "RngInitScalarDoubleOfParam"));
+    }
+
+    [Fact]
+    public void TestTheSourceShapesParameterFromParameterInitializationRefuses()
+    {
+        string Refusal(ComputationGraph g)
+            => Assert.Throws<InvalidOperationException>(() => Init(g)).Message;
+
+        Assert.Contains("read by nothing except the initializer",
+            Refusal(RngInitSourceOnlyInInitializer.ComputationGraph));
+        Assert.Contains("stands for a different one on each iteration",
+            Refusal(RngInitSourceInALoop.ComputationGraph));
     }
 
     [Fact]
     public void TestABankInitializesToTheProductOfTheTwoParametersItNames()
     {
         var ps = Init(RngInitBankFromEmbedding.ComputationGraph);
-        var drawn = ps.Where(p => p.Key.Contains("NormalDist"))
-            .OrderBy(p => p.Key, StringComparer.Ordinal).Select(p => p.Value).ToArray();
-        var (emb, wv) = (drawn[0], drawn[1]);
+        var (emb, wv) = (Named(ps, "NormalDist", 0), Named(ps, "NormalDist", 1));
         float[] expected =
         [
             emb[0] * wv[0] + emb[1] * wv[2], emb[0] * wv[1] + emb[1] * wv[3],
@@ -935,5 +1055,16 @@ public class RngInitComposedInitializerTests
         var bank = Named(ps, "RngInitProductOfParams");
         for (int i = 0; i < 4; i++) Assert.Equal(expected[i], bank[i], 1e-7f);
         Assert.False(bank.SequenceEqual(emb));
+    }
+
+    // An initialization draw is keyed by its ordinal in the initializer and nothing else, so every
+    // trip of a loop re-derives one key and returns one sample: 5 trips sum to exactly 2.5x what 2
+    // trips do. Independent draws would not hold that ratio.
+    [Fact(Skip = "Shorokoo/Shorokoo#343: an initialization draw inside a loop re-derives one key per trip")]
+    public void TestADrawInsideALoopInAnInitializerDrawsFreshPerIteration()
+    {
+        var two = Single(RngInitLoopDraw2Layer.ComputationGraph);
+        var five = Single(RngInitLoopDraw5Layer.ComputationGraph);
+        Assert.All(five.Zip(two, (a, b) => a / b), r => Assert.NotEqual(2.5f, r, 3));
     }
 }

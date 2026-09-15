@@ -523,6 +523,24 @@ namespace Shorokoo.Tests.Modules
             => input + TwoTypeArgTrainableParamInitializers.Init<float32, int32>(shape).Vec();
     }
 
+    /// <summary>A non-generic initializer whose body calls a GENERIC one. The call has to be typed
+    /// at the call site's concrete type: a generic body declares its output at a type standin, so
+    /// typing the call off the body leaves the Add below with nothing to infer from.</summary>
+    [TrainableParamInitializer]
+    public static partial class InitCallingAGenericInitializer
+    {
+        public static Tensor<float32> Inline(Vector<int64> shape)
+            => GenericTrainableParamInitializers.Init<float32>(shape) + Globals.TensorFill(shape, 3.0f);
+    }
+
+    /// <summary>Drives InitCallingAGenericInitializer.</summary>
+    [Module]
+    public partial class UsesInitCallingAGenericInitializer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => input * InitCallingAGenericInitializer.Init(input.ShapeTensor());
+    }
+
     /// <summary>Calls a generic trainable-parameter initializer with an explicit type argument
     /// from a non-generic body.</summary>
     [Module]

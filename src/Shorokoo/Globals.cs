@@ -59,7 +59,8 @@ namespace Shorokoo
                 stateOwnership: stateOwnership);
 
             if (GraphTrace.IsParamInitializerBodyTracing)
-                return InvokeInitializerBody(targetFn, inputs, genericTypeArgs: null);
+                return InvokeInitializerBody(targetFn, inputs, genericTypeArgs: null,
+                    targetFn.Outputs[0].Type, targetFn.Outputs[0].Rank);
 
             return InternalOp.TrainableParamRef(inputs, iterationIndices, localModelId: null, targetFn.Outputs[0].Type, targetFn.Outputs[0].Rank, targetFn, isTrainable);
         }
@@ -111,7 +112,7 @@ namespace Shorokoo
 
             // Create the trainable param ref with the appropriate dtype and generic type args
             var result = GraphTrace.IsParamInitializerBodyTracing
-                ? InvokeInitializerBody(targetFn, inputs, genericTypeArgs)
+                ? InvokeInitializerBody(targetFn, inputs, genericTypeArgs, dtype ?? targetFn.Outputs[0].Type, rank)
                 : InternalOp.TrainableParamRef(inputs, iterationIndices, localModelId: null, dtype, rank, targetFn, isTrainable, genericTypeArgs);
 
             // The result is Variable but we know it's a tensor with the specified dtype.
@@ -134,20 +135,36 @@ namespace Shorokoo
         /// parameter being created, on its own sub-stream (Shorokoo/Shorokoo#323).</para>
         /// </summary>
         private static Variable InvokeInitializerBody(
-            Function targetFn, Variable[] inputs, DType[]? genericTypeArgs)
+            Function targetFn, Variable[] inputs, DType[]? genericTypeArgs, DType dtype, int? rank)
         {
-            if (inputs.Length != targetFn.Inputs.Length)
+            // A generic body's leading type-placeholder slots are not arguments — the call site
+            // names its specialization in genericTypeArgs and erasure strips the slots when it
+            // builds that body — so the argument count is checked against the DATA inputs only.
+            int dataInputs = targetFn.Inputs.Count(
+                x => x.InputType != Core.Nodes.NodeDefinitions.InputType.GenericType);
+            if (inputs.Length != dataInputs)
                 throw new ModuleException(ErrorCodes.FW005, targetFn.FriendlyName,
                     $"Init was called from inside a parameter initializer's body with {inputs.Length} " +
-                    $"argument(s), but the initializer body declares {targetFn.Inputs.Length} input(s). " +
+                    $"argument(s), but the initializer body declares {dataInputs} input(s). " +
                     "A nested Init call is an ordinary call of that initializer's body, so it needs a " +
                     "value for every one of its Inline parameters.");
 
+            if (inputs.Any(x => x is null))
+                throw new ModuleException(ErrorCodes.FW005, targetFn.FriendlyName,
+                    "Init was called from inside a parameter initializer's body with a null argument. " +
+                    "Every one of the body's inputs needs a value; a null leaves the spliced body " +
+                    "input wired to nothing.");
+
+            // The output type comes from the CALL SITE, not from the body's declared output. A
+            // generic body declares its output at a type standin, and this call has already
+            // resolved which concrete type it wants; reading the body instead types the call at
+            // the standin, and the caller's next op then has no type to infer from. (That is why
+            // this is not Function.Call, which reads the body's own declared outputs.)
             return InternalOp.FunctionInvoke(
                 inputs,
-                targetFn.Outputs.Select(x => x.Structure()).ToArray(),
-                targetFn.Outputs.Select(x => x.DType).ToArray(),
-                targetFn.OutputRankOverrides.Select(x => x ?? -1).ToArray(),
+                [targetFn.Outputs[0].Structure()],
+                [dtype],
+                [rank ?? -1],
                 targetFn,
                 genericTypeArgs)[0];
         }

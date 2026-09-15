@@ -1889,6 +1889,33 @@ public class TrainingRigCheckpointCoverageTests
         }
     }
 
+    /// <summary>Binding is the last point where a value and the model that will use it are both in
+    /// hand, so it is where a value of the wrong shape is refused — a checkpoint assembled by hand
+    /// reaches the model without passing a load. Left unchecked the graph builds and runs, returning
+    /// a result of the bound value's shape instead of the model's. Part of Shorokoo/Shorokoo#322.</summary>
+    [Fact]
+    public void TestAValueOfAnotherShapeIsRefusedWhereItIsBoundToTheModel()
+    {
+        NamedModelParam[] sample =
+        [
+            new TensorDataModelParam("x", ModelParamType.InputParam,
+                TensorData([4L, 4L], [1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f, 11f, 12f, 13f, 14f, 15f, 16f])),
+        ];
+        TrainingRig Rig(ComputationGraph model) => TrainingRig.FromScratch(
+            model, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, sample, 0.1f);
+
+        var narrow = Rig(ParamShapeNarrowModel.ComputationGraph);
+        var wide = Rig(ParamShapeWideModel.ComputationGraph);
+        var wideCkpt = wide.CreateInitialCheckpoint();
+        var narrowValues = narrow.CreateInitialCheckpoint().TrainableParams.Fields;
+
+        Assert.NotNull(wideCkpt.ToInferenceModel());
+        var handAssembled = new TrainingCheckpoint(
+            new TensorDataStruct(wide.TrainableParamStructDef, narrowValues),
+            wideCkpt.ModelState, wideCkpt.OptimizerState, rig: wide);
+        Assert.Throws<InvalidOperationException>(() => handAssembled.ToInferenceModel());
+    }
+
     /// <summary>A flat checkpoint is self-describing, so it loads with no struct defs supplied: the
     /// section prefixes give the kinds and the safetensors header gives each field's name, rank and
     /// element type, in the order the file lays them out. The rig is what judges such a checkpoint —

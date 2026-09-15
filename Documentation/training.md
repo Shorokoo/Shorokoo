@@ -722,7 +722,12 @@ var more = rig.Fit(inputs, targets, numEpochs: 5, ckpt);  // continues where it 
 - `LoadCheckpoint` / `LoadCheckpointFromSkpt` reconstruct the checkpoint against the rig's own
   parameter and state definitions, so the rig must be built from the **same**
   model/loss/optimizer graphs. Loading a checkpoint from a different model or
-  optimizer throws.
+  optimizer throws. What is checked, and where: the rig compares field names, dtypes, stated
+  ranks and **dimensions** against its own parameters as it adopts the values, and every value is
+  checked once more against the shape the model declares for it at the point it is bound into a
+  graph — so a value of another shape is refused even when the checkpoint was assembled by hand
+  rather than loaded. A parameter whose stored shape differs from the model's is never bound
+  silently; unchecked it would broadcast, and the model would run and answer in the wrong shape.
 - Because `.Step` is restored, learning-rate **schedules resume from the right
   step** — not from step 0.
 - `rig.LoadCheckpoint(path)` delegates to `TrainingCheckpoint.Load(path, rig)` (and

@@ -23,8 +23,8 @@ Related: [core-types.md](core-types.md) · [defining-models.md](defining-models.
   code. Only one backend is live per process. How it is discovered, and how to
   override the choice: [Backend selection](#backend-selection).
 - On a GPU backend the CUDA arena is configured through `DeviceMemory`, which also reports
-  how much of the card is gone. Its arena strategy is chosen per session rather than left at
-  ORT's default, so that a training loop does not end up holding twice what it uses:
+  how much of the card is gone. Its arena strategy deliberately departs from ORT's default so
+  that a training loop does not end up holding far more of the card than it uses:
   [Device memory](#device-memory-gpu-backends).
 
 ## Workflow: one-shot evaluation
@@ -432,44 +432,51 @@ If no backend is found, the first inference call throws `InvalidOperationExcepti
 ### Device memory (GPU backends)
 
 ONNX Runtime allocates device memory out of a BFC arena that extends in blocks and never gives
-them back. How big each new block is comes from the *extend strategy*, and the two ORT offers suit
-opposite situations:
+them back. How large each new block is comes from the *extend strategy*, and the two ORT offers
+suit opposite situations:
 
 - **`NextPowerOfTwo`** (ORT's default) makes each extension at least as large as everything the
-  arena already holds. The regions are big, splittable and get reused, which is what an
-  unpredictable series of allocation sizes needs — but once a run's sizes have settled, the
+  arena already holds. The regions are big, splittable and reusable, which is what an
+  unpredictable series of allocation sizes needs — but once a run's sizes have settled the
   doubling is pure overshoot, and it is why a long training run ends up holding far more of the
   card than its steps use.
 - **`SameAsRequested`** extends by exactly what was asked for, so a settled run's arena tracks it.
   The catch is that an exactly-sized region cannot serve a later, larger request: a session whose
-  input shapes keep growing strands every region it outgrows and can need *more* memory this way.
+  input shapes keep growing strands every region it outgrows.
 
-Measured on the CPU arena — same allocator, same strategies — over four chained matmuls:
+**Shorokoo defaults to `SameAsRequested`.** That is a deliberate departure from ORT, and it is a
+bet rather than a free win. Measured on the CPU arena — the same allocator with the same two
+strategies — over four chained matmuls:
 
-| workload | `SameAsRequested` | `NextPowerOfTwo` |
+| shapes fed to the session | `SameAsRequested` | `NextPowerOfTwo` |
 |---|---|---|
-| ten runs at one shape | **11 MiB** | 16 MiB |
-| four runs, each shape larger | 23 MiB | **15 MiB** |
+| one shape, ten runs | **11 MiB** | 16 MiB |
+| alternating 2048/512, twenty runs | **24 MiB** | 33 MiB |
+| largest first, then settled | 18 MiB | **16 MiB** |
+| shuffled from four sizes, twenty runs | 34 MiB | **32 MiB** |
+| growing, then settled | 36 MiB | **32 MiB** |
+| growing 256 to 2048 | 23 MiB | **15 MiB** |
 
-**So Shorokoo does not pick one. `ArenaExtend` defaults to `Auto`, which chooses per session:** a
-training step gets `SameAsRequested`, everything else keeps ORT's `NextPowerOfTwo`. A training
-step is the settled case by construction — the rig compiles one step per input shape and then
-feeds that shape for the life of the run — while an inference session may be handed a larger shape
-on any call. Setting `ArenaExtend` to either concrete strategy overrides the choice for every
-session in the process.
+The bet is on the asymmetry, not on winning every row. A training run feeds one input shape to one
+compiled step for its whole length — the first row — and there exact-size extension holds 1.45x
+less (1.8x was reported on a 24 GiB card, where a step needing 12.9 GiB left the arena holding all
+24.6 GiB). Where several sizes are in play the doubling holds less, but by 1.06–1.13x. **The one
+case to override it in is input shapes that grow without settling** — the last row, where the
+doubling holds 1.5x less and, on a card with no room to spare, fits where exact-size extension
+does not:
 
 ```csharp
 using Shorokoo.Core.Inference.Abstractions;
 
+DeviceMemory.ArenaExtend = ArenaExtendStrategy.NextPowerOfTwo;   // ORT's doubling, back again
 DeviceMemory.LimitBytes = 16L * 1024 * 1024 * 1024;              // cap the arena at 16 GiB
 DeviceMemory.ShrinkArenaAfterRun = true;                          // hand unused blocks back each step
-DeviceMemory.ArenaExtend = ArenaExtendStrategy.SameAsRequested;   // override the per-session choice
 ```
 
 | setting | ORT option | default | read |
 |---|---|---|---|
 | `LimitBytes` | `gpu_mem_limit` | `null` — no cap | when a session is created |
-| `ArenaExtend` | `arena_extend_strategy` | `Auto` — per session, as above | when a session is created |
+| `ArenaExtend` | `arena_extend_strategy` | `SameAsRequested` — **not** ORT's default | when a session is created |
 | `ShrinkArenaAfterRun` | `memory.enable_memory_arena_shrinkage` | `false` | on every run |
 
 The other two are off by default because they cost on every step rather than only while the arena

@@ -26,16 +26,14 @@ namespace Shorokoo.OnnxRuntime;
 /// </summary>
 public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
 {
-    private readonly Action<SessionOptions, ShorokooGraphOptimization> _configureExecutionProvider;
+    private readonly Action<SessionOptions> _configureExecutionProvider;
     private readonly int? _cudaDeviceId;
 
     /// <param name="configureExecutionProvider">
     /// Applied to the <see cref="SessionOptions"/> of every session this factory creates,
     /// after the log-severity and graph-optimization settings and before the session is
     /// constructed. This is where a subclass appends its execution provider; a CPU backend
-    /// leaves ORT on its default provider and does nothing here. It is handed the session's
-    /// graph-optimization profile because the CUDA arena is configured differently for a
-    /// training step than for an inference session — see <see cref="DeviceMemory.Resolve"/>.
+    /// leaves ORT on its default provider and does nothing here.
     /// </param>
     /// <param name="cudaDeviceId">
     /// The CUDA device the provider appended above allocates on, or <c>null</c> when it is
@@ -43,8 +41,7 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
     /// <see cref="DeviceMemory.ShrinkArenaAfterRun"/> shrinks, so a backend that does not
     /// allocate on a card passes <c>null</c> and its sessions ignore the setting.
     /// </param>
-    protected OrtSessionFactory(
-        Action<SessionOptions, ShorokooGraphOptimization> configureExecutionProvider, int? cudaDeviceId)
+    protected OrtSessionFactory(Action<SessionOptions> configureExecutionProvider, int? cudaDeviceId)
     {
         _configureExecutionProvider = configureExecutionProvider;
         _cudaDeviceId = cudaDeviceId;
@@ -56,7 +53,7 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
     /// honours <see cref="DeviceMemory.ShrinkArenaAfterRun"/> for that device's arena.
     /// </summary>
     protected OrtSessionFactory(int cudaDeviceId)
-        : this((opts, graphOptimization) => AppendCuda(opts, cudaDeviceId, graphOptimization), cudaDeviceId) { }
+        : this(opts => AppendCuda(opts, cudaDeviceId), cudaDeviceId) { }
 
     /// <summary>
     /// Creates an ORT inference session over a serialized ONNX model, on this factory's
@@ -80,7 +77,7 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
         // process. Disposing in a finally keeps them rooted across the constructor.
         using var options = new SessionOptions();
         Configure(options, graphOptimization, logSeverity);
-        _configureExecutionProvider(options, graphOptimization);
+        _configureExecutionProvider(options);
         var session = new InferenceSession(modelBytes.ToArray(), options);
         return new OrtInferenceSession(session, _cudaDeviceId);
     }
@@ -124,14 +121,12 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
 
     /// <summary>
     /// Appends the CUDA execution provider on <paramref name="deviceId"/>, configured with the
-    /// device-memory settings <see cref="DeviceMemory"/> holds at this moment and with the arena
-    /// strategy <paramref name="graphOptimization"/> resolves to. This is what the GPU backends
-    /// pass as their execution-provider step, and the point at which
+    /// device-memory settings <see cref="DeviceMemory"/> holds at this moment. This is what the
+    /// GPU backends pass as their execution-provider step, and the point at which
     /// <see cref="DeviceMemory.LimitBytes"/> and <see cref="DeviceMemory.ArenaExtend"/> are read:
     /// a session built now keeps them for its life.
     /// </summary>
-    public static void AppendCuda(
-        SessionOptions options, int deviceId, ShorokooGraphOptimization graphOptimization)
+    public static void AppendCuda(SessionOptions options, int deviceId)
     {
         // OrtCUDAProviderOptions is a SafeHandle that ORT takes as a bare IntPtr, exactly like
         // the SessionOptions above, so it needs the same `using`: the options are read during
@@ -139,9 +134,7 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
         // read, and a GC there would run the critical finalizer under the native call.
         using var cuda = new OrtCUDAProviderOptions();
         cuda.UpdateOptions(CudaProviderOptions(
-            deviceId,
-            DeviceMemory.LimitBytes,
-            DeviceMemory.Resolve(DeviceMemory.ArenaExtend, graphOptimization)));
+            deviceId, DeviceMemory.LimitBytes, DeviceMemory.ArenaExtend));
         options.AppendExecutionProvider_CUDA(cuda);
     }
 
@@ -153,8 +146,7 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
     /// altogether, which leaves ORT at its default of the whole card.
     /// </summary>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="arenaExtend"/> is not one of
-    /// the two strategies ORT accepts — <see cref="ArenaExtendStrategy.Auto"/> is Shorokoo's
-    /// choice between them and has to be resolved (<see cref="DeviceMemory.Resolve"/>) first.</exception>
+    /// the two strategies ORT accepts.</exception>
     public static Dictionary<string, string> CudaProviderOptions(
         int deviceId,
         long? limitBytes,

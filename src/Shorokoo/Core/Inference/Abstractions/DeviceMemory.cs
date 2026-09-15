@@ -6,29 +6,18 @@ namespace Shorokoo.Core.Inference.Abstractions;
 public enum ArenaExtendStrategy
 {
     /// <summary>
-    /// Let Shorokoo choose per session, which is the default and what you want unless you have
-    /// measured otherwise. Neither ORT strategy is better than the other in general — which one
-    /// wastes less depends on whether a session's allocation sizes settle or keep growing — so
-    /// Shorokoo picks by what it knows about the session it is building:
-    /// <see cref="SameAsRequested"/> for a training step, whose shapes are fixed at compile time
-    /// and repeat for the life of the run, and <see cref="NextPowerOfTwo"/> everywhere else,
-    /// where an input shape may grow from call to call.
-    /// </summary>
-    Auto,
-
-    /// <summary>
     /// ORT's own default: each extension is at least as large as everything the arena already
-    /// holds. Its regions are large and get split and reused, which is what an unpredictable
-    /// series of sizes needs — but on a loop whose sizes have settled the doubling is pure
-    /// overshoot, and it is what a long training run ends up holding.
+    /// holds. Its regions are large, and get split and reused, which is what an unpredictable
+    /// series of allocation sizes needs — but on a loop whose sizes have settled the doubling is
+    /// pure overshoot, and that is what a long training run ends up holding.
     /// </summary>
     NextPowerOfTwo,
 
     /// <summary>
-    /// Extend by exactly the requested size. On a loop whose allocation sizes have settled the
-    /// arena then tracks them instead of doubling past them. The cost is that an exactly-sized
-    /// region cannot serve a later, larger request, so a session whose shapes keep growing
-    /// strands each region it outgrows and can need <b>more</b> memory this way, not less.
+    /// Extend by exactly the requested size — Shorokoo's default. A loop whose allocation sizes
+    /// have settled then tracks them instead of doubling past them. The cost is that an
+    /// exactly-sized region cannot serve a later, larger request: a run whose input shapes keep
+    /// growing strands each region it outgrows and can need <b>more</b> memory this way.
     /// </summary>
     SameAsRequested,
 }
@@ -53,9 +42,8 @@ public readonly record struct DeviceMemoryReading(long UsedBytes, long FreeBytes
 /// when a session is <i>created</i>, so set them at startup, before the first inference or
 /// training call; changing them later leaves already-compiled sessions as they were.
 /// <see cref="ShrinkArenaAfterRun"/> is read on every run and takes effect immediately.
-/// All three are ignored by the CPU backends. <see cref="ArenaExtend"/> defaults to
-/// <see cref="ArenaExtendStrategy.Auto"/>, under which a training step gets a different
-/// arena strategy from an inference session, for the reason given there.</para>
+/// All three are ignored by the CPU backends. <see cref="ArenaExtend"/> is the one whose
+/// default is not ORT's own; the reason is on the property.</para>
 ///
 /// <para><b>Readings.</b> <see cref="Read"/> and <see cref="Sample"/> call the CUDA
 /// runtime's <c>cudaMemGetInfo</c> directly and return <c>null</c> when there is no CUDA
@@ -109,24 +97,23 @@ public static class DeviceMemory
 
     /// <summary>
     /// How the arena extends itself — ORT's <c>arena_extend_strategy</c>. Defaults to
-    /// <see cref="ArenaExtendStrategy.Auto"/>, which is not one of ORT's two values but a
-    /// choice between them, made per session: see <see cref="ArenaExtendStrategy.Auto"/>.
-    /// Setting either concrete strategy here overrides that for every session in the process.
+    /// <see cref="ArenaExtendStrategy.SameAsRequested"/>, <b>not</b> to ORT's own
+    /// <see cref="ArenaExtendStrategy.NextPowerOfTwo"/>.
+    ///
+    /// <para>Neither strategy is better in general; the default is a bet on the workload
+    /// Shorokoo exists for. A training run feeds one input shape to one compiled step for its
+    /// whole length, and on that shape exact-size extension holds about 1.45x less than ORT's
+    /// doubling (measured small, and 1.8x was reported on a 24 GiB card). Where several
+    /// allocation sizes are in play it is the doubling that holds less, but by 1.06-1.13x — an
+    /// order of magnitude less at stake. The one case it loses badly is input shapes that keep
+    /// growing without settling, where each outgrown region is stranded: set
+    /// <see cref="ArenaExtendStrategy.NextPowerOfTwo"/> if that is your workload and device
+    /// memory is tight.</para>
+    ///
+    /// <para>Whichever you set applies to every session in the process, and a session keeps the
+    /// value it was built with, so this is startup configuration.</para>
     /// </summary>
-    public static ArenaExtendStrategy ArenaExtend { get; set; } = ArenaExtendStrategy.Auto;
-
-    /// <summary>
-    /// The strategy a session compiled at <paramref name="graphOptimization"/> actually gets:
-    /// <paramref name="requested"/> when it names one, otherwise the per-session choice
-    /// <see cref="ArenaExtendStrategy.Auto"/> stands for — exact-size extension for a training
-    /// step, whose allocation sizes settle, and ORT's doubling elsewhere, where they may not.
-    /// </summary>
-    public static ArenaExtendStrategy Resolve(
-        ArenaExtendStrategy requested, ShorokooGraphOptimization graphOptimization)
-        => requested is not ArenaExtendStrategy.Auto ? requested
-            : graphOptimization is ShorokooGraphOptimization.TrainingStep
-                ? ArenaExtendStrategy.SameAsRequested
-                : ArenaExtendStrategy.NextPowerOfTwo;
+    public static ArenaExtendStrategy ArenaExtend { get; set; } = ArenaExtendStrategy.SameAsRequested;
 
     /// <summary>
     /// Whether to hand the arena's unused blocks back to the device after every run —

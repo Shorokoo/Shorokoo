@@ -510,10 +510,10 @@ Leaving both `null`, so each defaults to `ComputeContext.Default`, is the normal
 
 What *is* configurable — on the GPU backends — is device memory, but process-wide rather than per
 context: an arena budget, the arena's extend strategy, per-step arena shrinkage, and a reading of how
-much of the card is gone. A training step's sessions are configured differently from an inference
-session's by default — a step's shapes are fixed when it is compiled, so its arena is told to extend
-by what it asks for rather than to keep doubling, which is what otherwise leaves a long run holding
-far more of the card than its steps use. On a run that is close to the card's limit, set a budget at
+much of the card is gone. The default arena strategy is picked for exactly this loop: a step's shapes
+are fixed when it is compiled and repeat for the length of the run, so the arena is told to extend by
+what it asks for rather than to keep doubling, which is what otherwise leaves a long run holding far
+more of the card than its steps use. On a run that is close to the card's limit, set a budget at
 startup and sample the peak inside your `TrainStep` loop; see
 [Device memory](inference.md#device-memory-gpu-backends).
 

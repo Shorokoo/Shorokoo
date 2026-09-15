@@ -7,11 +7,11 @@ using Shorokoo.OnnxRuntime;
 namespace Shorokoo.Tests;
 
 /// <summary>
-/// The measurement behind <see cref="ArenaExtendStrategy.Auto"/>: how much memory ORT's arena
-/// ends up holding under each extend strategy, for a session whose allocation sizes settle and
-/// for one whose sizes keep growing. A developer workflow rather than a check — it reads
-/// process-wide native allocation, which the parallel coverage suite would drown — so it is
-/// <c>Purpose=Manual</c> and prints a table:
+/// The measurement behind <c>DeviceMemory.ArenaExtend</c>'s default: how much memory ORT's arena
+/// ends up holding under each extend strategy, for a series of allocation sizes that settles and
+/// for ones that do not. A developer workflow rather than a check — it reads process-wide native
+/// allocation, which the parallel coverage suite would drown — so it is <c>Purpose=Manual</c> and
+/// prints a table:
 ///
 /// <code>
 /// dotnet test tests/Shorokoo.Tests/Shorokoo.Tests.csproj \
@@ -19,18 +19,24 @@ namespace Shorokoo.Tests;
 ///   --logger "console;verbosity=detailed" --no-build
 /// </code>
 ///
-/// Recorded on ORT 1.26, CPU EP, 4 chained [rows, 512] x [512, 512] matmuls, arena uncapped:
+/// Recorded on ORT 1.26, CPU EP, four chained [rows, 512] x [512, 512] matmuls, arena uncapped,
+/// stable to the MiB across repeats and across the order the two strategies run in:
 ///
-/// | workload | SameAsRequested | NextPowerOfTwo |
+/// | shapes fed to the session | SameAsRequested | NextPowerOfTwo |
 /// |---|---|---|
-/// | ten runs at one shape | 11 MiB | 16 MiB |
-/// | four runs, each shape larger | 23 MiB | 15 MiB |
+/// | one shape, ten runs | **11 MiB** | 16 MiB |
+/// | alternating 2048/512, twenty runs | **24 MiB** | 33 MiB |
+/// | largest first, then settled | 18 MiB | **16 MiB** |
+/// | shuffled from four sizes, twenty runs | 34 MiB | **32 MiB** |
+/// | growing, then settled | 36 MiB | **32 MiB** |
+/// | growing 256 to 2048 | 23 MiB | **15 MiB** |
 ///
-/// Neither strategy wins outright, which is why the choice is made per session. Exact-size
-/// extension tracks a settled series of sizes instead of doubling past it, and strands every
-/// region it outgrows when the sizes keep climbing — at a 16 MiB cap the growing workload fails
-/// outright under it while ORT's doubling runs in 15 MiB. A training step is the settled case:
-/// its shapes are fixed when the step is compiled and repeat for the life of the run.
+/// Neither strategy wins outright. Exact-size extension tracks a settled series of sizes instead
+/// of doubling past it, and strands every region it outgrows when the sizes keep climbing — at a
+/// 16 MiB arena the growing workload fails outright under it while ORT's doubling runs in 15 MiB.
+/// The default is <c>SameAsRequested</c> because the case it wins is the one a training run is in
+/// (one input shape, one compiled step, for the length of the run) and it wins it by more than it
+/// loses the mixed cases by.
 ///
 /// <para>The CPU and CUDA arenas are the same <c>BFCArena</c> with the same strategy enum, so the
 /// shape of the result carries over; the figures do not, and the ratio grows with the number of
@@ -121,18 +127,31 @@ public class ArenaExtendStrategyProbeTests
         const int k = 512;
         const long uncapped = 3072L << 20;
         var model = ModelBytes();
+        var rng = new Random(7);
+        int[] sizes = [256, 512, 1024, 2048];
+
         int[] settled = [.. Enumerable.Repeat(1024, 10)];
         int[] growing = [256, 512, 1024, 2048];
+        int[] growingThenSettled = [.. growing, .. Enumerable.Repeat(2048, 10)];
+        int[] largestFirst = [2048, 1024, 512, 256, .. Enumerable.Repeat(1024, 10)];
+        int[] shuffled = [.. Enumerable.Range(0, 20).Select(_ => sizes[rng.Next(sizes.Length)])];
+        int[] alternating = [.. Enumerable.Range(0, 20).Select(i => i % 2 == 0 ? 2048 : 512)];
 
         RunUnder(model, ArenaExtendStrategy.SameAsRequested, uncapped, [256], k);   // warm up
 
-        foreach (var (name, rows, limit) in new (string, int[], long)[]
+        foreach (var (name, rows) in new (string, int[])[]
                  {
-                     ("settled sizes, uncapped", settled, uncapped),
-                     ("growing sizes, uncapped", growing, uncapped),
-                     ("growing sizes, 16 MiB arena", growing, 16L << 20),
+                     ("settled, one shape x10", settled),
+                     ("growing 256->2048", growing),
+                     ("growing then settled x10", growingThenSettled),
+                     ("largest first, then settled", largestFirst),
+                     ("shuffled from 4 sizes x20", shuffled),
+                     ("alternating 2048/512 x20", alternating),
                  })
-            foreach (var strategy in new[] { ArenaExtendStrategy.SameAsRequested, ArenaExtendStrategy.NextPowerOfTwo })
-                Console.WriteLine($"{name,-28} {strategy,-16} {RunUnder(model, strategy, limit, rows, k)}");
+        {
+            var same = RunUnder(model, ArenaExtendStrategy.SameAsRequested, uncapped, rows, k);
+            var pow2 = RunUnder(model, ArenaExtendStrategy.NextPowerOfTwo, uncapped, rows, k);
+            Console.WriteLine($"{name,-30} SameAsRequested {same,-14} NextPowerOfTwo {pow2}");
+        }
     }
 }

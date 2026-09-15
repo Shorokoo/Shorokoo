@@ -193,12 +193,14 @@ rest of it.
 
 ### Device memory is configured process-wide
 
-The GPU backends read their arena budget, extend-strategy override and per-run shrinkage off the
-static `DeviceMemory`, not off the `ComputeContext` that builds the session — see
+The GPU backends read their arena budget, extend strategy and per-run shrinkage off the static
+`DeviceMemory`, not off the `ComputeContext` that builds the session — see
 [Device memory](inference.md#device-memory-gpu-backends). So every session in the process shares one
 configuration, it applies to CUDA device 0, and a reading (`DeviceMemory.Read()`, `Sample()`) is the
 whole device's rather than this process's share of it. A training rig's two contexts cannot differ in
-it, and a host running two models cannot give them separate budgets.
+it, and a host running two models cannot give them separate budgets — including when they would
+want different arena strategies, which the measured table in that section shows is a real
+difference between one workload and another.
 
 Lifting it means per-instance device configuration on `ComputeContext`, carried down to the session
 factory ([#344](https://github.com/Shorokoo/Shorokoo/issues/344)), and per-allocator figures out of

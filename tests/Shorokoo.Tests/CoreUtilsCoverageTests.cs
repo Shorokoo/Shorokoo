@@ -315,8 +315,6 @@ public class CoreUtilsCoverageTests
         Assert.Equal("17179869184", budgeted["gpu_mem_limit"]);
         Assert.Throws<ArgumentOutOfRangeException>(
             () => OrtSessionFactory.CudaProviderOptions(0, null, (ArenaExtendStrategy)7));
-        Assert.Throws<ArgumentOutOfRangeException>(
-            () => OrtSessionFactory.CudaProviderOptions(0, null, ArenaExtendStrategy.Auto));
 
         Assert.Equal("gpu:0", OrtSessionFactory.ArenaShrinkageRunConfig(0, shrinkArenaAfterRun: true));
         Assert.Equal("gpu:3", OrtSessionFactory.ArenaShrinkageRunConfig(3, shrinkArenaAfterRun: true));
@@ -325,34 +323,20 @@ public class CoreUtilsCoverageTests
     }
 
     /// <summary>
-    /// The shipped default is a per-session choice, not one of ORT's two strategies: a training
-    /// step, whose allocation sizes settle for the life of the run, extends the arena by what it
-    /// asks for; anything else, which may be fed a larger shape on any call, keeps ORT's doubling.
-    /// A strategy set explicitly overrides the choice everywhere.
+    /// The shipped defaults, and the ORT options a GPU session built with them asks for. The
+    /// arena strategy is deliberately not ORT's own: exact-size extension holds materially less
+    /// on a run that feeds one shape to one compiled step, which is what a training run is.
     /// </summary>
     [Fact]
-    public void TestTheArenaStrategyIsChosenPerSessionUnlessOneIsSetExplicitly()
+    public void TestDeviceMemoryDefaultsToTheExactSizeArenaAndRejectsAnEmptyBudget()
     {
-        Assert.Equal(ArenaExtendStrategy.Auto, DeviceMemory.ArenaExtend);
+        Assert.Equal(ArenaExtendStrategy.SameAsRequested, DeviceMemory.ArenaExtend);
         Assert.Null(DeviceMemory.LimitBytes);
         Assert.False(DeviceMemory.ShrinkArenaAfterRun);
 
-        ArenaExtendStrategy Shipped(ShorokooGraphOptimization o) => DeviceMemory.Resolve(DeviceMemory.ArenaExtend, o);
-        Assert.Equal(ArenaExtendStrategy.SameAsRequested, Shipped(ShorokooGraphOptimization.TrainingStep));
-        Assert.Equal(ArenaExtendStrategy.NextPowerOfTwo, Shipped(ShorokooGraphOptimization.EnableAll));
-        Assert.Equal(ArenaExtendStrategy.NextPowerOfTwo, Shipped(ShorokooGraphOptimization.EnableBasic));
-        Assert.Equal(ArenaExtendStrategy.NextPowerOfTwo, Shipped(ShorokooGraphOptimization.DisableAll));
-
-        foreach (var forced in new[] { ArenaExtendStrategy.NextPowerOfTwo, ArenaExtendStrategy.SameAsRequested })
-        {
-            Assert.Equal(forced, DeviceMemory.Resolve(forced, ShorokooGraphOptimization.TrainingStep));
-            Assert.Equal(forced, DeviceMemory.Resolve(forced, ShorokooGraphOptimization.EnableAll));
-        }
-
-        Assert.Equal("kSameAsRequested", OrtSessionFactory.CudaProviderOptions(
-            0, null, Shipped(ShorokooGraphOptimization.TrainingStep))["arena_extend_strategy"]);
-        Assert.Equal("kNextPowerOfTwo", OrtSessionFactory.CudaProviderOptions(
-            0, null, Shipped(ShorokooGraphOptimization.EnableAll))["arena_extend_strategy"]);
+        var shipped = OrtSessionFactory.CudaProviderOptions(0, DeviceMemory.LimitBytes, DeviceMemory.ArenaExtend);
+        Assert.Equal("kSameAsRequested", shipped["arena_extend_strategy"]);
+        Assert.False(shipped.ContainsKey("gpu_mem_limit"));
 
         Assert.Throws<ArgumentOutOfRangeException>(() => DeviceMemory.LimitBytes = 0);
         Assert.Throws<ArgumentOutOfRangeException>(() => DeviceMemory.LimitBytes = -1);

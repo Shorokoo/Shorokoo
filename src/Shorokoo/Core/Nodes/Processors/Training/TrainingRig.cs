@@ -3019,6 +3019,33 @@ namespace Shorokoo
             // compute+memory metric, only committing transforms that strictly improve it.
             Stage("InferTrainingStepShapes");
             var shapeInfo = shapeInferencer.Infer(graph, allInputs);
+
+            // A parameter's shape is declared by its initializer and baked into the arch, and every
+            // other part of the framework holds to it — binding a value of another shape into the
+            // model is refused. The optimizer is the one place that could change it: its update is
+            // ordinary tensor arithmetic, so a hyperparameter of another shape broadcasts against the
+            // parameter and the "updated" parameter comes back that shape instead. Nothing downstream
+            // would catch it — the update is packed by field name — and the rig would train happily
+            // while being unable to checkpoint or serve what it produced.
+            //
+            // The step's updated-parameter outputs lead this graph's outputs, and their shapes have
+            // just been inferred for the optimizer pass, so holding each to its parameter costs
+            // nothing and fails here, at build, rather than after a step. A dimension inference
+            // leaves symbolic (-1) constrains nothing.
+            for (int p = 0; p < TrainableParamStructDef.Fields.Length && p < graph.Outputs.Count; p++)
+            {
+                var field = TrainableParamStructDef.Fields[p];
+                if (shapeInfo.GetTensorInfo(graph.Outputs[p]) is not { } updatedInfo) continue;
+                var updatedDims = updatedInfo.Shape.Dims;
+                var declaredDims = ((TensorData)_initialParamFields[field.Name]).Shape.Dims;
+                if (updatedDims.Contains(-1L) || updatedDims.SequenceEqual(declaredDims)) continue;
+                throw new ArgumentException(
+                    $"The optimizer returns trainable parameter '{field.Name}' shaped "
+                    + $"[{string.Join(", ", updatedDims)}], but the model declares it "
+                    + $"[{string.Join(", ", declaredDims)}]. An optimizer must return each parameter "
+                    + "at that parameter's own shape; a hyperparameter or optimizer state of another "
+                    + "shape broadcasts against it instead of scaling it.");
+            }
             var baselineEval = new Shorokoo.Core.AutoDiffCheckpointing.GraphEvaluator().Evaluate(graph, shapeInfo);
             Stage("OptimizeTrainingStepGraph");
             var optimizer = new MemoryAwareGraphOptimizer(shapeInference: shapeInferencer);

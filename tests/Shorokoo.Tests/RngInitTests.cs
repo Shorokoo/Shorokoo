@@ -319,6 +319,16 @@ public class RngInitFrozenDerivationTests
             .Single(v => v.Length == 16);
         Assert.Equal(FrozenMultiDraw, w);
 
+        // Layer 4: the dense-normal decode. Every layer above draws uniform or raw bits, so
+        // none of them covers the table-driven normal path that nearly every shipping
+        // initializer takes.
+        var ng = RngInitNormalDistLayer.ComputationGraph;
+        var nw = ng.ToConcreteArchitecture(ng.FromOrderedInputs([sample]))
+            .InitializeTrainableParams(rngConfig: cfg).ModelParams
+            .Select(p => p.ToTensorData().As<float32>().AccessMemory().ToArray())
+            .Single(v => v.Length == 16);
+        Assert.Equal(FrozenNormalDraw, nw);
+
         // Layer 5: a draw inside a LOOP body. Its key is the parameter's own key folded once more
         // per trip, so this golden pins a link none of the layers above reach — the one a draw
         // executed N times rides to be N samples rather than one (Shorokoo/Shorokoo#343).
@@ -329,16 +339,6 @@ public class RngInitFrozenDerivationTests
             .Select(p => p.ToTensorData().As<float32>().AccessMemory().ToArray())
             .Single(v => v.Length == 4);
         Assert.Equal(FrozenLoopDraw, lw);
-
-        // Layer 4: the dense-normal decode. Every layer above draws uniform or raw bits, so
-        // none of them covers the table-driven normal path that nearly every shipping
-        // initializer takes.
-        var ng = RngInitNormalDistLayer.ComputationGraph;
-        var nw = ng.ToConcreteArchitecture(ng.FromOrderedInputs([sample]))
-            .InitializeTrainableParams(rngConfig: cfg).ModelParams
-            .Select(p => p.ToTensorData().As<float32>().AccessMemory().ToArray())
-            .Single(v => v.Length == 16);
-        Assert.Equal(FrozenNormalDraw, nw);
     }
 
     // The host oracles are independent reimplementations, so holding the same frozen constants up
@@ -1133,29 +1133,35 @@ public class RngInitComposedInitializerTests
     private static bool SumsScaleWithTripCount(float[] fewer, float[] more, float ratio)
         => fewer.Zip(more, (a, b) => b / a).All(r => Math.Abs(r - ratio) < 1e-3f);
 
-    [Fact]
-    public void TestADrawInsideALoopInAnInitializerDrawsFreshPerIteration()
+    // A ratio over a zeroed denominator is NaN, which SumsScaleWithTripCount reports as "does not
+    // scale" — so every sum it divides by has to be known non-degenerate first.
+    private static float[] NonZeroSums(ComputationGraph g)
     {
-        var two = Single(RngInitLoopDraw2Layer.ComputationGraph);
+        var sums = Single(g);
+        Assert.All(sums, x => Assert.NotEqual(0f, x));
+        return sums;
+    }
+
+    [Fact]
+    public void TestADrawInsideALoopInAnInitializerDrawsOncePerTripAndIsReproducible()
+    {
+        var two = NonZeroSums(RngInitLoopDraw2Layer.ComputationGraph);
         Assert.False(SumsScaleWithTripCount(two, Single(RngInitLoopDraw5Layer.ComputationGraph), 2.5f));
         Assert.Equal(two, Single(RngInitLoopDraw2Layer.ComputationGraph));
         Assert.False(two.SequenceEqual(Single(RngInitLoopDraw2Layer.ComputationGraph, seed: 8)));
         Assert.All(Single(RngInitLoopDraw0Layer.ComputationGraph), x => Assert.Equal(0f, x));
     }
 
-    // One case per nesting level, each holding only while THAT level's index enters the key:
-    // folding the inner index alone leaves the outer trips reusing one sample (ratio 2), folding
-    // the outer alone leaves each outer trip's inner trips reusing one (ratio 1.5).
     [Fact]
     public void TestADrawInsideNestedLoopsFoldsEveryEnclosingIterationIndexIntoItsKey()
     {
+        // Folding the inner index alone leaves the outer trips reusing one sample (ratio 2);
+        // folding the outer alone leaves each outer trip's inner trips reusing one (ratio 1.5).
         Assert.False(SumsScaleWithTripCount(
-            Single(RngInitNestedLoopDraw1x1Layer.ComputationGraph),
+            NonZeroSums(RngInitNestedLoopDraw1x1Layer.ComputationGraph),
             Single(RngInitNestedLoopDraw2x1Layer.ComputationGraph), 2.0f));
         Assert.False(SumsScaleWithTripCount(
-            Single(RngInitNestedLoopDraw2x2Layer.ComputationGraph),
+            NonZeroSums(RngInitNestedLoopDraw2x2Layer.ComputationGraph),
             Single(RngInitNestedLoopDraw2x3Layer.ComputationGraph), 1.5f));
-        // A dropped draw would make every ratio NaN, which the two assertions above accept.
-        Assert.All(Single(RngInitNestedLoopDraw2x2Layer.ComputationGraph), x => Assert.NotEqual(0f, x));
     }
 }

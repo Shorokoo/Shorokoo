@@ -281,8 +281,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             return AppendConstant(data, newNodes);
         }
 
-        /// <summary>Casts a value to uint64 — used to bring an int64 runtime iteration index into
-        /// the key tree's whole-64-bit split-counter type.</summary>
         /// <summary>Casts a value to uint64 — the width every key, split counter and draw
         /// position is. Shared with <see cref="FastInitKeyedDraws"/>, which folds the same kind of
         /// counter onto a parameter's init key.</summary>

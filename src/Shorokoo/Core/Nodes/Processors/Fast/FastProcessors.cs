@@ -4827,16 +4827,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         /// <summary>
-        /// Output key → the parameter it carries, for every <c>MODEL_PARAM_ID_REF</c> site that
-        /// names exactly one. This is what lets one parameter's initializer be handed another
+        /// Output keys that carry a parameter, split into the sites naming exactly ONE and the
+        /// sites naming SEVERAL. This is what lets one parameter's initializer be handed another
         /// parameter's value: the input never folds to a constant, so it is recorded as a
-        /// dependency on that parameter instead (Shorokoo/Shorokoo#324). Only a site that realizes
-        /// a SINGLE id qualifies — an in-loop site stands for one parameter per iteration, which no
-        /// single edge can name.
+        /// dependency on that parameter instead (Shorokoo/Shorokoo#324). Only a single-id site can
+        /// be wired that way — an in-loop site stands for one parameter per iteration, which no
+        /// single edge can name, so those are reported separately and refused by name.
         /// </summary>
-        /// <summary>Output keys that carry a parameter, split into the sites naming exactly one —
-        /// which an initializer input can be wired to — and the sites naming several, which it
-        /// cannot — an in-loop site stands for one parameter per iteration.</summary>
         private static (Dictionary<FastTensorKey, ModelId> Single, HashSet<FastTensorKey> Many)
             ParamIdsByOutputKey(InternalComputationGraph graph, Dictionary<FastTensorKey, IRuntimeTensor> store)
         {

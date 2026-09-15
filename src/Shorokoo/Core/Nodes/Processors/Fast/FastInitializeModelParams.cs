@@ -137,8 +137,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     {
                         // Stream key = init master folded along the parameter's ModelId path —
                         // the RNG key tree IS the ModelId tree — resolved above by executing the
-                        // derivation, so a param's init stream stays reconstructible offline
-                        // from its ModelId alone.
+                        // derivation, so a param's init stream stays reconstructible offline from
+                        // its ModelId, plus the trip number of each enclosing loop for a draw
+                        // inside one: BuildKeyedDraws folds those onto this key in-graph, and
+                        // without them every trip of such a draw collapses to one sample (#343).
                         // A non-drawing initializer has no key (none was resolved); BuildKeyedDraws
                         // returns null for it anyway, so the value here is never consumed.
                         var key = initKeys!.TryGetValue(modelId, out var k) ? k : default;

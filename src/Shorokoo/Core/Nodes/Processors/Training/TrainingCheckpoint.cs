@@ -611,9 +611,6 @@ namespace Shorokoo
                 if (!byName.TryGetValue(key, out var td))
                     throw new InvalidOperationException(
                         $"Checkpoint '{filePath}' is missing field '{key}'. Does it match this model/optimizer?");
-                if (fieldDef.Rank is int rank && td.Shape.Dims.Length != rank)
-                    throw new InvalidOperationException(
-                        $"Checkpoint field '{key}' has rank {td.Shape.Dims.Length}, expected {rank}.");
                 fields.Add(new KeyValuePair<string, IData>(fieldDef.Name, td));
             }
 

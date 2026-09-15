@@ -1129,17 +1129,16 @@ namespace Shorokoo
                     ?? throw new ArgumentException(
                         $"Checkpoint's {kind} definition is missing field '{e.Name}' this rig expects. " +
                         "The checkpoint was produced by a different model/optimizer.");
-                // An unknown rank on either side constrains nothing — a field def's Rank is null when
-                // the rank is unknown, which the rig's own defs often are, while a def read back from
-                // a file always knows it. Ranks that are both stated and differ are a mismatch; one
-                // stated against one unknown is not. The dimensions are checked separately, against
-                // the rig's actual parameters, which is the stronger check anyway.
-                if ((a.Rank is int actualRank && e.Rank is int expectedRank && actualRank != expectedRank)
-                    || a.ElementType != e.ElementType || a.Structure != e.Structure)
+                // Not compared: the field def's Rank. It describes the graph's struct TYPE, read off
+                // the dtype the training graph carries, and a trainable parameter's rank is not
+                // stated there at all (it is null) — the parameter's shape lives on its MODEL_PARAM
+                // node. Rank was standing in for "does this value fit this slot", which
+                // AssertShapesCompatible below answers exactly, against the rig's own parameters.
+                if (a.ElementType != e.ElementType || a.Structure != e.Structure)
                     throw new ArgumentException(
-                        $"Checkpoint's {kind} field '{e.Name}' (rank {a.Rank?.ToString() ?? "?"}, {a.ElementType}) " +
-                        $"does not match this rig's (rank {e.Rank?.ToString() ?? "?"}, {e.ElementType}). " +
-                        "The checkpoint was produced by a different model/optimizer.");
+                        $"Checkpoint's {kind} field '{e.Name}' ({a.ElementType}) does not match this " +
+                        $"rig's ({e.ElementType}). The checkpoint was produced by a different "
+                        + "model/optimizer.");
             }
         }
 

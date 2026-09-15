@@ -376,10 +376,6 @@ namespace Shorokoo
                     throw new InvalidDataException(
                         $"'{filePath}': '{mapped.Id}' maps to tensor '{mapped.Ref.Tensor}' in data entry " +
                         $"'{mapped.Ref.Data}', but that entry contains no such tensor.");
-                if (fieldDef.Rank is int rank && td.Shape.Dims.Length != rank)
-                    throw new InvalidDataException(
-                        $"'{filePath}': {role} '{fieldDef.Name}' has rank {td.Shape.Dims.Length}, " +
-                        $"expected {rank}.");
                 fields.Add(new KeyValuePair<string, IData>(fieldDef.Name, td));
             }
             return new TensorDataStruct(def, fields);

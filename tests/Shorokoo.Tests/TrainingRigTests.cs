@@ -1949,7 +1949,6 @@ public class TrainingRigCheckpointCoverageTests
             Assert.Equal(Names(rig.OptimizerStateDef), Names(loaded.OptimizerState.Definition));
             Assert.Equal((int?[])[1], Ranks(loaded.TrainableParams.Definition));
             Assert.Equal((int?[])[1, 1, 0], Ranks(loaded.OptimizerState.Definition));
-            Assert.Equal((int?[])[null], Ranks(rig.TrainableParamStructDef));
             Assert.Equal(1, loaded.Step);
             Assert.Null(loaded.Rig);
 

@@ -6,6 +6,7 @@ using Shorokoo.Core.Utils;
 using Shorokoo.Onnx;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using static Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames;
 
@@ -130,7 +131,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     {
                         // Swallowing an underflow would leave the stack shifted for every later
                         // draw and still end at zero, so it would report nothing.
-                        System.Diagnostics.Debug.Assert(enclosingLoops.Count > 0,
+                        Debug.Assert(enclosingLoops.Count > 0,
                             "FastInitKeyedDraws: LOOP_CLOSE before its LOOP_OPEN.");
                         if (enclosingLoops.Count > 0)
                             enclosingLoops.RemoveAt(enclosingLoops.Count - 1);
@@ -150,10 +151,27 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var keyKey = AppendConstant(new OnnxTensorData<uint64>(
                     new Shape(System.Array.Empty<long>()),
                     OnnxUtils.CreateTensorValue(new Shape(System.Array.Empty<long>()), (ulong[])[streamKey])), newNodes);
+                // The fold is FastWireRngKeyDerivation's own split, not a look-alike: a per-trip
+                // init key is the same bijection of the key tree a runtime feed's chain applies.
+                //
+                // The one asymmetry with that chain is overrides. A feed's chain selects an
+                // override at runtime, per iteration, because its iteration slots are ModelId path
+                // elements an override can address. A parameter's override is applied when
+                // streamKey is resolved on the host, so it is already baked into the constant
+                // these splits fold — which re-seeds every trip together and leaves no way to
+                // address one trip (see Documentation/rng-configuration.md).
+                //
+                // Splitting by the index is exactly the key a parameter at ModelId
+                // `path ++ [index]` would get. No such parameter exists: parameter slots and
+                // sub-module slots are numbered from one counter per parent, so an id that names a
+                // parameter is a leaf and nothing extends it. That invariant is what keeps the two
+                // key spaces disjoint — an id-allocation change that let one parameter's path be a
+                // prefix of another's would alias their streams silently.
                 foreach (var loopOpen in enclosingLoops)
-                    keyKey = AppendSplit(
+                    keyKey = FastWireRngKeyDerivation.AppendSplit(
                         keyKey,
-                        AppendCastToUInt64(loopOpen.Outputs[0]!.Value, newNodes),   // LOOP_OPEN out 0 = iteration index
+                        // LOOP_OPEN's output 0 is the iteration index.
+                        FastWireRngKeyDerivation.AppendCastToUInt64(loopOpen.Outputs[0]!.Value, newNodes),
                         newNodes);
 
                 var substreamIndexKey = AppendConstant(new OnnxTensorData<uint64>(
@@ -221,6 +239,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 randomOrdinal++;
             }
 
+            // The per-node check above catches a SHIFTED stack; this catches a phantom one — a
+            // LOOP_OPEN the sweep never saw closed, which would have silently split every later
+            // draw's key by an index that is not in scope.
+            Debug.Assert(enclosingLoops.Count == 0,
+                "FastInitKeyedDraws: a LOOP_OPEN in the initializer body was never closed.");
+
             if (randomOrdinal == 0)
                 return null; // no random ops; caller keeps the shared original
 
@@ -243,48 +267,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 defaultName: fn.DefaultName + "__rng__" + suffix,
                 friendlyName: fn.FriendlyName + "__rng__" + suffix,
                 fn.StateOwnership);
-        }
-
-        /// <summary>
-        /// <c>key ← split(key, counter)</c> — the key-tree fold, on the DEFAULT algorithm. The
-        /// split is deliberately algorithm-independent (see <c>RngAlgorithms.GetFunction</c>), so
-        /// the key tree stays the same tree whichever algorithm the draw itself runs under; that
-        /// is the same choice <see cref="FastWireRngKeyDerivation"/> makes for a runtime feed's
-        /// chain, and the same one the init master fold is resolved under.
-        /// </summary>
-        private static FastTensorKey AppendSplit(
-            FastTensorKey key, FastTensorKey counter, List<FastNode> newNodes)
-        {
-            var nodeKey = FastNodeKey.New();
-            var outKey = new FastTensorKey(nodeKey, 0);
-            newNodes.Add(new FastNode
-            {
-                Key = nodeKey,
-                OpCode = InternalOpCodes.SHRK_RNG_SPLIT,
-                Attributes = OnnxCSharpAttributes.FromCSharpVals(
-                    new Dictionary<string, object?> { [ShrkAttrRngAlgorithm] = Core.Rng.RngAlgorithms.Default },
-                    Definitions.NodeDefinitions[InternalOpCodes.SHRK_RNG_SPLIT].AttributeDefs),
-                FullInputs = { [""] = new List<FastTensorKey?> { key, counter } },
-                FullOutputs = { [""] = new List<FastTensorKey?> { outKey } },
-            });
-            return outKey;
-        }
-
-        private static FastTensorKey AppendCastToUInt64(FastTensorKey value, List<FastNode> newNodes)
-        {
-            var nodeKey = FastNodeKey.New();
-            var outKey = new FastTensorKey(nodeKey, 0);
-            newNodes.Add(new FastNode
-            {
-                Key = nodeKey,
-                OpCode = OpCodes.CAST,
-                Attributes = OnnxCSharpAttributes.FromCSharpVals(
-                    new Dictionary<string, object?> { [AttrTo] = DType.UInt64 },
-                    Definitions.NodeDefinitions[OpCodes.CAST].AttributeDefs),
-                FullInputs = { [""] = new List<FastTensorKey?> { value } },
-                FullOutputs = { [""] = new List<FastTensorKey?> { outKey } },
-            });
-            return outKey;
         }
 
         private static FastTensorKey AppendConstant(TensorData data, List<FastNode> newNodes)

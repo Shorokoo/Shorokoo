@@ -263,6 +263,8 @@ public class RngInitFrozenDerivationTests
     private static readonly float[] FrozenWeight11 = [0.3378866f, 1.2052094f, 0.37335718f, 0.7997707f, 1.0675026f, -0.9041115f, 0.10083773f, -0.7819222f, -1.023829f, -0.70204467f, -0.3367729f, 0.31696287f, -1.0910206f, -0.6310536f, 0.6859728f, 1.1874193f];
     private static readonly float[] FrozenWeight21 = [1.0079714f, 0.1395562f, -0.016731672f, -1.0395613f, 0.21706164f, -0.5711288f, 0.91078484f, 1.1091135f, 0.9176603f, 0.4229469f, -0.14127223f, 0.5303491f, 0.1532544f, 0.57974875f, 0.9801079f, -1.1877112f];
     private static readonly float[] FrozenNormalDraw = [-0.6527322f, 1.6720386f, 2.4050722f, -1.4918188f, 0.7854463f, -0.053713493f, -0.46181688f, 0.6094081f, -0.7145595f, 0.19966179f, -0.14030458f, -0.8725195f, -0.33896616f, 0.31981882f, -0.49256802f, -3.099073f];
+    // MasterSeed 123: the [2,2] parameter of a 2-trip loop that sums one draw site per trip.
+    private static readonly float[] FrozenLoopDraw = [0.6262446f, 1.622895f, 0.99366057f, 1.0661573f];
     private static readonly float[] FrozenMultiDraw = [0.31585765f, 0.21880347f, 0.17880033f, 0.23017395f, 0.2856346f, 0.55870205f, 0.14583084f, 0.17104696f, 0.5075757f, 0.074125335f, 0.2884086f, 0.12671219f, 0.017829021f, 0.14411132f, 0.33035496f, 0.088769004f];
 
     [Fact]
@@ -317,6 +319,17 @@ public class RngInitFrozenDerivationTests
             .Single(v => v.Length == 16);
         Assert.Equal(FrozenMultiDraw, w);
 
+        // Layer 5: a draw inside a LOOP body. Its key is the parameter's own key folded once more
+        // per trip, so this golden pins a link none of the layers above reach — the one a draw
+        // executed N times rides to be N samples rather than one (Shorokoo/Shorokoo#343).
+        var lg = RngInitLoopDraw2Layer.ComputationGraph;
+        var lsample = TensorData([2L, 2L], 1f, 1f, 1f, 1f);
+        var lw = lg.ToConcreteArchitecture(lg.FromOrderedInputs([lsample]))
+            .InitializeTrainableParams(rngConfig: cfg).ModelParams
+            .Select(p => p.ToTensorData().As<float32>().AccessMemory().ToArray())
+            .Single(v => v.Length == 4);
+        Assert.Equal(FrozenLoopDraw, lw);
+
         // Layer 4: the dense-normal decode. Every layer above draws uniform or raw bits, so
         // none of them covers the table-driven normal path that nearly every shipping
         // initializer takes.
@@ -356,6 +369,15 @@ public class RngInitFrozenDerivationTests
         ulong normalKey = RngTestOracle.InitKey(cfg, (int[])[1]);
         Assert.Equal(FrozenNormalDraw,
             [.. Enumerable.Range(0, 16).Select(i => RngDenseNormalOracle.Draw(normalKey, 0, i))]);
+
+        // The in-loop draw: one draw site (substream 0) on the parameter's key folded by the trip
+        // number, summed over the two trips.
+        ulong loopKey = RngTestOracle.InitKey(cfg, (int[])[1]);
+        float[] loopDraw = new float[4];
+        for (ulong trip = 0; trip < 2; trip++)
+            for (long i = 0; i < 4; i++)
+                loopDraw[i] += RngTestOracle.DrawUniform(RngTestOracle.FoldKey(loopKey, trip), 0, i);
+        Assert.Equal(FrozenLoopDraw, loopDraw);
     }
 
     private static readonly RngConfig RangeCfg = new() { MasterSeed = 4242 };
@@ -966,6 +988,20 @@ public static partial class RngInitNestedLoopDraw
 }
 
 [Module]
+public partial class RngInitNestedLoopDraw1x1Layer
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+        => x * RngInitNestedLoopDraw.Init(x.ShapeTensor(), Scalar(1L), Scalar(1L));
+}
+
+[Module]
+public partial class RngInitNestedLoopDraw2x1Layer
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+        => x * RngInitNestedLoopDraw.Init(x.ShapeTensor(), Scalar(2L), Scalar(1L));
+}
+
+[Module]
 public partial class RngInitNestedLoopDraw2x2Layer
 {
     public static Tensor<float32> Inline(Tensor<float32> x)
@@ -983,6 +1019,12 @@ public partial class RngInitNestedLoopDraw2x3Layer
 public partial class RngInitLoopDraw2Layer
 {
     public static Tensor<float32> Inline(Tensor<float32> x) => x * RngInitLoopDraw.Init(x.ShapeTensor(), Scalar(2L));
+}
+
+[Module]
+public partial class RngInitLoopDraw0Layer
+{
+    public static Tensor<float32> Inline(Tensor<float32> x) => x * RngInitLoopDraw.Init(x.ShapeTensor(), Scalar(0L));
 }
 
 [Module]
@@ -1096,12 +1138,24 @@ public class RngInitComposedInitializerTests
     {
         var two = Single(RngInitLoopDraw2Layer.ComputationGraph);
         Assert.False(SumsScaleWithTripCount(two, Single(RngInitLoopDraw5Layer.ComputationGraph), 2.5f));
+        Assert.Equal(two, Single(RngInitLoopDraw2Layer.ComputationGraph));
         Assert.False(two.SequenceEqual(Single(RngInitLoopDraw2Layer.ComputationGraph, seed: 8)));
+        Assert.All(Single(RngInitLoopDraw0Layer.ComputationGraph), x => Assert.Equal(0f, x));
     }
 
+    // One case per nesting level, each holding only while THAT level's index enters the key:
+    // folding the inner index alone leaves the outer trips reusing one sample (ratio 2), folding
+    // the outer alone leaves each outer trip's inner trips reusing one (ratio 1.5).
     [Fact]
     public void TestADrawInsideNestedLoopsFoldsEveryEnclosingIterationIndexIntoItsKey()
-        => Assert.False(SumsScaleWithTripCount(
+    {
+        Assert.False(SumsScaleWithTripCount(
+            Single(RngInitNestedLoopDraw1x1Layer.ComputationGraph),
+            Single(RngInitNestedLoopDraw2x1Layer.ComputationGraph), 2.0f));
+        Assert.False(SumsScaleWithTripCount(
             Single(RngInitNestedLoopDraw2x2Layer.ComputationGraph),
             Single(RngInitNestedLoopDraw2x3Layer.ComputationGraph), 1.5f));
+        // A dropped draw would make every ratio NaN, which the two assertions above accept.
+        Assert.All(Single(RngInitNestedLoopDraw2x2Layer.ComputationGraph), x => Assert.NotEqual(0f, x));
+    }
 }

@@ -3724,7 +3724,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 }
             }
             var store = engine.Run(graph, initialInputs);
-            var candidateModelIdInfos = ExtractModelIdInfosFromStore(graph, store, unresolvedSites);
+            // The parameter each output key carries, scanned once and used twice: to record an
+            // initializer input that IS a parameter, and to check below that such a source is read
+            // somewhere other than the initializer it feeds.
+            var paramIds = ParamIdsByOutputKey(graph, store);
+            var candidateModelIdInfos = ExtractModelIdInfosFromStore(graph, store, paramIds, unresolvedSites);
             var perSiteRealizedIds = ExtractPerSiteRealizedIds(graph, store);
 
             // If QEE couldn't resolve every MODEL_PARAM_ID_REF node's model ID (e.g., the
@@ -3794,7 +3798,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // still gets a zero CONSTANT, so the graph stays valid either way.
             FoldBranchesOwningOnlyDeadParams(graph, store, liveModelIds, perSiteRealizedIds);
 
-            NativeConvertTrainableParamIdRef(graph, liveModelIdInfos, deadModelIdInfos, paramIdentifierTemplates, perSiteRealizedIds, store);
+            NativeConvertTrainableParamIdRef(graph, liveModelIdInfos, deadModelIdInfos, paramIdentifierTemplates, perSiteRealizedIds, paramIds.Single);
             return unresolvedSites;
         }
 
@@ -3959,7 +3963,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 }
             }
             var store = engine.Run(graph, initialInputs);
-            return ExtractModelIdInfosFromStore(graph, store);
+            return ExtractModelIdInfosFromStore(graph, store, ParamIdsByOutputKey(graph, store));
         }
 
         /// <summary>
@@ -4089,7 +4093,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             ImmutableArray<TrainableParamInfo> deadParamInfos,
             IdTemplateInfos idTemplateInfos,
             Dictionary<FastNodeKey, ImmutableArray<ModelId>> perSiteRealizedIds,
-            Dictionary<FastTensorKey, IRuntimeTensor> store)
+            Dictionary<FastTensorKey, ModelId> paramIdByOutputKey)
         {
             // The value each MODEL_PARAM_ID_REF site materializes is now selected on the
             // FEED CONVENTION (Shorokoo/Shorokoo#22): per-site, over that site's own iteration
@@ -4112,7 +4116,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // Emitted in dependency order: an initializer handed another parameter's value keeps
             // that as an EDGE to the source MODEL_PARAM (Shorokoo/Shorokoo#324), and these nodes go
             // at the front of the graph, so a source has to be laid down before its dependent.
-            ThrowIfASourceParamIsReadByNothingElse(graph, liveParamInfos, StaticParamIdByOutputKey(graph, store));
+            ThrowIfASourceParamIsReadByNothingElse(graph, liveParamInfos, paramIdByOutputKey);
 
             var liveParamKeyByModelId = new Dictionary<ModelId, FastTensorKey>();
             foreach (var paramInfo in OrderParamsBySourceDependency(liveParamInfos))
@@ -4693,6 +4697,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         private static ImmutableArray<TrainableParamInfo> ExtractModelIdInfosFromStore(
             InternalComputationGraph graph,
             Dictionary<FastTensorKey, IRuntimeTensor> store,
+            (Dictionary<FastTensorKey, ModelId> Single, HashSet<FastTensorKey> Many) paramIds,
             List<FastNode>? unresolvedSites = null)
         {
             var result = new Dictionary<ModelId, TrainableParamInfo>();
@@ -4702,7 +4707,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // An initializer input that IS another parameter never folds to a constant — the
             // parameter has no value until materialization runs. Such an input is kept as a
             // dependency on that parameter instead (Shorokoo/Shorokoo#324).
-            var (paramIdByOutputKey, multiParamKeys) = ParamIdsByOutputKey(graph, store);
+            var (paramIdByOutputKey, multiParamKeys) = paramIds;
 
             foreach (var node in graph.Nodes)
             {
@@ -4829,13 +4834,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// a SINGLE id qualifies — an in-loop site stands for one parameter per iteration, which no
         /// single edge can name.
         /// </summary>
-        private static Dictionary<FastTensorKey, ModelId> StaticParamIdByOutputKey(
-            InternalComputationGraph graph, Dictionary<FastTensorKey, IRuntimeTensor> store)
-            => ParamIdsByOutputKey(graph, store).Single;
-
         /// <summary>Output keys that carry a parameter, split into the sites naming exactly one —
         /// which an initializer input can be wired to — and the sites naming several, which it
-        /// cannot (see <see cref="StaticParamIdByOutputKey"/>).</summary>
+        /// cannot — an in-loop site stands for one parameter per iteration.</summary>
         private static (Dictionary<FastTensorKey, ModelId> Single, HashSet<FastTensorKey> Many)
             ParamIdsByOutputKey(InternalComputationGraph graph, Dictionary<FastTensorKey, IRuntimeTensor> store)
         {

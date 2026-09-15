@@ -439,8 +439,6 @@ public class TrainingRigFromScratchCoverageTests
         Assert.Equal(1.0f, ((TensorData<float32>)sgdCkpt.TrainableParams
             .Fields[sgdRig.TrainableParamStructDef.Fields[0].Name]).AccessMemory()[0]);
 
-        CoverFromScratch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
-            SGDMomentumOptimizer.ComputationGraph, [4L], 0.5f, 0.9f);
         var (pfpRig, pfpCkpt) = CoverFromScratch(ScalarMultiplyParamFromParamModel.ComputationGraph,
             L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, [4L], 0.01f);
         Assert.Equal(2, pfpRig.TrainableParamStructDef.Fields.Length);
@@ -449,6 +447,8 @@ public class TrainingRigFromScratchCoverageTests
         Assert.Equal([1.0f, 3.0f], PfpValues(pfpCkpt));
         var pfpStepped = PfpValues(pfpRig.TrainStep(pfpCkpt, InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f)));
         Assert.All(PfpValues(pfpCkpt).Zip(pfpStepped), p => Assert.NotEqual(p.First, p.Second));
+        CoverFromScratch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            SGDMomentumOptimizer.ComputationGraph, [4L], 0.5f, 0.9f);
         CoverFromScratch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
             AdamWOptimizer.ComputationGraph, [4L], 0.001f, 0.9f, 0.999f, 1e-8f, 0.01f);
         CoverFromScratch(ScalarMultiplyWithBatchNormModel.ComputationGraph, L2Loss.ComputationGraph,

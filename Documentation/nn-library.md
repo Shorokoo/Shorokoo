@@ -169,6 +169,8 @@ Scalar<int64> vocab = Scalar(50257L), d = Scalar(384L);
 var emb  = NormalDist02.Init([vocab, d]);
 var wv   = NormalDist02.Init([d, d]);
 var bank = ProductOf.Init([vocab, d], emb, wv);   // starts as emb · wv, for the emb the model has
+
+return x.MatMul(emb).MatMul(wv) + x.MatMul(bank);   // every one of the three is read by the model
 ```
 
 The **shape** input is the one that must still fold to a constant at the call site: a parameter's

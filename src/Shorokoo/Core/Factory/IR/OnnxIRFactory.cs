@@ -253,7 +253,7 @@ namespace Shorokoo.Core.Factory.IR
                                 tensor.DType,
                                 identifierTemplate: null,
                                 isTrainable: true,  // Tensor attributes are not state params
-                                tensor.AccessRawMemory().ToArray());
+                                tensor.CopyRawMemory());
                             attribute.Type = AttributeProto.AttributeType.Tensor;
                             break;
                         case AttributeProto.AttributeType.Tensors:
@@ -267,7 +267,7 @@ namespace Shorokoo.Core.Factory.IR
                             //         t.IsNullDim ? null : t.TensorData.Shape.Dims,
                             //         null, // $"{name}_Tensor_{i}",
                             //         t.TensorData.Type,
-                            //         t.TensorData.AccessRawMemory().ToArray()));
+                            //         t.TensorData.CopyRawMemory()));
                             // }
                             // attribute.Type = AttributeProto.AttributeType.Tensors;
                             // break;

@@ -254,19 +254,19 @@ namespace Shorokoo
         internal static object Read(TensorData value)
         {
             var dtype = value.DType;
-            if (dtype == DType.Float32) return value.As<float32>().AccessMemory<float>()[0];
-            if (dtype == DType.Float64) return value.As<float64>().AccessMemory<double>()[0];
-            if (dtype == DType.Float16) return value.As<float16>().AccessMemory<Float16>()[0];
-            if (dtype == DType.BFloat16) return value.As<bfloat16>().AccessMemory<BFloat16>()[0];
-            if (dtype == DType.Int8) return value.As<int8>().AccessMemory<sbyte>()[0];
-            if (dtype == DType.Int16) return value.As<int16>().AccessMemory<short>()[0];
-            if (dtype == DType.Int32) return value.As<int32>().AccessMemory<int>()[0];
-            if (dtype == DType.Int64) return value.As<int64>().AccessMemory<long>()[0];
-            if (dtype == DType.UInt8) return value.As<uint8>().AccessMemory<byte>()[0];
-            if (dtype == DType.UInt16) return value.As<uint16>().AccessMemory<ushort>()[0];
-            if (dtype == DType.UInt32) return value.As<uint32>().AccessMemory<uint>()[0];
-            if (dtype == DType.UInt64) return value.As<uint64>().AccessMemory<ulong>()[0];
-            if (dtype == DType.Bool) return value.As<bit>().AccessMemory<bool>()[0];
+            if (dtype == DType.Float32) return value.As<float32>().ValueAt<float>(0);
+            if (dtype == DType.Float64) return value.As<float64>().ValueAt<double>(0);
+            if (dtype == DType.Float16) return value.As<float16>().ValueAt<Float16>(0);
+            if (dtype == DType.BFloat16) return value.As<bfloat16>().ValueAt<BFloat16>(0);
+            if (dtype == DType.Int8) return value.As<int8>().ValueAt<sbyte>(0);
+            if (dtype == DType.Int16) return value.As<int16>().ValueAt<short>(0);
+            if (dtype == DType.Int32) return value.As<int32>().ValueAt<int>(0);
+            if (dtype == DType.Int64) return value.As<int64>().ValueAt<long>(0);
+            if (dtype == DType.UInt8) return value.As<uint8>().ValueAt<byte>(0);
+            if (dtype == DType.UInt16) return value.As<uint16>().ValueAt<ushort>(0);
+            if (dtype == DType.UInt32) return value.As<uint32>().ValueAt<uint>(0);
+            if (dtype == DType.UInt64) return value.As<uint64>().ValueAt<ulong>(0);
+            if (dtype == DType.Bool) return value.As<bit>().ValueAt<bool>(0);
             throw new ArgumentException($"'{dtype}' is not a supported hyperparameter dtype.", nameof(value));
         }
 

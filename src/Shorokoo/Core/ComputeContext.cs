@@ -399,8 +399,9 @@ namespace Shorokoo.Runtime
                 // returned tensor values stay valid across it, and the finally also keeps the
                 // session rooted across the native calls above. They are not, however, free of
                 // it: a result keeps its session's ALLOCATOR alive, so a caller that retains one
-                // retains that session's arena — see `FastInitializeModelParams.Rehost` for a
-                // caller that must not, and Shorokoo/Shorokoo#180 for the general question.
+                // retains that session's arena — see `FastProcessorHelper.RehostOffSession` for
+                // what a caller that must not does, and Shorokoo/Shorokoo#180 for the general
+                // question.
                 session.Dispose();
             }
         }

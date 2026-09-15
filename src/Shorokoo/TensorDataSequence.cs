@@ -100,13 +100,21 @@ namespace Shorokoo
         private sealed class EmptyTensorDataSequence<T> : TensorDataSequence<T>
             where T : IVarType
         {
-            public override int Count => 0;
+            public override int Count
+            {
+                get
+                {
+                    ThrowIfDisposed();
+                    return 0;
+                }
+            }
 
             public override TensorData<T> this[int index]
                 => throw new ArgumentOutOfRangeException(nameof(index), "The sequence is empty.");
 
             public override IEnumerator<TensorData<T>> GetEnumerator()
             {
+                ThrowIfDisposed();
                 yield break;
             }
 
@@ -136,7 +144,7 @@ namespace Shorokoo
         public abstract void Dispose();
     }
 
-    public class OnnxTensorDataSequence<T> : TensorDataSequence<T>, IOnnxData, IDisposable
+    public sealed class OnnxTensorDataSequence<T> : TensorDataSequence<T>, IOnnxData, IDisposable
         where T : IVarType
     {
         private readonly IShorokooTensorValue backing;

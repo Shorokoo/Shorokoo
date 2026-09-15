@@ -278,9 +278,18 @@ namespace Shorokoo.Core.Utils
             // free under it — reading one after the sequence was disposed was a hard crash, from
             // four lines of public API (Shorokoo/Shorokoo#180).
             var inner = new List<IShorokooTensorValue>(data.Count);
-            foreach (var d in data) inner.Add(CopyTensorValue(d.ToTensorValue()));
-            var sequence = InferenceBackend.Factory.CreateSequence(inner);
-            return CreateTensorDataSequenceFromValue(dtype, sequence);
+            try
+            {
+                foreach (var d in data) inner.Add(CopyTensorValue(d.ToTensorValue()));
+                var sequence = InferenceBackend.Factory.CreateSequence(inner);
+                return CreateTensorDataSequenceFromValue(dtype, sequence);
+            }
+            catch
+            {
+                // These copies belong to nobody yet; on failure nothing else will release them.
+                foreach (var v in inner) v.Dispose();
+                throw;
+            }
         }
 
         /// <summary>

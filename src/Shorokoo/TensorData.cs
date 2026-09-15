@@ -30,6 +30,33 @@ namespace Shorokoo
         /// type). The span points straight into the tensor's storage, so it is valid only while the
         /// tensor is — see <see cref="TensorData.AccessRawMemory"/>.</summary>
         public abstract Span<V> AccessModifiableMemory<V>() where V : unmanaged;
+
+        /// <summary>
+        /// The elements copied into an array of V the caller owns, valid however long the caller
+        /// keeps it. This is <see cref="AccessMemory{V}"/> plus the copy, done safely: taking a
+        /// span is the tensor's last read, so copying out of one by hand races the collection that
+        /// frees what it points at (Shorokoo/Shorokoo#178). Prefer this wherever the whole buffer
+        /// is being copied anyway.
+        /// </summary>
+        public V[] CopyMemory<V>() where V : unmanaged
+        {
+            var copy = AccessMemory<V>().ToArray();
+            GC.KeepAlive(this);
+            return copy;
+        }
+
+        /// <summary>
+        /// One element, read safely — the single-value counterpart of <see cref="CopyMemory{V}"/>,
+        /// for the very common case of a scalar or a leading element. Reading
+        /// <c>AccessMemory&lt;V&gt;()[i]</c> by hand indexes a span whose tensor the JIT may already
+        /// have retired (Shorokoo/Shorokoo#178).
+        /// </summary>
+        public V ValueAt<V>(int index) where V : unmanaged
+        {
+            var value = AccessMemory<V>()[index];
+            GC.KeepAlive(this);
+            return value;
+        }
         /// <summary>Exposes the underlying buffer as a read-only span of V (V must match T's storage
         /// type). The span points straight into the tensor's storage, so it is valid only while the
         /// tensor is — see <see cref="TensorData.AccessRawMemory"/>.</summary>
@@ -43,33 +70,33 @@ namespace Shorokoo
                 switch(typeof(T))
                 {
                     case Type t when t == typeof(bit):
-                        return this.AccessMemory<bool>().ToArray().Cast<object>().ToArray();
+                        return this.CopyMemory<bool>().Cast<object>().ToArray();
                     case Type t when t == typeof(int8):
-                        return this.AccessMemory<sbyte>().ToArray().Cast<object>().ToArray();
+                        return this.CopyMemory<sbyte>().Cast<object>().ToArray();
                     case Type t when t == typeof(int16):
-                        return this.AccessMemory<short>().ToArray().Cast<object>().ToArray();
+                        return this.CopyMemory<short>().Cast<object>().ToArray();
                     case Type t when t == typeof(int32):
-                        return this.AccessMemory<int>().ToArray().Cast<object>().ToArray();
+                        return this.CopyMemory<int>().Cast<object>().ToArray();
                     case Type t when t == typeof(int64):
-                        return this.AccessMemory<long>().ToArray().Cast<object>().ToArray();
+                        return this.CopyMemory<long>().Cast<object>().ToArray();
                     case Type t when t == typeof(uint8):
-                        return this.AccessMemory<byte>().ToArray().Cast<object>().ToArray();
+                        return this.CopyMemory<byte>().Cast<object>().ToArray();
                     case Type t when t == typeof(uint16):
-                        return this.AccessMemory<ushort>().ToArray().Cast<object>().ToArray();
+                        return this.CopyMemory<ushort>().Cast<object>().ToArray();
                     case Type t when t == typeof(uint32):
-                        return this.AccessMemory<uint>().ToArray().Cast<object>().ToArray();
+                        return this.CopyMemory<uint>().Cast<object>().ToArray();
                     case Type t when t == typeof(uint64):
-                        return this.AccessMemory<ulong>().ToArray().Cast<object>().ToArray();
+                        return this.CopyMemory<ulong>().Cast<object>().ToArray();
                     case Type t when t == typeof(float16):
-                        return this.AccessMemory<Float16>().ToArray().Cast<object>().ToArray();
+                        return this.CopyMemory<Float16>().Cast<object>().ToArray();
                     case Type t when t == typeof(bfloat16):
-                        return this.AccessMemory<BFloat16>().ToArray().Cast<object>().ToArray();
+                        return this.CopyMemory<BFloat16>().Cast<object>().ToArray();
                     case Type t when t == typeof(float32):
-                        return this.AccessMemory<float>().ToArray().Cast<object>().ToArray();
+                        return this.CopyMemory<float>().Cast<object>().ToArray();
                     case Type t when t == typeof(float64):
-                        return this.AccessMemory<double>().ToArray().Cast<object>().ToArray();
+                        return this.CopyMemory<double>().Cast<object>().ToArray();
                     default:
-                        return this.AccessMemory<byte>().ToArray().Cast<object>().ToArray();
+                        return this.CopyMemory<byte>().Cast<object>().ToArray();
                 }
             }
         }
@@ -160,7 +187,7 @@ namespace Shorokoo
         {
             get
             {
-                return this.AccessRawMemory().ToArray().Cast<object>().ToArray();
+                return this.CopyRawMemory().Cast<object>().ToArray();
             }
         }
 
@@ -210,6 +237,18 @@ namespace Shorokoo
         /// </summary>
         public abstract ReadOnlySpan<byte> AccessRawMemory();
 
+        /// <summary>
+        /// The storage bytes copied into an array the caller owns, valid however long the caller
+        /// keeps it — <see cref="AccessRawMemory"/> plus the copy, with the tensor kept alive
+        /// across it. Prefer this wherever the whole buffer is being copied anyway.
+        /// </summary>
+        public byte[] CopyRawMemory()
+        {
+            var copy = AccessRawMemory().ToArray();
+            GC.KeepAlive(this);
+            return copy;
+        }
+
         /// <summary>Downcasts to the typed <see cref="TensorData{T}"/>; T must match the actual element type.</summary>
         public TensorData<T> As<T>() where T : IVarType => (TensorData<T>)this;
 
@@ -257,7 +296,7 @@ namespace Shorokoo
     /// <see cref="TensorData{T}"/> implementation backed by an inference-runtime
     /// (ONNX) tensor value; span access reads the runtime tensor's buffer directly.
     /// </summary>
-    public class OnnxTensorData<T> : TensorData<T>, IOnnxData, IDisposable
+    public sealed class OnnxTensorData<T> : TensorData<T>, IOnnxData, IDisposable
         where T : IVarType
     {
         private readonly IShorokooTensorValue backing;
@@ -280,7 +319,7 @@ namespace Shorokoo
         {
             get
             {
-                return this.AccessMemory<byte>().ToArray().Cast<object>().ToArray();
+                return this.CopyMemory<byte>().Cast<object>().ToArray();
             }
         }
 

@@ -337,7 +337,9 @@ public class TensorDataApiCoverageTests
         var result = OnnxEngine.Eval(Scalar(2f) * Scalar(21f)).As<float32>();
         GC.Collect(2, GCCollectionMode.Forced, blocking: true);
         GC.WaitForPendingFinalizers();
-        Assert.Equal(42f, result.AccessMemory()[0]);
+        float[] values = result.AccessMemory().ToArray();
+        GC.KeepAlive(result);
+        Assert.Equal(42f, values[0]);
     }
 
     /// <summary>Records disposal; every other member is unreachable in these tests.</summary>

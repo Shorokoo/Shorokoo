@@ -132,7 +132,7 @@ internal static class RngKeyResolver
         if (run.Length != 1)
             throw new InvalidOperationException(
                 $"RngKeyResolver: expected 1 resolved key block, got {run.Length}.");
-        var keyVals = run[0].ToTensorData().As<uint64>().AccessMemory().ToArray();
+        var keyVals = run[0].ToTensorData().As<uint64>().CopyMemory<ulong>();
         if (keyVals.Length != m)
             throw new InvalidOperationException(
                 $"RngKeyResolver: expected {m} resolved key(s), got {keyVals.Length}.");

@@ -498,7 +498,7 @@ namespace Shorokoo
                 throw new InvalidOperationException(
                     $"'{filePath}' is not a Shorokoo training checkpoint (missing '{CheckpointMarkerName}' marker).");
 
-            var marker = markerData.As<int64>().AccessMemory<long>();
+            var marker = markerData.As<int64>().CopyMemory<long>();
             // The marker is a fixed int64[2] = [version, step]. Exactly one format version exists (3);
             // a wrong shape or version is unreadable by this build. (v3 moves epoch/batch out of the
             // marker into presence-gated int64 scalars; there are no released v1/v2 files.)
@@ -548,11 +548,11 @@ namespace Shorokoo
             // never a sentinel 0.
             long? epoch = Want(CheckpointComponents.Counters)
                           && byName.TryGetValue(CheckpointEpochName, out var epochData)
-                ? epochData.As<int64>().AccessMemory<long>()[0]
+                ? epochData.As<int64>().ValueAt<long>(0)
                 : (long?)null;
             long? batchIndex = Want(CheckpointComponents.Counters)
                                && byName.TryGetValue(CheckpointBatchName, out var batchData)
-                ? batchData.As<int64>().AccessMemory<long>()[0]
+                ? batchData.As<int64>().ValueAt<long>(0)
                 : (long?)null;
 
             // Loss is its own component (independent of the counters): read it only when Loss is
@@ -560,7 +560,7 @@ namespace Shorokoo
             // initial/bare or Loss-less checkpoint), never a sentinel 0.
             float? loss = Want(CheckpointComponents.Loss)
                           && byName.TryGetValue(CheckpointLossName, out var lossData)
-                ? lossData.As<float32>().AccessMemory<float>()[0]
+                ? lossData.As<float32>().ValueAt<float>(0)
                 : (float?)null;
 
             TensorDataStruct trainable, modelState, optState;

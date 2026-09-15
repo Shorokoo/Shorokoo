@@ -247,6 +247,7 @@ cast to the typed `TensorData<T>` and call `AccessMemory()`, which returns a
 TensorData result = OnnxEngine.Eval(y);
 ReadOnlySpan<float> values = ((TensorData<float32>)result).AccessMemory();
 float first = values[0];
+GC.KeepAlive(result);   // see "What a TensorData owns" below — the span is a window, not a copy
 ```
 
 `AccessMemory()` maps each dtype marker to its CLR primitive: `float32`→`float`,
@@ -266,20 +267,33 @@ Disposing is optional. A tensor you simply drop is reclaimed like any other obje
 nothing in the framework hands you a tensor you are obliged to dispose. Dispose when you want
 the memory back at a known moment — a long loop that produces large tensors is the case that
 motivates it — and when you do, that tensor is finished: nothing else shares its storage.
-Operations that build one tensor from another copy, so the source keeps what it owns.
-`TensorDataSequence.Create(...)` copies the tensors you pass it, and disposing the sequence
-releases only the sequence's own copies.
+Operations that build one tensor from another copy, so the source keeps what it owns — unless
+they say otherwise in so many words. `TensorDataSequence.Create(...)` copies the tensors you pass
+it, and disposing the sequence releases only the sequence's own copies.
 
 **A span is a window, not a copy.** `AccessMemory()` and `AccessRawMemory()` point straight
 into the tensor's storage, and nothing ties the span's lifetime to the tensor's. A span
 outlives its tensor's storage if you dispose the tensor, and also if the tensor simply becomes
-unreachable while you are still reading — being in scope is not the same as being reachable,
-because a local is retired at its last use. Copy out (`.ToArray()`) before the tensor's last
-use, or keep reading through the tensor itself:
+unreachable while you are still reading.
+
+That second one catches people out, because being *in scope* is not the same as being
+*reachable*: the runtime retires a local at its last read, and taking the span **is** the
+tensor's last read. So copying out of the span does not by itself make you safe — the copy
+happens after the tensor is already collectable, and allocating the array is exactly the sort
+of thing that triggers a collection:
 
 ```csharp
 TensorData result = OnnxEngine.Eval(y);
-float[] values = ((TensorData<float32>)result).AccessMemory().ToArray();  // safe: copied out
+float[] values = ((TensorData<float32>)result).AccessMemory().ToArray();  // NOT safe
+```
+
+Keep the tensor alive across the read instead — with `GC.KeepAlive` after it, or by reading
+through something that outlives the span (a field, a collection, a later use of the tensor):
+
+```csharp
+TensorData result = OnnxEngine.Eval(y);
+float[] values = ((TensorData<float32>)result).AccessMemory().ToArray();
+GC.KeepAlive(result);                                                     // safe
 ```
 
 ## Anti-patterns

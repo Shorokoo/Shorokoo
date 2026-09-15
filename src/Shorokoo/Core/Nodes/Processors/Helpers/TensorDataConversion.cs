@@ -41,8 +41,10 @@ namespace Shorokoo.Core.Nodes.Processors.Helpers
             // without converting the data
             if (typesMatch && !metadataMatches)
             {
-                // Same bytes, different metadata — but on storage of its own, like every other
-                // branch here. Wrapping the source's own value handed the caller back a second
+                // Same bytes, different metadata — but on storage of its own, like every branch
+                // that converts. (The branch above, where nothing needs converting at all, hands
+                // the source straight back rather than copying it.) Wrapping the source's own
+                // value handed the caller back a second
                 // tensor over one runtime value, so whichever was disposed first took the other
                 // one's storage with it (Shorokoo/Shorokoo#180). The source graph may well still
                 // be in use: these passes rebuild attributes into a new graph and leave the
@@ -173,26 +175,22 @@ namespace Shorokoo.Core.Nodes.Processors.Helpers
             }
             
             object[] values;
-            if (dtype.ProtoTypeNum == DType.Bool.ProtoTypeNum) values = data.As<bit>().AccessMemory<bool>().ToArray().Cast<object>().ToArray();
-            else if (dtype.ProtoTypeNum == DType.Int8.ProtoTypeNum) values = data.As<int8>().AccessMemory<sbyte>().ToArray().Cast<object>().ToArray();
-            else if (dtype.ProtoTypeNum == DType.Int16.ProtoTypeNum) values = data.As<int16>().AccessMemory<short>().ToArray().Cast<object>().ToArray();
-            else if (dtype.ProtoTypeNum == DType.Int32.ProtoTypeNum) values = data.As<int32>().AccessMemory<int>().ToArray().Cast<object>().ToArray();
-            else if (dtype.ProtoTypeNum == DType.Int64.ProtoTypeNum) values = data.As<int64>().AccessMemory<long>().ToArray().Cast<object>().ToArray();
-            else if (dtype.ProtoTypeNum == DType.UInt8.ProtoTypeNum) values = data.As<uint8>().AccessMemory<byte>().ToArray().Cast<object>().ToArray();
-            else if (dtype.ProtoTypeNum == DType.UInt16.ProtoTypeNum) values = data.As<uint16>().AccessMemory<ushort>().ToArray().Cast<object>().ToArray();
-            else if (dtype.ProtoTypeNum == DType.UInt32.ProtoTypeNum) values = data.As<uint32>().AccessMemory<uint>().ToArray().Cast<object>().ToArray();
-            else if (dtype.ProtoTypeNum == DType.UInt64.ProtoTypeNum) values = data.As<uint64>().AccessMemory<ulong>().ToArray().Cast<object>().ToArray();
+            if (dtype.ProtoTypeNum == DType.Bool.ProtoTypeNum) values = data.As<bit>().CopyMemory<bool>().Cast<object>().ToArray();
+            else if (dtype.ProtoTypeNum == DType.Int8.ProtoTypeNum) values = data.As<int8>().CopyMemory<sbyte>().Cast<object>().ToArray();
+            else if (dtype.ProtoTypeNum == DType.Int16.ProtoTypeNum) values = data.As<int16>().CopyMemory<short>().Cast<object>().ToArray();
+            else if (dtype.ProtoTypeNum == DType.Int32.ProtoTypeNum) values = data.As<int32>().CopyMemory<int>().Cast<object>().ToArray();
+            else if (dtype.ProtoTypeNum == DType.Int64.ProtoTypeNum) values = data.As<int64>().CopyMemory<long>().Cast<object>().ToArray();
+            else if (dtype.ProtoTypeNum == DType.UInt8.ProtoTypeNum) values = data.As<uint8>().CopyMemory<byte>().Cast<object>().ToArray();
+            else if (dtype.ProtoTypeNum == DType.UInt16.ProtoTypeNum) values = data.As<uint16>().CopyMemory<ushort>().Cast<object>().ToArray();
+            else if (dtype.ProtoTypeNum == DType.UInt32.ProtoTypeNum) values = data.As<uint32>().CopyMemory<uint>().Cast<object>().ToArray();
+            else if (dtype.ProtoTypeNum == DType.UInt64.ProtoTypeNum) values = data.As<uint64>().CopyMemory<ulong>().Cast<object>().ToArray();
             // F16/BF16 widen exactly to float32, so extract as floats — keeps the
             // downstream Convert.To* calls working for every target type.
-            else if (dtype.ProtoTypeNum == DType.Float16.ProtoTypeNum) values = data.As<float16>().AccessMemory<Float16>().ToArray().Select(v => (object)(float)v).ToArray();
-            else if (dtype.ProtoTypeNum == DType.BFloat16.ProtoTypeNum) values = data.As<bfloat16>().AccessMemory<BFloat16>().ToArray().Select(v => (object)(float)v).ToArray();
-            else if (dtype.ProtoTypeNum == DType.Float32.ProtoTypeNum) values = data.As<float32>().AccessMemory<float>().ToArray().Cast<object>().ToArray();
-            else if (dtype.ProtoTypeNum == DType.Float64.ProtoTypeNum) values = data.As<float64>().AccessMemory<double>().ToArray().Cast<object>().ToArray();
+            else if (dtype.ProtoTypeNum == DType.Float16.ProtoTypeNum) values = data.As<float16>().CopyMemory<Float16>().Select(v => (object)(float)v).ToArray();
+            else if (dtype.ProtoTypeNum == DType.BFloat16.ProtoTypeNum) values = data.As<bfloat16>().CopyMemory<BFloat16>().Select(v => (object)(float)v).ToArray();
+            else if (dtype.ProtoTypeNum == DType.Float32.ProtoTypeNum) values = data.As<float32>().CopyMemory<float>().Cast<object>().ToArray();
+            else if (dtype.ProtoTypeNum == DType.Float64.ProtoTypeNum) values = data.As<float64>().CopyMemory<double>().Cast<object>().ToArray();
             else throw new NotSupportedException($"Extraction from {dtype} is not supported");
-            // The branches above read through spans pointing into data's own storage, and taking
-            // one is data's last read — keep it alive until they have finished copying out
-            // (Shorokoo/Shorokoo#178).
-            GC.KeepAlive(data);
             return values;
         }
         

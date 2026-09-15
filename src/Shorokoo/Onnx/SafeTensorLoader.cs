@@ -149,7 +149,7 @@ namespace Shorokoo.Onnx
                 var dtype = st.DataType.ToUpperInvariant();
 
                 // Flatten and convert tensor to raw bytes
-                var blob = st.Data.AccessRawMemory().ToArray();
+                var blob = st.Data.CopyRawMemory();
                 tensorBlobs.Add(blob);
 
                 long startOffset = currentOffset;

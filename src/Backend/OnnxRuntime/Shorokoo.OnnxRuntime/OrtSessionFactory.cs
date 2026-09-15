@@ -172,7 +172,17 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
     {
         var inner = new List<OrtValue>(values.Count);
         foreach (var v in values) inner.Add(((OrtTensorValue)v).Inner);
-        return new OrtTensorValue(OrtValue.CreateSequence(inner));
+        try
+        {
+            return new OrtTensorValue(OrtValue.CreateSequence(inner));
+        }
+        catch
+        {
+            // ORT hands the values back on failure — it empties the list only on success — so
+            // without this they would sit undisposed until their finalizers ran.
+            foreach (var v in inner) v.Dispose();
+            throw;
+        }
     }
 
     /// <summary>

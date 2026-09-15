@@ -62,7 +62,7 @@ internal sealed class ConstantOfShapeOp : QuickOp
     private static float ReadFloatFill(TensorData? valueTensor, DType dtype)
     {
         if (valueTensor is null) return 0f;
-        var bytes = valueTensor.AccessRawMemory();
+        var bytes = valueTensor.CopyRawMemory();
         if (dtype == DType.Float32) return bytes.Length >= 4 ? MemoryMarshal.Cast<byte, float>(bytes)[0] : 0f;
         if (dtype == DType.Float64) return bytes.Length >= 8 ? (float)MemoryMarshal.Cast<byte, double>(bytes)[0] : 0f;
         if (dtype == DType.Float16) return bytes.Length >= 2 ? (float)MemoryMarshal.Cast<byte, Float16>(bytes)[0] : 0f;
@@ -73,7 +73,7 @@ internal sealed class ConstantOfShapeOp : QuickOp
     private static long ReadLongFill(TensorData? valueTensor, DType dtype)
     {
         if (valueTensor is null) return 0L;
-        var bytes = valueTensor.AccessRawMemory();
+        var bytes = valueTensor.CopyRawMemory();
         if (dtype == DType.Int8)   return bytes.Length >= 1 ? MemoryMarshal.Cast<byte, sbyte>(bytes)[0] : 0L;
         if (dtype == DType.Int16)  return bytes.Length >= 2 ? MemoryMarshal.Cast<byte, short>(bytes)[0] : 0L;
         if (dtype == DType.Int32)  return bytes.Length >= 4 ? MemoryMarshal.Cast<byte, int>(bytes)[0] : 0L;
@@ -88,7 +88,7 @@ internal sealed class ConstantOfShapeOp : QuickOp
     private static bool ReadBoolFill(TensorData? valueTensor)
     {
         if (valueTensor is null) return false;
-        var bytes = valueTensor.AccessRawMemory();
+        var bytes = valueTensor.CopyRawMemory();
         return bytes.Length >= 1 && bytes[0] != 0;
     }
 }

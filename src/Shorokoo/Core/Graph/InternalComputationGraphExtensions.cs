@@ -345,7 +345,7 @@ namespace Shorokoo.Graph
             var node = FastWireRngKeyDerivation.FindRngSeedNode(graph);
             if (node is null || node.OpCode != InternalOpCodes.MODEL_PARAM_DATA) return null;
             var data = node.Attributes.GetTensorVal(OnnxOpAttributeNames.ShrkAttrTensorData);
-            return data?.As<uint64>().AccessMemory().ToArray();
+            return data?.As<uint64>().CopyMemory<ulong>();
         }
 
 
@@ -529,7 +529,7 @@ namespace Shorokoo.Graph
             if (producer.Attributes.GetTensorVal(OnnxOpAttributeNames.AttrValue) is not { } data
                 || data.DType != DType.Int64) return null;
 
-            var iterVals = data.As<int64>().AccessMemory().ToArray();
+            var iterVals = data.As<int64>().CopyMemory<long>();
             // One element per slot, every one a real index. Anything else is not the pairing the
             // chain made, and naming a stream the chain does not derive is worse than not naming.
             if (iterVals.Length != depth) return null;

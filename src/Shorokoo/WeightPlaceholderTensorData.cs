@@ -21,10 +21,18 @@ namespace Shorokoo
         }
 
         /// <inheritdoc/>
-        public override Span<byte> AccessModifiableRawMemory() => throw ValuesElided();
+        public override Span<byte> AccessModifiableRawMemory()
+        {
+            ThrowIfDisposed();
+            throw ValuesElided();
+        }
 
         /// <inheritdoc/>
-        public override ReadOnlySpan<byte> AccessRawMemory() => throw ValuesElided();
+        public override ReadOnlySpan<byte> AccessRawMemory()
+        {
+            ThrowIfDisposed();
+            throw ValuesElided();
+        }
 
         /// <inheritdoc/>
         public override void Dispose() => IsDisposed = true;

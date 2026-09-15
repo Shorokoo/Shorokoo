@@ -129,7 +129,7 @@ namespace Shorokoo
         // metadata) and shares one format with inference checkpoints. Each shape has its own
         // save/load pair (issue #185): SaveTrainingCheckpoint / LoadTrainingCheckpoint for the
         // flat file, SaveTrainingCheckpointToSkpt (or ForTrainingCheckpoint) /
-        // LoadTrainingCheckpointFromSkpt (in Persistence.TrainingCheckpoint.cs) for the
+        // TrainingRig.Load / rig.LoadCheckpointFromSkpt (via Persistence.TrainingCheckpoint.cs) for the
         // container. No load path sniffs the file's bytes to pick a shape — a wrong-format
         // file fails immediately naming both formats; a caller with a genuinely unknown file
         // identifies it with Inspect first and dispatches.
@@ -166,8 +166,8 @@ namespace Shorokoo
         /// defs it reconstructs describe the file, not an expectation of it. To load a checkpoint
         /// <i>for a model</i>, use <see cref="TrainingRig.LoadCheckpoint"/>, or hand the result to
         /// <see cref="TrainingRig.AdoptCheckpoint"/>: the rig holds the model, so it is the one thing
-        /// that can check the parameters it read are the parameters it expects — names, ranks, dtypes
-        /// and dimensions — and it refuses them otherwise. The result of this call carries no
+        /// that can check the parameters it read are the parameters it expects — names, dtypes and
+        /// dimensions — and it refuses them otherwise. The result of this call carries no
         /// <see cref="TrainingCheckpoint.Rig"/>.</para>
         /// </summary>
         public static TrainingCheckpoint LoadTrainingCheckpoint(string filePath)
@@ -176,7 +176,8 @@ namespace Shorokoo
                 throw new ArgumentException("Checkpoint path cannot be null or empty.", nameof(filePath));
 
             VerifyFlatTrainingCheckpoint(filePath,
-                "Load a .skpt training checkpoint by rebuilding its rig with TrainingRig.Load.");
+                "Load a .skpt training checkpoint with rig.LoadCheckpointFromSkpt(path), or rebuild "
+                + "its rig from the file with TrainingRig.Load(path).");
             return TrainingCheckpoint.LoadFlat(
                 filePath, trainableParamDef: null, modelStateDef: null, optimizerStateDef: null,
                 components: null, rigForDefaults: null);

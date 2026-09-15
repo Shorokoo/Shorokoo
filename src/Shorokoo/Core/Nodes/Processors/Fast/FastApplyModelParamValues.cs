@@ -78,8 +78,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     throw new InvalidOperationException(
                         $"Parameter '{node.IdentifierTemplate ?? modelId.ToString()}' is declared "
                         + $"[{string.Join(",", declaredDims)}] by this model, but the value being bound "
-                        + $"is [{string.Join(",", paramValue.Shape.Dims)}]. The values were produced by "
-                        + "a different model.");
+                        + $"is [{string.Join(",", paramValue.Shape.Dims)}]. A value is bound at the shape "
+                        + "the model declares for it, and nothing adapts one to the other — the values "
+                        + "may come from another model, or from an initializer that returned a shape "
+                        + "other than the one it was called with.");
 
                 node.OpCode = InternalOpCodes.MODEL_PARAM_DATA;
                 node.Attributes = OnnxCSharpAttributes.FromCSharpVals(

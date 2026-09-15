@@ -390,6 +390,39 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         Assert.Contains("major version 3", exPeek.Message);
     }
 
+    /// <summary>Tensors come back in the order the file lays their bytes out, whatever order the
+    /// JSON header happens to list them in — a header is a JSON object, and nothing promises the
+    /// parse preserves its key order.</summary>
+    [Fact]
+    public void TestSafeTensorsAreReadInDataOrderNotHeaderKeyOrder()
+    {
+        var tensors = new List<SafeTensor>
+        {
+            new("first", TensorData([4L], [1f, 2f, 3f, 4f]), "F32", [4L]),
+            new("second", TensorData([2L], [5f, 6f]), "F32", [2L]),
+            new("third", TensorData([1L], [7f]), "F32", [1L]),
+        };
+        using var stream = new MemoryStream();
+        SafeTensorLoader.SaveSafeTensorsToStream(stream, tensors);
+        var bytes = stream.ToArray();
+        var headerLen = (int)BitConverter.ToInt64(bytes, 0);
+
+        var header = JsonNode.Parse(System.Text.Encoding.UTF8.GetString(bytes, 8, headerLen))!.AsObject();
+        var shuffled = new JsonObject();
+        foreach (var entry in header.ToArray().Reverse())
+        {
+            header.Remove(entry.Key);
+            shuffled[entry.Key] = entry.Value;
+        }
+        var shuffledBytes = System.Text.Encoding.UTF8.GetBytes(shuffled.ToJsonString());
+        Assert.Equal(headerLen, shuffledBytes.Length);
+        shuffledBytes.CopyTo(bytes, 8);
+
+        Assert.Equal((string[])["third", "second", "first"], shuffled.Select(e => e.Key).ToArray());
+        Assert.Equal((string[])["first", "second", "third"],
+            SafeTensorLoader.ParseSafeTensorBytes(bytes).Select(t => t.Name).ToArray());
+    }
+
     [Fact]
     public void TestSafeTensorTruncationAndMissingMetadataFailLoudly()
     {

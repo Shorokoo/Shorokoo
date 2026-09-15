@@ -302,8 +302,10 @@ namespace Shorokoo.Onnx
                 }
             }
 
-            parsed.Sort((a, b) => a.Start.CompareTo(b.Start));
-            return [.. parsed.Select(x => x.Tensor)];
+            // OrderBy, not List.Sort: the sort has to be stable. A zero-element tensor occupies no
+            // bytes, so it shares a start offset with whatever follows it, and an unstable sort would
+            // order those two arbitrarily.
+            return [.. parsed.OrderBy(x => x.Start).Select(x => x.Tensor)];
         }
 
         /// <summary>

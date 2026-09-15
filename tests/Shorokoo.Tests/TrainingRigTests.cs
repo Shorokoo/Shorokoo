@@ -1816,6 +1816,15 @@ public class TrainingRigTrainingLoopCoverageTests
 [Trait("Purpose", "Coverage")]
 public class TrainingRigCheckpointCoverageTests
 {
+    private static TrainingRig ShapeRig(ComputationGraph model) => TrainingRig.FromScratch(
+        model, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+        [new TensorDataModelParam("x", ModelParamType.InputParam, TensorData([4L, 4L],
+            [1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f, 11f, 12f, 13f, 14f, 15f, 16f]))],
+        0.1f);
+
+    private static long[] ParamDims(TrainingCheckpoint c) =>
+        [.. ((TensorData)c.TrainableParams.Fields[c.TrainableParams.Definition.Fields[0].Name]).Shape.Dims];
+
     /// <summary>Parameter names are the initializer class plus a trace-order index, so two models
     /// that differ only in the order of their initializer calls produce the same names for
     /// different roles, and a checkpoint crosses from one into the other carrying every tensor to
@@ -1843,27 +1852,13 @@ public class TrainingRigCheckpointCoverageTests
         finally { if (File.Exists(path)) File.Delete(path); }
     }
 
-    /// <summary>Every checkpoint load path compares a parameter's rank, never its dimensions, so a
-    /// checkpoint whose parameters are shaped differently is accepted: a <c>[4, 2]</c> weight loads
-    /// into a rig whose parameter is <c>[4, 8]</c> on all four routes, and the resulting inference
-    /// model returns a <c>[4, 2]</c> result where the architecture says <c>[4, 8]</c>. `training.md`
-    /// states the opposite ("Loading a checkpoint from a different model or optimizer throws").
-    /// Part of Shorokoo/Shorokoo#322.</summary>
+    /// <summary>A checkpoint whose parameters are shaped differently is refused on every route
+    /// into a rig: dimensions are compared, not just ranks.</summary>
     [Fact]
     public void TestACheckpointIsRefusedByAModelWhoseParametersAreShapedDifferently()
     {
-        NamedModelParam[] sample =
-        [
-            new TensorDataModelParam("x", ModelParamType.InputParam,
-                TensorData([4L, 4L], [1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f, 11f, 12f, 13f, 14f, 15f, 16f])),
-        ];
-        TrainingRig Rig(ComputationGraph model) => TrainingRig.FromScratch(
-            model, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, sample, 0.1f);
-        static long[] ParamDims(TrainingCheckpoint c) =>
-            [.. ((TensorData)c.TrainableParams.Fields[c.TrainableParams.Definition.Fields[0].Name]).Shape.Dims];
-
-        var narrow = Rig(ParamShapeNarrowModel.ComputationGraph);
-        var wide = Rig(ParamShapeWideModel.ComputationGraph);
+        var narrow = ShapeRig(ParamShapeNarrowModel.ComputationGraph);
+        var wide = ShapeRig(ParamShapeWideModel.ComputationGraph);
         var flat = TempPath("ckpt_narrow") + ".safetensors";
         var skpt = TempPath("ckpt_narrow") + ".skpt";
         try
@@ -1877,16 +1872,52 @@ public class TrainingRigCheckpointCoverageTests
             Assert.Equal([4L, 2L], ParamDims(narrow.LoadCheckpoint(flat)));
             Assert.Equal([4L, 2L], ParamDims(narrow.LoadCheckpointFromSkpt(skpt)));
 
-            Assert.ThrowsAny<Exception>(() => wide.LoadCheckpoint(flat));
-            Assert.ThrowsAny<Exception>(() => wide.LoadCheckpointFromSkpt(skpt));
-            Assert.ThrowsAny<Exception>(() => wide.AdoptCheckpoint(Persistence.LoadTrainingCheckpoint(flat)));
-            Assert.ThrowsAny<Exception>(() => wide.AdoptCheckpoint(narrowCkpt));
+            var defLess = Persistence.LoadTrainingCheckpoint(flat);
+            Assert.Equal([4L, 2L], ParamDims(defLess));
+
+            string Refusal(Action load) => Assert.Throws<ArgumentException>(load).Message;
+            Assert.All(
+                (string[])
+                [
+                    Refusal(() => wide.LoadCheckpoint(flat)),
+                    Refusal(() => wide.LoadCheckpointFromSkpt(skpt)),
+                    Refusal(() => wide.AdoptCheckpoint(defLess)),
+                    Refusal(() => wide.AdoptCheckpoint(narrowCkpt)),
+                ],
+                m => Assert.Contains("[4,2]", m.Replace(", ", ",")));
         }
         finally
         {
             if (File.Exists(flat)) File.Delete(flat);
             if (File.Exists(skpt)) File.Delete(skpt);
         }
+    }
+
+    /// <summary>A rig refuses a checkpoint whose values do not fit it in any respect it can see: a
+    /// file saved without its inference state, which read on its own would claim a model with no
+    /// parameters, and a value whose element type is not the parameter's.</summary>
+    [Fact]
+    public void TestAPartialCheckpointAndAMismatchedElementTypeAreRefused()
+    {
+        var rig = ShapeRig(ParamShapeNarrowModel.ComputationGraph);
+        var paramName = rig.TrainableParamStructDef.Fields[0].Name;
+        var path = TempPath("ckpt_partial") + ".safetensors";
+        try
+        {
+            rig.CreateInitialCheckpoint().Save(
+                path, CheckpointComponents.OptimizerState | CheckpointComponents.Counters);
+
+            Assert.Contains("saved without its inference state",
+                Assert.Throws<InvalidOperationException>(() => Persistence.LoadTrainingCheckpoint(path)).Message);
+            Assert.Equal([4L, 2L], ParamDims(rig.LoadCheckpoint(path)));
+
+            var wrongType = new TrainingCheckpoint(
+                new TensorDataStruct(rig.TrainableParamStructDef,
+                    [new(paramName, TensorData([4L, 2L], [1d, 2d, 3d, 4d, 5d, 6d, 7d, 8d]))]),
+                rig.CreateInitialCheckpoint().ModelState, rig.CreateInitialCheckpoint().OptimizerState);
+            Assert.Contains("Float64", Assert.Throws<ArgumentException>(() => rig.AdoptCheckpoint(wrongType)).Message);
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
     }
 
     /// <summary>Binding is the last point where a value and the model that will use it are both in
@@ -1896,16 +1927,8 @@ public class TrainingRigCheckpointCoverageTests
     [Fact]
     public void TestAValueOfAnotherShapeIsRefusedWhereItIsBoundToTheModel()
     {
-        NamedModelParam[] sample =
-        [
-            new TensorDataModelParam("x", ModelParamType.InputParam,
-                TensorData([4L, 4L], [1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f, 11f, 12f, 13f, 14f, 15f, 16f])),
-        ];
-        TrainingRig Rig(ComputationGraph model) => TrainingRig.FromScratch(
-            model, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, sample, 0.1f);
-
-        var narrow = Rig(ParamShapeNarrowModel.ComputationGraph);
-        var wide = Rig(ParamShapeWideModel.ComputationGraph);
+        var narrow = ShapeRig(ParamShapeNarrowModel.ComputationGraph);
+        var wide = ShapeRig(ParamShapeWideModel.ComputationGraph);
         var wideCkpt = wide.CreateInitialCheckpoint();
         var narrowValues = narrow.CreateInitialCheckpoint().TrainableParams.Fields;
 
@@ -3237,13 +3260,15 @@ public class TrainingRigHyperparameterShapeCoverageTests
         Assert.Equal(DType.Float32, bakedRig.HyperparameterDTypes[0]);
         Assert.Empty(bakedRig.HyperparameterStructDef.Fields);
 
-        float Step(TrainingRig rig, TensorDataStruct? hypers = null)
+        float[] Step(TrainingRig rig, TensorDataStruct? hypers = null)
         {
             var ckpt = rig.CreateInitialCheckpoint();
-            return Weight(rig, hypers is null
+            return FlattenStruct((hypers is null
                 ? rig.TrainStep(ckpt, inputBatch, targetBatch)
-                : rig.TrainStep(ckpt, hypers, inputBatch, targetBatch));
+                : rig.TrainStep(ckpt, hypers, inputBatch, targetBatch)).TrainableParams);
         }
+        static bool Close(float[] a, float[] b) =>
+            a.Length == b.Length && a.Zip(b).All(p => MathF.Abs(p.First - p.Second) < 1e-5f);
 
         var runtimeRig = VectorRig(new VectorRateOptimizerHyperparameters
         {
@@ -3257,17 +3282,17 @@ public class TrainingRigHyperparameterShapeCoverageTests
         var matching = runtimeRig.MakeHyperparameters(
             ("perElementRate", Rate(0.1f, 0.2f, 0.4f, 0.8f)), ("gain", 1f));
         Assert.Equal((long[])[4L], ((TensorData)matching.Fields["perElementRate"]).Shape.Dims);
-        Assert.True(MathF.Abs(Step(bakedRig) - Step(runtimeRig, matching)) < 1e-5f);
+        Assert.True(Close(Step(bakedRig), Step(runtimeRig, matching)));
 
         var doubled = runtimeRig.MakeHyperparameters(
             ("perElementRate", Rate(0.1f, 0.2f, 0.4f, 0.8f)), ("gain", 2f));
-        Assert.True(MathF.Abs(Step(runtimeRig, doubled) - Step(runtimeRig, matching)) > 1e-4f);
+        Assert.False(Close(Step(runtimeRig, doubled), Step(runtimeRig, matching)));
 
         var scheduledRig = VectorRig(new VectorRateOptimizerHyperparameters
             { PerElementRate = Hyperparameter.Scheduled(VectorRateScheduler.ComputationGraph) });
         Assert.Equal((long[])[4L], scheduledRig.HyperparameterShapes[0].Dims);
         Assert.Empty(scheduledRig.HyperparameterStructDef.Fields);
-        Assert.True(MathF.Abs(Step(scheduledRig) - Step(bakedRig)) < 1e-5f);
+        Assert.True(Close(Step(scheduledRig), Step(bakedRig)));
 
         var scheduledCkpt = scheduledRig.CreateInitialCheckpoint();
         var hostCkpt = runtimeRig.CreateInitialCheckpoint();
@@ -3277,7 +3302,8 @@ public class TrainingRigHyperparameterShapeCoverageTests
             hostCkpt = runtimeRig.TrainStep(hostCkpt, runtimeRig.MakeHyperparameters(
                 ("perElementRate", Rate(0.1f - 0.01f * s, 0.2f - 0.01f * s, 0.4f - 0.01f * s, 0.8f - 0.01f * s)),
                 ("gain", 1f)), inputBatch, targetBatch);
-            Assert.True(MathF.Abs(Weight(scheduledRig, scheduledCkpt) - Weight(runtimeRig, hostCkpt)) < 1e-5f);
+            Assert.True(Close(FlattenStruct(scheduledCkpt.TrainableParams),
+                               FlattenStruct(hostCkpt.TrainableParams)));
         }
 
         var stateRig = TrainingRig.FromScratch(
@@ -3293,11 +3319,14 @@ public class TrainingRigHyperparameterShapeCoverageTests
     public void TestHyperparameterShapeMismatchesAndScalarOnlySourcesAreRejectedCoverage()
     {
         // A binding whose rank contradicts the declared Vector<T> / Scalar<T> fails at rig build.
-        Assert.Throws<ArgumentException>(() => VectorRig(new VectorRateOptimizerHyperparameters
+        static void RankMismatch(Func<TrainingRig> build) => Assert.Contains(
+            "declared with rank", Assert.Throws<ArgumentException>(() => build()).Message);
+
+        RankMismatch(() => VectorRig(new VectorRateOptimizerHyperparameters
             { PerElementRate = 0.1f }));
-        Assert.Throws<ArgumentException>(() => VectorRig(new VectorRateOptimizerHyperparameters
+        RankMismatch(() => VectorRig(new VectorRateOptimizerHyperparameters
             { PerElementRate = Hyperparameter.Runtime(2L, 2L) }));
-        Assert.Throws<ArgumentException>(() => VectorRig(new VectorRateOptimizerHyperparameters
+        RankMismatch(() => VectorRig(new VectorRateOptimizerHyperparameters
             { PerElementRate = Hyperparameter.Baked(Rate(0.1f)), Gain = Hyperparameter.Runtime(3L) }));
 
         // Built-in Schedule math is a float32 scalar, so it cannot drive a vector hyperparameter.
@@ -3328,36 +3357,22 @@ public class TrainingRigHyperparameterShapeCoverageTests
             new InternalComputationGraph([step], [step.Cast<float32>()]), GraphKind.Module);
     }
 
-    /// <summary>A <c>[4]</c> per-element rate against the <c>[1]</c> weight of
-    /// <c>ScalarMultiplyModel</c> broadcasts, so the optimizer's "updated" parameter comes back
-    /// <c>[4]</c>: the rig's own initial value no longer matches its checkpoint, and the inference
-    /// model answers <c>[4]</c> for a scalar-multiply weight. Any refusal satisfies this — at build
-    /// or at the step — as does a step that leaves the shape alone; only the silent reshape fails it.
-    /// Part of Shorokoo/Shorokoo#322.</summary>
+    /// <summary>An optimizer whose update returns a parameter at another shape — a <c>[4]</c>
+    /// per-element rate broadcasting against a <c>[1]</c> weight — is refused when the rig is
+    /// built, before any step can reshape the parameter.</summary>
     [Fact]
-    public void TestATrainStepDoesNotSilentlyReshapeATrainableParameter()
+    public void TestARigWhoseOptimizerWouldReshapeAParameterIsRefused()
     {
-        var (_, inputBatch, targetBatch) = ScalarMultiplyBatches();
-        static long[] WeightDims(TrainingCheckpoint c) =>
-            [.. ((TensorData)c.TrainableParams.Fields[c.TrainableParams.Definition.Fields[0].Name]).Shape.Dims];
-
-        TrainingRig? rig = null;
-        var refusedAtBuild = Record.Exception(() => rig = TrainingRig.FromScratch(
+        var refusal = Assert.Throws<ArgumentException>(() => TrainingRig.FromScratch(
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
             VectorRateOptimizer.ComputationGraph, ScalarMultiplyBatches().sample,
             new VectorRateOptimizerHyperparameters
             {
                 PerElementRate = Hyperparameter.Baked(Rate(0.1f, 0.2f, 0.4f, 0.8f)),
                 Gain = Hyperparameter.Runtime(),
-            }));
-
-        TrainingCheckpoint? after = null;
-        var refusedAtStep = rig is null ? null : Record.Exception(
-            () => after = rig.TrainStep(
-                rig.CreateInitialCheckpoint(), rig.MakeHyperparameters(1f), inputBatch, targetBatch));
-
-        Assert.True(refusedAtBuild is not null || refusedAtStep is not null
-                    || WeightDims(after!).SequenceEqual((long[])[1L]));
+            })).Message;
+        Assert.Contains("InitScalarWeight#0", refusal);
+        Assert.Contains("at that parameter's own shape", refusal);
     }
 
     [Fact]

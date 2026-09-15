@@ -405,8 +405,10 @@ namespace Shorokoo
             var raw = LoadFlat(
                 filePath, r.TrainableParamStructDef, r.ModelStateDef, r.OptimizerStateDef,
                 components, r);
-            // Attach the rig (sets Rig, preserves counters); the raw checkpoint was read against the
-            // rig's own defs, so the compatibility check inside AdoptCheckpoint always passes.
+            // Attach the rig (sets Rig, preserves counters). Reading against the rig's own defs
+            // settles the field names, so the def check inside AdoptCheckpoint passes by construction
+            // — but the dimension check there does not: the defs carry no shapes, so a checkpoint from
+            // a model of another width reaches this point and is refused as it is adopted.
             return r.AdoptCheckpoint(raw);
         }
 
@@ -492,6 +494,14 @@ namespace Shorokoo
             // each tensor's name, element type and shape — so a rig-less load needs nothing from
             // the caller. A load that must match a model supplies the rig's defs instead, and the
             // rig checks the values it read against its own parameters when it adopts them.
+            if (trainableParamDef is null && !SectionPresent(TrainableSection))
+                throw new InvalidOperationException(
+                    $"Checkpoint '{filePath}' holds no '{TrainableSection}' section. Every rig has at "
+                    + "least one trainable parameter, so this file was saved without its inference "
+                    + "state, and read on its own it would claim a model with no parameters. Load it "
+                    + "against the rig that produced it (rig.LoadCheckpoint(path)), which fills the "
+                    + "components the file omits from the rig's own initial values, or identify the "
+                    + "file with Persistence.Inspect.");
             trainableParamDef ??= InferSectionDef(tensors, TrainableSection, "TrainableParams");
             modelStateDef ??= InferSectionDef(tensors, ModelStateSection, "ModelState");
             optimizerStateDef ??= InferSectionDef(tensors, OptimizerStateSection, "OptimizerState");

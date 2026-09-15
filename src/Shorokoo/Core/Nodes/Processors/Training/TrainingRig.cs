@@ -1099,9 +1099,9 @@ namespace Shorokoo
             AssertStructDefCompatible(checkpoint.TrainableParams.Definition, TrainableParamStructDef, "trainable-parameter");
             AssertStructDefCompatible(checkpoint.ModelState.Definition, ModelStateDef, "model-state");
             AssertStructDefCompatible(checkpoint.OptimizerState.Definition, OptimizerStateDef, "optimizer-state");
-            AssertShapesCompatible(checkpoint.TrainableParams, _initialParamFields, "trainable-parameter");
-            AssertShapesCompatible(checkpoint.ModelState, _initialStateFields, "model-state");
-            AssertShapesCompatible(checkpoint.OptimizerState, _initialOptStateFields, "optimizer-state");
+            AssertValuesCompatible(checkpoint.TrainableParams, _initialParamFields, "trainable-parameter");
+            AssertValuesCompatible(checkpoint.ModelState, _initialStateFields, "model-state");
+            AssertValuesCompatible(checkpoint.OptimizerState, _initialOptStateFields, "optimizer-state");
             // Rebuilt against THIS rig's defs, not carried over: the checks above establish the two
             // agree field for field, but a checkpoint read straight from a file carries a def
             // reconstructed from that file, whose field ORDER is the file's. Everything that indexes
@@ -1115,49 +1115,54 @@ namespace Shorokoo
         }
 
         /// <summary>Fails loud when a checkpoint's struct def does not match this rig's, by field
-        /// names and per-field rank/dtype/structure (the compatibility contract for adoption/load).</summary>
+        /// names and per-field dtype/structure. The dimensions are checked separately, against the
+        /// rig's own values; see <see cref="AssertValuesCompatible"/>.</summary>
         private static void AssertStructDefCompatible(TensorStructDef actual, TensorStructDef expected, string kind)
         {
             if (actual.Fields.Length != expected.Fields.Length)
                 throw new ArgumentException(
                     $"Checkpoint's {kind} definition has {actual.Fields.Length} field(s), but this rig " +
-                    $"expects {expected.Fields.Length}. The checkpoint was produced by a different model/optimizer.");
+                    $"expects {expected.Fields.Length}. It may come from a different model or optimizer, " +
+                    "or be a checkpoint saved without this component — read without a rig, a component " +
+                    "the file omits comes back empty.");
             for (int i = 0; i < expected.Fields.Length; i++)
             {
                 var e = expected.Fields[i];
                 var a = actual.GetField(e.Name)
                     ?? throw new ArgumentException(
-                        $"Checkpoint's {kind} definition is missing field '{e.Name}' this rig expects. " +
-                        "The checkpoint was produced by a different model/optimizer.");
+                        $"Checkpoint's {kind} definition is missing field '{e.Name}' this rig expects.");
                 // Not compared: the field def's Rank. It describes the graph's struct TYPE, read off
                 // the dtype the training graph carries, and a trainable parameter's rank is not
                 // stated there at all (it is null) — the parameter's shape lives on its MODEL_PARAM
                 // node. Rank was standing in for "does this value fit this slot", which
-                // AssertShapesCompatible below answers exactly, against the rig's own parameters.
+                // AssertValuesCompatible below answers exactly, against the rig's own parameters.
                 if (a.ElementType != e.ElementType || a.Structure != e.Structure)
                     throw new ArgumentException(
                         $"Checkpoint's {kind} field '{e.Name}' ({a.ElementType}) does not match this " +
-                        $"rig's ({e.ElementType}). The checkpoint was produced by a different "
-                        + "model/optimizer.");
+                        $"rig's ({e.ElementType}).");
             }
         }
 
-        /// <summary>Fails loud when a checkpoint field's dimensions differ from this rig's own initial
-        /// value for that field. The struct defs cannot make this check — a field def carries a rank and
-        /// no shape — so a checkpoint from a model of another width matches def-for-def and would
-        /// otherwise be adopted, to surface later as a shape-inference error inside the runtime.</summary>
-        private static void AssertShapesCompatible(
+        /// <summary>Fails loud when a checkpoint field's dimensions or element type differ from this
+        /// rig's own initial value for that field. The struct defs cannot make either check: a field def
+        /// carries a rank and no shape, and on a rig-supplied load the checkpoint's def <i>is</i> this
+        /// rig's, so comparing the two defs' dtypes compares a def with itself. Left unchecked, a
+        /// checkpoint from a model of another width matches def-for-def and is adopted, to surface later
+        /// as a shape-inference error inside the runtime.</summary>
+        private static void AssertValuesCompatible(
             TensorDataStruct actual, Dictionary<string, IData> expected, string kind)
         {
             foreach (var (name, expectedField) in expected)
             {
                 if (expectedField is not TensorData e) continue;
                 if (!actual.Fields.TryGetValue(name, out var actualField) || actualField is not TensorData a) continue;
+                if (a.DType != e.DType)
+                    throw new ArgumentException(
+                        $"Checkpoint's {kind} '{name}' is {a.DType}, but this rig's is {e.DType}.");
                 if (a.Shape.Dims.SequenceEqual(e.Shape.Dims)) continue;
                 throw new ArgumentException(
                     $"Checkpoint's {kind} '{name}' is shaped [{string.Join(",", a.Shape.Dims)}], but this rig's "
-                    + $"is [{string.Join(",", e.Shape.Dims)}]. The checkpoint was produced by a different "
-                    + "model/optimizer.");
+                    + $"is [{string.Join(",", e.Shape.Dims)}].");
             }
         }
 

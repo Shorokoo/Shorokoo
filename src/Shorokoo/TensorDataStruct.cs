@@ -40,7 +40,10 @@ namespace Shorokoo
         /// </summary>
         /// <param name="definition">The struct definition describing the fields</param>
         /// <param name="fields">Field name to value, one per definition field, each of the kind that
-        /// field declares</param>
+        /// field declares — a plain tensor also serves for a field declared <c>Optional</c>, meaning
+        /// present. A key the definition does not declare is not a field of this struct: it is kept in
+        /// <see cref="Fields"/> but ignored by everything that reads the struct, including
+        /// <see cref="Count"/>, the indexer and the enumerator.</param>
         public TensorDataStruct(TensorStructDef definition, IEnumerable<KeyValuePair<string, IData>> fields)
         {
             Definition = definition ?? throw new ArgumentNullException(nameof(definition));
@@ -57,7 +60,14 @@ namespace Shorokoo
                 if (!Fields.TryGetValue(fieldDef.Name, out var value))
                     throw new ArgumentException($"Missing data for field '{fieldDef.Name}'", nameof(fields));
                 var actual = StructureOf(value, fieldDef.Name);
-                if (actual != fieldDef.Structure)
+                // A plain tensor for a field declared Optional is the PRESENT case, and is accepted:
+                // the runtime hands a struct's field values straight through, and ONNX Runtime takes a
+                // tensor where an optional input is expected (see NamedModelParam.ToTensorValue). A
+                // caller holding the tensor writes exactly that, so refusing it would break a working
+                // call for a distinction the layer below does not draw.
+                var fits = actual == fieldDef.Structure
+                    || (fieldDef.Structure == DataStructure.Optional && actual == DataStructure.Tensor);
+                if (!fits)
                     throw new ArgumentException(
                         $"Field '{fieldDef.Name}' is declared {fieldDef.Structure} by this struct's "
                         + $"definition, but the value given for it is a {actual}.", nameof(fields));
@@ -71,6 +81,7 @@ namespace Shorokoo
             TensorDataSequence => DataStructure.Sequence,
             OptionalTensorData => DataStructure.Optional,
             TensorData => DataStructure.Tensor,
+            // "fields" is the constructor's parameter; this method is only ever reached from there.
             _ => throw new ArgumentException(
                 $"Field '{fieldName}' has an unsupported value type "
                 + $"'{value?.GetType().Name ?? "null"}'.", "fields"),

@@ -1357,6 +1357,12 @@ public class TrainingRigTrainingLoopCoverageTests
         var rig = OptionalBiasRig(present, x);
         Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
         Assert.Equal(29f / 3f, StepLoss(rig, x, present), 1e-3f);
+
+        // A plain tensor for the optional field is the present arm, and is what a caller holding the
+        // tensor writes; the runtime takes one where an optional is expected.
+        Assert.Equal(29f / 3f, rig.TrainStep(rig.CreateInitialCheckpoint(),
+            rig.InputDef.FromOrderedData(x, TensorData([3L], 1f, 1f, 1f)),
+            rig.TargetDef.FromOrderedData(TensorData([3L], 0f, 0f, 0f))).Loss!.Value, 1e-3f);
     }
 
     private static float StepLoss(TrainingRig rig, TensorData x, OptionalTensorData bias)

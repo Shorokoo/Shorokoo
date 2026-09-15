@@ -747,11 +747,21 @@ public class CoreUtilsCoverageTests
         var declaresTensor = Declaring(DataStructure.Tensor, DType.Float32);
         var declaresStruct = Declaring(DataStructure.TensorStruct, DType.GetOrCreateForTensorStruct(inner));
 
-        Assert.Equal(1, new TensorDataStruct(declaresTensor, [new("f", tensorValue)]).Count);
-        Assert.Equal(1, new TensorDataStruct(declaresStruct, [new("f", innerValue)]).Count);
-        Assert.Contains("Tensor", Assert.Throws<ArgumentException>(
-            () => new TensorDataStruct(declaresTensor, [new("f", (IData)innerValue)])).Message);
-        Assert.Contains("TensorStruct", Assert.Throws<ArgumentException>(
-            () => new TensorDataStruct(declaresStruct, [new("f", (IData)tensorValue)])).Message);
+        var declaresOptional = Declaring(DataStructure.Optional, DType.Float32);
+        var declaresSequence = Declaring(DataStructure.Sequence, DType.Float32);
+        var optionalValue = OptionalTensorData.Some(Globals.TensorData([1L], [3f]));
+
+        IData[] accepted = [tensorValue, innerValue, optionalValue, tensorValue];
+        TensorStructDef[] declaring = [declaresTensor, declaresStruct, declaresOptional, declaresOptional];
+        Assert.All(declaring.Zip(accepted),
+            p => Assert.Equal(1, new TensorDataStruct(p.First, [new("f", p.Second)]).Count));
+
+        static string Refusal(TensorStructDef def, IData value) => Assert.Throws<ArgumentException>(
+            () => new TensorDataStruct(def, [new("f", value)])).Message;
+        Assert.Contains("Tensor", Refusal(declaresTensor, innerValue));
+        Assert.Contains("TensorStruct", Refusal(declaresStruct, tensorValue));
+        Assert.Contains("Sequence", Refusal(declaresSequence, tensorValue));
+        Assert.Contains("Optional", Refusal(declaresOptional, innerValue));
+        Assert.Contains("unsupported value type", Refusal(declaresTensor, null!));
     }
 }

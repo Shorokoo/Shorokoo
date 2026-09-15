@@ -1079,7 +1079,9 @@ namespace Shorokoo
             // Read through the definitions, not the field dictionary: a definition field is what the
             // model expects to be given, and a struct holds every one of them as the kind it declares.
             // Filtering the dictionary for tensors instead used to drop a field that was not one and
-            // leave the bind to fail on a lookup for a parameter nothing had supplied.
+            // leave the bind to fail on a lookup for a parameter nothing had supplied. Both defs
+            // declare only tensors and a struct is held to its definition, so the refusal below is
+            // unreachable today — it is here so that stops being true loudly rather than silently.
             static IEnumerable<KeyValuePair<string, TensorData>> Declared(TensorDataStruct s) =>
                 s.Definition.Fields.Select(f => s.Fields[f.Name] is TensorData t
                     ? new KeyValuePair<string, TensorData>(f.Name, t)

@@ -162,6 +162,11 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
 
     /// <summary>
     /// Packs already-created tensor values into an ORT sequence value, in order.
+    ///
+    /// <para>This <b>takes ownership</b> of <paramref name="values"/>: ORT moves them into the
+    /// sequence's own member list and the sequence frees them when it is disposed, so a caller
+    /// that still needs them must pass copies. Shorokoo's <c>TensorDataSequence.Create</c> does
+    /// exactly that.</para>
     /// </summary>
     public IShorokooTensorValue CreateSequence(IReadOnlyList<IShorokooTensorValue> values)
     {
@@ -186,17 +191,31 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
     /// </summary>
     private static OrtTensorValue Allocate(TensorElementType elementType, ReadOnlySpan<byte> bytes, long[] shape)
     {
-        var value = OrtValue.CreateAllocatedTensorValue(OrtAllocator.DefaultInstance, elementType, shape);
-        var destination = value.GetTensorMutableRawData();
-        if (bytes.Length < destination.Length)
-            throw new ArgumentException(
-                $"Supplied data of {bytes.Length} bytes is less than shape size {destination.Length} bytes.",
-                nameof(bytes));
-        // A caller may hand over a buffer longer than the shape covers — the node-definition tables
-        // do — in which case the surplus was never part of the tensor and the wrapped-memory path
-        // this replaced never read it either.
-        bytes.Slice(0, destination.Length).CopyTo(destination);
-        return new OrtTensorValue(value);
+        var wrapped = new OrtTensorValue(
+            OrtValue.CreateAllocatedTensorValue(OrtAllocator.DefaultInstance, elementType, shape));
+        try
+        {
+            var destination = wrapped.Inner.GetTensorMutableRawData();
+            if (bytes.Length < destination.Length)
+                throw new ArgumentException(
+                    $"Supplied data of {bytes.Length} bytes is less than shape size {destination.Length} bytes.",
+                    nameof(bytes));
+            // A caller may hand over a buffer longer than the shape covers — the node-definition
+            // tables do — in which case the surplus was never part of the tensor and the
+            // wrapped-memory path this replaced never read it either.
+            bytes.Slice(0, destination.Length).CopyTo(destination);
+            // The destination span is a bare pointer into the value's buffer: reading the value
+            // for it is the value's last read, after which the JIT may retire the local and a
+            // collection on any thread can run the value's finalizer and free the buffer out from
+            // under the copy. Scope does not root anything (Shorokoo/Shorokoo#178); this does.
+            GC.KeepAlive(wrapped);
+        }
+        catch
+        {
+            wrapped.Dispose();
+            throw;
+        }
+        return wrapped;
     }
 
     /// <summary>The ORT element type of the storage primitive <typeparamref name="T"/>.</summary>

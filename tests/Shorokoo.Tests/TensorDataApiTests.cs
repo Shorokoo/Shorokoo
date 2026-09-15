@@ -262,4 +262,98 @@ public class TensorDataApiCoverageTests
         Assert.NotNull(build(source));
         return new WeakReference(source);
     }
+
+    [Fact]
+    public void TestDisposingATensorReleasesItsBackingValueExactlyOnce()
+    {
+        var spy = new SpyTensorValue();
+        var td = new OnnxTensorData<float32>(new Shape(2L), spy);
+        Assert.False(td.IsDisposed);
+        Assert.Equal(0, spy.Disposals);
+
+        td.Dispose();
+        td.Dispose();
+        Assert.True(td.IsDisposed);
+        Assert.Equal(1, spy.Disposals);
+    }
+
+    [Fact]
+    public void TestEveryReadOfADisposedTensorThrowsInsteadOfReadingFreedMemory()
+    {
+        var td = TensorData(DType.Float32, [2L], 1f, 2f);
+        td.Dispose();
+
+        Action[] reads =
+        [
+            () => td.AccessRawMemory(),
+            () => td.AccessModifiableRawMemory(),
+            () => td.As<float32>().AccessMemory<float>(),
+            () => td.As<float32>().AccessModifiableMemory<float>(),
+            () => td.As<float32>().AccessMemory(),
+            () => td.As<float32>().AccessModifiableMemory(),
+            () => _ = td.Data,
+            () => _ = td.As<float32>().DebugData,
+            () => td.ToTensorValue(),
+            () => _ = ((IOnnxData)td).Value,
+        ];
+        Assert.All(reads, r => Assert.Throws<ObjectDisposedException>(r));
+
+        // Metadata stays readable — a disposed tensor still says what it was.
+        Assert.Equal(DType.Float32, td.DType);
+        Assert.Equal(new Shape(2L), td.Shape);
+        Assert.Contains("float", td.ToString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void TestASequenceOwnsItsOwnElementsAndLeavesTheTensorsItWasBuiltFromAlone()
+    {
+        var a = TensorData(DType.Float32, [2L], 1f, 2f);
+        var b = TensorData(DType.Float32, [2L], 3f, 4f);
+        var seq = TensorDataSequence.Create([a, b], null);
+
+        var element = seq[0];
+        element.Dispose();
+        float[] stillFirst = [1f, 2f];
+        Assert.Equal(stillFirst, seq[0].As<float32>().AccessMemory().ToArray());
+
+        seq.Dispose();
+        Assert.True(seq.IsDisposed);
+        Assert.Throws<ObjectDisposedException>(() => seq.Count);
+        Assert.Throws<ObjectDisposedException>(() => seq[0]);
+
+        // The sources were never the sequence's to free.
+        Assert.False(a.IsDisposed);
+        Assert.Equal(stillFirst, a.As<float32>().AccessMemory().ToArray());
+        float[] stillSecond = [3f, 4f];
+        Assert.Equal(stillSecond, b.As<float32>().AccessMemory().ToArray());
+        Assert.Equal(2, TensorDataSequence.Create([a, b], null).Count);
+    }
+
+    [Fact]
+    public void TestAnOutputOutlivesTheSessionThatProducedIt()
+    {
+        // ComputeContext.Run builds a session per call and disposes it before returning; the
+        // values it hands back stay valid because an ORT tensor holds its allocator alive.
+        var result = OnnxEngine.Eval(Scalar(2f) * Scalar(21f)).As<float32>();
+        GC.Collect(2, GCCollectionMode.Forced, blocking: true);
+        GC.WaitForPendingFinalizers();
+        Assert.Equal(42f, result.AccessMemory()[0]);
+    }
+
+    /// <summary>Records disposal; every other member is unreachable in these tests.</summary>
+    private sealed class SpyTensorValue : Shorokoo.Core.Inference.Abstractions.IShorokooTensorValue
+    {
+        public int Disposals { get; private set; }
+        public void Dispose() => Disposals++;
+
+        public Shorokoo.Core.Inference.Abstractions.ShorokooOnnxValueType ValueType => throw new NotSupportedException();
+        public Shorokoo.Core.Inference.Abstractions.ShorokooTensorElementType ElementType => throw new NotSupportedException();
+        public long[] Shape => throw new NotSupportedException();
+        public ReadOnlySpan<T> GetTensorDataAsSpan<T>() where T : unmanaged => throw new NotSupportedException();
+        public Span<T> GetTensorMutableDataAsSpan<T>() where T : unmanaged => throw new NotSupportedException();
+        public IReadOnlyList<string> GetStringTensorData() => throw new NotSupportedException();
+        public int GetValueCount() => throw new NotSupportedException();
+        public Shorokoo.Core.Inference.Abstractions.IShorokooTensorValue GetValue(int index) => throw new NotSupportedException();
+        public Shorokoo.Core.Inference.Abstractions.ShorokooTensorElementType GetSequenceElementType() => throw new NotSupportedException();
+    }
 }

@@ -30,6 +30,10 @@ internal sealed class OrtInferenceSession : IShorokooInferenceSession
         // by this instance and `runOptions` by the using; the inputs need this.
         GC.KeepAlive(ortInputs);
 
+        // `results` is deliberately not disposed. It is a container whose Dispose would dispose
+        // the values inside it, and those are exactly what this returns: each one is handed to an
+        // OrtTensorValue, and from there to the TensorData that owns it and releases it when
+        // disposed (Shorokoo/Shorokoo#180). The container itself holds nothing else to release.
         var wrapped = new List<IShorokooTensorValue>(results.Count);
         foreach (var r in results) wrapped.Add(new OrtTensorValue(r));
         return wrapped;

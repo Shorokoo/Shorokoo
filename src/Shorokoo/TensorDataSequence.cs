@@ -53,6 +53,21 @@ namespace Shorokoo
             this.DType = dtype;
         }
 
+        /// <summary>
+        /// True once this sequence's storage has been released. Its dtype and
+        /// <see cref="ToString"/> stay readable as metadata; every path to the elements throws.
+        /// </summary>
+        public bool IsDisposed { get; protected set; }
+
+        /// <summary>Guards every path to the sequence's elements.</summary>
+        protected void ThrowIfDisposed()
+        {
+            if (IsDisposed)
+                throw new ObjectDisposedException(GetType().Name,
+                    $"Sequence {this} has been disposed; its element storage is gone and reading " +
+                    "it would read freed memory.");
+        }
+
         public override string ToString()
         {
             return $"sequence:{this.DType.ToString()}";
@@ -95,9 +110,7 @@ namespace Shorokoo
                 yield break;
             }
 
-            public override void Dispose()
-            {
-            }
+            public override void Dispose() => IsDisposed = true;
         }
 
         internal static TensorDataSequence CreateEmpty(DType dtype)
@@ -126,12 +139,28 @@ namespace Shorokoo
     public class OnnxTensorDataSequence<T> : TensorDataSequence<T>, IOnnxData, IDisposable
         where T : IVarType
     {
-        private bool disposedValue = false;
+        private readonly IShorokooTensorValue backing;
 
-        public IShorokooTensorValue Value { get; private set; }
+        /// <summary>
+        /// The backing inference-runtime sequence value, which this sequence owns: disposing the
+        /// sequence releases it, and nothing else may hold or free it.
+        /// </summary>
+        public IShorokooTensorValue Value
+        {
+            get
+            {
+                ThrowIfDisposed();
+                return backing;
+            }
+        }
 
         public override int Count => Value.GetValueCount();
 
+        /// <summary>
+        /// The element at <paramref name="index"/>, on storage of its own: the runtime copies the
+        /// element out rather than aliasing the sequence, so the returned tensor owns what it
+        /// hands back and disposing it leaves this sequence intact.
+        /// </summary>
         public override TensorData<T> this[int index]
         {
             get
@@ -143,7 +172,7 @@ namespace Shorokoo
 
         public OnnxTensorDataSequence(IShorokooTensorValue value) : base()
         {
-            this.Value = value;
+            this.backing = value;
         }
 
         public override IEnumerator<TensorData<T>> GetEnumerator()
@@ -154,27 +183,16 @@ namespace Shorokoo
 
         #region IDisposable
 
-        protected virtual void Dispose(bool disposing)
-        {
-            if (!disposedValue)
-            {
-                if (disposing)
-                {
-                    this.Value.Dispose();
-                }
-                disposedValue = true;
-            }
-        }
-
-        ~OnnxTensorDataSequence()
-        {
-            Dispose(disposing: false);
-        }
-
+        /// <summary>
+        /// Releases the backing sequence value. Idempotent; every read afterwards throws
+        /// <see cref="ObjectDisposedException"/>. No finalizer, for the reason
+        /// <see cref="OnnxTensorData{T}.Dispose"/> gives.
+        /// </summary>
         public override void Dispose()
         {
-            Dispose(disposing: true);
-            GC.SuppressFinalize(this);
+            if (IsDisposed) return;
+            IsDisposed = true;
+            backing.Dispose();
         }
 
         #endregion

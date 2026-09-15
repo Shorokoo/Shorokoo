@@ -254,6 +254,34 @@ float first = values[0];
 `bfloat16`→`BFloat16`, etc. A boxed `TensorData.Data` (`object[]`) also exists; prefer
 `AccessMemory()`.
 
+## What a `TensorData` owns, and when its values go away
+
+A `TensorData` **owns its storage**. Disposing it frees that storage immediately, and every
+way of reading the values afterwards — `AccessMemory()`, `AccessRawMemory()`, `.Data`,
+`.DebugData` — throws `ObjectDisposedException` rather than reading freed memory. `.Shape`,
+`.DType`, `.ToString()` and `.IsDisposed` keep working, so a disposed tensor can still say
+what it was. Disposing twice is fine.
+
+Disposing is optional. A tensor you simply drop is reclaimed like any other object, and
+nothing in the framework hands you a tensor you are obliged to dispose. Dispose when you want
+the memory back at a known moment — a long loop that produces large tensors is the case that
+motivates it — and when you do, that tensor is finished: nothing else shares its storage.
+Operations that build one tensor from another copy, so the source keeps what it owns.
+`TensorDataSequence.Create(...)` copies the tensors you pass it, and disposing the sequence
+releases only the sequence's own copies.
+
+**A span is a window, not a copy.** `AccessMemory()` and `AccessRawMemory()` point straight
+into the tensor's storage, and nothing ties the span's lifetime to the tensor's. A span
+outlives its tensor's storage if you dispose the tensor, and also if the tensor simply becomes
+unreachable while you are still reading — being in scope is not the same as being reachable,
+because a local is retired at its last use. Copy out (`.ToArray()`) before the tensor's last
+use, or keep reading through the tensor itself:
+
+```csharp
+TensorData result = OnnxEngine.Eval(y);
+float[] values = ((TensorData<float32>)result).AccessMemory().ToArray();  // safe: copied out
+```
+
 ## Anti-patterns
 
 - Do not mix dtypes in one op (e.g. add `Tensor<float32>` to `Tensor<int64>`); cast

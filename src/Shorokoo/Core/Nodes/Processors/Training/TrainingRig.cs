@@ -2193,10 +2193,12 @@ namespace Shorokoo
         /// every ten steps, and the runtime's arena ratchets upward between collections instead of
         /// settling.</para>
         ///
-        /// <para>Nothing here decides who owns a checkpoint's tensors — the caller's checkpoints
-        /// are untouched, and only buffers already unreachable are released. It is the collection
-        /// that is scheduled, not the release (Shorokoo/Shorokoo#180 covers the ownership
-        /// question).</para>
+        /// <para>A tensor owns its storage and releases it when disposed, so a caller who wants
+        /// determinism has it; what the rig cannot do is dispose the checkpoint it was handed,
+        /// because the caller may still be holding it — comparing a step against the one before it
+        /// is an ordinary thing to do. So the superseded state is genuinely unreachable garbage
+        /// and only its collection needs scheduling. Nothing here disposes anything the caller can
+        /// still see.</para>
         /// </summary>
         private void ReclaimSupersededState(long stepBytes)
         {
@@ -2297,7 +2299,12 @@ namespace Shorokoo
 
             // Loss is the last output
             var lossIndex = UpdatedParamFieldCount + UpdatedStateFieldCount + UpdatedOptimizerStateFieldCount;
-            var lossValue = results[lossIndex].ToTensorData<float32>().AccessMemory()[0];
+            var lossTensor = results[lossIndex].ToTensorData<float32>();
+            var lossValue = lossTensor.AccessMemory()[0];
+            // Nothing past the checkpoint's fields is retained, so release it here rather than
+            // leaving a step's worth of outputs for a collection to notice.
+            for (int i = lossIndex; i < results.Length; i++)
+                results[i].ToTensorData().Dispose();
 
             // Step is the graph-advanced counter (one training step per call). Epoch and batch
             // index are host-owned — the training loop advances them — so they carry through

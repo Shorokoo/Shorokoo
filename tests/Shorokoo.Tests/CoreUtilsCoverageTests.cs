@@ -367,6 +367,58 @@ public class CoreUtilsCoverageTests
         return source;
     }
 
+    // The second rooting shape, which no `using` can express because the value has to be returned:
+    // a bare span taken out of a runtime tensor value and then read or written THROUGH. Taking the
+    // span is the value's last read, so the JIT may retire it before the span is used, and a
+    // collection on any thread then frees the buffer mid-copy. Forwarding the span straight out
+    // (`return Inner.GetTensorDataAsSpan<T>();`) is not this shape — the caller owns the lifetime.
+    private static readonly Regex SpanOutOfOrtValue = new(
+        @"\.\s*(GetTensorMutableRawData\s*\(\s*\)|GetTensorDataAsSpan\s*<[^>]*>\s*\(\s*\)"
+        + @"|GetTensorMutableDataAsSpan\s*<[^>]*>\s*\(\s*\))", RegexOptions.Compiled);
+
+    private static string[] SpansUsedWithoutKeepingTheValueAlive(string source)
+    {
+        var code = StripCommentsAndStrings(source);
+        return SpanOutOfOrtValue.Matches(code)
+            .Where(m => SpanIsUsedNotForwarded(code, m))
+            .Where(m => !EnclosingBody(code, m.Index).Contains("GC.KeepAlive"))
+            .Select(m => m.Value.Trim())
+            .ToArray();
+    }
+
+    // Used, not forwarded: the span is chained into (`.ToArray()`, `.CopyTo(...)`) or bound to a
+    // local. A statement that just returns it hands the lifetime question to the caller.
+    private static bool SpanIsUsedNotForwarded(string code, Match m)
+    {
+        var after = code[(m.Index + m.Length)..];
+        if (Regex.IsMatch(after, @"^\s*\.")) return true;
+        var before = code[(code.LastIndexOfAny([';', '{', '}'], m.Index) + 1)..m.Index];
+        // A real assignment, not the `=>` of an expression-bodied member forwarding the span on.
+        return !before.Contains("return") && Regex.IsMatch(before, @"(?<![=!<>])=(?!>)\s*[\w\.\(\)<>,\s]*$");
+    }
+
+    // The innermost braced block containing index -- the method body, for a statement sitting
+    // directly in one.
+    private static string EnclosingBody(string code, int index)
+    {
+        int depth = 0, start = index;
+        while (start > 0)
+        {
+            char c = code[--start];
+            if (c == '}') depth++;
+            else if (c == '{') { if (depth == 0) break; depth--; }
+        }
+        depth = 0;
+        int end = index;
+        while (end < code.Length)
+        {
+            char c = code[end++];
+            if (c == '{') depth++;
+            else if (c == '}') { if (depth == 0) break; depth--; }
+        }
+        return code[start..end];
+    }
+
     private static string[] UnrootedOrtSafeHandles(string source)
     {
         char[] statementEnds = [';', '{', '}', ')'];
@@ -448,6 +500,26 @@ public class CoreUtilsCoverageTests
         ];
         Assert.All(mustFlag, s => Assert.NotEmpty(UnrootedOrtSafeHandles(s)));
         Assert.All(mustNotFlag, s => Assert.Empty(UnrootedOrtSafeHandles(s)));
+
+        Assert.Contains(sources, s => SpanOutOfOrtValue.IsMatch(StripCommentsAndStrings(s)));
+        Assert.Empty(sources.SelectMany(SpansUsedWithoutKeepingTheValueAlive));
+
+        string[] spansMustFlag =
+        [
+            "void M() { var d = v.GetTensorMutableRawData(); b.CopyTo(d); }",
+            "byte[] M() { return v.GetTensorDataAsSpan<byte>().ToArray(); }",
+            "void M() { var s = v.GetTensorMutableDataAsSpan<float>(); s[0] = 1f; }",
+            "void M() { GC.KeepAlive(x); } void N() { var d = v.GetTensorMutableRawData(); b.CopyTo(d); }",
+        ];
+        string[] spansMustNotFlag =
+        [
+            "ReadOnlySpan<T> M() => Inner.GetTensorDataAsSpan<T>();",
+            "ReadOnlySpan<T> M() { return Inner.GetTensorDataAsSpan<T>(); }",
+            "byte[] M() { var a = v.GetTensorDataAsSpan<byte>().ToArray(); GC.KeepAlive(v); return a; }",
+            "void M() { var d = v.GetTensorMutableRawData(); b.CopyTo(d); GC.KeepAlive(v); }",
+        ];
+        Assert.All(spansMustFlag, s => Assert.NotEmpty(SpansUsedWithoutKeepingTheValueAlive(s)));
+        Assert.All(spansMustNotFlag, s => Assert.Empty(SpansUsedWithoutKeepingTheValueAlive(s)));
     }
 
     [Fact]

@@ -41,10 +41,14 @@ namespace Shorokoo.Core.Nodes.Processors.Helpers
             // without converting the data
             if (typesMatch && !metadataMatches)
             {
-                // Get the OrtValue from the original data
-                var ortValue = ((IOnnxData)originalData).Value;
-                // Create new TensorData with same data but different metadata
-                return OnnxUtils.CreateTensorDataFromValue(shape, targetDType, ortValue, targetDType);
+                // Same bytes, different metadata — but on storage of its own, like every other
+                // branch here. Wrapping the source's own value handed the caller back a second
+                // tensor over one runtime value, so whichever was disposed first took the other
+                // one's storage with it (Shorokoo/Shorokoo#180). The source graph may well still
+                // be in use: these passes rebuild attributes into a new graph and leave the
+                // original standing.
+                var copy = OnnxUtils.CopyTensorValue(((IOnnxData)originalData).Value);
+                return OnnxUtils.CreateTensorDataFromValue(shape, targetDType, copy, targetDType);
             }
             
             // Extract element count for conversion
@@ -168,41 +172,53 @@ namespace Shorokoo.Core.Nodes.Processors.Helpers
                 return ExtractValuesFromOrtValue(ortValue, actualDType);
             }
             
-            if (dtype.ProtoTypeNum == DType.Bool.ProtoTypeNum) return data.As<bit>().AccessMemory<bool>().ToArray().Cast<object>().ToArray();
-            else if (dtype.ProtoTypeNum == DType.Int8.ProtoTypeNum) return data.As<int8>().AccessMemory<sbyte>().ToArray().Cast<object>().ToArray();
-            else if (dtype.ProtoTypeNum == DType.Int16.ProtoTypeNum) return data.As<int16>().AccessMemory<short>().ToArray().Cast<object>().ToArray();
-            else if (dtype.ProtoTypeNum == DType.Int32.ProtoTypeNum) return data.As<int32>().AccessMemory<int>().ToArray().Cast<object>().ToArray();
-            else if (dtype.ProtoTypeNum == DType.Int64.ProtoTypeNum) return data.As<int64>().AccessMemory<long>().ToArray().Cast<object>().ToArray();
-            else if (dtype.ProtoTypeNum == DType.UInt8.ProtoTypeNum) return data.As<uint8>().AccessMemory<byte>().ToArray().Cast<object>().ToArray();
-            else if (dtype.ProtoTypeNum == DType.UInt16.ProtoTypeNum) return data.As<uint16>().AccessMemory<ushort>().ToArray().Cast<object>().ToArray();
-            else if (dtype.ProtoTypeNum == DType.UInt32.ProtoTypeNum) return data.As<uint32>().AccessMemory<uint>().ToArray().Cast<object>().ToArray();
-            else if (dtype.ProtoTypeNum == DType.UInt64.ProtoTypeNum) return data.As<uint64>().AccessMemory<ulong>().ToArray().Cast<object>().ToArray();
+            object[] values;
+            if (dtype.ProtoTypeNum == DType.Bool.ProtoTypeNum) values = data.As<bit>().AccessMemory<bool>().ToArray().Cast<object>().ToArray();
+            else if (dtype.ProtoTypeNum == DType.Int8.ProtoTypeNum) values = data.As<int8>().AccessMemory<sbyte>().ToArray().Cast<object>().ToArray();
+            else if (dtype.ProtoTypeNum == DType.Int16.ProtoTypeNum) values = data.As<int16>().AccessMemory<short>().ToArray().Cast<object>().ToArray();
+            else if (dtype.ProtoTypeNum == DType.Int32.ProtoTypeNum) values = data.As<int32>().AccessMemory<int>().ToArray().Cast<object>().ToArray();
+            else if (dtype.ProtoTypeNum == DType.Int64.ProtoTypeNum) values = data.As<int64>().AccessMemory<long>().ToArray().Cast<object>().ToArray();
+            else if (dtype.ProtoTypeNum == DType.UInt8.ProtoTypeNum) values = data.As<uint8>().AccessMemory<byte>().ToArray().Cast<object>().ToArray();
+            else if (dtype.ProtoTypeNum == DType.UInt16.ProtoTypeNum) values = data.As<uint16>().AccessMemory<ushort>().ToArray().Cast<object>().ToArray();
+            else if (dtype.ProtoTypeNum == DType.UInt32.ProtoTypeNum) values = data.As<uint32>().AccessMemory<uint>().ToArray().Cast<object>().ToArray();
+            else if (dtype.ProtoTypeNum == DType.UInt64.ProtoTypeNum) values = data.As<uint64>().AccessMemory<ulong>().ToArray().Cast<object>().ToArray();
             // F16/BF16 widen exactly to float32, so extract as floats — keeps the
             // downstream Convert.To* calls working for every target type.
-            else if (dtype.ProtoTypeNum == DType.Float16.ProtoTypeNum) return data.As<float16>().AccessMemory<Float16>().ToArray().Select(v => (object)(float)v).ToArray();
-            else if (dtype.ProtoTypeNum == DType.BFloat16.ProtoTypeNum) return data.As<bfloat16>().AccessMemory<BFloat16>().ToArray().Select(v => (object)(float)v).ToArray();
-            else if (dtype.ProtoTypeNum == DType.Float32.ProtoTypeNum) return data.As<float32>().AccessMemory<float>().ToArray().Cast<object>().ToArray();
-            else if (dtype.ProtoTypeNum == DType.Float64.ProtoTypeNum) return data.As<float64>().AccessMemory<double>().ToArray().Cast<object>().ToArray();
+            else if (dtype.ProtoTypeNum == DType.Float16.ProtoTypeNum) values = data.As<float16>().AccessMemory<Float16>().ToArray().Select(v => (object)(float)v).ToArray();
+            else if (dtype.ProtoTypeNum == DType.BFloat16.ProtoTypeNum) values = data.As<bfloat16>().AccessMemory<BFloat16>().ToArray().Select(v => (object)(float)v).ToArray();
+            else if (dtype.ProtoTypeNum == DType.Float32.ProtoTypeNum) values = data.As<float32>().AccessMemory<float>().ToArray().Cast<object>().ToArray();
+            else if (dtype.ProtoTypeNum == DType.Float64.ProtoTypeNum) values = data.As<float64>().AccessMemory<double>().ToArray().Cast<object>().ToArray();
             else throw new NotSupportedException($"Extraction from {dtype} is not supported");
+            // The branches above read through spans pointing into data's own storage, and taking
+            // one is data's last read — keep it alive until they have finished copying out
+            // (Shorokoo/Shorokoo#178).
+            GC.KeepAlive(data);
+            return values;
         }
         
         private static object[] ExtractValuesFromOrtValue(IShorokooTensorValue ortValue, DType dtype)
         {
             // Extract values directly from OrtValue without going through TensorData.As<T>()
-            if (dtype.ProtoTypeNum == DType.Bool.ProtoTypeNum) return ortValue.GetTensorDataAsSpan<bool>().ToArray().Cast<object>().ToArray();
-            else if (dtype.ProtoTypeNum == DType.Int8.ProtoTypeNum) return ortValue.GetTensorDataAsSpan<sbyte>().ToArray().Cast<object>().ToArray();
-            else if (dtype.ProtoTypeNum == DType.Int16.ProtoTypeNum) return ortValue.GetTensorDataAsSpan<short>().ToArray().Cast<object>().ToArray();
-            else if (dtype.ProtoTypeNum == DType.Int32.ProtoTypeNum) return ortValue.GetTensorDataAsSpan<int>().ToArray().Cast<object>().ToArray();
-            else if (dtype.ProtoTypeNum == DType.Int64.ProtoTypeNum) return ortValue.GetTensorDataAsSpan<long>().ToArray().Cast<object>().ToArray();
-            else if (dtype.ProtoTypeNum == DType.UInt8.ProtoTypeNum) return ortValue.GetTensorDataAsSpan<byte>().ToArray().Cast<object>().ToArray();
-            else if (dtype.ProtoTypeNum == DType.UInt16.ProtoTypeNum) return ortValue.GetTensorDataAsSpan<ushort>().ToArray().Cast<object>().ToArray();
-            else if (dtype.ProtoTypeNum == DType.UInt32.ProtoTypeNum) return ortValue.GetTensorDataAsSpan<uint>().ToArray().Cast<object>().ToArray();
-            else if (dtype.ProtoTypeNum == DType.UInt64.ProtoTypeNum) return ortValue.GetTensorDataAsSpan<ulong>().ToArray().Cast<object>().ToArray();
-            else if (dtype.ProtoTypeNum == DType.Float16.ProtoTypeNum) return ortValue.GetTensorDataAsSpan<Float16>().ToArray().Select(v => (object)(float)v).ToArray();
-            else if (dtype.ProtoTypeNum == DType.BFloat16.ProtoTypeNum) return ortValue.GetTensorDataAsSpan<BFloat16>().ToArray().Select(v => (object)(float)v).ToArray();
-            else if (dtype.ProtoTypeNum == DType.Float32.ProtoTypeNum) return ortValue.GetTensorDataAsSpan<float>().ToArray().Cast<object>().ToArray();
-            else if (dtype.ProtoTypeNum == DType.Float64.ProtoTypeNum) return ortValue.GetTensorDataAsSpan<double>().ToArray().Cast<object>().ToArray();
+            object[] values;
+            if (dtype.ProtoTypeNum == DType.Bool.ProtoTypeNum) values = ortValue.GetTensorDataAsSpan<bool>().ToArray().Cast<object>().ToArray();
+            else if (dtype.ProtoTypeNum == DType.Int8.ProtoTypeNum) values = ortValue.GetTensorDataAsSpan<sbyte>().ToArray().Cast<object>().ToArray();
+            else if (dtype.ProtoTypeNum == DType.Int16.ProtoTypeNum) values = ortValue.GetTensorDataAsSpan<short>().ToArray().Cast<object>().ToArray();
+            else if (dtype.ProtoTypeNum == DType.Int32.ProtoTypeNum) values = ortValue.GetTensorDataAsSpan<int>().ToArray().Cast<object>().ToArray();
+            else if (dtype.ProtoTypeNum == DType.Int64.ProtoTypeNum) values = ortValue.GetTensorDataAsSpan<long>().ToArray().Cast<object>().ToArray();
+            else if (dtype.ProtoTypeNum == DType.UInt8.ProtoTypeNum) values = ortValue.GetTensorDataAsSpan<byte>().ToArray().Cast<object>().ToArray();
+            else if (dtype.ProtoTypeNum == DType.UInt16.ProtoTypeNum) values = ortValue.GetTensorDataAsSpan<ushort>().ToArray().Cast<object>().ToArray();
+            else if (dtype.ProtoTypeNum == DType.UInt32.ProtoTypeNum) values = ortValue.GetTensorDataAsSpan<uint>().ToArray().Cast<object>().ToArray();
+            else if (dtype.ProtoTypeNum == DType.UInt64.ProtoTypeNum) values = ortValue.GetTensorDataAsSpan<ulong>().ToArray().Cast<object>().ToArray();
+            else if (dtype.ProtoTypeNum == DType.Float16.ProtoTypeNum) values = ortValue.GetTensorDataAsSpan<Float16>().ToArray().Select(v => (object)(float)v).ToArray();
+            else if (dtype.ProtoTypeNum == DType.BFloat16.ProtoTypeNum) values = ortValue.GetTensorDataAsSpan<BFloat16>().ToArray().Select(v => (object)(float)v).ToArray();
+            else if (dtype.ProtoTypeNum == DType.Float32.ProtoTypeNum) values = ortValue.GetTensorDataAsSpan<float>().ToArray().Cast<object>().ToArray();
+            else if (dtype.ProtoTypeNum == DType.Float64.ProtoTypeNum) values = ortValue.GetTensorDataAsSpan<double>().ToArray().Cast<object>().ToArray();
             else throw new NotSupportedException($"Extraction from {dtype} is not supported");
+            // Every branch reads through a span pointing into ortValue's own buffer, and
+            // taking that span is ortValue's last read — so without this the JIT may retire it
+            // and a collection free the buffer mid-copy (Shorokoo/Shorokoo#178).
+            GC.KeepAlive(ortValue);
+            return values;
         }
     }
 }

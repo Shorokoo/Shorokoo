@@ -26,9 +26,13 @@ namespace Shorokoo
         {
         }
 
-        /// <summary>Exposes the underlying buffer as a writable span of V (V must match T's storage type).</summary>
+        /// <summary>Exposes the underlying buffer as a writable span of V (V must match T's storage
+        /// type). The span points straight into the tensor's storage, so it is valid only while the
+        /// tensor is — see <see cref="TensorData.AccessRawMemory"/>.</summary>
         public abstract Span<V> AccessModifiableMemory<V>() where V : unmanaged;
-        /// <summary>Exposes the underlying buffer as a read-only span of V (V must match T's storage type).</summary>
+        /// <summary>Exposes the underlying buffer as a read-only span of V (V must match T's storage
+        /// type). The span points straight into the tensor's storage, so it is valid only while the
+        /// tensor is — see <see cref="TensorData.AccessRawMemory"/>.</summary>
         public abstract ReadOnlySpan<V> AccessMemory<V>() where V : unmanaged;
 
         /// <summary>The element values boxed as objects, for debugging/diagnostics.</summary>
@@ -166,6 +170,21 @@ namespace Shorokoo
             this.DType = dtype;
         }
 
+        /// <summary>
+        /// True once <see cref="Dispose"/> has released this tensor's storage. Its shape, dtype and
+        /// <see cref="ToString"/> stay readable as metadata; every path to the elements throws.
+        /// </summary>
+        public bool IsDisposed { get; protected set; }
+
+        /// <summary>Guards every path to the tensor's elements. Call it before touching storage.</summary>
+        protected void ThrowIfDisposed()
+        {
+            if (IsDisposed)
+                throw new ObjectDisposedException(GetType().Name,
+                    $"Tensor {this} has been disposed; its storage is gone and reading it would " +
+                    "read freed memory.");
+        }
+
         /// <summary>"shape:dtype" diagnostic string.</summary>
         public override string ToString()
         {
@@ -173,9 +192,22 @@ namespace Shorokoo
             return $"{shapeStr}:{this.DType.ToString()}";
         }
 
-        /// <summary>Exposes the underlying storage as a writable byte span.</summary>
+        /// <summary>Exposes the underlying storage as a writable byte span. Same lifetime rule as
+        /// <see cref="AccessRawMemory"/>.</summary>
         public abstract Span<byte> AccessModifiableRawMemory();
-        /// <summary>Exposes the underlying storage as a read-only byte span.</summary>
+
+        /// <summary>
+        /// Exposes the underlying storage as a read-only byte span.
+        ///
+        /// <para>The span is a window onto the tensor's own storage, not a copy, and nothing ties
+        /// its lifetime to the tensor's. It is valid only while the tensor is undisposed AND still
+        /// reachable: disposing the tensor frees what the span points at (later reads through the
+        /// tensor itself throw, but the span has no such guard), and so does letting the tensor
+        /// become unreachable, since its storage is released when the runtime value behind it is
+        /// finalized. Being in scope is not being reachable — a local is retired at its last read,
+        /// which is the call that produced the span. Copy out of the span before the tensor's last
+        /// use, or keep the tensor alive across it (Shorokoo/Shorokoo#178).</para>
+        /// </summary>
         public abstract ReadOnlySpan<byte> AccessRawMemory();
 
         /// <summary>Downcasts to the typed <see cref="TensorData{T}"/>; T must match the actual element type.</summary>
@@ -197,6 +229,7 @@ namespace Shorokoo
         /// <summary>Returns the backing inference-runtime tensor value; throws if this instance has none.</summary>
         public IShorokooTensorValue ToTensorValue()
         {
+            ThrowIfDisposed();
             if (this is IOnnxData od) return od.Value;
             throw new InvalidOperationException(
                 $"TensorData of type {this.GetType().Name} does not expose an inference-runtime tensor value.");
@@ -227,10 +260,20 @@ namespace Shorokoo
     public class OnnxTensorData<T> : TensorData<T>, IOnnxData, IDisposable
         where T : IVarType
     {
-        private bool disposedValue = false;
+        private readonly IShorokooTensorValue backing;
 
-        /// <summary>The backing inference-runtime tensor value.</summary>
-        public IShorokooTensorValue Value { get; private set; }
+        /// <summary>
+        /// The backing inference-runtime tensor value, which this tensor owns: disposing the
+        /// tensor releases it, and nothing else may hold or free it (Shorokoo/Shorokoo#180).
+        /// </summary>
+        public IShorokooTensorValue Value
+        {
+            get
+            {
+                ThrowIfDisposed();
+                return backing;
+            }
+        }
 
         /// <summary>The raw storage bytes boxed as objects, for debugging/diagnostics.</summary>
         public override object[] Data
@@ -244,12 +287,12 @@ namespace Shorokoo
         /// <summary>Creates TensorData of the given shape around an existing runtime tensor value; the dtype is derived from T.</summary>
         public OnnxTensorData(Shape shape, IShorokooTensorValue value) : base(shape)
         {
-            this.Value = value;
+            this.backing = value;
         }
 
         internal OnnxTensorData(Shape shape, IShorokooTensorValue value, DType actualDType) : base(shape, actualDType)
         {
-            this.Value = value;
+            this.backing = value;
         }
 
         /// <inheritdoc/>
@@ -277,29 +320,21 @@ namespace Shorokoo
 
         #region IDisposable
 
-        /// <summary>Standard dispose pattern hook; the runtime value owns the native buffer.</summary>
-        protected virtual void Dispose(bool disposing)
-        {
-            if (!disposedValue)
-            {
-                if (disposing)
-                {
-                }
-                disposedValue = true;
-            }
-        }
-
-        /// <summary>Finalizer running the dispose pattern.</summary>
-        ~OnnxTensorData()
-        {
-            Dispose(disposing: false);
-        }
-
-        /// <inheritdoc/>
+        /// <summary>
+        /// Releases the backing value's buffer. Idempotent; every read afterwards throws
+        /// <see cref="ObjectDisposedException"/> rather than reading freed memory.
+        ///
+        /// <para>There is deliberately no finalizer. One here could only release the backing
+        /// value, and a finalizer must not touch another managed object that may already have
+        /// been finalized itself. The backing value has its own finalizer, which is what reclaims
+        /// a tensor nobody disposes; adding a second one would put every tensor in the framework
+        /// on the finalization queue to duplicate it (Shorokoo/Shorokoo#180).</para>
+        /// </summary>
         public override void Dispose()
         {
-            Dispose(disposing: true);
-            GC.SuppressFinalize(this);
+            if (IsDisposed) return;
+            IsDisposed = true;
+            backing.Dispose();
         }
 
         #endregion

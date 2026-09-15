@@ -1099,6 +1099,9 @@ namespace Shorokoo
             AssertStructDefCompatible(checkpoint.TrainableParams.Definition, TrainableParamStructDef, "trainable-parameter");
             AssertStructDefCompatible(checkpoint.ModelState.Definition, ModelStateDef, "model-state");
             AssertStructDefCompatible(checkpoint.OptimizerState.Definition, OptimizerStateDef, "optimizer-state");
+            AssertShapesCompatible(checkpoint.TrainableParams, _initialParamFields, "trainable-parameter");
+            AssertShapesCompatible(checkpoint.ModelState, _initialStateFields, "model-state");
+            AssertShapesCompatible(checkpoint.OptimizerState, _initialOptStateFields, "optimizer-state");
             return new TrainingCheckpoint(
                 checkpoint.TrainableParams, checkpoint.ModelState, checkpoint.OptimizerState,
                 checkpoint.Step, checkpoint.Epoch, checkpoint.BatchIndex, this, checkpoint.Loss);
@@ -1124,6 +1127,25 @@ namespace Shorokoo
                         $"Checkpoint's {kind} field '{e.Name}' (rank {a.Rank?.ToString() ?? "?"}, {a.ElementType}) " +
                         $"does not match this rig's (rank {e.Rank?.ToString() ?? "?"}, {e.ElementType}). " +
                         "The checkpoint was produced by a different model/optimizer.");
+            }
+        }
+
+        /// <summary>Fails loud when a checkpoint field's dimensions differ from this rig's own initial
+        /// value for that field. The struct defs cannot make this check — a field def carries a rank and
+        /// no shape — so a checkpoint from a model of another width matches def-for-def and would
+        /// otherwise be adopted, to surface later as a shape-inference error inside the runtime.</summary>
+        private static void AssertShapesCompatible(
+            TensorDataStruct actual, Dictionary<string, IData> expected, string kind)
+        {
+            foreach (var (name, expectedField) in expected)
+            {
+                if (expectedField is not TensorData e) continue;
+                if (!actual.Fields.TryGetValue(name, out var actualField) || actualField is not TensorData a) continue;
+                if (a.Shape.Dims.SequenceEqual(e.Shape.Dims)) continue;
+                throw new ArgumentException(
+                    $"Checkpoint's {kind} '{name}' is shaped [{string.Join(",", a.Shape.Dims)}], but this rig's "
+                    + $"is [{string.Join(",", e.Shape.Dims)}]. The checkpoint was produced by a different "
+                    + "model/optimizer.");
             }
         }
 

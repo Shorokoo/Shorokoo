@@ -103,8 +103,10 @@ namespace Shorokoo
         /// entry point reads that format only: handed a flat safetensors checkpoint it fails
         /// immediately, naming <see cref="LoadTrainingCheckpoint"/> as the entry point for that
         /// shape (a caller with a genuinely unknown file identifies it with <see cref="Inspect"/>
-        /// first). The checkpoint is reconstructed against the given struct defs (which pin the
-        /// expected shapes, so a checkpoint from a different model or optimizer fails loudly). The
+        /// first). The checkpoint is reconstructed against the given struct defs, which pin each
+        /// field's name, rank and dtype — <b>not</b> its dimensions, which a field def does not carry,
+        /// so a checkpoint from a model of another width is accepted here; the rig-supplied loads check
+        /// the dimensions too, which is one more reason to prefer them. The
         /// result carries no <see cref="TrainingCheckpoint.Rig"/>; to resume a whole rig, prefer
         /// <see cref="TrainingRig.LoadCheckpointFromSkpt"/> (which supplies these defs from the
         /// rig) or the from-file-alone

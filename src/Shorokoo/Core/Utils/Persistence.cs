@@ -155,8 +155,10 @@ namespace Shorokoo
         /// <see cref="LoadTrainingCheckpointFromSkpt(string, TensorStructDef, TensorStructDef, TensorStructDef)"/>
         /// as the entry point for that shape (a caller with a genuinely unknown file identifies it
         /// with <see cref="Inspect"/> first). The checkpoint is reconstructed against the given
-        /// struct defs (which pin the expected shapes, so a checkpoint from a different model or
-        /// optimizer fails loudly). The result carries no <see cref="TrainingCheckpoint.Rig"/>; to
+        /// struct defs, which pin each field's name, rank and dtype — <b>not</b> its dimensions, which
+        /// a field def does not carry, so a checkpoint from a model of another width is accepted here.
+        /// The rig-supplied loads check the dimensions too (against the rig's own parameters), which is
+        /// one more reason to prefer them. The result carries no <see cref="TrainingCheckpoint.Rig"/>; to
         /// resume a whole rig (and attach it), prefer <see cref="TrainingRig.LoadCheckpoint"/>,
         /// which supplies these defs from the rig.
         /// </summary>

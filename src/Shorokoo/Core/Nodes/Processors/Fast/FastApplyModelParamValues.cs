@@ -8,8 +8,10 @@ using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Modules;
 using Shorokoo.Core.Utils;
 using Shorokoo.Onnx;
+using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
+using System.Linq;
 using Shorokoo.Core.Nodes.Processors.AutoGrad;
 
 namespace Shorokoo.Core.Nodes.Processors.Fast
@@ -63,6 +65,23 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     ? FastInjectRngDrawCounter.ExecutionCounterInitialValue()
                     : paramValues[modelId];
                 var isTrainable = node.Attributes.GetBoolVal(OnnxOpAttributeNames.ShrkAttrIsTrainable) ?? false;
+
+                // Binding is the last point at which a value and the model that is to use it are
+                // both in hand, and the node states the shape the model declared for this
+                // parameter — so it is the one place every load path can be held to it. A value of
+                // another shape does not fail on its own: matmuls and elementwise ops broadcast, so
+                // the graph builds, runs, and returns a differently shaped answer. A declared
+                // dimension of -1 is symbolic and constrains nothing.
+                var declaredDims = node.Attributes.GetLongsVal(OnnxOpAttributeNames.ShrkAttrShape);
+                if (declaredDims is not null && !declaredDims.Contains(-1L)
+                    && !paramValue.Shape.Dims.SequenceEqual(declaredDims))
+                    throw new InvalidOperationException(
+                        $"Parameter '{node.IdentifierTemplate ?? modelId.ToString()}' is declared "
+                        + $"[{string.Join(",", declaredDims)}] by this model, but the value being bound "
+                        + $"is [{string.Join(",", paramValue.Shape.Dims)}]. A value is bound at the shape "
+                        + "the model declares for it, and nothing adapts one to the other — the values "
+                        + "may come from another model, or from an initializer that returned a shape "
+                        + "other than the one it was called with.");
 
                 node.OpCode = InternalOpCodes.MODEL_PARAM_DATA;
                 node.Attributes = OnnxCSharpAttributes.FromCSharpVals(

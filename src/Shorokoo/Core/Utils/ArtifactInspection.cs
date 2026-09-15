@@ -1130,7 +1130,7 @@ namespace Shorokoo
                 else if (t.CheckpointVersion != SkptFileFormat.TrainingCheckpointVersion)
                     observations.Add($"training-checkpoint block version {t.CheckpointVersion} is not the " +
                         $"version this build reads ({SkptFileFormat.TrainingCheckpointVersion}); " +
-                        "Persistence.LoadTrainingCheckpointFromSkpt would refuse the file.");
+                        "TrainingRig.Load would refuse the file.");
 
                 training = new SkptTrainingSummary(t.CheckpointVersion, t.Step, t.Epoch, t.BatchIndex);
             }

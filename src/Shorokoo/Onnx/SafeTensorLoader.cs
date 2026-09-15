@@ -66,10 +66,12 @@ namespace Shorokoo.Onnx
         }
 
         /// <summary>
-        /// Load a SafeTensor file into a List of SafeTensor objects with full metadata
+        /// Load a SafeTensor file into a List of SafeTensor objects with full metadata. Tensors come
+        /// back in the order their bytes are laid out in the file, which is the order they were
+        /// written — not the order the JSON header happens to list them in.
         /// </summary>
         /// <param name="filePath">Path to the SafeTensor file</param>
-        /// <returns>List of SafeTensor objects containing tensor data and metadata</returns>
+        /// <returns>List of SafeTensor objects containing tensor data and metadata, in file order</returns>
         public static List<SafeTensor> LoadSafeTensors(string filePath)
         {
             if (!File.Exists(filePath))
@@ -188,11 +190,12 @@ namespace Shorokoo.Onnx
         }
 
         /// <summary>
-        /// Parse SafeTensor bytes and return list of SafeTensor objects.
+        /// Parse SafeTensor bytes and return list of SafeTensor objects, in the order their bytes are
+        /// laid out (the order they were written), not the order the JSON header lists them in.
         /// This is a public entry point for parsing in-memory safetensor data.
         /// </summary>
         /// <param name="fileBytes">Raw bytes of the SafeTensor file</param>
-        /// <returns>List of SafeTensor objects</returns>
+        /// <returns>List of SafeTensor objects, in file order</returns>
         public static List<SafeTensor> ParseSafeTensorBytes(byte[] fileBytes)
         {
             return ParseSafeTensorFile(fileBytes, "<in-memory SafeTensor data>");
@@ -274,7 +277,12 @@ namespace Shorokoo.Onnx
             if (metadata == null)
                 throw new InvalidOperationException("Failed to parse SafeTensor header JSON");
 
-            var result = new List<SafeTensor>();
+            // Ordered by where each tensor's bytes sit in the file, not by the order the JSON
+            // header's keys happen to enumerate: a Dictionary<string, object> does not promise
+            // insertion order, and the data region is laid out in the order the tensors were
+            // written. Callers that reconstruct a field list from a file therefore get the order
+            // it was written in, deterministically.
+            var parsed = new List<(long Start, SafeTensor Tensor)>();
             long dataOffset = 8 + headerLength; // Start of tensor data
 
             // Extract tensor information from metadata
@@ -287,8 +295,9 @@ namespace Shorokoo.Onnx
 
                 try
                 {
-                    var safeTensor = ParseTensorMetadata(tensorName, tensorMeta, fileBytes, dataOffset, origin);
-                    result.Add(safeTensor);
+                    var safeTensor = ParseTensorMetadata(
+                        tensorName, tensorMeta, fileBytes, dataOffset, origin, out var startOffset);
+                    parsed.Add((startOffset, safeTensor));
                 }
                 catch (Exception ex) when (ex is not ShorokooException)
                 {
@@ -296,15 +305,20 @@ namespace Shorokoo.Onnx
                 }
             }
 
-            return result;
+            // OrderBy, not List.Sort: the sort has to be stable. A zero-element tensor occupies no
+            // bytes, so it shares a start offset with whatever follows it, and an unstable sort would
+            // order those two arbitrarily.
+            return [.. parsed.OrderBy(x => x.Start).Select(x => x.Tensor)];
         }
 
         /// <summary>
         /// Parse metadata for a single tensor and create SafeTensor object
         /// </summary>
         private static SafeTensor ParseTensorMetadata(
-            string tensorName, object tensorMeta, byte[] fileBytes, long dataOffset, string origin)
+            string tensorName, object tensorMeta, byte[] fileBytes, long dataOffset, string origin,
+            out long startOffsetOut)
         {
+            startOffsetOut = 0;
             try
             {
                 // Parse the tensor metadata
@@ -319,6 +333,7 @@ namespace Shorokoo.Onnx
 
                 // Extract data_offsets
                 var (startOffset, endOffset) = ExtractDataOffsets(metaDict);
+                startOffsetOut = startOffset;
 
                 // Extract dtype
                 var dtype = ExtractDataType(metaDict);

@@ -198,8 +198,30 @@ How a hyper value gets supplied depends on the route:
   ```
 
 - Loops: `foreach (var ctx in LoopAPI.Iterate(count)) { ...; ctx.IterationIndex; }`
-  where `count` is `Scalar<int64>`. Use this instead of a plain C# `for` when the
-  iteration count is a graph value.
+  where `count` is `Scalar<int64>`. **Prefer this to a plain C# `for` for any repetition
+  in a model body** — not only when the count is a graph value. A plain `for` runs at
+  trace time and leaves nothing of the repetition behind: each iteration's parameters
+  become independent parameters numbered in trace order, so their names say how many
+  `Init(...)` calls preceded them and nothing about which iteration they belong to. A
+  `LoopAPI.Iterate` body carries the iteration index instead, and each iteration numbers
+  its own parameters from `#0`:
+
+  ```
+  for (int i = 0; i < 3; i++)          foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
+    TrainableParam#0.NormalDist#0        TrainableParam#0.Loop#0:0.NormalDist#0
+    TrainableParam#0.NormalDist#1        TrainableParam#0.Loop#0:1.NormalDist#0
+    TrainableParam#0.NormalDist#2        TrainableParam#0.Loop#0:2.NormalDist#0
+  ```
+
+  Those names are the keys of every checkpoint the model writes and the ids a naming
+  scheme maps ([onnx-and-weights.md](onnx-and-weights.md#naming)), so the difference
+  outlives the graph: under a plain `for` a parameter's index says how many `Init(...)` calls
+  preceded it and nothing about which iteration it belongs to, so adding or removing one
+  renumbers every parameter after it and silently re-points any name written against them.
+
+  Fall back to a plain `for` only where `LoopAPI.Iterate` cannot express the stack — a
+  body that genuinely differs from iteration to iteration. A uniform stack of layers is
+  not that case.
 
   Simple — add `x` to itself `n` times:
   ```csharp
@@ -210,7 +232,6 @@ How a hyper value gets supplied depends on the route:
 
   Comprehensive — weighted accumulation using the iteration index:
   ```csharp
-  // numSteps is a runtime Scalar<int64> — cannot use a plain C# for.
   var total = TensorFill(x.TShape, 0f);
   foreach (var ctx in LoopAPI.Iterate(numSteps))
   {
@@ -544,6 +565,10 @@ new Module<Scalar<float32>, (Tensor<float32>, Tensor<float32>), Tensor<float32>>
 - Do not forget `partial` on the class, or the `static` modifier on `Inline`.
 - Do not use a plain C# `for`/`if` on graph values (`Scalar<int64>`/`Scalar<bit>`) when
   the count/condition is dynamic; use `LoopAPI.Iterate` / `.IfElse`.
+- Do not stack layers with a plain C# `for` even when the trip count is a constant: the
+  repetition is gone by the time the graph exists, and its parameters are left numbered
+  in trace order rather than by iteration
+  ([Control flow inside `Inline`](#control-flow-inside-inline)).
 - Do not switch threads inside a module body (`async`/`await`, `Parallel.For`, callbacks
   run elsewhere): the body runs synchronously on a single thread, and calls like
   `Globals.StateUpdate` or `Rng.Pin` made from another thread throw.

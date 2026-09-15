@@ -314,6 +314,20 @@ public partial class ScalarMultiplyModel
     }
 }
 
+/// <summary><see cref="ScalarMultiplyModel"/> with a per-element weight: one weight per input
+/// element, so an optimizer driven by a per-element hyperparameter scales each weight by its own
+/// rate rather than broadcasting a vector against a single scalar weight.</summary>
+[Module]
+public partial class VectorMultiplyModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        Vector<int64> weightShape = Vector(4L);
+        var weight = InitScalarWeight.Init(weightShape);
+        return input * weight;
+    }
+}
+
 /// <summary>Module-owned rank-0 state: a call counter, one float rather than a param-shaped buffer.</summary>
 [StateInitializer(Ownership = StateOwnership.ModuleOwned)]
 public static partial class InitScalarCallCount

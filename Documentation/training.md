@@ -282,6 +282,10 @@ A runtime hyperparameter states its shape because the training step is compiled 
 to be known at build even though the values are not. That also makes the shape fixed for the rig's
 life: a per-step value whose shape differs fails loud rather than silently reshaping.
 
+A non-scalar hyperparameter also has to fit the parameters it will be applied to: the update is
+tensor arithmetic, so a vector rate against a scalar weight broadcasts rather than scales, and the
+rig refuses that at build ([Custom optimizers](#custom-optimizers)).
+
 Built-in `Schedule` math (cosine / linear / decay) is inherently continuous and scalar, so a built-in
 schedule drives `float32` **scalar** hyperparameters only; drive any other dtype or shape with a
 scheduler **module** producing it. Baked and runtime hyperparameters have no such restriction.
@@ -721,16 +725,27 @@ var more = rig.Fit(inputs, targets, numEpochs: 5, ckpt);  // continues where it 
   See [skpt-checkpoints.md](skpt-checkpoints.md#training-checkpoints).
 - `LoadCheckpoint` / `LoadCheckpointFromSkpt` reconstruct the checkpoint against the rig's own
   parameter and state definitions, so the rig must be built from the **same**
-  model/loss/optimizer graphs. Loading a checkpoint from a different model or
-  optimizer throws.
+  model/loss/optimizer graphs. What is checked, and where: the rig compares field names, dtypes and
+  **dimensions** against its own parameters as it adopts the values, and every value is
+  checked once more against the shape the model declares for it at the point it is bound into a
+  graph — so a value of another shape is refused even when the checkpoint was assembled by hand
+  rather than loaded. A parameter whose stored shape differs from the model's is never bound
+  silently; unchecked it would broadcast, and the model would run and answer in the wrong shape.
+  What is **not** checked is where a value came from: nothing records or compares the model that
+  produced a checkpoint, so weights of the right shape deliberately still load into a model that
+  computes something else. The limit of that is worth knowing — two parameters of the same shape
+  whose roles were swapped agree on every property checked here, and load into each other's places
+  without complaint ([#322](https://github.com/Shorokoo/Shorokoo/issues/322)).
 - Because `.Step` is restored, learning-rate **schedules resume from the right
   step** — not from step 0.
 - `rig.LoadCheckpoint(path)` delegates to `TrainingCheckpoint.Load(path, rig)` (and
   `rig.LoadCheckpointFromSkpt(path)` to `TrainingCheckpoint.LoadFromSkpt(path, rig)`), which
-  resolves the struct defs from the rig and sets `.Rig` on the result. The lower-level
-  `Persistence.LoadTrainingCheckpoint(path, trainableDef, modelStateDef, optimizerStateDef)`
-  (flat) / `Persistence.LoadTrainingCheckpointFromSkpt(...)` (`.skpt`) are the def-based forms
-  if you hold the struct defs without a rig (their results carry no rig).
+  resolves the struct defs from the rig and sets `.Rig` on the result. Without a rig,
+  `Persistence.LoadTrainingCheckpoint(path)` reads a flat checkpoint on its own — the file is
+  self-describing, so it needs no struct defs — and `TrainingRig.Load(path)` rebuilds rig and
+  checkpoint together from a `.skpt`. A checkpoint read without a rig carries no `.Rig` and has
+  been checked against nothing: only a rig knows what parameters to expect, so hand it to
+  `rig.AdoptCheckpoint(ckpt)` to have its fields and shapes validated against a model.
 - Both save and load take an optional `CheckpointComponents` flags value —
   `InferenceState` (trainable params + model state), `OptimizerState`, `Counters`, `Loss`, and
   `TrainingRig` — combined with `|`. On save, `null` writes every available component; on
@@ -783,7 +798,7 @@ All of these are in namespace `Shorokoo` (covered by `using Shorokoo;`):
 | `TensorDataModelParam` | Concrete `NamedModelParam` wrapping one `TensorData`. | `new TensorDataModelParam(name, ModelParamType.InputParam, tensorData)` |
 | `ModelParamType` (enum) | Tags a param's role. | `Undefined`, `HyperParam`, `TrainableParam`, `InputParam`, `OutputParam` |
 | `ModelParamList` | A set of named params (e.g. loaded weights). | `new ModelParamList(IEnumerable<(string name, TensorData data)>)` |
-| `TensorDataStruct` | A struct-shaped bundle of named `TensorData` fields; the form `Train`/`TrainStep` expect for inputs/targets. | Build: `new TensorDataStruct(structDef, fields)` where `structDef` is a `TensorStructDef` and `fields` are `KeyValuePair<string, IData>`. Read: `.Fields` (an `ImmutableDictionary<string, IData>` of name → value), `.Count`, or the `[int]` indexer. |
+| `TensorDataStruct` | A struct-shaped bundle of named `TensorData` fields; the form `Train`/`TrainStep` expect for inputs/targets. | Build: `new TensorDataStruct(structDef, fields)` where `structDef` is a `TensorStructDef` and `fields` are `KeyValuePair<string, IData>` — one per definition field, each of the kind that field declares (a value contradicting its definition throws). Read: `.Fields` (an `ImmutableDictionary<string, IData>` of name → value), `.Count`, or the `[int]` indexer. |
 
 `sampleInputs` for `FromScratch` is a `NamedModelParam[]` describing each model input
 by name and sample shape. `Train`/`TrainStep` take `TensorDataStruct` batches.
@@ -889,6 +904,12 @@ Constraints:
   graphs, and optimizer-owned ones are rejected inside model graphs.
 - **Each state is updated exactly once per step** — combine conditional updates into one
   value (e.g. with `IfElse`) and register it with a single `StateUpdate` call.
+- **The updated parameter must come back at the parameter's own shape.** The update is ordinary
+  tensor arithmetic, so a hyperparameter or state of another shape *broadcasts* against the
+  parameter instead of scaling it, and the "updated" parameter takes the other shape. A rig whose
+  optimizer does that is refused at build, naming the parameter and both shapes — a per-element
+  hyperparameter therefore needs parameters it fits (one rate per weight), not one rate vector
+  against a scalar weight.
 - **Hyperparameters must be tensor-shaped** — `Scalar<T>`, `Vector<T>` or `Tensor<T>`, at any supported
   dtype (`float32`, `int32`, `bit`, …); the rig bakes/feeds them at their declared dtype and shape, and a
   set is generated even when the dtypes and shapes are mixed. An `OptionalTensor`, sequence or struct

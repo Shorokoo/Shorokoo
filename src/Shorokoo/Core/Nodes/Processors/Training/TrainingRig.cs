@@ -1076,22 +1076,37 @@ namespace Shorokoo
         internal InternalComputationGraph BindInferenceWeights(TrainingCheckpoint checkpoint)
         {
             if (checkpoint is null) throw new ArgumentNullException(nameof(checkpoint));
+            // Read through the definitions, not the field dictionary: a definition field is what the
+            // model expects to be given, and a struct holds every one of them as the kind it declares.
+            // Filtering the dictionary for tensors instead used to drop a field that was not one and
+            // leave the bind to fail on a lookup for a parameter nothing had supplied. Both defs
+            // declare only tensors and a struct is held to its definition, so the refusal below is
+            // unreachable today — it is here so that stops being true loudly rather than silently.
+            static IEnumerable<KeyValuePair<string, TensorData>> Declared(TensorDataStruct s) =>
+                s.Definition.Fields.Select(f => s.Fields[f.Name] is TensorData t
+                    ? new KeyValuePair<string, TensorData>(f.Name, t)
+                    : throw new NotSupportedException(
+                        $"Field '{f.Name}' is a {s.Fields[f.Name].GetType().Name}; only plain tensors can "
+                        + "be bound into a model as weights."));
             var weights = new ModelParamList(
-                checkpoint.TrainableParams.Fields
-                    .Where(f => f.Value is TensorData)
-                    .Concat(checkpoint.ModelState.Fields.Where(f => f.Value is TensorData))
-                    .Select(f => new KeyValuePair<string, TensorData>(f.Key, (TensorData)f.Value)),
+                Declared(checkpoint.TrainableParams).Concat(Declared(checkpoint.ModelState)),
                 ModelParamType.TrainableParam);
             return _concreteArch.ToConcreteModel(weights, _concreteArch.GetShorokooIdNamingScheme());
         }
 
         /// <summary>
-        /// Returns a NEW checkpoint identical to <paramref name="checkpoint"/> — same trainable params,
-        /// model state, optimizer state, counters and loss — but with its <see cref="TrainingCheckpoint.Rig"/>
-        /// set to this rig, so <see cref="TrainingCheckpoint.ToInferenceModel()"/> and rig-based load/save
-        /// work against it. Validates that the checkpoint's field definitions are compatible with this rig
-        /// (trainable-param, model-state and optimizer-state field names and shapes must match); throws a
-        /// clear <see cref="ArgumentException"/> otherwise. The argument is not mutated.
+        /// Returns a NEW checkpoint carrying <paramref name="checkpoint"/>'s values, counters and loss,
+        /// with its <see cref="TrainingCheckpoint.Rig"/> set to this rig, so
+        /// <see cref="TrainingCheckpoint.ToInferenceModel()"/> and rig-based load/save work against it.
+        /// Validates that the checkpoint fits this rig — trainable-param, model-state and
+        /// optimizer-state field names, element types and dimensions — and throws a clear
+        /// <see cref="ArgumentException"/> otherwise. The argument is not mutated.
+        ///
+        /// <para>The values are re-labelled with THIS rig's struct definitions rather than keeping the
+        /// argument's, so the result's <c>Definition</c> is the rig's and its fields are in the rig's
+        /// order. That matters to anything reading a struct positionally (the <c>[int]</c> indexer,
+        /// <c>FlattenedFieldsOfType</c>): a checkpoint read from a file orders its fields the way the
+        /// file does.</para>
         /// </summary>
         public TrainingCheckpoint AdoptCheckpoint(TrainingCheckpoint checkpoint)
         {
@@ -1099,31 +1114,73 @@ namespace Shorokoo
             AssertStructDefCompatible(checkpoint.TrainableParams.Definition, TrainableParamStructDef, "trainable-parameter");
             AssertStructDefCompatible(checkpoint.ModelState.Definition, ModelStateDef, "model-state");
             AssertStructDefCompatible(checkpoint.OptimizerState.Definition, OptimizerStateDef, "optimizer-state");
+            AssertValuesCompatible(checkpoint.TrainableParams, _initialParamFields, "trainable-parameter");
+            AssertValuesCompatible(checkpoint.ModelState, _initialStateFields, "model-state");
+            AssertValuesCompatible(checkpoint.OptimizerState, _initialOptStateFields, "optimizer-state");
+            // Rebuilt against THIS rig's defs, not carried over: the checks above establish the two
+            // agree field for field, but a checkpoint read straight from a file carries a def
+            // reconstructed from that file, whose field ORDER is the file's. Everything that indexes
+            // a struct positionally (TensorDataStruct's indexer, FlattenedFieldsOfType) would then
+            // read the rig's order against the file's. Same values, rig's definition.
             return new TrainingCheckpoint(
-                checkpoint.TrainableParams, checkpoint.ModelState, checkpoint.OptimizerState,
+                new TensorDataStruct(TrainableParamStructDef, checkpoint.TrainableParams.Fields),
+                new TensorDataStruct(ModelStateDef, checkpoint.ModelState.Fields),
+                new TensorDataStruct(OptimizerStateDef, checkpoint.OptimizerState.Fields),
                 checkpoint.Step, checkpoint.Epoch, checkpoint.BatchIndex, this, checkpoint.Loss);
         }
 
         /// <summary>Fails loud when a checkpoint's struct def does not match this rig's, by field
-        /// names and per-field rank/dtype/structure (the compatibility contract for adoption/load).</summary>
+        /// names and per-field dtype/structure. The dimensions are checked separately, against the
+        /// rig's own values; see <see cref="AssertValuesCompatible"/>.</summary>
         private static void AssertStructDefCompatible(TensorStructDef actual, TensorStructDef expected, string kind)
         {
             if (actual.Fields.Length != expected.Fields.Length)
                 throw new ArgumentException(
                     $"Checkpoint's {kind} definition has {actual.Fields.Length} field(s), but this rig " +
-                    $"expects {expected.Fields.Length}. The checkpoint was produced by a different model/optimizer.");
+                    $"expects {expected.Fields.Length}. It may come from a different model or optimizer" +
+                    // A file with no trainable section is refused as it is read, so only the other two
+                    // kinds can reach here by having been saved without their component.
+                    (kind == "trainable-parameter" ? "." :
+                        ", or be a checkpoint saved without this component — read without a rig, a " +
+                        "component the file omits comes back empty."));
             for (int i = 0; i < expected.Fields.Length; i++)
             {
                 var e = expected.Fields[i];
                 var a = actual.GetField(e.Name)
                     ?? throw new ArgumentException(
-                        $"Checkpoint's {kind} definition is missing field '{e.Name}' this rig expects. " +
-                        "The checkpoint was produced by a different model/optimizer.");
-                if (a.Rank != e.Rank || a.ElementType != e.ElementType || a.Structure != e.Structure)
+                        $"Checkpoint's {kind} definition is missing field '{e.Name}' this rig expects.");
+                // Not compared: the field def's Rank. It describes the graph's struct TYPE, read off
+                // the dtype the training graph carries, and a trainable parameter's rank is not
+                // stated there at all (it is null) — the parameter's shape lives on its MODEL_PARAM
+                // node. Rank was standing in for "does this value fit this slot", which
+                // AssertValuesCompatible below answers exactly, against the rig's own parameters.
+                if (a.ElementType != e.ElementType || a.Structure != e.Structure)
                     throw new ArgumentException(
-                        $"Checkpoint's {kind} field '{e.Name}' (rank {a.Rank?.ToString() ?? "?"}, {a.ElementType}) " +
-                        $"does not match this rig's (rank {e.Rank?.ToString() ?? "?"}, {e.ElementType}). " +
-                        "The checkpoint was produced by a different model/optimizer.");
+                        $"Checkpoint's {kind} field '{e.Name}' ({a.ElementType}) does not match this " +
+                        $"rig's ({e.ElementType}).");
+            }
+        }
+
+        /// <summary>Fails loud when a checkpoint field's dimensions or element type differ from this
+        /// rig's own initial value for that field. The struct defs cannot make either check: a field def
+        /// carries a rank and no shape, and on a rig-supplied load the checkpoint's def <i>is</i> this
+        /// rig's, so comparing the two defs' dtypes compares a def with itself. Left unchecked, a
+        /// checkpoint from a model of another width matches def-for-def and is adopted, to surface later
+        /// as a shape-inference error inside the runtime.</summary>
+        private static void AssertValuesCompatible(
+            TensorDataStruct actual, Dictionary<string, IData> expected, string kind)
+        {
+            foreach (var (name, expectedField) in expected)
+            {
+                if (expectedField is not TensorData e) continue;
+                if (!actual.Fields.TryGetValue(name, out var actualField) || actualField is not TensorData a) continue;
+                if (a.DType != e.DType)
+                    throw new ArgumentException(
+                        $"Checkpoint's {kind} '{name}' is {a.DType}, but this rig's is {e.DType}.");
+                if (a.Shape.Dims.SequenceEqual(e.Shape.Dims)) continue;
+                throw new ArgumentException(
+                    $"Checkpoint's {kind} '{name}' is shaped [{string.Join(",", a.Shape.Dims)}], but this rig's "
+                    + $"is [{string.Join(",", e.Shape.Dims)}].");
             }
         }
 
@@ -2482,7 +2539,8 @@ namespace Shorokoo
         /// against this rig's parameter/state struct definitions so training resumes exactly where it
         /// left off: trainable params, optimizer moments, model state, and the host-owned run counters
         /// (global step, epoch, batch index) are all restored (schedules resume from that step; older
-        /// checkpoints lacking epoch/batch restore them as 0). Throws if the file's fields don't match this
+        /// checkpoints lacking epoch/batch restore them as null, an unknown position). Throws if the
+        /// file's fields don't match this
         /// rig — e.g. a checkpoint produced by a different model or optimizer. The rig must be built
         /// from the same model/loss/optimizer graphs as the one that saved the checkpoint. This entry
         /// point reads the flat shape only: handed a native <c>.skpt</c> container it fails
@@ -2985,6 +3043,33 @@ namespace Shorokoo
             // compute+memory metric, only committing transforms that strictly improve it.
             Stage("InferTrainingStepShapes");
             var shapeInfo = shapeInferencer.Infer(graph, allInputs);
+
+            // A parameter's shape is declared by its initializer and baked into the arch, and every
+            // other part of the framework holds to it — binding a value of another shape into the
+            // model is refused. The optimizer is the one place that could change it: its update is
+            // ordinary tensor arithmetic, so a hyperparameter of another shape broadcasts against the
+            // parameter and the "updated" parameter comes back that shape instead. Nothing downstream
+            // would catch it — the update is packed by field name — and the rig would train happily
+            // while being unable to checkpoint or serve what it produced.
+            //
+            // The step's updated-parameter outputs lead this graph's outputs, and their shapes have
+            // just been inferred for the optimizer pass, so holding each to its parameter costs
+            // nothing and fails here, at build, rather than after a step. A dimension inference
+            // leaves symbolic (-1) constrains nothing.
+            for (int p = 0; p < TrainableParamStructDef.Fields.Length && p < graph.Outputs.Count; p++)
+            {
+                var field = TrainableParamStructDef.Fields[p];
+                if (shapeInfo.GetTensorInfo(graph.Outputs[p]) is not { } updatedInfo) continue;
+                var updatedDims = updatedInfo.Shape.Dims;
+                var declaredDims = ((TensorData)_initialParamFields[field.Name]).Shape.Dims;
+                if (updatedDims.Contains(-1L) || updatedDims.SequenceEqual(declaredDims)) continue;
+                throw new ArgumentException(
+                    $"The optimizer returns trainable parameter '{field.Name}' shaped "
+                    + $"[{string.Join(", ", updatedDims)}], but the model declares it "
+                    + $"[{string.Join(", ", declaredDims)}]. An optimizer must return each parameter "
+                    + "at that parameter's own shape; a hyperparameter or optimizer state of another "
+                    + "shape broadcasts against it instead of scaling it.");
+            }
             var baselineEval = new Shorokoo.Core.AutoDiffCheckpointing.GraphEvaluator().Evaluate(graph, shapeInfo);
             Stage("OptimizeTrainingStepGraph");
             var optimizer = new MemoryAwareGraphOptimizer(shapeInference: shapeInferencer);

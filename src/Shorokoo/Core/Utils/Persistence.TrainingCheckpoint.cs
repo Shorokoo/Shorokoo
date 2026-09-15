@@ -34,8 +34,7 @@ namespace Shorokoo
         /// through the manifest's tensor mappings, with the global step recorded in the manifest.
         /// The trainable weights double as the model's default weight set, so the file also loads
         /// as an inference checkpoint via <see cref="Load(string)"/>. Reload the training state
-        /// with <see cref="TrainingRig.LoadCheckpointFromSkpt"/> /
-        /// <see cref="LoadTrainingCheckpointFromSkpt(string, TensorStructDef, TensorStructDef, TensorStructDef)"/>,
+        /// with <see cref="TrainingRig.LoadCheckpointFromSkpt"/>,
         /// or rebuild the whole rig from the file alone with
         /// <see cref="TrainingRig.Load(string, ComputeContext?, ComputeContext?, IProgress{BuildProgress})"/>.
         ///
@@ -98,35 +97,6 @@ namespace Shorokoo
         // ---- Load ----
 
         /// <summary>
-        /// Loads a <see cref="TrainingCheckpoint"/> from a native <c>.skpt</c> container written by
-        /// <see cref="SaveTrainingCheckpointToSkpt"/> / <see cref="ForTrainingCheckpoint"/>. This
-        /// entry point reads that format only: handed a flat safetensors checkpoint it fails
-        /// immediately, naming <see cref="LoadTrainingCheckpoint"/> as the entry point for that
-        /// shape (a caller with a genuinely unknown file identifies it with <see cref="Inspect"/>
-        /// first). The checkpoint is reconstructed against the given struct defs (which pin the
-        /// expected shapes, so a checkpoint from a different model or optimizer fails loudly). The
-        /// result carries no <see cref="TrainingCheckpoint.Rig"/>; to resume a whole rig, prefer
-        /// <see cref="TrainingRig.LoadCheckpointFromSkpt"/> (which supplies these defs from the
-        /// rig) or the from-file-alone
-        /// <see cref="TrainingRig.Load(string, ComputeContext?, ComputeContext?, IProgress{BuildProgress})"/>.
-        /// </summary>
-        public static TrainingCheckpoint LoadTrainingCheckpointFromSkpt(
-            string filePath,
-            TensorStructDef trainableParamDef,
-            TensorStructDef modelStateDef,
-            TensorStructDef optimizerStateDef)
-        {
-            if (string.IsNullOrWhiteSpace(filePath))
-                throw new ArgumentException("Checkpoint path cannot be null or empty.", nameof(filePath));
-
-            VerifySkptContainer(filePath,
-                "Load a flat safetensors training checkpoint with Persistence.LoadTrainingCheckpoint.");
-            return LoadTrainingCheckpointFromSkpt(
-                filePath, trainableParamDef, modelStateDef, optimizerStateDef,
-                components: null, rigForDefaults: null);
-        }
-
-        /// <summary>
         /// Reconstructs a <see cref="TrainingCheckpoint"/> from a native <c>.skpt</c> container
         /// written by <see cref="SaveTrainingCheckpointToSkpt"/>, resolving every state tensor
         /// individually through the manifest's tensor mappings (issue #184): trainable params and
@@ -134,11 +104,11 @@ namespace Shorokoo
         /// the optimizer constituent's per-instance mapping. Validated against the expected struct
         /// defs with the same fail-loud contract as <see cref="TrainingCheckpoint.Load"/>: every
         /// referenced entry's SHA-256 is verified, and the mapped tensors must cover each def
-        /// field-for-field (a missing field, a rank mismatch, or a mapped tensor no def declares
-        /// fails loudly, naming the mismatch). Backs the public
-        /// <see cref="LoadTrainingCheckpointFromSkpt(string, TensorStructDef, TensorStructDef, TensorStructDef)"/>
-        /// and the rig-supplied <see cref="TrainingCheckpoint.LoadFromSkpt"/>; callers verify the
-        /// container shape first.
+        /// field-for-field (a missing field, or a mapped tensor no def declares, fails loudly,
+        /// naming the mismatch; the dimensions are checked by the rig as it adopts the result). Backs the rig-supplied
+        /// <see cref="TrainingCheckpoint.LoadFromSkpt"/> and, through it,
+        /// <see cref="TrainingRig.Load(string, ComputeContext?, ComputeContext?, IProgress{BuildProgress})"/>;
+        /// callers verify the container shape first.
         ///
         /// <para><paramref name="components"/> selects which parts to load (<c>null</c> ⇒ everything
         /// present), exactly as the flat path (<see cref="TrainingCheckpoint.LoadFlat"/>) does: a
@@ -190,7 +160,7 @@ namespace Shorokoo
             // and the optimizer state through the optimizer constituent's mapping, keyed per
             // (parameter × slot) instance. Which def each tensor belongs to is re-derived from the
             // identifiers, with the same fail-loud coverage contract as before: a def field with no
-            // mapped tensor, a mapped tensor no def declares, or a rank mismatch names the culprit.
+            // mapped tensor, or a mapped tensor no def declares, names the culprit.
             var modelMapping = GetDefaultMappingTensors(manifest, SkptFileFormat.DefaultModelKey);
             var optimizerMapping = GetDefaultMappingTensors(
                 manifest, training.Rig?.OptimizerModel ?? SkptFileFormat.OptimizerModelKey);
@@ -382,7 +352,7 @@ namespace Shorokoo
         /// <summary>
         /// Materializes one state struct against <paramref name="def"/> from the per-field mapping
         /// index, consuming each claimed entry (so the caller can fail loudly on leftovers): every
-        /// def field must have a mapped tensor of the expected rank, resolved through the shared
+        /// def field must have a mapped tensor, resolved through the shared
         /// data-entry reader (SHA-256-verified and decoded at most once per entry via
         /// <paramref name="tensorsByDataKey"/>).
         /// </summary>
@@ -406,10 +376,6 @@ namespace Shorokoo
                     throw new InvalidDataException(
                         $"'{filePath}': '{mapped.Id}' maps to tensor '{mapped.Ref.Tensor}' in data entry " +
                         $"'{mapped.Ref.Data}', but that entry contains no such tensor.");
-                if (fieldDef.Rank is int rank && td.Shape.Dims.Length != rank)
-                    throw new InvalidDataException(
-                        $"'{filePath}': {role} '{fieldDef.Name}' has rank {td.Shape.Dims.Length}, " +
-                        $"expected {rank}.");
                 fields.Add(new KeyValuePair<string, IData>(fieldDef.Name, td));
             }
             return new TensorDataStruct(def, fields);

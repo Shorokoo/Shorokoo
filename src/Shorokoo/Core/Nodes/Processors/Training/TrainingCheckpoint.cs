@@ -405,8 +405,10 @@ namespace Shorokoo
             var raw = LoadFlat(
                 filePath, r.TrainableParamStructDef, r.ModelStateDef, r.OptimizerStateDef,
                 components, r);
-            // Attach the rig (sets Rig, preserves counters); the raw checkpoint was read against the
-            // rig's own defs, so the compatibility check inside AdoptCheckpoint always passes.
+            // Attach the rig (sets Rig, preserves counters). Reading against the rig's own defs
+            // settles the field names, so the def check inside AdoptCheckpoint passes by construction
+            // — but the dimension check there does not: the defs carry no shapes, so a checkpoint from
+            // a model of another width reaches this point and is refused as it is adopted.
             return r.AdoptCheckpoint(raw);
         }
 
@@ -478,18 +480,20 @@ namespace Shorokoo
         /// </summary>
         internal static TrainingCheckpoint LoadFlat(
             string filePath,
-            TensorStructDef trainableParamDef,
-            TensorStructDef modelStateDef,
-            TensorStructDef optimizerStateDef,
+            TensorStructDef? trainableParamDef,
+            TensorStructDef? modelStateDef,
+            TensorStructDef? optimizerStateDef,
             CheckpointComponents? components,
             TrainingRig? rigForDefaults)
         {
-            if (trainableParamDef is null) throw new ArgumentNullException(nameof(trainableParamDef));
-            if (modelStateDef is null) throw new ArgumentNullException(nameof(modelStateDef));
-            if (optimizerStateDef is null) throw new ArgumentNullException(nameof(optimizerStateDef));
+            var tensors = SafeTensorLoader.LoadSafeTensors(filePath);
+            var byName = tensors.ToDictionary(t => t.Name, t => t.Data);
 
-            var byName = SafeTensorLoader.LoadSafeTensors(filePath).ToDictionary(t => t.Name, t => t.Data);
-
+            // A null def means "read what the file says it holds": the flat format is
+            // self-describing — the section prefix gives the kind and the safetensors header gives
+            // each tensor's name, element type and shape — so a rig-less load needs nothing from
+            // the caller. A load that must match a model supplies the rig's defs instead, and the
+            // rig checks the values it read against its own parameters when it adopts them.
             if (!byName.TryGetValue(CheckpointMarkerName, out var markerData))
                 throw new InvalidOperationException(
                     $"'{filePath}' is not a Shorokoo training checkpoint (missing '{CheckpointMarkerName}' marker).");
@@ -506,6 +510,27 @@ namespace Shorokoo
                 throw new InvalidOperationException(
                     $"Unsupported checkpoint format version {marker[0]}; this build reads version " +
                     $"{CheckpointFormatVersion} only.");
+
+            // Only now, with the file established as a Shorokoo checkpoint of a readable version, is
+            // an absent section a statement about THIS file rather than about some unrelated one.
+            //
+            // A null def means "read what the file says it holds": the flat format is
+            // self-describing — the section prefix gives the kind and the safetensors header gives
+            // each tensor's name, element type and shape — so a rig-less load needs nothing from
+            // the caller. A load that must match a model supplies the rig's defs instead, and the
+            // rig checks the values it read against its own parameters when it adopts them. The one
+            // thing a rig-less read cannot represent is a missing section: an empty def and an
+            // omitted component are the same object, and for the trainable section — which every rig
+            // has at least one of — the second is the only possible reading.
+            if (trainableParamDef is null && !SectionPresent(TrainableSection))
+                throw new InvalidOperationException(
+                    $"Checkpoint '{filePath}' holds no '{TrainableSection}' section, so it was saved "
+                    + "without its inference state; read on its own it would claim a model with no "
+                    + "parameters. Load it against a rig (rig.LoadCheckpoint(path)), which fills the "
+                    + "components the file omits from that rig's own initial values.");
+            trainableParamDef ??= InferSectionDef(tensors, TrainableSection, "TrainableParams");
+            modelStateDef ??= InferSectionDef(tensors, ModelStateSection, "ModelState");
+            optimizerStateDef ??= InferSectionDef(tensors, OptimizerStateSection, "OptimizerState");
 
             bool Want(CheckpointComponents c) => components is null || (components.Value & c) != 0;
             bool SectionPresent(string section)
@@ -574,6 +599,27 @@ namespace Shorokoo
             return new TrainingCheckpoint(trainable, modelState, optState, step, epoch, batchIndex, rig: null, loss: loss);
         }
 
+        /// <summary>Reconstructs one section's struct def from the file itself: every tensor
+        /// namespaced into the section is a field, named by the remainder of its key, with the rank
+        /// and element type the safetensors header records. Fields keep the order the tensors are
+        /// laid out in the file's data region, which is the order they were written in — the writer
+        /// appends a section field by field — so a def read back this way matches the def that
+        /// wrote it, field for field and in the same order.</summary>
+        private static TensorStructDef InferSectionDef(
+            IEnumerable<SafeTensor> tensors, string section, string typeName)
+        {
+            var prefix = section + "/";
+            var fields = new List<TensorStructFieldDef>();
+            foreach (var tensor in tensors)
+            {
+                if (!tensor.Name.StartsWith(prefix, StringComparison.Ordinal)) continue;
+                fields.Add(new TensorStructFieldDef(
+                    tensor.Name.Substring(prefix.Length), Core.Nodes.NodeDefinitions.DataStructure.Tensor,
+                    tensor.Data.Shape.Dims.Length, tensor.Data.DType));
+            }
+            return new TensorStructDef([.. fields], typeName);
+        }
+
         private static TensorDataStruct ReadSection(
             IReadOnlyDictionary<string, TensorData> byName, string section, TensorStructDef def, string filePath)
         {
@@ -584,9 +630,6 @@ namespace Shorokoo
                 if (!byName.TryGetValue(key, out var td))
                     throw new InvalidOperationException(
                         $"Checkpoint '{filePath}' is missing field '{key}'. Does it match this model/optimizer?");
-                if (fieldDef.Rank is int rank && td.Shape.Dims.Length != rank)
-                    throw new InvalidOperationException(
-                        $"Checkpoint field '{key}' has rank {td.Shape.Dims.Length}, expected {rank}.");
                 fields.Add(new KeyValuePair<string, IData>(fieldDef.Name, td));
             }
 

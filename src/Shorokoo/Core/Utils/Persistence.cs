@@ -11,6 +11,7 @@ using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Core.Utils;
 using Shorokoo.Graph;
 using Shorokoo.Onnx;
+using Shorokoo.Runtime;
 
 namespace Shorokoo
 {
@@ -49,8 +50,9 @@ namespace Shorokoo
     /// <see cref="SaveTrainingCheckpoint(TrainingCheckpoint, string)"/> /
     /// <see cref="LoadTrainingCheckpoint"/> for the flat safetensors file, and
     /// <see cref="SaveTrainingCheckpointToSkpt"/> /
-    /// <see cref="LoadTrainingCheckpointFromSkpt(string, TensorStructDef, TensorStructDef, TensorStructDef)"/>
-    /// for the native .skpt container.
+    /// <see cref="TrainingRig.LoadCheckpointFromSkpt"/> (or
+    /// <see cref="TrainingRig.Load(string, ComputeContext?, ComputeContext?, IProgress{BuildProgress})"/>,
+    /// which rebuilds the rig from the file alone) for the native .skpt container.
     /// </summary>
     // Partial: Persistence.Inspect (read-only artifact identification) lives in
     // ArtifactInspection.cs and the safetensors weight-exchange boundary in
@@ -127,7 +129,7 @@ namespace Shorokoo
         // metadata) and shares one format with inference checkpoints. Each shape has its own
         // save/load pair (issue #185): SaveTrainingCheckpoint / LoadTrainingCheckpoint for the
         // flat file, SaveTrainingCheckpointToSkpt (or ForTrainingCheckpoint) /
-        // LoadTrainingCheckpointFromSkpt (in Persistence.TrainingCheckpoint.cs) for the
+        // TrainingRig.Load / rig.LoadCheckpointFromSkpt (via Persistence.TrainingCheckpoint.cs) for the
         // container. No load path sniffs the file's bytes to pick a shape — a wrong-format
         // file fails immediately naming both formats; a caller with a genuinely unknown file
         // identifies it with Inspect first and dispatches.
@@ -152,28 +154,32 @@ namespace Shorokoo
         /// by <see cref="SaveTrainingCheckpoint(TrainingCheckpoint, string)"/> /
         /// <see cref="TrainingCheckpoint.Save(string, CheckpointComponents?)"/>. This entry point
         /// reads that format only: handed a <c>.skpt</c> container it fails immediately, naming
-        /// <see cref="LoadTrainingCheckpointFromSkpt(string, TensorStructDef, TensorStructDef, TensorStructDef)"/>
+        /// <see cref="TrainingRig.Load(string, ComputeContext?, ComputeContext?, IProgress{BuildProgress})"/>
         /// as the entry point for that shape (a caller with a genuinely unknown file identifies it
-        /// with <see cref="Inspect"/> first). The checkpoint is reconstructed against the given
-        /// struct defs (which pin the expected shapes, so a checkpoint from a different model or
-        /// optimizer fails loudly). The result carries no <see cref="TrainingCheckpoint.Rig"/>; to
-        /// resume a whole rig (and attach it), prefer <see cref="TrainingRig.LoadCheckpoint"/>,
-        /// which supplies these defs from the rig.
+        /// with <see cref="Inspect"/> first). The file describes itself — the section prefix gives
+        /// each tensor's kind and the safetensors header its name, element type and shape — so the
+        /// struct defs are read back from the file rather than supplied: nothing about the
+        /// checkpoint has to be known in advance to open one.
+        ///
+        /// <para>That means this entry point reads a checkpoint; it does not judge one. Nothing here
+        /// can say whether the file belongs to a particular model, because no model is named — the
+        /// defs it reconstructs describe the file, not an expectation of it. To load a checkpoint
+        /// <i>for a model</i>, use <see cref="TrainingRig.LoadCheckpoint"/>, or hand the result to
+        /// <see cref="TrainingRig.AdoptCheckpoint"/>: the rig holds the model, so it is the one thing
+        /// that can check the parameters it read are the parameters it expects — names, dtypes and
+        /// dimensions — and it refuses them otherwise. The result of this call carries no
+        /// <see cref="TrainingCheckpoint.Rig"/>.</para>
         /// </summary>
-        public static TrainingCheckpoint LoadTrainingCheckpoint(
-            string filePath,
-            TensorStructDef trainableParamDef,
-            TensorStructDef modelStateDef,
-            TensorStructDef optimizerStateDef)
+        public static TrainingCheckpoint LoadTrainingCheckpoint(string filePath)
         {
             if (string.IsNullOrWhiteSpace(filePath))
                 throw new ArgumentException("Checkpoint path cannot be null or empty.", nameof(filePath));
 
             VerifyFlatTrainingCheckpoint(filePath,
-                "Load a .skpt training checkpoint with Persistence.LoadTrainingCheckpointFromSkpt " +
-                "(or rebuild the whole rig from it with TrainingRig.Load).");
+                "Load a .skpt training checkpoint with rig.LoadCheckpointFromSkpt(path), or rebuild "
+                + "its rig from the file with TrainingRig.Load(path).");
             return TrainingCheckpoint.LoadFlat(
-                filePath, trainableParamDef, modelStateDef, optimizerStateDef,
+                filePath, trainableParamDef: null, modelStateDef: null, optimizerStateDef: null,
                 components: null, rigForDefaults: null);
         }
 

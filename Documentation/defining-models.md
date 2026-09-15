@@ -215,8 +215,9 @@ How a hyper value gets supplied depends on the route:
 
   Those names are the keys of every checkpoint the model writes and the ids a naming
   scheme maps ([onnx-and-weights.md](onnx-and-weights.md#naming)), so the difference
-  outlives the graph: under a plain `for` there is no way to ask for layer 3's weights,
-  and adding or removing an `Init(...)` call renumbers every parameter after it.
+  outlives the graph: under a plain `for` a parameter's index says how many `Init(...)` calls
+  preceded it and nothing about which iteration it belongs to, so adding or removing one
+  renumbers every parameter after it and silently re-points any name written against them.
 
   Fall back to a plain `for` only where `LoopAPI.Iterate` cannot express the stack — a
   body that genuinely differs from iteration to iteration. A uniform stack of layers is

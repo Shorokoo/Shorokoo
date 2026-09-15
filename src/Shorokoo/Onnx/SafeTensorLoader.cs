@@ -66,10 +66,12 @@ namespace Shorokoo.Onnx
         }
 
         /// <summary>
-        /// Load a SafeTensor file into a List of SafeTensor objects with full metadata
+        /// Load a SafeTensor file into a List of SafeTensor objects with full metadata. Tensors come
+        /// back in the order their bytes are laid out in the file, which is the order they were
+        /// written — not the order the JSON header happens to list them in.
         /// </summary>
         /// <param name="filePath">Path to the SafeTensor file</param>
-        /// <returns>List of SafeTensor objects containing tensor data and metadata</returns>
+        /// <returns>List of SafeTensor objects containing tensor data and metadata, in file order</returns>
         public static List<SafeTensor> LoadSafeTensors(string filePath)
         {
             if (!File.Exists(filePath))
@@ -188,11 +190,12 @@ namespace Shorokoo.Onnx
         }
 
         /// <summary>
-        /// Parse SafeTensor bytes and return list of SafeTensor objects.
+        /// Parse SafeTensor bytes and return list of SafeTensor objects, in the order their bytes are
+        /// laid out (the order they were written), not the order the JSON header lists them in.
         /// This is a public entry point for parsing in-memory safetensor data.
         /// </summary>
         /// <param name="fileBytes">Raw bytes of the SafeTensor file</param>
-        /// <returns>List of SafeTensor objects</returns>
+        /// <returns>List of SafeTensor objects, in file order</returns>
         public static List<SafeTensor> ParseSafeTensorBytes(byte[] fileBytes)
         {
             return ParseSafeTensorFile(fileBytes, "<in-memory SafeTensor data>");

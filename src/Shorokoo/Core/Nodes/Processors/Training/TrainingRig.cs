@@ -1081,7 +1081,11 @@ namespace Shorokoo
             // Filtering the dictionary for tensors instead used to drop a field that was not one and
             // leave the bind to fail on a lookup for a parameter nothing had supplied.
             static IEnumerable<KeyValuePair<string, TensorData>> Declared(TensorDataStruct s) =>
-                s.Definition.Fields.Select(f => new KeyValuePair<string, TensorData>(f.Name, (TensorData)s.Fields[f.Name]));
+                s.Definition.Fields.Select(f => s.Fields[f.Name] is TensorData t
+                    ? new KeyValuePair<string, TensorData>(f.Name, t)
+                    : throw new NotSupportedException(
+                        $"Field '{f.Name}' is a {s.Fields[f.Name].GetType().Name}; only plain tensors can "
+                        + "be bound into a model as weights."));
             var weights = new ModelParamList(
                 Declared(checkpoint.TrainableParams).Concat(Declared(checkpoint.ModelState)),
                 ModelParamType.TrainableParam);
@@ -1089,12 +1093,18 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// Returns a NEW checkpoint identical to <paramref name="checkpoint"/> — same trainable params,
-        /// model state, optimizer state, counters and loss — but with its <see cref="TrainingCheckpoint.Rig"/>
-        /// set to this rig, so <see cref="TrainingCheckpoint.ToInferenceModel()"/> and rig-based load/save
-        /// work against it. Validates that the checkpoint's field definitions are compatible with this rig
-        /// (trainable-param, model-state and optimizer-state field names and shapes must match); throws a
-        /// clear <see cref="ArgumentException"/> otherwise. The argument is not mutated.
+        /// Returns a NEW checkpoint carrying <paramref name="checkpoint"/>'s values, counters and loss,
+        /// with its <see cref="TrainingCheckpoint.Rig"/> set to this rig, so
+        /// <see cref="TrainingCheckpoint.ToInferenceModel()"/> and rig-based load/save work against it.
+        /// Validates that the checkpoint fits this rig — trainable-param, model-state and
+        /// optimizer-state field names, element types and dimensions — and throws a clear
+        /// <see cref="ArgumentException"/> otherwise. The argument is not mutated.
+        ///
+        /// <para>The values are re-labelled with THIS rig's struct definitions rather than keeping the
+        /// argument's, so the result's <c>Definition</c> is the rig's and its fields are in the rig's
+        /// order. That matters to anything reading a struct positionally (the <c>[int]</c> indexer,
+        /// <c>FlattenedFieldsOfType</c>): a checkpoint read from a file orders its fields the way the
+        /// file does.</para>
         /// </summary>
         public TrainingCheckpoint AdoptCheckpoint(TrainingCheckpoint checkpoint)
         {
@@ -1125,9 +1135,12 @@ namespace Shorokoo
             if (actual.Fields.Length != expected.Fields.Length)
                 throw new ArgumentException(
                     $"Checkpoint's {kind} definition has {actual.Fields.Length} field(s), but this rig " +
-                    $"expects {expected.Fields.Length}. It may come from a different model or optimizer, " +
-                    "or be a checkpoint saved without this component — read without a rig, a component " +
-                    "the file omits comes back empty.");
+                    $"expects {expected.Fields.Length}. It may come from a different model or optimizer" +
+                    // A file with no trainable section is refused as it is read, so only the other two
+                    // kinds can reach here by having been saved without their component.
+                    (kind == "trainable-parameter" ? "." :
+                        ", or be a checkpoint saved without this component — read without a rig, a " +
+                        "component the file omits comes back empty."));
             for (int i = 0; i < expected.Fields.Length; i++)
             {
                 var e = expected.Fields[i];
@@ -2524,7 +2537,8 @@ namespace Shorokoo
         /// against this rig's parameter/state struct definitions so training resumes exactly where it
         /// left off: trainable params, optimizer moments, model state, and the host-owned run counters
         /// (global step, epoch, batch index) are all restored (schedules resume from that step; older
-        /// checkpoints lacking epoch/batch restore them as 0). Throws if the file's fields don't match this
+        /// checkpoints lacking epoch/batch restore them as null, an unknown position). Throws if the
+        /// file's fields don't match this
         /// rig — e.g. a checkpoint produced by a different model or optimizer. The rig must be built
         /// from the same model/loss/optimizer graphs as the one that saved the checkpoint. This entry
         /// point reads the flat shape only: handed a native <c>.skpt</c> container it fails

@@ -714,6 +714,22 @@ public class CoreUtilsCoverageTests
         finally { if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true); }
     }
 
+    /// <summary>A struct's list surface reads its definition: the indexer and the enumerator both
+    /// walk the definition's fields, so the count must too. A key beyond the definition is not a
+    /// field of the struct, and counting it made Count disagree with both.</summary>
+    [Fact]
+    public void TestAStructCountsTheFieldsItsDefinitionDeclares()
+    {
+        var def = new TensorStructDef(
+            [new TensorStructFieldDef("declared", DataStructure.Tensor, 1, DType.Float32)], "Counting");
+        var s = new TensorDataStruct(def,
+            [new("declared", Globals.TensorData([1L], [1f])), new("stray", Globals.TensorData([1L], [2f]))]);
+
+        Assert.Equal(1, s.Count);
+        Assert.Equal(s.Count, s.Count());
+        Assert.Equal(s[0], s.Single());
+    }
+
     /// <summary>A field's value must be the kind its definition declares. Nothing else can check it
     /// afterwards: the consumers disagree — the checkpoint writer refuses a non-tensor field by name,
     /// while binding drops it and fails two layers down on a dictionary lookup.</summary>

@@ -494,18 +494,6 @@ namespace Shorokoo
             // each tensor's name, element type and shape — so a rig-less load needs nothing from
             // the caller. A load that must match a model supplies the rig's defs instead, and the
             // rig checks the values it read against its own parameters when it adopts them.
-            if (trainableParamDef is null && !SectionPresent(TrainableSection))
-                throw new InvalidOperationException(
-                    $"Checkpoint '{filePath}' holds no '{TrainableSection}' section. Every rig has at "
-                    + "least one trainable parameter, so this file was saved without its inference "
-                    + "state, and read on its own it would claim a model with no parameters. Load it "
-                    + "against the rig that produced it (rig.LoadCheckpoint(path)), which fills the "
-                    + "components the file omits from the rig's own initial values, or identify the "
-                    + "file with Persistence.Inspect.");
-            trainableParamDef ??= InferSectionDef(tensors, TrainableSection, "TrainableParams");
-            modelStateDef ??= InferSectionDef(tensors, ModelStateSection, "ModelState");
-            optimizerStateDef ??= InferSectionDef(tensors, OptimizerStateSection, "OptimizerState");
-
             if (!byName.TryGetValue(CheckpointMarkerName, out var markerData))
                 throw new InvalidOperationException(
                     $"'{filePath}' is not a Shorokoo training checkpoint (missing '{CheckpointMarkerName}' marker).");
@@ -522,6 +510,27 @@ namespace Shorokoo
                 throw new InvalidOperationException(
                     $"Unsupported checkpoint format version {marker[0]}; this build reads version " +
                     $"{CheckpointFormatVersion} only.");
+
+            // Only now, with the file established as a Shorokoo checkpoint of a readable version, is
+            // an absent section a statement about THIS file rather than about some unrelated one.
+            //
+            // A null def means "read what the file says it holds": the flat format is
+            // self-describing — the section prefix gives the kind and the safetensors header gives
+            // each tensor's name, element type and shape — so a rig-less load needs nothing from
+            // the caller. A load that must match a model supplies the rig's defs instead, and the
+            // rig checks the values it read against its own parameters when it adopts them. The one
+            // thing a rig-less read cannot represent is a missing section: an empty def and an
+            // omitted component are the same object, and for the trainable section — which every rig
+            // has at least one of — the second is the only possible reading.
+            if (trainableParamDef is null && !SectionPresent(TrainableSection))
+                throw new InvalidOperationException(
+                    $"Checkpoint '{filePath}' holds no '{TrainableSection}' section, so it was saved "
+                    + "without its inference state; read on its own it would claim a model with no "
+                    + "parameters. Load it against a rig (rig.LoadCheckpoint(path)), which fills the "
+                    + "components the file omits from that rig's own initial values.");
+            trainableParamDef ??= InferSectionDef(tensors, TrainableSection, "TrainableParams");
+            modelStateDef ??= InferSectionDef(tensors, ModelStateSection, "ModelState");
+            optimizerStateDef ??= InferSectionDef(tensors, OptimizerStateSection, "OptimizerState");
 
             bool Want(CheckpointComponents c) => components is null || (components.Value & c) != 0;
             bool SectionPresent(string section)

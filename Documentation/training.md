@@ -725,13 +725,17 @@ var more = rig.Fit(inputs, targets, numEpochs: 5, ckpt);  // continues where it 
   See [skpt-checkpoints.md](skpt-checkpoints.md#training-checkpoints).
 - `LoadCheckpoint` / `LoadCheckpointFromSkpt` reconstruct the checkpoint against the rig's own
   parameter and state definitions, so the rig must be built from the **same**
-  model/loss/optimizer graphs. Loading a checkpoint from a different model or
-  optimizer throws. What is checked, and where: the rig compares field names, dtypes and
+  model/loss/optimizer graphs. What is checked, and where: the rig compares field names, dtypes and
   **dimensions** against its own parameters as it adopts the values, and every value is
   checked once more against the shape the model declares for it at the point it is bound into a
   graph — so a value of another shape is refused even when the checkpoint was assembled by hand
   rather than loaded. A parameter whose stored shape differs from the model's is never bound
   silently; unchecked it would broadcast, and the model would run and answer in the wrong shape.
+  What is **not** checked is where a value came from: nothing records or compares the model that
+  produced a checkpoint, so weights of the right shape deliberately still load into a model that
+  computes something else. The limit of that is worth knowing — two parameters of the same shape
+  whose roles were swapped agree on every property checked here, and load into each other's places
+  without complaint ([#322](https://github.com/Shorokoo/Shorokoo/issues/322)).
 - Because `.Step` is restored, learning-rate **schedules resume from the right
   step** — not from step 0.
 - `rig.LoadCheckpoint(path)` delegates to `TrainingCheckpoint.Load(path, rig)` (and
@@ -794,7 +798,7 @@ All of these are in namespace `Shorokoo` (covered by `using Shorokoo;`):
 | `TensorDataModelParam` | Concrete `NamedModelParam` wrapping one `TensorData`. | `new TensorDataModelParam(name, ModelParamType.InputParam, tensorData)` |
 | `ModelParamType` (enum) | Tags a param's role. | `Undefined`, `HyperParam`, `TrainableParam`, `InputParam`, `OutputParam` |
 | `ModelParamList` | A set of named params (e.g. loaded weights). | `new ModelParamList(IEnumerable<(string name, TensorData data)>)` |
-| `TensorDataStruct` | A struct-shaped bundle of named `TensorData` fields; the form `Train`/`TrainStep` expect for inputs/targets. | Build: `new TensorDataStruct(structDef, fields)` where `structDef` is a `TensorStructDef` and `fields` are `KeyValuePair<string, IData>`. Read: `.Fields` (an `ImmutableDictionary<string, IData>` of name → value), `.Count`, or the `[int]` indexer. |
+| `TensorDataStruct` | A struct-shaped bundle of named `TensorData` fields; the form `Train`/`TrainStep` expect for inputs/targets. | Build: `new TensorDataStruct(structDef, fields)` where `structDef` is a `TensorStructDef` and `fields` are `KeyValuePair<string, IData>` — one per definition field, each of the kind that field declares (a value contradicting its definition throws). Read: `.Fields` (an `ImmutableDictionary<string, IData>` of name → value), `.Count`, or the `[int]` indexer. |
 
 `sampleInputs` for `FromScratch` is a `NamedModelParam[]` describing each model input
 by name and sample shape. `Train`/`TrainStep` take `TensorDataStruct` batches.

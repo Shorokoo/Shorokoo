@@ -265,9 +265,10 @@ What the file carries:
 Round-trip is exact: reloaded trainable params, model state and optimizer state are
 bit-identical, the counters are preserved, and a resumed `TrainStep` reproduces the pre-save
 trajectory. Loading validates against the rig's struct definitions with the same fail-loud
-contract as the flat format — a checkpoint from a different model or optimizer (a state
-tensor mapped that the rig does not declare, or a declared one the checkpoint does not
-map — the mismatch is named), a rank mismatch, or a tampered entry (sha256) fails loudly.
+contract as the flat format — a state tensor mapped that the rig does not declare, or a
+declared one the checkpoint does not map, is named, and a tampered entry (sha256) fails
+loudly. The values themselves are checked as the rig adopts them: element type and
+dimensions against the rig's own parameters (see [training.md](training.md)).
 
 Reconstruct without a rig in hand by rebuilding the rig from the file itself — a training
 `.skpt` carries its own constituents, so nothing has to be supplied:

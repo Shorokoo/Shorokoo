@@ -1911,6 +1911,16 @@ public class TrainingRigCheckpointCoverageTests
                 Assert.Throws<InvalidOperationException>(() => Persistence.LoadTrainingCheckpoint(path)).Message);
             Assert.Equal([4L, 2L], ParamDims(rig.LoadCheckpoint(path)));
 
+            var foreign = TempPath("not_a_checkpoint") + ".safetensors";
+            try
+            {
+                Shorokoo.Onnx.SafeTensorLoader.SaveSafeTensors(foreign,
+                    [new Shorokoo.Onnx.SafeTensor("w", TensorData([2L], [1f, 2f]), "F32", [2L])]);
+                Assert.Contains("is not a Shorokoo training checkpoint",
+                    Assert.Throws<InvalidOperationException>(() => Persistence.LoadTrainingCheckpoint(foreign)).Message);
+            }
+            finally { if (File.Exists(foreign)) File.Delete(foreign); }
+
             var wrongType = new TrainingCheckpoint(
                 new TensorDataStruct(rig.TrainableParamStructDef,
                     [new(paramName, TensorData([4L, 2L], [1d, 2d, 3d, 4d, 5d, 6d, 7d, 8d]))]),

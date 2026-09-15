@@ -24,15 +24,23 @@ namespace Shorokoo
 
         public ImmutableDictionary<string, IData> Fields { get; private set; }
 
-        public int Count => Fields.Count;
+        /// <summary>The number of fields the definition declares — the same fields the indexer and the
+        /// enumerator walk. A key in <see cref="Fields"/> beyond the definition is not a field of this
+        /// struct, and counting it made this disagree with both.</summary>
+        public int Count => Definition.Fields.Length;
 
         public IData this[int index] => Fields[Definition.Fields[index].Name];
 
         /// <summary>
-        /// Creates a new TensorStructData with the specified definition and field data.
+        /// Creates a new TensorStructData with the specified definition and field data. Every field the
+        /// definition declares must be present, and must be the structural kind it is declared as — a
+        /// field declared <c>Tensor</c> takes a <see cref="TensorData"/>, one declared
+        /// <c>TensorStruct</c> takes a <see cref="TensorDataStruct"/>, and so on. A value that
+        /// contradicts its definition throws <see cref="ArgumentException"/>.
         /// </summary>
         /// <param name="definition">The struct definition describing the fields</param>
-        /// <param name="fields">Dictionary of field name to TensorData</param>
+        /// <param name="fields">Field name to value, one per definition field, each of the kind that
+        /// field declares</param>
         public TensorDataStruct(TensorStructDef definition, IEnumerable<KeyValuePair<string, IData>> fields)
         {
             Definition = definition ?? throw new ArgumentNullException(nameof(definition));
@@ -48,7 +56,7 @@ namespace Shorokoo
             {
                 if (!Fields.TryGetValue(fieldDef.Name, out var value))
                     throw new ArgumentException($"Missing data for field '{fieldDef.Name}'", nameof(fields));
-                var actual = StructureOf(value);
+                var actual = StructureOf(value, fieldDef.Name);
                 if (actual != fieldDef.Structure)
                     throw new ArgumentException(
                         $"Field '{fieldDef.Name}' is declared {fieldDef.Structure} by this struct's "
@@ -57,14 +65,15 @@ namespace Shorokoo
         }
 
         /// <summary>The structural kind of a value, as a definition declares kinds.</summary>
-        private static DataStructure StructureOf(IData value) => value switch
+        private static DataStructure StructureOf(IData value, string fieldName) => value switch
         {
             TensorDataStruct => DataStructure.TensorStruct,
             TensorDataSequence => DataStructure.Sequence,
             OptionalTensorData => DataStructure.Optional,
             TensorData => DataStructure.Tensor,
             _ => throw new ArgumentException(
-                $"Unsupported field value type '{value?.GetType().Name ?? "null"}'.", nameof(value)),
+                $"Field '{fieldName}' has an unsupported value type "
+                + $"'{value?.GetType().Name ?? "null"}'.", "fields"),
         };
 
         public override string ToString()

@@ -33,23 +33,24 @@ public class GpuExecutionTests
     }
 
     /// <summary>
-    /// The device-memory surface end to end: a session built under a budget and the
-    /// same-as-requested arena strategy runs, with per-run arena shrinkage on, and the card
-    /// reports a reading.
+    /// The device-memory surface end to end, on both settings of every knob: the shipped
+    /// defaults build and run a session, so does a budgeted power-of-two arena with per-run
+    /// shrinkage on, and the card reports a reading either way.
     /// </summary>
     [CudaFact]
-    public void CudaProvider_RunsUnderADeviceMemoryBudgetAndReportsTheCardsUsage()
+    public void CudaProvider_RunsUnderEveryDeviceMemoryConfigurationAndReportsTheCardsUsage()
     {
         var limit = DeviceMemory.LimitBytes;
         var arenaExtend = DeviceMemory.ArenaExtend;
         var shrink = DeviceMemory.ShrinkArenaAfterRun;
         try
         {
-            DeviceMemory.LimitBytes = 2L * 1024 * 1024 * 1024;
-            DeviceMemory.ArenaExtend = ArenaExtendStrategy.SameAsRequested;
-            DeviceMemory.ShrinkArenaAfterRun = true;
             DeviceMemory.ResetPeak();
+            Assert.Equal(5.0f, AddTwoScalars(2.0f, 3.0f));
 
+            DeviceMemory.LimitBytes = 2L * 1024 * 1024 * 1024;
+            DeviceMemory.ArenaExtend = ArenaExtendStrategy.NextPowerOfTwo;
+            DeviceMemory.ShrinkArenaAfterRun = true;
             Assert.Equal(5.0f, AddTwoScalars(2.0f, 3.0f));
 
             var reading = DeviceMemory.Sample();

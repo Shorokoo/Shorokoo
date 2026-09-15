@@ -322,12 +322,19 @@ public class CoreUtilsCoverageTests
         Assert.Null(OrtSessionFactory.ArenaShrinkageRunConfig(null, shrinkArenaAfterRun: true));
     }
 
+    /// <summary>The shipped defaults, and what a GPU session built with them asks ORT for: an
+    /// arena that extends by what is requested, not one that doubles until it has the card.</summary>
     [Fact]
-    public void TestDeviceMemoryDefaultsToOrtsOwnArenaBehaviourAndRejectsAnEmptyBudget()
+    public void TestDeviceMemoryDefaultsToAnArenaThatDoesNotDoubleItselfOntoTheWholeCard()
     {
+        Assert.Equal(ArenaExtendStrategy.SameAsRequested, DeviceMemory.ArenaExtend);
         Assert.Null(DeviceMemory.LimitBytes);
-        Assert.Equal(ArenaExtendStrategy.NextPowerOfTwo, DeviceMemory.ArenaExtend);
         Assert.False(DeviceMemory.ShrinkArenaAfterRun);
+
+        var shipped = OrtSessionFactory.CudaProviderOptions(0, DeviceMemory.LimitBytes, DeviceMemory.ArenaExtend);
+        Assert.Equal("kSameAsRequested", shipped["arena_extend_strategy"]);
+        Assert.False(shipped.ContainsKey("gpu_mem_limit"));
+
         Assert.Throws<ArgumentOutOfRangeException>(() => DeviceMemory.LimitBytes = 0);
         Assert.Throws<ArgumentOutOfRangeException>(() => DeviceMemory.LimitBytes = -1);
         Assert.Null(DeviceMemory.LimitBytes);

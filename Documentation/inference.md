@@ -22,9 +22,10 @@ Related: [core-types.md](core-types.md) · [defining-models.md](defining-models.
 - Reference one platform backend package and it is normally found for you — no setup
   code. Only one backend is live per process. How it is discovered, and how to
   override the choice: [Backend selection](#backend-selection).
-- On a GPU backend, `DeviceMemory` is what caps the CUDA arena, chooses how it extends,
-  and reports how much of the card is gone — the only public lever on device memory, and
-  a process-wide one: [Device memory](#device-memory-gpu-backends).
+- On a GPU backend the CUDA arena is configured through `DeviceMemory`, which also reports
+  how much of the card is gone. Its default extend strategy is deliberately not ORT's, so
+  that the arena cannot double itself onto the whole device:
+  [Device memory](#device-memory-gpu-backends).
 
 ## Workflow: one-shot evaluation
 
@@ -430,40 +431,51 @@ If no backend is found, the first inference call throws `InvalidOperationExcepti
 
 ### Device memory (GPU backends)
 
-ONNX Runtime allocates device memory out of a BFC arena that extends in large blocks and never
-gives them back. Left to itself it does not settle at what a step needs: it rounds each extension
-up to the next power of two, so a run settles at roughly **1.8x** its first step's figure and can
-end up holding the entire card while training perfectly happily — with no headroom for anything
-else, and no number anywhere saying how close to the edge the configuration is.
+ONNX Runtime allocates device memory out of a BFC arena that extends in blocks and never gives them
+back. Under ORT's own extend strategy those blocks *double*: each extension is at least as large as
+everything the arena already holds, and when a doubled block does not fit, ORT clips it to all the
+device memory that is left rather than refusing it. So a run that needs 12.9 GiB reaches 24.6 GiB of
+a 24.6 GiB card in a single extension, settles at roughly **1.8x** what its steps actually use, and
+trains perfectly happily there — with nothing left for anything else on the machine.
 
-`DeviceMemory` is the surface that changes both halves of that. It is process-wide and static:
+**Shorokoo therefore defaults to `SameAsRequested`, not to ORT's `NextPowerOfTwo`.** The arena then
+extends by what was asked for, so it tracks the run's real high-water mark instead of doubling past
+it, and no single extension can swallow the rest of the card. The cost is more device allocations —
+but only while the arena is still growing: a run reaches its steady state and stops extending under
+either strategy, so what it buys back is the whole of the 0.8x.
+
+`DeviceMemory` is where that default lives, along with the rest of the device-memory surface. It is
+process-wide and static:
 
 ```csharp
 using Shorokoo.Core.Inference.Abstractions;
 
-DeviceMemory.LimitBytes = 16L * 1024 * 1024 * 1024;            // cap the arena at 16 GiB
-DeviceMemory.ArenaExtend = ArenaExtendStrategy.SameAsRequested; // stop rounding up to a power of two
-DeviceMemory.ShrinkArenaAfterRun = true;                        // hand unused blocks back each step
+DeviceMemory.LimitBytes = 16L * 1024 * 1024 * 1024;              // cap the arena at 16 GiB
+DeviceMemory.ShrinkArenaAfterRun = true;                          // hand unused blocks back each step
+DeviceMemory.ArenaExtend = ArenaExtendStrategy.NextPowerOfTwo;    // ORT's doubling, back again
 ```
 
 | setting | ORT option | default | read |
 |---|---|---|---|
-| `LimitBytes` | `gpu_mem_limit` | `null` — the whole card | when a session is created |
-| `ArenaExtend` | `arena_extend_strategy` | `NextPowerOfTwo` — ORT's own | when a session is created |
+| `LimitBytes` | `gpu_mem_limit` | `null` — no cap | when a session is created |
+| `ArenaExtend` | `arena_extend_strategy` | `SameAsRequested` — **not** ORT's default | when a session is created |
 | `ShrinkArenaAfterRun` | `memory.enable_memory_arena_shrinkage` | `false` | on every run |
 
-The defaults leave ORT exactly as it behaves without Shorokoo, because each setting trades
-throughput for room: `SameAsRequested` extends the arena more often, and `ShrinkArenaAfterRun` pays
-a synchronizing device allocation per step to re-take what it returned. Reach for them when a
-configuration is close to the card's limit — which is also when an arena that ratchets up decides
-whether it fits. `LimitBytes` is a budget, not a hint: a step that needs more than it fails with
-ORT's `BFCArena ... Failed to allocate memory for requested buffer` rather than eating the rest of
-the device.
+The two that are not defaulted are the two that cost something on every step rather than only while
+the arena grows. `ShrinkArenaAfterRun` pays a synchronizing device allocation per step to re-take
+what it handed back; turn it on when the card is shared with something else that needs the room
+between steps. `LimitBytes` is a budget, not a hint: a step that needs more than it fails with ORT's
+`BFCArena ... Failed to allocate memory for requested buffer` rather than eating the rest of the
+device — which is what you want when a run must leave room for a second one, and not what you want
+otherwise.
 
-The first two are read **when a session is built** — the first inference call, or a training rig's
-first `TrainStep` for a given input shape — so set them at startup; changing them afterwards leaves
-already-compiled sessions as they were. `ShrinkArenaAfterRun` is read on every run and takes effect
-immediately, on sessions already compiled.
+`NextPowerOfTwo` is still the faster strategy on a card with room to spare, and setting it back is
+one line.
+
+The first two settings are read **when a session is built** — the first inference call, or a
+training rig's first `TrainStep` for a given input shape — so set them at startup; changing them
+afterwards leaves already-compiled sessions as they were. `ShrinkArenaAfterRun` is read on every run
+and takes effect immediately, on sessions already compiled.
 
 The same class reports what the card is doing:
 

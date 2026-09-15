@@ -6,17 +6,20 @@ namespace Shorokoo.Core.Inference.Abstractions;
 public enum ArenaExtendStrategy
 {
     /// <summary>
-    /// Extend by the next power of two at or above the requested size — ORT's default, and
-    /// what makes the arena settle at roughly 1.8x the memory a training step actually needs.
-    /// Fewer, larger extensions: fastest, and the reason a run that fits can still end up
-    /// holding the whole card.
+    /// ORT's own default: each extension doubles the last one, and a doubled request that
+    /// does not fit is clipped to <b>all</b> the device memory that is left rather than
+    /// refused. A run therefore settles at roughly 1.8x what its steps need, and one that
+    /// fits can still end up holding the whole card. Shorokoo does not default to this;
+    /// choose it to trade that back for the fewest possible device allocations.
     /// </summary>
     NextPowerOfTwo = 0,
 
     /// <summary>
-    /// Extend by exactly the requested size. The arena then tracks what the step asks for
-    /// instead of rounding up to a power of two, at the cost of more (and more frequent)
-    /// device allocations. Use it when a configuration is close to the card's limit.
+    /// Extend by exactly the requested size — Shorokoo's default. The arena tracks what the
+    /// step asks for instead of doubling past it, so it cannot swallow the rest of the card
+    /// in one extension. It pays for that with more device allocations, but only while the
+    /// arena is still growing: once a run reaches its steady state it stops extending under
+    /// either strategy.
     /// </summary>
     SameAsRequested = 1,
 }
@@ -41,7 +44,11 @@ public readonly record struct DeviceMemoryReading(long UsedBytes, long FreeBytes
 /// when a session is <i>created</i>, so set them at startup, before the first inference or
 /// training call; changing them later leaves already-compiled sessions as they were.
 /// <see cref="ShrinkArenaAfterRun"/> is read on every run and takes effect immediately.
-/// All three are ignored by the CPU backends.</para>
+/// All three are ignored by the CPU backends. Note that <see cref="ArenaExtend"/> defaults
+/// to <see cref="ArenaExtendStrategy.SameAsRequested"/> rather than to ORT's own choice —
+/// an arena that doubles its regions is why the card fills up — so the interesting default
+/// to change is that one, back to <see cref="ArenaExtendStrategy.NextPowerOfTwo"/>, when a
+/// run has device memory to spare and wants the last of the throughput.</para>
 ///
 /// <para><b>Readings.</b> <see cref="Read"/> and <see cref="Sample"/> call the CUDA
 /// runtime's <c>cudaMemGetInfo</c> directly and return <c>null</c> when there is no CUDA
@@ -53,7 +60,6 @@ public readonly record struct DeviceMemoryReading(long UsedBytes, long FreeBytes
 /// using Shorokoo.Core.Inference.Abstractions;
 ///
 /// DeviceMemory.LimitBytes = 16L * 1024 * 1024 * 1024;        // 16 GiB budget
-/// DeviceMemory.ArenaExtend = ArenaExtendStrategy.SameAsRequested;
 ///
 /// for (int step = 0; step &lt; steps; step++)
 /// {
@@ -96,10 +102,13 @@ public static class DeviceMemory
 
     /// <summary>
     /// How the arena extends itself — ORT's <c>arena_extend_strategy</c>. Defaults to
-    /// <see cref="ArenaExtendStrategy.NextPowerOfTwo"/>, which is ORT's own default and the
-    /// faster of the two.
+    /// <see cref="ArenaExtendStrategy.SameAsRequested"/>, <b>not</b> to ORT's own
+    /// <see cref="ArenaExtendStrategy.NextPowerOfTwo"/>: doubling regions is what takes a run
+    /// that needs 12.9 GiB to 24.6 GiB of a 24.6 GiB card and leaves nothing for anything
+    /// else. Set <see cref="ArenaExtendStrategy.NextPowerOfTwo"/> to have ORT's behaviour
+    /// back on a card with room to spare.
     /// </summary>
-    public static ArenaExtendStrategy ArenaExtend { get; set; } = ArenaExtendStrategy.NextPowerOfTwo;
+    public static ArenaExtendStrategy ArenaExtend { get; set; } = ArenaExtendStrategy.SameAsRequested;
 
     /// <summary>
     /// Whether to hand the arena's unused blocks back to the device after every run —

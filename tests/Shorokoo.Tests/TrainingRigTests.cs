@@ -3265,6 +3265,34 @@ public class TrainingRigHyperparameterShapeCoverageTests
             new InternalComputationGraph([step], [step.Cast<float32>()]), GraphKind.Module);
     }
 
+    /// <summary>A trainable parameter's shape is declared by its initializer, but the optimizer's
+    /// update is applied without regard to it: a <c>[4]</c> per-element rate against the <c>[1]</c>
+    /// weight of <c>ScalarMultiplyModel</c> broadcasts, so one <c>TrainStep</c> replaces the
+    /// <c>[1]</c> parameter with a <c>[4]</c> one and every later step keeps it. The rig's own
+    /// initial value then no longer matches its checkpoint and the inference model returns a
+    /// <c>[4]</c> result, with nothing refused anywhere. Either resolution satisfies this test: the
+    /// step keeps the declared shape, or it is refused. Part of Shorokoo/Shorokoo#322.</summary>
+    [Fact]
+    public void TestATrainStepDoesNotSilentlyReshapeATrainableParameter()
+    {
+        var (_, inputBatch, targetBatch) = ScalarMultiplyBatches();
+        var rig = VectorRig(new VectorRateOptimizerHyperparameters
+        {
+            PerElementRate = Hyperparameter.Baked(Rate(0.1f, 0.2f, 0.4f, 0.8f)),
+            Gain = Hyperparameter.Runtime(),
+        });
+        static long[] WeightDims(TrainingCheckpoint c) =>
+            [.. ((TensorData)c.TrainableParams.Fields[c.TrainableParams.Definition.Fields[0].Name]).Shape.Dims];
+
+        var initial = rig.CreateInitialCheckpoint();
+        Assert.Equal((long[])[1L], WeightDims(initial));
+
+        TrainingCheckpoint? after = null;
+        var refused = Record.Exception(
+            () => after = rig.TrainStep(initial, rig.MakeHyperparameters(1f), inputBatch, targetBatch));
+        Assert.True(refused is not null || WeightDims(after!).SequenceEqual((long[])[1L]));
+    }
+
     [Fact]
     public void TestNonScalarHyperparametersRoundTripThroughSkptCoverage()
     {

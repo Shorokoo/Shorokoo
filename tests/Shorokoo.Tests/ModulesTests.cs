@@ -1010,6 +1010,36 @@ public class ModulesCoverageTests
         Assert.DoesNotContain(concreteArch.ToInternal().Nodes, n => n.OpCode == InternalOpCodes.FUNCTION_INVOKE);
     }
 
+    private static ComputationGraph DocVariant(
+        long embedDim, long numHeads, long ffnDim, long numLayers, long numClasses,
+        bool useBias, bool useMlpHead)
+    {
+        var family = Modules.DocVariantVisionTransformer.ComputationGraph;
+        return family.Specialize(family.FromOrderedInputs([
+            TensorData([], embedDim), TensorData([], numHeads), TensorData([], ffnDim),
+            TensorData([], numLayers), TensorData([], numClasses),
+            TensorData([], useBias), TensorData([], useMlpHead)]));
+    }
+
+    private static int DocVariantParamCount(ComputationGraph g)
+    {
+        var input = TensorData([2L, 9L, 12L], new float[216]);
+        return g.ToConcreteArchitecture(g.FromOrderedInputs([input]))
+                .GetConcreteModelParamInfos().ModelIds.Count();
+    }
+
+    [Fact]
+    public void TestOneModuleSpecializesIntoVariantsDifferingInScaleDepthAndParameterSet()
+    {
+        var tiny  = DocVariant(32, 4,  64, 2, 10, useBias: false, useMlpHead: false);
+        var small = DocVariant(64, 8, 128, 4, 10, useBias: true,  useMlpHead: true);
+
+        Assert.Equal(["patches"], tiny.InputNames);
+        Assert.Equal(["patches"], small.InputNames);
+        Assert.Equal(23, DocVariantParamCount(tiny));
+        Assert.Equal(68, DocVariantParamCount(small));
+    }
+
     [Fact]
     public void TestSpecializeFullPartialAndThenConcretizePipelineCoverage()
     {

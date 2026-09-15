@@ -806,6 +806,10 @@ by name and sample shape. `Train`/`TrainStep` take `TensorDataStruct` batches.
 ## Workflow: train a model
 
 1. Define model, loss, and optimizer as `[Module]` classes (or reuse built-ins).
+   To train several sizes or configurations of one model, do **not** write a class per
+   variant: give the model `[Hyper]` parameters and `Specialize` the graph per variant —
+   `FromScratch` takes the specialized graph directly. See
+   [Workflow: one module, many variants](defining-models.md#workflow-one-module-many-variants).
 2. Build the rig with the optimizer's named hyperparameter set (a bare `float` bakes a constant;
    a `Schedule` makes it live):
    ```csharp

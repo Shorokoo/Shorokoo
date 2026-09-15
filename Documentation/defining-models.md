@@ -231,7 +231,6 @@ How a hyper value gets supplied depends on the route:
 
   Comprehensive — weighted accumulation using the iteration index:
   ```csharp
-  // numSteps is a runtime Scalar<int64> — cannot use a plain C# for.
   var total = TensorFill(x.TShape, 0f);
   foreach (var ctx in LoopAPI.Iterate(numSteps))
   {

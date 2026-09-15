@@ -38,15 +38,34 @@ namespace Shorokoo
             Definition = definition ?? throw new ArgumentNullException(nameof(definition));
             Fields = ImmutableDictionary.CreateRange(fields);
 
-            // Validate that all definition fields are present
+            // Every definition field must be present, and present as the kind the definition declares.
+            // Nothing downstream can recover from a value that contradicts its own definition, and the
+            // consumers do not even agree on what to do with one: the checkpoint writer refuses a
+            // non-tensor field by name, while weight binding drops it and fails two layers down on a
+            // lookup for a parameter that is no longer there. The definition is the contract; this is
+            // the one place that holds a value to it.
             foreach (var fieldDef in definition.Fields)
             {
-                if (!Fields.ContainsKey(fieldDef.Name))
-                {
+                if (!Fields.TryGetValue(fieldDef.Name, out var value))
                     throw new ArgumentException($"Missing data for field '{fieldDef.Name}'", nameof(fields));
-                }
+                var actual = StructureOf(value);
+                if (actual != fieldDef.Structure)
+                    throw new ArgumentException(
+                        $"Field '{fieldDef.Name}' is declared {fieldDef.Structure} by this struct's "
+                        + $"definition, but the value given for it is a {actual}.", nameof(fields));
             }
         }
+
+        /// <summary>The structural kind of a value, as a definition declares kinds.</summary>
+        private static DataStructure StructureOf(IData value) => value switch
+        {
+            TensorDataStruct => DataStructure.TensorStruct,
+            TensorDataSequence => DataStructure.Sequence,
+            OptionalTensorData => DataStructure.Optional,
+            TensorData => DataStructure.Tensor,
+            _ => throw new ArgumentException(
+                $"Unsupported field value type '{value?.GetType().Name ?? "null"}'.", nameof(value)),
+        };
 
         public override string ToString()
         {

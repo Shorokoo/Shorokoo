@@ -1076,11 +1076,14 @@ namespace Shorokoo
         internal InternalComputationGraph BindInferenceWeights(TrainingCheckpoint checkpoint)
         {
             if (checkpoint is null) throw new ArgumentNullException(nameof(checkpoint));
+            // Read through the definitions, not the field dictionary: a definition field is what the
+            // model expects to be given, and a struct holds every one of them as the kind it declares.
+            // Filtering the dictionary for tensors instead used to drop a field that was not one and
+            // leave the bind to fail on a lookup for a parameter nothing had supplied.
+            static IEnumerable<KeyValuePair<string, TensorData>> Declared(TensorDataStruct s) =>
+                s.Definition.Fields.Select(f => new KeyValuePair<string, TensorData>(f.Name, (TensorData)s.Fields[f.Name]));
             var weights = new ModelParamList(
-                checkpoint.TrainableParams.Fields
-                    .Where(f => f.Value is TensorData)
-                    .Concat(checkpoint.ModelState.Fields.Where(f => f.Value is TensorData))
-                    .Select(f => new KeyValuePair<string, TensorData>(f.Key, (TensorData)f.Value)),
+                Declared(checkpoint.TrainableParams).Concat(Declared(checkpoint.ModelState)),
                 ModelParamType.TrainableParam);
             return _concreteArch.ToConcreteModel(weights, _concreteArch.GetShorokooIdNamingScheme());
         }

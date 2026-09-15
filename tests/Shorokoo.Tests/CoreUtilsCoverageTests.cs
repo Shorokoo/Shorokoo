@@ -713,4 +713,29 @@ public class CoreUtilsCoverageTests
         }
         finally { if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true); }
     }
+
+    /// <summary>A field's value must be the kind its definition declares. Nothing else can check it
+    /// afterwards: the consumers disagree — the checkpoint writer refuses a non-tensor field by name,
+    /// while binding drops it and fails two layers down on a dictionary lookup.</summary>
+    [Fact]
+    public void TestAStructFieldValueMustBeTheKindItsDefinitionDeclares()
+    {
+        var inner = new TensorStructDef(
+            [new TensorStructFieldDef("inner", DataStructure.Tensor, 1, DType.Float32)], "Inner");
+        var innerValue = new TensorDataStruct(inner, [new("inner", Globals.TensorData([1L], [42f]))]);
+        var tensorValue = Globals.TensorData([1L], [1f]);
+
+        TensorStructDef Declaring(DataStructure structure, DType elementType) => new(
+            [new TensorStructFieldDef("f", structure, structure == DataStructure.Tensor ? 1 : null, elementType)],
+            "Declaring");
+        var declaresTensor = Declaring(DataStructure.Tensor, DType.Float32);
+        var declaresStruct = Declaring(DataStructure.TensorStruct, DType.GetOrCreateForTensorStruct(inner));
+
+        Assert.Equal(1, new TensorDataStruct(declaresTensor, [new("f", tensorValue)]).Count);
+        Assert.Equal(1, new TensorDataStruct(declaresStruct, [new("f", innerValue)]).Count);
+        Assert.Contains("Tensor", Assert.Throws<ArgumentException>(
+            () => new TensorDataStruct(declaresTensor, [new("f", (IData)innerValue)])).Message);
+        Assert.Contains("TensorStruct", Assert.Throws<ArgumentException>(
+            () => new TensorDataStruct(declaresStruct, [new("f", (IData)tensorValue)])).Message);
+    }
 }

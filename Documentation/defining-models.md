@@ -154,133 +154,6 @@ scale, depth and which parameters exist are all chosen by value, so N variants o
 model need one class, not N. See
 [Workflow: one module, many variants](#workflow-one-module-many-variants).
 
-## Workflow: one module, many variants
-
-A `[Module]` class is not one architecture — it is a **family**. The `Inline` body is
-traced once and the graph is cached per method, but `[Hyper]` parameters are *symbolic
-graph inputs*, so that one cached graph already covers every configuration its hypers
-can take. A `Scalar<int64>` hyper sets a parameter's shape or a `LoopAPI.Iterate` trip
-count; a `Scalar<bit>` hyper picks between algorithms and decides which trainable
-parameters exist at all ([Hyperparameter baking](#hyperparameter-baking)). So "the same
-model at a different scale" is a **value**, not a second class: write the family once and
-pick a member by supplying hyper values.
-
-A ViT-shaped classifier, parameterised over its width, depth, head count, class count,
-and two structural choices — whether the transformer blocks carry biases, and whether the
-classifier head is a single projection or a hidden-layer MLP:
-
-```csharp
-[Module]
-public partial class VisionTransformer
-{
-    public static Tensor<float32> Inline(
-        Tensor<float32> patches,                  // [N, L, patchDim]
-        [Hyper] Scalar<int64> embedDim,
-        [Hyper] Scalar<int64> numHeads,
-        [Hyper] Scalar<int64> ffnDim,
-        [Hyper] Scalar<int64> numLayers,
-        [Hyper] Scalar<int64> numClasses,
-        [Hyper] Scalar<bit>   useBias,
-        [Hyper] Scalar<bit>   useMlpHead)
-    {
-        var proj = XavierUniform.Init([patches.DimTensor(2), embedDim]);
-        var pos  = XavierUniform.Init([patches.DimTensor(1), embedDim]);
-        var x    = patches.MatMul(proj) + pos;
-
-        foreach (var ctx in LoopAPI.Iterate(numLayers))
-            x = TransformerEncoderLayer.Call(embedDim, numHeads, ffnDim, useBias, x);
-
-        var pooled = (Tensor<float32>)OnnxOp.ReduceMean(
-            x, Vector(1L), keepdims: false, noopWithEmptyAxes: null);
-
-        var wHead   = XavierUniform.Init([embedDim, numClasses]);
-        var wHidden = XavierUniform.Init([embedDim, embedDim]);
-        var wOut    = XavierUniform.Init([embedDim, numClasses]);
-        return useMlpHead.IfElse(
-            pooled.MatMul(wHidden).Tanh().MatMul(wOut),   // MLP head: two parameters
-            pooled.MatMul(wHead));                        // linear head: one
-    }
-}
-```
-
-Every knob is a hyper, so nothing about a variant is written in source. Note in
-particular what a plain C# `for` could not have done: `numLayers` is a graph value
-driving `LoopAPI.Iterate`, so the *number* of blocks — and with it the number of
-trainable parameters — is chosen by value too.
-
-### Picking a variant: `Specialize`
-
-`Specialize` constant-folds the hyper values into the graph **and removes them from the
-input list**, so what comes out is an ordinary single-input model with nothing left to
-re-supply ([inference.md](inference.md#hardcoding-hypers-with-specialize)):
-
-```csharp
-var family = VisionTransformer.ComputationGraph;   // inputs: the 7 hypers, then patches
-
-static ComputationGraph Variant(
-    ComputationGraph family,
-    long embedDim, long numHeads, long ffnDim, long numLayers, long numClasses,
-    bool useBias, bool useMlpHead)
-    => family.Specialize(family.FromOrderedInputs([
-        TensorData([], embedDim), TensorData([], numHeads), TensorData([], ffnDim),
-        TensorData([], numLayers), TensorData([], numClasses),
-        TensorData([], useBias), TensorData([], useMlpHead)]));
-
-var tiny  = Variant(family, 32, 4,  64, 2, 10, useBias: false, useMlpHead: false);
-var small = Variant(family, 64, 8, 128, 4, 10, useBias: true,  useMlpHead: true);
-// tiny.InputNames == small.InputNames == ["patches"] — the hypers are gone.
-```
-
-`FromOrderedInputs` pairs values with the *leading* input names, and a graph's hyper
-inputs come first (in `Inline` order) regardless of the inputs-first source signature —
-so passing just the hyper values names them correctly.
-
-The two graphs are different architectures, not two views of one. Concretized on the
-same patch input, `tiny` carries **23** trainable parameters and `small` **68**: the
-per-block count differs (`useBias = false` prunes the attention and FFN biases), the
-number of blocks differs (2 versus 4), every shape differs, and the head differs —
-`useMlpHead = false` prunes `wHidden`/`wOut` and folds the `IfElse` away, while
-`useMlpHead = true` prunes `wHead` instead.
-
-### Training a variant
-
-`TrainingRig.FromScratch` takes the specialized graph directly, so a variant trains with
-no hypers to thread through `TrainStep`:
-
-```csharp
-var sample = new TensorDataModelParam("patches", ModelParamType.InputParam,
-    TensorData([batch, numPatches, patchDim], /* … */));
-
-var rig = TrainingRig.FromScratch(
-    tiny, Losses.CrossEntropy, Optimizers.AdamW, [sample],
-    new AdamWOptimizerHyperparameters { LearningRate = 3e-4f });
-```
-
-Swapping `tiny` for `small` is the whole diff between training the two. (Each variant is
-still concretized and lowered separately, so this buys one source of truth, not a cheaper
-build — see [What construction costs](training.md#what-construction-costs).)
-
-### What must still be a C# argument
-
-Hypers are graph values, which fixes the boundary:
-
-- **`Inline`'s return type cannot vary.** One `Inline` is generated per class, and C#
-  cannot overload on return type, so a choice that changes the output's *type* — a loss
-  reduced to a `Scalar<float32>` versus kept per-element as a `Tensor<float32>` — cannot
-  be a hyper. Keep such a choice out of the model: `TrainingRig.FromScratch` takes the
-  loss as a **separate graph**, so the reduction is picked there
-  ([nn-library.md](nn-library.md#loss-configurable-knobs)), and the model module
-  stays one class.
-- **A `[Hyper]` is tensor-shaped — there is no enum hyper.** Where a knob is naturally an
-  enum, either encode it as a `Scalar<int64>` and compare in-graph
-  (`(mode > Scalar(3L)).IfElse(a, b)`), or make it a plain C# argument on a `static`
-  helper that is *not* a `[Module]` — the shape `Recurrent.RNN` and `EmbeddingBag.Bag`
-  take, since their knobs are topology-determining and baked at build time either way
-  ([nn-library.md](nn-library.md#recurrent-layers)).
-- **Both `IfElse` branches are built and must agree in type and shape.** A variant that
-  changes the output shape (adding a token to the sequence, say) is a build-time choice,
-  not a gate.
-
 ## Workflow: add a new layer
 
 1. Add `using Shorokoo; using Shorokoo.Modules; using static Shorokoo.Globals; using static Shorokoo.NN;`.
@@ -422,6 +295,154 @@ Hypers are graph values, which fixes the boundary:
   seeded from outside the loop — is refused, naming the shape. Wrapping every such
   assignment as `prev = LoopAPI.Carry(acc)` answers them, and a local the body only writes
   needs `LoopAPI.Init` as well. See [limitations.md](limitations.md).
+
+## Workflow: one module, many variants
+
+A `[Module]` class is not one architecture — it is a **family**. The `Inline` body is
+traced once and the graph is cached per method, but `[Hyper]` parameters are *symbolic
+graph inputs*, so that one cached graph already covers every configuration its hypers
+can take. A `Scalar<int64>` hyper sets a parameter's shape or a `LoopAPI.Iterate` trip
+count; a `Scalar<bit>` hyper picks between algorithms and decides which trainable
+parameters exist at all ([Hyperparameter baking](#hyperparameter-baking)). So "the same
+model at a different scale" is a **value**, not a second class: write the family once and
+pick a member by supplying hyper values.
+
+A ViT-shaped classifier, parameterised over its width, depth, head count, class count,
+and two structural choices — whether the transformer blocks carry biases, and whether the
+classifier head is a single projection or a hidden-layer MLP:
+
+```csharp
+using Shorokoo;
+using Shorokoo.Graph;                          // ComputationGraph
+using Shorokoo.Core.Nodes.Processors.Training; // TrainingRig
+using Shorokoo.Modules;
+using Shorokoo.Modules.Initializers;           // XavierUniform
+using Shorokoo.Modules.Layers;                 // TransformerEncoderLayer
+using Shorokoo.Modules.Optimizers;             // AdamWOptimizerHyperparameters
+using static Shorokoo.Globals;
+
+[Module]
+public partial class VisionTransformer
+{
+    public static Tensor<float32> Inline(
+        Tensor<float32> patches,                  // [N, L, patchDim]
+        [Hyper] Scalar<int64> embedDim,
+        [Hyper] Scalar<int64> numHeads,
+        [Hyper] Scalar<int64> ffnDim,
+        [Hyper] Scalar<int64> numLayers,
+        [Hyper] Scalar<int64> numClasses,
+        [Hyper] Scalar<bit>   useBias,
+        [Hyper] Scalar<bit>   useMlpHead)
+    {
+        var proj = XavierUniform.Init([patches.DimTensor(2), embedDim]);
+        var pos  = XavierUniform.Init([patches.DimTensor(1), embedDim]);
+        var x    = patches.MatMul(proj) + pos;
+
+        foreach (var ctx in LoopAPI.Iterate(numLayers))
+            x = TransformerEncoderLayer.Call(embedDim, numHeads, ffnDim, useBias, x);
+
+        Vector<int64> seqAxis = [Scalar(1L)];
+        var pooled = x.Reduce(ReduceKind.Mean, seqAxis, keepDims: false);
+
+        var wHead   = XavierUniform.Init([embedDim, numClasses]);
+        var wHidden = XavierUniform.Init([embedDim, embedDim]);
+        var wOut    = XavierUniform.Init([embedDim, numClasses]);
+        return useMlpHead.IfElse(
+            pooled.MatMul(wHidden).Tanh().MatMul(wOut),   // MLP head: two parameters
+            pooled.MatMul(wHead));                        // linear head: one
+    }
+}
+```
+
+Every knob is a hyper, so nothing about a variant is written in source. Note in
+particular what a plain C# `for` could not have done: `numLayers` is a graph value
+driving `LoopAPI.Iterate`, so the *number* of blocks — and with it the number of
+trainable parameters — is chosen by value too.
+
+### Picking a variant: `Specialize`
+
+(`using Shorokoo.Modules;` does not pull in its `.Layers` / `.Initializers` /
+`.Optimizers` children — `using` is not recursive — so the three snippets below assume the
+block above.)
+
+`Specialize` constant-folds the hyper values into the graph **and removes them from the
+input list**, so what comes out is an ordinary single-input graph with nothing left to
+re-supply ([inference.md](inference.md#hardcoding-hypers-with-specialize)):
+
+```csharp
+var family = VisionTransformer.ComputationGraph;   // inputs: the 7 hypers, then patches
+
+static ComputationGraph Variant(
+    ComputationGraph family,
+    long embedDim, long numHeads, long ffnDim, long numLayers, long numClasses,
+    bool useBias, bool useMlpHead)
+    => family.Specialize(family.FromOrderedInputs([
+        TensorData([], embedDim), TensorData([], numHeads), TensorData([], ffnDim),
+        TensorData([], numLayers), TensorData([], numClasses),
+        TensorData([], useBias), TensorData([], useMlpHead)]));
+
+var tiny  = Variant(family, 32, 4,  64, 2, 10, useBias: false, useMlpHead: false);
+var small = Variant(family, 64, 8, 128, 4, 10, useBias: true,  useMlpHead: true);
+// tiny.InputNames == small.InputNames == ["patches"] — the hypers are gone.
+```
+
+`FromOrderedInputs` pairs values with the *leading* input names, and a graph's hyper
+inputs come first (in `Inline` order) regardless of the inputs-first source signature —
+so passing just the hyper values names them correctly.
+
+The two graphs are different architectures, not two views of one. Concretized on the
+same patch input, `tiny` carries **23** trainable parameters and `small` **68**: the
+per-block count differs (`useBias = false` prunes the attention and FFN biases), the
+number of blocks differs (2 versus 4), the widths differ, and so does the head — `wHead`
+exists only when `useMlpHead = false`, `wHidden`/`wOut` only when it is true, and either
+way the `IfElse` that held the unselected pair is gone.
+
+Note that these values are **baked with `Specialize`**, not merely supplied as
+concretization hints, so each condition is a constant before lowering and *every* `IfElse`
+on it folds — including the `useBias` gates, which a plain concretization with
+`useBias = true` would have left live
+([Control flow inside `Inline`](#control-flow-inside-inline)).
+
+### Training a variant
+
+`TrainingRig.FromScratch` takes the specialized graph directly, so a variant trains with
+no hypers to thread through `TrainStep`:
+
+```csharp
+var sample = new TensorDataModelParam("patches", ModelParamType.InputParam,
+    TensorData([batch, numPatches, patchDim], /* … */));
+
+var rig = TrainingRig.FromScratch(
+    tiny, Losses.CrossEntropy, Optimizers.AdamW, [sample],
+    new AdamWOptimizerHyperparameters { LearningRate = 3e-4f });
+```
+
+Swapping `tiny` for `small` is the whole diff between training the two. (Each variant is
+still concretized and lowered separately, so this buys one source of truth, not a cheaper
+build — see [What construction costs](training.md#what-construction-costs).)
+
+### What must still be a C# argument
+
+Hypers are graph values, which fixes the boundary:
+
+- **`Inline`'s return type cannot vary.** A hyper is a value *inside* the graph, and a
+  graph's output type is fixed when it is built, so a choice that changes the output's
+  *type* — a loss reduced to a `Scalar<float32>` versus kept per-element as a
+  `Tensor<float32>` — cannot be a hyper. Keep such a choice out of the model: `TrainingRig.FromScratch` takes the
+  loss as a **separate graph**, so the reduction is picked there
+  ([nn-library.md](nn-library.md#loss-configurable-knobs)), and the model module
+  stays one class.
+- **A `[Hyper]` is a graph value of a tensor element type — there is no enum hyper.** Where a knob is naturally an
+  enum, either encode it as a `Scalar<int64>` and compare in-graph
+  (`(mode > Scalar(3L)).IfElse(a, b)`), or make it a plain C# argument on a `static`
+  helper that is *not* a `[Module]` — the shape `Recurrent.RNN` and `EmbeddingBag.Bag`
+  take, since their knobs are topology-determining and baked at build time either way
+  ([nn-library.md](nn-library.md#recurrent-layers)).
+- **Both `IfElse` branches are built, and they must agree in *type*** — they are the two
+  arguments of one call. Their *shapes* need not match: the selected branch's shape is the
+  result's, so gating a branch that adds a token to the sequence is fine, and on a gate
+  that is still live at run time the same compiled model returns whichever shape the bit
+  selects.
 
 ## Omittable parameters (defaulted hypers & optional inputs)
 

@@ -1,3 +1,6 @@
+using Shorokoo.Modules.Initializers;
+using Shorokoo.Modules.Layers;
+
 namespace Shorokoo.Tests.Modules
 {
     #region Trainable Parameter Initializers (New Pattern)
@@ -1586,5 +1589,40 @@ namespace Shorokoo.Tests.Modules
     public partial class UsesInitCallingAModule
     {
         public static Tensor<float32> Inline(Tensor<float32> input) => input * InitCallingAModule.Init(Vector(2L));
+    }
+
+    /// <summary>One [Module] whose width, depth, head count, class count, bias use and head shape
+    /// are all [Hyper]s, so each variant of it is a value rather than another class. Mirrors the
+    /// worked example in <c>Documentation/defining-models.md</c>.</summary>
+    [Module]
+    public partial class HyperParameterizedVisionTransformer
+    {
+        public static Tensor<float32> Inline(
+            Tensor<float32> patches,
+            [Hyper] Scalar<int64> embedDim,
+            [Hyper] Scalar<int64> numHeads,
+            [Hyper] Scalar<int64> ffnDim,
+            [Hyper] Scalar<int64> numLayers,
+            [Hyper] Scalar<int64> numClasses,
+            [Hyper] Scalar<bit> useBias,
+            [Hyper] Scalar<bit> useMlpHead)
+        {
+            var proj = XavierUniform.Init([patches.DimTensor(2), embedDim]);
+            var pos = XavierUniform.Init([patches.DimTensor(1), embedDim]);
+            var x = patches.MatMul(proj) + pos;
+
+            foreach (var ctx in LoopAPI.Iterate(numLayers))
+                x = TransformerEncoderLayer.Call(embedDim, numHeads, ffnDim, useBias, x);
+
+            Vector<int64> seqAxis = [Scalar(1L)];
+            var pooled = x.Reduce(ReduceKind.Mean, seqAxis, keepDims: false);
+
+            var wHead = XavierUniform.Init([embedDim, numClasses]);
+            var wHidden = XavierUniform.Init([embedDim, embedDim]);
+            var wOut = XavierUniform.Init([embedDim, numClasses]);
+            return useMlpHead.IfElse(
+                pooled.MatMul(wHidden).Tanh().MatMul(wOut),
+                pooled.MatMul(wHead));
+        }
     }
 }

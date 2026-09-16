@@ -405,6 +405,7 @@ Convolution.ConvTranspose(x, outChannels, long[] kernelSize,
   Transposed conv is **zeros-only** (no `padding_mode`): its "padding" is an
   output-shape crop, not an input border.
 
+<a id="recurrent-layers"></a>
 ### Recurrent layers — `Recurrent.RNN` / `Recurrent.LSTM` / `Recurrent.GRU`
 
 The vanilla (Elman) recurrent layer is the static helper `Recurrent.RNN`, in the

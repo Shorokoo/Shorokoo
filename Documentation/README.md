@@ -5,7 +5,7 @@ Which document covers what. For an overview of Shorokoo and an end-to-end exampl
 
 ## 1. Define models as C# classes
 
-- [defining-models.md](defining-models.md) — declare a model or layer with `[Module]`, expose `[Hyper]` parameters, create trainable weights, compose sub-modules, and add control flow (`IfElse`, `LoopAPI.Iterate`).
+- [defining-models.md](defining-models.md) — declare a model or layer with `[Module]`, expose `[Hyper]` parameters, create trainable weights, compose sub-modules, add control flow (`IfElse`, `LoopAPI.Iterate`), and specialize one module into many architecture variants.
 - [core-types.md](core-types.md) — the tensors, scalars, vectors, dtypes, shapes, and `NN` ops you build a model out of.
 
 ## 2. Train them

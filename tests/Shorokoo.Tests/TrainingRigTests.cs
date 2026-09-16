@@ -397,6 +397,30 @@ public class TrainingRigFromScratchCoverageTests
     }
 
     [Fact]
+    public void TestASpecializedModuleGraphTrainsWithItsHypersBakedOutOfTheInputList()
+    {
+        var family = FCLayer.ComputationGraph;
+        var specialized = family.Specialize(family.FromOrderedInputs([TensorData([], 3L)]));
+        Assert.Equal(["input"], specialized.InputNames);
+
+        NamedModelParam[] sample =
+        [
+            new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([2L, 4L], new float[8])),
+        ];
+        var rig = TrainingRig.FromScratch(
+            specialized, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, sample,
+            new SGDOptimizerHyperparameters { LearningRate = 0.05f });
+
+        Assert.Equal(["learningRate"], rig.HyperparameterNames);
+        Assert.Equal(2, rig.TrainableParamStructDef.Fields.Count());
+
+        var step = rig.TrainStep(rig.CreateInitialCheckpoint(),
+            NNLibraryTrainingFixtures.MakeBatch("input", "ModelInput", TensorData([2L, 4L], new float[8])),
+            NNLibraryTrainingFixtures.MakeBatch("targets", "Target", TensorData([2L, 3L], new float[6])));
+        Assert.NotNull(step.Loss);
+    }
+
+    [Fact]
     public void TestPositionalHyperparametersPrecedeTheRngConfigAndContextsCoverage()
     {
         NamedModelParam[] sample =

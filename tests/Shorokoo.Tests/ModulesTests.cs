@@ -1010,6 +1010,51 @@ public class ModulesCoverageTests
         Assert.DoesNotContain(concreteArch.ToInternal().Nodes, n => n.OpCode == InternalOpCodes.FUNCTION_INVOKE);
     }
 
+    private static readonly TensorData VitPatches = TensorDataWithSmallVals(DType.Float32, [1L, 4L, 6L]);
+
+    private static TensorData[] VitHypers(
+        long embedDim = 4, long numHeads = 2, long ffnDim = 8, long numLayers = 1,
+        long numClasses = 3, bool useBias = false, bool useMlpHead = false) =>
+        [TensorData([], embedDim), TensorData([], numHeads), TensorData([], ffnDim),
+         TensorData([], numLayers), TensorData([], numClasses),
+         TensorData([], useBias), TensorData([], useMlpHead)];
+
+    private static ComputationGraph VitVariant(TensorData[] hypers)
+    {
+        var family = Modules.HyperParameterizedVisionTransformer.ComputationGraph;
+        return family.Specialize(family.FromOrderedInputs([.. hypers]));
+    }
+
+    private static ConcreteModelParamInfos VitParams(TensorData[] hypers)
+    {
+        var g = VitVariant(hypers);
+        return g.ToConcreteArchitecture(g.FromOrderedInputs([VitPatches])).GetConcreteModelParamInfos();
+    }
+
+    private static int VitParamCount(TensorData[] hypers) => VitParams(hypers).ModelIds.Length;
+
+    private static string VitShapes(TensorData[] hypers) =>
+        string.Join(" ", VitParams(hypers).ParamInfos.Select(p => p.Shape.ToString()));
+
+    [Fact]
+    public void TestOneModuleSpecializesIntoVariantsDifferingInScaleDepthAndParameterSet()
+    {
+        Assert.Equal(["patches"], VitVariant(VitHypers()).InputNames);
+
+        Assert.Equal(13, VitParamCount(VitHypers()));
+        Assert.Equal(19, VitParamCount(VitHypers(useBias: true)));
+        Assert.Equal(14, VitParamCount(VitHypers(useMlpHead: true)));
+        Assert.Equal(23, VitParamCount(VitHypers(numLayers: 2)));
+
+        Assert.Equal("(6,4) (4,4) (4,) (4,) (4,4) (4,4) (4,4) (4,4) (4,) (4,) (4,8) (8,4) (4,3)",
+                     VitShapes(VitHypers()));
+        Assert.Equal("(6,8) (4,8) (8,) (8,) (8,8) (8,8) (8,8) (8,8) (8,) (8,) (8,8) (8,8) (8,7)",
+                     VitShapes(VitHypers(embedDim: 8, numClasses: 7)));
+        Assert.Equal("(6,4) (4,4) (4,) (4,) (4,4) (4,4) (4,4) (4,4) (4,) (4,) (4,16) (16,4) (4,4) (4,3)",
+                     VitShapes(VitHypers(ffnDim: 16, useMlpHead: true)));
+
+    }
+
     [Fact]
     public void TestSpecializeFullPartialAndThenConcretizePipelineCoverage()
     {

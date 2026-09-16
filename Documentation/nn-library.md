@@ -1501,7 +1501,8 @@ inputs, and trains against a **pass-through** loss module that forwards its pred
 ignores its targets. That lifts every restriction above — extra tensor inputs and unreduced forms are
 all reachable — at the price of a model whose output is a loss rather than a prediction. See
 [training.md → A loss graph may ignore its `targets`](training.md#loss-ignoring-targets) for the
-pattern and for what the rig still expects you to feed each step.
+pattern; the rig sees that the loss never reads its target and derives no target slot, so such a
+model trains on its inputs alone.
 
 ### TripletMarginLoss (metric / embedding learning)
 

@@ -70,16 +70,22 @@ public partial class PassThroughLoss      // its labels / mask are ordinary mode
 }
 ```
 
-**You still feed the ignored input.** `rig.TargetDef` is derived from the loss graph's second input
-whether or not the body reads it, and that input survives into the compiled trainstep, so every
-`TrainStep` still passes a target struct — omitting it fails the input-count check (`CR006`). Only its
-**dtype** must match the type the loss declares (a mismatch is rejected by the backend); its shape and
-contents are ignored, so a zero-element placeholder is enough and costs next to nothing:
+**You do not feed the ignored input.** The rig asks whether the loss body actually reaches its second
+input, and when it does not, derives no target field for it: `rig.TargetDef` is empty,
+`rig.HasTargets` is `false`, and the target-free `TrainStep` / `Fit` overloads take the model inputs
+alone ([#331](https://github.com/Shorokoo/Shorokoo/issues/331)).
 
 ```csharp
-var noTargets = rig.TargetDef.FromOrderedData(TensorData(DType.Float32, [0L]));
-ckpt = rig.TrainStep(ckpt, inputs, noTargets);   // the real labels ride inside `inputs`
+ckpt = rig.TrainStep(ckpt, inputs);              // the real labels ride inside `inputs`
+var result = rig.Fit(batches, numEpochs: 10);
 ```
+
+The dead input does survive into the compiled trainstep — the step's input layout is positional, so
+the slot stays — but it is the rig that supplies its value, not the call site, which is the whole
+point: `TrainStep(ckpt, inputs, noTargets)` read as "inputs and targets" while the real targets rode
+inside `inputs` and the third argument was an empty placeholder. Calling a target-free overload on a
+rig whose loss *does* read its target fails loud rather than training against something you never
+chose.
 
 Two things this shape does **not** change. The predictions tensor is never an output of the training
 step — the step's outputs are the updated parameters, model state, optimizer state and the loss — so
@@ -88,6 +94,11 @@ inlined into the same graph either way, and the composed training step does the 
 whichever side of the seam the loss sits on. And `ExtractInferenceModel` hands back the model **as
 authored**, so a loss-computing model yields an inference model that returns a loss and demands the
 labels; author the prediction path as its own module if you also need one.
+
+Note that folding the loss into the model is no longer the way to get a *validation loss* out of a
+checkpoint: `Persistence.LoadEvaluationModel(path)` composes a saved checkpoint's model with its loss
+and needs no rig ([#329](https://github.com/Shorokoo/Shorokoo/issues/329)). Fold the loss in when the
+loss genuinely needs more inputs than the slot carries — that is what this shape is for.
 
 An optimizer module takes its `[Hyper]` hyperparameters, then exactly `(currentParam, grad)`,
 and returns the updated parameter. Optimizer state never appears in the signature: it is
@@ -522,8 +533,17 @@ next supersedes it.
 `FromScratch` does real work before any training happens, and a checkpoint/resume workflow
 re-pays most of it on every process start. A training `.skpt` carries the constituents and the
 state, not the derived build products, so `TrainingRig.Load` rebuilds those — it reads the saved
-concrete architecture rather than re-concretizing, but everything after that is redone, including
-running every initializer whose values the checkpoint then overwrites.
+concrete architecture rather than re-concretizing, but composition, autograd, optimizer lowering
+and graph optimization are all redone.
+
+One cost it does **not** re-pay is the model's initializers
+([#327](https://github.com/Shorokoo/Shorokoo/issues/327)). Their values are about to be overwritten
+by the checkpoint the load is reading, so `TrainingRig.Load` skips the run and stands the parameters
+in with the dtype and shape the architecture declares for them — enough for shape inference and the
+optimization pass, which is all the build reads. The run is deferred, not dropped: the first thing
+to ask the rig for an initial *value* — `CreateInitialCheckpoint()`, or a load whose file omits a
+component and falls back to the rig's initial values — runs the initializers then, to exactly the
+values an eager build would have produced, and re-seeds the optimizer state from them.
 
 The build phase, all of it on `MergeContext`, is concretization, composition with the loss,
 autograd, optimizer lowering, shape inference and graph optimization, plus two costs that scale
@@ -900,6 +920,19 @@ Once trained, turn a checkpoint into a runnable concrete model with one call:
 ```csharp
 var concrete = result.FinalCheckpoint.ToInferenceModel();   // no graph to re-supply
 var output   = ComputeContext.Default.Execute(concrete, myInput);
+```
+
+From a **saved** checkpoint, no rig is involved at all: a training `.skpt` carries the model, so
+`Persistence.Load(path)` returns it runnable and `Persistence.LoadEvaluationModel(path)` returns it
+composed with its loss, for scoring a validation set
+([#329](https://github.com/Shorokoo/Shorokoo/issues/329)). Reach for `TrainingRig.Load(path)` when
+you mean to go on *training*; it is the one of the three that builds a rig. The flat safetensors
+format stores state and no architecture, so none of this applies to it — a checkpoint read with
+`Persistence.LoadTrainingCheckpoint` has no model in it to bind, and needs a rig that does.
+
+```csharp
+var model = Persistence.Load("run.skpt");                  // ConcreteModel, weights bound
+var eval  = Persistence.LoadEvaluationModel("run.skpt");   // [model inputs…, targets] → loss
 ```
 
 `ToInferenceModel()` binds this checkpoint's trainable params and model state, by canonical

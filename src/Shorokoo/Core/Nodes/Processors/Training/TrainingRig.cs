@@ -328,8 +328,33 @@ namespace Shorokoo
         /// input of the loss graph, in declaration order. Use <see cref="TensorStructDef.FromOrderedData(TensorData[])"/>
         /// to construct target batches without building the definition manually:
         /// <c>rig.TargetDef.FromOrderedData(TensorData([4L, 8L], myTargets))</c>.
+        ///
+        /// <para><b>Empty when the loss never reads its target</b> (Shorokoo/Shorokoo#331). A model that
+        /// computes its own loss takes a forwarding loss module whose body ignores the second input; the
+        /// rig sees that the input is unreachable from the loss output and derives no target field, so
+        /// there is nothing for a caller to construct. Use <see cref="HasTargets"/> to ask, and the
+        /// target-free <see cref="TrainStep(TrainingCheckpoint, TensorDataStruct)"/> /
+        /// <see cref="Fit(TensorDataStruct[], int, TrainingCheckpoint?)"/> to step such a rig.</para>
         /// </summary>
         public TensorStructDef TargetDef { get; private set; } = null!;
+
+        /// <summary>
+        /// Whether the loss reads a target at all — <c>false</c> for a rig whose loss body ignores its
+        /// second input, whose <see cref="TargetDef"/> is therefore empty (Shorokoo/Shorokoo#331).
+        /// </summary>
+        public bool HasTargets => TargetDef.Fields.Length > 0;
+
+        /// <summary>
+        /// The value fed to the composed trainstep's target input when the loss ignores it — a
+        /// zero-element tensor at the loss's declared target dtype and rank, built once at derivation.
+        /// <c>null</c> when the loss does read its target, which is then supplied by the caller.
+        ///
+        /// <para>The input survives composition even though nothing reads it: the trainstep's input
+        /// layout is positional, so the slot stays and the runtime still requires a value for it. What
+        /// Shorokoo/Shorokoo#331 is about is who constructs that value — the rig knows the input is dead,
+        /// so it holds the placeholder itself rather than making every call site pass one.</para>
+        /// </summary>
+        private TensorData? _ignoredTargetPlaceholder;
 
         /// <summary>
         /// Indices into the optimizer's hyperparameter order that were routed as runtime inputs, in
@@ -389,14 +414,105 @@ namespace Shorokoo
         /// <summary>Number of optimizer state fields in graph outputs. Internal output-layout machinery.</summary>
         internal int UpdatedOptimizerStateFieldCount { get; private set; }
 
-        /// <summary>Initial trainable parameter values, computed at FromScratch time.</summary>
+        /// <summary>
+        /// Initial trainable parameter values — <b>or</b>, on a deferred build, shape-and-dtype
+        /// stand-ins for them (Shorokoo/Shorokoo#327). Read the field directly only where shape and
+        /// dtype are all that is wanted (the optimization pass, a checkpoint's shape check); read
+        /// <see cref="InitialParamFields"/> to get values, which runs the initializers if a deferred
+        /// build has not yet.
+        /// </summary>
         private Dictionary<string, IData> _initialParamFields = null!;
 
-        /// <summary>Initial model state values, computed at FromScratch time.</summary>
+        /// <summary>Initial model state values, on the same deferred terms as <see cref="_initialParamFields"/>.</summary>
         private Dictionary<string, IData> _initialStateFields = null!;
 
-        /// <summary>Initial optimizer state values, computed by the optimizer's state initializers.</summary>
+        /// <summary>Initial optimizer state values, on the same deferred terms as <see cref="_initialParamFields"/>.</summary>
         private Dictionary<string, IData> _initialOptStateFields = null!;
+
+        /// <summary>
+        /// What a deferred build needs to run the initializers it skipped: the concrete arch, the
+        /// compute context and RNG config the build would have used, and the parameter order the
+        /// struct defs were built in. <c>null</c> once the values are in hand — on an eager build from
+        /// the start, and on a deferred one from the moment something asks for a value
+        /// (Shorokoo/Shorokoo#327).
+        /// </summary>
+        private DeferredInitialization? _deferredInit;
+
+        /// <summary>
+        /// The initializer run a deferred build skipped, held until something actually wants the
+        /// values it would have produced.
+        /// </summary>
+        private sealed record DeferredInitialization(
+            InternalComputationGraph ConcreteArch,
+            ComputeContext Context,
+            RngConfig? RngConfig,
+            ModelId[] TrainableModelIds,
+            ModelId[] StateModelIds);
+
+        /// <summary>
+        /// The rig's initial trainable-parameter <b>values</b>, running the deferred initializers on
+        /// first use. Everything that hands initial values to a caller goes through here; everything
+        /// that only needs their shape and dtype reads <see cref="_initialParamFields"/> directly, and
+        /// so never triggers the run (Shorokoo/Shorokoo#327).
+        /// </summary>
+        private Dictionary<string, IData> InitialParamFields
+        {
+            get { EnsureInitialValues(); return _initialParamFields; }
+        }
+
+        /// <summary>The materialized counterpart of <see cref="_initialStateFields"/>.</summary>
+        private Dictionary<string, IData> InitialStateFields
+        {
+            get { EnsureInitialValues(); return _initialStateFields; }
+        }
+
+        /// <summary>The materialized counterpart of <see cref="_initialOptStateFields"/>.</summary>
+        private Dictionary<string, IData> InitialOptStateFields
+        {
+            get { EnsureInitialValues(); return _initialOptStateFields; }
+        }
+
+        /// <summary>
+        /// Runs the initializers a deferred build skipped — the model's, then the optimizer's
+        /// state initializers over the resulting parameter values — and replaces the stand-ins with
+        /// what they produce. A no-op on an eager build, and after the first call on a deferred one.
+        ///
+        /// <para>The stand-ins and the values agree on shape and dtype by construction (both come from
+        /// the arch's own <c>MODEL_PARAM</c> declarations), so nothing derived from the stand-ins —
+        /// the struct defs, the optimized trainstep, a checkpoint's shape check — is invalidated by
+        /// this running late.</para>
+        /// </summary>
+        private void EnsureInitialValues()
+        {
+            if (_deferredInit is not { } deferred) return;
+            // Cleared first: the initializer run below goes through the same code the eager build
+            // uses, and nothing in it may re-enter this method.
+            _deferredInit = null;
+
+            var paramInfos = deferred.RngConfig is null
+                ? null
+                : deferred.ConcreteArch.GetConcreteModelParamInfos();
+            var paramValuesById = Shorokoo.Core.Nodes.Processors.Fast.FastInitializeModelParams.Process(
+                deferred.ConcreteArch, deferred.Context, deferred.RngConfig, paramInfos);
+
+            _initialParamFields = new Dictionary<string, IData>();
+            for (var i = 0; i < TrainableParamStructDef.Fields.Length; i++)
+                _initialParamFields[TrainableParamStructDef.Fields[i].Name] =
+                    paramValuesById[deferred.TrainableModelIds[i]];
+
+            _initialStateFields = new Dictionary<string, IData>();
+            for (var i = 0; i < ModelStateDef.Fields.Length; i++)
+                _initialStateFields[ModelStateDef.Fields[i].Name] =
+                    paramValuesById[deferred.StateModelIds[i]];
+
+            // The optimizer's state seeds were computed against the stand-ins, so they are recomputed
+            // here against the real parameter values — an optimizer whose state initializer reads a
+            // parameter's value (rather than only its shape) would otherwise be seeded from zeros.
+            if (OptimizerStateDef.Fields.Length > 0)
+                _initialOptStateFields = ComputeInitialOptStateFields(
+                    ResolveStateInitHyperValues(null, throwOnMissingConsumed: false),
+                    deferred.Context, _initialParamFields);
+        }
 
         /// <summary>
         /// Graph computing the optimizer's initial state values (one output per state field, inputs
@@ -761,7 +877,8 @@ namespace Shorokoo
             ComputeContext mergeContext,
             ComputeContext runtimeContext,
             BuildProgressReporter? progress,
-            bool completesBuild = true)
+            bool completesBuild = true,
+            bool deferInitialization = false)
         {
             var c = constituents;
             ValidateConstituents(c);
@@ -787,7 +904,7 @@ namespace Shorokoo
             rig.BuildTrainingStepPureGraph(
                 concreteArch, c.Loss.ToInternal(), c.Optimizer.ToInternal(), c.Hyperparameters, c.Names,
                 progress);
-            rig.InitializeAndOptimize(concreteArch, mergeContext, c.RngConfig, progress);
+            rig.InitializeAndOptimize(concreteArch, mergeContext, c.RngConfig, progress, deferInitialization);
             if (completesBuild) progress?.ReportComplete(BuildPhase.Initialize);
             return rig;
         }
@@ -919,6 +1036,19 @@ namespace Shorokoo
         /// the threshold we must therefore carry a real (zero) payload, exactly as the retired
         /// <c>ZeroExemplar</c> did for every size.</para>
         /// </summary>
+        /// <summary>
+        /// The zero-element stand-in for a target input the loss never reads (Shorokoo/Shorokoo#331),
+        /// at the loss's declared target dtype and — where it declares one — rank, so the dead slot is
+        /// fed something of the shape the graph expects to see rather than merely something typed.
+        /// Nothing reads its contents, so it carries no elements and costs no allocation worth naming.
+        /// </summary>
+        private static TensorData IgnoredTargetPlaceholder(DType dtype, int? rank)
+        {
+            long[] dims = new long[rank is int r && r > 1 ? r : 1];
+            for (var i = 1; i < dims.Length; i++) dims[i] = 1L;
+            return RepresentativeInputFor(new Shape(dims), dtype);
+        }
+
         internal static TensorData RepresentativeInputFor(Shape shape, DType dtype)
         {
             if (shape.Count > Shorokoo.Core.AutoDiffCheckpointing.ShapeInferenceInterpreter.MaxSmallTensorElements)
@@ -1185,13 +1315,13 @@ namespace Shorokoo
         }
 
         /// <summary>The rig's initial trainable-parameter values, as a struct (for load-time defaults).</summary>
-        internal TensorDataStruct InitialTrainableStruct => new(TrainableParamStructDef, _initialParamFields);
+        internal TensorDataStruct InitialTrainableStruct => new(TrainableParamStructDef, InitialParamFields);
 
         /// <summary>The rig's initial model-state values, as a struct (for load-time defaults).</summary>
-        internal TensorDataStruct InitialModelStateStruct => new(ModelStateDef, _initialStateFields);
+        internal TensorDataStruct InitialModelStateStruct => new(ModelStateDef, InitialStateFields);
 
         /// <summary>The rig's initial optimizer-state values, as a struct (for load-time defaults).</summary>
-        internal TensorDataStruct InitialOptimizerStateStruct => new(OptimizerStateDef, _initialOptStateFields);
+        internal TensorDataStruct InitialOptimizerStateStruct => new(OptimizerStateDef, InitialOptStateFields);
 
         /// <summary>
         /// Builds the TrainingStepPureGraph by composing model + loss + autograd + optimizer.
@@ -1251,6 +1381,11 @@ namespace Shorokoo
             // Build TargetDef from the loss graph's second input (the target tensor).
             // The target is a plain tensor in the training graph (not a TensorStruct), so we
             // synthesize a single-field struct so Fit can accept TensorDataStructs uniformly.
+            //
+            // A loss whose body never reads that input (a forwarder over a model that computes its own
+            // loss) gets no field at all and the rig keeps a placeholder for the dead graph input
+            // instead (Shorokoo/Shorokoo#331). The question is the same reachability one D5 asks of the
+            // optimizer's state-init graph, so it is asked the same way.
             {
                 var lossProdMap = BuildProducerByOutputMap(lossGraph);
                 if (!lossProdMap.TryGetValue(lossGraph.Inputs[1], out var targetProducer))
@@ -1261,9 +1396,18 @@ namespace Shorokoo
                 var targetFieldName = lossGraph.InputUniqueNames.Count > 1
                     ? lossGraph.InputUniqueNames[1] ?? "targets"
                     : "targets";
-                TargetDef = new TensorStructDef(
-                    [new TensorStructFieldDef(targetFieldName, DataStructure.Tensor, targetRank, targetDtype)],
-                    "Targets");
+                if (Shorokoo.Core.Training.TrainingGraphBuilder.LossReadsTarget(lossGraph))
+                {
+                    TargetDef = new TensorStructDef(
+                        [new TensorStructFieldDef(targetFieldName, DataStructure.Tensor, targetRank, targetDtype)],
+                        "Targets");
+                    _ignoredTargetPlaceholder = null;
+                }
+                else
+                {
+                    TargetDef = new TensorStructDef([], "Targets");
+                    _ignoredTargetPlaceholder = IgnoredTargetPlaceholder(targetDtype, targetRank);
+                }
             }
 
             // Step 2: Extract param struct definition from input[2].
@@ -2002,6 +2146,40 @@ namespace Shorokoo
             => TrainStepWith(checkpoint, trainingInput, trainingOutput);
 
         /// <summary>
+        /// Executes a single training step on a rig whose loss reads no target
+        /// (<see cref="HasTargets"/> is <c>false</c>) — a model that computes its own loss under a
+        /// forwarding loss module (Shorokoo/Shorokoo#331). Identical to
+        /// <see cref="TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct)"/> in every
+        /// other respect; the target the composed graph still carries is the rig's to supply, not the
+        /// caller's. Throws when the rig <i>does</i> read a target, since dropping it would silently
+        /// train against something the caller never chose.
+        /// </summary>
+        /// <param name="checkpoint">Current training state (params, model state, optimizer state, step)</param>
+        /// <param name="trainingInput">Training input data as TensorDataStruct</param>
+        /// <returns>The post-step checkpoint (advanced step, updated params/state) with its
+        /// <see cref="TrainingCheckpoint.Loss"/> set to this step's loss.</returns>
+        public TrainingCheckpoint TrainStep(
+            TrainingCheckpoint checkpoint,
+            TensorDataStruct trainingInput)
+        {
+            RequireTargetless(nameof(TrainStep));
+            return TrainStepWith(checkpoint, trainingInput, TargetDef.FromOrderedData());
+        }
+
+        /// <summary>
+        /// Fails loud when <paramref name="operation"/> — a target-free entry point — is called on a rig
+        /// whose loss does read a target, naming the overload that takes one.
+        /// </summary>
+        private void RequireTargetless(string operation)
+        {
+            if (HasTargets)
+                throw new InvalidOperationException(
+                    $"{operation} without targets requires a loss that ignores its target input, but this "
+                    + $"rig's loss reads one (TargetDef: [{string.Join(", ", TargetDef.Fields.Select(f => f.Name))}]). "
+                    + $"Use the {operation} overload that takes a target struct.");
+        }
+
+        /// <summary>
         /// Executes a single training step with explicit hyperparameter values, overriding any
         /// schedules for this step (build the values with <see cref="MakeHyperparameters(float)"/> or
         /// <see cref="MakeHyperparameters(ValueTuple{string, object}[])"/>). Use this for manual control, or
@@ -2360,6 +2538,10 @@ namespace Shorokoo
                 execInputs.Add(Shorokoo.Globals.TensorData(Array.Empty<long>(), CounterValue(checkpoint, counter)));
             execInputs.Add(trainingInput);
             execInputs.Add(trainingOutput);
+            // A loss that ignores its target leaves TargetDef empty, so the struct above contributes
+            // no field — the rig supplies the dead input's value itself (Shorokoo/Shorokoo#331). Target
+            // fields come last in the layout, so it goes here.
+            if (_ignoredTargetPlaceholder is not null) execInputs.Add(_ignoredTargetPlaceholder);
             var expandedInputs = ComputeContext.ExpandStructInputs(execInputs.ToArray());
             var compiled = CompiledTrainStepFor(expandedInputs);
             var stateOutputCount =
@@ -2627,6 +2809,25 @@ namespace Shorokoo
             => Train(initialCheckpoint ?? CreateInitialCheckpoint(), trainingInputs, trainingOutputs, numEpochs);
 
         /// <summary>
+        /// Fits a rig whose loss reads no target (<see cref="HasTargets"/> is <c>false</c>) over
+        /// <paramref name="trainingInputs"/> — the target-free counterpart of
+        /// <see cref="Fit(TensorDataStruct[], TensorDataStruct[], int, TrainingCheckpoint?)"/>
+        /// (Shorokoo/Shorokoo#331), for a model that computes its own loss. Throws when the rig's loss
+        /// does read a target.
+        /// </summary>
+        public TrainingResult Fit(
+            TensorDataStruct[] trainingInputs,
+            int numEpochs,
+            TrainingCheckpoint? initialCheckpoint = null)
+        {
+            RequireTargetless(nameof(Fit));
+            if (trainingInputs is null) throw new ArgumentNullException(nameof(trainingInputs));
+            var noTargets = new TensorDataStruct[trainingInputs.Length];
+            for (var i = 0; i < noTargets.Length; i++) noTargets[i] = TargetDef.FromOrderedData();
+            return Train(initialCheckpoint ?? CreateInitialCheckpoint(), trainingInputs, noTargets, numEpochs);
+        }
+
+        /// <summary>
         /// Fits the model by draining an <see cref="IDataLoader"/> for <paramref name="numEpochs"/>
         /// epochs, advancing the checkpoint's <see cref="TrainingCheckpoint.Step"/>,
         /// <see cref="TrainingCheckpoint.Epoch"/> and <see cref="TrainingCheckpoint.BatchIndex"/> at
@@ -2741,9 +2942,9 @@ namespace Shorokoo
                     "known when the checkpoint is created. Supply explicit initial values via " +
                     "CreateInitialCheckpoint(MakeHyperparameters(...)).");
             return new TrainingCheckpoint(
-                new TensorDataStruct(TrainableParamStructDef, _initialParamFields),
-                new TensorDataStruct(ModelStateDef, _initialStateFields),
-                new TensorDataStruct(OptimizerStateDef, _initialOptStateFields),
+                new TensorDataStruct(TrainableParamStructDef, InitialParamFields),
+                new TensorDataStruct(ModelStateDef, InitialStateFields),
+                new TensorDataStruct(OptimizerStateDef, InitialOptStateFields),
                 rig: this);
         }
 
@@ -2760,11 +2961,12 @@ namespace Shorokoo
             if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
             var optState = OptimizerStateDef.Fields.Length > 0
                 ? ComputeInitialOptStateFields(
-                    ResolveStateInitHyperValues(hyperparameters, throwOnMissingConsumed: true), MergeContext)
-                : _initialOptStateFields;
+                    ResolveStateInitHyperValues(hyperparameters, throwOnMissingConsumed: true),
+                    MergeContext, InitialParamFields)
+                : InitialOptStateFields;
             return new TrainingCheckpoint(
-                new TensorDataStruct(TrainableParamStructDef, _initialParamFields),
-                new TensorDataStruct(ModelStateDef, _initialStateFields),
+                new TensorDataStruct(TrainableParamStructDef, InitialParamFields),
+                new TensorDataStruct(ModelStateDef, InitialStateFields),
                 new TensorDataStruct(OptimizerStateDef, optState),
                 rig: this);
         }
@@ -2813,10 +3015,17 @@ namespace Shorokoo
 
         /// <summary>
         /// Runs the optimizer's split-off state-init graph once per trainable parameter, binding its
-        /// hyperparameter inputs to <paramref name="hyperSeeds"/> (in optimizer order), the parameter's initial
-        /// value, and a zero gradient; returns the initial optimizer-state field values.
+        /// hyperparameter inputs to <paramref name="hyperSeeds"/> (in optimizer order), the parameter's
+        /// value from <paramref name="paramValues"/>, and a zero gradient; returns the initial
+        /// optimizer-state field values.
+        ///
+        /// <para>The parameter values are passed in rather than read off the rig because a deferred
+        /// build has none yet (Shorokoo/Shorokoo#327) and must seed shapes without running the
+        /// initializers: it passes its stand-ins, whose elided payload is substituted for zeros here,
+        /// and <see cref="EnsureInitialValues"/> recomputes these seeds from the real values later.</para>
         /// </summary>
-        private Dictionary<string, IData> ComputeInitialOptStateFields(TensorData[] hyperSeeds, ComputeContext ctx)
+        private Dictionary<string, IData> ComputeInitialOptStateFields(
+            TensorData[] hyperSeeds, ComputeContext ctx, IReadOnlyDictionary<string, IData> paramValues)
         {
             var fields = new Dictionary<string, IData>();
             var stateInitGraph = _optimizerStateInitGraph
@@ -2825,8 +3034,13 @@ namespace Shorokoo
 
             for (var paramIdx = 0; paramIdx < TrainableParamStructDef.Fields.Length; paramIdx++)
             {
-                var paramData = (TensorData)_initialParamFields[TrainableParamStructDef.Fields[paramIdx].Name];
+                var paramData = (TensorData)paramValues[TrainableParamStructDef.Fields[paramIdx].Name];
                 var bytesPerElement = paramData.DType.EncodingBitCount / 8;
+                // A stand-in carries no payload to run an initializer over; zeros of its shape are what
+                // a shape-seeding run needs, and the real values arrive with EnsureInitialValues.
+                if (paramData is WeightPlaceholderTensorData)
+                    paramData = TensorData.CreateFromRawBytes(
+                        paramData.Shape, paramData.DType, new byte[paramData.Shape.Count * bytesPerElement]);
                 var zeroGrad = TensorData.CreateFromRawBytes(
                     paramData.Shape, paramData.DType, new byte[paramData.Shape.Count * bytesPerElement]);
 
@@ -3030,7 +3244,8 @@ namespace Shorokoo
             RngConfig rngConfig,
             ComputeContext mergeContext,
             ComputeContext runtimeContext,
-            BuildProgressReporter? progress = null)
+            BuildProgressReporter? progress = null,
+            bool deferInitialization = false)
         {
             if (concreteArch is null) throw new ArgumentNullException(nameof(concreteArch));
             if (loss is null) throw new ArgumentNullException(nameof(loss));
@@ -3056,7 +3271,8 @@ namespace Shorokoo
             // Not the end of the build: Load still has the checkpoint payload to read, and owns the
             // terminal report accordingly.
             return DeriveFromConcreteArch(
-                constituents, archInternal, mergeContext, runtimeContext, progress, completesBuild: false);
+                constituents, archInternal, mergeContext, runtimeContext, progress,
+                completesBuild: false, deferInitialization);
         }
 
         /// <summary>
@@ -3092,9 +3308,13 @@ namespace Shorokoo
             // build's largest I/O, and a "finished" report ahead of it would be worse than none.
             var reporter = BuildProgressReporter.For(progress);
             reporter?.Report(BuildPhase.Concretize, "ReadCheckpointFile");
+            // The checkpoint below overwrites every value the model's initializers would produce, so
+            // the rebuild does not run them (Shorokoo/Shorokoo#327). They are not lost: a component the
+            // file does not carry still falls back to the rig's initial values, and asking for one runs
+            // the initializers then.
             var rig = Persistence.ReconstructRigFromSkpt(
                 filePath, mergeContext ?? ComputeContext.Default,
-                runtimeContext ?? ComputeContext.Default, reporter);
+                runtimeContext ?? ComputeContext.Default, reporter, deferInitialization: true);
 
             reporter?.Report(BuildPhase.Initialize, "LoadCheckpointState");
             var checkpoint = rig.LoadCheckpointFromSkpt(filePath);
@@ -3212,7 +3432,8 @@ namespace Shorokoo
             InternalComputationGraph concreteArch,
             ComputeContext ctx,
             RngConfig? rngConfig = null,
-            BuildProgressReporter? progress = null)
+            BuildProgressReporter? progress = null,
+            bool deferInitialization = false)
         {
             void Stage(string stage) => progress?.Report(BuildPhase.Initialize, stage);
 
@@ -3234,6 +3455,7 @@ namespace Shorokoo
             // ModelId → TensorData; reindex by our captured order for alignment.
             var trainableModelIds = new List<ModelId>();
             var stateModelIds = new List<ModelId>();
+            var standInById = new Dictionary<ModelId, TensorData>();
             foreach (var node in concreteArch.Nodes)
             {
                 if (node.OpCode != InternalOpCodes.MODEL_PARAM) continue;
@@ -3241,22 +3463,53 @@ namespace Shorokoo
                 var modelId = new ModelId(modelIdVals);
                 var isTrainable = node.Attributes.GetBoolVal(OnnxOpAttributeNames.ShrkAttrIsTrainable) ?? true;
                 (isTrainable ? trainableModelIds : stateModelIds).Add(modelId);
+                // A concrete arch declares every parameter's dtype and shape on the node itself, so a
+                // deferred build has everything the pass below needs without running one initializer
+                // (Shorokoo/Shorokoo#327). The RngSeed parameter at reserved ModelId [0] carries no
+                // weight and FastInitializeModelParams skips it, so it is skipped here too.
+                if (deferInitialization && modelIdVals is not [0])
+                {
+                    var dtype = node.Attributes.GetDTypeVal(OnnxOpAttributeNames.ShrkAttrDtype).AssertNotNull();
+                    var dims = node.Attributes.GetLongsVal(OnnxOpAttributeNames.ShrkAttrShape)
+                        ?? throw new InvalidOperationException(
+                            $"Concrete arch parameter {modelId} declares no shape, so its initialization "
+                            + "cannot be deferred; this arch was not built through the concretization "
+                            + "that records one.");
+                    standInById[modelId] = RepresentativeInputFor(new Shape(dims), dtype);
+                }
             }
-
-            // Pass the concrete param infos so keyed per-parameter init actually engages:
-            // FastInitializeModelParams keys init noise only when BOTH rngConfig and paramInfos
-            // are non-null. Without the infos the rig would silently fall back to unkeyed
-            // seeded init, ignoring the config's master seed / algorithm for the weights.
-            var paramInfos = rngConfig is null ? null : concreteArch.GetConcreteModelParamInfos();
-            Stage("InitializeModelParams");
-            var paramValuesById = Shorokoo.Core.Nodes.Processors.Fast.FastInitializeModelParams.Process(
-                concreteArch, ctx, rngConfig, paramInfos);
 
             if (trainableModelIds.Count != TrainableParamStructDef.Fields.Length)
                 throw new InvalidOperationException(
                     $"Initialized {trainableModelIds.Count} trainable params but expected " +
                     $"{TrainableParamStructDef.Fields.Length}. State: {stateModelIds.Count} vs " +
                     $"expected {ModelStateDef.Fields.Length}.");
+
+            // Pass the concrete param infos so keyed per-parameter init actually engages:
+            // FastInitializeModelParams keys init noise only when BOTH rngConfig and paramInfos
+            // are non-null. Without the infos the rig would silently fall back to unkeyed
+            // seeded init, ignoring the config's master seed / algorithm for the weights.
+            IReadOnlyDictionary<ModelId, TensorData> paramValuesById;
+            if (deferInitialization)
+            {
+                // The run itself is what is deferred, not merely its bookkeeping: nothing below reads
+                // a parameter's value, so the whole per-parameter initializer pass — the largest
+                // single cost in a rig build, and pure waste when a checkpoint is about to overwrite
+                // every value it produces — is left for EnsureInitialValues to run if anything ever
+                // asks (Shorokoo/Shorokoo#327).
+                Stage("DeferModelParamInitialization");
+                paramValuesById = standInById;
+                _deferredInit = new DeferredInitialization(
+                    concreteArch, ctx, rngConfig, [.. trainableModelIds], [.. stateModelIds]);
+            }
+            else
+            {
+                var paramInfos = rngConfig is null ? null : concreteArch.GetConcreteModelParamInfos();
+                Stage("InitializeModelParams");
+                paramValuesById = Shorokoo.Core.Nodes.Processors.Fast.FastInitializeModelParams.Process(
+                    concreteArch, ctx, rngConfig, paramInfos);
+                _deferredInit = null;
+            }
 
             _initialParamFields = new Dictionary<string, IData>();
             for (var i = 0; i < TrainableParamStructDef.Fields.Length; i++)
@@ -3297,7 +3550,7 @@ namespace Shorokoo
                 // the no-arg CreateInitialCheckpoint fails loud on the _stateInitNeedsRuntimeHypers flag.
                 Stage("InitializeOptimizerState");
                 _initialOptStateFields = ComputeInitialOptStateFields(
-                    ResolveStateInitHyperValues(null, throwOnMissingConsumed: false), ctx);
+                    ResolveStateInitHyperValues(null, throwOnMissingConsumed: false), ctx, _initialParamFields);
             }
 
             // Step 2: derive the target tensor's shape from the model's prediction. Reuse

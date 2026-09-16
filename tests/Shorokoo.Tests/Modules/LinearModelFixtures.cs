@@ -1222,3 +1222,28 @@ public partial class ScalarMultiplyWithBatchNormModel
     }
 }
 
+
+/// <summary>A model that computes its own scalar loss, so the rig's loss slot has nothing left to
+/// do (Shorokoo/Shorokoo#331). Pairs with <see cref="ForwardingLoss"/>.</summary>
+[Module]
+public partial class SelfScoringModel
+{
+    public static Scalar<float32> Inline(Tensor<float32> input)
+    {
+        var weight = InitScalarWeight.Init(Globals.Vector(1L));
+        var scaled = input * weight;
+        var squared = (scaled * scaled).Reshape(Globals.Vector(-1L));
+        var reduced = (Tensor<float32>)Shorokoo.Core.Nodes.NodeDefinitions.OnnxOp.ReduceMean(
+            (Shorokoo.Core.Variable)squared, Globals.Vector(0L), keepdims: false);
+        return reduced.Scalar();
+    }
+}
+
+/// <summary>The rig's loss slot for a model that already produced the loss: it forwards the
+/// prediction and never reads its target (Shorokoo/Shorokoo#331).</summary>
+[Module]
+public partial class ForwardingLoss
+{
+    public static Scalar<float32> Inline(Scalar<float32> predictions, Tensor<float32> targets)
+        => predictions;
+}

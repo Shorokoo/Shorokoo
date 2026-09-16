@@ -33,7 +33,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     {
         public static InternalComputationGraph Process(
             InternalComputationGraph graph,
-            ImmutableDictionary<ModelId, TensorData> paramValues)
+            IReadOnlyDictionary<ModelId, TensorData> paramValues)
         {
             var workGraph = graph.Clone();
 

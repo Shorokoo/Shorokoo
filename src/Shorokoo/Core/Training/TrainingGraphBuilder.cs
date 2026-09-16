@@ -306,6 +306,116 @@ public static class TrainingGraphBuilder
     }
 
     /// <summary>
+    /// Composes a weight-bound concrete model with a loss module into a forward-only
+    /// <b>evaluation</b> model: one output, the loss, and inputs <c>[model_inputs…, targets]</c> —
+    /// the model's own inputs, unchanged and unwrapped, plus the loss's target
+    /// (Shorokoo/Shorokoo#329).
+    ///
+    /// <para>This is <see cref="PrepareForTrainingAsFast(InternalComputationGraph, InternalComputationGraph)"/>
+    /// with everything a gradient needs left out. The model's parameters are left exactly as they
+    /// are — already bound, since the caller passes the concrete model — so nothing here lifts them
+    /// into a struct input, differentiates them, replays an optimizer over them, or runs an
+    /// initializer for them. That is the point: computing a validation loss is a forward pass, and
+    /// it should cost one.</para>
+    ///
+    /// <para>A loss whose body never reads its target gets no target input at all
+    /// (Shorokoo/Shorokoo#331): the slot is created so the replay can map it, and then dropped from
+    /// the graph's inputs because nothing reaches it. Read <see cref="EvaluationGraphTakesTarget"/>
+    /// to know which shape a composed evaluation graph has.</para>
+    /// </summary>
+    /// <param name="concreteModel">The model, lowered and weight-bound (its single output is the
+    /// value the loss scores).</param>
+    /// <param name="lossGraph">The loss module graph (2 inputs → 1 scalar output).</param>
+    public static InternalComputationGraph ComposeEvaluationGraph(
+        InternalComputationGraph concreteModel,
+        InternalComputationGraph lossGraph)
+    {
+        if (concreteModel is null) throw new ArgumentNullException(nameof(concreteModel));
+        if (lossGraph is null) throw new ArgumentNullException(nameof(lossGraph));
+        if (lossGraph.Inputs.Count != 2)
+            throw new ArgumentException(
+                $"Loss graph must have exactly 2 inputs (predictions, targets), but has {lossGraph.Inputs.Count}.",
+                nameof(lossGraph));
+        if (lossGraph.Outputs.Count != 1)
+            throw new ArgumentException(
+                $"Loss graph must have exactly 1 output (loss), but has {lossGraph.Outputs.Count}.",
+                nameof(lossGraph));
+
+        var graph = concreteModel.Clone();
+        if (graph.Outputs.Count != 1)
+            throw new ArgumentException(
+                $"Model graph must have exactly 1 output, but has {graph.Outputs.Count}.",
+                nameof(concreteModel));
+        var modelOutputKey = graph.Outputs[0];
+
+        var (lossTargetType, lossTargetRank, lossTargetName) = ResolveFastInputDef(lossGraph, 1);
+        var targetInputNode = Nodes.Processors.Fast.FastInternalOp.RuntimeInput(
+            lossTargetType, lossTargetRank, lossTargetName ?? "targets");
+        graph.Nodes.Add(targetInputNode);
+        var targetInputKey = new FastTensorKey(targetInputNode.Key, 0);
+
+        var lossOutputKey = Nodes.Processors.Fast.FastReplay.ReplayInto(
+            graph, lossGraph, mappedInputs: [modelOutputKey, targetInputKey])[0];
+
+        var takesTarget = LossReadsTarget(lossGraph);
+        if (takesTarget)
+        {
+            graph.Inputs = [.. graph.Inputs, targetInputKey];
+            graph.InputUniqueNames = [.. graph.InputUniqueNames, lossTargetName ?? "targets"];
+        }
+        graph.Outputs = [lossOutputKey];
+        graph.OutputUniqueNames = [null];
+        graph.OutputRankOverrides = null;
+
+        Nodes.Processors.Fast.FastProcessorHelper.RemoveUnreachableNodes(graph);
+
+        // The target input was appended at the tail for convenience; every node reading it is already
+        // behind it in the body, so move it ahead of the body as the training composition does with
+        // the input-style nodes it adds.
+        if (takesTarget)
+        {
+            var body = graph.Nodes.Where(n => n.Key != targetInputNode.Key).ToList();
+            var reordered = new List<FastNode>(graph.Nodes.Count) { targetInputNode };
+            reordered.AddRange(body);
+            graph.Nodes = reordered;
+        }
+        System.Diagnostics.Debug.Assert(graph.TryValidateLinearOrder(out var orderError),
+            "evaluation graph.IsLinearOrderValid(): " + orderError);
+        return graph;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="lossGraph"/>'s target input (index 1) is reachable from its output —
+    /// i.e. whether the loss body reads the target at all (Shorokoo/Shorokoo#331).
+    /// </summary>
+    public static bool LossReadsTarget(InternalComputationGraph lossGraph)
+    {
+        if (lossGraph is null) throw new ArgumentNullException(nameof(lossGraph));
+        if (lossGraph.Inputs.Count < 2) return false;
+        var producerByOutput = BuildProducerByOutputMap(lossGraph);
+        var reached = new HashSet<FastTensorKey>();
+        var queue = new Queue<FastTensorKey>(lossGraph.Outputs);
+        while (queue.Count > 0)
+        {
+            var key = queue.Dequeue();
+            if (key.IsEmpty || !reached.Add(key)) continue;
+            if (producerByOutput.TryGetValue(key, out var node))
+                foreach (var (_, slots) in node.FullInputs)
+                    foreach (var s in slots)
+                        if (s is FastTensorKey ik && !ik.IsEmpty) queue.Enqueue(ik);
+        }
+        return reached.Contains(lossGraph.Inputs[1]);
+    }
+
+    /// <summary>
+    /// Whether an evaluation graph composed from <paramref name="lossGraph"/> takes a target input —
+    /// the same question <see cref="LossReadsTarget"/> answers, named for the caller that is asking
+    /// what to feed <see cref="ComposeEvaluationGraph"/>'s result.
+    /// </summary>
+    public static bool EvaluationGraphTakesTarget(InternalComputationGraph lossGraph)
+        => LossReadsTarget(lossGraph);
+
+    /// <summary>
     /// The data structure <paramref name="inputProducer"/> hands the model, read off the input op
     /// itself — a tensor, an optional or a sequence. Every input op the lowering can leave in a
     /// concrete architecture is named; anything else is a lowering fault, not an input the rig can

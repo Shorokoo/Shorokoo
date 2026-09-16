@@ -711,6 +711,64 @@ public class TrainingRigRepresentativeInputCoverageTests
 [Trait("Purpose", "Coverage")]
 public class TrainingRigCompositionCoverageTests
 {
+    private static TrainingRig SelfScoringRig() => TrainingRig.FromScratch(
+        SelfScoringModel.ComputationGraph, ForwardingLoss.ComputationGraph, SGDOptimizer.ComputationGraph,
+        [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([4L], [1f, 2f, 3f, 4f]))],
+        0.1f);
+
+    [Fact]
+    public void TestALossThatIgnoresItsTargetDerivesNoTargetFieldAndStepsWithoutOneCoverage()
+    {
+        var rig = SelfScoringRig();
+        Assert.False(rig.HasTargets);
+        Assert.Empty(rig.TargetDef.Fields);
+
+        var inputs = rig.InputDef.FromOrderedData(TensorData([4L], [1f, 2f, 3f, 4f]));
+        var start = rig.CreateInitialCheckpoint();
+        var stepped = rig.TrainStep(start, inputs);
+        Assert.Equal(1, stepped.Step);
+        Assert.True(stepped.Loss > 0f);
+        Assert.True(rig.TrainStep(stepped, inputs).Loss < stepped.Loss);
+
+        Assert.Equal(
+            FlattenStruct(rig.TrainStep(start, inputs).TrainableParams),
+            FlattenStruct(rig.TrainStep(start, inputs, rig.TargetDef.FromOrderedData()).TrainableParams));
+
+        var fitted = rig.Fit([inputs, inputs], numEpochs: 3);
+        Assert.Equal(3, fitted.EpochLosses.Length);
+        Assert.True(fitted.EpochLosses[^1] < fitted.EpochLosses[0]);
+        Assert.Equal(6, fitted.FinalCheckpoint.Step);
+
+        var targeted = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            ScalarMultiplyBatches().sample, 0.1f);
+        Assert.True(targeted.HasTargets);
+        Assert.Throws<InvalidOperationException>(
+            () => targeted.TrainStep(targeted.CreateInitialCheckpoint(), InBatch(1f, 2f, 3f, 4f)));
+        Assert.Throws<InvalidOperationException>(() => targeted.Fit([InBatch(1f, 2f, 3f, 4f)], numEpochs: 1));
+    }
+
+    [Fact]
+    public void TestAnIgnoredTargetIsAbsentFromTheCheckpointsEvaluationModelTooCoverage()
+    {
+        var rig = SelfScoringRig();
+        var inputs = rig.InputDef.FromOrderedData(TensorData([4L], [1f, 2f, 3f, 4f]));
+        var ckpt = rig.TrainStep(rig.CreateInitialCheckpoint(), inputs);
+        var expected = rig.TrainStep(ckpt, inputs).Loss!.Value;
+        var path = TempPath("skpt_notarget") + ".skpt";
+        try
+        {
+            Persistence.SaveTrainingCheckpointToSkpt(ckpt, path);
+            Assert.False(Persistence.EvaluationModelTakesTarget(path));
+            var eval = Persistence.LoadEvaluationModel(path);
+            Assert.Equal(GraphKind.ConcreteModel, eval.Kind);
+            var loss = ComputeContext.Default
+                .Execute(eval, TensorData([4L], [1f, 2f, 3f, 4f]))[0].ToTensorData<float32>().ValueAt<float>(0);
+            Assert.Equal((double)expected, loss, 5);
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
     [Fact]
     public void TestFromScratchGraphKindsAndConvenienceApisCoverage()
     {
@@ -3322,6 +3380,98 @@ public class TrainingRigSkptCheckpointCoverageTests
             if (File.Exists(packedPath)) File.Delete(packedPath);
         }
     }
+
+    [Fact]
+    public void TestEvaluationModelLoadsFromASkptWithNoRigAndScoresWhatTheRigWouldCoverage()
+    {
+        var (rig, ckpt, inBatch, outBatch) = BuildTrainedAdamWRig(steps: 2);
+        var expected = rig.TrainStep(ckpt, inBatch, outBatch).Loss!.Value;
+        var path = TempPath("skpt_eval") + ".skpt";
+        var dirPath = TempPath("skpt_eval_dir") + ".skpt";
+        try
+        {
+            Persistence.SaveTrainingCheckpointToSkpt(ckpt, path);
+            Persistence.ForTrainingCheckpoint(ckpt).SaveAsDirectory(dirPath);
+
+            Assert.True(Persistence.EvaluationModelTakesTarget(path));
+            var eval = Persistence.LoadEvaluationModel(path);
+            Assert.Equal(GraphKind.ConcreteModel, eval.Kind);
+            Assert.Equal((double)expected, EvalLoss(eval, [1f, 2f, 3f, 4f], [2f, 4f, 6f, 8f]), 5);
+            Assert.Equal((double)expected, EvalLoss(Persistence.LoadEvaluationModel(dirPath), [1f, 2f, 3f, 4f], [2f, 4f, 6f, 8f]), 5);
+
+            Assert.Equal(GraphKind.ConcreteModel, Persistence.Load(path).Kind);
+            Assert.Throws<InvalidDataException>(() => Persistence.LoadEvaluationModel(path, "nope"));
+            Assert.Throws<ArgumentException>(() => Persistence.LoadEvaluationModel(""));
+
+            var flat = TempPath("flat_eval") + ".safetensors";
+            try
+            {
+                ckpt.Save(flat);
+                Assert.Throws<InvalidDataException>(() => Persistence.LoadEvaluationModel(flat));
+                Assert.Throws<InvalidDataException>(() => Persistence.EvaluationModelTakesTarget(flat));
+                Assert.Contains("LoadEvaluationModel",
+                    Assert.Throws<InvalidOperationException>(
+                        () => Persistence.LoadTrainingCheckpoint(flat).ToInferenceModel()).Message);
+            }
+            finally { if (File.Exists(flat)) File.Delete(flat); }
+
+            var inferenceOnly = TempPath("inf_eval") + ".skpt";
+            try
+            {
+                Persistence.From(ckpt.ToInferenceModel()).WithModel().WithWeights().Save(inferenceOnly);
+                Assert.Throws<InvalidDataException>(() => Persistence.LoadEvaluationModel(inferenceOnly));
+            }
+            finally { if (File.Exists(inferenceOnly)) File.Delete(inferenceOnly); }
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+            if (Directory.Exists(dirPath)) Directory.Delete(dirPath, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void TestLoadDefersTheInitializersItsCheckpointOverwritesAndStillProducesThemOnDemandCoverage()
+    {
+        var (rig, ckpt, inBatch, outBatch) = BuildTrainedAdamWRig(steps: 2);
+        var reference = rig.TrainStep(ckpt, inBatch, outBatch);
+        var eagerInitial = rig.CreateInitialCheckpoint();
+        var path = TempPath("skpt_defer") + ".skpt";
+        try
+        {
+            Persistence.SaveTrainingCheckpointToSkpt(ckpt, path);
+            var (loadedRig, loaded) = TrainingRig.Load(path);
+
+            Assert.Equal(2, loaded.Step);
+            Assert.Equal(FlattenStruct(ckpt.TrainableParams), FlattenStruct(loaded.TrainableParams));
+            Assert.Equal(FlattenStruct(ckpt.OptimizerState), FlattenStruct(loaded.OptimizerState));
+
+            var resumed = loadedRig.TrainStep(loaded, inBatch, outBatch);
+            Assert.Equal(FlattenStruct(reference.TrainableParams), FlattenStruct(resumed.TrainableParams));
+            Assert.Equal(FlattenStruct(reference.OptimizerState), FlattenStruct(resumed.OptimizerState));
+            Assert.Equal(reference.Loss!.Value, resumed.Loss!.Value);
+
+            var deferredInitial = loadedRig.CreateInitialCheckpoint();
+            Assert.Equal(FlattenStruct(eagerInitial.TrainableParams), FlattenStruct(deferredInitial.TrainableParams));
+            Assert.Equal(FlattenStruct(eagerInitial.ModelState), FlattenStruct(deferredInitial.ModelState));
+            Assert.Equal(FlattenStruct(eagerInitial.OptimizerState), FlattenStruct(deferredInitial.OptimizerState));
+            Assert.Equal(FlattenStruct(eagerInitial.TrainableParams), FlattenStruct(loadedRig.CreateInitialCheckpoint().TrainableParams));
+
+            var weightsOnly = loadedRig.LoadCheckpointFromSkpt(path, CheckpointComponents.InferenceState);
+            Assert.Equal(FlattenStruct(ckpt.TrainableParams), FlattenStruct(weightsOnly.TrainableParams));
+            Assert.Equal(FlattenStruct(eagerInitial.OptimizerState), FlattenStruct(weightsOnly.OptimizerState));
+            Assert.Equal(0, weightsOnly.Step);
+
+            Assert.NotNull(loadedRig.AdoptCheckpoint(ckpt).Rig);
+            Assert.NotNull(loaded.ToInferenceModel());
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
+    private static float EvalLoss(ComputationGraph evaluationModel, float[] inputs, float[] targets)
+        => ComputeContext.Default
+            .Execute(evaluationModel, TensorData([(long)inputs.Length], inputs), TensorData([(long)targets.Length], targets))[0]
+            .ToTensorData<float32>().ValueAt<float>(0);
 }
 
 [Trait("Domain", "Training")]

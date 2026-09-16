@@ -1885,6 +1885,34 @@ public class TrainingRigCheckpointCoverageTests
         Assert.NotNull(cp);
     }
 
+    /// <summary>The backoff asks whether the checkpoint it handed back at the last reclamation
+    /// survived this collection, and reads "yes" as the caller keeping its checkpoints. But that
+    /// checkpoint is what the caller feeds back in as the next step's input, so it is rooted as a
+    /// live argument whenever reclamation fires on consecutive steps — for a caller that keeps
+    /// nothing exactly as much as for one that keeps everything. The budget therefore doubles away
+    /// from its base for the drop-everything loop the training guide endorses, withholding the
+    /// collections that loop exists to get, until it has grown enough to skip steps and the
+    /// reference finally goes stale. Tracked as Shorokoo/Shorokoo#348.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#348: the reclamation backoff doubles the budget for a caller that keeps no checkpoints, because the watched checkpoint is the next step's own input")]
+    public void TestReclamationDoesNotBackOffForACallerThatKeepsNoCheckpointAtAll()
+    {
+        var rig = ShapeRig(ParamOrderAModel.ComputationGraph);
+        var input = rig.InputDef.FromOrderedData(TensorData([4L], [1f, 2f, 3f, 4f]));
+        var target = rig.TargetDef.FromOrderedData(TensorData([4L], [1f, 2f, 3f, 4f]));
+        rig.SetReclaimBudgetForTests(1);
+
+        var cp = rig.CreateInitialCheckpoint();
+        long worst = 0;
+        for (int i = 0; i < 12; i++)
+        {
+            cp = rig.TrainStep(cp, input, target);
+            worst = Math.Max(worst, rig.ReclaimBudgetBytes);
+        }
+
+        Assert.NotNull(cp);
+        Assert.Equal(1, worst);
+    }
+
     /// <summary>Parameter names are the initializer class plus a trace-order index, so two models
     /// that differ only in the order of their initializer calls produce the same names for
     /// different roles, and a checkpoint crosses from one into the other carrying every tensor to

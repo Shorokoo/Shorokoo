@@ -399,6 +399,24 @@ public class CoreUtilsCoverageTests
         Assert.Matches(@"AddRunConfigEntry\s*\(", session);
     }
 
+    /// <summary>Two shapes the span-rooting guard lets through. A span passed into a call inside a
+    /// returned expression is exempted by the "handed straight back to the caller" rule, though the
+    /// caller never sees the span; and a mention of the same identifier in any later member of the
+    /// same type satisfies the widening search, so `data`, `value` or `t` is rooted by an unrelated
+    /// method further down the file. <c>Persistence.ContentKey</c> is an instance of the first that
+    /// is in the tree today, safe only because its callers happen to hold the tensor.
+    /// Tracked as Shorokoo/Shorokoo#349.</summary>
+    [Fact(Skip = "Shorokoo/Shorokoo#349: the span-rooting guard's return and widening exemptions let an unrooted span through")]
+    public void TestTheSpanGuardCatchesASpanConsumedInsideAReturnOrRootedByAnotherMember()
+    {
+        Assert.NotEmpty(SpansUsedWithoutKeepingTheTensorAlive(
+            "class C { string K(TensorData data) => Hex(data.AccessRawMemory()); }"));
+        Assert.NotEmpty(SpansUsedWithoutKeepingTheTensorAlive(
+            "class C { string K(TensorData data) { return Hex(data.AccessRawMemory()).Trim(); } }"));
+        Assert.NotEmpty(SpansUsedWithoutKeepingTheTensorAlive(
+            "class C { void K(TensorData data) { Use(data.AccessRawMemory(), 1); } void Other() { Log(data); } }"));
+    }
+
     /// <summary>
     /// No filter in <c>release.yml</c> selects a <c>Purpose=Benchmark</c> class implicitly — each
     /// needs a step naming it, and each must precede the <c>Purpose=Gate</c> step, whose MSBuild

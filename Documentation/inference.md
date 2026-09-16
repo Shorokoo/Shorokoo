@@ -491,7 +491,10 @@ DeviceMemory.ShrinkArenaAfterRun = true;                          // hand unused
 
 The other two are unset by default for their own reasons. `ShrinkArenaAfterRun` costs a
 synchronizing device allocation on every step to re-take what it handed back, so it is worth it
-only when the card is shared with something that needs the room between steps. `LimitBytes` is a
+only when the card is shared with something that needs the room between steps. It is also the one
+setting that can fail a run rather than degrade it: ORT rejects the request where the device it
+names has no arena allocator registered — an arena disabled through `ORT_DISABLE_ARENA`, say — so
+turn it on with a short run before a long one. `LimitBytes` is a
 budget, not a hint: a step that needs more than it fails with ORT's `BFCArena ... Failed to
 allocate memory for requested buffer` rather than eating the rest of the device, so a figure set
 too low fails a run that would have fitted.

@@ -2064,8 +2064,11 @@ public class TrainingRigCheckpointCoverageTests
         long worstKeepingOne = 0;
         for (int i = 0; i < 12; i++)
         {
-            current = keepsOne.TrainStep(current, input, target);
-            best = current;
+            var previous = current;
+            current = keepsOne.TrainStep(previous, input, target);
+            // One checkpoint held that is not the one being fed back in, which is what "the best so
+            // far" is: every third step improves, and the rest are superseded and freed.
+            if (i % 3 == 0) best = previous;
             worstKeepingOne = Math.Max(worstKeepingOne, keepsOne.ReclaimBudgetBytes);
         }
         Assert.NotNull(best);

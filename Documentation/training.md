@@ -557,7 +557,9 @@ The rig backs off when a collection turns out to free nothing — a caller that 
 buys nothing from one — by watching weakly what it handed back and seeing whether a later collection
 took it. What it judges is deliberately two reclamations old: the checkpoint from the last one is
 what you feed in as the next step's input, so it is alive at the moment of the collection whatever
-you do with it. A resident run does not go through any of this; it releases its state itself.
+you do with it. A resident run's retained steps do not go through any of this — the run releases
+that state itself — but its `StepToCheckpoint` steps bring state home for you to keep, so those are
+reclaimed like any other.
 
 If you **keep** your checkpoints — holding the best so far, or comparing a step against the one
 before it — then nothing is superseded and a collection would reclaim nothing. The rig notices:

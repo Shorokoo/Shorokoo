@@ -33,7 +33,16 @@ namespace Shorokoo
 
             static IEnumerator<TensorData> Widen(IEnumerator<TensorData<T>> inner)
             {
-                while (inner.MoveNext()) yield return inner.Current;
+                // The `foreach` this replaced disposed the inner enumerator; a bare while loop
+                // would not, on a full drain or an early one.
+                try
+                {
+                    while (inner.MoveNext()) yield return inner.Current;
+                }
+                finally
+                {
+                    inner.Dispose();
+                }
             }
         }
 

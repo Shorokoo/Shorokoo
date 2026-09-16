@@ -26,8 +26,17 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
     // Pinned host memory ("CudaPinned") is readable too, but nothing here ever asks for it,
     // so the narrow test is the safe one: an unrecognized allocator reads as device memory
     // and is copied rather than dereferenced. A value never moves, so this is asked once.
-    public bool IsHostAccessible => _isHostAccessible ??=
-        Inner.IsTensor && Inner.GetTensorMemoryInfo().Name == CpuAllocatorName;
+    public bool IsHostAccessible => _isHostAccessible ??= ProbeHostAccessible();
+
+    private bool ProbeHostAccessible()
+    {
+        if (!Inner.IsTensor) return false;
+        // Disposed, not abandoned: OrtMemoryInfo is a SafeHandle, so leaving one to its finalizer
+        // puts an object on the finalization queue for every tensor anyone reads -- the cost
+        // OnnxTensorData deliberately refuses to pay by having no finalizer of its own.
+        using var info = Inner.GetTensorMemoryInfo();
+        return info.Name == CpuAllocatorName;
+    }
 
     private bool? _isHostAccessible;
 
@@ -41,11 +50,17 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
     /// <c>OnnxUtils.CopyTensorValue</c> never passes that wrapper's guard.</summary>
     private void ThrowIfNotHostAccessible()
     {
-        if (!IsHostAccessible)
+        if (IsHostAccessible) return;
+        // Two different failures share this guard; saying the wrong one sends the reader looking
+        // for a resident run that does not exist.
+        if (!Inner.IsTensor)
             throw new InvalidOperationException(
-                "This value's storage is the execution provider's own memory, not host memory, so "
-                + "it cannot be read directly. A resident training run leaves its state there "
-                + "deliberately; ResidentTrainingRun.StepToCheckpoint is what brings it home.");
+                $"This value holds a {Inner.OnnxType}, not a tensor, so it has no element buffer "
+                + "to read. Read a sequence through its elements instead.");
+        throw new InvalidOperationException(
+            "This value's storage is the execution provider's own memory, not host memory, so "
+            + "it cannot be read directly. A resident training run leaves its state there "
+            + "deliberately; ResidentTrainingRun.StepToCheckpoint is what brings it home.");
     }
 
     public ReadOnlySpan<T> GetTensorDataAsSpan<T>() where T : unmanaged

@@ -420,6 +420,14 @@ public class CoreUtilsCoverageTests
             "class C { string K(TensorData data) { return Hex(data.AccessRawMemory()).Trim(); } }"));
         Assert.NotEmpty(SpansUsedWithoutKeepingTheTensorAlive(
             "class C { void K(TensorData data) { Use(data.AccessRawMemory(), 1); } void Other() { Log(data); } }"));
+        // An expression-bodied member has no braces to bound the search, which is the form the
+        // instance in the tree had.
+        Assert.NotEmpty(SpansUsedWithoutKeepingTheTensorAlive(
+            "class C { string K(TensorData d) => Hex(d.AccessRawMemory()).Trim(); void O() { var d = 1; } }"));
+        // ...and a generic constraint ending in `class` is not a type header, so it must not cut
+        // the search short and flag a rooted read.
+        Assert.Empty(SpansUsedWithoutKeepingTheTensorAlive(
+            "class C { void M<T>(TensorData t) where T : class { if (c) { var d = t.AccessRawMemory(); b.CopyTo(d); } GC.KeepAlive(t); } }"));
     }
 
     /// <summary>
@@ -531,10 +539,10 @@ public class CoreUtilsCoverageTests
             // Handed straight back to the caller, who owns the lifetime from there. The span has to
             // BE what is returned: `return Hex(t.AccessRawMemory());` consumes it inside a call and
             // hands back something else, leaving the tensor retired at the read -- the bug, not the
-            // exemption. What tells the two apart is an unclosed `(` between the `return`/`=>` and
-            // the span; the receiver expression in between (`d.`, `run[0].ToTensorData().`) is not
-            // one.
-            if (Regex.IsMatch(after, @"^\s*;") && ReturnedDirectly(before))
+            // exemption. Requiring `;` immediately after the span is what separates them, since a
+            // call around it closes with `)` first; the `return`/`=>` test only establishes that
+            // this is a return at all.
+            if (Regex.IsMatch(after, @"^\s*;") && Regex.IsMatch(before, @"(\breturn\b|=>)[^;{}]*$"))
                 continue;
             var receiver = ReceiverRoot.Match(before.TrimEnd());
             if (!receiver.Success) continue;
@@ -587,26 +595,36 @@ public class CoreUtilsCoverageTests
         foreach (var open in opens)
         {
             var header = code[Math.Max(0, open - 240)..open];
-            if (Regex.IsMatch(header, @"\b(class|struct|record|interface|enum|namespace)\b[^;{}]*$"))
-                break;
+            if (OpensATypeBody(header)) break;
             memberOpen = open;
         }
-        return memberOpen < 0 ? code.Length : BlockEndFrom(code, memberOpen + 1);
+        // No enclosing block below the type means an expression-bodied member, which has no braces
+        // to bound it. Its statement does: widening past the `;` would reach the whole rest of the
+        // file, which is the unbounded search this limit exists to stop.
+        return memberOpen < 0
+            ? StatementEndFrom(code, from)
+            : BlockEndFrom(code, memberOpen + 1);
     }
 
-    /// <summary>Whether the text from the statement's `return` or `=&gt;` to the span leaves no call
-    /// open — i.e. the span is the returned expression rather than an argument inside one.</summary>
-    private static bool ReturnedDirectly(string before)
+    /// <summary>Whether a block's header text opens a type body. A real one names the type, which
+    /// is what keeps a generic constraint — <c>where T : class</c>, ending in the same keyword —
+    /// from reading as one and cutting a method's limit short.</summary>
+    private static bool OpensATypeBody(string header) =>
+        Regex.IsMatch(header, @"\b(class|struct|record|interface|enum|namespace)\s+\w[^;{}]*$");
+
+    /// <summary>Index just past the `;` ending the statement containing <paramref name="from"/>,
+    /// ignoring any inside nested brackets so a lambda body does not end it early.</summary>
+    private static int StatementEndFrom(string code, int from)
     {
-        var start = Regex.Match(before, @"(\breturn\b|=>)(?!.*(\breturn\b|=>))", RegexOptions.Singleline);
-        if (!start.Success) return false;
         int depth = 0;
-        foreach (var c in before[(start.Index + start.Length)..])
+        for (int i = from; i < code.Length; i++)
         {
-            if (c == '(') depth++;
-            else if (c == ')') depth--;
+            char c = code[i];
+            if (c is '(' or '[' or '{') depth++;
+            else if (c is ')' or ']' or '}') depth--;
+            else if (c == ';' && depth <= 0) return i + 1;
         }
-        return depth == 0;
+        return code.Length;
     }
 
     /// <summary>Index just inside the opening brace of the block containing <paramref name="index"/>.</summary>
@@ -648,7 +666,7 @@ public class CoreUtilsCoverageTests
         int open = MatchingOpen(code, closeEnd - 1);
         if (open < 0) return true;
         var header = code[Math.Max(0, open - 240)..open];
-        return Regex.IsMatch(header, @"\b(class|struct|record|interface|enum|namespace)\b[^;{}]*$");
+        return OpensATypeBody(header);
     }
 
     private static int MatchingOpen(string code, int closeIndex)

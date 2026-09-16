@@ -90,8 +90,20 @@ internal sealed class OrtInferenceSession : IShorokooInferenceSession
         // order they were bound in -- ask it rather than assume, and hand them back in the order
         // the caller named.
         var boundNames = binding.GetOutputNames();
+        // Nothing owns these values until each is wrapped and handed to a TensorData, and the
+        // collection is deliberately not disposed, so anything that goes wrong between here and the
+        // return leaks a device allocation apiece. Establish the shape first, and dispose the lot
+        // if it is not what it must be.
+        if (boundNames.Length != results.Count || results.Count != outputNames.Count)
+        {
+            foreach (var value in results) value.Dispose();
+            throw new InvalidOperationException(
+                $"The run bound {boundNames.Length} outputs and returned {results.Count} values for "
+                + $"{outputNames.Count} requested names; they must agree one for one.");
+        }
+
         var byName = new Dictionary<string, OrtValue>(results.Count);
-        for (int i = 0; i < boundNames.Length && i < results.Count; i++)
+        for (int i = 0; i < boundNames.Length; i++)
             byName[boundNames[i]] = results[i];
 
         var wrapped = new List<IShorokooTensorValue>(outputNames.Count);
@@ -117,8 +129,10 @@ internal sealed class OrtInferenceSession : IShorokooInferenceSession
                 return new OrtMemoryInfo(info.Name, info.GetAllocatorType(), info.Id, info.GetMemoryType());
             }
         }
-        catch (OnnxRuntimeException) { }
-        catch (EntryPointNotFoundException) { }
+        // Catching broadly is the point: the doc above promises a failed probe costs the retention
+        // and nothing else, and Lazy caches an escaping exception and rethrows it on every later
+        // access -- which would fail every run of this session rather than fall back to the host.
+        catch (Exception) { }
         return null;
     }
 

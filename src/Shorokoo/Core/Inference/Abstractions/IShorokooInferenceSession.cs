@@ -14,7 +14,11 @@ public interface IShorokooInferenceSession : IDisposable
     // Whether this session's execution provider produces its outputs somewhere other than
     // host memory -- true for a GPU provider, false for a CPU one. When it is false
     // RunRetainingOutputs has nothing to retain and behaves exactly like Run.
-    bool HasDeviceMemory { get; }
+    //
+    // Defaulted so that a backend outside this repository keeps compiling when this interface
+    // grows: a backend that does not answer is one that produces everything on the host, and the
+    // default below follows from that rather than papering over it.
+    bool HasDeviceMemory => false;
 
     // Runs the session leaving the outputs named in retainedOutputNames in the execution
     // provider's own memory instead of fetching them back to the host, so they can be fed
@@ -27,5 +31,5 @@ public interface IShorokooInferenceSession : IDisposable
     IReadOnlyList<IShorokooTensorValue> RunRetainingOutputs(
         IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
         IReadOnlyList<string> outputNames,
-        IReadOnlySet<string> retainedOutputNames);
+        IReadOnlySet<string> retainedOutputNames) => Run(inputs, outputNames);
 }

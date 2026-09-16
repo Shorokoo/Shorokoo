@@ -2176,14 +2176,13 @@ namespace Shorokoo
             System.Threading.Interlocked.Exchange(ref _reclaimBudgetBytes, bytes);
         }
 
-        /// <summary>The checkpoints produced at the last two reclamations, watched weakly. Whether
-        /// the older survived is what says if the caller is keeping its checkpoints — see
-        /// <see cref="ReclaimSupersededState"/> for why the older and not the last.</summary>
-        private WeakReference<TrainingCheckpoint>? _watched;
-        private WeakReference<TrainingCheckpoint>? _watchedOlder;
+        /// <summary>The checkpoints produced at the last few reclamations, watched weakly, newest
+        /// first. Whether they all survived is what says the caller is keeping its checkpoints —
+        /// see <see cref="ReclaimSupersededState"/> for why all of them, and why not the newest.</summary>
+        private readonly WeakReference<TrainingCheckpoint>?[] _watches = new WeakReference<TrainingCheckpoint>?[4];
 
-        /// <summary>Guards the backoff's read-modify-write. The counter above is atomic on its own,
-        /// but the watches and the budget are three fields decided together.</summary>
+        /// <summary>Guards a reclamation end to end — the threshold, the collection and the verdict
+        /// are one decision, and two threads making it at once would judge each other's watches.</summary>
         private readonly object _reclaimGate = new();
 
         /// <summary>
@@ -2229,15 +2228,17 @@ namespace Shorokoo
         /// <see cref="MaxReclaimBudgetBytes"/>, snapping back the moment a watched checkpoint does
         /// not survive.</para>
         ///
-        /// <para><b>Which watch is judged matters, and judging the most recent one does not work.</b>
-        /// The checkpoint handed back at the last reclamation is exactly what the caller feeds in as
-        /// the next step's input, so while reclamations fall on consecutive steps it is rooted as a
-        /// live argument of the very call doing the collecting — and survives whether or not the
-        /// caller keeps anything. Measured before this was fixed, the budget doubled identically for
-        /// a caller that kept every checkpoint and one that kept none
-        /// (Shorokoo/Shorokoo#348). The watch judged here is therefore the one before it: two
-        /// reclamations old, so neither this step's input nor its output, and alive only if the
-        /// caller really is holding on.</para>
+        /// <para><b>Which watches are judged matters, and judging one recent checkpoint does not
+        /// work.</b> The checkpoint handed back at the last reclamation is exactly what the caller
+        /// feeds in as the next step's input, so while reclamations fall on consecutive steps it is
+        /// rooted as a live argument of the very call doing the collecting, and survives whether or
+        /// not the caller keeps anything — measured, the budget doubled identically for a caller
+        /// that kept every checkpoint and one that kept none (Shorokoo/Shorokoo#348). So the newest
+        /// watch is never judged. Nor is one older watch enough: a caller holding a single
+        /// checkpoint — the best so far — supersedes all the rest, so collecting is still worth
+        /// doing, but that one checkpoint surfacing as the watch would read as keeping them all.
+        /// The question is therefore asked of a population: the budget doubles only when <b>every</b>
+        /// older watch survived, which one retained checkpoint among several cannot produce.</para>
         ///
         /// <para>A tensor owns its storage and releases it when disposed, so a caller who wants
         /// determinism has it; what the rig cannot do is dispose the checkpoint it was handed,
@@ -2246,26 +2247,43 @@ namespace Shorokoo
         /// </summary>
         private void ReclaimSupersededState(long stepBytes, TrainingCheckpoint produced)
         {
-            long budget = System.Threading.Interlocked.Read(ref _reclaimBudgetBytes);
-            if (System.Threading.Interlocked.Add(ref _supersededStateBytes, stepBytes) < budget) return;
-            // Subtract the budget rather than zeroing: another step's bytes may have landed in
-            // between, and zeroing would drop them.
-            System.Threading.Interlocked.Add(ref _supersededStateBytes, -budget);
+            if (System.Threading.Interlocked.Add(ref _supersededStateBytes, stepBytes)
+                < System.Threading.Interlocked.Read(ref _reclaimBudgetBytes)) return;
 
-            GC.Collect(2, GCCollectionMode.Forced, blocking: true);
-            GC.WaitForPendingFinalizers();
-
+            // The whole sequence, not just the update: two threads crossing the threshold together
+            // would otherwise both collect, and the second would judge watches the first had already
+            // rotated -- a caller that keeps nothing seeing the budget double, which is the shape
+            // #348 was. Collecting under the gate is safe because nothing finalizable takes it.
             lock (_reclaimGate)
             {
-                // Did a checkpoint we handed back two reclamations ago survive this collection? If
+                long budget = System.Threading.Interlocked.Read(ref _reclaimBudgetBytes);
+                if (System.Threading.Interlocked.Read(ref _supersededStateBytes) < budget) return;
+                // Subtract the budget rather than zeroing: another step's bytes may have landed in
+                // between, and zeroing would drop them.
+                System.Threading.Interlocked.Add(ref _supersededStateBytes, -budget);
+
+                GC.Collect(2, GCCollectionMode.Forced, blocking: true);
+                GC.WaitForPendingFinalizers();
+
+                // Did every checkpoint we handed back, bar the newest, survive this collection? If
                 // so the caller is holding its checkpoints, this collection freed nothing, and the
-                // next one would not either.
-                bool retained = _watchedOlder is not null && _watchedOlder.TryGetTarget(out _);
-                _watchedOlder = _watched;
-                _watched = new WeakReference<TrainingCheckpoint>(produced);
+                // next one would not either. The newest is skipped because it is this step's own
+                // input; two survivors are the fewest that distinguish keeping them all from
+                // keeping one.
+                int judged = 0, survived = 0;
+                for (int i = 1; i < _watches.Length; i++)
+                {
+                    if (_watches[i] is not { } watch) continue;
+                    judged++;
+                    if (watch.TryGetTarget(out _)) survived++;
+                }
+                bool retained = judged >= 2 && survived == judged;
+
+                for (int i = _watches.Length - 1; i > 0; i--) _watches[i] = _watches[i - 1];
+                _watches[0] = new WeakReference<TrainingCheckpoint>(produced);
+
                 System.Threading.Interlocked.Exchange(ref _reclaimBudgetBytes,
-                    retained ? Math.Min(System.Threading.Interlocked.Read(ref _reclaimBudgetBytes) * 2,
-                                        MaxReclaimBudgetBytes)
+                    retained ? Math.Min(budget * 2, MaxReclaimBudgetBytes)
                              : System.Threading.Interlocked.Read(ref _baseReclaimBudgetBytes));
             }
         }
@@ -2523,6 +2541,10 @@ namespace Shorokoo
                 {
                     case TensorData tensor: tensor.Dispose(); break;
                     case TensorDataStruct nested: ReleaseStructFields(nested); break;
+                    // Conservative is harmless where the budget counts and wrong here: this is the
+                    // one place that frees, so a kind it does not know is state nobody releases.
+                    default: throw new NotSupportedException(
+                        $"Cannot release checkpoint state field of type {field.GetType().Name}.");
                 }
         }
 

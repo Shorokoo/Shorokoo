@@ -251,7 +251,9 @@ namespace Shorokoo
 
         /// <summary>
         /// Whether this tensor's storage is host memory, so the <c>Access…Memory</c> accessors
-        /// may be called. It is <c>false</c> only for a tensor an execution provider produced in
+        /// may be called. Like every path to the elements it throws once the tensor is disposed,
+        /// rather than answering about storage that is gone — ask <see cref="IsDisposed"/> first if
+        /// a tensor may have been released. It is <c>false</c> only for a tensor an execution provider produced in
         /// its own memory and a <see cref="ResidentTrainingRun"/> deliberately left there; reading
         /// such a tensor throws, and <see cref="ResidentTrainingRun.StepToCheckpoint(TensorDataStruct, TensorDataStruct)"/>
         /// is what brings one back to the host.

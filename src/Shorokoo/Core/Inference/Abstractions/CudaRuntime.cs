@@ -17,6 +17,8 @@ internal static class CudaRuntime
         ? "cudart64_12.dll"
         : "libcudart.so.12";
 
+    // Cdecl on x64, where it is the only convention, which is the only architecture Shorokoo
+    // builds for; cudart declares its entry points CUDARTAPI, i.e. __stdcall on 32-bit Windows.
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate int MemGetInfo(out nuint free, out nuint total);
 
@@ -49,13 +51,19 @@ internal static class CudaRuntime
         lock (_gate)
         {
             if (_bound) return _memGetInfo;
-            _bound = true;
-            if (!NativeLibrary.TryLoad(LibraryName, out var library)) return null;
-            if (NativeLibrary.TryGetExport(library, "cudaMemGetInfo", out var export))
-                // The library stays loaded on purpose: the delegate points into it.
-                _memGetInfo = Marshal.GetDelegateForFunctionPointer<MemGetInfo>(export);
-            else
-                NativeLibrary.Free(library);
+            try
+            {
+                if (!NativeLibrary.TryLoad(LibraryName, out var library)) return null;
+                if (NativeLibrary.TryGetExport(library, "cudaMemGetInfo", out var export))
+                    // The library stays loaded on purpose: the delegate points into it.
+                    _memGetInfo = Marshal.GetDelegateForFunctionPointer<MemGetInfo>(export);
+                else
+                    NativeLibrary.Free(library);
+            }
+            // Binding is best effort -- a reading is worth nothing next to failing a run, and
+            // TryMemGetInfo promises to report rather than throw.
+            catch (Exception) { _memGetInfo = null; }
+            finally { _bound = true; }
             return _memGetInfo;
         }
     }

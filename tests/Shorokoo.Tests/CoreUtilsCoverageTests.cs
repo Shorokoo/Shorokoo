@@ -367,6 +367,123 @@ public class CoreUtilsCoverageTests
         return source;
     }
 
+    // The second rooting shape, which no `using` can express because the value has to be
+    // returned: a bare span taken out of a tensor (or the runtime value under one) and then read
+    // or written THROUGH. Taking the span is the tensor's last read, so the JIT may retire it
+    // before the span is used, and a collection on any thread then frees the buffer mid-copy.
+    // Forwarding the span straight out (`return Inner.GetTensorDataAsSpan<T>();`) is not this
+    // shape — the caller owns the lifetime from there. CopyMemory / CopyRawMemory / ValueAt do
+    // the copy with the tensor kept alive, and are what a call site should reach for instead.
+    private static readonly Regex SpanOutOfTensor = new(
+        @"\.\s*(GetTensorMutableRawData|GetTensorDataAsSpan|GetTensorMutableDataAsSpan"
+        + @"|AccessRawMemory|AccessModifiableRawMemory|AccessMemory|AccessModifiableMemory)"
+        + @"\s*(<[^>()]*>)?\s*\(\s*\)", RegexOptions.Compiled);
+
+    // The leading identifier of the receiver expression: `t`, `t.Field`, `run[0].ToTensorData()`.
+    private static readonly Regex ReceiverRoot = new(
+        @"([A-Za-z_]\w*)(?:\s*(?:\[[^\]]*\]|\.\s*\w+\s*(?:<[^>()]*>)?\s*(?:\([^()]*\))?))*\s*$",
+        RegexOptions.Compiled);
+
+    private static string[] SpansUsedWithoutKeepingTheTensorAlive(string source)
+    {
+        var code = StripCommentsAndStrings(source);
+        var flagged = new List<string>();
+        foreach (Match m in SpanOutOfTensor.Matches(code))
+        {
+            var before = code[(code.LastIndexOfAny([';', '{', '}'], m.Index) + 1)..m.Index];
+            var after = code[(m.Index + m.Length)..];
+            // Handed straight back to the caller, who owns the lifetime from there.
+            if (Regex.IsMatch(after, @"^\s*[;)]") && Regex.IsMatch(before, @"(\breturn\b|=>)[^;{}]*$"))
+                continue;
+            var receiver = ReceiverRoot.Match(before.TrimEnd());
+            if (!receiver.Success) continue;
+            var name = receiver.Groups[1].Value;
+            if (name is "this" or "base") continue;
+            // A `using` compiles to try/finally, so the resource is reachable for the whole block.
+            var enclosing = code[BlockStartBefore(code, m.Index)..m.Index];
+            if (Regex.IsMatch(enclosing, @"\busing\s+(var|[\w<>\[\],\s]+)\s+" + Regex.Escape(name) + @"\b"))
+                continue;
+            if (!RootedAfter(code, m.Index + m.Length, name))
+                flagged.Add(m.Value.Trim());
+        }
+        return [.. flagged];
+    }
+
+    // Rooted if the receiver is named again after the span is taken — a later read keeps it
+    // reachable — or kept alive explicitly. Scoped to the enclosing block, then widened outwards
+    // so a `GC.KeepAlive` after the `if`/`try` that uses the span still counts, but stopping
+    // before the type body so one method's keep-alive never excuses another's.
+    private static bool RootedAfter(string code, int from, string name)
+    {
+        var mention = new Regex(@"\b" + Regex.Escape(name) + @"\b");
+        int cursor = from;
+        for (int depth = 0; depth < 8; depth++)
+        {
+            int end = BlockEndFrom(code, cursor);
+            if (mention.IsMatch(code[cursor..end])) return true;
+            if (end >= code.Length || IsTypeBody(code, end)) return false;
+            cursor = end;
+        }
+        return false;
+    }
+
+    /// <summary>Index just inside the opening brace of the block containing <paramref name="index"/>.</summary>
+    private static int BlockStartBefore(string code, int index)
+    {
+        int depth = 0;
+        for (int i = index - 1; i >= 0; i--)
+        {
+            if (code[i] == '}') depth++;
+            else if (code[i] == '{')
+            {
+                if (depth == 0) return i + 1;
+                depth--;
+            }
+        }
+        return 0;
+    }
+
+    /// <summary>Index just past the closing brace of the block containing <paramref name="from"/>.</summary>
+    private static int BlockEndFrom(string code, int from)
+    {
+        int depth = 0;
+        for (int i = from; i < code.Length; i++)
+        {
+            if (code[i] == '{') depth++;
+            else if (code[i] == '}')
+            {
+                if (depth == 0) return i + 1;
+                depth--;
+            }
+        }
+        return code.Length;
+    }
+
+    /// <summary>True when the block just closed at <paramref name="closeEnd"/> was a type or
+    /// namespace body — the point past which widening would see unrelated members.</summary>
+    private static bool IsTypeBody(string code, int closeEnd)
+    {
+        int open = MatchingOpen(code, closeEnd - 1);
+        if (open < 0) return true;
+        var header = code[Math.Max(0, open - 240)..open];
+        return Regex.IsMatch(header, @"\b(class|struct|record|interface|enum|namespace)\b[^;{}]*$");
+    }
+
+    private static int MatchingOpen(string code, int closeIndex)
+    {
+        int depth = 0;
+        for (int i = closeIndex; i >= 0; i--)
+        {
+            if (code[i] == '}') depth++;
+            else if (code[i] == '{')
+            {
+                depth--;
+                if (depth == 0) return i;
+            }
+        }
+        return -1;
+    }
+
     private static string[] UnrootedOrtSafeHandles(string source)
     {
         char[] statementEnds = [';', '{', '}', ')'];
@@ -448,6 +565,36 @@ public class CoreUtilsCoverageTests
         ];
         Assert.All(mustFlag, s => Assert.NotEmpty(UnrootedOrtSafeHandles(s)));
         Assert.All(mustNotFlag, s => Assert.Empty(UnrootedOrtSafeHandles(s)));
+
+        Assert.Contains(sources, s => SpanOutOfTensor.IsMatch(StripCommentsAndStrings(s)));
+        Assert.Empty(sources.SelectMany(SpansUsedWithoutKeepingTheTensorAlive));
+
+        string[] spansMustFlag =
+        [
+            "void M() { var d = v.GetTensorMutableRawData(); b.CopyTo(d); }",
+            "byte[] M() { return v.GetTensorDataAsSpan<byte>().ToArray(); }",
+            "long[] M() { return t.As<int64>().AccessMemory().ToArray(); }",
+            "float M() { return t.AccessMemory<float>()[0]; }",
+            "void M() { var s = t.AccessModifiableRawMemory(); s[0] = 1; }",
+            "void M() { GC.KeepAlive(v); } void N() { var d = v.GetTensorMutableRawData(); b.CopyTo(d); }",
+            "void M() { var a = x.AccessRawMemory().ToArray(); GC.KeepAlive(x); var b2 = y.AccessRawMemory().ToArray(); }",
+            "void M() { GC.KeepAlive(v); var d = v.GetTensorMutableRawData(); b.CopyTo(d); }",
+            "void M() { if (c) { GC.KeepAlive(other); } var d = v.GetTensorMutableRawData(); b.CopyTo(d); }",
+        ];
+        string[] spansMustNotFlag =
+        [
+            "ReadOnlySpan<T> M() => Inner.GetTensorDataAsSpan<T>();",
+            "ReadOnlySpan<T> M() { return Inner.GetTensorDataAsSpan<T>(); }",
+            "Span<double> M(TensorData<float64> d) => d.AccessModifiableMemory<double>();",
+            "byte[] M() { var a = v.GetTensorDataAsSpan<byte>().ToArray(); GC.KeepAlive(v); return a; }",
+            "void M() { var d = v.GetTensorMutableRawData(); b.CopyTo(d); GC.KeepAlive(v); }",
+            "void M() { using var v = Make(); var d = v.GetTensorMutableRawData(); b.CopyTo(d); }",
+            "void M() { if (c) { var d = v.GetTensorMutableRawData(); b.CopyTo(d); } GC.KeepAlive(v); }",
+            "void M() { try { var d = v.GetTensorMutableRawData(); b.CopyTo(d); } finally { Q(); } GC.KeepAlive(v); }",
+            "byte[] M() { var a = t.AccessRawMemory().ToArray(); return Use(t, a); }",
+        ];
+        Assert.All(spansMustFlag, s => Assert.NotEmpty(SpansUsedWithoutKeepingTheTensorAlive(s)));
+        Assert.All(spansMustNotFlag, s => Assert.Empty(SpansUsedWithoutKeepingTheTensorAlive(s)));
     }
 
     [Fact]

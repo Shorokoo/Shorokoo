@@ -72,7 +72,7 @@ namespace Shorokoo.Core.Graph
                 // required-constant, since a parameter's shape has to be known before anything is
                 // initialized (see TrainableParamInputSourceIds).
                 var shapeTensorData = TrainableParamInputParamValues.First().AssertNotNull();
-                var shapeLongs = shapeTensorData.As<int64>().AccessMemory().ToArray();
+                var shapeLongs = shapeTensorData.As<int64>().CopyMemory<long>();
                 return new Shape(shapeLongs);
             }
         }

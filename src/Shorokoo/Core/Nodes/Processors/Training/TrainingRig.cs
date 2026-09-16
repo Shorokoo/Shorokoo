@@ -2158,6 +2158,136 @@ namespace Shorokoo
             _ => throw new InvalidOperationException($"Unknown scheduler counter input '{counter}'."),
         };
 
+        /// <summary>
+        /// Backend bytes of superseded checkpoint state produced since the last reclamation.
+        /// </summary>
+        private long _supersededStateBytes;
+
+        /// <summary>
+        /// The budget currently in force. Starts at <see cref="SupersededStateBudgetBytes"/> and
+        /// doubles, up to <see cref="MaxReclaimBudgetBytes"/>, for as long as reclaiming turns out
+        /// not to reclaim anything — see <see cref="ReclaimSupersededState"/>.
+        /// </summary>
+        private long _reclaimBudgetBytes = SupersededStateBudgetBytes;
+
+        /// <summary>The budget the backoff snaps back to. Constant in production; a test lowers it
+        /// so a handful of steps exercises the backoff that a real run reaches after thousands.</summary>
+        private long _baseReclaimBudgetBytes = SupersededStateBudgetBytes;
+
+        /// <summary>The budget currently in force (test hook).</summary>
+        internal long ReclaimBudgetBytes => System.Threading.Interlocked.Read(ref _reclaimBudgetBytes);
+
+        /// <summary>Lowers both the base budget and the one in force (test hook).</summary>
+        internal void SetReclaimBudgetForTests(long bytes)
+        {
+            System.Threading.Interlocked.Exchange(ref _baseReclaimBudgetBytes, bytes);
+            System.Threading.Interlocked.Exchange(ref _reclaimBudgetBytes, bytes);
+        }
+
+        /// <summary>The checkpoint produced at the last reclamation, watched weakly: whether it
+        /// survived the next collection is what says if the caller is keeping its checkpoints.</summary>
+        private WeakReference<TrainingCheckpoint>? _watched;
+
+        /// <summary>
+        /// How much superseded state may pile up before <see cref="ReclaimSupersededState"/> does
+        /// something about it. Small enough that a step's state is reclaimed within a few steps of
+        /// being superseded; large enough that a model whose whole checkpoint is a few kilobytes
+        /// reaches it only after thousands of steps, and so pays essentially nothing. It is a
+        /// running total, not a per-step test.
+        /// </summary>
+        private const long SupersededStateBudgetBytes = 32L * 1024 * 1024;
+
+        /// <summary>The ceiling the backoff in <see cref="ReclaimSupersededState"/> climbs to.</summary>
+        private const long MaxReclaimBudgetBytes = 8L * 1024 * 1024 * 1024;
+
+        /// <summary>
+        /// Collects, once more than the current budget of superseded checkpoint state has piled up.
+        ///
+        /// <para>A step's checkpoint holds the trainable parameters and every optimizer moment in
+        /// runtime-owned buffers, behind managed wrappers of a few dozen bytes each. In
+        /// <c>cp = rig.TrainStep(cp, …)</c> — the loop the training guide documents — the previous
+        /// checkpoint becomes garbage on every step, but garbage so small that nothing prompts a
+        /// collection: the wrappers are never finalized, their buffers are never released, and the
+        /// process grows by the whole parameter set plus both moments every step until it dies
+        /// (Shorokoo/Shorokoo#321). At 49 M parameters that is ~565 MiB a step, and the run dies
+        /// around step 12 of 48,000.</para>
+        ///
+        /// <para>The rig knows what the runtime cannot infer from the managed heap: the step just
+        /// taken supersedes a known quantity of runtime memory. Collecting on that budget is the
+        /// same thing a caller would otherwise have to write by hand after every step. A model
+        /// producing a few MiB a step pays one collection every few steps; one producing hundreds
+        /// of MiB a step pays one per step, which is what the by-hand version cost and what a run
+        /// of that size has to pay to survive at all. The alternative,
+        /// <see cref="GC.AddMemoryPressure"/>, is too slack at this ratio: it collects roughly
+        /// every ten steps, and the runtime's arena ratchets upward between collections instead of
+        /// settling.</para>
+        ///
+        /// <para><b>The budget counts what a step produces, which is only garbage if the caller
+        /// drops it.</b> A caller may legitimately keep its checkpoints — comparing a step against
+        /// the one before it, or holding the best so far — and then there is nothing to reclaim and
+        /// a forced collection is pure cost, repeated forever. So the rig watches, weakly, the
+        /// checkpoint it produced at the last reclamation: if that survived the collection, the
+        /// caller is keeping them, and the budget doubles. It keeps doubling to
+        /// <see cref="MaxReclaimBudgetBytes"/> while that stays true, and snaps back the moment a
+        /// watched checkpoint does not survive.</para>
+        ///
+        /// <para>A tensor owns its storage and releases it when disposed, so a caller who wants
+        /// determinism has it; what the rig cannot do is dispose the checkpoint it was handed,
+        /// because the caller may still be holding it. Nothing here disposes anything the caller
+        /// can still see — it schedules a collection, and only unreachable state is affected.</para>
+        /// </summary>
+        private void ReclaimSupersededState(long stepBytes, TrainingCheckpoint produced)
+        {
+            long budget = System.Threading.Interlocked.Read(ref _reclaimBudgetBytes);
+            if (System.Threading.Interlocked.Add(ref _supersededStateBytes, stepBytes) < budget) return;
+            // Subtract the budget rather than zeroing: another step's bytes may have landed in
+            // between, and zeroing would drop them.
+            System.Threading.Interlocked.Add(ref _supersededStateBytes, -budget);
+
+            GC.Collect(2, GCCollectionMode.Forced, blocking: true);
+            GC.WaitForPendingFinalizers();
+
+            // The collection just answered last time's question: did the checkpoint we handed back
+            // then survive it? If so the caller is holding its checkpoints, this collection freed
+            // nothing, and the next one would not either.
+            bool retained = _watched is not null && _watched.TryGetTarget(out _);
+            _watched = new WeakReference<TrainingCheckpoint>(produced);
+            System.Threading.Interlocked.Exchange(ref _reclaimBudgetBytes,
+                retained ? Math.Min(budget * 2, MaxReclaimBudgetBytes)
+                         : System.Threading.Interlocked.Read(ref _baseReclaimBudgetBytes));
+        }
+
+        /// <summary>Backend bytes a checkpoint's tensor fields hold. A field whose size is not
+        /// derivable — a dtype with no fixed byte stride, a shape with no element count, or a
+        /// sequence or optional rather than a tensor — contributes nothing, which only makes the
+        /// budget conservative.</summary>
+        private static long BackendBytes(params IEnumerable<IData>[] structs)
+        {
+            long total = 0;
+            foreach (var s in structs)
+                foreach (var field in s)
+                    total += field switch
+                    {
+                        TensorDataStruct nested => BackendBytes(nested),
+                        TensorData tensor when tensor.Shape.Count > 0 => tensor.Shape.Count * ElementBytes(tensor.DType),
+                        _ => 0,
+                    };
+            return total;
+        }
+
+        /// <summary>The fixed byte stride of one element of <paramref name="dtype"/>, or 0 if it has none.</summary>
+        private static long ElementBytes(DType dtype)
+        {
+            if (dtype == DType.Bool || dtype == DType.Int8 || dtype == DType.UInt8) return 1;
+            if (dtype == DType.Int16 || dtype == DType.UInt16
+                || dtype == DType.Float16 || dtype == DType.BFloat16) return 2;
+            if (dtype == DType.Int32 || dtype == DType.UInt32 || dtype == DType.Float32) return 4;
+            if (dtype == DType.Int64 || dtype == DType.UInt64 || dtype == DType.Float64
+                || dtype == DType.Complex64) return 8;
+            if (dtype == DType.Complex128) return 16;
+            return 0;
+        }
+
         private TrainingCheckpoint RunStep(
             TrainingCheckpoint checkpoint,
             TensorDataStruct? hyperparams,
@@ -2221,7 +2351,12 @@ namespace Shorokoo
 
             // Loss is the last output
             var lossIndex = UpdatedParamFieldCount + UpdatedStateFieldCount + UpdatedOptimizerStateFieldCount;
-            var lossValue = results[lossIndex].ToTensorData<float32>().AccessMemory()[0];
+            var lossTensor = results[lossIndex].ToTensorData<float32>();
+            var lossValue = lossTensor.ValueAt<float>(0);
+            // Nothing past the checkpoint's fields is retained, so release it here rather than
+            // leaving a step's worth of outputs for a collection to notice.
+            for (int i = lossIndex; i < results.Length; i++)
+                results[i].ToTensorData().Dispose();
 
             // Step is the graph-advanced counter (one training step per call). Epoch and batch
             // index are host-owned — the training loop advances them — so they carry through
@@ -2235,6 +2370,9 @@ namespace Shorokoo
                 checkpoint.BatchIndex,
                 this,
                 lossValue);
+
+            ReclaimSupersededState(
+                BackendBytes(updatedParams, updatedModelState, updatedOptimizerState), newCheckpoint);
 
             return newCheckpoint;
         }

@@ -158,7 +158,7 @@ namespace Shorokoo.Core.Factory
                 type: data.DType,
                 identifierTemplate: paramDataNode.IdentifierTemplate,
                 isTrainable: isTrainable,
-                data: valuesElided ? [] : data.AccessRawMemory().ToArray());
+                data: valuesElided ? [] : data.CopyRawMemory());
             if (valuesElided)
             {
                 tensor.MetadataProps.Add(new StringStringEntryProto

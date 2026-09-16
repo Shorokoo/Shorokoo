@@ -171,7 +171,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             for (int i = 0; i < spec.TensorAttributes.Length; i++)
             {
                 var mapping = spec.TensorAttributes[i];
-                var longs = resolved[i].As<int64>().AccessMemory().ToArray();
+                var longs = resolved[i].As<int64>().CopyMemory<long>();
                 newAttrs[mapping.AttributeName] = mapping.IsScalar
                     ? (object)(longs.Length > 0 ? longs[0] : 0L)
                     : longs;

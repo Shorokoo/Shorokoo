@@ -86,8 +86,7 @@ internal static class RigScalingStack
 /// state, which is both larger and noisier than the signal. Optimizer-state seeding is the other
 /// per-parameter session loop that keeps its outputs, and it takes the same copy — but its graph
 /// is a fill rather than a draw, so the arena it would pin is small enough to sit inside that
-/// noise, and no memory gate discriminates it. It is not pinned here, and the finding
-/// <c>ort-values-are-never-disposed</c> says so.</para>
+/// noise, and no memory gate discriminates it. It is not pinned here.</para>
 ///
 /// <para>Each budget sits well above the measured behaviour and well below the broken law, so
 /// jitter never trips one. The timing points are best-of-<see cref="TimingRuns"/>: a single

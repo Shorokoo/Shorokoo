@@ -39,7 +39,7 @@ internal static class TensorDataConverter
         // for the string ops only needs dtype + shape — leave the data fields unset.
         if (shape.Count <= maxElements && dtype != DType.String)
         {
-            var bytes = data.AccessRawMemory();
+            var bytes = data.CopyRawMemory();
             if (dtype == DType.Float32)
             {
                 var buf = new float[count];

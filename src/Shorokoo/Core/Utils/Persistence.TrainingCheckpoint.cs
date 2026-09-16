@@ -927,7 +927,7 @@ namespace Shorokoo
                     // training-step graph carries.
                     binding.DType = hv.BakedDType.ToString();
                     binding.Shape = hv.BakedValue.Shape.Dims;
-                    binding.Value = Convert.ToBase64String(hv.BakedValue.AccessRawMemory());
+                    binding.Value = Convert.ToBase64String(hv.BakedValue.CopyRawMemory());
                 }
                 else if (hv.Kind == HyperparameterKind.Runtime)
                 {

@@ -1839,6 +1839,28 @@ public class TrainingRigCheckpointCoverageTests
     private static long[] ParamDims(TrainingCheckpoint c) =>
         [.. ((TensorData)c.TrainableParams.Fields[c.TrainableParams.Definition.Fields[0].Name]).Shape.Dims];
 
+    /// <summary>The rig collects on a budget of superseded checkpoint state, which is only garbage
+    /// if the caller drops it. A caller that keeps its checkpoints would otherwise buy a blocking
+    /// collection that frees nothing, on every step, forever.</summary>
+    [Fact]
+    public void TestReclamationBacksOffWhileTheCallerKeepsItsCheckpointsAndResumesWhenItStops()
+    {
+        var rig = ShapeRig(ParamOrderAModel.ComputationGraph);
+        var input = rig.InputDef.FromOrderedData(TensorData([4L], [1f, 2f, 3f, 4f]));
+        var target = rig.TargetDef.FromOrderedData(TensorData([4L], [1f, 2f, 3f, 4f]));
+        rig.SetReclaimBudgetForTests(1);
+
+        var kept = new List<TrainingCheckpoint>();
+        var cp = rig.CreateInitialCheckpoint();
+        for (int i = 0; i < 4; i++) { cp = rig.TrainStep(cp, input, target); kept.Add(cp); }
+        Assert.True(rig.ReclaimBudgetBytes > 1);
+
+        kept.Clear();
+        for (int i = 0; i < 4; i++) cp = rig.TrainStep(cp, input, target);
+        Assert.Equal(1, rig.ReclaimBudgetBytes);
+        Assert.NotNull(cp);
+    }
+
     /// <summary>Parameter names are the initializer class plus a trace-order index, so two models
     /// that differ only in the order of their initializer calls produce the same names for
     /// different roles, and a checkpoint crosses from one into the other carrying every tensor to

@@ -54,10 +54,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// general ownership question this sidesteps rather than settles.</para>
         ///
         /// <para>The copy is the part that frees the arena — it makes the backend tensor
-        /// unreachable. Disposing it as well only makes the release deterministic instead of
-        /// leaving it to the finalizer thread, and it has to be the BACKING VALUE: TensorData's
-        /// own Dispose is the standard pattern with an empty body, since the runtime value owns
-        /// the buffer, so disposing the wrapper frees nothing.</para>
+        /// unreachable. Disposing the source as well makes the release deterministic instead of
+        /// leaving it to the finalizer thread, and leaves the source guarded: a tensor is
+        /// disposed by disposing it, and every read afterwards says so rather than reading freed
+        /// memory (Shorokoo/Shorokoo#180).</para>
         ///
         /// <para>A string tensor is returned untouched — it has no fixed byte stride to copy
         /// through — so a caller retaining one still pins its session.</para>
@@ -66,8 +66,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         {
             if (data.DType.ProtoTypeNum == DType.String.ProtoTypeNum) return data;
             // Read the bytes before disposing: that invalidates the buffer they came from.
-            var copy = TensorData.CreateFromRawBytes(data.Shape, data.DType, data.AccessRawMemory().ToArray());
-            if (data is IOnnxData backed) backed.Value.Dispose();
+            var copy = TensorData.CreateFromRawBytes(data.Shape, data.DType, data.CopyRawMemory());
+            // Taking the span is data's last read, so keep it alive until the copy is out of the
+            // buffer the span points at (Shorokoo/Shorokoo#178).
+            GC.KeepAlive(data);
+            data.Dispose();
             return copy;
         }
 
@@ -1428,7 +1431,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 if (producer.OpCode != OpCodes.CONSTANT) return null;
                 var tensorVal = producer.Attributes.GetTensorVal(OnnxOpAttributeNames.AttrValue);
                 if (tensorVal is null || tensorVal.DType != DType.Int64) return null;
-                var vals = tensorVal.As<int64>().AccessMemory();
+                var vals = tensorVal.As<int64>().CopyMemory<long>();
                 return vals.Length == 1 ? vals[0] : null;
             }
             return null;
@@ -1457,7 +1460,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 if (producer.OpCode != OpCodes.CONSTANT) return false;
                 var tensorVal = producer.Attributes.GetTensorVal(OnnxOpAttributeNames.AttrValue);
                 if (tensorVal is null || tensorVal.DType != DType.Bool) return false;
-                var vals = tensorVal.As<bit>().AccessMemory();
+                var vals = tensorVal.As<bit>().CopyMemory<bool>();
                 return vals.Length == 1 && vals[0];
             }
             return false;
@@ -1597,7 +1600,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
                 var tensorVal = producer.Attributes.GetTensorVal(OnnxOpAttributeNames.AttrValue);
                 if (tensorVal is null || tensorVal.DType != DType.Int64) return null;
-                var vals = tensorVal.As<int64>().AccessMemory();
+                var vals = tensorVal.As<int64>().CopyMemory<long>();
                 if (vals.Length != 1) return null;
                 var position = vals[0];
                 return position is >= int.MinValue and <= int.MaxValue ? (int)position : null;
@@ -5051,7 +5054,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var tensorVal = producer.Attributes.GetTensorVal(OnnxOpAttributeNames.AttrValue);
                 if (tensorVal is null || tensorVal.DType != DType.Bool) continue;
 
-                bool boolVal = tensorVal.As<bit>().AccessMemory()[0];
+                bool boolVal = tensorVal.As<bit>().ValueAt<bool>(0);
 
                 if (!closeNode.FullInputs.TryGetValue(OnnxOpAttributeNames.AttrThenBranch, out var thenInputs)) continue;
                 if (!closeNode.FullInputs.TryGetValue(OnnxOpAttributeNames.AttrElseBranch, out var elseInputs)) continue;
@@ -5360,7 +5363,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             if (tensorVal is null) return null;
             if (tensorVal.DType != DType.Int64) return null;
             if (tensorVal.Shape.Dims.Length != 0) return null; // require scalar
-            return tensorVal.As<int64>().AccessMemory()[0];
+            return tensorVal.As<int64>().ValueAt<long>(0);
         }
     }
 
@@ -5724,7 +5727,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var tv = prod.Attributes.GetTensorVal(OnnxOpAttributeNames.AttrValue);
             if (tv is null || tv.DType != DType.Bool) return false;
             if (tv.Shape.Dims.Length != 0) return false;
-            return tv.As<bit>().AccessMemory()[0];
+            return tv.As<bit>().ValueAt<bool>(0);
         }
 
         /// <summary>
@@ -6394,7 +6397,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             if (tensorVal is null) return null;
             if (tensorVal.DType != DType.Int64) return null;
             if (tensorVal.Shape.Dims.Length != 0) return null;
-            return tensorVal.As<int64>().AccessMemory()[0];
+            return tensorVal.As<int64>().ValueAt<long>(0);
         }
     }
 

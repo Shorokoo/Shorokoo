@@ -271,10 +271,42 @@ namespace Shorokoo.Core.Utils
 
         internal static TensorDataSequence CreateTensorDataSequence(DType dtype, List<TensorData> data)
         {
+            // Building a sequence hands its elements to the runtime, which takes them over: the
+            // sequence owns them from then on and releases them with itself. Copy first, so the
+            // caller's tensors keep the storage they own and go on working. Handing the live
+            // values over instead left every source tensor pointing at memory the sequence would
+            // free under it — reading one after the sequence was disposed was a hard crash, from
+            // four lines of public API (Shorokoo/Shorokoo#180).
             var inner = new List<IShorokooTensorValue>(data.Count);
-            foreach (var d in data) inner.Add(d.ToTensorValue());
-            var sequence = InferenceBackend.Factory.CreateSequence(inner);
-            return CreateTensorDataSequenceFromValue(dtype, sequence);
+            try
+            {
+                foreach (var d in data) inner.Add(CopyTensorValue(d.ToTensorValue()));
+                var sequence = InferenceBackend.Factory.CreateSequence(inner);
+                return CreateTensorDataSequenceFromValue(dtype, sequence);
+            }
+            catch
+            {
+                // These copies belong to nobody yet; on failure nothing else will release them.
+                foreach (var v in inner) v.Dispose();
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// An independent copy of <paramref name="value"/>, on storage of its own, for the places
+        /// that would otherwise leave two owners pointing at one runtime value.
+        /// </summary>
+        internal static IShorokooTensorValue CopyTensorValue(IShorokooTensorValue value)
+        {
+            var elementType = value.ElementType;
+            if (elementType == ShorokooTensorElementType.String)
+                return InferenceBackend.Factory.CreateStringTensor(value.GetStringTensorData(), value.Shape);
+            var copy = InferenceBackend.Factory.CreateTensorFromRawBytes(
+                elementType, value.GetTensorDataAsSpan<byte>().ToArray(), value.Shape);
+            // Taking the span is the source's last read, so without this the JIT may retire it
+            // before ToArray has copied out of the buffer it points at (Shorokoo/Shorokoo#178).
+            GC.KeepAlive(value);
+            return copy;
         }
 
         public static IData CreateData(IShorokooTensorValue value)

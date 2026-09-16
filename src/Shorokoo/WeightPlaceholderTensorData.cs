@@ -21,15 +21,21 @@ namespace Shorokoo
         }
 
         /// <inheritdoc/>
-        public override Span<byte> AccessModifiableRawMemory() => throw ValuesElided();
-
-        /// <inheritdoc/>
-        public override ReadOnlySpan<byte> AccessRawMemory() => throw ValuesElided();
-
-        /// <inheritdoc/>
-        public override void Dispose()
+        public override Span<byte> AccessModifiableRawMemory()
         {
+            ThrowIfDisposed();
+            throw ValuesElided();
         }
+
+        /// <inheritdoc/>
+        public override ReadOnlySpan<byte> AccessRawMemory()
+        {
+            ThrowIfDisposed();
+            throw ValuesElided();
+        }
+
+        /// <inheritdoc/>
+        public override void Dispose() => IsDisposed = true;
 
         private InvalidOperationException ValuesElided() => new(
             $"Tensor {this} is a weights-stripped placeholder carrying dtype/shape metadata only — " +

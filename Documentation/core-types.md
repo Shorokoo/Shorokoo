@@ -296,6 +296,20 @@ float[] values = ((TensorData<float32>)result).AccessMemory().ToArray();
 GC.KeepAlive(result);                                                     // safe
 ```
 
+Or reach for the copying accessors, which do both for you — `CopyMemory<V>()` and
+`CopyRawMemory()` return an array the caller owns, `ValueAt<V>(int)` reads one element, and each
+keeps the tensor alive across the read. Where the whole buffer is being copied anyway, they are
+the shorter and safer form.
+
+### A tensor whose values are not on the host
+
+Disposal is not the only reason a tensor's elements cannot be read. A tensor produced by a
+[resident training run](training.md#keeping-training-state-on-the-device) is left in the execution
+provider's own memory, where a host read would dereference a device address. `IsHostResident` says
+which it is, and the accessors throw `InvalidOperationException` rather than reading it — naming
+`StepToCheckpoint`, which is what brings that state home. A tensor from any other route is
+host-resident, so this only arises for a run that asked for residency.
+
 ## Anti-patterns
 
 - Do not mix dtypes in one op (e.g. add `Tensor<float32>` to `Tensor<int64>`); cast

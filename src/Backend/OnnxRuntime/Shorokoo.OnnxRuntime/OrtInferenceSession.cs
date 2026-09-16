@@ -6,11 +6,26 @@ namespace Shorokoo.OnnxRuntime;
 internal sealed class OrtInferenceSession : IShorokooInferenceSession
 {
     private readonly InferenceSession _session;
+    private readonly int? _cudaDeviceId;
 
-    public OrtInferenceSession(InferenceSession session) { _session = session; }
+    // ORT's memory info for this session's own (non-host) output memory, or null when it
+    // produces everything on the host. Held in a field, not a local: OrtMemoryInfo owns a
+    // native handle and the binding below takes it as a bare pointer. Probed on first ask,
+    // because most sessions never retain anything and a session is a common object here --
+    // parameter initialization and every eager Eval build one.
+    private readonly Lazy<OrtMemoryInfo?> _deviceMemoryInfo;
+
+    public OrtInferenceSession(InferenceSession session, int? cudaDeviceId)
+    {
+        _session = session;
+        _cudaDeviceId = cudaDeviceId;
+        _deviceMemoryInfo = new Lazy<OrtMemoryInfo?>(() => DiscoverDeviceMemoryInfo(session));
+    }
 
     public IReadOnlyList<string> InputNames => _session.InputNames;
     public IReadOnlyList<string> OutputNames => _session.OutputNames;
+
+    public bool HasDeviceMemory => _deviceMemoryInfo.Value is not null;
 
     public IReadOnlyList<IShorokooTensorValue> Run(
         IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
@@ -21,6 +36,7 @@ internal sealed class OrtInferenceSession : IShorokooInferenceSession
             ortInputs[k] = ((OrtTensorValue)v).Inner;
 
         using var runOptions = new RunOptions();
+        ConfigureRun(runOptions);
         var results = _session.Run(runOptions, ortInputs, outputNames);
 
         // ORT snapshots each input's handle into an IntPtr[] and keeps no reference to the OrtValue
@@ -39,5 +55,102 @@ internal sealed class OrtInferenceSession : IShorokooInferenceSession
         return wrapped;
     }
 
-    public void Dispose() => _session.Dispose();
+    public IReadOnlyList<IShorokooTensorValue> RunRetainingOutputs(
+        IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
+        IReadOnlyList<string> outputNames,
+        IReadOnlySet<string> retainedOutputNames)
+    {
+        // Nothing to retain, or nowhere to retain it: an unbound Run is the same thing and
+        // costs one native call less.
+        var deviceMemoryInfo = _deviceMemoryInfo.Value;
+        if (deviceMemoryInfo is null || retainedOutputNames.Count == 0)
+            return Run(inputs, outputNames);
+
+        using var binding = _session.CreateIoBinding();
+        foreach (var (k, v) in inputs)
+            binding.BindInput(k, ((OrtTensorValue)v).Inner);
+
+        // An output bound to a device is allocated there by ORT and left there; one bound to
+        // the host allocator is fetched back exactly as an unbound Run fetches it. ORT sizes
+        // both itself, so a shape it only learns while running is fine.
+        var hostMemoryInfo = OrtMemoryInfo.DefaultInstance;
+        foreach (var name in outputNames)
+            binding.BindOutputToDevice(
+                name, retainedOutputNames.Contains(name) ? deviceMemoryInfo : hostMemoryInfo);
+
+        using var runOptions = new RunOptions();
+        ConfigureRun(runOptions);
+        var results = _session.RunWithBoundResults(runOptions, binding);
+
+        // Same rooting hazard as Run: the binding holds the feeds' raw handles, not the managed
+        // wrappers, so nothing but `inputs` keeps them alive across the native run.
+        GC.KeepAlive(inputs);
+
+        // RunWithBoundResults returns the bound outputs in the binding's own order, which is the
+        // order they were bound in -- ask it rather than assume, and hand them back in the order
+        // the caller named.
+        var boundNames = binding.GetOutputNames();
+        // Nothing owns these values until each is wrapped and handed to a TensorData, and the
+        // collection is deliberately not disposed, so anything that goes wrong between here and the
+        // return leaks a device allocation apiece. Establish the shape first, and dispose the lot
+        // if it is not what it must be.
+        if (boundNames.Length != results.Count || results.Count != outputNames.Count)
+        {
+            foreach (var value in results) value.Dispose();
+            throw new InvalidOperationException(
+                $"The run bound {boundNames.Length} outputs and returned {results.Count} values for "
+                + $"{outputNames.Count} requested names; they must agree one for one.");
+        }
+
+        var byName = new Dictionary<string, OrtValue>(results.Count);
+        for (int i = 0; i < boundNames.Length; i++)
+            byName[boundNames[i]] = results[i];
+
+        var wrapped = new List<IShorokooTensorValue>(outputNames.Count);
+        foreach (var name in outputNames) wrapped.Add(new OrtTensorValue(byName[name]));
+        return wrapped;
+    }
+
+    /// <summary>
+    /// The memory the session's execution provider produces its outputs in, when that is not host
+    /// memory; null when every output lands on the host (a CPU provider), and null too when the
+    /// native build does not answer the question — which costs the retention, never correctness.
+    /// The infos ORT reports are owned by the collection it returns, so this copies the one it
+    /// keeps rather than outliving its source.
+    /// </summary>
+    private static OrtMemoryInfo? DiscoverDeviceMemoryInfo(InferenceSession session)
+    {
+        try
+        {
+            using var infos = session.GetMemoryInfosForOutputs();
+            foreach (var info in infos)
+            {
+                if (info.Name == OrtTensorValue.CpuAllocatorName) continue;
+                return new OrtMemoryInfo(info.Name, info.GetAllocatorType(), info.Id, info.GetMemoryType());
+            }
+        }
+        // Catching broadly is the point: the doc above promises a failed probe costs the retention
+        // and nothing else, and Lazy caches an escaping exception and rethrows it on every later
+        // access -- which would fail every run of this session rather than fall back to the host.
+        catch (Exception) { }
+        return null;
+    }
+
+    /// <summary>Applies what every run of this session runs with. Read per run, not per session, so
+    /// turning arena shrinkage on takes effect on sessions that are already compiled — and applied
+    /// by both run paths, because a retaining run is the one that most wants the arena it keeps its
+    /// state in bounded. It configures options the caller owns rather than returning new ones, so
+    /// the handle stays inside a `using` at each call site.</summary>
+    private void ConfigureRun(RunOptions runOptions)
+    {
+        if (OrtSessionFactory.ArenaShrinkageRunConfig(_cudaDeviceId, DeviceMemory.ShrinkArenaAfterRun)
+            is { } arena)
+            runOptions.AddRunConfigEntry("memory.enable_memory_arena_shrinkage", arena);
+    }
+
+    public void Dispose()
+    {
+        if (_deviceMemoryInfo.IsValueCreated) _deviceMemoryInfo.Value?.Dispose();
+        _session.Dispose();
+    }
 }

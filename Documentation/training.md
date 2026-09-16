@@ -10,6 +10,9 @@ Related: [defining-models.md](defining-models.md) · [nn-library.md](nn-library.
   produces a trainable step.
 - Gradients are produced by automatic differentiation; you do not write backward
   passes.
+- `TrainStep` moves the whole training state through host memory every step. On a GPU that is what
+  sets the pace, so a long run belongs in a `rig.BeginResidentRun()` loop (or in `Fit` / `Train`,
+  which already use one) — see [Keeping training state on the device](#keeping-training-state-on-the-device).
 - State (optimizer moments, momentum velocity, BatchNorm running stats) is **created**
   by a `[StateInitializer]` class's `Init(...)` call inside a module's `Inline` (the
   state analog of trainable-parameter initializers) and its per-step update is
@@ -436,7 +439,83 @@ public TrainingResult Train(
     TensorDataStruct[] trainingInputs,
     TensorDataStruct[] trainingOutputs,
     int numEpochs);
+
+// A training loop that keeps its state where the execution provider produced it, instead of moving
+// the whole of it through host memory on every step — see "Keeping training state on the device".
+// The initial checkpoint stays yours; the run never frees it.
+public ResidentTrainingRun BeginResidentRun(TrainingCheckpoint? initialCheckpoint = null);
 ```
+
+```csharp
+public sealed class ResidentTrainingRun : IDisposable
+{
+    // Train on one batch; returns that step's loss and nothing else, so nothing is downloaded.
+    public float Step(TensorDataStruct trainingInput, TensorDataStruct trainingTarget);
+    public float Step(TensorDataStruct hyperparameters,                 // from MakeHyperparameters(...)
+                      TensorDataStruct trainingInput, TensorDataStruct trainingTarget);
+    public float Step(IDataLoader loader);                              // draws loader.Next()
+    public float Step(DataBatch batch);                                 // a batch you drew yourself
+
+    // The same step, with the updated state brought back to the host as an ordinary checkpoint you
+    // can read, save and resume from. This is the step that pays for the transfer.
+    public TrainingCheckpoint StepToCheckpoint(TensorDataStruct trainingInput, TensorDataStruct trainingTarget);
+    public TrainingCheckpoint StepToCheckpoint(TensorDataStruct hyperparameters,
+                                               TensorDataStruct trainingInput, TensorDataStruct trainingTarget);
+    public TrainingCheckpoint StepToCheckpoint(IDataLoader loader);
+    public TrainingCheckpoint StepToCheckpoint(DataBatch batch);
+
+    public long CurrentStep { get; }   // the Step the run's last checkpoint carries; next is +1
+
+    public void Dispose();             // releases state the run still holds; published checkpoints survive
+}
+```
+
+### Keeping training state on the device
+
+`TrainStep` is checkpoint-in / checkpoint-out: it hands back a host-readable copy of every
+trainable parameter, all model state and all optimizer state, and takes them all back on the next
+call. On a CPU backend that costs nothing — there is one memory. On a GPU it is the whole training
+state crossing the bus twice per step, so **step time tracks parameter count rather than
+arithmetic**: on one measured pair of transformers, tripling the parameters while slightly
+*reducing* the FLOPs more than doubled the time per step.
+
+`BeginResidentRun` is the loop that does not do that. The state stays where the execution provider
+produced it, and each step feeds the previous step's values straight back:
+
+```csharp
+using var run = rig.BeginResidentRun();
+for (int step = 0; step < 50_000; step++)
+{
+    if (step % 1_000 == 999)
+        run.StepToCheckpoint(loader).Save($"ckpt-{step}.safetensors");  // this step transfers
+    else
+        run.Step(loader);                                               // no transfer
+}
+```
+
+Read it as a cost model:
+
+- **`Step` returns the loss and nothing else.** The loss is a scalar, so it always comes back; the
+  state does not.
+- **`StepToCheckpoint` runs a step** — it is not a "fetch the state" call, so it replaces that
+  step's `Step` rather than following it — **and brings the state home**, as an ordinary
+  `TrainingCheckpoint` — save it, resume from it, extract an inference model from it. Use it on the
+  steps you actually want a checkpoint at, including the last step whose state you want to keep.
+- **`Dispose` discards whatever the run still holds.** A checkpoint the run already published stays
+  valid: the run gives up the right to free that state when it hands it to you. So does the initial
+  checkpoint you passed in.
+
+`Train` and every `Fit` overload already drive a resident run internally and take their checkpoint
+on the final step — they return one checkpoint, so they only ever needed one transfer. A manual
+`TrainStep` loop is unchanged and still transfers every step; `BeginResidentRun` is how a manual
+loop opts out.
+
+On a backend whose provider has no memory of its own, a resident run is an ordinary step loop —
+same losses, same checkpoints, to the bit — that additionally releases each step's state as the
+next supersedes it.
+
+> A checkpoint's tensors are readable exactly when they are on the host. Reading one a run is still
+> holding on the device throws and says so; that state reaches you through `StepToCheckpoint`.
 
 ### What construction costs
 
@@ -472,7 +551,15 @@ piled up — a running total across steps, not a per-step test. A model whose wh
 few kilobytes only reaches that after thousands of steps, so it pays essentially nothing; a model
 producing a few MiB a step pays one collection every few steps; one producing hundreds of MiB a step
 pays one per step, which is what a run of that size has to pay to survive at all. Collecting in your
-own loop is unnecessary and changes nothing but the timing.
+own loop is normally unnecessary and changes nothing but the timing.
+
+The rig backs off when a collection turns out to free nothing — a caller that keeps every checkpoint
+buys nothing from one — by watching weakly what it handed back and seeing whether a later collection
+took it. What it judges is deliberately two reclamations old: the checkpoint from the last one is
+what you feed in as the next step's input, so it is alive at the moment of the collection whatever
+you do with it. A resident run's retained steps do not go through any of this — the run releases
+that state itself — but its `StepToCheckpoint` steps bring state home for you to keep, so those are
+reclaimed like any other.
 
 If you **keep** your checkpoints — holding the best so far, or comparing a step against the one
 before it — then nothing is superseded and a collection would reclaim nothing. The rig notices:
@@ -507,6 +594,23 @@ and both contexts go through it, so the naming does not offer a CPU-build / GPU-
 two members as a division of *phases* — which work is build/merge and which is compile/run — not of
 hardware; they would only become a lever if `ComputeContext` gained per-instance configuration.
 Leaving both `null`, so each defaults to `ComputeContext.Default`, is the normal choice.
+
+What *is* configurable — on the GPU backends — is **device** memory, but process-wide rather than per
+context: an arena budget, the arena's extend strategy, per-step arena shrinkage, and a reading of how
+much of the card is gone. The default arena strategy is picked for exactly this loop: a step's shapes
+are fixed when it is compiled and repeat for the length of the run, so the arena is told to extend by
+what it asks for rather than to keep doubling, which is what otherwise leaves a long run holding far
+more of the card than its steps use. On a run that is close to the card's limit, set a budget at
+startup and sample the peak inside your `TrainStep` loop; see
+[Device memory](inference.md#device-memory-gpu-backends).
+
+**Mind which memory is which.** A `TrainStep` loop's checkpoints are fetched to the host, so the
+rig's budgeted collection governs *host* memory there, while the `DeviceMemory` settings reach only
+the CUDA arena: a process whose RSS climbs is not helped by an arena budget, and a card that fills
+up is not helped by the rig's reclamation. A resident run is the case where the two meet — its state
+stays in the arena, and the run releases it deterministically as each step supersedes it, which is
+why a retained step does not go through the rig's collection at all. A `StepToCheckpoint` step hands
+state back to you instead, so that one is reclaimed like any other.
 
 Result types:
 - `TrainingCheckpoint` → `.TrainableParams`, `.ModelState`, `.OptimizerState`, `.Step` (global step, `long`; advances each `TrainStep`, so schedules resume from a saved checkpoint), and the host-owned run counters `.Epoch` / `.BatchIndex` (`long?`; the training loop advances them — the counter-agnostic `TrainStep` carries them through unchanged). They are `null` when the position is genuinely **unknown** — an initial checkpoint, or one trained without a data loader / explicit counters — rather than a misleading `0`; the loader-driven and explicit-counter paths set concrete values. A scheduled hyperparameter reading the epoch / batch counter sees `0` for a `null` value. `.Step` is always a concrete `long`; all counters are `int64` end to end. It also carries `.Rig` (the `TrainingRig?` that produced it — set on every rig-produced checkpoint, so `checkpoint.ToInferenceModel()` needs no re-supplied graph) and `.Loss` (`float?`; the loss of the `TrainStep` that produced it, `null` on an initial or bare checkpoint). Both are preserved through the counter derivations (`WithCounters`/`WithStep`/`WithEpoch`/`WithBatchIndex`). `TrainStep` returns this checkpoint directly — read the step's loss off `.Loss`. `.Loss` persists as its own `Loss` component, independent of `Counters` (dropping `Loss`, or an initial checkpoint, reloads with `.Loss == null` — never a sentinel `0`).
@@ -986,6 +1090,11 @@ Constraints:
 - Do not implement backward passes manually; rely on autodiff.
 - Do not mutate `TrainingCheckpoint` in place across steps; thread the returned
   checkpoint forward.
+- Do not run a long GPU training loop on `TrainStep` when you only want the last checkpoint: every
+  step then pays a full download and upload of parameters and optimizer state. Use
+  `rig.BeginResidentRun()`, or `Fit` / `Train`.
+- Do not expect a resident run's state after disposing it — take it with `StepToCheckpoint` on the
+  last step you care about, before the run goes away.
 - Do not declare optimizer state as `Inline` parameters — state is created inside the body
   via an optimizer-owned `[StateInitializer]`'s `Init` and registered with `StateUpdate`.
 - Do not call `Globals.StateUpdate` on inputs, trainable parameters, or computed tensors;

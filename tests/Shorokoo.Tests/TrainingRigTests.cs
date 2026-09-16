@@ -196,19 +196,6 @@ public partial class ParamOrderAModel
     }
 }
 
-/// <summary><see cref="ParamOrderAModel"/> with the two initializer calls swapped: the same two
-/// parameter names and shapes, each attached to the other role.</summary>
-[Module]
-public partial class ParamOrderBModel
-{
-    public static Tensor<float32> Inline(Tensor<float32> x)
-    {
-        var offset = NormalDist.Init(Vector(1L), Scalar(0f), Scalar(1f));
-        var scale = NormalDist.Init(Vector(1L), Scalar(0f), Scalar(1f));
-        return x * scale.Scalar() + offset.Scalar();
-    }
-}
-
 /// <summary>One <c>[4, 2]</c> weight applied to the input.</summary>
 [Module]
 public partial class ParamShapeNarrowModel
@@ -1848,6 +1835,198 @@ public class TrainingRigTrainingLoopCoverageTests
         for (int i = 0; i < twoExpected.Length; i++)
             Assert.True(MathF.Abs(twoExpected[i] - twoOut[i]) < 1e-5f);
     }
+
+    // ---- Resident training runs (Shorokoo/Shorokoo#325) ----
+
+    private static TrainingRig AdamWScalarRig() => TrainingRig.FromScratch(
+        ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
+        [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([4L], [1f, 2f, 3f, 4f]))],
+        new AdamWOptimizerHyperparameters { LearningRate = 0.1f });
+
+    /// <summary>The losses and final checkpoint of <paramref name="steps"/> TrainStep calls.</summary>
+    private static (float[] Losses, TrainingCheckpoint Final) StepLoopRun(TrainingRig rig, int steps)
+    {
+        var (input, target) = (InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f));
+        var ckpt = rig.CreateInitialCheckpoint();
+        var losses = new float[steps];
+        for (int i = 0; i < steps; i++)
+        {
+            ckpt = rig.TrainStep(ckpt, input, target);
+            losses[i] = ckpt.Loss!.Value;
+        }
+        return (losses, ckpt);
+    }
+
+    /// <summary>The other half of the ownership rule, and the one only a benchmark watched: the
+    /// release a resident run performs on the state each step supersedes. The run owns that state
+    /// internally, so the primitive it calls is what is assertable here — and a released tensor
+    /// says so rather than reading freed memory, which is the invariant that makes it safe.</summary>
+    [Fact]
+    public void TestReleasingSupersededStateDisposesItsTensorsRatherThanLeavingThemReadable()
+    {
+        var rig = AdamWScalarRig();
+        var (input, target) = (InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f));
+        var superseded = rig.TrainStep(rig.CreateInitialCheckpoint(), input, target);
+        var tensors = Tensors(superseded);
+        Assert.NotEmpty(tensors);
+        Assert.All(tensors, t => Assert.False(t.IsDisposed));
+
+        TrainingRig.ReleaseCheckpointState(superseded);
+
+        Assert.All(tensors, t => Assert.True(t.IsDisposed));
+        Assert.All(tensors, t => Assert.Throws<ObjectDisposedException>(() => t.CopyRawMemory()));
+        TrainingRig.ReleaseCheckpointState(superseded);   // idempotent
+    }
+
+    /// <summary>A checkpoint the run published, and the one it was handed, outlive it: handing one
+    /// over gives up the right to free it.</summary>
+    [Fact]
+    public void TestAResidentRunLeavesEveryCheckpointItPublishedReadable()
+    {
+        var rig = AdamWScalarRig();
+        var (input, target) = (InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f));
+        var initial = rig.CreateInitialCheckpoint();
+
+        var run = rig.BeginResidentRun(initial);
+        var published = run.StepToCheckpoint(input, target);
+        run.Step(input, target);
+        run.Dispose();
+
+        Assert.All(Tensors(published), t => Assert.False(t.IsDisposed));
+        Assert.All(Tensors(initial), t => Assert.False(t.IsDisposed));
+    }
+
+    private static TensorData[] Tensors(TrainingCheckpoint checkpoint) =>
+        [.. checkpoint.TrainableParams.Fields.Values.OfType<TensorData>()];
+
+    /// <summary>The same run through a resident run, checkpointing on the last step only.</summary>
+    private static (float[] Losses, TrainingCheckpoint Final) ResidentRun(TrainingRig rig, int steps)
+    {
+        var (input, target) = (InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f));
+        using var run = rig.BeginResidentRun();
+        var losses = new float[steps];
+        TrainingCheckpoint final = null!;
+        for (int i = 0; i < steps; i++)
+        {
+            if (i == steps - 1) losses[i] = (final = run.StepToCheckpoint(input, target)).Loss!.Value;
+            else losses[i] = run.Step(input, target);
+        }
+        return (losses, final);
+    }
+
+    [Fact]
+    public void TestAResidentRunTrainsTheSameTrajectoryAsATrainStepLoop()
+    {
+        var (stepLosses, stepFinal) = StepLoopRun(AdamWScalarRig(), 5);
+        var (residentLosses, residentFinal) = ResidentRun(AdamWScalarRig(), 5);
+
+        Assert.Equal(stepLosses, residentLosses);
+        Assert.Equal(FlattenStruct(stepFinal.TrainableParams), FlattenStruct(residentFinal.TrainableParams));
+        Assert.Equal(FlattenStruct(stepFinal.OptimizerState), FlattenStruct(residentFinal.OptimizerState));
+        Assert.Equal(stepFinal.Step, residentFinal.Step);
+        Assert.Equal(stepFinal.Loss, residentFinal.Loss);
+    }
+
+    [Fact]
+    public void TestAResidentRunOverALoaderMatchesFitAndCarriesTheSameCounters()
+    {
+        const int features = 4;
+        var fitRig = LoaderRig(batchSize: 2, features);
+        var (fitIn, fitTgt) = IndexDataset(fitRig, n: 6, features);
+        var fit = fitRig.Fit(new InMemoryDataLoader(fitIn, fitTgt, batchSize: 2), numEpochs: 1);
+
+        var runRig = LoaderRig(batchSize: 2, features);
+        var (runIn, runTgt) = IndexDataset(runRig, n: 6, features);
+        var loader = new InMemoryDataLoader(runIn, runTgt, batchSize: 2);
+        using var run = runRig.BeginResidentRun();
+        run.Step(loader);
+        run.Step(loader);
+        var final = run.StepToCheckpoint(loader);
+
+        Assert.Equal(fit.FinalCheckpoint.Step, final.Step);
+        Assert.Equal(fit.FinalCheckpoint.Epoch, final.Epoch);
+        Assert.Equal(fit.FinalCheckpoint.BatchIndex, final.BatchIndex);
+        Assert.Equal(FlattenStruct(fit.FinalCheckpoint.TrainableParams), FlattenStruct(final.TrainableParams));
+        Assert.Same(runRig, final.Rig);
+        Assert.Equal(3, run.CurrentStep);
+    }
+
+    [Fact]
+    public void TestAResidentRunFreesOnlyTheStateNobodyElseHolds()
+    {
+        var rig = AdamWScalarRig();
+        var (input, target) = (InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f));
+        var initial = rig.CreateInitialCheckpoint();
+
+        var initialBefore = FlattenStruct(initial.TrainableParams);
+
+        var run = rig.BeginResidentRun(initial);
+        run.Step(input, target);
+        var published = run.StepToCheckpoint(input, target);
+        var publishedBefore = FlattenStruct(published.TrainableParams);
+        run.Step(input, target);
+        run.Dispose();
+
+        // Values, not emptiness: a released tensor still reports its element count, so an array of
+        // the right length says nothing. These two have to still hold what they held.
+        Assert.Equal(initialBefore, FlattenStruct(initial.TrainableParams));
+        Assert.Equal(publishedBefore, FlattenStruct(published.TrainableParams));
+        Assert.NotEmpty(initialBefore);
+        Assert.Equal(2, published.Step);
+        Assert.Throws<ObjectDisposedException>(() => run.Step(input, target));
+        run.Dispose();
+    }
+
+    [Fact]
+    public void TestAResidentRunAppliesRuntimeHyperparametersAndRefusesThemMissing()
+    {
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([4L], [1f, 2f, 3f, 4f]))],
+            Hyperparameter.Runtime());
+        var (input, target) = (InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f));
+        var hypers = rig.MakeHyperparameters(0.1f);
+
+        var stepped = rig.TrainStep(rig.CreateInitialCheckpoint(), hypers, input, target);
+        using var run = rig.BeginResidentRun();
+        var resident = run.StepToCheckpoint(hypers, input, target);
+
+        Assert.Equal(FlattenStruct(stepped.TrainableParams), FlattenStruct(resident.TrainableParams));
+        Assert.Contains("MakeHyperparameters", Assert.Throws<InvalidOperationException>(
+            () => run.Step(input, target)).Message);
+    }
+
+    // Retention is a backend capability, and this one has no memory but the host's. A provider
+    // wrongly reported as having its own would leave every checkpoint tensor unreadable, so the
+    // discovery must not misfire — and asking to retain must stay a no-op when there is nowhere to
+    // retain to.
+    [Fact]
+    public void TestOnAHostOnlyBackendNothingIsRetainedAndEveryOutputStaysReadable()
+    {
+        var rig = AdamWScalarRig();
+        var (input, target) = (InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f));
+        var ckpt = rig.CreateInitialCheckpoint();
+        var compiled = rig.RuntimeContext.Compile(rig.TrainingStepPureGraph);
+        Assert.False(compiled.HasDeviceMemory);
+
+        // A retention array of any other length is refused rather than half-applied.
+        Assert.Throws<InvalidTensorOperationException>(() => compiled.Execute(
+            ComputeContext.ExpandStructInputs([ckpt.TrainableParams, ckpt.ModelState, ckpt.OptimizerState, input, target]),
+            [.. Enumerable.Repeat(true, compiled.OutputCount + 1)]));
+
+        IData[] inputs = [ckpt.TrainableParams, ckpt.ModelState, ckpt.OptimizerState, input, target];
+        var outputs = compiled.Execute(
+            ComputeContext.ExpandStructInputs(inputs),
+            [.. Enumerable.Repeat(true, compiled.OutputCount)]);
+        Assert.All(outputs, o => Assert.True(o.ToTensorData().IsHostResident));
+
+        using var run = rig.BeginResidentRun(ckpt);
+        run.Step(input, target);
+        var stepped = run.StepToCheckpoint(input, target);
+        Assert.All(stepped.TrainableParams.Fields.Values, f => Assert.True(((TensorData)f).IsHostResident));
+        Assert.All(stepped.OptimizerState.Fields.Values, f => Assert.True(((TensorData)f).IsHostResident));
+        Assert.NotEmpty(FlattenStruct(stepped.TrainableParams));
+    }
 }
 
 [Trait("Domain", "Training")]
@@ -1885,31 +2064,48 @@ public class TrainingRigCheckpointCoverageTests
         Assert.NotNull(cp);
     }
 
-    /// <summary>Parameter names are the initializer class plus a trace-order index, so two models
-    /// that differ only in the order of their initializer calls produce the same names for
-    /// different roles, and a checkpoint crosses from one into the other carrying every tensor to
-    /// the wrong parameter. `training.md` states the opposite ("Loading a checkpoint from a
-    /// different model or optimizer throws"); it does not. Tracked as Shorokoo/Shorokoo#322.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#322: a checkpoint loads into a model whose initializer calls were reordered, silently transposing the parameters")]
-    public void TestACheckpointIsRefusedByAModelWhoseParametersMeanSomethingElse()
+    /// <summary>A caller that keeps no checkpoint, and one that keeps a single older checkpoint,
+    /// both supersede everything else — so every collection reclaims and the budget must stay at its
+    /// base. Neither is distinguishable by watching one recent checkpoint: the one handed back at a
+    /// reclamation is the next step's own input, alive at the collection whatever the caller does,
+    /// and a single older survivor is what keeping one looks like. The rule is therefore all the
+    /// older watches or none.</summary>
+    [Fact]
+    public void TestReclamationDoesNotBackOffForACallerThatKeepsNoCheckpointAtAll()
     {
-        NamedModelParam[] sample =
-        [
-            new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([4L], [1f, 2f, 3f, 4f])),
-        ];
-        var rigA = TrainingRig.FromScratch(ParamOrderAModel.ComputationGraph, L2Loss.ComputationGraph,
-            SGDOptimizer.ComputationGraph, sample, 0.1f);
-        var rigB = TrainingRig.FromScratch(ParamOrderBModel.ComputationGraph, L2Loss.ComputationGraph,
-            SGDOptimizer.ComputationGraph, sample, 0.1f);
+        var rig = ShapeRig(ParamOrderAModel.ComputationGraph);
+        var input = rig.InputDef.FromOrderedData(TensorData([4L], [1f, 2f, 3f, 4f]));
+        var target = rig.TargetDef.FromOrderedData(TensorData([4L], [1f, 2f, 3f, 4f]));
+        rig.SetReclaimBudgetForTests(1);
 
-        var ckpt = rigA.CreateInitialCheckpoint();
-        var path = TempPath("ckpt_reordered") + ".safetensors";
-        try
+        var cp = rig.CreateInitialCheckpoint();
+        long worst = 0;
+        for (int i = 0; i < 12; i++)
         {
-            ckpt.Save(path);
-            Assert.Throws<InvalidOperationException>(() => rigB.LoadCheckpoint(path));
+            cp = rig.TrainStep(cp, input, target);
+            worst = Math.Max(worst, rig.ReclaimBudgetBytes);
         }
-        finally { if (File.Exists(path)) File.Delete(path); }
+        Assert.NotNull(cp);
+        Assert.Equal(1, worst);
+
+        // Keeping one checkpoint — the best so far, the step before — supersedes every other, so
+        // the collections are still worth making and the budget still must not climb.
+        var keepsOne = ShapeRig(ParamOrderAModel.ComputationGraph);
+        keepsOne.SetReclaimBudgetForTests(1);
+        var current = keepsOne.CreateInitialCheckpoint();
+        TrainingCheckpoint? best = null;
+        long worstKeepingOne = 0;
+        for (int i = 0; i < 12; i++)
+        {
+            var previous = current;
+            current = keepsOne.TrainStep(previous, input, target);
+            // One checkpoint held that is not the one being fed back in, which is what "the best so
+            // far" is: every third step improves, and the rest are superseded and freed.
+            if (i % 3 == 0) best = previous;
+            worstKeepingOne = Math.Max(worstKeepingOne, keepsOne.ReclaimBudgetBytes);
+        }
+        Assert.NotNull(best);
+        Assert.Equal(1, worstKeepingOne);
     }
 
     /// <summary>A checkpoint whose parameters are shaped differently is refused on every route

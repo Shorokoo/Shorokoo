@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Runtime.InteropServices;
 using Microsoft.ML.OnnxRuntime;
 using Shorokoo.Core.Inference.Abstractions;
@@ -26,18 +27,33 @@ namespace Shorokoo.OnnxRuntime;
 public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
 {
     private readonly Action<SessionOptions> _configureExecutionProvider;
+    private readonly int? _cudaDeviceId;
 
     /// <param name="configureExecutionProvider">
     /// Applied to the <see cref="SessionOptions"/> of every session this factory creates,
     /// after the log-severity and graph-optimization settings and before the session is
-    /// constructed. This is where a subclass appends its execution provider (e.g.
-    /// <c>opts =&gt; opts.AppendExecutionProvider_CUDA(0)</c>); a CPU backend leaves ORT on
-    /// its default provider and does nothing here.
+    /// constructed. This is where a subclass appends its execution provider; a CPU backend
+    /// leaves ORT on its default provider and does nothing here.
     /// </param>
-    protected OrtSessionFactory(Action<SessionOptions> configureExecutionProvider)
+    /// <param name="cudaDeviceId">
+    /// The CUDA device the provider appended above allocates on, or <c>null</c> when it is
+    /// not a CUDA provider. It names the arena that
+    /// <see cref="DeviceMemory.ShrinkArenaAfterRun"/> shrinks, so a backend that does not
+    /// allocate on a card passes <c>null</c> and its sessions ignore the setting.
+    /// </param>
+    protected OrtSessionFactory(Action<SessionOptions> configureExecutionProvider, int? cudaDeviceId)
     {
         _configureExecutionProvider = configureExecutionProvider;
+        _cudaDeviceId = cudaDeviceId;
     }
+
+    /// <summary>
+    /// The CUDA-backend constructor: every session gets the CUDA execution provider on
+    /// <paramref name="cudaDeviceId"/>, configured from <see cref="DeviceMemory"/>, and
+    /// honours <see cref="DeviceMemory.ShrinkArenaAfterRun"/> for that device's arena.
+    /// </summary>
+    protected OrtSessionFactory(int cudaDeviceId)
+        : this(opts => AppendCuda(opts, cudaDeviceId), cudaDeviceId) { }
 
     /// <summary>
     /// Creates an ORT inference session over a serialized ONNX model, on this factory's
@@ -63,7 +79,7 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
         Configure(options, graphOptimization, logSeverity);
         _configureExecutionProvider(options);
         var session = new InferenceSession(modelBytes.ToArray(), options);
-        return new OrtInferenceSession(session);
+        return new OrtInferenceSession(session, _cudaDeviceId);
     }
 
     /// <summary>
@@ -102,6 +118,74 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
         else
             options.GraphOptimizationLevel = (GraphOptimizationLevel)(int)graphOptimization;
     }
+
+    /// <summary>
+    /// Appends the CUDA execution provider on <paramref name="deviceId"/>, configured with the
+    /// device-memory settings <see cref="DeviceMemory"/> holds at this moment. This is what the
+    /// GPU backends pass as their execution-provider step, and the point at which
+    /// <see cref="DeviceMemory.LimitBytes"/> and <see cref="DeviceMemory.ArenaExtend"/> are read:
+    /// a session built now keeps them for its life.
+    /// </summary>
+    public static void AppendCuda(SessionOptions options, int deviceId)
+    {
+        // OrtCUDAProviderOptions is a SafeHandle that ORT takes as a bare IntPtr, exactly like
+        // the SessionOptions above, so it needs the same `using`: the options are read during
+        // AppendExecutionProvider_CUDA, well after the JIT has retired the local at its .Handle
+        // read, and a GC there would run the critical finalizer under the native call.
+        using var cuda = new OrtCUDAProviderOptions();
+        cuda.UpdateOptions(CudaProviderOptions(
+            deviceId, DeviceMemory.LimitBytes, DeviceMemory.ArenaExtend));
+        options.AppendExecutionProvider_CUDA(cuda);
+    }
+
+    /// <summary>
+    /// The CUDA execution-provider options for a device and a device-memory configuration, in
+    /// ORT's own <c>provider_options</c> spelling. Pure, and public alongside
+    /// <see cref="Configure"/> so the mapping can be read and asserted without a CUDA machine to
+    /// build a session on. An absent <paramref name="limitBytes"/> omits <c>gpu_mem_limit</c>
+    /// altogether, which leaves ORT at its default of the whole card.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="arenaExtend"/> is not one of
+    /// the two strategies ORT accepts, or <paramref name="limitBytes"/> is not positive.</exception>
+    public static Dictionary<string, string> CudaProviderOptions(
+        int deviceId,
+        long? limitBytes,
+        ArenaExtendStrategy arenaExtend)
+    {
+        var options = new Dictionary<string, string>
+        {
+            ["device_id"] = deviceId.ToString(CultureInfo.InvariantCulture),
+            ["arena_extend_strategy"] = arenaExtend switch
+            {
+                ArenaExtendStrategy.NextPowerOfTwo => "kNextPowerOfTwo",
+                ArenaExtendStrategy.SameAsRequested => "kSameAsRequested",
+                _ => throw new ArgumentOutOfRangeException(
+                    nameof(arenaExtend), arenaExtend, "Not an ONNX Runtime arena-extend strategy."),
+            },
+        };
+        if (limitBytes is { } limit)
+        {
+            // ORT parses this into a size_t, where a negative reads back as SIZE_MAX -- an
+            // uncapped arena from a caller who asked for the opposite. Refuse it here, as
+            // DeviceMemory.LimitBytes refuses it at the assignment.
+            if (limit <= 0)
+                throw new ArgumentOutOfRangeException(
+                    nameof(limitBytes), limit, "The device-memory limit must be positive.");
+            options["gpu_mem_limit"] = limit.ToString(CultureInfo.InvariantCulture);
+        }
+        return options;
+    }
+
+    /// <summary>
+    /// The arena ORT should shrink after a run — the value of its
+    /// <c>memory.enable_memory_arena_shrinkage</c> run option — or <c>null</c> to leave the run
+    /// option off. Only a GPU backend names one: the entry says <i>which</i> arena to shrink, and
+    /// a CPU backend's device memory is not what <see cref="DeviceMemory"/> is about.
+    /// </summary>
+    public static string? ArenaShrinkageRunConfig(int? cudaDeviceId, bool shrinkArenaAfterRun)
+        => cudaDeviceId is { } device && shrinkArenaAfterRun
+            ? $"gpu:{device.ToString(CultureInfo.InvariantCulture)}"
+            : null;
 
     /// <summary>
     /// Copies a flat managed array into an ORT tensor of the given shape. Shorokoo's

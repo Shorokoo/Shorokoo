@@ -22,6 +22,10 @@ Related: [core-types.md](core-types.md) · [defining-models.md](defining-models.
 - Reference one platform backend package and it is normally found for you — no setup
   code. Only one backend is live per process. How it is discovered, and how to
   override the choice: [Backend selection](#backend-selection).
+- On a GPU backend the CUDA arena is configured through `DeviceMemory`, which also reports
+  how much of the card is gone. Its arena strategy deliberately departs from ORT's default so
+  that a training loop does not end up holding far more of the card than it uses:
+  [Device memory](#device-memory-gpu-backends).
 
 ## Workflow: one-shot evaluation
 
@@ -424,6 +428,119 @@ If no backend is found, the first inference call throws `InvalidOperationExcepti
 > startup -- e.g. InferenceBackend.Factory = new LinuxCpuInferenceFactory(); (or the
 > factory from whichever Shorokoo.{WinCPU,WinGPU,LinuxCPU,LinuxGPU} package you
 > reference) -- or add such a package as a dependency.`
+
+### Device memory (GPU backends)
+
+ONNX Runtime allocates device memory out of a BFC arena that extends in blocks and, unless asked to
+shrink (below), never gives them back. How large each new block is comes from the *extend strategy*, and the two ORT offers
+suit opposite situations:
+
+- **`NextPowerOfTwo`** (ORT's default) makes each extension at least as large as everything the
+  arena already holds. The regions are big, splittable and reusable, which is what an
+  unpredictable series of allocation sizes needs — but once a run's sizes have settled the
+  doubling is pure overshoot, and it is why a long training run ends up holding far more of the
+  card than its steps use.
+- **`SameAsRequested`** extends by exactly what was asked for, so a settled run's arena tracks it.
+  The catch is that an exactly-sized region cannot serve a later, larger request: a session whose
+  input shapes keep growing strands every region it outgrows.
+
+**Shorokoo defaults to `SameAsRequested`.** That is a deliberate departure from ORT, and it is a
+bet rather than a free win. Measured on the CPU arena — the same allocator with the same two
+strategies — over four chained matmuls. Both columns move by a MiB or two between runs, and on the
+mixed rows a run can put the two within one MiB of each other, so read every ratio below as
+approximate and the near-ties as ties:
+
+| shapes fed to the session | `SameAsRequested` | `NextPowerOfTwo` |
+|---|---|---|
+| one shape, ten runs | **11–12 MiB** | 16 MiB |
+| alternating 2048/512, twenty runs | **20–25 MiB** | 28–33 MiB |
+| largest first, then settled | 17–18 MiB | 15–16 MiB |
+| shuffled from four sizes, twenty runs | 34 MiB | **31 MiB** |
+| growing, then settled | 34–35 MiB | **31 MiB** |
+| growing 256 to 2048 | 23 MiB | **15 MiB** |
+| growing 256 to 2048, 16 MiB arena | does not fit | **15 MiB** |
+
+The measurement is a test in the Shorokoo repository
+(`ArenaExtendStrategyProbeTests`, `Purpose=Manual`) rather than something you can run against the
+package, so treat these as indicative of the shape, not as your machine's numbers — what settles
+your case is `DeviceMemory.Sample()` around your own run.
+
+The bet is on the asymmetry, not on winning every row. A training run feeds one input shape to one
+compiled step for its whole length — the first row — and there exact-size extension holds about
+1.3–1.45x less. On the card that prompted this, a step whose first step showed 12,877 MiB ended up
+with the arena holding all 24,563 MiB — the whole of a 24 GiB card — and a smaller batch of the same
+model settled at roughly 1.8x what its steps used. Two allocation sizes still favour exact-size extension
+(row 2, by 1.2–1.6x depending on the run); it is once several are in play that ORT's doubling holds less, by about 1.1x, or
+ties (rows 3 to 5). **The one case to override it in is input shapes that grow without settling** —
+the last two rows, where the doubling holds around 1.5x less and, on a card with no room to spare,
+fits where exact-size extension does not:
+
+```csharp
+using Shorokoo.Core.Inference.Abstractions;
+
+DeviceMemory.ArenaExtend = ArenaExtendStrategy.NextPowerOfTwo;   // ORT's doubling, back again
+DeviceMemory.LimitBytes = 16L * 1024 * 1024 * 1024;              // cap the arena at 16 GiB
+DeviceMemory.ShrinkArenaAfterRun = true;                          // hand unused blocks back each step
+```
+
+| setting | ORT option | default | read |
+|---|---|---|---|
+| `LimitBytes` | `gpu_mem_limit` | `null` — no cap | when a session is created |
+| `ArenaExtend` | `arena_extend_strategy` | `SameAsRequested` — **not** ORT's default | when a session is created |
+| `ShrinkArenaAfterRun` | `memory.enable_memory_arena_shrinkage` | `false` | on every run |
+
+The other two are unset by default for their own reasons. `ShrinkArenaAfterRun` costs a
+synchronizing device allocation on every step to re-take what it handed back, so it is worth it
+only when the card is shared with something that needs the room between steps. It is also the one
+setting that can fail a run rather than degrade it: ORT rejects the request where the device it
+names has no arena allocator registered — an arena disabled through `ORT_DISABLE_ARENA`, say — so
+turn it on with a short run before a long one. `LimitBytes` is a
+budget, not a hint: a step that needs more than it fails with ORT's `BFCArena ... Failed to
+allocate memory for requested buffer` rather than eating the rest of the device, so a figure set
+too low fails a run that would have fitted.
+
+Note that the budget caps **each session's** arena, not the process. ORT gives a session its own
+CUDA arena, so a process holding a compiled graph and a training rig at once can hold the limit
+more than once over; read it as the ceiling on any one session.
+
+The first two settings are read **when a session is built** — the first inference call, or a
+training rig's first `TrainStep` for a given input shape — so set them at startup; changing them
+afterwards leaves already-compiled sessions as they were. `ShrinkArenaAfterRun` is read on every
+run and takes effect immediately, on sessions already compiled.
+
+The same class reports what the card is doing:
+
+```csharp
+using var run = rig.BeginResidentRun(checkpoint);
+for (int step = 0; step < steps; step++)
+{
+    run.Step(input, target);
+    DeviceMemory.Sample();
+}
+Console.WriteLine($"peak {DeviceMemory.PeakUsedBytes / (1024 * 1024)} MiB");
+```
+
+`Read()` returns a `DeviceMemoryReading` (`UsedBytes`, `FreeBytes`, `TotalBytes`), `Sample()` does
+the same and folds the reading into `PeakUsedBytes`, and `ResetPeak()` starts a fresh peak. Four
+things to know about the numbers:
+
+- They are the **device's**, not this process's — every other process on the card, a desktop
+  session included, is in `UsedBytes`.
+- Nothing samples on its own. `PeakUsedBytes` is exactly the largest figure your own `Sample()`
+  calls have seen, which is the point: a step lasting 0.2 s falls between the polls of a
+  half-second `nvidia-smi` sampler, and the "peak" such a sampler reports can be half the real one.
+  A `Sample()` per step costs about a microsecond and cannot miss the step it follows.
+- On a machine with no CUDA runtime installed both return `null` rather than throwing, so the call
+  can stay in code that also runs on a CPU backend.
+- The reading goes through the CUDA runtime directly, which initializes this process's context on
+  the device if it has none — itself a few hundred MiB. Take the first reading after the backend is
+  up, not before, or that cost lands inside your baseline.
+
+**Process-wide is the shape, not a staging post.** One device (0), one setting for every session in
+the process, mutable at any time. Per-`ComputeContext` device configuration was considered and is
+not planned, so do not expect two contexts to differ: treat these as startup configuration, and
+where one process must serve both a training loop and a variable-shape inference path, pick the
+arena strategy whose cost you would rather pay.
 
 ## Debugging engine (no OnnxRuntime)
 

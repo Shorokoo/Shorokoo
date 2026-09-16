@@ -21,8 +21,51 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
 
     public long[] Shape => Inner.GetTensorTypeAndShape().Shape;
 
+    // ORT names the allocator a value was made by on its memory info, and "Cpu" is the one
+    // that names host memory -- every other name ("Cuda", "Hip", ...) is the provider's own.
+    // Pinned host memory ("CudaPinned") is readable too, but nothing here ever asks for it,
+    // so the narrow test is the safe one: an unrecognized allocator reads as device memory
+    // and is copied rather than dereferenced. A value never moves, so this is asked once.
+    public bool IsHostAccessible => _isHostAccessible ??= ProbeHostAccessible();
+
+    private bool ProbeHostAccessible()
+    {
+        if (!Inner.IsTensor) return false;
+        // Disposed, not abandoned: OrtMemoryInfo is a SafeHandle, so leaving one to its finalizer
+        // puts an object on the finalization queue for every tensor anyone reads -- the cost
+        // OnnxTensorData deliberately refuses to pay by having no finalizer of its own.
+        using var info = Inner.GetTensorMemoryInfo();
+        return info.Name == CpuAllocatorName;
+    }
+
+    private bool? _isHostAccessible;
+
+    /// <summary>ORT's name for the host allocator, on every execution provider.</summary>
+    internal const string CpuAllocatorName = "Cpu";
+
+    /// <summary>Refuses a span over memory the host cannot read. The span accessors hand out a
+    /// pointer without checking where it points, so this is the difference between an exception
+    /// and a wild read of a device address — and it belongs here rather than only on the tensor
+    /// wrapper, because a value reached through <c>ToTensorValue()</c> or copied by
+    /// <c>OnnxUtils.CopyTensorValue</c> never passes that wrapper's guard.</summary>
+    private void ThrowIfNotHostAccessible()
+    {
+        if (IsHostAccessible) return;
+        // Two different failures share this guard; saying the wrong one sends the reader looking
+        // for a resident run that does not exist.
+        if (!Inner.IsTensor)
+            throw new InvalidOperationException(
+                $"This value holds a {Inner.OnnxType}, not a tensor, so it has no element buffer "
+                + "to read. Read a sequence through its elements instead.");
+        throw new InvalidOperationException(
+            "This value's storage is the execution provider's own memory, not host memory, so "
+            + "it cannot be read directly. A resident training run leaves its state there "
+            + "deliberately; ResidentTrainingRun.StepToCheckpoint is what brings it home.");
+    }
+
     public ReadOnlySpan<T> GetTensorDataAsSpan<T>() where T : unmanaged
     {
+        ThrowIfNotHostAccessible();
         if (typeof(T) == typeof(ShoFloat16))
             return MemoryMarshal.Cast<OrtFloat16, T>(Inner.GetTensorDataAsSpan<OrtFloat16>());
         if (typeof(T) == typeof(ShoBFloat16))
@@ -32,6 +75,7 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
 
     public Span<T> GetTensorMutableDataAsSpan<T>() where T : unmanaged
     {
+        ThrowIfNotHostAccessible();
         if (typeof(T) == typeof(ShoFloat16))
             return MemoryMarshal.Cast<OrtFloat16, T>(Inner.GetTensorMutableDataAsSpan<OrtFloat16>());
         if (typeof(T) == typeof(ShoBFloat16))

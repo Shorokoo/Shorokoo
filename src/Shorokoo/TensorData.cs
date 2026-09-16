@@ -249,6 +249,17 @@ namespace Shorokoo
             return copy;
         }
 
+        /// <summary>
+        /// Whether this tensor's storage is host memory, so the <c>Access…Memory</c> accessors
+        /// may be called. Like every path to the elements it throws once the tensor is disposed,
+        /// rather than answering about storage that is gone — ask <see cref="IsDisposed"/> first if
+        /// a tensor may have been released. It is <c>false</c> only for a tensor an execution provider produced in
+        /// its own memory and a <see cref="ResidentTrainingRun"/> deliberately left there; reading
+        /// such a tensor throws, and <see cref="ResidentTrainingRun.StepToCheckpoint(TensorDataStruct, TensorDataStruct)"/>
+        /// is what brings one back to the host.
+        /// </summary>
+        public virtual bool IsHostResident => true;
+
         /// <summary>Downcasts to the typed <see cref="TensorData{T}"/>; T must match the actual element type.</summary>
         public TensorData<T> As<T>() where T : IVarType => (TensorData<T>)this;
 
@@ -335,26 +346,43 @@ namespace Shorokoo
         }
 
         /// <inheritdoc/>
+        public override bool IsHostResident => this.Value.IsHostAccessible;
+
+        /// <summary>
+        /// The backing value, checked to be readable from the host first. The span accessors below
+        /// hand out a raw pointer with no idea what it points at, so a device-resident value would
+        /// not fail on them — it would read whatever host address the device pointer happens to
+        /// collide with. This turns that into an exception naming what to do instead.
+        /// </summary>
+        private IShorokooTensorValue HostValue => this.Value.IsHostAccessible ? this.Value
+            : throw new InvalidOperationException(
+                $"This tensor ({this.Shape}:{this.DType}) lives in the execution provider's own " +
+                "memory, not host memory, so its contents cannot be read here. It belongs to a " +
+                "ResidentTrainingRun, which keeps training state on the device between steps; take " +
+                "a host copy of the state with StepToCheckpoint(...) on the step you want to read " +
+                "or save.");
+
+        /// <inheritdoc/>
         public override Span<V> AccessModifiableMemory<V>()
         {
-            return this.Value.GetTensorMutableDataAsSpan<V>();
+            return this.HostValue.GetTensorMutableDataAsSpan<V>();
         }
 
         /// <inheritdoc/>
         public override ReadOnlySpan<V> AccessMemory<V>()
         {
-            return this.Value.GetTensorDataAsSpan<V>();
+            return this.HostValue.GetTensorDataAsSpan<V>();
         }
 
         /// <inheritdoc/>
         public override Span<byte> AccessModifiableRawMemory()
         {
-            return this.Value.GetTensorMutableDataAsSpan<byte>();
+            return this.HostValue.GetTensorMutableDataAsSpan<byte>();
         }
         /// <inheritdoc/>
         public override ReadOnlySpan<byte> AccessRawMemory()
         {
-            return this.Value.GetTensorDataAsSpan<byte>();
+            return this.HostValue.GetTensorDataAsSpan<byte>();
         }
 
         #region IDisposable

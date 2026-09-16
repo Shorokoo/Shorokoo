@@ -13,6 +13,18 @@ public interface IShorokooTensorValue : IDisposable
     ShorokooTensorElementType ElementType { get; }
     long[] Shape { get; }
 
+    // Whether the buffer behind this value is host memory, so the span accessors below
+    // may be read. It is false for a value the execution provider produced in its OWN
+    // memory -- a CUDA device allocation, say -- which a resident training run keeps
+    // there deliberately (see IShorokooInferenceSession.RunRetainingOutputs). The span
+    // accessors hand out a pointer without checking where it points, so reading one of
+    // those spans is not an error but a wild read; callers must consult this first.
+    //
+    // Defaulted for the same reason as IShorokooInferenceSession.HasDeviceMemory: a value from a
+    // backend that does not answer came off the host path, which is where every backend that does
+    // not retain produces its outputs.
+    bool IsHostAccessible => true;
+
     ReadOnlySpan<T> GetTensorDataAsSpan<T>() where T : unmanaged;
     Span<T> GetTensorMutableDataAsSpan<T>() where T : unmanaged;
 

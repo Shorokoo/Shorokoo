@@ -16,12 +16,9 @@ public partial class MemoryStabilityWideModel
 }
 
 /// <summary>
-/// Code-pinned memory-stability gate for the training hot path — the automated
-/// half of <c>release-test-plan</c> <c>R-2</c> ("a long-running training loop
-/// shows stable memory: no unbounded RSS growth / handle leaks"), the
-/// memory-performance check introduced in the
-/// <see href="../../../docs/testing/v1.1/release-test-plan.md">v1.1 plan</see>.
-/// It drives the same pinned linear scenario as the <c>R-1</c> throughput gate
+/// Code-pinned memory-stability gate for the training hot path: a long-running
+/// training loop must show stable memory, with no unbounded RSS growth and no
+/// handle leaks. It drives the same pinned linear scenario as the throughput gate
 /// (<see cref="PerfBaselineLinearModel"/>) through thousands of
 /// <see cref="TrainingRig.TrainStep"/> calls and asserts the live managed heap
 /// does not grow without bound — a per-step reference leak (accumulating
@@ -29,7 +26,7 @@ public partial class MemoryStabilityWideModel
 /// roughly linearly with the step count and blow the budget.
 ///
 /// <para>
-/// Like the R-1 gate this is deliberately loose so ordinary run-to-run / GC /
+/// Like the throughput gate this is deliberately loose so ordinary run-to-run / GC /
 /// fresh-container jitter never trips it, while a genuine leak — which grows
 /// without bound — still does:
 /// </para>
@@ -57,13 +54,13 @@ public class TrainingMemoryStabilityTests
 {
     private static readonly long[] WideInputShape = [4L, 1024L];
 
-    // Pinned scenario geometry — identical to the R-1 throughput gate.
+    // Pinned scenario geometry — identical to the throughput gate.
     private static readonly long[] InputShape = [4L, 2L];
     private static readonly long[] TargetShape = [4L, 1L];
 
     // A long loop preceded by a warm-up so pools / tiered JIT / first-touch
     // allocations have settled before the first measurement. At the steady-state
-    // rate the R-1 gate records (several thousand steps/s on this scenario) the
+    // rate the throughput gate records (several thousand steps/s on this scenario) the
     // whole run is a couple of seconds of CPU.
     private const int WarmupSteps = 1_000;
     private const int MeasuredSteps = 10_000;
@@ -140,9 +137,36 @@ public class TrainingMemoryStabilityTests
         Assert.True(NativeRssGrowth(collectEachStep: false) <= NativeRssGrowthBudgetBytes);
     }
 
-    /// <summary>Working-set growth across <see cref="NativeMeasuredSteps"/> steps of a rig whose
-    /// per-step state is 12 MiB, measured after a warm-up so the arena has settled.</summary>
-    private static long NativeRssGrowth(bool collectEachStep)
+    /// <summary>
+    /// A resident run (Shorokoo/Shorokoo#325) supersedes its own state every step and releases what
+    /// it superseded, rather than leaving it to a finalizer that a loop this light on managed
+    /// allocation never provokes. So the same scenario as the gate above, driven through a resident
+    /// run and forcing nothing, must hold the process flat. This is also the only place the release
+    /// can be seen on a host-only backend, where residency itself is a no-op.
+    /// </summary>
+    [Fact]
+    public void TestAResidentRunDoesNotGrowTheProcessWhenNothingForcesACollection()
+        => Assert.True(ResidentRssGrowth() <= NativeRssGrowthBudgetBytes);
+
+    /// <summary>Working-set growth across <see cref="NativeMeasuredSteps"/> resident steps of the
+    /// same 12 MiB-per-step rig, measured after a warm-up and with no forced collection.</summary>
+    private static long ResidentRssGrowth()
+    {
+        var (rig, inputBatch, targetBatch) = WideRig();
+        using var run = rig.BeginResidentRun();
+        for (int i = 0; i < NativeWarmupSteps; i++) run.Step(inputBatch, targetBatch);
+
+        long before = WorkingSetBytes();
+        for (int i = 0; i < NativeMeasuredSteps; i++) run.Step(inputBatch, targetBatch);
+        long after = WorkingSetBytes();
+
+        // Keep the run reachable past the measurement.
+        Assert.Equal(NativeWarmupSteps + NativeMeasuredSteps, run.CurrentStep);
+        return after - before;
+    }
+
+    /// <summary>The 12 MiB-per-step rig both native-growth measurements drive, and its batches.</summary>
+    private static (TrainingRig Rig, TensorDataStruct Input, TensorDataStruct Target) WideRig()
     {
         var graph = MemoryStabilityWideModel.ComputationGraph;
         var exampleInput = TensorData(WideInputShape, new float[4 * 1024]);
@@ -150,9 +174,16 @@ public class TrainingMemoryStabilityTests
             graph, Losses.L2Loss, Optimizers.Adam,
             graph.FromOrderedInputs([exampleInput]),
             new AdamOptimizerHyperparameters { LearningRate = 1e-3f });
+        return (rig,
+            rig.InputDef.FromOrderedData(TensorData(WideInputShape, new float[4 * 1024])),
+            rig.TargetDef.FromOrderedData(TensorData(WideInputShape, new float[4 * 1024])));
+    }
 
-        var inputBatch = rig.InputDef.FromOrderedData(TensorData(WideInputShape, new float[4 * 1024]));
-        var targetBatch = rig.TargetDef.FromOrderedData(TensorData(WideInputShape, new float[4 * 1024]));
+    /// <summary>Working-set growth across <see cref="NativeMeasuredSteps"/> steps of a rig whose
+    /// per-step state is 12 MiB, measured after a warm-up so the arena has settled.</summary>
+    private static long NativeRssGrowth(bool collectEachStep)
+    {
+        var (rig, inputBatch, targetBatch) = WideRig();
 
         var ckpt = rig.CreateInitialCheckpoint();
         for (int i = 0; i < NativeWarmupSteps; i++)

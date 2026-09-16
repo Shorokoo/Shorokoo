@@ -5,6 +5,7 @@ using System.Text.RegularExpressions;
 using Shorokoo.Core.Factory.OpsFactories;
 using Shorokoo.Core.Inference;
 using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.OnnxRuntime;
 using Shorokoo.Runtime;
 
 namespace Shorokoo.Tests;
@@ -14,7 +15,8 @@ namespace Shorokoo.Tests;
 /// internal LINQ-ish helpers in <c>Shorokoo.Core.Utils.Extensions</c>, the <see cref="NodeKey"/> /
 /// <see cref="TensorKey"/> identity structs, the <see cref="ShorokooException"/> hierarchy, the
 /// OpsFactories <see cref="Helpers"/> dtype sets and attribute-type mapping, the
-/// <see cref="InferenceBackend"/> deployment-folder discovery and selection policy, the typed
+/// <see cref="InferenceBackend"/> deployment-folder discovery and selection policy, the
+/// <see cref="DeviceMemory"/> settings the CUDA backends map onto ORT's arena options, the typed
 /// value-handle conversions, <c>ShapeUtils</c>' argument validation for <c>Reshape</c>'s
 /// <c>keepAxes</c>, the <see cref="AtomicFileWriter"/> temp-and-rename commit protocol
 /// (crash-window fault injection, stale-temp sweep, retain-last-N rotation), the
@@ -24,6 +26,7 @@ namespace Shorokoo.Tests;
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
+[Collection(DeviceMemorySettings.Name)]
 public class CoreUtilsCoverageTests
 {
     private static InternalComputationGraph BoolGraph(IValue only) => new([], [only.ToVariable()]);
@@ -298,6 +301,143 @@ public class CoreUtilsCoverageTests
         Assert.Equal(cpu, InferenceBackend.SelectBackend([cpu, gpu], cudaAvailable: false)!.Value);
     }
 
+    [Fact]
+    public void TestDeviceMemorySettingsMapOntoTheCudaArenaOptions()
+    {
+        var uncapped = OrtSessionFactory.CudaProviderOptions(0, null, ArenaExtendStrategy.NextPowerOfTwo);
+        Assert.Equal("0", uncapped["device_id"]);
+        Assert.Equal("kNextPowerOfTwo", uncapped["arena_extend_strategy"]);
+        Assert.False(uncapped.ContainsKey("gpu_mem_limit"));
+
+        var budgeted = OrtSessionFactory.CudaProviderOptions(
+            1, 16L * 1024 * 1024 * 1024, ArenaExtendStrategy.SameAsRequested);
+        Assert.Equal("1", budgeted["device_id"]);
+        Assert.Equal("kSameAsRequested", budgeted["arena_extend_strategy"]);
+        Assert.Equal("17179869184", budgeted["gpu_mem_limit"]);
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => OrtSessionFactory.CudaProviderOptions(0, null, (ArenaExtendStrategy)7));
+
+        Assert.Equal("gpu:0", OrtSessionFactory.ArenaShrinkageRunConfig(0, shrinkArenaAfterRun: true));
+        Assert.Equal("gpu:3", OrtSessionFactory.ArenaShrinkageRunConfig(3, shrinkArenaAfterRun: true));
+        Assert.Null(OrtSessionFactory.ArenaShrinkageRunConfig(0, shrinkArenaAfterRun: false));
+        Assert.Null(OrtSessionFactory.ArenaShrinkageRunConfig(null, shrinkArenaAfterRun: true));
+    }
+
+    /// <summary>
+    /// The shipped defaults, and the ORT options a GPU session built with them asks for. The
+    /// arena strategy is deliberately not ORT's own: exact-size extension holds materially less
+    /// on a run that feeds one shape to one compiled step, which is what a training run is.
+    /// </summary>
+    [Fact]
+    public void TestDeviceMemoryDefaultsToTheExactSizeArenaAndRejectsAnEmptyBudget()
+    {
+        Assert.Equal(ArenaExtendStrategy.SameAsRequested, DeviceMemory.ArenaExtend);
+        Assert.Null(DeviceMemory.LimitBytes);
+        Assert.False(DeviceMemory.ShrinkArenaAfterRun);
+
+        var shipped = OrtSessionFactory.CudaProviderOptions(0, DeviceMemory.LimitBytes, DeviceMemory.ArenaExtend);
+        Assert.Equal("kSameAsRequested", shipped["arena_extend_strategy"]);
+        Assert.False(shipped.ContainsKey("gpu_mem_limit"));
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => DeviceMemory.LimitBytes = 0);
+        Assert.Throws<ArgumentOutOfRangeException>(() => DeviceMemory.LimitBytes = -1);
+        Assert.Throws<ArgumentOutOfRangeException>(() => DeviceMemory.ArenaExtend = (ArenaExtendStrategy)7);
+        Assert.Null(DeviceMemory.LimitBytes);
+        Assert.Equal(ArenaExtendStrategy.SameAsRequested, DeviceMemory.ArenaExtend);
+
+        // A limit set and cleared leaves nothing behind: null is the absence, not a zero.
+        DeviceMemory.LimitBytes = 4096;
+        Assert.Equal(4096L, DeviceMemory.LimitBytes);
+        DeviceMemory.LimitBytes = null;
+        Assert.Null(DeviceMemory.LimitBytes);
+    }
+
+    /// <summary>A reading is null on a machine with no CUDA runtime and a real one where there is
+    /// a card, so the first assertion holds either way; the fold into the peak is driven through
+    /// the seam so it is pinned on both.</summary>
+    [Fact]
+    public void TestDeviceMemoryReadsTheCardWhenThereIsOneAndSampleFoldsIntoThePeak()
+    {
+        Assert.True(DeviceMemory.Read() is not { TotalBytes: <= 0 });
+
+        DeviceMemory.ResetPeak();
+        Assert.Equal(0L, DeviceMemory.PeakUsedBytes);
+        Assert.Null(DeviceMemory.SampleFrom(null));
+        Assert.Equal(0L, DeviceMemory.PeakUsedBytes);
+
+        var reading = new DeviceMemoryReading(4096, 1024, 5120);
+        Assert.Equal(reading, DeviceMemory.SampleFrom(reading));
+        Assert.Equal(4096L, DeviceMemory.PeakUsedBytes);
+        Assert.Equal(4096L, DeviceMemory.ObservePeak(512));
+        Assert.Equal(8192L, DeviceMemory.ObservePeak(8192));
+        Assert.Equal(8192L, DeviceMemory.PeakUsedBytes);
+        DeviceMemory.ResetPeak();
+        Assert.Equal(0L, DeviceMemory.PeakUsedBytes);
+    }
+
+    /// <summary>
+    /// The settings are reachable from a GPU session, which no test on a CPU box can observe by
+    /// running one. What it can observe is that the product still calls the wiring: a backend that
+    /// stopped passing its device id, stopped reading <see cref="DeviceMemory"/> when it builds the
+    /// provider options, or stopped putting the shrinkage entry on its run options would leave
+    /// every setting dead with every other test still green.
+    /// </summary>
+    [Fact]
+    public void TestTheGpuBackendsStillCarryTheDeviceMemorySettingsIntoOrt()
+    {
+        var backend = Path.Combine(ProductSourceRoot(), "Backend", "OnnxRuntime");
+        string Source(params string[] parts) =>
+            StripCommentsAndStrings(File.ReadAllText(Path.Combine(backend, Path.Combine(parts))));
+
+        string[] gpuFactories = ["Shorokoo.LinuxGPU/LinuxGpuInferenceFactory.cs", "Shorokoo.WinGPU/WinGpuInferenceFactory.cs"];
+        foreach (var gpu in gpuFactories)
+            Assert.Matches(@"base\s*\(\s*cudaDeviceId\s*:\s*0\s*\)", Source(gpu.Split('/')));
+        string[] cpuFactories = ["Shorokoo.LinuxCPU/LinuxCpuInferenceFactory.cs", "Shorokoo.WinCPU/WinCpuInferenceFactory.cs"];
+        foreach (var cpu in cpuFactories)
+            Assert.Matches(@"cudaDeviceId\s*:\s*null", Source(cpu.Split('/')));
+
+        var factory = Source("Shorokoo.OnnxRuntime", "OrtSessionFactory.cs");
+        Assert.Matches(@"new\s+OrtInferenceSession\s*\(\s*session\s*,\s*_cudaDeviceId\s*\)", factory);
+        Assert.Matches(@"AppendExecutionProvider_CUDA\s*\(\s*cuda\s*\)", factory);
+        Assert.Contains("DeviceMemory.LimitBytes", factory);
+        Assert.Contains("DeviceMemory.ArenaExtend", factory);
+
+        var session = Source("Shorokoo.OnnxRuntime", "OrtInferenceSession.cs");
+        Assert.Contains("memory.enable_memory_arena_shrinkage", File.ReadAllText(
+            Path.Combine(backend, "Shorokoo.OnnxRuntime", "OrtInferenceSession.cs")));
+        Assert.Matches(@"ArenaShrinkageRunConfig\s*\(\s*_cudaDeviceId\s*,\s*DeviceMemory\.ShrinkArenaAfterRun\s*\)", session);
+        Assert.Matches(@"AddRunConfigEntry\s*\(", session);
+
+        // Every path that runs the session has to apply it, not just one: the retaining path is
+        // the loop a GPU user is steered into, and it is where an unbounded arena costs most.
+        var runPaths = Regex.Matches(session, @"_session\s*\.\s*Run\w*\s*\(").Count;
+        Assert.Equal(runPaths, Regex.Matches(session, @"ConfigureRun\s*\(\s*runOptions\s*\)").Count);
+    }
+
+    /// <summary>Two shapes the guard's exemptions once let through: a span consumed by a call
+    /// inside a returned expression, which the caller never sees, and one "rooted" by a mention of
+    /// the same identifier in a later member — with names like `data`, `value` or `t`, nearly
+    /// always true. The return exemption now needs the span to be the returned expression itself,
+    /// and the widening stops at the member the span was taken in.</summary>
+    [Fact]
+    public void TestTheSpanGuardCatchesASpanConsumedInsideAReturnOrRootedByAnotherMember()
+    {
+        Assert.NotEmpty(SpansUsedWithoutKeepingTheTensorAlive(
+            "class C { string K(TensorData data) => Hex(data.AccessRawMemory()); }"));
+        Assert.NotEmpty(SpansUsedWithoutKeepingTheTensorAlive(
+            "class C { string K(TensorData data) { return Hex(data.AccessRawMemory()).Trim(); } }"));
+        Assert.NotEmpty(SpansUsedWithoutKeepingTheTensorAlive(
+            "class C { void K(TensorData data) { Use(data.AccessRawMemory(), 1); } void Other() { Log(data); } }"));
+        // An expression-bodied member has no braces to bound the search, which is the form the
+        // instance in the tree had.
+        Assert.NotEmpty(SpansUsedWithoutKeepingTheTensorAlive(
+            "class C { string K(TensorData d) => Hex(d.AccessRawMemory()).Trim(); void O() { var d = 1; } }"));
+        // ...and a generic constraint ending in `class` is not a type header, so it must not cut
+        // the search short and flag a rooted read.
+        Assert.Empty(SpansUsedWithoutKeepingTheTensorAlive(
+            "class C { void M<T>(TensorData t) where T : class { if (c) { var d = t.AccessRawMemory(); b.CopyTo(d); } GC.KeepAlive(t); } }"));
+    }
+
     /// <summary>
     /// No filter in <c>release.yml</c> selects a <c>Purpose=Benchmark</c> class implicitly — each
     /// needs a step naming it, and each must precede the <c>Purpose=Gate</c> step, whose MSBuild
@@ -342,18 +482,30 @@ public class CoreUtilsCoverageTests
         return dir!.FullName;
     }
 
-    // Every way to come by one of ORT's SafeHandle types: the constructors, and the SessionOptions
-    // factories (MakeSessionOptionWithCudaProvider and friends) that return one with no `new` in it.
+    // Every way the product comes by one of ORT's SafeHandle types: the constructors, and the
+    // SessionOptions factories (MakeSessionOptionWithCudaProvider and friends) that return one with
+    // no `new` in it. The provider-options and arena types are here for the same reason as the rest
+    // -- ORT takes each as a bare IntPtr and does no ref-counting, so an unrooted one is freed by
+    // its critical finalizer mid-call. Test sources are deliberately out of scope: they use the
+    // options-factory shape (build, configure, return), which this guard's stricter
+    // `using`-or-field rule cannot express.
     private static readonly Regex OrtSafeHandleSource = new(
-        @"new\s+(SessionOptions|RunOptions)\s*\(|SessionOptions\s*\.\s*Make\w*\s*\(", RegexOptions.Compiled);
+        @"new\s+(SessionOptions|RunOptions|OrtCUDAProviderOptions|OrtArenaCfg|OrtMemoryInfo)\s*\("
+        + @"|SessionOptions\s*\.\s*Make\w*\s*\(", RegexOptions.Compiled);
 
-    // The two shapes that actually root the handle across a native call: the resource of a `using`,
-    // and a field, which lives as long as its owner. The handle must be the WHOLE initializer --
-    // `using var s = new InferenceSession(b, new SessionOptions())` roots the session and leaves the
-    // options collectible, which is the exact bug this guard exists for.
+    // The shapes that actually root the handle across a native call: the resource of a `using`, a
+    // field, which lives as long as its owner, and a bare `return` of the handle itself, where
+    // ownership passes to the caller and the callee never touches it again. The handle must be the
+    // WHOLE initializer -- `using var s = new InferenceSession(b, new SessionOptions())` roots the
+    // session and leaves the options collectible, which is the exact bug this guard exists for, and
+    // `return Wrap(new SessionOptions())` consumes the handle rather than handing it back.
+    private const string OrtSafeHandleTypes =
+        "SessionOptions|RunOptions|OrtCUDAProviderOptions|OrtArenaCfg|OrtMemoryInfo";
+
     private static readonly Regex RootedInitializer = new(
-        @"^\s*(using\s*\(?\s*(var|SessionOptions|RunOptions)\s+\w+\s*=\s*"
-        + @"|(public|private|protected|internal)[\w\s]*?(SessionOptions|RunOptions)\s+\w+\s*=\s*)$",
+        @"^\s*(using\s*\(?\s*(var|" + OrtSafeHandleTypes + @")\s+\w+\s*=\s*"
+        + @"|(public|private|protected|internal)[\w\s]*?(" + OrtSafeHandleTypes + @")\s+\w+\s*=\s*"
+        + @"|return\s*)$",
         RegexOptions.Compiled);
 
     // Strings go before line comments: a literal containing "//" would otherwise blank the rest of
@@ -392,8 +544,13 @@ public class CoreUtilsCoverageTests
         {
             var before = code[(code.LastIndexOfAny([';', '{', '}'], m.Index) + 1)..m.Index];
             var after = code[(m.Index + m.Length)..];
-            // Handed straight back to the caller, who owns the lifetime from there.
-            if (Regex.IsMatch(after, @"^\s*[;)]") && Regex.IsMatch(before, @"(\breturn\b|=>)[^;{}]*$"))
+            // Handed straight back to the caller, who owns the lifetime from there. The span has to
+            // BE what is returned: `return Hex(t.AccessRawMemory());` consumes it inside a call and
+            // hands back something else, leaving the tensor retired at the read -- the bug, not the
+            // exemption. Requiring `;` immediately after the span is what separates them, since a
+            // call around it closes with `)` first; the `return`/`=>` test only establishes that
+            // this is a return at all.
+            if (Regex.IsMatch(after, @"^\s*;") && Regex.IsMatch(before, @"(\breturn\b|=>)[^;{}]*$"))
                 continue;
             var receiver = ReceiverRoot.Match(before.TrimEnd());
             if (!receiver.Success) continue;
@@ -416,15 +573,66 @@ public class CoreUtilsCoverageTests
     private static bool RootedAfter(string code, int from, string name)
     {
         var mention = new Regex(@"\b" + Regex.Escape(name) + @"\b");
+        // The member the span was taken in. Widening past it would let a later sibling's mention
+        // of the same identifier -- `data`, `value`, `t` -- root a read in this one, which with
+        // names that common is nearly always true and exempts everything.
+        int limit = MemberEndFrom(code, from);
         int cursor = from;
         for (int depth = 0; depth < 8; depth++)
         {
-            int end = BlockEndFrom(code, cursor);
+            int end = Math.Min(BlockEndFrom(code, cursor), limit);
             if (mention.IsMatch(code[cursor..end])) return true;
-            if (end >= code.Length || IsTypeBody(code, end)) return false;
+            if (end >= limit || end >= code.Length || IsTypeBody(code, end)) return false;
             cursor = end;
         }
         return false;
+    }
+
+    /// <summary>Index just past the closing brace of the member — method, property, local
+    /// function — containing <paramref name="from"/>: the outermost block enclosing it whose
+    /// header is not a type's.</summary>
+    private static int MemberEndFrom(string code, int from)
+    {
+        // The opening braces enclosing `from`, innermost first.
+        var opens = new List<int>();
+        for (int inside = BlockStartBefore(code, from); inside > 0 && opens.Count < 32;
+             inside = BlockStartBefore(code, inside - 1))
+            opens.Add(inside - 1);
+
+        int memberOpen = -1;
+        foreach (var open in opens)
+        {
+            var header = code[Math.Max(0, open - 240)..open];
+            if (OpensATypeBody(header)) break;
+            memberOpen = open;
+        }
+        // No enclosing block below the type means an expression-bodied member, which has no braces
+        // to bound it. Its statement does: widening past the `;` would reach the whole rest of the
+        // file, which is the unbounded search this limit exists to stop.
+        return memberOpen < 0
+            ? StatementEndFrom(code, from)
+            : BlockEndFrom(code, memberOpen + 1);
+    }
+
+    /// <summary>Whether a block's header text opens a type body. A real one names the type, which
+    /// is what keeps a generic constraint — <c>where T : class</c>, ending in the same keyword —
+    /// from reading as one and cutting a method's limit short.</summary>
+    private static bool OpensATypeBody(string header) =>
+        Regex.IsMatch(header, @"\b(class|struct|record|interface|enum|namespace)\s+\w[^;{}]*$");
+
+    /// <summary>Index just past the `;` ending the statement containing <paramref name="from"/>,
+    /// ignoring any inside nested brackets so a lambda body does not end it early.</summary>
+    private static int StatementEndFrom(string code, int from)
+    {
+        int depth = 0;
+        for (int i = from; i < code.Length; i++)
+        {
+            char c = code[i];
+            if (c is '(' or '[' or '{') depth++;
+            else if (c is ')' or ']' or '}') depth--;
+            else if (c == ';' && depth <= 0) return i + 1;
+        }
+        return code.Length;
     }
 
     /// <summary>Index just inside the opening brace of the block containing <paramref name="index"/>.</summary>
@@ -466,7 +674,7 @@ public class CoreUtilsCoverageTests
         int open = MatchingOpen(code, closeEnd - 1);
         if (open < 0) return true;
         var header = code[Math.Max(0, open - 240)..open];
-        return Regex.IsMatch(header, @"\b(class|struct|record|interface|enum|namespace)\b[^;{}]*$");
+        return OpensATypeBody(header);
     }
 
     private static int MatchingOpen(string code, int closeIndex)
@@ -489,9 +697,31 @@ public class CoreUtilsCoverageTests
         char[] statementEnds = [';', '{', '}', ')'];
         var code = StripCommentsAndStrings(source);
         return OrtSafeHandleSource.Matches(code)
-            .Where(m => !RootedInitializer.IsMatch(code[(code.LastIndexOfAny(statementEnds, m.Index) + 1)..m.Index]))
+            .Where(m =>
+            {
+                var before = code[(code.LastIndexOfAny(statementEnds, m.Index) + 1)..m.Index];
+                if (!RootedInitializer.IsMatch(before)) return true;
+                // `return` roots the handle only when the handle IS what is returned. Anything
+                // after its closing paren means the caller gets something else and the handle is
+                // a temporary retired at the read that produced it -- the bug, not the exemption.
+                return Regex.IsMatch(before, @"^\s*return\s*$") && !ReturnsTheHandleItself(code, m);
+            })
             .Select(m => m.Value.Trim())
             .ToArray();
+    }
+
+    /// <summary>Whether the construction starting at <paramref name="m"/> is the whole of its
+    /// return statement — its closing parenthesis followed by nothing but `;`.</summary>
+    private static bool ReturnsTheHandleItself(string code, Match m)
+    {
+        int depth = 0;
+        for (int i = m.Index + m.Length - 1; i < code.Length; i++)
+        {
+            if (code[i] == '(') depth++;
+            else if (code[i] == ')' && --depth == 0)
+                return Regex.IsMatch(code[(i + 1)..], @"^\s*;");
+        }
+        return false;
     }
 
     // A params array behind an optional parameter lets a positional argument bind to the optional
@@ -554,6 +784,13 @@ public class CoreUtilsCoverageTests
             "using var s = new InferenceSession(b, new SessionOptions());",
             "var o = SessionOptions.MakeSessionOptionWithCudaProvider(0);",
             "_prefix = \"https://x\"; var o = new SessionOptions();",
+            "var cuda = new OrtCUDAProviderOptions();",
+            "options.AppendExecutionProvider_CUDA(new OrtCUDAProviderOptions());",
+            "var cfg = new OrtArenaCfg(limit, 1, 1024, -1);",
+            "env.CreateAndRegisterAllocator(new OrtMemoryInfo(\"Cpu\", t, 0, m), cfg);",
+            "return Wrap(new OrtMemoryInfo(n, t, 0, m));",
+            "return new OrtMemoryInfo(n, t, 0, m).GetAllocatorType();",
+            "return new SessionOptions().WithSomething();",
         ];
         string[] mustNotFlag =
         [
@@ -562,6 +799,11 @@ public class CoreUtilsCoverageTests
             "using SessionOptions o = new SessionOptions();",
             "private readonly SessionOptions _o = new SessionOptions();",
             "using var o = SessionOptions.MakeSessionOptionWithCudaProvider(0);",
+            "using var cuda = new OrtCUDAProviderOptions();",
+            "using OrtCUDAProviderOptions cuda = new OrtCUDAProviderOptions();",
+            "using var cfg = new OrtArenaCfg(limit, 1, 1024, -1);",
+            "private readonly OrtMemoryInfo _info = new OrtMemoryInfo(\"Cpu\", t, 0, m);",
+            "return new OrtMemoryInfo(info.Name, info.GetAllocatorType(), info.Id, info.GetMemoryType());",
         ];
         Assert.All(mustFlag, s => Assert.NotEmpty(UnrootedOrtSafeHandles(s)));
         Assert.All(mustNotFlag, s => Assert.Empty(UnrootedOrtSafeHandles(s)));

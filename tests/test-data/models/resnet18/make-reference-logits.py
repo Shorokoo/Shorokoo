@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Print the PyTorch reference logits for ResNet18 parity (release-test-plan E-3).
+"""Print the PyTorch reference logits for ResNet18 parity.
 
 Runs the reference ResNet18 (standard torchvision architecture, loaded from the same
 `resnet18.safetensors` checkpoint Shorokoo binds) on the exact same preprocessed input

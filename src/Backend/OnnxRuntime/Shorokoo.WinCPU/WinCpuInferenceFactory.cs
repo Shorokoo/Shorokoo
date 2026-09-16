@@ -29,5 +29,5 @@ public sealed class WinCpuInferenceFactory : OrtSessionFactory
     /// execution-provider step does nothing; sessions still get the usual log-severity
     /// and graph-optimization options.
     /// </summary>
-    public WinCpuInferenceFactory() : base(static _ => { }) { }
+    public WinCpuInferenceFactory() : base(static _ => { }, cudaDeviceId: null) { }
 }

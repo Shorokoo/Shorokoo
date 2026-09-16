@@ -191,6 +191,22 @@ rest of it.
 
 ## Current limitations (could be lifted)
 
+### Device memory is configured process-wide
+
+The GPU backends read their arena budget, extend strategy and per-run shrinkage off the static
+`DeviceMemory`, not off the `ComputeContext` that builds the session — see
+[Device memory](inference.md#device-memory-gpu-backends). So every session in the process shares one
+configuration, it applies to CUDA device 0, and a reading (`DeviceMemory.Read()`, `Sample()`) is the
+whole device's rather than this process's share of it. A training rig's two contexts cannot differ in
+it, and a host running two models cannot give them separate budgets — including when they would
+want different arena strategies, which the measured table in that section shows is a real
+difference between one workload and another.
+
+Per-`ComputeContext` device configuration was considered and is not planned, so this is the shape to
+build against rather than one to wait out. What would still improve is the reporting: per-allocator
+figures out of ORT ([#198](https://github.com/Shorokoo/Shorokoo/issues/198)) would say what this
+process holds rather than what the device does.
+
 ### Backprop through dynamic loops
 
 Reverse-mode autodiff through a `Loop` whose trip count is only known at run

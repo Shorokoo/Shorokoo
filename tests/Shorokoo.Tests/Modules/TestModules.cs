@@ -1180,8 +1180,8 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
-    /// <summary>Pins the NaN-safety of the audit modules' mismatch counting
-    /// (test-suite-gaps.md #5): a NaN actual must REGISTER as a mismatch. The plain
+    /// <summary>Pins the NaN-safety of the audit modules' mismatch counting:
+    /// a NaN actual must REGISTER as a mismatch. The plain
     /// "(diff > tol)" form is NaN-blind — IEEE comparisons with NaN are false — which
     /// is why every audit FloatMismatch helper is written as Not(diff &lt;= tol). This
     /// module produces NaN via 0/0 and asserts the NaN-safe form counts every element.</summary>

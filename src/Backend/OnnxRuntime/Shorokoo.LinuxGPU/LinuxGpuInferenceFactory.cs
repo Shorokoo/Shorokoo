@@ -27,7 +27,9 @@ public sealed class LinuxGpuInferenceFactory : OrtSessionFactory
 {
     /// <summary>
     /// Creates the factory. Every session it builds gets the CUDA execution provider on
-    /// device 0.
+    /// device 0, configured with the arena settings
+    /// <see cref="Shorokoo.Core.Inference.Abstractions.DeviceMemory"/> holds when the
+    /// session is built.
     /// </summary>
-    public LinuxGpuInferenceFactory() : base(static opts => opts.AppendExecutionProvider_CUDA(0)) { }
+    public LinuxGpuInferenceFactory() : base(cudaDeviceId: 0) { }
 }

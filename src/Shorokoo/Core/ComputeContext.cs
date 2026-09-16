@@ -30,7 +30,7 @@ namespace Shorokoo.Runtime
     /// <summary>
     /// A compiled computation graph backed by a Shorokoo inference session.
     /// Created once via <see cref="ComputeContext.Compile(ComputationGraph)"/>, then invoked repeatedly
-    /// via <see cref="Execute"/> — each call only feeds new data, with zero graph
+    /// via <see cref="Execute(IData[])"/> — each call only feeds new data, with zero graph
     /// rebuilding or session creation overhead.
     /// </summary>
     public class CompiledGraph
@@ -58,7 +58,63 @@ namespace Shorokoo.Runtime
         /// Executes the compiled graph with the given inputs.
         /// TensorDataStruct inputs are automatically expanded into individual fields.
         /// </summary>
-        public NamedModelParam[] Execute(params IData[] inputs)
+        public NamedModelParam[] Execute(params IData[] inputs) => Run(NameInputs(inputs));
+
+        /// <summary>
+        /// Executes the compiled graph, leaving the outputs whose index is <c>true</c> in
+        /// <paramref name="retainOnDevice"/> in the execution provider's own memory instead of
+        /// fetching them back to the host — so a value produced by one call can be fed straight
+        /// into the next without crossing the bus. A retained output is not host-readable
+        /// (<see cref="TensorData.IsHostResident"/>); every other output comes back exactly as
+        /// <see cref="Execute(IData[])"/>'s do, and on a session with no device memory
+        /// (<see cref="HasDeviceMemory"/>) nothing is retained and this <i>is</i>
+        /// <see cref="Execute(IData[])"/>.
+        /// </summary>
+        /// <param name="inputs">The graph inputs, struct inputs expanded as in <see cref="Execute(IData[])"/>.
+        /// They may themselves be values a previous call retained.</param>
+        /// <param name="retainOnDevice">One flag per graph output, in output order.</param>
+        public NamedModelParam[] Execute(IData[] inputs, bool[] retainOnDevice)
+        {
+            if (retainOnDevice is null) throw new ArgumentNullException(nameof(retainOnDevice));
+            if (retainOnDevice.Length != _session.OutputNames.Count)
+                throw new InvalidTensorOperationException(ErrorCodes.CR006, "CompiledGraph.Execute",
+                    $"retainOnDevice.Length={retainOnDevice.Length}, graph.Outputs.Count={_session.OutputNames.Count}",
+                    "Retention flag count does not match the graph's output count");
+
+            var retained = new HashSet<string>();
+            for (int i = 0; i < retainOnDevice.Length; i++)
+                if (retainOnDevice[i]) retained.Add(_session.OutputNames[i]);
+
+            return Run(NameInputs(inputs), retained);
+        }
+
+        /// <summary>
+        /// Executes the compiled graph with pre-built named inputs.
+        /// </summary>
+        public NamedModelParam[] Run(params NamedModelParam[] inputs)
+            => Run(inputs, retainedOutputNames: null);
+
+        private NamedModelParam[] Run(NamedModelParam[] inputs, IReadOnlySet<string>? retainedOutputNames)
+        {
+            var sessionInputs = new Dictionary<string, IShorokooTensorValue>();
+            foreach (var input in inputs)
+            {
+                var onnxName = _onnxInputNameByOriginal.TryGetValue(input.ParamName, out var mapped)
+                    ? mapped : input.ParamName;
+                sessionInputs[onnxName] = input.ToTensorValue();
+            }
+
+            var results = retainedOutputNames is null
+                ? _session.Run(sessionInputs, _session.OutputNames)
+                : _session.RunRetainingOutputs(sessionInputs, _session.OutputNames, retainedOutputNames);
+
+            return results.Zip(_session.OutputNames)
+                .Select(x => OnnxUtils.CreateNamedModelParam(x.First, ModelParamType.OutputParam, x.Second))
+                .ToArray();
+        }
+
+        /// <summary>Pairs the expanded inputs with the graph's input names, positionally.</summary>
+        private NamedModelParam[] NameInputs(IData[] inputs)
         {
             var expandedInputs = ComputeContext.ExpandStructInputs(inputs);
 
@@ -69,32 +125,21 @@ namespace Shorokoo.Runtime
                     "Input length mismatch: number of provided inputs does not match the graph's expected input tensor count");
             }
 
-            var namedInputs = expandedInputs.Zip(_originalInputNames)
+            return expandedInputs.Zip(_originalInputNames)
                 .Select(zip => NamedModelParam.FromIData(zip.Second, ModelParamType.InputParam, zip.First))
                 .ToArray();
-
-            return Run(namedInputs);
         }
 
         /// <summary>
-        /// Executes the compiled graph with pre-built named inputs.
+        /// Whether this graph's session produces its outputs somewhere other than host memory, so
+        /// <see cref="Execute(IData[], bool[])"/> has somewhere to retain them.
         /// </summary>
-        public NamedModelParam[] Run(params NamedModelParam[] inputs)
-        {
-            var sessionInputs = new Dictionary<string, IShorokooTensorValue>();
-            foreach (var input in inputs)
-            {
-                var onnxName = _onnxInputNameByOriginal.TryGetValue(input.ParamName, out var mapped)
-                    ? mapped : input.ParamName;
-                sessionInputs[onnxName] = input.ToTensorValue();
-            }
+        public bool HasDeviceMemory => _session.HasDeviceMemory;
 
-            var results = _session.Run(sessionInputs, _session.OutputNames);
-
-            return results.Zip(_session.OutputNames)
-                .Select(x => OnnxUtils.CreateNamedModelParam(x.First, ModelParamType.OutputParam, x.Second))
-                .ToArray();
-        }
+        /// <summary>How many outputs this graph's session produces — the length
+        /// <see cref="Execute(IData[], bool[])"/> requires of a retention array, so a caller can
+        /// size one without deriving the count a second way and disagreeing.</summary>
+        public int OutputCount => _session.OutputNames.Count;
     }
 
     /// <summary>

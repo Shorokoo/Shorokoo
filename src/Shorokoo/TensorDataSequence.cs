@@ -26,8 +26,24 @@ namespace Shorokoo
 
         internal override IEnumerator<TensorData> InternalGetEnumerator()
         {
-            foreach (var item in this)
-                yield return item;
+            // GetEnumerator() validates; calling it here rather than iterating `this` lazily is
+            // what makes the non-generic path throw at the call too.
+            var elements = GetEnumerator();
+            return Widen(elements);
+
+            static IEnumerator<TensorData> Widen(IEnumerator<TensorData<T>> inner)
+            {
+                // The `foreach` this replaced disposed the inner enumerator; a bare while loop
+                // would not, on a full drain or an early one.
+                try
+                {
+                    while (inner.MoveNext()) yield return inner.Current;
+                }
+                finally
+                {
+                    inner.Dispose();
+                }
+            }
         }
 
         internal override TensorData GetAt(int index) => this[index];
@@ -110,12 +126,23 @@ namespace Shorokoo
             }
 
             public override TensorData<T> this[int index]
-                => throw new ArgumentOutOfRangeException(nameof(index), "The sequence is empty.");
+            {
+                get
+                {
+                    ThrowIfDisposed();
+                    throw new ArgumentOutOfRangeException(nameof(index), "The sequence is empty.");
+                }
+            }
 
+            // The validation cannot live in the iterator: an iterator method's body does not run
+            // until the first MoveNext, so a disposed sequence would hand back an enumerator and
+            // only throw once someone stepped it.
             public override IEnumerator<TensorData<T>> GetEnumerator()
             {
                 ThrowIfDisposed();
-                yield break;
+                return Empty();
+
+                static IEnumerator<TensorData<T>> Empty() { yield break; }
             }
 
             public override void Dispose() => IsDisposed = true;
@@ -185,8 +212,14 @@ namespace Shorokoo
 
         public override IEnumerator<TensorData<T>> GetEnumerator()
         {
-            for (int i = 0; i < this.Count; i++)
-                yield return this[i];
+            ThrowIfDisposed();
+            return Elements(this);
+
+            static IEnumerator<TensorData<T>> Elements(OnnxTensorDataSequence<T> self)
+            {
+                for (int i = 0; i < self.Count; i++)
+                    yield return self[i];
+            }
         }
 
         #region IDisposable

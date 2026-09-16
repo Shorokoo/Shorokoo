@@ -453,8 +453,8 @@ approximate and the near-ties as ties:
 | shapes fed to the session | `SameAsRequested` | `NextPowerOfTwo` |
 |---|---|---|
 | one shape, ten runs | **11–12 MiB** | 16 MiB |
-| alternating 2048/512, twenty runs | **21–24 MiB** | 33 MiB |
-| largest first, then settled | 15–18 MiB | 15–16 MiB |
+| alternating 2048/512, twenty runs | **20–25 MiB** | 28–33 MiB |
+| largest first, then settled | 17–18 MiB | 15–16 MiB |
 | shuffled from four sizes, twenty runs | 34 MiB | **31 MiB** |
 | growing, then settled | 34–35 MiB | **31 MiB** |
 | growing 256 to 2048 | 23 MiB | **15 MiB** |
@@ -467,10 +467,10 @@ your case is `DeviceMemory.Sample()` around your own run.
 
 The bet is on the asymmetry, not on winning every row. A training run feeds one input shape to one
 compiled step for its whole length — the first row — and there exact-size extension holds about
-1.3–1.45x less. On the card that prompted this, a step that showed 12.9 GiB at its first step ended up
-with the arena holding all 24.6 GiB of a 24.6 GiB card, and a smaller batch of the same model
-settled at roughly 1.8x what its steps used. Two allocation sizes still favour exact-size extension
-(row 2, by 1.38x); it is once several are in play that ORT's doubling holds less, by about 1.1x, or
+1.3–1.45x less. On the card that prompted this, a step whose first step showed 12,877 MiB ended up
+with the arena holding all 24,563 MiB — the whole of a 24 GiB card — and a smaller batch of the same
+model settled at roughly 1.8x what its steps used. Two allocation sizes still favour exact-size extension
+(row 2, by 1.2–1.6x depending on the run); it is once several are in play that ORT's doubling holds less, by about 1.1x, or
 ties (rows 3 to 5). **The one case to override it in is input shapes that grow without settling** —
 the last two rows, where the doubling holds around 1.5x less and, on a card with no room to spare,
 fits where exact-size extension does not:
@@ -536,10 +536,11 @@ things to know about the numbers:
   the device if it has none — itself a few hundred MiB. Take the first reading after the backend is
   up, not before, or that cost lands inside your baseline.
 
-**This is a stopgap, deliberately.** One device (0), one setting for every session in the process,
-mutable at any time. Per-`ComputeContext` device configuration is what it should become
-([#344](https://github.com/Shorokoo/Shorokoo/issues/344)); until then do not expect two contexts to
-differ, and treat these as startup configuration.
+**Process-wide is the shape, not a staging post.** One device (0), one setting for every session in
+the process, mutable at any time. Per-`ComputeContext` device configuration was considered and is
+not planned, so do not expect two contexts to differ: treat these as startup configuration, and
+where one process must serve both a training loop and a variable-shape inference path, pick the
+arena strategy whose cost you would rather pay.
 
 ## Debugging engine (no OnnxRuntime)
 

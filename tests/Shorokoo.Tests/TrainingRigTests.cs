@@ -196,19 +196,6 @@ public partial class ParamOrderAModel
     }
 }
 
-/// <summary><see cref="ParamOrderAModel"/> with the two initializer calls swapped: the same two
-/// parameter names and shapes, each attached to the other role.</summary>
-[Module]
-public partial class ParamOrderBModel
-{
-    public static Tensor<float32> Inline(Tensor<float32> x)
-    {
-        var offset = NormalDist.Init(Vector(1L), Scalar(0f), Scalar(1f));
-        var scale = NormalDist.Init(Vector(1L), Scalar(0f), Scalar(1f));
-        return x * scale.Scalar() + offset.Scalar();
-    }
-}
-
 /// <summary>One <c>[4, 2]</c> weight applied to the input.</summary>
 [Module]
 public partial class ParamShapeNarrowModel
@@ -1870,6 +1857,48 @@ public class TrainingRigTrainingLoopCoverageTests
         return (losses, ckpt);
     }
 
+    /// <summary>The other half of the ownership rule, and the one only a benchmark watched: the
+    /// release a resident run performs on the state each step supersedes. The run owns that state
+    /// internally, so the primitive it calls is what is assertable here — and a released tensor
+    /// says so rather than reading freed memory, which is the invariant that makes it safe.</summary>
+    [Fact]
+    public void TestReleasingSupersededStateDisposesItsTensorsRatherThanLeavingThemReadable()
+    {
+        var rig = AdamWScalarRig();
+        var (input, target) = (InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f));
+        var superseded = rig.TrainStep(rig.CreateInitialCheckpoint(), input, target);
+        var tensors = Tensors(superseded);
+        Assert.NotEmpty(tensors);
+        Assert.All(tensors, t => Assert.False(t.IsDisposed));
+
+        TrainingRig.ReleaseCheckpointState(superseded);
+
+        Assert.All(tensors, t => Assert.True(t.IsDisposed));
+        Assert.All(tensors, t => Assert.Throws<ObjectDisposedException>(() => t.CopyRawMemory()));
+        TrainingRig.ReleaseCheckpointState(superseded);   // idempotent
+    }
+
+    /// <summary>A checkpoint the run published, and the one it was handed, outlive it: handing one
+    /// over gives up the right to free it.</summary>
+    [Fact]
+    public void TestAResidentRunLeavesEveryCheckpointItPublishedReadable()
+    {
+        var rig = AdamWScalarRig();
+        var (input, target) = (InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f));
+        var initial = rig.CreateInitialCheckpoint();
+
+        var run = rig.BeginResidentRun(initial);
+        var published = run.StepToCheckpoint(input, target);
+        run.Step(input, target);
+        run.Dispose();
+
+        Assert.All(Tensors(published), t => Assert.False(t.IsDisposed));
+        Assert.All(Tensors(initial), t => Assert.False(t.IsDisposed));
+    }
+
+    private static TensorData[] Tensors(TrainingCheckpoint checkpoint) =>
+        [.. checkpoint.TrainableParams.Fields.Values.OfType<TensorData>()];
+
     /// <summary>The same run through a resident run, checkpointing on the last step only.</summary>
     private static (float[] Losses, TrainingCheckpoint Final) ResidentRun(TrainingRig rig, int steps)
     {
@@ -1980,10 +2009,15 @@ public class TrainingRigTrainingLoopCoverageTests
         var compiled = rig.RuntimeContext.Compile(rig.TrainingStepPureGraph);
         Assert.False(compiled.HasDeviceMemory);
 
+        // A retention array of any other length is refused rather than half-applied.
+        Assert.Throws<InvalidTensorOperationException>(() => compiled.Execute(
+            ComputeContext.ExpandStructInputs([ckpt.TrainableParams, ckpt.ModelState, ckpt.OptimizerState, input, target]),
+            [.. Enumerable.Repeat(true, compiled.OutputCount + 1)]));
+
         IData[] inputs = [ckpt.TrainableParams, ckpt.ModelState, ckpt.OptimizerState, input, target];
         var outputs = compiled.Execute(
             ComputeContext.ExpandStructInputs(inputs),
-            [.. Enumerable.Repeat(true, rig.TrainingStepPureGraph.ToInternal().Outputs.Count)]);
+            [.. Enumerable.Repeat(true, compiled.OutputCount)]);
         Assert.All(outputs, o => Assert.True(o.ToTensorData().IsHostResident));
 
         using var run = rig.BeginResidentRun(ckpt);
@@ -2030,13 +2064,12 @@ public class TrainingRigCheckpointCoverageTests
         Assert.NotNull(cp);
     }
 
-    /// <summary>A caller that keeps no checkpoint at all supersedes everything, so every collection
-    /// reclaims the lot and the budget must stay at its base. The checkpoint handed back at a
-    /// reclamation is what the caller feeds in as the next step's input, so judging whether THAT
-    /// survived says nothing: it is rooted as a live argument whenever reclamations fall on
-    /// consecutive steps, for a caller that keeps nothing exactly as much as for one that keeps
-    /// everything. Until the budget had grown enough to skip steps and the
-    /// reference goes stale — which is why the watch judged is two reclamations old, not one.</summary>
+    /// <summary>A caller that keeps no checkpoint, and one that keeps a single older checkpoint,
+    /// both supersede everything else — so every collection reclaims and the budget must stay at its
+    /// base. Neither is distinguishable by watching one recent checkpoint: the one handed back at a
+    /// reclamation is the next step's own input, alive at the collection whatever the caller does,
+    /// and a single older survivor is what keeping one looks like. The rule is therefore all the
+    /// older watches or none.</summary>
     [Fact]
     public void TestReclamationDoesNotBackOffForACallerThatKeepsNoCheckpointAtAll()
     {

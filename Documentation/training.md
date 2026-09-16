@@ -464,7 +464,7 @@ public sealed class ResidentTrainingRun : IDisposable
     public TrainingCheckpoint StepToCheckpoint(IDataLoader loader);
     public TrainingCheckpoint StepToCheckpoint(DataBatch batch);
 
-    public long CurrentStep { get; }   // the Step the next checkpoint this run produces will carry
+    public long CurrentStep { get; }   // the Step the run's last checkpoint carries; next is +1
 
     public void Dispose();             // releases state the run still holds; published checkpoints survive
 }
@@ -609,7 +609,8 @@ rig's budgeted collection governs *host* memory there, while the `DeviceMemory` 
 the CUDA arena: a process whose RSS climbs is not helped by an arena budget, and a card that fills
 up is not helped by the rig's reclamation. A resident run is the case where the two meet — its state
 stays in the arena, and the run releases it deterministically as each step supersedes it, which is
-why a resident step does not go through the rig's collection at all.
+why a retained step does not go through the rig's collection at all. A `StepToCheckpoint` step hands
+state back to you instead, so that one is reclaimed like any other.
 
 Result types:
 - `TrainingCheckpoint` → `.TrainableParams`, `.ModelState`, `.OptimizerState`, `.Step` (global step, `long`; advances each `TrainStep`, so schedules resume from a saved checkpoint), and the host-owned run counters `.Epoch` / `.BatchIndex` (`long?`; the training loop advances them — the counter-agnostic `TrainStep` carries them through unchanged). They are `null` when the position is genuinely **unknown** — an initial checkpoint, or one trained without a data loader / explicit counters — rather than a misleading `0`; the loader-driven and explicit-counter paths set concrete values. A scheduled hyperparameter reading the epoch / batch counter sees `0` for a `null` value. `.Step` is always a concrete `long`; all counters are `int64` end to end. It also carries `.Rig` (the `TrainingRig?` that produced it — set on every rig-produced checkpoint, so `checkpoint.ToInferenceModel()` needs no re-supplied graph) and `.Loss` (`float?`; the loss of the `TrainStep` that produced it, `null` on an initial or bare checkpoint). Both are preserved through the counter derivations (`WithCounters`/`WithStep`/`WithEpoch`/`WithBatchIndex`). `TrainStep` returns this checkpoint directly — read the step's loss off `.Loss`. `.Loss` persists as its own `Loss` component, independent of `Counters` (dropping `Loss`, or an initial checkpoint, reloads with `.Loss == null` — never a sentinel `0`).

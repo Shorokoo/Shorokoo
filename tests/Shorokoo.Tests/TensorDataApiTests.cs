@@ -359,15 +359,39 @@ public class TensorDataApiCoverageTests
         Assert.Equal(42f, values[0]);
     }
 
+    /// <summary>A tensor whose storage the provider kept refuses every read, naming the call that
+    /// brings it home rather than dereferencing a device address as a host one. Reachable on a
+    /// host-only machine only through a value that says it is not host-accessible.</summary>
+    [Fact]
+    public void TestATensorLeftInProviderMemoryRefusesEveryReadAndSaysWhatBringsItHome()
+    {
+        var resident = new OnnxTensorData<float32>(new Shape(2L), new SpyTensorValue { IsHostAccessible = false });
+        Assert.False(resident.IsHostResident);
+
+        var ex = Assert.Throws<InvalidOperationException>(() => resident.AccessMemory<float>().ToArray());
+        Assert.Contains("StepToCheckpoint", ex.Message);
+        Assert.Throws<InvalidOperationException>(() => resident.AccessRawMemory().ToArray());
+        Assert.Throws<InvalidOperationException>(() => resident.CopyRawMemory());
+        Assert.Throws<InvalidOperationException>(() => resident.ValueAt<float>(0));
+
+        // Metadata stays readable; it is the elements that are elsewhere.
+        Assert.Equal(2, resident.Shape.Dims[0]);
+        Assert.False(resident.IsDisposed);
+
+        var host = new OnnxTensorData<float32>(new Shape(2L), new SpyTensorValue());
+        Assert.True(host.IsHostResident);
+    }
+
     /// <summary>Records disposal; every other member is unreachable in these tests.</summary>
     private sealed class SpyTensorValue : Shorokoo.Core.Inference.Abstractions.IShorokooTensorValue
     {
         public int Disposals { get; private set; }
         public void Dispose() => Disposals++;
 
-        // The one member the tensor wrapping this spy consults on its own: a host-resident
-        // value, which is what these disposal tests stand in for.
-        public bool IsHostAccessible => true;
+        // The one member the tensor wrapping this spy consults on its own. Settable so a test can
+        // stand in for a value an execution provider left in its own memory, which is otherwise
+        // only reachable with a card.
+        public bool IsHostAccessible { get; init; } = true;
 
         public Shorokoo.Core.Inference.Abstractions.ShorokooOnnxValueType ValueType => throw new NotSupportedException();
         public Shorokoo.Core.Inference.Abstractions.ShorokooTensorElementType ElementType => throw new NotSupportedException();

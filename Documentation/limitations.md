@@ -202,9 +202,10 @@ it, and a host running two models cannot give them separate budgets — includin
 want different arena strategies, which the measured table in that section shows is a real
 difference between one workload and another.
 
-Lifting it means per-instance device configuration on `ComputeContext`, carried down to the session
-factory ([#344](https://github.com/Shorokoo/Shorokoo/issues/344)), and per-allocator figures out of
-ORT for the readings ([#198](https://github.com/Shorokoo/Shorokoo/issues/198)).
+Per-`ComputeContext` device configuration was considered and is not planned, so this is the shape to
+build against rather than one to wait out. What would still improve is the reporting: per-allocator
+figures out of ORT ([#198](https://github.com/Shorokoo/Shorokoo/issues/198)) would say what this
+process holds rather than what the device does.
 
 ### Backprop through dynamic loops
 

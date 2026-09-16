@@ -113,8 +113,10 @@ public static class DeviceMemory
     ///
     /// <para>Neither strategy is better in general; the default is a bet on the workload
     /// Shorokoo exists for. A training run feeds one input shape to one compiled step for its
-    /// whole length, and on that shape exact-size extension holds about 1.45x less than ORT's
-    /// doubling (measured small, and 1.8x was reported on a 24 GiB card). Where several
+    /// whole length, and on that shape exact-size extension holds about 1.3-1.45x less than ORT's
+    /// doubling. (A separate figure from the same report: under ORT's doubling the arena settled at
+    /// roughly 1.8x what the run's own steps used — that is the waste being removed, not a ratio
+    /// between the two strategies.) Where several
     /// allocation sizes are in play it is the doubling that holds less, but by 1.06-1.13x — an
     /// order of magnitude less at stake. The one case it loses badly is input shapes that keep
     /// growing without settling, where each outgrown region is stranded: set

@@ -341,6 +341,14 @@ public class CoreUtilsCoverageTests
 
         Assert.Throws<ArgumentOutOfRangeException>(() => DeviceMemory.LimitBytes = 0);
         Assert.Throws<ArgumentOutOfRangeException>(() => DeviceMemory.LimitBytes = -1);
+        Assert.Throws<ArgumentOutOfRangeException>(() => DeviceMemory.ArenaExtend = (ArenaExtendStrategy)7);
+        Assert.Null(DeviceMemory.LimitBytes);
+        Assert.Equal(ArenaExtendStrategy.SameAsRequested, DeviceMemory.ArenaExtend);
+
+        // A limit set and cleared leaves nothing behind: null is the absence, not a zero.
+        DeviceMemory.LimitBytes = 4096;
+        Assert.Equal(4096L, DeviceMemory.LimitBytes);
+        DeviceMemory.LimitBytes = null;
         Assert.Null(DeviceMemory.LimitBytes);
     }
 

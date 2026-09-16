@@ -6,12 +6,11 @@ namespace Shorokoo.Tests;
 /// cannot run at the same time — which they otherwise would, being in different classes and so in
 /// different collections. Any new test touching those statics belongs in a class that joins this.
 ///
-/// <para>It costs the coverage suite nothing today: the only other member is
-/// <c>GpuExecutionTests</c>, which is <c>Purpose=Hardware</c> and never in a coverage run — so the
-/// serialisation only binds on a machine running both purposes at once, which is exactly the case
-/// it is for.</para>
+/// <para>Sharing the name is what serializes them against each other, and is all that is wanted:
+/// <c>DisableParallelization</c> would additionally stop the collection running alongside every
+/// other one, which costs the whole suite to solve a problem between two classes.</para>
 /// </summary>
-[CollectionDefinition(Name, DisableParallelization = true)]
+[CollectionDefinition(Name)]
 public sealed class DeviceMemorySettings
 {
     public const string Name = "device memory settings";

@@ -631,7 +631,10 @@ factory. Passing two distinct instances therefore selects nothing. In particular
 on one device and train on another: [only one backend is live per process](inference.md#backend-selection)
 and both contexts go through it, so the naming does not offer a CPU-build / GPU-train split. Read the
 two members as a division of *phases* — which work is build/merge and which is compile/run — not of
-hardware; they would only become a lever if `ComputeContext` gained per-instance configuration.
+hardware; they would only become a lever if `ComputeContext` gained per-instance configuration. The
+device both of them will use is not a secret, though: read `rig.RuntimeContext.Backend`, or call
+`InferenceBackend.RequireDevice(...)` at startup to refuse to train on the wrong one — see
+[Which device am I on?](inference.md#which-device-am-i-on).
 Leaving both `null`, so each defaults to `ComputeContext.Default`, is the normal choice.
 
 What *is* configurable — on the GPU backends — is **device** memory, but process-wide rather than per

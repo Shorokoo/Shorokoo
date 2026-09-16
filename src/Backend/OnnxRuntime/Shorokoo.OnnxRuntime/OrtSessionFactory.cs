@@ -56,6 +56,17 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
         : this(opts => AppendCuda(opts, cudaDeviceId), cudaDeviceId) { }
 
     /// <summary>
+    /// This backend: the assembly the concrete factory lives in, and the device its sessions
+    /// run on — CUDA when the subclass named a device id, the CPU otherwise. Derived from the
+    /// constructor arguments, so a subclass driving a different execution provider describes
+    /// itself correctly without overriding anything.
+    /// </summary>
+    public BackendDescription Description => new(
+        GetType().Assembly.GetName().Name ?? GetType().Name,
+        _cudaDeviceId is null ? ComputeDevice.Cpu : ComputeDevice.Cuda,
+        _cudaDeviceId);
+
+    /// <summary>
     /// Creates an ORT inference session over a serialized ONNX model, on this factory's
     /// execution provider.
     /// </summary>

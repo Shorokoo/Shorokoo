@@ -20,8 +20,14 @@ Related: [core-types.md](core-types.md) · [defining-models.md](defining-models.
 - `OnnxEngine.Eval` rebuilds and recreates an ORT session on every call. For repeated
   inference, compile once with `ComputeContext` (below).
 - Reference one platform backend package and it is normally found for you — no setup
-  code. Only one backend is live per process. How it is discovered, and how to
-  override the choice: [Backend selection](#backend-selection).
+  code. Only one backend is live per process, and referencing two is refused rather than
+  guessed at. How it is discovered, and how to override the choice:
+  [Backend selection](#backend-selection).
+- Which device the work will run on is invisible at the call site but answerable:
+  `ComputeContext.Backend` and `InferenceBackend.Describe()` name it, and
+  `InferenceBackend.RequireDevice(...)` refuses to start on the wrong one —
+  [Which device am I on?](#which-device-am-i-on). To run part of the work on another
+  device, [One model, two devices](#one-model-two-devices).
 - On a GPU backend the CUDA arena is configured through `DeviceMemory`, which also reports
   how much of the card is gone. Its arena strategy deliberately departs from ORT's default so
   that a training loop does not end up holding far more of the card than it uses:
@@ -363,9 +369,9 @@ graph to the next call. `Eval` is the exception: it returns `TensorData` (or
   ONNX Runtime (CPU- or CUDA-flavored) for its platform.
 - With exactly one backend package referenced you normally need no setup at all:
   auto-discovery (below) finds it on the first inference call. Set the backend
-  explicitly when several backends are deployed side by side and you want to override
-  the choice, when you want a startup failure instead of one on the first inference
-  call, or when the backend DLL is not deployed next to `Shorokoo.dll`:
+  explicitly to name which one you mean when a deployment holds more than one (which
+  discovery otherwise refuses), when you want a startup failure instead of one on the
+  first inference call, or when the backend DLL is not deployed next to `Shorokoo.dll`:
 
   ```csharp
   using Shorokoo.Core.Inference.Abstractions;
@@ -381,6 +387,13 @@ graph to the next call. `Eval` is the exception: it returns `TensorData` (or
   training rig's two, which for that reason cannot select different devices (see
   [Compute contexts](training.md#compute-contexts-mergecontext-and-runtimecontext) in the
   training guide).
+- **Exactly one** is the rule, not a recommendation: a deployment carrying two backends for
+  the same OS is refused rather than resolved by guesswork — see
+  [Auto-discovery](#auto-discovery). To run part of the work on another device, see
+  [One model, two devices](#one-model-two-devices).
+- Which backend you ended up on is a question you can ask — `InferenceBackend.Describe()`,
+  or `ComputeContext.Backend` where the work is submitted. See
+  [Which device am I on?](#which-device-am-i-on).
 
 ### The factory types
 
@@ -413,10 +426,23 @@ once and caches the result:
    candidates. Nothing else is searched: no other directory, no NuGet cache, and no
    assembly whose name is not one of those four.
 
-When step 2 finds both the CPU and the GPU backend for the current OS, the GPU one is
-used if a CUDA 12.x runtime (`libcudart.so.12` on Linux, `cudart64_12.dll` on Windows)
-can be loaded, otherwise the CPU one. A single candidate is taken as-is — a lone GPU
-backend is chosen even when no CUDA runtime is present.
+A single candidate is taken as-is — a lone GPU backend is chosen even when no CUDA
+runtime is present. **Two or more are refused**, in either step, with an
+`InvalidOperationException` naming them:
+
+> `Several Shorokoo inference backends are deployed in '<folder>': Shorokoo.WinCPU (CPU),
+> Shorokoo.WinGPU (CUDA). Only one can be live in a process, and each package brings its
+> own native ONNX Runtime, so a build carrying both is ambiguous. Reference exactly one
+> backend package -- keeping model code in a library that references no backend, and one
+> executable per device -- or assign InferenceBackend.Factory before the first inference
+> call to say which of these you mean.`
+
+Discovery does not resolve that by looking for a CUDA runtime and preferring the GPU. A
+deployment holding both packages has already had their native ONNX Runtimes collide —
+each ships `libonnxruntime.so` (`onnxruntime.dll`) at the same path — so the managed DLL
+that discovery would pick says nothing about the native that is actually there. The usual
+way to arrive at this state is a `ProjectReference` to a project that carries a backend of
+its own; [One model, two devices](#one-model-two-devices) is the layout that avoids it.
 
 Referencing a backend package is enough for step 2: the package copies its DLL to your
 output folder, so discovery finds it whether or not your code mentions the factory type.
@@ -428,6 +454,79 @@ If no backend is found, the first inference call throws `InvalidOperationExcepti
 > startup -- e.g. InferenceBackend.Factory = new LinuxCpuInferenceFactory(); (or the
 > factory from whichever Shorokoo.{WinCPU,WinGPU,LinuxCPU,LinuxGPU} package you
 > reference) -- or add such a package as a dependency.`
+
+### Which device am I on?
+
+Nothing at a call site says which device the work will go to — `Compile(...)` and
+`Execute(...)` look the same on a CPU build and a GPU one. Ask instead:
+
+```csharp
+using Shorokoo.Core.Inference.Abstractions;
+
+Console.WriteLine(InferenceBackend.Describe());       // Shorokoo.WinGPU (CUDA device 0)
+Console.WriteLine(ComputeContext.Default.Backend);    // the same, at the point work is submitted
+```
+
+`BackendDescription` carries the `Name` of the supplying assembly, the `Device`
+(`ComputeDevice.Cpu` or `ComputeDevice.Cuda`), and the `CudaDeviceId` a CUDA backend
+allocates on (null on CPU). Record it in a run's log: a training run that cannot say which
+device produced its numbers has lost something it cannot reconstruct later.
+
+Two related entry points:
+
+- `InferenceBackend.Current` is the live backend **or null**, and — unlike `Factory` and
+  `Describe()` — reading it does not resolve one. Use it to tell "nothing chosen yet" from
+  "already bound" without settling the question by asking it.
+- `InferenceBackend.RequireDevice(ComputeDevice.Cpu)` throws unless the live backend is on
+  that device. Put it at the top of a program whose correctness depends on where it runs —
+  a check that must not contend with a training run holding the card — and it fails at
+  startup, with the live backend named, instead of quietly sharing the GPU:
+
+  ```csharp
+  InferenceBackend.RequireDevice(ComputeDevice.Cpu);   // before any inference call
+  ```
+
+### One model, two devices
+
+Only one backend is live per process, so running part of the work on the CPU while the rest
+uses the GPU means **two processes**. It does not mean two copies of the model.
+
+Put the model and its `[Module]`s in a class library that references no backend at all —
+`Shorokoo` (or `Shorokoo.Core` + `Shorokoo.Modules`) carries no ONNX Runtime dependency, so
+such a library compiles and is device-neutral. Then give each device a thin executable that
+references that library plus one backend:
+
+```xml
+<!-- Model.csproj — the model, its modules, its losses. No backend. -->
+<ItemGroup>
+  <PackageReference Include="Shorokoo" Version="..." />
+</ItemGroup>
+```
+
+```xml
+<!-- Train.csproj — the long run. -->
+<ItemGroup>
+  <ProjectReference Include="../Model/Model.csproj" />
+  <PackageReference Include="Shorokoo.WinGPU" Version="..." />
+</ItemGroup>
+```
+
+```xml
+<!-- Check.csproj — the causality check, the shape probe, the debugging execution. -->
+<ItemGroup>
+  <ProjectReference Include="../Model/Model.csproj" />
+  <PackageReference Include="Shorokoo.WinCPU" Version="..." />
+</ItemGroup>
+```
+
+The model is compiled once, into one assembly, and both hosts run *that* — so a check tests
+the model the run is training, not a second compilation of its source. `[Module]` classes the
+check needs live beside the model they test, in the library.
+
+What breaks this is a `ProjectReference` to a project that carries a backend: the backend
+flows with it into the referencing project's output folder, two backends end up deployed, and
+[auto-discovery](#auto-discovery) refuses to guess between them. Keep the backend in the
+executable, where the device is decided, and let nothing reference an executable.
 
 ### Device memory (GPU backends)
 

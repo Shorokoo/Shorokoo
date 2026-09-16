@@ -191,6 +191,21 @@ rest of it.
 
 ## Current limitations (could be lifted)
 
+### The backend is process-wide and chosen when you build
+
+Which device Shorokoo runs on is decided by the backend package a project references, and it holds
+for the whole process — see [Backend selection](inference.md#backend-selection). There is no
+per-call, per-context or per-rig device choice, and a program cannot hold both backends and pick at
+startup: ONNX Runtime binds one native runtime per process, and the CPU and CUDA packages deliver
+their native library at the same path, so the two cannot even be deployed side by side.
+
+This is not scheduled to change. What is available instead: the device is answerable
+(`ComputeContext.Backend`, `InferenceBackend.Describe()`) and assertable
+(`InferenceBackend.RequireDevice(...)`), and work that genuinely needs both devices is split into
+one executable per device over a shared, backend-free model library —
+[One model, two devices](inference.md#one-model-two-devices). That costs a process, not a second
+copy of the model.
+
 ### Device memory is configured process-wide
 
 The GPU backends read their arena budget, extend strategy and per-run shrinkage off the static

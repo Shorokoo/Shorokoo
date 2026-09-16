@@ -11,10 +11,10 @@ namespace Shorokoo.WinCPU;
 /// <para>Naming it in your code is <b>optional</b>. Referencing the package copies
 /// <c>Shorokoo.WinCPU.dll</c> next to <c>Shorokoo.dll</c>, where
 /// <see cref="Shorokoo.Core.Inference.Abstractions.InferenceBackend"/> auto-discovers it
-/// on the first inference call. Assign it explicitly only to override the choice when
-/// several backends are deployed side by side, to get a failure at startup instead of on
-/// the first inference call, or when the backend DLL is not deployed next to
-/// <c>Shorokoo.dll</c>:</para>
+/// on the first inference call. Assign it explicitly only to name the backend when a
+/// deployment holds more than one (which discovery otherwise refuses rather than choosing
+/// between), to get a failure at startup instead of on the first inference call, or when
+/// the backend DLL is not deployed next to <c>Shorokoo.dll</c>:</para>
 /// <code>
 /// InferenceBackend.Factory = new WinCpuInferenceFactory();
 /// </code>

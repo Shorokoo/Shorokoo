@@ -22,10 +22,15 @@ namespace Shorokoo.Core.Inference.Abstractions;
 /// If you never set one, the first inference call auto-discovers a backend in two
 /// steps: a Shorokoo.{Platform} assembly already loaded in the process wins, and
 /// only failing that is the folder next to this assembly probed for the known
-/// Shorokoo.{Platform} DLLs. When both a CPU and a GPU backend for the current
-/// OS are deployed there, the GPU one is used if a CUDA 12.x runtime is present,
-/// otherwise the CPU one. Only one backend is ever live per process; loading a
+/// Shorokoo.{Platform} DLLs. Either step <b>refuses</b> a deployment carrying more
+/// than one backend rather than choosing between them — see
+/// <see cref="SelectBackend"/>. Only one backend is ever live per process; loading a
 /// second native (e.g. comparing CPU vs CUDA) requires separate processes.
+/// </para>
+/// <para>
+/// Which backend that turned out to be is answerable: <see cref="Current"/> peeks
+/// without resolving one, <see cref="Describe"/> names the live one, and
+/// <see cref="RequireDevice"/> asserts it is the device this program meant to run on.
 /// </para>
 /// </summary>
 public static class InferenceBackend
@@ -52,6 +57,40 @@ public static class InferenceBackend
         }
     }
 
+    /// <summary>
+    /// The backend if one is live, null if none has been assigned or discovered yet.
+    /// Unlike <see cref="Factory"/>, reading this does not resolve one — so a startup
+    /// path can tell "nothing chosen yet" from "already bound" without deciding the
+    /// question by asking it.
+    /// </summary>
+    public static IShorokooInferenceSessionFactory? Current => _factory;
+
+    /// <summary>
+    /// Names the live backend and the device it runs on, resolving one the way
+    /// <see cref="Factory"/> would if none is live yet. This is what a run's log should
+    /// record: nothing at a call site says which device the work went to.
+    /// </summary>
+    public static BackendDescription Describe() => Factory.Description;
+
+    /// <summary>
+    /// Throws unless the live backend runs on <paramref name="device"/>, resolving one the
+    /// way <see cref="Factory"/> would if none is live yet. A program whose correctness
+    /// depends on its device — a check that must not contend with a training run on the
+    /// card, say — states that here and fails at startup rather than discovering it from a
+    /// throughput figure.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The live backend runs on another device.</exception>
+    public static void RequireDevice(ComputeDevice device)
+    {
+        var live = Describe();
+        if (live.Device != device)
+            throw new InvalidOperationException(
+                $"This program requires a {(device == ComputeDevice.Cuda ? "CUDA" : "CPU")} " +
+                $"backend, but {live} is live. Reference the " +
+                "Shorokoo.{WinCPU,WinGPU,LinuxCPU,LinuxGPU} package for the device you want, or " +
+                "assign InferenceBackend.Factory before the first inference call.");
+    }
+
     // The backend DLLs Shorokoo ships: the OS each targets and whether it drives
     // the CUDA execution provider.
     private static readonly (string Assembly, OSPlatform Os, bool Gpu)[] KnownBackends =
@@ -76,7 +115,7 @@ public static class InferenceBackend
             .Select(b => (b.Assembly, b.Gpu))
             .ToList();
 
-        var chosen = SelectBackend(osCandidates, IsCudaAvailable())
+        var chosen = SelectBackend(osCandidates, $"deployed in '{dir}'")
             ?? throw new InvalidOperationException(
                 $"No Shorokoo inference backend is set and none was found in '{dir}'. " +
                 "Set one at startup -- e.g. InferenceBackend.Factory = new " +
@@ -92,16 +131,29 @@ public static class InferenceBackend
     }
 
     /// <summary>
-    /// Chooses one backend from those deployed for the current OS. With several to
-    /// pick from, the GPU backend is used only when a CUDA runtime is present,
-    /// otherwise the CPU one; with a single candidate it is taken as-is. Returns
-    /// null when nothing is deployed. Pure (no I/O) so the policy is unit-testable.
+    /// Chooses the one backend among those deployed for the current OS. Nothing deployed
+    /// returns null; a single candidate is taken as-is. Several are <b>refused</b>: only one
+    /// backend can be live in a process, and the CPU and GPU packages deliver their native
+    /// ONNX Runtime at the same path, so a deployment carrying both is already ambiguous and
+    /// guessing at it silently is how work lands on a device its author did not intend. Pure
+    /// (no I/O) so the policy is unit-testable; <paramref name="origin"/> is where the
+    /// candidates were found, for the message.
     /// </summary>
+    /// <exception cref="InvalidOperationException">More than one backend is deployed.</exception>
     internal static (string Assembly, bool Gpu)? SelectBackend(
-        IReadOnlyList<(string Assembly, bool Gpu)> osCandidates, bool cudaAvailable)
+        IReadOnlyList<(string Assembly, bool Gpu)> osCandidates, string origin)
     {
         if (osCandidates.Count == 0) return null;
-        return osCandidates.FirstOrDefault(c => c.Gpu == cudaAvailable, osCandidates[0]);
+        if (osCandidates.Count == 1) return osCandidates[0];
+        var names = string.Join(", ", osCandidates.Select(
+            c => c.Assembly + (c.Gpu ? " (CUDA)" : " (CPU)")));
+        throw new InvalidOperationException(
+            $"Several Shorokoo inference backends are {origin}: {names}. Only one can be live " +
+            "in a process, and each package brings its own native ONNX Runtime, so a build " +
+            "carrying both is ambiguous. Reference exactly one backend package -- keeping model " +
+            "code in a library that references no backend, and one executable per device -- or " +
+            "assign InferenceBackend.Factory before the first inference call to say which of " +
+            "these you mean.");
     }
 
     private static string ProbeDirectory()
@@ -115,13 +167,22 @@ public static class InferenceBackend
 
     private static IShorokooInferenceSessionFactory? TryFindAlreadyLoadedFactory()
     {
-        var known = KnownBackends.Select(b => b.Assembly).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
-        {
-            if (!known.Contains(asm.GetName().Name ?? "")) continue;
-            if (InstantiateFactory(asm) is { } factory) return factory;
-        }
-        return null;
+        var loaded = AppDomain.CurrentDomain.GetAssemblies()
+            .Select(asm => asm.GetName().Name ?? "")
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var candidates = KnownBackends
+            .Where(b => loaded.Contains(b.Assembly))
+            .Select(b => (b.Assembly, b.Gpu))
+            .ToList();
+
+        // The OS filter of the deployment-folder probe does not apply here: an assembly that
+        // is loaded is loaded. Ambiguity is refused on the same grounds either way.
+        if (SelectBackend(candidates, "already loaded in this process") is not { } chosen)
+            return null;
+        return AppDomain.CurrentDomain.GetAssemblies()
+            .Where(asm => string.Equals(asm.GetName().Name, chosen.Assembly, StringComparison.OrdinalIgnoreCase))
+            .Select(InstantiateFactory)
+            .FirstOrDefault(factory => factory is not null);
     }
 
     private static IShorokooInferenceSessionFactory? InstantiateFactory(Assembly asm)
@@ -139,17 +200,5 @@ public static class InferenceBackend
             return null;
         }
         return type is null ? null : (IShorokooInferenceSessionFactory)Activator.CreateInstance(type)!;
-    }
-
-    private static bool IsCudaAvailable()
-    {
-        // Presence of the CUDA 12.x runtime implies the libs ORT's CUDA EP DT_NEEDs are
-        // installed and resolvable.
-        if (NativeLibrary.TryLoad(CudaRuntime.LibraryName, out var h))
-        {
-            NativeLibrary.Free(h);
-            return true;
-        }
-        return false;
     }
 }

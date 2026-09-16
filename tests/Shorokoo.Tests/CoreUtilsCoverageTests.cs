@@ -16,6 +16,7 @@ namespace Shorokoo.Tests;
 /// <see cref="TensorKey"/> identity structs, the <see cref="ShorokooException"/> hierarchy, the
 /// OpsFactories <see cref="Helpers"/> dtype sets and attribute-type mapping, the
 /// <see cref="InferenceBackend"/> deployment-folder discovery and selection policy, the
+/// description a live backend answers with and the device assertion built on it, the
 /// <see cref="DeviceMemory"/> settings the CUDA backends map onto ORT's arena options, the typed
 /// value-handle conversions, <c>ShapeUtils</c>' argument validation for <c>Reshape</c>'s
 /// <c>keepAxes</c>, the <see cref="AtomicFileWriter"/> temp-and-rename commit protocol
@@ -290,15 +291,59 @@ public class CoreUtilsCoverageTests
         Assert.Equal(5f, OnnxEngine.Eval(Scalar(2f) + Scalar(3f)).As<float32>().AccessMemory()[0]);
 
         // The multi-candidate selection policy (the suite ships only one backend, so drive it
-        // directly): nothing deployed → no choice; a single backend is taken as-is regardless of
-        // CUDA; with both accessible CUDA presence decides.
+        // directly): nothing deployed → no choice; a single backend is taken as-is; several are
+        // refused by name rather than guessed between.
         var cpu = ("Shorokoo.LinuxCPU", false);
         var gpu = ("Shorokoo.LinuxGPU", true);
-        Assert.Null(InferenceBackend.SelectBackend([], cudaAvailable: true));
-        Assert.Equal(cpu, InferenceBackend.SelectBackend([cpu], cudaAvailable: true)!.Value);
-        Assert.Equal(gpu, InferenceBackend.SelectBackend([gpu], cudaAvailable: false)!.Value);
-        Assert.Equal(gpu, InferenceBackend.SelectBackend([cpu, gpu], cudaAvailable: true)!.Value);
-        Assert.Equal(cpu, InferenceBackend.SelectBackend([cpu, gpu], cudaAvailable: false)!.Value);
+        Assert.Null(InferenceBackend.SelectBackend([], "deployed in '/app'"));
+        Assert.Equal(cpu, InferenceBackend.SelectBackend([cpu], "deployed in '/app'")!.Value);
+        Assert.Equal(gpu, InferenceBackend.SelectBackend([gpu], "deployed in '/app'")!.Value);
+        var refused = Assert.Throws<InvalidOperationException>(
+            () => InferenceBackend.SelectBackend([cpu, gpu], "deployed in '/app'"));
+        Assert.Contains("Shorokoo.LinuxCPU (CPU), Shorokoo.LinuxGPU (CUDA)", refused.Message);
+        Assert.Contains("deployed in '/app'", refused.Message);
+    }
+
+    [Fact]
+    public void TestTheLiveBackendNamesItsDeviceAndCanBeRequired()
+    {
+        var live = InferenceBackend.Describe();
+        Assert.Same(InferenceBackend.Factory, InferenceBackend.Current);
+        Assert.Equal(InferenceBackend.Factory.GetType().Assembly.GetName().Name, live.Name);
+        Assert.Equal(live.Device == ComputeDevice.Cuda, live.CudaDeviceId is not null);
+        Assert.Equal(live, ComputeContext.Default.Backend);
+        Assert.Equal(live, new ComputeContext().Backend);
+
+        InferenceBackend.RequireDevice(live.Device);
+        var other = live.Device == ComputeDevice.Cpu ? ComputeDevice.Cuda : ComputeDevice.Cpu;
+        Assert.Contains(live.ToString(), Assert.Throws<InvalidOperationException>(
+            () => InferenceBackend.RequireDevice(other)).Message);
+
+        var cuda = new CudaFactoryProbe(3).Description;
+        Assert.Equal(new BackendDescription("Shorokoo.Tests", ComputeDevice.Cuda, 3), cuda);
+        Assert.Equal("Shorokoo.Tests (CUDA device 3)", cuda.ToString());
+        Assert.Equal("Shorokoo.LinuxCPU (CPU)",
+            new BackendDescription("Shorokoo.LinuxCPU", ComputeDevice.Cpu, null).ToString());
+    }
+
+    /// <summary>
+    /// A model library carries no backend — that is what lets one model serve a GPU host and a
+    /// CPU host without its source being compiled into each of them.
+    /// </summary>
+    [Fact]
+    public void TestTheCoreAndModuleAssembliesCarryNoOnnxRuntimeDependency()
+    {
+        Assembly[] backendFree = [typeof(InferenceBackend).Assembly, typeof(global::Shorokoo.Modules.Layers.Linear).Assembly];
+        foreach (var assembly in backendFree)
+            Assert.DoesNotContain(assembly.GetReferencedAssemblies(), a =>
+                (a.Name ?? "").StartsWith("Microsoft.ML.OnnxRuntime", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>A CUDA <see cref="OrtSessionFactory"/> without a card: it describes itself from its
+    /// constructor arguments, and no session is built here.</summary>
+    private sealed class CudaFactoryProbe : OrtSessionFactory
+    {
+        public CudaFactoryProbe(int device) : base(device) { }
     }
 
     [Fact]

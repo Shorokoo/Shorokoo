@@ -361,7 +361,7 @@ public static class TrainingGraphBuilder
         if (takesTarget)
         {
             graph.Inputs = [.. graph.Inputs, targetInputKey];
-            graph.InputUniqueNames = [.. graph.InputUniqueNames, lossTargetName ?? "targets"];
+            graph.InputUniqueNames = [.. graph.InputUniqueNames, UniqueTargetName(graph, lossTargetName)];
         }
         graph.Outputs = [lossOutputKey];
         graph.OutputUniqueNames = [null];
@@ -382,6 +382,24 @@ public static class TrainingGraphBuilder
         System.Diagnostics.Debug.Assert(graph.TryValidateLinearOrder(out var orderError),
             "evaluation graph.IsLinearOrderValid(): " + orderError);
         return graph;
+    }
+
+    /// <summary>
+    /// A name for the appended target input that no model input already has. The model's own inputs
+    /// come through this composition <b>unwrapped</b> — unlike the training composition, which hides
+    /// them behind a <c>model_inputs</c> struct — so a model whose input is itself called
+    /// <c>targets</c> would otherwise give the graph two inputs of one name. Execution maps original
+    /// name to ONNX name through a dictionary, so the duplicate collapses: one of the two is never
+    /// fed, and the failure is an opaque runtime error about a missing internal tensor — or, worse,
+    /// no error and a silently wrong loss.
+    /// </summary>
+    private static string UniqueTargetName(InternalComputationGraph graph, string? preferred)
+    {
+        var taken = new HashSet<string>(
+            graph.InputUniqueNames.Where(n => n is not null)!, StringComparer.Ordinal);
+        var name = preferred ?? "targets";
+        for (var suffix = 2; taken.Contains(name); suffix++) name = $"{preferred ?? "targets"}_{suffix}";
+        return name;
     }
 
     /// <summary>

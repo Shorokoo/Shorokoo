@@ -52,9 +52,11 @@ The library losses' configurable knobs (`reduction`, `ignore_index`, `label_smoo
 
 <a id="loss-ignoring-targets"></a>
 **A loss graph may ignore its `targets`.** The two-input shape is a *signature* requirement, not a
-data-flow one: rig build checks the counts only — exactly two inputs, exactly one output — then wires
+data-flow one: rig build checks the counts — exactly two inputs, exactly one output — then wires
 the model's output to input 0, creates a fresh runtime input for input 1, and replays the loss body.
-Nothing requires input 1 to be read. So a model that computes its **own** loss can be trained with a
+Nothing requires input 1 to be read; the build asks whether it *is* (a reachability walk from the loss
+output, which follows branch conditions as well as data edges) and derives the target slot from the
+answer. So a model that computes its **own** loss can be trained with a
 pass-through loss module. That is the normal shape when the loss needs more than the one predictions
 tensor and one targets tensor the slot can carry — label ids, a padding mask, per-token weights, or the
 `Reduced`/`PerElement` knobs: those all arrive as ordinary **model** inputs and are consumed in the
@@ -88,12 +90,19 @@ overload on a rig whose loss *does* read its target fails loud rather than train
 you never chose.
 
 The target-free overloads are the counter-agnostic `TrainStep(checkpoint, inputs)`, its
-explicit-counter form `TrainStep(checkpoint, inputs, epoch, batchNumber)`, and
-`Fit(inputs, numEpochs)`. The remaining entry points still take a target argument, because their
-signatures cannot drop one unambiguously (`TrainStep(checkpoint, hyperparams, …)`) or because the
-target rides in a `DataBatch` (`TrainStep(checkpoint, loader)`, `Fit(loader, …)`). On a target-free
-rig that argument is `rig.TargetDef.FromOrderedData()` — an **empty** struct contributing no field,
-not a placeholder tensor you had to invent.
+explicit-counter form `TrainStep(checkpoint, inputs, epoch, batchNumber)`, `Fit(inputs, numEpochs)`,
+and the resident run's `Step(inputs)` / `StepToCheckpoint(inputs)`. The loader path takes a target
+*dataset* rather than a per-step target, and an empty one is what a target-free rig gives it:
+
+```csharp
+var loader = new InMemoryDataLoader(inputs, rig.TargetDef.FromOrderedData(), batchSize: 32);
+var result = rig.Fit(loader, numEpochs: 10);
+```
+
+The only entry points still needing an explicit target argument are those whose signature cannot drop
+one unambiguously — `TrainStep(checkpoint, hyperparams, …)` and the resident run's
+hyperparameter forms. There too the argument is `rig.TargetDef.FromOrderedData()`: an **empty** struct
+contributing no field, not a placeholder tensor you had to invent.
 
 Two things this shape does **not** change. The predictions tensor is never an output of the training
 step — the step's outputs are the updated parameters, model state, optimizer state and the loss — so
@@ -691,13 +700,6 @@ terminal report, the one whose `IsComplete` is true.)
 Each `BuildProgress` is reported as the build **enters** the named stage, so a build that has been
 quiet for minutes is inside the stage its last report named. It carries four members:
 
-One caveat for `TrainingRig.Load`, which reports through the same sink: it reports
-`DeferModelParamInitialization` where a fresh build reports `InitializeModelParams`, because it does
-not run them ([#327](https://github.com/Shorokoo/Shorokoo/issues/327)). That work has not vanished —
-it moves to whichever later call first asks the rig for an initial value, and *that* call reports
-nothing. A resume never makes such a call, so it simply costs less; a load that then asks for an
-initial checkpoint pays the initializers there, silently.
-
 - `Phase` — `BuildPhase.Concretize` (lowering the model to a concrete architecture),
   `BuildPhase.TrainingStep` (composing and lowering the training-step graph), or
   `BuildPhase.Initialize` (running the initializers, shape inference and graph optimization). The
@@ -711,6 +713,13 @@ initial checkpoint pays the initializers there, silently.
   stamped by the build, not re-derived from the stage text, so test it rather than the `Done` string.
   `Stage` is the one member a program should not branch on; the other three are stable.
 - `Elapsed` — time since the start of *this* build. One clock spans all three phases.
+
+One caveat for `TrainingRig.Load`, which reports through the same sink: it reports
+`DeferModelParamInitialization` where a fresh build reports `InitializeModelParams`, because it does
+not run them ([#327](https://github.com/Shorokoo/Shorokoo/issues/327)). That work has not vanished —
+it moves to whichever later call first asks the rig for an initial value, and *that* call reports
+nothing. A resume never makes such a call, so it simply costs less; a load that then asks for an
+initial checkpoint pays the initializers there, silently.
 
 `ToString()` renders the line shown above. Reports are raised **synchronously on the building
 thread**, so use `SynchronousBuildProgress` (which calls its handler inline) rather than

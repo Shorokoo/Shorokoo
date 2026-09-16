@@ -487,9 +487,13 @@ namespace Shorokoo
         /// what they produce. A no-op on an eager build, and after the first call on a deferred one.
         ///
         /// <para>The stand-ins and the values agree on shape and dtype by construction (both come from
-        /// the arch's own <c>MODEL_PARAM</c> declarations), so nothing derived from the stand-ins —
-        /// the struct defs, the optimized trainstep, a checkpoint's shape check — is invalidated by
-        /// this running late.</para>
+        /// the arch's own <c>MODEL_PARAM</c> declarations), so nothing <i>shape-driven</i> derived from
+        /// the stand-ins — the struct defs, a checkpoint's shape check, the optimized trainstep — is
+        /// invalidated by this running late. The build's shape inference does read small payloads, and
+        /// a stand-in's are zeros, so a graph whose shapes depended on a trainable parameter's
+        /// <b>value</b> could be inferred differently under deferral. That is the assumption the pass
+        /// already makes of every model input, which it feeds zero exemplars; deferral extends it from
+        /// inputs to parameters rather than introducing it.</para>
         /// </summary>
         private void EnsureInitialValues()
         {
@@ -2215,13 +2219,13 @@ namespace Shorokoo
         /// Fails loud when <paramref name="operation"/> — a target-free entry point — is called on a rig
         /// whose loss does read a target, naming the overload that takes one.
         /// </summary>
-        private void RequireTargetless(string operation)
+        internal void RequireTargetless(string operation)
         {
             if (HasTargets)
                 throw new InvalidOperationException(
                     $"{operation} without targets requires a loss that ignores its target input, but this "
                     + $"rig's loss reads one (TargetDef: [{string.Join(", ", TargetDef.Fields.Select(f => f.Name))}]). "
-                    + $"Use the {operation} overload that takes a target struct.");
+                    + $"Use the {operation} overload that takes targets.");
         }
 
         /// <summary>
@@ -2865,8 +2869,8 @@ namespace Shorokoo
             int numEpochs,
             TrainingCheckpoint? initialCheckpoint = null)
         {
-            RequireTargetless(nameof(Fit));
             if (trainingInputs is null) throw new ArgumentNullException(nameof(trainingInputs));
+            RequireTargetless(nameof(Fit));
             var noTargets = new TensorDataStruct[trainingInputs.Length];
             for (var i = 0; i < noTargets.Length; i++) noTargets[i] = TargetDef.FromOrderedData();
             return Train(initialCheckpoint ?? CreateInitialCheckpoint(), trainingInputs, noTargets, numEpochs);
@@ -3487,6 +3491,7 @@ namespace Shorokoo
             var trainableModelIds = new List<ModelId>();
             var stateModelIds = new List<ModelId>();
             var standInById = new Dictionary<ModelId, TensorData>();
+            var canDefer = deferInitialization;
             foreach (var node in concreteArch.Nodes)
             {
                 if (node.OpCode != InternalOpCodes.MODEL_PARAM) continue;
@@ -3500,19 +3505,19 @@ namespace Shorokoo
                 // weight and FastInitializeModelParams skips it, so it is skipped here too.
                 if (deferInitialization && modelIdVals is not [0])
                 {
+                    // Deferral needs a concrete dtype and shape to stand the parameter in with. A
+                    // parameter that declares neither — no shape attribute, or one with a symbolic
+                    // dimension, which names no element count — cannot be stood in for, so the build
+                    // runs the initializers instead of failing. The eager path never needed the
+                    // attribute, and deferral is an optimization: it may decline, but it must not
+                    // narrow what a rig can be built from.
+                    var dims = node.Attributes.GetLongsVal(OnnxOpAttributeNames.ShrkAttrShape);
+                    if (dims is null || Array.IndexOf(dims, -1L) >= 0)
+                    {
+                        canDefer = false;
+                        continue;
+                    }
                     var dtype = node.Attributes.GetDTypeVal(OnnxOpAttributeNames.ShrkAttrDtype).AssertNotNull();
-                    var dims = node.Attributes.GetLongsVal(OnnxOpAttributeNames.ShrkAttrShape)
-                        ?? throw new InvalidOperationException(
-                            $"Concrete arch parameter {modelId} declares no shape, so its initialization "
-                            + "cannot be deferred; this arch was not built through the concretization "
-                            + "that records one.");
-                    // A symbolic dimension names no element count, so there is no stand-in to build —
-                    // and left alone it would surface as an arithmetic overflow rather than as this.
-                    if (Array.IndexOf(dims, -1L) >= 0)
-                        throw new InvalidOperationException(
-                            $"Concrete arch parameter {modelId} declares the symbolic shape "
-                            + $"[{string.Join(", ", dims)}], which names no element count, so its "
-                            + "initialization cannot be deferred. Build the rig without deferral.");
                     standInById[modelId] = RepresentativeInputFor(new Shape(dims), dtype);
                 }
             }
@@ -3528,7 +3533,7 @@ namespace Shorokoo
             // are non-null. Without the infos the rig would silently fall back to unkeyed
             // seeded init, ignoring the config's master seed / algorithm for the weights.
             IReadOnlyDictionary<ModelId, TensorData> paramValuesById;
-            if (deferInitialization)
+            if (canDefer)
             {
                 // The run itself is what is deferred, not merely its bookkeeping: nothing below reads
                 // a parameter's value, so the whole per-parameter initializer pass — the largest

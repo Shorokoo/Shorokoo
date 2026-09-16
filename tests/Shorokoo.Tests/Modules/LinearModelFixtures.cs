@@ -1308,3 +1308,46 @@ public partial class TargetGatedLoss
         return gate.IfElse(meanSq.Scalar(), meanSq.Scalar() * Scalar(2f));
     }
 }
+
+/// <summary>
+/// A model whose forward pass <b>reads</b> its module-owned state, not merely updates it — so a
+/// checkpoint whose state has moved off its initial value produces a different output, and binding
+/// the wrong state is visible. <see cref="ScalarMultiplyWithBatchNormModel"/> updates running stats
+/// but normalizes from batch statistics, so its output never depends on them.
+/// </summary>
+[Module]
+public partial class StateReadingModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var scalarShape = Vector(1L);
+        var running = InitBnRunningMean.Init(scalarShape);
+        var weight = InitScalarWeight.Init(scalarShape);
+
+        Vector<int64> batchAxis = [Scalar(0L)];
+        var batchMean = input.Reduce(ReduceKind.Mean, batchAxis, keepDims: false).Reshape(scalarShape);
+        Globals.StateUpdate(running, running * Scalar(0.5f) + batchMean * Scalar(0.5f));
+        return input * weight + running;
+    }
+}
+
+/// <summary>A forwarding loss whose ignored target is a <b>scalar</b> — rank 0, where
+/// <see cref="ForwardingLoss"/>'s is a tensor (Shorokoo/Shorokoo#331).</summary>
+[Module]
+public partial class ScalarTargetForwardingLoss
+{
+    public static Scalar<float32> Inline(Scalar<float32> predictions, Scalar<float32> targets)
+        => predictions;
+}
+
+/// <summary>A model with an input literally named <c>targets</c>, which the evaluation composition
+/// appends its own target input beside (Shorokoo/Shorokoo#329).</summary>
+[Module]
+public partial class TargetsNamedInputModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> targets)
+    {
+        var weight = InitScalarWeight.Init(Vector(1L));
+        return targets * weight;
+    }
+}

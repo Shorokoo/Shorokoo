@@ -2030,15 +2030,14 @@ public class TrainingRigCheckpointCoverageTests
         Assert.NotNull(cp);
     }
 
-    /// <summary>The backoff asks whether the checkpoint it handed back at the last reclamation
-    /// survived this collection, and reads "yes" as the caller keeping its checkpoints. But that
-    /// checkpoint is what the caller feeds back in as the next step's input, so it is rooted as a
-    /// live argument whenever reclamation fires on consecutive steps — for a caller that keeps
-    /// nothing exactly as much as for one that keeps everything. The budget therefore doubles away
-    /// from its base for the drop-everything loop the training guide endorses, withholding the
-    /// collections that loop exists to get, until it has grown enough to skip steps and the
-    /// reference finally goes stale. Tracked as Shorokoo/Shorokoo#348.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#348: the reclamation backoff doubles the budget for a caller that keeps no checkpoints, because the watched checkpoint is the next step's own input")]
+    /// <summary>A caller that keeps no checkpoint at all supersedes everything, so every collection
+    /// reclaims the lot and the budget must stay at its base. The checkpoint handed back at a
+    /// reclamation is what the caller feeds in as the next step's input, so judging whether THAT
+    /// survived says nothing: it is rooted as a live argument whenever reclamations fall on
+    /// consecutive steps, for a caller that keeps nothing exactly as much as for one that keeps
+    /// everything. Until the budget had grown enough to skip steps and the
+    /// reference goes stale — which is why the watch judged is two reclamations old, not one.</summary>
+    [Fact]
     public void TestReclamationDoesNotBackOffForACallerThatKeepsNoCheckpointAtAll()
     {
         var rig = ShapeRig(ParamOrderAModel.ComputationGraph);
@@ -2053,9 +2052,24 @@ public class TrainingRigCheckpointCoverageTests
             cp = rig.TrainStep(cp, input, target);
             worst = Math.Max(worst, rig.ReclaimBudgetBytes);
         }
-
         Assert.NotNull(cp);
         Assert.Equal(1, worst);
+
+        // Keeping one checkpoint — the best so far, the step before — supersedes every other, so
+        // the collections are still worth making and the budget still must not climb.
+        var keepsOne = ShapeRig(ParamOrderAModel.ComputationGraph);
+        keepsOne.SetReclaimBudgetForTests(1);
+        var current = keepsOne.CreateInitialCheckpoint();
+        TrainingCheckpoint? best = null;
+        long worstKeepingOne = 0;
+        for (int i = 0; i < 12; i++)
+        {
+            current = keepsOne.TrainStep(current, input, target);
+            best = current;
+            worstKeepingOne = Math.Max(worstKeepingOne, keepsOne.ReclaimBudgetBytes);
+        }
+        Assert.NotNull(best);
+        Assert.Equal(1, worstKeepingOne);
     }
 
     /// <summary>A checkpoint whose parameters are shaped differently is refused on every route

@@ -2176,9 +2176,15 @@ namespace Shorokoo
             System.Threading.Interlocked.Exchange(ref _reclaimBudgetBytes, bytes);
         }
 
-        /// <summary>The checkpoint produced at the last reclamation, watched weakly: whether it
-        /// survived the next collection is what says if the caller is keeping its checkpoints.</summary>
+        /// <summary>The checkpoints produced at the last two reclamations, watched weakly. Whether
+        /// the older survived is what says if the caller is keeping its checkpoints — see
+        /// <see cref="ReclaimSupersededState"/> for why the older and not the last.</summary>
         private WeakReference<TrainingCheckpoint>? _watched;
+        private WeakReference<TrainingCheckpoint>? _watchedOlder;
+
+        /// <summary>Guards the backoff's read-modify-write. The counter above is atomic on its own,
+        /// but the watches and the budget are three fields decided together.</summary>
+        private readonly object _reclaimGate = new();
 
         /// <summary>
         /// How much superseded state may pile up before <see cref="ReclaimSupersededState"/> does
@@ -2217,11 +2223,21 @@ namespace Shorokoo
         /// <para><b>The budget counts what a step produces, which is only garbage if the caller
         /// drops it.</b> A caller may legitimately keep its checkpoints — comparing a step against
         /// the one before it, or holding the best so far — and then there is nothing to reclaim and
-        /// a forced collection is pure cost, repeated forever. So the rig watches, weakly, the
-        /// checkpoint it produced at the last reclamation: if that survived the collection, the
-        /// caller is keeping them, and the budget doubles. It keeps doubling to
-        /// <see cref="MaxReclaimBudgetBytes"/> while that stays true, and snaps back the moment a
-        /// watched checkpoint does not survive.</para>
+        /// a forced collection is pure cost, repeated forever. So the rig watches weakly the
+        /// checkpoints it produced, and asks whether one of them survived a later collection: if it
+        /// did, the caller is keeping them, and the budget doubles, up to
+        /// <see cref="MaxReclaimBudgetBytes"/>, snapping back the moment a watched checkpoint does
+        /// not survive.</para>
+        ///
+        /// <para><b>Which watch is judged matters, and judging the most recent one does not work.</b>
+        /// The checkpoint handed back at the last reclamation is exactly what the caller feeds in as
+        /// the next step's input, so while reclamations fall on consecutive steps it is rooted as a
+        /// live argument of the very call doing the collecting — and survives whether or not the
+        /// caller keeps anything. Measured before this was fixed, the budget doubled identically for
+        /// a caller that kept every checkpoint and one that kept none
+        /// (Shorokoo/Shorokoo#348). The watch judged here is therefore the one before it: two
+        /// reclamations old, so neither this step's input nor its output, and alive only if the
+        /// caller really is holding on.</para>
         ///
         /// <para>A tensor owns its storage and releases it when disposed, so a caller who wants
         /// determinism has it; what the rig cannot do is dispose the checkpoint it was handed,
@@ -2239,14 +2255,19 @@ namespace Shorokoo
             GC.Collect(2, GCCollectionMode.Forced, blocking: true);
             GC.WaitForPendingFinalizers();
 
-            // The collection just answered last time's question: did the checkpoint we handed back
-            // then survive it? If so the caller is holding its checkpoints, this collection freed
-            // nothing, and the next one would not either.
-            bool retained = _watched is not null && _watched.TryGetTarget(out _);
-            _watched = new WeakReference<TrainingCheckpoint>(produced);
-            System.Threading.Interlocked.Exchange(ref _reclaimBudgetBytes,
-                retained ? Math.Min(budget * 2, MaxReclaimBudgetBytes)
-                         : System.Threading.Interlocked.Read(ref _baseReclaimBudgetBytes));
+            lock (_reclaimGate)
+            {
+                // Did a checkpoint we handed back two reclamations ago survive this collection? If
+                // so the caller is holding its checkpoints, this collection freed nothing, and the
+                // next one would not either.
+                bool retained = _watchedOlder is not null && _watchedOlder.TryGetTarget(out _);
+                _watchedOlder = _watched;
+                _watched = new WeakReference<TrainingCheckpoint>(produced);
+                System.Threading.Interlocked.Exchange(ref _reclaimBudgetBytes,
+                    retained ? Math.Min(System.Threading.Interlocked.Read(ref _reclaimBudgetBytes) * 2,
+                                        MaxReclaimBudgetBytes)
+                             : System.Threading.Interlocked.Read(ref _baseReclaimBudgetBytes));
+            }
         }
 
         /// <summary>Backend bytes a checkpoint's tensor fields hold. A field whose size is not

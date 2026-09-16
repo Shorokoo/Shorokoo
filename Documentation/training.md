@@ -553,11 +553,11 @@ producing a few MiB a step pays one collection every few steps; one producing hu
 pays one per step, which is what a run of that size has to pay to survive at all. Collecting in your
 own loop is normally unnecessary and changes nothing but the timing.
 
-One caveat while [#348](https://github.com/Shorokoo/Shorokoo/issues/348) is open: the rig backs off
-when it judges that a collection freed nothing, and the signal it judges by misreads a loop that
-keeps no checkpoints — so the budget can climb away from 32 MiB even for the loop above, and more
-superseded state than that piles up between collections. A resident run is unaffected: it releases
-its state itself and never goes through this path.
+The rig backs off when a collection turns out to free nothing — a caller that keeps every checkpoint
+buys nothing from one — by watching weakly what it handed back and seeing whether a later collection
+took it. What it judges is deliberately two reclamations old: the checkpoint from the last one is
+what you feed in as the next step's input, so it is alive at the moment of the collection whatever
+you do with it. A resident run does not go through any of this; it releases its state itself.
 
 If you **keep** your checkpoints — holding the best so far, or comparing a step against the one
 before it — then nothing is superseded and a collection would reclaim nothing. The rig notices:

@@ -304,11 +304,10 @@ public class TensorDataApiCoverageTests
         Assert.Contains("float", td.ToString(), StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary>A disposed sequence says so on every path to its elements. GetEnumerator is an
-    /// iterator method on both implementations, so its ThrowIfDisposed runs at the first MoveNext
-    /// rather than at the call, and the empty sequence's indexer reports an out-of-range index
-    /// whether or not it has been disposed. Tracked as Shorokoo/Shorokoo#350.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#350: a disposed TensorDataSequence hands out an enumerator instead of throwing")]
+    /// <summary>A disposed sequence says so on every path to its elements, including the two that
+    /// used to defer: GetEnumerator validates before it hands back an iterator, and the empty
+    /// sequence's indexer reports disposal ahead of the index it does not have.</summary>
+    [Fact]
     public void TestEveryPathToADisposedSequencesElementsThrows()
     {
         var populated = TensorDataSequence.Create(

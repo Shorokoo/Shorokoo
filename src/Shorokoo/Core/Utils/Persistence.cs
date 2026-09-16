@@ -1028,8 +1028,15 @@ namespace Shorokoo
         /// bytes into an identically-shaped parameter.
         /// </summary>
         private static string ContentKey(TensorData data)
-            => $"{data.DType}|{string.Join(",", data.Shape.Dims)}|" +
-               SkptFileFormat.Sha256Hex(data.AccessRawMemory());
+        {
+            // Hashed through the span rather than a copy -- this runs over every tensor being
+            // written -- so the tensor has to be kept alive across it: taking the span is its last
+            // read, and Sha256Hex allocates while reading through it.
+            var key = $"{data.DType}|{string.Join(",", data.Shape.Dims)}|" +
+                      SkptFileFormat.Sha256Hex(data.AccessRawMemory());
+            GC.KeepAlive(data);
+            return key;
+        }
 
         /// <summary>
         /// The model's weight parameters: every MODEL_PARAM_DATA node except the RNG identity

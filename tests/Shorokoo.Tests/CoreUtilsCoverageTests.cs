@@ -406,14 +406,12 @@ public class CoreUtilsCoverageTests
         Assert.Equal(runPaths, Regex.Matches(session, @"ConfigureRun\s*\(\s*runOptions\s*\)").Count);
     }
 
-    /// <summary>Two shapes the span-rooting guard lets through. A span passed into a call inside a
-    /// returned expression is exempted by the "handed straight back to the caller" rule, though the
-    /// caller never sees the span; and a mention of the same identifier in any later member of the
-    /// same type satisfies the widening search, so `data`, `value` or `t` is rooted by an unrelated
-    /// method further down the file. <c>Persistence.ContentKey</c> is an instance of the first that
-    /// is in the tree today, safe only because its callers happen to hold the tensor.
-    /// Tracked as Shorokoo/Shorokoo#349.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#349: the span-rooting guard's return and widening exemptions let an unrooted span through")]
+    /// <summary>Two shapes the guard's exemptions once let through: a span consumed by a call
+    /// inside a returned expression, which the caller never sees, and one "rooted" by a mention of
+    /// the same identifier in a later member — with names like `data`, `value` or `t`, nearly
+    /// always true. The return exemption now needs the span to be the returned expression itself,
+    /// and the widening stops at the member the span was taken in.</summary>
+    [Fact]
     public void TestTheSpanGuardCatchesASpanConsumedInsideAReturnOrRootedByAnotherMember()
     {
         Assert.NotEmpty(SpansUsedWithoutKeepingTheTensorAlive(
@@ -530,8 +528,13 @@ public class CoreUtilsCoverageTests
         {
             var before = code[(code.LastIndexOfAny([';', '{', '}'], m.Index) + 1)..m.Index];
             var after = code[(m.Index + m.Length)..];
-            // Handed straight back to the caller, who owns the lifetime from there.
-            if (Regex.IsMatch(after, @"^\s*[;)]") && Regex.IsMatch(before, @"(\breturn\b|=>)[^;{}]*$"))
+            // Handed straight back to the caller, who owns the lifetime from there. The span has to
+            // BE what is returned: `return Hex(t.AccessRawMemory());` consumes it inside a call and
+            // hands back something else, leaving the tensor retired at the read -- the bug, not the
+            // exemption. What tells the two apart is an unclosed `(` between the `return`/`=>` and
+            // the span; the receiver expression in between (`d.`, `run[0].ToTensorData().`) is not
+            // one.
+            if (Regex.IsMatch(after, @"^\s*;") && ReturnedDirectly(before))
                 continue;
             var receiver = ReceiverRoot.Match(before.TrimEnd());
             if (!receiver.Success) continue;
@@ -554,15 +557,56 @@ public class CoreUtilsCoverageTests
     private static bool RootedAfter(string code, int from, string name)
     {
         var mention = new Regex(@"\b" + Regex.Escape(name) + @"\b");
+        // The member the span was taken in. Widening past it would let a later sibling's mention
+        // of the same identifier -- `data`, `value`, `t` -- root a read in this one, which with
+        // names that common is nearly always true and exempts everything.
+        int limit = MemberEndFrom(code, from);
         int cursor = from;
         for (int depth = 0; depth < 8; depth++)
         {
-            int end = BlockEndFrom(code, cursor);
+            int end = Math.Min(BlockEndFrom(code, cursor), limit);
             if (mention.IsMatch(code[cursor..end])) return true;
-            if (end >= code.Length || IsTypeBody(code, end)) return false;
+            if (end >= limit || end >= code.Length || IsTypeBody(code, end)) return false;
             cursor = end;
         }
         return false;
+    }
+
+    /// <summary>Index just past the closing brace of the member — method, property, local
+    /// function — containing <paramref name="from"/>: the outermost block enclosing it whose
+    /// header is not a type's.</summary>
+    private static int MemberEndFrom(string code, int from)
+    {
+        // The opening braces enclosing `from`, innermost first.
+        var opens = new List<int>();
+        for (int inside = BlockStartBefore(code, from); inside > 0 && opens.Count < 32;
+             inside = BlockStartBefore(code, inside - 1))
+            opens.Add(inside - 1);
+
+        int memberOpen = -1;
+        foreach (var open in opens)
+        {
+            var header = code[Math.Max(0, open - 240)..open];
+            if (Regex.IsMatch(header, @"\b(class|struct|record|interface|enum|namespace)\b[^;{}]*$"))
+                break;
+            memberOpen = open;
+        }
+        return memberOpen < 0 ? code.Length : BlockEndFrom(code, memberOpen + 1);
+    }
+
+    /// <summary>Whether the text from the statement's `return` or `=&gt;` to the span leaves no call
+    /// open — i.e. the span is the returned expression rather than an argument inside one.</summary>
+    private static bool ReturnedDirectly(string before)
+    {
+        var start = Regex.Match(before, @"(\breturn\b|=>)(?!.*(\breturn\b|=>))", RegexOptions.Singleline);
+        if (!start.Success) return false;
+        int depth = 0;
+        foreach (var c in before[(start.Index + start.Length)..])
+        {
+            if (c == '(') depth++;
+            else if (c == ')') depth--;
+        }
+        return depth == 0;
     }
 
     /// <summary>Index just inside the opening brace of the block containing <paramref name="index"/>.</summary>

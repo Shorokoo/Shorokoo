@@ -39,6 +39,11 @@ public readonly record struct BackendDescription
     public BackendDescription(string name, ComputeDevice device, int? cudaDeviceId)
     {
         ArgumentNullException.ThrowIfNull(name);
+        if (!Enum.IsDefined(device))
+            throw new ArgumentOutOfRangeException(nameof(device), device, "Not a ComputeDevice.");
+        if (cudaDeviceId is < 0)
+            throw new ArgumentOutOfRangeException(
+                nameof(cudaDeviceId), cudaDeviceId, "A CUDA device is numbered from zero.");
         if ((device == ComputeDevice.Cuda) != (cudaDeviceId is not null))
             throw new ArgumentException(
                 $"A CUDA backend names the device it allocates on and every other kind names none, "
@@ -58,6 +63,18 @@ public readonly record struct BackendDescription
 
     /// <summary>The CUDA device its sessions allocate on, or null on any non-CUDA backend.</summary>
     public int? CudaDeviceId { get; }
+
+    /// <summary>
+    /// Equality is over what the type reports, not over how it stores it: a default-constructed
+    /// value has no name, reports <see cref="Name"/> as empty, and must therefore equal — and
+    /// hash with — a description built with an empty name, which comparing the backing field
+    /// would not do.
+    /// </summary>
+    public bool Equals(BackendDescription other)
+        => Name == other.Name && Device == other.Device && CudaDeviceId == other.CudaDeviceId;
+
+    /// <inheritdoc/>
+    public override int GetHashCode() => HashCode.Combine(Name, Device, CudaDeviceId);
 
     /// <summary>One line naming the backend and the device, for a log or an error.</summary>
     public override string ToString() => Device switch

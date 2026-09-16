@@ -35,7 +35,7 @@ namespace Shorokoo.Core.Inference.Abstractions;
 /// </summary>
 public static class InferenceBackend
 {
-    private static IShorokooInferenceSessionFactory? _factory;
+    private static volatile IShorokooInferenceSessionFactory? _factory;
     private static readonly object _gate = new();
 
     /// <summary>
@@ -86,19 +86,35 @@ public static class InferenceBackend
     /// <exception cref="InvalidOperationException">The live backend runs on another device.</exception>
     public static void RequireDevice(ComputeDevice device)
     {
-        var live = Describe();
-        if (live.Device != device)
-            throw new InvalidOperationException(
-                $"This program requires a {Label(device)} backend, but {live} is live. Reference the " +
-                "Shorokoo.{WinCPU,WinGPU,LinuxCPU,LinuxGPU} package for the device you want, or " +
-                "assign InferenceBackend.Factory before the first inference call.");
+        if (!Enum.IsDefined(device))
+            throw new ArgumentOutOfRangeException(nameof(device), device, "Not a ComputeDevice.");
+        if (DeviceRefusal(Describe(), device) is { } refusal)
+            throw new InvalidOperationException(refusal);
     }
 
-    private static string Label(ComputeDevice device) => device switch
+    /// <summary>
+    /// Why <paramref name="live"/> does not satisfy a program requiring <paramref name="required"/>,
+    /// or null when it does. Pure, so every pairing is testable without a process whose backend is
+    /// the one under test.
+    /// </summary>
+    internal static string? DeviceRefusal(BackendDescription live, ComputeDevice required)
     {
-        ComputeDevice.Cuda => "CUDA",
-        ComputeDevice.Cpu => "CPU",
-        _ => device.ToString(),
+        if (live.Device == required) return null;
+        var remedy = required == ComputeDevice.Other
+            // None of the shipped packages reports Other, so naming them here would be a remedy
+            // the reader cannot follow.
+            ? "No shipped backend runs on another provider, so assign InferenceBackend.Factory with "
+              + "your own before the first inference call."
+            : "Reference the Shorokoo.{WinCPU,WinGPU,LinuxCPU,LinuxGPU} package for the device you "
+              + "want, or assign InferenceBackend.Factory before the first inference call.";
+        return $"This program requires {Requirement(required)}, but {live} is live. {remedy}";
+    }
+
+    private static string Requirement(ComputeDevice device) => device switch
+    {
+        ComputeDevice.Cuda => "a CUDA backend",
+        ComputeDevice.Cpu => "a CPU backend",
+        _ => "a backend on some other execution provider",
     };
 
     // The backend DLLs Shorokoo ships: the OS each targets and whether it drives
@@ -221,18 +237,20 @@ public static class InferenceBackend
 
     private static IShorokooInferenceSessionFactory? InstantiateFactory(Assembly asm)
     {
-        Type? type;
         try
         {
-            type = asm.GetExportedTypes().FirstOrDefault(t =>
+            var type = asm.GetExportedTypes().FirstOrDefault(t =>
                 typeof(IShorokooInferenceSessionFactory).IsAssignableFrom(t)
                 && !t.IsAbstract
                 && t.GetConstructor(Type.EmptyTypes) is not null);
+            return type is null ? null : (IShorokooInferenceSessionFactory)Activator.CreateInstance(type)!;
         }
+        // Constructing is as fallible as reflecting, and a candidate that throws on construction
+        // is simply not a backend this process can use -- it must not abort the search, the more
+        // so now that every candidate is constructed rather than only the first.
         catch
         {
             return null;
         }
-        return type is null ? null : (IShorokooInferenceSessionFactory)Activator.CreateInstance(type)!;
     }
 }

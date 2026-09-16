@@ -1,3 +1,4 @@
+using Shorokoo.Core.Inference.Abstractions;
 using Shorokoo.OnnxRuntime;
 
 namespace Shorokoo.WinCPU;
@@ -29,5 +30,5 @@ public sealed class WinCpuInferenceFactory : OrtSessionFactory
     /// execution-provider step does nothing; sessions still get the usual log-severity
     /// and graph-optimization options.
     /// </summary>
-    public WinCpuInferenceFactory() : base(static _ => { }, cudaDeviceId: null) { }
+    public WinCpuInferenceFactory() : base(static _ => { }, ComputeDevice.Cpu, cudaDeviceId: null) { }
 }

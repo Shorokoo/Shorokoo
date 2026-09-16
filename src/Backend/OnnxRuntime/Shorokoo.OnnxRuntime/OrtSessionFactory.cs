@@ -35,14 +35,28 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
     /// constructed. This is where a subclass appends its execution provider; a CPU backend
     /// leaves ORT on its default provider and does nothing here.
     /// </param>
+    /// <param name="device">
+    /// The kind of device those sessions run on. A subclass driving a provider that is neither
+    /// the CPU nor CUDA — DirectML, ROCm, CoreML — passes <see cref="ComputeDevice.Other"/>.
+    /// It is a parameter rather than something inferred from <paramref name="cudaDeviceId"/>
+    /// precisely because such a subclass names no CUDA device: inferring would report it as the
+    /// CPU, and <see cref="InferenceBackend.RequireDevice"/> would then wave work onto a card
+    /// its author meant to stay off.
+    /// </param>
     /// <param name="cudaDeviceId">
     /// The CUDA device the provider appended above allocates on, or <c>null</c> when it is
     /// not a CUDA provider. It names the arena that
     /// <see cref="DeviceMemory.ShrinkArenaAfterRun"/> shrinks, so a backend that does not
     /// allocate on a card passes <c>null</c> and its sessions ignore the setting.
     /// </param>
-    protected OrtSessionFactory(Action<SessionOptions> configureExecutionProvider, int? cudaDeviceId)
+    /// <exception cref="ArgumentException"><paramref name="cudaDeviceId"/> disagrees with
+    /// <paramref name="device"/>, or is negative.</exception>
+    protected OrtSessionFactory(
+        Action<SessionOptions> configureExecutionProvider, ComputeDevice device, int? cudaDeviceId)
     {
+        // Built here rather than on each read of Description, so a factory that could only
+        // describe itself incoherently cannot be constructed at all.
+        Description = new BackendDescription(GetType().Assembly.GetName().Name ?? GetType().Name, device, cudaDeviceId);
         _configureExecutionProvider = configureExecutionProvider;
         _cudaDeviceId = cudaDeviceId;
     }
@@ -53,21 +67,14 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
     /// honours <see cref="DeviceMemory.ShrinkArenaAfterRun"/> for that device's arena.
     /// </summary>
     protected OrtSessionFactory(int cudaDeviceId)
-        : this(opts => AppendCuda(opts, cudaDeviceId), cudaDeviceId) { }
+        : this(opts => AppendCuda(opts, cudaDeviceId), ComputeDevice.Cuda, cudaDeviceId) { }
 
     /// <summary>
-    /// This backend: the assembly the concrete factory lives in, and the device its sessions
-    /// run on — CUDA when the subclass named a device id, the CPU otherwise. That covers the
-    /// four shipped packages and any CUDA subclass. A subclass driving a <b>third</b> provider
-    /// (DirectML, ROCm, CoreML, OpenVINO) names no CUDA device and is not the CPU either, so it
-    /// must override this and report <see cref="ComputeDevice.Other"/> — otherwise it passes for
-    /// a CPU backend and <see cref="InferenceBackend.RequireDevice"/> waves the work through onto
-    /// a device its author meant to stay off.
+    /// This backend: the assembly the concrete factory lives in, and the device the constructor
+    /// named. Fixed at construction, so every read agrees and none can contradict the provider
+    /// the subclass actually appended.
     /// </summary>
-    public virtual BackendDescription Description => new(
-        GetType().Assembly.GetName().Name ?? GetType().Name,
-        _cudaDeviceId is null ? ComputeDevice.Cpu : ComputeDevice.Cuda,
-        _cudaDeviceId);
+    public BackendDescription Description { get; }
 
     /// <summary>
     /// Creates an ORT inference session over a serialized ONNX model, on this factory's

@@ -420,7 +420,8 @@ once and caches the result:
 
 1. If one of the four backend assemblies is **already loaded** in the process, its
    factory is used — this avoids pulling a second native in alongside one already bound.
-   The match is on assembly name alone; the OS filter in step 2 does not apply here.
+   Only assemblies targeting the running OS count, as in step 2, and only those that
+   actually expose a factory; anything else falls through to step 2.
 2. Otherwise the folder next to `Shorokoo.dll` is probed for the known
    `Shorokoo.{Platform}.dll` files, and only those targeting the current OS count as
    candidates. Nothing else is searched: no other directory, no NuGet cache, and no
@@ -445,7 +446,8 @@ each ships `libonnxruntime.so` (`onnxruntime.dll`) at the same path, so only one
 deployed and which one is NuGet's conflict resolution to decide — and the managed DLL that
 discovery would pick says nothing about the native that is actually there. Backends for
 *different* OSes are not ambiguous and are not refused: only those targeting the running one
-are candidates, so a cross-platform build carrying all four is fine.
+are candidates, so a Windows backend alongside a Linux one is no ambiguity at all. Carrying
+all four, on the other hand, is two for whichever OS you run on — and refused on both.
 
 Mind that step 1 settles it first. If exactly one backend assembly is already loaded when the
 first inference call happens — which naming its factory type anywhere in a method your program

@@ -2329,7 +2329,11 @@ namespace Shorokoo
             if (retainStateOnDevice && compiled.HasDeviceMemory)
             {
                 // Every output but the trailing loss is state the next step feeds straight back.
-                var retain = new bool[stateOutputCount + 1];
+                // Sized from the session's own outputs, not from the field counts: the release
+                // loop below already allows more outputs than state plus loss, and Execute refuses
+                // a retention array of any other length -- so deriving it twice would fail the GPU
+                // path on a graph the CPU path runs fine.
+                var retain = new bool[compiled.OutputCount];
                 for (int i = 0; i < stateOutputCount; i++) retain[i] = true;
                 results = compiled.Execute(expandedInputs, retain);
             }
@@ -2386,8 +2390,15 @@ namespace Shorokoo
                 this,
                 lossValue);
 
-            ReclaimSupersededState(
-                BackendBytes(updatedParams, updatedModelState, updatedOptimizerState), newCheckpoint);
+            // Only state nobody is going to release explicitly. A retained step's state belongs to
+            // the ResidentTrainingRun, which frees it deterministically as the next step supersedes
+            // it, so counting it here would buy a forced blocking gen-2 collection per step -- on
+            // a model whose state crosses the budget every step, that is a full-heap collection
+            // with nothing to collect, in the loop whose whole point is that per-step overhead
+            // dominates.
+            if (!retainStateOnDevice)
+                ReclaimSupersededState(
+                    BackendBytes(updatedParams, updatedModelState, updatedOptimizerState), newCheckpoint);
 
             return newCheckpoint;
         }
@@ -2480,8 +2491,18 @@ namespace Shorokoo
 
         private static void ReleaseStructFields(TensorDataStruct fields)
         {
+            // Release through the tensor, not the value behind it. Disposing the backing value
+            // directly leaves the tensor's IsDisposed false over a freed buffer, so every later
+            // read sails past ThrowIfDisposed and hands out a span over released memory instead
+            // of throwing -- which turns any ownership slip here into a wild read rather than an
+            // ObjectDisposedException. A nested struct is state too, and would otherwise be the
+            // one thing a resident run never frees.
             foreach (var field in fields.Fields.Values)
-                if (field is IOnnxData backed) backed.Value.Dispose();
+                switch (field)
+                {
+                    case TensorData tensor: tensor.Dispose(); break;
+                    case TensorDataStruct nested: ReleaseStructFields(nested); break;
+                }
         }
 
         /// <summary>
@@ -2544,8 +2565,8 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// Fits the model to the data for <paramref name="numEpochs"/> epochs — a one-liner over
-        /// <see cref="TrainingRig.TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct)"/>.
+        /// Fits the model to the data for <paramref name="numEpochs"/> epochs, over a resident run
+        /// that takes its one checkpoint on the final step.
         /// Scheduled hyperparameters are applied automatically (the global step advances across epochs
         /// via the checkpoint), so the schedule sees a monotonically increasing step. Delegates to
         /// <see cref="Train"/>, but the argument orders are not interchangeable: <see cref="Train"/>

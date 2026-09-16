@@ -446,31 +446,34 @@ suit opposite situations:
 
 **Shorokoo defaults to `SameAsRequested`.** That is a deliberate departure from ORT, and it is a
 bet rather than a free win. Measured on the CPU arena — the same allocator with the same two
-strategies — over four chained matmuls, three runs on one quiet machine. The `SameAsRequested`
-column repeated exactly; the `NextPowerOfTwo` one moves a little run to run, so read the ratios as
-approximate:
+strategies — over four chained matmuls. Both columns move by a MiB or two between runs, and on the
+mixed rows a run can put the two within one MiB of each other, so read every ratio below as
+approximate and the near-ties as ties:
 
 | shapes fed to the session | `SameAsRequested` | `NextPowerOfTwo` |
 |---|---|---|
-| one shape, ten runs | **11 MiB** | 16 MiB |
-| alternating 2048/512, twenty runs | **24 MiB** | 33 MiB |
-| largest first, then settled | 18 MiB | **16 MiB** |
-| shuffled from four sizes, twenty runs | 34 MiB | **31–32 MiB** |
-| growing, then settled | 35 MiB | **31 MiB** |
-| growing 256 to 2048 | 23 MiB | **11–15 MiB** |
-| growing 256 to 2048, 16 MiB arena | **does not fit** | 15 MiB |
+| one shape, ten runs | **11–12 MiB** | 16 MiB |
+| alternating 2048/512, twenty runs | **21–24 MiB** | 33 MiB |
+| largest first, then settled | 15–18 MiB | 15–16 MiB |
+| shuffled from four sizes, twenty runs | 34 MiB | **31 MiB** |
+| growing, then settled | 34–35 MiB | **31 MiB** |
+| growing 256 to 2048 | 23 MiB | **15 MiB** |
+| growing 256 to 2048, 16 MiB arena | does not fit | **15 MiB** |
 
-Re-run it yourself with `dotnet test --filter "FullyQualifiedName~ArenaExtendStrategyProbeTests"
---logger "console;verbosity=detailed"`.
+The measurement is a test in the Shorokoo repository
+(`ArenaExtendStrategyProbeTests`, `Purpose=Manual`) rather than something you can run against the
+package, so treat these as indicative of the shape, not as your machine's numbers — what settles
+your case is `DeviceMemory.Sample()` around your own run.
 
 The bet is on the asymmetry, not on winning every row. A training run feeds one input shape to one
 compiled step for its whole length — the first row — and there exact-size extension holds about
-1.45x less. On the card that prompted this, a step that showed 12.9 GiB at its first step ended up
+1.3–1.45x less. On the card that prompted this, a step that showed 12.9 GiB at its first step ended up
 with the arena holding all 24.6 GiB of a 24.6 GiB card, and a smaller batch of the same model
-settled at roughly 1.8x what its steps used. Where several allocation sizes are in play ORT's
-doubling holds less, by 1.08–1.13x. **The one case to override it in is input shapes that grow
-without settling** — the last two rows, where the doubling holds 1.5–2x less and, on a card with no
-room to spare, fits where exact-size extension does not:
+settled at roughly 1.8x what its steps used. Two allocation sizes still favour exact-size extension
+(row 2, by 1.38x); it is once several are in play that ORT's doubling holds less, by about 1.1x, or
+ties (rows 3 to 5). **The one case to override it in is input shapes that grow without settling** —
+the last two rows, where the doubling holds around 1.5x less and, on a card with no room to spare,
+fits where exact-size extension does not:
 
 ```csharp
 using Shorokoo.Core.Inference.Abstractions;
@@ -505,9 +508,10 @@ run and takes effect immediately, on sessions already compiled.
 The same class reports what the card is doing:
 
 ```csharp
+using var run = rig.BeginResidentRun(checkpoint);
 for (int step = 0; step < steps; step++)
 {
-    checkpoint = rig.TrainStep(checkpoint, inputs);
+    run.Step(input, target);
     DeviceMemory.Sample();
 }
 Console.WriteLine($"peak {DeviceMemory.PeakUsedBytes / (1024 * 1024)} MiB");

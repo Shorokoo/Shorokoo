@@ -135,6 +135,11 @@ namespace Shorokoo.Runtime
         /// <see cref="Execute(IData[], bool[])"/> has somewhere to retain them.
         /// </summary>
         public bool HasDeviceMemory => _session.HasDeviceMemory;
+
+        /// <summary>How many outputs this graph's session produces — the length
+        /// <see cref="Execute(IData[], bool[])"/> requires of a retention array, so a caller can
+        /// size one without deriving the count a second way and disagreeing.</summary>
+        public int OutputCount => _session.OutputNames.Count;
     }
 
     /// <summary>

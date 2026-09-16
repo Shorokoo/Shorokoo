@@ -35,12 +35,8 @@ internal sealed class OrtInferenceSession : IShorokooInferenceSession
         foreach (var (k, v) in inputs)
             ortInputs[k] = ((OrtTensorValue)v).Inner;
 
-        // Read per run, not per session, so turning arena shrinkage on takes effect on sessions
-        // that are already compiled.
         using var runOptions = new RunOptions();
-        if (OrtSessionFactory.ArenaShrinkageRunConfig(_cudaDeviceId, DeviceMemory.ShrinkArenaAfterRun)
-            is { } arena)
-            runOptions.AddRunConfigEntry("memory.enable_memory_arena_shrinkage", arena);
+        ConfigureRun(runOptions);
         var results = _session.Run(runOptions, ortInputs, outputNames);
 
         // ORT snapshots each input's handle into an IntPtr[] and keeps no reference to the OrtValue
@@ -83,6 +79,7 @@ internal sealed class OrtInferenceSession : IShorokooInferenceSession
                 name, retainedOutputNames.Contains(name) ? deviceMemoryInfo : hostMemoryInfo);
 
         using var runOptions = new RunOptions();
+        ConfigureRun(runOptions);
         var results = _session.RunWithBoundResults(runOptions, binding);
 
         // Same rooting hazard as Run: the binding holds the feeds' raw handles, not the managed
@@ -123,6 +120,18 @@ internal sealed class OrtInferenceSession : IShorokooInferenceSession
         catch (OnnxRuntimeException) { }
         catch (EntryPointNotFoundException) { }
         return null;
+    }
+
+    /// <summary>Applies what every run of this session runs with. Read per run, not per session, so
+    /// turning arena shrinkage on takes effect on sessions that are already compiled — and applied
+    /// by both run paths, because a retaining run is the one that most wants the arena it keeps its
+    /// state in bounded. It configures options the caller owns rather than returning new ones, so
+    /// the handle stays inside a `using` at each call site.</summary>
+    private void ConfigureRun(RunOptions runOptions)
+    {
+        if (OrtSessionFactory.ArenaShrinkageRunConfig(_cudaDeviceId, DeviceMemory.ShrinkArenaAfterRun)
+            is { } arena)
+            runOptions.AddRunConfigEntry("memory.enable_memory_arena_shrinkage", arena);
     }
 
     public void Dispose()

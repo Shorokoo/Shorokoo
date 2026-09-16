@@ -26,7 +26,7 @@ public partial class MemoryStabilityWideModel
 /// roughly linearly with the step count and blow the budget.
 ///
 /// <para>
-/// Like the R-1 gate this is deliberately loose so ordinary run-to-run / GC /
+/// Like the throughput gate this is deliberately loose so ordinary run-to-run / GC /
 /// fresh-container jitter never trips it, while a genuine leak — which grows
 /// without bound — still does:
 /// </para>
@@ -54,13 +54,13 @@ public class TrainingMemoryStabilityTests
 {
     private static readonly long[] WideInputShape = [4L, 1024L];
 
-    // Pinned scenario geometry — identical to the R-1 throughput gate.
+    // Pinned scenario geometry — identical to the throughput gate.
     private static readonly long[] InputShape = [4L, 2L];
     private static readonly long[] TargetShape = [4L, 1L];
 
     // A long loop preceded by a warm-up so pools / tiered JIT / first-touch
     // allocations have settled before the first measurement. At the steady-state
-    // rate the R-1 gate records (several thousand steps/s on this scenario) the
+    // rate the throughput gate records (several thousand steps/s on this scenario) the
     // whole run is a couple of seconds of CPU.
     private const int WarmupSteps = 1_000;
     private const int MeasuredSteps = 10_000;

@@ -381,9 +381,11 @@ public class CoreUtilsCoverageTests
         string Source(params string[] parts) =>
             StripCommentsAndStrings(File.ReadAllText(Path.Combine(backend, Path.Combine(parts))));
 
-        foreach (var gpu in new[] { "Shorokoo.LinuxGPU/LinuxGpuInferenceFactory.cs", "Shorokoo.WinGPU/WinGpuInferenceFactory.cs" })
+        string[] gpuFactories = ["Shorokoo.LinuxGPU/LinuxGpuInferenceFactory.cs", "Shorokoo.WinGPU/WinGpuInferenceFactory.cs"];
+        foreach (var gpu in gpuFactories)
             Assert.Matches(@"base\s*\(\s*cudaDeviceId\s*:\s*0\s*\)", Source(gpu.Split('/')));
-        foreach (var cpu in new[] { "Shorokoo.LinuxCPU/LinuxCpuInferenceFactory.cs", "Shorokoo.WinCPU/WinCpuInferenceFactory.cs" })
+        string[] cpuFactories = ["Shorokoo.LinuxCPU/LinuxCpuInferenceFactory.cs", "Shorokoo.WinCPU/WinCpuInferenceFactory.cs"];
+        foreach (var cpu in cpuFactories)
             Assert.Matches(@"cudaDeviceId\s*:\s*null", Source(cpu.Split('/')));
 
         var factory = Source("Shorokoo.OnnxRuntime", "OrtSessionFactory.cs");
@@ -397,6 +399,11 @@ public class CoreUtilsCoverageTests
             Path.Combine(backend, "Shorokoo.OnnxRuntime", "OrtInferenceSession.cs")));
         Assert.Matches(@"ArenaShrinkageRunConfig\s*\(\s*_cudaDeviceId\s*,\s*DeviceMemory\.ShrinkArenaAfterRun\s*\)", session);
         Assert.Matches(@"AddRunConfigEntry\s*\(", session);
+
+        // Every path that runs the session has to apply it, not just one: the retaining path is
+        // the loop a GPU user is steered into, and it is where an unbounded arena costs most.
+        var runPaths = Regex.Matches(session, @"_session\s*\.\s*Run\w*\s*\(").Count;
+        Assert.Equal(runPaths, Regex.Matches(session, @"ConfigureRun\s*\(\s*runOptions\s*\)").Count);
     }
 
     /// <summary>Two shapes the span-rooting guard lets through. A span passed into a call inside a
@@ -620,9 +627,31 @@ public class CoreUtilsCoverageTests
         char[] statementEnds = [';', '{', '}', ')'];
         var code = StripCommentsAndStrings(source);
         return OrtSafeHandleSource.Matches(code)
-            .Where(m => !RootedInitializer.IsMatch(code[(code.LastIndexOfAny(statementEnds, m.Index) + 1)..m.Index]))
+            .Where(m =>
+            {
+                var before = code[(code.LastIndexOfAny(statementEnds, m.Index) + 1)..m.Index];
+                if (!RootedInitializer.IsMatch(before)) return true;
+                // `return` roots the handle only when the handle IS what is returned. Anything
+                // after its closing paren means the caller gets something else and the handle is
+                // a temporary retired at the read that produced it -- the bug, not the exemption.
+                return Regex.IsMatch(before, @"^\s*return\s*$") && !ReturnsTheHandleItself(code, m);
+            })
             .Select(m => m.Value.Trim())
             .ToArray();
+    }
+
+    /// <summary>Whether the construction starting at <paramref name="m"/> is the whole of its
+    /// return statement — its closing parenthesis followed by nothing but `;`.</summary>
+    private static bool ReturnsTheHandleItself(string code, Match m)
+    {
+        int depth = 0;
+        for (int i = m.Index + m.Length - 1; i < code.Length; i++)
+        {
+            if (code[i] == '(') depth++;
+            else if (code[i] == ')' && --depth == 0)
+                return Regex.IsMatch(code[(i + 1)..], @"^\s*;");
+        }
+        return false;
     }
 
     // A params array behind an optional parameter lets a positional argument bind to the optional
@@ -690,6 +719,8 @@ public class CoreUtilsCoverageTests
             "var cfg = new OrtArenaCfg(limit, 1, 1024, -1);",
             "env.CreateAndRegisterAllocator(new OrtMemoryInfo(\"Cpu\", t, 0, m), cfg);",
             "return Wrap(new OrtMemoryInfo(n, t, 0, m));",
+            "return new OrtMemoryInfo(n, t, 0, m).GetAllocatorType();",
+            "return new SessionOptions().WithSomething();",
         ];
         string[] mustNotFlag =
         [

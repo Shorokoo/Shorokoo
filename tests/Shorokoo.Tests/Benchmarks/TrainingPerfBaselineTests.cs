@@ -9,7 +9,7 @@ namespace Shorokoo.Tests.Benchmarks;
 /// <summary>
 /// The fixed linear model behind the perf baseline: a single trainable affine
 /// map <c>[4,2] → [4,1]</c> (weight <c>[1,2]</c> + bias <c>[1]</c>), no hypers.
-/// This is the pinned "R-1" release-validation scenario, frozen here as code so
+/// This is the pinned release-validation scenario, frozen here as code so
 /// the benchmark measures the same shape every run.
 /// </summary>
 [Module]
@@ -24,9 +24,9 @@ public partial class PerfBaselineLinearModel
 }
 
 /// <summary>
-/// Code-pinned performance gate for the training hot path — the structural fix
-/// the throughput half of the release checks
-/// ("No performance baselines"). It measures the four phases R-1 tracks for the
+/// Code-pinned performance gate for the training hot path: the throughput half of the
+/// release checks, frozen here as code so a regression is caught on every run rather
+/// than at release time. It measures four phases of the
 /// pinned linear scenario — graph-build (concretize), <c>TrainingRig.FromScratch</c>,
 /// <c>Compile</c>, and steady-state <c>TrainStep</c> throughput — and compares each
 /// against a baseline checked in beside this test
@@ -36,7 +36,7 @@ public partial class PerfBaselineLinearModel
 /// The gate is deliberately loose: it fails only when the current run is more than
 /// <see cref="SlowdownFactor"/>× slower than the baseline (for throughput, less than
 /// 1/<see cref="SlowdownFactor"/>× as fast). A 2× band absorbs the ordinary
-/// cross-machine / fresh-container variance that left R-1 "inconclusive" while still
+/// cross-machine / fresh-container variance that once left it inconclusive while still
 /// catching a real order-of-changes regression. Each phase is measured best-of-N to
 /// further suppress noise.
 /// </para>

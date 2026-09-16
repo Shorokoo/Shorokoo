@@ -53,7 +53,7 @@ canonical landmark tensors (`conv1.weight` `[64,3,7,7]`, `fc.weight` `[1000,512]
 
 ### ResNet18 prediction (consumed by `RealCheckpointPredictionTests`)
 
-`RealCheckpointPredictionTests` completes the E-3 **prediction** half: it binds the
+`RealCheckpointPredictionTests` completes the **prediction** half: it binds the
 downloaded checkpoint onto the Shorokoo `ResNet18` graph through
 `TorchvisionResNet18NamingScheme` (the PyTorch→Shorokoo name map) and runs a forward
 pass. It checks both the top-1 class **and** full-distribution parity against PyTorch
@@ -87,7 +87,7 @@ pip install torch safetensors          # CPU torch is enough; torchvision/timm n
 python tests/test-data/models/resnet18/make-reference-logits.py
 ```
 
-## Real-pretrained-model parity (release check E-6)
+## Real-pretrained-model parity
 
 Full bit-exact parity against recorded PyTorch outputs (ResNet18/50, ViT-Tiny,
 RetinaNet) is a **manual** release-time
@@ -118,5 +118,5 @@ hub, custom-trained), (2) the model version/checkpoint, (3) any preprocessing.
 The automated coverage suite (`Purpose=Coverage`) exercises this directory only
 via the small committed fixtures. Tests that need a downloaded checkpoint are
 tagged `Purpose=Manual` and skip unless the file is present (see
-`RealCheckpointTests`). Real-pretrained-model parity (E-6) is validated manually
+`RealCheckpointTests`). Real-pretrained-model parity is validated manually
 at release time.

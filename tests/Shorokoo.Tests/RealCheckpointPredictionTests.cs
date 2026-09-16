@@ -8,7 +8,7 @@ namespace Shorokoo.Tests;
 /// Opt-in end-to-end checks that bind a real torchvision/timm ResNet18 checkpoint onto the
 /// Shorokoo <see cref="ResNet18"/> graph via <see cref="TorchvisionResNet18NamingScheme"/> and
 /// run a forward pass — the <b>prediction</b> half of the real-checkpoint release check (the load half
-/// is <see cref="RealCheckpointTests"/>). Together they make E-3 completable end-to-end.
+/// is <see cref="RealCheckpointTests"/>). Together they cover it end-to-end.
 ///
 /// <para>Both the checkpoint and the preprocessed sample input are developer-downloaded/generated
 /// (git-ignored — see <c>tests/test-data/README.md</c>), so these are tagged
@@ -68,7 +68,7 @@ public partial class RealCheckpointPredictionTests
     /// <summary>
     /// Binds the real checkpoint and classifies the canonical PyTorch sample image (a Samoyed):
     /// the top-1 prediction must be ImageNet class 258 (Samoyed). This is the judged top-1
-    /// prediction E-3 calls for — real third-party weights, bound by name, producing a correct
+    /// prediction the release check calls for — real third-party weights, bound by name, producing a correct
     /// classification through Shorokoo's own execution path. (Torch-free: needs only the
     /// downloaded checkpoint and the generated input.)
     /// </summary>

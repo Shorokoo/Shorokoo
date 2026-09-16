@@ -486,9 +486,10 @@ produced it, and each step feeds the previous step's values straight back:
 using var run = rig.BeginResidentRun();
 for (int step = 0; step < 50_000; step++)
 {
-    float loss = run.Step(loader);                        // no transfer
     if (step % 1_000 == 999)
         run.StepToCheckpoint(loader).Save($"ckpt-{step}.safetensors");  // this step transfers
+    else
+        run.Step(loader);                                               // no transfer
 }
 ```
 
@@ -496,7 +497,8 @@ Read it as a cost model:
 
 - **`Step` returns the loss and nothing else.** The loss is a scalar, so it always comes back; the
   state does not.
-- **`StepToCheckpoint` runs the same step and brings the state home**, as an ordinary
+- **`StepToCheckpoint` runs a step** — it is not a "fetch the state" call, so it replaces that
+  step's `Step` rather than following it — **and brings the state home**, as an ordinary
   `TrainingCheckpoint` — save it, resume from it, extract an inference model from it. Use it on the
   steps you actually want a checkpoint at, including the last step whose state you want to keep.
 - **`Dispose` discards whatever the run still holds.** A checkpoint the run already published stays
@@ -549,7 +551,13 @@ piled up — a running total across steps, not a per-step test. A model whose wh
 few kilobytes only reaches that after thousands of steps, so it pays essentially nothing; a model
 producing a few MiB a step pays one collection every few steps; one producing hundreds of MiB a step
 pays one per step, which is what a run of that size has to pay to survive at all. Collecting in your
-own loop is unnecessary and changes nothing but the timing.
+own loop is normally unnecessary and changes nothing but the timing.
+
+One caveat while [#348](https://github.com/Shorokoo/Shorokoo/issues/348) is open: the rig backs off
+when it judges that a collection freed nothing, and the signal it judges by misreads a loop that
+keeps no checkpoints — so the budget can climb away from 32 MiB even for the loop above, and more
+superseded state than that piles up between collections. A resident run is unaffected: it releases
+its state itself and never goes through this path.
 
 If you **keep** your checkpoints — holding the best so far, or comparing a step against the one
 before it — then nothing is superseded and a collection would reclaim nothing. The rig notices:
@@ -594,11 +602,12 @@ more of the card than its steps use. On a run that is close to the card's limit,
 startup and sample the peak inside your `TrainStep` loop; see
 [Device memory](inference.md#device-memory-gpu-backends).
 
-**That is a different memory from the one the rig reclaims above.** A checkpoint's tensors are
-fetched to the host, so the rig's budgeted collection governs *host* memory, and the `DeviceMemory`
-settings reach only the CUDA arena. A process whose RSS climbs is not helped by an arena budget, and
-a card that fills up is not helped by the rig's reclamation. Check which one is growing before
-reaching for either.
+**Mind which memory is which.** A `TrainStep` loop's checkpoints are fetched to the host, so the
+rig's budgeted collection governs *host* memory there, while the `DeviceMemory` settings reach only
+the CUDA arena: a process whose RSS climbs is not helped by an arena budget, and a card that fills
+up is not helped by the rig's reclamation. A resident run is the case where the two meet — its state
+stays in the arena, and the run releases it deterministically as each step supersedes it, which is
+why a resident step does not go through the rig's collection at all.
 
 Result types:
 - `TrainingCheckpoint` → `.TrainableParams`, `.ModelState`, `.OptimizerState`, `.Step` (global step, `long`; advances each `TrainStep`, so schedules resume from a saved checkpoint), and the host-owned run counters `.Epoch` / `.BatchIndex` (`long?`; the training loop advances them — the counter-agnostic `TrainStep` carries them through unchanged). They are `null` when the position is genuinely **unknown** — an initial checkpoint, or one trained without a data loader / explicit counters — rather than a misleading `0`; the loader-driven and explicit-counter paths set concrete values. A scheduled hyperparameter reading the epoch / batch counter sees `0` for a `null` value. `.Step` is always a concrete `long`; all counters are `int64` end to end. It also carries `.Rig` (the `TrainingRig?` that produced it — set on every rig-produced checkpoint, so `checkpoint.ToInferenceModel()` needs no re-supplied graph) and `.Loss` (`float?`; the loss of the `TrainStep` that produced it, `null` on an initial or bare checkpoint). Both are preserved through the counter derivations (`WithCounters`/`WithStep`/`WithEpoch`/`WithBatchIndex`). `TrainStep` returns this checkpoint directly — read the step's loss off `.Loss`. `.Loss` persists as its own `Loss` component, independent of `Counters` (dropping `Loss`, or an initial checkpoint, reloads with `.Loss == null` — never a sentinel `0`).

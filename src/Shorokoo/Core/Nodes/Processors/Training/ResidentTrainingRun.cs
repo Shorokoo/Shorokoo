@@ -67,10 +67,11 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// The global step the run sits at — the <see cref="TrainingCheckpoint.Step"/> the next
-        /// checkpoint this run produces will carry, and the value its scheduled hyperparameters see.
+        /// The global step the run sits at — the <see cref="TrainingCheckpoint.Step"/> the run's
+        /// last step produced, and the value its scheduled hyperparameters see. The next step
+        /// produces this plus one.
         /// </summary>
-        public long CurrentStep => _current.Step;
+        public long CurrentStep => Current.Step;
 
         /// <summary>Trains on one batch and returns its loss, leaving the updated state resident.</summary>
         /// <param name="trainingInput">Training input data as a <see cref="TensorDataStruct"/>.</param>
@@ -193,6 +194,9 @@ namespace Shorokoo
         {
             if (_disposed) return;
             ReleaseCurrent();
+            // Drop the released checkpoint rather than pinning its whole object graph for the
+            // lifetime of a run that is finished with it.
+            _current = null!;
             _disposed = true;
         }
     }

@@ -320,8 +320,8 @@ public static class TrainingGraphBuilder
     ///
     /// <para>A loss whose body never reads its target gets no target input at all
     /// (Shorokoo/Shorokoo#331): the slot is created so the replay can map it, and then dropped from
-    /// the graph's inputs because nothing reaches it. Read <see cref="EvaluationGraphTakesTarget"/>
-    /// to know which shape a composed evaluation graph has.</para>
+    /// the graph's inputs because nothing reaches it. Read <see cref="LossReadsTarget"/> to know
+    /// which shape a composed evaluation graph has.</para>
     /// </summary>
     /// <param name="concreteModel">The model, lowered and weight-bound (its single output is the
     /// value the loss scores).</param>
@@ -392,28 +392,66 @@ public static class TrainingGraphBuilder
     {
         if (lossGraph is null) throw new ArgumentNullException(nameof(lossGraph));
         if (lossGraph.Inputs.Count < 2) return false;
-        var producerByOutput = BuildProducerByOutputMap(lossGraph);
+        return ReachableFromOutputs(lossGraph).Contains(lossGraph.Inputs[1]);
+    }
+
+    /// <summary>
+    /// Every tensor key an output of <paramref name="graph"/> depends on, following the same two
+    /// kinds of edge <see cref="Nodes.Processors.Fast.FastProcessorHelper.RemoveUnreachableNodes"/>
+    /// follows: data inputs, and a scope close node's edge to its paired open through
+    /// <see cref="FastNode.GraphOpenNodeKey"/>.
+    ///
+    /// <para>That second edge is not an optimization — it is the only way an <c>IF</c>'s condition is
+    /// reachable at all. The condition is an input of the <c>IF_OPEN</c>, which has no outputs, so a
+    /// walk over data inputs alone concludes that a value used only as a branch condition is unused.
+    /// A loss selecting between two prediction-derived branches on its target reads that target, and
+    /// answering otherwise drops the graph input the caller feeds it through. The same edge carries a
+    /// nested loop's trip count and carry initializers, which live on the inner <c>LOOP_OPEN</c>.</para>
+    /// </summary>
+    private static HashSet<FastTensorKey> ReachableFromOutputs(InternalComputationGraph graph)
+    {
+        var producerByOutput = BuildProducerByOutputMap(graph);
+        var nodeByKey = Nodes.Processors.Fast.FastProcessorHelper.BuildNodeByKey(graph);
         var reached = new HashSet<FastTensorKey>();
-        var queue = new Queue<FastTensorKey>(lossGraph.Outputs);
+        var queue = new Queue<FastTensorKey>(graph.Outputs);
+
+        void EnqueueInputsOf(FastNode node)
+        {
+            foreach (var (_, slots) in node.FullInputs)
+                foreach (var s in slots)
+                    if (s is FastTensorKey k && !k.IsEmpty) queue.Enqueue(k);
+        }
+
         while (queue.Count > 0)
         {
             var key = queue.Dequeue();
             if (key.IsEmpty || !reached.Add(key)) continue;
-            if (producerByOutput.TryGetValue(key, out var node))
-                foreach (var (_, slots) in node.FullInputs)
-                    foreach (var s in slots)
-                        if (s is FastTensorKey ik && !ik.IsEmpty) queue.Enqueue(ik);
+            // A LOOP_OPEN carry key belongs to no node's own outputs, so fall back to the node map
+            // exactly as the param-initializer walk does.
+            if (!producerByOutput.TryGetValue(key, out var producer)
+                && !nodeByKey.TryGetValue(key.FastNodeKey, out producer)) continue;
+
+            EnqueueInputsOf(producer);
+            if (producer.GraphOpenNodeKey is FastNodeKey openKey && !openKey.IsEmpty
+                && nodeByKey.TryGetValue(openKey, out var openNode))
+                EnqueueInputsOf(openNode);
         }
-        return reached.Contains(lossGraph.Inputs[1]);
+        return reached;
     }
 
     /// <summary>
-    /// Whether an evaluation graph composed from <paramref name="lossGraph"/> takes a target input —
-    /// the same question <see cref="LossReadsTarget"/> answers, named for the caller that is asking
-    /// what to feed <see cref="ComposeEvaluationGraph"/>'s result.
+    /// The subset of the first <paramref name="count"/> input indices of <paramref name="graph"/>
+    /// that an output depends on, by the same scope-aware reachability
+    /// <see cref="LossReadsTarget"/> uses.
     /// </summary>
-    public static bool EvaluationGraphTakesTarget(InternalComputationGraph lossGraph)
-        => LossReadsTarget(lossGraph);
+    internal static HashSet<int> ConsumedInputIndices(InternalComputationGraph graph, int count)
+    {
+        var reached = ReachableFromOutputs(graph);
+        var consumed = new HashSet<int>();
+        for (int i = 0; i < count && i < graph.Inputs.Count; i++)
+            if (reached.Contains(graph.Inputs[i])) consumed.Add(i);
+        return consumed;
+    }
 
     /// <summary>
     /// The data structure <paramref name="inputProducer"/> hands the model, read off the input op

@@ -187,11 +187,12 @@ namespace Shorokoo
                     "ToInferenceModel() requires a training rig, but this checkpoint has none attached. " +
                     "Adopt one via rig.AdoptCheckpoint(checkpoint), or load the checkpoint against a rig " +
                     "(rig.LoadCheckpoint(path)), then call ToInferenceModel(). " +
-                    "If this checkpoint came from Persistence.LoadTrainingCheckpoint(path), the rig is not " +
+                    "If this checkpoint came from Persistence.LoadTrainingCheckpoint, the rig is not " +
                     "the only thing missing: the flat safetensors format stores state and no architecture, " +
-                    "so nothing in that file can be turned into a model. A .skpt carries the model itself — " +
-                    "Persistence.Load(path) returns it runnable, and Persistence.LoadEvaluationModel(path) " +
-                    "returns it composed with its loss, neither needing a rig.");
+                    "so nothing in that file can be turned into a model, and no entry point can read one " +
+                    "out of it. A checkpoint saved as a .skpt carries the model itself — for such a file " +
+                    "Persistence.Load returns it runnable and Persistence.LoadEvaluationModel returns it " +
+                    "composed with its loss, neither needing a rig.");
             return Rig.ExtractInferenceModel(this);
         }
 

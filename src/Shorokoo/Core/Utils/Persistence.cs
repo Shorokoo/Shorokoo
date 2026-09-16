@@ -134,31 +134,37 @@ namespace Shorokoo
         /// <see cref="TrainingRig.Load(string, ComputeContext?, ComputeContext?, IProgress{BuildProgress})"/>:
         /// the file stores the rig's constituents, not its derived trainstep.</para>
         ///
-        /// <para>When the loss ignores its target — a model that computes its own loss under a
-        /// forwarding loss module (Shorokoo/Shorokoo#331) — the returned model takes the model inputs
-        /// only, and there is no target to feed. <paramref name="set"/> selects the weight mapping set
-        /// exactly as <see cref="Load(string, string)"/> does, so an <c>ema</c> set evaluates as easily
-        /// as the trained weights. The path may name either on-disk shape, the single file or the
-        /// checkpoint directory.</para>
+        /// <para>The weights bound are the trained ones — a training checkpoint carries the single
+        /// <c>default</c> mapping set and nothing writes it a second one, so there is no set to select
+        /// here as there is on <see cref="Load(string, string)"/>. When the loss ignores its target — a
+        /// model that computes its own loss under a forwarding loss module (Shorokoo/Shorokoo#331) —
+        /// the returned model takes the model inputs only, and there is no target to feed; ask which
+        /// shape you have with <see cref="EvaluationModelTakesTarget"/>. The path may name either
+        /// on-disk shape, the single file or the checkpoint directory.</para>
         /// </summary>
         /// <returns>A runnable <see cref="GraphKind.ConcreteModel"/> whose one output is the loss.</returns>
-        public static ComputationGraph LoadEvaluationModel(
-            string filePath, string set = SkptFileFormat.DefaultMappingSetName)
+        public static ComputationGraph LoadEvaluationModel(string filePath)
         {
             if (string.IsNullOrWhiteSpace(filePath))
                 throw new ArgumentException("Checkpoint path cannot be null or empty.", nameof(filePath));
-            if (string.IsNullOrWhiteSpace(set))
-                throw new ArgumentException("Mapping set name cannot be null or empty.", nameof(set));
-
             VerifySkptContainer(filePath,
                 "A flat checkpoint stores training state only — it carries neither the model nor the "
                 + "loss, so there is nothing to evaluate with; save the checkpoint as a .skpt.");
 
-            var lossGraph = ReadLossConstituent(filePath);
-            var model = Load(filePath, set);
-            var evaluation = Core.Training.TrainingGraphBuilder.ComposeEvaluationGraph(
-                model.ToInternal(), lossGraph.ToInternal());
-            return new ComputationGraph(evaluation, GraphKind.ConcreteModel);
+            // One open for both halves: the model and the loss come out of the same file, and reading
+            // it twice would let the two halves come from different versions of it.
+            using var container = SkptContainer.Open(filePath);
+            var manifest = SkptFileFormat.ParseManifest(container.ReadManifestBytes(), filePath);
+            ValidateManifestIdentity(manifest, filePath);
+
+            var lossGraph = ReadLossConstituent(container, manifest, filePath);
+            var (modelKey, modelEntry) = SingleModel(manifest, filePath);
+            var model = LoadModelDefinition(container, modelKey, modelEntry, filePath);
+            BindWeights(container, manifest, modelKey, SkptFileFormat.DefaultMappingSetName, model, filePath);
+
+            return new ComputationGraph(
+                Core.Training.TrainingGraphBuilder.ComposeEvaluationGraph(model, lossGraph.ToInternal()),
+                GraphKind.ConcreteModel);
         }
 
         /// <summary>
@@ -173,19 +179,22 @@ namespace Shorokoo
                 throw new ArgumentException("Checkpoint path cannot be null or empty.", nameof(filePath));
             VerifySkptContainer(filePath,
                 "A flat checkpoint stores training state only — it carries no loss to ask about.");
-            return Core.Training.TrainingGraphBuilder.EvaluationGraphTakesTarget(
-                ReadLossConstituent(filePath).ToInternal());
-        }
 
-        /// <summary>
-        /// The loss module graph a training <c>.skpt</c> carries as a rig constituent. An inference
-        /// checkpoint, or a training one written without the rig block, has none and fails loud.
-        /// </summary>
-        private static ComputationGraph ReadLossConstituent(string filePath)
-        {
             using var container = SkptContainer.Open(filePath);
             var manifest = SkptFileFormat.ParseManifest(container.ReadManifestBytes(), filePath);
             ValidateManifestIdentity(manifest, filePath);
+            return Core.Training.TrainingGraphBuilder.LossReadsTarget(
+                ReadLossConstituent(container, manifest, filePath).ToInternal());
+        }
+
+        /// <summary>
+        /// The loss module graph a training <c>.skpt</c> carries as a rig constituent, read off an
+        /// already-open container. An inference checkpoint, or a training one written without the rig
+        /// block, has none and fails loud.
+        /// </summary>
+        private static ComputationGraph ReadLossConstituent(
+            SkptContainer container, SkptManifest manifest, string filePath)
+        {
             var training = manifest.Training
                 ?? throw new InvalidDataException(
                     $"'{filePath}': the .skpt manifest has no 'training' block — this is an inference "

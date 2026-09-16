@@ -11,6 +11,7 @@ using Shorokoo.Core.Utils;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 
 namespace Shorokoo
 {
@@ -439,6 +440,14 @@ namespace Shorokoo
         private DeferredInitialization? _deferredInit;
 
         /// <summary>
+        /// Guards the one-time materialization in <see cref="EnsureInitialValues"/>. A rig is
+        /// otherwise an immutable value that several threads may read at once — the coverage suite
+        /// runs four in parallel — and deferral is the one piece of state that changes after
+        /// construction, so it is the one piece that needs a lock.
+        /// </summary>
+        private readonly object _initialValuesGate = new();
+
+        /// <summary>
         /// The initializer run a deferred build skipped, held until something actually wants the
         /// values it would have produced.
         /// </summary>
@@ -484,34 +493,53 @@ namespace Shorokoo
         /// </summary>
         private void EnsureInitialValues()
         {
-            if (_deferredInit is not { } deferred) return;
-            // Cleared first: the initializer run below goes through the same code the eager build
-            // uses, and nothing in it may re-enter this method.
-            _deferredInit = null;
+            // Read once, with acquire semantics: a caller that sees null must also see the three
+            // dictionaries the materializing thread published before clearing it.
+            if (Volatile.Read(ref _deferredInit) is null) return;
+            lock (_initialValuesGate)
+            {
+                if (_deferredInit is not { } deferred) return;
 
-            var paramInfos = deferred.RngConfig is null
-                ? null
-                : deferred.ConcreteArch.GetConcreteModelParamInfos();
-            var paramValuesById = Shorokoo.Core.Nodes.Processors.Fast.FastInitializeModelParams.Process(
-                deferred.ConcreteArch, deferred.Context, deferred.RngConfig, paramInfos);
+                var paramInfos = deferred.RngConfig is null
+                    ? null
+                    : deferred.ConcreteArch.GetConcreteModelParamInfos();
+                var paramValuesById = Shorokoo.Core.Nodes.Processors.Fast.FastInitializeModelParams.Process(
+                    deferred.ConcreteArch, deferred.Context, deferred.RngConfig, paramInfos);
 
-            _initialParamFields = new Dictionary<string, IData>();
-            for (var i = 0; i < TrainableParamStructDef.Fields.Length; i++)
-                _initialParamFields[TrainableParamStructDef.Fields[i].Name] =
-                    paramValuesById[deferred.TrainableModelIds[i]];
+                var paramFields = new Dictionary<string, IData>();
+                for (var i = 0; i < TrainableParamStructDef.Fields.Length; i++)
+                    paramFields[TrainableParamStructDef.Fields[i].Name] =
+                        paramValuesById[deferred.TrainableModelIds[i]];
 
-            _initialStateFields = new Dictionary<string, IData>();
-            for (var i = 0; i < ModelStateDef.Fields.Length; i++)
-                _initialStateFields[ModelStateDef.Fields[i].Name] =
-                    paramValuesById[deferred.StateModelIds[i]];
+                var stateFields = new Dictionary<string, IData>();
+                for (var i = 0; i < ModelStateDef.Fields.Length; i++)
+                    stateFields[ModelStateDef.Fields[i].Name] =
+                        paramValuesById[deferred.StateModelIds[i]];
 
-            // The optimizer's state seeds were computed against the stand-ins, so they are recomputed
-            // here against the real parameter values — an optimizer whose state initializer reads a
-            // parameter's value (rather than only its shape) would otherwise be seeded from zeros.
-            if (OptimizerStateDef.Fields.Length > 0)
-                _initialOptStateFields = ComputeInitialOptStateFields(
-                    ResolveStateInitHyperValues(null, throwOnMissingConsumed: false),
-                    deferred.Context, _initialParamFields);
+                // The optimizer's state seeds were computed against the stand-ins, so they are
+                // recomputed here against the real parameter values — an optimizer whose state
+                // initializer reads a parameter's value (rather than only its shape) would otherwise
+                // be seeded from zeros.
+                var optStateFields = OptimizerStateDef.Fields.Length > 0
+                    ? ComputeInitialOptStateFields(
+                        ResolveStateInitHyperValues(null, throwOnMissingConsumed: false),
+                        deferred.Context, paramFields)
+                    : _initialOptStateFields;
+
+                // Everything is built into locals and published before the flag is cleared, because
+                // the flag is what every other thread reads to decide the values are ready. Clearing
+                // it first — with the dictionaries still holding stand-ins — handed a concurrent
+                // caller a values-elided placeholder, whose every read throws.
+                _initialParamFields = paramFields;
+                _initialStateFields = stateFields;
+                _initialOptStateFields = optStateFields;
+                Volatile.Write(ref _deferredInit, null);
+                // Publishing last means the flag is still set for the whole run above, so nothing this
+                // method calls may read the materializing properties — it would re-enter, find the flag
+                // set, and recurse (the lock is re-entrant and would not stop it). Nothing does today:
+                // the initializer pass, ResolveStateInitHyperValues and ComputeInitialOptStateFields
+                // all take what they need as arguments or read build-time state.
+            }
         }
 
         /// <summary>
@@ -1036,6 +1064,14 @@ namespace Shorokoo
         /// the threshold we must therefore carry a real (zero) payload, exactly as the retired
         /// <c>ZeroExemplar</c> did for every size.</para>
         /// </summary>
+        internal static TensorData RepresentativeInputFor(Shape shape, DType dtype)
+        {
+            if (shape.Count > Shorokoo.Core.AutoDiffCheckpointing.ShapeInferenceInterpreter.MaxSmallTensorElements)
+                return new WeightPlaceholderTensorData(shape, dtype);
+            var bytesPerElement = dtype.EncodingBitCount / 8;
+            return TensorData.CreateFromRawBytes(shape, dtype, new byte[shape.Count * bytesPerElement]);
+        }
+
         /// <summary>
         /// The zero-element stand-in for a target input the loss never reads (Shorokoo/Shorokoo#331),
         /// at the loss's declared target dtype and — where it declares one — rank, so the dead slot is
@@ -1047,14 +1083,6 @@ namespace Shorokoo
             long[] dims = new long[rank is int r && r > 1 ? r : 1];
             for (var i = 1; i < dims.Length; i++) dims[i] = 1L;
             return RepresentativeInputFor(new Shape(dims), dtype);
-        }
-
-        internal static TensorData RepresentativeInputFor(Shape shape, DType dtype)
-        {
-            if (shape.Count > Shorokoo.Core.AutoDiffCheckpointing.ShapeInferenceInterpreter.MaxSmallTensorElements)
-                return new WeightPlaceholderTensorData(shape, dtype);
-            var bytesPerElement = dtype.EncodingBitCount / 8;
-            return TensorData.CreateFromRawBytes(shape, dtype, new byte[shape.Count * bytesPerElement]);
         }
 
         // ───────────────────── Two-layer rig: immutable derivations (§5.8.5) ─────────────────────
@@ -2167,6 +2195,23 @@ namespace Shorokoo
         }
 
         /// <summary>
+        /// The explicit-counter form of <see cref="TrainStep(TrainingCheckpoint, TensorDataStruct)"/>,
+        /// for a host driving its own data iteration over a rig whose loss reads no target
+        /// (Shorokoo/Shorokoo#331). <paramref name="epoch"/> and <paramref name="batchNumber"/> mean
+        /// what they mean on
+        /// <see cref="TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, long, long)"/>.
+        /// </summary>
+        public TrainingCheckpoint TrainStep(
+            TrainingCheckpoint checkpoint,
+            TensorDataStruct trainingInput,
+            long epoch,
+            long batchNumber)
+        {
+            RequireTargetless(nameof(TrainStep));
+            return TrainStep(checkpoint, trainingInput, TargetDef.FromOrderedData(), epoch, batchNumber);
+        }
+
+        /// <summary>
         /// Fails loud when <paramref name="operation"/> — a target-free entry point — is called on a rig
         /// whose loss does read a target, naming the overload that takes one.
         /// </summary>
@@ -3056,27 +3101,13 @@ namespace Shorokoo
         /// <summary>
         /// The subset of the first <paramref name="count"/> input indices of <paramref name="graph"/>
         /// that are actually reachable from its outputs — the D5 dependency analysis over the optimizer
-        /// state-init graph, whose leading inputs are the hyperparameters (then param, grad).
+        /// state-init graph, whose leading inputs are the hyperparameters (then param, grad). Shares
+        /// <see cref="Shorokoo.Core.Training.TrainingGraphBuilder"/>'s scope-aware walk with the
+        /// target-reachability question, so the two cannot disagree about what "reaches" means: a
+        /// hyperparameter read only as a branch condition is consumed, and must be supplied.
         /// </summary>
         private static HashSet<int> ConsumedInputIndices(InternalComputationGraph graph, int count)
-        {
-            var producerByOutput = BuildProducerByOutputMap(graph);
-            var reached = new HashSet<FastTensorKey>();
-            var queue = new Queue<FastTensorKey>(graph.Outputs);
-            while (queue.Count > 0)
-            {
-                var key = queue.Dequeue();
-                if (key.IsEmpty || !reached.Add(key)) continue;
-                if (producerByOutput.TryGetValue(key, out var node))
-                    foreach (var (_, slots) in node.FullInputs)
-                        foreach (var s in slots)
-                            if (s is FastTensorKey ik && !ik.IsEmpty) queue.Enqueue(ik);
-            }
-            var consumed = new HashSet<int>();
-            for (int i = 0; i < count && i < graph.Inputs.Count; i++)
-                if (reached.Contains(graph.Inputs[i])) consumed.Add(i);
-            return consumed;
-        }
+            => Shorokoo.Core.Training.TrainingGraphBuilder.ConsumedInputIndices(graph, count);
 
         /// <summary>
         /// Loads a checkpoint previously written by <see cref="TrainingCheckpoint.Save(string, CheckpointComponents?)"/>
@@ -3475,6 +3506,13 @@ namespace Shorokoo
                             $"Concrete arch parameter {modelId} declares no shape, so its initialization "
                             + "cannot be deferred; this arch was not built through the concretization "
                             + "that records one.");
+                    // A symbolic dimension names no element count, so there is no stand-in to build —
+                    // and left alone it would surface as an arithmetic overflow rather than as this.
+                    if (Array.IndexOf(dims, -1L) >= 0)
+                        throw new InvalidOperationException(
+                            $"Concrete arch parameter {modelId} declares the symbolic shape "
+                            + $"[{string.Join(", ", dims)}], which names no element count, so its "
+                            + "initialization cannot be deferred. Build the rig without deferral.");
                     standInById[modelId] = RepresentativeInputFor(new Shape(dims), dtype);
                 }
             }

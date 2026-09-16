@@ -83,9 +83,17 @@ var result = rig.Fit(batches, numEpochs: 10);
 The dead input does survive into the compiled trainstep — the step's input layout is positional, so
 the slot stays — but it is the rig that supplies its value, not the call site, which is the whole
 point: `TrainStep(ckpt, inputs, noTargets)` read as "inputs and targets" while the real targets rode
-inside `inputs` and the third argument was an empty placeholder. Calling a target-free overload on a
-rig whose loss *does* read its target fails loud rather than training against something you never
-chose.
+inside `inputs` and the third argument was a fabricated zero-element tensor. Calling a target-free
+overload on a rig whose loss *does* read its target fails loud rather than training against something
+you never chose.
+
+The target-free overloads are the counter-agnostic `TrainStep(checkpoint, inputs)`, its
+explicit-counter form `TrainStep(checkpoint, inputs, epoch, batchNumber)`, and
+`Fit(inputs, numEpochs)`. The remaining entry points still take a target argument, because their
+signatures cannot drop one unambiguously (`TrainStep(checkpoint, hyperparams, …)`) or because the
+target rides in a `DataBatch` (`TrainStep(checkpoint, loader)`, `Fit(loader, …)`). On a target-free
+rig that argument is `rig.TargetDef.FromOrderedData()` — an **empty** struct contributing no field,
+not a placeholder tensor you had to invent.
 
 Two things this shape does **not** change. The predictions tensor is never an output of the training
 step — the step's outputs are the updated parameters, model state, optimizer state and the loss — so
@@ -540,7 +548,9 @@ One cost it does **not** re-pay is the model's initializers
 ([#327](https://github.com/Shorokoo/Shorokoo/issues/327)). Their values are about to be overwritten
 by the checkpoint the load is reading, so `TrainingRig.Load` skips the run and stands the parameters
 in with the dtype and shape the architecture declares for them — enough for shape inference and the
-optimization pass, which is all the build reads. The run is deferred, not dropped: the first thing
+optimization pass, and enough to seed the optimizer's state initializers for their shapes (those do
+still run, over the stand-ins, reading zeros wherever a payload was elided). The run is deferred,
+not dropped: the first thing
 to ask the rig for an initial *value* — `CreateInitialCheckpoint()`, or a load whose file omits a
 component and falls back to the rig's initial values — runs the initializers then, to exactly the
 values an eager build would have produced, and re-seeds the optimizer state from them.
@@ -680,6 +690,13 @@ terminal report, the one whose `IsComplete` is true.)
 
 Each `BuildProgress` is reported as the build **enters** the named stage, so a build that has been
 quiet for minutes is inside the stage its last report named. It carries four members:
+
+One caveat for `TrainingRig.Load`, which reports through the same sink: it reports
+`DeferModelParamInitialization` where a fresh build reports `InitializeModelParams`, because it does
+not run them ([#327](https://github.com/Shorokoo/Shorokoo/issues/327)). That work has not vanished —
+it moves to whichever later call first asks the rig for an initial value, and *that* call reports
+nothing. A resume never makes such a call, so it simply costs less; a load that then asks for an
+initial checkpoint pays the initializers there, silently.
 
 - `Phase` — `BuildPhase.Concretize` (lowering the model to a concrete architecture),
   `BuildPhase.TrainingStep` (composing and lowering the training-step graph), or
@@ -857,7 +874,9 @@ var more = rig.Fit(inputs, targets, numEpochs: 5, ckpt);  // continues where it 
   is needed (or use the `Persistence.ForTrainingCheckpoint(...)` builder) — and resume with
   `rig.LoadCheckpointFromSkpt("run.skpt")` — or, with no model/loss/optimizer graphs in hand,
   with the static `var (rig, ckpt) = TrainingRig.Load("run.skpt")`, which rebuilds the rig from
-  the constituents the file carries and hands it back alongside the resumed checkpoint, so the
+  the constituents the file carries and hands it back alongside the resumed checkpoint (and, when
+  you want the file's model rather than its rig, `Persistence.Load` and
+  `Persistence.LoadEvaluationModel` read the same file with no rig at all), so the
   rig need not be rebuilt by you at all. Each on-disk format has its own load entry point:
   `rig.LoadCheckpoint` reads the flat safetensors file only, `rig.LoadCheckpointFromSkpt` and
   `TrainingRig.Load` the `.skpt` container only, and handing any of them the other format fails

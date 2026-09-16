@@ -80,7 +80,11 @@ if (!float.IsFinite(validationLoss)) throw new Exception("Validation loss is not
 
 if (reloadedCheckpoint.Step != result.FinalCheckpoint.Step)
     throw new Exception("Reloaded checkpoint resumed at the wrong step.");
-if (reloadedRig.TrainStep(reloadedCheckpoint, trainInputs[0], trainTargets[0]).Loss is not { } resumedLoss
+// Built from the reloaded rig's own definitions, not the original rig's: a struct carries the
+// definition it was made with, and the two rigs' field orders need not agree.
+var resumedInputs  = reloadedRig.InputDef.FromOrderedData(TensorData([4L, 8L], batch1X));
+var resumedTargets = reloadedRig.TargetDef.FromOrderedData(TensorData([4L, 8L], batch1Y));
+if (reloadedRig.TrainStep(reloadedCheckpoint, resumedInputs, resumedTargets).Loss is not { } resumedLoss
     || !float.IsFinite(resumedLoss))
     throw new Exception("Resumed training step did not produce a finite loss.");
 

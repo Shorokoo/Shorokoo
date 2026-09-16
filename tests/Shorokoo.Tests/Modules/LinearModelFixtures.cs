@@ -1247,3 +1247,64 @@ public partial class ForwardingLoss
     public static Scalar<float32> Inline(Scalar<float32> predictions, Tensor<float32> targets)
         => predictions;
 }
+
+/// <summary>A model whose one trainable parameter matches its input element for element, so a
+/// wide-enough input pushes it past <c>ShapeInferenceInterpreter.MaxSmallTensorElements</c> and a
+/// deferred build stands it in with a values-elided placeholder rather than real zeros
+/// (Shorokoo/Shorokoo#327).</summary>
+[Module]
+public partial class WideWeightModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var weight = InitScalarWeight.Init(input.ShapeTensor());
+        return input * weight;
+    }
+}
+
+/// <summary>
+/// Optimizer-owned state initializer that reads the parameter's <b>value</b>, not just its shape —
+/// the case a deferred build cannot seed from stand-ins, so <c>EnsureInitialValues</c> must recompute
+/// the optimizer state once the real initializer values are in hand (Shorokoo/Shorokoo#327).
+/// </summary>
+[StateInitializer(Ownership = StateOwnership.OptimizerOwned)]
+public static partial class InitOptStateFromParamValue
+{
+    public static Tensor<float32> Inline(Tensor<float32> currentParam) => currentParam * Scalar(3.0f);
+}
+
+/// <summary>SGD whose optimizer state starts at three times the parameter's initial value (via
+/// <see cref="InitOptStateFromParamValue"/>), then is carried unchanged — so a test can read the
+/// state back and prove it was seeded from the parameter's real initial value.</summary>
+[Module]
+public partial class ParamValueSeededOptimizer
+{
+    public static Tensor<float32> Inline(
+        Tensor<float32> currentParam,
+        Tensor<float32> grad,
+        [Hyper(0.1f)] Scalar<float32> learningRate)
+    {
+        var s = InitOptStateFromParamValue.Init(currentParam);
+        Globals.StateUpdate(s, s);
+        return currentParam - learningRate * grad;
+    }
+}
+
+/// <summary>
+/// A loss whose target reaches the result only through an <c>IF</c> condition — the branch value
+/// itself is computed from the predictions alone. The target is genuinely read, but a reachability
+/// walk that follows data inputs and not the close-to-open scope edge cannot see it
+/// (Shorokoo/Shorokoo#331).
+/// </summary>
+[Module]
+public partial class TargetGatedLoss
+{
+    public static Scalar<float32> Inline(Tensor<float32> predictions, Tensor<float32> targets)
+    {
+        var squared = (predictions * predictions).Reshape(Globals.Vector(-1L));
+        var meanSq = (Tensor<float32>)Shorokoo.Core.Nodes.NodeDefinitions.OnnxOp.ReduceMean(
+            (Shorokoo.Core.Variable)squared, Globals.Vector(0L), keepdims: false);
+        var gate = targets.Reduce(ReduceKind.Sum, keepDims: false).Scalar() > Scalar(0f);
+        return gate.IfElse(meanSq.Scalar(), meanSq.Scalar() * Scalar(2f));
+    }
+}

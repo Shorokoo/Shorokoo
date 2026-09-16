@@ -203,8 +203,9 @@ var next = rig.TrainStep(resumed, inputBatch, targetBatch);
 ```
 
 The rebuilt rig re-derives its trainstep exactly as a fresh build does, so a resumed step
-continues the saved trajectory — and costs most of a build, everything but the concretization the
-saved architecture replaces. On a large model pass `TrainingRig.Load` a `progress:` sink to
+continues the saved trajectory — and costs most of a build: everything but the concretization the
+saved architecture replaces, and the model's initializers, whose values the checkpoint would
+overwrite and which are therefore deferred (see [below](#without-a-rig-in-hand)). On a large model pass `TrainingRig.Load` a `progress:` sink to
 [watch it stage by stage](training.md#watching-a-long-build) rather than wait blind; the file read
 and the checkpoint payload read are reported too, so the stream reports complete only once the
 resumed checkpoint is in hand. Its optional arguments are that sink and the two compute contexts that
@@ -296,8 +297,9 @@ Both halves are already in the file — the model as the `model` entry, the loss
 constituent — so this splices two graphs and binds weights. Nothing composes a trainstep,
 differentiates anything, lowers an optimizer per parameter, or runs an initializer, which is what
 made a forward-only evaluation cost a whole rig build
-([#329](https://github.com/Shorokoo/Shorokoo/issues/329)). `set` selects a weight mapping set just
-as `Persistence.Load` does, so an `ema` set evaluates as easily as the trained weights. When the
+([#329](https://github.com/Shorokoo/Shorokoo/issues/329)). The weights it binds are the trained
+ones: a training checkpoint carries the single `default` mapping set and nothing writes it a second
+one, so unlike `Persistence.Load` there is no set to select. When the
 loss ignores its target ([#331](https://github.com/Shorokoo/Shorokoo/issues/331)) the evaluation
 model takes the model inputs alone; ask which shape you have with
 `Persistence.EvaluationModelTakesTarget(path)`.

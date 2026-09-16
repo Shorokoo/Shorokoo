@@ -169,15 +169,20 @@ namespace Shorokoo
 
             if (_inputs.Definition.Fields.Length == 0)
                 throw new ArgumentException("Input dataset has no fields.", nameof(inputs));
-            if (_targets.Definition.Fields.Length == 0)
-                throw new ArgumentException("Target dataset has no fields.", nameof(targets));
 
             _sampleCount = LeadingDimAcrossFields(_inputs, nameof(inputs));
-            long targetCount = LeadingDimAcrossFields(_targets, nameof(targets));
-            if (targetCount != _sampleCount)
-                throw new ArgumentException(
-                    $"Input and target sample counts disagree: inputs have {_sampleCount} samples, targets have {targetCount}.",
-                    nameof(targets));
+            // A rig whose loss reads no target has an empty TargetDef (Shorokoo/Shorokoo#331), and
+            // `rig.TargetDef.FromOrderedData()` is the dataset for it: legitimately field-less, with
+            // no sample count of its own to agree with the inputs'. Every batch then carries the same
+            // empty struct, which contributes no field when the step expands it.
+            if (_targets.Definition.Fields.Length > 0)
+            {
+                long targetCount = LeadingDimAcrossFields(_targets, nameof(targets));
+                if (targetCount != _sampleCount)
+                    throw new ArgumentException(
+                        $"Input and target sample counts disagree: inputs have {_sampleCount} samples, targets have {targetCount}.",
+                        nameof(targets));
+            }
 
             if (batchSize > _sampleCount)
                 throw new ArgumentOutOfRangeException(nameof(batchSize), batchSize,

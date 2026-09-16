@@ -80,6 +80,17 @@ namespace Shorokoo
             => Advance(_rig.ResidentStep(Current, null, trainingInput, trainingTarget, retain: true)).Loss!.Value;
 
         /// <summary>
+        /// Trains on one batch of a rig whose loss reads no target
+        /// (<see cref="TrainingRig.HasTargets"/> is <c>false</c>), and returns its loss
+        /// (Shorokoo/Shorokoo#331). Throws when the rig's loss does read a target.
+        /// </summary>
+        public float Step(TensorDataStruct trainingInput)
+        {
+            _rig.RequireTargetless(nameof(Step));
+            return Step(trainingInput, _rig.TargetDef.FromOrderedData());
+        }
+
+        /// <summary>
         /// Trains on one batch with explicit values for the rig's schedule-less runtime
         /// hyperparameters (build them with <see cref="TrainingRig.MakeHyperparameters(float)"/>) and
         /// returns its loss, leaving the updated state resident.
@@ -120,6 +131,16 @@ namespace Shorokoo
         /// </summary>
         public TrainingCheckpoint StepToCheckpoint(TensorDataStruct trainingInput, TensorDataStruct trainingTarget)
             => Publish(_rig.ResidentStep(Current, null, trainingInput, trainingTarget, retain: false));
+
+        /// <summary>
+        /// <see cref="StepToCheckpoint(TensorDataStruct, TensorDataStruct)"/> for a rig whose loss
+        /// reads no target (Shorokoo/Shorokoo#331). Throws when the rig's loss does read one.
+        /// </summary>
+        public TrainingCheckpoint StepToCheckpoint(TensorDataStruct trainingInput)
+        {
+            _rig.RequireTargetless(nameof(StepToCheckpoint));
+            return StepToCheckpoint(trainingInput, _rig.TargetDef.FromOrderedData());
+        }
 
         /// <summary>
         /// <see cref="StepToCheckpoint(TensorDataStruct, TensorDataStruct)"/> with explicit values for

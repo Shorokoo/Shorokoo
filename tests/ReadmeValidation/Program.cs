@@ -46,8 +46,8 @@ if (!float.IsFinite(lastLoss)) throw new Exception("Loss is not finite!");
 
 // ── Run ──────────────────────────────────────────────────────────────────────
 
-var savePath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "readme-validation.safetensors");
-result.FinalCheckpoint.Save(savePath);
+var savePath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "readme-validation.skpt");
+Persistence.SaveTrainingCheckpointToSkpt(result.FinalCheckpoint, savePath);
 Console.WriteLine($"Checkpoint saved to: {savePath}");
 
 var inferenceInput = TensorData([4L, 8L], new float[32]);   // same [4 × 8] shape the rig trained on
@@ -59,5 +59,33 @@ ReadOnlySpan<float> prediction = ComputeContext.Default
 
 Console.WriteLine($"Inference output ({prediction.Length} values): [{string.Join(", ", prediction.ToArray())}]");
 if (prediction.Length != 32) throw new Exception($"Expected 32 output values, got {prediction.Length}");
+
+// ── Reload, as a later process would ─────────────────────────────────────────
+
+var reloaded = Persistence.Load(savePath);
+var evaluation = Persistence.LoadEvaluationModel(savePath);
+var (reloadedRig, reloadedCheckpoint) = TrainingRig.Load(savePath);
+
+ReadOnlySpan<float> reloadedPrediction = ComputeContext.Default
+    .Execute(reloaded, inferenceInput)[0]
+    .ToTensorData<float32>().AccessMemory();
+if (!reloadedPrediction.SequenceEqual(prediction))
+    throw new Exception("Reloaded model disagrees with the checkpoint's inference model.");
+
+var validationLoss = ComputeContext.Default
+    .Execute(evaluation, TensorData([4L, 8L], batch1X), TensorData([4L, 8L], batch1Y))[0]
+    .ToTensorData<float32>().ValueAt<float>(0);
+Console.WriteLine($"Validation loss from the file alone: {validationLoss:F6}");
+if (!float.IsFinite(validationLoss)) throw new Exception("Validation loss is not finite!");
+
+if (reloadedCheckpoint.Step != result.FinalCheckpoint.Step)
+    throw new Exception("Reloaded checkpoint resumed at the wrong step.");
+// Built from the reloaded rig's own definitions, not the original rig's: a struct carries the
+// definition it was made with, and the two rigs' field orders need not agree.
+var resumedInputs  = reloadedRig.InputDef.FromOrderedData(TensorData([4L, 8L], batch1X));
+var resumedTargets = reloadedRig.TargetDef.FromOrderedData(TensorData([4L, 8L], batch1Y));
+if (reloadedRig.TrainStep(reloadedCheckpoint, resumedInputs, resumedTargets).Loss is not { } resumedLoss
+    || !float.IsFinite(resumedLoss))
+    throw new Exception("Resumed training step did not produce a finite loss.");
 
 Console.WriteLine("\nREADME validation passed.");

@@ -331,6 +331,11 @@ internal static class TrainingRigHelpers
         return (rig, ckpt, inBatch, outBatch);
     }
 
+    internal static float EvalLoss(ComputationGraph evaluationModel, float[] inputs, float[] targets)
+        => ComputeContext.Default
+            .Execute(evaluationModel, TensorData([(long)inputs.Length], inputs), TensorData([(long)targets.Length], targets))[0]
+            .ToTensorData<float32>().ValueAt<float>(0);
+
     internal static byte[] ReadEntryBytesViaBcl(string path, string entryName)
     {
         using var zip = System.IO.Compression.ZipFile.OpenRead(path);
@@ -711,6 +716,173 @@ public class TrainingRigRepresentativeInputCoverageTests
 [Trait("Purpose", "Coverage")]
 public class TrainingRigCompositionCoverageTests
 {
+    private static TrainingRig SelfScoringRig() => TrainingRig.FromScratch(
+        SelfScoringModel.ComputationGraph, ForwardingLoss.ComputationGraph, SGDOptimizer.ComputationGraph,
+        [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([4L], [1f, 2f, 3f, 4f]))],
+        0.1f);
+
+    [Fact]
+    public void TestALossThatIgnoresItsTargetDerivesNoTargetFieldAndStepsWithoutOneCoverage()
+    {
+        var rig = SelfScoringRig();
+        Assert.False(rig.HasTargets);
+        Assert.Empty(rig.TargetDef.Fields);
+
+        var inputs = rig.InputDef.FromOrderedData(TensorData([4L], [1f, 2f, 3f, 4f]));
+        var start = rig.CreateInitialCheckpoint();
+        var stepped = rig.TrainStep(start, inputs);
+        Assert.Equal(1, stepped.Step);
+        Assert.True(stepped.Loss > 0f);
+        Assert.True(rig.TrainStep(stepped, inputs).Loss < stepped.Loss);
+
+        Assert.Equal(
+            FlattenStruct(rig.TrainStep(start, inputs).TrainableParams),
+            FlattenStruct(rig.TrainStep(start, inputs, rig.TargetDef.FromOrderedData()).TrainableParams));
+
+        var fitted = rig.Fit([inputs, inputs], numEpochs: 3);
+        Assert.Equal(3, fitted.EpochLosses.Length);
+        Assert.True(fitted.EpochLosses[^1] < fitted.EpochLosses[0]);
+        Assert.Equal(6, fitted.FinalCheckpoint.Step);
+
+        var targeted = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            ScalarMultiplyBatches().sample, 0.1f);
+        Assert.True(targeted.HasTargets);
+        Assert.Throws<InvalidOperationException>(
+            () => targeted.TrainStep(targeted.CreateInitialCheckpoint(), InBatch(1f, 2f, 3f, 4f)));
+        Assert.Throws<InvalidOperationException>(() => targeted.Fit([InBatch(1f, 2f, 3f, 4f)], numEpochs: 1));
+    }
+
+    [Fact]
+    public void TestAScalarIgnoredTargetAndAModelInputNamedTargetsBothComposeCoverage()
+    {
+        var scalarRig = TrainingRig.FromScratch(
+            SelfScoringModel.ComputationGraph, ScalarTargetForwardingLoss.ComputationGraph,
+            SGDOptimizer.ComputationGraph,
+            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([4L], [1f, 2f, 3f, 4f]))],
+            0.1f);
+        Assert.False(scalarRig.HasTargets);
+        var scalarIn = scalarRig.InputDef.FromOrderedData(TensorData([4L], [1f, 2f, 3f, 4f]));
+        var scalarCkpt = scalarRig.TrainStep(scalarRig.CreateInitialCheckpoint(), scalarIn);
+        Assert.True(scalarCkpt.Loss > 0f);
+
+        var namedRig = TrainingRig.FromScratch(
+            TargetsNamedInputModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [new TensorDataModelParam("targets", ModelParamType.InputParam, TensorData([4L], [1f, 2f, 3f, 4f]))],
+            0.1f);
+        var namedIn = namedRig.InputDef.FromOrderedData(TensorData([4L], [1f, 2f, 3f, 4f]));
+        var namedTg = namedRig.TargetDef.FromOrderedData(TensorData([4L], [2f, 4f, 6f, 8f]));
+        var namedCkpt = namedRig.TrainStep(namedRig.CreateInitialCheckpoint(), namedIn, namedTg);
+
+        var scalarPath = TempPath("skpt_scalar_target") + ".skpt";
+        var namedPath = TempPath("skpt_named_target") + ".skpt";
+        try
+        {
+            Persistence.SaveTrainingCheckpointToSkpt(scalarCkpt, scalarPath);
+            Assert.False(Persistence.EvaluationModelTakesTarget(scalarPath));
+            Assert.Equal((double)scalarRig.TrainStep(scalarCkpt, scalarIn).Loss!.Value,
+                ComputeContext.Default.Execute(Persistence.LoadEvaluationModel(scalarPath), TensorData([4L], [1f, 2f, 3f, 4f]))[0]
+                    .ToTensorData<float32>().ValueAt<float>(0), 5);
+
+            Persistence.SaveTrainingCheckpointToSkpt(namedCkpt, namedPath);
+            var namedEval = Persistence.LoadEvaluationModel(namedPath);
+            Assert.Equal(namedEval.InputNames.Count, namedEval.InputNames.Distinct().Count());
+            Assert.Equal((double)namedRig.TrainStep(namedCkpt, namedIn, namedTg).Loss!.Value,
+                EvalLoss(namedEval, [1f, 2f, 3f, 4f], [2f, 4f, 6f, 8f]), 5);
+        }
+        finally
+        {
+            if (File.Exists(scalarPath)) File.Delete(scalarPath);
+            if (File.Exists(namedPath)) File.Delete(namedPath);
+        }
+    }
+
+    [Fact]
+    public void TestATargetReadOnlyThroughABranchConditionStillDerivesATargetFieldCoverage()
+    {
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, TargetGatedLoss.ComputationGraph,
+            SGDOptimizer.ComputationGraph, ScalarMultiplyBatches().sample, 0.1f);
+
+        Assert.True(rig.HasTargets);
+        Assert.Equal(1, rig.TargetDef.Fields.Length);
+
+        var ckpt = rig.CreateInitialCheckpoint();
+        var inputs = InBatch(1f, 2f, 3f, 4f);
+        var gated = rig.TrainStep(ckpt, inputs, TargetBatch(1f, 1f, 1f, 1f)).Loss!.Value;
+        var ungated = rig.TrainStep(ckpt, inputs, TargetBatch(-1f, -1f, -1f, -1f)).Loss!.Value;
+        Assert.Equal((double)(gated * 2f), ungated, 4);
+        Assert.Throws<InvalidOperationException>(() => rig.TrainStep(ckpt, inputs));
+
+        var path = TempPath("skpt_gated") + ".skpt";
+        try
+        {
+            Persistence.SaveTrainingCheckpointToSkpt(ckpt, path);
+            Assert.True(Persistence.EvaluationModelTakesTarget(path));
+            var eval = Persistence.LoadEvaluationModel(path);
+            Assert.Equal((double)gated, EvalLoss(eval, [1f, 2f, 3f, 4f], [1f, 1f, 1f, 1f]), 4);
+            Assert.Equal((double)ungated, EvalLoss(eval, [1f, 2f, 3f, 4f], [-1f, -1f, -1f, -1f]), 4);
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
+    [Fact]
+    public void TestATargetlessRigDrivesALoaderAndAResidentRunWithoutATargetCoverage()
+    {
+        var rig = SelfScoringRig();
+        var rows = new float[8 * 4];
+        for (var i = 0; i < rows.Length; i++) rows[i] = (i % 7) / 7f;
+        var dataset = new TensorDataStruct(rig.InputDef,
+            new Dictionary<string, IData> { { "input", TensorData([8L, 4L], rows) } });
+
+        var loader = new InMemoryDataLoader(dataset, rig.TargetDef.FromOrderedData(), batchSize: 4);
+        Assert.Equal(2, loader.BatchesPerEpoch);
+
+        var start = rig.CreateInitialCheckpoint();
+        var stepped = rig.TrainStep(start, loader);
+        Assert.Equal(1, stepped.Step);
+        Assert.Equal(0, stepped.Epoch);
+        Assert.True(stepped.Loss > 0f);
+
+        var fitted = rig.Fit(loader, numEpochs: 1, stepped);
+        Assert.True(fitted.FinalCheckpoint.Step > stepped.Step);
+
+        var inputs = rig.InputDef.FromOrderedData(TensorData([4L, 4L], rows[..16]));
+        using var run = rig.BeginResidentRun(start);
+        var residentLoss = run.Step(inputs);
+        Assert.True(residentLoss > 0f);
+        var published = run.StepToCheckpoint(inputs);
+        Assert.Equal(2, published.Step);
+
+        var targeted = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            ScalarMultiplyBatches().sample, 0.1f);
+        using var targetedRun = targeted.BeginResidentRun(targeted.CreateInitialCheckpoint());
+        Assert.Throws<InvalidOperationException>(() => targetedRun.Step(InBatch(1f, 2f, 3f, 4f)));
+        Assert.Throws<InvalidOperationException>(() => targetedRun.StepToCheckpoint(InBatch(1f, 2f, 3f, 4f)));
+    }
+
+    [Fact]
+    public void TestAnIgnoredTargetIsAbsentFromTheCheckpointsEvaluationModelTooCoverage()
+    {
+        var rig = SelfScoringRig();
+        var inputs = rig.InputDef.FromOrderedData(TensorData([4L], [1f, 2f, 3f, 4f]));
+        var ckpt = rig.TrainStep(rig.CreateInitialCheckpoint(), inputs);
+        var expected = rig.TrainStep(ckpt, inputs).Loss!.Value;
+        var path = TempPath("skpt_notarget") + ".skpt";
+        try
+        {
+            Persistence.SaveTrainingCheckpointToSkpt(ckpt, path);
+            Assert.False(Persistence.EvaluationModelTakesTarget(path));
+            var eval = Persistence.LoadEvaluationModel(path);
+            Assert.Equal(GraphKind.ConcreteModel, eval.Kind);
+            var loss = ComputeContext.Default
+                .Execute(eval, TensorData([4L], [1f, 2f, 3f, 4f]))[0].ToTensorData<float32>().ValueAt<float>(0);
+            Assert.Equal((double)expected, loss, 5);
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
     [Fact]
     public void TestFromScratchGraphKindsAndConvenienceApisCoverage()
     {
@@ -3322,6 +3494,244 @@ public class TrainingRigSkptCheckpointCoverageTests
             if (File.Exists(packedPath)) File.Delete(packedPath);
         }
     }
+
+    [Fact]
+    public void TestEvaluationModelLoadsFromASkptWithNoRigAndScoresWhatTheRigWouldCoverage()
+    {
+        var (rig, ckpt, inBatch, outBatch) = BuildTrainedAdamWRig(steps: 2);
+        var expected = rig.TrainStep(ckpt, inBatch, outBatch).Loss!.Value;
+        var path = TempPath("skpt_eval") + ".skpt";
+        var dirPath = TempPath("skpt_eval_dir") + ".skpt";
+        try
+        {
+            Persistence.SaveTrainingCheckpointToSkpt(ckpt, path);
+            Persistence.ForTrainingCheckpoint(ckpt).SaveAsDirectory(dirPath);
+
+            Assert.True(Persistence.EvaluationModelTakesTarget(path));
+            var eval = Persistence.LoadEvaluationModel(path);
+            Assert.Equal(GraphKind.ConcreteModel, eval.Kind);
+            Assert.Equal((double)expected, EvalLoss(eval, [1f, 2f, 3f, 4f], [2f, 4f, 6f, 8f]), 5);
+            Assert.Equal((double)expected, EvalLoss(Persistence.LoadEvaluationModel(dirPath), [1f, 2f, 3f, 4f], [2f, 4f, 6f, 8f]), 5);
+
+            Assert.Equal(GraphKind.ConcreteModel, Persistence.Load(path).Kind);
+            Assert.Throws<ArgumentException>(() => Persistence.LoadEvaluationModel(""));
+            Assert.Throws<ArgumentException>(() => Persistence.EvaluationModelTakesTarget(""));
+
+            var flat = TempPath("flat_eval") + ".safetensors";
+            try
+            {
+                ckpt.Save(flat);
+                Assert.Throws<InvalidDataException>(() => Persistence.LoadEvaluationModel(flat));
+                Assert.Throws<InvalidDataException>(() => Persistence.EvaluationModelTakesTarget(flat));
+                Assert.Contains("LoadEvaluationModel",
+                    Assert.Throws<InvalidOperationException>(
+                        () => Persistence.LoadTrainingCheckpoint(flat).ToInferenceModel()).Message);
+            }
+            finally { if (File.Exists(flat)) File.Delete(flat); }
+
+            var inferenceOnly = TempPath("inf_eval") + ".skpt";
+            try
+            {
+                Persistence.From(ckpt.ToInferenceModel()).WithModel().WithWeights().Save(inferenceOnly);
+                Assert.Throws<InvalidDataException>(() => Persistence.LoadEvaluationModel(inferenceOnly));
+            }
+            finally { if (File.Exists(inferenceOnly)) File.Delete(inferenceOnly); }
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+            if (Directory.Exists(dirPath)) Directory.Delete(dirPath, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void TestLoadDefersTheInitializersItsCheckpointOverwritesAndStillProducesThemOnDemandCoverage()
+    {
+        var (rig, ckpt, inBatch, outBatch) = BuildTrainedAdamWRig(steps: 2);
+        var reference = rig.TrainStep(ckpt, inBatch, outBatch);
+        var eagerInitial = rig.CreateInitialCheckpoint();
+        var path = TempPath("skpt_defer") + ".skpt";
+        try
+        {
+            Persistence.SaveTrainingCheckpointToSkpt(ckpt, path);
+            var (loadedRig, loaded) = TrainingRig.Load(path);
+
+            Assert.Equal(2, loaded.Step);
+            Assert.Equal(FlattenStruct(ckpt.TrainableParams), FlattenStruct(loaded.TrainableParams));
+            Assert.Equal(FlattenStruct(ckpt.OptimizerState), FlattenStruct(loaded.OptimizerState));
+
+            var resumed = loadedRig.TrainStep(loaded, inBatch, outBatch);
+            Assert.Equal(FlattenStruct(reference.TrainableParams), FlattenStruct(resumed.TrainableParams));
+            Assert.Equal(FlattenStruct(reference.OptimizerState), FlattenStruct(resumed.OptimizerState));
+            Assert.Equal(reference.Loss!.Value, resumed.Loss!.Value);
+
+            var deferredInitial = loadedRig.CreateInitialCheckpoint();
+            Assert.Equal(FlattenStruct(eagerInitial.TrainableParams), FlattenStruct(deferredInitial.TrainableParams));
+            Assert.Equal(FlattenStruct(eagerInitial.ModelState), FlattenStruct(deferredInitial.ModelState));
+            Assert.Equal(FlattenStruct(eagerInitial.OptimizerState), FlattenStruct(deferredInitial.OptimizerState));
+            Assert.Equal(FlattenStruct(eagerInitial.TrainableParams), FlattenStruct(loadedRig.CreateInitialCheckpoint().TrainableParams));
+
+            var weightsOnly = loadedRig.LoadCheckpointFromSkpt(path, CheckpointComponents.InferenceState);
+            Assert.Equal(FlattenStruct(ckpt.TrainableParams), FlattenStruct(weightsOnly.TrainableParams));
+            Assert.Equal(FlattenStruct(eagerInitial.OptimizerState), FlattenStruct(weightsOnly.OptimizerState));
+            Assert.Equal(0, weightsOnly.Step);
+
+            Assert.NotNull(loadedRig.AdoptCheckpoint(ckpt).Rig);
+            Assert.NotNull(loaded.ToInferenceModel());
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
+    [Fact]
+    public void TestADeferredRigReseedsOptimizerStateThatReadsAParameterValueCoverage()
+    {
+        NamedModelParam[] sample =
+            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData(ScalarInputShape, [1f, 2f, 3f, 4f]))];
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            ParamValueSeededOptimizer.ComputationGraph, sample, 0.1f);
+        var eager = rig.CreateInitialCheckpoint();
+        var ckpt = rig.TrainStep(eager, InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f));
+
+        Assert.Equal(
+            FlattenStruct(eager.TrainableParams).Select(v => v * 3f).ToArray(),
+            FlattenStruct(eager.OptimizerState));
+
+        var path = TempPath("skpt_paramseed") + ".skpt";
+        try
+        {
+            Persistence.SaveTrainingCheckpointToSkpt(ckpt, path);
+            var (loadedRig, loaded) = TrainingRig.Load(path);
+            Assert.Equal(FlattenStruct(ckpt.OptimizerState), FlattenStruct(loaded.OptimizerState));
+            Assert.Equal(FlattenStruct(eager.OptimizerState),
+                FlattenStruct(loadedRig.CreateInitialCheckpoint().OptimizerState));
+            Assert.Equal(FlattenStruct(eager.OptimizerState),
+                FlattenStruct(loadedRig.LoadCheckpointFromSkpt(path, CheckpointComponents.InferenceState).OptimizerState));
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
+    [Fact]
+    public void TestADeferredRigHandsTheSameInitialValuesToEveryConcurrentCallerCoverage()
+    {
+        const int width = 2048;
+        var sample = new float[width];
+        for (var i = 0; i < width; i++) sample[i] = (i % 13) / 13f;
+
+        var rig = TrainingRig.FromScratch(
+            WideWeightModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([(long)width], sample))],
+            0.1f);
+        var inputs = rig.InputDef.FromOrderedData(TensorData([(long)width], sample));
+        var targets = rig.TargetDef.FromOrderedData(TensorData([(long)width], new float[width]));
+        var expected = FlattenStruct(rig.CreateInitialCheckpoint().TrainableParams);
+        var ckpt = rig.TrainStep(rig.CreateInitialCheckpoint(), inputs, targets);
+
+        var path = TempPath("skpt_concurrent") + ".skpt";
+        try
+        {
+            Persistence.SaveTrainingCheckpointToSkpt(ckpt, path);
+            for (var attempt = 0; attempt < 4; attempt++)
+            {
+                var (loadedRig, _) = TrainingRig.Load(path);
+                var seen = new float[8][];
+                Parallel.For(0, seen.Length, i =>
+                    seen[i] = FlattenStruct(loadedRig.CreateInitialCheckpoint().TrainableParams));
+                Assert.All(seen, values => Assert.Equal(expected, values));
+            }
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
+    [Fact]
+    public void TestEvaluationModelCoversModelStateMultiInputAndInt64TargetShapesCoverage()
+    {
+        float[] batch = [1f, 2f, 3f, 4f];
+        float[] labels = [2f, 4f, 6f, 8f];
+
+        var bnRig = TrainingRig.FromScratch(
+            StateReadingModel.ComputationGraph, L2Loss.ComputationGraph,
+            SGDOptimizer.ComputationGraph,
+            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData(ScalarInputShape, batch))],
+            0.1f);
+        var bnInitial = bnRig.CreateInitialCheckpoint();
+        var bnCkpt = bnRig.TrainStep(bnInitial, InBatch(batch), TargetBatch(labels));
+        Assert.NotEmpty(bnCkpt.ModelState.Fields);
+        Assert.NotEqual(FlattenStruct(bnInitial.ModelState), FlattenStruct(bnCkpt.ModelState));
+
+        var twoRig = TrainingRig.FromScratch(
+            TwoInputSumModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [
+                new TensorDataModelParam("a", ModelParamType.InputParam, TensorData(ScalarInputShape, batch)),
+                new TensorDataModelParam("b", ModelParamType.InputParam, TensorData(ScalarInputShape, batch)),
+            ],
+            0.1f);
+        var twoInputs = twoRig.InputDef.FromOrderedData(
+            TensorData(ScalarInputShape, batch), TensorData(ScalarInputShape, batch));
+        var twoCkpt = twoRig.TrainStep(twoRig.CreateInitialCheckpoint(), twoInputs,
+            twoRig.TargetDef.FromOrderedData(TensorData(ScalarInputShape, labels)));
+
+        var bnPath = TempPath("skpt_eval_bn") + ".skpt";
+        var twoPath = TempPath("skpt_eval_two") + ".skpt";
+        try
+        {
+            Persistence.SaveTrainingCheckpointToSkpt(bnCkpt, bnPath);
+            Persistence.SaveTrainingCheckpointToSkpt(twoCkpt, twoPath);
+
+            Assert.Equal((double)bnRig.TrainStep(bnCkpt, InBatch(batch), TargetBatch(labels)).Loss!.Value,
+                EvalLoss(Persistence.LoadEvaluationModel(bnPath), batch, labels), 5);
+
+            var initialPath = TempPath("skpt_eval_bn0") + ".skpt";
+            try
+            {
+                Persistence.SaveTrainingCheckpointToSkpt(bnInitial, initialPath);
+                Assert.NotEqual(
+                    EvalLoss(Persistence.LoadEvaluationModel(initialPath), batch, labels),
+                    EvalLoss(Persistence.LoadEvaluationModel(bnPath), batch, labels));
+            }
+            finally { if (File.Exists(initialPath)) File.Delete(initialPath); }
+
+            var (bnLoadedRig, bnLoaded) = TrainingRig.Load(bnPath);
+            Assert.Equal(FlattenStruct(bnCkpt.ModelState), FlattenStruct(bnLoaded.ModelState));
+            Assert.Equal(FlattenStruct(bnRig.CreateInitialCheckpoint().ModelState),
+                FlattenStruct(bnLoadedRig.CreateInitialCheckpoint().ModelState));
+
+            var (ceInput, ceTarget) = NNLibraryTrainingFixtures.MakeTinyConvBatch();
+            var ceRig = TrainingRig.FromScratch(
+                NNTinyConvClassifier.ComputationGraph, CrossEntropyLoss.ComputationGraph,
+                SGDOptimizer.ComputationGraph,
+                [new TensorDataModelParam("input", ModelParamType.InputParam, ceInput)],
+                0.1f);
+            var ceIn = ceRig.InputDef.FromOrderedData(ceInput);
+            var ceTg = ceRig.TargetDef.FromOrderedData(ceTarget);
+            var ceCkpt = ceRig.TrainStep(ceRig.CreateInitialCheckpoint(), ceIn, ceTg);
+            Assert.Equal(DType.Int64, ceRig.TargetDef.Fields[0].ElementType);
+
+            var cePath = TempPath("skpt_eval_ce") + ".skpt";
+            try
+            {
+                Persistence.SaveTrainingCheckpointToSkpt(ceCkpt, cePath);
+                var ceLoss = ComputeContext.Default
+                    .Execute(Persistence.LoadEvaluationModel(cePath), ceInput, ceTarget)[0]
+                    .ToTensorData<float32>().ValueAt<float>(0);
+                Assert.Equal((double)ceRig.TrainStep(ceCkpt, ceIn, ceTg).Loss!.Value, ceLoss, 5);
+            }
+            finally { if (File.Exists(cePath)) File.Delete(cePath); }
+
+            var twoEval = Persistence.LoadEvaluationModel(twoPath);
+            var twoLoss = ComputeContext.Default.Execute(twoEval,
+                TensorData(ScalarInputShape, batch), TensorData(ScalarInputShape, batch),
+                TensorData(ScalarInputShape, labels))[0].ToTensorData<float32>().ValueAt<float>(0);
+            Assert.Equal((double)twoRig.TrainStep(twoCkpt, twoInputs,
+                twoRig.TargetDef.FromOrderedData(TensorData(ScalarInputShape, labels))).Loss!.Value, twoLoss, 5);
+        }
+        finally
+        {
+            if (File.Exists(bnPath)) File.Delete(bnPath);
+            if (File.Exists(twoPath)) File.Delete(twoPath);
+        }
+    }
+
 }
 
 [Trait("Domain", "Training")]
@@ -3701,6 +4111,42 @@ public class BuildProgressCoverageTests
         "UnpackTensorStructs", "ConvertModelParamIdRefToModelParam", "Simplify",
         "LowerAttributeTensorOps", "ExpandAutoGrad", "SimplifyAfterAutoGrad",
     ];
+
+    [Fact]
+    public void TestLoadReportsTheDeferredInitializationStageInsteadOfRunningInitializersCoverage()
+    {
+        var (rig, ckpt, inBatch, outBatch) = BuildTrainedAdamWRig(steps: 1);
+        var path = TempPath("skpt_defer_stage") + ".skpt";
+        try
+        {
+            Persistence.SaveTrainingCheckpointToSkpt(ckpt, path);
+
+            var (reports, sink) = Watched();
+            var (loadedRig, loaded) = TrainingRig.Load(path, progress: sink);
+            var stages = StagesOf(reports, BuildPhase.Initialize);
+
+            Assert.Contains("DeferModelParamInitialization", stages);
+            Assert.DoesNotContain("InitializeModelParams", stages);
+            Assert.Equal(1, loaded.Step);
+
+            var (eagerReports, eagerSink) = Watched();
+            _ = TrainingRig.FromScratch(
+                ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+                AdamWOptimizer.ComputationGraph, ScalarMultiplyBatches().sample,
+                new AdamWOptimizerHyperparameters { LearningRate = 0.1f }, progress: eagerSink);
+            var eagerStages = StagesOf(eagerReports, BuildPhase.Initialize);
+            Assert.Contains("InitializeModelParams", eagerStages);
+            Assert.DoesNotContain("DeferModelParamInitialization", eagerStages);
+
+            Assert.Equal(
+                FlattenStruct(rig.CreateInitialCheckpoint().TrainableParams),
+                FlattenStruct(loadedRig.CreateInitialCheckpoint().TrainableParams));
+            Assert.Equal(
+                FlattenStruct(rig.TrainStep(ckpt, inBatch, outBatch).TrainableParams),
+                FlattenStruct(loadedRig.TrainStep(loaded, inBatch, outBatch).TrainableParams));
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
 
     [Fact]
     public void TestFromScratchReportsEveryStageOfEveryPhaseInOrderCoverage()

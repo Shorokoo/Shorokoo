@@ -84,7 +84,7 @@ Console.WriteLine($"Final loss: {result.EpochLosses[^1]:F4}");
 Save the checkpoint, then bind the trained weights into a concrete model with one call and execute. `ToInferenceModel()` binds the checkpoint's trained parameters and module-owned state into the concrete architecture the checkpoint's rig already holds — concretized once when the rig was built and never re-concretized, so there are no sample inputs to re-supply.
 
 ```csharp
-result.FinalCheckpoint.Save("my-model.safetensors");   // persist trained weights
+Persistence.SaveTrainingCheckpointToSkpt(result.FinalCheckpoint, "my-model.skpt");
 
 var inferenceInput = TensorData([4L, 8L], new float[32]);   // same [4 × 8] shape the rig trained on
 var concrete       = result.FinalCheckpoint.ToInferenceModel();
@@ -92,6 +92,14 @@ var concrete       = result.FinalCheckpoint.ToInferenceModel();
 ReadOnlySpan<float> prediction = ComputeContext.Default
     .Execute(concrete, inferenceInput)[0]
     .ToTensorData<float32>().AccessMemory();
+```
+
+In a later process, the file alone is enough — and which call you want depends on what you are doing with it. None of the first two builds a training rig:
+
+```csharp
+var model = Persistence.Load("my-model.skpt");                  // run it
+var eval  = Persistence.LoadEvaluationModel("my-model.skpt");   // score a validation set: → loss
+var (rig, ckpt) = TrainingRig.Load("my-model.skpt");            // go on training
 ```
 
 ## Documentation

@@ -203,8 +203,9 @@ var next = rig.TrainStep(resumed, inputBatch, targetBatch);
 ```
 
 The rebuilt rig re-derives its trainstep exactly as a fresh build does, so a resumed step
-continues the saved trajectory — and costs most of a build, everything but the concretization the
-saved architecture replaces. On a large model pass `TrainingRig.Load` a `progress:` sink to
+continues the saved trajectory — and costs most of a build: everything but the concretization the
+saved architecture replaces, and the model's initializers, whose values the checkpoint would
+overwrite and which are therefore deferred (see [below](#without-a-rig-in-hand)). On a large model pass `TrainingRig.Load` a `progress:` sink to
 [watch it stage by stage](training.md#watching-a-long-build) rather than wait blind; the file read
 and the checkpoint payload read are reported too, so the stream reports complete only once the
 resumed checkpoint is in hand. Its optional arguments are that sink and the two compute contexts that
@@ -270,19 +271,62 @@ declared one the checkpoint does not map, is named, and a tampered entry (sha256
 loudly. The values themselves are checked as the rig adopts them: element type and
 dimensions against the rig's own parameters (see [training.md](training.md)).
 
-Reconstruct without a rig in hand by rebuilding the rig from the file itself — a training
-`.skpt` carries its own constituents, so nothing has to be supplied:
+### Without a rig in hand
+
+What you want from the file decides which of these you reach for. Only the last one builds a
+training rig, and only the last one needs to.
+
+**To run the model** — inference, a demo, an export — load the checkpoint as a model. A training
+`.skpt` carries the concrete inference model as its `model` entry, so this is the same call an
+inference checkpoint takes, and it costs a graph read and a weight bind:
+
+```csharp
+var model = Persistence.Load("run.skpt");                  // ConcreteModel, weights bound
+```
+
+**To score a validation set** — the loss, not the prediction — load the model already composed
+with the loss it was trained under. Inputs are the model's own, plus the target; the one output is
+the scalar loss:
+
+```csharp
+var eval = Persistence.LoadEvaluationModel("run.skpt");    // [model inputs…, targets] → loss
+var loss = ComputeContext.Default.Execute(eval, batch, targets)[0].ToTensorData<float32>().ValueAt<float>(0);
+```
+
+Both halves are already in the file — the model as the `model` entry, the loss as the rig's loss
+constituent — so this splices two graphs and binds weights. Nothing composes a trainstep,
+differentiates anything, lowers an optimizer per parameter, or runs an initializer, which is what
+made a forward-only evaluation cost a whole rig build
+([#329](https://github.com/Shorokoo/Shorokoo/issues/329)). The weights it binds are the trained
+ones: a training checkpoint carries the single `default` mapping set and nothing writes it a second
+one, so unlike `Persistence.Load` there is no set to select. When the
+loss ignores its target ([#331](https://github.com/Shorokoo/Shorokoo/issues/331)) the evaluation
+model takes the model inputs alone; ask which shape you have with
+`Persistence.EvaluationModelTakesTarget(path)`.
+
+**To continue training**, rebuild the rig from the file itself — a training `.skpt` carries its own
+constituents, so nothing has to be supplied:
 
 ```csharp
 var (rig, ckpt) = TrainingRig.Load("run.skpt");
 ```
+
+This one is a build, and unavoidably so: the file stores the rig's *constituents*, never its
+derived trainstep, so composition, autodiff and the optimizer's per-parameter lowering are redone
+here. What it no longer redoes is the model's initializers — every value they produce is about to
+be overwritten by the checkpoint, so `TrainingRig.Load` skips the run and defers it
+([#327](https://github.com/Shorokoo/Shorokoo/issues/327)). Nothing is lost by that: a component the
+file does not carry still falls back to the rig's initial values, and asking for one
+(`rig.CreateInitialCheckpoint()`) runs the initializers then, to exactly the values an eager build
+would have produced.
 
 Each on-disk format has its own save/load pair. `Persistence.SaveTrainingCheckpoint` /
 `Persistence.LoadTrainingCheckpoint` (and `rig.LoadCheckpoint`) handle the **flat**
 [safetensors format](training.md); `SaveTrainingCheckpointToSkpt` /
 `ForTrainingCheckpoint` and `rig.LoadCheckpointFromSkpt` (and the static
 `TrainingRig.Load`, which rebuilds the rig from the file alone) handle the `.skpt`
-container. No load entry point sniffs
+container, which `Persistence.Load` and `Persistence.LoadEvaluationModel` also read
+without a rig at all. No load entry point sniffs
 the file's bytes to pick a format: handing one the other format fails immediately with an
 error naming both formats and the entry point that reads the file's actual format. To
 identify a genuinely unknown file first, use `Persistence.Inspect`.

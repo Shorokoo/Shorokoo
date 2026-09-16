@@ -394,7 +394,7 @@ namespace Shorokoo
         /// </summary>
         internal static TrainingRig ReconstructRigFromSkpt(
             string filePath, ComputeContext mergeContext, ComputeContext runtimeContext,
-            BuildProgressReporter? progress = null)
+            BuildProgressReporter? progress = null, bool deferInitialization = false)
         {
             VerifySkptContainer(filePath,
                 "A flat checkpoint stores training state only — no rig constituents to rebuild " +
@@ -461,7 +461,7 @@ namespace Shorokoo
 
             return TrainingRig.ReconstructFromConstituents(
                 archGraph, lossGraph, optimizerGraph, hypers, names, rngConfig,
-                mergeContext, runtimeContext, progress);
+                mergeContext, runtimeContext, progress, deferInitialization);
         }
 
         /// <summary>

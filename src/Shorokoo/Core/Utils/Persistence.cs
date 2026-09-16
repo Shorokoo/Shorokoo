@@ -119,6 +119,94 @@ namespace Shorokoo
             return new ComputationGraph(graph, GraphKind.ConcreteModel);
         }
 
+        /// <summary>
+        /// Loads a training <c>.skpt</c> as a runnable <b>evaluation</b> model — the checkpoint's
+        /// weight-bound model composed with the loss it was trained under, so the result computes the
+        /// loss directly: inputs <c>[model_inputs…, targets]</c>, output the scalar loss
+        /// (Shorokoo/Shorokoo#329). Use it to score a validation set from a checkpoint file.
+        ///
+        /// <para><b>No training rig is built.</b> Both halves are already in the file — the model as
+        /// the <c>model</c> entry <see cref="Load(string)"/> binds, the loss as the rig's loss
+        /// constituent — so this reads two graphs and splices them. Nothing here composes a trainstep,
+        /// differentiates anything, lowers an optimizer per parameter, or runs an initializer, which is
+        /// what made the rig route cost a build for a job that computes no gradients. Resuming
+        /// <i>training</i> is a different question and still wants
+        /// <see cref="TrainingRig.Load(string, ComputeContext?, ComputeContext?, IProgress{BuildProgress})"/>:
+        /// the file stores the rig's constituents, not its derived trainstep.</para>
+        ///
+        /// <para>The weights bound are the trained ones — a training checkpoint carries the single
+        /// <c>default</c> mapping set and nothing writes it a second one, so there is no set to select
+        /// here as there is on <see cref="Load(string, string)"/>. When the loss ignores its target — a
+        /// model that computes its own loss under a forwarding loss module (Shorokoo/Shorokoo#331) —
+        /// the returned model takes the model inputs only, and there is no target to feed; ask which
+        /// shape you have with <see cref="EvaluationModelTakesTarget"/>. The path may name either
+        /// on-disk shape, the single file or the checkpoint directory.</para>
+        /// </summary>
+        /// <returns>A runnable <see cref="GraphKind.ConcreteModel"/> whose one output is the loss.</returns>
+        public static ComputationGraph LoadEvaluationModel(string filePath)
+        {
+            if (string.IsNullOrWhiteSpace(filePath))
+                throw new ArgumentException("Checkpoint path cannot be null or empty.", nameof(filePath));
+            VerifySkptContainer(filePath,
+                "A flat checkpoint stores training state only — it carries neither the model nor the "
+                + "loss, so there is nothing to evaluate with; save the checkpoint as a .skpt.");
+
+            // One open for both halves: the model and the loss come out of the same file, and reading
+            // it twice would let the two halves come from different versions of it.
+            using var container = SkptContainer.Open(filePath);
+            var manifest = SkptFileFormat.ParseManifest(container.ReadManifestBytes(), filePath);
+            ValidateManifestIdentity(manifest, filePath);
+
+            var lossGraph = ReadLossConstituent(container, manifest, filePath);
+            var (modelKey, modelEntry) = SingleModel(manifest, filePath);
+            var model = LoadModelDefinition(container, modelKey, modelEntry, filePath);
+            BindWeights(container, manifest, modelKey, SkptFileFormat.DefaultMappingSetName, model, filePath);
+
+            return new ComputationGraph(
+                Core.Training.TrainingGraphBuilder.ComposeEvaluationGraph(model, lossGraph.ToInternal()),
+                GraphKind.ConcreteModel);
+        }
+
+        /// <summary>
+        /// Whether the evaluation model <see cref="LoadEvaluationModel"/> returns for
+        /// <paramref name="filePath"/> takes a target input — <c>false</c> for a checkpoint whose loss
+        /// ignores its target (Shorokoo/Shorokoo#331), whose evaluation model therefore takes the model
+        /// inputs alone. Reads the manifest and the loss constituent only.
+        /// </summary>
+        public static bool EvaluationModelTakesTarget(string filePath)
+        {
+            if (string.IsNullOrWhiteSpace(filePath))
+                throw new ArgumentException("Checkpoint path cannot be null or empty.", nameof(filePath));
+            VerifySkptContainer(filePath,
+                "A flat checkpoint stores training state only — it carries no loss to ask about.");
+
+            using var container = SkptContainer.Open(filePath);
+            var manifest = SkptFileFormat.ParseManifest(container.ReadManifestBytes(), filePath);
+            ValidateManifestIdentity(manifest, filePath);
+            return Core.Training.TrainingGraphBuilder.LossReadsTarget(
+                ReadLossConstituent(container, manifest, filePath).ToInternal());
+        }
+
+        /// <summary>
+        /// The loss module graph a training <c>.skpt</c> carries as a rig constituent, read off an
+        /// already-open container. An inference checkpoint, or a training one written without the rig
+        /// block, has none and fails loud.
+        /// </summary>
+        private static ComputationGraph ReadLossConstituent(
+            SkptContainer container, SkptManifest manifest, string filePath)
+        {
+            var training = manifest.Training
+                ?? throw new InvalidDataException(
+                    $"'{filePath}': the .skpt manifest has no 'training' block — this is an inference "
+                    + "checkpoint, which carries no loss. Load it as a model with Persistence.Load.");
+            var rig = training.Rig
+                ?? throw new InvalidDataException(
+                    $"'{filePath}': this training checkpoint stores no rig constituents, so it carries "
+                    + "no loss to evaluate with.");
+            return LoadConstituentGraph(
+                container, manifest, rig.LossModel ?? SkptFileFormat.LossModelKey, filePath);
+        }
+
         // ---- Training checkpoints ----
         // Training-run state (trainable params, model + optimizer state, global step) persists
         // through this same facade in one of two on-disk shapes. The flat shape is the

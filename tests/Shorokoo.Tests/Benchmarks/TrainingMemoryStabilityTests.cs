@@ -16,12 +16,9 @@ public partial class MemoryStabilityWideModel
 }
 
 /// <summary>
-/// Code-pinned memory-stability gate for the training hot path — the automated
-/// half of <c>release-test-plan</c> <c>R-2</c> ("a long-running training loop
-/// shows stable memory: no unbounded RSS growth / handle leaks"), the
-/// memory-performance check introduced in the
-/// <see href="../../../docs/testing/v1.1/release-test-plan.md">v1.1 plan</see>.
-/// It drives the same pinned linear scenario as the <c>R-1</c> throughput gate
+/// Code-pinned memory-stability gate for the training hot path: a long-running
+/// training loop must show stable memory, with no unbounded RSS growth and no
+/// handle leaks. It drives the same pinned linear scenario as the throughput gate
 /// (<see cref="PerfBaselineLinearModel"/>) through thousands of
 /// <see cref="TrainingRig.TrainStep"/> calls and asserts the live managed heap
 /// does not grow without bound — a per-step reference leak (accumulating

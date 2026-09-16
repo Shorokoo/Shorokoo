@@ -508,7 +508,7 @@ two members as a division of *phases* — which work is build/merge and which is
 hardware; they would only become a lever if `ComputeContext` gained per-instance configuration.
 Leaving both `null`, so each defaults to `ComputeContext.Default`, is the normal choice.
 
-What *is* configurable — on the GPU backends — is device memory, but process-wide rather than per
+What *is* configurable — on the GPU backends — is **device** memory, but process-wide rather than per
 context: an arena budget, the arena's extend strategy, per-step arena shrinkage, and a reading of how
 much of the card is gone. The default arena strategy is picked for exactly this loop: a step's shapes
 are fixed when it is compiled and repeat for the length of the run, so the arena is told to extend by
@@ -516,6 +516,12 @@ what it asks for rather than to keep doubling, which is what otherwise leaves a 
 more of the card than its steps use. On a run that is close to the card's limit, set a budget at
 startup and sample the peak inside your `TrainStep` loop; see
 [Device memory](inference.md#device-memory-gpu-backends).
+
+**That is a different memory from the one the rig reclaims above.** A checkpoint's tensors are
+fetched to the host, so the rig's budgeted collection governs *host* memory, and the `DeviceMemory`
+settings reach only the CUDA arena. A process whose RSS climbs is not helped by an arena budget, and
+a card that fills up is not helped by the rig's reclamation. Check which one is growing before
+reaching for either.
 
 Result types:
 - `TrainingCheckpoint` → `.TrainableParams`, `.ModelState`, `.OptimizerState`, `.Step` (global step, `long`; advances each `TrainStep`, so schedules resume from a saved checkpoint), and the host-owned run counters `.Epoch` / `.BatchIndex` (`long?`; the training loop advances them — the counter-agnostic `TrainStep` carries them through unchanged). They are `null` when the position is genuinely **unknown** — an initial checkpoint, or one trained without a data loader / explicit counters — rather than a misleading `0`; the loader-driven and explicit-counter paths set concrete values. A scheduled hyperparameter reading the epoch / batch counter sees `0` for a `null` value. `.Step` is always a concrete `long`; all counters are `int64` end to end. It also carries `.Rig` (the `TrainingRig?` that produced it — set on every rig-produced checkpoint, so `checkpoint.ToInferenceModel()` needs no re-supplied graph) and `.Loss` (`float?`; the loss of the `TrainStep` that produced it, `null` on an initial or bare checkpoint). Both are preserved through the counter derivations (`WithCounters`/`WithStep`/`WithEpoch`/`WithBatchIndex`). `TrainStep` returns this checkpoint directly — read the step's loss off `.Loss`. `.Loss` persists as its own `Loss` component, independent of `Counters` (dropping `Loss`, or an initial checkpoint, reloads with `.Loss == null` — never a sentinel `0`).

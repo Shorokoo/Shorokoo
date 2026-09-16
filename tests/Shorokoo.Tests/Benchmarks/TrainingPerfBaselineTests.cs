@@ -25,7 +25,7 @@ public partial class PerfBaselineLinearModel
 
 /// <summary>
 /// Code-pinned performance gate for the training hot path — the structural fix
-/// called for by <c>release-test-plan</c> <c>R-1</c> and <c>test-suite-gaps #4</c>
+/// the throughput half of the release checks
 /// ("No performance baselines"). It measures the four phases R-1 tracks for the
 /// pinned linear scenario — graph-build (concretize), <c>TrainingRig.FromScratch</c>,
 /// <c>Compile</c>, and steady-state <c>TrainStep</c> throughput — and compares each

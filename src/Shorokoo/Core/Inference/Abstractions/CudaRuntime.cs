@@ -50,9 +50,12 @@ internal static class CudaRuntime
         {
             if (_bound) return _memGetInfo;
             _bound = true;
-            if (NativeLibrary.TryLoad(LibraryName, out var library)
-                && NativeLibrary.TryGetExport(library, "cudaMemGetInfo", out var export))
+            if (!NativeLibrary.TryLoad(LibraryName, out var library)) return null;
+            if (NativeLibrary.TryGetExport(library, "cudaMemGetInfo", out var export))
+                // The library stays loaded on purpose: the delegate points into it.
                 _memGetInfo = Marshal.GetDelegateForFunctionPointer<MemGetInfo>(export);
+            else
+                NativeLibrary.Free(library);
             return _memGetInfo;
         }
     }

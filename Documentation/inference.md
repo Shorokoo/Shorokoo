@@ -431,8 +431,8 @@ If no backend is found, the first inference call throws `InvalidOperationExcepti
 
 ### Device memory (GPU backends)
 
-ONNX Runtime allocates device memory out of a BFC arena that extends in blocks and never gives
-them back. How large each new block is comes from the *extend strategy*, and the two ORT offers
+ONNX Runtime allocates device memory out of a BFC arena that extends in blocks and, unless asked to
+shrink (below), never gives them back. How large each new block is comes from the *extend strategy*, and the two ORT offers
 suit opposite situations:
 
 - **`NextPowerOfTwo`** (ORT's default) makes each extension at least as large as everything the
@@ -446,24 +446,31 @@ suit opposite situations:
 
 **Shorokoo defaults to `SameAsRequested`.** That is a deliberate departure from ORT, and it is a
 bet rather than a free win. Measured on the CPU arena — the same allocator with the same two
-strategies — over four chained matmuls:
+strategies — over four chained matmuls, three runs on one quiet machine. The `SameAsRequested`
+column repeated exactly; the `NextPowerOfTwo` one moves a little run to run, so read the ratios as
+approximate:
 
 | shapes fed to the session | `SameAsRequested` | `NextPowerOfTwo` |
 |---|---|---|
 | one shape, ten runs | **11 MiB** | 16 MiB |
 | alternating 2048/512, twenty runs | **24 MiB** | 33 MiB |
 | largest first, then settled | 18 MiB | **16 MiB** |
-| shuffled from four sizes, twenty runs | 34 MiB | **32 MiB** |
-| growing, then settled | 36 MiB | **32 MiB** |
-| growing 256 to 2048 | 23 MiB | **15 MiB** |
+| shuffled from four sizes, twenty runs | 34 MiB | **31–32 MiB** |
+| growing, then settled | 35 MiB | **31 MiB** |
+| growing 256 to 2048 | 23 MiB | **11–15 MiB** |
+| growing 256 to 2048, 16 MiB arena | **does not fit** | 15 MiB |
+
+Re-run it yourself with `dotnet test --filter "FullyQualifiedName~ArenaExtendStrategyProbeTests"
+--logger "console;verbosity=detailed"`.
 
 The bet is on the asymmetry, not on winning every row. A training run feeds one input shape to one
-compiled step for its whole length — the first row — and there exact-size extension holds 1.45x
-less (1.8x was reported on a 24 GiB card, where a step needing 12.9 GiB left the arena holding all
-24.6 GiB). Where several sizes are in play the doubling holds less, but by 1.06–1.13x. **The one
-case to override it in is input shapes that grow without settling** — the last row, where the
-doubling holds 1.5x less and, on a card with no room to spare, fits where exact-size extension
-does not:
+compiled step for its whole length — the first row — and there exact-size extension holds about
+1.45x less. On the card that prompted this, a step that showed 12.9 GiB at its first step ended up
+with the arena holding all 24.6 GiB of a 24.6 GiB card, and a smaller batch of the same model
+settled at roughly 1.8x what its steps used. Where several allocation sizes are in play ORT's
+doubling holds less, by 1.08–1.13x. **The one case to override it in is input shapes that grow
+without settling** — the last two rows, where the doubling holds 1.5–2x less and, on a card with no
+room to spare, fits where exact-size extension does not:
 
 ```csharp
 using Shorokoo.Core.Inference.Abstractions;
@@ -479,13 +486,16 @@ DeviceMemory.ShrinkArenaAfterRun = true;                          // hand unused
 | `ArenaExtend` | `arena_extend_strategy` | `SameAsRequested` — **not** ORT's default | when a session is created |
 | `ShrinkArenaAfterRun` | `memory.enable_memory_arena_shrinkage` | `false` | on every run |
 
-The other two are off by default because they cost on every step rather than only while the arena
-grows. `ShrinkArenaAfterRun` pays a synchronizing device allocation per step to re-take what it
-handed back; turn it on when the card is shared with something that needs the room between steps.
-`LimitBytes` is a budget, not a hint: a step that needs more than it fails with ORT's
-`BFCArena ... Failed to allocate memory for requested buffer` rather than eating the rest of the
-device — which is what you want when a run must leave room for a second one, and not what you want
-otherwise.
+The other two are unset by default for their own reasons. `ShrinkArenaAfterRun` costs a
+synchronizing device allocation on every step to re-take what it handed back, so it is worth it
+only when the card is shared with something that needs the room between steps. `LimitBytes` is a
+budget, not a hint: a step that needs more than it fails with ORT's `BFCArena ... Failed to
+allocate memory for requested buffer` rather than eating the rest of the device, so a figure set
+too low fails a run that would have fitted.
+
+Note that the budget caps **each session's** arena, not the process. ORT gives a session its own
+CUDA arena, so a process holding a compiled graph and a training rig at once can hold the limit
+more than once over; read it as the ceiling on any one session.
 
 The first two settings are read **when a session is built** — the first inference call, or a
 training rig's first `TrainStep` for a given input shape — so set them at startup; changing them

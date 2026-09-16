@@ -64,16 +64,22 @@ public readonly record struct DeviceMemoryReading(long UsedBytes, long FreeBytes
 /// Console.WriteLine($"peak {DeviceMemory.PeakUsedBytes / (1024 * 1024)} MiB");
 /// </code>
 ///
-/// <para><b>This is a process-wide stopgap, not the final shape.</b> One CUDA device
-/// (device 0) and one setting for every session in the process, mutable at any time and
-/// read at the moment a session is built or run. A per-<c>ComputeContext</c> settings
+/// <para><b>This is a process-wide stopgap, not the final shape.</b> One setting for every
+/// session in the process, mutable at any time and read at the moment a session is built or
+/// run, and readings taken from whichever CUDA device is current for the calling thread —
+/// which is device 0 only because that is the device the shipped GPU backends use. A per-<c>ComputeContext</c> settings
 /// object is what this should become; until then, treat these as startup configuration
 /// and do not expect two contexts to differ.</para>
 /// </summary>
 public static class DeviceMemory
 {
     private static long _peakUsedBytes;
-    private static long? _limitBytes;
+
+    // A long, not a long?: Nullable<long> is two fields, so neither the write nor the read is
+    // atomic, and a session built on another thread mid-assignment could see HasValue with the
+    // old value -- a gpu_mem_limit of 0, which the setter exists to refuse. Zero is not a legal
+    // limit, so it doubles as "unset" and one Interlocked pair covers both accessors.
+    private static long _limitBytes;
 
     /// <summary>
     /// The upper bound, in bytes, on what the CUDA arena may allocate — ORT's
@@ -82,16 +88,21 @@ public static class DeviceMemory
     /// error rather than eating into what is left of the device, which is what makes a
     /// too-large configuration fail early and visibly instead of starving everything else
     /// on the machine.
+    ///
+    /// <para>It caps <b>each session's</b> arena, not the process: ORT gives a session its own
+    /// CUDA arena, so a process holding several live sessions — a compiled graph plus a rig, say —
+    /// can hold this much more than once. Read it as the ceiling on any one session, and halve it
+    /// accordingly when two must coexist.</para>
     /// </summary>
     /// <exception cref="ArgumentOutOfRangeException">A limit of zero or less.</exception>
     public static long? LimitBytes
     {
-        get => _limitBytes;
+        get => Interlocked.Read(ref _limitBytes) is var limit && limit != 0 ? limit : null;
         set
         {
             if (value is <= 0)
                 throw new ArgumentOutOfRangeException(nameof(value), value, "The device-memory limit must be positive.");
-            _limitBytes = value;
+            Interlocked.Exchange(ref _limitBytes, value ?? 0);
         }
     }
 
@@ -113,7 +124,19 @@ public static class DeviceMemory
     /// <para>Whichever you set applies to every session in the process, and a session keeps the
     /// value it was built with, so this is startup configuration.</para>
     /// </summary>
-    public static ArenaExtendStrategy ArenaExtend { get; set; } = ArenaExtendStrategy.SameAsRequested;
+    /// <exception cref="ArgumentOutOfRangeException">Not one of the strategies.</exception>
+    public static ArenaExtendStrategy ArenaExtend
+    {
+        get => _arenaExtend;
+        set
+        {
+            if (!Enum.IsDefined(value))
+                throw new ArgumentOutOfRangeException(nameof(value), value, "Not an arena-extend strategy.");
+            _arenaExtend = value;
+        }
+    }
+
+    private static ArenaExtendStrategy _arenaExtend = ArenaExtendStrategy.SameAsRequested;
 
     /// <summary>
     /// Whether to hand the arena's unused blocks back to the device after every run —
@@ -138,9 +161,12 @@ public static class DeviceMemory
     /// <see cref="Read"/>, and folds the reading into <see cref="PeakUsedBytes"/>. A
     /// <c>null</c> reading leaves the peak alone.
     /// </summary>
-    public static DeviceMemoryReading? Sample()
+    public static DeviceMemoryReading? Sample() => SampleFrom(Read());
+
+    /// <summary>What <see cref="Sample"/> does with a reading once it has one, split out so the
+    /// fold can be driven from a machine that has no card to read.</summary>
+    internal static DeviceMemoryReading? SampleFrom(DeviceMemoryReading? reading)
     {
-        var reading = Read();
         if (reading is { } taken) ObservePeak(taken.UsedBytes);
         return reading;
     }

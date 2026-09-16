@@ -7,7 +7,7 @@ namespace Shorokoo.Tests;
 /// Code-pinned hygiene gate: the shipping product must build warning-free.
 ///
 /// <para>
-/// This guards the regression caught by <c>release-test-plan</c> <c>H-2</c>,
+/// This guards a regression caught at release time,
 /// where v0.1.8-dev shipped with 7 compiler warnings (4× CS8321 dead local
 /// functions in the module source generator, 3× CS1573 missing
 /// <c>&lt;param&gt;</c> docs on a public API). Those

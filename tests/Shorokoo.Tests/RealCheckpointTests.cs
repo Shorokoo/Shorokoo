@@ -22,7 +22,7 @@ public class RealCheckpointTests
     /// <summary>
     /// A real torchvision/timm ResNet18 <c>.safetensors</c> loads through Shorokoo's
     /// <see cref="SafeTensorLoader"/> with its tensor names, shapes and dtypes intact —
-    /// the load half of release-test-plan check E-3. (Bit-exact PyTorch parity remains
+    /// the load half of the real-checkpoint release check. (Bit-exact PyTorch parity remains
     /// the manual E-6 exercise; binding third-party parameter names onto a built graph
     /// needs a per-architecture naming scheme, out of scope for this smoke test.)
     /// </summary>

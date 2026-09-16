@@ -15,6 +15,7 @@ namespace Shorokoo.Tests;
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Hardware")]
+[Collection(DeviceMemorySettings.Name)]
 public class GpuExecutionTests
 {
     /// <summary>
@@ -34,8 +35,9 @@ public class GpuExecutionTests
 
     /// <summary>
     /// The device-memory surface end to end, on both settings of every knob: the shipped
-    /// defaults build and run a session, so does a budgeted power-of-two arena with per-run
-    /// shrinkage on, and the card reports a reading either way.
+    /// defaults build and run a session — they are set explicitly, so the leg establishes them
+    /// rather than inheriting whatever the process holds — and so does a budgeted power-of-two
+    /// arena with per-run shrinkage on, with the card reporting a reading either way.
     /// </summary>
     [CudaFact]
     public void CudaProvider_RunsUnderEveryDeviceMemoryConfigurationAndReportsTheCardsUsage()
@@ -45,6 +47,9 @@ public class GpuExecutionTests
         var shrink = DeviceMemory.ShrinkArenaAfterRun;
         try
         {
+            DeviceMemory.LimitBytes = null;
+            DeviceMemory.ArenaExtend = ArenaExtendStrategy.SameAsRequested;
+            DeviceMemory.ShrinkArenaAfterRun = false;
             DeviceMemory.ResetPeak();
             Assert.Equal(5.0f, AddTwoScalars(2.0f, 3.0f));
 

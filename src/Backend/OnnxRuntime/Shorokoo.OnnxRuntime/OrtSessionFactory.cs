@@ -146,7 +146,7 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
     /// altogether, which leaves ORT at its default of the whole card.
     /// </summary>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="arenaExtend"/> is not one of
-    /// the two strategies ORT accepts.</exception>
+    /// the two strategies ORT accepts, or <paramref name="limitBytes"/> is not positive.</exception>
     public static Dictionary<string, string> CudaProviderOptions(
         int deviceId,
         long? limitBytes,
@@ -164,7 +164,15 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
             },
         };
         if (limitBytes is { } limit)
+        {
+            // ORT parses this into a size_t, where a negative reads back as SIZE_MAX -- an
+            // uncapped arena from a caller who asked for the opposite. Refuse it here, as
+            // DeviceMemory.LimitBytes refuses it at the assignment.
+            if (limit <= 0)
+                throw new ArgumentOutOfRangeException(
+                    nameof(limitBytes), limit, "The device-memory limit must be positive.");
             options["gpu_mem_limit"] = limit.ToString(CultureInfo.InvariantCulture);
+        }
         return options;
     }
 

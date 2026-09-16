@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the ResNet18 sample input tensor for release-test-plan check E-3.
+"""Generate the ResNet18 sample input tensor for the real-checkpoint parity check.
 
 Downloads the canonical PyTorch test image (a Samoyed, ImageNet class 258),
 applies the timm `resnet18.a1_in1k` eval transform (bicubic resize with

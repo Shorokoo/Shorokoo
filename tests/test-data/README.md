@@ -90,7 +90,7 @@ python tests/test-data/models/resnet18/make-reference-logits.py
 ## Real-pretrained-model parity (release check E-6)
 
 Full bit-exact parity against recorded PyTorch outputs (ResNet18/50, ViT-Tiny,
-RetinaNet — release-test-plan check **E-6**) is a **manual** release-time
+RetinaNet) is a **manual** release-time
 exercise. Its golden weights and intermediate-layer outputs are no longer
 committed; regenerate or re-export them with PyTorch exporters and the Shorokoo
 architecture generators, then place them under the matching

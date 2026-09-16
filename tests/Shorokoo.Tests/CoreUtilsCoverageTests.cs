@@ -26,6 +26,7 @@ namespace Shorokoo.Tests;
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
+[Collection(DeviceMemorySettings.Name)]
 public class CoreUtilsCoverageTests
 {
     private static InternalComputationGraph BoolGraph(IValue only) => new([], [only.ToVariable()]);
@@ -343,23 +344,59 @@ public class CoreUtilsCoverageTests
         Assert.Null(DeviceMemory.LimitBytes);
     }
 
-    /// <summary>A reading is null on a machine with no CUDA runtime, and self-consistent on one
-    /// that has it, so this holds on the CPU sandbox and a GPU box alike.</summary>
+    /// <summary>A reading is null on a machine with no CUDA runtime and a real one where there is
+    /// a card, so the first assertion holds either way; the fold into the peak is driven through
+    /// the seam so it is pinned on both.</summary>
     [Fact]
-    public void TestDeviceMemoryReadsTheCardWhenThereIsOneAndTracksTheSampledPeak()
+    public void TestDeviceMemoryReadsTheCardWhenThereIsOneAndSampleFoldsIntoThePeak()
     {
-        var reading = DeviceMemory.Read();
-        Assert.True(reading is null || reading.Value.TotalBytes > 0);
-        Assert.True(reading is null || reading.Value.UsedBytes + reading.Value.FreeBytes == reading.Value.TotalBytes);
+        Assert.True(DeviceMemory.Read() is not { TotalBytes: <= 0 });
 
         DeviceMemory.ResetPeak();
         Assert.Equal(0L, DeviceMemory.PeakUsedBytes);
-        Assert.Equal(4096L, DeviceMemory.ObservePeak(4096));
+        Assert.Null(DeviceMemory.SampleFrom(null));
+        Assert.Equal(0L, DeviceMemory.PeakUsedBytes);
+
+        var reading = new DeviceMemoryReading(4096, 1024, 5120);
+        Assert.Equal(reading, DeviceMemory.SampleFrom(reading));
+        Assert.Equal(4096L, DeviceMemory.PeakUsedBytes);
         Assert.Equal(4096L, DeviceMemory.ObservePeak(512));
         Assert.Equal(8192L, DeviceMemory.ObservePeak(8192));
         Assert.Equal(8192L, DeviceMemory.PeakUsedBytes);
         DeviceMemory.ResetPeak();
         Assert.Equal(0L, DeviceMemory.PeakUsedBytes);
+    }
+
+    /// <summary>
+    /// The settings are reachable from a GPU session, which no test on a CPU box can observe by
+    /// running one. What it can observe is that the product still calls the wiring: a backend that
+    /// stopped passing its device id, stopped reading <see cref="DeviceMemory"/> when it builds the
+    /// provider options, or stopped putting the shrinkage entry on its run options would leave
+    /// every setting dead with every other test still green.
+    /// </summary>
+    [Fact]
+    public void TestTheGpuBackendsStillCarryTheDeviceMemorySettingsIntoOrt()
+    {
+        var backend = Path.Combine(ProductSourceRoot(), "Backend", "OnnxRuntime");
+        string Source(params string[] parts) =>
+            StripCommentsAndStrings(File.ReadAllText(Path.Combine(backend, Path.Combine(parts))));
+
+        foreach (var gpu in new[] { "Shorokoo.LinuxGPU/LinuxGpuInferenceFactory.cs", "Shorokoo.WinGPU/WinGpuInferenceFactory.cs" })
+            Assert.Matches(@"base\s*\(\s*cudaDeviceId\s*:\s*0\s*\)", Source(gpu.Split('/')));
+        foreach (var cpu in new[] { "Shorokoo.LinuxCPU/LinuxCpuInferenceFactory.cs", "Shorokoo.WinCPU/WinCpuInferenceFactory.cs" })
+            Assert.Matches(@"cudaDeviceId\s*:\s*null", Source(cpu.Split('/')));
+
+        var factory = Source("Shorokoo.OnnxRuntime", "OrtSessionFactory.cs");
+        Assert.Matches(@"new\s+OrtInferenceSession\s*\(\s*session\s*,\s*_cudaDeviceId\s*\)", factory);
+        Assert.Matches(@"AppendExecutionProvider_CUDA\s*\(\s*cuda\s*\)", factory);
+        Assert.Contains("DeviceMemory.LimitBytes", factory);
+        Assert.Contains("DeviceMemory.ArenaExtend", factory);
+
+        var session = Source("Shorokoo.OnnxRuntime", "OrtInferenceSession.cs");
+        Assert.Contains("memory.enable_memory_arena_shrinkage", File.ReadAllText(
+            Path.Combine(backend, "Shorokoo.OnnxRuntime", "OrtInferenceSession.cs")));
+        Assert.Matches(@"ArenaShrinkageRunConfig\s*\(\s*_cudaDeviceId\s*,\s*DeviceMemory\.ShrinkArenaAfterRun\s*\)", session);
+        Assert.Matches(@"AddRunConfigEntry\s*\(", session);
     }
 
     /// <summary>
@@ -406,18 +443,27 @@ public class CoreUtilsCoverageTests
         return dir!.FullName;
     }
 
-    // Every way to come by one of ORT's SafeHandle types: the constructors, and the SessionOptions
-    // factories (MakeSessionOptionWithCudaProvider and friends) that return one with no `new` in it.
+    // Every way the product comes by one of ORT's SafeHandle types: the constructors, and the
+    // SessionOptions factories (MakeSessionOptionWithCudaProvider and friends) that return one with
+    // no `new` in it. The provider-options and arena types are here for the same reason as the rest
+    // -- ORT takes each as a bare IntPtr and does no ref-counting, so an unrooted one is freed by
+    // its critical finalizer mid-call. Test sources are deliberately out of scope: they use the
+    // options-factory shape (build, configure, return), which this guard's stricter
+    // `using`-or-field rule cannot express.
     private static readonly Regex OrtSafeHandleSource = new(
-        @"new\s+(SessionOptions|RunOptions)\s*\(|SessionOptions\s*\.\s*Make\w*\s*\(", RegexOptions.Compiled);
+        @"new\s+(SessionOptions|RunOptions|OrtCUDAProviderOptions|OrtArenaCfg|OrtMemoryInfo)\s*\("
+        + @"|SessionOptions\s*\.\s*Make\w*\s*\(", RegexOptions.Compiled);
 
     // The two shapes that actually root the handle across a native call: the resource of a `using`,
     // and a field, which lives as long as its owner. The handle must be the WHOLE initializer --
     // `using var s = new InferenceSession(b, new SessionOptions())` roots the session and leaves the
     // options collectible, which is the exact bug this guard exists for.
+    private const string OrtSafeHandleTypes =
+        "SessionOptions|RunOptions|OrtCUDAProviderOptions|OrtArenaCfg|OrtMemoryInfo";
+
     private static readonly Regex RootedInitializer = new(
-        @"^\s*(using\s*\(?\s*(var|SessionOptions|RunOptions)\s+\w+\s*=\s*"
-        + @"|(public|private|protected|internal)[\w\s]*?(SessionOptions|RunOptions)\s+\w+\s*=\s*)$",
+        @"^\s*(using\s*\(?\s*(var|" + OrtSafeHandleTypes + @")\s+\w+\s*=\s*"
+        + @"|(public|private|protected|internal)[\w\s]*?(" + OrtSafeHandleTypes + @")\s+\w+\s*=\s*)$",
         RegexOptions.Compiled);
 
     // Strings go before line comments: a literal containing "//" would otherwise blank the rest of
@@ -618,6 +664,10 @@ public class CoreUtilsCoverageTests
             "using var s = new InferenceSession(b, new SessionOptions());",
             "var o = SessionOptions.MakeSessionOptionWithCudaProvider(0);",
             "_prefix = \"https://x\"; var o = new SessionOptions();",
+            "var cuda = new OrtCUDAProviderOptions();",
+            "options.AppendExecutionProvider_CUDA(new OrtCUDAProviderOptions());",
+            "var cfg = new OrtArenaCfg(limit, 1, 1024, -1);",
+            "env.CreateAndRegisterAllocator(new OrtMemoryInfo(\"Cpu\", t, 0, m), cfg);",
         ];
         string[] mustNotFlag =
         [
@@ -626,6 +676,10 @@ public class CoreUtilsCoverageTests
             "using SessionOptions o = new SessionOptions();",
             "private readonly SessionOptions _o = new SessionOptions();",
             "using var o = SessionOptions.MakeSessionOptionWithCudaProvider(0);",
+            "using var cuda = new OrtCUDAProviderOptions();",
+            "using OrtCUDAProviderOptions cuda = new OrtCUDAProviderOptions();",
+            "using var cfg = new OrtArenaCfg(limit, 1, 1024, -1);",
+            "private readonly OrtMemoryInfo _info = new OrtMemoryInfo(\"Cpu\", t, 0, m);",
         ];
         Assert.All(mustFlag, s => Assert.NotEmpty(UnrootedOrtSafeHandles(s)));
         Assert.All(mustNotFlag, s => Assert.Empty(UnrootedOrtSafeHandles(s)));

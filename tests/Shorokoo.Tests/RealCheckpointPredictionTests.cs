@@ -7,7 +7,7 @@ namespace Shorokoo.Tests;
 /// <summary>
 /// Opt-in end-to-end checks that bind a real torchvision/timm ResNet18 checkpoint onto the
 /// Shorokoo <see cref="ResNet18"/> graph via <see cref="TorchvisionResNet18NamingScheme"/> and
-/// run a forward pass — the <b>prediction</b> half of release-test-plan check E-3 (the load half
+/// run a forward pass — the <b>prediction</b> half of the real-checkpoint release check (the load half
 /// is <see cref="RealCheckpointTests"/>). Together they make E-3 completable end-to-end.
 ///
 /// <para>Both the checkpoint and the preprocessed sample input are developer-downloaded/generated

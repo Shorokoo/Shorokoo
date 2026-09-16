@@ -6,7 +6,7 @@ namespace Shorokoo.Tests;
 /// PyTorch/torchvision → Shorokoo parameter name mapping for the
 /// <see cref="RetinaNet.Models.ResNet18"/> sample model, used to bind a real
 /// torchvision/timm ResNet18 <c>.safetensors</c> checkpoint onto the Shorokoo graph
-/// (release-test-plan check E-3, the prediction half).
+/// (the prediction half of the real-checkpoint release check).
 ///
 /// <para>The Shorokoo side uses <see cref="RetinaNet.Models.FrozenBatchNorm"/> (eval-mode
 /// batch norm: <c>y = x*scale + bias</c>), which carries the same four learnable/buffer

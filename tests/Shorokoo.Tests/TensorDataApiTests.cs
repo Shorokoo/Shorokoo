@@ -348,6 +348,10 @@ public class TensorDataApiCoverageTests
         public int Disposals { get; private set; }
         public void Dispose() => Disposals++;
 
+        // The one member the tensor wrapping this spy consults on its own: a host-resident
+        // value, which is what these disposal tests stand in for.
+        public bool IsHostAccessible => true;
+
         public Shorokoo.Core.Inference.Abstractions.ShorokooOnnxValueType ValueType => throw new NotSupportedException();
         public Shorokoo.Core.Inference.Abstractions.ShorokooTensorElementType ElementType => throw new NotSupportedException();
         public long[] Shape => throw new NotSupportedException();

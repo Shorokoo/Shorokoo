@@ -472,16 +472,19 @@ public class CoreUtilsCoverageTests
         @"new\s+(SessionOptions|RunOptions|OrtCUDAProviderOptions|OrtArenaCfg|OrtMemoryInfo)\s*\("
         + @"|SessionOptions\s*\.\s*Make\w*\s*\(", RegexOptions.Compiled);
 
-    // The two shapes that actually root the handle across a native call: the resource of a `using`,
-    // and a field, which lives as long as its owner. The handle must be the WHOLE initializer --
-    // `using var s = new InferenceSession(b, new SessionOptions())` roots the session and leaves the
-    // options collectible, which is the exact bug this guard exists for.
+    // The shapes that actually root the handle across a native call: the resource of a `using`, a
+    // field, which lives as long as its owner, and a bare `return` of the handle itself, where
+    // ownership passes to the caller and the callee never touches it again. The handle must be the
+    // WHOLE initializer -- `using var s = new InferenceSession(b, new SessionOptions())` roots the
+    // session and leaves the options collectible, which is the exact bug this guard exists for, and
+    // `return Wrap(new SessionOptions())` consumes the handle rather than handing it back.
     private const string OrtSafeHandleTypes =
         "SessionOptions|RunOptions|OrtCUDAProviderOptions|OrtArenaCfg|OrtMemoryInfo";
 
     private static readonly Regex RootedInitializer = new(
         @"^\s*(using\s*\(?\s*(var|" + OrtSafeHandleTypes + @")\s+\w+\s*=\s*"
-        + @"|(public|private|protected|internal)[\w\s]*?(" + OrtSafeHandleTypes + @")\s+\w+\s*=\s*)$",
+        + @"|(public|private|protected|internal)[\w\s]*?(" + OrtSafeHandleTypes + @")\s+\w+\s*=\s*"
+        + @"|return\s*)$",
         RegexOptions.Compiled);
 
     // Strings go before line comments: a literal containing "//" would otherwise blank the rest of
@@ -686,6 +689,7 @@ public class CoreUtilsCoverageTests
             "options.AppendExecutionProvider_CUDA(new OrtCUDAProviderOptions());",
             "var cfg = new OrtArenaCfg(limit, 1, 1024, -1);",
             "env.CreateAndRegisterAllocator(new OrtMemoryInfo(\"Cpu\", t, 0, m), cfg);",
+            "return Wrap(new OrtMemoryInfo(n, t, 0, m));",
         ];
         string[] mustNotFlag =
         [
@@ -698,6 +702,7 @@ public class CoreUtilsCoverageTests
             "using OrtCUDAProviderOptions cuda = new OrtCUDAProviderOptions();",
             "using var cfg = new OrtArenaCfg(limit, 1, 1024, -1);",
             "private readonly OrtMemoryInfo _info = new OrtMemoryInfo(\"Cpu\", t, 0, m);",
+            "return new OrtMemoryInfo(info.Name, info.GetAllocatorType(), info.Id, info.GetMemoryType());",
         ];
         Assert.All(mustFlag, s => Assert.NotEmpty(UnrootedOrtSafeHandles(s)));
         Assert.All(mustNotFlag, s => Assert.Empty(UnrootedOrtSafeHandles(s)));

@@ -57,11 +57,14 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
 
     /// <summary>
     /// This backend: the assembly the concrete factory lives in, and the device its sessions
-    /// run on — CUDA when the subclass named a device id, the CPU otherwise. Derived from the
-    /// constructor arguments, so a subclass driving a different execution provider describes
-    /// itself correctly without overriding anything.
+    /// run on — CUDA when the subclass named a device id, the CPU otherwise. That covers the
+    /// four shipped packages and any CUDA subclass. A subclass driving a <b>third</b> provider
+    /// (DirectML, ROCm, CoreML, OpenVINO) names no CUDA device and is not the CPU either, so it
+    /// must override this and report <see cref="ComputeDevice.Other"/> — otherwise it passes for
+    /// a CPU backend and <see cref="InferenceBackend.RequireDevice"/> waves the work through onto
+    /// a device its author meant to stay off.
     /// </summary>
-    public BackendDescription Description => new(
+    public virtual BackendDescription Description => new(
         GetType().Assembly.GetName().Name ?? GetType().Name,
         _cudaDeviceId is null ? ComputeDevice.Cpu : ComputeDevice.Cuda,
         _cudaDeviceId);

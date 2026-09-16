@@ -309,15 +309,19 @@ public class CoreUtilsCoverageTests
     {
         var live = InferenceBackend.Describe();
         Assert.Same(InferenceBackend.Factory, InferenceBackend.Current);
-        Assert.Equal(InferenceBackend.Factory.GetType().Assembly.GetName().Name, live.Name);
-        Assert.Equal(live.Device == ComputeDevice.Cuda, live.CudaDeviceId is not null);
+        Assert.StartsWith(
+            RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Shorokoo.Win" : "Shorokoo.Linux", live.Name);
+        Assert.Equal(live.Name.EndsWith("GPU", StringComparison.Ordinal) ? ComputeDevice.Cuda : ComputeDevice.Cpu,
+            live.Device);
         Assert.Equal(live, ComputeContext.Default.Backend);
         Assert.Equal(live, new ComputeContext().Backend);
 
         InferenceBackend.RequireDevice(live.Device);
         var other = live.Device == ComputeDevice.Cpu ? ComputeDevice.Cuda : ComputeDevice.Cpu;
-        Assert.Contains(live.ToString(), Assert.Throws<InvalidOperationException>(
-            () => InferenceBackend.RequireDevice(other)).Message);
+        var refusal = Assert.Throws<InvalidOperationException>(
+            () => InferenceBackend.RequireDevice(other)).Message;
+        Assert.Contains(live.ToString(), refusal);
+        Assert.Contains(other == ComputeDevice.Cuda ? "requires a CUDA backend" : "requires a CPU backend", refusal);
 
         var cuda = new CudaFactoryProbe(3).Description;
         Assert.Equal(new BackendDescription("Shorokoo.Tests", ComputeDevice.Cuda, 3), cuda);
@@ -326,17 +330,58 @@ public class CoreUtilsCoverageTests
             new BackendDescription("Shorokoo.LinuxCPU", ComputeDevice.Cpu, null).ToString());
     }
 
-    /// <summary>
-    /// A model library carries no backend — that is what lets one model serve a GPU host and a
-    /// CPU host without its source being compiled into each of them.
-    /// </summary>
     [Fact]
-    public void TestTheCoreAndModuleAssembliesCarryNoOnnxRuntimeDependency()
+    public void TestTheProjectsAModelLibraryReferencesCarryNoBackendOrOnnxRuntime()
     {
+        string[] projects = ["src/Shorokoo/Shorokoo.csproj", "src/Shorokoo.Modules/Shorokoo.Modules.csproj"];
+        foreach (var project in projects)
+        {
+            var text = File.ReadAllText(Path.Combine(RepoRoot(), project.Replace('/', Path.DirectorySeparatorChar)));
+            Assert.DoesNotContain(
+                Regex.Matches(text, @"<(?:Package|Project)Reference\s+Include=""([^""]+)""")
+                    .Select(m => Path.GetFileNameWithoutExtension(m.Groups[1].Value)),
+                r => r.Contains("OnnxRuntime", StringComparison.OrdinalIgnoreCase)
+                     || Regex.IsMatch(r, "(Win|Linux)(CPU|GPU)$"));
+        }
+
         Assembly[] backendFree = [typeof(InferenceBackend).Assembly, typeof(global::Shorokoo.Modules.Layers.Linear).Assembly];
         foreach (var assembly in backendFree)
             Assert.DoesNotContain(assembly.GetReferencedAssemblies(), a =>
-                (a.Name ?? "").StartsWith("Microsoft.ML.OnnxRuntime", StringComparison.OrdinalIgnoreCase));
+                (a.Name ?? "").Contains("OnnxRuntime", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void TestABackendDescriptionCannotContradictItself()
+    {
+        Assert.Throws<ArgumentException>(() => new BackendDescription("X", ComputeDevice.Cuda, null));
+        Assert.Throws<ArgumentException>(() => new BackendDescription("X", ComputeDevice.Cpu, 0));
+        Assert.Throws<ArgumentException>(() => new BackendDescription("X", ComputeDevice.Other, 0));
+        Assert.Equal("X (CUDA device 2)", new BackendDescription("X", ComputeDevice.Cuda, 2).ToString());
+        Assert.Equal("X (CPU)", new BackendDescription("X", ComputeDevice.Cpu, null).ToString());
+        Assert.Equal("X (Other)", new BackendDescription("X", ComputeDevice.Other, null).ToString());
+        Assert.Equal("", default(BackendDescription).Name);
+    }
+
+    [Fact]
+    public void TestABackendOnAnotherProviderCanSaySoAndIsNotTakenForTheCpu()
+    {
+        IShorokooInferenceSessionFactory other = new OtherDeviceFactoryProbe();
+        Assert.Equal(ComputeDevice.Other, other.Description.Device);
+        Assert.Null(other.Description.CudaDeviceId);
+    }
+
+    [Fact]
+    public void TestALoadedBackendForAnotherOsIsNotACandidate()
+    {
+        var windows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+        (string, bool)[] thisOs = windows ? [("Shorokoo.WinCPU", false)] : [("Shorokoo.LinuxCPU", false)];
+        string[] bothOses = ["System.Private.CoreLib", "Shorokoo.WinCPU", "Shorokoo.LinuxCPU"];
+        string[] bothDevices = windows
+            ? ["Shorokoo.WinCPU", "Shorokoo.WinGPU"]
+            : ["Shorokoo.LinuxCPU", "Shorokoo.LinuxGPU"];
+        Assert.Equal(thisOs, InferenceBackend.LoadedCandidates(bothOses));
+        Assert.Empty(InferenceBackend.LoadedCandidates(["System.Private.CoreLib"]));
+        Assert.Equal(2, InferenceBackend.LoadedCandidates(bothDevices).Count);
     }
 
     /// <summary>A CUDA <see cref="OrtSessionFactory"/> without a card: it describes itself from its
@@ -344,6 +389,16 @@ public class CoreUtilsCoverageTests
     private sealed class CudaFactoryProbe : OrtSessionFactory
     {
         public CudaFactoryProbe(int device) : base(device) { }
+    }
+
+    /// <summary>The subclass the base class invites: a different execution provider, on no CUDA
+    /// device, which is neither the CPU nor something the base class can name for it.</summary>
+    private sealed class OtherDeviceFactoryProbe : OrtSessionFactory
+    {
+        public OtherDeviceFactoryProbe() : base(_ => { }, cudaDeviceId: null) { }
+
+        public override BackendDescription Description
+            => new("Shorokoo.Tests", ComputeDevice.Other, null);
     }
 
     [Fact]

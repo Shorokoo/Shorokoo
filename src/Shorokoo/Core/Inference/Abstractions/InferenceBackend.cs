@@ -22,8 +22,8 @@ namespace Shorokoo.Core.Inference.Abstractions;
 /// If you never set one, the first inference call auto-discovers a backend in two
 /// steps: a Shorokoo.{Platform} assembly already loaded in the process wins, and
 /// only failing that is the folder next to this assembly probed for the known
-/// Shorokoo.{Platform} DLLs. Either step <b>refuses</b> a deployment carrying more
-/// than one backend rather than choosing between them — see
+/// Shorokoo.{Platform} DLLs. Both steps consider only backends targeting the running
+/// OS, and both <b>refuse</b> two of them rather than choosing between them — see
 /// <see cref="SelectBackend"/>. Only one backend is ever live per process; loading a
 /// second native (e.g. comparing CPU vs CUDA) requires separate processes.
 /// </para>
@@ -62,6 +62,10 @@ public static class InferenceBackend
     /// Unlike <see cref="Factory"/>, reading this does not resolve one — so a startup
     /// path can tell "nothing chosen yet" from "already bound" without deciding the
     /// question by asking it.
+    ///
+    /// <para>It reports, it does not reserve: two threads can both read null and both
+    /// assign, and the last assignment wins. Decide the backend on one startup path
+    /// rather than racing to fill in a null.</para>
     /// </summary>
     public static IShorokooInferenceSessionFactory? Current => _factory;
 
@@ -85,11 +89,17 @@ public static class InferenceBackend
         var live = Describe();
         if (live.Device != device)
             throw new InvalidOperationException(
-                $"This program requires a {(device == ComputeDevice.Cuda ? "CUDA" : "CPU")} " +
-                $"backend, but {live} is live. Reference the " +
+                $"This program requires a {Label(device)} backend, but {live} is live. Reference the " +
                 "Shorokoo.{WinCPU,WinGPU,LinuxCPU,LinuxGPU} package for the device you want, or " +
                 "assign InferenceBackend.Factory before the first inference call.");
     }
+
+    private static string Label(ComputeDevice device) => device switch
+    {
+        ComputeDevice.Cuda => "CUDA",
+        ComputeDevice.Cpu => "CPU",
+        _ => device.ToString(),
+    };
 
     // The backend DLLs Shorokoo ships: the OS each targets and whether it drives
     // the CUDA execution provider.
@@ -145,15 +155,38 @@ public static class InferenceBackend
     {
         if (osCandidates.Count == 0) return null;
         if (osCandidates.Count == 1) return osCandidates[0];
-        var names = string.Join(", ", osCandidates.Select(
+        throw Ambiguous(osCandidates, origin);
+    }
+
+    private static InvalidOperationException Ambiguous(
+        IReadOnlyList<(string Assembly, bool Gpu)> candidates, string origin)
+    {
+        var names = string.Join(", ", candidates.Select(
             c => c.Assembly + (c.Gpu ? " (CUDA)" : " (CPU)")));
-        throw new InvalidOperationException(
+        return new InvalidOperationException(
             $"Several Shorokoo inference backends are {origin}: {names}. Only one can be live " +
             "in a process, and each package brings its own native ONNX Runtime, so a build " +
             "carrying both is ambiguous. Reference exactly one backend package -- keeping model " +
             "code in a library that references no backend, and one executable per device -- or " +
             "assign InferenceBackend.Factory before the first inference call to say which of " +
             "these you mean.");
+    }
+
+    /// <summary>
+    /// The backends among <paramref name="loadedAssemblyNames"/> that could serve this process:
+    /// known backend assemblies targeting the running OS. A Windows backend loaded into a Linux
+    /// process is not one — it cannot run, and its native collides with nothing here, so it must
+    /// not make the choice ambiguous. Pure, in <c>KnownBackends</c> order, so the policy is
+    /// unit-testable and the refusal message is stable.
+    /// </summary>
+    internal static IReadOnlyList<(string Assembly, bool Gpu)> LoadedCandidates(
+        IEnumerable<string> loadedAssemblyNames)
+    {
+        var loaded = loadedAssemblyNames.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return KnownBackends
+            .Where(b => RuntimeInformation.IsOSPlatform(b.Os) && loaded.Contains(b.Assembly))
+            .Select(b => (b.Assembly, b.Gpu))
+            .ToList();
     }
 
     private static string ProbeDirectory()
@@ -167,22 +200,23 @@ public static class InferenceBackend
 
     private static IShorokooInferenceSessionFactory? TryFindAlreadyLoadedFactory()
     {
-        var loaded = AppDomain.CurrentDomain.GetAssemblies()
-            .Select(asm => asm.GetName().Name ?? "")
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var candidates = KnownBackends
-            .Where(b => loaded.Contains(b.Assembly))
-            .Select(b => (b.Assembly, b.Gpu))
+        var assemblies = AppDomain.CurrentDomain.GetAssemblies();
+        var usable = LoadedCandidates(assemblies.Select(asm => asm.GetName().Name ?? ""))
+            .Select(candidate => (candidate, Factory: assemblies
+                .Where(asm => string.Equals(
+                    asm.GetName().Name, candidate.Assembly, StringComparison.OrdinalIgnoreCase))
+                .Select(InstantiateFactory)
+                .FirstOrDefault(factory => factory is not null)))
+            .Where(found => found.Factory is not null)
             .ToList();
 
-        // The OS filter of the deployment-folder probe does not apply here: an assembly that
-        // is loaded is loaded. Ambiguity is refused on the same grounds either way.
-        if (SelectBackend(candidates, "already loaded in this process") is not { } chosen)
-            return null;
-        return AppDomain.CurrentDomain.GetAssemblies()
-            .Where(asm => string.Equals(asm.GetName().Name, chosen.Assembly, StringComparison.OrdinalIgnoreCase))
-            .Select(InstantiateFactory)
-            .FirstOrDefault(factory => factory is not null);
+        // Only what is usable can be ambiguous: a backend assembly exposing no concrete factory
+        // is no more a choice than one that is not loaded, and the folder probe still gets its
+        // turn. Hence the instantiation before the refusal, not after it.
+        if (usable.Count == 0) return null;
+        if (usable.Count > 1)
+            throw Ambiguous([.. usable.Select(found => found.candidate)], "already loaded in this process");
+        return usable[0].Factory;
     }
 
     private static IShorokooInferenceSessionFactory? InstantiateFactory(Assembly asm)

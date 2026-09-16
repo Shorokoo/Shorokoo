@@ -20,8 +20,8 @@ Related: [core-types.md](core-types.md) · [defining-models.md](defining-models.
 - `OnnxEngine.Eval` rebuilds and recreates an ORT session on every call. For repeated
   inference, compile once with `ComputeContext` (below).
 - Reference one platform backend package and it is normally found for you — no setup
-  code. Only one backend is live per process, and referencing two is refused rather than
-  guessed at. How it is discovered, and how to override the choice:
+  code. Only one backend is live per process, and two of them for one OS is refused rather
+  than guessed at. How it is discovered, and how to override the choice:
   [Backend selection](#backend-selection).
 - Which device the work will run on is invisible at the call site but answerable:
   `ComputeContext.Backend` and `InferenceBackend.Describe()` name it, and
@@ -428,7 +428,9 @@ once and caches the result:
 
 A single candidate is taken as-is — a lone GPU backend is chosen even when no CUDA
 runtime is present. **Two or more are refused**, in either step, with an
-`InvalidOperationException` naming them:
+`InvalidOperationException` naming them. From the folder probe (step 1 says `already loaded
+in this process` in place of `deployed in '<folder>'`, and refuses only backends that
+actually expose a factory):
 
 > `Several Shorokoo inference backends are deployed in '<folder>': Shorokoo.WinCPU (CPU),
 > Shorokoo.WinGPU (CUDA). Only one can be live in a process, and each package brings its
@@ -439,10 +441,21 @@ runtime is present. **Two or more are refused**, in either step, with an
 
 Discovery does not resolve that by looking for a CUDA runtime and preferring the GPU. A
 deployment holding both packages has already had their native ONNX Runtimes collide —
-each ships `libonnxruntime.so` (`onnxruntime.dll`) at the same path — so the managed DLL
-that discovery would pick says nothing about the native that is actually there. The usual
-way to arrive at this state is a `ProjectReference` to a project that carries a backend of
-its own; [One model, two devices](#one-model-two-devices) is the layout that avoids it.
+each ships `libonnxruntime.so` (`onnxruntime.dll`) at the same path, so only one of them is
+deployed and which one is NuGet's conflict resolution to decide — and the managed DLL that
+discovery would pick says nothing about the native that is actually there. Backends for
+*different* OSes are not ambiguous and are not refused: only those targeting the running one
+are candidates, so a cross-platform build carrying all four is fine.
+
+Mind that step 1 settles it first. If exactly one backend assembly is already loaded when the
+first inference call happens — which naming its factory type anywhere in a method your program
+runs is enough to cause — that one wins and the folder is never probed. The refusal is what
+happens when the *deployment* is left to make the choice, not a guarantee that an ambiguous
+build cannot run.
+
+The usual way to arrive at an ambiguous deployment is a shared library that references a
+backend, which flows to everything referencing it;
+[One model, two devices](#one-model-two-devices) is the layout that avoids it.
 
 Referencing a backend package is enough for step 2: the package copies its DLL to your
 output folder, so discovery finds it whether or not your code mentions the factory type.
@@ -468,8 +481,8 @@ Console.WriteLine(ComputeContext.Default.Backend);    // the same, at the point 
 ```
 
 `BackendDescription` carries the `Name` of the supplying assembly, the `Device`
-(`ComputeDevice.Cpu` or `ComputeDevice.Cuda`), and the `CudaDeviceId` a CUDA backend
-allocates on (null on CPU). Record it in a run's log: a training run that cannot say which
+(`ComputeDevice.Cpu`, `Cuda`, or `Other` for a backend you wrote against a third execution
+provider), and the `CudaDeviceId` a CUDA backend allocates on (null on anything else). Record it in a run's log: a training run that cannot say which
 device produced its numbers has lost something it cannot reconstruct later.
 
 Two related entry points:
@@ -523,8 +536,9 @@ The model is compiled once, into one assembly, and both hosts run *that* — so 
 the model the run is training, not a second compilation of its source. `[Module]` classes the
 check needs live beside the model they test, in the library.
 
-What breaks this is a `ProjectReference` to a project that carries a backend: the backend
-flows with it into the referencing project's output folder, two backends end up deployed, and
+What breaks this is a backend reference in the shared library — a `PackageReference` or a
+`ProjectReference` to an executable that carries one. Either flows into the referencing
+project's output folder, two backends end up deployed, and
 [auto-discovery](#auto-discovery) refuses to guess between them. Keep the backend in the
 executable, where the device is decided, and let nothing reference an executable.
 

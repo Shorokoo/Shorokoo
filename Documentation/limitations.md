@@ -326,6 +326,11 @@ public only as an artefact of the assembly layout: everything that produces or
 consumes them is internal, so no API you can call ever hands you one. Treat them
 as unsupported and do not build on them.
 
+That warning is about this one namespace, not about the `Shorokoo.Core.*` prefix:
+six namespaces under it — including `Shorokoo.Core.Training`, where the
+learning-rate `Schedule` / `Schedules` API lives — are supported public surface.
+[orientation.md](orientation.md#public-core-namespaces) lists them.
+
 ### Quick Execution Engine value computation is bounded
 
 The Quick Execution Engine (QEE) always propagates output **dtype and shape**

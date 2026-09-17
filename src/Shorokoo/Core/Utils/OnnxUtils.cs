@@ -300,9 +300,15 @@ namespace Shorokoo.Core.Utils
             => BackendTransfer.CopyTo(InferenceBackend.Factory, value);
 
         public static IData CreateData(IShorokooTensorValue value)
+            => CreateData(value, context: null);
+
+        public static IData CreateData(IShorokooTensorValue value, Shorokoo.Runtime.ComputeContext? context)
         {
             if (value.ValueType == ShorokooOnnxValueType.Tensor)
-                return CreateTensorDataFromValue(value);
+                return context is null
+                    ? CreateTensorDataFromValue(value)
+                    : CreateTensorDataFromValue(
+                        new Shape(value.Shape), (DType)(int)value.ElementType, value, context);
             else if (value.ValueType == ShorokooOnnxValueType.Sequence)
                 return CreateTensorDataSequenceFromValue(value);
 
@@ -311,8 +317,13 @@ namespace Shorokoo.Core.Utils
         }
 
         public static NamedModelParam CreateNamedModelParam(IShorokooTensorValue value, ModelParamType paramType, string name)
+            => CreateNamedModelParam(value, paramType, name, context: null);
+
+        public static NamedModelParam CreateNamedModelParam(
+            IShorokooTensorValue value, ModelParamType paramType, string name,
+            Shorokoo.Runtime.ComputeContext? context)
         {
-            var data = CreateData(value);
+            var data = CreateData(value, context);
             if (data is TensorDataSequence sequenceData)
                 return new TensorDataSequenceModelParam(name, paramType, sequenceData);
             if (data is TensorData tensorData)

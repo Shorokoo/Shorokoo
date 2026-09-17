@@ -65,6 +65,7 @@ public static class InferenceBackend
         {
             ArgumentNullException.ThrowIfNull(value);
             lock (_gate) { _factory = value; }
+            Remember(value);
         }
     }
 
@@ -79,6 +80,43 @@ public static class InferenceBackend
     /// rather than racing to fill in a null.</para>
     /// </summary>
     public static IShorokooInferenceSessionFactory? Current => _factory;
+
+    private static volatile IShorokooInferenceSessionFactory? _remembered;
+
+    /// <summary>
+    /// The backend <see cref="Shorokoo.Runtime.ComputeContext.Default"/> is built on: the first
+    /// one loaded, except that a CPU backend displaces a GPU one and is never displaced itself.
+    ///
+    /// <para>The asymmetry is deliberate. A program that has loaded both is running them side by
+    /// side on purpose and will name the one it means for each context; what it should not get for
+    /// the <i>unnamed</i> default is the card, where a stray convenience call quietly allocates
+    /// device memory. The host is the safe default and the one every machine has.</para>
+    /// </summary>
+    public static IShorokooInferenceSessionFactory? Remembered => _remembered;
+
+    /// <summary>
+    /// Records <paramref name="factory"/> as a loaded backend. A CPU backend always wins; a GPU
+    /// backend is kept only while no CPU one has been seen. Called for every backend that enters
+    /// the process, however it got here.
+    /// </summary>
+    public static void Remember(IShorokooInferenceSessionFactory factory)
+    {
+        ArgumentNullException.ThrowIfNull(factory);
+        lock (_gate)
+        {
+            var incomingIsCpu = factory.Description.Device == ComputeDevice.Cpu;
+            if (_remembered is null || incomingIsCpu)
+            {
+                if (_remembered is null
+                    || incomingIsCpu && _remembered.Description.Device != ComputeDevice.Cpu)
+                    _remembered = factory;
+            }
+        }
+    }
+
+    /// <summary>Forgets the remembered backend. Test hook: the rule is about what a process loaded,
+    /// and a test process loads several.</summary>
+    internal static void ForgetRemembered() { lock (_gate) _remembered = null; }
 
     /// <summary>
     /// Names the live backend and the device it runs on, resolving one the way
@@ -143,7 +181,7 @@ public static class InferenceBackend
         // A backend already loaded in the process wins -- it avoids pulling a
         // second native in alongside one the consumer has already bound.
         var preLoaded = TryFindAlreadyLoadedFactory();
-        if (preLoaded is not null) return preLoaded;
+        if (preLoaded is not null) return Remembering(preLoaded)!;
 
         var dir = ProbeDirectory();
         var osCandidates = KnownBackends
@@ -161,7 +199,7 @@ public static class InferenceBackend
                 "or add such a package as a dependency.");
 
         var path = Path.Combine(dir, chosen.Assembly + ".dll");
-        return InstantiateFactory(Assembly.LoadFrom(path))
+        return Remembering(InstantiateFactory(Assembly.LoadFrom(path)))
             ?? throw new InvalidOperationException(
                 $"'{chosen.Assembly}' was found at '{path}' but exposes no concrete " +
                 $"{nameof(IShorokooInferenceSessionFactory)}.");
@@ -230,6 +268,13 @@ public static class InferenceBackend
     internal static Assembly[] DiscoverableAssemblies(IEnumerable<Assembly> assemblies)
         => [.. assemblies.Where(
             asm => AssemblyLoadContext.GetLoadContext(asm) == AssemblyLoadContext.Default)];
+
+    /// <summary>Records a factory as it is produced, and hands it straight back.</summary>
+    private static IShorokooInferenceSessionFactory? Remembering(IShorokooInferenceSessionFactory? factory)
+    {
+        if (factory is not null) Remember(factory);
+        return factory;
+    }
 
     private static string ProbeDirectory()
     {

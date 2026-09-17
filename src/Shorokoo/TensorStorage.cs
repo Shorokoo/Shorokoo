@@ -33,6 +33,26 @@ namespace Shorokoo
         /// <summary>Where these bytes are.</summary>
         internal MemorySpace Space { get; }
 
+        /// <summary>
+        /// The context whose disposal releases these bytes, or null when they belong to the
+        /// framework's own host memory and outlive every context.
+        ///
+        /// <para>It follows the ownership, not the allocation. A tensor transferred out of the
+        /// context that allocated it takes the bytes with it, and disposing that first context
+        /// must then leave them alone — they are the target's now.</para>
+        /// </summary>
+        internal Shorokoo.Runtime.ComputeContext? Owner { get; private set; }
+
+        /// <summary>Moves responsibility for these bytes to <paramref name="context"/>, off
+        /// whoever had it. Exactly one context is on the hook at a time.</summary>
+        internal void TransferOwnershipTo(Shorokoo.Runtime.ComputeContext? context)
+        {
+            if (ReferenceEquals(Owner, context)) return;
+            Owner?.ReleaseOwnership(this);
+            Owner = context;
+            context?.TakeOwnership(this);
+        }
+
         /// <summary>False once the owner has released these bytes. Reading them afterwards is a
         /// use-after-free, and every accessor checks this to make it an exception instead.</summary>
         internal bool IsLive => _release is not null;

@@ -184,7 +184,11 @@ public static class IsolatedBackend
                 $"backend '{spec.Name}' but exposes no concrete " +
                 $"{nameof(IShorokooInferenceSessionFactory)} with a parameterless constructor.");
 
-        return new RenamedFactory(factory, spec.Name);
+        var loaded = new RenamedFactory(factory, spec.Name);
+        // A backend loaded here is a backend this process has, so it counts towards the one the
+        // default context is built on -- under the same rule, where a CPU backend wins.
+        InferenceBackend.Remember(loaded);
+        return loaded;
     }
 
     /// <summary>

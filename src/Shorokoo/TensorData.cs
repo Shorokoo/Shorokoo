@@ -226,6 +226,11 @@ namespace Shorokoo
                 throw new ArgumentException(
                     "A tensor with no compute context owns its memory: there is no other tensor or "
                     + "backend that could own it instead.", nameof(ownsMemory));
+
+            // Taking ownership puts the bytes on this context's books, so disposing the context
+            // releases them -- and takes them off whoever had them before, so disposing that one
+            // does not.
+            if (ownsMemory) storage.TransferOwnershipTo(context);
         }
 
         /// <summary>
@@ -259,7 +264,11 @@ namespace Shorokoo
             OwnsMemory = ownsMemory;
         }
 
-        /// <summary>Gives up ownership without releasing anything — the other half of a transfer.</summary>
+        /// <summary>
+        /// Gives up ownership without releasing anything — the other half of a transfer. The
+        /// storage's owner has already moved on by the time this runs, so there is nothing to
+        /// deregister here.
+        /// </summary>
         internal void SurrenderOwnership() => OwnsMemory = false;
 
         /// <summary>

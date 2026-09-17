@@ -1318,6 +1318,46 @@ public class CoreUtilsCoverageTests
     }
 
     [Fact]
+    public void TestAtomicFileWriterReportsWhatEachWriteCost()
+    {
+        var dir = NewScratchDir();
+        try
+        {
+            var payload = new byte[1 << 20];
+            var target = Path.Combine(dir, "state.bin");
+            AtomicFileWriter.WriteFile(target, s => s.Write(payload));
+
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            var report = AtomicFileWriter.WriteFile(target, s => s.Write(payload));
+            var outer = clock.Elapsed;
+            Assert.Equal(payload.Length, report.BytesWritten);
+            Assert.Equal(new FileInfo(target).Length, report.BytesWritten);
+            Assert.True(report.Write > TimeSpan.Zero
+                && report.Flush > TimeSpan.Zero && report.Commit > TimeSpan.Zero);
+            Assert.True(report.Elapsed <= outer && report.Elapsed >= outer * 0.5);
+
+            // Rotation runs inside the call, so the report still accounts for the caller's clock.
+            clock = System.Diagnostics.Stopwatch.StartNew();
+            var rotated = AtomicFileWriter.WriteFile(
+                Path.Combine(dir, "ckpt-7.bin"), s => s.Write(payload),
+                AtomicFileWriter.RetainPolicy.KeepLast(1, "ckpt-", ".bin"));
+            var rotatedOuter = clock.Elapsed;
+            Assert.Equal(payload.Length, rotated.BytesWritten);
+            Assert.True(rotated.Elapsed <= rotatedOuter && rotated.Elapsed >= rotatedOuter * 0.5);
+
+            Assert.Equal(0.0, default(SaveReport).BytesPerSecond);
+            Assert.Equal(2_000_000.0, new SaveReport(
+                1_000_000, TimeSpan.FromSeconds(0.2), TimeSpan.FromSeconds(0.2),
+                TimeSpan.FromSeconds(0.1)).BytesPerSecond);
+            Assert.Equal(
+                "200,000,077 bytes in 0.252s (757 MiB/s): write 0.051s, flush 0.194s, commit 0.007s",
+                new SaveReport(200_000_077, TimeSpan.FromSeconds(0.051),
+                    TimeSpan.FromSeconds(0.194), TimeSpan.FromSeconds(0.007)).ToString());
+        }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
+
+    [Fact]
     public void TestAtomicFileWriterCommitAndValidationCoverage()
     {
         var dir = NewScratchDir();

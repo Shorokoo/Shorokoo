@@ -46,7 +46,10 @@ namespace Shorokoo
         /// <see cref="TrainingCheckpoint.Rig"/> — the self-describing inference model is bound into the
         /// rig's retained concrete architecture, so no model graph or example input is needed.</param>
         /// <param name="filePath">Target <c>.skpt</c> path; its directory must already exist.</param>
-        public static void SaveTrainingCheckpointToSkpt(
+        /// <returns>What the save cost — the committed size and where its time went
+        /// (<see cref="SaveReport"/>), on the same terms as
+        /// <see cref="TrainingCheckpoint.Save(string, CheckpointComponents?)"/>.</returns>
+        public static SaveReport SaveTrainingCheckpointToSkpt(
             TrainingCheckpoint checkpoint, string filePath)
             => ForTrainingCheckpoint(checkpoint).Save(filePath);
 
@@ -632,15 +635,22 @@ namespace Shorokoo
         /// Commits the training checkpoint as a single <c>.skpt</c> file. The write is atomic (staged
         /// to a temp file beside <paramref name="filePath"/> and committed by rename), so a crash
         /// mid-save never corrupts an existing checkpoint; the target's directory must already exist.
-        /// See <see cref="Persistence.SaveTrainingCheckpointToSkpt"/> for the on-disk shape.
+        /// See <see cref="Persistence.SaveTrainingCheckpointToSkpt"/> for the on-disk shape, and
+        /// <see cref="SaveReport"/> for what the return value says about the cost.
         /// </summary>
-        public void Save(string filePath)
+        public SaveReport Save(string filePath)
         {
             if (string.IsNullOrWhiteSpace(filePath))
                 throw new ArgumentException("Checkpoint path cannot be null or empty.", nameof(filePath));
-            var entries = BuildCheckpointEntries();
-            AtomicFileWriter.WriteFile(filePath,
-                stream => SkptFileFormat.WriteStoredZip(stream, entries, DateTime.UtcNow));
+            // The entries are built INSIDE the write callback, as the flat save builds its tensors
+            // (TrainingCheckpoint.Save). Building them is the bulk of a .skpt save — it binds the
+            // inference weights, serializes every state kind to safetensors bytes, compresses, and
+            // SHA-256s each entry — so building them outside would leave all of it out of the
+            // measured cost: the report would name a few milliseconds of zip framing for a call that
+            // took fifty, and a loop subtracting it would still charge the rest to its training rate,
+            // which is the very miscount #338 is about.
+            return AtomicFileWriter.WriteFile(filePath,
+                stream => SkptFileFormat.WriteStoredZip(stream, BuildCheckpointEntries(), DateTime.UtcNow));
         }
 
         /// <summary>

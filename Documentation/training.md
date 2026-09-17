@@ -1019,6 +1019,58 @@ var more = rig.Fit(inputs, targets, numEpochs: 5, ckpt);  // continues where it 
   file — use `Persistence.Inspect(path)`;
   see [onnx-and-weights.md](onnx-and-weights.md#identify-and-summarize-a-file-persistenceinspect).
 
+### What a save costs
+
+Every checkpoint save that writes a **single file** returns a `SaveReport` — the bytes it committed
+and where its time went ([#338](https://github.com/Shorokoo/Shorokoo/issues/338)):
+
+```csharp
+var save = checkpoint.Save("run.safetensors");
+Console.WriteLine(save);
+// 200,000,077 bytes in 0.252s (757 MiB/s): write 0.051s, flush 0.194s, commit 0.007s
+```
+
+`Write` is producing the content and writing it into the staged file — serializing the state, and
+for a `.skpt` also compressing and hashing its entries — `Flush` the fsync that makes it durable,
+and `Commit` the rename that publishes it plus the sweep of any staged sibling an earlier
+interrupted save left behind. The three are disjoint and add up to `Elapsed`, the wall clock of the call;
+`BytesWritten` is the committed file's own size, and `BytesPerSecond` the rate that save achieved.
+`Persistence.SaveTrainingCheckpoint`, `Persistence.SaveTrainingCheckpointToSkpt` and the
+`Persistence.ForTrainingCheckpoint(...)` builder's `Save` all return the same report. The
+**directory** form (`SaveAsDirectory`) does not: it commits a tree of files rather than one, which
+is a different measurement, and it still returns `void`.
+
+Two reasons it is reported rather than left to be worked out from the file's size:
+
+- **The cost does not follow the size.** Two identical saves of one identical file differ, and the
+  phases are separated because the total alone cannot say why. For a flat save at size it is the
+  flush that both dominates and moves — what it costs depends on how much of the file the OS had already written
+  back before it ran — while the serialization is steady and the commit is metadata-only. One
+  200 MB file saved six times over: write steady at 51 ms, flush between 184 and 243 ms, commit at
+  7 ms. The rate a save achieves is a property of that save, not a constant of the machine to
+  calibrate once.
+- **At a checkpoint cadence it is not negligible to the run.** Saving a multi-GB checkpoint every N
+  steps can cost tens of seconds each time; over a long run that is minutes to tens of minutes.
+
+Saving is disk I/O, not training. A loop that reports its own throughput should subtract the
+returned `Elapsed` from the window it measures, rather than charging the checkpoint cadence to the
+training rate and reporting a step time that silently moves with it:
+
+```csharp
+steady.Stop();                                   // saving is I/O, not training
+var save = checkpoint.Save(path);
+steady.Start();
+savedBytes += save.BytesWritten;
+```
+
+The **flat safetensors** save writes each tensor's payload straight out of its storage, so it costs
+no second copy of the training state in memory. The `.skpt` container does not share that: it
+serializes each state kind to a `byte[]`, hashes it and holds every entry in memory until the write
+begins, so budget for a full extra copy of the training state there — which is why its `Write` phase
+dominates its report. Neither form can yet go past the safetensors layer's 2 GB ceiling — a
+checkpoint at or above that size is written without complaint and then cannot be read back
+([#48](https://github.com/Shorokoo/Shorokoo/issues/48)).
+
 ### Bind trained weights into an inference model
 
 Once trained, turn a checkpoint into a runnable concrete model with one call:
@@ -1059,6 +1111,7 @@ All of these are in namespace `Shorokoo` (covered by `using Shorokoo;`):
 | `ModelParamType` (enum) | Tags a param's role. | `Undefined`, `HyperParam`, `TrainableParam`, `InputParam`, `OutputParam` |
 | `ModelParamList` | A set of named params (e.g. loaded weights). | `new ModelParamList(IEnumerable<(string name, TensorData data)>)` |
 | `TensorDataStruct` | A struct-shaped bundle of named `TensorData` fields; the form `Train`/`TrainStep` expect for inputs/targets. | Build: `new TensorDataStruct(structDef, fields)` where `structDef` is a `TensorStructDef` and `fields` are `KeyValuePair<string, IData>` — one per definition field, each of the kind that field declares (a value contradicting its definition throws). Read: `.Fields` (an `ImmutableDictionary<string, IData>` of name → value), `.Count`, or the `[int]` indexer. |
+| `SaveReport` | What a checkpoint save cost: `BytesWritten`, the disjoint `Write` / `Flush` / `Commit` phases, their sum `Elapsed`, and `BytesPerSecond`. | Returned by every checkpoint save — see [What a save costs](#what-a-save-costs). |
 
 `sampleInputs` for `FromScratch` is a `NamedModelParam[]` describing each model input
 by name and sample shape. `Train`/`TrainStep` take `TensorDataStruct` batches.

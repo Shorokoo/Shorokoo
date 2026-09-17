@@ -230,11 +230,12 @@ namespace Shorokoo
         /// <c>.safetensors</c> extension is conventional. To write the native .skpt container
         /// instead (carrying the inference model and per-kind data entries), use
         /// <see cref="SaveTrainingCheckpointToSkpt"/> / <see cref="ForTrainingCheckpoint"/>.
+        /// Returns what the save cost, exactly as the method it delegates to does.
         /// </summary>
-        public static void SaveTrainingCheckpoint(TrainingCheckpoint checkpoint, string filePath)
+        public static SaveReport SaveTrainingCheckpoint(TrainingCheckpoint checkpoint, string filePath)
         {
             if (checkpoint is null) throw new ArgumentNullException(nameof(checkpoint));
-            checkpoint.Save(filePath);
+            return checkpoint.Save(filePath);
         }
 
         /// <summary>

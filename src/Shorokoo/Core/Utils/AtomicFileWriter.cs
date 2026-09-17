@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace Shorokoo.Core.Utils
 {
     /// <summary>
@@ -58,8 +60,14 @@ namespace Shorokoo.Core.Utils
         /// target's directory must already exist — the temp file lives there precisely so the
         /// rename cannot cross filesystems. The callback must leave the stream open: the
         /// writer flushes it to disk (and disposes it) itself.
+        ///
+        /// <para>Returns what the write cost — the committed size and the time split across the
+        /// three phases, which at multi-GB sizes do not scale together. This is the one place that
+        /// can measure them, since it owns the staged file: the caller's callback sees only its own
+        /// serialization, and a caller timing the whole call cannot tell the fsync from the rest.
+        /// Callers with nothing to report it to may ignore it.</para>
         /// </summary>
-        internal static void WriteFile(
+        internal static SaveReport WriteFile(
             string targetPath,
             Action<Stream> writeContent,
             Action<string>? onWarning = null)
@@ -72,12 +80,21 @@ namespace Shorokoo.Core.Utils
                     "Delete it first, or save to another path.");
 
             string tempPath = Path.Combine(directory, StageName(name));
+            TimeSpan written, flushed;
+            long bytes;
+            var clock = Stopwatch.StartNew();
             try
             {
                 using (var fs = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
                 {
                     writeContent(fs);
+                    written = clock.Elapsed;
                     fs.Flush(flushToDisk: true);
+                    // After the flush, so the length is the staged file's own, not a buffered
+                    // figure — and it is measured rather than derived, so it counts whatever the
+                    // content callback actually wrote.
+                    bytes = fs.Length;
+                    flushed = clock.Elapsed;
                 }
                 CommitFaultInjection?.Invoke(tempPath);
                 File.Move(tempPath, fullTarget, overwrite: true);
@@ -89,6 +106,7 @@ namespace Shorokoo.Core.Utils
             }
 
             AfterCommit(directory, name, onWarning);
+            return new SaveReport(bytes, written, flushed - written, clock.Elapsed - flushed);
         }
 
         /// <summary>
@@ -363,17 +381,21 @@ namespace Shorokoo.Core.Utils
         /// prefix/suffix, or a non-numeric token), staged <c>.tmp-</c> temps, and the entry just
         /// committed are left untouched. Rotation is best-effort: because the new file is already
         /// committed when it runs, a rotation failure <b>never</b> fails the save — it surfaces only
-        /// through <paramref name="onWarning"/> (silent if none is given).
+        /// through <paramref name="onWarning"/> (silent if none is given). Its cost rides in the
+        /// returned report's post-commit phase, so <see cref="SaveReport.Elapsed"/> stays the wall
+        /// clock of the whole call.
         /// </para>
         /// </summary>
-        internal static void WriteFile(
+        internal static SaveReport WriteFile(
             string targetPath,
             Action<Stream> writeContent,
             RetainPolicy retain,
             Action<string>? onWarning = null)
         {
+            var clock = Stopwatch.StartNew();
+
             // Commit first — this throws on write failure, which correctly fails the save.
-            WriteFile(targetPath, writeContent, onWarning);
+            var report = WriteFile(targetPath, writeContent, onWarning);
 
             // The checkpoint is now committed; rotation is pure housekeeping and must not throw
             // out of a successful save.
@@ -382,6 +404,11 @@ namespace Shorokoo.Core.Utils
             {
                 (onWarning ?? (static _ => { }))($"Shorokoo: checkpoint rotation failed: {e.Message}");
             }
+
+            // Rotation runs inside this call, so its cost is the caller's: it belongs in the
+            // post-commit phase, which keeps SaveReport.Elapsed the wall clock of the whole save
+            // whichever overload produced it.
+            return report with { Commit = clock.Elapsed - report.Write - report.Flush };
         }
 
         /// <summary>

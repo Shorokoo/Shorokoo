@@ -2709,6 +2709,78 @@ public class TrainingRigCheckpointCoverageTests
         finally { if (File.Exists(adamPath)) File.Delete(adamPath); }
     }
 
+    /// <summary>Runs one save and holds it to the whole contract: the bytes are the file's own, each
+    /// phase is measured, and Elapsed accounts for the caller's wall clock — the last of which is
+    /// what a save that leaves its content production outside the measurement fails.</summary>
+    private static SaveReport Saved(Func<SaveReport> save, string path)
+    {
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var r = save();
+        var outer = clock.Elapsed;
+        Assert.Equal(new FileInfo(path).Length, r.BytesWritten);
+        Assert.True(r.Write > TimeSpan.Zero && r.Flush > TimeSpan.Zero && r.Commit > TimeSpan.Zero);
+        Assert.True(r.Elapsed <= outer && r.Elapsed >= outer * 0.5);
+        return r;
+    }
+
+    [Fact]
+    public void TestEveryCheckpointSaveReportsItsBytesAndWhereItsTimeWent()
+    {
+        var rig = AdamRig();
+        var ckpt = SteppedOnce(rig);
+
+        var flat = TempPath("save_report") + ".safetensors";
+        var narrow = TempPath("save_report_narrow") + ".safetensors";
+        var skpt = TempPath("save_report") + ".skpt";
+        try
+        {
+            ckpt.Save(flat);
+            Persistence.SaveTrainingCheckpointToSkpt(ckpt, skpt);
+
+            var full = Saved(() => ckpt.Save(flat), flat);
+            var weightsOnly = Saved(() => ckpt.Save(narrow, CheckpointComponents.InferenceState), narrow);
+            Assert.True(weightsOnly.BytesWritten < full.BytesWritten);
+
+            Saved(() => Persistence.SaveTrainingCheckpoint(ckpt, flat), flat);
+            Saved(() => Persistence.SaveTrainingCheckpointToSkpt(ckpt, skpt), skpt);
+            Saved(() => Persistence.ForTrainingCheckpoint(ckpt).Save(skpt), skpt);
+
+            Assert.Equal(FlattenStruct(ckpt.OptimizerState),
+                FlattenStruct(rig.LoadCheckpoint(flat).OptimizerState));
+            Assert.Equal(FlattenStruct(ckpt.OptimizerState),
+                FlattenStruct(rig.LoadCheckpointFromSkpt(skpt).OptimizerState));
+        }
+        finally
+        {
+            string[] written = [flat, narrow, skpt];
+            foreach (var p in written) if (File.Exists(p)) File.Delete(p);
+        }
+    }
+
+    [Fact]
+    public void TestSavingAParameterSetWritesItsStorageWithoutCopyingIt()
+    {
+        var big = TensorData([2L << 20], new float[2 << 20]);
+        var scalar = TensorData(Array.Empty<long>(), 7f);
+        List<SafeTensor> tensors =
+        [
+            new SafeTensor("w", big, SafeTensorLoader.DTypeToSafeTensorDType(big.DType), big.Shape.Dims),
+            new SafeTensor("s", scalar, SafeTensorLoader.DTypeToSafeTensorDType(scalar.DType), scalar.Shape.Dims),
+        ];
+
+        SafeTensorLoader.SaveSafeTensorsToStream(Stream.Null, tensors);
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        SafeTensorLoader.SaveSafeTensorsToStream(Stream.Null, tensors);
+        Assert.True(GC.GetAllocatedBytesForCurrentThread() - before < big.AccessRawMemory().Length / 128);
+
+        using var buffer = new MemoryStream();
+        SafeTensorLoader.SaveSafeTensorsToStream(buffer, tensors);
+        var read = SafeTensorLoader.ParseSafeTensorBytes(buffer.ToArray());
+        Assert.Equal(["w", "s"], read.Select(t => t.Name));
+        Assert.Equal(big.CopyRawMemory(), read[0].Data.CopyRawMemory());
+        Assert.Equal(scalar.CopyRawMemory(), read[1].Data.CopyRawMemory());
+    }
+
     [Fact]
     public void TestCheckpointSaveAtomicityAndTruncatedLoadFailsLoudlyCoverage()
     {

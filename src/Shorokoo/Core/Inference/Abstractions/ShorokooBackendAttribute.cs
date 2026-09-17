@@ -44,9 +44,15 @@ public sealed class ShorokooBackendAttribute : Attribute
     public string Device { get; }
 
     /// <summary>
-    /// The native libraries that must sit beside this assembly for it to load, separated by
+    /// The native libraries this assembly's folder must carry for it to load, separated by
     /// semicolons. Checked by <see cref="BackendPackage.Probe"/>, so a deployment missing one is
     /// refused with the file named rather than failing at the first P/Invoke.
+    ///
+    /// <para>Names only, never paths: where the file lands is the deployment's business, not the
+    /// backend's. A build that flattens its natives puts them beside this assembly, and one that
+    /// does not leaves them under <c>runtimes/&lt;rid&gt;/native/</c> — the probe looks in both,
+    /// because which one a backend gets depends on the platform it was built on rather than on
+    /// anything declared here.</para>
     /// </summary>
     public string Natives { get; set; } = "";
 

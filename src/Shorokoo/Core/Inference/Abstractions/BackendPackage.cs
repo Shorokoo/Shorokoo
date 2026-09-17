@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.IO;
 using System.Linq;
@@ -26,7 +27,8 @@ public enum BackendRejection
     /// <summary>Built for a different processor architecture.</summary>
     WrongArchitecture,
 
-    /// <summary>A native library it declares is not deployed beside it.</summary>
+    /// <summary>A native library it declares is not deployed anywhere the backend's own folder
+    /// carries natives — neither flat beside it nor under <c>runtimes/&lt;rid&gt;/native/</c>.</summary>
     MissingNative,
 
     /// <summary>It needs a CUDA runtime this machine does not have.</summary>
@@ -126,12 +128,12 @@ public static class BackendPackage
         var directory = Path.GetDirectoryName(full)!;
         var missing = declared.GetValueOrDefault("natives", "")
             .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Where(n => !File.Exists(Path.Combine(directory, n)))
+            .Where(n => ResolveNative(directory, n) is null)
             .ToList();
         if (missing.Count > 0)
             return No(BackendRejection.MissingNative,
-                $"'{Path.GetFileName(full)}' needs {string.Join(", ", missing)} beside it in "
-                + $"'{directory}', and they are not there.");
+                $"'{Path.GetFileName(full)}' is missing {string.Join(", ", missing)}: not beside it "
+                + $"in '{directory}', and not under '{RuntimesNativeFolder()}' there either.");
 
         if (declared.TryGetValue("requirescudaruntime", out var cuda)
             && !string.IsNullOrEmpty(cuda) && !CudaRuntime.TryMemGetInfo(out _, out _))
@@ -147,8 +149,10 @@ public static class BackendPackage
     /// not if it cannot. A backend that does not fit this machine is a <c>false</c>, not a throw —
     /// the caller decides whether that is a fallback, a warning or the end of the program.
     ///
-    /// <para>The backend is loaded into isolation of its own, bound to the native beside it, so
-    /// several loaded this way run side by side without sharing a runtime.</para>
+    /// <para>The backend is loaded into isolation of its own, bound to the native ONNX Runtime
+    /// found in its folder — flat beside it, or under <c>runtimes/&lt;rid&gt;/native/</c>, whichever
+    /// the deployment used — so several loaded this way run side by side without sharing a
+    /// runtime.</para>
     /// </summary>
     /// <param name="assemblyPath">The backend DLL.</param>
     /// <param name="factory">The loaded backend, or null.</param>
@@ -165,16 +169,20 @@ public static class BackendPackage
         var full = Path.GetFullPath(assemblyPath);
         var directory = Path.GetDirectoryName(full)!;
         var name = Path.GetFileNameWithoutExtension(full);
-        var native = Path.Combine(directory, NativeRuntimeFileName());
 
-        if (!File.Exists(native))
+        // Resolved rather than assumed: IsolatedBackend.Load binds this path as a file, so it has
+        // to be where the native really is, not where a flat deployment would have put it.
+        var native = ResolveNative(directory, NativeRuntimeFileName());
+
+        if (native is null)
         {
             failure = probe with
             {
                 Supported = false,
                 Reason = BackendRejection.MissingNative,
                 Detail = $"'{name}' passed its own checks but the native ONNX Runtime it binds "
-                    + $"({Path.GetFileName(native)}) is not in '{directory}'.",
+                    + $"({NativeRuntimeFileName()}) is in neither '{directory}' nor "
+                    + $"'{Path.Combine(directory, RuntimesNativeFolder())}'.",
             };
             return false;
         }
@@ -264,6 +272,95 @@ public static class BackendPackage
         }
         return values.ToImmutable();
     }
+
+    /// <summary>
+    /// Where <paramref name="nativeFileName"/> actually is for a backend deployed in
+    /// <paramref name="directory"/>, or null when it is in neither place a .NET build puts one.
+    ///
+    /// <para>There are two layouts, and a backend has no say in which it gets. The standard one
+    /// is <c>runtimes/&lt;rid&gt;/native/</c>, which is how a native NuGet package ships and how
+    /// the host resolves a P/Invoke through <c>deps.json</c>. The flat one — the native sitting
+    /// beside the managed assembly — is an artefact of a package's own build props copying it to
+    /// the output root, and ONNX Runtime's props do that <i>on Windows only</i>. So these
+    /// backends build flat on Windows and under <c>runtimes/</c> on Linux and macOS. A program
+    /// that installs a backend's NuGet package gets <c>runtimes/</c> on every platform,
+    /// Windows included, because those props sit in the package's <c>build/</c> folder rather
+    /// than its <c>buildTransitive/</c> one and so never reach a consumer that did not reference
+    /// ONNX Runtime itself. Assuming either layout makes the backend unloadable wherever the
+    /// other one is what the deployment produced.</para>
+    ///
+    /// <para>Flat wins when both exist. A build that flattened deliberately — the
+    /// <c>ShorokooBackendNatives</c> deployment that gives each isolated backend a native folder
+    /// of its own, say — means the file it put there, not whatever a package happened to leave
+    /// under <c>runtimes/</c> beside it.</para>
+    /// </summary>
+    internal static string? ResolveNative(string directory, string nativeFileName)
+    {
+        var flat = Path.Combine(directory, nativeFileName);
+        if (File.Exists(flat)) return flat;
+
+        var runtimes = Path.Combine(directory, "runtimes");
+        foreach (var rid in CandidateRuntimeIdentifiers(runtimes))
+        {
+            var path = Path.Combine(runtimes, rid, "native", nativeFileName);
+            if (File.Exists(path)) return path;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// The runtime identifiers whose <c>native/</c> folder may hold this machine's copy of a
+    /// native, most specific first.
+    ///
+    /// <para>The host's own identifier comes first, then the portable one it normally equals
+    /// (<c>win-x64</c>, <c>linux-x64</c>, <c>osx-arm64</c>) for the case where the host reports
+    /// something narrower than the folder a package shipped. Last, and only if neither was
+    /// there, any folder actually present for this operating system and this architecture: that
+    /// is what finds a package shipping under a RID this code cannot name in advance —
+    /// <c>linux-musl-x64</c>, <c>win10-x64</c> — without ever crossing an OS or an architecture
+    /// boundary, which is the part that would load a library this process cannot run.</para>
+    /// </summary>
+    private static IEnumerable<string> CandidateRuntimeIdentifiers(string runtimesDirectory)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var rid in (string[])[RuntimeInformation.RuntimeIdentifier, PortableRuntimeIdentifier()])
+            if (!string.IsNullOrEmpty(rid) && seen.Add(rid))
+                yield return rid;
+
+        if (!Directory.Exists(runtimesDirectory)) yield break;
+
+        var os = RuntimeIdentifierOs();
+        var architecture = "-" + RuntimeIdentifierArchitecture();
+        // Ordered, so that a folder set offering more than one match resolves to the same file on
+        // every run rather than to whatever the file system happened to enumerate first.
+        foreach (var candidate in Directory.EnumerateDirectories(runtimesDirectory)
+                     .Select(Path.GetFileName)
+                     .OfType<string>()
+                     .Order(StringComparer.Ordinal))
+            if (candidate.StartsWith(os, StringComparison.OrdinalIgnoreCase)
+                && candidate.EndsWith(architecture, StringComparison.OrdinalIgnoreCase)
+                && seen.Add(candidate))
+                yield return candidate;
+    }
+
+    /// <summary>The path a <c>runtimes/</c>-layout native sits at, relative to the backend's
+    /// folder. For naming the place in a rejection, not for probing — probing goes through
+    /// <see cref="CandidateRuntimeIdentifiers"/>, which considers more than this one.</summary>
+    private static string RuntimesNativeFolder()
+        => Path.Combine("runtimes", PortableRuntimeIdentifier(), "native");
+
+    private static string PortableRuntimeIdentifier()
+        => $"{RuntimeIdentifierOs()}-{RuntimeIdentifierArchitecture()}";
+
+    // "win", not "windows": a RID spells the operating system its own way, and this is the token
+    // a runtimes/ folder is named with rather than the one the backend's manifest declares.
+    private static string RuntimeIdentifierOs()
+        => RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "win"
+            : RuntimeInformation.IsOSPlatform(OSPlatform.Linux) ? "linux"
+            : "osx";
+
+    private static string RuntimeIdentifierArchitecture()
+        => RuntimeInformation.ProcessArchitecture.ToString().ToLowerInvariant();
 
     private static OSPlatform CurrentPlatform()
         => RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? OSPlatform.Windows

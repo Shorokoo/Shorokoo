@@ -539,10 +539,21 @@ else
 
 `BackendPackage.Probe` answers the same question without loading anything: it reads the
 backend's own declaration out of the file's metadata, so a backend for another operating
-system, another architecture, or one whose native libraries are not deployed beside it is
+system, another architecture, or one whose native libraries are not deployed with it is
 refused before any native code is touched. `BackendProbe.Reason` says which it was
 (`WrongOperatingSystem`, `MissingNative`, `MissingCudaRuntime`, …) and `Detail` names the
 file or library that is wrong.
+
+A backend's natives are looked for in both of the places a .NET build puts them: flat
+beside the backend assembly, and under `runtimes/<rid>/native/` next to it. Which one a
+given deployment has is not the backend's choice. ONNX Runtime's native packages copy
+their library to the output root through build props that fire on Windows only, so a
+source build of a backend is flat on Windows and under `runtimes/linux-x64/native/` on
+Linux; and a program that installs `Shorokoo.LinuxCPU` (or any of the other backend
+packages) from NuGet gets the `runtimes/` layout on *every* platform, because those props
+live in the ONNX Runtime package's `build/` folder and so do not reach a consumer that
+reached ONNX Runtime transitively. The native ONNX Runtime a loaded backend binds is
+resolved the same way, so it binds the file that is really there.
 
 Each backend loaded this way gets a load context of its own, so several run side by side
 without sharing a native runtime.

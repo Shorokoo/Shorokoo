@@ -109,5 +109,54 @@ namespace Shorokoo
         {
             return GetEnumerator();
         }
+
+        /// <summary>
+        /// The compute context this struct's fields belong to, or null for the framework's own
+        /// host memory. Set by the transfer operations below.
+        /// </summary>
+        public Shorokoo.Runtime.ComputeContext? Context { get; private set; }
+
+        /// <summary>Moves this struct's owned tensors to <paramref name="target"/>, recursing
+        /// through nested structs and sequences. A field it only has access to is left where it
+        /// is, since moving what you do not own is what the non-owning case forbids.</summary>
+        public TensorDataStruct TransferTo(Shorokoo.Runtime.ComputeContext? target)
+            => Rebuild(target, static (d, c) => Move(d, c, static (t, x) => t.TransferTo(x),
+                static (q, x) => q.TransferTo(x), static (u, x) => u.TransferTo(x)));
+
+        /// <summary>Copies this struct's owned tensors into <paramref name="target"/>'s memory,
+        /// leaving this struct untouched.</summary>
+        public TensorDataStruct CopyTo(Shorokoo.Runtime.ComputeContext? target)
+            => Rebuild(target, static (d, c) => Move(d, c, static (t, x) => t.CopyTo(x),
+                static (q, x) => q.CopyTo(x), static (u, x) => u.CopyTo(x)));
+
+        /// <summary>Hands <paramref name="target"/> readers for this struct's owned tensors,
+        /// taking no ownership of any of them.</summary>
+        public TensorDataStruct GiveAccessTo(Shorokoo.Runtime.ComputeContext? target)
+            => Rebuild(target, static (d, c) => Move(d, c, static (t, x) => t.GiveAccessTo(x),
+                static (q, x) => q.GiveAccessTo(x), static (u, x) => u.GiveAccessTo(x)));
+
+        private TensorDataStruct Rebuild(
+            Shorokoo.Runtime.ComputeContext? target,
+            Func<IData, Shorokoo.Runtime.ComputeContext?, IData> operation)
+        {
+            var moved = Fields.Select(f =>
+                new KeyValuePair<string, IData>(f.Key, operation(f.Value, target)));
+            return new TensorDataStruct(Definition, moved) { Context = target };
+        }
+
+        /// <summary>Applies the right one of three operations to whichever kind of field this is,
+        /// and leaves anything else -- a tensor that owns nothing included -- alone.</summary>
+        private static IData Move(
+            IData field, Shorokoo.Runtime.ComputeContext? target,
+            Func<TensorData, Shorokoo.Runtime.ComputeContext?, TensorData> onTensor,
+            Func<TensorDataSequence, Shorokoo.Runtime.ComputeContext?, TensorDataSequence> onSequence,
+            Func<TensorDataStruct, Shorokoo.Runtime.ComputeContext?, TensorDataStruct> onStruct)
+            => field switch
+            {
+                TensorData t => t.OwnsMemory ? onTensor(t, target) : t,
+                TensorDataSequence q => onSequence(q, target),
+                TensorDataStruct u => onStruct(u, target),
+                _ => field,
+            };
     }
 }

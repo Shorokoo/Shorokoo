@@ -148,6 +148,59 @@ namespace Shorokoo
             public override void Dispose() => IsDisposed = true;
         }
 
+        /// <summary>
+        /// A sequence that is just a list of tensors, holding the very tensors it was given.
+        ///
+        /// <para>Which is what the transfer operations need. Building one through the runtime --
+        /// <see cref="Create"/>'s ordinary path -- makes a fresh sequence value and fresh elements
+        /// owning it, so every element's context and ownership would be replaced by the act of
+        /// rebuilding, and a GiveAccessTo would hand back owners. Holding the elements keeps what
+        /// each of them decided.</para>
+        /// </summary>
+        private sealed class ListTensorDataSequence<T> : TensorDataSequence<T>
+            where T : IVarType
+        {
+            private readonly List<TensorData<T>> _elements;
+
+            internal ListTensorDataSequence(List<TensorData<T>> elements) => _elements = elements;
+
+            public override int Count
+            {
+                get { ThrowIfDisposed(); return _elements.Count; }
+            }
+
+            public override TensorData<T> this[int index]
+            {
+                get { ThrowIfDisposed(); return _elements[index]; }
+            }
+
+            public override IEnumerator<TensorData<T>> GetEnumerator()
+            {
+                ThrowIfDisposed();
+                return _elements.GetEnumerator();
+            }
+
+            /// <summary>Disposes the elements, each of which then decides for itself whether that
+            /// releases anything -- a reader among them releases nothing.</summary>
+            public override void Dispose()
+            {
+                if (IsDisposed) return;
+                IsDisposed = true;
+                foreach (var element in _elements) element.Dispose();
+            }
+        }
+
+        /// <summary>A sequence holding these tensors as they are, rather than rebuilding them
+        /// through a runtime.</summary>
+        internal static TensorDataSequence OfElements(List<TensorData> data, DType dtype)
+            => data.Count == 0
+                ? CreateEmpty(dtype)
+                : (TensorDataSequence)OnnxUtils.CallGeneric(
+                    dtype.ToIVarType(), typeof(TensorDataSequence), nameof(internalOfElements), data);
+
+        internal static TensorDataSequence internalOfElements<T>(List<TensorData> data) where T : IVarType
+            => new ListTensorDataSequence<T>([.. data.Cast<TensorData<T>>()]);
+
         internal static TensorDataSequence CreateEmpty(DType dtype)
             => (TensorDataSequence)OnnxUtils.CallGeneric(dtype.ToIVarType(), typeof(TensorDataSequence), nameof(internalCreateEmpty));
 
@@ -166,6 +219,41 @@ namespace Shorokoo
             if (data.Count == 0)
                 return CreateEmpty(dtype);
             return OnnxUtils.CreateTensorDataSequence(dtype, data);
+        }
+
+
+        /// <summary>
+        /// The compute context these elements belong to, or null for the framework's own host
+        /// memory. Set by the transfer operations; a sequence built any other way inherits nothing
+        /// and reports null.
+        /// </summary>
+        public Shorokoo.Runtime.ComputeContext? Context { get; internal set; }
+
+        /// <summary>Moves this sequence's owned elements to <paramref name="target"/>, element by
+        /// element and under each element's own rules. Elements it only has access to are left
+        /// where they are: moving what you do not own is what the non-owning case forbids.</summary>
+        public TensorDataSequence TransferTo(Shorokoo.Runtime.ComputeContext? target)
+            => Rebuild(target, static (t, c) => t.TransferTo(c));
+
+        /// <summary>Copies this sequence's owned elements into <paramref name="target"/>'s memory,
+        /// leaving this sequence untouched.</summary>
+        public TensorDataSequence CopyTo(Shorokoo.Runtime.ComputeContext? target)
+            => Rebuild(target, static (t, c) => t.CopyTo(c));
+
+        /// <summary>Hands <paramref name="target"/> a reader for this sequence's owned elements,
+        /// taking no ownership of any of them.</summary>
+        public TensorDataSequence GiveAccessTo(Shorokoo.Runtime.ComputeContext? target)
+            => Rebuild(target, static (t, c) => t.GiveAccessTo(c));
+
+        private TensorDataSequence Rebuild(
+            Shorokoo.Runtime.ComputeContext? target,
+            Func<TensorData, Shorokoo.Runtime.ComputeContext?, TensorData> operation)
+        {
+            ThrowIfDisposed();
+            List<TensorData> moved = [.. this.Select(e => e.OwnsMemory ? operation(e, target) : e)];
+            var rebuilt = OfElements(moved, DType);
+            rebuilt.Context = target;
+            return rebuilt;
         }
 
         public abstract void Dispose();

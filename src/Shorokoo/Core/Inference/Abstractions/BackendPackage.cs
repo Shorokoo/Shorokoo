@@ -1,0 +1,277 @@
+using System;
+using System.Collections.Immutable;
+using System.IO;
+using System.Linq;
+using System.Reflection.Metadata;
+using System.Reflection.PortableExecutable;
+using System.Runtime.InteropServices;
+
+namespace Shorokoo.Core.Inference.Abstractions;
+
+/// <summary>Why a backend cannot be used here, or <see cref="None"/> when it can.</summary>
+public enum BackendRejection
+{
+    /// <summary>It can be used.</summary>
+    None = 0,
+
+    /// <summary>The file is not there, or is not a managed assembly at all.</summary>
+    Unreadable,
+
+    /// <summary>A managed assembly, but not one declaring itself a Shorokoo backend.</summary>
+    NotABackend,
+
+    /// <summary>Built for a different operating system.</summary>
+    WrongOperatingSystem,
+
+    /// <summary>Built for a different processor architecture.</summary>
+    WrongArchitecture,
+
+    /// <summary>A native library it declares is not deployed beside it.</summary>
+    MissingNative,
+
+    /// <summary>It needs a CUDA runtime this machine does not have.</summary>
+    MissingCudaRuntime,
+
+    /// <summary>It loaded, but holds no usable factory.</summary>
+    NoFactory,
+}
+
+/// <summary>
+/// What <see cref="BackendPackage.Probe"/> found: whether the backend can be used here, and if
+/// not, which of the reasons it is and what to do about it.
+/// </summary>
+/// <param name="Supported">Whether this backend can be loaded on this machine.</param>
+/// <param name="Reason">Why not, or <see cref="BackendRejection.None"/>.</param>
+/// <param name="Detail">A sentence for a human, naming the thing that is wrong.</param>
+/// <param name="Os">The operating system it declares, when it declared one.</param>
+/// <param name="Architecture">The architecture it declares, when it declared one.</param>
+/// <param name="Device">The device it declares, when it declared one.</param>
+public readonly record struct BackendProbe(
+    bool Supported, BackendRejection Reason, string Detail,
+    string? Os = null, string? Architecture = null, string? Device = null)
+{
+    /// <inheritdoc/>
+    public override string ToString() => Supported ? "supported" : $"{Reason}: {Detail}";
+}
+
+/// <summary>
+/// Loading a Shorokoo backend from a DLL at runtime, without having referenced it at compile time
+/// and without having to know in advance whether it will work here.
+///
+/// <para><see cref="Probe"/> answers that question by reading the file's metadata — it does not
+/// load the assembly, resolve its references or run any of its code — so a backend for another
+/// operating system is turned away as a value rather than as an exception thrown from somewhere
+/// inside the loader. <see cref="TryLoad"/> does the same and then loads the ones that pass.</para>
+///
+/// <para>Several may be loaded at once. Each gets a load context of its own, so each binds its own
+/// native ONNX Runtime — which is what lets one process drive a CPU backend and a CUDA one
+/// together.</para>
+/// </summary>
+public static class BackendPackage
+{
+    private const string AttributeName = "ShorokooBackendAttribute";
+
+    /// <summary>
+    /// Whether the backend assembly at <paramref name="assemblyPath"/> can be used on this
+    /// machine, and why not when it cannot.
+    ///
+    /// <para>Never throws for an answer of "no": a missing file, a file that is not an assembly,
+    /// an assembly that is not a backend and a backend for the wrong platform are all results.</para>
+    /// </summary>
+    /// <exception cref="ArgumentException"><paramref name="assemblyPath"/> is blank.</exception>
+    public static BackendProbe Probe(string assemblyPath)
+    {
+        if (string.IsNullOrWhiteSpace(assemblyPath))
+            throw new ArgumentException("A backend's path is required.", nameof(assemblyPath));
+
+        var full = Path.GetFullPath(assemblyPath);
+        if (!File.Exists(full))
+            return new(false, BackendRejection.Unreadable, $"There is no file at '{full}'.");
+
+        ImmutableDictionary<string, string> declared;
+        try
+        {
+            declared = ReadManifest(full);
+        }
+        catch (BadImageFormatException)
+        {
+            return new(false, BackendRejection.Unreadable,
+                $"'{full}' is not a managed assembly, so it cannot be a Shorokoo backend.");
+        }
+        catch (IOException ex)
+        {
+            return new(false, BackendRejection.Unreadable, $"'{full}' could not be read: {ex.Message}");
+        }
+
+        if (declared.IsEmpty)
+            return new(false, BackendRejection.NotABackend,
+                $"'{Path.GetFileName(full)}' declares no [ShorokooBackend], so it is not a backend "
+                + "-- or was built against a Shorokoo too old to declare one.");
+
+        var os = declared.GetValueOrDefault("os", "");
+        var arch = declared.GetValueOrDefault("architecture", "");
+        var device = declared.GetValueOrDefault("device", "");
+        BackendProbe No(BackendRejection reason, string detail)
+            => new(false, reason, detail, os, arch, device);
+
+        if (!OSPlatform.Create(os.ToUpperInvariant()).Equals(CurrentPlatform()))
+            return No(BackendRejection.WrongOperatingSystem,
+                $"'{Path.GetFileName(full)}' is a {os} backend and this is {CurrentOsName()}.");
+
+        if (!arch.Equals(RuntimeInformation.ProcessArchitecture.ToString(), StringComparison.OrdinalIgnoreCase))
+            return No(BackendRejection.WrongArchitecture,
+                $"'{Path.GetFileName(full)}' is built for {arch} and this process is "
+                + $"{RuntimeInformation.ProcessArchitecture.ToString().ToLowerInvariant()}.");
+
+        var directory = Path.GetDirectoryName(full)!;
+        var missing = declared.GetValueOrDefault("natives", "")
+            .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(n => !File.Exists(Path.Combine(directory, n)))
+            .ToList();
+        if (missing.Count > 0)
+            return No(BackendRejection.MissingNative,
+                $"'{Path.GetFileName(full)}' needs {string.Join(", ", missing)} beside it in "
+                + $"'{directory}', and they are not there.");
+
+        if (declared.TryGetValue("requirescudaruntime", out var cuda)
+            && !string.IsNullOrEmpty(cuda) && !CudaRuntime.TryMemGetInfo(out _, out _))
+            return No(BackendRejection.MissingCudaRuntime,
+                $"'{Path.GetFileName(full)}' needs a CUDA {cuda}.x runtime, which this machine "
+                + "does not have -- no driver, no device, or the toolkit is not installed.");
+
+        return new(true, BackendRejection.None, "supported", os, arch, device);
+    }
+
+    /// <summary>
+    /// Loads the backend at <paramref name="assemblyPath"/> if it can be used here, and reports why
+    /// not if it cannot. A backend that does not fit this machine is a <c>false</c>, not a throw —
+    /// the caller decides whether that is a fallback, a warning or the end of the program.
+    ///
+    /// <para>The backend is loaded into isolation of its own, bound to the native beside it, so
+    /// several loaded this way run side by side without sharing a runtime.</para>
+    /// </summary>
+    /// <param name="assemblyPath">The backend DLL.</param>
+    /// <param name="factory">The loaded backend, or null.</param>
+    /// <param name="failure">Why it was not loaded, meaningful only when this returns false.</param>
+    public static bool TryLoad(
+        string assemblyPath,
+        out IShorokooInferenceSessionFactory? factory,
+        out BackendProbe failure)
+    {
+        factory = null;
+        var probe = Probe(assemblyPath);
+        if (!probe.Supported) { failure = probe; return false; }
+
+        var full = Path.GetFullPath(assemblyPath);
+        var directory = Path.GetDirectoryName(full)!;
+        var name = Path.GetFileNameWithoutExtension(full);
+        var native = Path.Combine(directory, NativeRuntimeFileName());
+
+        if (!File.Exists(native))
+        {
+            failure = probe with
+            {
+                Supported = false,
+                Reason = BackendRejection.MissingNative,
+                Detail = $"'{name}' passed its own checks but the native ONNX Runtime it binds "
+                    + $"({Path.GetFileName(native)}) is not in '{directory}'.",
+            };
+            return false;
+        }
+
+        try
+        {
+            factory = IsolatedBackend.Load(new IsolatedBackendSpec
+            {
+                Name = $"{name} ({probe.Device})",
+                FactoryAssembly = name,
+                NativeRuntimePath = native,
+                ProbeDirectory = directory,
+            });
+            failure = probe;
+            return true;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or FileNotFoundException)
+        {
+            failure = probe with
+            {
+                Supported = false,
+                Reason = BackendRejection.NoFactory,
+                Detail = $"'{name}' fits this machine but could not be loaded: {ex.Message}",
+            };
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// The backend's declaration, read straight out of the file's metadata tables. Nothing is
+    /// loaded, resolved or executed — which is what makes a rejection cheap and total.
+    /// </summary>
+    private static ImmutableDictionary<string, string> ReadManifest(string path)
+    {
+        using var stream = File.OpenRead(path);
+        using var pe = new PEReader(stream);
+        if (!pe.HasMetadata) throw new BadImageFormatException("No CLI metadata.", path);
+
+        var reader = pe.GetMetadataReader();
+        foreach (var handle in reader.GetAssemblyDefinition().GetCustomAttributes())
+        {
+            var attribute = reader.GetCustomAttribute(handle);
+            if (NameOf(reader, attribute) != AttributeName) continue;
+
+            // Every value is a string, so the blob is walked rather than decoded through a type
+            // provider: a provider would have to resolve types out of an assembly this is
+            // deliberately not loading.
+            return ReadAllStrings(reader.GetBlobReader(attribute.Value));
+        }
+        return ImmutableDictionary<string, string>.Empty;
+    }
+
+    private static string? NameOf(MetadataReader reader, CustomAttribute attribute)
+        => attribute.Constructor.Kind switch
+        {
+            HandleKind.MemberReference => reader.GetString(
+                reader.GetTypeReference((TypeReferenceHandle)reader
+                    .GetMemberReference((MemberReferenceHandle)attribute.Constructor).Parent).Name),
+            HandleKind.MethodDefinition => reader.GetString(
+                reader.GetTypeDefinition(reader
+                    .GetMethodDefinition((MethodDefinitionHandle)attribute.Constructor)
+                    .GetDeclaringType()).Name),
+            _ => null,
+        };
+
+    /// <summary>
+    /// The attribute's three positional strings and then its named ones, keyed lower-case. The
+    /// blob layout is fixed by ECMA-335: a 0x0001 prologue, the fixed arguments in declaration
+    /// order, a count of named arguments, and then each named one as kind, type, name, value.
+    /// </summary>
+    private static ImmutableDictionary<string, string> ReadAllStrings(BlobReader blob)
+    {
+        var values = ImmutableDictionary.CreateBuilder<string, string>();
+        if (blob.ReadUInt16() != 1) return values.ToImmutable();
+
+        foreach (var name in (string[])["os", "architecture", "device"])
+            values[name] = blob.ReadSerializedString() ?? "";
+
+        var namedCount = blob.ReadUInt16();
+        for (int i = 0; i < namedCount && blob.RemainingBytes > 0; i++)
+        {
+            blob.ReadByte();                       // field or property
+            var elementType = blob.ReadByte();     // ELEMENT_TYPE_STRING for all of ours
+            var name = blob.ReadSerializedString();
+            if (elementType != 0x0E || name is null) break;   // not a string: stop rather than guess
+            values[name.ToLowerInvariant()] = blob.ReadSerializedString() ?? "";
+        }
+        return values.ToImmutable();
+    }
+
+    private static OSPlatform CurrentPlatform()
+        => RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? OSPlatform.Windows
+            : RuntimeInformation.IsOSPlatform(OSPlatform.Linux) ? OSPlatform.Linux
+            : OSPlatform.OSX;
+
+    private static string CurrentOsName() => CurrentPlatform().ToString().ToLowerInvariant();
+
+    private static string NativeRuntimeFileName()
+        => RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "onnxruntime.dll" : "libonnxruntime.so";
+}

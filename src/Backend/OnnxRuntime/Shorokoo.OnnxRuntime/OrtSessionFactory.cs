@@ -379,7 +379,13 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
                 + "cannot be read here.");
 
         var span = ort.Inner.GetTensorMutableRawData();
-        fixed (byte* p = span) return (IntPtr)p;
+        IntPtr address;
+        fixed (byte* p = span) address = (IntPtr)p;
+        // Taking the span is the value's last read here, so without this the JIT may retire the
+        // local and a collection on any thread free the allocation before the address is used.
+        // The caller keeps it alive across the copy itself (Shorokoo/Shorokoo#178).
+        GC.KeepAlive(ort);
+        return address;
     }
 
     private static int ElementSize(ShorokooTensorElementType type) => type switch

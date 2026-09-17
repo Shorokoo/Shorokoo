@@ -73,6 +73,8 @@ namespace Shorokoo.Runtime
         /// one call, so this is a default and never a ceiling.
         /// </summary>
         public RunSettings DefaultRunSettings { get; }
+
+        /// <summary>
         /// The backend this graph was compiled on and runs on — fixed when it was compiled, since
         /// the session belongs to that backend and cannot move. Feeding it data another backend
         /// built is allowed: the session rebuilds what it must, provided the data is host-resident.

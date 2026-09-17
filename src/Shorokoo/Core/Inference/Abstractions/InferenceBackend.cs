@@ -322,21 +322,21 @@ public static class InferenceBackend
     {
         var assemblies = DiscoverableAssemblies(AppDomain.CurrentDomain.GetAssemblies());
         var usable = LoadedCandidates(assemblies.Select(asm => asm.GetName().Name ?? ""))
-            .Select(candidate => (candidate, Factory: assemblies
+            .Select(candidate => (candidate, Backend: assemblies
                 .Where(asm => string.Equals(
                     asm.GetName().Name, candidate.Assembly, StringComparison.OrdinalIgnoreCase))
                 .Select(InstantiateBackend)
-                .FirstOrDefault(factory => factory is not null)))
-            .Where(found => found.Factory is not null)
+                .FirstOrDefault(backend => backend is not null)))
+            .Where(found => found.Backend is not null)
             .ToList();
 
-        // Only what is usable can be ambiguous: a backend assembly exposing no concrete factory
+        // Only what is usable can be ambiguous: a backend assembly exposing no concrete backend
         // is no more a choice than one that is not loaded, and the folder probe still gets its
         // turn. Hence the instantiation before the refusal, not after it.
         if (usable.Count == 0) return null;
         if (usable.Count > 1)
             throw Ambiguous([.. usable.Select(found => found.candidate)], "already loaded in this process");
-        return usable[0].Factory;
+        return usable[0].Backend;
     }
 
     private static IShorokooInferenceBackend? InstantiateBackend(Assembly asm)

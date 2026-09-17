@@ -52,7 +52,7 @@ public sealed record IsolatedBackendSpec
 /// <para>
 /// Most programs that want two devices at once do not need this. One ONNX Runtime build
 /// serves every execution provider compiled into it — the CUDA-flavoured native carries the
-/// CPU provider too — so two ordinary factories over the one loaded runtime already give a
+/// CPU provider too — so two ordinary backends over the one loaded runtime already give a
 /// CPU context and a CUDA context side by side:
 /// </para>
 /// <code>
@@ -321,12 +321,12 @@ public static class IsolatedBackend
     }
 
     /// <summary>
-    /// A factory reporting the name its spec gave it, forwarding everything else to the one
-    /// loaded in isolation. Without it two backends off one factory assembly describe
-    /// themselves identically, and a log saying which device a run used stops saying it.
+    /// A backend reporting the name its spec gave it, forwarding everything else to the one
+    /// loaded in isolation. Without it two backends off one assembly describe themselves
+    /// identically, and a log saying which device a run used stops saying it.
     ///
     /// <para>It forwards rather than copies: every tensor and session still comes from the inner
-    /// factory, so they carry that backend's runtime types — which is how a session recognises a
+    /// backend, so they carry that backend's runtime types — which is how a session recognises a
     /// value as its own or as another backend's.</para>
     /// </summary>
     private sealed class RenamedBackend : IShorokooInferenceBackend

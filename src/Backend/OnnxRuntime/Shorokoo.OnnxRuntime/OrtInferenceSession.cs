@@ -33,7 +33,7 @@ internal sealed class OrtInferenceSession : IShorokooInferenceSession
     /// <see cref="IsolatedBackend"/> gets a private copy of this assembly, so its
     /// <c>OrtTensorValue</c> is a different type from this one — and its handles point into a
     /// native runtime this session knows nothing about, which is precisely when feeding them
-    /// would be a wild pointer rather than a mistake ORT could catch. Two factories over one
+    /// would be a wild pointer rather than a mistake ORT could catch. Two backends over one
     /// loaded runtime share this assembly and so share the type, which is right too: their values
     /// are interchangeable and ORT moves them to the device itself.</para>
     ///

@@ -6,11 +6,11 @@ namespace Shorokoo.OnnxRuntime;
 
 /// <summary>
 /// ONNX Runtime's allocator for a CUDA device: what an allocation in that card's own memory has
-/// to come from, and the one thing a factory cannot simply ask the runtime for.
+/// to come from, and the one thing a backend cannot simply ask the runtime for.
 ///
 /// <para>The obstacle is that <see cref="OrtAllocator"/> is created <i>from a session</i> — ORT
 /// looks the device's allocator up in the session's registered execution providers — and a
-/// factory may be asked for a tensor before any session exists. So this opens one of its own, the
+/// backend may be asked for a tensor before any session exists. So this opens one of its own, the
 /// smallest model ORT will load, and keeps it. The session is never run: it exists to register the
 /// CUDA execution provider's allocator, which a session does whether or not any node was placed on
 /// the card.</para>
@@ -21,8 +21,8 @@ namespace Shorokoo.OnnxRuntime;
 /// every later collection of one into a use-after-free; and the arena the allocator draws on
 /// belongs to the session, so the session has to outlive the allocator in turn. A tensor's lifetime
 /// is the caller's business and can be arbitrarily long, so the only lifetime that is certainly
-/// long enough is the process's. Holding it here rather than on the factory matters for the same
-/// reason: a factory is an ordinary object a program may drop while its tensors live on.</para>
+/// long enough is the process's. Holding it here rather than on the backend matters for the same
+/// reason: a backend is an ordinary object a program may drop while its tensors live on.</para>
 ///
 /// <para>The cost is bounded and deferred — one session per CUDA device, built on the first tensor
 /// actually allocated on that device, so a program that never puts one there never pays it. An
@@ -57,9 +57,9 @@ internal static class CudaDeviceAllocator
     /// <summary>
     /// The allocator for CUDA device <paramref name="deviceId"/>, built on first use through a
     /// session configured by <paramref name="configureExecutionProvider"/> — the very step the
-    /// asking factory puts its own sessions on that card with.
+    /// asking backend puts its own sessions on that card with.
     ///
-    /// <para>Keyed on the device alone: a card's memory is the card's memory, so a second factory
+    /// <para>Keyed on the device alone: a card's memory is the card's memory, so a second backend
     /// on the same one is asking for the same allocator, and the provider options that differ
     /// between them would only have configured a second arena over the same device.</para>
     ///

@@ -72,20 +72,20 @@ public class BackendPackageCoverageTests
         Assert.Contains(Windows ? "linux backend" : "windows backend", probe.Detail);
 
         // And TryLoad says the same rather than attempting it.
-        Assert.False(BackendPackage.TryLoad(foreign, out var factory, out var failure));
-        Assert.Null(factory);
+        Assert.False(BackendPackage.TryLoad(foreign, out var backend, out var failure));
+        Assert.Null(backend);
         Assert.Equal(BackendRejection.WrongOperatingSystem, failure.Reason);
     }
 
     [Fact]
     public void TestABackendLoadedFromAPathYieldsAContextThatRuns()
     {
-        Assert.True(BackendPackage.TryLoad(NativeBackend, out var factory, out _));
-        Assert.NotNull(factory);
-        Assert.Equal(ComputeDevice.Cpu, factory!.Description.Device);
-        Assert.Equal(MemorySpace.Host, factory.MemorySpace);
+        Assert.True(BackendPackage.TryLoad(NativeBackend, out var backend, out _));
+        Assert.NotNull(backend);
+        Assert.Equal(ComputeDevice.Cpu, backend!.Description.Device);
+        Assert.Equal(MemorySpace.Host, backend.MemorySpace);
 
-        using var context = new ComputeContext(factory, detachesOutputs: true);
+        using var context = new ComputeContext(backend, detachesOutputs: true);
         var a = InputVector<float32>("a");
         var b = InputVector<float32>("b");
         var graph = new InternalComputationGraph([a, b], [a * b + a]);
@@ -196,8 +196,8 @@ public class BackendPackageCoverageTests
             Assert.Contains(NativeFileName, probe.Detail);
             Assert.Null(BackendPackage.ResolveNative(root, NativeFileName));
 
-            Assert.False(BackendPackage.TryLoad(backend, out var factory, out var failure));
-            Assert.Null(factory);
+            Assert.False(BackendPackage.TryLoad(backend, out var loaded, out var failure));
+            Assert.Null(loaded);
             Assert.Equal(BackendRejection.MissingNative, failure.Reason);
         }
         finally

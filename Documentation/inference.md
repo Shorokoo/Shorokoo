@@ -522,7 +522,7 @@ Two related entry points:
 ### Loading a backend at runtime
 
 A program need not reference a backend at compile time at all. `BackendPackage.TryLoad`
-takes a path and hands back a factory, and a backend that does not fit the machine comes
+takes a path and hands back a backend, and one that does not fit the machine comes
 back as a reason rather than an exception — so one executable can carry backends for
 several platforms and pick at startup.
 

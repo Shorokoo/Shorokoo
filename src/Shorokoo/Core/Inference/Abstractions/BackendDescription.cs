@@ -11,7 +11,7 @@ public enum ComputeDevice
 
     /// <summary>
     /// Some other execution provider — DirectML, ROCm, CoreML, OpenVINO. None of the four
-    /// shipped backends is one; a factory driving one says so here rather than passing itself
+    /// shipped backends is one; a backend driving one says so here rather than passing itself
     /// off as the CPU, so that <see cref="InferenceBackend.RequireDevice"/> refuses it.
     /// </summary>
     Other,
@@ -30,7 +30,7 @@ public readonly record struct BackendDescription
 {
     private readonly string? _name;
 
-    /// <param name="name">The assembly supplying the factory, e.g. <c>Shorokoo.WinGPU</c>.</param>
+    /// <param name="name">The assembly supplying the backend, e.g. <c>Shorokoo.WinGPU</c>.</param>
     /// <param name="device">The kind of device its sessions execute on.</param>
     /// <param name="cudaDeviceId">The CUDA device its sessions allocate on — required of a
     /// <see cref="ComputeDevice.Cuda"/> backend, and refused of any other.</param>
@@ -55,7 +55,7 @@ public readonly record struct BackendDescription
         CudaDeviceId = cudaDeviceId;
     }
 
-    /// <summary>The assembly supplying the factory, e.g. <c>Shorokoo.WinGPU</c>.</summary>
+    /// <summary>The assembly supplying the backend, e.g. <c>Shorokoo.WinGPU</c>.</summary>
     public string Name => _name ?? "";
 
     /// <summary>The kind of device this backend's sessions execute on.</summary>

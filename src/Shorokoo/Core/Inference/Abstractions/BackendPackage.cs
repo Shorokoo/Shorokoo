@@ -35,8 +35,8 @@ public enum BackendRejection
     /// <summary>It needs a CUDA runtime this machine does not have.</summary>
     MissingCudaRuntime,
 
-    /// <summary>It loaded, but holds no usable factory.</summary>
-    NoFactory,
+    /// <summary>It fits this machine, but loading it did not yield a usable backend.</summary>
+    NotLoadable,
 }
 
 /// <summary>
@@ -164,14 +164,14 @@ public static class BackendPackage
     /// runtime.</para>
     /// </summary>
     /// <param name="assemblyPath">The backend DLL.</param>
-    /// <param name="factory">The loaded backend, or null.</param>
+    /// <param name="backend">The loaded backend, or null.</param>
     /// <param name="failure">Why it was not loaded, meaningful only when this returns false.</param>
     public static bool TryLoad(
         string assemblyPath,
-        out IShorokooInferenceBackend? factory,
+        out IShorokooInferenceBackend? backend,
         out BackendProbe failure)
     {
-        factory = null;
+        backend = null;
         var probe = Probe(assemblyPath);
         if (!probe.Supported) { failure = probe; return false; }
 
@@ -198,7 +198,7 @@ public static class BackendPackage
 
         try
         {
-            factory = IsolatedBackend.Load(new IsolatedBackendSpec
+            backend = IsolatedBackend.Load(new IsolatedBackendSpec
             {
                 Name = $"{name} ({probe.Device})",
                 BackendAssembly = name,
@@ -209,7 +209,7 @@ public static class BackendPackage
             return true;
         }
         // Every way loading can fail, not a list of the ones seen so far. A backend that fits the
-        // machine on paper can still fail to load -- a native of the wrong bitness, a factory
+        // machine on paper can still fail to load -- a native of the wrong bitness, a backend
         // constructor that reaches for a driver -- and a caller walking a folder of candidates has
         // to be able to skip that file rather than crash on it. That is what this method promises
         // by answering with a bool.
@@ -218,7 +218,7 @@ public static class BackendPackage
             failure = probe with
             {
                 Supported = false,
-                Reason = BackendRejection.NoFactory,
+                Reason = BackendRejection.NotLoadable,
                 Detail = $"'{name}' fits this machine but could not be loaded: "
                     + (ex is TargetInvocationException { InnerException: { } inner } ? inner : ex).Message,
             };

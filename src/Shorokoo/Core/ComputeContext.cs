@@ -6,6 +6,7 @@ using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using Shorokoo;
 using Shorokoo.Core;
@@ -251,6 +252,36 @@ namespace Shorokoo.Runtime
         // context built before InferenceBackend.Factory was assigned must still honour it.
         private readonly IShorokooInferenceSessionFactory? _backend;
 
+        // Counts reads of Default made inside a CountDefaultReads call, and nothing else. It is an
+        // AsyncLocal rather than a static counter because the callers that care run in parallel
+        // with the rest of a test suite: a process-wide count would also see everything else
+        // running at the time. An AsyncLocal flows into whatever the measured call does — a thread
+        // it starts included — and no further; the box is what makes an increment made down there
+        // visible back up here.
+        private static readonly AsyncLocal<StrongBox<int>?> _defaultReads = new();
+
+        /// <summary>
+        /// Runs <paramref name="work"/> and returns how many times it read <see cref="Default"/>.
+        ///
+        /// <para>The seam a test needs to hold the graph-building path to "requires no inference
+        /// backend". It counts <i>asks</i> rather than backends resolved, because a resolution is
+        /// unobservable in the process that can observe anything: a host with a backend loaded —
+        /// every test host — answers a wrongly eager read in silence, and the failure shows up only
+        /// where no backend was deployed, which is exactly the program that describes a model and
+        /// exports it as ONNX rather than running it. Reads that hit the cached default count too:
+        /// the question is whether the path reached for the default at all, not whether this
+        /// particular process had already paid for one.</para>
+        /// </summary>
+        internal static int CountDefaultReads(Action work)
+        {
+            var outer = _defaultReads.Value;
+            var counter = new StrongBox<int>(0);
+            _defaultReads.Value = counter;
+            try { work(); }
+            finally { _defaultReads.Value = outer; }
+            return Volatile.Read(ref counter.Value);
+        }
+
         /// <summary>
         /// Process-wide default context, created lazily on first access and used wherever no
         /// explicit context is supplied. Settable to swap in a custom context.
@@ -261,11 +292,17 @@ namespace Shorokoo.Runtime
         /// and cannot reach a session that has already been compiled — including those compiled by
         /// the context being replaced. Code that wants a configuration of its own should hold its
         /// own context rather than assign this one.</para>
+        /// <para>Reading this resolves an inference backend, and refuses — naming the packages to
+        /// deploy — when there is none. So it belongs at the point work actually runs: a
+        /// <c>compute ??= ComputeContext.Default</c> at the top of a graph pass turns that whole
+        /// pass into a backend requirement, including for the graphs it has nothing to execute
+        /// for. Thread the nullable context through and resolve it where the execution is.</para>
         /// </summary>
         public static ComputeContext Default
         {
             get
             {
+                if (_defaultReads.Value is { } counter) Interlocked.Increment(ref counter.Value);
                 if (_defaultComputeContext is not null) return _defaultComputeContext;
 
                 // The backend a process loaded, under the rule that a CPU one wins: the unnamed

@@ -46,20 +46,29 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// </summary>
     internal static class FastLowerAttributeTensorOps
     {
+        /// <param name="graph">The graph to lower in place.</param>
+        /// <param name="sampleInputs">Sample values for resolution strategies 2/3, or null for
+        /// constant folding only.</param>
+        /// <param name="compute">The context strategy 3 runs on, or null for
+        /// <see cref="ComputeContext.Default"/>. Deliberately left null rather than resolved here:
+        /// a null context is only turned into the default at the one place that executes a graph
+        /// (<see cref="TryResolveWithOrt"/>), because resolving it means resolving an inference
+        /// backend, and a graph with no variant op — or one whose geometry constant-folds, which is
+        /// nearly all of them — never reaches strategy 3. Describing a model is not inference, so
+        /// this pass must not require a backend be deployed just to run.</param>
         public static void Process(
             InternalComputationGraph graph,
             ModelParamList? sampleInputs = null,
             ComputeContext? compute = null)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
-            compute ??= ComputeContext.Default;
             ProcessGraph(graph, sampleInputs, compute, new Dictionary<Function, Function>());
         }
 
         private static void ProcessGraph(
             InternalComputationGraph graph,
             ModelParamList? sampleInputs,
-            ComputeContext compute,
+            ComputeContext? compute,
             Dictionary<Function, Function> functionRemap)
         {
             // Lower every Function reachable from this graph (post-order, memoized per instance).
@@ -87,7 +96,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         private static void LowerFunctionRecursive(
-            Function fn, ComputeContext compute, Dictionary<Function, Function> functionRemap)
+            Function fn, ComputeContext? compute, Dictionary<Function, Function> functionRemap)
         {
             if (functionRemap.ContainsKey(fn)) return;
 
@@ -116,7 +125,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             AttributeTensorSpec spec,
             InternalComputationGraph graph,
             ModelParamList? sampleInputs,
-            ComputeContext compute,
+            ComputeContext? compute,
             HashSet<FastTensorKey> perIteration)
         {
             var inputDefs = Definitions.NodeDefinitions[node.OpCode].VariantDefinitions[0].InputDefs;
@@ -194,7 +203,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             InternalComputationGraph graph,
             List<FastTensorKey> keys,
             ModelParamList? sampleInputs,
-            ComputeContext compute,
+            ComputeContext? compute,
             string opCodeForError)
         {
             var resolved = new TensorData?[keys.Count];
@@ -271,9 +280,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
         private static void TryResolveWithOrt(
             InternalComputationGraph resolver, List<FastTensorKey> keys, TensorData?[] resolved,
-            TensorData[] samples, ComputeContext compute)
+            TensorData[] samples, ComputeContext? compute)
         {
-            var results = compute.Execute(resolver, samples);
+            // The one point in this pass that runs a graph, and so the one point that may require
+            // an inference backend. Everything above resolves without one.
+            var results = (compute ?? ComputeContext.Default).Execute(resolver, samples);
             for (int i = 0; i < keys.Count; i++)
                 if (resolved[i] is null)
                     resolved[i] = results[i].ToTensorData();

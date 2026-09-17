@@ -33,6 +33,16 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// </summary>
     internal static class FastInitializeModelParams
     {
+        /// <param name="graph">The concrete architecture whose initializers to run.</param>
+        /// <param name="computeContext">The context the initializers run on, or null for
+        /// <see cref="ComputeContext.Default"/>. Resolved only once there is an initializer to
+        /// run — resolving the default context resolves an inference backend, and a graph with no
+        /// trainable parameter returns empty below without executing anything. Building and
+        /// exporting such a model must not require a backend be deployed.</param>
+        /// <param name="rngConfig">The RNG configuration the per-parameter init streams derive
+        /// from, or null to initialize outside the keyed scheme.</param>
+        /// <param name="paramInfos">The parameter inventory keyed initialization needs; required
+        /// whenever <paramref name="rngConfig"/> is supplied.</param>
         public static ImmutableDictionary<ModelId, TensorData> Process(
             InternalComputationGraph graph,
             ComputeContext? computeContext,
@@ -51,8 +61,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     "inventory every parameter would initialize outside the keyed scheme, from " +
                     "values not derived from the config. Pass GetConcreteModelParamInfos() " +
                     "of the same concrete architecture.");
-
-            computeContext ??= ComputeContext.Default;
 
             var workGraph = graph.Clone();
 
@@ -203,6 +211,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             if (collectedOutputKeys.Count == 0)
                 return ImmutableDictionary<ModelId, TensorData>.Empty;
 
+            // Past that return there IS an initializer to execute, so this is the first point that
+            // genuinely needs a backend — and therefore the first point that may resolve the
+            // default context, which is what resolves one. A graph with no trainable parameter has
+            // already returned above having asked for nothing.
+            var compute = computeContext ?? ComputeContext.Default;
+
             // Mirror the legacy `RebuildGraph(newInputs: [], newOutputs: [...])` call: the
             // initialization graph takes no input at all, and each parameter's initializer
             // output becomes a graph output.
@@ -226,7 +240,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 try
                 {
                     var chunk = ChunkFor(workGraph, collectedOutputKeys[i]);
-                    builder[collectedModelIds[i]] = FastProcessorHelper.RehostOffSession(computeContext.Run(chunk)[0].ToTensorData());
+                    builder[collectedModelIds[i]] = FastProcessorHelper.RehostOffSession(compute.Run(chunk)[0].ToTensorData());
                 }
                 catch (System.Exception ex) when (IsAllocationFailure(ex))
                 {

@@ -4,6 +4,18 @@ using Shorokoo.Runtime;
 namespace Shorokoo.Tests;
 
 /// <summary>
+/// <c>y = -x</c>, the whole model: one node, no trainable parameter, no randomness, nothing whose
+/// geometry has to be resolved by running anything. A model this small is the one that most
+/// obviously needs no inference backend to describe, which is what makes it the subject of
+/// <see cref="ComputeContextLifetimeCoverageTests.TestBuildingAndExportingAModelAsksForNoComputeContextAtAll"/>.
+/// </summary>
+[Module]
+public partial class BackendFreeNegate
+{
+    public static Tensor<float32> Inline(Tensor<float32> x) => -x;
+}
+
+/// <summary>
 /// A compute context owns the tensors whose memory is on its books, releases them when it is
 /// disposed, and can be asked to hand its results out detached so they outlive it.
 /// </summary>
@@ -172,6 +184,53 @@ public class ComputeContextLifetimeCoverageTests
         // Whatever this process ended up with, the default context is the one nobody disposes, so
         // its results must not be tied to it.
         Assert.True(ComputeContext.Default.DetachesOutputs);
+    }
+
+    /// <summary>
+    /// Describing a model is not inference: building a graph, concretizing it and exporting it as
+    /// ONNX must work in a process with no inference backend deployed at all. Reading
+    /// <see cref="ComputeContext.Default"/> is what resolves one, and what refuses — naming the
+    /// packages to deploy — when there is none, so no step of that path may read it.
+    ///
+    /// <para>This test cannot run with no backend deployed: the suite deploys one and shares a
+    /// process across tests, so by the time any given test runs a backend is long since live and
+    /// asserting on <see cref="InferenceBackend.Current"/> alone would pass whatever the build
+    /// path did. What survives a loaded backend is the question of whether the path <i>asks</i>,
+    /// and <see cref="ComputeContext.CountDefaultReads"/> answers exactly that — scoped to this
+    /// call, so the other tests running alongside it do not count. A regression that puts
+    /// <c>compute ??= ComputeContext.Default</c> back at the top of a lowering pass fails here
+    /// even though this process would have answered it.</para>
+    /// </summary>
+    [Fact]
+    public void TestBuildingAndExportingAModelAsksForNoComputeContextAtAll()
+    {
+        var module = BackendFreeNegate.ComputationGraph;
+        var sample = TensorData([8L], new float[8]);
+        var onnx = Path.Combine(Path.GetTempPath(), $"shorokoo-backend-free-{Guid.NewGuid():N}.onnx");
+        var liveBackend = InferenceBackend.Current;
+
+        try
+        {
+            var reads = ComputeContext.CountDefaultReads(() =>
+            {
+                var concrete = module
+                    .ToConcreteArchitecture(module.FromOrderedInputs([sample]))
+                    .ToConcreteModel();
+                Persistence.ExportOnnx(concrete, onnx);
+            });
+
+            Assert.Equal(0, reads);
+            Assert.True(new FileInfo(onnx).Length > 0);
+        }
+        finally
+        {
+            if (File.Exists(onnx)) File.Delete(onnx);
+        }
+
+        // The weaker half, kept because it is the statement the shipped program actually makes:
+        // nothing about building this model resolved a backend. Weak only here, in a process that
+        // already had one — in the process that has none it is the whole of the contract.
+        Assert.Same(liveBackend, InferenceBackend.Current);
     }
 
     private sealed class StubFactory(ComputeDevice device, int? cudaDeviceId)

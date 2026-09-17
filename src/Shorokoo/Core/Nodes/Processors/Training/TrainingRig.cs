@@ -213,8 +213,19 @@ namespace Shorokoo
         /// never persisted</b> — no checkpoint (flat or <c>.skpt</c>) or manifest records it, so a
         /// reloaded rig receives a fresh one via <see cref="FromScratch(ComputationGraph, ComputationGraph,
         /// ComputationGraph, NamedModelParam[], IOptimizerHyperparameters, RngConfig?, ComputeContext?, ComputeContext?, IProgress{BuildProgress})"/>.
+        ///
+        /// <para>The default is taken on the first READ, not at construction. Reading
+        /// <see cref="ComputeContext.Default"/> resolves an inference backend, so a field
+        /// initializer here made merely constructing a rig require one deployed — including when the
+        /// caller supplied both contexts explicitly and the default was overwritten unread.</para>
         /// </summary>
-        public ComputeContext MergeContext { get; private set; } = ComputeContext.Default;
+        public ComputeContext MergeContext
+        {
+            get => _mergeContext ??= ComputeContext.Default;
+            private set => _mergeContext = value;
+        }
+
+        private ComputeContext? _mergeContext;
 
         /// <summary>
         /// The compute context used to <b>compile the merged <see cref="TrainingStepPureGraph"/> into an
@@ -233,8 +244,17 @@ namespace Shorokoo
         /// through it. What the two <i>can</i> differ in is their device memory: this context's
         /// <see cref="ComputeContext.DeviceMemory"/> configures the arena of every training-step
         /// session, and its <see cref="ComputeContext.RunSettings"/> what each step's run does.</para>
+        ///
+        /// <para>Resolved on first read rather than at construction, for the reason given on
+        /// <see cref="MergeContext"/>.</para>
         /// </summary>
-        public ComputeContext RuntimeContext { get; private set; } = ComputeContext.Default;
+        public ComputeContext RuntimeContext
+        {
+            get => _runtimeContext ??= ComputeContext.Default;
+            private set => _runtimeContext = value;
+        }
+
+        private ComputeContext? _runtimeContext;
 
         /// <summary>Struct definition for trainable parameters. Internal build/persistence machinery —
         /// persistence sources the defs from the rig directly, and callers drive training through the

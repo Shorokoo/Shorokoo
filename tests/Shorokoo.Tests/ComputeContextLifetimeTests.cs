@@ -184,7 +184,7 @@ public class ComputeContextLifetimeCoverageTests
         Assert.Same(liveBackend, InferenceBackend.Current);
     }
 
-    internal sealed class StubFactory(ComputeDevice device, int? cudaDeviceId)
+    internal sealed class StubBackend(ComputeDevice device, int? cudaDeviceId)
         : IShorokooInferenceBackend
     {
         public BackendDescription Description { get; } =
@@ -226,8 +226,8 @@ public class ProcessWideBackendCoverageTests
         try
         {
             InferenceBackend.ForgetRemembered();
-            var gpu = new ComputeContextLifetimeCoverageTests.StubFactory(ComputeDevice.Cuda, 0);
-            var cpu = new ComputeContextLifetimeCoverageTests.StubFactory(ComputeDevice.Cpu, null);
+            var gpu = new ComputeContextLifetimeCoverageTests.StubBackend(ComputeDevice.Cuda, 0);
+            var cpu = new ComputeContextLifetimeCoverageTests.StubBackend(ComputeDevice.Cpu, null);
 
             InferenceBackend.Remember(gpu);
             Assert.Same(gpu, InferenceBackend.Remembered);
@@ -238,11 +238,11 @@ public class ProcessWideBackendCoverageTests
 
             // ...and is not displaced back, by that GPU backend or another.
             InferenceBackend.Remember(gpu);
-            InferenceBackend.Remember(new ComputeContextLifetimeCoverageTests.StubFactory(ComputeDevice.Cuda, 1));
+            InferenceBackend.Remember(new ComputeContextLifetimeCoverageTests.StubBackend(ComputeDevice.Cuda, 1));
             Assert.Same(cpu, InferenceBackend.Remembered);
 
             // Nor by a second CPU one: the first backend loaded is the one that counts.
-            InferenceBackend.Remember(new ComputeContextLifetimeCoverageTests.StubFactory(ComputeDevice.Cpu, null));
+            InferenceBackend.Remember(new ComputeContextLifetimeCoverageTests.StubBackend(ComputeDevice.Cpu, null));
             Assert.Same(cpu, InferenceBackend.Remembered);
         }
         finally
@@ -261,16 +261,16 @@ public class ProcessWideBackendCoverageTests
     /// assignment before anything reads Default.
     /// </summary>
     [Fact]
-    public void TestAssigningTheFactorySettlesBothTheLiveAndTheRememberedSlot()
+    public void TestAssigningTheDefaultBackendSettlesBothTheLiveAndTheRememberedSlot()
     {
-        var liveFactory = InferenceBackend.Current;
+        var liveDefault = InferenceBackend.Current;
         var liveRemembered = InferenceBackend.Remembered;
         try
         {
             InferenceBackend.ForgetRemembered();
-            InferenceBackend.Remember(new ComputeContextLifetimeCoverageTests.StubFactory(ComputeDevice.Cpu, null));
+            InferenceBackend.Remember(new ComputeContextLifetimeCoverageTests.StubBackend(ComputeDevice.Cpu, null));
 
-            var named = new ComputeContextLifetimeCoverageTests.StubFactory(ComputeDevice.Cuda, 0);
+            var named = new ComputeContextLifetimeCoverageTests.StubBackend(ComputeDevice.Cuda, 0);
             InferenceBackend.Default = named;
 
             Assert.Same(named, InferenceBackend.Remembered);
@@ -279,7 +279,7 @@ public class ProcessWideBackendCoverageTests
         finally
         {
             InferenceBackend.ForgetRemembered();
-            if (liveFactory is not null) InferenceBackend.Default = liveFactory;
+            if (liveDefault is not null) InferenceBackend.Default = liveDefault;
             InferenceBackend.ForgetRemembered();
             if (liveRemembered is not null) InferenceBackend.Remember(liveRemembered);
         }

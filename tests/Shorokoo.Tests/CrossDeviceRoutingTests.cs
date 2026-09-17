@@ -24,8 +24,8 @@ public class CrossDeviceRoutingCoverageTests
         Assert.Equal(MemorySpace.Cuda(0), MemorySpace.Cuda(0));
         Assert.NotEqual(MemorySpace.Host, MemorySpace.Cuda(0));
 
-        IShorokooInferenceBackend first = new StubFactory(ComputeDevice.Cuda, 0);
-        IShorokooInferenceBackend second = new StubFactory(ComputeDevice.Cuda, 0);
+        IShorokooInferenceBackend first = new StubBackend(ComputeDevice.Cuda, 0);
+        IShorokooInferenceBackend second = new StubBackend(ComputeDevice.Cuda, 0);
         Assert.Equal(first.MemorySpace, second.MemorySpace);
         Assert.Equal(MemorySpace.Cuda(0), first.MemorySpace);
     }
@@ -37,8 +37,8 @@ public class CrossDeviceRoutingCoverageTests
         // already on a card. Starting on the host makes CopyAcross the route for the trivial
         // reason that the source is host-resident, so a regression that re-wrapped between two
         // CUDA device ids -- or that dropped DeviceId from the space comparison -- passed.
-        var firstCard = new StubFactory(ComputeDevice.Cuda, 0);
-        var secondCard = new StubFactory(ComputeDevice.Cuda, 1);
+        var firstCard = new StubBackend(ComputeDevice.Cuda, 0);
+        var secondCard = new StubBackend(ComputeDevice.Cuda, 1);
         using var one = new ComputeContext(firstCard);
         using var two = new ComputeContext(secondCard);
 
@@ -63,10 +63,10 @@ public class CrossDeviceRoutingCoverageTests
         // Same space is necessary and, off the host, not sufficient: an allocation means nothing
         // to a runtime that did not make it. Same backend shares; two backends reporting the same
         // card copy through the host.
-        var backend = new StubFactory(ComputeDevice.Cuda, 0);
+        var backend = new StubBackend(ComputeDevice.Cuda, 0);
         using var one = new ComputeContext(backend);
         using var alsoOne = new ComputeContext(backend);
-        using var otherRuntime = new ComputeContext(new StubFactory(ComputeDevice.Cuda, 0));
+        using var otherRuntime = new ComputeContext(new StubBackend(ComputeDevice.Cuda, 0));
 
         var onCard = TensorData([2L], (float[])[5f, 6f]).TransferTo(one);
         var shared = onCard.GiveAccessTo(alsoOne);
@@ -84,7 +84,7 @@ public class CrossDeviceRoutingCoverageTests
         // A backend on some other execution provider reports a space nothing can name. Two such
         // tensors compare equal as spaces without being in the same place, so every operation is
         // refused rather than guessed at.
-        var other = new StubFactory(ComputeDevice.Other, null);
+        var other = new StubBackend(ComputeDevice.Other, null);
         Assert.Equal(MemoryKind.Unknown, ((IShorokooInferenceBackend)other).MemorySpace.Kind);
 
         using var context = new ComputeContext(other);
@@ -99,7 +99,7 @@ public class CrossDeviceRoutingCoverageTests
     [Fact]
     public void TestATransferToAnotherCardGoesThroughHostBytes()
     {
-        var target = new StubFactory(ComputeDevice.Cuda, 1);
+        var target = new StubBackend(ComputeDevice.Cuda, 1);
         using var secondCard = new ComputeContext(target);
 
         float[] values = [1f, 2f, 3f, 4f];
@@ -118,7 +118,7 @@ public class CrossDeviceRoutingCoverageTests
     [Fact]
     public void TestACopyToAnotherCardLeavesTheSourceWhereItIs()
     {
-        var target = new StubFactory(ComputeDevice.Cuda, 1);
+        var target = new StubBackend(ComputeDevice.Cuda, 1);
         using var secondCard = new ComputeContext(target);
         var onHost = TensorData([2L], (float[])[7f, 8f]);
 
@@ -133,7 +133,7 @@ public class CrossDeviceRoutingCoverageTests
     [Fact]
     public void TestGiveAccessToAnotherCardIsRefusedBecauseReachingItMeansAllocating()
     {
-        using var secondCard = new ComputeContext(new StubFactory(ComputeDevice.Cuda, 1));
+        using var secondCard = new ComputeContext(new StubBackend(ComputeDevice.Cuda, 1));
         var onHost = TensorData([2L], (float[])[7f, 8f]);
 
         var ex = Assert.Throws<InvalidOperationException>(() => onHost.GiveAccessTo(secondCard));
@@ -143,7 +143,7 @@ public class CrossDeviceRoutingCoverageTests
     [Fact]
     public void TestADetachingContextLeavesARetainedDeviceOutputOnTheCard()
     {
-        using var card = new ComputeContext(new StubFactory(ComputeDevice.Cuda, 0), detachesOutputs: true);
+        using var card = new ComputeContext(new StubBackend(ComputeDevice.Cuda, 0), detachesOutputs: true);
         var onCard = TensorData([2L], (float[])[1f, 2f]).TransferTo(card);
         NamedModelParam[] outputs =
             [new TensorDataModelParam("state", ModelParamType.OutputParam, onCard)];
@@ -156,7 +156,7 @@ public class CrossDeviceRoutingCoverageTests
 
     /// <summary>A backend that answers about itself and records what it was asked to build, so a
     /// transfer's route can be read off it without a session, a native runtime or a card.</summary>
-    private sealed class StubFactory(ComputeDevice device, int? cudaDeviceId)
+    private sealed class StubBackend(ComputeDevice device, int? cudaDeviceId)
         : IShorokooInferenceBackend
     {
         public int BackendMemoryBuilds { get; private set; }

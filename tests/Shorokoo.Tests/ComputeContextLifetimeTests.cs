@@ -99,7 +99,7 @@ public class ComputeContextLifetimeCoverageTests
     public void TestAContextThatDetachesOutputsHandsBackResultsThatOutliveIt()
     {
         var (graph, a, b, expected) = Model();
-        var context = new ComputeContext(InferenceBackend.Factory, detachesOutputs: true);
+        var context = new ComputeContext(InferenceBackend.Default, detachesOutputs: true);
 
         Assert.True(context.DetachesOutputs);
         var result = context.Execute(graph, a, b)[0].ToTensorData();
@@ -116,7 +116,7 @@ public class ComputeContextLifetimeCoverageTests
     public void TestAContextThatDoesNotDetachTakesItsOutputsWithIt()
     {
         var (graph, a, b, _) = Model();
-        var context = new ComputeContext(InferenceBackend.Factory, detachesOutputs: false);
+        var context = new ComputeContext(InferenceBackend.Default, detachesOutputs: false);
 
         Assert.False(context.DetachesOutputs);
         var result = context.Execute(graph, a, b)[0].ToTensorData();
@@ -130,7 +130,7 @@ public class ComputeContextLifetimeCoverageTests
     public void TestACompiledGraphDetachesItsOutputsWhenItsContextDoes()
     {
         var (graph, a, b, expected) = Model();
-        var context = new ComputeContext(InferenceBackend.Factory, detachesOutputs: true);
+        var context = new ComputeContext(InferenceBackend.Default, detachesOutputs: true);
         var compiled = context.Compile(graph);
 
         var result = compiled.Execute(a, b)[0].ToTensorData();
@@ -178,7 +178,7 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     internal sealed class StubFactory(ComputeDevice device, int? cudaDeviceId)
-        : IShorokooInferenceSessionFactory
+        : IShorokooInferenceBackend
     {
         public BackendDescription Description { get; } =
             new($"stub-{device}", device, cudaDeviceId);
@@ -246,7 +246,7 @@ public class ProcessWideBackendCoverageTests
     }
 
     /// <summary>
-    /// Assigning <see cref="InferenceBackend.Factory"/> settles both slots outright — the live one
+    /// Assigning <see cref="InferenceBackend.Default"/> settles both slots outright — the live one
     /// and the remembered one — rather than going through the first-CPU-wins rule that governs a
     /// backend the process merely loaded. It does not say anything about
     /// <see cref="ComputeContext.Default"/>, which caches the backend it resolves on first read and
@@ -264,7 +264,7 @@ public class ProcessWideBackendCoverageTests
             InferenceBackend.Remember(new ComputeContextLifetimeCoverageTests.StubFactory(ComputeDevice.Cpu, null));
 
             var named = new ComputeContextLifetimeCoverageTests.StubFactory(ComputeDevice.Cuda, 0);
-            InferenceBackend.Factory = named;
+            InferenceBackend.Default = named;
 
             Assert.Same(named, InferenceBackend.Remembered);
             Assert.Same(named, InferenceBackend.Current);
@@ -272,7 +272,7 @@ public class ProcessWideBackendCoverageTests
         finally
         {
             InferenceBackend.ForgetRemembered();
-            if (liveFactory is not null) InferenceBackend.Factory = liveFactory;
+            if (liveFactory is not null) InferenceBackend.Default = liveFactory;
             InferenceBackend.ForgetRemembered();
             if (liveRemembered is not null) InferenceBackend.Remember(liveRemembered);
         }

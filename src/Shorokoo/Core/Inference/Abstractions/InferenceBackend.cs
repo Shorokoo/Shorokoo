@@ -5,7 +5,7 @@ using System.Runtime.Loader;
 namespace Shorokoo.Core.Inference.Abstractions;
 
 /// <summary>
-/// Holds the default <see cref="IShorokooInferenceSessionFactory"/>: the backend every tensor
+/// Holds the default <see cref="IShorokooInferenceBackend"/>: the backend every tensor
 /// is built on, and the one inference runs on when no <c>ComputeContext</c> names another.
 ///
 /// <para>
@@ -17,7 +17,7 @@ namespace Shorokoo.Core.Inference.Abstractions;
 /// to fail at startup rather than on the first inference call:
 /// </para>
 /// <code>
-/// InferenceBackend.Factory = new LinuxCpuInferenceFactory();
+/// InferenceBackend.Default = new LinuxCpuBackend();
 /// </code>
 /// <para>
 /// If you never set one, the first inference call auto-discovers a backend in two
@@ -45,7 +45,7 @@ namespace Shorokoo.Core.Inference.Abstractions;
 /// </summary>
 public static class InferenceBackend
 {
-    private static volatile IShorokooInferenceSessionFactory? _factory;
+    private static volatile IShorokooInferenceBackend? _factory;
     private static readonly object _gate = new();
 
     /// <summary>
@@ -54,7 +54,7 @@ public static class InferenceBackend
     /// is optional; if left unset it is auto-discovered on first access — an already-loaded
     /// backend assembly first, otherwise the deployment folder.
     /// </summary>
-    public static IShorokooInferenceSessionFactory Factory
+    public static IShorokooInferenceBackend Default
     {
         get
         {
@@ -74,7 +74,7 @@ public static class InferenceBackend
 
     /// <summary>
     /// The backend if one is live, null if none has been assigned or discovered yet.
-    /// Unlike <see cref="Factory"/>, reading this does not resolve one — so a startup
+    /// Unlike <see cref="Default"/>, reading this does not resolve one — so a startup
     /// path can tell "nothing chosen yet" from "already bound" without deciding the
     /// question by asking it.
     ///
@@ -82,9 +82,9 @@ public static class InferenceBackend
     /// assign, and the last assignment wins. Decide the backend on one startup path
     /// rather than racing to fill in a null.</para>
     /// </summary>
-    public static IShorokooInferenceSessionFactory? Current => _factory;
+    public static IShorokooInferenceBackend? Current => _factory;
 
-    private static volatile IShorokooInferenceSessionFactory? _remembered;
+    private static volatile IShorokooInferenceBackend? _remembered;
 
     /// <summary>
     /// The backend <see cref="Shorokoo.Runtime.ComputeContext.Default"/> is built on: the first
@@ -95,7 +95,7 @@ public static class InferenceBackend
     /// the <i>unnamed</i> default is the card, where a stray convenience call quietly allocates
     /// device memory. The host is the safe default and the one every machine has.</para>
     /// </summary>
-    public static IShorokooInferenceSessionFactory? Remembered => _remembered;
+    public static IShorokooInferenceBackend? Remembered => _remembered;
 
     /// <summary>
     /// Records <paramref name="factory"/> as a loaded backend. A CPU backend always wins; a GPU
@@ -103,10 +103,10 @@ public static class InferenceBackend
     /// resolved for itself.
     ///
     /// <para>Not for one the program named. A backend it asked for by name is an answer to that
-    /// question and to no other, so <see cref="Factory"/>'s setter records its choice directly and
+    /// question and to no other, so <see cref="Default"/>'s setter records its choice directly and
     /// <see cref="IsolatedBackend"/> records nothing at all.</para>
     /// </summary>
-    public static void Remember(IShorokooInferenceSessionFactory factory)
+    public static void Remember(IShorokooInferenceBackend factory)
     {
         ArgumentNullException.ThrowIfNull(factory);
         lock (_gate)
@@ -127,14 +127,14 @@ public static class InferenceBackend
 
     /// <summary>
     /// Names the live backend and the device it runs on, resolving one the way
-    /// <see cref="Factory"/> would if none is live yet. This is what a run's log should
+    /// <see cref="Default"/> would if none is live yet. This is what a run's log should
     /// record: nothing at a call site says which device the work went to.
     /// </summary>
-    public static BackendDescription Describe() => Factory.Description;
+    public static BackendDescription Describe() => Default.Description;
 
     /// <summary>
     /// Throws unless the live backend runs on <paramref name="device"/>, resolving one the
-    /// way <see cref="Factory"/> would if none is live yet. A program whose correctness
+    /// way <see cref="Default"/> would if none is live yet. A program whose correctness
     /// depends on its device — a check that must not contend with a training run on the
     /// card, say — states that here and fails at startup rather than discovering it from a
     /// throughput figure.
@@ -159,10 +159,10 @@ public static class InferenceBackend
         var remedy = required == ComputeDevice.Other
             // None of the shipped packages reports Other, so naming them here would be a remedy
             // the reader cannot follow.
-            ? "No shipped backend runs on another provider, so assign InferenceBackend.Factory with "
+            ? "No shipped backend runs on another provider, so assign InferenceBackend.Default with "
               + "your own before the first inference call."
             : "Reference the Shorokoo.{WinCPU,WinGPU,LinuxCPU,LinuxGPU} package for the device you "
-              + "want, or assign InferenceBackend.Factory before the first inference call.";
+              + "want, or assign InferenceBackend.Default before the first inference call.";
         return $"This program requires {Requirement(required)}, but {live} is live. {remedy}";
     }
 
@@ -183,7 +183,7 @@ public static class InferenceBackend
         ("Shorokoo.LinuxGPU", OSPlatform.Linux,   true),
     ];
 
-    private static IShorokooInferenceSessionFactory Discover()
+    private static IShorokooInferenceBackend Discover()
     {
         // A backend already loaded in the process wins -- it avoids pulling a
         // second native in alongside one the consumer has already bound.
@@ -200,16 +200,16 @@ public static class InferenceBackend
         var chosen = SelectBackend(osCandidates, $"deployed in '{dir}'")
             ?? throw new InvalidOperationException(
                 $"No Shorokoo inference backend is set and none was found in '{dir}'. " +
-                "Set one at startup -- e.g. InferenceBackend.Factory = new " +
-                "LinuxCpuInferenceFactory(); (or the factory from whichever " +
+                "Set one at startup -- e.g. InferenceBackend.Default = new " +
+                "LinuxCpuBackend(); (or the backend from whichever " +
                 "Shorokoo.{WinCPU,WinGPU,LinuxCPU,LinuxGPU} package you reference) -- " +
                 "or add such a package as a dependency.");
 
         var path = Path.Combine(dir, chosen.Assembly + ".dll");
-        return Remembering(InstantiateFactory(Assembly.LoadFrom(path)))
+        return Remembering(InstantiateBackend(Assembly.LoadFrom(path)))
             ?? throw new InvalidOperationException(
                 $"'{chosen.Assembly}' was found at '{path}' but exposes no concrete " +
-                $"{nameof(IShorokooInferenceSessionFactory)}.");
+                $"{nameof(IShorokooInferenceBackend)}.");
     }
 
     /// <summary>
@@ -238,9 +238,9 @@ public static class InferenceBackend
         return new InvalidOperationException(
             $"Several Shorokoo inference backends are {origin}: {names}. Discovery picks the " +
             "backend for a program that named none, and this deployment gives it no way to " +
-            "choose. Say which you mean: assign InferenceBackend.Factory before the first " +
+            "choose. Say which you mean: assign InferenceBackend.Default before the first " +
             "inference call to make one of them the default. To run several at once, give each " +
-            "ComputeContext its own factory -- new ComputeContext(new LinuxGpuInferenceFactory()) " +
+            "ComputeContext its own backend -- new ComputeContext(new LinuxGpuBackend()) " +
             "-- and where they need separate native ONNX Runtimes, load them with " +
             "IsolatedBackend.Load.");
     }
@@ -277,7 +277,7 @@ public static class InferenceBackend
             asm => AssemblyLoadContext.GetLoadContext(asm) == AssemblyLoadContext.Default)];
 
     /// <summary>Records a factory as it is produced, and hands it straight back.</summary>
-    private static IShorokooInferenceSessionFactory? Remembering(IShorokooInferenceSessionFactory? factory)
+    private static IShorokooInferenceBackend? Remembering(IShorokooInferenceBackend? factory)
     {
         if (factory is not null) Remember(factory);
         return factory;
@@ -292,14 +292,14 @@ public static class InferenceBackend
         return AppContext.BaseDirectory;
     }
 
-    private static IShorokooInferenceSessionFactory? TryFindAlreadyLoadedFactory()
+    private static IShorokooInferenceBackend? TryFindAlreadyLoadedFactory()
     {
         var assemblies = DiscoverableAssemblies(AppDomain.CurrentDomain.GetAssemblies());
         var usable = LoadedCandidates(assemblies.Select(asm => asm.GetName().Name ?? ""))
             .Select(candidate => (candidate, Factory: assemblies
                 .Where(asm => string.Equals(
                     asm.GetName().Name, candidate.Assembly, StringComparison.OrdinalIgnoreCase))
-                .Select(InstantiateFactory)
+                .Select(InstantiateBackend)
                 .FirstOrDefault(factory => factory is not null)))
             .Where(found => found.Factory is not null)
             .ToList();
@@ -313,15 +313,15 @@ public static class InferenceBackend
         return usable[0].Factory;
     }
 
-    private static IShorokooInferenceSessionFactory? InstantiateFactory(Assembly asm)
+    private static IShorokooInferenceBackend? InstantiateBackend(Assembly asm)
     {
         try
         {
             var type = asm.GetExportedTypes().FirstOrDefault(t =>
-                typeof(IShorokooInferenceSessionFactory).IsAssignableFrom(t)
+                typeof(IShorokooInferenceBackend).IsAssignableFrom(t)
                 && !t.IsAbstract
                 && t.GetConstructor(Type.EmptyTypes) is not null);
-            return type is null ? null : (IShorokooInferenceSessionFactory)Activator.CreateInstance(type)!;
+            return type is null ? null : (IShorokooInferenceBackend)Activator.CreateInstance(type)!;
         }
         // Constructing is as fallible as reflecting, and a candidate that throws on construction
         // is simply not a backend this process can use -- it must not abort the search, the more

@@ -153,7 +153,7 @@ namespace Shorokoo
         /// </summary>
         private bool CanShareWith(ComputeContext? target)
             => Space.IsHost
-               || ReferenceEquals(Context?.Factory, target?.Factory);
+               || ReferenceEquals(Context?.ResolvedBackend, target?.ResolvedBackend);
 
         /// <summary>Where a context's tensors live; null is the framework's own host memory.</summary>
         private static MemorySpace SpaceOf(ComputeContext? context)
@@ -165,7 +165,7 @@ namespace Shorokoo
         /// the runtime that made it, so the target has to be handed contents rather than a pointer.
         ///
         /// <para>The target allocates them itself, through
-        /// <see cref="IShorokooInferenceSessionFactory.CreateTensorInBackendMemory"/> rather than
+        /// <see cref="IShorokooInferenceBackend.CreateTensorInBackendMemory"/> rather than
         /// <c>CreateTensorFromRawBytes</c>, so the bytes land in the memory
         /// <paramref name="to"/> names instead of in host memory wearing its name. That is the
         /// difference between a tensor that is on the card and one an execution provider has to
@@ -183,7 +183,7 @@ namespace Shorokoo
             if (to.IsHost)
                 return NewHostTensor(Shape, DType, bytes, target);
 
-            var value = target!.Factory.CreateTensorInBackendMemory(
+            var value = target!.ResolvedBackend.CreateTensorInBackendMemory(
                 (ShorokooTensorElementType)(int)DType, bytes, (long[])Shape);
             return Create(Shape, DType, value, target);
         }
@@ -226,7 +226,7 @@ namespace Shorokoo
                     $"This tensor ({this}) is in {Space} but carries no runtime value, so nothing "
                     + "can read it back.");
 
-            return Context.Factory.CopyTensorToHost(onnx.Value);
+            return Context.ResolvedBackend.CopyTensorToHost(onnx.Value);
         }
     }
 }

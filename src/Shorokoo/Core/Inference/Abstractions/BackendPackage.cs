@@ -168,7 +168,7 @@ public static class BackendPackage
     /// <param name="failure">Why it was not loaded, meaningful only when this returns false.</param>
     public static bool TryLoad(
         string assemblyPath,
-        out IShorokooInferenceSessionFactory? factory,
+        out IShorokooInferenceBackend? factory,
         out BackendProbe failure)
     {
         factory = null;
@@ -201,7 +201,7 @@ public static class BackendPackage
             factory = IsolatedBackend.Load(new IsolatedBackendSpec
             {
                 Name = $"{name} ({probe.Device})",
-                FactoryAssembly = name,
+                BackendAssembly = name,
                 NativeRuntimePath = native,
                 ProbeDirectory = directory,
             });

@@ -7,7 +7,7 @@ internal sealed class OrtInferenceSession : IShorokooInferenceSession
 {
     private readonly InferenceSession _session;
     private readonly int? _cudaDeviceId;
-    private readonly IShorokooInferenceSessionFactory _factory;
+    private readonly IShorokooInferenceBackend _backend;
 
     // ORT's memory info for this session's own (non-host) output memory, or null when it
     // produces everything on the host. Held in a field, not a local: OrtMemoryInfo owns a
@@ -17,11 +17,11 @@ internal sealed class OrtInferenceSession : IShorokooInferenceSession
     private readonly Lazy<OrtMemoryInfo?> _deviceMemoryInfo;
 
     public OrtInferenceSession(
-        InferenceSession session, int? cudaDeviceId, IShorokooInferenceSessionFactory factory)
+        InferenceSession session, int? cudaDeviceId, IShorokooInferenceBackend backend)
     {
         _session = session;
         _cudaDeviceId = cudaDeviceId;
-        _factory = factory;
+        _backend = backend;
         _deviceMemoryInfo = new Lazy<OrtMemoryInfo?>(() => DiscoverDeviceMemoryInfo(session));
     }
 
@@ -46,7 +46,7 @@ internal sealed class OrtInferenceSession : IShorokooInferenceSession
     private OrtValue Unwrap(IShorokooTensorValue value, ref List<IShorokooTensorValue>? borrowed)
     {
         if (value is OrtTensorValue own) return own.Inner;
-        var copy = BackendTransfer.CopyTo(_factory, value);
+        var copy = BackendTransfer.CopyTo(_backend, value);
         (borrowed ??= []).Add(copy);
         return ((OrtTensorValue)copy).Inner;
     }
@@ -199,7 +199,7 @@ internal sealed class OrtInferenceSession : IShorokooInferenceSession
     /// handle stays inside a `using` at each call site.</summary>
     private void ConfigureRun(RunOptions runOptions, RunSettings runSettings)
     {
-        if (OrtSessionFactory.ArenaShrinkageRunConfig(_cudaDeviceId, runSettings.ShrinkArenaAfterRun)
+        if (OrtBackend.ArenaShrinkageRunConfig(_cudaDeviceId, runSettings.ShrinkArenaAfterRun)
             is { } arena)
             runOptions.AddRunConfigEntry("memory.enable_memory_arena_shrinkage", arena);
     }

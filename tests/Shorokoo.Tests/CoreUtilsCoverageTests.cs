@@ -282,13 +282,13 @@ public class CoreUtilsCoverageTests
         // No backend is set explicitly in this suite, so accessing Factory exercises the
         // deployment-folder auto-discovery fallback; the platform backend is derived from the
         // running OS, so this holds on Windows and Linux alike.
-        var factory = InferenceBackend.Factory;
+        var factory = InferenceBackend.Default;
         Assert.NotNull(factory);
         var name = factory.GetType().Assembly.GetName().Name ?? "";
         Assert.StartsWith(RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Shorokoo.Win" : "Shorokoo.Linux", name);
 
         // Discovery is sticky, and the discovered backend actually executes.
-        Assert.Same(factory, InferenceBackend.Factory);
+        Assert.Same(factory, InferenceBackend.Default);
         Assert.Equal(5f, OnnxEngine.Eval(Scalar(2f) + Scalar(3f)).As<float32>().AccessMemory()[0]);
 
         // The candidate policy, driven directly since the suite ships one backend: nothing
@@ -320,7 +320,7 @@ public class CoreUtilsCoverageTests
     public void TestTheLiveBackendNamesItsDeviceAndCanBeRequired()
     {
         var live = InferenceBackend.Describe();
-        Assert.Same(InferenceBackend.Factory, InferenceBackend.Current);
+        Assert.Same(InferenceBackend.Default, InferenceBackend.Current);
         Assert.StartsWith(
             RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Shorokoo.Win" : "Shorokoo.Linux", live.Name);
         Assert.Equal(live.Name.EndsWith("GPU", StringComparison.Ordinal) ? ComputeDevice.Cuda : ComputeDevice.Cpu,
@@ -415,24 +415,24 @@ public class CoreUtilsCoverageTests
         return dependencies;
     }
 
-    private sealed class CudaFactoryProbe : OrtSessionFactory
+    private sealed class CudaFactoryProbe : OrtBackend
     {
         public CudaFactoryProbe(int device) : base(device) { }
     }
 
-    private sealed class CpuFactoryProbe : OrtSessionFactory
+    private sealed class CpuFactoryProbe : OrtBackend
     {
         public CpuFactoryProbe() : base(static (_, _) => { }, ComputeDevice.Cpu, cudaDeviceId: null) { }
     }
 
-    private sealed class OtherDeviceFactoryProbe : OrtSessionFactory
+    private sealed class OtherDeviceFactoryProbe : OrtBackend
     {
         public OtherDeviceFactoryProbe() : base(static (_, _) => { }, ComputeDevice.Other, cudaDeviceId: null) { }
     }
 
     /// <summary>A CPU factory whose execution-provider step records the settings it is handed,
     /// which is where a GPU backend would read the arena budget out of them.</summary>
-    private sealed class CapturingFactoryProbe : OrtSessionFactory
+    private sealed class CapturingFactoryProbe : OrtBackend
     {
         public CapturingFactoryProbe(List<DeviceMemorySettings> seen)
             : base((_, mem) => seen.Add(mem), ComputeDevice.Cpu, cudaDeviceId: null) { }
@@ -471,23 +471,23 @@ public class CoreUtilsCoverageTests
     [Fact]
     public void TestDeviceMemorySettingsMapOntoTheCudaArenaOptions()
     {
-        var uncapped = OrtSessionFactory.CudaProviderOptions(0, null, ArenaExtendStrategy.NextPowerOfTwo);
+        var uncapped = OrtBackend.CudaProviderOptions(0, null, ArenaExtendStrategy.NextPowerOfTwo);
         Assert.Equal("0", uncapped["device_id"]);
         Assert.Equal("kNextPowerOfTwo", uncapped["arena_extend_strategy"]);
         Assert.False(uncapped.ContainsKey("gpu_mem_limit"));
 
-        var budgeted = OrtSessionFactory.CudaProviderOptions(
+        var budgeted = OrtBackend.CudaProviderOptions(
             1, 16L * 1024 * 1024 * 1024, ArenaExtendStrategy.SameAsRequested);
         Assert.Equal("1", budgeted["device_id"]);
         Assert.Equal("kSameAsRequested", budgeted["arena_extend_strategy"]);
         Assert.Equal("17179869184", budgeted["gpu_mem_limit"]);
         Assert.Throws<ArgumentOutOfRangeException>(
-            () => OrtSessionFactory.CudaProviderOptions(0, null, (ArenaExtendStrategy)7));
+            () => OrtBackend.CudaProviderOptions(0, null, (ArenaExtendStrategy)7));
 
-        Assert.Equal("gpu:0", OrtSessionFactory.ArenaShrinkageRunConfig(0, shrinkArenaAfterRun: true));
-        Assert.Equal("gpu:3", OrtSessionFactory.ArenaShrinkageRunConfig(3, shrinkArenaAfterRun: true));
-        Assert.Null(OrtSessionFactory.ArenaShrinkageRunConfig(0, shrinkArenaAfterRun: false));
-        Assert.Null(OrtSessionFactory.ArenaShrinkageRunConfig(null, shrinkArenaAfterRun: true));
+        Assert.Equal("gpu:0", OrtBackend.ArenaShrinkageRunConfig(0, shrinkArenaAfterRun: true));
+        Assert.Equal("gpu:3", OrtBackend.ArenaShrinkageRunConfig(3, shrinkArenaAfterRun: true));
+        Assert.Null(OrtBackend.ArenaShrinkageRunConfig(0, shrinkArenaAfterRun: false));
+        Assert.Null(OrtBackend.ArenaShrinkageRunConfig(null, shrinkArenaAfterRun: true));
     }
 
     /// <summary>
@@ -504,7 +504,7 @@ public class CoreUtilsCoverageTests
         Assert.Equal(DeviceMemorySettings.Default, new ComputeContext().DeviceMemory);
         Assert.Equal(RunSettings.Default, new ComputeContext().RunSettings);
 
-        var shipped = OrtSessionFactory.CudaProviderOptions(
+        var shipped = OrtBackend.CudaProviderOptions(
             0,
             DeviceMemorySettings.Default.LimitBytes,
             DeviceMemorySettings.Default.Resolve(reusedAcrossShapes: false).ArenaExtend);
@@ -512,7 +512,7 @@ public class CoreUtilsCoverageTests
         Assert.False(shipped.ContainsKey("gpu_mem_limit"));
 
         Assert.Throws<ArgumentOutOfRangeException>(
-            () => OrtSessionFactory.CudaProviderOptions(0, null, ArenaExtendStrategy.Auto));
+            () => OrtBackend.CudaProviderOptions(0, null, ArenaExtendStrategy.Auto));
 
         Assert.Throws<ArgumentOutOfRangeException>(() => new DeviceMemorySettings { LimitBytes = 0 });
         Assert.Throws<ArgumentOutOfRangeException>(() => new DeviceMemorySettings { LimitBytes = -1 });
@@ -657,7 +657,7 @@ public class CoreUtilsCoverageTests
         var session = new RunSettingsRecorder();
         var context = new ComputeContext();
         var compiled = new CompiledGraph(
-            session, context.Factory, [], [], ShorokooGraphOptimization.EnableAll,
+            session, context.ResolvedBackend, [], [], ShorokooGraphOptimization.EnableAll,
             DeviceMemorySettings.Default, shrinking, context);
 
         compiled.Execute();
@@ -711,14 +711,14 @@ public class CoreUtilsCoverageTests
         string Source(params string[] parts) =>
             StripCommentsAndStrings(File.ReadAllText(Path.Combine(backend, Path.Combine(parts))));
 
-        string[] gpuFactories = ["Shorokoo.LinuxGPU/LinuxGpuInferenceFactory.cs", "Shorokoo.WinGPU/WinGpuInferenceFactory.cs"];
+        string[] gpuFactories = ["Shorokoo.LinuxGPU/LinuxGpuBackend.cs", "Shorokoo.WinGPU/WinGpuBackend.cs"];
         foreach (var gpu in gpuFactories)
             Assert.Matches(@"base\s*\(\s*cudaDeviceId\s*:\s*0\s*\)", Source(gpu.Split('/')));
-        string[] cpuFactories = ["Shorokoo.LinuxCPU/LinuxCpuInferenceFactory.cs", "Shorokoo.WinCPU/WinCpuInferenceFactory.cs"];
+        string[] cpuFactories = ["Shorokoo.LinuxCPU/LinuxCpuBackend.cs", "Shorokoo.WinCPU/WinCpuBackend.cs"];
         foreach (var cpu in cpuFactories)
             Assert.Matches(@"cudaDeviceId\s*:\s*null", Source(cpu.Split('/')));
 
-        var factory = Source("Shorokoo.OnnxRuntime", "OrtSessionFactory.cs");
+        var factory = Source("Shorokoo.OnnxRuntime", "OrtBackend.cs");
         // Trailing [,)] rather than a closing paren: what this pins is that the device id still
         // reaches the session, not how many other things travel with it.
         Assert.Matches(@"new\s+OrtInferenceSession\s*\(\s*session\s*,\s*_cudaDeviceId\s*[,)]", factory);

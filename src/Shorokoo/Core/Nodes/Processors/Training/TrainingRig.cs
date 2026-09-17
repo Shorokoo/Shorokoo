@@ -68,7 +68,7 @@ namespace Shorokoo
         /// <see cref="Shorokoo.Core.Inference.Abstractions.ShorokooGraphOptimization.TrainingStep"/>. A caller compiling this graph
         /// to observe what the rig runs needs that profile, which <see cref="ComputeContext"/> does
         /// not expose: build the model with <c>FastOnnxModelBuilder</c> and hand it to
-        /// <c>InferenceBackend.Factory.CreateSession</c> with that level.</para>
+        /// <c>InferenceBackend.Default.CreateSession</c> with that level.</para>
         /// </summary>
         public ComputationGraph TrainingStepPureGraph { get; private set; } = null!;
 

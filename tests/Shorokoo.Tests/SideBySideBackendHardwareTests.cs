@@ -43,11 +43,11 @@ public class SideBySideBackendHardwareTests
               + $"'{CudaBackendDirectory}'. Rebuild with -p:ShorokooDeployGpuBackend=true.";
     }
 
-    private static IShorokooInferenceSessionFactory LoadCuda() => IsolatedBackend.Load(
+    private static IShorokooInferenceBackend LoadCuda() => IsolatedBackend.Load(
         new IsolatedBackendSpec
         {
             Name = "cuda:0",
-            FactoryAssembly = Windows ? "Shorokoo.WinGPU" : "Shorokoo.LinuxGPU",
+            BackendAssembly = Windows ? "Shorokoo.WinGPU" : "Shorokoo.LinuxGPU",
             NativeRuntimePath = Path.Combine(
                 CudaBackendDirectory, Windows ? "onnxruntime.dll" : "libonnxruntime.so"),
             ProbeDirectory = CudaBackendDirectory,

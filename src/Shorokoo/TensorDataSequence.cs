@@ -93,10 +93,10 @@ namespace Shorokoo
         /// This sequence as a value of the process-wide backend's runtime, for a caller with no
         /// context to name. <see cref="TensorData.ToTensorValue()"/>'s counterpart.
         /// </summary>
-        internal IShorokooTensorValue ToTensorValue() => ToTensorValue(InferenceBackend.Factory);
+        internal IShorokooTensorValue ToTensorValue() => ToTensorValue(InferenceBackend.Default);
 
         /// <summary>
-        /// This sequence as a value of <paramref name="factory"/>'s runtime — the form the feed
+        /// This sequence as a value of <paramref name="backend"/>'s runtime — the form the feed
         /// sites take, so a sequence is built by the backend whose session is about to read it.
         /// A sequence that already holds a runtime value hands it over and ignores the argument,
         /// since a value belongs to the runtime that made it; one that is only a list of tensors
@@ -104,7 +104,7 @@ namespace Shorokoo
         ///
         /// <para>The value returned is the sequence's own: read it, do not dispose it.</para>
         /// </summary>
-        internal virtual IShorokooTensorValue ToTensorValue(IShorokooInferenceSessionFactory factory)
+        internal virtual IShorokooTensorValue ToTensorValue(IShorokooInferenceBackend backend)
         {
             ThrowIfDisposed();
             // The empty sequence, and only it: ONNX Runtime's binding cannot build a zero-element
@@ -186,7 +186,7 @@ namespace Shorokoo
         /// <para>It is not <see cref="IOnnxData"/>, for the same reason
         /// <see cref="HostTensorData{T}"/> is not: there is no runtime value here until something
         /// asks for one. Feeding such a sequence to a session builds it then, on that session's
-        /// backend -- see <see cref="ToTensorValue(IShorokooInferenceSessionFactory)"/>.</para>
+        /// backend -- see <see cref="ToTensorValue(IShorokooInferenceBackend)"/>.</para>
         /// </summary>
         private sealed class ListTensorDataSequence<T> : TensorDataSequence<T>
             where T : IVarType
@@ -215,7 +215,7 @@ namespace Shorokoo
             }
 
             /// <summary>
-            /// This sequence's elements as one sequence value of <paramref name="factory"/>'s
+            /// This sequence's elements as one sequence value of <paramref name="backend"/>'s
             /// runtime, built the first time that backend asks and kept for the next time.
             ///
             /// <para>Each element is copied rather than handed over. <c>CreateSequence</c> takes
@@ -224,17 +224,17 @@ namespace Shorokoo
             /// (Shorokoo/Shorokoo#180). The copy is the same one <c>TensorDataSequence.Create</c>
             /// makes for the same reason, taken on this backend rather than the process default.</para>
             /// </summary>
-            internal override IShorokooTensorValue ToTensorValue(IShorokooInferenceSessionFactory factory)
+            internal override IShorokooTensorValue ToTensorValue(IShorokooInferenceBackend backend)
             {
-                ArgumentNullException.ThrowIfNull(factory);
+                ArgumentNullException.ThrowIfNull(backend);
                 ThrowIfDisposed();
 
-                return _materialized.Get(factory, Build);
+                return _materialized.Get(backend, Build);
             }
 
             /// <summary>Builds this sequence's elements into one sequence value of
-            /// <paramref name="factory"/>'s runtime.</summary>
-            private IShorokooTensorValue Build(IShorokooInferenceSessionFactory factory)
+            /// <paramref name="backend"/>'s runtime.</summary>
+            private IShorokooTensorValue Build(IShorokooInferenceBackend backend)
             {
                 var inner = new List<IShorokooTensorValue>(_elements.Count);
                 try
@@ -243,7 +243,7 @@ namespace Shorokoo
                     // rather than somewhere else and is then dragged across; BackendTransfer then
                     // has nothing to move for an element already of this runtime.
                     foreach (var element in _elements)
-                        inner.Add(BackendTransfer.CopyTo(factory, element.ToTensorValue(factory)));
+                        inner.Add(BackendTransfer.CopyTo(backend, element.ToTensorValue(backend)));
                 }
                 catch
                 {
@@ -254,7 +254,7 @@ namespace Shorokoo
 
                 // Outside the catch on purpose: CreateSequence takes the copies over, and releases
                 // them itself if it cannot. Inside, a failure there would free each of them twice.
-                return factory.CreateSequence(inner);
+                return backend.CreateSequence(inner);
             }
 
             /// <summary>
@@ -469,7 +469,7 @@ namespace Shorokoo
         /// one runtime and belongs to it; a session of another rebuilds it as it is fed, which is
         /// a thing only that session can do.
         /// </summary>
-        internal override IShorokooTensorValue ToTensorValue(IShorokooInferenceSessionFactory factory)
+        internal override IShorokooTensorValue ToTensorValue(IShorokooInferenceBackend backend)
             => Value;
 
         public override IEnumerator<TensorData<T>> GetEnumerator()

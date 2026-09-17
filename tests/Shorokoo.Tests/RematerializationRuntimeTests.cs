@@ -135,7 +135,7 @@ public class RematerializationRuntimeTests
         try
         {
             using var options = new SessionOptions();
-            OrtSessionFactory.Configure(options, level, ShorokooLogSeverity.Fatal);
+            OrtBackend.Configure(options, level, ShorokooLogSeverity.Fatal);
             options.OptimizedModelFilePath = path;
             using var session = new InferenceSession(stream.ToArray(), options);
             using var file = File.OpenRead(path);

@@ -383,14 +383,14 @@ graph to the next call. `Eval` is the exception: it returns `TensorData` (or
   using Shorokoo.Core.Inference.Abstractions;
   using Shorokoo.LinuxCPU;                                // the package you referenced
 
-  InferenceBackend.Factory = new LinuxCpuInferenceFactory();
+  InferenceBackend.Default = new LinuxCpuBackend();
   ```
 
-- `InferenceBackend.Factory` is the **default** backend: the one every `TensorData` is
+- `InferenceBackend.Default` is the **default** backend: the one every `TensorData` is
   built on, and the one a `ComputeContext` that names no backend of its own runs on. The
-  first factory resolved is cached and reused; assigning `Factory` afterwards swaps it but
+  first backend resolved is cached and reused; assigning `Default` afterwards swaps it but
   does not unload a native ONNX Runtime already bound.
-- A `ComputeContext` constructed with a factory runs there instead, and two contexts may
+- A `ComputeContext` constructed with a backend runs there instead, and two contexts may
   name different backends — that is how one process uses two devices. See
   [One model, two devices](#one-model-two-devices).
 - **Exactly one deployed** is still the rule for *discovery*: a deployment carrying two
@@ -401,33 +401,34 @@ graph to the next call. `Eval` is the exception: it returns `TensorData` (or
   or `ComputeContext.Backend` where the work is submitted. See
   [Which device am I on?](#which-device-am-i-on).
 
-### The factory types
+### The backend types
 
-Each backend package contains exactly one factory, in a namespace equal to the package
+Each backend package contains exactly one backend, in a namespace equal to the package
 id. **The type name spells the device `Cpu`/`Gpu`, while the package, namespace and
 assembly spell it `CPU`/`GPU`** — so `Shorokoo.WinGPU` contains
-`WinGpuInferenceFactory`, *not* `WinGPUInferenceFactory`:
+`WinGpuBackend`, *not* `WinGPUBackend`:
 
-| package (= namespace) | factory type | fully qualified |
+| package (= namespace) | backend type | fully qualified |
 |---|---|---|
-| `Shorokoo.LinuxCPU` | `LinuxCpuInferenceFactory` | `Shorokoo.LinuxCPU.LinuxCpuInferenceFactory` |
-| `Shorokoo.LinuxGPU` | `LinuxGpuInferenceFactory` | `Shorokoo.LinuxGPU.LinuxGpuInferenceFactory` |
-| `Shorokoo.WinCPU` | `WinCpuInferenceFactory` | `Shorokoo.WinCPU.WinCpuInferenceFactory` |
-| `Shorokoo.WinGPU` | `WinGpuInferenceFactory` | `Shorokoo.WinGPU.WinGpuInferenceFactory` |
+| `Shorokoo.LinuxCPU` | `LinuxCpuBackend` | `Shorokoo.LinuxCPU.LinuxCpuBackend` |
+| `Shorokoo.LinuxGPU` | `LinuxGpuBackend` | `Shorokoo.LinuxGPU.LinuxGpuBackend` |
+| `Shorokoo.WinCPU` | `WinCpuBackend` | `Shorokoo.WinCPU.WinCpuBackend` |
+| `Shorokoo.WinGPU` | `WinGpuBackend` | `Shorokoo.WinGPU.WinGpuBackend` |
 
-All four take a parameterless constructor and differ only in the execution provider
+All four implement `IShorokooInferenceBackend`, take a parameterless constructor, and
+differ only in the execution provider
 they configure: the GPU ones append the CUDA provider on device 0, the CPU ones leave
 ORT on its default provider.
 
 ### Auto-discovery
 
-If you never assign `InferenceBackend.Factory`, the first read of it resolves a backend
+If you never assign `InferenceBackend.Default`, the first read of it resolves a backend
 once and caches the result:
 
 1. If one of the four backend assemblies is **already loaded** in the process, its
-   factory is used — this avoids pulling a second native in alongside one already bound.
+   backend is used — this avoids pulling a second native in alongside one already bound.
    Only assemblies targeting the running OS count, as in step 2, and only those that
-   actually expose a factory; anything else falls through to step 2. A backend loaded by
+   actually expose a backend; anything else falls through to step 2. A backend loaded by
    `IsolatedBackend.Load` is not a candidate at all: it lives in a load context of its own,
    and it is there because the program named it, so it is no answer to which backend a
    program that named none meant.
@@ -440,14 +441,14 @@ A single candidate is taken as-is — a lone GPU backend is chosen even when no 
 runtime is present. **Two or more are refused**, in either step, with an
 `InvalidOperationException` naming them. From the folder probe (step 1 says `already loaded
 in this process` in place of `deployed in '<folder>'`, and refuses only backends that
-actually expose a factory):
+actually expose a backend):
 
 > `Several Shorokoo inference backends are deployed in '<folder>': Shorokoo.WinCPU (CPU),
 > Shorokoo.WinGPU (CUDA). Discovery picks the backend for a program that named none, and
 > this deployment gives it no way to choose. Say which you mean: assign
-> InferenceBackend.Factory before the first inference call to make one of them the default.
-> To run several at once, give each ComputeContext its own factory -- new ComputeContext(new
-> LinuxGpuInferenceFactory()) -- and where they need separate native ONNX Runtimes, load
+> InferenceBackend.Default before the first inference call to make one of them the default.
+> To run several at once, give each ComputeContext its own backend -- new ComputeContext(new
+> LinuxGpuBackend()) -- and where they need separate native ONNX Runtimes, load
 > them with IsolatedBackend.Load.`
 
 Discovery does not resolve that by looking for a CUDA runtime and preferring the GPU. A
@@ -462,7 +463,7 @@ are candidates, so a Windows backend alongside a Linux one is no ambiguity at al
 all four, on the other hand, is two for whichever OS you run on — and refused on both.
 
 Mind that step 1 settles it first. If exactly one backend assembly is already loaded when the
-first inference call happens — which naming its factory type anywhere in a method your program
+first inference call happens — which naming its backend type anywhere in a method your program
 runs is enough to cause — that one wins and the folder is never probed. The refusal is what
 happens when the *deployment* is left to make the choice, not a guarantee that an ambiguous
 build cannot run.
@@ -481,7 +482,7 @@ On a Linux sandbox that ships only `Shorokoo.LinuxCPU`, discovery picks it with 
 If no backend is found, the first inference call throws `InvalidOperationException`:
 
 > `No Shorokoo inference backend is set and none was found in '<folder>'. Set one at
-> startup -- e.g. InferenceBackend.Factory = new LinuxCpuInferenceFactory(); (or the
+> startup -- e.g. InferenceBackend.Default = new LinuxCpuBackend(); (or the
 > factory from whichever Shorokoo.{WinCPU,WinGPU,LinuxCPU,LinuxGPU} package you
 > reference) -- or add such a package as a dependency.`
 
@@ -602,8 +603,8 @@ using Shorokoo.Core.Inference.Abstractions;
 using Shorokoo.LinuxCPU;
 using Shorokoo.LinuxGPU;
 
-var cpu  = new ComputeContext(new LinuxCpuInferenceFactory());
-var cuda = new ComputeContext(new LinuxGpuInferenceFactory());
+var cpu  = new ComputeContext(new LinuxCpuBackend());
+var cuda = new ComputeContext(new LinuxGpuBackend());
 
 var onHost = cpu.Execute(graph, input);     // the host
 var onCard = cuda.Execute(graph, input);    // the same graph, the same input, the card
@@ -663,7 +664,7 @@ has to sit beside the core it belongs to, so deploy a package's whole native fol
 var cuda = new ComputeContext(IsolatedBackend.Load(new IsolatedBackendSpec
 {
     Name = "cuda:0",
-    FactoryAssembly = "Shorokoo.LinuxGPU",
+    BackendAssembly = "Shorokoo.LinuxGPU",
     NativeRuntimePath = Path.Combine(AppContext.BaseDirectory, "ort", "cuda", "libonnxruntime.so"),
 }));
 ```

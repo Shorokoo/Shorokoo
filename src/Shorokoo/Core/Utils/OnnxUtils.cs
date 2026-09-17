@@ -245,13 +245,13 @@ namespace Shorokoo.Core.Utils
 
         public static IShorokooTensorValue CreateTensorValue<T>(Shape shape, T[] data)
             where T : unmanaged
-            => InferenceBackend.Factory.CreateTensor<T>(data, (long[])shape);
+            => InferenceBackend.Default.CreateTensor<T>(data, (long[])shape);
 
         public static IShorokooTensorValue CreateTensorValue(Shape shape, byte[] data)
-            => InferenceBackend.Factory.CreateTensor<byte>(data, (long[])shape);
+            => InferenceBackend.Default.CreateTensor<byte>(data, (long[])shape);
 
         public static IShorokooTensorValue CreateTensorValue(Shape shape, string[] data)
-            => InferenceBackend.Factory.CreateStringTensor(data, (long[])shape);
+            => InferenceBackend.Default.CreateStringTensor(data, (long[])shape);
 
         /// <summary>
         /// A tensor over <paramref name="value"/> with no context: the framework's own host memory,
@@ -292,7 +292,7 @@ namespace Shorokoo.Core.Utils
             try
             {
                 foreach (var d in data) inner.Add(CopyTensorValue(d.ToTensorValue()));
-                var sequence = InferenceBackend.Factory.CreateSequence(inner);
+                var sequence = InferenceBackend.Default.CreateSequence(inner);
                 return CreateTensorDataSequenceFromValue(dtype, sequence);
             }
             catch
@@ -308,7 +308,7 @@ namespace Shorokoo.Core.Utils
         /// that would otherwise leave two owners pointing at one runtime value.
         /// </summary>
         internal static IShorokooTensorValue CopyTensorValue(IShorokooTensorValue value)
-            => BackendTransfer.CopyTo(InferenceBackend.Factory, value);
+            => BackendTransfer.CopyTo(InferenceBackend.Default, value);
 
         /// <summary>
         /// Wraps a runtime value whose producer is not known — the framework's own paths all know
@@ -401,7 +401,7 @@ namespace Shorokoo.Core.Utils
             => new OnnxTensorDataSequence<T>(value);
 
         public static IShorokooTensorValue CreateTensorValueFromRawData(Shape shape, DType type, byte[] data)
-            => InferenceBackend.Factory.CreateTensorFromRawBytes(
+            => InferenceBackend.Default.CreateTensorFromRawBytes(
                 (ShorokooTensorElementType)(int)type.ProtoTypeNum, data, (long[])shape);
 
         public static string ToJson(this InternalComputationGraph fastGraph)

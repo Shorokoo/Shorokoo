@@ -4,7 +4,7 @@ namespace Shorokoo.Tests.Utils;
 
 /// <summary>
 /// Marks a test that requires a CUDA-capable Shorokoo inference provider.
-/// Consults <see cref="InferenceBackend.Factory"/>: if the loaded
+/// Consults <see cref="InferenceBackend.Default"/>: if the loaded
 /// platform DLL's assembly name ends in "GPU" (e.g. Shorokoo.WinGPU), the
 /// test runs; otherwise it is skipped with a clear message.
 ///
@@ -21,7 +21,7 @@ public sealed class CudaFactAttribute : FactAttribute
         string assemblyName;
         try
         {
-            assemblyName = InferenceBackend.Factory.GetType().Assembly.GetName().Name ?? "?";
+            assemblyName = InferenceBackend.Default.GetType().Assembly.GetName().Name ?? "?";
         }
         catch (Exception ex)
         {

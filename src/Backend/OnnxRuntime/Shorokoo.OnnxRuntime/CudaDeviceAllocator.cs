@@ -73,7 +73,7 @@ internal static class CudaDeviceAllocator
     private static Binding Bind(
         int deviceId, Action<SessionOptions, DeviceMemorySettings> configureExecutionProvider)
     {
-        // The `using` is the same load-bearing one as in OrtSessionFactory.CreateSession: ORT takes
+        // The `using` is the same load-bearing one as in OrtBackend.CreateSession: ORT takes
         // the options as a bare IntPtr and does no ref-counting, so a plain local is collectible --
         // and its critical finalizer free-able -- while the session constructor is still reading it.
         using var options = new SessionOptions();

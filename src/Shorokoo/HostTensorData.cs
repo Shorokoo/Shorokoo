@@ -20,11 +20,11 @@ namespace Shorokoo
     /// provider, no native runtime, and no deployed backend at all.</para>
     ///
     /// <para>It did before. Every literal went through
-    /// <c>InferenceBackend.Factory.CreateTensor</c>, so the node definition table's own tensors
+    /// <c>InferenceBackend.Default.CreateTensor</c>, so the node definition table's own tensors
     /// resolved the process-wide backend the first time anything touched a graph — which meant a
     /// program that only wanted to build a model and export it as ONNX still had to deploy a
     /// runtime to do it. The tensor arrives on a backend when it is fed to a session, in
-    /// <see cref="TensorData.ToTensorValue(IShorokooInferenceSessionFactory)"/>, and not before.</para>
+    /// <see cref="TensorData.ToTensorValue(IShorokooInferenceBackend)"/>, and not before.</para>
     ///
     /// <para>String tensors are not held here: their elements are variable-length and
     /// reference-typed, so they do not fit a flat byte buffer and keep the backend-backed path.</para>
@@ -142,16 +142,16 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// This tensor's contents as a value of <paramref name="factory"/>'s runtime, built the
+        /// This tensor's contents as a value of <paramref name="backend"/>'s runtime, built the
         /// first time that backend asks and kept for the next time. The value is this tensor's,
         /// like <see cref="OnnxTensorData{T}"/>'s is: the caller reads it and does not dispose it.
         /// </summary>
-        internal override IShorokooTensorValue ToTensorValue(IShorokooInferenceSessionFactory factory)
+        internal override IShorokooTensorValue ToTensorValue(IShorokooInferenceBackend backend)
         {
-            ArgumentNullException.ThrowIfNull(factory);
+            ArgumentNullException.ThrowIfNull(backend);
             ThrowIfDisposed();
 
-            return _materialized.Get(factory, f => f.CreateTensorFromRawBytes(
+            return _materialized.Get(backend, f => f.CreateTensorFromRawBytes(
                 (ShorokooTensorElementType)(int)this.DType, _bytes, (long[])this.Shape));
         }
 

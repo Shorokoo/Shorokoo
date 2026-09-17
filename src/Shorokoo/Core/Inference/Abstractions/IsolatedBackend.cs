@@ -13,18 +13,18 @@ public sealed record IsolatedBackendSpec
 {
     /// <summary>
     /// What this backend is called in <see cref="BackendDescription.Name"/> — in a log, in
-    /// <see cref="InferenceBackend.Describe"/>, in an error. It replaces the factory assembly's
+    /// <see cref="InferenceBackend.Describe"/>, in an error. It replaces the backend assembly's
     /// name, which cannot tell two loads of one assembly apart. Give it something a reader can
     /// act on: <c>cuda:0</c>, <c>cpu</c>, <c>ort-1.22</c>.
     /// </summary>
     public required string Name { get; init; }
 
     /// <summary>
-    /// The simple name of the assembly holding the factory to load — <c>Shorokoo.LinuxGPU</c>,
+    /// The simple name of the assembly holding the backend to load — <c>Shorokoo.LinuxGPU</c>,
     /// <c>Shorokoo.WinCPU</c>, or your own. It is loaded privately to this backend, as is the
     /// ONNX Runtime glue beneath it, so its types are this backend's alone.
     /// </summary>
-    public required string FactoryAssembly { get; init; }
+    public required string BackendAssembly { get; init; }
 
     /// <summary>
     /// The full path to the native ONNX Runtime this backend binds to
@@ -56,8 +56,8 @@ public sealed record IsolatedBackendSpec
 /// CPU context and a CUDA context side by side:
 /// </para>
 /// <code>
-/// var cpu  = new ComputeContext(new LinuxCpuInferenceFactory());
-/// var cuda = new ComputeContext(new LinuxGpuInferenceFactory());
+/// var cpu  = new ComputeContext(new LinuxCpuBackend());
+/// var cuda = new ComputeContext(new LinuxGpuBackend());
 /// </code>
 /// <para>
 /// What needs isolation is a <i>second runtime</i>: two ONNX Runtime builds, or two versions,
@@ -69,14 +69,14 @@ public sealed record IsolatedBackendSpec
 /// </para>
 /// <code>
 /// var cpu  = IsolatedBackend.Load(new IsolatedBackendSpec {
-///     Name = "cpu",  FactoryAssembly = "Shorokoo.LinuxCPU",
+///     Name = "cpu",  BackendAssembly = "Shorokoo.LinuxCPU",
 ///     NativeRuntimePath = Path.Combine(AppContext.BaseDirectory, "ort/cpu/libonnxruntime.so") });
 /// var cuda = IsolatedBackend.Load(new IsolatedBackendSpec {
-///     Name = "cuda", FactoryAssembly = "Shorokoo.LinuxGPU",
+///     Name = "cuda", BackendAssembly = "Shorokoo.LinuxGPU",
 ///     NativeRuntimePath = Path.Combine(AppContext.BaseDirectory, "ort/cuda/libonnxruntime.so") });
 /// </code>
 /// <para>
-/// Only the ONNX Runtime wrapper, the glue over it and the factory assembly are private to a
+/// Only the ONNX Runtime wrapper, the glue over it and the backend assembly are private to a
 /// backend. Everything else — the core Shorokoo assembly, the abstractions in this namespace,
 /// the framework types your model is written in — resolves to the one copy the program already
 /// loaded, so a <see cref="BackendDescription"/> or an <see cref="IShorokooTensorValue"/> is
@@ -102,25 +102,25 @@ public static class IsolatedBackend
     // The bare name ONNX Runtime's wrapper imports every entry point from.
     private const string OrtNativeLibrary = "onnxruntime";
 
-    private static readonly ConcurrentDictionary<IsolatedBackendSpec, IShorokooInferenceSessionFactory> _loaded = new();
+    private static readonly ConcurrentDictionary<IsolatedBackendSpec, IShorokooInferenceBackend> _loaded = new();
 
     /// <summary>
     /// Loads the backend <paramref name="spec"/> names, bound to the native ONNX Runtime at
-    /// <see cref="IsolatedBackendSpec.NativeRuntimePath"/>, and returns its factory —
+    /// <see cref="IsolatedBackendSpec.NativeRuntimePath"/>, and returns it —
     /// ready to hand to a <c>ComputeContext</c>. Loading the same spec again returns the same
     /// backend.
     /// </summary>
     /// <exception cref="ArgumentNullException"><paramref name="spec"/> is null.</exception>
     /// <exception cref="ArgumentException">A required field of the spec is blank.</exception>
-    /// <exception cref="FileNotFoundException">The native runtime, or the factory assembly,
+    /// <exception cref="FileNotFoundException">The native runtime, or the backend assembly,
     /// is not where the spec says.</exception>
-    /// <exception cref="InvalidOperationException">The factory assembly holds no usable
-    /// factory.</exception>
-    public static IShorokooInferenceSessionFactory Load(IsolatedBackendSpec spec)
+    /// <exception cref="InvalidOperationException">The backend assembly holds no usable
+    /// backend.</exception>
+    public static IShorokooInferenceBackend Load(IsolatedBackendSpec spec)
     {
         ArgumentNullException.ThrowIfNull(spec);
         Require(spec.Name, nameof(IsolatedBackendSpec.Name));
-        Require(spec.FactoryAssembly, nameof(IsolatedBackendSpec.FactoryAssembly));
+        Require(spec.BackendAssembly, nameof(IsolatedBackendSpec.BackendAssembly));
         Require(spec.NativeRuntimePath, nameof(IsolatedBackendSpec.NativeRuntimePath));
 
         // Keyed on the resolved paths rather than on the spec as written, so that two spellings
@@ -133,7 +133,7 @@ public static class IsolatedBackend
         };
 
         // Not GetOrAdd: loading is expensive, throws for several distinct reasons, and pins a
-        // native library for the life of the process. GetOrAdd may run its factory more than
+        // native library for the life of the process. GetOrAdd may run its value factory more than
         // once under contention, and a second load of the same spec is exactly the waste this
         // cache exists to prevent.
         if (_loaded.TryGetValue(key, out var cached)) return cached;
@@ -152,7 +152,7 @@ public static class IsolatedBackend
             throw new ArgumentException($"An isolated backend's {field} is required.", nameof(IsolatedBackendSpec));
     }
 
-    private static IShorokooInferenceSessionFactory LoadUncached(IsolatedBackendSpec spec)
+    private static IShorokooInferenceBackend LoadUncached(IsolatedBackendSpec spec)
     {
         var native = Path.GetFullPath(spec.NativeRuntimePath);
         if (!File.Exists(native))
@@ -165,31 +165,31 @@ public static class IsolatedBackend
         var probeDirectory = spec.ProbeDirectory is { Length: > 0 } given
             ? Path.GetFullPath(given)
             : ProbeDirectory();
-        var factoryPath = Path.Combine(probeDirectory, spec.FactoryAssembly + ".dll");
-        if (!File.Exists(factoryPath))
+        var backendPath = Path.Combine(probeDirectory, spec.BackendAssembly + ".dll");
+        if (!File.Exists(backendPath))
             throw new FileNotFoundException(
-                $"The isolated backend '{spec.Name}' loads its factory from " +
-                $"'{spec.FactoryAssembly}', which is not in '{probeDirectory}'. Reference that " +
+                $"The isolated backend '{spec.Name}' loads its backend type from " +
+                $"'{spec.BackendAssembly}', which is not in '{probeDirectory}'. Reference that " +
                 "backend package, or set IsolatedBackendSpec.ProbeDirectory to where it is deployed.",
-                factoryPath);
+                backendPath);
 
-        // The glue and the ONNX Runtime wrapper are looked for beside the factory first and beside
+        // The glue and the ONNX Runtime wrapper are looked for beside the backend first and beside
         // the core assembly second, because a backend deployed in a folder of its own normally
-        // carries only its factory there and shares the rest with the ordinary build.
+        // carries only its backend there and shares the rest with the ordinary build.
         var context = new BackendLoadContext(spec.Name, [probeDirectory, ProbeDirectory()], native);
         BindNativeRuntime(context, native);
-        var factory = InstantiateFactory(context.LoadFromAssemblyPath(factoryPath))
+        var backend = InstantiateBackend(context.LoadFromAssemblyPath(backendPath))
             ?? throw new InvalidOperationException(
-                $"'{spec.FactoryAssembly}' was loaded from '{factoryPath}' for the isolated " +
+                $"'{spec.BackendAssembly}' was loaded from '{backendPath}' for the isolated " +
                 $"backend '{spec.Name}' but exposes no concrete " +
-                $"{nameof(IShorokooInferenceSessionFactory)} with a parameterless constructor.");
+                $"{nameof(IShorokooInferenceBackend)} with a parameterless constructor.");
 
         // Deliberately not remembered. A backend loaded here is one the program named, and
         // discovery's question is which backend a program that named none meant -- so this is no
         // answer to it, as Documentation/inference.md says under Auto-discovery. Remembering it
         // made whichever isolated backend happened to load first the one every unnamed context
         // ran on, and, since a CPU one is never displaced, permanently.
-        return new RenamedFactory(factory, spec.Name);
+        return new RenamedBackend(backend, spec.Name);
     }
 
     /// <summary>
@@ -207,7 +207,7 @@ public static class IsolatedBackend
     /// an assembly takes only one resolver, so the wrapper's own attempt then fails, which it
     /// expects and handles (it is how a host is meant to take this over).</para>
     ///
-    /// <para>A backend whose factory does not sit on ONNX Runtime has no wrapper to bind here, and
+    /// <para>A backend that does not sit on ONNX Runtime has no wrapper to bind here, and
     /// its native is left to the load context to resolve.</para>
     /// </summary>
     private static void BindNativeRuntime(BackendLoadContext context, string nativeRuntimePath)
@@ -229,20 +229,20 @@ public static class IsolatedBackend
             : AppContext.BaseDirectory;
     }
 
-    private static IShorokooInferenceSessionFactory? InstantiateFactory(Assembly asm)
+    private static IShorokooInferenceBackend? InstantiateBackend(Assembly asm)
     {
         var type = asm.GetExportedTypes().FirstOrDefault(t =>
-            typeof(IShorokooInferenceSessionFactory).IsAssignableFrom(t)
+            typeof(IShorokooInferenceBackend).IsAssignableFrom(t)
             && !t.IsAbstract
             && t.GetConstructor(Type.EmptyTypes) is not null);
         // Unlike the discovery path in InferenceBackend, a failure to construct is not swallowed:
         // there is no other candidate to fall through to, and the caller named this one.
-        return type is null ? null : (IShorokooInferenceSessionFactory)Activator.CreateInstance(type)!;
+        return type is null ? null : (IShorokooInferenceBackend)Activator.CreateInstance(type)!;
     }
 
     /// <summary>
     /// The load context one backend lives in: it resolves the ONNX Runtime wrapper, the glue
-    /// over it and the factory assembly to its own private copies, lets everything else resolve
+    /// over it and the backend assembly to its own private copies, lets everything else resolve
     /// to the copy the program already loaded, and answers the unmanaged <c>onnxruntime</c> with
     /// this backend's native.
     /// </summary>
@@ -284,8 +284,8 @@ public static class IsolatedBackend
                     name + ".dll");
         }
 
-        // The factory assembly resolves through LoadFromAssemblyPath in LoadUncached rather than
-        // through here, so this names only what the factory pulls in behind it.
+        // The backend assembly resolves through LoadFromAssemblyPath in LoadUncached rather than
+        // through here, so this names only what the backend pulls in behind it.
         private static bool IsPrivate(string name)
             => name.Equals(OrtManagedAssembly, StringComparison.OrdinalIgnoreCase)
                || name.Equals(OrtGlueAssembly, StringComparison.OrdinalIgnoreCase);
@@ -310,11 +310,11 @@ public static class IsolatedBackend
     /// factory, so they carry that backend's runtime types — which is how a session recognises a
     /// value as its own or as another backend's.</para>
     /// </summary>
-    private sealed class RenamedFactory : IShorokooInferenceSessionFactory
+    private sealed class RenamedBackend : IShorokooInferenceBackend
     {
-        private readonly IShorokooInferenceSessionFactory _inner;
+        private readonly IShorokooInferenceBackend _inner;
 
-        internal RenamedFactory(IShorokooInferenceSessionFactory inner, string name)
+        internal RenamedBackend(IShorokooInferenceBackend inner, string name)
         {
             _inner = inner;
             var described = inner.Description;

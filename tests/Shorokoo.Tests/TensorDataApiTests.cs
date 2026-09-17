@@ -318,7 +318,7 @@ public class TensorDataApiCoverageTests
         // is named or left to the default, because there is only one backend to name here.
         Assert.Same(value, literal.ToTensorValue());
         Assert.Same(value, literal.ToTensorValue(
-            Shorokoo.Core.Inference.Abstractions.InferenceBackend.Factory));
+            Shorokoo.Core.Inference.Abstractions.InferenceBackend.Default));
 
         // A transfer rebuilds a sequence as a plain list of the tensors it moved, so there is no
         // runtime sequence value left in it either; asking builds one over its elements.
@@ -332,7 +332,7 @@ public class TensorDataApiCoverageTests
             Shorokoo.Core.Inference.Abstractions.ShorokooOnnxValueType.Sequence, sequence.ValueType);
         Assert.Equal(2, sequence.GetValueCount());
         Assert.Same(sequence, moved.ToTensorValue(
-            Shorokoo.Core.Inference.Abstractions.InferenceBackend.Factory));
+            Shorokoo.Core.Inference.Abstractions.InferenceBackend.Default));
 
         Assert.Throws<ArgumentNullException>(() => literal.ToTensorValue(null!));
 

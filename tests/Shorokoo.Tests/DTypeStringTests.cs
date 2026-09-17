@@ -34,7 +34,7 @@ public class DTypeStringCoverageTests
         string[] values = ["hello", "", "shoroko̅o", "with\nnewline", "🦀"];
         long[] shape = [values.Length];
 
-        using (var tensor = InferenceBackend.Factory.CreateStringTensor(values, shape))
+        using (var tensor = InferenceBackend.Default.CreateStringTensor(values, shape))
         {
             Assert.Equal(ShorokooOnnxValueType.Tensor, tensor.ValueType);
             Assert.Equal(ShorokooTensorElementType.String, tensor.ElementType);
@@ -43,7 +43,7 @@ public class DTypeStringCoverageTests
         }
 
         var rawBytesEx = Assert.Throws<NotSupportedException>(() =>
-            InferenceBackend.Factory.CreateTensorFromRawBytes(
+            InferenceBackend.Default.CreateTensorFromRawBytes(
                 ShorokooTensorElementType.String, [], [0L]));
         Assert.Contains("CreateStringTensor", rawBytesEx.Message);
 

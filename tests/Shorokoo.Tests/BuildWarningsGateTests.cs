@@ -26,7 +26,7 @@ namespace Shorokoo.Tests;
 /// That list used to be <c>Shorokoo.Modules</c> alone, on the reasoning that
 /// building it pulls in <c>Shorokoo</c> (Core) and the <c>Shorokoo.CodeGen</c>
 /// analyzer, and that the backends carried no compiled C#. The second half stopped
-/// being true: <c>Shorokoo.OnnxRuntime</c> holds <c>OrtSessionFactory</c>,
+/// being true: <c>Shorokoo.OnnxRuntime</c> holds <c>OrtBackend</c>,
 /// <c>OrtInferenceSession</c>, <c>OrtTensorValue</c> and the glue around them, and
 /// each platform package holds its <c>[ShorokooBackend]</c> manifest and a factory
 /// of its own. A <c>CS1734</c> lived there unnoticed for exactly as long as the gate

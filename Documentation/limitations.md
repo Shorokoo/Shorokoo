@@ -205,6 +205,24 @@ A tensor that came back from a session without the context that produced it bein
 its space as unknown, and cannot be transferred at all — there is no telling whether another
 context shares it. Bring such a value home on the backend that owns it first.
 
+### A tensor being fed to a run is not yours until the run returns
+
+Feeding a `TensorData` to a run builds a runtime value from its contents and hands the execution
+provider a pointer into it. Writing through `AccessModifiableMemory` / `AccessModifiableRawMemory`,
+or disposing the tensor, releases that value — so doing either while a run on that tensor is still
+going leaves the provider reading freed memory.
+
+Within one thread this is hard to hit: the run has returned before you get the chance. It becomes
+reachable the moment a program runs two contexts at once, which is the arrangement
+[One model, two devices](inference.md#one-model-two-devices) exists for — staging the next batch
+into a tensor while the other device is still reading it is the natural thing to write, and it is
+the unsafe thing. Give the concurrent run a tensor of its own (`CopyTo`) or wait for it to return.
+
+Nothing detects a violation. The release is explicit rather than a collection, so no rooting
+discipline on this side can see that a native call is in flight, and the failure is a read of freed
+memory rather than an exception. Making it enforceable rather than stated needs the runtime values
+reference-counted for the length of a run — [#366](https://github.com/Shorokoo/Shorokoo/issues/366).
+
 ### Device-memory readings are the device's, and device 0's
 
 Arena configuration is per session and per run — `ComputeContext.DeviceMemory` for the sessions a

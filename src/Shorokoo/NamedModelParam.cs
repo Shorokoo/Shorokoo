@@ -39,8 +39,8 @@ namespace Shorokoo
         }
 
         /// <inheritdoc/>
-        internal override IShorokooTensorValue ToTensorValue(IShorokooInferenceSessionFactory factory)
-            => data.ToTensorValue(factory);
+        internal override IShorokooTensorValue ToTensorValue(IShorokooInferenceBackend backend)
+            => data.ToTensorValue(backend);
 
         public override TensorData ToTensorData() => data;
         public override TensorData<T> ToTensorData<T>() => (TensorData<T>)data;
@@ -83,8 +83,8 @@ namespace Shorokoo
         public override IShorokooTensorValue ToTensorValue() => data.ToTensorValue();
 
         /// <inheritdoc/>
-        internal override IShorokooTensorValue ToTensorValue(IShorokooInferenceSessionFactory factory)
-            => data.ToTensorValue(factory);
+        internal override IShorokooTensorValue ToTensorValue(IShorokooInferenceBackend backend)
+            => data.ToTensorValue(backend);
 
         public override TensorData ToTensorData() =>
             throw new InvalidTensorOperationException(ErrorCodes.FW007, "ToTensorData", "TensorDataSequenceModelParam",
@@ -123,15 +123,15 @@ namespace Shorokoo
             base.Structure = DataStructure.Optional;
         }
 
-        public override IShorokooTensorValue ToTensorValue() => ToTensorValue(InferenceBackend.Factory);
+        public override IShorokooTensorValue ToTensorValue() => ToTensorValue(InferenceBackend.Default);
 
         /// <inheritdoc/>
-        internal override IShorokooTensorValue ToTensorValue(IShorokooInferenceSessionFactory factory)
+        internal override IShorokooTensorValue ToTensorValue(IShorokooInferenceBackend backend)
         {
             // ONNX Runtime accepts a plain tensor where an optional input is expected (opset 18+),
             // so a present optional feeds its inner tensor directly.
             if (Data.HasValue && Data.Value is not null)
-                return Data.Value.ToTensorValue(factory);
+                return Data.Value.ToTensorValue(backend);
             throw new InvalidTensorOperationException(ErrorCodes.FW007, "ToTensorValue", "OptionalTensorDataModelParam",
                 "An absent OptionalTensorData cannot be fed to the ONNX Runtime session as a none-optional input. " +
                 "Execute through the QuickExecutionEngine (QuickExecutionEngine.Execute), which supports absent optionals.");
@@ -234,7 +234,7 @@ namespace Shorokoo
         public abstract IShorokooTensorValue ToTensorValue();
 
         /// <summary>
-        /// This parameter as a value of <paramref name="factory"/>'s runtime — the form the feed
+        /// This parameter as a value of <paramref name="backend"/>'s runtime — the form the feed
         /// sites take, so that a literal is materialised by the backend whose session is about to
         /// read it rather than by whichever one the process happens to default to. A value belongs
         /// to the runtime that made it, and feeding one built elsewhere costs a rebuild per run at
@@ -248,7 +248,7 @@ namespace Shorokoo
         ///
         /// <para>The value returned is the parameter's own: read it, do not dispose it.</para>
         /// </summary>
-        internal virtual IShorokooTensorValue ToTensorValue(IShorokooInferenceSessionFactory factory)
+        internal virtual IShorokooTensorValue ToTensorValue(IShorokooInferenceBackend backend)
             => ToTensorValue();
 
         public abstract TensorData ToTensorData();

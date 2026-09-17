@@ -24,8 +24,8 @@ public class CrossDeviceRoutingCoverageTests
         Assert.Equal(MemorySpace.Cuda(0), MemorySpace.Cuda(0));
         Assert.NotEqual(MemorySpace.Host, MemorySpace.Cuda(0));
 
-        IShorokooInferenceSessionFactory first = new StubFactory(ComputeDevice.Cuda, 0);
-        IShorokooInferenceSessionFactory second = new StubFactory(ComputeDevice.Cuda, 0);
+        IShorokooInferenceBackend first = new StubFactory(ComputeDevice.Cuda, 0);
+        IShorokooInferenceBackend second = new StubFactory(ComputeDevice.Cuda, 0);
         Assert.Equal(first.MemorySpace, second.MemorySpace);
         Assert.Equal(MemorySpace.Cuda(0), first.MemorySpace);
     }
@@ -91,7 +91,7 @@ public class CrossDeviceRoutingCoverageTests
     /// <summary>A backend that answers about itself and records what it was asked to build, so a
     /// transfer's route can be read off it without a session, a native runtime or a card.</summary>
     private sealed class StubFactory(ComputeDevice device, int? cudaDeviceId)
-        : IShorokooInferenceSessionFactory
+        : IShorokooInferenceBackend
     {
         public int BackendMemoryBuilds { get; private set; }
 

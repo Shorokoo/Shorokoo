@@ -3,7 +3,7 @@ namespace Shorokoo.Core.Inference.Abstractions;
 /// <summary>
 /// Moves a tensor value from the backend that produced it onto another one.
 ///
-/// <para>Two backends sharing a native ONNX Runtime — a CPU factory and a CUDA factory over one
+/// <para>Two backends sharing a native ONNX Runtime — a CPU backend and a CUDA backend over one
 /// loaded runtime — need none of this: a value either of them made is a value the other's
 /// sessions accept, and the runtime does whatever copying the device needs. This is for the
 /// case where the backends do <i>not</i> share a runtime, which
@@ -26,7 +26,7 @@ public static class BackendTransfer
     /// <exception cref="InvalidOperationException"><paramref name="value"/> lives in an
     /// execution provider's own memory, or is neither a tensor nor a sequence.</exception>
     public static IShorokooTensorValue CopyTo(
-        IShorokooInferenceSessionFactory target, IShorokooTensorValue value)
+        IShorokooInferenceBackend target, IShorokooTensorValue value)
     {
         ArgumentNullException.ThrowIfNull(target);
         ArgumentNullException.ThrowIfNull(value);
@@ -42,7 +42,7 @@ public static class BackendTransfer
     }
 
     private static IShorokooTensorValue CopyTensor(
-        IShorokooInferenceSessionFactory target, IShorokooTensorValue value)
+        IShorokooInferenceBackend target, IShorokooTensorValue value)
     {
         if (!value.IsHostAccessible)
             throw new InvalidOperationException(
@@ -65,7 +65,7 @@ public static class BackendTransfer
     }
 
     private static IShorokooTensorValue CopySequence(
-        IShorokooInferenceSessionFactory target, IShorokooTensorValue value)
+        IShorokooInferenceBackend target, IShorokooTensorValue value)
     {
         var count = value.GetValueCount();
         var copies = new List<IShorokooTensorValue>(count);

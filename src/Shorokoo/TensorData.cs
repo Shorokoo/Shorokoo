@@ -186,6 +186,18 @@ namespace Shorokoo
     /// <summary>
     /// Concrete tensor value: a shape, a dtype, and raw element storage.
     /// Base of the typed <see cref="TensorData{T}"/> hierarchy.
+    ///
+    /// <para><b>A tensor being fed to a run must not be written to or disposed until that run
+    /// returns.</b> Feeding one builds a runtime value from its contents and hands the execution
+    /// provider a bare pointer into it; writing through <c>AccessModifiable…</c>, or disposing the
+    /// tensor, releases that value outright so the provider can go on reading freed memory. The
+    /// rule binds across threads as well as within one, and across contexts: two contexts running
+    /// at once is exactly the arrangement in which a caller is most likely to stage the next
+    /// batch into a tensor the other is still reading. Give a concurrent run its own tensor —
+    /// <see cref="CopyTo"/> makes one — or wait for it to return. This is a contract rather than a
+    /// guard because the release is explicit, not a collection, so nothing on this side can see
+    /// that a native call is in flight; Shorokoo/Shorokoo#366 is the reference counting that would
+    /// make it enforceable.</para>
     /// </summary>
     public abstract partial class TensorData : IData, IDisposable
     {
@@ -385,10 +397,10 @@ namespace Shorokoo
         ///
         /// <para>Raw bytes are what a tensor read out of a model file, or zeroed for a gradient
         /// buffer, already is; wrapping them describes data rather than running anything. This
-        /// went through <c>InferenceBackend.Factory</c> instead, so reading an <c>.onnx</c> file
+        /// went through <c>InferenceBackend.Default</c> instead, so reading an <c>.onnx</c> file
         /// resolved the process-wide backend and put a native allocation behind every initializer
         /// in it. The value is built when a session is fed this tensor, in
-        /// <see cref="ToTensorValue(IShorokooInferenceSessionFactory)"/>, and not before.</para>
+        /// <see cref="ToTensorValue(IShorokooInferenceBackend)"/>, and not before.</para>
         ///
         /// <para>Exactly <paramref name="shape"/>'s worth of <paramref name="data"/> becomes the
         /// tensor: too few bytes is an error, a surplus is not and is dropped. That asymmetry is
@@ -445,17 +457,17 @@ namespace Shorokoo
         /// Returns the backing inference-runtime tensor value, on the process-wide backend;
         /// throws if this instance has none and none can be built.
         /// </summary>
-        public IShorokooTensorValue ToTensorValue() => ToTensorValue(InferenceBackend.Factory);
+        public IShorokooTensorValue ToTensorValue() => ToTensorValue(InferenceBackend.Default);
 
         /// <summary>
-        /// This tensor as a value of <paramref name="factory"/>'s runtime. A tensor that already
+        /// This tensor as a value of <paramref name="backend"/>'s runtime. A tensor that already
         /// holds one hands it over and ignores the argument, since a value belongs to the runtime
         /// that made it; one held in plain host memory builds it here, which is the first moment a
         /// backend is needed at all.
         ///
         /// <para>The value returned is the tensor's own: read it, do not dispose it.</para>
         /// </summary>
-        internal virtual IShorokooTensorValue ToTensorValue(IShorokooInferenceSessionFactory factory)
+        internal virtual IShorokooTensorValue ToTensorValue(IShorokooInferenceBackend backend)
         {
             ThrowIfDisposed();
             if (this is IOnnxData od) return od.Value;

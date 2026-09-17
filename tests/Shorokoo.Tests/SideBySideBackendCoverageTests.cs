@@ -34,18 +34,18 @@ public class SideBySideBackendCoverageTests
         BackendRoot, "cuda",
         RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "onnxruntime.dll" : "libonnxruntime.so");
 
-    internal static string PlatformFactoryAssembly(bool gpu)
+    internal static string PlatformBackendAssembly(bool gpu)
         => RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
             ? (gpu ? "Shorokoo.WinGPU" : "Shorokoo.WinCPU")
             : (gpu ? "Shorokoo.LinuxGPU" : "Shorokoo.LinuxCPU");
 
     // One isolated backend for the whole class: loading pins a native library for the life of the
     // process, and Load caches on the spec, so a per-test load would return this one anyway.
-    private static readonly Lazy<IShorokooInferenceSessionFactory> Alt = new(() =>
+    private static readonly Lazy<IShorokooInferenceBackend> Alt = new(() =>
         IsolatedBackend.Load(new IsolatedBackendSpec
         {
             Name = "alt-runtime",
-            FactoryAssembly = PlatformFactoryAssembly(gpu: false),
+            BackendAssembly = PlatformBackendAssembly(gpu: false),
             NativeRuntimePath = AltRuntimePath,
         }));
 
@@ -91,18 +91,18 @@ public class SideBySideBackendCoverageTests
         Assert.Equal(ComputeDevice.Cpu, alt.Backend.Device);
         Assert.Null(alt.Backend.CudaDeviceId);
 
-        Assert.Same(InferenceBackend.Factory, InferenceBackend.Current);
+        Assert.Same(InferenceBackend.Default, InferenceBackend.Current);
         Assert.Equal(InferenceBackend.Describe(), ComputeContext.Default.Backend);
     }
 
     [Fact]
-    public void TestTheRenamingWrapperForwardsEveryMemberOfTheFactoryInterface()
+    public void TestTheRenamingWrapperForwardsEveryMemberOfTheBackendInterface()
     {
         var wrapper = typeof(IsolatedBackend)
-            .GetNestedType("RenamedFactory", System.Reflection.BindingFlags.NonPublic);
+            .GetNestedType("RenamedBackend", System.Reflection.BindingFlags.NonPublic);
         Assert.NotNull(wrapper);
 
-        var map = wrapper!.GetInterfaceMap(typeof(IShorokooInferenceSessionFactory));
+        var map = wrapper!.GetInterfaceMap(typeof(IShorokooInferenceBackend));
         for (int i = 0; i < map.InterfaceMethods.Length; i++)
             Assert.Equal(wrapper, map.TargetMethods[i].DeclaringType);
     }
@@ -118,16 +118,16 @@ public class SideBySideBackendCoverageTests
             .GetValue(alt)!;
         var innerContext = AssemblyLoadContext.GetLoadContext(inner.GetType().Assembly);
         var defaultContext = AssemblyLoadContext.GetLoadContext(
-            InferenceBackend.Factory.GetType().Assembly);
+            InferenceBackend.Default.GetType().Assembly);
 
         Assert.NotNull(innerContext);
         Assert.NotSame(AssemblyLoadContext.Default, innerContext);
         Assert.Same(AssemblyLoadContext.Default, defaultContext);
 
         Assert.Equal(
-            InferenceBackend.Factory.GetType().Assembly.GetName().Name,
+            InferenceBackend.Default.GetType().Assembly.GetName().Name,
             inner.GetType().Assembly.GetName().Name);
-        Assert.NotSame(InferenceBackend.Factory.GetType().Assembly, inner.GetType().Assembly);
+        Assert.NotSame(InferenceBackend.Default.GetType().Assembly, inner.GetType().Assembly);
 
         var stock = AvailableProviders(AssemblyLoadContext.Default);
         Assert.Contains("CPUExecutionProvider", stock);
@@ -137,7 +137,7 @@ public class SideBySideBackendCoverageTests
         Assert.Same(alt, IsolatedBackend.Load(new IsolatedBackendSpec
         {
             Name = "alt-runtime",
-            FactoryAssembly = PlatformFactoryAssembly(gpu: false),
+            BackendAssembly = PlatformBackendAssembly(gpu: false),
             NativeRuntimePath = AltRuntimePath,
         }));
     }
@@ -154,13 +154,13 @@ public class SideBySideBackendCoverageTests
         Assert.Contains(isolated, loaded);
         Assert.DoesNotContain(isolated, InferenceBackend.DiscoverableAssemblies(loaded));
         Assert.Contains(
-            InferenceBackend.Factory.GetType().Assembly,
+            InferenceBackend.Default.GetType().Assembly,
             InferenceBackend.DiscoverableAssemblies(loaded));
 
         var candidates = InferenceBackend.LoadedCandidates(
             InferenceBackend.DiscoverableAssemblies(loaded).Select(a => a.GetName().Name ?? ""));
         Assert.Single(candidates);
-        Assert.Equal(InferenceBackend.Factory.GetType().Assembly.GetName().Name, candidates[0].Assembly);
+        Assert.Equal(InferenceBackend.Default.GetType().Assembly.GetName().Name, candidates[0].Assembly);
     }
 
     [Fact]
@@ -245,8 +245,8 @@ public class SideBySideBackendCoverageTests
     /// what reaches the session has to be what the wrapped runtime would have produced, or the
     /// recording says nothing about which runtime that was.
     /// </summary>
-    private sealed class RecordingBackend(IShorokooInferenceSessionFactory inner)
-        : IShorokooInferenceSessionFactory
+    private sealed class RecordingBackend(IShorokooInferenceBackend inner)
+        : IShorokooInferenceBackend
     {
         internal List<IShorokooTensorValue> Fed { get; } = [];
 
@@ -333,7 +333,7 @@ public class SideBySideBackendCoverageTests
     public void TestBackendTransferRebuildsATensorAStringTensorAndASequenceOnTheOtherBackend()
     {
         var target = Alt.Value;
-        var source = InferenceBackend.Factory;
+        var source = InferenceBackend.Default;
 
         float[] floats = [1.5f, -2.5f, 3.5f];
         var tensor = source.CreateTensor(floats, [3L]);
@@ -361,9 +361,9 @@ public class SideBySideBackendCoverageTests
     [Fact]
     public void TestLoadingAnIsolatedBackendRefusesEveryWayOfNamingOneThatIsNotThere()
     {
-        var factoryAssembly = PlatformFactoryAssembly(gpu: false);
+        var factoryAssembly = PlatformBackendAssembly(gpu: false);
         IsolatedBackendSpec Spec(string name, string assembly, string native, string? probe = null)
-            => new() { Name = name, FactoryAssembly = assembly, NativeRuntimePath = native, ProbeDirectory = probe };
+            => new() { Name = name, BackendAssembly = assembly, NativeRuntimePath = native, ProbeDirectory = probe };
 
         Assert.Throws<ArgumentNullException>(() => IsolatedBackend.Load(null!));
         Assert.Throws<ArgumentException>(() => IsolatedBackend.Load(Spec(" ", factoryAssembly, AltRuntimePath)));

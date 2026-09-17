@@ -11,7 +11,7 @@ using TensorElementType = Microsoft.ML.OnnxRuntime.Tensors.TensorElementType;
 namespace Shorokoo.OnnxRuntime;
 
 /// <summary>
-/// The <see cref="IShorokooInferenceSessionFactory"/> implementation backed by ONNX
+/// The <see cref="IShorokooInferenceBackend"/> implementation backed by ONNX
 /// Runtime: it builds ORT sessions and ORT-backed tensor values for Shorokoo's inference
 /// pipeline. It is platform-neutral and abstract — each platform package
 /// (<c>Shorokoo.WinCPU</c>, <c>Shorokoo.WinGPU</c>, <c>Shorokoo.LinuxCPU</c>,
@@ -20,17 +20,17 @@ namespace Shorokoo.OnnxRuntime;
 ///
 /// <para>You do not normally reference this type, or the <c>Shorokoo.OnnxRuntime</c>
 /// package that carries it, directly: reference one platform package instead and let
-/// <see cref="Shorokoo.Core.Inference.Abstractions.InferenceBackend"/> find its factory.
+/// <see cref="Shorokoo.Core.Inference.Abstractions.InferenceBackend"/> find its backend.
 /// Subclass this only to drive a different ONNX Runtime execution provider than the four
 /// shipped packages offer.</para>
 /// </summary>
-public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
+public abstract class OrtBackend : IShorokooInferenceBackend
 {
     private readonly Action<SessionOptions, DeviceMemorySettings> _configureExecutionProvider;
     private readonly int? _cudaDeviceId;
 
     /// <param name="configureExecutionProvider">
-    /// Applied to the <see cref="SessionOptions"/> of every session this factory creates,
+    /// Applied to the <see cref="SessionOptions"/> of every session this backend creates,
     /// after the log-severity and graph-optimization settings and before the session is
     /// constructed. This is where a subclass appends its execution provider; a CPU backend
     /// leaves ORT on its default provider and does nothing here. It is handed the
@@ -53,12 +53,12 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
     /// </param>
     /// <exception cref="ArgumentException"><paramref name="cudaDeviceId"/> disagrees with
     /// <paramref name="device"/>, or is negative.</exception>
-    protected OrtSessionFactory(
+    protected OrtBackend(
         Action<SessionOptions, DeviceMemorySettings> configureExecutionProvider,
         ComputeDevice device,
         int? cudaDeviceId)
     {
-        // Built here rather than on each read of Description, so a factory that could only
+        // Built here rather than on each read of Description, so a backend that could only
         // describe itself incoherently cannot be constructed at all.
         Description = new BackendDescription(GetType().Assembly.GetName().Name ?? GetType().Name, device, cudaDeviceId);
         _configureExecutionProvider = configureExecutionProvider;
@@ -71,18 +71,18 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
     /// that session is built with, and honours <see cref="RunSettings.ShrinkArenaAfterRun"/> for
     /// that device's arena on each run.
     /// </summary>
-    protected OrtSessionFactory(int cudaDeviceId)
+    protected OrtBackend(int cudaDeviceId)
         : this((opts, mem) => AppendCuda(opts, cudaDeviceId, mem), ComputeDevice.Cuda, cudaDeviceId) { }
 
     /// <summary>
-    /// This backend: the assembly the concrete factory lives in, and the device the constructor
+    /// This backend: the assembly the concrete backend lives in, and the device the constructor
     /// named. Fixed at construction, so every read agrees and none can contradict the provider
     /// the subclass actually appended.
     /// </summary>
     public BackendDescription Description { get; }
 
     /// <summary>
-    /// Creates an ORT inference session over a serialized ONNX model, on this factory's
+    /// Creates an ORT inference session over a serialized ONNX model, on this backend's
     /// execution provider.
     /// </summary>
     /// <param name="modelBytes">The serialized ONNX model.</param>
@@ -110,13 +110,13 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
         Configure(options, graphOptimization, logSeverity);
         _configureExecutionProvider(options, deviceMemory);
         var session = new InferenceSession(modelBytes.ToArray(), options);
-        // The session keeps this factory so it can rebuild a feed that came from another
+        // The session keeps this backend so it can rebuild a feed that came from another
         // backend's native runtime -- see OrtInferenceSession.Unwrap.
         return new OrtInferenceSession(session, _cudaDeviceId, this);
     }
 
     /// <summary>
-    /// Applies the settings every session this factory creates runs with — the log severity
+    /// Applies the settings every session this backend creates runs with — the log severity
     /// and the graph-optimization level, plus the session configuration entry that
     /// <see cref="ShorokooGraphOptimization.TrainingStep"/> stands for — to
     /// <paramref name="options"/>. Public so a diagnostic can build an ORT session with exactly

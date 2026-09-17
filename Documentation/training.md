@@ -638,14 +638,14 @@ Every `With…` derivation keeps the same two contexts.
 configured.** A `ComputeContext` carries `DeviceMemory` for the sessions it compiles and
 `RunSettings` for what its runs do, so the merge phase and the training loop can hold different
 arena budgets — see [Device memory](inference.md#device-memory-gpu-backends). It also carries the
-backend: a context constructed with one (`new ComputeContext(new LinuxCpuInferenceFactory())`) runs
+backend: a context constructed with one (`new ComputeContext(new LinuxCpuBackend())`) runs
 its work there, so a rig **can** build on one device and train on another:
 
 ```csharp
 var rig = TrainingRig.FromScratch(
     model, loss, optimizer,
-    mergeContext:   new ComputeContext(new LinuxCpuInferenceFactory()),
-    runtimeContext: new ComputeContext(new LinuxGpuInferenceFactory()));
+    mergeContext:   new ComputeContext(new LinuxCpuBackend()),
+    runtimeContext: new ComputeContext(new LinuxGpuBackend()));
 ```
 
 Both devices then have to be deployed and reachable from one process — see

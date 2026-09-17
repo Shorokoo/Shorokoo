@@ -324,6 +324,78 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
     /// finalizer along with the value, so it behaves like every other tensor the runtime hands
     /// back.</para>
     /// </summary>
+    /// <summary>
+    /// This value's contents as host bytes, including from the execution provider's own memory.
+    ///
+    /// <para>ONNX Runtime's managed surface has no device-to-host copy to call here: a value it
+    /// left on the card hands out a pointer and no way to read it. So the copy is made through the
+    /// CUDA runtime directly, from the address the value carries — the same address the runtime
+    /// would use, since there is only one allocation and this backend is the one that made it.</para>
+    /// </summary>
+    public byte[] CopyTensorToHost(IShorokooTensorValue value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+
+        if (value.IsHostAccessible)
+        {
+            var hostBytes = value.GetTensorDataAsSpan<byte>().ToArray();
+            GC.KeepAlive(value);
+            return hostBytes;
+        }
+
+        if (value.ValueType != ShorokooOnnxValueType.Tensor)
+            throw new InvalidOperationException(
+                $"Only a tensor can be read back from device memory; this is a {value.ValueType}.");
+
+        var elements = 1L;
+        foreach (var dim in value.Shape) elements *= dim;
+        var byteCount = checked((int)(elements * ElementSize(value.ElementType)));
+
+        var destination = new byte[byteCount];
+        var copied = CudaInterop.CopyDeviceToHost(DevicePointer(value), destination);
+        GC.KeepAlive(value);
+        if (!copied)
+            throw new InvalidOperationException(
+                $"Reading this tensor ({string.Join('x', value.Shape)}:{value.ElementType}) back "
+                + $"from {Description}'s device memory failed. The CUDA runtime is what performs "
+                + "the copy, so a machine without it cannot bring a device-resident value home.");
+        return destination;
+    }
+
+    /// <summary>
+    /// The address the value's buffer is at, without reading it — which for a device allocation is
+    /// the one thing that may be done with it here.
+    ///
+    /// <para>Through the ORT value rather than through <see cref="IShorokooTensorValue"/>, whose
+    /// span accessors refuse a value the provider kept precisely so that nobody dereferences a
+    /// device address as a host one. Taking the address is not dereferencing it, and this is the
+    /// backend that made the allocation.</para>
+    /// </summary>
+    private static unsafe IntPtr DevicePointer(IShorokooTensorValue value)
+    {
+        if (value is not OrtTensorValue ort)
+            throw new InvalidOperationException(
+                $"A {value.GetType().Name} did not come from this backend, so its device memory "
+                + "cannot be read here.");
+
+        var span = ort.Inner.GetTensorMutableRawData();
+        fixed (byte* p = span) return (IntPtr)p;
+    }
+
+    private static int ElementSize(ShorokooTensorElementType type) => type switch
+    {
+        ShorokooTensorElementType.Float => 4,
+        ShorokooTensorElementType.Double => 8,
+        ShorokooTensorElementType.Int8 or ShorokooTensorElementType.UInt8
+            or ShorokooTensorElementType.Bool => 1,
+        ShorokooTensorElementType.Int16 or ShorokooTensorElementType.UInt16
+            or ShorokooTensorElementType.Float16 or ShorokooTensorElementType.BFloat16 => 2,
+        ShorokooTensorElementType.Int32 or ShorokooTensorElementType.UInt32 => 4,
+        ShorokooTensorElementType.Int64 or ShorokooTensorElementType.UInt64 => 8,
+        _ => throw new InvalidOperationException(
+            $"A {type} tensor has no fixed element size, so it cannot be copied back by bytes."),
+    };
+
     private static OrtTensorValue Allocate(TensorElementType elementType, ReadOnlySpan<byte> bytes, long[] shape)
     {
         var wrapped = new OrtTensorValue(

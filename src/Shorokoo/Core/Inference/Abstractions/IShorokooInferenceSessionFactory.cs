@@ -41,4 +41,22 @@ public interface IShorokooInferenceSessionFactory
     IShorokooTensorValue CreateStringTensor(IReadOnlyList<string> data, long[] shape);
 
     IShorokooTensorValue CreateSequence(IReadOnlyList<IShorokooTensorValue> values);
+
+    // This value's contents as host bytes, whatever memory it is in. The default serves a value
+    // the host can already read; a backend whose execution provider keeps values in its own memory
+    // overrides it with the copy only that backend can make, since the allocation is its runtime's
+    // and nothing outside knows how to reach it.
+    byte[] CopyTensorToHost(IShorokooTensorValue value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        if (!value.IsHostAccessible)
+            throw new InvalidOperationException(
+                $"{Description} cannot read a tensor back from its execution provider's own "
+                + "memory: it does not implement CopyTensorToHost.");
+        var bytes = value.GetTensorDataAsSpan<byte>().ToArray();
+        // Taking the span is the value's last read, so without this the JIT may retire it before
+        // ToArray has copied out of the buffer it points at (Shorokoo/Shorokoo#178).
+        GC.KeepAlive(value);
+        return bytes;
+    }
 }

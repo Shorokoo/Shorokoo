@@ -338,6 +338,14 @@ public static class IsolatedBackend
         public IShorokooTensorValue CreateStringTensor(IReadOnlyList<string> data, long[] shape)
             => _inner.CreateStringTensor(data, shape);
 
+        // Forwarded rather than inherited. Every member of the interface has to be, including the
+        // ones with a default body: a default implementation is the wrapper's own, so leaving one
+        // alone would answer for the backend instead of asking it -- and this one is exactly the
+        // question only the backend that made the allocation can answer.
+        public MemorySpace MemorySpace => _inner.MemorySpace;
+
+        public byte[] CopyTensorToHost(IShorokooTensorValue value) => _inner.CopyTensorToHost(value);
+
         public IShorokooTensorValue CreateSequence(IReadOnlyList<IShorokooTensorValue> values)
             => _inner.CreateSequence(values);
     }

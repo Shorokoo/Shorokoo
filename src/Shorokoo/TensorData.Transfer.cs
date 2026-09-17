@@ -150,14 +150,7 @@ namespace Shorokoo
         /// </summary>
         private TensorData CopyAcross(ComputeContext? target, MemorySpace to)
         {
-            if (!Space.IsHost)
-                throw new InvalidOperationException(
-                    $"This tensor ({this}) is in {Space}, and reading it back to the host is not "
-                    + "wired up yet: it needs a device-to-host copy from the backend that owns it. "
-                    + "Until then a device-resident tensor can be transferred within its own space "
-                    + "but not out of it.");
-
-            var bytes = AccessRawMemory().ToArray();
+            var bytes = HostBytes();
 
             if (to.IsHost)
                 return NewHostTensor(Shape, DType, bytes, target);
@@ -165,6 +158,31 @@ namespace Shorokoo
             var value = target!.Factory.CreateTensorFromRawBytes(
                 (ShorokooTensorElementType)(int)DType, bytes, (long[])Shape);
             return Create(Shape, DType, value, target);
+        }
+
+        /// <summary>
+        /// This tensor's contents as host bytes, whatever memory it is in.
+        ///
+        /// <para>A host tensor reads its own. One the execution provider kept cannot be read here
+        /// at all — the accessors would hand out a device address and dereference it as a host one
+        /// — so the copy is asked of the backend that owns the allocation, which is the only thing
+        /// that knows how to reach it.</para>
+        /// </summary>
+        private byte[] HostBytes()
+        {
+            if (Space.IsHost) return AccessRawMemory().ToArray();
+
+            if (!Space.IsKnown || Context is null)
+                throw new InvalidOperationException(
+                    $"This tensor ({this}) is in {Space}, and the context that produced it was not "
+                    + "recorded, so there is no backend to ask for a copy of it.");
+
+            if (this is not IOnnxData onnx)
+                throw new InvalidOperationException(
+                    $"This tensor ({this}) is in {Space} but carries no runtime value, so nothing "
+                    + "can read it back.");
+
+            return Context.Factory.CopyTensorToHost(onnx.Value);
         }
     }
 }

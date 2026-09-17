@@ -149,6 +149,60 @@ public class SideBySideBackendHardwareTests
             SideBySideModel.DeviceTolerance);
     }
 
+    /// <summary>
+    /// The whole of part 2's promise, on the card: a tensor the execution provider kept in device
+    /// memory, moved to host memory by one call, handed between host contexts without moving
+    /// again, and run on.
+    /// </summary>
+    [SideBySideCudaFact]
+    public void TestATensorLeftOnTheCardMovesToHostMemoryAndRunsThere()
+    {
+        var a = InputVector<float32>("a");
+        var b = InputVector<float32>("b");
+        var graph = new InternalComputationGraph([a, b], [a * b + a]);
+        float[] av = [1f, 2f, 3f, 4f];
+        float[] bv = [10f, 20f, 30f, 40f];
+        var (ta, tb) = (TensorData([4L], av), TensorData([4L], bv));
+        float[] expected = [.. av.Zip(bv, (x, y) => x * y + x)];
+
+        var cuda = new ComputeContext(LoadCuda());
+        var compiled = cuda.Compile(graph);
+        Assert.True(compiled.HasDeviceMemory);
+
+        // Left where the provider put it: this is the one kind of tensor the host cannot read.
+        var onCard = compiled.Execute([ta, tb], [true])[0].ToTensorData();
+        Assert.Equal(MemoryKind.Cuda, onCard.Space.Kind);
+        Assert.False(onCard.IsHostResident);
+        Assert.Throws<InvalidOperationException>(() => onCard.As<float32>().AccessMemory<float>());
+
+        // One call brings it home, through the backend that owns the allocation.
+        var firstHost = new ComputeContext();
+        var onHost = onCard.TransferTo(firstHost);
+
+        Assert.Equal(MemorySpace.Host, onHost.Space);
+        Assert.True(onHost.OwnsMemory);
+        SideBySideModel.AssertAgree(expected, Floats(onHost), SideBySideModel.DeviceTolerance);
+
+        // The move spent the source, which is what a move across spaces means.
+        Assert.True(onCard.IsDisposed);
+
+        // Between two host contexts nothing moves but the ownership...
+        var secondHost = new ComputeContext();
+        var shared = onHost.TransferTo(secondHost);
+        Assert.False(onHost.OwnsMemory);
+        Assert.True(shared.OwnsMemory);
+
+        // ...and the result runs on the second one, which is where it now lives. Fed back through
+        // the same graph, so the answer is the model applied twice rather than the first answer.
+        float[] twice = [.. expected.Zip(bv, (x, y) => x * y + x)];
+        SideBySideModel.AssertAgree(
+            twice, Floats(secondHost.Execute(graph, shared, tb)[0].ToTensorData()),
+            SideBySideModel.DeviceTolerance);
+    }
+
+    private static float[] Floats(TensorData data)
+        => [.. data.As<float32>().AccessMemory<float>()];
+
     private static float[] Floats(NamedModelParam param)
         => [.. param.ToTensorData().As<float32>().AccessMemory<float>()];
 }

@@ -719,9 +719,13 @@ producing two backends over one runtime. A loaded backend lasts for the life of 
 process: its native runtime holds thread pools, arenas and allocators, and nothing unloads
 it. Loading the same spec twice returns the same backend.
 
-Only the ONNX Runtime wrapper, the glue over it and the factory assembly are private to an
+Only the ONNX Runtime wrapper, the glue over it and the backend assembly are private to an
 isolated backend; the core Shorokoo assembly and everything your model is written in stay
 shared, which is what lets one context be handed the other's data.
+
+One combination does not work: a model with *sequence* outputs on an isolated backend running
+on a card faults ONNX Runtime outright. See
+[Sequence-valued models on an isolated CUDA backend](limitations.md#sequence-valued-models-on-an-isolated-cuda-backend).
 
 #### Or keep it to two processes
 

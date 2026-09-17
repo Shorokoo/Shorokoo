@@ -240,6 +240,21 @@ cannot account for this allocator, since it is not a session the program compile
 needs an allocator per (device, settings) and a rule for which context's budget governs a tensor
 more than one has touched.
 
+### Sequence-valued models on an isolated CUDA backend
+
+A model whose outputs are *sequences* — `SequenceAt`, `SplitToSequence`, anything producing an ONNX
+sequence type — faults ONNX Runtime when it runs on a backend loaded through
+`IsolatedBackend.Load` or `BackendPackage.TryLoad` onto a CUDA device. The crash is an access
+violation inside ORT's own `OrtValue.GetValue`, so it takes the process down rather than raising.
+
+It is specific to the combination. The same model runs on an isolated *CPU* backend, and on a CUDA
+backend reached the ordinary way — by referencing `Shorokoo.LinuxGPU` or `Shorokoo.WinGPU` and
+letting discovery find it. Tensor and string values are unaffected in every combination.
+
+Until it is diagnosed, a program that needs sequence outputs on a card should reach its CUDA
+backend by reference rather than by loading it into isolation. That costs the ability to run a
+second ONNX Runtime alongside it, which is the only thing isolation buys.
+
 ### Device-memory readings are the device's, and device 0's
 
 Arena configuration is per session and per run — `ComputeContext.DeviceMemory` for the sessions a

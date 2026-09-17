@@ -103,6 +103,23 @@ public class CompositeTransferCoverageTests
     }
 
     [Fact]
+    public void TestASequenceIsReleasedWithTheContextThatProducedIt()
+    {
+        var x = InputVector<float32>("x");
+        var graph = new InternalComputationGraph([x], [OnnxOp.SequenceConstruct(x, x + x)]);
+        var context = new ComputeContext();
+        var sequence = context.Execute(graph, TensorData([2L], (float[])[1f, 2f]))[0]
+            .ToTensorDataSequence();
+
+        Assert.Equal(2, sequence.Count);
+
+        context.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(() => sequence.Count);
+        Assert.Throws<ObjectDisposedException>(() => sequence[0]);
+    }
+
+    [Fact]
     public void TestADetachingContextHandsASequenceOutBelongingToNobody()
     {
         var x = InputVector<float32>("x");

@@ -336,11 +336,37 @@ namespace Shorokoo
             Func<TensorData, Shorokoo.Runtime.ComputeContext?, TensorData> operation)
         {
             ThrowIfDisposed();
-            List<TensorData> moved = [.. this.Select(e => e.OwnsMemory ? operation(e, target) : e)];
+            List<TensorData> moved = new(Count);
+            foreach (var element in this)
+            {
+                var rebuiltElement = element.OwnsMemory ? operation(element, target) : element;
+                moved.Add(rebuiltElement);
+                // A sequence whose elements are copied out per read hands this loop a tensor
+                // nobody else will ever see again, so releasing it here is the only chance --
+                // otherwise every rebuild of a session's sequence output leaves one runtime
+                // value, a device allocation on a card, to its context's disposal, and the
+                // default context is never disposed. Not where the rebuilt element borrowed
+                // this one's storage rather than taking it: releasing it would take the
+                // borrower's bytes with it.
+                if (MintsElementsPerRead && !ReferenceEquals(rebuiltElement, element)
+                    && rebuiltElement.OwnsMemory)
+                    element.Dispose();
+            }
             var rebuilt = OfElements(moved, DType);
             rebuilt.Context = target;
             return rebuilt;
         }
+
+        /// <summary>
+        /// Whether reading an element mints a tensor of its own rather than handing out one this
+        /// sequence holds. True where a runtime copies the element out per read, which makes the
+        /// reader responsible for releasing it.
+        /// </summary>
+        private protected virtual bool MintsElementsPerRead => false;
+
+        /// <summary>Records which context this sequence belongs to. Overridden where there is a
+        /// runtime value for that context to own.</summary>
+        internal virtual void BindTo(Shorokoo.Runtime.ComputeContext? context) => Context = context;
 
         public abstract void Dispose();
     }
@@ -363,7 +389,10 @@ namespace Shorokoo
             }
         }
 
-        public override int Count => Value.GetValueCount();
+        public override int Count
+        {
+            get { ThrowIfGone(); return backing.GetValueCount(); }
+        }
 
         /// <summary>
         /// The element at <paramref name="index"/>, on storage of its own: the runtime copies the
@@ -380,10 +409,42 @@ namespace Shorokoo
         {
             get
             {
-                var val = Value.GetValue(index);
+                ThrowIfGone();
+                var val = backing.GetValue(index);
                 return (TensorData<T>)OnnxUtils.CreateTensorDataFromValue(
                     new Shape(val.Shape), (DType)(int)val.ElementType, val, Context);
             }
+        }
+
+        // Set once this sequence belongs to a context, which is then what releases the backing
+        // value. Null for one that belongs to nobody: it releases its own on Dispose.
+        private TensorStorage? _storage;
+
+        private protected override bool MintsElementsPerRead => true;
+
+        /// <summary>
+        /// Puts this sequence, and the runtime value behind it, on <paramref name="context"/>'s
+        /// books. Without it a sequence output named its context but nothing of it was ever
+        /// released by that context, while its elements were -- so disposing the context took the
+        /// elements and left the sequence, which then answered about data it could no longer
+        /// reach.
+        /// </summary>
+        internal override void BindTo(Shorokoo.Runtime.ComputeContext? context)
+        {
+            base.BindTo(context);
+            if (context is null) return;
+            _storage = new TensorStorage(context.MemorySpace, backing.Dispose);
+            _storage.TransferOwnershipTo(context);
+        }
+
+        /// <summary>Refuses a read once this sequence is disposed, or once the context that owns
+        /// its value has released it.</summary>
+        private void ThrowIfGone()
+        {
+            ThrowIfDisposed();
+            if (_storage is { IsLive: false })
+                throw new ObjectDisposedException(GetType().Name,
+                    $"Sequence {this} was released with the compute context that produced it.");
         }
 
         public OnnxTensorDataSequence(IShorokooTensorValue value) : base()
@@ -401,7 +462,7 @@ namespace Shorokoo
 
         public override IEnumerator<TensorData<T>> GetEnumerator()
         {
-            ThrowIfDisposed();
+            ThrowIfGone();
             return Elements(this);
 
             static IEnumerator<TensorData<T>> Elements(OnnxTensorDataSequence<T> self)
@@ -422,7 +483,10 @@ namespace Shorokoo
         {
             if (IsDisposed) return;
             IsDisposed = true;
-            backing.Dispose();
+            // The backing value goes with the storage where a context owns it, and directly where
+            // none does. Release is idempotent, so a context that got there first is no problem.
+            if (_storage is null) backing.Dispose();
+            else _storage.Release();
         }
 
         #endregion

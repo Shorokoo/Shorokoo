@@ -336,7 +336,7 @@ namespace Shorokoo.Core.Utils
             else if (value.ValueType == ShorokooOnnxValueType.Sequence)
             {
                 var sequence = CreateTensorDataSequenceFromValue(value);
-                sequence.Context = context;
+                sequence.BindTo(context);
                 return sequence;
             }
 

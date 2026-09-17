@@ -163,8 +163,14 @@ namespace Shorokoo
 
         /// <summary>
         /// The one place a derived checkpoint is assembled: copies every slot of this checkpoint,
-        /// overriding those the caller names. Keeping it single-sourced means a slot added to the type
-        /// cannot be silently dropped by one derivation that forgot to copy it.
+        /// overriding those the caller passes a non-null value for. Keeping it single-sourced means a
+        /// slot added to the type cannot be silently dropped by one derivation that forgot to copy it.
+        ///
+        /// <para>Null means "keep", not "clear" — so this cannot express resetting a slot back to
+        /// <c>null</c>, and a derivation that needs to (detaching the rig, clearing a loss) must add
+        /// an explicit override rather than passing <c>null</c> here and expecting it to take.
+        /// Nothing in the run needs to: an unknown counter, a null loss and a bare checkpoint's
+        /// absent rig all arise at construction, and every later step only ever sets them.</para>
         /// </summary>
         private TrainingCheckpoint Derive(
             TensorDataStruct? trainableParams = null,
@@ -202,7 +208,7 @@ namespace Shorokoo
             => Derive(optimizerState: optimizerState
                 ?? throw new ArgumentNullException(nameof(optimizerState)));
 
-        // ---- Counter derivations (§5.8.5): step/epoch/batch are host-owned scalars, not rig
+        // ---- Counter derivations: step/epoch/batch are host-owned scalars, not rig
         // state, so resetting one yields a NEW checkpoint value carrying the same trainable
         // params / model state / optimizer state (shared by reference — nothing is re-derived).
         // The receiver is never mutated. ----
@@ -211,7 +217,7 @@ namespace Shorokoo
         /// Returns a new checkpoint identical to this one but with the given host-owned run
         /// counter(s) set (each defaulting to this checkpoint's current value when omitted). The
         /// tensor state — trainable params, model state, optimizer state — is shared by reference,
-        /// since counters are not graph state (§5.8.1). The receiver is unchanged.
+        /// since counters are not graph state. The receiver is unchanged.
         ///
         /// <para>An omitted (<c>null</c>) argument keeps the current value — which, for
         /// <paramref name="epoch"/> / <paramref name="batchIndex"/>, may itself be <c>null</c> (unknown).

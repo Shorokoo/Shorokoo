@@ -2541,6 +2541,15 @@ namespace Shorokoo
         }
 
         /// <summary>
+        /// Test hook: invoked on the step's execution path, in the scope the allocation-failure
+        /// wrap covers, so a test can raise the backend's own failure text without the memory
+        /// conditions that produce it. Thread-scoped, so a hook installed by one parallel test is
+        /// invisible to every other thread; still reset it in a <c>finally</c>.
+        /// </summary>
+        [ThreadStatic]
+        internal static Action? StepFaultInjection;
+
+        /// <summary>
         /// The tensor state a training step holds resident, by section — what the step path already
         /// knows and an allocation failure never said (Shorokoo/Shorokoo#330). Best-effort
         /// throughout: a field whose size is not derivable contributes an unknown size rather than
@@ -2647,6 +2656,7 @@ namespace Shorokoo
             NamedModelParam[] results;
             try
             {
+                StepFaultInjection?.Invoke();
                 if (retainStateOnDevice && compiled.HasDeviceMemory)
                 {
                     // Every output but the trailing loss is state the next step feeds straight back.
@@ -2672,20 +2682,34 @@ namespace Shorokoo
                 // host memory (Shorokoo/Shorokoo#332). Everything needed to tell them apart is
                 // already here: the step's own resident state, whether this session even has device
                 // memory to exhaust, and this process's commit against any limit in force.
-                throw new ComputeContextException(
-                    ErrorCodes.CR009, "TrainingRig.TrainStep",
-                    AllocationFailureReport.Render(
+                string report;
+                try
+                {
+                    // DeviceMemory.Read() asks the card itself where a CUDA runtime is installed and
+                    // answers null otherwise, so "the accelerator is full" stops being an inference
+                    // (Shorokoo/Shorokoo#332, Shorokoo/Shorokoo#347). HasDeviceMemory is the
+                    // session's own answer to whether there is device memory to exhaust, and one
+                    // value feeds both the classification and the wording built on it.
+                    var device = new DeviceFacts(
+                        compiled.HasDeviceMemory, DeviceMemory.Read(), DeviceMemory.LimitBytes,
+                        AllocationFailureReport.BackendAssemblyName());
+                    report = AllocationFailureReport.Render(
                         $"the training step at step {checkpoint.Step}",
-                        AllocationFailureReport.Classify(ex, compiled.HasDeviceMemory),
-                        AllocationFailureReport.BackendAssemblyName(),
+                        AllocationFailureReport.Classify(ex, device.HasDeviceMemory),
+                        device,
                         StepTensorInventory(checkpoint, trainingInput, trainingOutput),
                         AllocationFailureReport.ReadProcessMemory(),
-                        // Reads the card itself where a CUDA runtime is installed, null otherwise
-                        // -- so "the accelerator is full" stops being an inference (#332, #347).
-                        DeviceMemory.Read(),
-                        DeviceMemory.LimitBytes,
-                        ex.Message),
-                    ex);
+                        ex.Message);
+                }
+                catch
+                {
+                    // Building the report allocates, under exactly the condition that just refused
+                    // an allocation. If that fails, the backend's own diagnosis is still worth more
+                    // than anything this could add, so it leaves unchanged rather than replaced.
+                    throw ex;
+                }
+                throw new ComputeContextException(
+                    ErrorCodes.CR009, "TrainingRig.TrainStep", report, ex);
             }
 
             // Graph outputs (after lowering): [updated_param_field_0, ..., updated_state_field_0, ..., updated_opt_state_field_0, ..., loss]

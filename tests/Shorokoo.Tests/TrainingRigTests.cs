@@ -8,8 +8,6 @@ using Shorokoo.Runtime;
 using Shorokoo.Modules.Losses;
 using Shorokoo.Modules.Optimizers;
 using Shorokoo.Core.Nodes.Processors.Training;
-using Shorokoo.Core.Utils;
-using Shorokoo.Core.Inference.Abstractions;
 using static Shorokoo.Tests.TrainingRigHelpers;
 
 namespace Shorokoo.Tests;
@@ -1178,6 +1176,47 @@ public class TrainingRigScheduleCoverageTests
         => new(new InternalComputationGraph([.. inputs], [.. outputs]), GraphKind.Module);
 
     [Fact]
+    public void TestWarmupRampSpansStartFactorToPeakOverExactlyWarmupSteps()
+    {
+        static void Ramp(float peak, int warmup, float startFactor)
+        {
+            var s = Schedules.Constant(peak).WithWarmup(warmup, startFactor);
+            Assert.Equal(startFactor * peak, s.At(0));
+            Assert.Equal(peak, s.At(warmup));
+            Assert.Equal(peak, s.At(warmup + 1));
+            for (long k = 0; k < warmup; k++)
+                Assert.Equal(peak * (startFactor + (1f - startFactor) * ((float)k / warmup)), s.At(k));
+        }
+
+        Ramp(5e-4f, 800, 0f);
+        Ramp(5e-4f, 1600, 0f);
+        Ramp(1f, 1, 0f);
+        Ramp(3e-4f, 100, 0.25f);
+        Ramp(0.05f, 7, 0.5f);
+
+        var decaying = Schedules.Cosine(2e-3f, 500).WithWarmup(50);
+        Assert.Equal(0f, decaying.At(0));
+        Assert.Equal(2e-3f, decaying.At(50));
+        Assert.True(decaying.At(49) < decaying.At(50));
+        Assert.True(decaying.At(51) < decaying.At(50));
+
+        var recipe = Schedules.Constant(5e-4f).WithWarmup(800)
+            .Then(15600, Schedules.Linear(5e-4f, 0.05f * 5e-4f, 24000 - 15600));
+        Assert.Equal(0f, recipe.At(0));
+        Assert.Equal(5e-4f, recipe.At(800));
+        Assert.Equal(5e-4f, recipe.At(15599));
+        Assert.True(MathF.Abs(recipe.At(24000) - 0.05f * 5e-4f) < 1e-9f);
+
+        var documented = Schedules.Constant(1e-3f).WithWarmup(200)
+            .Then(3900, Schedules.Linear(1e-3f, 5e-5f, 2100));
+        Assert.Equal(0f, documented.At(0));
+        Assert.Equal(5.0e-4f, documented.At(100));
+        Assert.Equal(9.95e-4f, documented.At(199));
+        Assert.Equal(1e-3f, documented.At(200));
+        Assert.Equal(1e-3f, documented.At(3899));
+    }
+
+    [Fact]
     public void TestScheduleCombinatorsCoverage()
     {
         static void Eq(float expected, float actual) => Assert.True(MathF.Abs(expected - actual) < 1e-4f);
@@ -2235,18 +2274,18 @@ public class TrainingRigTrainingLoopCoverageTests
 [Trait("Purpose", "Coverage")]
 public class TrainingRigCheckpointCoverageTests
 {
+    private static TrainingRig AdamRig() => TrainingRig.FromScratch(
+        ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, AdamOptimizer.ComputationGraph,
+        [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([4L], [1f, 2f, 3f, 4f]))],
+        new AdamOptimizerHyperparameters { LearningRate = 0.1f });
+
+    private static TrainingCheckpoint SteppedOnce(TrainingRig rig) => rig.TrainStep(
+        rig.CreateInitialCheckpoint(), InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f));
+
     [Fact]
     public void TestStepTensorInventoryNamesEverySectionOfTheResidentState()
     {
-        NamedModelParam[] sample =
-        [
-            new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([4L], [1f, 2f, 3f, 4f])),
-        ];
-        var rig = TrainingRig.FromScratch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
-            AdamOptimizer.ComputationGraph, sample,
-            new AdamOptimizerHyperparameters { LearningRate = 0.1f });
-        var ckpt = rig.TrainStep(rig.CreateInitialCheckpoint(),
-            InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f));
+        var ckpt = SteppedOnce(AdamRig());
 
         var inventory = TrainingRig.StepTensorInventory(ckpt);
         Assert.Equal(["trainable parameters", "model state", "optimizer state"],
@@ -2264,27 +2303,47 @@ public class TrainingRigCheckpointCoverageTests
         Assert.True(inventory.Sum(s => s.TotalBytes) > 0);
 
         var report = AllocationFailureReport.Render(
-            $"the training step at step {ckpt.Step}", AllocationPool.Device, "Shorokoo.LinuxGPU",
-            inventory, AllocationFailureReport.ReadProcessMemory(),
-            DeviceMemory.Read(), DeviceMemory.LimitBytes, "bad allocation");
+            $"the training step at step {ckpt.Step}", AllocationPool.Device,
+            new DeviceFacts(true, null, null, "Shorokoo.LinuxGPU"),
+            inventory, AllocationFailureReport.ReadProcessMemory(), "bad allocation");
         Assert.Contains("trainable parameters", report);
         Assert.Contains("optimizer state", report);
         Assert.Contains("the training step at step 1", report);
     }
 
     [Fact]
+    public void TestATrainStepAllocationFailureIsWrappedWithTheStepAndItsOriginalCause()
+    {
+        var rig = AdamRig();
+        var ckpt = rig.CreateInitialCheckpoint().WithStep(41);
+        const string arena = "[ErrorCode:Fail] /onnxruntime/core/framework/bfc_arena.cc:358 "
+            + "onnxruntime::BFCArena::AllocateRawInternal Failed to allocate memory for "
+            + "requested buffer of size 2359296";
+
+        TrainingRig.StepFaultInjection = () => throw new InvalidOperationException(arena);
+        try
+        {
+            var thrown = Assert.Throws<ComputeContextException>(
+                () => rig.TrainStep(ckpt, InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f)));
+            Assert.Equal(ErrorCodes.CR009, thrown.ErrorCode);
+            Assert.Contains("the training step at step 41", thrown.Message);
+            Assert.Contains("trainable parameters", thrown.Message);
+            Assert.Contains(arena, thrown.Message);
+            Assert.Equal(arena, thrown.InnerException?.Message);
+            Assert.Contains("HOST memory", thrown.Message);
+
+            TrainingRig.StepFaultInjection = () => throw new InvalidOperationException("Node (Foo) is not supported");
+            Assert.IsNotType<ComputeContextException>(Assert.Throws<InvalidOperationException>(
+                () => rig.TrainStep(ckpt, InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f))));
+        }
+        finally { TrainingRig.StepFaultInjection = null; }
+    }
+
+    [Fact]
     public void TestCheckpointDerivationsCarryEverySlotThrough()
     {
-        NamedModelParam[] sample =
-        [
-            new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([4L], [1f, 2f, 3f, 4f])),
-        ];
-        var rig = TrainingRig.FromScratch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
-            AdamOptimizer.ComputationGraph, sample,
-            new AdamOptimizerHyperparameters { LearningRate = 0.1f });
-        var seed = rig.TrainStep(rig.CreateInitialCheckpoint(),
-            InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f));
-        var ckpt = seed.WithCounters(step: 5, epoch: 2, batchIndex: 7);
+        var rig = AdamRig();
+        var ckpt = SteppedOnce(rig).WithCounters(step: 5, epoch: 2, batchIndex: 7);
 
         static void Same(TrainingCheckpoint a, TrainingCheckpoint b)
         {

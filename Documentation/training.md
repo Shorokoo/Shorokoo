@@ -240,7 +240,7 @@ in `s`, so step 0 is exactly `startFactor · peak` (a true `0` at the default `s
 stated in its *own* steps and the boundary is stated in absolute steps — the two are independent:
 
 ```csharp
-// Ramp 0 → 1e-3 over steps 0..199, hold 1e-3 to step 3899,
+// Ramp 0 → 1e-3 over steps 0..200, hold 1e-3 to step 3899,
 // then decay 1e-3 → 5e-5 over steps 3900..6000 and hold.
 Schedule lr = Schedules.Constant(1e-3f)
     .WithWarmup(200)                                    // peak = Constant's step-0 value = 1e-3
@@ -249,10 +249,10 @@ Schedule lr = Schedules.Constant(1e-3f)
 
 | step | `lr.At(step)` | why |
 |---|---|---|
-| `0` | `5e-6` | ramp: `1e-3 · 1/200` |
-| `99` | `5.0e-4` | ramp: `1e-3 · 100/200` |
-| `199` | `1e-3` | ramp: `1e-3 · 200/200` — the peak |
-| `200` … `3899` | `1e-3` | the `Constant` inner schedule, re-based past the warmup |
+| `0` | `0` | ramp: `1e-3 · 0/200` |
+| `100` | `5.0e-4` | ramp: `1e-3 · 100/200` |
+| `199` | `9.95e-4` | ramp: `1e-3 · 199/200` — one step short of the peak |
+| `200` … `3899` | `1e-3` | the `Constant` inner schedule, re-based past the warmup — its step 0 *is* the peak, so the ramp arrives there exactly |
 | `3900` | `1e-3` | boundary: `Linear` at *its* step 0 |
 | `4950` | `5.25e-4` | `Linear` at its step 1050, halfway through 2100 |
 | `6000` | `5e-5` | `Linear` at its step 2100 — the final value |
@@ -805,7 +805,10 @@ wraps it as a `ComputeContextException` with code `CR009` that adds what the ste
 
 - **Which pool.** `HOST memory` for a C++ allocation the process could not commit, `DEVICE memory`
   for the accelerator's arena. A bare `bad allocation` is a *host* failure even on a GPU backend, so
-  the two no longer read the same.
+  the two no longer read the same. Where the backend's text names no allocator at all and the session
+  does have device memory, the report says so rather than guessing, and leans on the figures below.
+  Note ONNX Runtime's arena message is execution-provider-agnostic — the same text comes out of the
+  CPU arena — so on a CPU-only session it is read as host memory, never as a device that isn't there.
 - **What the step was holding.** Trainable parameters, model state, optimizer state and the batch
   itself, each with its tensor count and total size, plus the five largest tensors by size. For a
   small model on a large batch the batch is the whole of it, and the report says so.
@@ -819,7 +822,7 @@ The last two together are the discriminator. On Windows/WDDM a device allocation
 commit, so a process memory limit meant to bound host RAM silently bounds device memory too, and an
 arena expansion past it fails with **the same message a genuinely full accelerator produces**. The two
 call for opposite responses — shrink the model, versus raise a limit that has nothing to do with the
-model — so the report distinguishes three cases outright: the device is out of memory; the device has
+model — so the report distinguishes them outright, in three cases: the device is out of memory; the device has
 room but this process is at its own limit (the limit, not the model); or the device has room and so
 does the process, so the arena simply could not extend by the block it wanted.
 
@@ -828,7 +831,7 @@ does the process, so the arena simply could not extend by the block it wanted.
 step at step 1 failed. The failing allocation was for DEVICE memory — the accelerator's arena (backend
 'Shorokoo.WinGPU'). Training state held for this operation: 296 tensor(s), 1.83 GiB in total (...).
 Device: 12.59 GiB of 23.99 GiB in use across all processes, 11.4 GiB free. Host process: working set
-9.61 GiB, commit 27.4 GiB, managed heap 3.02 GiB; against a configured memory limit of 28 GiB (97%
+9.61 GiB, commit 27.4 GiB, managed heap 3.02 GiB; against a configured memory limit of 28 GiB (98%
 used). The device has room, yet this process is close to its own memory limit — and on Windows/WDDM a
 device allocation is backed by system commit, so a limit meant to bound HOST memory bounds DEVICE
 memory too ... This is the limit, not the model: re-run with it raised or removed. Underlying failure:

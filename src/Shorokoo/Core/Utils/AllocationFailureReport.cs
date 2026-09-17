@@ -8,6 +8,23 @@ using Shorokoo.Core.Inference.Abstractions;
 
 namespace Shorokoo.Core.Utils
 {
+    /// <summary>
+    /// What is known about the accelerator side of a failing operation.
+    /// <paramref name="HasDeviceMemory"/> is the authority on whether there is device memory to
+    /// exhaust at all — a session's own answer, not a guess from the backend's name — and is the
+    /// same value handed to <see cref="AllocationFailureReport.Classify"/>, so the classification
+    /// and the wording built on it cannot disagree.
+    /// </summary>
+    /// <param name="HasDeviceMemory">Whether the failing session produces outputs in device memory.</param>
+    /// <param name="Reading">The card's memory right now, or <c>null</c> where no CUDA runtime answers.</param>
+    /// <param name="ArenaLimitBytes">This process's configured arena cap, or <c>null</c> when uncapped.</param>
+    /// <param name="BackendAssemblyName">The loaded backend assembly, for display only.</param>
+    internal readonly record struct DeviceFacts(
+        bool HasDeviceMemory,
+        DeviceMemoryReading? Reading,
+        long? ArenaLimitBytes,
+        string? BackendAssemblyName);
+
     /// <summary>Which allocator ran out, as far as the backend's own text allows it to be told apart.</summary>
     internal enum AllocationPool
     {
@@ -70,13 +87,19 @@ namespace Shorokoo.Core.Utils
             "failed to allocate", "insufficient memory", "alloc_failed",
         ];
 
-        // Fragments naming the arena allocator, which on a GPU-backed session is the device arena.
-        private static readonly string[] DeviceMarkers =
+        // Fragments that name a CUDA allocator outright, so they mean device memory whatever the
+        // session is.
+        private static readonly string[] CudaMarkers =
         [
-            "bfc_arena", "bfcarena", "cuda_allocator", "cudaerrormemoryallocation",
-            "cuda_error_out_of_memory", "cudamalloc", "cudnn_status_alloc_failed",
-            "cublas_status_alloc_failed", "gpu memory",
+            "cuda_allocator", "cudaerrormemoryallocation", "cuda_error_out_of_memory",
+            "cudamalloc", "cudnn_status_alloc_failed", "cublas_status_alloc_failed",
         ];
+
+        // Fragments naming ONNX Runtime's BFC arena. These say NOTHING about which memory: the
+        // arena in core/framework is execution-provider-agnostic and backs the CPU allocator too
+        // (enable_cpu_mem_arena defaults on), so the identical text is produced by a CPU-only build.
+        // Only a session that has device memory could have been allocating on a device at all.
+        private static readonly string[] ArenaMarkers = ["bfc_arena", "bfcarena"];
 
         // A C++ `new` that could not be satisfied: host commit, whatever the session's device is.
         private static readonly string[] HostMarkers = ["bad alloc", "bad_alloc"];
@@ -93,8 +116,9 @@ namespace Shorokoo.Core.Utils
                 if (e is OutOfMemoryException) return true;
                 // Device markers count as recognition too, or a failure Classify would name as
                 // DEVICE would never reach it.
-                if (AllocationMarkers.Concat(DeviceMarkers)
-                        .Any(m => e.Message.Contains(m, StringComparison.OrdinalIgnoreCase)))
+                if (ContainsAny(e.Message, AllocationMarkers)
+                    || ContainsAny(e.Message, CudaMarkers)
+                    || ContainsAny(e.Message, ArenaMarkers))
                     return true;
             }
             return false;
@@ -109,16 +133,40 @@ namespace Shorokoo.Core.Utils
         /// </summary>
         internal static AllocationPool Classify(Exception ex, bool gpuBackend)
         {
+            // Device evidence wins wherever it sits in the chain, so the WHOLE chain is scanned for
+            // it before any host marker is considered. A CUDA frame names the allocator outright;
+            // "bad allocation" is generic, and is exactly what the backend wraps such a frame in by
+            // the time a step sees it — scanning frame by frame would let the generic outer text
+            // mask the specific inner one, and report a device failure as a host one.
+            for (var e = ex; e is not null; e = e.InnerException)
+                if (ContainsAny(e.Message, CudaMarkers)) return AllocationPool.Device;
+
+            // An arena frame is only device evidence on a session that HAS device memory: the same
+            // text comes out of the CPU arena, so reading it as the accelerator's on a CPU-only
+            // session would blame hardware that is not there.
+            for (var e = ex; e is not null; e = e.InnerException)
+                if (ContainsAny(e.Message, ArenaMarkers))
+                    return gpuBackend ? AllocationPool.Device : AllocationPool.Host;
+
             for (var e = ex; e is not null; e = e.InnerException)
             {
-                var text = e.Message;
-                if (DeviceMarkers.Any(m => text.Contains(m, StringComparison.OrdinalIgnoreCase)))
-                    return AllocationPool.Device;
-                if (HostMarkers.Any(m => text.Contains(m, StringComparison.OrdinalIgnoreCase)))
-                    return AllocationPool.Host;
+                if (ContainsAny(e.Message, HostMarkers)) return AllocationPool.Host;
                 if (e is OutOfMemoryException) return AllocationPool.Host;
             }
             return gpuBackend ? AllocationPool.Unknown : AllocationPool.Host;
+        }
+
+        /// <summary>
+        /// Substring search over a marker table with no allocation. This runs inside an exception
+        /// FILTER, which the CLR evaluates before unwinding: a filter that throws is treated as
+        /// having returned false, so a LINQ chain allocating here under a genuine out-of-memory
+        /// would silently skip the very wrap it is deciding on.
+        /// </summary>
+        private static bool ContainsAny(string text, string[] markers)
+        {
+            foreach (var m in markers)
+                if (text.Contains(m, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
         }
 
         /// <summary>True when the loaded backend drives an accelerator rather than the CPU.</summary>
@@ -221,31 +269,28 @@ namespace Shorokoo.Core.Utils
         /// </summary>
         /// <param name="operation">What was being run, e.g. <c>"the training step at step 41"</c>.</param>
         /// <param name="pool">Which allocator failed, per <see cref="Classify"/>.</param>
-        /// <param name="backendAssemblyName">The loaded backend assembly, or null when unknown.</param>
+        /// <param name="device">What is known about the accelerator side, per <see cref="DeviceFacts"/>.</param>
         /// <param name="inventory">The tensor state resident for the operation, by section.</param>
         /// <param name="memory">This process's memory position, per <see cref="ReadProcessMemory"/>.</param>
         /// <param name="underlying">The backend's own text, quoted verbatim at the end.</param>
         internal static string Render(
             string operation,
             AllocationPool pool,
-            string? backendAssemblyName,
+            DeviceFacts device,
             IReadOnlyList<TensorInventorySection> inventory,
             ProcessMemoryFacts memory,
-            DeviceMemoryReading? device,
-            long? deviceArenaLimitBytes,
             string underlying)
         {
-            bool gpu = IsGpuBackend(backendAssemblyName);
             var parts = new List<string>
             {
                 $"allocating memory for {operation} failed.",
-                DescribePool(pool, gpu, backendAssemblyName),
+                DescribePool(pool, device),
             };
 
             if (inventory.Count > 0) parts.Add(DescribeInventory(inventory));
-            if (DescribeDevice(device, deviceArenaLimitBytes) is string deviceText) parts.Add(deviceText);
+            if (DescribeDevice(device) is string deviceText) parts.Add(deviceText);
             parts.Add(DescribeMemory(memory));
-            if (Advice(pool, gpu, memory, device) is string advice) parts.Add(advice);
+            if (Advice(pool, device, memory) is string advice) parts.Add(advice);
             parts.Add("Underlying failure: " + underlying);
             return string.Join(" ", parts);
         }
@@ -256,19 +301,21 @@ namespace Shorokoo.Core.Utils
         /// is a 2.36 MB request refused with gigabytes still free on the device, which reads as
         /// absurd until the free figure is printed next to it.
         /// </summary>
-        private static string? DescribeDevice(DeviceMemoryReading? device, long? arenaLimitBytes)
+        private static string? DescribeDevice(DeviceFacts device)
         {
-            if (device is not DeviceMemoryReading d) return null;
+            if (device.Reading is not DeviceMemoryReading d) return null;
             var text = $"Device: {Bytes(d.UsedBytes)} of {Bytes(d.TotalBytes)} in use across all "
                        + $"processes, {Bytes(d.FreeBytes)} free";
-            if (arenaLimitBytes is long limit)
-                text += $"; this process's arena is capped at {Bytes(limit)} (DeviceMemory.LimitBytes)";
+            if (device.ArenaLimitBytes is long limit)
+                text += $"; each session's arena is capped at {Bytes(limit)} (DeviceMemory.LimitBytes), "
+                      + "so a process holding several live sessions can hold that much more than once";
             return text + ".";
         }
 
-        private static string DescribePool(AllocationPool pool, bool gpu, string? backend)
+        private static string DescribePool(AllocationPool pool, DeviceFacts device)
         {
-            string where = backend is null ? "" : $" (backend '{backend}')";
+            bool gpu = device.HasDeviceMemory;
+            string where = device.BackendAssemblyName is not string backend ? "" : $" (backend '{backend}')";
             return pool switch
             {
                 AllocationPool.Device =>
@@ -290,7 +337,11 @@ namespace Shorokoo.Core.Utils
             int totalTensors = 0;
             foreach (var section in inventory)
             {
-                totalBytes = AddSat(totalBytes, section.TotalBytes);
+                // A section of unknown size makes the whole total unknown. Folding its -1 sentinel
+                // in arithmetically would saturate the sum and print an absurd figure — the one
+                // thing a memory diagnostic must not do.
+                totalBytes = totalBytes < 0 || section.TotalBytes < 0
+                    ? -1 : AddSat(totalBytes, section.TotalBytes);
                 totalTensors += section.Tensors.Count;
             }
 
@@ -332,14 +383,14 @@ namespace Shorokoo.Core.Utils
         /// identical. It is stated whenever the process is close to a limit it did not have to be
         /// close to, because that is the case where the accelerator is the wrong thing to blame.
         /// </summary>
-        private static string? Advice(
-            AllocationPool pool, bool gpu, ProcessMemoryFacts m, DeviceMemoryReading? device)
+        private static string? Advice(AllocationPool pool, DeviceFacts device, ProcessMemoryFacts m)
         {
+            bool gpu = device.HasDeviceMemory;
             bool nearLimit = Utilisation(m) is double u && u >= 0.85;
             // "Room left on the card" is only meaningful against the request that was refused; a
             // tenth of the device is far more than any single arena block, so free space above that
             // means the refusal did not come from the card being out of memory.
-            bool deviceHasRoom = device is DeviceMemoryReading d
+            bool deviceHasRoom = device.Reading is DeviceMemoryReading d
                                  && d.TotalBytes > 0 && d.FreeBytes > d.TotalBytes / 10;
 
             if (gpu && deviceHasRoom && nearLimit)

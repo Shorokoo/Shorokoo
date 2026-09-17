@@ -112,33 +112,6 @@ public class ScheduleLoweringCoverageTests
     }
 
     [Fact]
-    public void TestWarmupRampSpansStartFactorToPeakOverExactlyWarmupSteps()
-    {
-        static void Ramp(float peak, int warmup, float startFactor)
-        {
-            var s = Schedules.Constant(peak).WithWarmup(warmup, startFactor);
-            Assert.Equal(startFactor * peak, s.At(0));
-            Assert.Equal(peak, s.At(warmup));
-            Assert.Equal(peak, s.At(warmup + 1));
-            for (long k = 0; k < warmup; k++)
-                Assert.Equal(peak * (startFactor + (1f - startFactor) * ((float)k / warmup)), s.At(k));
-        }
-
-        Ramp(5e-4f, 800, 0f);
-        Ramp(5e-4f, 1600, 0f);
-        Ramp(1f, 1, 0f);
-        Ramp(3e-4f, 100, 0.25f);
-        Ramp(0.05f, 7, 0.5f);
-
-        var recipe = Schedules.Constant(5e-4f).WithWarmup(800)
-            .Then(15600, Schedules.Linear(5e-4f, 0.05f * 5e-4f, 24000 - 15600));
-        Assert.Equal(0f, recipe.At(0));
-        Assert.Equal(5e-4f, recipe.At(800));
-        Assert.Equal(5e-4f, recipe.At(15599));
-        Assert.True(MathF.Abs(recipe.At(24000) - 0.05f * 5e-4f) < 1e-9f);
-    }
-
-    [Fact]
     public void TestCompositeParity()
     {
         AssertParity(Schedules.Cosine(3e-4f, 900).WithWarmup(100).Then(1000, Schedules.Constant(1e-5f)),

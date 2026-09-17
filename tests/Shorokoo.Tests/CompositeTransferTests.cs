@@ -208,4 +208,38 @@ public class CompositeTransferCoverageTests
         _ = OnnxProtoAttributes.FromCSharpVals(
             new Dictionary<string, object?> { ["value"] = detached }, defs);
     }
+
+    [Fact]
+    public void TestCopyingACompositeCopiesTheElementsItOnlyHasAccessTo()
+    {
+        var source = new ComputeContext();
+        var sequence = TensorDataSequence.Create([Sample(1f)], DType.Float32).TransferTo(source);
+        TensorStructFieldDef[] fields =
+            [new TensorStructFieldDef("f", DataStructure.Tensor, 1, DType.Float32)];
+        var struc = new TensorDataStruct(
+            new TensorStructDef(fields, "S"),
+            new Dictionary<string, IData> { { "f", Sample(5f) } }).TransferTo(source);
+
+        // A reader owns none of its elements, which is the case the ownership gate on the transfer
+        // operations is for -- and the case a copy must not be gated by, since a copy is exactly
+        // what a caller holding no ownership has to reach for.
+        var sequenceReader = sequence.GiveAccessTo(source);
+        var structReader = struc.GiveAccessTo(source);
+
+        var keptSequence = sequenceReader.CopyTo(null);
+        var keptStruct = structReader.CopyTo(null);
+
+        Assert.NotSame(sequenceReader[0], keptSequence[0]);
+        Assert.True(keptSequence[0].OwnsMemory);
+        Assert.Null(keptSequence[0].Context);
+        Assert.NotSame(StructField(structReader), StructField(keptStruct));
+        Assert.True(StructField(keptStruct).OwnsMemory);
+
+        // The point of the copy: it outlives the context the elements were read from.
+        source.Dispose();
+        Assert.Equal([1f, 2f], Floats(keptSequence[0]));
+        Assert.Equal([5f, 6f], Floats(StructField(keptStruct)));
+    }
+
+    private static TensorData StructField(TensorDataStruct s) => (TensorData)s.Fields["f"];
 }

@@ -319,27 +319,39 @@ namespace Shorokoo
         /// element and under each element's own rules. Elements it only has access to are left
         /// where they are: moving what you do not own is what the non-owning case forbids.</summary>
         public TensorDataSequence TransferTo(Shorokoo.Runtime.ComputeContext? target)
-            => Rebuild(target, static (t, c) => t.TransferTo(c));
+            => Rebuild(target, static (t, c) => t.TransferTo(c), ownedOnly: true);
 
         /// <summary>Copies this sequence's owned elements into <paramref name="target"/>'s memory,
         /// leaving this sequence untouched.</summary>
         public TensorDataSequence CopyTo(Shorokoo.Runtime.ComputeContext? target)
-            => Rebuild(target, static (t, c) => t.CopyTo(c));
+            => Rebuild(target, static (t, c) => t.CopyTo(c), ownedOnly: false);
 
         /// <summary>Hands <paramref name="target"/> a reader for this sequence's owned elements,
         /// taking no ownership of any of them.</summary>
         public TensorDataSequence GiveAccessTo(Shorokoo.Runtime.ComputeContext? target)
-            => Rebuild(target, static (t, c) => t.GiveAccessTo(c));
+            => Rebuild(target, static (t, c) => t.GiveAccessTo(c), ownedOnly: true);
 
+        /// <param name="target">The context the rebuilt sequence belongs to, or null for the
+        /// framework's own host memory.</param>
+        /// <param name="operation">The per-element operation to apply.</param>
+        /// <param name="ownedOnly">Whether an element this sequence does not own is left alone.
+        /// True of the two operations that move ownership around, which cannot speak for an element
+        /// whose bytes belong to someone else. False of <see cref="CopyTo"/>, which takes nothing
+        /// and gives the target its own: a caller holding only access is exactly who has to copy,
+        /// and gating that on ownership handed them back the very elements they were copying to
+        /// escape, to die with the context they were read from.</param>
         private TensorDataSequence Rebuild(
             Shorokoo.Runtime.ComputeContext? target,
-            Func<TensorData, Shorokoo.Runtime.ComputeContext?, TensorData> operation)
+            Func<TensorData, Shorokoo.Runtime.ComputeContext?, TensorData> operation,
+            bool ownedOnly)
         {
             ThrowIfDisposed();
             List<TensorData> moved = new(Count);
             foreach (var element in this)
             {
-                var rebuiltElement = element.OwnsMemory ? operation(element, target) : element;
+                var rebuiltElement = !ownedOnly || element.OwnsMemory
+                    ? operation(element, target)
+                    : element;
                 moved.Add(rebuiltElement);
                 // A sequence whose elements are copied out per read hands this loop a tensor
                 // nobody else will ever see again, so releasing it here is the only chance --

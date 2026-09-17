@@ -185,4 +185,40 @@ public class TensorContextTransferCoverageTests
         Assert.Equal(["a", "b"], ((HostStringTensorData)copy).Strings);
         Assert.Equal(["a", "b"], ((HostStringTensorData)strings).Strings);
     }
+
+    [Fact]
+    public void TestATransferredFromTensorNamesTheContextThatWillFreeItsBytes()
+    {
+        // A same-space transfer leaves the source readable and owning nothing -- that is the
+        // documented contract. What it must not leave behind is a source whose Context names a
+        // context that no longer governs its bytes: Context is the only thing on the object that
+        // says whose disposal takes them away.
+        var first = new ComputeContext();
+        var second = new ComputeContext();
+        var tensor = Sample().TransferTo(first);
+        tensor.TransferTo(second);
+
+        Assert.False(tensor.OwnsMemory);
+        Assert.Same(second, tensor.Context);
+
+        first.Dispose();
+        Assert.Equal([1f, 2f, 3f, 4f], Floats(tensor));
+        second.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => Floats(tensor));
+    }
+
+    [Fact]
+    public void TestATransferFromFrameworkHostMemoryLeavesTheSourceNamingItsNewOwner()
+    {
+        var context = new ComputeContext();
+        var tensor = Sample();
+        Assert.Null(tensor.Context);
+
+        tensor.TransferTo(context);
+
+        Assert.False(tensor.OwnsMemory);
+        Assert.Same(context, tensor.Context);
+        context.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => Floats(tensor));
+    }
 }

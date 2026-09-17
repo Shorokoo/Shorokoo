@@ -120,20 +120,20 @@ namespace Shorokoo
         /// through nested structs and sequences. A field it only has access to is left where it
         /// is, since moving what you do not own is what the non-owning case forbids.</summary>
         public TensorDataStruct TransferTo(Shorokoo.Runtime.ComputeContext? target)
-            => Rebuild(target, static (d, c) => Move(d, c, static (t, x) => t.TransferTo(x),
-                static (q, x) => q.TransferTo(x), static (u, x) => u.TransferTo(x)));
+            => Rebuild(target, (d, c) => Move(d, c, static (t, x) => t.TransferTo(x),
+                static (q, x) => q.TransferTo(x), static (u, x) => u.TransferTo(x), ownedOnly: true));
 
         /// <summary>Copies this struct's owned tensors into <paramref name="target"/>'s memory,
         /// leaving this struct untouched.</summary>
         public TensorDataStruct CopyTo(Shorokoo.Runtime.ComputeContext? target)
-            => Rebuild(target, static (d, c) => Move(d, c, static (t, x) => t.CopyTo(x),
-                static (q, x) => q.CopyTo(x), static (u, x) => u.CopyTo(x)));
+            => Rebuild(target, (d, c) => Move(d, c, static (t, x) => t.CopyTo(x),
+                static (q, x) => q.CopyTo(x), static (u, x) => u.CopyTo(x), ownedOnly: false));
 
         /// <summary>Hands <paramref name="target"/> readers for this struct's owned tensors,
         /// taking no ownership of any of them.</summary>
         public TensorDataStruct GiveAccessTo(Shorokoo.Runtime.ComputeContext? target)
-            => Rebuild(target, static (d, c) => Move(d, c, static (t, x) => t.GiveAccessTo(x),
-                static (q, x) => q.GiveAccessTo(x), static (u, x) => u.GiveAccessTo(x)));
+            => Rebuild(target, (d, c) => Move(d, c, static (t, x) => t.GiveAccessTo(x),
+                static (q, x) => q.GiveAccessTo(x), static (u, x) => u.GiveAccessTo(x), ownedOnly: true));
 
         private TensorDataStruct Rebuild(
             Shorokoo.Runtime.ComputeContext? target,
@@ -146,20 +146,30 @@ namespace Shorokoo
 
         /// <summary>Applies the right one of three operations to whichever kind of field this is,
         /// and leaves anything else -- a tensor that owns nothing included -- alone.</summary>
+        /// <param name="field">The field to move.</param>
+        /// <param name="target">The context the rebuilt field belongs to, or null.</param>
+        /// <param name="onTensor">What to do with a tensor field.</param>
+        /// <param name="onSequence">What to do with a sequence field.</param>
+        /// <param name="onStruct">What to do with a nested struct field.</param>
+        /// <param name="ownedOnly">Whether a tensor this struct does not own is left alone. True of
+        /// the two operations that move ownership around; false of <see cref="CopyTo"/>, which takes
+        /// nothing and gives the target its own -- see the same parameter on
+        /// <see cref="TensorDataSequence"/>'s rebuild for why a copy must not be gated on it.</param>
         private static IData Move(
             IData field, Shorokoo.Runtime.ComputeContext? target,
             Func<TensorData, Shorokoo.Runtime.ComputeContext?, TensorData> onTensor,
             Func<TensorDataSequence, Shorokoo.Runtime.ComputeContext?, TensorDataSequence> onSequence,
-            Func<TensorDataStruct, Shorokoo.Runtime.ComputeContext?, TensorDataStruct> onStruct)
+            Func<TensorDataStruct, Shorokoo.Runtime.ComputeContext?, TensorDataStruct> onStruct,
+            bool ownedOnly)
             => field switch
             {
-                TensorData t => t.OwnsMemory ? onTensor(t, target) : t,
+                TensorData t => !ownedOnly || t.OwnsMemory ? onTensor(t, target) : t,
                 TensorDataSequence q => onSequence(q, target),
                 TensorDataStruct u => onStruct(u, target),
                 // A present optional holds a tensor like any other field does. Left alone, it
                 // stayed in the memory of the context the struct had just left -- inside a struct
                 // reporting the target's -- and went when that context did.
-                OptionalTensorData { HasValue: true, Value: { OwnsMemory: true } v }
+                OptionalTensorData { HasValue: true, Value: { } v } when !ownedOnly || v.OwnsMemory
                     => OptionalTensorData.Some(onTensor(v, target)),
                 _ => field,
             };

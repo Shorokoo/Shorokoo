@@ -245,8 +245,16 @@ public class ProcessWideBackendCoverageTests
         }
     }
 
+    /// <summary>
+    /// Assigning <see cref="InferenceBackend.Factory"/> settles both slots outright — the live one
+    /// and the remembered one — rather than going through the first-CPU-wins rule that governs a
+    /// backend the process merely loaded. It does not say anything about
+    /// <see cref="ComputeContext.Default"/>, which caches the backend it resolves on first read and
+    /// keeps it: a program that means the default to follow an assignment has to make the
+    /// assignment before anything reads Default.
+    /// </summary>
     [Fact]
-    public void TestAssigningTheFactoryIsTheChoiceTheDefaultContextFollows()
+    public void TestAssigningTheFactorySettlesBothTheLiveAndTheRememberedSlot()
     {
         var liveFactory = InferenceBackend.Current;
         var liveRemembered = InferenceBackend.Remembered;

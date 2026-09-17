@@ -49,7 +49,7 @@ namespace Shorokoo
                 RefuseUnownedNullContext(target, wouldOwn: OwnsMemory, operation: nameof(TransferTo));
                 // The bytes stay exactly where they are; only the names on them change.
                 var moved = CloneSharing(target, OwnsMemory);
-                SurrenderOwnership();
+                SurrenderOwnership(target);
                 return moved;
             }
 

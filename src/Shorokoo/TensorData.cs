@@ -261,8 +261,19 @@ namespace Shorokoo
         /// Gives up ownership without releasing anything — the other half of a transfer. The
         /// storage's owner has already moved on by the time this runs, so there is nothing to
         /// deregister here.
+        ///
+        /// <para>It repoints <see cref="Context"/> at <paramref name="newOwner"/> as well, because
+        /// that is now the context whose disposal takes these bytes away. Leaving the old one there
+        /// made <c>Context</c> a stale answer to the only question it exists to answer: a tensor
+        /// transferred from one context to another went on naming the first while dying with the
+        /// second, and one transferred out of the framework's own host memory named no context at
+        /// all while depending on one.</para>
         /// </summary>
-        internal void SurrenderOwnership() => OwnsMemory = false;
+        internal void SurrenderOwnership(Shorokoo.Runtime.ComputeContext? newOwner)
+        {
+            OwnsMemory = false;
+            Context = newOwner;
+        }
 
         /// <summary>
         /// True once <see cref="Dispose"/> has released this tensor's storage. Its shape, dtype and

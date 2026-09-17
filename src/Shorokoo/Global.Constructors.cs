@@ -458,7 +458,7 @@ namespace Shorokoo
         /// <summary>Creates TensorData with the given dims from the flat values.</summary>
         public static TensorData<float64> TensorData(long[] dims, params double[] val) => HostTensorData<float64>.From(dims, val);
         /// <summary>Creates TensorData with the given dims from the flat values.</summary>
-        public static TensorData<@string> TensorData(long[] dims, params string[] val) => new OnnxTensorData<@string>(dims, OnnxUtils.CreateTensorValue(dims, val));
+        public static TensorData<@string> TensorData(long[] dims, params string[] val) => new HostStringTensorData(dims, val);
 
         /// <summary>Creates rank-1 TensorData of the given length from the values.</summary>
         public static TensorData<bit> TensorData(long dims, params bool[] val) => HostTensorData<bit>.From(dims, val);
@@ -487,7 +487,7 @@ namespace Shorokoo
         /// <summary>Creates rank-1 TensorData of the given length from the values.</summary>
         public static TensorData<float64> TensorData(long dims, params double[] val) => HostTensorData<float64>.From(dims, val);
         /// <summary>Creates rank-1 TensorData of the given length from the values.</summary>
-        public static TensorData<@string> TensorData(long dims, params string[] val) => new OnnxTensorData<@string>(dims, OnnxUtils.CreateTensorValue(dims, val));
+        public static TensorData<@string> TensorData(long dims, params string[] val) => new HostStringTensorData(dims, val);
 
         /// <summary>Creates a tensor of the given runtime shape filled with the value (ONNX ConstantOfShape).</summary>
         public static Tensor<bit> TensorFill(Vector<int64> shape, bool val) => OnnxOp.ConstantOfShape(shape, OnnxTensorData(1, val));

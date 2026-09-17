@@ -369,11 +369,63 @@ namespace Shorokoo
             Shape shape, DType dtype, byte[] bytes, ComputeContext? context)
             => OnnxUtils.CreateHostTensorData(shape, dtype, bytes, context);
 
-        /// <summary>Creates TensorData of the given shape and dtype from raw storage bytes.</summary>
+        /// <summary>
+        /// Creates TensorData of the given shape and dtype over <paramref name="data"/> — plain
+        /// host memory belonging to no backend, the same thing <see cref="NewHostTensor"/> makes.
+        ///
+        /// <para>Raw bytes are what a tensor read out of a model file, or zeroed for a gradient
+        /// buffer, already is; wrapping them describes data rather than running anything. This
+        /// went through <c>InferenceBackend.Factory</c> instead, so reading an <c>.onnx</c> file
+        /// resolved the process-wide backend and put a native allocation behind every initializer
+        /// in it. The value is built when a session is fed this tensor, in
+        /// <see cref="ToTensorValue(IShorokooInferenceSessionFactory)"/>, and not before.</para>
+        ///
+        /// <para>Exactly <paramref name="shape"/>'s worth of <paramref name="data"/> becomes the
+        /// tensor: too few bytes is an error, a surplus is not and is dropped. That asymmetry is
+        /// the backend allocator's — it allocated to the shape and filled what it could reach, so
+        /// the surplus was never part of the tensor — and it has to be kept, because a tensor whose
+        /// buffer outruns its own dims serializes to an ONNX initializer no runtime will
+        /// deserialize.</para>
+        /// </summary>
+        /// <exception cref="ArgumentException"><paramref name="data"/> does not cover
+        /// <paramref name="shape"/>.</exception>
+        /// <exception cref="NotSupportedException"><paramref name="dtype"/> is
+        /// <see cref="DType.String"/>, or <paramref name="shape"/> has no known element
+        /// count.</exception>
+        /// <exception cref="UnsupportedDTypeException"><paramref name="dtype"/> has no whole-byte
+        /// element stride, so no flat buffer can describe it.</exception>
         public static TensorData CreateFromRawBytes(Shape shape, DType dtype, byte[] data)
         {
-            var value = OnnxUtils.CreateTensorValueFromRawData(shape, dtype, data);
-            return Create(shape, dtype, value);
+            ArgumentNullException.ThrowIfNull(data);
+            // The refusal the backend used to give, kept where it can still be given eagerly: a
+            // string element is variable-length, so a flat byte buffer does not describe one and
+            // a HostTensorData<@string> over these bytes would be a tensor of nothing.
+            if (dtype == DType.String)
+                throw new NotSupportedException(
+                    "String tensors are variable-length and not byte-stride, so raw bytes cannot "
+                    + "describe one. Build it from its elements with TensorData(dims, string[]).");
+
+            // Throws for the element types with no whole-byte stride at all -- the sub-byte
+            // integers and the complex pairs -- which the byte-wise backend constructor refused
+            // just as flatly, and which the framework refuses in its own words here.
+            var bits = dtype.EncodingBitCount;
+            // A shape carrying an unknown dimension reports a negative count, and so would the
+            // slice length below; refuse it while it can still be said what is wrong.
+            if (bits < 8 || shape.Count < 0)
+                throw new NotSupportedException(
+                    $"A tensor of {shape}:{dtype} cannot be described by a flat byte buffer: its "
+                    + "elements have no whole-byte stride, or its shape has no known element count.");
+
+            var required = checked(shape.Count * (bits / 8));
+            if (data.Length < required)
+                throw new ArgumentException(
+                    $"Supplied data of {data.Length} bytes is less than shape size {required} bytes.",
+                    nameof(data));
+
+            // Taken as the tensor's own storage when it is already the right length -- the common
+            // case, and one copy of every weight in a model saved by not copying it.
+            return NewHostTensor(
+                shape, dtype, data.Length == required ? data : data[..(int)required], context: null);
         }
 
         /// <summary>

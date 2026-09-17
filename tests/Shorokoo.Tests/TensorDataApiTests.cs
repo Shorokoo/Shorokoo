@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using Shorokoo.Runtime;
 
 namespace Shorokoo.Tests;
 
@@ -98,6 +99,36 @@ public class TensorDataApiCoverageTests
 
         var ex = Assert.ThrowsAny<Exception>(() => TensorData([2L, 2L], 1f, 2f, 3f));
         Assert.Contains("less than shape size", ex.Message);
+    }
+
+    /// <summary>
+    /// A raw-byte tensor is exactly its shape's worth of the buffer it was handed. The backend
+    /// allocator enforced that by construction — it allocated to the shape and copied into what it
+    /// had allocated — and a host tensor has to do it deliberately: the ONNX reader hands over a
+    /// whole element's worth of zero bytes for an empty tensor, and keeping the surplus wrote an
+    /// initializer whose raw_data outran its own dims, which ONNX Runtime refuses to deserialize.
+    /// </summary>
+    [Fact]
+    public void TestRawByteTensorsTakeExactlyTheirShapeAndRefuseAShortfall()
+    {
+        var empty = TensorData.CreateFromRawBytes(new Shape(0L), DType.Bool, new byte[1]);
+        Assert.Empty(empty.AccessRawMemory().ToArray());
+        GC.KeepAlive(empty);
+
+        float[] expected = [1.5f];
+        var trimmed = TensorData.CreateFromRawBytes(new Shape(1L), DType.Float32, [.. BitConverter.GetBytes(1.5f), .. new byte[16]]);
+        Assert.Equal(expected, trimmed.As<float32>().CopyMemory<float>());
+
+        var shortfall = Assert.Throws<ArgumentException>(
+            () => TensorData.CreateFromRawBytes(new Shape(4L), DType.Float32, new byte[8]));
+        Assert.Contains("less than shape size", shortfall.Message);
+
+        // The dtypes a flat buffer cannot describe are refused rather than silently mis-sized.
+        var stringEx = Assert.Throws<NotSupportedException>(
+            () => TensorData.CreateFromRawBytes(new Shape(1L), DType.String, new byte[8]));
+        Assert.Contains("variable-length", stringEx.Message);
+        Assert.Throws<UnsupportedDTypeException>(
+            () => TensorData.CreateFromRawBytes(new Shape(1L), DType.Complex64, new byte[8]));
     }
 
     [Fact]
@@ -263,6 +294,59 @@ public class TensorDataApiCoverageTests
         return new WeakReference(source);
     }
 
+    /// <summary>
+    /// <see cref="ComputeContextExtensions.ToTensorValue(IData)"/> is the only way to ask for a
+    /// runtime value through an <see cref="IData"/>-typed reference, and it unwrapped
+    /// <see cref="IOnnxData"/> or threw. That left it throwing for the two kinds of data that
+    /// hold no runtime value until something asks: a literal in managed memory — the commonest
+    /// tensor in the framework — and a sequence the transfer operations rebuilt as the tensors it
+    /// moved. Both now build one, and the overload beside it builds it on the backend the caller
+    /// names rather than the process-wide default.
+    /// </summary>
+    [Fact]
+    public void TestToTensorValueThroughIDataReachesAHostLiteralAndATransferredSequence()
+    {
+        IData literal = TensorData([2L], (float[])[1f, 2f]);
+        Assert.False(literal is IOnnxData);
+
+        var value = literal.ToTensorValue();
+        float[] expected = [1f, 2f];
+        Assert.Equal(expected, value.GetTensorDataAsSpan<float>().ToArray());
+        GC.KeepAlive(value);
+
+        // The tensor's own, kept per backend: a second ask is the same value, whether the backend
+        // is named or left to the default, because there is only one backend to name here.
+        Assert.Same(value, literal.ToTensorValue());
+        Assert.Same(value, literal.ToTensorValue(
+            Shorokoo.Core.Inference.Abstractions.InferenceBackend.Factory));
+
+        // A transfer rebuilds a sequence as a plain list of the tensors it moved, so there is no
+        // runtime sequence value left in it either; asking builds one over its elements.
+        IData moved = TensorDataSequence
+            .Create([TensorData([2L], (float[])[1f, 2f]), TensorData([2L], (float[])[3f, 4f])], DType.Float32)
+            .TransferTo(null);
+        Assert.False(moved is IOnnxData);
+
+        var sequence = moved.ToTensorValue();
+        Assert.Equal(
+            Shorokoo.Core.Inference.Abstractions.ShorokooOnnxValueType.Sequence, sequence.ValueType);
+        Assert.Equal(2, sequence.GetValueCount());
+        Assert.Same(sequence, moved.ToTensorValue(
+            Shorokoo.Core.Inference.Abstractions.InferenceBackend.Factory));
+
+        Assert.Throws<ArgumentNullException>(() => literal.ToTensorValue(null!));
+
+        // And what it never was: a promise about data it knows nothing of.
+        Assert.Throws<UnsupportedDTypeException>(() => new ForeignData().ToTensorValue());
+    }
+
+    /// <summary>An <see cref="IData"/> from outside the framework: no storage, no runtime value,
+    /// and nothing <see cref="ComputeContextExtensions.ToTensorValue(IData)"/> can make of it.</summary>
+    private sealed class ForeignData : IData
+    {
+        public DType DType => DType.Float32;
+    }
+
     [Fact]
     public void TestDisposingATensorReleasesItsBackingValueExactlyOnce()
     {
@@ -299,7 +383,10 @@ public class TensorDataApiCoverageTests
 
         // The backing-value read is a backend-backed tensor's alone: a host tensor holds managed
         // bytes and is not IOnnxData at all, so the cast would fail before the disposal check.
-        var backendBacked = TensorData.CreateFromRawBytes(new Shape(2L), DType.Float32, new byte[8]);
+        // Built from a runtime value on purpose -- CreateFromRawBytes makes a host tensor now,
+        // so the one constructor that still hands back a backend-backed tensor is this one.
+        var backendBacked = TensorData.Create(new Shape(2L), DType.Float32,
+            OnnxUtils.CreateTensorValueFromRawData(new Shape(2L), DType.Float32, new byte[8]));
         backendBacked.Dispose();
         Assert.Throws<ObjectDisposedException>(() => _ = ((IOnnxData)backendBacked).Value);
 

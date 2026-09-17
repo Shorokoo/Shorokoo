@@ -974,14 +974,49 @@ namespace Shorokoo.Runtime
     /// <summary>Extension entry points for eager evaluation and data conversion.</summary>
     public static class ComputeContextExtensions
     {
-        /// <summary>Unwraps the backend tensor value carried by <paramref name="data"/>.</summary>
+        /// <summary>
+        /// The runtime value of <paramref name="data"/>, on the process-wide default backend —
+        /// <see cref="InferenceBackend.Factory"/>, resolved here if nothing has resolved one yet.
+        /// Use <see cref="ToTensorValue(IData, IShorokooInferenceSessionFactory)"/> wherever the
+        /// backend that is going to read the value is known, since a value belongs to the runtime
+        /// that made it.
+        ///
+        /// <para>The value returned belongs to <paramref name="data"/>: read it, do not dispose
+        /// it.</para>
+        /// </summary>
         public static IShorokooTensorValue ToTensorValue(this IData data)
-        {
-            if (data is IOnnxData onnxData)
-                return onnxData.Value;
+            => data.ToTensorValue(InferenceBackend.Factory);
 
-            throw new UnsupportedDTypeException(ErrorCodes.CR006, data?.GetType()?.Name ?? "null", "ToTensorValue",
-                "Data type is not supported for tensor value conversion");
+        /// <summary>
+        /// The runtime value of <paramref name="data"/> as a value of
+        /// <paramref name="factory"/>'s runtime, built there if it does not exist yet.
+        ///
+        /// <para>This used to unwrap <see cref="IOnnxData"/> and throw at everything else, which
+        /// made it a hole rather than an entry point: a tensor literal is held as managed bytes
+        /// (<see cref="HostTensorData{T}"/>), a string literal as managed strings
+        /// (<see cref="HostStringTensorData"/>) and a transferred sequence as the tensors it was
+        /// handed, and none of the three carries a runtime value until something asks for one.
+        /// Asking each of them is what this does now; a value a runtime already made is still
+        /// handed straight over.</para>
+        ///
+        /// <para>The value returned belongs to <paramref name="data"/>: read it, do not dispose
+        /// it.</para>
+        /// </summary>
+        public static IShorokooTensorValue ToTensorValue(
+            this IData data, IShorokooInferenceSessionFactory factory)
+        {
+            ArgumentNullException.ThrowIfNull(factory);
+            return data switch
+            {
+                TensorData tensor => tensor.ToTensorValue(factory),
+                TensorDataSequence sequence => sequence.ToTensorValue(factory),
+                // Nothing in the framework is IOnnxData without being one of the two above. A
+                // caller's own IData may be, and unwrapping it is what this method promised.
+                IOnnxData onnxData => onnxData.Value,
+                _ => throw new UnsupportedDTypeException(
+                    ErrorCodes.CR006, data?.GetType()?.Name ?? "null", "ToTensorValue",
+                    "Data type is not supported for tensor value conversion"),
+            };
         }
 
         /// <summary>Starts a fluent eager evaluation: <c>inputs.Eval(outputs).With(data)</c>.</summary>

@@ -147,6 +147,13 @@ namespace Shorokoo
         /// A fresh, owned tensor holding this one's contents in <paramref name="to"/>. Goes through
         /// host bytes, which is the only route a backend-independent copy has: a value belongs to
         /// the runtime that made it, so the target has to be handed contents rather than a pointer.
+        ///
+        /// <para>The target allocates them itself, through
+        /// <see cref="IShorokooInferenceSessionFactory.CreateTensorInBackendMemory"/> rather than
+        /// <c>CreateTensorFromRawBytes</c>, so the bytes land in the memory
+        /// <paramref name="to"/> names instead of in host memory wearing its name. That is the
+        /// difference between a tensor that is on the card and one an execution provider has to
+        /// copy there on every run.</para>
         /// </summary>
         private TensorData CopyAcross(ComputeContext? target, MemorySpace to)
         {
@@ -155,7 +162,7 @@ namespace Shorokoo
             if (to.IsHost)
                 return NewHostTensor(Shape, DType, bytes, target);
 
-            var value = target!.Factory.CreateTensorFromRawBytes(
+            var value = target!.Factory.CreateTensorInBackendMemory(
                 (ShorokooTensorElementType)(int)DType, bytes, (long[])Shape);
             return Create(Shape, DType, value, target);
         }

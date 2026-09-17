@@ -245,6 +245,10 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
     /// <summary>
     /// Builds an ORT tensor of <paramref name="elementType"/> and
     /// <paramref name="shape"/> by reinterpreting a fixed-stride byte buffer.
+    ///
+    /// <para>In host memory, whatever device this backend computes on — ORT's default allocator is
+    /// the CPU one on every execution provider. <see cref="CreateTensorInBackendMemory"/> is the
+    /// one that builds it where this backend's tensors are meant to live.</para>
     /// </summary>
     /// <exception cref="NotSupportedException">
     /// The element type has no fixed byte stride — <see cref="ShorokooTensorElementType.String"/>
@@ -255,6 +259,85 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
         ShorokooTensorElementType elementType,
         byte[] data,
         long[] shape)
+        => Allocate(
+            FixedStrideElementType(elementType, nameof(CreateTensorFromRawBytes)),
+            data.AsSpan(),
+            shape);
+
+    /// <summary>
+    /// A tensor of this backend holding <paramref name="data"/>, in the memory this backend's
+    /// tensors live in.
+    ///
+    /// <para>On a host backend that is where <see cref="CreateTensorFromRawBytes"/> already builds
+    /// it, so this defers to it. On a CUDA backend it is the card's own memory: the buffer comes
+    /// from that device's ORT allocator and the bytes cross the bus once, here — rather than being
+    /// left on the host for the execution provider to copy over on every run of every session they
+    /// are fed to, which is what a tensor "moved onto the card" used to mean.</para>
+    /// </summary>
+    /// <exception cref="ArgumentException"><paramref name="data"/> holds fewer bytes than
+    /// <paramref name="shape"/> covers.</exception>
+    /// <exception cref="InvalidOperationException">The CUDA runtime is not available to make the
+    /// copy with.</exception>
+    /// <exception cref="NotSupportedException">The element type has no fixed byte stride.</exception>
+    public IShorokooTensorValue CreateTensorInBackendMemory(
+        ShorokooTensorElementType elementType,
+        byte[] data,
+        long[] shape)
+    {
+        ArgumentNullException.ThrowIfNull(data);
+        ArgumentNullException.ThrowIfNull(shape);
+        if (_cudaDeviceId is not { } deviceId)
+            return CreateTensorFromRawBytes(elementType, data, shape);
+
+        var ortElementType = FixedStrideElementType(elementType, nameof(CreateTensorInBackendMemory));
+        var byteCount = ByteCount(elementType, shape);
+        // A caller may hand over a buffer longer than the shape covers -- the node-definition
+        // tables do -- in which case the surplus was never part of the tensor. Shorter is a
+        // mistake, and on this path it would leave the tail of a device allocation unwritten.
+        if (data.Length < byteCount)
+            throw new ArgumentException(
+                $"Supplied data of {data.Length} bytes is less than shape size {byteCount} bytes.",
+                nameof(data));
+
+        var wrapped = new OrtTensorValue(OrtValue.CreateAllocatedTensorValue(
+            CudaDeviceAllocator.For(deviceId, _configureExecutionProvider), ortElementType, shape));
+        try
+        {
+            // ORT's managed surface has no host-to-device copy, so this goes through the CUDA
+            // runtime, to the address the value carries -- which is the one thing that may be done
+            // with a device allocation here. An empty tensor has nothing to copy, and CUDA is
+            // entitled to refuse the address ORT hands back for a zero-byte one.
+            var copied = byteCount == 0
+                || CudaInterop.CopyHostToDevice(data, DevicePointer(wrapped), byteCount);
+            GC.KeepAlive(wrapped);
+            if (!copied)
+                throw new InvalidOperationException(
+                    $"Filling this tensor ({string.Join('x', shape)}:{elementType}) in "
+                    + $"{Description}'s device memory failed. The CUDA runtime is what performs the "
+                    + "copy, so a machine without it cannot put a tensor on the card.");
+        }
+        catch
+        {
+            // The value owns a device allocation from the moment ORT returns it, and nothing else
+            // has a reference to free it by.
+            wrapped.Dispose();
+            throw;
+        }
+        return wrapped;
+    }
+
+    /// <summary>
+    /// The ORT element type <paramref name="elementType"/> is laid down as, refusing the ones a
+    /// flat byte buffer cannot express. <paramref name="operation"/> names the caller, so a
+    /// refusal says which of the two byte-wise constructors was asked.
+    /// </summary>
+    /// <exception cref="NotSupportedException">
+    /// The element type has no fixed byte stride — <see cref="ShorokooTensorElementType.String"/>
+    /// is variable-length, so use <see cref="CreateStringTensor"/> for it — or is not one these
+    /// methods handle at all.
+    /// </exception>
+    private static TensorElementType FixedStrideElementType(
+        ShorokooTensorElementType elementType, string operation)
     {
         return elementType switch
         {
@@ -265,11 +348,11 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
                 or ShorokooTensorElementType.Float16 or ShorokooTensorElementType.Double
                 or ShorokooTensorElementType.UInt32 or ShorokooTensorElementType.UInt64
                 or ShorokooTensorElementType.BFloat16
-                => Allocate((TensorElementType)(int)elementType, data.AsSpan(), shape),
+                => (TensorElementType)(int)elementType,
             ShorokooTensorElementType.String => throw new NotSupportedException(
                 "String tensors are variable-length and not byte-stride; use CreateStringTensor instead."),
             _ => throw new NotSupportedException(
-                $"CreateTensorFromRawBytes does not support element type {elementType}."),
+                $"{operation} does not support element type {elementType}."),
         };
     }
 
@@ -334,11 +417,7 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
             throw new InvalidOperationException(
                 $"Only a tensor can be read back from device memory; this is a {value.ValueType}.");
 
-        var elements = 1L;
-        foreach (var dim in value.Shape) elements *= dim;
-        var byteCount = checked((int)(elements * ElementSize(value.ElementType)));
-
-        var destination = new byte[byteCount];
+        var destination = new byte[ByteCount(value.ElementType, value.Shape)];
         var copied = CudaInterop.CopyDeviceToHost(DevicePointer(value), destination);
         GC.KeepAlive(value);
         if (!copied)
@@ -375,6 +454,15 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
         return address;
     }
 
+    /// <summary>How many bytes a tensor of this element type and shape occupies — the size of the
+    /// buffer on either side of a copy between the host and the card.</summary>
+    private static int ByteCount(ShorokooTensorElementType elementType, long[] shape)
+    {
+        var elements = 1L;
+        foreach (var dim in shape) elements *= dim;
+        return checked((int)(elements * ElementSize(elementType)));
+    }
+
     private static int ElementSize(ShorokooTensorElementType type) => type switch
     {
         ShorokooTensorElementType.Float => 4,
@@ -390,8 +478,8 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
     };
 
     /// <summary>
-    /// Builds an ORT tensor on a buffer ORT itself allocates and copies <paramref name="bytes"/>
-    /// into it.
+    /// Builds an ORT tensor on a buffer ORT itself allocates, in host memory, and copies
+    /// <paramref name="bytes"/> into it.
     ///
     /// <para>The obvious alternative — <c>OrtValue.CreateTensorValueFromMemory</c> over a managed
     /// array — is why this is a copy. That API pins the array for the value's lifetime and releases
@@ -401,7 +489,8 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
     /// a training loop that fed a fresh batch each step leaked one batch per step, permanently, and
     /// no collection could ever get it back. An ORT-allocated buffer is released by the value's
     /// finalizer along with the value, so it behaves like every other tensor the runtime hands
-    /// back.</para>
+    /// back — which is why <see cref="CreateTensorInBackendMemory"/> allocates device memory the
+    /// same way rather than calling <c>cudaMalloc</c> and owning the result itself.</para>
     /// </summary>
     private static OrtTensorValue Allocate(TensorElementType elementType, ReadOnlySpan<byte> bytes, long[] shape)
     {

@@ -262,6 +262,60 @@ public class SideBySideBackendHardwareTests
         Assert.NotEmpty(TrainingRigHelpers.FlattenStruct(published.TrainableParams));
     }
 
+    /// <summary>
+    /// The other direction, and the whole reason a tensor has a context: host bytes moved <i>onto</i>
+    /// the card land in the card's memory. Before the backend could allocate there, a tensor
+    /// "transferred to a CUDA context" was host bytes wearing that context's name, which the
+    /// execution provider then copied over on every single run — so the test that it really moved
+    /// is that the host can no longer read it.
+    /// </summary>
+    [SideBySideCudaFact]
+    public void TestATensorTransferredToTheCardLivesInDeviceMemoryAndRunsThere()
+    {
+        var a = InputVector<float32>("a");
+        var b = InputVector<float32>("b");
+        var graph = new InternalComputationGraph([a, b], [a * b + a]);
+        float[] av = [1f, 2f, 3f, 4f];
+        float[] bv = [10f, 20f, 30f, 40f];
+        float[] expected = [.. av.Zip(bv, (x, y) => x * y + x)];
+
+        var cuda = new ComputeContext(LoadCuda());
+        var onHost = TensorData([4L], av);
+        Assert.Equal(MemorySpace.Host, onHost.Space);
+
+        var onCard = onHost.TransferTo(cuda);
+
+        // Where it says it is. Not host memory with a device context's name on it: the host cannot
+        // read these bytes at all, which is the only claim about a device allocation that cannot be
+        // faked from this side.
+        Assert.Equal(MemorySpace.Cuda(0), onCard.Space);
+        Assert.Same(cuda, onCard.Context);
+        Assert.True(onCard.OwnsMemory);
+        Assert.False(onCard.IsHostResident);
+        Assert.Throws<InvalidOperationException>(() => onCard.As<float32>().AccessMemory<float>());
+
+        // The move spent the source, which is what a move across spaces means.
+        Assert.True(onHost.IsDisposed);
+
+        // And the right bytes arrived: the model runs on the device-resident tensor and answers
+        // what the host would have. Nothing short of a correct copy across the bus gets here -- an
+        // allocation left unwritten reads back as whatever the arena last held.
+        var tb = TensorData([4L], bv);
+        SideBySideModel.AssertAgree(
+            expected, Floats(cuda.Execute(graph, onCard, tb)[0]), SideBySideModel.DeviceTolerance);
+
+        // Still there afterwards, and still the card's: a run reads a feed, it does not consume it.
+        Assert.Equal(MemorySpace.Cuda(0), onCard.Space);
+
+        // And it comes home by the mirror of the copy that put it there, unchanged -- the round
+        // trip, which pins that the bytes on the card are the bytes that were handed over rather
+        // than merely bytes the graph happened to like.
+        var home = onCard.CopyTo(null);
+        Assert.Equal(MemorySpace.Host, home.Space);
+        Assert.True(home.IsHostResident);
+        Assert.Equal(av, Floats(home));
+    }
+
     private static float[] Floats(TensorData data)
         => [.. data.As<float32>().AccessMemory<float>()];
 

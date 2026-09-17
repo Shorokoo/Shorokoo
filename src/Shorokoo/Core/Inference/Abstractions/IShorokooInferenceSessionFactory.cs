@@ -59,4 +59,24 @@ public interface IShorokooInferenceSessionFactory
         GC.KeepAlive(value);
         return bytes;
     }
+
+    // A tensor of this backend holding `data`, allocated where this backend's tensors live -- the
+    // mirror of CopyTensorToHost above, and the one call that puts host bytes into MemorySpace.
+    // For a host backend that is host memory; for a CUDA one it is the card's own memory, which is
+    // where a tensor belonging to a CUDA context is supposed to be.
+    //
+    // The default builds it wherever CreateTensorFromRawBytes does, which is already the right
+    // place for a host backend and for any backend whose values the host can read. A backend that
+    // computes in memory of its own overrides it with the allocation only that backend can make,
+    // exactly as it overrides CopyTensorToHost -- the two are one pair, and a backend answering
+    // one and not the other can bring a tensor home but not send one out.
+    //
+    // Left to the default on a device backend, a tensor "moved onto the card" is host bytes with a
+    // device context's name on them, which the execution provider then copies over on every single
+    // run: the per-run copy that giving a tensor a context exists to remove.
+    IShorokooTensorValue CreateTensorInBackendMemory(
+        ShorokooTensorElementType elementType,
+        byte[] data,
+        long[] shape)
+        => CreateTensorFromRawBytes(elementType, data, shape);
 }

@@ -100,6 +100,30 @@ public class SideBySideBackendCoverageTests
         Assert.Equal(InferenceBackend.Describe(), ComputeContext.Default.Backend);
     }
 
+    /// <summary>
+    /// The wrapper that renames a loaded backend answers <i>nothing</i> on its behalf: every
+    /// member of the factory interface reaches the backend that was loaded.
+    ///
+    /// <para>A member with a default body is the whole point of asserting this. Inheriting one is
+    /// silent and compiles, and the wrapper then answers a question only the backend can — where
+    /// its tensors live, how to read one back off its card, where to put one. A tensor built by
+    /// the wrapper's default would be host memory the caller was told is device memory.</para>
+    /// </summary>
+    [Fact]
+    public void TestTheRenamingWrapperForwardsEveryMemberOfTheFactoryInterface()
+    {
+        var wrapper = typeof(IsolatedBackend)
+            .GetNestedType("RenamedFactory", System.Reflection.BindingFlags.NonPublic);
+        Assert.NotNull(wrapper);
+
+        var map = wrapper!.GetInterfaceMap(typeof(IShorokooInferenceSessionFactory));
+        for (int i = 0; i < map.InterfaceMethods.Length; i++)
+            Assert.True(
+                map.TargetMethods[i].DeclaringType == wrapper,
+                $"RenamedFactory inherits {map.InterfaceMethods[i].Name} instead of forwarding it, "
+                + "so it answers for the backend it wraps rather than asking it.");
+    }
+
     [Fact]
     public void TestTheIsolatedBackendIsASecondNativeRuntimeRatherThanTheSameOneTwice()
     {

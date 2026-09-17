@@ -346,6 +346,10 @@ public static class IsolatedBackend
 
         public byte[] CopyTensorToHost(IShorokooTensorValue value) => _inner.CopyTensorToHost(value);
 
+        public IShorokooTensorValue CreateTensorInBackendMemory(
+            ShorokooTensorElementType elementType, byte[] data, long[] shape)
+            => _inner.CreateTensorInBackendMemory(elementType, data, shape);
+
         public IShorokooTensorValue CreateSequence(IReadOnlyList<IShorokooTensorValue> values)
             => _inner.CreateSequence(values);
     }

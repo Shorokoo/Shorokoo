@@ -626,6 +626,28 @@ public class CoreUtilsCoverageTests
         Assert.Empty(usings.Where(u => !(u.Static ? types : namespaces).Contains(u.Name)).Select(u => u.At));
     }
 
+    /// <summary>
+    /// A member the documentation spells out — <c>NN.Conv</c>, <c>OnnxOp.Attention</c> — must exist
+    /// on a public type of that name. Citing one that never existed sends the reader looking for an
+    /// API to call, and no other test in the suite reads the prose.
+    /// </summary>
+    [Fact]
+    public void TestEveryDocumentationMemberReferenceExists()
+    {
+        var byName = ShippedAssemblies().SelectMany(a => a.GetExportedTypes())
+            .Where(t => t.Name is "Ops" or "OnnxOp" or "NN")
+            .ToLookup(t => t.Name, StringComparer.Ordinal);
+
+        var cited = Directory.GetFiles(Path.Combine(RepoRoot(), "Documentation"), "*.md")
+            .SelectMany(f => Regex.Matches(File.ReadAllText(f), @"`(Ops|OnnxOp|NN)\.([A-Za-z0-9_]+)`")
+                .Select(m => (At: $"{Path.GetFileName(f)}: {m.Value}", Type: m.Groups[1].Value, Member: m.Groups[2].Value)))
+            .Distinct()
+            .ToArray();
+
+        Assert.True(cited.Length >= 10);
+        Assert.Empty(cited.Where(c => !byName[c.Type].Any(t => t.GetMember(c.Member).Length != 0)).Select(c => c.At));
+    }
+
     private static Assembly[] ShippedAssemblies() =>
         [.. Directory.EnumerateFiles(AppContext.BaseDirectory, "Shorokoo*.dll")
             .Where(f => Path.GetFileName(f) is not ("Shorokoo.Tests.dll" or "Shorokoo.CodeGen.dll"))

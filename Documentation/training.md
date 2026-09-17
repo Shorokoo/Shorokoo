@@ -650,21 +650,21 @@ Leaving both `null`, so each defaults to `ComputeContext.Default`, is the normal
 
 What *is* configurable — on the GPU backends — is **device** memory, on the context the rig compiles
 and runs on: an arena budget and extend strategy in its `DeviceMemory`, per-step arena shrinkage in
-its `RunSettings`, plus a reading of how much of the card is gone. The arena strategy needs no
-setting for this loop: a step compiled for one batch shape repeats it for the length of the run,
-and the default `Auto` recognizes exactly that, telling the arena to extend by what the step asks
-for rather than to keep doubling — which is what otherwise leaves a long run holding far more of
-the card than its steps use.
+its `RunSettings`. The arena strategy needs no setting for this loop: a step compiled for one batch
+shape repeats it for the length of the run, and the default `Auto` leaves it on exact-size
+extension — the arena tracks what the step asks for rather than doubling past it, which is what
+otherwise leaves a long run holding far more of the card than its steps use.
 
-It follows the shapes rather than the word "training", which matters here: the rig keeps a compiled
-step per input shape **up to a limit**, and a run that feeds more distinct shapes than that falls
-back to a single symbolic step. That step does see growing shapes, so `Auto` gives it ORT's
-doubling — the strategy that does not strand a region every time an input outgrows it. Feeding a
-handful of stable batch shapes keeps every step on the tighter arena; feeding an unbounded variety
-does not, and no setting makes exact-size extension the right answer there.
+The one place it departs is worth knowing: the rig keeps a compiled step per input shape **up to a
+limit**, and a run that feeds more distinct shapes than that falls back to a single step every
+later shape shares. That step really does see growing shapes, so `Auto` gives it ORT's doubling —
+the strategy that does not strand a region each time an input outgrows it. Feeding a handful of
+stable batch shapes keeps every step on the tighter arena.
 
-On a run that is close to the card's limit, hand `FromScratch` a `runtimeContext` carrying a budget
-and sample the peak inside your `TrainStep` loop; see
+Both are fixed when a step is compiled, and so is `ShrinkArenaAfterRun`: `TrainStep` takes no
+per-call override, so hand `FromScratch` a `runtimeContext` carrying what you want before the first
+step. On a run close to the card's limit, put a budget on that context and sample the peak inside
+your `TrainStep` loop; the readings come from the separate static `DeviceMemory` class. See
 [Device memory](inference.md#device-memory-gpu-backends).
 
 **Mind which memory is which.** A `TrainStep` loop's checkpoints are fetched to the host, so the

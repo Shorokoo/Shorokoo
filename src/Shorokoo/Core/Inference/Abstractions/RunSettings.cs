@@ -7,9 +7,13 @@ namespace Shorokoo.Core.Inference.Abstractions;
 /// rebuilding anything.
 ///
 /// <para>A <see cref="Shorokoo.Runtime.ComputeContext"/> holds the instance its runs use when a
-/// call names none, and every run entry point takes one to override it for that call alone.
-/// Like <see cref="DeviceMemorySettings"/> it is a record, so an override is a <c>with</c>
-/// expression rather than a mutation something else can see:</para>
+/// call names none, and every <see cref="Shorokoo.Runtime.CompiledGraph"/> run entry point takes
+/// one to override it for that call alone. A context's own one-shot entry points —
+/// <c>Execute</c>, <c>Run</c>, <c>Eval</c>, <c>ExecuteWithState</c> — and a training rig's
+/// <c>TrainStep</c> build or reuse a session per call and run on the context's instance, with no
+/// per-call override; set it on the context they run on. Like
+/// <see cref="DeviceMemorySettings"/> it is a record, so an override is a <c>with</c> expression
+/// rather than a mutation something else can see:</para>
 /// <code>
 /// using Shorokoo.Core.Inference.Abstractions;
 ///

@@ -2,6 +2,7 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
+using Shorokoo.Core.Factory;
 using Shorokoo.Core.Factory.OpsFactories;
 using Shorokoo.Core.Inference;
 using Shorokoo.Core.Inference.Abstractions;
@@ -429,6 +430,14 @@ public class CoreUtilsCoverageTests
         public OtherDeviceFactoryProbe() : base(static (_, _) => { }, ComputeDevice.Other, cudaDeviceId: null) { }
     }
 
+    /// <summary>A CPU factory whose execution-provider step records the settings it is handed,
+    /// which is where a GPU backend would read the arena budget out of them.</summary>
+    private sealed class CapturingFactoryProbe : OrtSessionFactory
+    {
+        public CapturingFactoryProbe(List<DeviceMemorySettings> seen)
+            : base((_, mem) => seen.Add(mem), ComputeDevice.Cpu, cudaDeviceId: null) { }
+    }
+
     /// <summary>Records the settings each run was handed. No outputs, so both run paths return
     /// nothing and every overload can be driven without a model.</summary>
     private sealed class RunSettingsRecorder : IShorokooInferenceSession
@@ -487,7 +496,7 @@ public class CoreUtilsCoverageTests
     /// ever handed a strategy it has — an unresolved one is refused rather than guessed at.
     /// </summary>
     [Fact]
-    public void TestDeviceMemoryDefaultsToTheExactSizeArenaAndRejectsAnEmptyBudget()
+    public void TestDeviceMemoryDefaultsToAutoAndRejectsAnEmptyBudget()
     {
         Assert.Equal(ArenaExtendStrategy.Auto, DeviceMemorySettings.Default.ArenaExtend);
         Assert.Null(DeviceMemorySettings.Default.LimitBytes);
@@ -498,7 +507,7 @@ public class CoreUtilsCoverageTests
         var shipped = OrtSessionFactory.CudaProviderOptions(
             0,
             DeviceMemorySettings.Default.LimitBytes,
-            DeviceMemorySettings.Default.Resolve(fixedInputShapes: true).ArenaExtend);
+            DeviceMemorySettings.Default.Resolve(reusedAcrossShapes: false).ArenaExtend);
         Assert.Equal("kSameAsRequested", shipped["arena_extend_strategy"]);
         Assert.False(shipped.ContainsKey("gpu_mem_limit"));
 
@@ -522,61 +531,83 @@ public class CoreUtilsCoverageTests
     }
 
     /// <summary>
-    /// Auto is decided by whether a session's input shapes can change, not by what kind of graph
-    /// it holds: a session pinned to one set of shapes gets exact-size extension, and a symbolic
-    /// one — which may be handed a larger input on any call — gets ORT's doubling. A rig's
-    /// generic training step is symbolic and is the case the two are most often confused over.
+    /// Auto departs from exact-size extension only where Shorokoo knows a session is reused
+    /// across differing shapes; a session it knows nothing about keeps exact-size extension
+    /// rather than being guessed at. A named strategy is carried through untouched, and the
+    /// budget rides along either way.
     /// </summary>
     [Fact]
-    public void TestAutoPicksTheArenaStrategyFromWhetherTheSessionsShapesCanChange()
+    public void TestAutoTakesTheDoublingOnlyForASessionKnownToBeReusedAcrossShapes()
     {
-        ArenaExtendStrategy Auto(bool fixedInputShapes) => DeviceMemorySettings.Default.Resolve(fixedInputShapes).ArenaExtend;
+        ArenaExtendStrategy Auto(bool reused) => DeviceMemorySettings.Default.Resolve(reused).ArenaExtend;
 
-        Assert.Equal(ArenaExtendStrategy.SameAsRequested, Auto(fixedInputShapes: true));
-        Assert.Equal(ArenaExtendStrategy.NextPowerOfTwo, Auto(fixedInputShapes: false));
+        Assert.Equal(ArenaExtendStrategy.SameAsRequested, Auto(reused: false));
+        Assert.Equal(ArenaExtendStrategy.NextPowerOfTwo, Auto(reused: true));
 
         var named = new DeviceMemorySettings { ArenaExtend = ArenaExtendStrategy.NextPowerOfTwo, LimitBytes = 4096 };
-        Assert.Same(named, named.Resolve(fixedInputShapes: true));
-        Assert.Same(named, named.Resolve(fixedInputShapes: false));
+        Assert.Same(named, named.Resolve(reusedAcrossShapes: false));
+        Assert.Same(named, named.Resolve(reusedAcrossShapes: true));
 
         var budgeted = new DeviceMemorySettings { LimitBytes = 8192 };
         Assert.Equal(
             new DeviceMemorySettings { LimitBytes = 8192, ArenaExtend = ArenaExtendStrategy.SameAsRequested },
-            budgeted.Resolve(fixedInputShapes: true));
+            budgeted.Resolve(reusedAcrossShapes: false));
     }
 
     /// <summary>
-    /// The strategy a compiled graph really ends up with, across every shape a compile can be
-    /// given. A training step stamped with concrete dims settles its sizes; one left symbolic —
-    /// which is what a rig falls back to once its shape-specialized slots are full — does not, and
-    /// exact-size extension is the strategy that strands regions and fails to fit there. One
-    /// symbolic input among concrete ones is enough, since that input alone can grow.
+    /// The strategy a compiled graph really ends up with. A symbolic graph is not by itself
+    /// evidence that shapes vary — an ordinary compiled inference graph is symbolic and is the
+    /// case exact-size extension wins widest — so only the caller's own assertion moves it.
     /// </summary>
     [Fact]
-    public void TestASymbolicTrainingStepGetsTheGrowingShapeArenaAndAPinnedOneDoesNot()
+    public void TestOnlyAnAssertedShapeReuseMovesACompiledGraphOffExactSizeExtension()
     {
         var x = InputTensor<float32>("x", rank: 1);
         var graph = new InternalComputationGraph([x], [x + x]);
         var ctx = new ComputeContext();
 
-        ArenaExtendStrategy Compiled(IReadOnlyList<long[]?>? dims, bool trainingStep)
-            => ctx.Compile(graph, dims, trainingStep).DeviceMemory.ArenaExtend;
+        ArenaExtendStrategy Compiled(IReadOnlyList<long[]?>? dims, bool trainingStep, bool reused)
+            => ctx.Compile(graph, dims, trainingStep, reused).DeviceMemory.ArenaExtend;
 
         long[]?[] pinned = [[4L]];
-        long[]?[] symbolic = [null];
 
-        Assert.Equal(ArenaExtendStrategy.SameAsRequested, Compiled(pinned, trainingStep: true));
-        Assert.Equal(ArenaExtendStrategy.SameAsRequested, Compiled(pinned, trainingStep: false));
-        Assert.Equal(ArenaExtendStrategy.NextPowerOfTwo, Compiled(null, trainingStep: true));
-        Assert.Equal(ArenaExtendStrategy.NextPowerOfTwo, Compiled(null, trainingStep: false));
-        Assert.Equal(ArenaExtendStrategy.NextPowerOfTwo, Compiled(symbolic, trainingStep: true));
+        Assert.Equal(ArenaExtendStrategy.SameAsRequested, Compiled(pinned, trainingStep: true, reused: false));
+        Assert.Equal(ArenaExtendStrategy.SameAsRequested, Compiled(null, trainingStep: true, reused: false));
+        Assert.Equal(ArenaExtendStrategy.SameAsRequested, Compiled(null, trainingStep: false, reused: false));
+        Assert.Equal(ArenaExtendStrategy.SameAsRequested, ctx.Compile(graph).DeviceMemory.ArenaExtend);
+        Assert.Equal(ArenaExtendStrategy.NextPowerOfTwo, Compiled(null, trainingStep: true, reused: true));
+    }
 
-        var y = InputTensor<float32>("y", rank: 1);
-        var twoInputs = new InternalComputationGraph([x, y], [x + y]);
-        long[]?[] halfPinned = [[4L], null];
-        Assert.Equal(
-            ArenaExtendStrategy.NextPowerOfTwo,
-            ctx.Compile(twoInputs, halfPinned, trainingStep: true).DeviceMemory.ArenaExtend);
+    /// <summary>
+    /// The settings a session is built with reach the execution-provider step that configures its
+    /// arena, already resolved. Nothing else on a box without a card observes an arena at all, so
+    /// without this the whole per-session surface could be assembled, reported by
+    /// <see cref="CompiledGraph.DeviceMemory"/>, and dropped on the way to ORT with the suite green.
+    /// </summary>
+    [Fact]
+    public void TestASessionsSettingsReachTheExecutionProviderStepResolved()
+    {
+        var x = InputTensor<float32>("x", rank: 1);
+        var proto = FastOnnxModelBuilder.BuildInternalOnnxModel(
+            new InternalComputationGraph([x], [x + x]), prepForOnnx: true);
+        var model = new MemoryStream();
+        ProtoBuf.Serializer.Serialize(model, proto);
+
+        var seen = new List<DeviceMemorySettings>();
+        var factory = new CapturingFactoryProbe(seen);
+        var budget = new DeviceMemorySettings { LimitBytes = 8L << 30, ArenaExtend = ArenaExtendStrategy.NextPowerOfTwo };
+
+        using (factory.CreateSession(model.ToArray(), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, budget)) { }
+        Assert.Equal(budget, Assert.Single(seen));
+
+        seen.Clear();
+        using (factory.CreateSession(
+            model.ToArray(), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal,
+            DeviceMemorySettings.Default.Resolve(reusedAcrossShapes: true))) { }
+        Assert.Equal(ArenaExtendStrategy.NextPowerOfTwo, Assert.Single(seen).ArenaExtend);
+
+        Assert.Throws<ArgumentNullException>(() => factory.CreateSession(
+            model.ToArray(), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal, null!));
     }
 
     /// <summary>
@@ -606,13 +637,12 @@ public class CoreUtilsCoverageTests
         // Nothing a caller does afterwards can reach that session: the settings it was built with
         // are its own, and a differently configured context builds a differently configured one.
         // A default context resolves Auto rather than carrying it into the session.
-        Assert.Equal(
-            DeviceMemorySettings.Default.Resolve(fixedInputShapes: false),
-            new ComputeContext().Compile(graph).DeviceMemory);
+        Assert.Equal(ArenaExtendStrategy.SameAsRequested, new ComputeContext().Compile(graph).DeviceMemory.ArenaExtend);
+        Assert.Null(new ComputeContext().Compile(graph).DeviceMemory.LimitBytes);
 
         Assert.Throws<ArgumentNullException>(() => new ComputeContext { DeviceMemory = null! });
         Assert.Throws<ArgumentNullException>(() => new ComputeContext { RunSettings = null! });
-        Assert.Throws<ArgumentNullException>(() => compiled.Run(null!, (RunSettings)null!));
+        Assert.Throws<ArgumentNullException>(() => compiled.Run([], null!));
     }
 
     /// <summary>
@@ -690,6 +720,12 @@ public class CoreUtilsCoverageTests
         Assert.Matches(@"new\s+OrtInferenceSession\s*\(\s*session\s*,\s*_cudaDeviceId\s*\)", factory);
         Assert.Matches(@"AppendExecutionProvider_CUDA\s*\(\s*cuda\s*\)", factory);
         Assert.Matches(@"CudaProviderOptions\s*\(\s*deviceId\s*,\s*deviceMemory\.LimitBytes\s*,\s*deviceMemory\.ArenaExtend\s*\)", factory);
+        Assert.Matches(@"_configureExecutionProvider\s*\(\s*options\s*,\s*deviceMemory\s*\)", factory);
+
+        var context = StripCommentsAndStrings(File.ReadAllText(
+            Path.Combine(ProductSourceRoot(), "Shorokoo", "Core", "ComputeContext.cs")));
+        Assert.Matches(@"CreateSession\s*\(\s*modelData\s*,\s*optimization\s*,\s*deviceMemory\s*\)", context);
+        Assert.Matches(@"DeviceMemory\.Resolve\s*\(\s*reusedAcrossShapes\s*\)", context);
 
         var session = Source("Shorokoo.OnnxRuntime", "OrtInferenceSession.cs");
         Assert.Contains("memory.enable_memory_arena_shrinkage", File.ReadAllText(

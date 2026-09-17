@@ -29,11 +29,14 @@ public readonly record struct DeviceMemoryReading(long UsedBytes, long FreeBytes
 ///
 /// <code>
 /// using Shorokoo.Core.Inference.Abstractions;
+/// using Shorokoo.Runtime;
 ///
+/// // The budget belongs to the sessions the rig compiles, so it goes on the rig's runtime context.
 /// var ctx = new ComputeContext
 /// {
 ///     DeviceMemory = new DeviceMemorySettings { LimitBytes = 16L * 1024 * 1024 * 1024 },
 /// };
+/// var rig = TrainingRig.FromScratch(model, loss, optimizer, sample, hypers, runtimeContext: ctx);
 ///
 /// for (int step = 0; step &lt; steps; step++)
 /// {

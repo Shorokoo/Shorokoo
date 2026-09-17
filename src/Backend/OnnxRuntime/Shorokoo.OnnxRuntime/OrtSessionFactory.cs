@@ -219,7 +219,7 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
     /// The arena ORT should shrink after a run — the value of its
     /// <c>memory.enable_memory_arena_shrinkage</c> run option — or <c>null</c> to leave the run
     /// option off. Only a GPU backend names one: the entry says <i>which</i> arena to shrink, and
-    /// a CPU backend's device memory is not what <see cref="DeviceMemory"/> is about.
+    /// a CPU backend's device memory is not what <see cref="DeviceMemorySettings"/> is about.
     /// </summary>
     public static string? ArenaShrinkageRunConfig(int? cudaDeviceId, bool shrinkArenaAfterRun)
         => cudaDeviceId is { } device && shrinkArenaAfterRun

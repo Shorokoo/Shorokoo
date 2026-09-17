@@ -6,17 +6,24 @@ namespace Shorokoo.Core.Inference.Abstractions;
 public enum ArenaExtendStrategy
 {
     /// <summary>
-    /// Let Shorokoo choose per session — the default, and what you want unless you have measured
-    /// otherwise. Neither ORT strategy is better in general: which one wastes less depends on
-    /// whether a session's allocation sizes settle or keep growing, and the two differ by about
-    /// 1.5x in each direction. So the choice is made from the one thing that decides it, which
-    /// Shorokoo knows when it builds a session and ORT does not: <b>whether that session's input
-    /// shapes can change</b>. A session compiled for one set of shapes — a shape-specialized
-    /// training step, or a graph run once and thrown away — gets <see cref="SameAsRequested"/>,
-    /// because its allocation sizes settle and the doubling is pure overshoot. A session left
-    /// symbolic, which may be handed a larger input on any call, gets
-    /// <see cref="NextPowerOfTwo"/>, because exact-size extension strands every region such a
-    /// session outgrows and can fail to fit at all on a capped arena.
+    /// Let Shorokoo choose per session — the default. Which strategy wastes less depends on
+    /// whether a session's allocation sizes settle: on a series that settles, exact-size
+    /// extension holds about 1.3-1.45x less; on shapes that keep growing, ORT's doubling holds
+    /// about 1.5x less and fits on a capped arena where exact-size extension does not. Between
+    /// those lies a band where the two are within about 1.1x, or tie.
+    ///
+    /// <para>Whether a given session's sizes settle is a property of how its caller feeds it, so
+    /// Shorokoo does not guess at it. <see cref="Auto"/> is <see cref="SameAsRequested"/> except
+    /// where Shorokoo <i>knows</i> a session is reused across differing input shapes — today that
+    /// is one case, a training rig's fallback step, which it reaches only after more distinct
+    /// shapes have been fed than it keeps specialized steps for and which every later shape then
+    /// shares. There the sizes demonstrably do not settle, and exact-size extension is the
+    /// strategy that strands a region per outgrown input.</para>
+    ///
+    /// <para>So this departs from exact-size extension only on evidence, never on a guess. If
+    /// your own session is fed shapes that keep growing, say <see cref="NextPowerOfTwo"/> —
+    /// Shorokoo has no way to know that before the feeds arrive. What a session was built with
+    /// is reported by <see cref="Shorokoo.Runtime.CompiledGraph.DeviceMemory"/>.</para>
     ///
     /// <para>It is a default, not a policy: naming either concrete strategy on a
     /// <see cref="DeviceMemorySettings"/> overrides it for the sessions built from that one, and
@@ -35,10 +42,11 @@ public enum ArenaExtendStrategy
     NextPowerOfTwo,
 
     /// <summary>
-    /// Extend by exactly the requested size — Shorokoo's default. A loop whose allocation sizes
-    /// have settled then tracks them instead of doubling past them. The cost is that an
-    /// exactly-sized region cannot serve a later, larger request: a run whose input shapes keep
-    /// growing strands each region it outgrows and can need <b>more</b> memory this way.
+    /// Extend by exactly the requested size. A loop whose allocation sizes have settled then
+    /// tracks them instead of doubling past them, and this is what <see cref="Auto"/> resolves to
+    /// in every case but one. The cost is that an exactly-sized region cannot serve a later,
+    /// larger request: a run whose input shapes keep growing strands each region it outgrows and
+    /// can need <b>more</b> memory this way.
     /// </summary>
     SameAsRequested,
 }
@@ -72,9 +80,9 @@ public enum ArenaExtendStrategy
 public sealed record DeviceMemorySettings
 {
     /// <summary>
-    /// What a session gets when nothing names otherwise: no budget, and exact-size arena
-    /// extension. Immutable and shared — a record, so it cannot be altered in place by one
-    /// caller on behalf of every other.
+    /// What a session gets when nothing names otherwise: no budget, and
+    /// <see cref="ArenaExtendStrategy.Auto"/>. Immutable and shared — a record, so it cannot be
+    /// altered in place by one caller on behalf of every other.
     /// </summary>
     public static DeviceMemorySettings Default { get; } = new();
 
@@ -112,8 +120,7 @@ public sealed record DeviceMemorySettings
     /// <summary>
     /// How this session's arena extends itself — ORT's <c>arena_extend_strategy</c>. Defaults to
     /// <see cref="ArenaExtendStrategy.Auto"/>, which is not one of ORT's values but a choice
-    /// between them made per session; <see cref="Resolve"/> is that choice, and
-    /// <see cref="ArenaExtendStrategy.Auto"/> says what it decides on.
+    /// between them made per session; <see cref="Resolve"/> is that choice.
     ///
     /// <para>Neither concrete strategy is better in general. A training run feeds one input shape
     /// to one compiled step for its whole length, and on that shape exact-size extension holds
@@ -123,9 +130,7 @@ public sealed record DeviceMemorySettings
     /// sizes are in play it is the doubling that holds less, but by 1.06-1.13x. The case it wins
     /// outright is input shapes that keep growing without settling, where each outgrown region is
     /// stranded: there the doubling holds about 1.5x less and fits on a capped arena where
-    /// exact-size extension does not. Those are the two cases
-    /// <see cref="ArenaExtendStrategy.Auto"/> tells apart; name a strategy here to decide it
-    /// yourself.</para>
+    /// exact-size extension does not. Name a strategy here to decide it yourself.</para>
     /// </summary>
     /// <exception cref="ArgumentOutOfRangeException">Not one of the strategies.</exception>
     public ArenaExtendStrategy ArenaExtend
@@ -141,16 +146,15 @@ public sealed record DeviceMemorySettings
 
     /// <summary>
     /// These settings with <see cref="ArenaExtend"/> settled to one of the two strategies ORT
-    /// accepts: unchanged when a concrete strategy was named, and otherwise the choice
-    /// <see cref="ArenaExtendStrategy.Auto"/> stands for, taken on
-    /// <paramref name="fixedInputShapes"/>.
+    /// accepts: unchanged when a concrete strategy was named, and otherwise
+    /// <see cref="ArenaExtendStrategy.SameAsRequested"/> unless
+    /// <paramref name="reusedAcrossShapes"/> says this session is known to be fed differing input
+    /// shapes, in which case ORT's doubling.
     ///
-    /// <para><paramref name="fixedInputShapes"/> is true when the session being built can only
-    /// ever be fed one set of input shapes — every graph input's dims stamped on the model, so
-    /// ORT refuses a differently-shaped feed, or a session run once and disposed. It is
-    /// <b>not</b> "this is a training step": a rig that has run out of shape-specialized slots
-    /// compiles a symbolic training step and feeds it every shape thereafter, which is the case
-    /// exact-size extension loses worst.</para>
+    /// <para><paramref name="reusedAcrossShapes"/> is an assertion of fact, not a guess: pass it
+    /// only where the differing shapes have already happened. A symbolic session is <b>not</b>
+    /// enough on its own — a compiled graph fed one batch shape for its whole life is symbolic
+    /// too, and it is the case exact-size extension wins by the widest measured margin.</para>
     ///
     /// <para>The resolution happens here rather than in the backend, so that the settings a
     /// session is built with are concrete by the time anything sees them: the backend never has
@@ -158,13 +162,13 @@ public sealed record DeviceMemorySettings
     /// <see cref="Shorokoo.Runtime.CompiledGraph.DeviceMemory"/> reports what was chosen rather
     /// than what was asked for.</para>
     /// </summary>
-    public DeviceMemorySettings Resolve(bool fixedInputShapes)
+    public DeviceMemorySettings Resolve(bool reusedAcrossShapes)
         => ArenaExtend is not ArenaExtendStrategy.Auto
             ? this
             : this with
             {
-                ArenaExtend = fixedInputShapes
-                    ? ArenaExtendStrategy.SameAsRequested
-                    : ArenaExtendStrategy.NextPowerOfTwo,
+                ArenaExtend = reusedAcrossShapes
+                    ? ArenaExtendStrategy.NextPowerOfTwo
+                    : ArenaExtendStrategy.SameAsRequested,
             };
 }

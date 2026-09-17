@@ -136,7 +136,11 @@ namespace Shorokoo
                 if (_compiledTrainSteps.TryGetValue(key, out var compiled)) return compiled;
                 if (_compiledTrainSteps.Count < MaxShapeSpecializedTrainSteps)
                     return _compiledTrainSteps[key] = RuntimeContext.Compile(TrainingStepPureGraph.ToInternal(), dims, trainingStep: true);
-                return _compiledTrainStepGeneric ??= RuntimeContext.Compile(TrainingStepPureGraph.ToInternal(), inputDims: null, trainingStep: true);
+                // Reached only once more distinct shapes have been fed than there are specialized
+                // slots, and shared by every shape after that -- so this session's sizes are known
+                // not to settle, which is the one case the arena strategy departs on.
+                return _compiledTrainStepGeneric ??= RuntimeContext.Compile(
+                    TrainingStepPureGraph.ToInternal(), inputDims: null, trainingStep: true, reusedAcrossShapes: true);
             }
         }
 

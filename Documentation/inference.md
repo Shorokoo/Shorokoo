@@ -29,10 +29,10 @@ Related: [core-types.md](core-types.md) · [defining-models.md](defining-models.
   [Which device am I on?](#which-device-am-i-on). To run part of the work on another
   device, [One model, two devices](#one-model-two-devices).
 - On a GPU backend the CUDA arena is configured on the `ComputeContext` — `DeviceMemory` for
-  the sessions it compiles, `RunSettings` for what its runs do — while the static `DeviceMemory`
-  class reports how much of the card is gone. The arena strategy is chosen per session from
-  whether that session's shapes can change, so a fixed-shape loop does not end up holding far more
-  of the card than it uses and a variable-shape path still gets the strategy that suits it:
+  the sessions it compiles, `RunSettings` for what its runs do — while the separate static
+  `DeviceMemory` class reports how much of the card is gone. The arena strategy departs from
+  exact-size extension only for a session Shorokoo knows is reused across differing shapes, so a
+  long training loop does not end up holding far more of the card than it uses:
   [Device memory](#device-memory-gpu-backends).
 
 ## Workflow: one-shot evaluation
@@ -595,21 +595,21 @@ less, by about 1.1x, or ties (rows 3 to 5). The last two rows are the other end:
 grow without settling, where each outgrown region is stranded, the doubling holds around 1.5x less
 and — on a card with no room to spare — fits where exact-size extension does not.
 
-So `ArenaExtend` defaults to `Auto`, which is not one of ORT's values but the choice between them,
-made per session on the one thing that decides it: **whether that session's input shapes can
-change**. A session compiled for one set of shapes gets `SameAsRequested` — a training step the rig
-specialized for a batch shape, or a graph run once and thrown away — because its sizes settle. A
-session left **symbolic**, which ORT will accept a larger input for on any call, gets
-`NextPowerOfTwo`, because exact-size extension strands every region such a session outgrows.
+Which of those a given session is turns on **how its caller feeds it**, and that is not knowable
+when the session is built: a compiled graph fed one batch shape for its whole life and one fed a new
+shape every call are the same object. So `ArenaExtend` defaults to `Auto`, which is not one of ORT's
+values but `SameAsRequested` **except where Shorokoo already knows the shapes differ**.
 
-Note what that is *not*: "training steps get exact-size extension". A rig keeps a compiled step per
-input shape up to a limit, and once that limit is reached it falls back to one symbolic step and
-feeds it every shape thereafter — which is the growing-shape case, and the one exact-size extension
-loses worst. `Auto` follows the shapes, so that fallback gets the doubling, while the specialized
-steps around it keep the tighter arena.
+Today that is one case. A training rig keeps a compiled step per input shape up to a limit; feed it
+more distinct shapes than that and it falls back to a single step that every later shape shares.
+By the time that step exists the differing shapes have already happened — it is not a guess — and it
+is the growing-shape row, the one where exact-size extension strands a region per outgrown input and
+cannot fit under a budget at all. That step gets the doubling; everything else keeps exact-size
+extension, as it did before `Auto` existed.
 
-Name a strategy to decide it yourself — for the sessions that context compiles, and no others — and
-read back what a graph actually got from `CompiledGraph.DeviceMemory`:
+**If your own session is fed shapes that keep growing, say so** — Shorokoo cannot know it before the
+feeds arrive, and this is the case worth overriding. Naming a strategy applies to the sessions that
+context compiles and no others, and `CompiledGraph.DeviceMemory` reports what a graph actually got:
 
 ```csharp
 using Shorokoo.Core.Inference.Abstractions;
@@ -635,7 +635,7 @@ Console.WriteLine(compiled.DeviceMemory.ArenaExtend);              // what this 
 | setting | on | ORT option | default | read |
 |---|---|---|---|---|
 | `LimitBytes` | `DeviceMemorySettings` | `gpu_mem_limit` | `null` — no cap | when a session is created |
-| `ArenaExtend` | `DeviceMemorySettings` | `arena_extend_strategy` | `Auto` — `SameAsRequested` when the session's input shapes are fixed, ORT's `NextPowerOfTwo` when they are symbolic | when a session is created |
+| `ArenaExtend` | `DeviceMemorySettings` | `arena_extend_strategy` | `Auto` — `SameAsRequested`, except ORT's `NextPowerOfTwo` for a session Shorokoo knows is reused across differing shapes | when a session is created |
 | `ShrinkArenaAfterRun` | `RunSettings` | `memory.enable_memory_arena_shrinkage` | `false` | on every run |
 
 The other two are unset by default for their own reasons. `ShrinkArenaAfterRun` costs a
@@ -656,10 +656,11 @@ The first two are read **when a session is built** — the first inference call,
 first `TrainStep` for a given input shape — so the context has to carry them before the graph is
 compiled on it; a graph already compiled keeps what it was built with, which is why
 `CompiledGraph.DeviceMemory` reports the settled strategy rather than `Auto`. `ShrinkArenaAfterRun`
-is read on every run, so it takes effect on sessions already compiled and a single call can
-override it.
+ORT reads on every run, so a `CompiledGraph.Execute` / `Run` call can override it for that call
+alone. The context's own one-shot entry points and a rig's `TrainStep` take no such override and
+run on the context's instance, so set it on the context they run on.
 
-The same class reports what the card is doing:
+The static `DeviceMemory` class — the readings, not the settings — reports what the card is doing:
 
 ```csharp
 using var run = rig.BeginResidentRun(checkpoint);

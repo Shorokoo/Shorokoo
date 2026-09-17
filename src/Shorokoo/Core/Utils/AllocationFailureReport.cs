@@ -308,8 +308,8 @@ namespace Shorokoo.Core.Utils
                        + $"processes, {Bytes(d.FreeBytes)} free";
             if (device.ArenaLimitBytes is long limit)
                 text += $"; this session's arena is capped at {Bytes(limit)} (its context's "
-                      + "DeviceMemorySettings.LimitBytes), and another live session holds a budget "
-                      + "of its own on top";
+                      + "DeviceMemorySettings.LimitBytes), and any other live session can hold a "
+                      + "budget of its own on top";
             return text + ".";
         }
 

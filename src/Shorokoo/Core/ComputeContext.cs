@@ -58,9 +58,9 @@ namespace Shorokoo.Runtime
         /// <summary>
         /// What a run of this graph uses when the call names nothing: the
         /// <see cref="ComputeContext.RunSettings"/> of the context that compiled it, taken when
-        /// it was compiled. Every <c>Execute</c> / <c>Run</c> overload takes a
-        /// <see cref="Shorokoo.Core.Inference.Abstractions.RunSettings"/> to override it for one
-        /// call, so this is a default and never a ceiling.
+        /// it was compiled. Each <c>Execute</c> / <c>Run</c> overload has a sibling taking a
+        /// <see cref="Shorokoo.Core.Inference.Abstractions.RunSettings"/> that overrides it for
+        /// one call, so this is a default and never a ceiling.
         /// </summary>
         public RunSettings DefaultRunSettings { get; }
 
@@ -249,8 +249,9 @@ namespace Shorokoo.Runtime
         /// to run a graph under a different budget, compile it on a context that carries one.
         ///
         /// <para>Its default <see cref="ArenaExtendStrategy.Auto"/> resolves per session, so one
-        /// context can still give a training step a different arena strategy from an eager
-        /// evaluation; <see cref="CompiledGraph.DeviceMemory"/> reports which one a graph got.</para>
+        /// context can still give a session it knows is reused across shapes a different arena
+        /// strategy from the rest; <see cref="CompiledGraph.DeviceMemory"/> reports which one a
+        /// graph got.</para>
         ///
         /// <para>Ignored by the CPU backends, which have no device arena.</para>
         /// </summary>
@@ -266,9 +267,14 @@ namespace Shorokoo.Runtime
         /// <summary>
         /// What runs on this context do when the call names nothing of its own. A
         /// <see cref="CompiledGraph"/> takes a copy of this when it is compiled
-        /// (<see cref="CompiledGraph.DefaultRunSettings"/>); every run entry point also takes a
+        /// (<see cref="CompiledGraph.DefaultRunSettings"/>), and every <see cref="CompiledGraph"/>
+        /// run entry point also takes a
         /// <see cref="Shorokoo.Core.Inference.Abstractions.RunSettings"/> to override it for one
-        /// call, because ORT reads these off the run rather than the session.
+        /// call, because ORT reads these off the run rather than the session. This context's own
+        /// one-shot entry points — <see cref="Execute(ComputationGraph, IData[])"/>,
+        /// <see cref="Run(ComputationGraph, NamedModelParam[])"/>, <c>Eval</c> and
+        /// <c>ExecuteWithState</c> — build and dispose a session per call and offer no such
+        /// override; they run on this.
         /// </summary>
         /// <exception cref="ArgumentNullException">A null settings object.</exception>
         public RunSettings RunSettings
@@ -369,7 +375,17 @@ namespace Shorokoo.Runtime
         /// already scheduled: what it duplicates, it duplicates on purpose, so the session must not
         /// merge it back (<see cref="ShorokooGraphOptimization.TrainingStep"/>). Every other graph
         /// — a user's <see cref="Compile(ComputationGraph)"/> included — runs the ordinary profile.</param>
-        internal CompiledGraph Compile(InternalComputationGraph graph, IReadOnlyList<long[]?>? inputDims, bool trainingStep)
+        /// <param name="reusedAcrossShapes">True only where this session is <i>known</i> to be fed
+        /// differing input shapes — the shapes have already differed, not merely could. It is the
+        /// one thing that moves <see cref="ArenaExtendStrategy.Auto"/> off exact-size extension
+        /// (<see cref="DeviceMemorySettings.Resolve"/>); a symbolic graph is not by itself
+        /// evidence, since an ordinary compiled graph fed one shape for its whole life is symbolic
+        /// too.</param>
+        internal CompiledGraph Compile(
+            InternalComputationGraph graph,
+            IReadOnlyList<long[]?>? inputDims,
+            bool trainingStep,
+            bool reusedAcrossShapes = false)
         {
             graph.RequireRunnableOps("ComputeContext.Compile");
             var originalInputNames = ResolveOriginalInputNames(graph);
@@ -377,24 +393,14 @@ namespace Shorokoo.Runtime
                 () => FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true, inputDims: inputDims),
                 originalInputNames,
                 trainingStep,
-                FixedInputShapes(inputDims));
+                reusedAcrossShapes);
         }
-
-        /// <summary>
-        /// Whether a session built over <paramref name="inputDims"/> can only ever be fed one set
-        /// of input shapes — every input stamped with concrete dims, so ORT refuses a
-        /// differently-shaped feed. One null entry is enough to make it false: that input stays
-        /// symbolic and the session can be handed a larger one on any call, which is what decides
-        /// the arena strategy (<see cref="DeviceMemorySettings.Resolve"/>).
-        /// </summary>
-        private static bool FixedInputShapes(IReadOnlyList<long[]?>? inputDims)
-            => inputDims is not null && inputDims.All(dims => dims is not null);
 
         private CompiledGraph CompileFromModel(
             Func<ModelProto> buildModel,
             string[] originalInputNames,
-            bool trainingStep = false,
-            bool fixedInputShapes = false)
+            bool trainingStep,
+            bool reusedAcrossShapes)
         {
             var model = buildModel();
 
@@ -405,7 +411,7 @@ namespace Shorokoo.Runtime
             var optimization = SessionOptimization(HasOptionalOps(model.Graph), trainingStep);
             // Settled here, not inside the session: CompiledGraph then reports the strategy this
             // session actually got rather than the Auto that asked for it.
-            var deviceMemory = DeviceMemory.Resolve(fixedInputShapes);
+            var deviceMemory = DeviceMemory.Resolve(reusedAcrossShapes);
             var session = CreateSession(modelData, optimization, deviceMemory);
 
             var onnxInputNameByOriginal = new Dictionary<string, string>();
@@ -593,12 +599,12 @@ namespace Shorokoo.Runtime
                 : ShorokooGraphOptimization.EnableAll;
         }
 
-        // A one-shot session: built, fed once, and disposed, so its shapes cannot change under it.
+        // A one-shot session: built, fed once, and disposed, so no differing shapes can reach it.
         private IShorokooInferenceSession CreateSession(byte[] modelData, bool disableOptimizations = false)
             => CreateSession(
                 modelData,
                 SessionOptimization(disableOptimizations, trainingStep: false),
-                DeviceMemory.Resolve(fixedInputShapes: true));
+                DeviceMemory.Resolve(reusedAcrossShapes: false));
 
         private IShorokooInferenceSession CreateSession(
             byte[] modelData, ShorokooGraphOptimization optimization, DeviceMemorySettings deviceMemory)

@@ -1,0 +1,161 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Utils;
+
+namespace Shorokoo
+{
+    /// <summary>
+    /// <see cref="TensorData{T}"/> held in ordinary managed memory, owned by this object and
+    /// belonging to no backend.
+    ///
+    /// <para>This is what the convenience constructors build — <c>TensorData([4], 1f, 2f, 3f, 4f)</c>
+    /// and its thirty-odd siblings — and so it is what a model's literals, a node definition's
+    /// test values and an operator's tensor attributes are made of. None of those are inference:
+    /// they are how a graph is <i>described</i>. Describing one therefore needs no execution
+    /// provider, no native runtime, and no deployed backend at all.</para>
+    ///
+    /// <para>It did before. Every literal went through
+    /// <c>InferenceBackend.Factory.CreateTensor</c>, so the node definition table's own tensors
+    /// resolved the process-wide backend the first time anything touched a graph — which meant a
+    /// program that only wanted to build a model and export it as ONNX still had to deploy a
+    /// runtime to do it. The tensor arrives on a backend when it is fed to a session, in
+    /// <see cref="TensorData.ToTensorValue(IShorokooInferenceSessionFactory)"/>, and not before.</para>
+    ///
+    /// <para>String tensors are not held here: their elements are variable-length and
+    /// reference-typed, so they do not fit a flat byte buffer and keep the backend-backed path.</para>
+    /// </summary>
+    public sealed class HostTensorData<T> : TensorData<T>, IDisposable
+        where T : IVarType
+    {
+        private readonly byte[] _bytes;
+
+        // One materialized value per backend this tensor has been fed to, owned here and released
+        // on Dispose. Built on demand rather than up front, because most tensors are never fed to
+        // anything: a graph literal is read by the builder and that is the end of it.
+        //
+        // Keyed by backend because a tensor may legitimately be fed to more than one -- that is
+        // the whole point of a program running two -- and a value belongs to the runtime that
+        // made it. Reference equality is the right comparison: two factories are the same backend
+        // exactly when they are the same object.
+        private Dictionary<IShorokooInferenceSessionFactory, IShorokooTensorValue>? _materialized;
+
+        /// <summary>Creates a tensor of <paramref name="shape"/> over <paramref name="bytes"/>,
+        /// which it takes as its own storage rather than copying.</summary>
+        public HostTensorData(Shape shape, byte[] bytes) : base(shape)
+        {
+            _bytes = bytes ?? throw new ArgumentNullException(nameof(bytes));
+        }
+
+        internal HostTensorData(Shape shape, byte[] bytes, DType actualDType) : base(shape, actualDType)
+        {
+            _bytes = bytes ?? throw new ArgumentNullException(nameof(bytes));
+        }
+
+        /// <summary>
+        /// Creates a tensor of <paramref name="shape"/> holding a copy of
+        /// <paramref name="values"/>' bytes.
+        ///
+        /// <para>Too few values is an error; a surplus is not, and is ignored. That asymmetry is
+        /// the backend allocator's, kept because the node-definition tables rely on it — they hand
+        /// over a buffer longer than the shape covers, and the surplus was never part of the
+        /// tensor.</para>
+        /// </summary>
+        /// <exception cref="ArgumentException"><paramref name="values"/> does not cover
+        /// <paramref name="shape"/>.</exception>
+        public static HostTensorData<T> From<V>(Shape shape, V[] values) where V : unmanaged
+        {
+            ArgumentNullException.ThrowIfNull(values);
+            var required = checked((int)shape.Count * Unsafe.SizeOf<V>());
+            var supplied = MemoryMarshal.AsBytes(values.AsSpan());
+            if (supplied.Length < required)
+                throw new ArgumentException(
+                    $"Supplied data of {supplied.Length} bytes is less than shape size {required} bytes.",
+                    nameof(values));
+            return new HostTensorData<T>(shape, supplied[..required].ToArray());
+        }
+
+        /// <summary>The raw storage bytes boxed as objects, for debugging/diagnostics.</summary>
+        public override object[] Data
+        {
+            get
+            {
+                ThrowIfDisposed();
+                return _bytes.Cast<object>().ToArray();
+            }
+        }
+
+        /// <summary>Always true: this tensor is managed memory and nothing else.</summary>
+        public override bool IsHostResident => true;
+
+        /// <inheritdoc/>
+        public override Span<V> AccessModifiableMemory<V>()
+        {
+            ThrowIfDisposed();
+            return MemoryMarshal.Cast<byte, V>(_bytes.AsSpan());
+        }
+
+        /// <inheritdoc/>
+        public override ReadOnlySpan<V> AccessMemory<V>()
+        {
+            ThrowIfDisposed();
+            return MemoryMarshal.Cast<byte, V>(_bytes);
+        }
+
+        /// <inheritdoc/>
+        public override Span<byte> AccessModifiableRawMemory()
+        {
+            ThrowIfDisposed();
+            return _bytes;
+        }
+
+        /// <inheritdoc/>
+        public override ReadOnlySpan<byte> AccessRawMemory()
+        {
+            ThrowIfDisposed();
+            return _bytes;
+        }
+
+        /// <summary>
+        /// This tensor's contents as a value of <paramref name="factory"/>'s runtime, built the
+        /// first time that backend asks and kept for the next time. The value is this tensor's,
+        /// like <see cref="OnnxTensorData{T}"/>'s is: the caller reads it and does not dispose it.
+        /// </summary>
+        internal override IShorokooTensorValue ToTensorValue(IShorokooInferenceSessionFactory factory)
+        {
+            ArgumentNullException.ThrowIfNull(factory);
+            ThrowIfDisposed();
+
+            _materialized ??= new Dictionary<IShorokooInferenceSessionFactory, IShorokooTensorValue>(
+                ReferenceEqualityComparer.Instance as IEqualityComparer<IShorokooInferenceSessionFactory>
+                ?? EqualityComparer<IShorokooInferenceSessionFactory>.Default);
+
+            if (_materialized.TryGetValue(factory, out var existing)) return existing;
+
+            var value = factory.CreateTensorFromRawBytes(
+                (ShorokooTensorElementType)(int)this.DType, _bytes, (long[])this.Shape);
+            _materialized[factory] = value;
+            return value;
+        }
+
+        /// <summary>
+        /// Releases the values this tensor had built on backends. The bytes themselves are managed
+        /// and need no release; what needs one is each runtime's copy of them.
+        ///
+        /// <para>No finalizer, for the reason <see cref="OnnxTensorData{T}"/> has none: a
+        /// finalizer must not touch another managed object that may already have been finalized,
+        /// and each materialized value has its own.</para>
+        /// </summary>
+        public override void Dispose()
+        {
+            if (IsDisposed) return;
+            IsDisposed = true;
+            if (_materialized is null) return;
+            foreach (var value in _materialized.Values) value.Dispose();
+            _materialized = null;
+        }
+    }
+}

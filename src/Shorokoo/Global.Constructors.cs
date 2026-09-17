@@ -432,60 +432,60 @@ namespace Shorokoo
         #region TensorData constants constructors
 
         /// <summary>Creates TensorData with the given dims from the flat values.</summary>
-        public static TensorData<bit> TensorData(long[] dims, params bool[] val) => new OnnxTensorData<bit>(dims, OnnxUtils.CreateTensorValue(dims, val));
+        public static TensorData<bit> TensorData(long[] dims, params bool[] val) => HostTensorData<bit>.From(dims, val);
         /// <summary>Creates TensorData with the given dims from the flat values.</summary>
-        public static TensorData<int8> TensorData(long[] dims, params sbyte[] val) => new OnnxTensorData<int8>(dims, OnnxUtils.CreateTensorValue(dims, val));
+        public static TensorData<int8> TensorData(long[] dims, params sbyte[] val) => HostTensorData<int8>.From(dims, val);
         /// <summary>Creates TensorData with the given dims from the flat values.</summary>
-        public static TensorData<int16> TensorData(long[] dims, params short[] val) => new OnnxTensorData<int16>(dims, OnnxUtils.CreateTensorValue(dims, val));
+        public static TensorData<int16> TensorData(long[] dims, params short[] val) => HostTensorData<int16>.From(dims, val);
         /// <summary>Creates TensorData with the given dims from the flat values.</summary>
-        public static TensorData<int32> TensorData(long[] dims, params int[] val) => new OnnxTensorData<int32>(dims, OnnxUtils.CreateTensorValue(dims, val));
+        public static TensorData<int32> TensorData(long[] dims, params int[] val) => HostTensorData<int32>.From(dims, val);
         /// <summary>Creates TensorData with the given dims from the flat values.</summary>
-        public static TensorData<int64> TensorData(long[] dims, params long[] val) => new OnnxTensorData<int64>(dims, OnnxUtils.CreateTensorValue(dims, val));
+        public static TensorData<int64> TensorData(long[] dims, params long[] val) => HostTensorData<int64>.From(dims, val);
         /// <summary>Creates TensorData with the given dims from the flat values.</summary>
-        public static TensorData<uint8> TensorData(long[] dims, params byte[] val) => new OnnxTensorData<uint8>(dims, OnnxUtils.CreateTensorValue(dims, val));
+        public static TensorData<uint8> TensorData(long[] dims, params byte[] val) => HostTensorData<uint8>.From(dims, val);
         /// <summary>Creates TensorData with the given dims from the flat values.</summary>
-        public static TensorData<uint16> TensorData(long[] dims, params ushort[] val) => new OnnxTensorData<uint16>(dims, OnnxUtils.CreateTensorValue(dims, val));
+        public static TensorData<uint16> TensorData(long[] dims, params ushort[] val) => HostTensorData<uint16>.From(dims, val);
         /// <summary>Creates TensorData with the given dims from the flat values.</summary>
-        public static TensorData<uint32> TensorData(long[] dims, params uint[] val) => new OnnxTensorData<uint32>(dims, OnnxUtils.CreateTensorValue(dims, val));
+        public static TensorData<uint32> TensorData(long[] dims, params uint[] val) => HostTensorData<uint32>.From(dims, val);
         /// <summary>Creates TensorData with the given dims from the flat values.</summary>
-        public static TensorData<uint64> TensorData(long[] dims, params ulong[] val) => new OnnxTensorData<uint64>(dims, OnnxUtils.CreateTensorValue(dims, val));
+        public static TensorData<uint64> TensorData(long[] dims, params ulong[] val) => HostTensorData<uint64>.From(dims, val);
         /// <summary>Creates TensorData with the given dims from the flat values.</summary>
-        public static TensorData<bfloat16> TensorData(long[] dims, params BFloat16[] val) => new OnnxTensorData<bfloat16>(dims, OnnxUtils.CreateTensorValue(dims, val));
+        public static TensorData<bfloat16> TensorData(long[] dims, params BFloat16[] val) => HostTensorData<bfloat16>.From(dims, val);
         /// <summary>Creates TensorData with the given dims from the flat values.</summary>
-        public static TensorData<float16> TensorData(long[] dims, params Float16[] val) => new OnnxTensorData<float16>(dims, OnnxUtils.CreateTensorValue(dims, val));
+        public static TensorData<float16> TensorData(long[] dims, params Float16[] val) => HostTensorData<float16>.From(dims, val);
         /// <summary>Creates TensorData with the given dims from the flat values.</summary>
-        public static TensorData<float32> TensorData(long[] dims, params float[] val) => new OnnxTensorData<float32>(dims, OnnxUtils.CreateTensorValue(dims, val));
+        public static TensorData<float32> TensorData(long[] dims, params float[] val) => HostTensorData<float32>.From(dims, val);
         /// <summary>Creates TensorData with the given dims from the flat values.</summary>
-        public static TensorData<float64> TensorData(long[] dims, params double[] val) => new OnnxTensorData<float64>(dims, OnnxUtils.CreateTensorValue(dims, val));
+        public static TensorData<float64> TensorData(long[] dims, params double[] val) => HostTensorData<float64>.From(dims, val);
         /// <summary>Creates TensorData with the given dims from the flat values.</summary>
         public static TensorData<@string> TensorData(long[] dims, params string[] val) => new OnnxTensorData<@string>(dims, OnnxUtils.CreateTensorValue(dims, val));
 
         /// <summary>Creates rank-1 TensorData of the given length from the values.</summary>
-        public static TensorData<bit> TensorData(long dims, params bool[] val) => new OnnxTensorData<bit>(dims, OnnxUtils.CreateTensorValue(dims, val));
+        public static TensorData<bit> TensorData(long dims, params bool[] val) => HostTensorData<bit>.From(dims, val);
         /// <summary>Creates rank-1 TensorData of the given length from the values.</summary>
-        public static TensorData<int8> TensorData(long dims, params sbyte[] val) => new OnnxTensorData<int8>(dims, OnnxUtils.CreateTensorValue(dims, val));
+        public static TensorData<int8> TensorData(long dims, params sbyte[] val) => HostTensorData<int8>.From(dims, val);
         /// <summary>Creates rank-1 TensorData of the given length from the values.</summary>
-        public static TensorData<int16> TensorData(long dims, params short[] val) => new OnnxTensorData<int16>(dims, OnnxUtils.CreateTensorValue(dims, val));
+        public static TensorData<int16> TensorData(long dims, params short[] val) => HostTensorData<int16>.From(dims, val);
         /// <summary>Creates rank-1 TensorData of the given length from the values.</summary>
-        public static TensorData<int32> TensorData(long dims, params int[] val) => new OnnxTensorData<int32>(dims, OnnxUtils.CreateTensorValue(dims, val));
+        public static TensorData<int32> TensorData(long dims, params int[] val) => HostTensorData<int32>.From(dims, val);
         /// <summary>Creates rank-1 TensorData of the given length from the values.</summary>
-        public static TensorData<int64> TensorData(long dims, params long[] val) => new OnnxTensorData<int64>(dims, OnnxUtils.CreateTensorValue(dims, val));
+        public static TensorData<int64> TensorData(long dims, params long[] val) => HostTensorData<int64>.From(dims, val);
         /// <summary>Creates rank-1 TensorData of the given length from the values.</summary>
-        public static TensorData<uint8> TensorData(long dims, params byte[] val) => new OnnxTensorData<uint8>(dims, OnnxUtils.CreateTensorValue(dims, val));
+        public static TensorData<uint8> TensorData(long dims, params byte[] val) => HostTensorData<uint8>.From(dims, val);
         /// <summary>Creates rank-1 TensorData of the given length from the values.</summary>
-        public static TensorData<uint16> TensorData(long dims, params ushort[] val) => new OnnxTensorData<uint16>(dims, OnnxUtils.CreateTensorValue(dims, val));
+        public static TensorData<uint16> TensorData(long dims, params ushort[] val) => HostTensorData<uint16>.From(dims, val);
         /// <summary>Creates rank-1 TensorData of the given length from the values.</summary>
-        public static TensorData<uint32> TensorData(long dims, params uint[] val) => new OnnxTensorData<uint32>(dims, OnnxUtils.CreateTensorValue(dims, val));
+        public static TensorData<uint32> TensorData(long dims, params uint[] val) => HostTensorData<uint32>.From(dims, val);
         /// <summary>Creates rank-1 TensorData of the given length from the values.</summary>
-        public static TensorData<uint64> TensorData(long dims, params ulong[] val) => new OnnxTensorData<uint64>(dims, OnnxUtils.CreateTensorValue(dims, val));
+        public static TensorData<uint64> TensorData(long dims, params ulong[] val) => HostTensorData<uint64>.From(dims, val);
         /// <summary>Creates rank-1 TensorData of the given length from the values.</summary>
-        public static TensorData<bfloat16> TensorData(long dims, params BFloat16[] val) => new OnnxTensorData<bfloat16>(dims, OnnxUtils.CreateTensorValue(dims, val));
+        public static TensorData<bfloat16> TensorData(long dims, params BFloat16[] val) => HostTensorData<bfloat16>.From(dims, val);
         /// <summary>Creates rank-1 TensorData of the given length from the values.</summary>
-        public static TensorData<float16> TensorData(long dims, params Float16[] val) => new OnnxTensorData<float16>(dims, OnnxUtils.CreateTensorValue(dims, val));
+        public static TensorData<float16> TensorData(long dims, params Float16[] val) => HostTensorData<float16>.From(dims, val);
         /// <summary>Creates rank-1 TensorData of the given length from the values.</summary>
-        public static TensorData<float32> TensorData(long dims, params float[] val) => new OnnxTensorData<float32>(dims, OnnxUtils.CreateTensorValue(dims, val));
+        public static TensorData<float32> TensorData(long dims, params float[] val) => HostTensorData<float32>.From(dims, val);
         /// <summary>Creates rank-1 TensorData of the given length from the values.</summary>
-        public static TensorData<float64> TensorData(long dims, params double[] val) => new OnnxTensorData<float64>(dims, OnnxUtils.CreateTensorValue(dims, val));
+        public static TensorData<float64> TensorData(long dims, params double[] val) => HostTensorData<float64>.From(dims, val);
         /// <summary>Creates rank-1 TensorData of the given length from the values.</summary>
         public static TensorData<@string> TensorData(long dims, params string[] val) => new OnnxTensorData<@string>(dims, OnnxUtils.CreateTensorValue(dims, val));
 

@@ -294,9 +294,14 @@ public class TensorDataApiCoverageTests
             () => _ = td.Data,
             () => _ = td.As<float32>().DebugData,
             () => td.ToTensorValue(),
-            () => _ = ((IOnnxData)td).Value,
         ];
         Assert.All(reads, r => Assert.Throws<ObjectDisposedException>(r));
+
+        // The backing-value read is a backend-backed tensor's alone: a host tensor holds managed
+        // bytes and is not IOnnxData at all, so the cast would fail before the disposal check.
+        var backendBacked = TensorData.CreateFromRawBytes(new Shape(2L), DType.Float32, new byte[8]);
+        backendBacked.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => _ = ((IOnnxData)backendBacked).Value);
 
         // Metadata stays readable — a disposed tensor still says what it was.
         Assert.Equal(DType.Float32, td.DType);

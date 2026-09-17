@@ -276,8 +276,21 @@ namespace Shorokoo
             return Create(shape, dtype, value);
         }
 
-        /// <summary>Returns the backing inference-runtime tensor value; throws if this instance has none.</summary>
-        public IShorokooTensorValue ToTensorValue()
+        /// <summary>
+        /// Returns the backing inference-runtime tensor value, on the process-wide backend;
+        /// throws if this instance has none and none can be built.
+        /// </summary>
+        public IShorokooTensorValue ToTensorValue() => ToTensorValue(InferenceBackend.Factory);
+
+        /// <summary>
+        /// This tensor as a value of <paramref name="factory"/>'s runtime. A tensor that already
+        /// holds one hands it over and ignores the argument, since a value belongs to the runtime
+        /// that made it; one held in plain host memory builds it here, which is the first moment a
+        /// backend is needed at all.
+        ///
+        /// <para>The value returned is the tensor's own: read it, do not dispose it.</para>
+        /// </summary>
+        internal virtual IShorokooTensorValue ToTensorValue(IShorokooInferenceSessionFactory factory)
         {
             ThrowIfDisposed();
             if (this is IOnnxData od) return od.Value;
@@ -286,10 +299,10 @@ namespace Shorokoo
         }
 
         /// <summary>Creates int32 TensorData of the given shape holding 0, 1, ..., Count-1 in row-major order.</summary>
-        public static OnnxTensorData<int32> BuildRange(Shape shape)
+        public static TensorData<int32> BuildRange(Shape shape)
         {
             var vals = Enumerable.Range(0, (int)shape.Count).ToArray();
-            return (OnnxTensorData<int32>)TensorData(shape.Dims, vals);
+            return (TensorData<int32>)TensorData(shape.Dims, vals);
         }
 
         /// <summary>Releases the underlying storage.</summary>

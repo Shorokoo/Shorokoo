@@ -311,7 +311,8 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
     }
 
     /// <summary>
-    /// This value's contents as host bytes, including from the execution provider's own memory.
+    /// <paramref name="value"/>'s contents as host bytes, including when it is in the execution
+    /// provider's own memory and so cannot be read here at all.
     ///
     /// <para>ONNX Runtime's managed surface has no device-to-host copy to call here: a value it
     /// left on the card hands out a pointer and no way to read it. So the copy is made through the

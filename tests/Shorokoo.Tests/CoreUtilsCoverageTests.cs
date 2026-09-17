@@ -27,7 +27,7 @@ namespace Shorokoo.Tests;
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
-[Collection(DeviceMemorySettings.Name)]
+[Collection(DeviceMemoryPeak.Name)]
 public class CoreUtilsCoverageTests
 {
     private static InternalComputationGraph BoolGraph(IValue only) => new([], [only.ToVariable()]);
@@ -421,12 +421,42 @@ public class CoreUtilsCoverageTests
 
     private sealed class CpuFactoryProbe : OrtSessionFactory
     {
-        public CpuFactoryProbe() : base(static _ => { }, ComputeDevice.Cpu, cudaDeviceId: null) { }
+        public CpuFactoryProbe() : base(static (_, _) => { }, ComputeDevice.Cpu, cudaDeviceId: null) { }
     }
 
     private sealed class OtherDeviceFactoryProbe : OrtSessionFactory
     {
-        public OtherDeviceFactoryProbe() : base(static _ => { }, ComputeDevice.Other, cudaDeviceId: null) { }
+        public OtherDeviceFactoryProbe() : base(static (_, _) => { }, ComputeDevice.Other, cudaDeviceId: null) { }
+    }
+
+    /// <summary>Records the settings each run was handed. No outputs, so both run paths return
+    /// nothing and every overload can be driven without a model.</summary>
+    private sealed class RunSettingsRecorder : IShorokooInferenceSession
+    {
+        public List<RunSettings> Seen { get; } = [];
+        public IReadOnlyList<string> InputNames => [];
+        public IReadOnlyList<string> OutputNames => [];
+
+        public IReadOnlyList<IShorokooTensorValue> Run(
+            IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
+            IReadOnlyList<string> outputNames,
+            RunSettings runSettings)
+        {
+            Seen.Add(runSettings);
+            return [];
+        }
+
+        public IReadOnlyList<IShorokooTensorValue> RunRetainingOutputs(
+            IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
+            IReadOnlyList<string> outputNames,
+            IReadOnlySet<string> retainedOutputNames,
+            RunSettings runSettings)
+        {
+            Seen.Add(runSettings);
+            return [];
+        }
+
+        public void Dispose() { }
     }
 
     [Fact]
@@ -459,25 +489,89 @@ public class CoreUtilsCoverageTests
     [Fact]
     public void TestDeviceMemoryDefaultsToTheExactSizeArenaAndRejectsAnEmptyBudget()
     {
-        Assert.Equal(ArenaExtendStrategy.SameAsRequested, DeviceMemory.ArenaExtend);
-        Assert.Null(DeviceMemory.LimitBytes);
-        Assert.False(DeviceMemory.ShrinkArenaAfterRun);
+        Assert.Equal(ArenaExtendStrategy.SameAsRequested, DeviceMemorySettings.Default.ArenaExtend);
+        Assert.Null(DeviceMemorySettings.Default.LimitBytes);
+        Assert.False(RunSettings.Default.ShrinkArenaAfterRun);
+        Assert.Equal(DeviceMemorySettings.Default, new ComputeContext().DeviceMemory);
+        Assert.Equal(RunSettings.Default, new ComputeContext().RunSettings);
 
-        var shipped = OrtSessionFactory.CudaProviderOptions(0, DeviceMemory.LimitBytes, DeviceMemory.ArenaExtend);
+        var shipped = OrtSessionFactory.CudaProviderOptions(
+            0, DeviceMemorySettings.Default.LimitBytes, DeviceMemorySettings.Default.ArenaExtend);
         Assert.Equal("kSameAsRequested", shipped["arena_extend_strategy"]);
         Assert.False(shipped.ContainsKey("gpu_mem_limit"));
 
-        Assert.Throws<ArgumentOutOfRangeException>(() => DeviceMemory.LimitBytes = 0);
-        Assert.Throws<ArgumentOutOfRangeException>(() => DeviceMemory.LimitBytes = -1);
-        Assert.Throws<ArgumentOutOfRangeException>(() => DeviceMemory.ArenaExtend = (ArenaExtendStrategy)7);
-        Assert.Null(DeviceMemory.LimitBytes);
-        Assert.Equal(ArenaExtendStrategy.SameAsRequested, DeviceMemory.ArenaExtend);
+        Assert.Throws<ArgumentOutOfRangeException>(() => new DeviceMemorySettings { LimitBytes = 0 });
+        Assert.Throws<ArgumentOutOfRangeException>(() => new DeviceMemorySettings { LimitBytes = -1 });
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => new DeviceMemorySettings { ArenaExtend = (ArenaExtendStrategy)7 });
 
-        // A limit set and cleared leaves nothing behind: null is the absence, not a zero.
-        DeviceMemory.LimitBytes = 4096;
-        Assert.Equal(4096L, DeviceMemory.LimitBytes);
-        DeviceMemory.LimitBytes = null;
-        Assert.Null(DeviceMemory.LimitBytes);
+        // A refused assignment leaves the shared default as it was: a record cannot be edited in
+        // place, so no caller can spoil it for another.
+        Assert.Null(DeviceMemorySettings.Default.LimitBytes);
+        Assert.Equal(ArenaExtendStrategy.SameAsRequested, DeviceMemorySettings.Default.ArenaExtend);
+
+        var capped = DeviceMemorySettings.Default with { LimitBytes = 4096 };
+        Assert.Equal(4096L, capped.LimitBytes);
+        Assert.Null(DeviceMemorySettings.Default.LimitBytes);
+        Assert.Equal(DeviceMemorySettings.Default, capped with { LimitBytes = null });
+    }
+
+    /// <summary>
+    /// The settings belong to the session and the run, not to the process: a context configures
+    /// the sessions it compiles from then on, a second context is unaffected, and a graph already
+    /// compiled keeps what it was built with. This is what stops a later change reaching a rig
+    /// that is already running.
+    /// </summary>
+    [Fact]
+    public void TestSessionAndRunSettingsAreScopedToTheSessionAndTheRunAndNotToTheProcess()
+    {
+        var budget = new DeviceMemorySettings { LimitBytes = 8L << 30, ArenaExtend = ArenaExtendStrategy.NextPowerOfTwo };
+        var shrinking = new RunSettings { ShrinkArenaAfterRun = true };
+        var configured = new ComputeContext { DeviceMemory = budget, RunSettings = shrinking };
+
+        Assert.Equal(budget, configured.DeviceMemory);
+        Assert.Equal(shrinking, configured.RunSettings);
+        Assert.Equal(DeviceMemorySettings.Default, new ComputeContext().DeviceMemory);
+        Assert.Equal(RunSettings.Default, new ComputeContext().RunSettings);
+
+        var x = InputTensor<float32>("x", rank: 1);
+        var graph = new ComputationGraph(new InternalComputationGraph([x], [x + x]), GraphKind.ConcreteModel);
+        var compiled = configured.Compile(graph);
+        Assert.Equal(budget, compiled.DeviceMemory);
+        Assert.Equal(shrinking, compiled.DefaultRunSettings);
+
+        // Nothing a caller does afterwards can reach that session: the settings it was built with
+        // are its own, and a differently configured context builds a differently configured one.
+        Assert.Equal(DeviceMemorySettings.Default, new ComputeContext().Compile(graph).DeviceMemory);
+
+        Assert.Throws<ArgumentNullException>(() => new ComputeContext { DeviceMemory = null! });
+        Assert.Throws<ArgumentNullException>(() => new ComputeContext { RunSettings = null! });
+        Assert.Throws<ArgumentNullException>(() => compiled.Run(null!, (RunSettings)null!));
+    }
+
+    /// <summary>
+    /// Every run entry point runs under what the call named, and under the compiling context's
+    /// default when it named nothing. Without this a per-run override could be accepted and
+    /// quietly dropped, which no GPU-free test would otherwise notice.
+    /// </summary>
+    [Fact]
+    public void TestEveryRunEntryPointCarriesTheCallsRunSettingsAndOtherwiseTheContextsDefault()
+    {
+        var shrinking = new RunSettings { ShrinkArenaAfterRun = true };
+        var session = new RunSettingsRecorder();
+        var compiled = new CompiledGraph(
+            session, [], [], ShorokooGraphOptimization.EnableAll, DeviceMemorySettings.Default, shrinking);
+
+        compiled.Execute();
+        compiled.Execute([], RunSettings.Default);
+        compiled.Run();
+        compiled.Run([], RunSettings.Default);
+        compiled.Execute([], []);
+        compiled.Execute([], [], RunSettings.Default);
+
+        RunSettings[] expected = [shrinking, RunSettings.Default, shrinking, RunSettings.Default, shrinking, RunSettings.Default];
+        Assert.Equal(expected, session.Seen);
+        Assert.Equal(shrinking, compiled.DefaultRunSettings);
     }
 
     /// <summary>A reading is null on a machine with no CUDA runtime and a real one where there is
@@ -506,9 +600,11 @@ public class CoreUtilsCoverageTests
     /// <summary>
     /// The settings are reachable from a GPU session, which no test on a CPU box can observe by
     /// running one. What it can observe is that the product still calls the wiring: a backend that
-    /// stopped passing its device id, stopped reading <see cref="DeviceMemory"/> when it builds the
-    /// provider options, or stopped putting the shrinkage entry on its run options would leave
-    /// every setting dead with every other test still green.
+    /// stopped passing its device id, stopped carrying the session's
+    /// <see cref="DeviceMemorySettings"/> into the provider options, or stopped putting the
+    /// shrinkage entry on its run options would leave every setting dead with every other test
+    /// still green. It also pins where those values come from — the parameter the session or run
+    /// was given, never process-wide state.
     /// </summary>
     [Fact]
     public void TestTheGpuBackendsStillCarryTheDeviceMemorySettingsIntoOrt()
@@ -527,19 +623,18 @@ public class CoreUtilsCoverageTests
         var factory = Source("Shorokoo.OnnxRuntime", "OrtSessionFactory.cs");
         Assert.Matches(@"new\s+OrtInferenceSession\s*\(\s*session\s*,\s*_cudaDeviceId\s*\)", factory);
         Assert.Matches(@"AppendExecutionProvider_CUDA\s*\(\s*cuda\s*\)", factory);
-        Assert.Contains("DeviceMemory.LimitBytes", factory);
-        Assert.Contains("DeviceMemory.ArenaExtend", factory);
+        Assert.Matches(@"CudaProviderOptions\s*\(\s*deviceId\s*,\s*deviceMemory\.LimitBytes\s*,\s*deviceMemory\.ArenaExtend\s*\)", factory);
 
         var session = Source("Shorokoo.OnnxRuntime", "OrtInferenceSession.cs");
         Assert.Contains("memory.enable_memory_arena_shrinkage", File.ReadAllText(
             Path.Combine(backend, "Shorokoo.OnnxRuntime", "OrtInferenceSession.cs")));
-        Assert.Matches(@"ArenaShrinkageRunConfig\s*\(\s*_cudaDeviceId\s*,\s*DeviceMemory\.ShrinkArenaAfterRun\s*\)", session);
+        Assert.Matches(@"ArenaShrinkageRunConfig\s*\(\s*_cudaDeviceId\s*,\s*runSettings\.ShrinkArenaAfterRun\s*\)", session);
         Assert.Matches(@"AddRunConfigEntry\s*\(", session);
 
         // Every path that runs the session has to apply it, not just one: the retaining path is
         // the loop a GPU user is steered into, and it is where an unbounded arena costs most.
         var runPaths = Regex.Matches(session, @"_session\s*\.\s*Run\w*\s*\(").Count;
-        Assert.Equal(runPaths, Regex.Matches(session, @"ConfigureRun\s*\(\s*runOptions\s*\)").Count);
+        Assert.Equal(runPaths, Regex.Matches(session, @"ConfigureRun\s*\(\s*runOptions\s*,\s*runSettings\s*\)").Count);
     }
 
     /// <summary>Two shapes the guard's exemptions once let through: a span consumed by a call

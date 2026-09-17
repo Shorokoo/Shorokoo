@@ -29,14 +29,16 @@ internal sealed class OrtInferenceSession : IShorokooInferenceSession
 
     public IReadOnlyList<IShorokooTensorValue> Run(
         IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
-        IReadOnlyList<string> outputNames)
+        IReadOnlyList<string> outputNames,
+        RunSettings runSettings)
     {
+        ArgumentNullException.ThrowIfNull(runSettings);
         var ortInputs = new Dictionary<string, OrtValue>(inputs.Count);
         foreach (var (k, v) in inputs)
             ortInputs[k] = ((OrtTensorValue)v).Inner;
 
         using var runOptions = new RunOptions();
-        ConfigureRun(runOptions);
+        ConfigureRun(runOptions, runSettings);
         var results = _session.Run(runOptions, ortInputs, outputNames);
 
         // ORT snapshots each input's handle into an IntPtr[] and keeps no reference to the OrtValue
@@ -58,13 +60,16 @@ internal sealed class OrtInferenceSession : IShorokooInferenceSession
     public IReadOnlyList<IShorokooTensorValue> RunRetainingOutputs(
         IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
         IReadOnlyList<string> outputNames,
-        IReadOnlySet<string> retainedOutputNames)
+        IReadOnlySet<string> retainedOutputNames,
+        RunSettings runSettings)
     {
+        ArgumentNullException.ThrowIfNull(runSettings);
+
         // Nothing to retain, or nowhere to retain it: an unbound Run is the same thing and
         // costs one native call less.
         var deviceMemoryInfo = _deviceMemoryInfo.Value;
         if (deviceMemoryInfo is null || retainedOutputNames.Count == 0)
-            return Run(inputs, outputNames);
+            return Run(inputs, outputNames, runSettings);
 
         using var binding = _session.CreateIoBinding();
         foreach (var (k, v) in inputs)
@@ -79,7 +84,7 @@ internal sealed class OrtInferenceSession : IShorokooInferenceSession
                 name, retainedOutputNames.Contains(name) ? deviceMemoryInfo : hostMemoryInfo);
 
         using var runOptions = new RunOptions();
-        ConfigureRun(runOptions);
+        ConfigureRun(runOptions, runSettings);
         var results = _session.RunWithBoundResults(runOptions, binding);
 
         // Same rooting hazard as Run: the binding holds the feeds' raw handles, not the managed
@@ -136,14 +141,15 @@ internal sealed class OrtInferenceSession : IShorokooInferenceSession
         return null;
     }
 
-    /// <summary>Applies what every run of this session runs with. Read per run, not per session, so
-    /// turning arena shrinkage on takes effect on sessions that are already compiled — and applied
-    /// by both run paths, because a retaining run is the one that most wants the arena it keeps its
-    /// state in bounded. It configures options the caller owns rather than returning new ones, so
-    /// the handle stays inside a `using` at each call site.</summary>
-    private void ConfigureRun(RunOptions runOptions)
+    /// <summary>Applies what <i>this</i> run runs with. The settings arrive per call rather than
+    /// being held by the session, which is ORT's own shape for them: turning arena shrinkage on
+    /// takes effect on a session that is already compiled, and on that run alone. Applied by both
+    /// run paths, because a retaining run is the one that most wants the arena it keeps its state
+    /// in bounded. It configures options the caller owns rather than returning new ones, so the
+    /// handle stays inside a `using` at each call site.</summary>
+    private void ConfigureRun(RunOptions runOptions, RunSettings runSettings)
     {
-        if (OrtSessionFactory.ArenaShrinkageRunConfig(_cudaDeviceId, DeviceMemory.ShrinkArenaAfterRun)
+        if (OrtSessionFactory.ArenaShrinkageRunConfig(_cudaDeviceId, runSettings.ShrinkArenaAfterRun)
             is { } arena)
             runOptions.AddRunConfigEntry("memory.enable_memory_arena_shrinkage", arena);
     }

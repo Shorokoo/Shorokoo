@@ -28,9 +28,10 @@ Related: [core-types.md](core-types.md) · [defining-models.md](defining-models.
   `InferenceBackend.RequireDevice(...)` refuses to start on the wrong one —
   [Which device am I on?](#which-device-am-i-on). To run part of the work on another
   device, [One model, two devices](#one-model-two-devices).
-- On a GPU backend the CUDA arena is configured through `DeviceMemory`, which also reports
-  how much of the card is gone. Its arena strategy deliberately departs from ORT's default so
-  that a training loop does not end up holding far more of the card than it uses:
+- On a GPU backend the CUDA arena is configured on the `ComputeContext` — `DeviceMemory` for
+  the sessions it compiles, `RunSettings` for what its runs do — while the static `DeviceMemory`
+  class reports how much of the card is gone. The arena strategy deliberately departs from ORT's
+  default so that a training loop does not end up holding far more of the card than it uses:
   [Device memory](#device-memory-gpu-backends).
 
 ## Workflow: one-shot evaluation
@@ -592,17 +593,28 @@ fits where exact-size extension does not:
 
 ```csharp
 using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Runtime;
 
-DeviceMemory.ArenaExtend = ArenaExtendStrategy.NextPowerOfTwo;   // ORT's doubling, back again
-DeviceMemory.LimitBytes = 16L * 1024 * 1024 * 1024;              // cap the arena at 16 GiB
-DeviceMemory.ShrinkArenaAfterRun = true;                          // hand unused blocks back each step
+var ctx = new ComputeContext
+{
+    DeviceMemory = new DeviceMemorySettings
+    {
+        ArenaExtend = ArenaExtendStrategy.NextPowerOfTwo,   // ORT's doubling, back again
+        LimitBytes = 16L * 1024 * 1024 * 1024,              // cap this session's arena at 16 GiB
+    },
+    RunSettings = new RunSettings { ShrinkArenaAfterRun = true },  // hand unused blocks back each step
+};
+
+var compiled = ctx.Compile(graph);
+compiled.Execute(inputs);                                          // the context's run settings
+compiled.Execute(inputs, new RunSettings { ShrinkArenaAfterRun = false });   // this run only
 ```
 
-| setting | ORT option | default | read |
-|---|---|---|---|
-| `LimitBytes` | `gpu_mem_limit` | `null` — no cap | when a session is created |
-| `ArenaExtend` | `arena_extend_strategy` | `SameAsRequested` — **not** ORT's default | when a session is created |
-| `ShrinkArenaAfterRun` | `memory.enable_memory_arena_shrinkage` | `false` | on every run |
+| setting | on | ORT option | default | read |
+|---|---|---|---|---|
+| `LimitBytes` | `DeviceMemorySettings` | `gpu_mem_limit` | `null` — no cap | when a session is created |
+| `ArenaExtend` | `DeviceMemorySettings` | `arena_extend_strategy` | `SameAsRequested` — **not** ORT's default | when a session is created |
+| `ShrinkArenaAfterRun` | `RunSettings` | `memory.enable_memory_arena_shrinkage` | `false` | on every run |
 
 The other two are unset by default for their own reasons. `ShrinkArenaAfterRun` costs a
 synchronizing device allocation on every step to re-take what it handed back, so it is worth it
@@ -618,10 +630,11 @@ Note that the budget caps **each session's** arena, not the process. ORT gives a
 CUDA arena, so a process holding a compiled graph and a training rig at once can hold the limit
 more than once over; read it as the ceiling on any one session.
 
-The first two settings are read **when a session is built** — the first inference call, or a
-training rig's first `TrainStep` for a given input shape — so set them at startup; changing them
-afterwards leaves already-compiled sessions as they were. `ShrinkArenaAfterRun` is read on every
-run and takes effect immediately, on sessions already compiled.
+The first two are read **when a session is built** — the first inference call, or a training rig's
+first `TrainStep` for a given input shape — so the context has to carry them before the graph is
+compiled on it; a graph already compiled keeps what it was built with. `ShrinkArenaAfterRun` is
+read on every run, so it takes effect on sessions already compiled and a single call can override
+it.
 
 The same class reports what the card is doing:
 
@@ -651,11 +664,20 @@ things to know about the numbers:
   the device if it has none — itself a few hundred MiB. Take the first reading after the backend is
   up, not before, or that cost lands inside your baseline.
 
-**Process-wide is the shape, not a staging post.** One device (0), one setting for every session in
-the process, mutable at any time. Per-`ComputeContext` device configuration was considered and is
-not planned, so do not expect two contexts to differ: treat these as startup configuration, and
-where one process must serve both a training loop and a variable-shape inference path, pick the
-arena strategy whose cost you would rather pay.
+**Scope: the session and the run, never the process.** That is ONNX Runtime's own shape, not a
+convention layered on top. ORT gives each session its own arena and reads `DeviceMemorySettings`
+once while building it, after which the session keeps them for life — so a context configures the
+sessions it compiles from then on, two contexts may differ, and a graph already compiled is
+untouched by any later change. To run something under a different budget, compile it on a context
+that carries one. `RunSettings` ORT reads off the run instead, so those are settled per call and a
+compiled graph can shrink its arena on one run and not the next.
+
+Where one process must serve both a training loop and a variable-shape inference path, give them a
+context each rather than picking one arena strategy for both.
+
+The readings are the exception, and they are readings rather than settings: `Read()` and `Sample()`
+go to whichever CUDA device is current for the calling thread — device 0, because that is what the
+shipped GPU backends use — and `PeakUsedBytes` is one process's record of its own run.
 
 ## Debugging engine (no OnnxRuntime)
 

@@ -307,8 +307,9 @@ namespace Shorokoo.Core.Utils
             var text = $"Device: {Bytes(d.UsedBytes)} of {Bytes(d.TotalBytes)} in use across all "
                        + $"processes, {Bytes(d.FreeBytes)} free";
             if (device.ArenaLimitBytes is long limit)
-                text += $"; each session's arena is capped at {Bytes(limit)} (DeviceMemory.LimitBytes), "
-                      + "so a process holding several live sessions can hold that much more than once";
+                text += $"; this session's arena is capped at {Bytes(limit)} (its context's "
+                      + "DeviceMemorySettings.LimitBytes), and another live session holds a budget "
+                      + "of its own on top";
             return text + ".";
         }
 
@@ -415,8 +416,8 @@ namespace Shorokoo.Core.Utils
             if (pool == AllocationPool.Device && deviceHasRoom)
                 return "The device still reports free memory, so the refusal is not the card being "
                      + "out of memory: the arena could not extend by the block it wanted. Turn on "
-                     + "DeviceMemory.ShrinkArenaAfterRun so the arena stops ratcheting, or cap it "
-                     + "with DeviceMemory.LimitBytes so it asks for less at a time.";
+                     + "RunSettings.ShrinkArenaAfterRun so the arena stops ratcheting, or cap it "
+                     + "with DeviceMemorySettings.LimitBytes so it asks for less at a time.";
 
             if (pool == AllocationPool.Device)
                 return "The process is well inside its host memory limit, so this is the accelerator "

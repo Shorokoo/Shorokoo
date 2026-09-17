@@ -7,7 +7,7 @@ using Shorokoo.OnnxRuntime;
 namespace Shorokoo.Tests.Benchmarks;
 
 /// <summary>
-/// The measurement behind <c>DeviceMemory.ArenaExtend</c>'s default: what ORT's arena ends up
+/// The measurement behind <c>DeviceMemorySettings.ArenaExtend</c>'s default: what ORT's arena ends up
 /// holding under each extend strategy, for a series of allocation sizes that settles and for ones
 /// that do not. Manual: it measures the machine, so it is never part of the coverage suite, and it
 /// prints a table rather than gating anything.

@@ -10,10 +10,14 @@ public interface IShorokooInferenceSessionFactory
     // allocates on. Every session it creates runs there.
     BackendDescription Description { get; }
 
+    // deviceMemory configures the arena this one session allocates in. It is a parameter, not
+    // process state, because that is what ORT's own shape is: each session gets its own arena,
+    // built from the values read here and kept for the session's life.
     IShorokooInferenceSession CreateSession(
         ReadOnlyMemory<byte> modelBytes,
         ShorokooGraphOptimization graphOptimization,
-        ShorokooLogSeverity logSeverity);
+        ShorokooLogSeverity logSeverity,
+        DeviceMemorySettings deviceMemory);
 
     IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged;
 

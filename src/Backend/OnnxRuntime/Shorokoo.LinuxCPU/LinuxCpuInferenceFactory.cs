@@ -30,5 +30,5 @@ public sealed class LinuxCpuInferenceFactory : OrtSessionFactory
     /// execution-provider step does nothing; sessions still get the usual log-severity
     /// and graph-optimization options.
     /// </summary>
-    public LinuxCpuInferenceFactory() : base(static _ => { }, ComputeDevice.Cpu, cudaDeviceId: null) { }
+    public LinuxCpuInferenceFactory() : base(static (_, _) => { }, ComputeDevice.Cpu, cudaDeviceId: null) { }
 }

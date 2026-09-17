@@ -43,22 +43,51 @@ namespace Shorokoo.Runtime
             IShorokooInferenceSession session,
             Dictionary<string, string> onnxInputNameByOriginal,
             string[] originalInputNames,
-            ShorokooGraphOptimization optimization)
+            ShorokooGraphOptimization optimization,
+            DeviceMemorySettings deviceMemory,
+            RunSettings defaultRunSettings)
         {
             _session = session;
             _onnxInputNameByOriginal = onnxInputNameByOriginal;
             _originalInputNames = originalInputNames;
             Optimization = optimization;
+            DeviceMemory = deviceMemory;
+            DefaultRunSettings = defaultRunSettings;
         }
+
+        /// <summary>
+        /// What a run of this graph uses when the call names nothing: the
+        /// <see cref="ComputeContext.RunSettings"/> of the context that compiled it, taken when
+        /// it was compiled. Every <c>Execute</c> / <c>Run</c> overload takes a
+        /// <see cref="Shorokoo.Core.Inference.Abstractions.RunSettings"/> to override it for one
+        /// call, so this is a default and never a ceiling.
+        /// </summary>
+        public RunSettings DefaultRunSettings { get; }
 
         /// <summary>The graph-optimization profile the session was built with (test hook).</summary>
         internal ShorokooGraphOptimization Optimization { get; }
 
         /// <summary>
+        /// The arena settings this graph's session was built with — the compiling context's
+        /// <see cref="ComputeContext.DeviceMemory"/> as it stood then. A session keeps what it was
+        /// built with, so this is what the session actually has, not what its context says now.
+        /// </summary>
+        public DeviceMemorySettings DeviceMemory { get; }
+
+        /// <summary>
         /// Executes the compiled graph with the given inputs.
         /// TensorDataStruct inputs are automatically expanded into individual fields.
         /// </summary>
-        public NamedModelParam[] Execute(params IData[] inputs) => Run(NameInputs(inputs));
+        public NamedModelParam[] Execute(params IData[] inputs)
+            => Run(NameInputs(inputs), retainedOutputNames: null, DefaultRunSettings);
+
+        /// <summary>
+        /// <see cref="Execute(IData[])"/> under <paramref name="runSettings"/> instead of
+        /// <see cref="DefaultRunSettings"/>. ONNX Runtime reads these off the run, so this
+        /// changes nothing about the session and applies to this call alone.
+        /// </summary>
+        public NamedModelParam[] Execute(IData[] inputs, RunSettings runSettings)
+            => Run(NameInputs(inputs), retainedOutputNames: null, runSettings);
 
         /// <summary>
         /// Executes the compiled graph, leaving the outputs whose index is <c>true</c> in
@@ -74,6 +103,13 @@ namespace Shorokoo.Runtime
         /// They may themselves be values a previous call retained.</param>
         /// <param name="retainOnDevice">One flag per graph output, in output order.</param>
         public NamedModelParam[] Execute(IData[] inputs, bool[] retainOnDevice)
+            => Execute(inputs, retainOnDevice, DefaultRunSettings);
+
+        /// <summary>
+        /// <see cref="Execute(IData[], bool[])"/> under <paramref name="runSettings"/> instead of
+        /// <see cref="DefaultRunSettings"/>, for this call alone.
+        /// </summary>
+        public NamedModelParam[] Execute(IData[] inputs, bool[] retainOnDevice, RunSettings runSettings)
         {
             if (retainOnDevice is null) throw new ArgumentNullException(nameof(retainOnDevice));
             if (retainOnDevice.Length != _session.OutputNames.Count)
@@ -85,17 +121,28 @@ namespace Shorokoo.Runtime
             for (int i = 0; i < retainOnDevice.Length; i++)
                 if (retainOnDevice[i]) retained.Add(_session.OutputNames[i]);
 
-            return Run(NameInputs(inputs), retained);
+            return Run(NameInputs(inputs), retained, runSettings);
         }
 
         /// <summary>
         /// Executes the compiled graph with pre-built named inputs.
         /// </summary>
         public NamedModelParam[] Run(params NamedModelParam[] inputs)
-            => Run(inputs, retainedOutputNames: null);
+            => Run(inputs, retainedOutputNames: null, DefaultRunSettings);
 
-        private NamedModelParam[] Run(NamedModelParam[] inputs, IReadOnlySet<string>? retainedOutputNames)
+        /// <summary>
+        /// <see cref="Run(NamedModelParam[])"/> under <paramref name="runSettings"/> instead of
+        /// <see cref="DefaultRunSettings"/>, for this call alone.
+        /// </summary>
+        public NamedModelParam[] Run(NamedModelParam[] inputs, RunSettings runSettings)
+            => Run(inputs, retainedOutputNames: null, runSettings);
+
+        // Every Execute and Run overload funnels here, so one guard covers the lot -- and covers it
+        // before anything is fed, which a per-overload one would not for the retaining path.
+        private NamedModelParam[] Run(
+            NamedModelParam[] inputs, IReadOnlySet<string>? retainedOutputNames, RunSettings runSettings)
         {
+            ArgumentNullException.ThrowIfNull(runSettings);
             var sessionInputs = new Dictionary<string, IShorokooTensorValue>();
             foreach (var input in inputs)
             {
@@ -105,8 +152,9 @@ namespace Shorokoo.Runtime
             }
 
             var results = retainedOutputNames is null
-                ? _session.Run(sessionInputs, _session.OutputNames)
-                : _session.RunRetainingOutputs(sessionInputs, _session.OutputNames, retainedOutputNames);
+                ? _session.Run(sessionInputs, _session.OutputNames, runSettings)
+                : _session.RunRetainingOutputs(
+                    sessionInputs, _session.OutputNames, retainedOutputNames, runSettings);
 
             return results.Zip(_session.OutputNames)
                 .Select(x => OnnxUtils.CreateNamedModelParam(x.First, ModelParamType.OutputParam, x.Second))
@@ -147,11 +195,13 @@ namespace Shorokoo.Runtime
     /// once via <see cref="Execute(ComputationGraph, IData[])"/>, or repeatedly via a
     /// <see cref="CompiledGraph"/> from <see cref="Compile(ComputationGraph)"/>.
     ///
-    /// A context carries no per-instance configuration — no device, execution provider, thread count
-    /// or session options — and every session it creates is built by the one process-wide
-    /// <see cref="Shorokoo.Core.Inference.Abstractions.InferenceBackend.Factory"/>. Two distinct
-    /// instances therefore name a <i>phase</i> of the work, never a device. Which device the work
-    /// will go to is read off <see cref="Backend"/>.
+    /// A context does not choose the device: every session it creates is built by the one
+    /// process-wide <see cref="Shorokoo.Core.Inference.Abstractions.InferenceBackend.Factory"/>,
+    /// and which device the work goes to is read off <see cref="Backend"/>. What it does carry is
+    /// how those sessions and runs are configured — <see cref="DeviceMemory"/> for the arena each
+    /// session it compiles is built with, and <see cref="RunSettings"/> for what its runs do by
+    /// default. Both are per instance, so two contexts may differ and neither reaches the other's
+    /// sessions.
     /// </summary>
     public class ComputeContext
     {
@@ -160,6 +210,13 @@ namespace Shorokoo.Runtime
         /// <summary>
         /// Process-wide default context, created lazily on first access and used wherever no
         /// explicit context is supplied. Settable to swap in a custom context.
+        ///
+        /// <para>This names <i>which</i> context is the fallback; it is not a way to reconfigure
+        /// one. A context's <see cref="DeviceMemory"/> and <see cref="RunSettings"/> are
+        /// initialize-only, so assigning here cannot alter a context anything else already holds,
+        /// and cannot reach a session that has already been compiled — including those compiled by
+        /// the context being replaced. Code that wants a configuration of its own should hold its
+        /// own context rather than assign this one.</para>
         /// </summary>
         public static ComputeContext Default
         {
@@ -174,11 +231,44 @@ namespace Shorokoo.Runtime
             set { _defaultComputeContext = value; }
         }
 
-        /// <summary>Creates a compute context. There is nothing per-context to configure — its sessions
-        /// come from the process-wide
-        /// <see cref="Shorokoo.Core.Inference.Abstractions.InferenceBackend.Factory"/>.</summary>
+        /// <summary>Creates a compute context on the shipped defaults. Set
+        /// <see cref="DeviceMemory"/> or <see cref="RunSettings"/> in an object initializer to
+        /// compile and run under something else.</summary>
         public ComputeContext()
         {
+        }
+
+        private readonly DeviceMemorySettings _deviceMemory = DeviceMemorySettings.Default;
+
+        /// <summary>
+        /// The arena settings every session this context compiles from now on is built with.
+        /// ONNX Runtime reads them while a session is being created and that session keeps them
+        /// for life, so this configures the sessions to come and never the ones already built —
+        /// to run a graph under a different budget, compile it on a context that carries one.
+        ///
+        /// <para>Ignored by the CPU backends, which have no device arena.</para>
+        /// </summary>
+        /// <exception cref="ArgumentNullException">A null settings object.</exception>
+        public DeviceMemorySettings DeviceMemory
+        {
+            get => _deviceMemory;
+            init => _deviceMemory = value ?? throw new ArgumentNullException(nameof(value));
+        }
+
+        private readonly RunSettings _runSettings = RunSettings.Default;
+
+        /// <summary>
+        /// What runs on this context do when the call names nothing of its own. A
+        /// <see cref="CompiledGraph"/> takes a copy of this when it is compiled
+        /// (<see cref="CompiledGraph.DefaultRunSettings"/>); every run entry point also takes a
+        /// <see cref="Shorokoo.Core.Inference.Abstractions.RunSettings"/> to override it for one
+        /// call, because ORT reads these off the run rather than the session.
+        /// </summary>
+        /// <exception cref="ArgumentNullException">A null settings object.</exception>
+        public RunSettings RunSettings
+        {
+            get => _runSettings;
+            init => _runSettings = value ?? throw new ArgumentNullException(nameof(value));
         }
 
         /// <summary>
@@ -298,7 +388,9 @@ namespace Shorokoo.Runtime
             for (int i = 0; i < originalInputNames.Length && i < session.InputNames.Count; i++)
                 onnxInputNameByOriginal[originalInputNames[i]] = session.InputNames[i];
 
-            return new CompiledGraph(session, onnxInputNameByOriginal, originalInputNames, optimization);
+            return new CompiledGraph(
+                session, onnxInputNameByOriginal, originalInputNames, optimization,
+                DeviceMemory, RunSettings);
         }
 
         private static string[] ResolveOriginalInputNames(InternalComputationGraph graph)
@@ -443,7 +535,7 @@ namespace Shorokoo.Runtime
                         ? mapped : input.ParamName;
                     sessionInputs[onnxName] = input.ToTensorValue();
                 }
-                var results = session.Run(sessionInputs, session.OutputNames);
+                var results = session.Run(sessionInputs, session.OutputNames, RunSettings);
 
                 return results.Zip(session.OutputNames).Select(x =>
                             OnnxUtils.CreateNamedModelParam(x.First, ModelParamType.OutputParam, x.Second))
@@ -481,7 +573,8 @@ namespace Shorokoo.Runtime
             => CreateSession(modelData, SessionOptimization(disableOptimizations, trainingStep: false));
 
         private IShorokooInferenceSession CreateSession(byte[] modelData, ShorokooGraphOptimization optimization)
-            => InferenceBackend.Factory.CreateSession(modelData, optimization, ShorokooLogSeverity.Fatal);
+            => InferenceBackend.Factory.CreateSession(
+                modelData, optimization, ShorokooLogSeverity.Fatal, DeviceMemory);
 
         /// <summary>
         /// Whether the model takes no runtime input, so every node's value is already

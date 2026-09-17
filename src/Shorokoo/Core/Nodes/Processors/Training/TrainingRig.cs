@@ -226,7 +226,9 @@ namespace Shorokoo
         /// <para><b>It selects no backend or device</b> (see <see cref="ComputeContext"/>): this context
         /// and <see cref="MergeContext"/> divide <i>phases</i>, not hardware. You <b>cannot</b> merge on
         /// one device and train on another — one backend is live per process and both contexts go
-        /// through it.</para>
+        /// through it. What the two <i>can</i> differ in is their device memory: this context's
+        /// <see cref="ComputeContext.DeviceMemory"/> configures the arena of every training-step
+        /// session, and its <see cref="ComputeContext.RunSettings"/> what each step's run does.</para>
         /// </summary>
         public ComputeContext RuntimeContext { get; private set; } = ComputeContext.Default;
 
@@ -2690,8 +2692,11 @@ namespace Shorokoo
                     // (Shorokoo/Shorokoo#332, Shorokoo/Shorokoo#347). HasDeviceMemory is the
                     // session's own answer to whether there is device memory to exhaust, and one
                     // value feeds both the classification and the wording built on it.
+                    // The arena cap is the one this session was BUILT with, which is the context's
+                    // setting at compile time; reading it off the context now would report a
+                    // budget the failing session never had.
                     var device = new DeviceFacts(
-                        compiled.HasDeviceMemory, DeviceMemory.Read(), DeviceMemory.LimitBytes,
+                        compiled.HasDeviceMemory, DeviceMemory.Read(), compiled.DeviceMemory.LimitBytes,
                         AllocationFailureReport.BackendAssemblyName());
                     report = AllocationFailureReport.Render(
                         $"the training step at step {checkpoint.Step}",

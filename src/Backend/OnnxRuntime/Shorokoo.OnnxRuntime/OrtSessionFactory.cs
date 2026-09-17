@@ -26,14 +26,16 @@ namespace Shorokoo.OnnxRuntime;
 /// </summary>
 public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
 {
-    private readonly Action<SessionOptions> _configureExecutionProvider;
+    private readonly Action<SessionOptions, DeviceMemorySettings> _configureExecutionProvider;
     private readonly int? _cudaDeviceId;
 
     /// <param name="configureExecutionProvider">
     /// Applied to the <see cref="SessionOptions"/> of every session this factory creates,
     /// after the log-severity and graph-optimization settings and before the session is
     /// constructed. This is where a subclass appends its execution provider; a CPU backend
-    /// leaves ORT on its default provider and does nothing here.
+    /// leaves ORT on its default provider and does nothing here. It is handed the
+    /// <see cref="DeviceMemorySettings"/> of the session being built — the arena settings belong
+    /// to that session, so they arrive with it rather than being read from anywhere else.
     /// </param>
     /// <param name="device">
     /// The kind of device those sessions run on. A subclass driving a provider that is neither
@@ -46,13 +48,15 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
     /// <param name="cudaDeviceId">
     /// The CUDA device the provider appended above allocates on, or <c>null</c> when it is
     /// not a CUDA provider. It names the arena that
-    /// <see cref="DeviceMemory.ShrinkArenaAfterRun"/> shrinks, so a backend that does not
+    /// <see cref="RunSettings.ShrinkArenaAfterRun"/> shrinks, so a backend that does not
     /// allocate on a card passes <c>null</c> and its sessions ignore the setting.
     /// </param>
     /// <exception cref="ArgumentException"><paramref name="cudaDeviceId"/> disagrees with
     /// <paramref name="device"/>, or is negative.</exception>
     protected OrtSessionFactory(
-        Action<SessionOptions> configureExecutionProvider, ComputeDevice device, int? cudaDeviceId)
+        Action<SessionOptions, DeviceMemorySettings> configureExecutionProvider,
+        ComputeDevice device,
+        int? cudaDeviceId)
     {
         // Built here rather than on each read of Description, so a factory that could only
         // describe itself incoherently cannot be constructed at all.
@@ -63,11 +67,12 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
 
     /// <summary>
     /// The CUDA-backend constructor: every session gets the CUDA execution provider on
-    /// <paramref name="cudaDeviceId"/>, configured from <see cref="DeviceMemory"/>, and
-    /// honours <see cref="DeviceMemory.ShrinkArenaAfterRun"/> for that device's arena.
+    /// <paramref name="cudaDeviceId"/>, configured from the <see cref="DeviceMemorySettings"/>
+    /// that session is built with, and honours <see cref="RunSettings.ShrinkArenaAfterRun"/> for
+    /// that device's arena on each run.
     /// </summary>
     protected OrtSessionFactory(int cudaDeviceId)
-        : this(opts => AppendCuda(opts, cudaDeviceId), ComputeDevice.Cuda, cudaDeviceId) { }
+        : this((opts, mem) => AppendCuda(opts, cudaDeviceId, mem), ComputeDevice.Cuda, cudaDeviceId) { }
 
     /// <summary>
     /// This backend: the assembly the concrete factory lives in, and the device the constructor
@@ -83,11 +88,16 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
     /// <param name="modelBytes">The serialized ONNX model.</param>
     /// <param name="graphOptimization">The ORT graph-optimization level to apply.</param>
     /// <param name="logSeverity">The minimum severity ORT logs at.</param>
+    /// <param name="deviceMemory">The arena settings this session is built with. ORT reads them
+    /// during construction and the session keeps them for life, so they are settled here and
+    /// nowhere else.</param>
     public IShorokooInferenceSession CreateSession(
         ReadOnlyMemory<byte> modelBytes,
         ShorokooGraphOptimization graphOptimization,
-        ShorokooLogSeverity logSeverity)
+        ShorokooLogSeverity logSeverity,
+        DeviceMemorySettings deviceMemory)
     {
+        ArgumentNullException.ThrowIfNull(deviceMemory);
         // The `using` is load-bearing, not tidiness. SessionOptions is a SafeHandle, so it
         // carries a critical finalizer that calls OrtReleaseSessionOptions, and ORT takes its
         // handle as a bare IntPtr -- the P/Invoke does no SafeHandle ref-counting, and the
@@ -98,7 +108,7 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
         // process. Disposing in a finally keeps them rooted across the constructor.
         using var options = new SessionOptions();
         Configure(options, graphOptimization, logSeverity);
-        _configureExecutionProvider(options);
+        _configureExecutionProvider(options, deviceMemory);
         var session = new InferenceSession(modelBytes.ToArray(), options);
         return new OrtInferenceSession(session, _cudaDeviceId);
     }
@@ -141,21 +151,23 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
     }
 
     /// <summary>
-    /// Appends the CUDA execution provider on <paramref name="deviceId"/>, configured with the
-    /// device-memory settings <see cref="DeviceMemory"/> holds at this moment. This is what the
-    /// GPU backends pass as their execution-provider step, and the point at which
-    /// <see cref="DeviceMemory.LimitBytes"/> and <see cref="DeviceMemory.ArenaExtend"/> are read:
-    /// a session built now keeps them for its life.
+    /// Appends the CUDA execution provider on <paramref name="deviceId"/>, configured with
+    /// <paramref name="deviceMemory"/>. This is what the GPU backends pass as their
+    /// execution-provider step, and the point at which
+    /// <see cref="DeviceMemorySettings.LimitBytes"/> and
+    /// <see cref="DeviceMemorySettings.ArenaExtend"/> reach ORT: the session being built keeps
+    /// them for its life, and no other session is touched.
     /// </summary>
-    public static void AppendCuda(SessionOptions options, int deviceId)
+    public static void AppendCuda(SessionOptions options, int deviceId, DeviceMemorySettings deviceMemory)
     {
+        ArgumentNullException.ThrowIfNull(deviceMemory);
         // OrtCUDAProviderOptions is a SafeHandle that ORT takes as a bare IntPtr, exactly like
         // the SessionOptions above, so it needs the same `using`: the options are read during
         // AppendExecutionProvider_CUDA, well after the JIT has retired the local at its .Handle
         // read, and a GC there would run the critical finalizer under the native call.
         using var cuda = new OrtCUDAProviderOptions();
         cuda.UpdateOptions(CudaProviderOptions(
-            deviceId, DeviceMemory.LimitBytes, DeviceMemory.ArenaExtend));
+            deviceId, deviceMemory.LimitBytes, deviceMemory.ArenaExtend));
         options.AppendExecutionProvider_CUDA(cuda);
     }
 
@@ -188,7 +200,7 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
         {
             // ORT parses this into a size_t, where a negative reads back as SIZE_MAX -- an
             // uncapped arena from a caller who asked for the opposite. Refuse it here, as
-            // DeviceMemory.LimitBytes refuses it at the assignment.
+            // DeviceMemorySettings.LimitBytes refuses it at the assignment.
             if (limit <= 0)
                 throw new ArgumentOutOfRangeException(
                     nameof(limitBytes), limit, "The device-memory limit must be positive.");

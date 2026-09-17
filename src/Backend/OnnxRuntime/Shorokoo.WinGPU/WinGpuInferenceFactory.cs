@@ -27,9 +27,9 @@ public sealed class WinGpuInferenceFactory : OrtSessionFactory
 {
     /// <summary>
     /// Creates the factory. Every session it builds gets the CUDA execution provider on
-    /// device 0, configured with the arena settings
-    /// <see cref="Shorokoo.Core.Inference.Abstractions.DeviceMemory"/> holds when the
-    /// session is built.
+    /// device 0, configured with the
+    /// <see cref="Shorokoo.Core.Inference.Abstractions.DeviceMemorySettings"/> that session is
+    /// built with.
     /// </summary>
     public WinGpuInferenceFactory() : base(cudaDeviceId: 0) { }
 }

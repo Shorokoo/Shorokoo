@@ -184,11 +184,12 @@ public static class IsolatedBackend
                 $"backend '{spec.Name}' but exposes no concrete " +
                 $"{nameof(IShorokooInferenceSessionFactory)} with a parameterless constructor.");
 
-        var loaded = new RenamedFactory(factory, spec.Name);
-        // A backend loaded here is a backend this process has, so it counts towards the one the
-        // default context is built on -- under the same rule, where a CPU backend wins.
-        InferenceBackend.Remember(loaded);
-        return loaded;
+        // Deliberately not remembered. A backend loaded here is one the program named, and
+        // discovery's question is which backend a program that named none meant -- so this is no
+        // answer to it, as Documentation/inference.md says under Auto-discovery. Remembering it
+        // made whichever isolated backend happened to load first the one every unnamed context
+        // ran on, and, since a CPU one is never displaced, permanently.
+        return new RenamedFactory(factory, spec.Name);
     }
 
     /// <summary>

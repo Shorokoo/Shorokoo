@@ -64,8 +64,11 @@ public static class InferenceBackend
         set
         {
             ArgumentNullException.ThrowIfNull(value);
-            lock (_gate) { _factory = value; }
-            Remember(value);
+            // Assigning here is a choice, not a load, so it settles the remembered slot outright
+            // rather than going through Remember's first-CPU-wins rule -- which would otherwise
+            // refuse the assignment the ambiguity error tells the caller to make, leaving the
+            // default context on a backend the program has just said it did not want.
+            lock (_gate) { _factory = value; _remembered = value; }
         }
     }
 
@@ -96,8 +99,12 @@ public static class InferenceBackend
 
     /// <summary>
     /// Records <paramref name="factory"/> as a loaded backend. A CPU backend always wins; a GPU
-    /// backend is kept only while no CPU one has been seen. Called for every backend that enters
-    /// the process, however it got here.
+    /// backend is kept only while no CPU one has been seen. Called for every backend the process
+    /// resolved for itself.
+    ///
+    /// <para>Not for one the program named. A backend it asked for by name is an answer to that
+    /// question and to no other, so <see cref="Factory"/>'s setter records its choice directly and
+    /// <see cref="IsolatedBackend"/> records nothing at all.</para>
     /// </summary>
     public static void Remember(IShorokooInferenceSessionFactory factory)
     {

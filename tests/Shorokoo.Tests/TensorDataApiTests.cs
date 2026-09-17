@@ -496,6 +496,15 @@ public class TensorDataApiCoverageTests
         public Shorokoo.Core.Inference.Abstractions.ShorokooTensorElementType GetSequenceElementType() => throw new NotSupportedException();
     }
     [Fact]
+    public void TestEvalHandsBackATensorBelongingToNobodyThatAnAttributeWillTake()
+    {
+        var value = OnnxEngine.Eval(Scalar(2f) + Scalar(3f));
+
+        Assert.Null(value.Context);
+        Assert.Equal(5f, OnnxEngine.Eval(OnnxOp.Constant(value)).As<float32>().AccessMemory()[0]);
+    }
+
+    [Fact]
     public void TestWritingToALiteralIsSeenByTheNextRunAndNotTheOneBeforeIt()
     {
         var a = InputVector<float32>("a");

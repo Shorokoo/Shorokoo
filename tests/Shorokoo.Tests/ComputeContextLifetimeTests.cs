@@ -218,7 +218,8 @@ public class ComputeContextLifetimeCoverageTests
 
         public IShorokooInferenceSession CreateSession(
             ReadOnlyMemory<byte> modelBytes, ShorokooGraphOptimization graphOptimization,
-            ShorokooLogSeverity logSeverity) => throw new NotSupportedException();
+            ShorokooLogSeverity logSeverity,
+            DeviceMemorySettings deviceMemory) => throw new NotSupportedException();
 
         public IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged
             => throw new NotSupportedException();

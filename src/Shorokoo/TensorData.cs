@@ -543,16 +543,15 @@ namespace Shorokoo
         /// context has to copy anything. Releasing the storage disposes the value, which is what
         /// owning it means.
         ///
-        /// <para>Deliberately not <see cref="IShorokooTensorValue.IsHostAccessible"/>, which
-        /// answers a different question: whether the CPU may read this buffer. The span accessors
-        /// below ask that one and this does not. Asking it here instead reported a tensor the
-        /// backend had just allocated in a CUDA context's memory as being in host memory, and
-        /// every later transfer of it then re-wrapped host bytes rather than moving anything.</para>
+        /// <para>The value is asked first, because it knows: ONNX Runtime names the allocator a
+        /// buffer came from, so a tensor the backend allocated on the card says so and one it
+        /// allocated on the host says that. Only when the answer is "not the host" does the
+        /// context decide <i>which</i> device, which is the one thing the value cannot say.</para>
         ///
-        /// <para>With no context there is nothing to ask, so the value answers for itself. One the
-        /// provider kept is then somewhere this cannot name — recorded as unknown rather than
-        /// guessed at, since a wrong device id would make two unrelated allocations look like one
-        /// space and invite a transfer between them.</para>
+        /// <para>That order matters. Letting the context answer outright would label a genuinely
+        /// host-readable value — a resident run's published state, say, which was deliberately
+        /// brought home — as living on the card it came from, and every later hand-off of it would
+        /// copy bytes that were already where they were wanted.</para>
         /// </summary>
         private static TensorStorage StorageFor(IShorokooTensorValue value, ComputeContext? context)
         {

@@ -1,4 +1,5 @@
 using Microsoft.ML.OnnxRuntime;
+using Shorokoo.Core.Inference.Abstractions;
 using Shorokoo.Core.Factory.IR;
 
 namespace Shorokoo.OnnxRuntime;
@@ -57,7 +58,8 @@ internal static class CudaDeviceAllocator
     /// </summary>
     /// <exception cref="OnnxRuntimeException">There is no such CUDA device, or this build of ONNX
     /// Runtime cannot load its CUDA execution provider.</exception>
-    internal static OrtAllocator For(int deviceId, Action<SessionOptions> configureExecutionProvider)
+    internal static OrtAllocator For(
+        int deviceId, Action<SessionOptions, DeviceMemorySettings> configureExecutionProvider)
     {
         lock (_gate)
         {
@@ -68,13 +70,17 @@ internal static class CudaDeviceAllocator
         }
     }
 
-    private static Binding Bind(int deviceId, Action<SessionOptions> configureExecutionProvider)
+    private static Binding Bind(
+        int deviceId, Action<SessionOptions, DeviceMemorySettings> configureExecutionProvider)
     {
         // The `using` is the same load-bearing one as in OrtSessionFactory.CreateSession: ORT takes
         // the options as a bare IntPtr and does no ref-counting, so a plain local is collectible --
         // and its critical finalizer free-able -- while the session constructor is still reading it.
         using var options = new SessionOptions();
-        configureExecutionProvider(options);
+        // The shipped settings, and no caller's: this session is never run, and the allocator it
+        // registers is the device's rather than any one session's -- the same reason the cache is
+        // keyed on the device alone. Resolved because AppendCuda refuses ArenaExtendStrategy.Auto.
+        configureExecutionProvider(options, DeviceMemorySettings.Default.Resolve(reusedAcrossShapes: false));
         var session = new InferenceSession(MinimalModel(), options);
         try
         {

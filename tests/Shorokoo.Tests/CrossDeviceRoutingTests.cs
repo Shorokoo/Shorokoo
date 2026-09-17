@@ -96,7 +96,8 @@ public class CrossDeviceRoutingCoverageTests
 
         public IShorokooInferenceSession CreateSession(
             ReadOnlyMemory<byte> modelBytes, ShorokooGraphOptimization graphOptimization,
-            ShorokooLogSeverity logSeverity) => throw new NotSupportedException();
+            ShorokooLogSeverity logSeverity,
+            DeviceMemorySettings deviceMemory) => throw new NotSupportedException();
 
         public IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged
             => throw new NotSupportedException();
@@ -108,11 +109,14 @@ public class CrossDeviceRoutingCoverageTests
             => throw new NotSupportedException();
     }
 
-    /// <summary>A tensor value that is host-readable and belongs to no runtime — enough for a
-    /// routing test, which never runs anything on it.</summary>
-    private sealed class StubValue(ShorokooTensorElementType elementType, byte[] data, long[] shape)
+    /// <summary>A tensor value belonging to no runtime, which says whether the host may read it —
+    /// enough for a routing test, which never runs anything on it.</summary>
+    private sealed class StubValue(
+        ShorokooTensorElementType elementType, byte[] data, long[] shape, bool hostAccessible)
         : IShorokooTensorValue
     {
+        public bool IsHostAccessible => hostAccessible;
+
         public ShorokooOnnxValueType ValueType => ShorokooOnnxValueType.Tensor;
         public ShorokooTensorElementType ElementType => elementType;
         public long[] Shape => shape;

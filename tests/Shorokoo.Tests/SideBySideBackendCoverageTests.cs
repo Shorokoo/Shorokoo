@@ -274,8 +274,9 @@ public class SideBySideBackendCoverageTests
 
         public IShorokooInferenceSession CreateSession(
             ReadOnlyMemory<byte> modelBytes, ShorokooGraphOptimization graphOptimization,
-            ShorokooLogSeverity logSeverity)
-            => new RecordingSession(inner.CreateSession(modelBytes, graphOptimization, logSeverity), Fed);
+            ShorokooLogSeverity logSeverity, DeviceMemorySettings deviceMemory)
+            => new RecordingSession(
+                inner.CreateSession(modelBytes, graphOptimization, logSeverity, deviceMemory), Fed);
 
         public IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged
             => inner.CreateTensor(data, shape);
@@ -306,18 +307,21 @@ public class SideBySideBackendCoverageTests
         public bool HasDeviceMemory => inner.HasDeviceMemory;
 
         public IReadOnlyList<IShorokooTensorValue> Run(
-            IReadOnlyDictionary<string, IShorokooTensorValue> inputs, IReadOnlyList<string> outputNames)
+            IReadOnlyDictionary<string, IShorokooTensorValue> inputs, IReadOnlyList<string> outputNames,
+            RunSettings runSettings)
         {
             fed.AddRange(inputs.Values);
-            return inner.Run(inputs, outputNames);
+            return inner.Run(inputs, outputNames, runSettings);
         }
 
         public IReadOnlyList<IShorokooTensorValue> RunRetainingOutputs(
             IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
-            IReadOnlyList<string> outputNames, IReadOnlySet<string> retainedOutputNames)
+            IReadOnlyList<string> outputNames, IReadOnlySet<string> retainedOutputNames,
+            RunSettings runSettings)
         {
             fed.AddRange(inputs.Values);
-            return inner.RunRetainingOutputs(inputs, outputNames, retainedOutputNames);
+            return inner.RunRetainingOutputs(
+                inputs, outputNames, retainedOutputNames, runSettings);
         }
 
         public void Dispose() => inner.Dispose();

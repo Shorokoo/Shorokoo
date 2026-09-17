@@ -325,8 +325,9 @@ public static class IsolatedBackend
         public IShorokooInferenceSession CreateSession(
             ReadOnlyMemory<byte> modelBytes,
             ShorokooGraphOptimization graphOptimization,
-            ShorokooLogSeverity logSeverity)
-            => _inner.CreateSession(modelBytes, graphOptimization, logSeverity);
+            ShorokooLogSeverity logSeverity,
+            DeviceMemorySettings deviceMemory)
+            => _inner.CreateSession(modelBytes, graphOptimization, logSeverity, deviceMemory);
 
         public IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged
             => _inner.CreateTensor(data, shape);

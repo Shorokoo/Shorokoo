@@ -655,8 +655,10 @@ public class CoreUtilsCoverageTests
     {
         var shrinking = new RunSettings { ShrinkArenaAfterRun = true };
         var session = new RunSettingsRecorder();
+        var context = new ComputeContext();
         var compiled = new CompiledGraph(
-            session, [], [], ShorokooGraphOptimization.EnableAll, DeviceMemorySettings.Default, shrinking);
+            session, context.Factory, [], [], ShorokooGraphOptimization.EnableAll,
+            DeviceMemorySettings.Default, shrinking, context);
 
         compiled.Execute();
         compiled.Execute([], RunSettings.Default);

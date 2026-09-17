@@ -173,4 +173,16 @@ public class TensorContextTransferCoverageTests
         Assert.True(t.OwnsMemory);
         Assert.Equal([1f, 2f, 3f, 4f], Floats(t));
     }
+    [Fact]
+    public void TestAStringTensorCrossesContextsByItsElements()
+    {
+        using var context = new ComputeContext();
+        var strings = TensorData([2L], "a", "b");
+
+        var copy = strings.CopyTo(context);
+
+        Assert.Same(context, copy.Context);
+        Assert.Equal(["a", "b"], ((HostStringTensorData)copy).Strings);
+        Assert.Equal(["a", "b"], ((HostStringTensorData)strings).Strings);
+    }
 }

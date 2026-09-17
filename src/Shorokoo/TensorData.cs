@@ -369,6 +369,12 @@ namespace Shorokoo
             Shape shape, DType dtype, byte[] bytes, ComputeContext? context)
             => OnnxUtils.CreateHostTensorData(shape, dtype, bytes, context);
 
+        /// <summary>A host string tensor over the given elements, bound to the given host
+        /// context.</summary>
+        internal static TensorData NewHostStringTensor(
+            Shape shape, string[] values, ComputeContext? context)
+            => HostStringTensorData.Bound(shape, values, context);
+
         /// <summary>
         /// Creates TensorData of the given shape and dtype over <paramref name="data"/> — plain
         /// host memory belonging to no backend, the same thing <see cref="NewHostTensor"/> makes.

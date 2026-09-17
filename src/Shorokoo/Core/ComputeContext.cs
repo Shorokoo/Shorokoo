@@ -179,10 +179,12 @@ namespace Shorokoo.Runtime
                 : _session.RunRetainingOutputs(
                     sessionInputs, _session.OutputNames, retainedOutputNames, runSettings);
 
-            return _owner.Deliver(results.Zip(_session.OutputNames)
-                .Select(x => OnnxUtils.CreateNamedModelParam(
-                    x.First, ModelParamType.OutputParam, x.Second, _owner))
-                .ToArray());
+            return _owner.Deliver(
+                results.Zip(_session.OutputNames)
+                    .Select(x => OnnxUtils.CreateNamedModelParam(
+                        x.First, ModelParamType.OutputParam, x.Second, _owner))
+                    .ToArray(),
+                retainedOutputNames);
         }
 
         /// <summary>Pairs the expanded inputs with the graph's input names, positionally.</summary>
@@ -474,7 +476,8 @@ namespace Shorokoo.Runtime
         /// Hands a run's outputs to the caller the way this context was asked to: as they are, or
         /// detached from it.
         /// </summary>
-        internal NamedModelParam[] Deliver(NamedModelParam[] outputs)
+        internal NamedModelParam[] Deliver(
+            NamedModelParam[] outputs, IReadOnlySet<string>? retainedOutputNames = null)
         {
             if (!DetachesOutputs) return outputs;
 
@@ -506,6 +509,17 @@ namespace Shorokoo.Runtime
                 }
                 if (outputs[i] is not TensorDataModelParam tensorParam) continue;
                 var original = tensorParam.ToTensorData();
+
+                // An output the caller asked to keep on the device, and that really is there, is
+                // the one thing detaching must not touch: bringing it home is exactly what
+                // retaining it was meant to avoid, and this context would otherwise copy a
+                // resident run's whole state across the bus and free the device buffer on every
+                // step. A session with no device memory retains nothing, so its outputs are host
+                // ones and detach as any other output does.
+                if (!original.Space.IsHost
+                    && retainedOutputNames?.Contains(tensorParam.ParamName) == true)
+                    continue;
+
                 var detached = original.TransferTo(null);
                 original.Dispose();
                 outputs[i] = new TensorDataModelParam(

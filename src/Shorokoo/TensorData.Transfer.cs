@@ -173,6 +173,11 @@ namespace Shorokoo
         /// </summary>
         private TensorData CopyAcross(ComputeContext? target, MemorySpace to)
         {
+            // Strings have no flat buffer to copy, so they take the route their own literals take:
+            // the elements themselves, rebuilt on the other side. A backend holding them is asked
+            // for them the same way, through the value it made.
+            if (DType == DType.String) return CopyStringsAcross(target);
+
             var bytes = HostBytes();
 
             if (to.IsHost)
@@ -191,9 +196,25 @@ namespace Shorokoo
         /// — so the copy is asked of the backend that owns the allocation, which is the only thing
         /// that knows how to reach it.</para>
         /// </summary>
+        private TensorData CopyStringsAcross(ComputeContext? target)
+        {
+            var strings = this switch
+            {
+                HostStringTensorData host => host.Strings,
+                IOnnxData onnx => onnx.Value.GetStringTensorData(),
+                _ => throw new InvalidOperationException(
+                    $"This tensor ({this}) holds strings but carries neither the elements "
+                    + "themselves nor a runtime value to read them from."),
+            };
+            return NewHostStringTensor(Shape, [.. strings], target);
+        }
+
+        // Taken through CopyRawMemory rather than a bare span: the span is this tensor's last
+        // read, so copying out of one by hand races the collection that frees what it points at
+        // (Shorokoo/Shorokoo#178).
         private byte[] HostBytes()
         {
-            if (Space.IsHost) return AccessRawMemory().ToArray();
+            if (Space.IsHost) return CopyRawMemory();
 
             if (!Space.IsKnown || Context is null)
                 throw new InvalidOperationException(

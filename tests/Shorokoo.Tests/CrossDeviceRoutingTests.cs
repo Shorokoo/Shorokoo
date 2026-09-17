@@ -74,6 +74,20 @@ public class CrossDeviceRoutingCoverageTests
         Assert.Contains("CopyTo", ex.Message);
     }
 
+    [Fact]
+    public void TestADetachingContextLeavesARetainedDeviceOutputOnTheCard()
+    {
+        using var card = new ComputeContext(new StubFactory(ComputeDevice.Cuda, 0), detachesOutputs: true);
+        var onCard = TensorData([2L], (float[])[1f, 2f]).TransferTo(card);
+        NamedModelParam[] outputs =
+            [new TensorDataModelParam("state", ModelParamType.OutputParam, onCard)];
+
+        var delivered = card.Deliver(outputs, new HashSet<string> { "state" });
+
+        Assert.Same(card, delivered[0].ToTensorData().Context);
+        Assert.Equal(MemorySpace.Cuda(0), delivered[0].ToTensorData().Space);
+    }
+
     /// <summary>A backend that answers about itself and records what it was asked to build, so a
     /// transfer's route can be read off it without a session, a native runtime or a card.</summary>
     private sealed class StubFactory(ComputeDevice device, int? cudaDeviceId)

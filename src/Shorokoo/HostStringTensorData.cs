@@ -97,9 +97,10 @@ namespace Shorokoo
         /// The elements as they were given, in row-major order. This is the one read of a string
         /// tensor that costs no backend.
         ///
-        /// <para>It is the literal, not the laid-out tensor: a runtime value of this tensor covers
-        /// <see cref="TensorData.Shape"/> and pads a short literal with empty strings, which is the
-        /// backend's rule and still applies where it always did — when the value is built.</para>
+        /// <para>Exactly <see cref="TensorData.Shape"/>'s worth of them. The backend used to pad a
+        /// short literal with empty strings when it built the value, and that is no longer how a
+        /// short one ends: <see cref="From"/> refuses it, at the construction site, where the
+        /// mistake is.</para>
         /// </summary>
         public IReadOnlyList<string> Strings
         {

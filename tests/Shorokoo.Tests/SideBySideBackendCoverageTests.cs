@@ -62,9 +62,6 @@ public class SideBySideBackendCoverageTests
             [.. av.Zip(bv, (x, y) => x * y + x)]);
     }
 
-    private static float[] Floats(NamedModelParam param)
-        => [.. param.ToTensorData().As<float32>().AccessMemory<float>()];
-
     [Fact]
     public void TestTwoBackendsRunOneModelOnOneSetOfInputsInOneProcess()
     {
@@ -72,16 +69,13 @@ public class SideBySideBackendCoverageTests
         var first = new ComputeContext();
         var second = new ComputeContext(Alt.Value);
 
-        // The whole point: the same graph and the same two tensors, run on each backend in turn.
-        Assert.Equal(expected, Floats(first.Execute(graph, a, b)[0]));
-        Assert.Equal(expected, Floats(second.Execute(graph, a, b)[0]));
-        // And back again, so neither run left the other's runtime unable to serve.
-        Assert.Equal(expected, Floats(first.Execute(graph, a, b)[0]));
+        Assert.Equal(expected, SideBySideModel.Floats(first.Execute(graph, a, b)[0]));
+        Assert.Equal(expected, SideBySideModel.Floats(second.Execute(graph, a, b)[0]));
+        Assert.Equal(expected, SideBySideModel.Floats(first.Execute(graph, a, b)[0]));
 
-        // A compiled session belongs to the backend that built it, and re-runs there.
         var compiled = second.Compile(graph);
-        Assert.Equal(expected, Floats(compiled.Execute(a, b)[0]));
-        Assert.Equal(expected, Floats(compiled.Execute(a, b)[0]));
+        Assert.Equal(expected, SideBySideModel.Floats(compiled.Execute(a, b)[0]));
+        Assert.Equal(expected, SideBySideModel.Floats(compiled.Execute(a, b)[0]));
         Assert.Equal("alt-runtime", compiled.Backend.Name);
     }
 
@@ -97,8 +91,6 @@ public class SideBySideBackendCoverageTests
         Assert.Equal(ComputeDevice.Cpu, alt.Backend.Device);
         Assert.Null(alt.Backend.CudaDeviceId);
 
-        // Naming a backend on one context does not move the process default, which is what
-        // everything that never asked for a backend goes on using.
         Assert.Same(InferenceBackend.Factory, InferenceBackend.Current);
         Assert.Equal(InferenceBackend.Describe(), ComputeContext.Default.Backend);
     }
@@ -121,8 +113,6 @@ public class SideBySideBackendCoverageTests
         var alt = Alt.Value;
         var loadedType = alt.GetType();
 
-        // The renaming wrapper lives in the core assembly; the factory it forwards to is the one
-        // loaded in isolation, and that is the type whose context is the question.
         var inner = loadedType
             .GetField("_inner", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
             .GetValue(alt)!;
@@ -134,8 +124,6 @@ public class SideBySideBackendCoverageTests
         Assert.NotSame(AssemblyLoadContext.Default, innerContext);
         Assert.Same(AssemblyLoadContext.Default, defaultContext);
 
-        // Same assembly by name, two instances: that is what gives the ONNX Runtime wrapper a
-        // second copy of its static native binding, and so a second native runtime.
         Assert.Equal(
             InferenceBackend.Factory.GetType().Assembly.GetName().Name,
             inner.GetType().Assembly.GetName().Name);
@@ -146,7 +134,6 @@ public class SideBySideBackendCoverageTests
         Assert.DoesNotContain("CUDAExecutionProvider", stock);
         Assert.Contains("CUDAExecutionProvider", AvailableProviders(innerContext));
 
-        // Loading the same spec again is the same backend, not a third runtime.
         Assert.Same(alt, IsolatedBackend.Load(new IsolatedBackendSpec
         {
             Name = "alt-runtime",
@@ -170,7 +157,6 @@ public class SideBySideBackendCoverageTests
             InferenceBackend.Factory.GetType().Assembly,
             InferenceBackend.DiscoverableAssemblies(loaded));
 
-        // Which is what discovery needs: one candidate, so it still has an unambiguous answer.
         var candidates = InferenceBackend.LoadedCandidates(
             InferenceBackend.DiscoverableAssemblies(loaded).Select(a => a.GetName().Name ?? ""));
         Assert.Single(candidates);
@@ -190,11 +176,8 @@ public class SideBySideBackendCoverageTests
         Assert.Equal(onFirst, SideBySideModel.Floats(first.Execute(model, input)[0]));
         SideBySideModel.AssertAgree(onFirst, onSecond);
 
-        // And the model is doing something. A forward pass that came out constant would be
-        // agreed on by any two backends, working or not.
         Assert.True(onFirst.Distinct().Count() > 1);
 
-        // A compiled session belongs to the backend that built it, and re-runs there.
         var compiled = second.Compile(model);
         Assert.Equal("alt-runtime", compiled.Backend.Name);
         SideBySideModel.AssertAgree(onFirst, SideBySideModel.Floats(compiled.Execute(input)[0]));
@@ -223,22 +206,18 @@ public class SideBySideBackendCoverageTests
         var recorder = new RecordingBackend(Alt.Value);
         var onAlt = new ComputeContext(recorder);
 
-        Assert.Equal(expected, Floats(onAlt.Execute(graph, a, b)[0]));
+        Assert.Equal(expected, SideBySideModel.Floats(onAlt.Execute(graph, a, b)[0]));
 
-        // Two literals went in, and each reached the session as a value of the isolated runtime --
-        // the one that was about to read it.
         var isolated = AltLoadContext();
         Assert.Equal(2, recorder.Fed.Count);
         Assert.All(recorder.Fed, v => Assert.Same(isolated, LoadContextOf(v)));
 
-        // Each literal kept what it built, so feeding the same backend again costs nothing: a
-        // tensor that rebuilt itself per run would be the same waste by another route.
         var built = recorder.Fed.ToArray();
         recorder.Fed.Clear();
-        Assert.Equal(expected, Floats(onAlt.Execute(graph, a, b)[0]));
+        Assert.Equal(expected, SideBySideModel.Floats(onAlt.Execute(graph, a, b)[0]));
         Assert.Equal(built, recorder.Fed);
 
-        Assert.Equal(expected, Floats(new ComputeContext().Execute(graph, a, b)[0]));
+        Assert.Equal(expected, SideBySideModel.Floats(new ComputeContext().Execute(graph, a, b)[0]));
         foreach (var literal in (TensorData[])[a, b])
         {
             Assert.Same(AssemblyLoadContext.Default, LoadContextOf(literal.ToTensorValue()));
@@ -337,19 +316,16 @@ public class SideBySideBackendCoverageTests
         var first = new ComputeContext();
         var second = new ComputeContext(Alt.Value);
 
-        // An output is the producing backend's own value. Feeding it to the other backend's
-        // session is the case BackendTransfer exists for.
         var fromAlt = second.Execute(graph, a, b)[0].ToTensorData();
-        var throughDefault = Floats(first.Execute(graph, fromAlt, b)[0]);
+        var throughDefault = SideBySideModel.Floats(first.Execute(graph, fromAlt, b)[0]);
         Assert.Equal([.. expected.Zip([10f, 20f, 30f, 40f], (x, y) => x * y + x)], throughDefault);
 
         var fromDefault = first.Execute(graph, a, b)[0].ToTensorData();
         Assert.Equal(expected, [.. fromDefault.As<float32>().AccessMemory<float>()]);
         Assert.Equal(
             [.. expected.Zip([10f, 20f, 30f, 40f], (x, y) => x * y + x)],
-            Floats(second.Execute(graph, fromDefault, b)[0]));
+            SideBySideModel.Floats(second.Execute(graph, fromDefault, b)[0]));
 
-        // Crossing copies rather than moves: the source is still readable, and still its own.
         Assert.Equal(expected, [.. fromAlt.As<float32>().AccessMemory<float>()]);
     }
 
@@ -401,8 +377,6 @@ public class SideBySideBackendCoverageTests
         Assert.Contains("Shorokoo.NotABackend", Assert.Throws<FileNotFoundException>(
             () => IsolatedBackend.Load(Spec("x", "Shorokoo.NotABackend", AltRuntimePath))).Message);
 
-        // An assembly that is there but carries no factory is a different failure from one that
-        // is not there at all, and says so.
         Assert.Contains("exposes no concrete", Assert.Throws<InvalidOperationException>(
             () => IsolatedBackend.Load(Spec("x", "Shorokoo", AltRuntimePath))).Message);
 

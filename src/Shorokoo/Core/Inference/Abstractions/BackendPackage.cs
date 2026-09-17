@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Reflection.Metadata;
 using System.Reflection.PortableExecutable;
 using System.Runtime.InteropServices;
@@ -116,6 +117,14 @@ public static class BackendPackage
         BackendProbe No(BackendRejection reason, string detail)
             => new(false, reason, detail, os, arch, device);
 
+        // Before OSPlatform.Create, which throws on an empty string: a manifest that names no
+        // operating system is one this machine is not, and saying so is this method's whole job.
+        // Nothing here may answer by throwing, least of all for a file a caller is merely probing.
+        if (os.Length == 0)
+            return No(BackendRejection.NotABackend,
+                $"'{Path.GetFileName(full)}' carries a [ShorokooBackend] that names no operating "
+                + "system, so there is no way to tell whether it fits this machine.");
+
         if (!OSPlatform.Create(os.ToUpperInvariant()).Equals(CurrentPlatform()))
             return No(BackendRejection.WrongOperatingSystem,
                 $"'{Path.GetFileName(full)}' is a {os} backend and this is {CurrentOsName()}.");
@@ -199,13 +208,19 @@ public static class BackendPackage
             failure = probe;
             return true;
         }
-        catch (Exception ex) when (ex is InvalidOperationException or FileNotFoundException)
+        // Every way loading can fail, not a list of the ones seen so far. A backend that fits the
+        // machine on paper can still fail to load -- a native of the wrong bitness, a factory
+        // constructor that reaches for a driver -- and a caller walking a folder of candidates has
+        // to be able to skip that file rather than crash on it. That is what this method promises
+        // by answering with a bool.
+        catch (Exception ex) when (ex is not OutOfMemoryException)
         {
             failure = probe with
             {
                 Supported = false,
                 Reason = BackendRejection.NoFactory,
-                Detail = $"'{name}' fits this machine but could not be loaded: {ex.Message}",
+                Detail = $"'{name}' fits this machine but could not be loaded: "
+                    + (ex is TargetInvocationException { InnerException: { } inner } ? inner : ex).Message,
             };
             return false;
         }

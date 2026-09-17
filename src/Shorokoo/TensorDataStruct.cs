@@ -156,6 +156,11 @@ namespace Shorokoo
                 TensorData t => t.OwnsMemory ? onTensor(t, target) : t,
                 TensorDataSequence q => onSequence(q, target),
                 TensorDataStruct u => onStruct(u, target),
+                // A present optional holds a tensor like any other field does. Left alone, it
+                // stayed in the memory of the context the struct had just left -- inside a struct
+                // reporting the target's -- and went when that context did.
+                OptionalTensorData { HasValue: true, Value: { OwnsMemory: true } v }
+                    => OptionalTensorData.Some(onTensor(v, target)),
                 _ => field,
             };
     }

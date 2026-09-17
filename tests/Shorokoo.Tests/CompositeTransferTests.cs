@@ -169,6 +169,30 @@ public class CompositeTransferCoverageTests
     }
 
     [Fact]
+    public void TestAStructMovesAPresentOptionalFieldWithTheRest()
+    {
+        var context = new ComputeContext();
+        TensorStructFieldDef[] fields =
+        [
+            new TensorStructFieldDef("plain", DataStructure.Tensor, 1, DType.Float32),
+            new TensorStructFieldDef("maybe", DataStructure.Optional, 1, DType.Float32),
+        ];
+        var subject = new TensorDataStruct(
+            new TensorStructDef(fields, "WithOptional"),
+            new Dictionary<string, IData>
+            {
+                { "plain", Sample(1f) },
+                { "maybe", OptionalTensorData.Some(Sample(5f)) },
+            });
+
+        var moved = subject.TransferTo(context);
+
+        var optional = (OptionalTensorData)moved.Fields["maybe"];
+        Assert.Same(context, optional.Value!.Context);
+        Assert.Equal([5f, 6f], Floats(optional.Value));
+    }
+
+    [Fact]
     public void TestAnOperatorAttributeRefusesATensorBoundToAContext()
     {
         var bound = Sample(1f).TransferTo(new ComputeContext());

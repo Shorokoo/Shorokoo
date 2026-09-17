@@ -182,8 +182,14 @@ namespace Shorokoo.Core.Utils
                 method = method.MakeGenericMethod(genericType);
             }
 
-            // Invoke the method
-            var result = method.Invoke(null, parameters);
+            // DoNotWrapExceptions, because everything reached this way is ordinary framework code
+            // whose failures are part of its contract: a disposed compute context refusing to take
+            // ownership, an argument that does not cover its shape. Wrapped in a
+            // TargetInvocationException, none of them could be caught as the type they are
+            // documented to be, and the call being generic is the caller's business rather than
+            // theirs.
+            var result = method.Invoke(
+                null, BindingFlags.DoNotWrapExceptions, binder: null, parameters, culture: null);
 
             // Assert that the return value is not null
             Debug.Assert(result != null, "The method's return value should not be null.");

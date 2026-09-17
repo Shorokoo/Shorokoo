@@ -257,13 +257,6 @@ namespace Shorokoo
         /// <summary>Where this tensor's bytes are. Derived from the storage, never set.</summary>
         public MemorySpace Space => Storage.Space;
 
-        /// <summary>Sets the context and ownership of a freshly cloned tensor.</summary>
-        internal void Rebind(ComputeContext? context, bool ownsMemory)
-        {
-            Context = context;
-            OwnsMemory = ownsMemory;
-        }
-
         /// <summary>
         /// Gives up ownership without releasing anything — the other half of a transfer. The
         /// storage's owner has already moved on by the time this runs, so there is nothing to
@@ -428,14 +421,13 @@ namespace Shorokoo
                     $"Supplied data of {data.Length} bytes is less than shape size {required} bytes.",
                     nameof(data));
 
-            // Taken as the tensor's own storage when it is already the right length -- the common
-            // case, and one copy of every weight in a model saved by not copying it.
+            // Always a copy, and exactly one. Taking the caller's array made every tensor share
+            // mutable state with whatever produced the buffer -- a model's initializers aliased
+            // the parsed protobuf, and a loader reusing one scratch array got tensors that all
+            // held the contents of its last read. Through a span rather than the range indexer,
+            // which allocates one array of its own and then hands it to LINQ for a second.
             return NewHostTensor(
-                // Always a copy. Taking the caller's array made every tensor share mutable state
-                // with whatever produced the buffer -- a model's initializers aliased the parsed
-                // protobuf, and a loader reusing one scratch array got tensors that all held the
-                // contents of its last read.
-                shape, dtype, data[..(int)required].ToArray(), context: null);
+                shape, dtype, data.AsSpan(0, (int)required).ToArray(), context: null);
         }
 
         /// <summary>

@@ -73,14 +73,11 @@ internal static class CudaInterop
         {
             if (_bound) return _memcpy;
             _bound = true;
-            try
-            {
-                if (NativeLibrary.TryLoad(LibraryName, out var handle)
-                    && NativeLibrary.TryGetExport(handle, "cudaMemcpy", out var entry))
-                    _memcpy = Marshal.GetDelegateForFunctionPointer<Memcpy>(entry);
-            }
-            catch (DllNotFoundException) { /* no CUDA here; the caller reports it */ }
-            catch (BadImageFormatException) { /* likewise */ }
+            // Try rather than Load: both report a missing or unloadable CUDA runtime by returning
+            // false, so there is nothing here to catch -- the caller reports the absence.
+            if (NativeLibrary.TryLoad(LibraryName, out var handle)
+                && NativeLibrary.TryGetExport(handle, "cudaMemcpy", out var entry))
+                _memcpy = Marshal.GetDelegateForFunctionPointer<Memcpy>(entry);
             return _memcpy;
         }
     }

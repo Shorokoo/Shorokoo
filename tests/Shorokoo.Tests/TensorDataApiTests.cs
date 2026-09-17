@@ -496,6 +496,27 @@ public class TensorDataApiCoverageTests
         public Shorokoo.Core.Inference.Abstractions.ShorokooTensorElementType GetSequenceElementType() => throw new NotSupportedException();
     }
     [Fact]
+    public void TestStringTensorsTakeExactlyTheirShapeAndRefuseAShortfall()
+    {
+        string[] two = ["a", "b"];
+        Assert.Equal(two, ((HostStringTensorData)TensorData([2L], "a", "b", "c")).Strings);
+        Assert.Equal(two, ((HostStringTensorData)TensorData([2L], "a", "b")).Strings);
+
+        var shortfall = Assert.Throws<ArgumentException>(() => TensorData([3L], "a"));
+        Assert.Contains("less than shape size", shortfall.Message);
+    }
+
+    [Fact]
+    public void TestADisposedContextRefusesAsItselfAndNotWrappedInAReflectionFailure()
+    {
+        var context = new ComputeContext();
+        context.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(
+            () => TensorData([2L], (float[])[1f, 2f]).CopyTo(context));
+    }
+
+    [Fact]
     public void TestEvalHandsBackATensorBelongingToNobodyThatAnAttributeWillTake()
     {
         var value = OnnxEngine.Eval(Scalar(2f) + Scalar(3f));

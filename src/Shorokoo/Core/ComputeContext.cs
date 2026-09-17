@@ -430,6 +430,12 @@ namespace Shorokoo.Runtime
 
         private readonly ConditionalWeakTable<TensorStorage, object> _ownedStorage = new();
         private static readonly object OwnedMarker = new();
+        // Guards the disposal flag against the two writers that matter: a second Dispose, and a
+        // TakeOwnership racing one. Both are ordinary in a design whose premise is several live
+        // contexts driven at once, and the flag alone settled neither -- two threads could both
+        // pass the check and run the release loop, or a storage could be enrolled just after the
+        // loop had passed it, ending up on nobody's books and never released.
+        private readonly object _disposalGate = new();
         private bool _disposed;
 
         /// <summary>Whether this context has been disposed, and so has released what it owned.</summary>
@@ -438,8 +444,11 @@ namespace Shorokoo.Runtime
         /// <summary>Puts a storage on this context's books; its disposal will release it.</summary>
         internal void TakeOwnership(TensorStorage storage)
         {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-            _ownedStorage.AddOrUpdate(storage, OwnedMarker);
+            lock (_disposalGate)
+            {
+                ObjectDisposedException.ThrowIf(_disposed, this);
+                _ownedStorage.AddOrUpdate(storage, OwnedMarker);
+            }
         }
 
         /// <summary>Takes a storage off this context's books, because something else owns it now.</summary>
@@ -459,11 +468,14 @@ namespace Shorokoo.Runtime
         /// </summary>
         public void Dispose()
         {
-            if (_disposed) return;
-            _disposed = true;
+            lock (_disposalGate)
+            {
+                if (_disposed) return;
+                _disposed = true;
 
-            foreach (var (storage, _) in _ownedStorage) storage.Release();
-            _ownedStorage.Clear();
+                foreach (var (storage, _) in _ownedStorage) storage.Release();
+                _ownedStorage.Clear();
+            }
 
             // The backend is deliberately left alone. It was handed in, so it may be shared with
             // another context or be the process-wide one -- disposing a factory two contexts were
@@ -477,7 +489,7 @@ namespace Shorokoo.Runtime
         /// detached from it.
         /// </summary>
         internal NamedModelParam[] Deliver(
-            NamedModelParam[] outputs, IReadOnlySet<string>? retainedOutputNames = null)
+            NamedModelParam[] outputs, IReadOnlySet<string>? retainedOutputNames)
         {
             if (!DetachesOutputs) return outputs;
 

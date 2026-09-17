@@ -28,12 +28,16 @@ public enum MemoryKind
 /// Where a tensor's bytes live, precisely enough to say whether two of them are in the same
 /// place: a kind, and the device within that kind.
 ///
-/// <para>This — and not which backend allocated it — is what decides whether moving a tensor
-/// between two <c>ComputeContext</c>s has to copy anything. Two CUDA contexts on device 0 share
-/// a space even when they are two isolated backends over two separate native ONNX Runtimes,
-/// because a CUDA device pointer is valid across them: both reach the device through its primary
-/// context. So a transfer between them re-wraps and moves no bytes, while a transfer between a
-/// host context and either of them is a real copy across the bus.</para>
+/// <para>It is the first of the two questions a transfer asks: bytes in different spaces have to
+/// be copied, and a transfer between a host context and a device one is a real copy across the
+/// bus. Two CUDA contexts on device 0 are the same space, and the device pointer really is valid
+/// across them even when they are two isolated backends over two separate native ONNX Runtimes —
+/// both reach the device through its primary context.</para>
+///
+/// <para>The same space is not by itself enough to re-wrap, though, because a re-wrap hands over
+/// a <i>runtime value</i> rather than an address, and a session recognises its own by type. So a
+/// transfer also asks whether the two contexts share a backend, and two isolated ones over the
+/// same card do not; <c>TensorData.CanShareWith</c> is where the two questions meet.</para>
 /// </summary>
 public readonly record struct MemorySpace(MemoryKind Kind, int DeviceId)
 {

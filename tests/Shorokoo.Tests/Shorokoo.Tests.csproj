@@ -45,8 +45,12 @@
     On this Linux sandbox we reference Shorokoo.LinuxCPU. On a Windows dev box
     swap the ProjectReference for Shorokoo.WinCPU or Shorokoo.WinGPU.
   -->
-  <ItemGroup>
+  <ItemGroup Condition="$([MSBuild]::IsOSPlatform('Linux'))">
     <ProjectReference Include="..\..\src\Backend\OnnxRuntime\Shorokoo.LinuxCPU\Shorokoo.LinuxCPU.csproj" />
+  </ItemGroup>
+
+  <ItemGroup Condition="$([MSBuild]::IsOSPlatform('Windows'))">
+    <ProjectReference Include="..\..\src\Backend\OnnxRuntime\Shorokoo.WinCPU\Shorokoo.WinCPU.csproj" />
   </ItemGroup>
 
   <!--
@@ -72,6 +76,16 @@
       Include="$(PkgMicrosoft_ML_OnnxRuntime_Gpu_Linux)\runtimes\linux-x64\native\libonnxruntime.so;$(PkgMicrosoft_ML_OnnxRuntime_Gpu_Linux)\runtimes\linux-x64\native\libonnxruntime_providers_shared.so" />
   </ItemGroup>
 
+  <!-- The same arrangement on Windows: the CUDA-flavoured onnxruntime.dll under ort/cuda/, a
+       second runtime beside the stock CPU one the WinCPU reference deploys. Without
+       ShorokooDeployGpuBackend the CUDA provider's own DLL is left out, exactly as on Linux. -->
+  <ItemGroup Condition="$([MSBuild]::IsOSPlatform('Windows'))">
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu.Windows" Version="1.26.0"
+                      ExcludeAssets="all" GeneratePathProperty="true" />
+    <ShorokooBackendNatives BackendId="cuda" Condition="'$(ShorokooDeployGpuBackend)' != 'true'"
+      Include="$(PkgMicrosoft_ML_OnnxRuntime_Gpu_Windows)\runtimes\win-x64\native\onnxruntime.dll;$(PkgMicrosoft_ML_OnnxRuntime_Gpu_Windows)\runtimes\win-x64\native\onnxruntime_providers_shared.dll" />
+  </ItemGroup>
+
   <!--
     -p:ShorokooDeployGpuBackend=true completes ort/cuda/ into a CUDA backend that can actually be
     loaded: the whole native set (the CUDA provider included, which is why this is opt-in) plus
@@ -91,9 +105,24 @@
       Include="$(PkgMicrosoft_ML_OnnxRuntime_Gpu_Linux)\runtimes\linux-x64\native\*" />
   </ItemGroup>
 
+  <ItemGroup Condition="'$(ShorokooDeployGpuBackend)' == 'true' AND $([MSBuild]::IsOSPlatform('Windows'))">
+    <ShorokooBackendNatives BackendId="cuda"
+      Include="$(PkgMicrosoft_ML_OnnxRuntime_Gpu_Windows)\runtimes\win-x64\native\*" />
+  </ItemGroup>
+
   <Target Name="ShorokooDeployGpuBackendAssembly" AfterTargets="Build"
           Condition="'$(ShorokooDeployGpuBackend)' == 'true' AND $([MSBuild]::IsOSPlatform('Linux'))">
     <MSBuild Projects="..\..\src\Backend\OnnxRuntime\Shorokoo.LinuxGPU\Shorokoo.LinuxGPU.csproj"
+             Targets="Build" Properties="Configuration=$(Configuration)">
+      <Output TaskParameter="TargetOutputs" ItemName="ShorokooGpuBackendAssembly" />
+    </MSBuild>
+    <Copy SourceFiles="@(ShorokooGpuBackendAssembly)" DestinationFolder="$(OutDir)ort\cuda"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="ShorokooDeployGpuBackendAssemblyWindows" AfterTargets="Build"
+          Condition="'$(ShorokooDeployGpuBackend)' == 'true' AND $([MSBuild]::IsOSPlatform('Windows'))">
+    <MSBuild Projects="..\..\src\Backend\OnnxRuntime\Shorokoo.WinGPU\Shorokoo.WinGPU.csproj"
              Targets="Build" Properties="Configuration=$(Configuration)">
       <Output TaskParameter="TargetOutputs" ItemName="ShorokooGpuBackendAssembly" />
     </MSBuild>

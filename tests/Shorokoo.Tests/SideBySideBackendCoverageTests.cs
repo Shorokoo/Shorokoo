@@ -129,9 +129,15 @@ public class SideBySideBackendCoverageTests
         // And the second copy bound the native the spec named, not another one the ordinary
         // probing would have found. Two contexts prove nothing on their own -- a LoadUnmanagedDll
         // that declined would leave both on the same file and every test above would still pass.
-        // The runtimes say which they are: the stock build carries the CPU execution provider
-        // alone, the CUDA-flavoured build carries the CUDA and TensorRT ones as well.
-        Assert.Equal(["CPUExecutionProvider"], AvailableProviders(AssemblyLoadContext.Default));
+        // The runtimes say which they are: the stock build carries no CUDA execution provider,
+        // the CUDA-flavoured build does. On the provider set rather than on a whole-list equality
+        // because the stock build's set is not the same on every platform -- the Windows one
+        // carries the Azure provider beside the CPU one, the Linux one carries the CPU alone --
+        // whereas CUDA's absence from the one and presence in the other is what distinguishes
+        // the runtimes, on either platform.
+        var stock = AvailableProviders(AssemblyLoadContext.Default);
+        Assert.Contains("CPUExecutionProvider", stock);
+        Assert.DoesNotContain("CUDAExecutionProvider", stock);
         Assert.Contains("CUDAExecutionProvider", AvailableProviders(innerContext));
 
         // Loading the same spec again is the same backend, not a third runtime.

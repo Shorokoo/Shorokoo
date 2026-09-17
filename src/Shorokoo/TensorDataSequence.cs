@@ -283,13 +283,20 @@ namespace Shorokoo
         /// The element at <paramref name="index"/>, on storage of its own: the runtime copies the
         /// element out rather than aliasing the sequence, so the returned tensor owns what it
         /// hands back and disposing it leaves this sequence intact.
+        ///
+        /// <para>The copy is made by the runtime holding the sequence, in that runtime's memory, so
+        /// the element belongs to this sequence's <see cref="TensorDataSequence.Context"/> — the
+        /// context whose session produced the sequence. Wrapping it without one left an element the
+        /// provider had kept in device memory unable to say where it was, and so unable to be moved
+        /// anywhere at all.</para>
         /// </summary>
         public override TensorData<T> this[int index]
         {
             get
             {
                 var val = Value.GetValue(index);
-                return (TensorData<T>)OnnxUtils.CreateTensorDataFromValue(val);
+                return (TensorData<T>)OnnxUtils.CreateTensorDataFromValue(
+                    new Shape(val.Shape), (DType)(int)val.ElementType, val, Context);
             }
         }
 

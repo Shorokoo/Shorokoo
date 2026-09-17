@@ -347,7 +347,13 @@ namespace Shorokoo
         /// <summary>Downcasts to the typed <see cref="TensorData{T}"/>; T must match the actual element type.</summary>
         public TensorData<T> As<T>() where T : IVarType => (TensorData<T>)this;
 
-        /// <summary>Creates TensorData backed by an existing inference-runtime tensor value.</summary>
+        /// <summary>
+        /// Creates TensorData backed by an existing inference-runtime tensor value, belonging to no
+        /// compute context — the framework's own host memory, which is where a value it built
+        /// itself is. A value a session produced comes with the context that produced it instead,
+        /// so that it can say where it is; that is the internal overload below, and every path
+        /// through <c>ComputeContext</c> takes it.
+        /// </summary>
         public static TensorData Create(Shape shape, DType dtype, IShorokooTensorValue data)
         {
             return OnnxUtils.CreateTensorDataFromValue(shape, dtype, data);
@@ -448,7 +454,13 @@ namespace Shorokoo
             }
         }
 
-        /// <summary>Creates TensorData of the given shape around an existing runtime tensor value; the dtype is derived from T.</summary>
+        /// <summary>
+        /// Creates TensorData of the given shape around an existing runtime tensor value; the dtype
+        /// is derived from T. The tensor belongs to no compute context, so its value must be one
+        /// the host can read — every path that wraps a session's output hands over the context that
+        /// produced it, and a value in a provider's own memory needs that context to say which
+        /// memory it is (see <see cref="StorageFor"/>).
+        /// </summary>
         public OnnxTensorData(Shape shape, IShorokooTensorValue value)
             : this(shape, value, context: null, ownsMemory: true, storage: null)
         {
@@ -480,6 +492,9 @@ namespace Shorokoo
             // A value the provider kept, wrapped without the context that produced it, is somewhere
             // this cannot name. Recorded as unknown rather than guessed at: a wrong device id would
             // make two unrelated allocations look like one space and invite a transfer between them.
+            // Nothing the framework runs arrives here without one -- a session's outputs, a
+            // sequence's elements and a transfer's results all carry theirs -- so this is reached
+            // only by a caller wrapping a value of its own.
             return new TensorStorage(
                 context?.MemorySpace ?? MemorySpace.UnknownDevice, value.Dispose);
         }

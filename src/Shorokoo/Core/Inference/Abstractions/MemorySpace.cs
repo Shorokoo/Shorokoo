@@ -10,10 +10,16 @@ public enum MemoryKind
     Cuda = 1,
 
     /// <summary>
-    /// Somewhere an execution provider kept it, and no record of where. A value that came back
-    /// from a session without the context that produced it is in this state: it is certainly not
-    /// host memory, and nothing knows which device it is on, so no transfer can reason about it.
-    /// Transitional — binding session outputs to their producing context is what removes it.
+    /// Somewhere an execution provider kept it, and no record of where. It is certainly not host
+    /// memory, and nothing knows which device it is on, so no transfer can reason about it — two
+    /// such tensors compare equal as spaces without being in the same place.
+    ///
+    /// <para>Nothing the framework runs produces one: every session output, every element read out
+    /// of a sequence and every transfer result carries the context whose memory it is in, and that
+    /// context names the device. It is what remains for a caller that wraps a runtime value of its
+    /// own (<c>TensorData.Create(shape, dtype, value)</c> and the other context-free factories)
+    /// and that value turns out not to be host-readable — the honest answer where there is no
+    /// producer to ask.</para>
     /// </summary>
     Unknown = 2,
 }

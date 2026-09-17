@@ -311,20 +311,6 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
     }
 
     /// <summary>
-    /// Builds an ORT tensor on a buffer ORT itself allocates and copies <paramref name="bytes"/>
-    /// into it.
-    ///
-    /// <para>The obvious alternative — <c>OrtValue.CreateTensorValueFromMemory</c> over a managed
-    /// array — is why this is a copy. That API pins the array for the value's lifetime and releases
-    /// the pin only from <c>Dispose</c>: the release sits behind the <c>disposing</c> guard, so an
-    /// <c>OrtValue</c> reclaimed by its finalizer never runs it. Nothing in Shorokoo disposes a
-    /// tensor value, so every tensor built that way pinned its bytes for the life of the process —
-    /// a training loop that fed a fresh batch each step leaked one batch per step, permanently, and
-    /// no collection could ever get it back. An ORT-allocated buffer is released by the value's
-    /// finalizer along with the value, so it behaves like every other tensor the runtime hands
-    /// back.</para>
-    /// </summary>
-    /// <summary>
     /// This value's contents as host bytes, including from the execution provider's own memory.
     ///
     /// <para>ONNX Runtime's managed surface has no device-to-host copy to call here: a value it
@@ -402,6 +388,20 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
             $"A {type} tensor has no fixed element size, so it cannot be copied back by bytes."),
     };
 
+    /// <summary>
+    /// Builds an ORT tensor on a buffer ORT itself allocates and copies <paramref name="bytes"/>
+    /// into it.
+    ///
+    /// <para>The obvious alternative — <c>OrtValue.CreateTensorValueFromMemory</c> over a managed
+    /// array — is why this is a copy. That API pins the array for the value's lifetime and releases
+    /// the pin only from <c>Dispose</c>: the release sits behind the <c>disposing</c> guard, so an
+    /// <c>OrtValue</c> reclaimed by its finalizer never runs it. Nothing in Shorokoo disposes a
+    /// tensor value, so every tensor built that way pinned its bytes for the life of the process —
+    /// a training loop that fed a fresh batch each step leaked one batch per step, permanently, and
+    /// no collection could ever get it back. An ORT-allocated buffer is released by the value's
+    /// finalizer along with the value, so it behaves like every other tensor the runtime hands
+    /// back.</para>
+    /// </summary>
     private static OrtTensorValue Allocate(TensorElementType elementType, ReadOnlySpan<byte> bytes, long[] shape)
     {
         var wrapped = new OrtTensorValue(

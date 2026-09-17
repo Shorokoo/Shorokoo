@@ -1,5 +1,7 @@
 using System.Runtime.InteropServices;
 using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Modules.Losses;
+using Shorokoo.Modules.Optimizers;
 using Shorokoo.Runtime;
 
 namespace Shorokoo.Tests;
@@ -198,6 +200,66 @@ public class SideBySideBackendHardwareTests
         SideBySideModel.AssertAgree(
             twice, Floats(secondHost.Execute(graph, shared, tb)[0].ToTensorData()),
             SideBySideModel.DeviceTolerance);
+    }
+
+    /// <summary>
+    /// The state a resident training run leaves on the card names the card. This is the shape
+    /// <see cref="ResidentTrainingRun"/>'s step takes — the trainstep compiled on the CUDA context,
+    /// run with every output retained — and the outputs it hands back are the one kind of tensor
+    /// that has to carry its producing context to be worth anything: they are not host-readable, so
+    /// the context is the only thing that can say which device they are on, and without it they
+    /// would report <see cref="MemoryKind.Unknown"/> and refuse to move anywhere.
+    /// </summary>
+    [SideBySideCudaFact]
+    public void TestTrainingStateLeftOnTheCardNamesTheDeviceAndComesHomeFromIt()
+    {
+        using var cuda = new ComputeContext(LoadCuda());
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
+            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([4L], [1f, 2f, 3f, 4f]))],
+            new AdamWOptimizerHyperparameters { LearningRate = 0.1f },
+            runtimeContext: cuda);
+
+        var checkpoint = rig.CreateInitialCheckpoint();
+        var (input, target) = (TrainingRigHelpers.InBatch(1f, 2f, 3f, 4f),
+                               TrainingRigHelpers.TargetBatch(2f, 4f, 6f, 8f));
+
+        var compiled = rig.RuntimeContext.Compile(rig.TrainingStepPureGraph);
+        Assert.True(compiled.HasDeviceMemory);
+
+        var retained = compiled.Execute(
+            ComputeContext.ExpandStructInputs(
+                [checkpoint.TrainableParams, checkpoint.ModelState, checkpoint.OptimizerState, input, target]),
+            [.. Enumerable.Repeat(true, compiled.OutputCount)]);
+
+        Assert.NotEmpty(retained);
+        Assert.NotNull(cuda.Backend.CudaDeviceId);
+        var onCard = MemorySpace.Cuda(cuda.Backend.CudaDeviceId!.Value);
+        foreach (var output in retained)
+        {
+            var state = output.ToTensorData();
+            Assert.False(state.IsHostResident);
+            Assert.True(state.Space.IsKnown);
+            Assert.Equal(onCard, state.Space);
+            Assert.Same(cuda, state.Context);
+        }
+
+        // A named space is a usable one, which is the point of naming it: the move reads the bytes
+        // back through the backend that owns the allocation, and a tensor in an unnamed space is
+        // refused here rather than moved.
+        var home = retained[0].ToTensorData().TransferTo(null);
+        Assert.Equal(MemorySpace.Host, home.Space);
+        Assert.All(Floats(home), v => Assert.True(float.IsFinite(v)));
+
+        // And the loop built on all this still trains, publishing state the host can read.
+        using var run = rig.BeginResidentRun(checkpoint);
+        run.Step(input, target);
+        var published = run.StepToCheckpoint(input, target);
+
+        Assert.Equal(2, published.Step);
+        Assert.All(published.TrainableParams.Fields.Values,
+            f => Assert.Equal(MemorySpace.Host, ((TensorData)f).Space));
+        Assert.NotEmpty(TrainingRigHelpers.FlattenStruct(published.TrainableParams));
     }
 
     private static float[] Floats(TensorData data)

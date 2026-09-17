@@ -247,6 +247,11 @@ namespace Shorokoo.Core.Utils
         public static IShorokooTensorValue CreateTensorValue(Shape shape, string[] data)
             => InferenceBackend.Factory.CreateStringTensor(data, (long[])shape);
 
+        /// <summary>
+        /// A tensor over <paramref name="value"/> with no context: the framework's own host memory,
+        /// which is what a value it built itself is in. The overload taking a
+        /// <c>ComputeContext</c> is the one for a value a session produced.
+        /// </summary>
         public static TensorData CreateTensorDataFromValue(IShorokooTensorValue value)
         {
             var shape = new Shape(value.Shape);
@@ -299,9 +304,28 @@ namespace Shorokoo.Core.Utils
         internal static IShorokooTensorValue CopyTensorValue(IShorokooTensorValue value)
             => BackendTransfer.CopyTo(InferenceBackend.Factory, value);
 
+        /// <summary>
+        /// Wraps a runtime value whose producer is not known — the framework's own paths all know
+        /// theirs and call the overload below.
+        ///
+        /// <para>A value an execution provider kept in its own memory has no way to say <i>which</i>
+        /// memory when it arrives here, so it lands in <see cref="MemoryKind.Unknown"/> and can be
+        /// read but not moved. That is the honest answer rather than a useful one: pass the
+        /// context that produced it and it names a real place.</para>
+        /// </summary>
         public static IData CreateData(IShorokooTensorValue value)
             => CreateData(value, context: null);
 
+        /// <summary>
+        /// Wraps a runtime value as the data it holds, belonging to <paramref name="context"/> —
+        /// the context whose session produced it, and so whose memory it is in. Null means it came
+        /// from outside any context, which can only be the framework's own host memory.
+        ///
+        /// <para>A sequence is bound the same way a tensor is. Its elements are copied out of it
+        /// one at a time, on demand, by the runtime that holds it, so they are in that context's
+        /// memory too and <see cref="OnnxTensorDataSequence{T}"/> hands each of them this same
+        /// context.</para>
+        /// </summary>
         public static IData CreateData(IShorokooTensorValue value, Shorokoo.Runtime.ComputeContext? context)
         {
             if (value.ValueType == ShorokooOnnxValueType.Tensor)
@@ -310,15 +334,24 @@ namespace Shorokoo.Core.Utils
                     : CreateTensorDataFromValue(
                         new Shape(value.Shape), (DType)(int)value.ElementType, value, context);
             else if (value.ValueType == ShorokooOnnxValueType.Sequence)
-                return CreateTensorDataSequenceFromValue(value);
+            {
+                var sequence = CreateTensorDataSequenceFromValue(value);
+                sequence.Context = context;
+                return sequence;
+            }
 
             throw new UnsupportedDTypeException(ErrorCodes.OU002, value.ValueType.ToString(), "CreateData",
                 $"ONNX value type '{value.ValueType}' is not supported. Only TENSOR and SEQUENCE types are supported");
         }
 
+        /// <summary>A named parameter over a runtime value with no known producer; see
+        /// <see cref="CreateData(IShorokooTensorValue)"/> for what that costs.</summary>
         public static NamedModelParam CreateNamedModelParam(IShorokooTensorValue value, ModelParamType paramType, string name)
             => CreateNamedModelParam(value, paramType, name, context: null);
 
+        /// <summary>A named parameter over a runtime value produced by <paramref name="context"/>.
+        /// This is the shape every session output takes, so that an output can say where it is and
+        /// be moved from there.</summary>
         public static NamedModelParam CreateNamedModelParam(
             IShorokooTensorValue value, ModelParamType paramType, string name,
             Shorokoo.Runtime.ComputeContext? context)

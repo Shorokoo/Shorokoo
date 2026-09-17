@@ -430,6 +430,17 @@ namespace Shorokoo.Runtime
 
             for (int i = 0; i < outputs.Length; i++)
             {
+                if (outputs[i] is TensorDataSequenceModelParam sequenceParam)
+                {
+                    // A sequence is detached by forgetting this context rather than by being moved:
+                    // it holds its runtime value outright, so it already outlives the context --
+                    // this context's books never had it -- and its elements are copied out of that
+                    // value one at a time, so there is nothing yet to move. Clearing the context is
+                    // what stops each of those elements being handed one that may be disposed
+                    // before it is read.
+                    sequenceParam.ToTensorDataSequence().Context = null;
+                    continue;
+                }
                 if (outputs[i] is not TensorDataModelParam tensorParam) continue;
                 var original = tensorParam.ToTensorData();
                 var detached = original.TransferTo(null);

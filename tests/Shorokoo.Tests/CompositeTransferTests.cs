@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using Shorokoo.Core.Inference.Abstractions;
 using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Runtime;
 
@@ -82,6 +83,52 @@ public class CompositeTransferCoverageTests
         Assert.Same(context, movedInner.Context);
         Assert.Same(context, ((TensorData)movedInner.Fields["deep"]).Context);
         Assert.Equal([9f, 10f], Floats((TensorData)movedInner.Fields["deep"]));
+    }
+
+    /// <summary>
+    /// A sequence a run produced belongs to the context that produced it, and so does every
+    /// element read out of it — the runtime copies each one out of its own memory, so an element
+    /// is wherever the sequence is. Wrapping them with no context said "the framework's own host
+    /// memory" of something an execution provider may never have put there, which on a card is
+    /// the difference between a tensor that can say which device it is on and one that cannot be
+    /// moved at all.
+    /// </summary>
+    [Fact]
+    public void TestASequenceARunProducedCarriesItsContextDownToItsElements()
+    {
+        using var context = new ComputeContext();
+        var x = InputVector<float32>("x");
+        var graph = new InternalComputationGraph([x], [OnnxOp.SequenceConstruct(x, x + x)]);
+
+        var sequence = context.Execute(graph, TensorData([2L], (float[])[1f, 2f]))[0].ToTensorDataSequence();
+
+        Assert.Same(context, sequence.Context);
+        Assert.Equal(2, sequence.Count);
+        Assert.All(sequence, e => Assert.Same(context, e.Context));
+        Assert.All(sequence, e => Assert.Equal(MemorySpace.Host, e.Space));
+        Assert.Equal([1f, 2f], Floats(sequence[0]));
+        Assert.Equal([2f, 4f], Floats(sequence[1]));
+    }
+
+    /// <summary>
+    /// ...and a context that detaches its outputs hands the sequence out belonging to nobody, so
+    /// its elements are not handed a context that may be disposed before they are read. The
+    /// sequence holds its runtime value outright, which is why forgetting the context is the whole
+    /// of the detachment here.
+    /// </summary>
+    [Fact]
+    public void TestADetachingContextHandsASequenceOutBelongingToNobody()
+    {
+        var x = InputVector<float32>("x");
+        var graph = new InternalComputationGraph([x], [OnnxOp.SequenceConstruct(x, x + x)]);
+
+        TensorDataSequence sequence;
+        using (var context = new ComputeContext(detachesOutputs: true))
+            sequence = context.Execute(graph, TensorData([2L], (float[])[1f, 2f]))[0].ToTensorDataSequence();
+
+        Assert.Null(sequence.Context);
+        Assert.All(sequence, e => Assert.Null(e.Context));
+        Assert.Equal([2f, 4f], Floats(sequence[1]));
     }
 
     /// <summary>

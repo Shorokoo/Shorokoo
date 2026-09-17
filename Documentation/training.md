@@ -650,12 +650,14 @@ Leaving both `null`, so each defaults to `ComputeContext.Default`, is the normal
 
 What *is* configurable — on the GPU backends — is **device** memory, on the context the rig compiles
 and runs on: an arena budget and extend strategy in its `DeviceMemory`, per-step arena shrinkage in
-its `RunSettings`, plus a reading of how much of the card is gone. The default arena strategy is
-picked for exactly this loop: a step's shapes are fixed when it is compiled and repeat for the
-length of the run, so the arena is told to extend by what it asks for rather than to keep doubling,
-which is what otherwise leaves a long run holding far more of the card than its steps use. On a run
-that is close to the card's limit, hand `FromScratch` a `runtimeContext` carrying a budget and
-sample the peak inside your `TrainStep` loop; see
+its `RunSettings`, plus a reading of how much of the card is gone. The arena strategy needs no
+setting for this loop: a training step's shapes are fixed when it is compiled and repeat for the
+length of the run, and the default `Auto` recognizes exactly that, telling the arena to extend by
+what the step asks for rather than to keep doubling — which is what otherwise leaves a long run
+holding far more of the card than its steps use. Sessions that are not training steps, in the same
+process or the same context, still get ORT's doubling, which is what a shape that can grow needs.
+On a run that is close to the card's limit, hand `FromScratch` a `runtimeContext` carrying a budget
+and sample the peak inside your `TrainStep` loop; see
 [Device memory](inference.md#device-memory-gpu-backends).
 
 **Mind which memory is which.** A `TrainStep` loop's checkpoints are fetched to the host, so the

@@ -30,8 +30,9 @@ Related: [core-types.md](core-types.md) · [defining-models.md](defining-models.
   device, [One model, two devices](#one-model-two-devices).
 - On a GPU backend the CUDA arena is configured on the `ComputeContext` — `DeviceMemory` for
   the sessions it compiles, `RunSettings` for what its runs do — while the static `DeviceMemory`
-  class reports how much of the card is gone. The arena strategy deliberately departs from ORT's
-  default so that a training loop does not end up holding far more of the card than it uses:
+  class reports how much of the card is gone. The arena strategy is chosen per session, so a
+  training loop does not end up holding far more of the card than it uses and a variable-shape
+  inference path still gets the strategy that suits it:
   [Device memory](#device-memory-gpu-backends).
 
 ## Workflow: one-shot evaluation
@@ -560,11 +561,10 @@ suit opposite situations:
   The catch is that an exactly-sized region cannot serve a later, larger request: a session whose
   input shapes keep growing strands every region it outgrows.
 
-**Shorokoo defaults to `SameAsRequested`.** That is a deliberate departure from ORT, and it is a
-bet rather than a free win. Measured on the CPU arena — the same allocator with the same two
-strategies — over four chained matmuls. Both columns move by a MiB or two between runs, and on the
-mixed rows a run can put the two within one MiB of each other, so read every ratio below as
-approximate and the near-ties as ties:
+**Shorokoo picks between them per session, and does not ship one value for both.** Measured on the
+CPU arena — the same allocator with the same two strategies — over four chained matmuls. Both
+columns move by a MiB or two between runs, and on the mixed rows a run can put the two within one
+MiB of each other, so read every ratio below as approximate and the near-ties as ties:
 
 | shapes fed to the session | `SameAsRequested` | `NextPowerOfTwo` |
 |---|---|---|
@@ -581,15 +581,23 @@ The measurement is a test in the Shorokoo repository
 package, so treat these as indicative of the shape, not as your machine's numbers — what settles
 your case is `DeviceMemory.Sample()` around your own run.
 
-The bet is on the asymmetry, not on winning every row. A training run feeds one input shape to one
-compiled step for its whole length — the first row — and there exact-size extension holds about
-1.3–1.45x less. On the card that prompted this, a step whose first step showed 12,877 MiB ended up
-with the arena holding all 24,563 MiB — the whole of a 24 GiB card — and a smaller batch of the same
-model settled at roughly 1.8x what its steps used. Two allocation sizes still favour exact-size extension
-(row 2, by 1.2–1.6x depending on the run); it is once several are in play that ORT's doubling holds less, by about 1.1x, or
-ties (rows 3 to 5). **The one case to override it in is input shapes that grow without settling** —
-the last two rows, where the doubling holds around 1.5x less and, on a card with no room to spare,
-fits where exact-size extension does not:
+Neither column wins outright, and which one wins is decided by something Shorokoo knows about each
+session: whether its allocation sizes settle. A training run feeds one input shape to one compiled
+step for its whole length — the first row — and there exact-size extension holds about 1.3–1.45x
+less. On the card that prompted this, a step whose first step showed 12,877 MiB ended up with the
+arena holding all 24,563 MiB — the whole of a 24 GiB card — and a smaller batch of the same model
+settled at roughly 1.8x what its steps used. Two allocation sizes still favour exact-size extension
+(row 2, by 1.2–1.6x depending on the run); it is once several are in play that ORT's doubling holds
+less, by about 1.1x, or ties (rows 3 to 5). The last two rows are the other end: input shapes that
+grow without settling, where each outgrown region is stranded, the doubling holds around 1.5x less
+and — on a card with no room to spare — fits where exact-size extension does not.
+
+So `ArenaExtend` defaults to `Auto`, which is not one of ORT's values but the choice between them,
+made per session: a **training step** gets `SameAsRequested`, because its shapes are fixed when the
+step is compiled and repeat for the life of the run; **every other session** gets ORT's
+`NextPowerOfTwo`, because it may be handed a larger input on any call. Name a strategy to decide it
+yourself — for the sessions that context compiles, and no others — and read back what a graph
+actually got from `CompiledGraph.DeviceMemory`:
 
 ```csharp
 using Shorokoo.Core.Inference.Abstractions;
@@ -608,12 +616,14 @@ var ctx = new ComputeContext
 var compiled = ctx.Compile(graph);
 compiled.Execute(inputs);                                          // the context's run settings
 compiled.Execute(inputs, new RunSettings { ShrinkArenaAfterRun = false });   // this run only
+
+Console.WriteLine(compiled.DeviceMemory.ArenaExtend);              // what this session was built with
 ```
 
 | setting | on | ORT option | default | read |
 |---|---|---|---|---|
 | `LimitBytes` | `DeviceMemorySettings` | `gpu_mem_limit` | `null` — no cap | when a session is created |
-| `ArenaExtend` | `DeviceMemorySettings` | `arena_extend_strategy` | `SameAsRequested` — **not** ORT's default | when a session is created |
+| `ArenaExtend` | `DeviceMemorySettings` | `arena_extend_strategy` | `Auto` — `SameAsRequested` for a training step, ORT's `NextPowerOfTwo` elsewhere | when a session is created |
 | `ShrinkArenaAfterRun` | `RunSettings` | `memory.enable_memory_arena_shrinkage` | `false` | on every run |
 
 The other two are unset by default for their own reasons. `ShrinkArenaAfterRun` costs a
@@ -632,9 +642,10 @@ more than once over; read it as the ceiling on any one session.
 
 The first two are read **when a session is built** — the first inference call, or a training rig's
 first `TrainStep` for a given input shape — so the context has to carry them before the graph is
-compiled on it; a graph already compiled keeps what it was built with. `ShrinkArenaAfterRun` is
-read on every run, so it takes effect on sessions already compiled and a single call can override
-it.
+compiled on it; a graph already compiled keeps what it was built with, which is why
+`CompiledGraph.DeviceMemory` reports the settled strategy rather than `Auto`. `ShrinkArenaAfterRun`
+is read on every run, so it takes effect on sessions already compiled and a single call can
+override it.
 
 The same class reports what the card is doing:
 

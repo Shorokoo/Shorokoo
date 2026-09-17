@@ -68,9 +68,11 @@ namespace Shorokoo.Runtime
         internal ShorokooGraphOptimization Optimization { get; }
 
         /// <summary>
-        /// The arena settings this graph's session was built with — the compiling context's
-        /// <see cref="ComputeContext.DeviceMemory"/> as it stood then. A session keeps what it was
-        /// built with, so this is what the session actually has, not what its context says now.
+        /// The arena settings this graph's session was built with: the compiling context's
+        /// <see cref="ComputeContext.DeviceMemory"/> as it stood then, with
+        /// <see cref="ArenaExtendStrategy.Auto"/> already settled to the strategy this session
+        /// got. A session keeps what it was built with, so this is what the session actually has —
+        /// not what its context says now, and not <c>Auto</c>.
         /// </summary>
         public DeviceMemorySettings DeviceMemory { get; }
 
@@ -246,6 +248,10 @@ namespace Shorokoo.Runtime
         /// for life, so this configures the sessions to come and never the ones already built —
         /// to run a graph under a different budget, compile it on a context that carries one.
         ///
+        /// <para>Its default <see cref="ArenaExtendStrategy.Auto"/> resolves per session, so one
+        /// context can still give a training step a different arena strategy from an eager
+        /// evaluation; <see cref="CompiledGraph.DeviceMemory"/> reports which one a graph got.</para>
+        ///
         /// <para>Ignored by the CPU backends, which have no device arena.</para>
         /// </summary>
         /// <exception cref="ArgumentNullException">A null settings object.</exception>
@@ -382,7 +388,10 @@ namespace Shorokoo.Runtime
             var modelData = memoryStream.ToArray();
 
             var optimization = SessionOptimization(HasOptionalOps(model.Graph), trainingStep);
-            var session = CreateSession(modelData, optimization);
+            // Settled here, not inside the session: CompiledGraph then reports the strategy this
+            // session actually got rather than the Auto that asked for it.
+            var deviceMemory = DeviceMemory.Resolve(optimization);
+            var session = CreateSession(modelData, optimization, deviceMemory);
 
             var onnxInputNameByOriginal = new Dictionary<string, string>();
             for (int i = 0; i < originalInputNames.Length && i < session.InputNames.Count; i++)
@@ -390,7 +399,7 @@ namespace Shorokoo.Runtime
 
             return new CompiledGraph(
                 session, onnxInputNameByOriginal, originalInputNames, optimization,
-                DeviceMemory, RunSettings);
+                deviceMemory, RunSettings);
         }
 
         private static string[] ResolveOriginalInputNames(InternalComputationGraph graph)
@@ -573,8 +582,12 @@ namespace Shorokoo.Runtime
             => CreateSession(modelData, SessionOptimization(disableOptimizations, trainingStep: false));
 
         private IShorokooInferenceSession CreateSession(byte[] modelData, ShorokooGraphOptimization optimization)
+            => CreateSession(modelData, optimization, DeviceMemory.Resolve(optimization));
+
+        private IShorokooInferenceSession CreateSession(
+            byte[] modelData, ShorokooGraphOptimization optimization, DeviceMemorySettings deviceMemory)
             => InferenceBackend.Factory.CreateSession(
-                modelData, optimization, ShorokooLogSeverity.Fatal, DeviceMemory);
+                modelData, optimization, ShorokooLogSeverity.Fatal, deviceMemory);
 
         /// <summary>
         /// Whether the model takes no runtime input, so every node's value is already

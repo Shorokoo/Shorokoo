@@ -6,6 +6,24 @@ namespace Shorokoo.Core.Inference.Abstractions;
 public enum ArenaExtendStrategy
 {
     /// <summary>
+    /// Let Shorokoo choose per session — the default, and what you want unless you have measured
+    /// otherwise. Neither ORT strategy is better in general: which one wastes less depends on
+    /// whether a session's allocation sizes settle or keep growing, and the two differ by about
+    /// 1.5x in each direction. So the choice is made from what Shorokoo knows about the session
+    /// it is building and ORT does not — <see cref="SameAsRequested"/> for a training step, whose
+    /// shapes are fixed when the step is compiled and repeat for the life of the run, and
+    /// <see cref="NextPowerOfTwo"/> for every other session, which may be handed a larger input
+    /// on any call.
+    ///
+    /// <para>It is a default, not a policy: naming either concrete strategy on a
+    /// <see cref="DeviceMemorySettings"/> overrides it for the sessions built from that one, and
+    /// no others. What a session actually got is reported by
+    /// <see cref="Shorokoo.Runtime.CompiledGraph.DeviceMemory"/>, so the choice can be read back
+    /// rather than inferred.</para>
+    /// </summary>
+    Auto,
+
+    /// <summary>
     /// ORT's own default: each extension is at least as large as everything the arena already
     /// holds. Its regions are large, and get split and reused, which is what an unpredictable
     /// series of allocation sizes needs — but on a loop whose sizes have settled the doubling is
@@ -86,24 +104,25 @@ public sealed record DeviceMemorySettings
         }
     }
 
-    private readonly ArenaExtendStrategy _arenaExtend = ArenaExtendStrategy.SameAsRequested;
+    private readonly ArenaExtendStrategy _arenaExtend = ArenaExtendStrategy.Auto;
 
     /// <summary>
     /// How this session's arena extends itself — ORT's <c>arena_extend_strategy</c>. Defaults to
-    /// <see cref="ArenaExtendStrategy.SameAsRequested"/>, <b>not</b> to ORT's own
-    /// <see cref="ArenaExtendStrategy.NextPowerOfTwo"/>.
+    /// <see cref="ArenaExtendStrategy.Auto"/>, which is not one of ORT's values but a choice
+    /// between them made per session; <see cref="Resolve"/> is that choice, and
+    /// <see cref="ArenaExtendStrategy.Auto"/> says what it decides on.
     ///
-    /// <para>Neither strategy is better in general; the default is a bet on the workload
-    /// Shorokoo exists for. A training run feeds one input shape to one compiled step for its
-    /// whole length, and on that shape exact-size extension holds about 1.3-1.45x less than ORT's
-    /// doubling. (A separate figure from the same report: under ORT's doubling the arena settled at
-    /// roughly 1.8x what the run's own steps used — that is the waste being removed, not a ratio
-    /// between the two strategies.) Where several
-    /// allocation sizes are in play it is the doubling that holds less, but by 1.06-1.13x — an
-    /// order of magnitude less at stake. The one case it loses badly is input shapes that keep
-    /// growing without settling, where each outgrown region is stranded: set
-    /// <see cref="ArenaExtendStrategy.NextPowerOfTwo"/> if that is your workload and device
-    /// memory is tight.</para>
+    /// <para>Neither concrete strategy is better in general. A training run feeds one input shape
+    /// to one compiled step for its whole length, and on that shape exact-size extension holds
+    /// about 1.3-1.45x less than ORT's doubling. (A separate figure from the same report: under
+    /// ORT's doubling the arena settled at roughly 1.8x what the run's own steps used — that is
+    /// the waste being removed, not a ratio between the two strategies.) Where several allocation
+    /// sizes are in play it is the doubling that holds less, but by 1.06-1.13x. The case it wins
+    /// outright is input shapes that keep growing without settling, where each outgrown region is
+    /// stranded: there the doubling holds about 1.5x less and fits on a capped arena where
+    /// exact-size extension does not. Those are the two cases
+    /// <see cref="ArenaExtendStrategy.Auto"/> tells apart; name a strategy here to decide it
+    /// yourself.</para>
     /// </summary>
     /// <exception cref="ArgumentOutOfRangeException">Not one of the strategies.</exception>
     public ArenaExtendStrategy ArenaExtend
@@ -116,4 +135,36 @@ public sealed record DeviceMemorySettings
             _arenaExtend = value;
         }
     }
+
+    /// <summary>
+    /// These settings with <see cref="ArenaExtend"/> settled to one of the two strategies ORT
+    /// accepts, for a session compiled at <paramref name="graphOptimization"/>: unchanged when a
+    /// concrete strategy was named, and otherwise the choice
+    /// <see cref="ArenaExtendStrategy.Auto"/> stands for — exact-size extension for a training
+    /// step, whose allocation sizes settle, and ORT's doubling elsewhere, where they may not.
+    ///
+    /// <para>The resolution happens here rather than in the backend, so that the settings a
+    /// session is built with are concrete by the time anything sees them: the backend never has
+    /// to interpret <see cref="ArenaExtendStrategy.Auto"/>, and
+    /// <see cref="Shorokoo.Runtime.CompiledGraph.DeviceMemory"/> reports what was chosen rather
+    /// than what was asked for.</para>
+    ///
+    /// <para>The profile is a proxy for the property that actually matters — whether the
+    /// session's allocation sizes settle — and it is exact in one direction only: nothing but a
+    /// training step is compiled at
+    /// <see cref="ShorokooGraphOptimization.TrainingStep"/>, but a training step whose graph
+    /// carries an <c>Optional</c> op is compiled at
+    /// <see cref="ShorokooGraphOptimization.DisableAll"/> instead and is read here as an ordinary
+    /// session. That costs it the tighter arena, never correctness, and naming a strategy takes
+    /// it back.</para>
+    /// </summary>
+    public DeviceMemorySettings Resolve(ShorokooGraphOptimization graphOptimization)
+        => ArenaExtend is not ArenaExtendStrategy.Auto
+            ? this
+            : this with
+            {
+                ArenaExtend = graphOptimization is ShorokooGraphOptimization.TrainingStep
+                    ? ArenaExtendStrategy.SameAsRequested
+                    : ArenaExtendStrategy.NextPowerOfTwo,
+            };
 }

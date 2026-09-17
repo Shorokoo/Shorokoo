@@ -483,22 +483,27 @@ public class CoreUtilsCoverageTests
 
     /// <summary>
     /// The shipped defaults, and the ORT options a GPU session built with them asks for. The
-    /// arena strategy is deliberately not ORT's own: exact-size extension holds materially less
-    /// on a run that feeds one shape to one compiled step, which is what a training run is.
+    /// arena strategy is chosen per session rather than shipped as one value, and ORT is only
+    /// ever handed a strategy it has — an unresolved one is refused rather than guessed at.
     /// </summary>
     [Fact]
     public void TestDeviceMemoryDefaultsToTheExactSizeArenaAndRejectsAnEmptyBudget()
     {
-        Assert.Equal(ArenaExtendStrategy.SameAsRequested, DeviceMemorySettings.Default.ArenaExtend);
+        Assert.Equal(ArenaExtendStrategy.Auto, DeviceMemorySettings.Default.ArenaExtend);
         Assert.Null(DeviceMemorySettings.Default.LimitBytes);
         Assert.False(RunSettings.Default.ShrinkArenaAfterRun);
         Assert.Equal(DeviceMemorySettings.Default, new ComputeContext().DeviceMemory);
         Assert.Equal(RunSettings.Default, new ComputeContext().RunSettings);
 
         var shipped = OrtSessionFactory.CudaProviderOptions(
-            0, DeviceMemorySettings.Default.LimitBytes, DeviceMemorySettings.Default.ArenaExtend);
+            0,
+            DeviceMemorySettings.Default.LimitBytes,
+            DeviceMemorySettings.Default.Resolve(ShorokooGraphOptimization.TrainingStep).ArenaExtend);
         Assert.Equal("kSameAsRequested", shipped["arena_extend_strategy"]);
         Assert.False(shipped.ContainsKey("gpu_mem_limit"));
+
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => OrtSessionFactory.CudaProviderOptions(0, null, ArenaExtendStrategy.Auto));
 
         Assert.Throws<ArgumentOutOfRangeException>(() => new DeviceMemorySettings { LimitBytes = 0 });
         Assert.Throws<ArgumentOutOfRangeException>(() => new DeviceMemorySettings { LimitBytes = -1 });
@@ -508,12 +513,38 @@ public class CoreUtilsCoverageTests
         // A refused assignment leaves the shared default as it was: a record cannot be edited in
         // place, so no caller can spoil it for another.
         Assert.Null(DeviceMemorySettings.Default.LimitBytes);
-        Assert.Equal(ArenaExtendStrategy.SameAsRequested, DeviceMemorySettings.Default.ArenaExtend);
+        Assert.Equal(ArenaExtendStrategy.Auto, DeviceMemorySettings.Default.ArenaExtend);
 
         var capped = DeviceMemorySettings.Default with { LimitBytes = 4096 };
         Assert.Equal(4096L, capped.LimitBytes);
         Assert.Null(DeviceMemorySettings.Default.LimitBytes);
         Assert.Equal(DeviceMemorySettings.Default, capped with { LimitBytes = null });
+    }
+
+    /// <summary>
+    /// Auto is the per-session choice: exact-size extension for a training step, whose shapes are
+    /// fixed when it is compiled, and ORT's doubling for everything else, which may be handed a
+    /// larger input on any call. A named strategy is carried through untouched, and the budget
+    /// rides along either way.
+    /// </summary>
+    [Fact]
+    public void TestAutoPicksTheArenaStrategyPerSessionAndANamedStrategyOverridesIt()
+    {
+        ArenaExtendStrategy Auto(ShorokooGraphOptimization o) => DeviceMemorySettings.Default.Resolve(o).ArenaExtend;
+
+        Assert.Equal(ArenaExtendStrategy.SameAsRequested, Auto(ShorokooGraphOptimization.TrainingStep));
+        Assert.Equal(ArenaExtendStrategy.NextPowerOfTwo, Auto(ShorokooGraphOptimization.EnableAll));
+        Assert.Equal(ArenaExtendStrategy.NextPowerOfTwo, Auto(ShorokooGraphOptimization.EnableBasic));
+        Assert.Equal(ArenaExtendStrategy.NextPowerOfTwo, Auto(ShorokooGraphOptimization.DisableAll));
+
+        var named = new DeviceMemorySettings { ArenaExtend = ArenaExtendStrategy.NextPowerOfTwo, LimitBytes = 4096 };
+        Assert.Same(named, named.Resolve(ShorokooGraphOptimization.TrainingStep));
+        Assert.Same(named, named.Resolve(ShorokooGraphOptimization.EnableAll));
+
+        var budgeted = new DeviceMemorySettings { LimitBytes = 8192 };
+        Assert.Equal(
+            new DeviceMemorySettings { LimitBytes = 8192, ArenaExtend = ArenaExtendStrategy.SameAsRequested },
+            budgeted.Resolve(ShorokooGraphOptimization.TrainingStep));
     }
 
     /// <summary>
@@ -542,7 +573,10 @@ public class CoreUtilsCoverageTests
 
         // Nothing a caller does afterwards can reach that session: the settings it was built with
         // are its own, and a differently configured context builds a differently configured one.
-        Assert.Equal(DeviceMemorySettings.Default, new ComputeContext().Compile(graph).DeviceMemory);
+        // A default context resolves Auto rather than carrying it into the session.
+        Assert.Equal(
+            DeviceMemorySettings.Default.Resolve(ShorokooGraphOptimization.EnableAll),
+            new ComputeContext().Compile(graph).DeviceMemory);
 
         Assert.Throws<ArgumentNullException>(() => new ComputeContext { DeviceMemory = null! });
         Assert.Throws<ArgumentNullException>(() => new ComputeContext { RunSettings = null! });

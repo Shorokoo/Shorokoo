@@ -179,7 +179,9 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
     /// altogether, which leaves ORT at its default of the whole card.
     /// </summary>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="arenaExtend"/> is not one of
-    /// the two strategies ORT accepts, or <paramref name="limitBytes"/> is not positive.</exception>
+    /// the two strategies ORT accepts — <see cref="ArenaExtendStrategy.Auto"/> is Shorokoo's choice
+    /// between them and must be resolved first — or <paramref name="limitBytes"/> is not
+    /// positive.</exception>
     public static Dictionary<string, string> CudaProviderOptions(
         int deviceId,
         long? limitBytes,
@@ -192,8 +194,12 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
             {
                 ArenaExtendStrategy.NextPowerOfTwo => "kNextPowerOfTwo",
                 ArenaExtendStrategy.SameAsRequested => "kSameAsRequested",
+                // Auto lands here too, and should: it is Shorokoo's choice between the two and
+                // DeviceMemorySettings.Resolve settles it before a session is built, so one
+                // reaching ORT means that step was skipped rather than that ORT gained a value.
                 _ => throw new ArgumentOutOfRangeException(
-                    nameof(arenaExtend), arenaExtend, "Not an ONNX Runtime arena-extend strategy."),
+                    nameof(arenaExtend), arenaExtend,
+                    "Not an ONNX Runtime arena-extend strategy; resolve DeviceMemorySettings first."),
             },
         };
         if (limitBytes is { } limit)

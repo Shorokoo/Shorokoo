@@ -1021,27 +1021,30 @@ var more = rig.Fit(inputs, targets, numEpochs: 5, ckpt);  // continues where it 
 
 ### What a save costs
 
-Every checkpoint save returns a `SaveReport` — the bytes it committed and where its time went
-([#338](https://github.com/Shorokoo/Shorokoo/issues/338)):
+Every checkpoint save that writes a **single file** returns a `SaveReport` — the bytes it committed
+and where its time went ([#338](https://github.com/Shorokoo/Shorokoo/issues/338)):
 
 ```csharp
 var save = checkpoint.Save("run.safetensors");
 Console.WriteLine(save);
-// 201,327,183 bytes in 0.743s (258 MiB/s): write 0.281s, flush 0.459s, commit 0.003s
+// 200,000,077 bytes in 0.252s (757 MiB/s): write 0.051s, flush 0.194s, commit 0.007s
 ```
 
-`Write` is serializing the state into the staged file, `Flush` the fsync that makes it durable, and
-`Commit` the rename that publishes it plus the sweep of any staged sibling an earlier interrupted
-save left behind. The three are disjoint and add up to `Elapsed`, the wall clock of the call;
+`Write` is producing the content and writing it into the staged file — serializing the state, and
+for a `.skpt` also compressing and hashing its entries — `Flush` the fsync that makes it durable,
+and `Commit` the rename that publishes it plus the sweep of any staged sibling an earlier
+interrupted save left behind. The three are disjoint and add up to `Elapsed`, the wall clock of the call;
 `BytesWritten` is the committed file's own size, and `BytesPerSecond` the rate that save achieved.
 `Persistence.SaveTrainingCheckpoint`, `Persistence.SaveTrainingCheckpointToSkpt` and the
-`Persistence.ForTrainingCheckpoint(...)` builder's `Save` all return the same report.
+`Persistence.ForTrainingCheckpoint(...)` builder's `Save` all return the same report. The
+**directory** form (`SaveAsDirectory`) does not: it commits a tree of files rather than one, which
+is a different measurement, and it still returns `void`.
 
 Two reasons it is reported rather than left to be worked out from the file's size:
 
 - **The cost does not follow the size.** Two identical saves of one identical file differ, and the
-  phases are separated because the total alone cannot say why. At size it is the flush that both
-  dominates and moves — what it costs depends on how much of the file the OS had already written
+  phases are separated because the total alone cannot say why. For a flat save at size it is the
+  flush that both dominates and moves — what it costs depends on how much of the file the OS had already written
   back before it ran — while the serialization is steady and the commit is metadata-only. One
   200 MB file saved six times over: write steady at 51 ms, flush between 184 and 243 ms, commit at
   7 ms. The rate a save achieves is a property of that save, not a constant of the machine to
@@ -1060,9 +1063,12 @@ steady.Start();
 savedBytes += save.BytesWritten;
 ```
 
-The save writes each tensor's payload straight out of its storage, so it costs no second copy of
-the training state in memory. What it cannot yet do is go past the safetensors layer's 2 GB ceiling
-— a checkpoint at or above that size is written without complaint and then cannot be read back
+The **flat safetensors** save writes each tensor's payload straight out of its storage, so it costs
+no second copy of the training state in memory. The `.skpt` container does not share that: it
+serializes each state kind to a `byte[]`, hashes it and holds every entry in memory until the write
+begins, so budget for a full extra copy of the training state there — which is why its `Write` phase
+dominates its report. Neither form can yet go past the safetensors layer's 2 GB ceiling — a
+checkpoint at or above that size is written without complaint and then cannot be read back
 ([#48](https://github.com/Shorokoo/Shorokoo/issues/48)).
 
 ### Bind trained weights into an inference model

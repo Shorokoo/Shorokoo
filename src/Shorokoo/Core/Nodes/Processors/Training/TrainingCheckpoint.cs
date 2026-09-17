@@ -336,9 +336,9 @@ namespace Shorokoo
         /// at a checkpoint cadence it is not negligible to a run: a loop measuring its own
         /// throughput subtracts the returned <see cref="SaveReport.Elapsed"/> from the window it
         /// measures instead of reporting a step rate that silently carries the saves in it
-        /// (Shorokoo/Shorokoo#338). The cost is not proportional to the size — two identical saves
-        /// of one identical file differ by a factor of several — which is why it is reported rather
-        /// than left to be predicted from the file's size.
+        /// (Shorokoo/Shorokoo#338). The cost is not proportional to the size, and two identical saves
+        /// of one identical file differ, which is why it is reported rather than left to be predicted
+        /// from the file's size.
         /// </para>
         /// </summary>
         public SaveReport Save(string filePath, CheckpointComponents? components = null)

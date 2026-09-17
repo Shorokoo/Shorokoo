@@ -642,9 +642,15 @@ namespace Shorokoo
         {
             if (string.IsNullOrWhiteSpace(filePath))
                 throw new ArgumentException("Checkpoint path cannot be null or empty.", nameof(filePath));
-            var entries = BuildCheckpointEntries();
+            // The entries are built INSIDE the write callback, as the flat save builds its tensors
+            // (TrainingCheckpoint.Save). Building them is the bulk of a .skpt save — it binds the
+            // inference weights, serializes every state kind to safetensors bytes, compresses, and
+            // SHA-256s each entry — so building them outside would leave all of it out of the
+            // measured cost: the report would name a few milliseconds of zip framing for a call that
+            // took fifty, and a loop subtracting it would still charge the rest to its training rate,
+            // which is the very miscount #338 is about.
             return AtomicFileWriter.WriteFile(filePath,
-                stream => SkptFileFormat.WriteStoredZip(stream, entries, DateTime.UtcNow));
+                stream => SkptFileFormat.WriteStoredZip(stream, BuildCheckpointEntries(), DateTime.UtcNow));
         }
 
         /// <summary>

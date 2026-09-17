@@ -126,7 +126,6 @@ namespace Shorokoo.Onnx
             // which at checkpoint sizes is both the allocation and the collection of a duplicate of
             // the whole model (Shorokoo/Shorokoo#48, #338).
             var header = new Dictionary<string, object>();
-            var blobLengths = new int[tensors.Count];
 
             long currentOffset = 0L;
 
@@ -155,7 +154,6 @@ namespace Shorokoo.Onnx
 
                 // The tensor's storage as raw bytes — measured, not copied.
                 int blobLength = st.Data.AccessRawMemory().Length;
-                blobLengths[i] = blobLength;
 
                 long startOffset = currentOffset;
                 long endOffset = startOffset + blobLength;
@@ -190,21 +188,19 @@ namespace Shorokoo.Onnx
             stream.Write(lengthBytes, 0, lengthBytes.Length);
             stream.Write(headerBytes, 0, headerBytes.Length);
 
-            // Second pass: each tensor's payload goes from its own storage into the stream. The span
-            // is a window onto storage the tensor owns and roots nothing itself, so the tensor is
-            // kept alive across the write — a local retired at its last read would leave the write
-            // reading freed memory (Shorokoo/Shorokoo#178). Lengths are the ones the header was
-            // built from, so a tensor whose storage changed size under us cannot silently write a
-            // payload the offsets disagree with.
+            // Second pass: each tensor's payload goes from its own storage into the stream, in the
+            // order the header's offsets were accumulated. Re-reading the storage is sound because a
+            // tensor's byte length is fixed by the value it wraps and SafeTensor.Data is get-only, so
+            // the payload cannot disagree with the offsets already written.
+            //
+            // The span is a window onto storage the tensor owns and roots nothing itself, so the
+            // tensor is kept alive across the write: a local is retired at its LAST READ, which
+            // without the KeepAlive would be the call that produced the span, leaving the write
+            // reading memory a collection could already have freed (Shorokoo/Shorokoo#178).
             for (int i = 0; i < tensors.Count; i++)
             {
                 var data = tensors[i].Data;
-                var blob = data.AccessRawMemory();
-                if (blob.Length != blobLengths[i])
-                    throw new InvalidOperationException(
-                        $"SafeTensor '{tensors[i].Name}' changed size while it was being written " +
-                        $"({blobLengths[i]} bytes when the header was built, {blob.Length} now).");
-                stream.Write(blob);
+                stream.Write(data.AccessRawMemory());
                 GC.KeepAlive(data);
             }
         }

@@ -38,9 +38,11 @@ Related: [onnx-and-weights.md](onnx-and-weights.md) · [training.md](training.md
   facade write **in place** — see
   [onnx-and-weights.md](onnx-and-weights.md#facts). See also
   [training.md](training.md#save-and-resume-a-checkpoint-across-process-restarts).
-- Every training-checkpoint save **returns what it cost** — a `SaveReport` carrying the committed
-  size and the time split across writing, flushing and committing, since at checkpoint sizes that
-  cost neither follows the file's size nor stays the same between two saves of the same file. See
+- Every training-checkpoint save that writes a **single file** — the `.skpt` one included —
+  **returns what it cost**: a `SaveReport` carrying the committed size and the time split across
+  writing, flushing and committing, since at checkpoint sizes that cost neither follows the file's
+  size nor stays the same between two saves of the same file. The directory form commits a tree
+  rather than one file and still returns `void`. See
   [What a save costs](training.md#what-a-save-costs).
 - This version writes an **inference checkpoint of a concrete model** (definition +
   weights). It can also carry **additional named weight sets** over the same parameters

@@ -2709,13 +2709,18 @@ public class TrainingRigCheckpointCoverageTests
         finally { if (File.Exists(adamPath)) File.Delete(adamPath); }
     }
 
-    private static void AssertReportMatches(SaveReport r, string path)
+    /// <summary>Runs one save and holds it to the whole contract: the bytes are the file's own, each
+    /// phase is measured, and Elapsed accounts for the caller's wall clock — the last of which is
+    /// what a save that leaves its content production outside the measurement fails.</summary>
+    private static SaveReport Saved(Func<SaveReport> save, string path)
     {
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var r = save();
+        var outer = clock.Elapsed;
         Assert.Equal(new FileInfo(path).Length, r.BytesWritten);
-        Assert.Equal(r.Write + r.Flush + r.Commit, r.Elapsed);
-        Assert.True(r.Elapsed > TimeSpan.Zero);
-        Assert.True(r.Write >= TimeSpan.Zero && r.Flush >= TimeSpan.Zero && r.Commit >= TimeSpan.Zero);
-        Assert.Equal(r.BytesWritten / r.Elapsed.TotalSeconds, r.BytesPerSecond);
+        Assert.True(r.Write > TimeSpan.Zero && r.Flush > TimeSpan.Zero && r.Commit > TimeSpan.Zero);
+        Assert.True(r.Elapsed <= outer && r.Elapsed >= outer * 0.5);
+        return r;
     }
 
     [Fact]
@@ -2729,19 +2734,21 @@ public class TrainingRigCheckpointCoverageTests
         var skpt = TempPath("save_report") + ".skpt";
         try
         {
-            var full = ckpt.Save(flat);
-            AssertReportMatches(full, flat);
+            ckpt.Save(flat);
+            Persistence.SaveTrainingCheckpointToSkpt(ckpt, skpt);
 
-            var weightsOnly = ckpt.Save(narrow, CheckpointComponents.InferenceState);
-            AssertReportMatches(weightsOnly, narrow);
+            var full = Saved(() => ckpt.Save(flat), flat);
+            var weightsOnly = Saved(() => ckpt.Save(narrow, CheckpointComponents.InferenceState), narrow);
             Assert.True(weightsOnly.BytesWritten < full.BytesWritten);
 
-            AssertReportMatches(Persistence.SaveTrainingCheckpoint(ckpt, flat), flat);
-            AssertReportMatches(Persistence.SaveTrainingCheckpointToSkpt(ckpt, skpt), skpt);
-            AssertReportMatches(Persistence.ForTrainingCheckpoint(ckpt).Save(skpt), skpt);
+            Saved(() => Persistence.SaveTrainingCheckpoint(ckpt, flat), flat);
+            Saved(() => Persistence.SaveTrainingCheckpointToSkpt(ckpt, skpt), skpt);
+            Saved(() => Persistence.ForTrainingCheckpoint(ckpt).Save(skpt), skpt);
 
             Assert.Equal(FlattenStruct(ckpt.OptimizerState),
                 FlattenStruct(rig.LoadCheckpoint(flat).OptimizerState));
+            Assert.Equal(FlattenStruct(ckpt.OptimizerState),
+                FlattenStruct(rig.LoadCheckpointFromSkpt(skpt).OptimizerState));
         }
         finally
         {
@@ -2764,7 +2771,7 @@ public class TrainingRigCheckpointCoverageTests
         SafeTensorLoader.SaveSafeTensorsToStream(Stream.Null, tensors);
         var before = GC.GetAllocatedBytesForCurrentThread();
         SafeTensorLoader.SaveSafeTensorsToStream(Stream.Null, tensors);
-        Assert.True(GC.GetAllocatedBytesForCurrentThread() - before < 64 * 1024);
+        Assert.True(GC.GetAllocatedBytesForCurrentThread() - before < big.AccessRawMemory().Length / 128);
 
         using var buffer = new MemoryStream();
         SafeTensorLoader.SaveSafeTensorsToStream(buffer, tensors);

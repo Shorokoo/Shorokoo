@@ -363,8 +363,19 @@ public abstract class OrtBackend : IShorokooInferenceBackend
     public IShorokooTensorValue CreateStringTensor(IReadOnlyList<string> data, long[] shape)
     {
         var ortValue = OrtValue.CreateTensorWithEmptyStrings(OrtAllocator.DefaultInstance, shape);
-        for (int i = 0; i < data.Count; i++)
-            ortValue.StringTensorSetElementAt(data[i].AsSpan(), i);
+        try
+        {
+            for (int i = 0; i < data.Count; i++)
+                ortValue.StringTensorSetElementAt(data[i].AsSpan(), i);
+        }
+        catch
+        {
+            // A null element, or more elements than the shape covers, throws part-way through --
+            // and nothing references the value yet, so it would sit on the finalizer queue. Every
+            // sibling on this path already brackets its fill this way.
+            ortValue.Dispose();
+            throw;
+        }
         return new OrtTensorValue(ortValue);
     }
 
@@ -379,9 +390,13 @@ public abstract class OrtBackend : IShorokooInferenceBackend
     public IShorokooTensorValue CreateSequence(IReadOnlyList<IShorokooTensorValue> values)
     {
         var inner = new List<OrtValue>(values.Count);
-        foreach (var v in values) inner.Add(((OrtTensorValue)v).Inner);
         try
         {
+            // Inside the try, not before it: this method documents itself as taking ownership, so
+            // an element that is not this backend's value -- one from another runtime, or a foreign
+            // implementation -- throws on the cast with the earlier elements already unwrapped and
+            // the caller already committed to having given them up.
+            foreach (var v in values) inner.Add(((OrtTensorValue)v).Inner);
             return new OrtTensorValue(OrtValue.CreateSequence(inner));
         }
         catch

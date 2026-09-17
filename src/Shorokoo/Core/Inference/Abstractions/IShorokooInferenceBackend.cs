@@ -17,7 +17,13 @@ public interface IShorokooInferenceBackend
     MemorySpace MemorySpace => Description.Device switch
     {
         ComputeDevice.Cuda => MemorySpace.Cuda(Description.CudaDeviceId ?? 0),
-        _ => MemorySpace.Host,
+        ComputeDevice.Cpu => MemorySpace.Host,
+        // A backend on some other execution provider -- DirectML, ROCm, CoreML -- allocates
+        // somewhere this has no name for, and saying "host" would be a guess with teeth: a device
+        // value would report IsHost, so the transfer code would share it with any context at all
+        // and the accessors would dereference a device address as a host one. Unknown is refused
+        // cleanly instead, which is the honest answer until such a backend names its own space.
+        _ => MemorySpace.UnknownDevice,
     };
 
     // deviceMemory configures the arena this one session allocates in. It is a parameter, not

@@ -38,9 +38,17 @@ public class SideBySideBackendHardwareTests
             (Windows ? "Shorokoo.WinGPU" : "Shorokoo.LinuxGPU") + ".dll",
         ];
         var missing = required.Where(f => !File.Exists(Path.Combine(CudaBackendDirectory, f))).ToList();
-        return missing.Count == 0 ? null
-            : $"The CUDA backend is not deployed: {string.Join(", ", missing)} missing from "
-              + $"'{CudaBackendDirectory}'. Rebuild with -p:ShorokooDeployGpuBackend=true.";
+        if (missing.Count > 0)
+            return $"The CUDA backend is not deployed: {string.Join(", ", missing)} missing from "
+                + $"'{CudaBackendDirectory}'. Rebuild with -p:ShorokooDeployGpuBackend=true.";
+
+        // The deployment is only half of what these need. Without this, a machine with the files
+        // and no card ran every test here and failed inside ORT's session creation instead of
+        // skipping -- which says nothing about the product and reads like a real regression.
+        return DeviceMemory.Read() is null
+            ? "No CUDA device answers on this machine, so the card half of the CPU-and-CUDA pairing "
+              + "cannot run. The deployment is in place; run this on a CUDA machine."
+            : null;
     }
 
     private static IShorokooInferenceBackend LoadCuda() => IsolatedBackend.Load(

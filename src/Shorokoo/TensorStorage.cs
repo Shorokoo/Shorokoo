@@ -43,17 +43,34 @@ namespace Shorokoo
         /// </summary>
         internal Shorokoo.Runtime.ComputeContext? Owner { get; private set; }
 
+        /// <summary>
+        /// The one lock every change of ownership is made under, and that a context's disposal
+        /// takes around its release loop.
+        ///
+        /// <para>It has to be shared rather than per-context, because a hand-off touches two
+        /// books and the danger is in the gap between them. Taken first and each context's own
+        /// disposal gate second, always, so the two orders cannot invert.</para>
+        ///
+        /// <para>Without it the hand-off was two unsynchronised steps: a disposal of the old owner
+        /// landing between them found the storage still on its books, released bytes the new owner
+        /// had already accepted, and left a live context holding freed memory.</para>
+        /// </summary>
+        internal static object OwnershipGate { get; } = new();
+
         /// <summary>Moves responsibility for these bytes to <paramref name="context"/>, off
         /// whoever had it. Exactly one context is on the hook at a time.</summary>
         internal void TransferOwnershipTo(Shorokoo.Runtime.ComputeContext? context)
         {
-            if (ReferenceEquals(Owner, context)) return;
-            // The new owner first: TakeOwnership refuses a disposed context, and a hand-off that
-            // fails after the old owner has let go would leave these bytes on nobody's books --
-            // freed by neither context, which is the leak disposal exists to prevent.
-            context?.TakeOwnership(this);
-            Owner?.ReleaseOwnership(this);
-            Owner = context;
+            lock (OwnershipGate)
+            {
+                if (ReferenceEquals(Owner, context)) return;
+                // The new owner first: TakeOwnership refuses a disposed context, and a hand-off
+                // that fails after the old owner has let go would leave these bytes on nobody's
+                // books -- freed by neither context, which is the leak disposal exists to prevent.
+                context?.TakeOwnership(this);
+                Owner?.ReleaseOwnership(this);
+                Owner = context;
+            }
         }
 
         /// <summary>False once the owner has released these bytes. Reading them afterwards is a

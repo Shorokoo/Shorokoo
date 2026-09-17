@@ -195,11 +195,13 @@ rest of it.
 
 A `TensorData` belongs to a compute context and says whether it owns its bytes, and
 `TransferTo` / `CopyTo` / `GiveAccessTo` move it between contexts; see
-[Moving data between contexts](inference.md#moving-data-between-contexts). Within one memory space
-nothing is copied — two CUDA contexts on one device share the allocation, and so do any two host
-contexts — but crossing from the host to a device or back is a real copy, once per crossing. There
-is no way to have a tensor be in two spaces at once, and there is no direct device-to-device path:
-a tensor moving between two different cards goes through the host.
+[Moving data between contexts](inference.md#moving-data-between-contexts). Any two host contexts
+share host bytes without copying. Two CUDA contexts on one device share the allocation only when
+they share a native ONNX Runtime — a device allocation means nothing to a runtime that did not make
+it, so two *isolated* backends over one card copy through the host like any other crossing. Crossing
+from the host to a device or back is a real copy, once per crossing. There is no way to have a
+tensor be in two spaces at once, and there is no direct device-to-device path: a tensor moving
+between two different cards goes through the host.
 
 A tensor that came back from a session without the context that produced it being recorded reports
 its space as unknown, and cannot be transferred at all — there is no telling whether another
@@ -222,6 +224,21 @@ Nothing detects a violation. The release is explicit rather than a collection, s
 discipline on this side can see that a native call is in flight, and the failure is a read of freed
 memory rather than an exception. Making it enforceable rather than stated needs the runtime values
 reference-counted for the length of a run — [#366](https://github.com/Shorokoo/Shorokoo/issues/366).
+
+### A tensor moved onto a card is not covered by any device-memory budget
+
+`ComputeContext.DeviceMemory` bounds the arenas of the sessions that context compiles. It does not
+bound `TransferTo` / `CopyTo` onto that context: placing a tensor in device memory allocates out of
+a separate, process-wide allocator held per CUDA device, built with the defaults and no limit.
+
+So a context configured with `LimitBytes` can still put an arbitrarily large tensor on the card, and
+`CompiledGraph.DeviceMemory` reports a budget that does not describe that context's whole device
+footprint. Counting live sessions against a card — which `DeviceMemorySettings.LimitBytes` advises —
+cannot account for this allocator, since it is not a session the program compiled.
+
+[#367](https://github.com/Shorokoo/Shorokoo/issues/367) tracks bringing it under a budget, which
+needs an allocator per (device, settings) and a rule for which context's budget governs a tensor
+more than one has touched.
 
 ### Device-memory readings are the device's, and device 0's
 

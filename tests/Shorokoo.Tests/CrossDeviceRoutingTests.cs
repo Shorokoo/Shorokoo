@@ -31,6 +31,72 @@ public class CrossDeviceRoutingCoverageTests
     }
 
     [Fact]
+    public void TestATensorOnOneCardReachesAnotherOnlyByGoingThroughTheHost()
+    {
+        // The case the class is named for, and the one every other test here skips: the source is
+        // already on a card. Starting on the host makes CopyAcross the route for the trivial
+        // reason that the source is host-resident, so a regression that re-wrapped between two
+        // CUDA device ids -- or that dropped DeviceId from the space comparison -- passed.
+        var firstCard = new StubFactory(ComputeDevice.Cuda, 0);
+        var secondCard = new StubFactory(ComputeDevice.Cuda, 1);
+        using var one = new ComputeContext(firstCard);
+        using var two = new ComputeContext(secondCard);
+
+        var onFirst = TensorData([2L], (float[])[3f, 4f]).TransferTo(one);
+        Assert.Equal(MemorySpace.Cuda(0), onFirst.Space);
+        Assert.False(onFirst.IsHostResident);
+
+        var onSecond = onFirst.TransferTo(two);
+
+        // Through the host: the owning backend was asked for the bytes, and the target was asked
+        // to build from them. Neither happens on a re-wrap.
+        Assert.Equal(1, firstCard.HostCopies);
+        Assert.Equal(1, secondCard.BackendMemoryBuilds);
+        Assert.Equal(MemorySpace.Cuda(1), onSecond.Space);
+        Assert.True(onSecond.OwnsMemory);
+        Assert.True(onFirst.IsDisposed);
+    }
+
+    [Fact]
+    public void TestTwoContextsOnOneCardShareItsAllocationOnlyWhenTheyShareABackend()
+    {
+        // Same space is necessary and, off the host, not sufficient: an allocation means nothing
+        // to a runtime that did not make it. Same backend shares; two backends reporting the same
+        // card copy through the host.
+        var backend = new StubFactory(ComputeDevice.Cuda, 0);
+        using var one = new ComputeContext(backend);
+        using var alsoOne = new ComputeContext(backend);
+        using var otherRuntime = new ComputeContext(new StubFactory(ComputeDevice.Cuda, 0));
+
+        var onCard = TensorData([2L], (float[])[5f, 6f]).TransferTo(one);
+        var shared = onCard.GiveAccessTo(alsoOne);
+        Assert.False(shared.OwnsMemory);
+        Assert.Equal(0, backend.HostCopies);
+
+        // The same request across runtimes cannot be served without allocating, which is what
+        // GiveAccessTo promises not to do.
+        Assert.Throws<InvalidOperationException>(() => onCard.GiveAccessTo(otherRuntime));
+    }
+
+    [Fact]
+    public void TestAnUnknownMemorySpaceRefusesEveryTransfer()
+    {
+        // A backend on some other execution provider reports a space nothing can name. Two such
+        // tensors compare equal as spaces without being in the same place, so every operation is
+        // refused rather than guessed at.
+        var other = new StubFactory(ComputeDevice.Other, null);
+        Assert.Equal(MemoryKind.Unknown, ((IShorokooInferenceBackend)other).MemorySpace.Kind);
+
+        using var context = new ComputeContext(other);
+        var onUnknown = TensorData([2L], (float[])[1f, 2f]).TransferTo(context);
+        Assert.Equal(MemoryKind.Unknown, onUnknown.Space.Kind);
+
+        Assert.Throws<InvalidOperationException>(() => onUnknown.TransferTo(null));
+        Assert.Throws<InvalidOperationException>(() => onUnknown.CopyTo(null));
+        Assert.Throws<InvalidOperationException>(() => onUnknown.GiveAccessTo(context));
+    }
+
+    [Fact]
     public void TestATransferToAnotherCardGoesThroughHostBytes()
     {
         var target = new StubFactory(ComputeDevice.Cuda, 1);
@@ -101,12 +167,20 @@ public class CrossDeviceRoutingCoverageTests
             ShorokooTensorElementType elementType, byte[] data, long[] shape)
         {
             BackendMemoryBuilds++;
-            return new StubValue(elementType, data, shape, hostAccessible: device != ComputeDevice.Cuda);
+            return new StubValue(elementType, data, shape, hostAccessible: device == ComputeDevice.Cpu);
         }
+
+        public int HostCopies { get; private set; }
 
         public IShorokooTensorValue CreateTensorFromRawBytes(
             ShorokooTensorElementType elementType, byte[] data, long[] shape)
             => throw new NotSupportedException();
+
+        public byte[] CopyTensorToHost(IShorokooTensorValue value)
+        {
+            HostCopies++;
+            return ((StubValue)value).Bytes;
+        }
 
         public IShorokooInferenceSession CreateSession(
             ReadOnlyMemory<byte> modelBytes, ShorokooGraphOptimization graphOptimization,
@@ -129,6 +203,8 @@ public class CrossDeviceRoutingCoverageTests
         ShorokooTensorElementType elementType, byte[] data, long[] shape, bool hostAccessible)
         : IShorokooTensorValue
     {
+        internal byte[] Bytes => data;
+
         public bool IsHostAccessible => hostAccessible;
 
         public ShorokooOnnxValueType ValueType => ShorokooOnnxValueType.Tensor;

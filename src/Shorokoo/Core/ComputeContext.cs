@@ -161,6 +161,12 @@ namespace Shorokoo.Runtime
         private NamedModelParam[] Run(
             NamedModelParam[] inputs, IReadOnlySet<string>? retainedOutputNames, RunSettings runSettings)
         {
+            // Before the work, not after it. The outputs are handed to the owning context as they
+            // are wrapped, so a disposed one threw from inside the wrap of output 0 -- with the
+            // native run already paid for, on a card a whole step's allocation, and outputs 1..n
+            // never wrapped and so left to their finalizers. The exception also named the context
+            // rather than the graph the caller had actually invoked.
+            ObjectDisposedException.ThrowIf(_owner.IsDisposed, this);
             ArgumentNullException.ThrowIfNull(runSettings);
             var sessionInputs = new Dictionary<string, IShorokooTensorValue>();
             foreach (var input in inputs)
@@ -250,7 +256,8 @@ namespace Shorokoo.Runtime
     /// </summary>
     public class ComputeContext : IDisposable
     {
-        private static ComputeContext? _defaultComputeContext;
+        private static volatile ComputeContext? _defaultComputeContext;
+        private static readonly object _defaultGate = new();
 
         // Null means the default backend, read when the work runs rather than at construction: a
         // context built before InferenceBackend.Default was assigned must still honour it.
@@ -311,7 +318,14 @@ namespace Shorokoo.Runtime
                 // disposable, so `using var ctx = ComputeContext.Default;` would otherwise poison
                 // the process: every later read returns the same dead object and every run through
                 // it throws, with no way back short of assigning the setter.
-                if (_defaultComputeContext is { IsDisposed: false }) return _defaultComputeContext;
+                // Under a lock, and the field is volatile: the getter now resolves a backend and
+                // constructs a context, so two threads racing it each handed their caller a
+                // different default. Harmless while both detach, but it is process-wide lazily
+                // initialized state in a suite that runs four tests at once.
+                if (_defaultComputeContext is { IsDisposed: false } live) return live;
+                lock (_defaultGate)
+                {
+                    if (_defaultComputeContext is { IsDisposed: false } bound) return bound;
 
                 // The backend a process loaded, under the rule that a CPU one wins: the unnamed
                 // default should not be the card. Reading InferenceBackend.Default is what
@@ -322,10 +336,11 @@ namespace Shorokoo.Runtime
                 // Its outputs leave it. The default context is the one nobody named and nobody
                 // disposes, so a result that belonged to it would be tied to a lifetime the caller
                 // never sees; detached, a result is the caller's and outlives everything here.
-                return _defaultComputeContext = new ComputeContext(backend, detachesOutputs: true);
+                    return _defaultComputeContext = new ComputeContext(backend, detachesOutputs: true);
+                }
             }
 
-            set { _defaultComputeContext = value; }
+            set { lock (_defaultGate) _defaultComputeContext = value; }
         }
 
         /// <summary>Creates a compute context that runs on the process-wide
@@ -436,7 +451,9 @@ namespace Shorokoo.Runtime
         // pass the check and run the release loop, or a storage could be enrolled just after the
         // loop had passed it, ending up on nobody's books and never released.
         private readonly object _disposalGate = new();
-        private bool _disposed;
+        // Volatile: read by IsDisposed from threads that never took _disposalGate -- the Default
+        // getter's liveness check among them.
+        private volatile bool _disposed;
 
         /// <summary>Whether this context has been disposed, and so has released what it owned.</summary>
         public bool IsDisposed => _disposed;
@@ -451,11 +468,14 @@ namespace Shorokoo.Runtime
             }
         }
 
-        /// <summary>Takes a storage off this context's books, because something else owns it now.</summary>
+        /// <summary>Takes a storage off this context's books, because something else owns it now.
+        /// Called only from <see cref="TensorStorage.TransferOwnershipTo"/>, under
+        /// <see cref="TensorStorage.OwnershipGate"/>, which is what keeps it from racing a
+        /// disposal.</summary>
         internal void ReleaseOwnership(TensorStorage storage) => _ownedStorage.Remove(storage);
 
         /// <summary>
-        /// Releases everything this context still owns, and the backend with it.
+        /// Releases everything this context still owns. The backend is left alone.
         ///
         /// <para>Every tensor whose bytes were on this context's books is invalidated: reading one
         /// afterwards throws rather than reading freed memory, whether or not that tensor was
@@ -468,6 +488,11 @@ namespace Shorokoo.Runtime
         /// </summary>
         public void Dispose()
         {
+            // The ownership gate first, and the same one every hand-off takes: a transfer that had
+            // enrolled a storage with its new owner but not yet taken it off this context's books
+            // would otherwise be found here and released, out from under a context that is alive
+            // and now holds freed bytes. Outermost, so the two locks are always taken in one order.
+            lock (TensorStorage.OwnershipGate)
             lock (_disposalGate)
             {
                 if (_disposed) return;
@@ -497,6 +522,12 @@ namespace Shorokoo.Runtime
             {
                 if (outputs[i] is TensorDataSequenceModelParam sequenceParam)
                 {
+                    // Retention first, as for a tensor below. The caller passes one flag per
+                    // output with no restriction on its value type, so a sequence can be named in
+                    // retainOnDevice -- and copying it home anyway honoured the flag for one kind
+                    // of output and silently ignored it for the other.
+                    if (retainedOutputNames?.Contains(sequenceParam.ParamName) == true) continue;
+
                     // Detached by being moved, not by forgetting this context. Simply clearing the
                     // context strands an element the provider kept on the card: the indexer then
                     // wraps it with no context, which records an unknown space, and an unknown
@@ -516,6 +547,8 @@ namespace Shorokoo.Runtime
                     {
                         // Elements the execution provider kept cannot be copied to the host from
                         // here. Bound to this context is worse than detached and better than lost.
+                        // What the failed copy built is released by the rebuild itself, so there
+                        // is nothing to undo here -- see TensorDataSequence's rebuild.
                     }
                     continue;
                 }
@@ -557,8 +590,11 @@ namespace Shorokoo.Runtime
         /// </summary>
         public BackendDescription Backend => ResolvedBackend.Description;
 
-        /// <summary>Where this context's tensors live. Two contexts reporting the same space can
-        /// pass a tensor between them without copying it.</summary>
+        /// <summary>Where this context's tensors live. The same space is necessary for passing a
+        /// tensor between two contexts without copying it, and sufficient only on the host: a
+        /// device allocation means nothing to a runtime that did not make it, so two contexts on
+        /// one card share it when they share a backend's runtime and copy through the host when
+        /// they do not.</summary>
         public MemorySpace MemorySpace => ResolvedBackend.MemorySpace;
 
         /// <summary>
@@ -709,9 +745,27 @@ namespace Shorokoo.Runtime
         {
             var graph = new InternalComputationGraph([], [.. outputs]);
             graph.RequireRunnableOps("ComputeContext.Eval");
-            var results = this.Execute(graph).Select(x => x.ToTensorData()).ToArray();
+            var results = this.Execute(graph).Select(x => Detached(x.ToTensorData())).ToArray();
 
             return results;
+        }
+
+        /// <summary>
+        /// <paramref name="result"/> belonging to nobody, so it outlives every context and can go
+        /// straight back into a graph as a literal.
+        ///
+        /// <para>Eval is the eager-evaluation API: its answer is a value for the caller to use, and
+        /// the first thing callers do with one is build it into the next graph — which an operator
+        /// attribute refuses of a tensor bound to a context. A context that detaches its outputs
+        /// already hands one back this way, so without this the same call on the same graph
+        /// produced a usable result or an unusable one depending on which context ran it.</para>
+        /// </summary>
+        private static TensorData Detached(TensorData result)
+        {
+            if (result.Context is null) return result;
+            var free = result.TransferTo(null);
+            result.Dispose();
+            return free;
         }
 
         /// <summary>Params convenience over <see cref="Eval(Variable[])"/> for two or more outputs.</summary>

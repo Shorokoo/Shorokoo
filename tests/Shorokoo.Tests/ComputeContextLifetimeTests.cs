@@ -158,15 +158,22 @@ public class ComputeContextLifetimeCoverageTests
 
         try
         {
+            var backendReads = 0;
             var reads = ComputeContext.CountDefaultReads(() =>
-            {
-                var concrete = module
-                    .ToConcreteArchitecture(module.FromOrderedInputs([sample]))
-                    .ToConcreteModel();
-                Persistence.ExportOnnx(concrete, onnx);
-            });
+                backendReads = InferenceBackend.CountDefaultReads(() =>
+                {
+                    var concrete = module
+                        .ToConcreteArchitecture(module.FromOrderedInputs([sample]))
+                        .ToConcreteModel();
+                    Persistence.ExportOnnx(concrete, onnx);
+                }));
 
             Assert.Equal(0, reads);
+            // Both seams, because they are two independent ways to a backend: a graph pass reaches
+            // InferenceBackend.Default without going through any compute context -- every
+            // OnnxUtils.CreateTensorValue does -- so counting only the context's reads would let a
+            // regression that rebuilt a literal on the default backend through at zero.
+            Assert.Equal(0, backendReads);
             Assert.True(new FileInfo(onnx).Length > 0);
         }
         finally

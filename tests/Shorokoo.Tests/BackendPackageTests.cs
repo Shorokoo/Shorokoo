@@ -62,11 +62,7 @@ public class BackendPackageCoverageTests
     [Fact]
     public void TestABackendForTheOtherOperatingSystemIsRefusedWithAReason()
     {
-        var foreign = Path.Combine(
-            AppContext.BaseDirectory, "..", "..", "..", "..", "..",
-            "src", "Backend", "OnnxRuntime", ForeignBackendName, "bin", "Release", "net10.0",
-            ForeignBackendName + ".dll");
-        foreign = Path.GetFullPath(foreign);
+        var foreign = ForeignBackendAssembly();
         Assert.True(File.Exists(foreign));
 
         var probe = BackendPackage.Probe(foreign);
@@ -278,4 +274,35 @@ public class BackendPackageCoverageTests
             Directory.Delete(root, recursive: true);
         }
     }
+
+    /// <summary>
+    /// The other operating system's backend assembly, wherever this build put it.
+    ///
+    /// <para>It is not this test project's output — the foreign backend is referenced only on its
+    /// own platform — so it has to be found in the backend project's own bin. Searching both
+    /// configurations rather than hard-coding Release matters: the repo sets no default, so
+    /// `dotnet build` followed by the documented `dotnet test` is a Debug tree, and a hard-coded
+    /// Release path turned that into a red suite that said nothing about the product.</para>
+    /// </summary>
+    private static string ForeignBackendAssembly()
+    {
+        var backendBin = Path.GetFullPath(Path.Combine(
+            AppContext.BaseDirectory, "..", "..", "..", "..", "..",
+            "src", "Backend", "OnnxRuntime", ForeignBackendName, "bin"));
+        var candidates = Directory.Exists(backendBin)
+            ? Directory.GetFiles(backendBin, ForeignBackendName + ".dll", SearchOption.AllDirectories)
+            : [];
+        // This build's configuration first, so a stale tree from the other one is never preferred.
+        var thisConfiguration = candidates.FirstOrDefault(
+            p => p.Contains(Path.DirectorySeparatorChar + Configuration + Path.DirectorySeparatorChar,
+                StringComparison.OrdinalIgnoreCase));
+        return thisConfiguration ?? candidates.FirstOrDefault() ?? Path.Combine(backendBin, "missing.dll");
+    }
+
+    /// <summary>The configuration this test assembly was built in, read off its own location.</summary>
+    private static string Configuration =>
+        AppContext.BaseDirectory.Contains(
+            Path.DirectorySeparatorChar + "Debug" + Path.DirectorySeparatorChar,
+            StringComparison.OrdinalIgnoreCase) ? "Debug" : "Release";
+
 }

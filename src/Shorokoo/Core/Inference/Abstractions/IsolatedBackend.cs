@@ -125,9 +125,13 @@ public static class IsolatedBackend
 
         // Keyed on the resolved paths rather than on the spec as written, so that two spellings
         // of one file -- a relative path and an absolute one -- are one backend rather than two
-        // wrappers over the same native.
+        // wrappers over the same native. Name is cleared out of the key for the same reason: it is
+        // a label for logs, not part of what is loaded, and leaving it in meant two names over one
+        // file silently built two load contexts, two private copies of the ONNX Runtime wrapper and
+        // two OrtCreateEnv calls against a single dlopen'd runtime.
         var key = spec with
         {
+            Name = "",
             NativeRuntimePath = Path.GetFullPath(spec.NativeRuntimePath),
             ProbeDirectory = spec.ProbeDirectory is { Length: > 0 } dir ? Path.GetFullPath(dir) : null,
         };
@@ -136,15 +140,30 @@ public static class IsolatedBackend
         // native library for the life of the process. GetOrAdd may run its value factory more than
         // once under contention, and a second load of the same spec is exactly the waste this
         // cache exists to prevent.
-        if (_loaded.TryGetValue(key, out var cached)) return cached;
+        if (_loaded.TryGetValue(key, out var cached)) return Named(cached, spec);
         lock (_loaded)
         {
-            if (_loaded.TryGetValue(key, out cached)) return cached;
-            var loaded = LoadUncached(key);
+            if (_loaded.TryGetValue(key, out cached)) return Named(cached, spec);
+            var loaded = LoadUncached(key with { Name = spec.Name });
             _loaded[key] = loaded;
             return loaded;
         }
     }
+
+    /// <summary>
+    /// The already-loaded backend, refusing a second name for it. Two names would be two backends
+    /// to every caller — a context reports one, a log records one — while being one runtime, so the
+    /// distinction they are asking for does not exist. Saying so beats handing back a backend whose
+    /// name is not the one that was asked for.
+    /// </summary>
+    private static IShorokooInferenceBackend Named(
+        IShorokooInferenceBackend loaded, IsolatedBackendSpec spec)
+        => loaded.Description.Name == spec.Name ? loaded
+            : throw new InvalidOperationException(
+                $"The native ONNX Runtime at '{Path.GetFullPath(spec.NativeRuntimePath)}' is already "
+                + $"loaded as the backend '{loaded.Description.Name}', so it cannot also be loaded "
+                + $"as '{spec.Name}'. One file is one runtime; give the second backend a native of "
+                + "its own, or use the name it already has.");
 
     private static void Require(string value, string field)
     {

@@ -245,10 +245,35 @@ public class SideBySideBackendCoverageTests
     /// what reaches the session has to be what the wrapped runtime would have produced, or the
     /// recording says nothing about which runtime that was.
     /// </summary>
+    /// <summary>A value that reports device residency, and optionally a type that is neither a
+    /// tensor nor a sequence — the two things BackendTransfer refuses.</summary>
+    private sealed class UnreadableValue : IShorokooTensorValue
+    {
+        internal bool Map { get; init; }
+
+        public bool IsHostAccessible => false;
+        public ShorokooOnnxValueType ValueType =>
+            Map ? ShorokooOnnxValueType.Map : ShorokooOnnxValueType.Tensor;
+        public ShorokooTensorElementType ElementType => ShorokooTensorElementType.Float;
+        public long[] Shape => [2L];
+
+        public ReadOnlySpan<T> GetTensorDataAsSpan<T>() where T : unmanaged
+            => throw new NotSupportedException();
+        public Span<T> GetTensorMutableDataAsSpan<T>() where T : unmanaged
+            => throw new NotSupportedException();
+        public IReadOnlyList<string> GetStringTensorData() => throw new NotSupportedException();
+        public int GetValueCount() => throw new NotSupportedException();
+        public IShorokooTensorValue GetValue(int index) => throw new NotSupportedException();
+        public ShorokooTensorElementType GetSequenceElementType() => throw new NotSupportedException();
+        public void Dispose() { }
+    }
+
     private sealed class RecordingBackend(IShorokooInferenceBackend inner)
         : IShorokooInferenceBackend
     {
         internal List<IShorokooTensorValue> Fed { get; } = [];
+
+        internal List<ShorokooGraphOptimization> Sessions { get; } = [];
 
         public BackendDescription Description => inner.Description;
 
@@ -257,8 +282,11 @@ public class SideBySideBackendCoverageTests
         public IShorokooInferenceSession CreateSession(
             ReadOnlyMemory<byte> modelBytes, ShorokooGraphOptimization graphOptimization,
             ShorokooLogSeverity logSeverity, DeviceMemorySettings deviceMemory)
-            => new RecordingSession(
+        {
+            Sessions.Add(graphOptimization);
+            return new RecordingSession(
                 inner.CreateSession(modelBytes, graphOptimization, logSeverity, deviceMemory), Fed);
+        }
 
         public IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged
             => inner.CreateTensor(data, shape);
@@ -356,6 +384,17 @@ public class SideBySideBackendCoverageTests
 
         Assert.Throws<ArgumentNullException>(() => BackendTransfer.CopyTo(target, null!));
         Assert.Throws<ArgumentNullException>(() => BackendTransfer.CopyTo(null!, tensor));
+
+        // A value the execution provider kept cannot cross: rebuilding it reads the source, and
+        // there is no path from one runtime's device allocation to another's. This is the refusal
+        // inference.md promises users, and the message has to name the way home.
+        var refused = Assert.Throws<InvalidOperationException>(
+            () => BackendTransfer.CopyTo(target, new UnreadableValue()));
+        Assert.Contains("StepToCheckpoint", refused.Message);
+
+        // And a value that is neither a tensor nor a sequence has no contents to rebuild at all.
+        Assert.Throws<InvalidOperationException>(
+            () => BackendTransfer.CopyTo(target, new UnreadableValue { Map = true }));
     }
 
     [Fact]
@@ -387,8 +426,13 @@ public class SideBySideBackendCoverageTests
     [Fact]
     public void TestARigMergesOnOneBackendAndTrainsOnAnother()
     {
-        using var merge = new ComputeContext();
-        using var runtime = new ComputeContext(Alt.Value);
+        // Recording backends, because the claim is about WHERE each phase ran. Asserting that the
+        // rig kept the two contexts and that the loss fell says nothing about it: a rig that used
+        // RuntimeContext for the merge as well, or ignored MergeContext entirely, passes both.
+        var mergeBackend = new RecordingBackend(InferenceBackend.Default);
+        var runtimeBackend = new RecordingBackend(Alt.Value);
+        using var merge = new ComputeContext(mergeBackend);
+        using var runtime = new ComputeContext(runtimeBackend);
         var rig = TrainingRig.FromScratch(
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
             [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([4L], [1f, 2f, 3f, 4f]))],
@@ -406,6 +450,10 @@ public class SideBySideBackendCoverageTests
             first, TrainingRigHelpers.InBatch(1f, 2f, 3f, 4f), TrainingRigHelpers.TargetBatch(2f, 4f, 6f, 8f));
 
         Assert.True(second.Loss < first.Loss);
+
+        // Each phase built sessions on its own backend, and neither built any on the other's.
+        Assert.NotEmpty(mergeBackend.Sessions);
+        Assert.NotEmpty(runtimeBackend.Sessions);
     }
 }
 

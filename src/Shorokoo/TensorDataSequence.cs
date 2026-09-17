@@ -347,22 +347,44 @@ namespace Shorokoo
         {
             ThrowIfDisposed();
             List<TensorData> moved = new(Count);
-            foreach (var element in this)
+            TensorData? minted = null;
+            try
             {
-                var rebuiltElement = !ownedOnly || element.OwnsMemory
-                    ? operation(element, target)
-                    : element;
-                moved.Add(rebuiltElement);
-                // A sequence whose elements are copied out per read hands this loop a tensor
-                // nobody else will ever see again, so releasing it here is the only chance --
-                // otherwise every rebuild of a session's sequence output leaves one runtime
-                // value, a device allocation on a card, to its context's disposal, and the
-                // default context is never disposed. Not where the rebuilt element borrowed
-                // this one's storage rather than taking it: releasing it would take the
-                // borrower's bytes with it.
-                if (MintsElementsPerRead && !ReferenceEquals(rebuiltElement, element)
-                    && rebuiltElement.OwnsMemory)
-                    element.Dispose();
+                foreach (var element in this)
+                {
+                    // Held so the cleanup below can release it: a sequence that mints its elements
+                    // per read hands this loop a tensor nobody else will ever see, and an operation
+                    // that throws on it would otherwise leave that one to a finalizer too.
+                    minted = MintsElementsPerRead ? element : null;
+                    var rebuiltElement = !ownedOnly || element.OwnsMemory
+                        ? operation(element, target)
+                        : element;
+                    minted = null;
+                    moved.Add(rebuiltElement);
+                    // A sequence whose elements are copied out per read hands this loop a tensor
+                    // nobody else will ever see again, so releasing it here is the only chance --
+                    // otherwise every rebuild of a session's sequence output leaves one runtime
+                    // value, a device allocation on a card, to its context's disposal, and the
+                    // default context is never disposed. Not where the rebuilt element borrowed
+                    // this one's storage rather than taking it: releasing it would take the
+                    // borrower's bytes with it.
+                    if (MintsElementsPerRead && !ReferenceEquals(rebuiltElement, element)
+                        && rebuiltElement.OwnsMemory)
+                        element.Dispose();
+                }
+            }
+            catch
+            {
+                // What this loop built belongs to nobody: the sequence that would have owned it is
+                // never constructed, so without this each rebuilt element is a runtime value -- a
+                // device allocation on a card -- left to its finalizer. The elements it did not
+                // reach are untouched, and the ones it moved keep whatever the operation did to
+                // them: a transfer that fails part-way leaves the source straddling two contexts,
+                // which is a real loose end and not one a cleanup here can tie.
+                minted?.Dispose();
+                foreach (var element in moved)
+                    if (element.OwnsMemory) element.Dispose();
+                throw;
             }
             var rebuilt = OfElements(moved, DType);
             rebuilt.Context = target;

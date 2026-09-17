@@ -18,11 +18,16 @@
     <PackageReference Include="Microsoft.ML.OnnxRuntime.Managed" Version="1.26.0" />
   </ItemGroup>
 
-  <!-- build/<PackageId>.targets is imported into consuming projects automatically. It defines
-       nothing unless a project declares ShorokooBackendNatives items, which is how a build asks
-       for more than one native ONNX Runtime deployed side by side. -->
+  <!-- NuGet auto-imports build/<PackageId>.targets for a DIRECT PackageReference and
+       buildTransitive/<PackageId>.targets for one that arrives through another package. Nobody
+       references this package directly: it reaches a user through Shorokoo.LinuxCPU / LinuxGPU /
+       WinCPU / WinGPU, so build/ alone never reached anyone, and a project declaring
+       ShorokooBackendNatives items got no target to read them, an empty ort/ folder, and a
+       FileNotFoundException at runtime with nothing said at build time. Packed to both, because
+       either route is legitimate. It defines nothing unless a project declares those items. -->
   <ItemGroup>
-    <None Include="build\Shorokoo.OnnxRuntime.targets" Pack="true" PackagePath="build\" />
+    <None Include="build\Shorokoo.OnnxRuntime.targets" Pack="true"
+          PackagePath="build/Shorokoo.OnnxRuntime.targets;buildTransitive/Shorokoo.OnnxRuntime.targets" />
   </ItemGroup>
 
   <ItemGroup>

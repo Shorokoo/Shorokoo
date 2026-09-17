@@ -47,6 +47,7 @@ namespace Shorokoo
             if (to == Space && CanShareWith(target))
             {
                 RefuseUnownedNullContext(target, wouldOwn: OwnsMemory, operation: nameof(TransferTo));
+                RefuseDisposedTarget(target, nameof(TransferTo));
                 // The bytes stay exactly where they are; only the names on them change.
                 var moved = CloneSharing(target, OwnsMemory);
                 SurrenderOwnership(target);
@@ -102,7 +103,28 @@ namespace Shorokoo
                     + "takes ownership; use CopyTo, which does.");
 
             RefuseUnownedNullContext(target, wouldOwn: false, operation: nameof(GiveAccessTo));
+            RefuseDisposedTarget(target, nameof(GiveAccessTo));
             return CloneSharing(target, ownsMemory: false);
+        }
+
+        /// <summary>
+        /// Refuses a target that has been disposed.
+        ///
+        /// <para>Taking ownership already refuses one — <c>ComputeContext.TakeOwnership</c> does
+        /// it — but the two non-owning results reach no such path, so they were handed back bound
+        /// to a context that had already released everything. <see cref="Context"/> is what every
+        /// later operation routes through (<c>CanShareWith</c> reads the target's backend, and
+        /// bringing a device tensor home asks that backend for the copy), so such a tensor is one
+        /// the API says is usable and nothing will ever reject.</para>
+        /// </summary>
+        private void RefuseDisposedTarget(ComputeContext? target, string operation)
+        {
+            if (target is not { IsDisposed: true }) return;
+            throw new ObjectDisposedException(
+                nameof(ComputeContext),
+                $"{operation} was given a compute context that has been disposed, so the tensor it "
+                + "returned would name a context that has already released everything and can "
+                + "answer nothing about its memory.");
         }
 
         /// <summary>
@@ -185,7 +207,18 @@ namespace Shorokoo
 
             var value = target!.ResolvedBackend.CreateTensorInBackendMemory(
                 (ShorokooTensorElementType)(int)DType, bytes, (long[])Shape);
-            return Create(Shape, DType, value, target);
+            try
+            {
+                return Create(Shape, DType, value, target);
+            }
+            catch
+            {
+                // Nothing else references it yet, and on a card it is an allocation that has just
+                // been filled across the bus -- left to a finalizer it is a device leak for as long
+                // as that takes.
+                value.Dispose();
+                throw;
+            }
         }
 
         /// <summary>

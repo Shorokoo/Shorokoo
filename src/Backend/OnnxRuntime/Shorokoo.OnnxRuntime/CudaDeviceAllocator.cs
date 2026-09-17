@@ -28,6 +28,17 @@ namespace Shorokoo.OnnxRuntime;
 /// actually allocated on that device, so a program that never puts one there never pays it. An
 /// isolated backend gets its own, because it gets its own copy of this assembly along with the
 /// native runtime it binds, which is exactly right: its allocator belongs to its runtime.</para>
+///
+/// <para><b>Its arena is not covered by any context's
+/// <see cref="DeviceMemorySettings"/>.</b> This session is built with the defaults — no
+/// <c>LimitBytes</c> — and every tensor a transfer places in device memory is allocated out of it
+/// rather than out of a session the caller compiled. So a context given a budget bounds the
+/// sessions it compiles and not the tensors moved onto its card, and
+/// <c>DeviceMemorySettings.LimitBytes</c>' advice to count the live sessions sharing a card cannot
+/// account for this one, which the caller never asked for and cannot see. Honouring a per-context
+/// budget here needs an allocator per (device, settings) rather than per device, and a rule for
+/// which context's budget governs a tensor that several have touched — see
+/// Shorokoo/Shorokoo#367.</para>
 /// </summary>
 internal static class CudaDeviceAllocator
 {

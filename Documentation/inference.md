@@ -386,10 +386,12 @@ graph to the next call. `Eval` is the exception: it returns `TensorData` (or
   InferenceBackend.Default = new LinuxCpuBackend();
   ```
 
-- `InferenceBackend.Default` is the **default** backend: the one every `TensorData` is
-  built on, and the one a `ComputeContext` that names no backend of its own runs on. The
-  first backend resolved is cached and reused; assigning `Default` afterwards swaps it but
-  does not unload a native ONNX Runtime already bound.
+- `InferenceBackend.Default` is the **default** backend: the one a `ComputeContext` that
+  names no backend of its own runs on, and the one a tensor is built for when it is fed
+  without a context naming another. The first backend resolved is cached and reused;
+  assigning `Default` afterwards swaps it but does not unload a native ONNX Runtime already
+  bound, and does not reach a `ComputeContext.Default` that has already resolved — so assign
+  it at startup, before anything runs.
 - A `ComputeContext` constructed with a backend runs there instead, and two contexts may
   name different backends — that is how one process uses two devices. See
   [One model, two devices](#one-model-two-devices).
@@ -574,12 +576,18 @@ ownership rather than to the bytes:
 | `CopyTo` | an independent copy, owned by the result | the same |
 | `GiveAccessTo` | a reader that owns nothing; the source keeps what it had | refused — use `CopyTo` |
 
-Whether the bytes move is decided by the space and not by which context is which, so two
-CUDA contexts on one device pass a tensor between them without copying it, even when they
-are separate backends over separate native runtimes.
+Whether the bytes move is decided by the space **and** by whether the two contexts share a
+native runtime. Host memory is host memory whoever allocated it, so any two host contexts
+pass a tensor between them without copying. A device allocation is not: it is meaningful
+only to the runtime that made it, so two CUDA contexts share one without copying when they
+are the same backend, or two backends over one loaded runtime — and copy through the host
+when they are separate runtimes, which is what `IsolatedBackend` produces. A run's outputs
+come back on the host unless you asked for them to be retained
+(`CompiledGraph.Execute(inputs, retainOnDevice)`), so this arises for a tensor you put on
+the card or kept there deliberately.
 
 ```csharp
-var onCard  = cuda.Execute(model, input)[0].ToTensorData();  // device memory
+var onCard  = cuda.Execute(model, input, [true])[0].ToTensorData();  // retained: device memory
 var onHost  = onCard.TransferTo(cpu);                        // one copy across the bus
 var shared  = onHost.TransferTo(otherCpu);                   // no copy: same space
 ```
@@ -615,11 +623,13 @@ the CPU tests the model the GPU run is training, not a second compilation of its
 `ComputeContext.Backend` says which device each one will use, and a `CompiledGraph` carries
 the backend it was built on in `CompiledGraph.Backend`.
 
-**Tensors are not tied to a backend.** A `TensorData` is built on the default backend
-wherever you build it, and either context accepts it: a session hands what it is fed to its
-own runtime, converting it first when it came from another. That costs a host copy per feed
-and is possible only for data the host can read — a value an execution provider kept in its
-own memory (`TensorData.IsHostResident` is false, which a
+**Tensors are not tied to a backend.** A `TensorData` you build holds managed bytes and no
+backend at all, so building a model and exporting it needs no runtime; a backend enters only
+when the tensor is fed to one, and then either context accepts it — a session hands what it
+is fed to its own runtime, building it there if it does not have it yet. Those built values
+are cached per backend, so the cost is one copy per (tensor, backend) pair rather than per
+run. It is possible only for data the host can read: a value an execution provider kept in
+its own memory (`TensorData.IsHostResident` is false, which a
 [resident training run](training.md#keeping-training-state-on-the-device) produces) cannot
 cross, and says so rather than being read as a host address.
 
@@ -635,9 +645,25 @@ How you avoid that depends on whether the two backends need separate native runt
 
 **One runtime, two providers — the simple case, and the usual one.** A native ONNX Runtime
 serves every execution provider compiled into it, and the CUDA-flavoured build carries the
-CPU provider too. So deploy the GPU package alone and reference the CPU backend for its
-factory only; both contexts above then run on that one runtime, and nothing further is
-needed.
+CPU provider too. So deploy the GPU package alone and add the CPU package for its backend
+type only, with `ExcludeAssets="native"` so it brings no second runtime:
+
+```xml
+<PackageReference Include="Shorokoo.LinuxGPU" Version="..." />
+<PackageReference Include="Shorokoo.LinuxCPU" Version="..." ExcludeAssets="native" />
+```
+
+**Then name the default explicitly, before anything runs.** Both backend assemblies are now
+deployed, so [auto-discovery](#auto-discovery) has two candidates and refuses — and it is
+the *first* read of `InferenceBackend.Default` that refuses, which may be some framework
+call you did not write. Constructing a backend does not settle the question; assigning does:
+
+```csharp
+InferenceBackend.Default = new LinuxCpuBackend();   // startup, before any inference call
+
+var cpu  = new ComputeContext(InferenceBackend.Default);
+var cuda = new ComputeContext(new LinuxGpuBackend());
+```
 
 **Two runtimes.** Two ONNX Runtime *builds*, or two versions, in one process — a vendor
 build beside the stock one, say. Give each native a folder of its own and load the second
@@ -658,19 +684,38 @@ with `IsolatedBackend`:
 
 `ShorokooBackendNatives` items are read by a target the `Shorokoo.OnnxRuntime` package
 imports; each lands in `ort/<BackendId>/` in the output. An execution provider's own library
-has to sit beside the core it belongs to, so deploy a package's whole native folder. Then:
+has to sit beside the core it belongs to, so deploy a package's whole native folder.
+
+**The backend's own assembly has to be somewhere too, and not beside `Shorokoo.dll`** — two
+backend assemblies there is the ambiguity [auto-discovery](#auto-discovery) refuses. Put it
+in the same folder as its native and point `ProbeDirectory` at it:
+
+```xml
+<PackageReference Include="Shorokoo.LinuxGPU" Version="..." ExcludeAssets="all"
+                  GeneratePathProperty="true" />
+<None Include="$(PkgShorokoo_LinuxGPU)\lib
+et10.0\Shorokoo.LinuxGPU.dll"
+      Link="ort/cuda/Shorokoo.LinuxGPU.dll" CopyToOutputDirectory="PreserveNewest" />
+```
 
 ```csharp
+var cudaDirectory = Path.Combine(AppContext.BaseDirectory, "ort", "cuda");
 var cuda = new ComputeContext(IsolatedBackend.Load(new IsolatedBackendSpec
 {
     Name = "cuda:0",
     BackendAssembly = "Shorokoo.LinuxGPU",
-    NativeRuntimePath = Path.Combine(AppContext.BaseDirectory, "ort", "cuda", "libonnxruntime.so"),
+    NativeRuntimePath = Path.Combine(cudaDirectory, "libonnxruntime.so"),
+    ProbeDirectory = cudaDirectory,
 }));
 ```
 
-`Name` is what `Backend.Name` reports — the factory assembly cannot tell two loads of itself
-apart, so give it something a log can act on. A loaded backend lasts for the life of the
+The ONNX Runtime wrapper and the glue below it are looked for beside the backend first and
+beside `Shorokoo.dll` second, so only the backend's own assembly has to move.
+
+`Name` is what `Backend.Name` reports — the backend assembly cannot tell two loads of itself
+apart, so give it something a log can act on. It is a label and nothing more: the backend is
+identified by its native, so loading one native twice under two names is refused rather than
+producing two backends over one runtime. A loaded backend lasts for the life of the
 process: its native runtime holds thread pools, arenas and allocators, and nothing unloads
 it. Loading the same spec twice returns the same backend.
 

@@ -1,16 +1,18 @@
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Runtime.Loader;
+using System.Threading;
 
 namespace Shorokoo.Core.Inference.Abstractions;
 
 /// <summary>
-/// Holds the default <see cref="IShorokooInferenceBackend"/>: the backend every tensor
-/// is built on, and the one inference runs on when no <c>ComputeContext</c> names another.
+/// Holds the default <see cref="IShorokooInferenceBackend"/>: the one inference runs on when no
+/// <c>ComputeContext</c> names another, and the one a tensor is built for when it is fed without
+/// a context naming one.
 ///
 /// <para>
 /// The core Shorokoo assembly does not reference ONNX Runtime; the concrete
-/// factory lives in a platform package (Shorokoo.WinCPU, Shorokoo.WinGPU,
+/// backend lives in a platform package (Shorokoo.WinCPU, Shorokoo.WinGPU,
 /// Shorokoo.LinuxCPU, or Shorokoo.LinuxGPU) that you add as a dependency.
 /// Naming one in code is optional — referencing the package is normally enough —
 /// but you can set it explicitly at startup to override the discovered choice, or
@@ -30,11 +32,11 @@ namespace Shorokoo.Core.Inference.Abstractions;
 /// </para>
 /// <para>
 /// Several backends <b>can</b> be live at once. A <c>ComputeContext</c> constructed with a
-/// factory compiles and runs on that one, so two contexts on two backends share a process
-/// without sharing a device. Tensors stay out of it: <see cref="IShorokooTensorValue"/> is
-/// built by this default backend wherever it is built, and a session on another backend
-/// converts what it is fed (<see cref="BackendTransfer"/>). Where the second backend needs its
-/// own native ONNX Runtime rather than another execution provider on the same one,
+/// backend compiles and runs on that one, so two contexts on two backends share a process
+/// without sharing a device. Tensors stay out of it: a <c>TensorData</c> holds managed bytes
+/// and names no backend until it is fed to one, and a session builds what it is fed on its own
+/// runtime (<see cref="BackendTransfer"/>). Where the second backend needs its own native ONNX
+/// Runtime rather than another execution provider on the same one,
 /// <see cref="IsolatedBackend"/> loads it.
 /// </para>
 /// <para>
@@ -45,12 +47,12 @@ namespace Shorokoo.Core.Inference.Abstractions;
 /// </summary>
 public static class InferenceBackend
 {
-    private static volatile IShorokooInferenceBackend? _factory;
+    private static volatile IShorokooInferenceBackend? _default;
     private static readonly object _gate = new();
 
     /// <summary>
-    /// The default backend: the one every tensor the framework builds is built by, and the one a
-    /// <c>ComputeContext</c> that names no backend of its own compiles and runs on. Assigning one
+    /// The default backend: the one a <c>ComputeContext</c> that names no backend of its own
+    /// compiles and runs on. Assigning one
     /// is optional; if left unset it is auto-discovered on first access — an already-loaded
     /// backend assembly first, otherwise the deployment folder.
     /// </summary>
@@ -58,8 +60,9 @@ public static class InferenceBackend
     {
         get
         {
-            if (_factory is not null) return _factory;
-            lock (_gate) { return _factory ??= Discover(); }
+            if (_defaultReads.Value is { } counter) Interlocked.Increment(ref counter.Value);
+            if (_default is not null) return _default;
+            lock (_gate) { return _default ??= Discover(); }
         }
         set
         {
@@ -68,7 +71,7 @@ public static class InferenceBackend
             // rather than going through Remember's first-CPU-wins rule -- which would otherwise
             // refuse the assignment the ambiguity error tells the caller to make, leaving the
             // default context on a backend the program has just said it did not want.
-            lock (_gate) { _factory = value; _remembered = value; }
+            lock (_gate) { _default = value; _remembered = value; }
         }
     }
 
@@ -82,7 +85,30 @@ public static class InferenceBackend
     /// assign, and the last assignment wins. Decide the backend on one startup path
     /// rather than racing to fill in a null.</para>
     /// </summary>
-    public static IShorokooInferenceBackend? Current => _factory;
+    public static IShorokooInferenceBackend? Current => _default;
+
+    // Counts reads of Default made inside a CountDefaultReads call, and nothing else -- the same
+    // seam ComputeContext.Default carries, and for the same reason. The two are distinct paths to a
+    // backend: a graph pass can reach one without ever touching a compute context (every
+    // OnnxUtils.CreateTensorValue does), so counting only the context's reads left half the
+    // question unasked.
+    private static readonly AsyncLocal<System.Runtime.CompilerServices.StrongBox<int>?> _defaultReads = new();
+
+    /// <summary>
+    /// Runs <paramref name="work"/> and returns how many times it read <see cref="Default"/>.
+    /// The seam for holding the graph-building path to "requires no inference backend"; it counts
+    /// asks rather than backends resolved, because every test host has one deployed and answers a
+    /// wrongly eager read in silence.
+    /// </summary>
+    internal static int CountDefaultReads(Action work)
+    {
+        var outer = _defaultReads.Value;
+        var counter = new System.Runtime.CompilerServices.StrongBox<int>(0);
+        _defaultReads.Value = counter;
+        try { work(); }
+        finally { _defaultReads.Value = outer; }
+        return counter.Value;
+    }
 
     private static volatile IShorokooInferenceBackend? _remembered;
 
@@ -98,7 +124,7 @@ public static class InferenceBackend
     public static IShorokooInferenceBackend? Remembered => _remembered;
 
     /// <summary>
-    /// Records <paramref name="factory"/> as a loaded backend. A CPU backend always wins; a GPU
+    /// Records <paramref name="backend"/> as a loaded backend. A CPU backend always wins; a GPU
     /// backend is kept only while no CPU one has been seen. Called for every backend the process
     /// resolved for itself.
     ///
@@ -106,17 +132,17 @@ public static class InferenceBackend
     /// question and to no other, so <see cref="Default"/>'s setter records its choice directly and
     /// <see cref="IsolatedBackend"/> records nothing at all.</para>
     /// </summary>
-    public static void Remember(IShorokooInferenceBackend factory)
+    public static void Remember(IShorokooInferenceBackend backend)
     {
-        ArgumentNullException.ThrowIfNull(factory);
+        ArgumentNullException.ThrowIfNull(backend);
         lock (_gate)
         {
-            var incomingIsCpu = factory.Description.Device == ComputeDevice.Cpu;
+            var incomingIsCpu = backend.Description.Device == ComputeDevice.Cpu;
             if (_remembered is null || incomingIsCpu)
             {
                 if (_remembered is null
                     || incomingIsCpu && _remembered.Description.Device != ComputeDevice.Cpu)
-                    _remembered = factory;
+                    _remembered = backend;
             }
         }
     }
@@ -187,7 +213,7 @@ public static class InferenceBackend
     {
         // A backend already loaded in the process wins -- it avoids pulling a
         // second native in alongside one the consumer has already bound.
-        var preLoaded = TryFindAlreadyLoadedFactory();
+        var preLoaded = TryFindAlreadyLoadedBackend();
         if (preLoaded is not null) return Remembering(preLoaded)!;
 
         var dir = ProbeDirectory();
@@ -276,11 +302,11 @@ public static class InferenceBackend
         => [.. assemblies.Where(
             asm => AssemblyLoadContext.GetLoadContext(asm) == AssemblyLoadContext.Default)];
 
-    /// <summary>Records a factory as it is produced, and hands it straight back.</summary>
-    private static IShorokooInferenceBackend? Remembering(IShorokooInferenceBackend? factory)
+    /// <summary>Records a backend as it is produced, and hands it straight back.</summary>
+    private static IShorokooInferenceBackend? Remembering(IShorokooInferenceBackend? backend)
     {
-        if (factory is not null) Remember(factory);
-        return factory;
+        if (backend is not null) Remember(backend);
+        return backend;
     }
 
     private static string ProbeDirectory()
@@ -292,7 +318,7 @@ public static class InferenceBackend
         return AppContext.BaseDirectory;
     }
 
-    private static IShorokooInferenceBackend? TryFindAlreadyLoadedFactory()
+    private static IShorokooInferenceBackend? TryFindAlreadyLoadedBackend()
     {
         var assemblies = DiscoverableAssemblies(AppDomain.CurrentDomain.GetAssemblies());
         var usable = LoadedCandidates(assemblies.Select(asm => asm.GetName().Name ?? ""))

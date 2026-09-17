@@ -1,7 +1,10 @@
 using System.Runtime.InteropServices;
 using System.Runtime.Loader;
 using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Modules.Losses;
+using Shorokoo.Modules.Optimizers;
 using Shorokoo.Runtime;
+using Shorokoo.Tests.Modules;
 
 namespace Shorokoo.Tests;
 
@@ -405,6 +408,30 @@ public class SideBySideBackendCoverageTests
 
         Assert.Contains("elsewhere", Assert.Throws<FileNotFoundException>(
             () => IsolatedBackend.Load(Spec("x", factoryAssembly, AltRuntimePath, "/elsewhere"))).Message);
+    }
+
+    [Fact]
+    public void TestARigMergesOnOneBackendAndTrainsOnAnother()
+    {
+        using var merge = new ComputeContext();
+        using var runtime = new ComputeContext(Alt.Value);
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
+            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([4L], [1f, 2f, 3f, 4f]))],
+            new AdamWOptimizerHyperparameters { LearningRate = 0.1f },
+            rngConfig: null, mergeContext: merge, runtimeContext: runtime);
+
+        Assert.Same(merge, rig.MergeContext);
+        Assert.Same(runtime, rig.RuntimeContext);
+        Assert.NotEqual(merge.Backend.Name, runtime.Backend.Name);
+
+        var first = rig.TrainStep(
+            rig.CreateInitialCheckpoint(),
+            TrainingRigHelpers.InBatch(1f, 2f, 3f, 4f), TrainingRigHelpers.TargetBatch(2f, 4f, 6f, 8f));
+        var second = rig.TrainStep(
+            first, TrainingRigHelpers.InBatch(1f, 2f, 3f, 4f), TrainingRigHelpers.TargetBatch(2f, 4f, 6f, 8f));
+
+        Assert.True(second.Loss < first.Loss);
     }
 }
 

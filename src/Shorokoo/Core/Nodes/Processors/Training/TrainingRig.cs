@@ -206,9 +206,8 @@ namespace Shorokoo
         /// <summary>
         /// The compute context used for the rig's <b>build/merge phase</b>: concretizing the model and
         /// the hyperparameters, building scheduler modules, shape-inferring, lowering, memory-optimizing
-        /// and initializing the training-step graph and the optimizer state. It selects no backend or
-        /// device either — see <see cref="RuntimeContext"/> for why the rig's two contexts divide phases
-        /// rather than hardware. Supplied at construction (defaults to <see cref="ComputeContext.Default"/>);
+        /// and initializing the training-step graph and the optimizer state. Which backend it merges on
+        /// is its own — see <see cref="RuntimeContext"/>. Supplied at construction (defaults to <see cref="ComputeContext.Default"/>);
         /// every <c>With…</c> derivation carries it forward by reference. It is <b>runtime configuration,
         /// never persisted</b> — no checkpoint (flat or <c>.skpt</c>) or manifest records it, so a
         /// reloaded rig receives a fresh one via <see cref="FromScratch(ComputationGraph, ComputationGraph,
@@ -238,12 +237,16 @@ namespace Shorokoo
         /// forward by reference and, like <see cref="MergeContext"/>, it is runtime configuration that is
         /// <b>never persisted</b>.
         ///
-        /// <para><b>It selects no backend or device</b> (see <see cref="ComputeContext"/>): this context
-        /// and <see cref="MergeContext"/> divide <i>phases</i>, not hardware. You <b>cannot</b> merge on
-        /// one device and train on another — one backend is live per process and both contexts go
-        /// through it. What the two <i>can</i> differ in is their device memory: this context's
-        /// <see cref="ComputeContext.DeviceMemory"/> configures the arena of every training-step
-        /// session, and its <see cref="ComputeContext.RunSettings"/> what each step's run does.</para>
+        /// <para>Left unset, this context and <see cref="MergeContext"/> are both
+        /// <see cref="ComputeContext.Default"/> and divide <i>phases</i> rather than hardware: which
+        /// work is build/merge and which is compile/run. They may differ, though. A context carries
+        /// the backend it runs on (see <see cref="ComputeContext"/>), so a rig <b>can</b> merge on one
+        /// device and train on another, at the cost of a host copy per feed — both backends then have
+        /// to be deployed and reachable from the one process. They may also differ in their device
+        /// memory: this context's <see cref="ComputeContext.DeviceMemory"/> configures the arena of
+        /// every training-step session, and its <see cref="ComputeContext.RunSettings"/> what each
+        /// step's run does. Which device each will use is readable either way, off
+        /// <see cref="ComputeContext.Backend"/>.</para>
         ///
         /// <para>Resolved on first read rather than at construction, for the reason given on
         /// <see cref="MergeContext"/>.</para>

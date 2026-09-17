@@ -180,6 +180,41 @@ public class SideBySideBackendCoverageTests
     }
 
     /// <summary>
+    /// The same pairing, over a graph a model actually produces. The tests above run an
+    /// <see cref="InternalComputationGraph"/> assembled here out of two inputs and an expression,
+    /// which exercises the backends but skips everything a Shorokoo model goes through on its way
+    /// to one: a <c>[Module]</c> lowered by the source generator, its trainable parameters
+    /// concretized, and the <see cref="ComputationGraph"/> overloads of Execute and Compile.
+    /// This runs that.
+    /// </summary>
+    [Fact]
+    public void TestAModelGraphRunsOnTwoBackendsInOneProcess()
+    {
+        var (model, input) = SideBySideModel.Concrete();
+        var first = new ComputeContext();
+        var second = new ComputeContext(Alt.Value);
+
+        var onFirst = SideBySideModel.Floats(first.Execute(model, input)[0]);
+        var onSecond = SideBySideModel.Floats(second.Execute(model, input)[0]);
+
+        // The weights are sampled once, when the model is concretized, and baked into the graph
+        // that both backends are handed. Pin that before comparing across them: were a run to
+        // re-sample, the two arms would be two different models and their agreeing -- or their
+        // failing to -- would say nothing about backends at all.
+        Assert.Equal(onFirst, SideBySideModel.Floats(first.Execute(model, input)[0]));
+        SideBySideModel.AssertAgree(onFirst, onSecond);
+
+        // And the model is doing something. A forward pass that came out constant would be
+        // agreed on by any two backends, working or not.
+        Assert.True(onFirst.Distinct().Count() > 1, "the model's output is constant");
+
+        // A compiled session belongs to the backend that built it, and re-runs there.
+        var compiled = second.Compile(model);
+        Assert.Equal("alt-runtime", compiled.Backend.Name);
+        SideBySideModel.AssertAgree(onFirst, SideBySideModel.Floats(compiled.Execute(input)[0]));
+    }
+
+    /// <summary>
     /// The execution providers compiled into the native ONNX Runtime that <paramref name="context"/>'s
     /// copy of the wrapper bound. Reached by reflection because it is a property of the native
     /// build rather than of a backend, so nothing in Shorokoo's own surface reports it.
@@ -273,5 +308,70 @@ public class SideBySideBackendCoverageTests
 
         Assert.Contains("elsewhere", Assert.Throws<FileNotFoundException>(
             () => IsolatedBackend.Load(Spec("x", factoryAssembly, AltRuntimePath, "/elsewhere"))).Message);
+    }
+}
+
+/// <summary>
+/// The Shorokoo model the side-by-side tests run, and what it takes to hold one backend's answer
+/// against another's. Shared by the coverage pairing and the hardware one so that both put the
+/// same graph over the same inputs on two backends.
+/// </summary>
+internal static class SideBySideModel
+{
+    /// <summary>
+    /// <see cref="SideBySideMlp"/> as a graph a context can execute: the module's
+    /// <c>ComputationGraph</c>, concretized against the shape it is about to be fed, which is
+    /// what resolves its parameter shapes and samples its weights. One call, one model, so the
+    /// graph handed to the second backend is the graph the first one ran.
+    /// </summary>
+    internal static (ComputationGraph Model, TensorData Input) Concrete()
+    {
+        float[] xv = [0.5f, -1.5f, 2.0f, 0.25f, -0.75f, 1.25f, -0.5f, 3.0f];
+        var input = TensorData([2L, 4L], xv);
+        var module = SideBySideMlp.ComputationGraph;
+        var model = module
+            .ToConcreteArchitecture(module.FromOrderedInputs([input]))
+            .ToConcreteModel();
+        return (model, input);
+    }
+
+    internal static float[] Floats(NamedModelParam param)
+        => [.. param.ToTensorData().As<float32>().AccessMemory<float>()];
+
+    /// <summary>
+    /// What two runtimes running on the <i>same</i> device may differ by, which is very little:
+    /// they are two builds of one library doing one arithmetic.
+    /// </summary>
+    internal const double RuntimeTolerance = AutoTest.Tolerance;
+
+    /// <summary>
+    /// What the host and the card may differ by, which is a good deal more. An NVIDIA card from
+    /// Ampere on puts an fp32 MatMul through its tensor cores in TF32 unless told otherwise --
+    /// ten mantissa bits against fp32's twenty-three -- so its answer sits a long way from a CPU
+    /// that really did the sum in fp32, and no amount of correctness on either side closes that
+    /// gap.
+    ///
+    /// <para>Measured rather than guessed: this model deviates by 8.3e-4 over one pass on an
+    /// RTX 4090, and by 2.5e-3 where a value the card produced is fed back through it, the input
+    /// error and the arithmetic error compounding. Running the same test under
+    /// <c>NVIDIA_TF32_OVERRIDE=0</c> brings every arm back inside
+    /// <see cref="RuntimeTolerance"/>, which is what identifies TF32 as the cause. The bound is
+    /// set clear of the worst of those with room to spare, and is still four orders of magnitude
+    /// tighter than a backend that had genuinely miscomputed the model would land.</para>
+    /// </summary>
+    internal const double DeviceTolerance = 5e-3;
+
+    /// <summary>
+    /// Asserts two backends answered alike, to <paramref name="tolerance"/> -- absolute near
+    /// zero, relative above it. Not exact equality: two runtimes need not agree bit for bit, and
+    /// two <i>devices</i> need not agree to anything like fp32's precision.
+    /// </summary>
+    internal static void AssertAgree(float[] expected, float[] actual, double tolerance = RuntimeTolerance)
+    {
+        Assert.Equal(expected.Length, actual.Length);
+        foreach (var (want, got) in expected.Zip(actual))
+            Assert.True(
+                Math.Abs(want - got) <= tolerance * Math.Max(1.0, Math.Abs(want)),
+                $"the backends disagree by more than {tolerance:g}: one made {want}, the other {got}");
     }
 }

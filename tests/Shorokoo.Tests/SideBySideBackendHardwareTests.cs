@@ -88,6 +88,67 @@ public class SideBySideBackendHardwareTests
         Assert.Equal(twice, Floats(cuda.Execute(graph, fromHost, tb)[0]));
     }
 
+    /// <summary>
+    /// The one above runs a graph assembled here out of two inputs and an expression. This runs a
+    /// Shorokoo <i>model</i>: <see cref="SideBySideMlp"/>, a <c>[Module]</c> the source generator
+    /// lowered to a <c>ComputationGraph</c>, concretized once so its two weight matrices are
+    /// sampled and baked in -- and then put on the host and on the card, in one process, from two
+    /// <see cref="ComputeContext"/>s.
+    /// </summary>
+    [SideBySideCudaFact]
+    public void TestAShorokooModelRunsOnTheCpuAndOnTheCardInOneProcess()
+    {
+        var (model, input) = SideBySideModel.Concrete();
+        var cpu = new ComputeContext();
+        var cuda = new ComputeContext(LoadCuda());
+
+        Assert.Equal(ComputeDevice.Cpu, cpu.Backend.Device);
+        Assert.Equal(ComputeDevice.Cuda, cuda.Backend.Device);
+
+        var onCpu = SideBySideModel.Floats(cpu.Execute(model, input)[0]);
+        var onCard = SideBySideModel.Floats(cuda.Execute(model, input)[0]);
+
+        // One model, so the weights are the same weights: they were sampled when it was
+        // concretized, above, and both contexts were handed the graph carrying them. Pin that the
+        // host run repeats before holding the card's answer against it -- two different models
+        // agreeing, or failing to, would say nothing about the backends.
+        Assert.Equal(onCpu, SideBySideModel.Floats(cpu.Execute(model, input)[0]));
+        SideBySideModel.AssertAgree(onCpu, onCard, SideBySideModel.DeviceTolerance);
+
+        // And there is something to agree on: a forward pass that came out constant would read
+        // the same off any two backends, working or not.
+        Assert.True(onCpu.Distinct().Count() > 1, "the model's output is constant");
+
+        // Back to the host afterwards, so neither run left the other's runtime unable to serve.
+        SideBySideModel.AssertAgree(onCpu, SideBySideModel.Floats(cpu.Execute(model, input)[0]));
+
+        // A session compiled on the card stays there, and re-runs there.
+        var onCardCompiled = cuda.Compile(model);
+        Assert.Equal("cuda:0", onCardCompiled.Backend.Name);
+        SideBySideModel.AssertAgree(
+            onCpu, SideBySideModel.Floats(onCardCompiled.Execute(input)[0]),
+            SideBySideModel.DeviceTolerance);
+        SideBySideModel.AssertAgree(
+            onCpu, SideBySideModel.Floats(onCardCompiled.Execute(input)[0]),
+            SideBySideModel.DeviceTolerance);
+
+        // And what the card computed feeds the host's context, and the other way round. The
+        // subject is the crossing itself -- a tensor from one runtime is a type the other knows
+        // nothing about, and BackendTransfer is what makes it feedable -- so each arm is held
+        // against the host running the model on its own output, which is the answer both are
+        // approximating. Not against each other: that comparison differs in its input and in its
+        // arithmetic at once, and so measures the card's mantissa rather than the transfer.
+        var fromCard = cuda.Execute(model, input)[0].ToTensorData();
+        var fromHost = cpu.Execute(model, input)[0].ToTensorData();
+        var secondPass = SideBySideModel.Floats(cpu.Execute(model, fromHost)[0]);
+        SideBySideModel.AssertAgree(
+            secondPass, SideBySideModel.Floats(cpu.Execute(model, fromCard)[0]),
+            SideBySideModel.DeviceTolerance);
+        SideBySideModel.AssertAgree(
+            secondPass, SideBySideModel.Floats(cuda.Execute(model, fromHost)[0]),
+            SideBySideModel.DeviceTolerance);
+    }
+
     private static float[] Floats(NamedModelParam param)
         => [.. param.ToTensorData().As<float32>().AccessMemory<float>()];
 }

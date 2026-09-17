@@ -651,11 +651,18 @@ Leaving both `null`, so each defaults to `ComputeContext.Default`, is the normal
 What *is* configurable — on the GPU backends — is **device** memory, on the context the rig compiles
 and runs on: an arena budget and extend strategy in its `DeviceMemory`, per-step arena shrinkage in
 its `RunSettings`, plus a reading of how much of the card is gone. The arena strategy needs no
-setting for this loop: a training step's shapes are fixed when it is compiled and repeat for the
-length of the run, and the default `Auto` recognizes exactly that, telling the arena to extend by
-what the step asks for rather than to keep doubling — which is what otherwise leaves a long run
-holding far more of the card than its steps use. Sessions that are not training steps, in the same
-process or the same context, still get ORT's doubling, which is what a shape that can grow needs.
+setting for this loop: a step compiled for one batch shape repeats it for the length of the run,
+and the default `Auto` recognizes exactly that, telling the arena to extend by what the step asks
+for rather than to keep doubling — which is what otherwise leaves a long run holding far more of
+the card than its steps use.
+
+It follows the shapes rather than the word "training", which matters here: the rig keeps a compiled
+step per input shape **up to a limit**, and a run that feeds more distinct shapes than that falls
+back to a single symbolic step. That step does see growing shapes, so `Auto` gives it ORT's
+doubling — the strategy that does not strand a region every time an input outgrows it. Feeding a
+handful of stable batch shapes keeps every step on the tighter arena; feeding an unbounded variety
+does not, and no setting makes exact-size extension the right answer there.
+
 On a run that is close to the card's limit, hand `FromScratch` a `runtimeContext` carrying a budget
 and sample the peak inside your `TrainStep` loop; see
 [Device memory](inference.md#device-memory-gpu-backends).

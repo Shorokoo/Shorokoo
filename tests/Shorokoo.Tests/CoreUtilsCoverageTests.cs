@@ -498,7 +498,7 @@ public class CoreUtilsCoverageTests
         var shipped = OrtSessionFactory.CudaProviderOptions(
             0,
             DeviceMemorySettings.Default.LimitBytes,
-            DeviceMemorySettings.Default.Resolve(ShorokooGraphOptimization.TrainingStep).ArenaExtend);
+            DeviceMemorySettings.Default.Resolve(fixedInputShapes: true).ArenaExtend);
         Assert.Equal("kSameAsRequested", shipped["arena_extend_strategy"]);
         Assert.False(shipped.ContainsKey("gpu_mem_limit"));
 
@@ -522,29 +522,61 @@ public class CoreUtilsCoverageTests
     }
 
     /// <summary>
-    /// Auto is the per-session choice: exact-size extension for a training step, whose shapes are
-    /// fixed when it is compiled, and ORT's doubling for everything else, which may be handed a
-    /// larger input on any call. A named strategy is carried through untouched, and the budget
-    /// rides along either way.
+    /// Auto is decided by whether a session's input shapes can change, not by what kind of graph
+    /// it holds: a session pinned to one set of shapes gets exact-size extension, and a symbolic
+    /// one — which may be handed a larger input on any call — gets ORT's doubling. A rig's
+    /// generic training step is symbolic and is the case the two are most often confused over.
     /// </summary>
     [Fact]
-    public void TestAutoPicksTheArenaStrategyPerSessionAndANamedStrategyOverridesIt()
+    public void TestAutoPicksTheArenaStrategyFromWhetherTheSessionsShapesCanChange()
     {
-        ArenaExtendStrategy Auto(ShorokooGraphOptimization o) => DeviceMemorySettings.Default.Resolve(o).ArenaExtend;
+        ArenaExtendStrategy Auto(bool fixedInputShapes) => DeviceMemorySettings.Default.Resolve(fixedInputShapes).ArenaExtend;
 
-        Assert.Equal(ArenaExtendStrategy.SameAsRequested, Auto(ShorokooGraphOptimization.TrainingStep));
-        Assert.Equal(ArenaExtendStrategy.NextPowerOfTwo, Auto(ShorokooGraphOptimization.EnableAll));
-        Assert.Equal(ArenaExtendStrategy.NextPowerOfTwo, Auto(ShorokooGraphOptimization.EnableBasic));
-        Assert.Equal(ArenaExtendStrategy.NextPowerOfTwo, Auto(ShorokooGraphOptimization.DisableAll));
+        Assert.Equal(ArenaExtendStrategy.SameAsRequested, Auto(fixedInputShapes: true));
+        Assert.Equal(ArenaExtendStrategy.NextPowerOfTwo, Auto(fixedInputShapes: false));
 
         var named = new DeviceMemorySettings { ArenaExtend = ArenaExtendStrategy.NextPowerOfTwo, LimitBytes = 4096 };
-        Assert.Same(named, named.Resolve(ShorokooGraphOptimization.TrainingStep));
-        Assert.Same(named, named.Resolve(ShorokooGraphOptimization.EnableAll));
+        Assert.Same(named, named.Resolve(fixedInputShapes: true));
+        Assert.Same(named, named.Resolve(fixedInputShapes: false));
 
         var budgeted = new DeviceMemorySettings { LimitBytes = 8192 };
         Assert.Equal(
             new DeviceMemorySettings { LimitBytes = 8192, ArenaExtend = ArenaExtendStrategy.SameAsRequested },
-            budgeted.Resolve(ShorokooGraphOptimization.TrainingStep));
+            budgeted.Resolve(fixedInputShapes: true));
+    }
+
+    /// <summary>
+    /// The strategy a compiled graph really ends up with, across every shape a compile can be
+    /// given. A training step stamped with concrete dims settles its sizes; one left symbolic —
+    /// which is what a rig falls back to once its shape-specialized slots are full — does not, and
+    /// exact-size extension is the strategy that strands regions and fails to fit there. One
+    /// symbolic input among concrete ones is enough, since that input alone can grow.
+    /// </summary>
+    [Fact]
+    public void TestASymbolicTrainingStepGetsTheGrowingShapeArenaAndAPinnedOneDoesNot()
+    {
+        var x = InputTensor<float32>("x", rank: 1);
+        var graph = new InternalComputationGraph([x], [x + x]);
+        var ctx = new ComputeContext();
+
+        ArenaExtendStrategy Compiled(IReadOnlyList<long[]?>? dims, bool trainingStep)
+            => ctx.Compile(graph, dims, trainingStep).DeviceMemory.ArenaExtend;
+
+        long[]?[] pinned = [[4L]];
+        long[]?[] symbolic = [null];
+
+        Assert.Equal(ArenaExtendStrategy.SameAsRequested, Compiled(pinned, trainingStep: true));
+        Assert.Equal(ArenaExtendStrategy.SameAsRequested, Compiled(pinned, trainingStep: false));
+        Assert.Equal(ArenaExtendStrategy.NextPowerOfTwo, Compiled(null, trainingStep: true));
+        Assert.Equal(ArenaExtendStrategy.NextPowerOfTwo, Compiled(null, trainingStep: false));
+        Assert.Equal(ArenaExtendStrategy.NextPowerOfTwo, Compiled(symbolic, trainingStep: true));
+
+        var y = InputTensor<float32>("y", rank: 1);
+        var twoInputs = new InternalComputationGraph([x, y], [x + y]);
+        long[]?[] halfPinned = [[4L], null];
+        Assert.Equal(
+            ArenaExtendStrategy.NextPowerOfTwo,
+            ctx.Compile(twoInputs, halfPinned, trainingStep: true).DeviceMemory.ArenaExtend);
     }
 
     /// <summary>
@@ -575,7 +607,7 @@ public class CoreUtilsCoverageTests
         // are its own, and a differently configured context builds a differently configured one.
         // A default context resolves Auto rather than carrying it into the session.
         Assert.Equal(
-            DeviceMemorySettings.Default.Resolve(ShorokooGraphOptimization.EnableAll),
+            DeviceMemorySettings.Default.Resolve(fixedInputShapes: false),
             new ComputeContext().Compile(graph).DeviceMemory);
 
         Assert.Throws<ArgumentNullException>(() => new ComputeContext { DeviceMemory = null! });

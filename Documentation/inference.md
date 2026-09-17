@@ -30,9 +30,9 @@ Related: [core-types.md](core-types.md) · [defining-models.md](defining-models.
   device, [One model, two devices](#one-model-two-devices).
 - On a GPU backend the CUDA arena is configured on the `ComputeContext` — `DeviceMemory` for
   the sessions it compiles, `RunSettings` for what its runs do — while the static `DeviceMemory`
-  class reports how much of the card is gone. The arena strategy is chosen per session, so a
-  training loop does not end up holding far more of the card than it uses and a variable-shape
-  inference path still gets the strategy that suits it:
+  class reports how much of the card is gone. The arena strategy is chosen per session from
+  whether that session's shapes can change, so a fixed-shape loop does not end up holding far more
+  of the card than it uses and a variable-shape path still gets the strategy that suits it:
   [Device memory](#device-memory-gpu-backends).
 
 ## Workflow: one-shot evaluation
@@ -578,8 +578,11 @@ MiB of each other, so read every ratio below as approximate and the near-ties as
 
 The measurement is a test in the Shorokoo repository
 (`ArenaExtendStrategyProbeTests`, `Purpose=Manual`) rather than something you can run against the
-package, so treat these as indicative of the shape, not as your machine's numbers — what settles
-your case is `DeviceMemory.Sample()` around your own run.
+package, and it is taken on the **CPU** arena — the same `BFCArena` with the same strategy enum the
+CUDA provider uses, so the shape carries over but the numbers do not
+([#357](https://github.com/Shorokoo/Shorokoo/issues/357) tracks confirming them on a card). Treat
+these as indicative of the shape, not as your machine's numbers — what settles your case is
+`DeviceMemory.Sample()` around your own run.
 
 Neither column wins outright, and which one wins is decided by something Shorokoo knows about each
 session: whether its allocation sizes settle. A training run feeds one input shape to one compiled
@@ -593,11 +596,20 @@ grow without settling, where each outgrown region is stranded, the doubling hold
 and — on a card with no room to spare — fits where exact-size extension does not.
 
 So `ArenaExtend` defaults to `Auto`, which is not one of ORT's values but the choice between them,
-made per session: a **training step** gets `SameAsRequested`, because its shapes are fixed when the
-step is compiled and repeat for the life of the run; **every other session** gets ORT's
-`NextPowerOfTwo`, because it may be handed a larger input on any call. Name a strategy to decide it
-yourself — for the sessions that context compiles, and no others — and read back what a graph
-actually got from `CompiledGraph.DeviceMemory`:
+made per session on the one thing that decides it: **whether that session's input shapes can
+change**. A session compiled for one set of shapes gets `SameAsRequested` — a training step the rig
+specialized for a batch shape, or a graph run once and thrown away — because its sizes settle. A
+session left **symbolic**, which ORT will accept a larger input for on any call, gets
+`NextPowerOfTwo`, because exact-size extension strands every region such a session outgrows.
+
+Note what that is *not*: "training steps get exact-size extension". A rig keeps a compiled step per
+input shape up to a limit, and once that limit is reached it falls back to one symbolic step and
+feeds it every shape thereafter — which is the growing-shape case, and the one exact-size extension
+loses worst. `Auto` follows the shapes, so that fallback gets the doubling, while the specialized
+steps around it keep the tighter arena.
+
+Name a strategy to decide it yourself — for the sessions that context compiles, and no others — and
+read back what a graph actually got from `CompiledGraph.DeviceMemory`:
 
 ```csharp
 using Shorokoo.Core.Inference.Abstractions;
@@ -623,7 +635,7 @@ Console.WriteLine(compiled.DeviceMemory.ArenaExtend);              // what this 
 | setting | on | ORT option | default | read |
 |---|---|---|---|---|
 | `LimitBytes` | `DeviceMemorySettings` | `gpu_mem_limit` | `null` — no cap | when a session is created |
-| `ArenaExtend` | `DeviceMemorySettings` | `arena_extend_strategy` | `Auto` — `SameAsRequested` for a training step, ORT's `NextPowerOfTwo` elsewhere | when a session is created |
+| `ArenaExtend` | `DeviceMemorySettings` | `arena_extend_strategy` | `Auto` — `SameAsRequested` when the session's input shapes are fixed, ORT's `NextPowerOfTwo` when they are symbolic | when a session is created |
 | `ShrinkArenaAfterRun` | `RunSettings` | `memory.enable_memory_arena_shrinkage` | `false` | on every run |
 
 The other two are unset by default for their own reasons. `ShrinkArenaAfterRun` costs a

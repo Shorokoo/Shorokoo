@@ -9,11 +9,14 @@ public enum ArenaExtendStrategy
     /// Let Shorokoo choose per session — the default, and what you want unless you have measured
     /// otherwise. Neither ORT strategy is better in general: which one wastes less depends on
     /// whether a session's allocation sizes settle or keep growing, and the two differ by about
-    /// 1.5x in each direction. So the choice is made from what Shorokoo knows about the session
-    /// it is building and ORT does not — <see cref="SameAsRequested"/> for a training step, whose
-    /// shapes are fixed when the step is compiled and repeat for the life of the run, and
-    /// <see cref="NextPowerOfTwo"/> for every other session, which may be handed a larger input
-    /// on any call.
+    /// 1.5x in each direction. So the choice is made from the one thing that decides it, which
+    /// Shorokoo knows when it builds a session and ORT does not: <b>whether that session's input
+    /// shapes can change</b>. A session compiled for one set of shapes — a shape-specialized
+    /// training step, or a graph run once and thrown away — gets <see cref="SameAsRequested"/>,
+    /// because its allocation sizes settle and the doubling is pure overshoot. A session left
+    /// symbolic, which may be handed a larger input on any call, gets
+    /// <see cref="NextPowerOfTwo"/>, because exact-size extension strands every region such a
+    /// session outgrows and can fail to fit at all on a capped arena.
     ///
     /// <para>It is a default, not a policy: naming either concrete strategy on a
     /// <see cref="DeviceMemorySettings"/> overrides it for the sessions built from that one, and
@@ -138,32 +141,29 @@ public sealed record DeviceMemorySettings
 
     /// <summary>
     /// These settings with <see cref="ArenaExtend"/> settled to one of the two strategies ORT
-    /// accepts, for a session compiled at <paramref name="graphOptimization"/>: unchanged when a
-    /// concrete strategy was named, and otherwise the choice
-    /// <see cref="ArenaExtendStrategy.Auto"/> stands for — exact-size extension for a training
-    /// step, whose allocation sizes settle, and ORT's doubling elsewhere, where they may not.
+    /// accepts: unchanged when a concrete strategy was named, and otherwise the choice
+    /// <see cref="ArenaExtendStrategy.Auto"/> stands for, taken on
+    /// <paramref name="fixedInputShapes"/>.
+    ///
+    /// <para><paramref name="fixedInputShapes"/> is true when the session being built can only
+    /// ever be fed one set of input shapes — every graph input's dims stamped on the model, so
+    /// ORT refuses a differently-shaped feed, or a session run once and disposed. It is
+    /// <b>not</b> "this is a training step": a rig that has run out of shape-specialized slots
+    /// compiles a symbolic training step and feeds it every shape thereafter, which is the case
+    /// exact-size extension loses worst.</para>
     ///
     /// <para>The resolution happens here rather than in the backend, so that the settings a
     /// session is built with are concrete by the time anything sees them: the backend never has
     /// to interpret <see cref="ArenaExtendStrategy.Auto"/>, and
     /// <see cref="Shorokoo.Runtime.CompiledGraph.DeviceMemory"/> reports what was chosen rather
     /// than what was asked for.</para>
-    ///
-    /// <para>The profile is a proxy for the property that actually matters — whether the
-    /// session's allocation sizes settle — and it is exact in one direction only: nothing but a
-    /// training step is compiled at
-    /// <see cref="ShorokooGraphOptimization.TrainingStep"/>, but a training step whose graph
-    /// carries an <c>Optional</c> op is compiled at
-    /// <see cref="ShorokooGraphOptimization.DisableAll"/> instead and is read here as an ordinary
-    /// session. That costs it the tighter arena, never correctness, and naming a strategy takes
-    /// it back.</para>
     /// </summary>
-    public DeviceMemorySettings Resolve(ShorokooGraphOptimization graphOptimization)
+    public DeviceMemorySettings Resolve(bool fixedInputShapes)
         => ArenaExtend is not ArenaExtendStrategy.Auto
             ? this
             : this with
             {
-                ArenaExtend = graphOptimization is ShorokooGraphOptimization.TrainingStep
+                ArenaExtend = fixedInputShapes
                     ? ArenaExtendStrategy.SameAsRequested
                     : ArenaExtendStrategy.NextPowerOfTwo,
             };

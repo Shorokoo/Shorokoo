@@ -376,10 +376,25 @@ namespace Shorokoo.Runtime
             return CompileFromModel(
                 () => FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true, inputDims: inputDims),
                 originalInputNames,
-                trainingStep);
+                trainingStep,
+                FixedInputShapes(inputDims));
         }
 
-        private CompiledGraph CompileFromModel(Func<ModelProto> buildModel, string[] originalInputNames, bool trainingStep = false)
+        /// <summary>
+        /// Whether a session built over <paramref name="inputDims"/> can only ever be fed one set
+        /// of input shapes — every input stamped with concrete dims, so ORT refuses a
+        /// differently-shaped feed. One null entry is enough to make it false: that input stays
+        /// symbolic and the session can be handed a larger one on any call, which is what decides
+        /// the arena strategy (<see cref="DeviceMemorySettings.Resolve"/>).
+        /// </summary>
+        private static bool FixedInputShapes(IReadOnlyList<long[]?>? inputDims)
+            => inputDims is not null && inputDims.All(dims => dims is not null);
+
+        private CompiledGraph CompileFromModel(
+            Func<ModelProto> buildModel,
+            string[] originalInputNames,
+            bool trainingStep = false,
+            bool fixedInputShapes = false)
         {
             var model = buildModel();
 
@@ -390,7 +405,7 @@ namespace Shorokoo.Runtime
             var optimization = SessionOptimization(HasOptionalOps(model.Graph), trainingStep);
             // Settled here, not inside the session: CompiledGraph then reports the strategy this
             // session actually got rather than the Auto that asked for it.
-            var deviceMemory = DeviceMemory.Resolve(optimization);
+            var deviceMemory = DeviceMemory.Resolve(fixedInputShapes);
             var session = CreateSession(modelData, optimization, deviceMemory);
 
             var onnxInputNameByOriginal = new Dictionary<string, string>();
@@ -578,11 +593,12 @@ namespace Shorokoo.Runtime
                 : ShorokooGraphOptimization.EnableAll;
         }
 
+        // A one-shot session: built, fed once, and disposed, so its shapes cannot change under it.
         private IShorokooInferenceSession CreateSession(byte[] modelData, bool disableOptimizations = false)
-            => CreateSession(modelData, SessionOptimization(disableOptimizations, trainingStep: false));
-
-        private IShorokooInferenceSession CreateSession(byte[] modelData, ShorokooGraphOptimization optimization)
-            => CreateSession(modelData, optimization, DeviceMemory.Resolve(optimization));
+            => CreateSession(
+                modelData,
+                SessionOptimization(disableOptimizations, trainingStep: false),
+                DeviceMemory.Resolve(fixedInputShapes: true));
 
         private IShorokooInferenceSession CreateSession(
             byte[] modelData, ShorokooGraphOptimization optimization, DeviceMemorySettings deviceMemory)

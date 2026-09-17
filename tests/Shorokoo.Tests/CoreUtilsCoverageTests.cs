@@ -22,8 +22,8 @@ namespace Shorokoo.Tests;
 /// <c>keepAxes</c>, the <see cref="AtomicFileWriter"/> temp-and-rename commit protocol
 /// (crash-window fault injection, stale-temp sweep, retain-last-N rotation), the
 /// <see cref="DebugRequests"/> snapshot hook firing at every <see cref="GraphCreationPoint"/>,
-/// and the public-API shape guard against a <c>params</c> array sitting behind an optional
-/// parameter.
+/// the public-API shape guard against a <c>params</c> array sitting behind an optional
+/// parameter, and the guard that every <c>using</c> the documentation shows names public API.
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
@@ -594,6 +594,47 @@ public class CoreUtilsCoverageTests
             Assert.True(step > 0);
             Assert.True(step < gate);
         }
+    }
+
+    /// <summary>
+    /// Every <c>using Shorokoo…;</c> a Documentation sample opens with must name a namespace that
+    /// carries public API — a public type, for <c>using static</c>. Existing is not enough: a
+    /// namespace whose types are all internal imports nothing a reader can call, so the line is a
+    /// no-op that still asserts, by sitting there and being commented, that the types beside it
+    /// live somewhere they do not. The compiler does not object to one (an internals-only
+    /// namespace is a namespace), which is exactly why it needs a test.
+    /// </summary>
+    [Fact]
+    public void TestEveryDocumentationUsingNamesPublicApi()
+    {
+        Assembly[] product = [.. Directory.GetFiles(AppContext.BaseDirectory, "Shorokoo*.dll").Select(Loaded).OfType<Assembly>()];
+        Type[] exported = [.. product.SelectMany(ExportedTypes)];
+        var namespaces = exported.Select(t => t.Namespace).OfType<string>()
+            .Concat(Directory.GetDirectories(Path.Combine(RepoRoot(), "src", "Backend", "OnnxRuntime"))
+                .Select(Path.GetFileName).OfType<string>())
+            .ToHashSet(StringComparer.Ordinal);
+        var types = exported.Select(t => t.FullName).OfType<string>().ToHashSet(StringComparer.Ordinal);
+
+        var usings = Directory.GetFiles(Path.Combine(RepoRoot(), "Documentation"), "*.md")
+            .SelectMany(f => Regex.Matches(File.ReadAllText(f), @"^\s*using (static )?(Shorokoo[\w.]*)\s*;", RegexOptions.Multiline)
+                .Select(m => $"{Path.GetFileName(f)}: using {m.Groups[1].Value}{m.Groups[2].Value}; [{(m.Groups[1].Success ? types : namespaces).Contains(m.Groups[2].Value)}]"))
+            .Distinct()
+            .ToArray();
+
+        Assert.NotEmpty(usings);
+        Assert.Empty(usings.Where(u => u.EndsWith("[False]", StringComparison.Ordinal)));
+    }
+
+    private static Assembly? Loaded(string assemblyPath)
+    {
+        try { return Assembly.LoadFrom(assemblyPath); }
+        catch { return null; }
+    }
+
+    private static IEnumerable<Type> ExportedTypes(Assembly assembly)
+    {
+        try { return assembly.GetExportedTypes(); }
+        catch { return []; }
     }
 
     private static string RepoRoot() => Ancestor(d => File.Exists(Path.Combine(d, "Shorokoo.sln")));

@@ -254,6 +254,132 @@ public class SideBySideBackendCoverageTests
         return (string[])providers.Invoke(providers.IsStatic ? null : instance, null)!;
     }
 
+    /// <summary>
+    /// A literal is materialised by the backend whose session is about to read it, not by whichever
+    /// one the process defaulted to.
+    ///
+    /// <para>The answer cannot show this. A session handed a value from a runtime it does not share
+    /// rebuilds it as it feeds it (<c>OrtInferenceSession.Unwrap</c>), so the numbers come out
+    /// right either way; what differs is which runtime owns what reaches the session, and so
+    /// whether every run pays for that rebuild. So this asks the session: a backend that records
+    /// what each of its sessions was fed, over the isolated runtime, and the load context of each
+    /// value's type to say which runtime made it — the same way
+    /// <see cref="TestTheIsolatedBackendIsASecondNativeRuntimeRatherThanTheSameOneTwice"/> tells
+    /// the two apart.</para>
+    /// </summary>
+    [Fact]
+    public void TestALiteralFedToANonDefaultBackendIsBuiltByThatBackendsRuntime()
+    {
+        var (graph, a, b, expected) = Model();
+        var recorder = new RecordingBackend(Alt.Value);
+        var onAlt = new ComputeContext(recorder);
+
+        Assert.Equal(expected, Floats(onAlt.Execute(graph, a, b)[0]));
+
+        // Two literals went in, and each reached the session as a value of the isolated runtime --
+        // the one that was about to read it.
+        var isolated = AltLoadContext();
+        Assert.Equal(2, recorder.Fed.Count);
+        Assert.All(recorder.Fed, v => Assert.Same(isolated, LoadContextOf(v)));
+
+        // Each literal kept what it built, so feeding the same backend again costs nothing: a
+        // tensor that rebuilt itself per run would be the same waste by another route.
+        var built = recorder.Fed.ToArray();
+        recorder.Fed.Clear();
+        Assert.Equal(expected, Floats(onAlt.Execute(graph, a, b)[0]));
+        Assert.Equal(built, recorder.Fed);
+
+        // ...and the process default gets values of its own off the very same tensors, at the same
+        // time. That is what a value per backend buys: one literal serves both runtimes, and
+        // neither is handed the other's.
+        Assert.Equal(expected, Floats(new ComputeContext().Execute(graph, a, b)[0]));
+        foreach (var literal in (TensorData[])[a, b])
+        {
+            Assert.Same(AssemblyLoadContext.Default, LoadContextOf(literal.ToTensorValue()));
+            Assert.DoesNotContain(literal.ToTensorValue(), built);
+        }
+    }
+
+    /// <summary>The load context the isolated backend's own assemblies live in. It is what tells a
+    /// value that backend built apart from one the default backend built, the two being the same
+    /// type name in two loads of one assembly.</summary>
+    private static AssemblyLoadContext AltLoadContext()
+    {
+        var inner = Alt.Value.GetType()
+            .GetField("_inner", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(Alt.Value)!;
+        return AssemblyLoadContext.GetLoadContext(inner.GetType().Assembly)!;
+    }
+
+    private static AssemblyLoadContext LoadContextOf(IShorokooTensorValue value)
+        => AssemblyLoadContext.GetLoadContext(value.GetType().Assembly)!;
+
+    /// <summary>
+    /// A backend that is the backend it wraps in every respect, and keeps the values each session
+    /// it makes was fed. Everything forwards, including the interface's default-bodied members:
+    /// what reaches the session has to be what the wrapped runtime would have produced, or the
+    /// recording says nothing about which runtime that was.
+    /// </summary>
+    private sealed class RecordingBackend(IShorokooInferenceSessionFactory inner)
+        : IShorokooInferenceSessionFactory
+    {
+        internal List<IShorokooTensorValue> Fed { get; } = [];
+
+        public BackendDescription Description => inner.Description;
+
+        public MemorySpace MemorySpace => inner.MemorySpace;
+
+        public IShorokooInferenceSession CreateSession(
+            ReadOnlyMemory<byte> modelBytes, ShorokooGraphOptimization graphOptimization,
+            ShorokooLogSeverity logSeverity)
+            => new RecordingSession(inner.CreateSession(modelBytes, graphOptimization, logSeverity), Fed);
+
+        public IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged
+            => inner.CreateTensor(data, shape);
+
+        public IShorokooTensorValue CreateTensorFromRawBytes(
+            ShorokooTensorElementType elementType, byte[] data, long[] shape)
+            => inner.CreateTensorFromRawBytes(elementType, data, shape);
+
+        public IShorokooTensorValue CreateStringTensor(IReadOnlyList<string> data, long[] shape)
+            => inner.CreateStringTensor(data, shape);
+
+        public IShorokooTensorValue CreateSequence(IReadOnlyList<IShorokooTensorValue> values)
+            => inner.CreateSequence(values);
+
+        public byte[] CopyTensorToHost(IShorokooTensorValue value) => inner.CopyTensorToHost(value);
+
+        public IShorokooTensorValue CreateTensorInBackendMemory(
+            ShorokooTensorElementType elementType, byte[] data, long[] shape)
+            => inner.CreateTensorInBackendMemory(elementType, data, shape);
+    }
+
+    /// <summary>A session that notes what it was fed on its way to running it.</summary>
+    private sealed class RecordingSession(
+        IShorokooInferenceSession inner, List<IShorokooTensorValue> fed) : IShorokooInferenceSession
+    {
+        public IReadOnlyList<string> InputNames => inner.InputNames;
+        public IReadOnlyList<string> OutputNames => inner.OutputNames;
+        public bool HasDeviceMemory => inner.HasDeviceMemory;
+
+        public IReadOnlyList<IShorokooTensorValue> Run(
+            IReadOnlyDictionary<string, IShorokooTensorValue> inputs, IReadOnlyList<string> outputNames)
+        {
+            fed.AddRange(inputs.Values);
+            return inner.Run(inputs, outputNames);
+        }
+
+        public IReadOnlyList<IShorokooTensorValue> RunRetainingOutputs(
+            IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
+            IReadOnlyList<string> outputNames, IReadOnlySet<string> retainedOutputNames)
+        {
+            fed.AddRange(inputs.Values);
+            return inner.RunRetainingOutputs(inputs, outputNames, retainedOutputNames);
+        }
+
+        public void Dispose() => inner.Dispose();
+    }
+
     [Fact]
     public void TestDataCrossesBetweenBackendsInBothDirectionsAndSurvivesARoundTrip()
     {

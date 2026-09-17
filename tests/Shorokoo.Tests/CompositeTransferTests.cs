@@ -132,6 +132,50 @@ public class CompositeTransferCoverageTests
     }
 
     /// <summary>
+    /// A sequence that has been moved to another context can be fed back into a session.
+    ///
+    /// <para>A transfer rebuilds the sequence as a plain list of the tensors it moved — which is
+    /// what lets each element keep the context and the ownership the move gave it — so there is no
+    /// runtime sequence value left to hand over, and feeding one was refused outright. It builds
+    /// one on demand now, over its elements' values on the backend whose session is asking, the
+    /// way a literal in managed memory materialises its bytes. What it builds is its own: kept for
+    /// the next feed of that backend, and released with the sequence.</para>
+    /// </summary>
+    [Fact]
+    public void TestASequenceThatHasBeenTransferredCanBeFedBackIntoASession()
+    {
+        using var producer = new ComputeContext();
+        var x = InputVector<float32>("x");
+        var construct = new InternalComputationGraph([x], [OnnxOp.SequenceConstruct(x, x + x)]);
+        var produced = producer
+            .Execute(construct, TensorData([2L], (float[])[1f, 2f]))[0].ToTensorDataSequence();
+
+        using var consumer = new ComputeContext();
+        var moved = produced.TransferTo(consumer);
+
+        // There is nothing of a runtime's left in it to hand over: the transfer holds the tensors
+        // themselves, which is exactly why this case needed answering.
+        Assert.False(moved is IOnnxData);
+
+        var seq = InternalOp.ModuleSequenceInput(DType.Float32, null, null, "seq");
+        var join = new InternalComputationGraph(
+            [seq], [OnnxOp.ConcatFromSequence(seq, axis: 0, newAxis: false)]);
+
+        Assert.Equal([1f, 2f, 2f, 4f], Floats(consumer.Execute(join, moved)[0].ToTensorData()));
+
+        // Twice, because what it built is kept rather than rebuilt: a run must not be handed a
+        // sequence whose elements an earlier one has already had released under it.
+        Assert.Equal([1f, 2f, 2f, 4f], Floats(consumer.Execute(join, moved)[0].ToTensorData()));
+        Assert.Same(moved.ToTensorValue(), moved.ToTensorValue());
+
+        // And the elements it was moved are untouched by any of it — the sequence value holds
+        // copies, so the run cannot reach the storage each element owns.
+        Assert.Equal([1f, 2f], Floats(moved[0]));
+        Assert.Equal([2f, 4f], Floats(moved[1]));
+        Assert.All(moved, e => Assert.Same(consumer, e.Context));
+    }
+
+    /// <summary>
     /// A graph's description is the same description on every machine. A tensor bound to a context
     /// is bound to one backend's memory, so a graph that captured one could only be built where
     /// that context is — which is why an operator attribute refuses one.

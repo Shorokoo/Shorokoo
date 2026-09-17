@@ -164,7 +164,11 @@ namespace Shorokoo.Runtime
             {
                 var onnxName = _onnxInputNameByOriginal.TryGetValue(input.ParamName, out var mapped)
                     ? mapped : input.ParamName;
-                sessionInputs[onnxName] = input.ToTensorValue();
+                // On this graph's own backend, because that is the runtime about to read the
+                // value. An input that already holds one hands it over whatever is passed; one
+                // held in plain managed memory -- every literal in the program -- builds it here,
+                // and this is what decides which runtime builds it.
+                sessionInputs[onnxName] = input.ToTensorValue(_backend);
             }
 
             var results = retainedOutputNames is null
@@ -230,13 +234,13 @@ namespace Shorokoo.Runtime
     /// its runs do by default. Both are per instance, so two contexts may differ and neither
     /// reaches the other's sessions.</para>
     ///
-    /// <para>A context names where the <i>work</i> runs; it does not change where tensors are
-    /// built. Every <c>TensorData</c> in the program is built by the default backend
-    /// (<see cref="Shorokoo.Core.Inference.Abstractions.InferenceBackend.Factory"/>) wherever it is
-    /// built, and a session on another backend converts what it is fed, handing its own outputs
-    /// back. So the same data feeds either context and the same model runs on both, with nothing to
-    /// say at the call site. The conversion costs a host copy per feed, and is possible only for
-    /// data the host can read — see
+    /// <para>The same data feeds either context and the same model runs on both, with nothing to
+    /// say at the call site. A literal costs nothing to share: it is managed bytes until something
+    /// runs (<see cref="Shorokoo.HostTensorData{T}"/>), and the context that feeds it to a session
+    /// is the one that materialises it, on its own backend. What a context cannot do is change
+    /// where an existing runtime value lives — a tensor another backend produced is that backend's,
+    /// so a session here converts it as it is fed and hands its own outputs back. That conversion
+    /// costs a host copy per feed and is possible only for data the host can read; see
     /// <see cref="Shorokoo.Core.Inference.Abstractions.BackendTransfer"/>.</para>
     /// </summary>
     public class ComputeContext : IDisposable
@@ -741,7 +745,9 @@ namespace Shorokoo.Runtime
                 {
                     var onnxName = onnxInputNameByOriginal.TryGetValue(input.ParamName, out var mapped)
                         ? mapped : input.ParamName;
-                    sessionInputs[onnxName] = input.ToTensorValue();
+                    // This context's backend: the one that just built the session above, and so
+                    // the runtime that is about to read what it is fed.
+                    sessionInputs[onnxName] = input.ToTensorValue(Factory);
                 }
                 var results = session.Run(sessionInputs, session.OutputNames, RunSettings);
 

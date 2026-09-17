@@ -89,6 +89,32 @@ namespace Shorokoo
             return $"sequence:{this.DType.ToString()}";
         }
 
+        /// <summary>
+        /// This sequence as a value of the process-wide backend's runtime, for a caller with no
+        /// context to name. <see cref="TensorData.ToTensorValue()"/>'s counterpart.
+        /// </summary>
+        internal IShorokooTensorValue ToTensorValue() => ToTensorValue(InferenceBackend.Factory);
+
+        /// <summary>
+        /// This sequence as a value of <paramref name="factory"/>'s runtime — the form the feed
+        /// sites take, so a sequence is built by the backend whose session is about to read it.
+        /// A sequence that already holds a runtime value hands it over and ignores the argument,
+        /// since a value belongs to the runtime that made it; one that is only a list of tensors
+        /// builds it here.
+        ///
+        /// <para>The value returned is the sequence's own: read it, do not dispose it.</para>
+        /// </summary>
+        internal virtual IShorokooTensorValue ToTensorValue(IShorokooInferenceSessionFactory factory)
+        {
+            ThrowIfDisposed();
+            // The empty sequence, and only it: ONNX Runtime's binding cannot build a zero-element
+            // sequence value, which is why the empty case is represented on the managed side alone.
+            throw new InvalidTensorOperationException(ErrorCodes.FW007, "ToTensorValue", ToString(),
+                "This sequence has no inference-runtime value to feed a session, and none can be "
+                + "built: ONNX Runtime cannot represent a zero-element sequence. Build an empty one "
+                + "inside the graph with the SequenceEmpty op instead of passing one in.");
+        }
+
         internal abstract TensorData GetAt(int index);
 
         public TensorData this[int index] => GetAt(index);
@@ -156,11 +182,23 @@ namespace Shorokoo
         /// owning it, so every element's context and ownership would be replaced by the act of
         /// rebuilding, and a GiveAccessTo would hand back owners. Holding the elements keeps what
         /// each of them decided.</para>
+        ///
+        /// <para>It is not <see cref="IOnnxData"/>, for the same reason
+        /// <see cref="HostTensorData{T}"/> is not: there is no runtime value here until something
+        /// asks for one. Feeding such a sequence to a session builds it then, on that session's
+        /// backend -- see <see cref="ToTensorValue(IShorokooInferenceSessionFactory)"/>.</para>
         /// </summary>
         private sealed class ListTensorDataSequence<T> : TensorDataSequence<T>
             where T : IVarType
         {
             private readonly List<TensorData<T>> _elements;
+
+            // One materialized sequence value per backend this has been fed to, owned here and
+            // released on Dispose -- HostTensorData<T>'s arrangement, for the same reasons. Built
+            // on demand, because a transferred sequence is usually just read; keyed by backend
+            // under reference equality, because a value belongs to the runtime that made it and
+            // two factories are the same backend exactly when they are the same object.
+            private Dictionary<IShorokooInferenceSessionFactory, IShorokooTensorValue>? _materialized;
 
             internal ListTensorDataSequence(List<TensorData<T>> elements) => _elements = elements;
 
@@ -180,13 +218,61 @@ namespace Shorokoo
                 return _elements.GetEnumerator();
             }
 
+            /// <summary>
+            /// This sequence's elements as one sequence value of <paramref name="factory"/>'s
+            /// runtime, built the first time that backend asks and kept for the next time.
+            ///
+            /// <para>Each element is copied rather than handed over. <c>CreateSequence</c> takes
+            /// the values it is given: the sequence owns them from then on and releases them with
+            /// itself, which would free storage the elements still own and still read
+            /// (Shorokoo/Shorokoo#180). The copy is the same one <c>TensorDataSequence.Create</c>
+            /// makes for the same reason, taken on this backend rather than the process default.</para>
+            /// </summary>
+            internal override IShorokooTensorValue ToTensorValue(IShorokooInferenceSessionFactory factory)
+            {
+                ArgumentNullException.ThrowIfNull(factory);
+                ThrowIfDisposed();
+
+                _materialized ??= new Dictionary<IShorokooInferenceSessionFactory, IShorokooTensorValue>(
+                    ReferenceEqualityComparer.Instance as IEqualityComparer<IShorokooInferenceSessionFactory>
+                    ?? EqualityComparer<IShorokooInferenceSessionFactory>.Default);
+
+                if (_materialized.TryGetValue(factory, out var existing)) return existing;
+
+                var inner = new List<IShorokooTensorValue>(_elements.Count);
+                try
+                {
+                    // Each element on this backend first, so that a literal materializes here
+                    // rather than somewhere else and is then dragged across; BackendTransfer then
+                    // has nothing to move for an element already of this runtime.
+                    foreach (var element in _elements)
+                        inner.Add(BackendTransfer.CopyTo(factory, element.ToTensorValue(factory)));
+                }
+                catch
+                {
+                    // These copies belong to nobody yet; on failure nothing else will release them.
+                    foreach (var copy in inner) copy.Dispose();
+                    throw;
+                }
+
+                // Outside the catch on purpose: CreateSequence takes the copies over, and releases
+                // them itself if it cannot. Inside, a failure there would free each of them twice.
+                var value = factory.CreateSequence(inner);
+                _materialized[factory] = value;
+                return value;
+            }
+
             /// <summary>Disposes the elements, each of which then decides for itself whether that
-            /// releases anything -- a reader among them releases nothing.</summary>
+            /// releases anything -- a reader among them releases nothing -- and then the sequence
+            /// values this had built on backends, which are this object's alone.</summary>
             public override void Dispose()
             {
                 if (IsDisposed) return;
                 IsDisposed = true;
                 foreach (var element in _elements) element.Dispose();
+                if (_materialized is null) return;
+                foreach (var value in _materialized.Values) value.Dispose();
+                _materialized = null;
             }
         }
 
@@ -304,6 +390,14 @@ namespace Shorokoo
         {
             this.backing = value;
         }
+
+        /// <summary>
+        /// The value this sequence already holds, whatever backend is asked for. It was made by
+        /// one runtime and belongs to it; a session of another rebuilds it as it is fed, which is
+        /// a thing only that session can do.
+        /// </summary>
+        internal override IShorokooTensorValue ToTensorValue(IShorokooInferenceSessionFactory factory)
+            => Value;
 
         public override IEnumerator<TensorData<T>> GetEnumerator()
         {

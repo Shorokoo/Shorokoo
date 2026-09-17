@@ -47,14 +47,30 @@ namespace Shorokoo
     /// </summary>
     public class TrainingCheckpoint
     {
+        private readonly TensorDataStruct _trainableParams = null!;
+        private readonly TensorDataStruct _modelState = null!;
+        private readonly TensorDataStruct _optimizerState = null!;
+
         /// <summary>Current trainable parameter values (fields per <see cref="TrainingRig.TrainableParamStructDef"/>).</summary>
-        public TensorDataStruct TrainableParams { get; }
+        public required TensorDataStruct TrainableParams
+        {
+            get => _trainableParams;
+            init => _trainableParams = value ?? throw new ArgumentNullException(nameof(TrainableParams));
+        }
 
         /// <summary>Current model state values (empty struct for stateless models).</summary>
-        public TensorDataStruct ModelState { get; }
+        public required TensorDataStruct ModelState
+        {
+            get => _modelState;
+            init => _modelState = value ?? throw new ArgumentNullException(nameof(ModelState));
+        }
 
         /// <summary>Current optimizer state values, e.g. moment buffers (empty for basic SGD).</summary>
-        public TensorDataStruct OptimizerState { get; }
+        public required TensorDataStruct OptimizerState
+        {
+            get => _optimizerState;
+            init => _optimizerState = value ?? throw new ArgumentNullException(nameof(OptimizerState));
+        }
 
         /// <summary>
         /// The 0-based global training step this checkpoint sits at. Each
@@ -62,7 +78,7 @@ namespace Shorokoo
         /// advances it by one and the rig evaluates scheduled hyperparameters at this step, so a
         /// schedule resumes correctly from a saved checkpoint.
         /// </summary>
-        public long Step { get; }
+        public long Step { get; init; }
 
         /// <summary>
         /// The 0-based epoch counter this checkpoint sits at — a host-owned run counter the
@@ -78,7 +94,7 @@ namespace Shorokoo
         /// <see cref="CheckpointComponents.Counters"/> component (absent on disk ⇒ <c>null</c>, never a
         /// sentinel 0). A scheduled hyperparameter reading the epoch counter sees <c>0</c> for a null epoch.
         /// </summary>
-        public long? Epoch { get; }
+        public long? Epoch { get; init; }
 
         /// <summary>
         /// The 0-based batch index within the current epoch — a host-owned run counter the
@@ -87,7 +103,7 @@ namespace Shorokoo
         /// counter ⇒ <c>null</c>, never a sentinel 0). The loader-driven and explicit-counter paths set a
         /// concrete value; a scheduled hyperparameter reading the batch counter sees <c>0</c> for a null value.
         /// </summary>
-        public long? BatchIndex { get; }
+        public long? BatchIndex { get; init; }
 
         /// <summary>
         /// The <see cref="TrainingRig"/> this checkpoint belongs to, or <c>null</c> for a bare
@@ -99,7 +115,7 @@ namespace Shorokoo
         /// checkpoints, so there is no reference cycle. Attach one to a bare checkpoint via
         /// <see cref="TrainingRig.AdoptCheckpoint"/>.
         /// </summary>
-        public TrainingRig? Rig { get; }
+        public TrainingRig? Rig { get; init; }
 
         /// <summary>
         /// The loss computed for the training step that produced this checkpoint, or <c>null</c> on an
@@ -110,33 +126,81 @@ namespace Shorokoo
         /// <see cref="CheckpointComponents.Loss"/> component, independent of the counters (absent, or a
         /// null loss, ⇒ reads back <c>null</c>).
         /// </summary>
-        public float? Loss { get; }
+        public float? Loss { get; init; }
 
-        /// <summary>Packages trainable params, model state and optimizer state at
-        /// <paramref name="step"/> / <paramref name="epoch"/> / <paramref name="batchIndex"/>,
-        /// optionally attaching the producing <paramref name="rig"/> and the <paramref name="loss"/>
-        /// of the step that produced it. <paramref name="epoch"/> and <paramref name="batchIndex"/>
-        /// default to <c>null</c> — "unknown", the right value for a checkpoint with no data-loader or
-        /// explicit position (see <see cref="Epoch"/>); pass concrete values only when the position is known.</summary>
-        public TrainingCheckpoint(
-            TensorDataStruct trainableParams,
-            TensorDataStruct modelState,
-            TensorDataStruct optimizerState,
-            long step = 0,
+        /// <summary>
+        /// Packages trainable params, model state and optimizer state, plus the run counters and the
+        /// optional producing rig / step loss. The three tensor-state slots are
+        /// <see langword="required"/> object-initializer properties rather than constructor
+        /// parameters, so every one of them is <b>named at the call site</b>:
+        ///
+        /// <code>
+        /// var checkpoint = new TrainingCheckpoint
+        /// {
+        ///     TrainableParams = trainable,
+        ///     ModelState = modelState,
+        ///     OptimizerState = optimizerState,
+        ///     Step = 42,
+        /// };
+        /// </code>
+        ///
+        /// <para>All three are the same type (<see cref="TensorDataStruct"/>) and, for a real model,
+        /// often the same field shapes too — so a positional form would let the optimizer's moments be
+        /// passed as the parameters, compile, and train to a plausible-looking loss with the error only
+        /// surfacing hours later. Naming them removes that failure mode: the compiler requires all three
+        /// and rejects a checkpoint that omits one.</para>
+        ///
+        /// <para>To change one slot of an existing checkpoint, prefer the derivations
+        /// (<see cref="WithTrainableParams"/>, <see cref="WithModelState"/>,
+        /// <see cref="WithOptimizerState"/>, <see cref="WithCounters"/>) — they carry every other slot
+        /// through unchanged, so nothing can be dropped or transposed by rewriting a whole initializer.</para>
+        ///
+        /// <para><see cref="Epoch"/> and <see cref="BatchIndex"/> default to <c>null</c> — "unknown",
+        /// the right value for a checkpoint with no data loader or explicit position; set concrete
+        /// values only when the position is known.</para>
+        /// </summary>
+        public TrainingCheckpoint() { }
+
+        /// <summary>
+        /// The one place a derived checkpoint is assembled: copies every slot of this checkpoint,
+        /// overriding those the caller names. Keeping it single-sourced means a slot added to the type
+        /// cannot be silently dropped by one derivation that forgot to copy it.
+        /// </summary>
+        private TrainingCheckpoint Derive(
+            TensorDataStruct? trainableParams = null,
+            TensorDataStruct? modelState = null,
+            TensorDataStruct? optimizerState = null,
+            long? step = null,
             long? epoch = null,
             long? batchIndex = null,
             TrainingRig? rig = null,
             float? loss = null)
-        {
-            TrainableParams = trainableParams ?? throw new ArgumentNullException(nameof(trainableParams));
-            ModelState = modelState ?? throw new ArgumentNullException(nameof(modelState));
-            OptimizerState = optimizerState ?? throw new ArgumentNullException(nameof(optimizerState));
-            Step = step;
-            Epoch = epoch;
-            BatchIndex = batchIndex;
-            Rig = rig;
-            Loss = loss;
-        }
+            => new()
+            {
+                TrainableParams = trainableParams ?? TrainableParams,
+                ModelState = modelState ?? ModelState,
+                OptimizerState = optimizerState ?? OptimizerState,
+                Step = step ?? Step,
+                Epoch = epoch ?? Epoch,
+                BatchIndex = batchIndex ?? BatchIndex,
+                Rig = rig ?? Rig,
+                Loss = loss ?? Loss,
+            };
+
+        /// <summary>A new checkpoint with <see cref="TrainableParams"/> replaced; every other slot —
+        /// model state, optimizer state, counters, rig and loss — carries through unchanged.</summary>
+        public TrainingCheckpoint WithTrainableParams(TensorDataStruct trainableParams)
+            => Derive(trainableParams: trainableParams
+                ?? throw new ArgumentNullException(nameof(trainableParams)));
+
+        /// <summary>A new checkpoint with <see cref="ModelState"/> replaced; every other slot carries through.</summary>
+        public TrainingCheckpoint WithModelState(TensorDataStruct modelState)
+            => Derive(modelState: modelState ?? throw new ArgumentNullException(nameof(modelState)));
+
+        /// <summary>A new checkpoint with <see cref="OptimizerState"/> replaced; every other slot carries through.</summary>
+        public TrainingCheckpoint WithOptimizerState(TensorDataStruct optimizerState)
+            => Derive(optimizerState: optimizerState
+                ?? throw new ArgumentNullException(nameof(optimizerState)));
 
         // ---- Counter derivations (§5.8.5): step/epoch/batch are host-owned scalars, not rig
         // state, so resetting one yields a NEW checkpoint value carrying the same trainable
@@ -157,8 +221,7 @@ namespace Shorokoo
         /// concrete value that is carried forward).</para>
         /// </summary>
         public TrainingCheckpoint WithCounters(long? step = null, long? epoch = null, long? batchIndex = null)
-            => new(TrainableParams, ModelState, OptimizerState,
-                step ?? Step, epoch ?? Epoch, batchIndex ?? BatchIndex, Rig, Loss);
+            => Derive(step: step, epoch: epoch, batchIndex: batchIndex);
 
         /// <summary>A new checkpoint with <see cref="Step"/> set (epoch/batch carried through).</summary>
         public TrainingCheckpoint WithStep(long step) => WithCounters(step: step);
@@ -602,7 +665,16 @@ namespace Shorokoo
                 optState = ReadSection(byName, OptimizerStateSection, optimizerStateDef, filePath);
             }
 
-            return new TrainingCheckpoint(trainable, modelState, optState, step, epoch, batchIndex, rig: null, loss: loss);
+            return new TrainingCheckpoint
+            {
+                TrainableParams = trainable,
+                ModelState = modelState,
+                OptimizerState = optState,
+                Step = step,
+                Epoch = epoch,
+                BatchIndex = batchIndex,
+                Loss = loss,
+            };
         }
 
         /// <summary>Reconstructs one section's struct def from the file itself: every tensor

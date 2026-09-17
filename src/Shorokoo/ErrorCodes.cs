@@ -510,6 +510,10 @@ namespace Shorokoo
         /// <summary>Trainable-parameter initialization failed; the parameter inventory is reported</summary>
         public const string CR008 = "CR008";
 
+        /// <summary>A training step's allocation failed; the pool, the step's resident state and the
+        /// process's memory position against any limit in force are reported</summary>
+        public const string CR009 = "CR009";
+
         /// <summary>Variable→handle conversion: structural kind (tensor/optional/sequence/struct) mismatch</summary>
         public const string CR011 = "CR011";
 

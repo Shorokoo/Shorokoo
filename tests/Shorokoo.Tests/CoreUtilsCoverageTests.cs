@@ -1031,6 +1031,156 @@ public class CoreUtilsCoverageTests
         Assert.Equal(DataStructure.Sequence, afterBoth.Structure());
     }
 
+    // ---- AllocationFailureReport: host/device classification and the limit-vs-card discriminator ----
+
+    // The two failures Shorokoo/Shorokoo#330 and #332 report as indistinguishable, verbatim.
+    private const string ArenaFailure =
+        "[ErrorCode:Fail] E:\\_work\\1\\s\\onnxruntime\\core\\framework\\bfc_arena.cc:358 "
+        + "onnxruntime::BFCArena::AllocateRawInternal Failed to allocate memory for requested buffer of size 2359296";
+    private const string HostFailure = "[ErrorCode:Fail] bad allocation";
+
+    private static ProcessMemoryFacts Facts(long commitGiB, long limitGiB) => new(
+        WorkingSetBytes: commitGiB * (1L << 30),
+        CommitBytes: commitGiB * (1L << 30),
+        ManagedHeapBytes: 3L << 30,
+        LimitBytes: limitGiB * (1L << 30),
+        LimitIsExplicit: true);
+
+    private static string Report(
+        string failure, ProcessMemoryFacts facts, string backend, DeviceMemoryReading? device = null) =>
+        AllocationFailureReport.Render(
+            "the training step at step 1",
+            AllocationFailureReport.Classify(
+                new InvalidOperationException(failure), AllocationFailureReport.IsGpuBackend(backend)),
+            backend,
+            [new TensorInventorySection("trainable parameters",
+                [new TensorInventoryEntry("wte", "Float32", [50257L, 384L], 50257L * 384 * 4)])],
+            facts,
+            device,
+            deviceArenaLimitBytes: null,
+            failure);
+
+    [Fact]
+    public void TestAllocationFailuresAreRecognizedAndClassifiedByPool()
+    {
+        Assert.True(AllocationFailureReport.IsAllocationFailure(new InvalidOperationException(ArenaFailure)));
+        Assert.True(AllocationFailureReport.IsAllocationFailure(new InvalidOperationException(HostFailure)));
+        Assert.True(AllocationFailureReport.IsAllocationFailure(new OutOfMemoryException()));
+        Assert.True(AllocationFailureReport.IsAllocationFailure(
+            new InvalidOperationException("outer", new InvalidOperationException(ArenaFailure))));
+        Assert.True(AllocationFailureReport.IsAllocationFailure(
+            new InvalidOperationException("CUDA_ERROR_OUT_OF_MEMORY")));
+
+        Assert.False(AllocationFailureReport.IsAllocationFailure(
+            new InvalidOperationException("[ErrorCode:InvalidGraph] Node () Op (Foo) is not supported")));
+        Assert.False(AllocationFailureReport.IsAllocationFailure(new InvalidOperationException("bad input shape")));
+
+        Assert.Equal(AllocationPool.Device,
+            AllocationFailureReport.Classify(new InvalidOperationException(ArenaFailure), gpuBackend: true));
+        Assert.Equal(AllocationPool.Host,
+            AllocationFailureReport.Classify(new InvalidOperationException(HostFailure), gpuBackend: true));
+        Assert.Equal(AllocationPool.Host,
+            AllocationFailureReport.Classify(new OutOfMemoryException(), gpuBackend: true));
+        Assert.Equal(AllocationPool.Host,
+            AllocationFailureReport.Classify(new InvalidOperationException("something else"), gpuBackend: false));
+        Assert.Equal(AllocationPool.Unknown,
+            AllocationFailureReport.Classify(new InvalidOperationException("something else"), gpuBackend: true));
+
+        Assert.True(AllocationFailureReport.IsGpuBackend("Shorokoo.LinuxGPU"));
+        Assert.True(AllocationFailureReport.IsGpuBackend("Shorokoo.WinGPU"));
+        Assert.False(AllocationFailureReport.IsGpuBackend("Shorokoo.LinuxCPU"));
+        Assert.False(AllocationFailureReport.IsGpuBackend(null));
+    }
+
+    [Fact]
+    public void TestAHostLimitAndAFullDeviceNoLongerReadTheSame()
+    {
+        // Shorokoo/Shorokoo#332's table: the identical arena text, varying only the process limit.
+        var capped = Report(ArenaFailure, Facts(commitGiB: 27, limitGiB: 28), "Shorokoo.LinuxGPU");
+        var roomy = Report(ArenaFailure, Facts(commitGiB: 12, limitGiB: 128), "Shorokoo.LinuxGPU");
+        Assert.NotEqual(capped, roomy);
+
+        Assert.Contains("DEVICE memory", capped);
+        Assert.Contains("28 GiB", capped);
+        Assert.Contains("96% used", capped);
+        Assert.Contains("backed by system commit", capped);
+        Assert.Contains("re-run with it raised or removed", capped);
+
+        Assert.Contains("DEVICE memory", roomy);
+        Assert.DoesNotContain("backed by system commit", roomy);
+        Assert.Contains("well inside its host memory limit", roomy);
+
+        // Shorokoo/Shorokoo#330 mode 2: the same stack, the other pool -- and it says so.
+        var host = Report(HostFailure, Facts(commitGiB: 27, limitGiB: 28), "Shorokoo.LinuxGPU");
+        Assert.Contains("HOST memory", host);
+        Assert.DoesNotContain("The failing allocation was for DEVICE memory", host);
+        Assert.NotEqual(capped, host);
+
+        // Every report names the inventory, the backend and quotes the backend's own text.
+        string[] reports = [capped, roomy, host];
+        foreach (var report in reports)
+        {
+            Assert.Contains("73.62 MiB", report);
+            Assert.Contains("Shorokoo.LinuxGPU", report);
+            Assert.Contains("Underlying failure:", report);
+            Assert.Contains("the training step at step 1", report);
+        }
+
+        Assert.Contains("no memory limit could be read",
+            AllocationFailureReport.Render("the training step at step 0", AllocationPool.Host, null, [],
+                new ProcessMemoryFacts(null, null, 0, null, false), null, null, "boom"));
+    }
+
+    [Fact]
+    public void TestTheDeviceReadingSeparatesAFullCardFromAnArenaThatCouldNotExtend()
+    {
+        // Shorokoo/Shorokoo#332: a 2.36 MB request refused with ~11 GiB still free on the card.
+        // The card's own figures are what make that legible rather than absurd.
+        var roomy = new DeviceMemoryReading(
+            UsedBytes: 13L << 30, FreeBytes: 11L << 30, TotalBytes: 24L << 30);
+        var full = new DeviceMemoryReading(
+            UsedBytes: 24L << 30, FreeBytes: 64L << 20, TotalBytes: 24L << 30);
+
+        var cappedHost = Report(ArenaFailure, Facts(27, 28), "Shorokoo.WinGPU", roomy);
+        Assert.Contains("11 GiB free", cappedHost);
+        Assert.Contains("The device has room", cappedHost);
+        Assert.Contains("This is the limit, not the model", cappedHost);
+
+        var fullCard = Report(ArenaFailure, Facts(12, 128), "Shorokoo.WinGPU", full);
+        Assert.Contains("64 MiB free", fullCard);
+        Assert.Contains("the accelerator itself running out", fullCard);
+        Assert.DoesNotContain("The device has room", fullCard);
+
+        var arenaStuck = Report(ArenaFailure, Facts(12, 128), "Shorokoo.WinGPU", roomy);
+        Assert.Contains("not the card being out of memory", arenaStuck);
+        Assert.Contains("ShrinkArenaAfterRun", arenaStuck);
+
+        Assert.NotEqual(cappedHost, fullCard);
+        Assert.NotEqual(cappedHost, arenaStuck);
+        Assert.NotEqual(fullCard, arenaStuck);
+
+        // No CUDA runtime to ask: the device sentence is absent, the rest still stands.
+        Assert.DoesNotContain("Device:", Report(ArenaFailure, Facts(12, 128), "Shorokoo.LinuxCPU"));
+
+        Assert.Contains("arena is capped at 8 GiB", AllocationFailureReport.Render(
+            "the training step at step 1", AllocationPool.Device, "Shorokoo.WinGPU", [],
+            Facts(12, 128), roomy, 8L << 30, ArenaFailure));
+    }
+
+    [Fact]
+    public void TestReadProcessMemoryReportsThisProcessWithoutThrowing()
+    {
+        var facts = AllocationFailureReport.ReadProcessMemory();
+        Assert.True(facts.ManagedHeapBytes > 0);
+        Assert.True(facts.WorkingSetBytes is null or > 0);
+        Assert.True(facts.CommitBytes is null or > 0);
+        Assert.True(facts.LimitBytes is null or > 0);
+        Assert.Equal("1.5 KiB", AllocationFailureReport.Bytes(1536));
+        Assert.Equal("512 B", AllocationFailureReport.Bytes(512));
+        Assert.Equal("2 GiB", AllocationFailureReport.Bytes(2L << 30));
+        Assert.Equal("unknown size", AllocationFailureReport.Bytes(-1));
+    }
+
     // ---- AtomicFileWriter: temp-and-rename commit, stale sweep, retain-last-N rotation ----
 
     private static string NewScratchDir()

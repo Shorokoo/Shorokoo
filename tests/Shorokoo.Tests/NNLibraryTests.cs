@@ -1358,7 +1358,7 @@ public class NNLibraryBatchNormTrainAndDropoutCoverageTests
                 [new TensorDataModelParam("input", ModelParamType.InputParam, inputData)], 0f);
             var fresh = rig.CreateInitialCheckpoint();
             var injected = InjectModelState(fresh.ModelState, injectedState);
-            var ckpt = new TrainingCheckpoint(fresh.TrainableParams, injected, fresh.OptimizerState, fresh.Step);
+            var ckpt = fresh.WithModelState(injected);
             var step = rig.TrainStep(ckpt,
                 MakeBatch("input", "ModelInput", inputData),
                 MakeBatch("targets", "Target", TensorData(inShape, target)));

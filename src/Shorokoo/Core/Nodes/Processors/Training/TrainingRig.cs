@@ -8,6 +8,7 @@ using Shorokoo.Core.Nodes.AutoDiff;
 using Shorokoo.Core.Training;
 using Shorokoo.Core.Nodes.Processors.Training;
 using Shorokoo.Core.Utils;
+using Shorokoo.Core.Inference.Abstractions;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -1284,11 +1285,17 @@ namespace Shorokoo
             // reconstructed from that file, whose field ORDER is the file's. Everything that indexes
             // a struct positionally (TensorDataStruct's indexer, FlattenedFieldsOfType) would then
             // read the rig's order against the file's. Same values, rig's definition.
-            return new TrainingCheckpoint(
-                new TensorDataStruct(TrainableParamStructDef, checkpoint.TrainableParams.Fields),
-                new TensorDataStruct(ModelStateDef, checkpoint.ModelState.Fields),
-                new TensorDataStruct(OptimizerStateDef, checkpoint.OptimizerState.Fields),
-                checkpoint.Step, checkpoint.Epoch, checkpoint.BatchIndex, this, checkpoint.Loss);
+            return new TrainingCheckpoint
+            {
+                TrainableParams = new TensorDataStruct(TrainableParamStructDef, checkpoint.TrainableParams.Fields),
+                ModelState = new TensorDataStruct(ModelStateDef, checkpoint.ModelState.Fields),
+                OptimizerState = new TensorDataStruct(OptimizerStateDef, checkpoint.OptimizerState.Fields),
+                Step = checkpoint.Step,
+                Epoch = checkpoint.Epoch,
+                BatchIndex = checkpoint.BatchIndex,
+                Rig = this,
+                Loss = checkpoint.Loss,
+            };
         }
 
         /// <summary>Fails loud when a checkpoint's struct def does not match this rig's, by field
@@ -2533,6 +2540,48 @@ namespace Shorokoo
             return total;
         }
 
+        /// <summary>
+        /// The tensor state a training step holds resident, by section — what the step path already
+        /// knows and an allocation failure never said (Shorokoo/Shorokoo#330). Best-effort
+        /// throughout: a field whose size is not derivable contributes an unknown size rather than
+        /// failing the report, since this runs only while a failure is already being raised.
+        /// </summary>
+        internal static List<TensorInventorySection> StepTensorInventory(
+            TrainingCheckpoint checkpoint,
+            TensorDataStruct? trainingInput = null,
+            TensorDataStruct? trainingOutput = null)
+        {
+            var sections = new List<TensorInventorySection>(5);
+            Add("trainable parameters", checkpoint.TrainableParams);
+            Add("model state", checkpoint.ModelState);
+            Add("optimizer state", checkpoint.OptimizerState);
+            // The batch is state the step holds too, and for a small model on a large batch it is
+            // the whole of it — a report naming only the checkpoint would point at the wrong thing.
+            if (trainingInput is not null) Add("training input", trainingInput);
+            if (trainingOutput is not null) Add("training target", trainingOutput);
+            return sections;
+
+            void Add(string name, TensorDataStruct? data)
+            {
+                var entries = new List<TensorInventoryEntry>();
+                try
+                {
+                    foreach (var fieldDef in data?.Definition.Fields ?? [])
+                    {
+                        if (data!.Fields[fieldDef.Name] is not TensorData td) continue;
+                        // ElementBytes yields 0 for a dtype with no fixed stride; report that as
+                        // unknown rather than as zero bytes, which would read as an empty tensor.
+                        long stride = ElementBytes(td.DType);
+                        entries.Add(new TensorInventoryEntry(
+                            fieldDef.Name, td.DType.ToString(), td.Shape.Dims,
+                            stride == 0 ? -1 : td.Shape.Count * stride));
+                    }
+                }
+                catch { /* a partially built struct still contributes what it managed to describe */ }
+                sections.Add(new TensorInventorySection(name, entries));
+            }
+        }
+
         /// <summary>The fixed byte stride of one element of <paramref name="dtype"/>, or 0 if it has none.</summary>
         private static long ElementBytes(DType dtype)
         {
@@ -2596,20 +2645,47 @@ namespace Shorokoo
             var stateOutputCount =
                 UpdatedParamFieldCount + UpdatedStateFieldCount + UpdatedOptimizerStateFieldCount;
             NamedModelParam[] results;
-            if (retainStateOnDevice && compiled.HasDeviceMemory)
+            try
             {
-                // Every output but the trailing loss is state the next step feeds straight back.
-                // Sized from the session's own outputs, not from the field counts: the release
-                // loop below already allows more outputs than state plus loss, and Execute refuses
-                // a retention array of any other length -- so deriving it twice would fail the GPU
-                // path on a graph the CPU path runs fine.
-                var retain = new bool[compiled.OutputCount];
-                for (int i = 0; i < stateOutputCount; i++) retain[i] = true;
-                results = compiled.Execute(expandedInputs, retain);
+                if (retainStateOnDevice && compiled.HasDeviceMemory)
+                {
+                    // Every output but the trailing loss is state the next step feeds straight back.
+                    // Sized from the session's own outputs, not from the field counts: the release
+                    // loop below already allows more outputs than state plus loss, and Execute refuses
+                    // a retention array of any other length -- so deriving it twice would fail the GPU
+                    // path on a graph the CPU path runs fine.
+                    var retain = new bool[compiled.OutputCount];
+                    for (int i = 0; i < stateOutputCount; i++) retain[i] = true;
+                    results = compiled.Execute(expandedInputs, retain);
+                }
+                else
+                {
+                    results = compiled.Execute(expandedInputs);
+                }
             }
-            else
+            catch (Exception ex) when (AllocationFailureReport.IsAllocationFailure(ex))
             {
-                results = compiled.Execute(expandedInputs);
+                // The backend reports an allocation abort as bare text — an arena source path and
+                // a request size, or the two words "bad allocation" — with no pool, no host/device
+                // indication, and the same managed stack either way (Shorokoo/Shorokoo#330), so
+                // nothing separates a full accelerator from a process that may not commit any more
+                // host memory (Shorokoo/Shorokoo#332). Everything needed to tell them apart is
+                // already here: the step's own resident state, whether this session even has device
+                // memory to exhaust, and this process's commit against any limit in force.
+                throw new ComputeContextException(
+                    ErrorCodes.CR009, "TrainingRig.TrainStep",
+                    AllocationFailureReport.Render(
+                        $"the training step at step {checkpoint.Step}",
+                        AllocationFailureReport.Classify(ex, compiled.HasDeviceMemory),
+                        AllocationFailureReport.BackendAssemblyName(),
+                        StepTensorInventory(checkpoint, trainingInput, trainingOutput),
+                        AllocationFailureReport.ReadProcessMemory(),
+                        // Reads the card itself where a CUDA runtime is installed, null otherwise
+                        // -- so "the accelerator is full" stops being an inference (#332, #347).
+                        DeviceMemory.Read(),
+                        DeviceMemory.LimitBytes,
+                        ex.Message),
+                    ex);
             }
 
             // Graph outputs (after lowering): [updated_param_field_0, ..., updated_state_field_0, ..., updated_opt_state_field_0, ..., loss]
@@ -2650,15 +2726,17 @@ namespace Shorokoo
             // Step is the graph-advanced counter (one training step per call). Epoch and batch
             // index are host-owned — the training loop advances them — so they carry through
             // unchanged here.
-            var newCheckpoint = new TrainingCheckpoint(
-                updatedParams,
-                updatedModelState,
-                updatedOptimizerState,
-                checkpoint.Step + 1,
-                checkpoint.Epoch,
-                checkpoint.BatchIndex,
-                this,
-                lossValue);
+            var newCheckpoint = new TrainingCheckpoint
+            {
+                TrainableParams = updatedParams,
+                ModelState = updatedModelState,
+                OptimizerState = updatedOptimizerState,
+                Step = checkpoint.Step + 1,
+                Epoch = checkpoint.Epoch,
+                BatchIndex = checkpoint.BatchIndex,
+                Rig = this,
+                Loss = lossValue,
+            };
 
             // Only state nobody is going to release explicitly. A retained step's state belongs to
             // the ResidentTrainingRun, which frees it deterministically as the next step supersedes
@@ -2990,11 +3068,13 @@ namespace Shorokoo
                     $"[{string.Join(", ", _stateInitConsumedRuntimeHyperNames)}], whose value is not " +
                     "known when the checkpoint is created. Supply explicit initial values via " +
                     "CreateInitialCheckpoint(MakeHyperparameters(...)).");
-            return new TrainingCheckpoint(
-                new TensorDataStruct(TrainableParamStructDef, InitialParamFields),
-                new TensorDataStruct(ModelStateDef, InitialStateFields),
-                new TensorDataStruct(OptimizerStateDef, InitialOptStateFields),
-                rig: this);
+            return new TrainingCheckpoint
+            {
+                TrainableParams = new TensorDataStruct(TrainableParamStructDef, InitialParamFields),
+                ModelState = new TensorDataStruct(ModelStateDef, InitialStateFields),
+                OptimizerState = new TensorDataStruct(OptimizerStateDef, InitialOptStateFields),
+                Rig = this,
+            };
         }
 
         /// <summary>
@@ -3013,11 +3093,13 @@ namespace Shorokoo
                     ResolveStateInitHyperValues(hyperparameters, throwOnMissingConsumed: true),
                     MergeContext, InitialParamFields)
                 : InitialOptStateFields;
-            return new TrainingCheckpoint(
-                new TensorDataStruct(TrainableParamStructDef, InitialParamFields),
-                new TensorDataStruct(ModelStateDef, InitialStateFields),
-                new TensorDataStruct(OptimizerStateDef, optState),
-                rig: this);
+            return new TrainingCheckpoint
+            {
+                TrainableParams = new TensorDataStruct(TrainableParamStructDef, InitialParamFields),
+                ModelState = new TensorDataStruct(ModelStateDef, InitialStateFields),
+                OptimizerState = new TensorDataStruct(OptimizerStateDef, optState),
+                Rig = this,
+            };
         }
 
         /// <summary>

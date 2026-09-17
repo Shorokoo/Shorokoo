@@ -188,11 +188,11 @@ public static class ScheduleLowering
             case ScheduleExpr.PerEpoch p:
                 return Emit(p.Inner, step / Scalar((long)p.StepsPerEpoch));
 
-            // Host: step < warmupSteps ? peak * (startFactor + (1-startFactor) * (step+1)/(float)warmupSteps)
+            // Host: step < warmupSteps ? peak * (startFactor + (1-startFactor) * step/(float)warmupSteps)
             //                          : inner(step - warmupSteps)
             case ScheduleExpr.Warmup w:
             {
-                var t = (step + Scalar(1L)).Cast<float32>() / Scalar((float)w.WarmupSteps);
+                var t = step.Cast<float32>() / Scalar((float)w.WarmupSteps);
                 var ramp = Scalar(w.Peak) * (Scalar(w.StartFactor) + Scalar(1f - w.StartFactor) * t);
                 return (step < Scalar((long)w.WarmupSteps))
                     .Where(ramp, Emit(w.Inner, step - Scalar((long)w.WarmupSteps)));
@@ -278,7 +278,7 @@ internal static class ScheduleInterpreter
             {
                 if (step < w.WarmupSteps)
                 {
-                    float t = (float)(step + 1) / (float)w.WarmupSteps;
+                    float t = (float)step / (float)w.WarmupSteps;
                     return w.Peak * (w.StartFactor + (1f - w.StartFactor) * t);
                 }
                 return Evaluate(w.Inner, step - w.WarmupSteps);

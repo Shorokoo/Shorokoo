@@ -197,7 +197,17 @@ namespace Shorokoo.Core.Nodes.Processors.Training
                 var ortResolved = compute.Execute(resolverGraph);
                 for (int i = 0; i < iterCountKeys.Count; i++)
                     if (resolved[i] is null)
-                        resolved[i] = ortResolved[i].ToTensorData();
+                    {
+                        // Each of these becomes a CONSTANT's `value` attribute below, and an
+                        // attribute is part of the graph's description — the same description on
+                        // every machine — so it must not name one backend's memory. A session's
+                        // output belongs to the context that ran it, so it is copied off that
+                        // context first. The QEE path above materializes its own host tensors and
+                        // needs nothing. (Copying is also the only route that works when the
+                        // context is a card's: the copy is made by the backend that allocated it.)
+                        var fromOrt = ortResolved[i].ToTensorData();
+                        resolved[i] = fromOrt.Context is null ? fromOrt : fromOrt.CopyTo(null);
+                    }
             }
 
             var result = new TensorData[iterCountKeys.Count];

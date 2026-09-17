@@ -521,8 +521,31 @@ internal class ShapeInferenceInterpreter
         store[key] = new TensorShapeInfo(
             data.Shape,
             data.DType,
-            isSmall ? data : null);
+            isSmall ? Detached(data) : null);
     }
+
+    /// <summary>
+    /// The value as a <see cref="ShapeInferenceResult"/> may keep it: in the framework's own host
+    /// memory, belonging to no compute context. A tensor that already belongs to none — an
+    /// attribute's, or one QEE materialized — is kept as it stands.
+    ///
+    /// <para>A tensor a session produced belongs to the context that ran it, and two things here
+    /// outlive that. The result is handed back to a caller who keeps it long after this run, and
+    /// disposing the context in the meantime would leave every retained value reading freed
+    /// memory. And the values go back into a graph: <see cref="ExecuteNode"/> feeds each resolved
+    /// input to the next node's mini-graph as a CONSTANT attribute, and an attribute is part of a
+    /// graph's description — the same description on every machine — so one naming a particular
+    /// backend's memory is refused outright. That refusal is what made a multi-input fallback
+    /// (TopK over an ORT-resolved <c>k</c>) resolve nothing at all.</para>
+    ///
+    /// <para><see cref="TensorData.CopyTo"/> rather than a transfer, because the copy is the point:
+    /// it lands in managed memory the collector reclaims, where moving the runtime value here
+    /// would tie a native allocation to a record nothing ever disposes. Only small tensors are
+    /// retained at all, so the copy is bounded by
+    /// <see cref="MaxSmallTensorElements"/> elements.</para>
+    /// </summary>
+    private static TensorData Detached(TensorData data)
+        => data.Context is null ? data : data.CopyTo(null);
 
     private static TensorData CreateZeroTensorData(Shape shape, DType dtype)
     {

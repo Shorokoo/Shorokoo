@@ -49,7 +49,12 @@ namespace Shorokoo.Core.Nodes.Processors.Helpers
                 // one's storage with it (Shorokoo/Shorokoo#180). The source graph may well still
                 // be in use: these passes rebuild attributes into a new graph and leave the
                 // original standing.
-                var copy = OnnxUtils.CopyTensorValue(((IOnnxData)originalData).Value);
+                //
+                // Asked of the tensor rather than cast out of it, so that a literal held in plain
+                // managed memory answers too: a HostTensorData builds the runtime value here, and
+                // a backend-backed one hands over the one it already has. The cast would have
+                // thrown on the first of those, and this path already needs a backend to copy on.
+                var copy = OnnxUtils.CopyTensorValue(originalData.ToTensorValue());
                 return OnnxUtils.CreateTensorDataFromValue(shape, targetDType, copy, targetDType);
             }
             
@@ -166,8 +171,11 @@ namespace Shorokoo.Core.Nodes.Processors.Helpers
             // For generic types (IGenericType1-8), get the actual data type from the OrtValue
             if (dtype.IsGenericType)
             {
-                // For generic types, we need to determine the actual data type from the OrtValue
-                var ortValue = ((IOnnxData)data).Value;
+                // For generic types, we need to determine the actual data type from the OrtValue.
+                // Asked of the tensor, not cast out of it: a literal in plain managed memory has no
+                // runtime value to cast to and builds one on demand, and either way the value
+                // stays the tensor's to dispose.
+                var ortValue = data.ToTensorValue();
                 var actualDType = (DType)(int)ortValue.ElementType;
                 
                 // Extract directly from OrtValue based on actual element type

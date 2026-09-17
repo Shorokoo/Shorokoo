@@ -4,16 +4,14 @@ namespace Shorokoo.Core.Inference.Abstractions;
 
 /// <summary>
 /// The thin bit of the CUDA runtime library Shorokoo calls itself, outside ONNX Runtime:
-/// its presence (which decides the GPU/CPU backend choice in
-/// <see cref="InferenceBackend"/>) and <c>cudaMemGetInfo</c>, which
-/// <see cref="DeviceMemory"/> reports. The library is resolved by name and its exports
-/// bound lazily, so nothing here requires a CUDA machine to load — every entry point
+/// <c>cudaMemGetInfo</c>, which <see cref="DeviceMemory"/> reports. The library is resolved
+/// by name and its exports bound lazily, so nothing here requires a CUDA machine to load — every entry point
 /// simply reports failure when the runtime is absent.
 /// </summary>
 internal static class CudaRuntime
 {
     /// <summary>CUDA Toolkit 12.x ships its runtime under an OS-specific name.</summary>
-    internal static string LibraryName => RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+    private static string LibraryName => RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
         ? "cudart64_12.dll"
         : "libcudart.so.12";
 

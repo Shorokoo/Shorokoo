@@ -150,7 +150,8 @@ namespace Shorokoo.Runtime
     /// A context carries no per-instance configuration — no device, execution provider, thread count
     /// or session options — and every session it creates is built by the one process-wide
     /// <see cref="Shorokoo.Core.Inference.Abstractions.InferenceBackend.Factory"/>. Two distinct
-    /// instances therefore name a <i>phase</i> of the work, never a device.
+    /// instances therefore name a <i>phase</i> of the work, never a device. Which device the work
+    /// will go to is read off <see cref="Backend"/>.
     /// </summary>
     public class ComputeContext
     {
@@ -179,6 +180,17 @@ namespace Shorokoo.Runtime
         public ComputeContext()
         {
         }
+
+        /// <summary>
+        /// The backend this context compiles and runs on — its name, its device, and the CUDA device
+        /// it allocates on. Every context in the process reports the same one; it is a property of
+        /// the build, not of the instance. Read it to log the device a run used, or call
+        /// <see cref="Shorokoo.Core.Inference.Abstractions.InferenceBackend.RequireDevice"/> to
+        /// refuse to start on the wrong one.
+        ///
+        /// <para>Reading this resolves the backend if none is live yet, exactly as compiling would.</para>
+        /// </summary>
+        public BackendDescription Backend => InferenceBackend.Factory.Description;
 
         /// <summary>
         /// Compiles the graph into a reusable <see cref="CompiledGraph"/>: the ONNX model and

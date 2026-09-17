@@ -508,6 +508,20 @@ public class TensorDataApiCoverageTests
         Assert.Equal([198f, 4f], Floats(context.Execute(graph, t)[0]));
     }
 
+    [Fact]
+    public void TestWritingToALiteralIsSeenByARunFedTheReaderItWasGivenAccessThrough()
+    {
+        var a = InputVector<float32>("a");
+        var graph = new InternalComputationGraph([a], [a + a]);
+        var t = TensorData([2L], (float[])[1f, 2f]);
+        using var context = new ComputeContext();
+        var reader = t.GiveAccessTo(context);
+
+        Assert.Equal([2f, 4f], Floats(context.Execute(graph, reader)[0]));
+        t.As<float32>().AccessModifiableMemory<float>()[0] = 99f;
+        Assert.Equal([198f, 4f], Floats(context.Execute(graph, reader)[0]));
+    }
+
     private static float[] Floats(NamedModelParam param)
         => [.. param.ToTensorData().As<float32>().AccessMemory<float>()];
 

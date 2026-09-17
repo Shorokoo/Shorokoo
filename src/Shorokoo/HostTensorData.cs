@@ -34,24 +34,14 @@ namespace Shorokoo
     {
         private readonly byte[] _bytes;
 
-        // One materialized value per backend this tensor has been fed to, owned here and released
-        // on Dispose. Built on demand rather than up front, because most tensors are never fed to
-        // anything: a graph literal is read by the builder and that is the end of it.
-        //
-        // Keyed by backend because a tensor may legitimately be fed to more than one -- that is
-        // the whole point of a program running two -- and a value belongs to the runtime that
-        // made it. Reference equality is the right comparison: two factories are the same backend
-        // exactly when they are the same object.
-        private Dictionary<IShorokooInferenceSessionFactory, IShorokooTensorValue>? _materialized;
-
-        // The cache is written from whichever thread is feeding a session, and the whole point of
-        // this branch is two backends fed at once.
-        private readonly object _gate = new();
+        // What these bytes have been built into, per backend. Shared with every clone over the
+        // same bytes, because the materializations name the bytes rather than this wrapper.
+        private readonly MaterializedValues _materialized;
 
         /// <summary>Creates a tensor of <paramref name="shape"/> over <paramref name="bytes"/>,
         /// which it takes as its own storage rather than copying.</summary>
         public HostTensorData(Shape shape, byte[] bytes)
-            : this(shape, bytes, context: null, ownsMemory: true, storage: null)
+            : this(shape, bytes, context: null, ownsMemory: true, storage: null, materialized: null)
         {
         }
 
@@ -59,19 +49,22 @@ namespace Shorokoo
             : base(shape, actualDType, HostStorage(), null, true)
         {
             _bytes = bytes ?? throw new ArgumentNullException(nameof(bytes));
+            _materialized = new MaterializedValues();
         }
 
         private HostTensorData(
-            Shape shape, byte[] bytes, ComputeContext? context, bool ownsMemory, TensorStorage? storage)
+            Shape shape, byte[] bytes, ComputeContext? context, bool ownsMemory, TensorStorage? storage,
+            MaterializedValues? materialized)
             : base(shape, storage ?? HostStorage(), context, ownsMemory)
         {
             _bytes = bytes ?? throw new ArgumentNullException(nameof(bytes));
+            _materialized = materialized ?? new MaterializedValues();
         }
 
         /// <summary>A host tensor over <paramref name="bytes"/> belonging to
         /// <paramref name="context"/>, which must be a host-memory context or null.</summary>
         internal static HostTensorData<T> Bound(Shape shape, byte[] bytes, ComputeContext? context)
-            => new(shape, bytes, context, ownsMemory: true, storage: null);
+            => new(shape, bytes, context, ownsMemory: true, storage: null, materialized: null);
 
         // Managed bytes are the garbage collector's to reclaim, so releasing this storage frees
         // nothing directly. It still matters: it is what tells a tensor that was given access to
@@ -80,7 +73,7 @@ namespace Shorokoo
 
         /// <inheritdoc/>
         internal override TensorData CloneSharing(ComputeContext? context, bool ownsMemory)
-            => new HostTensorData<T>(Shape, _bytes, context, ownsMemory, Storage);
+            => new HostTensorData<T>(Shape, _bytes, context, ownsMemory, Storage, _materialized);
 
         /// <summary>
         /// Creates a tensor of <paramref name="shape"/> holding a copy of
@@ -122,7 +115,7 @@ namespace Shorokoo
         public override Span<V> AccessModifiableMemory<V>()
         {
             ThrowIfDisposed();
-            Invalidate();
+            _materialized.Invalidate();
             return MemoryMarshal.Cast<byte, V>(_bytes.AsSpan());
         }
 
@@ -137,7 +130,7 @@ namespace Shorokoo
         public override Span<byte> AccessModifiableRawMemory()
         {
             ThrowIfDisposed();
-            Invalidate();
+            _materialized.Invalidate();
             return _bytes;
         }
 
@@ -158,34 +151,8 @@ namespace Shorokoo
             ArgumentNullException.ThrowIfNull(factory);
             ThrowIfDisposed();
 
-            lock (_gate)
-            {
-                _materialized ??= new Dictionary<IShorokooInferenceSessionFactory, IShorokooTensorValue>(
-                    ReferenceEqualityComparer.Instance);
-
-                if (_materialized.TryGetValue(factory, out var existing)) return existing;
-
-                var value = factory.CreateTensorFromRawBytes(
-                    (ShorokooTensorElementType)(int)this.DType, _bytes, (long[])this.Shape);
-                _materialized[factory] = value;
-                return value;
-            }
-        }
-
-        /// <summary>
-        /// Drops every runtime's copy of these bytes, because the bytes have just been handed out
-        /// for writing. A materialized value is a copy taken at the moment it was built, so a
-        /// tensor mutated after being fed would otherwise keep feeding the old contents -- silently,
-        /// since the tensor itself reads back the new ones.
-        /// </summary>
-        private void Invalidate()
-        {
-            lock (_gate)
-            {
-                if (_materialized is null) return;
-                foreach (var value in _materialized.Values) value.Dispose();
-                _materialized = null;
-            }
+            return _materialized.Get(factory, f => f.CreateTensorFromRawBytes(
+                (ShorokooTensorElementType)(int)this.DType, _bytes, (long[])this.Shape));
         }
 
         /// <summary>
@@ -200,8 +167,13 @@ namespace Shorokoo
         {
             if (IsDisposed) return;
             IsDisposed = true;
-            if (OwnsMemory) Storage.Release();
-            Invalidate();
+            // Only the owner tears the materializations down: they are shared with every clone
+            // over these bytes, and a reader letting go of its name for them frees nothing.
+            if (OwnsMemory)
+            {
+                Storage.Release();
+                _materialized.Invalidate();
+            }
         }
     }
 }

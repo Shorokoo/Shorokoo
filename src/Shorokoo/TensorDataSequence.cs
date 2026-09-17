@@ -192,14 +192,9 @@ namespace Shorokoo
             where T : IVarType
         {
             private readonly List<TensorData<T>> _elements;
-            private readonly object _gate = new();
 
-            // One materialized sequence value per backend this has been fed to, owned here and
-            // released on Dispose -- HostTensorData<T>'s arrangement, for the same reasons. Built
-            // on demand, because a transferred sequence is usually just read; keyed by backend
-            // under reference equality, because a value belongs to the runtime that made it and
-            // two factories are the same backend exactly when they are the same object.
-            private Dictionary<IShorokooInferenceSessionFactory, IShorokooTensorValue>? _materialized;
+            // What these elements have been built into, per backend.
+            private readonly MaterializedValues _materialized = new();
 
             internal ListTensorDataSequence(List<TensorData<T>> elements) => _elements = elements;
 
@@ -234,13 +229,13 @@ namespace Shorokoo
                 ArgumentNullException.ThrowIfNull(factory);
                 ThrowIfDisposed();
 
-                lock (_gate)
-                {
-                    _materialized ??= new Dictionary<IShorokooInferenceSessionFactory, IShorokooTensorValue>(
-                        ReferenceEqualityComparer.Instance);
+                return _materialized.Get(factory, Build);
+            }
 
-                    if (_materialized.TryGetValue(factory, out var existing)) return existing;
-
+            /// <summary>Builds this sequence's elements into one sequence value of
+            /// <paramref name="factory"/>'s runtime.</summary>
+            private IShorokooTensorValue Build(IShorokooInferenceSessionFactory factory)
+            {
                 var inner = new List<IShorokooTensorValue>(_elements.Count);
                 try
                 {
@@ -259,10 +254,7 @@ namespace Shorokoo
 
                 // Outside the catch on purpose: CreateSequence takes the copies over, and releases
                 // them itself if it cannot. Inside, a failure there would free each of them twice.
-                    var value = factory.CreateSequence(inner);
-                    _materialized[factory] = value;
-                    return value;
-                }
+                return factory.CreateSequence(inner);
             }
 
             /// <summary>
@@ -280,12 +272,7 @@ namespace Shorokoo
                 IsDisposed = true;
                 foreach (var element in _elements)
                     if (element.OwnsMemory) element.Dispose();
-                lock (_gate)
-                {
-                    if (_materialized is null) return;
-                    foreach (var value in _materialized.Values) value.Dispose();
-                    _materialized = null;
-                }
+                _materialized.Invalidate();
             }
         }
 

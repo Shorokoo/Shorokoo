@@ -35,26 +35,24 @@ namespace Shorokoo
     {
         private readonly string[] _values;
 
-        // One materialized value per backend this tensor has been fed to, owned here and released
-        // on Dispose -- HostTensorData<T>'s arrangement, for its reasons. Built on demand, because
-        // most literals are only ever read by the graph builder; keyed by backend under reference
-        // equality, because a value belongs to the runtime that made it and two factories are the
-        // same backend exactly when they are the same object.
-        private Dictionary<IShorokooInferenceSessionFactory, IShorokooTensorValue>? _materialized;
-        private readonly object _gate = new();
+        // What these strings have been built into, per backend. Shared with every clone over the
+        // same strings, because the materializations name the strings rather than this wrapper.
+        private readonly MaterializedValues _materialized;
 
         /// <summary>Creates a string tensor of <paramref name="shape"/> over
         /// <paramref name="values"/>, which it takes as its own storage rather than copying.</summary>
         public HostStringTensorData(Shape shape, string[] values)
-            : this(shape, values, context: null, ownsMemory: true, storage: null)
+            : this(shape, values, context: null, ownsMemory: true, storage: null, materialized: null)
         {
         }
 
         private HostStringTensorData(
-            Shape shape, string[] values, ComputeContext? context, bool ownsMemory, TensorStorage? storage)
+            Shape shape, string[] values, ComputeContext? context, bool ownsMemory, TensorStorage? storage,
+            MaterializedValues? materialized)
             : base(shape, storage ?? HostStorage(), context, ownsMemory)
         {
             _values = values ?? throw new ArgumentNullException(nameof(values));
+            _materialized = materialized ?? new MaterializedValues();
         }
 
         /// <summary>
@@ -84,7 +82,7 @@ namespace Shorokoo
         /// <summary>A host string tensor over <paramref name="values"/> belonging to
         /// <paramref name="context"/>, which must be a host-memory context or null.</summary>
         internal static HostStringTensorData Bound(Shape shape, string[] values, ComputeContext? context)
-            => new(shape, values, context, ownsMemory: true, storage: null);
+            => new(shape, values, context, ownsMemory: true, storage: null, materialized: null);
 
         // The strings are the garbage collector's to reclaim, so releasing this storage frees
         // nothing directly. It still matters: it is what tells a tensor that was given access to
@@ -93,7 +91,7 @@ namespace Shorokoo
 
         /// <inheritdoc/>
         internal override TensorData CloneSharing(ComputeContext? context, bool ownsMemory)
-            => new HostStringTensorData(Shape, _values, context, ownsMemory, Storage);
+            => new HostStringTensorData(Shape, _values, context, ownsMemory, Storage, _materialized);
 
         /// <summary>
         /// The elements as they were given, in row-major order. This is the one read of a string
@@ -165,17 +163,8 @@ namespace Shorokoo
             ArgumentNullException.ThrowIfNull(factory);
             ThrowIfDisposed();
 
-            lock (_gate)
-            {
-                _materialized ??= new Dictionary<IShorokooInferenceSessionFactory, IShorokooTensorValue>(
-                    ReferenceEqualityComparer.Instance);
-
-                if (_materialized.TryGetValue(factory, out var existing)) return existing;
-
-                var value = factory.CreateStringTensor(_values, (long[])this.Shape);
-                _materialized[factory] = value;
-                return value;
-            }
+            return _materialized.Get(
+                factory, f => f.CreateStringTensor(_values, (long[])this.Shape));
         }
 
         /// <summary>
@@ -190,12 +179,12 @@ namespace Shorokoo
         {
             if (IsDisposed) return;
             IsDisposed = true;
-            if (OwnsMemory) Storage.Release();
-            lock (_gate)
+            // Only the owner tears the materializations down: they are shared with every clone
+            // over these strings, and a reader letting go of its name for them frees nothing.
+            if (OwnsMemory)
             {
-                if (_materialized is null) return;
-                foreach (var value in _materialized.Values) value.Dispose();
-                _materialized = null;
+                Storage.Release();
+                _materialized.Invalidate();
             }
         }
 

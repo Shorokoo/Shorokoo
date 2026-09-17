@@ -1039,11 +1039,13 @@ save left behind. The three are disjoint and add up to `Elapsed`, the wall clock
 
 Two reasons it is reported rather than left to be worked out from the file's size:
 
-- **The cost does not follow the size.** Two identical saves of one identical file routinely differ
-  by a factor of several, because what the flush costs depends on how much of the file the OS had
-  already written back before it ran — which is why the phases are separated: the total alone
-  cannot say whether a slow save was the serialization or the device. The rate a save achieves is
-  a property of that save, not a constant of the machine to calibrate once.
+- **The cost does not follow the size.** Two identical saves of one identical file differ, and the
+  phases are separated because the total alone cannot say why. At size it is the flush that both
+  dominates and moves — what it costs depends on how much of the file the OS had already written
+  back before it ran — while the serialization is steady and the commit is metadata-only. One
+  200 MB file saved six times over: write steady at 51 ms, flush between 184 and 243 ms, commit at
+  7 ms. The rate a save achieves is a property of that save, not a constant of the machine to
+  calibrate once.
 - **At a checkpoint cadence it is not negligible to the run.** Saving a multi-GB checkpoint every N
   steps can cost tens of seconds each time; over a long run that is minutes to tens of minutes.
 

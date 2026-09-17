@@ -368,9 +368,11 @@ graph to the next call. `Eval` is the exception: it returns `TensorData` (or
 
 ## Backend selection
 
-- Add exactly one backend package as a dependency: `Shorokoo.LinuxCPU`,
-  `Shorokoo.LinuxGPU`, `Shorokoo.WinCPU`, or `Shorokoo.WinGPU`. Each brings the native
-  ONNX Runtime (CPU- or CUDA-flavored) for its platform.
+- Add a backend package as a dependency: `Shorokoo.LinuxCPU`, `Shorokoo.LinuxGPU`,
+  `Shorokoo.WinCPU`, or `Shorokoo.WinGPU`. Each brings the native ONNX Runtime (CPU- or
+  CUDA-flavored) for its platform. One is enough; a program that names its backends may
+  reference several, or load them at runtime and reference none — see
+  [Loading a backend at runtime](#loading-a-backend-at-runtime).
 - With exactly one backend package referenced you normally need no setup at all:
   auto-discovery (below) finds it on the first inference call. Set the backend
   explicitly to name which one you mean when a deployment holds more than one (which
@@ -513,6 +515,71 @@ Two related entry points:
   ```csharp
   InferenceBackend.RequireDevice(ComputeDevice.Cpu);   // before any inference call
   ```
+
+### Loading a backend at runtime
+
+A program need not reference a backend at compile time at all. `BackendPackage.TryLoad`
+takes a path and hands back a factory, and a backend that does not fit the machine comes
+back as a reason rather than an exception — so one executable can carry backends for
+several platforms and pick at startup.
+
+```csharp
+using Shorokoo.Core.Inference.Abstractions;
+
+if (BackendPackage.TryLoad("plugins/Shorokoo.WinGPU.dll", out var gpu, out var why))
+{
+    using var cuda = new ComputeContext(gpu!);
+    // ...
+}
+else
+{
+    Console.WriteLine($"No GPU backend here: {why.Detail}");   // fall back, warn, or stop
+}
+```
+
+`BackendPackage.Probe` answers the same question without loading anything: it reads the
+backend's own declaration out of the file's metadata, so a backend for another operating
+system, another architecture, or one whose native libraries are not deployed beside it is
+refused before any native code is touched. `BackendProbe.Reason` says which it was
+(`WrongOperatingSystem`, `MissingNative`, `MissingCudaRuntime`, …) and `Detail` names the
+file or library that is wrong.
+
+Each backend loaded this way gets a load context of its own, so several run side by side
+without sharing a native runtime.
+
+### Moving data between contexts
+
+A `TensorData` belongs to a compute context — `Context`, null for the framework's own host
+memory — and says whether it owns its bytes, in `OwnsMemory`. `Space` says where those bytes
+are: host memory, or a particular CUDA device.
+
+Three operations move a tensor between contexts. They differ in what happens to the
+ownership rather than to the bytes:
+
+| | Same memory space | Different memory space |
+|---|---|---|
+| `TransferTo` | nothing is copied; ownership moves to the result | the bytes are copied and the source is spent — owner only |
+| `CopyTo` | an independent copy, owned by the result | the same |
+| `GiveAccessTo` | a reader that owns nothing; the source keeps what it had | refused — use `CopyTo` |
+
+Whether the bytes move is decided by the space and not by which context is which, so two
+CUDA contexts on one device pass a tensor between them without copying it, even when they
+are separate backends over separate native runtimes.
+
+```csharp
+var onCard  = cuda.Execute(model, input)[0].ToTensorData();  // device memory
+var onHost  = onCard.TransferTo(cpu);                        // one copy across the bus
+var shared  = onHost.TransferTo(otherCpu);                   // no copy: same space
+```
+
+Disposing a context releases every tensor it still owns, and reading one afterwards throws
+rather than reading freed memory. Bytes that were transferred away are not touched — they
+belong to the context that took them. A context constructed with `detachesOutputs: true`
+hands its results out belonging to nobody, so they outlive it; `ComputeContext.Default` is
+built that way.
+
+`TensorDataStruct` and `TensorDataSequence` carry a context and take the same three
+operations, recursing into what they own.
 
 ### One model, two devices
 

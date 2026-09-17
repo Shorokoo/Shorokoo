@@ -191,26 +191,19 @@ rest of it.
 
 ## Current limitations (could be lifted)
 
-### Data crosses between backends by a host copy
+### Moving a tensor between memory spaces copies it
 
-A program can run several backends at once — a CPU context and a CUDA context in one process, each
-on its own device; see [One model, two devices](inference.md#one-model-two-devices). What it cannot
-do is move data between them cheaply.
+A `TensorData` belongs to a compute context and says whether it owns its bytes, and
+`TransferTo` / `CopyTo` / `GiveAccessTo` move it between contexts; see
+[Moving data between contexts](inference.md#moving-data-between-contexts). Within one memory space
+nothing is copied — two CUDA contexts on one device share the allocation, and so do any two host
+contexts — but crossing from the host to a device or back is a real copy, once per crossing. There
+is no way to have a tensor be in two spaces at once, and there is no direct device-to-device path:
+a tensor moving between two different cards goes through the host.
 
-A `TensorData` is built on the default backend wherever you build it, and stays there. Feeding it to
-a context on another backend works, but the session rebuilds it on its own side first: a host copy
-per feed, every run. For a training loop that means the inputs are copied on every step, and there
-is no way to pin a tensor to the backend that will consume it.
-
-Two consequences worth planning around. A value an execution provider kept in its own memory
-(`TensorData.IsHostResident` is false — what a
-[resident training run](training.md#keeping-training-state-on-the-device) produces) cannot cross at
-all, since there is no path from one runtime's device allocation to another's; it has to come back
-to the host on the backend that owns it first. And two backends that *do* share a native ONNX
-Runtime — a CPU factory and a CUDA factory over one loaded runtime, which is the usual way to get
-two devices — pay none of this, because a value either makes is a value the other's sessions accept
-directly. Prefer that arrangement where the choice is open, and keep separate native runtimes for
-where they are actually needed: two ONNX Runtime builds, or two versions, in one process.
+A tensor that came back from a session without the context that produced it being recorded reports
+its space as unknown, and cannot be transferred at all — there is no telling whether another
+context shares it. Bring such a value home on the backend that owns it first.
 
 ### Device-memory readings are the device's, and device 0's
 

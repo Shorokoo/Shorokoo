@@ -28,9 +28,11 @@ Related: [core-types.md](core-types.md) · [defining-models.md](defining-models.
   `InferenceBackend.RequireDevice(...)` refuses to start on the wrong one —
   [Which device am I on?](#which-device-am-i-on). To run part of the work on another
   device, [One model, two devices](#one-model-two-devices).
-- On a GPU backend the CUDA arena is configured through `DeviceMemory`, which also reports
-  how much of the card is gone. Its arena strategy deliberately departs from ORT's default so
-  that a training loop does not end up holding far more of the card than it uses:
+- On a GPU backend the CUDA arena is configured on the `ComputeContext` — `DeviceMemory` for
+  the sessions it compiles, `RunSettings` for what its runs do — while the separate static
+  `DeviceMemory` class reports how much of the card is gone. The arena strategy departs from
+  exact-size extension only for a session Shorokoo knows is reused across differing shapes, so a
+  long training loop does not end up holding far more of the card than it uses:
   [Device memory](#device-memory-gpu-backends).
 
 ## Workflow: one-shot evaluation
@@ -559,11 +561,10 @@ suit opposite situations:
   The catch is that an exactly-sized region cannot serve a later, larger request: a session whose
   input shapes keep growing strands every region it outgrows.
 
-**Shorokoo defaults to `SameAsRequested`.** That is a deliberate departure from ORT, and it is a
-bet rather than a free win. Measured on the CPU arena — the same allocator with the same two
-strategies — over four chained matmuls. Both columns move by a MiB or two between runs, and on the
-mixed rows a run can put the two within one MiB of each other, so read every ratio below as
-approximate and the near-ties as ties:
+**Shorokoo picks between them per session, and does not ship one value for both.** Measured on the
+CPU arena — the same allocator with the same two strategies — over four chained matmuls. Both
+columns move by a MiB or two between runs, and on the mixed rows a run can put the two within one
+MiB of each other, so read every ratio below as approximate and the near-ties as ties:
 
 | shapes fed to the session | `SameAsRequested` | `NextPowerOfTwo` |
 |---|---|---|
@@ -577,32 +578,65 @@ approximate and the near-ties as ties:
 
 The measurement is a test in the Shorokoo repository
 (`ArenaExtendStrategyProbeTests`, `Purpose=Manual`) rather than something you can run against the
-package, so treat these as indicative of the shape, not as your machine's numbers — what settles
-your case is `DeviceMemory.Sample()` around your own run.
+package, and it is taken on the **CPU** arena — the same `BFCArena` with the same strategy enum the
+CUDA provider uses, so the shape carries over but the numbers do not
+([#357](https://github.com/Shorokoo/Shorokoo/issues/357) tracks confirming them on a card). Treat
+these as indicative of the shape, not as your machine's numbers — what settles your case is
+`DeviceMemory.Sample()` around your own run.
 
-The bet is on the asymmetry, not on winning every row. A training run feeds one input shape to one
-compiled step for its whole length — the first row — and there exact-size extension holds about
-1.3–1.45x less. On the card that prompted this, a step whose first step showed 12,877 MiB ended up
-with the arena holding all 24,563 MiB — the whole of a 24 GiB card — and a smaller batch of the same
-model settled at roughly 1.8x what its steps used. Two allocation sizes still favour exact-size extension
-(row 2, by 1.2–1.6x depending on the run); it is once several are in play that ORT's doubling holds less, by about 1.1x, or
-ties (rows 3 to 5). **The one case to override it in is input shapes that grow without settling** —
-the last two rows, where the doubling holds around 1.5x less and, on a card with no room to spare,
-fits where exact-size extension does not:
+Neither column wins outright, and which one wins is decided by something Shorokoo knows about each
+session: whether its allocation sizes settle. A training run feeds one input shape to one compiled
+step for its whole length — the first row — and there exact-size extension holds about 1.3–1.45x
+less. On the card that prompted this, a step whose first step showed 12,877 MiB ended up with the
+arena holding all 24,563 MiB — the whole of a 24 GiB card — and a smaller batch of the same model
+settled at roughly 1.8x what its steps used. Two allocation sizes still favour exact-size extension
+(row 2, by 1.2–1.6x depending on the run); it is once several are in play that ORT's doubling holds
+less, by about 1.1x, or ties (rows 3 to 5). The last two rows are the other end: input shapes that
+grow without settling, where each outgrown region is stranded, the doubling holds around 1.5x less
+and — on a card with no room to spare — fits where exact-size extension does not.
+
+Which of those a given session is turns on **how its caller feeds it**, and that is not knowable
+when the session is built: a compiled graph fed one batch shape for its whole life and one fed a new
+shape every call are the same object. So `ArenaExtend` defaults to `Auto`, which is not one of ORT's
+values but `SameAsRequested` **except where Shorokoo already knows the shapes differ**.
+
+Today that is one case. A training rig keeps a compiled step per input shape up to a limit; feed it
+more distinct shapes than that and it falls back to a single step that every later shape shares.
+By the time that step exists the differing shapes have already happened — it is not a guess — and it
+is the growing-shape row, the one where exact-size extension strands a region per outgrown input and
+cannot fit under a budget at all. That step gets the doubling; everything else keeps exact-size
+extension, as it did before `Auto` existed.
+
+**If your own session is fed shapes that keep growing, say so** — Shorokoo cannot know it before the
+feeds arrive, and this is the case worth overriding. Naming a strategy applies to the sessions that
+context compiles and no others, and `CompiledGraph.DeviceMemory` reports what a graph actually got:
 
 ```csharp
 using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Runtime;
 
-DeviceMemory.ArenaExtend = ArenaExtendStrategy.NextPowerOfTwo;   // ORT's doubling, back again
-DeviceMemory.LimitBytes = 16L * 1024 * 1024 * 1024;              // cap the arena at 16 GiB
-DeviceMemory.ShrinkArenaAfterRun = true;                          // hand unused blocks back each step
+var ctx = new ComputeContext
+{
+    DeviceMemory = new DeviceMemorySettings
+    {
+        ArenaExtend = ArenaExtendStrategy.NextPowerOfTwo,   // ORT's doubling, back again
+        LimitBytes = 16L * 1024 * 1024 * 1024,              // cap this session's arena at 16 GiB
+    },
+    RunSettings = new RunSettings { ShrinkArenaAfterRun = true },  // hand unused blocks back each step
+};
+
+var compiled = ctx.Compile(graph);
+compiled.Execute(inputs);                                          // the context's run settings
+compiled.Execute(inputs, new RunSettings { ShrinkArenaAfterRun = false });   // this run only
+
+Console.WriteLine(compiled.DeviceMemory.ArenaExtend);              // what this session was built with
 ```
 
-| setting | ORT option | default | read |
-|---|---|---|---|
-| `LimitBytes` | `gpu_mem_limit` | `null` — no cap | when a session is created |
-| `ArenaExtend` | `arena_extend_strategy` | `SameAsRequested` — **not** ORT's default | when a session is created |
-| `ShrinkArenaAfterRun` | `memory.enable_memory_arena_shrinkage` | `false` | on every run |
+| setting | on | ORT option | default | read |
+|---|---|---|---|---|
+| `LimitBytes` | `DeviceMemorySettings` | `gpu_mem_limit` | `null` — no cap | when a session is created |
+| `ArenaExtend` | `DeviceMemorySettings` | `arena_extend_strategy` | `Auto` — `SameAsRequested`, except ORT's `NextPowerOfTwo` for a session Shorokoo knows is reused across differing shapes | when a session is created |
+| `ShrinkArenaAfterRun` | `RunSettings` | `memory.enable_memory_arena_shrinkage` | `false` | on every run |
 
 The other two are unset by default for their own reasons. `ShrinkArenaAfterRun` costs a
 synchronizing device allocation on every step to re-take what it handed back, so it is worth it
@@ -618,12 +652,15 @@ Note that the budget caps **each session's** arena, not the process. ORT gives a
 CUDA arena, so a process holding a compiled graph and a training rig at once can hold the limit
 more than once over; read it as the ceiling on any one session.
 
-The first two settings are read **when a session is built** — the first inference call, or a
-training rig's first `TrainStep` for a given input shape — so set them at startup; changing them
-afterwards leaves already-compiled sessions as they were. `ShrinkArenaAfterRun` is read on every
-run and takes effect immediately, on sessions already compiled.
+The first two are read **when a session is built** — the first inference call, or a training rig's
+first `TrainStep` for a given input shape — so the context has to carry them before the graph is
+compiled on it; a graph already compiled keeps what it was built with, which is why
+`CompiledGraph.DeviceMemory` reports the settled strategy rather than `Auto`. `ShrinkArenaAfterRun`
+ORT reads on every run, so a `CompiledGraph.Execute` / `Run` call can override it for that call
+alone. The context's own one-shot entry points and a rig's `TrainStep` take no such override and
+run on the context's instance, so set it on the context they run on.
 
-The same class reports what the card is doing:
+The static `DeviceMemory` class — the readings, not the settings — reports what the card is doing:
 
 ```csharp
 using var run = rig.BeginResidentRun(checkpoint);
@@ -651,11 +688,20 @@ things to know about the numbers:
   the device if it has none — itself a few hundred MiB. Take the first reading after the backend is
   up, not before, or that cost lands inside your baseline.
 
-**Process-wide is the shape, not a staging post.** One device (0), one setting for every session in
-the process, mutable at any time. Per-`ComputeContext` device configuration was considered and is
-not planned, so do not expect two contexts to differ: treat these as startup configuration, and
-where one process must serve both a training loop and a variable-shape inference path, pick the
-arena strategy whose cost you would rather pay.
+**Scope: the session and the run, never the process.** That is ONNX Runtime's own shape, not a
+convention layered on top. ORT gives each session its own arena and reads `DeviceMemorySettings`
+once while building it, after which the session keeps them for life — so a context configures the
+sessions it compiles from then on, two contexts may differ, and a graph already compiled is
+untouched by any later change. To run something under a different budget, compile it on a context
+that carries one. `RunSettings` ORT reads off the run instead, so those are settled per call and a
+compiled graph can shrink its arena on one run and not the next.
+
+Where one process must serve both a training loop and a variable-shape inference path, give them a
+context each rather than picking one arena strategy for both.
+
+The readings are the exception, and they are readings rather than settings: `Read()` and `Sample()`
+go to whichever CUDA device is current for the calling thread — device 0, because that is what the
+shipped GPU backends use — and `PeakUsedBytes` is one process's record of its own run.
 
 ## Debugging engine (no OnnxRuntime)
 

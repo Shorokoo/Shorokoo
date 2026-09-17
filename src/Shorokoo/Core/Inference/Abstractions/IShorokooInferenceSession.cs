@@ -6,10 +6,12 @@ public interface IShorokooInferenceSession : IDisposable
     IReadOnlyList<string> OutputNames { get; }
 
     // Runs the session. The returned values are owned by the caller and must
-    // be disposed.
+    // be disposed. runSettings applies to this run alone -- ORT reads these off the run, not
+    // the session, so two runs of one session may differ.
     IReadOnlyList<IShorokooTensorValue> Run(
         IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
-        IReadOnlyList<string> outputNames);
+        IReadOnlyList<string> outputNames,
+        RunSettings runSettings);
 
     // Whether this session's execution provider produces its outputs somewhere other than
     // host memory -- true for a GPU provider, false for a CPU one. When it is false
@@ -31,5 +33,6 @@ public interface IShorokooInferenceSession : IDisposable
     IReadOnlyList<IShorokooTensorValue> RunRetainingOutputs(
         IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
         IReadOnlyList<string> outputNames,
-        IReadOnlySet<string> retainedOutputNames) => Run(inputs, outputNames);
+        IReadOnlySet<string> retainedOutputNames,
+        RunSettings runSettings) => Run(inputs, outputNames, runSettings);
 }

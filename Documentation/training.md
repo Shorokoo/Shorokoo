@@ -634,31 +634,42 @@ one set of compiled training-step sessions (one per fed input shape) that the `F
 manual `TrainStep` loop all share.
 Every `With…` derivation keeps the same two contexts.
 
-**What the two can usefully differ in: nothing, today.** `ComputeContext` has a single parameterless
-constructor and carries no per-instance settings — no device, no execution provider, no thread count,
-no session options — and every session either context creates is built by the one process-wide backend
-factory. Passing two distinct instances therefore selects nothing. In particular you **cannot** merge
-on one device and train on another: [only one backend is live per process](inference.md#backend-selection)
-and both contexts go through it, so the naming does not offer a CPU-build / GPU-train split. Read the
-two members as a division of *phases* — which work is build/merge and which is compile/run — not of
-hardware; they would only become a lever if `ComputeContext` gained per-instance configuration. The
-device both of them will use is not a secret, though: read `rig.RuntimeContext.Backend`, or call
+**What the two can usefully differ in: their device memory, and nothing else.** A `ComputeContext`
+carries `DeviceMemory` for the sessions it compiles and `RunSettings` for what its runs do, so the
+merge phase and the training loop can hold different arena budgets — see
+[Device memory](inference.md#device-memory-gpu-backends). What it does not carry is the device, the
+execution provider or the thread count: every session either context creates is built by the one
+process-wide backend factory. In particular you **cannot** merge on one device and train on another:
+[only one backend is live per process](inference.md#backend-selection) and both contexts go through
+it, so the naming does not offer a CPU-build / GPU-train split. Read the two members as a division of
+*phases* — which work is build/merge and which is compile/run — not of hardware. The device both of
+them will use is not a secret, though: read `rig.RuntimeContext.Backend`, or call
 `InferenceBackend.RequireDevice(...)` at startup to refuse to train on the wrong one — see
 [Which device am I on?](inference.md#which-device-am-i-on).
 Leaving both `null`, so each defaults to `ComputeContext.Default`, is the normal choice.
 
-What *is* configurable — on the GPU backends — is **device** memory, but process-wide rather than per
-context: an arena budget, the arena's extend strategy, per-step arena shrinkage, and a reading of how
-much of the card is gone. The default arena strategy is picked for exactly this loop: a step's shapes
-are fixed when it is compiled and repeat for the length of the run, so the arena is told to extend by
-what it asks for rather than to keep doubling, which is what otherwise leaves a long run holding far
-more of the card than its steps use. On a run that is close to the card's limit, set a budget at
-startup and sample the peak inside your `TrainStep` loop; see
+What *is* configurable — on the GPU backends — is **device** memory, on the context the rig compiles
+and runs on: an arena budget and extend strategy in its `DeviceMemory`, per-step arena shrinkage in
+its `RunSettings`. The arena strategy needs no setting for this loop: a step compiled for one batch
+shape repeats it for the length of the run, and the default `Auto` leaves it on exact-size
+extension — the arena tracks what the step asks for rather than doubling past it, which is what
+otherwise leaves a long run holding far more of the card than its steps use.
+
+The one place it departs is worth knowing: the rig keeps a compiled step per input shape **up to a
+limit**, and a run that feeds more distinct shapes than that falls back to a single step every
+later shape shares. That step really does see growing shapes, so `Auto` gives it ORT's doubling —
+the strategy that does not strand a region each time an input outgrows it. Feeding a handful of
+stable batch shapes keeps every step on the tighter arena.
+
+Both are fixed when a step is compiled, and so is `ShrinkArenaAfterRun`: `TrainStep` takes no
+per-call override, so hand `FromScratch` a `runtimeContext` carrying what you want before the first
+step. On a run close to the card's limit, put a budget on that context and sample the peak inside
+your `TrainStep` loop; the readings come from the separate static `DeviceMemory` class. See
 [Device memory](inference.md#device-memory-gpu-backends).
 
 **Mind which memory is which.** A `TrainStep` loop's checkpoints are fetched to the host, so the
-rig's budgeted collection governs *host* memory there, while the `DeviceMemory` settings reach only
-the CUDA arena: a process whose RSS climbs is not helped by an arena budget, and a card that fills
+rig's budgeted collection governs *host* memory there, while a context's `DeviceMemory` settings
+reach only the CUDA arena: a process whose RSS climbs is not helped by an arena budget, and a card that fills
 up is not helped by the rig's reclamation. A resident run is the case where the two meet — its state
 stays in the arena, and the run releases it deterministically as each step supersedes it, which is
 why a retained step does not go through the rig's collection at all. A `StepToCheckpoint` step hands

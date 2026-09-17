@@ -211,21 +211,22 @@ one executable per device over a shared, backend-free model library —
 [One model, two devices](inference.md#one-model-two-devices). That costs a process, not a second
 copy of the model.
 
-### Device memory is configured process-wide
+### Device-memory readings are the device's, and device 0's
 
-The GPU backends read their arena budget, extend strategy and per-run shrinkage off the static
-`DeviceMemory`, not off the `ComputeContext` that builds the session — see
-[Device memory](inference.md#device-memory-gpu-backends). So every session in the process shares one
-configuration, it applies to CUDA device 0, and a reading (`DeviceMemory.Read()`, `Sample()`) is the
-whole device's rather than this process's share of it. A training rig's two contexts cannot differ in
-it, and a host running two models cannot give them separate budgets — including when they would
-want different arena strategies, which the measured table in that section shows is a real
-difference between one workload and another.
+Arena configuration is per session and per run — `ComputeContext.DeviceMemory` for the sessions a
+context compiles, `RunSettings` for what a run does, see
+[Device memory](inference.md#device-memory-gpu-backends). Two contexts may differ, and a host
+running two models can give them separate budgets and separate arena strategies.
 
-Per-`ComputeContext` device configuration was considered and is not planned, so this is the shape to
-build against rather than one to wait out. What would still improve is the reporting: per-allocator
-figures out of ORT ([#198](https://github.com/Shorokoo/Shorokoo/issues/198)) would say what this
-process holds rather than what the device does.
+What remains process-wide is the *reporting*. `DeviceMemory.Read()` and `Sample()` go to whichever
+CUDA device is current for the calling thread — device 0, because that is what the shipped GPU
+backends use — and what they return is the whole device's usage rather than this process's share of
+it, so another process on the card is in your figures. `PeakUsedBytes` is likewise one record for
+the process.
+
+What would improve it is per-allocator figures out of ORT
+([#198](https://github.com/Shorokoo/Shorokoo/issues/198)), which would say what this process holds
+rather than what the device does.
 
 ### Backprop through dynamic loops
 

@@ -79,11 +79,6 @@ public class TensorContextTransferCoverageTests
         Assert.True(owner.OwnsMemory);
     }
 
-    /// <summary>
-    /// The one place the two invariants meet: a tensor with no context owns its bytes, and
-    /// GiveAccessTo never takes ownership. So the null context cannot be given access to anything,
-    /// and cannot be transferred to from a tensor with no ownership to hand over.
-    /// </summary>
     [Fact]
     public void TestTheNullContextCannotHoldMemoryItDoesNotOwn()
     {

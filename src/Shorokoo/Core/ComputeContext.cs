@@ -303,7 +303,11 @@ namespace Shorokoo.Runtime
             get
             {
                 if (_defaultReads.Value is { } counter) Interlocked.Increment(ref counter.Value);
-                if (_defaultComputeContext is not null) return _defaultComputeContext;
+                // A disposed one is not handed back. Default is a cached singleton and is now
+                // disposable, so `using var ctx = ComputeContext.Default;` would otherwise poison
+                // the process: every later read returns the same dead object and every run through
+                // it throws, with no way back short of assigning the setter.
+                if (_defaultComputeContext is { IsDisposed: false }) return _defaultComputeContext;
 
                 // The backend a process loaded, under the rule that a CPU one wins: the unnamed
                 // default should not be the card. Reading InferenceBackend.Factory is what
@@ -424,6 +428,9 @@ namespace Shorokoo.Runtime
         private static readonly object OwnedMarker = new();
         private bool _disposed;
 
+        /// <summary>Whether this context has been disposed, and so has released what it owned.</summary>
+        public bool IsDisposed => _disposed;
+
         /// <summary>Puts a storage on this context's books; its disposal will release it.</summary>
         internal void TakeOwnership(TensorStorage storage)
         {
@@ -454,9 +461,9 @@ namespace Shorokoo.Runtime
             foreach (var (storage, _) in _ownedStorage) storage.Release();
             _ownedStorage.Clear();
 
-            // Only a backend this context was given, and only one that has something to release.
-            // The process-wide default belongs to the process, not to whichever context read it.
-            if (_backend is IDisposable disposable) disposable.Dispose();
+            // The backend is deliberately left alone. It was handed in, so it may be shared with
+            // another context or be the process-wide one -- disposing a factory two contexts were
+            // given would kill the second, which is the arrangement this whole design is for.
 
             GC.SuppressFinalize(this);
         }
@@ -473,13 +480,26 @@ namespace Shorokoo.Runtime
             {
                 if (outputs[i] is TensorDataSequenceModelParam sequenceParam)
                 {
-                    // A sequence is detached by forgetting this context rather than by being moved:
-                    // it holds its runtime value outright, so it already outlives the context --
-                    // this context's books never had it -- and its elements are copied out of that
-                    // value one at a time, so there is nothing yet to move. Clearing the context is
-                    // what stops each of those elements being handed one that may be disposed
-                    // before it is read.
-                    sequenceParam.ToTensorDataSequence().Context = null;
+                    // Detached by being moved, not by forgetting this context. Simply clearing the
+                    // context strands an element the provider kept on the card: the indexer then
+                    // wraps it with no context, which records an unknown space, and an unknown
+                    // space can be neither read nor moved -- the data is there with no call left
+                    // that reaches it. A real move brings the elements home, and where it cannot,
+                    // the sequence stays bound so they remain reachable through the context that
+                    // owns them.
+                    var boundSequence = sequenceParam.ToTensorDataSequence();
+                    try
+                    {
+                        var freeSequence = boundSequence.CopyTo(null);
+                        boundSequence.Dispose();
+                        outputs[i] = new TensorDataSequenceModelParam(
+                            sequenceParam.ParamName, sequenceParam.ParamType, freeSequence);
+                    }
+                    catch (InvalidOperationException)
+                    {
+                        // Elements the execution provider kept cannot be copied to the host from
+                        // here. Bound to this context is worse than detached and better than lost.
+                    }
                     continue;
                 }
                 if (outputs[i] is not TensorDataModelParam tensorParam) continue;

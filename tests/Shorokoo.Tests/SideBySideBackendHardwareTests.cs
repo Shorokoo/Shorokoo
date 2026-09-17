@@ -90,13 +90,6 @@ public class SideBySideBackendHardwareTests
         Assert.Equal(twice, Floats(cuda.Execute(graph, fromHost, tb)[0]));
     }
 
-    /// <summary>
-    /// The one above runs a graph assembled here out of two inputs and an expression. This runs a
-    /// Shorokoo <i>model</i>: <see cref="SideBySideMlp"/>, a <c>[Module]</c> the source generator
-    /// lowered to a <c>ComputationGraph</c>, concretized once so its two weight matrices are
-    /// sampled and baked in -- and then put on the host and on the card, in one process, from two
-    /// <see cref="ComputeContext"/>s.
-    /// </summary>
     [SideBySideCudaFact]
     public void TestAShorokooModelRunsOnTheCpuAndOnTheCardInOneProcess()
     {
@@ -110,16 +103,12 @@ public class SideBySideBackendHardwareTests
         var onCpu = SideBySideModel.Floats(cpu.Execute(model, input)[0]);
         var onCard = SideBySideModel.Floats(cuda.Execute(model, input)[0]);
 
-        // One model, so the weights are the same weights: they were sampled when it was
-        // concretized, above, and both contexts were handed the graph carrying them. Pin that the
-        // host run repeats before holding the card's answer against it -- two different models
-        // agreeing, or failing to, would say nothing about the backends.
         Assert.Equal(onCpu, SideBySideModel.Floats(cpu.Execute(model, input)[0]));
         SideBySideModel.AssertAgree(onCpu, onCard, SideBySideModel.DeviceTolerance);
 
         // And there is something to agree on: a forward pass that came out constant would read
         // the same off any two backends, working or not.
-        Assert.True(onCpu.Distinct().Count() > 1, "the model's output is constant");
+        Assert.True(onCpu.Distinct().Count() > 1);
 
         // Back to the host afterwards, so neither run left the other's runtime unable to serve.
         SideBySideModel.AssertAgree(onCpu, SideBySideModel.Floats(cpu.Execute(model, input)[0]));
@@ -134,12 +123,6 @@ public class SideBySideBackendHardwareTests
             onCpu, SideBySideModel.Floats(onCardCompiled.Execute(input)[0]),
             SideBySideModel.DeviceTolerance);
 
-        // And what the card computed feeds the host's context, and the other way round. The
-        // subject is the crossing itself -- a tensor from one runtime is a type the other knows
-        // nothing about, and BackendTransfer is what makes it feedable -- so each arm is held
-        // against the host running the model on its own output, which is the answer both are
-        // approximating. Not against each other: that comparison differs in its input and in its
-        // arithmetic at once, and so measures the card's mantissa rather than the transfer.
         var fromCard = cuda.Execute(model, input)[0].ToTensorData();
         var fromHost = cpu.Execute(model, input)[0].ToTensorData();
         var secondPass = SideBySideModel.Floats(cpu.Execute(model, fromHost)[0]);
@@ -151,11 +134,6 @@ public class SideBySideBackendHardwareTests
             SideBySideModel.DeviceTolerance);
     }
 
-    /// <summary>
-    /// The whole of part 2's promise, on the card: a tensor the execution provider kept in device
-    /// memory, moved to host memory by one call, handed between host contexts without moving
-    /// again, and run on.
-    /// </summary>
     [SideBySideCudaFact]
     public void TestATensorLeftOnTheCardMovesToHostMemoryAndRunsThere()
     {
@@ -202,14 +180,6 @@ public class SideBySideBackendHardwareTests
             SideBySideModel.DeviceTolerance);
     }
 
-    /// <summary>
-    /// The state a resident training run leaves on the card names the card. This is the shape
-    /// <see cref="ResidentTrainingRun"/>'s step takes — the trainstep compiled on the CUDA context,
-    /// run with every output retained — and the outputs it hands back are the one kind of tensor
-    /// that has to carry its producing context to be worth anything: they are not host-readable, so
-    /// the context is the only thing that can say which device they are on, and without it they
-    /// would report <see cref="MemoryKind.Unknown"/> and refuse to move anywhere.
-    /// </summary>
     [SideBySideCudaFact]
     public void TestTrainingStateLeftOnTheCardNamesTheDeviceAndComesHomeFromIt()
     {
@@ -244,9 +214,6 @@ public class SideBySideBackendHardwareTests
             Assert.Same(cuda, state.Context);
         }
 
-        // A named space is a usable one, which is the point of naming it: the move reads the bytes
-        // back through the backend that owns the allocation, and a tensor in an unnamed space is
-        // refused here rather than moved.
         var home = retained[0].ToTensorData().TransferTo(null);
         Assert.Equal(MemorySpace.Host, home.Space);
         Assert.All(Floats(home), v => Assert.True(float.IsFinite(v)));
@@ -262,13 +229,6 @@ public class SideBySideBackendHardwareTests
         Assert.NotEmpty(TrainingRigHelpers.FlattenStruct(published.TrainableParams));
     }
 
-    /// <summary>
-    /// The other direction, and the whole reason a tensor has a context: host bytes moved <i>onto</i>
-    /// the card land in the card's memory. Before the backend could allocate there, a tensor
-    /// "transferred to a CUDA context" was host bytes wearing that context's name, which the
-    /// execution provider then copied over on every single run — so the test that it really moved
-    /// is that the host can no longer read it.
-    /// </summary>
     [SideBySideCudaFact]
     public void TestATensorTransferredToTheCardLivesInDeviceMemoryAndRunsThere()
     {
@@ -285,9 +245,6 @@ public class SideBySideBackendHardwareTests
 
         var onCard = onHost.TransferTo(cuda);
 
-        // Where it says it is. Not host memory with a device context's name on it: the host cannot
-        // read these bytes at all, which is the only claim about a device allocation that cannot be
-        // faked from this side.
         Assert.Equal(MemorySpace.Cuda(0), onCard.Space);
         Assert.Same(cuda, onCard.Context);
         Assert.True(onCard.OwnsMemory);
@@ -297,9 +254,6 @@ public class SideBySideBackendHardwareTests
         // The move spent the source, which is what a move across spaces means.
         Assert.True(onHost.IsDisposed);
 
-        // And the right bytes arrived: the model runs on the device-resident tensor and answers
-        // what the host would have. Nothing short of a correct copy across the bus gets here -- an
-        // allocation left unwritten reads back as whatever the arena last held.
         var tb = TensorData([4L], bv);
         SideBySideModel.AssertAgree(
             expected, Floats(cuda.Execute(graph, onCard, tb)[0]), SideBySideModel.DeviceTolerance);
@@ -307,9 +261,6 @@ public class SideBySideBackendHardwareTests
         // Still there afterwards, and still the card's: a run reads a feed, it does not consume it.
         Assert.Equal(MemorySpace.Cuda(0), onCard.Space);
 
-        // And it comes home by the mirror of the copy that put it there, unchanged -- the round
-        // trip, which pins that the bytes on the card are the bytes that were handed over rather
-        // than merely bytes the graph happened to like.
         var home = onCard.CopyTo(null);
         Assert.Equal(MemorySpace.Host, home.Space);
         Assert.True(home.IsHostResident);

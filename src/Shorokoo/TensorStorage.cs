@@ -48,9 +48,12 @@ namespace Shorokoo
         internal void TransferOwnershipTo(Shorokoo.Runtime.ComputeContext? context)
         {
             if (ReferenceEquals(Owner, context)) return;
+            // The new owner first: TakeOwnership refuses a disposed context, and a hand-off that
+            // fails after the old owner has let go would leave these bytes on nobody's books --
+            // freed by neither context, which is the leak disposal exists to prevent.
+            context?.TakeOwnership(this);
             Owner?.ReleaseOwnership(this);
             Owner = context;
-            context?.TakeOwnership(this);
         }
 
         /// <summary>False once the owner has released these bytes. Reading them afterwards is a

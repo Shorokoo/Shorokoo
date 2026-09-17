@@ -30,7 +30,7 @@ public class BackendPackageCoverageTests
     {
         var probe = BackendPackage.Probe(NativeBackend);
 
-        Assert.True(probe.Supported, probe.Detail);
+        Assert.True(probe.Supported);
         Assert.Equal(BackendRejection.None, probe.Reason);
         Assert.Equal(Windows ? "windows" : "linux", probe.Os);
         Assert.Equal("x64", probe.Architecture);
@@ -59,11 +59,6 @@ public class BackendPackageCoverageTests
         }
     }
 
-    /// <summary>
-    /// The case the whole probe exists for: a backend built for the other operating system is
-    /// turned away with a reason, rather than throwing a BadImageFormatException from the loader
-    /// or a DllNotFoundException from the first P/Invoke.
-    /// </summary>
     [Fact]
     public void TestABackendForTheOtherOperatingSystemIsRefusedWithAReason()
     {
@@ -72,8 +67,7 @@ public class BackendPackageCoverageTests
             "src", "Backend", "OnnxRuntime", ForeignBackendName, "bin", "Release", "net10.0",
             ForeignBackendName + ".dll");
         foreign = Path.GetFullPath(foreign);
-        Assert.True(File.Exists(foreign),
-            $"The other platform's backend should be built beside this one, at '{foreign}'.");
+        Assert.True(File.Exists(foreign));
 
         var probe = BackendPackage.Probe(foreign);
 
@@ -90,8 +84,7 @@ public class BackendPackageCoverageTests
     [Fact]
     public void TestABackendLoadedFromAPathYieldsAContextThatRuns()
     {
-        Assert.True(BackendPackage.TryLoad(NativeBackend, out var factory, out var failure),
-            failure.Detail);
+        Assert.True(BackendPackage.TryLoad(NativeBackend, out var factory, out _));
         Assert.NotNull(factory);
         Assert.Equal(ComputeDevice.Cpu, factory!.Description.Device);
         Assert.Equal(MemorySpace.Host, factory.MemorySpace);
@@ -158,21 +151,10 @@ public class BackendPackageCoverageTests
         return path;
     }
 
-    /// <summary>
-    /// The layout the backends actually ship in on Linux and macOS, and the one every consumer of
-    /// the NuGet package gets: the native under <c>runtimes/&lt;rid&gt;/native/</c> rather than
-    /// flat beside the assembly.
-    ///
-    /// <para>The flat layout the probe used to insist on is an accident of ONNX Runtime's own
-    /// build props, which copy the native to the output root on Windows only. Nothing in the
-    /// backend asks for it and nothing on Linux produces it, so a probe that required it refused
-    /// every Linux deployment there is — while the .NET host, resolving the P/Invoke through
-    /// <c>deps.json</c>, would have loaded the very library the probe said was absent.</para>
-    /// </summary>
     [Fact]
     public void TestANativeUnderRuntimesRidNativeResolvesJustAsAFlatOneDoes()
     {
-        Assert.True(File.Exists(DeployedNative), $"no native to copy from '{DeployedNative}'");
+        Assert.True(File.Exists(DeployedNative));
         var root = NewTempDirectory();
         try
         {
@@ -187,7 +169,7 @@ public class BackendPackageCoverageTests
 
             var probe = BackendPackage.Probe(backend);
 
-            Assert.True(probe.Supported, probe.Detail);
+            Assert.True(probe.Supported);
             Assert.Equal(BackendRejection.None, probe.Reason);
 
             // And the path TryLoad hands to IsolatedBackend.Load, which opens it as a file, is
@@ -200,11 +182,6 @@ public class BackendPackageCoverageTests
         }
     }
 
-    /// <summary>
-    /// A native that is genuinely nowhere is still a <see cref="BackendRejection.MissingNative"/>
-    /// naming the file. Widening the search must not turn a broken deployment into a silent pass,
-    /// which is the way a fix like this goes wrong.
-    /// </summary>
     [Fact]
     public void TestANativeThatIsInNeitherLayoutIsStillMissingNativeNamingTheFile()
     {
@@ -233,12 +210,6 @@ public class BackendPackageCoverageTests
         }
     }
 
-    /// <summary>
-    /// Order matters: the operating system and the architecture are answered before the natives
-    /// are looked for, so a backend built for another platform is refused for being that rather
-    /// than for missing a library it was never going to be asked for. Without the ordering, the
-    /// reason a caller prints is the wrong one and the remedy it suggests is useless.
-    /// </summary>
     [Fact]
     public void TestTheWrongOperatingSystemIsAnsweredBeforeAnyNativeIsLookedFor()
     {
@@ -264,15 +235,6 @@ public class BackendPackageCoverageTests
         }
     }
 
-    /// <summary>
-    /// What the resolver will and will not accept. A flat native wins over a <c>runtimes/</c> one,
-    /// because a build that flattened deliberately — the per-backend native folders the
-    /// side-by-side tests deploy — means the file it put there. A RID folder narrower than the
-    /// portable one still counts, since a package may ship <c>linux-musl-x64</c> or
-    /// <c>win10-x64</c>. A folder for another operating system or another architecture never
-    /// does: that is a library this process cannot load, and calling it found would turn a clear
-    /// rejection into a crash inside the loader.
-    /// </summary>
     [Fact]
     public void TestNativeResolutionPrefersFlatAcceptsANarrowerRidAndCrossesNoPlatformBoundary()
     {

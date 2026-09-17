@@ -24,10 +24,6 @@ public class CrossDeviceRoutingCoverageTests
         Assert.Equal(MemorySpace.Cuda(0), MemorySpace.Cuda(0));
         Assert.NotEqual(MemorySpace.Host, MemorySpace.Cuda(0));
 
-        // A backend reports its space off its description, so two contexts on one card share one
-        // space even when they are two separate backends -- which is what makes that transfer free.
-        // Through the interface: MemorySpace is a default member, derived from the description,
-        // so a backend gets it without implementing anything.
         IShorokooInferenceSessionFactory first = new StubFactory(ComputeDevice.Cuda, 0);
         IShorokooInferenceSessionFactory second = new StubFactory(ComputeDevice.Cuda, 0);
         Assert.Equal(first.MemorySpace, second.MemorySpace);
@@ -47,10 +43,10 @@ public class CrossDeviceRoutingCoverageTests
 
         // The target was asked to build the tensor from raw bytes -- the host route -- rather than
         // being handed the allocation, which is the only thing that can cross a space boundary.
-        Assert.Equal(1, target.RawByteBuilds);
+        Assert.Equal(1, target.BackendMemoryBuilds);
         Assert.Equal(MemorySpace.Cuda(1), moved.Space);
         Assert.True(moved.OwnsMemory);
-        Assert.False(onHost.IsDisposed is false && onHost.OwnsMemory);
+        Assert.True(onHost.IsDisposed);
     }
 
     [Fact]
@@ -62,7 +58,7 @@ public class CrossDeviceRoutingCoverageTests
 
         var copy = onHost.CopyTo(secondCard);
 
-        Assert.Equal(1, target.RawByteBuilds);
+        Assert.Equal(1, target.BackendMemoryBuilds);
         Assert.Equal(MemorySpace.Cuda(1), copy.Space);
         Assert.True(onHost.OwnsMemory);
         Assert.Equal([7f, 8f], onHost.As<float32>().AccessMemory<float>().ToArray());
@@ -83,16 +79,20 @@ public class CrossDeviceRoutingCoverageTests
     private sealed class StubFactory(ComputeDevice device, int? cudaDeviceId)
         : IShorokooInferenceSessionFactory
     {
-        public int RawByteBuilds { get; private set; }
+        public int BackendMemoryBuilds { get; private set; }
 
         public BackendDescription Description { get; } = new($"stub-{device}", device, cudaDeviceId);
 
-        public IShorokooTensorValue CreateTensorFromRawBytes(
+        public IShorokooTensorValue CreateTensorInBackendMemory(
             ShorokooTensorElementType elementType, byte[] data, long[] shape)
         {
-            RawByteBuilds++;
-            return new StubValue(elementType, data, shape);
+            BackendMemoryBuilds++;
+            return new StubValue(elementType, data, shape, hostAccessible: device != ComputeDevice.Cuda);
         }
+
+        public IShorokooTensorValue CreateTensorFromRawBytes(
+            ShorokooTensorElementType elementType, byte[] data, long[] shape)
+            => throw new NotSupportedException();
 
         public IShorokooInferenceSession CreateSession(
             ReadOnlyMemory<byte> modelBytes, ShorokooGraphOptimization graphOptimization,

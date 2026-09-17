@@ -192,6 +192,7 @@ namespace Shorokoo
             where T : IVarType
         {
             private readonly List<TensorData<T>> _elements;
+            private readonly object _gate = new();
 
             // One materialized sequence value per backend this has been fed to, owned here and
             // released on Dispose -- HostTensorData<T>'s arrangement, for the same reasons. Built
@@ -233,11 +234,12 @@ namespace Shorokoo
                 ArgumentNullException.ThrowIfNull(factory);
                 ThrowIfDisposed();
 
-                _materialized ??= new Dictionary<IShorokooInferenceSessionFactory, IShorokooTensorValue>(
-                    ReferenceEqualityComparer.Instance as IEqualityComparer<IShorokooInferenceSessionFactory>
-                    ?? EqualityComparer<IShorokooInferenceSessionFactory>.Default);
+                lock (_gate)
+                {
+                    _materialized ??= new Dictionary<IShorokooInferenceSessionFactory, IShorokooTensorValue>(
+                        ReferenceEqualityComparer.Instance);
 
-                if (_materialized.TryGetValue(factory, out var existing)) return existing;
+                    if (_materialized.TryGetValue(factory, out var existing)) return existing;
 
                 var inner = new List<IShorokooTensorValue>(_elements.Count);
                 try
@@ -257,22 +259,33 @@ namespace Shorokoo
 
                 // Outside the catch on purpose: CreateSequence takes the copies over, and releases
                 // them itself if it cannot. Inside, a failure there would free each of them twice.
-                var value = factory.CreateSequence(inner);
-                _materialized[factory] = value;
-                return value;
+                    var value = factory.CreateSequence(inner);
+                    _materialized[factory] = value;
+                    return value;
+                }
             }
 
-            /// <summary>Disposes the elements, each of which then decides for itself whether that
-            /// releases anything -- a reader among them releases nothing -- and then the sequence
-            /// values this had built on backends, which are this object's alone.</summary>
+            /// <summary>
+            /// Disposes the elements this sequence owns, and then the sequence values it had built
+            /// on backends, which are this object's alone.
+            ///
+            /// <para>Only the owned ones. A rebuilt sequence holds a non-owning element by
+            /// reference rather than copying it, so the same object sits in the source sequence
+            /// too; disposing it here would dispose theirs, and disposing a reader was never
+            /// supposed to free anything.</para>
+            /// </summary>
             public override void Dispose()
             {
                 if (IsDisposed) return;
                 IsDisposed = true;
-                foreach (var element in _elements) element.Dispose();
-                if (_materialized is null) return;
-                foreach (var value in _materialized.Values) value.Dispose();
-                _materialized = null;
+                foreach (var element in _elements)
+                    if (element.OwnsMemory) element.Dispose();
+                lock (_gate)
+                {
+                    if (_materialized is null) return;
+                    foreach (var value in _materialized.Values) value.Dispose();
+                    _materialized = null;
+                }
             }
         }
 

@@ -495,4 +495,20 @@ public class TensorDataApiCoverageTests
         public Shorokoo.Core.Inference.Abstractions.IShorokooTensorValue GetValue(int index) => throw new NotSupportedException();
         public Shorokoo.Core.Inference.Abstractions.ShorokooTensorElementType GetSequenceElementType() => throw new NotSupportedException();
     }
+    [Fact]
+    public void TestWritingToALiteralIsSeenByTheNextRunAndNotTheOneBeforeIt()
+    {
+        var a = InputVector<float32>("a");
+        var graph = new InternalComputationGraph([a], [a + a]);
+        var t = TensorData([2L], (float[])[1f, 2f]);
+        var context = new ComputeContext();
+
+        Assert.Equal([2f, 4f], Floats(context.Execute(graph, t)[0]));
+        t.As<float32>().AccessModifiableMemory<float>()[0] = 99f;
+        Assert.Equal([198f, 4f], Floats(context.Execute(graph, t)[0]));
+    }
+
+    private static float[] Floats(NamedModelParam param)
+        => [.. param.ToTensorData().As<float32>().AccessMemory<float>()];
+
 }

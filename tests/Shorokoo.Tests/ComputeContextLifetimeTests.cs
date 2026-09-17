@@ -140,11 +140,6 @@ public class ComputeContextLifetimeCoverageTests
         Assert.Equal(expected, Floats(result));
     }
 
-    /// <summary>
-    /// The backend the unnamed default is built on: the first one loaded, except that a CPU
-    /// backend displaces a GPU one and is never displaced itself. A program running both names
-    /// the one it means per context; what it should not get by saying nothing is the card.
-    /// </summary>
     [Fact]
     public void TestACpuBackendWinsTheRememberedSlotAndAGpuOneDoesNotTakeItBack()
     {
@@ -186,21 +181,6 @@ public class ComputeContextLifetimeCoverageTests
         Assert.True(ComputeContext.Default.DetachesOutputs);
     }
 
-    /// <summary>
-    /// Describing a model is not inference: building a graph, concretizing it and exporting it as
-    /// ONNX must work in a process with no inference backend deployed at all. Reading
-    /// <see cref="ComputeContext.Default"/> is what resolves one, and what refuses — naming the
-    /// packages to deploy — when there is none, so no step of that path may read it.
-    ///
-    /// <para>This test cannot run with no backend deployed: the suite deploys one and shares a
-    /// process across tests, so by the time any given test runs a backend is long since live and
-    /// asserting on <see cref="InferenceBackend.Current"/> alone would pass whatever the build
-    /// path did. What survives a loaded backend is the question of whether the path <i>asks</i>,
-    /// and <see cref="ComputeContext.CountDefaultReads"/> answers exactly that — scoped to this
-    /// call, so the other tests running alongside it do not count. A regression that puts
-    /// <c>compute ??= ComputeContext.Default</c> back at the top of a lowering pass fails here
-    /// even though this process would have answered it.</para>
-    /// </summary>
     [Fact]
     public void TestBuildingAndExportingAModelAsksForNoComputeContextAtAll()
     {
@@ -227,9 +207,6 @@ public class ComputeContextLifetimeCoverageTests
             if (File.Exists(onnx)) File.Delete(onnx);
         }
 
-        // The weaker half, kept because it is the statement the shipped program actually makes:
-        // nothing about building this model resolved a backend. Weak only here, in a process that
-        // already had one — in the process that has none it is the whole of the contract.
         Assert.Same(liveBackend, InferenceBackend.Current);
     }
 

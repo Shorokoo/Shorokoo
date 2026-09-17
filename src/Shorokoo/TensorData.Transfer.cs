@@ -44,7 +44,7 @@ namespace Shorokoo
             RefuseUnknownSpace(nameof(TransferTo));
             var to = SpaceOf(target);
 
-            if (to == Space)
+            if (to == Space && CanShareWith(target))
             {
                 RefuseUnownedNullContext(target, wouldOwn: OwnsMemory, operation: nameof(TransferTo));
                 // The bytes stay exactly where they are; only the names on them change.
@@ -95,7 +95,7 @@ namespace Shorokoo
             ThrowIfDisposed();
             RefuseUnknownSpace(nameof(GiveAccessTo));
             var to = SpaceOf(target);
-            if (to != Space)
+            if (to != Space || !CanShareWith(target))
                 throw new InvalidOperationException(
                     $"This tensor ({this}) is in {Space} and cannot be reached from {to} without "
                     + "allocating there, which would make the result an owner. GiveAccessTo never "
@@ -138,6 +138,22 @@ namespace Shorokoo
                 + "telling whether another context shares it. It came back from a session without "
                 + "the context that produced it being recorded.");
         }
+
+        /// <summary>
+        /// Whether <paramref name="target"/> could actually use these bytes as they stand, rather
+        /// than merely sharing a memory space with them.
+        ///
+        /// <para>The two are not the same for a value the execution provider kept. Sharing a space
+        /// makes the <i>bytes</i> reachable from both, but a re-wrap hands the target this tensor's
+        /// runtime value, and a session recognises its own values by type identity: two isolated
+        /// backends on one device compare equal as a space while their values are types from
+        /// different assemblies. So a re-wrap there would report success and hand back a tensor the
+        /// context it now belongs to cannot feed. Host bytes have no such problem — anything can
+        /// rebuild them — and the same backend trivially accepts its own.</para>
+        /// </summary>
+        private bool CanShareWith(ComputeContext? target)
+            => Space.IsHost
+               || ReferenceEquals(Context?.Factory, target?.Factory);
 
         /// <summary>Where a context's tensors live; null is the framework's own host memory.</summary>
         private static MemorySpace SpaceOf(ComputeContext? context)

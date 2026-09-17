@@ -85,14 +85,6 @@ public class CompositeTransferCoverageTests
         Assert.Equal([9f, 10f], Floats((TensorData)movedInner.Fields["deep"]));
     }
 
-    /// <summary>
-    /// A sequence a run produced belongs to the context that produced it, and so does every
-    /// element read out of it — the runtime copies each one out of its own memory, so an element
-    /// is wherever the sequence is. Wrapping them with no context said "the framework's own host
-    /// memory" of something an execution provider may never have put there, which on a card is
-    /// the difference between a tensor that can say which device it is on and one that cannot be
-    /// moved at all.
-    /// </summary>
     [Fact]
     public void TestASequenceARunProducedCarriesItsContextDownToItsElements()
     {
@@ -110,12 +102,6 @@ public class CompositeTransferCoverageTests
         Assert.Equal([2f, 4f], Floats(sequence[1]));
     }
 
-    /// <summary>
-    /// ...and a context that detaches its outputs hands the sequence out belonging to nobody, so
-    /// its elements are not handed a context that may be disposed before they are read. The
-    /// sequence holds its runtime value outright, which is why forgetting the context is the whole
-    /// of the detachment here.
-    /// </summary>
     [Fact]
     public void TestADetachingContextHandsASequenceOutBelongingToNobody()
     {
@@ -131,16 +117,6 @@ public class CompositeTransferCoverageTests
         Assert.Equal([2f, 4f], Floats(sequence[1]));
     }
 
-    /// <summary>
-    /// A sequence that has been moved to another context can be fed back into a session.
-    ///
-    /// <para>A transfer rebuilds the sequence as a plain list of the tensors it moved — which is
-    /// what lets each element keep the context and the ownership the move gave it — so there is no
-    /// runtime sequence value left to hand over, and feeding one was refused outright. It builds
-    /// one on demand now, over its elements' values on the backend whose session is asking, the
-    /// way a literal in managed memory materialises its bytes. What it builds is its own: kept for
-    /// the next feed of that backend, and released with the sequence.</para>
-    /// </summary>
     [Fact]
     public void TestASequenceThatHasBeenTransferredCanBeFedBackIntoASession()
     {
@@ -175,11 +151,6 @@ public class CompositeTransferCoverageTests
         Assert.All(moved, e => Assert.Same(consumer, e.Context));
     }
 
-    /// <summary>
-    /// A graph's description is the same description on every machine. A tensor bound to a context
-    /// is bound to one backend's memory, so a graph that captured one could only be built where
-    /// that context is — which is why an operator attribute refuses one.
-    /// </summary>
     [Fact]
     public void TestAnOperatorAttributeRefusesATensorBoundToAContext()
     {

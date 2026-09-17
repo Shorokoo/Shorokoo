@@ -100,15 +100,6 @@ public class SideBySideBackendCoverageTests
         Assert.Equal(InferenceBackend.Describe(), ComputeContext.Default.Backend);
     }
 
-    /// <summary>
-    /// The wrapper that renames a loaded backend answers <i>nothing</i> on its behalf: every
-    /// member of the factory interface reaches the backend that was loaded.
-    ///
-    /// <para>A member with a default body is the whole point of asserting this. Inheriting one is
-    /// silent and compiles, and the wrapper then answers a question only the backend can — where
-    /// its tensors live, how to read one back off its card, where to put one. A tensor built by
-    /// the wrapper's default would be host memory the caller was told is device memory.</para>
-    /// </summary>
     [Fact]
     public void TestTheRenamingWrapperForwardsEveryMemberOfTheFactoryInterface()
     {
@@ -118,10 +109,7 @@ public class SideBySideBackendCoverageTests
 
         var map = wrapper!.GetInterfaceMap(typeof(IShorokooInferenceSessionFactory));
         for (int i = 0; i < map.InterfaceMethods.Length; i++)
-            Assert.True(
-                map.TargetMethods[i].DeclaringType == wrapper,
-                $"RenamedFactory inherits {map.InterfaceMethods[i].Name} instead of forwarding it, "
-                + "so it answers for the backend it wraps rather than asking it.");
+            Assert.Equal(wrapper, map.TargetMethods[i].DeclaringType);
     }
 
     [Fact]
@@ -150,15 +138,6 @@ public class SideBySideBackendCoverageTests
             inner.GetType().Assembly.GetName().Name);
         Assert.NotSame(InferenceBackend.Factory.GetType().Assembly, inner.GetType().Assembly);
 
-        // And the second copy bound the native the spec named, not another one the ordinary
-        // probing would have found. Two contexts prove nothing on their own -- a LoadUnmanagedDll
-        // that declined would leave both on the same file and every test above would still pass.
-        // The runtimes say which they are: the stock build carries no CUDA execution provider,
-        // the CUDA-flavoured build does. On the provider set rather than on a whole-list equality
-        // because the stock build's set is not the same on every platform -- the Windows one
-        // carries the Azure provider beside the CPU one, the Linux one carries the CPU alone --
-        // whereas CUDA's absence from the one and presence in the other is what distinguishes
-        // the runtimes, on either platform.
         var stock = AvailableProviders(AssemblyLoadContext.Default);
         Assert.Contains("CPUExecutionProvider", stock);
         Assert.DoesNotContain("CUDAExecutionProvider", stock);
@@ -173,14 +152,6 @@ public class SideBySideBackendCoverageTests
         }));
     }
 
-    /// <summary>
-    /// Loading a backend must not cost the program its default one. Discovery refuses two backend
-    /// assemblies, and an isolated backend's is a backend assembly loaded into the process — so
-    /// without the load-context filter, loading one here makes the <i>next</i> first read of
-    /// <see cref="InferenceBackend.Factory"/> throw, anywhere in the process. The suite only
-    /// survives it when something has already resolved the default, which is an ordering it does
-    /// not control.
-    /// </summary>
     [Fact]
     public void TestLoadingAnIsolatedBackendLeavesDiscoveryWithExactlyOneCandidate()
     {
@@ -203,14 +174,6 @@ public class SideBySideBackendCoverageTests
         Assert.Equal(InferenceBackend.Factory.GetType().Assembly.GetName().Name, candidates[0].Assembly);
     }
 
-    /// <summary>
-    /// The same pairing, over a graph a model actually produces. The tests above run an
-    /// <see cref="InternalComputationGraph"/> assembled here out of two inputs and an expression,
-    /// which exercises the backends but skips everything a Shorokoo model goes through on its way
-    /// to one: a <c>[Module]</c> lowered by the source generator, its trainable parameters
-    /// concretized, and the <see cref="ComputationGraph"/> overloads of Execute and Compile.
-    /// This runs that.
-    /// </summary>
     [Fact]
     public void TestAModelGraphRunsOnTwoBackendsInOneProcess()
     {
@@ -221,16 +184,12 @@ public class SideBySideBackendCoverageTests
         var onFirst = SideBySideModel.Floats(first.Execute(model, input)[0]);
         var onSecond = SideBySideModel.Floats(second.Execute(model, input)[0]);
 
-        // The weights are sampled once, when the model is concretized, and baked into the graph
-        // that both backends are handed. Pin that before comparing across them: were a run to
-        // re-sample, the two arms would be two different models and their agreeing -- or their
-        // failing to -- would say nothing about backends at all.
         Assert.Equal(onFirst, SideBySideModel.Floats(first.Execute(model, input)[0]));
         SideBySideModel.AssertAgree(onFirst, onSecond);
 
         // And the model is doing something. A forward pass that came out constant would be
         // agreed on by any two backends, working or not.
-        Assert.True(onFirst.Distinct().Count() > 1, "the model's output is constant");
+        Assert.True(onFirst.Distinct().Count() > 1);
 
         // A compiled session belongs to the backend that built it, and re-runs there.
         var compiled = second.Compile(model);
@@ -254,19 +213,6 @@ public class SideBySideBackendCoverageTests
         return (string[])providers.Invoke(providers.IsStatic ? null : instance, null)!;
     }
 
-    /// <summary>
-    /// A literal is materialised by the backend whose session is about to read it, not by whichever
-    /// one the process defaulted to.
-    ///
-    /// <para>The answer cannot show this. A session handed a value from a runtime it does not share
-    /// rebuilds it as it feeds it (<c>OrtInferenceSession.Unwrap</c>), so the numbers come out
-    /// right either way; what differs is which runtime owns what reaches the session, and so
-    /// whether every run pays for that rebuild. So this asks the session: a backend that records
-    /// what each of its sessions was fed, over the isolated runtime, and the load context of each
-    /// value's type to say which runtime made it — the same way
-    /// <see cref="TestTheIsolatedBackendIsASecondNativeRuntimeRatherThanTheSameOneTwice"/> tells
-    /// the two apart.</para>
-    /// </summary>
     [Fact]
     public void TestALiteralFedToANonDefaultBackendIsBuiltByThatBackendsRuntime()
     {
@@ -289,9 +235,6 @@ public class SideBySideBackendCoverageTests
         Assert.Equal(expected, Floats(onAlt.Execute(graph, a, b)[0]));
         Assert.Equal(built, recorder.Fed);
 
-        // ...and the process default gets values of its own off the very same tensors, at the same
-        // time. That is what a value per backend buys: one literal serves both runtimes, and
-        // neither is handed the other's.
         Assert.Equal(expected, Floats(new ComputeContext().Execute(graph, a, b)[0]));
         foreach (var literal in (TensorData[])[a, b])
         {
@@ -520,8 +463,6 @@ internal static class SideBySideModel
     {
         Assert.Equal(expected.Length, actual.Length);
         foreach (var (want, got) in expected.Zip(actual))
-            Assert.True(
-                Math.Abs(want - got) <= tolerance * Math.Max(1.0, Math.Abs(want)),
-                $"the backends disagree by more than {tolerance:g}: one made {want}, the other {got}");
+            Assert.True(Math.Abs(want - got) <= tolerance * Math.Max(1.0, Math.Abs(want)));
     }
 }

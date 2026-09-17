@@ -544,8 +544,22 @@ internal class ShapeInferenceInterpreter
     /// retained at all, so the copy is bounded by
     /// <see cref="MaxSmallTensorElements"/> elements.</para>
     /// </summary>
-    private static TensorData Detached(TensorData data)
-        => data.Context is null ? data : data.CopyTo(null);
+    private static TensorData? Detached(TensorData data)
+    {
+        if (data.Context is null) return data;
+        try
+        {
+            return data.CopyTo(null);
+        }
+        catch (Exception) when (CatchShapeInferenceErrors())
+        {
+            // Storing a value used to be an expression that could not fail, and this one can: a
+            // string tensor has no flat bytes to copy, and a device-resident one needs a CUDA
+            // runtime that may not be there. Keeping the shape and dropping the value costs this
+            // node its constant folding; letting it out would cost the whole pass.
+            return null;
+        }
+    }
 
     private static TensorData CreateZeroTensorData(Shape shape, DType dtype)
     {

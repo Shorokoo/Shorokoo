@@ -41,6 +41,7 @@ namespace Shorokoo
         // equality, because a value belongs to the runtime that made it and two factories are the
         // same backend exactly when they are the same object.
         private Dictionary<IShorokooInferenceSessionFactory, IShorokooTensorValue>? _materialized;
+        private readonly object _gate = new();
 
         /// <summary>Creates a string tensor of <paramref name="shape"/> over
         /// <paramref name="values"/>, which it takes as its own storage rather than copying.</summary>
@@ -54,6 +55,30 @@ namespace Shorokoo
             : base(shape, storage ?? HostStorage(), context, ownsMemory)
         {
             _values = values ?? throw new ArgumentNullException(nameof(values));
+        }
+
+        /// <summary>
+        /// Creates a string tensor of <paramref name="shape"/> holding <paramref name="values"/>,
+        /// checked against the shape.
+        ///
+        /// <para>Too few is an error; a surplus is not, and is trimmed. That is the same asymmetry
+        /// the numeric literals keep, and it used to be the backend's: <c>CreateStringTensor</c>
+        /// set an element per supplied value into a shape-sized tensor, so a surplus threw at the
+        /// construction site. Holding the array instead would let a tensor outrun its own dims and
+        /// only fail if some session ever materialized it -- which for a program that just
+        /// describes a graph and exports it never happens.</para>
+        /// </summary>
+        /// <exception cref="ArgumentException"><paramref name="values"/> does not cover
+        /// <paramref name="shape"/>.</exception>
+        public static HostStringTensorData From(Shape shape, string[] values)
+        {
+            ArgumentNullException.ThrowIfNull(values);
+            var required = checked((int)shape.Count);
+            if (values.Length < required)
+                throw new ArgumentException(
+                    $"Supplied data of {values.Length} strings is less than shape size {required} "
+                    + "strings.", nameof(values));
+            return new HostStringTensorData(shape, values.Length == required ? values : values[..required]);
         }
 
         /// <summary>A host string tensor over <paramref name="values"/> belonging to
@@ -140,15 +165,17 @@ namespace Shorokoo
             ArgumentNullException.ThrowIfNull(factory);
             ThrowIfDisposed();
 
-            _materialized ??= new Dictionary<IShorokooInferenceSessionFactory, IShorokooTensorValue>(
-                ReferenceEqualityComparer.Instance as IEqualityComparer<IShorokooInferenceSessionFactory>
-                ?? EqualityComparer<IShorokooInferenceSessionFactory>.Default);
+            lock (_gate)
+            {
+                _materialized ??= new Dictionary<IShorokooInferenceSessionFactory, IShorokooTensorValue>(
+                    ReferenceEqualityComparer.Instance);
 
-            if (_materialized.TryGetValue(factory, out var existing)) return existing;
+                if (_materialized.TryGetValue(factory, out var existing)) return existing;
 
-            var value = factory.CreateStringTensor(_values, (long[])this.Shape);
-            _materialized[factory] = value;
-            return value;
+                var value = factory.CreateStringTensor(_values, (long[])this.Shape);
+                _materialized[factory] = value;
+                return value;
+            }
         }
 
         /// <summary>
@@ -164,9 +191,12 @@ namespace Shorokoo
             if (IsDisposed) return;
             IsDisposed = true;
             if (OwnsMemory) Storage.Release();
-            if (_materialized is null) return;
-            foreach (var value in _materialized.Values) value.Dispose();
-            _materialized = null;
+            lock (_gate)
+            {
+                if (_materialized is null) return;
+                foreach (var value in _materialized.Values) value.Dispose();
+                _materialized = null;
+            }
         }
 
         // Every byte-wise accessor lands here rather than on a cast that cannot work. The message

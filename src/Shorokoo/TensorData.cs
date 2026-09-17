@@ -425,7 +425,11 @@ namespace Shorokoo
             // Taken as the tensor's own storage when it is already the right length -- the common
             // case, and one copy of every weight in a model saved by not copying it.
             return NewHostTensor(
-                shape, dtype, data.Length == required ? data : data[..(int)required], context: null);
+                // Always a copy. Taking the caller's array made every tensor share mutable state
+                // with whatever produced the buffer -- a model's initializers aliased the parsed
+                // protobuf, and a loader reusing one scratch array got tensors that all held the
+                // contents of its last read.
+                shape, dtype, data[..(int)required].ToArray(), context: null);
         }
 
         /// <summary>

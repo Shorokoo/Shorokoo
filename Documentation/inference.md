@@ -659,6 +659,10 @@ arena strategy whose cost you would rather pay.
 
 ## Debugging engine (no OnnxRuntime)
 
+```csharp
+using Shorokoo.Core.Inference;   // QuickExecutionEngine
+```
+
 `QuickExecutionEngine` is a CPU-only interpreter used for debugging, shape inference,
 and small prototypes. It only materializes values for tensors ≤ `MaxDataElements`
 (default 256). Do not use it as a production inference path.

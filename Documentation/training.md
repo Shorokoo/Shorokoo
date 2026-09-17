@@ -143,6 +143,11 @@ Its *kind* — not a separate flag — decides the wiring:
 [Schedule factories and combinators](#schedule-factories-and-combinators) below.
 `Schedule.At(long)` previews a schedule's value at a step.
 
+Both types live in namespace `Shorokoo.Core.Training`, which `using Shorokoo;` does **not** cover —
+add `using Shorokoo.Core.Training;` to any file that names `Schedule` or `Schedules`. It is supported
+public surface, not an assembly-layout artefact — see
+[`Shorokoo.Core.*` is not all internal](orientation.md#public-core-namespaces).
+
 **Two scheduler construction paths, one runtime representation.** Every schedule the rig accepts is a
 graph, from exactly two sources: a built-in `Schedule`, or a scheduler **module** — a Shorokoo module
 graph whose inputs are a named subset of the reserved int64 scalar counters `{step, epoch, batchIndex}`
@@ -240,6 +245,8 @@ in `s`, so step 0 is exactly `startFactor · peak` (a true `0` at the default `s
 stated in its *own* steps and the boundary is stated in absolute steps — the two are independent:
 
 ```csharp
+using Shorokoo.Core.Training;   // Schedule, Schedules
+
 // Ramp 0 → 1e-3 over steps 0..200, hold 1e-3 to step 3899,
 // then decay 1e-3 → 5e-5 over steps 3900..6000 and hold.
 Schedule lr = Schedules.Constant(1e-3f)
@@ -1102,7 +1109,7 @@ rig — every rig-produced checkpoint has one; attach one to a bare checkpoint w
 
 ## Types used by the training API
 
-All of these are in namespace `Shorokoo` (covered by `using Shorokoo;`):
+These are in namespace `Shorokoo` (covered by `using Shorokoo;`), except `Schedule` and `Schedules`, which are in `Shorokoo.Core.Training` and need `using Shorokoo.Core.Training;`:
 
 | Type | Role | How to make one |
 |---|---|---|
@@ -1110,8 +1117,10 @@ All of these are in namespace `Shorokoo` (covered by `using Shorokoo;`):
 | `TensorDataModelParam` | Concrete `NamedModelParam` wrapping one `TensorData`. | `new TensorDataModelParam(name, ModelParamType.InputParam, tensorData)` |
 | `ModelParamType` (enum) | Tags a param's role. | `Undefined`, `HyperParam`, `TrainableParam`, `InputParam`, `OutputParam` |
 | `ModelParamList` | A set of named params (e.g. loaded weights). | `new ModelParamList(IEnumerable<(string name, TensorData data)>)` |
-| `TensorDataStruct` | A struct-shaped bundle of named `TensorData` fields; the form `Train`/`TrainStep` expect for inputs/targets. | Build: `new TensorDataStruct(structDef, fields)` where `structDef` is a `TensorStructDef` and `fields` are `KeyValuePair<string, IData>` — one per definition field, each of the kind that field declares (a value contradicting its definition throws). Read: `.Fields` (an `ImmutableDictionary<string, IData>` of name → value), `.Count`, or the `[int]` indexer. |
+| `TensorDataStruct` | A struct-shaped bundle of named `TensorData` fields; the form `Train`/`TrainStep` expect for inputs/targets. | Build: `new TensorDataStruct(structDef, fields)` where `structDef` is a `TensorStructDef` (namespace `Shorokoo.Core`) and `fields` are `KeyValuePair<string, IData>` — one per definition field, each of the kind that field declares (a value contradicting its definition throws). Read: `.Fields` (an `ImmutableDictionary<string, IData>` of name → value), `.Count`, or the `[int]` indexer. |
 | `SaveReport` | What a checkpoint save cost: `BytesWritten`, the disjoint `Write` / `Flush` / `Commit` phases, their sum `Elapsed`, and `BytesPerSecond`. | Returned by every checkpoint save — see [What a save costs](#what-a-save-costs). |
+| `Schedule` (namespace `Shorokoo.Core.Training`) | A `step → value` hyperparameter schedule; assign one to a `Hyperparameter` property to make it [`Scheduled`](#hyperparameter-kinds-hyperparameter). | A `Schedules.…` factory, then the combinators on the result (`WithWarmup`, `Then`, `Scale`, `Clamp`, `Shift`, `PerEpoch`). Preview with `.At(step)`. |
+| `Schedules` (static, namespace `Shorokoo.Core.Training`) | The factories: `Constant`, `Linear`, `Cosine`, `CosineWithWarmup`, `StepDecay`, `Exponential`, `OneCycle`. | Call one — `Schedules.Cosine(1e-3f, totalSteps)`. See [Schedule factories and combinators](#schedule-factories-and-combinators). |
 
 `sampleInputs` for `FromScratch` is a `NamedModelParam[]` describing each model input
 by name and sample shape. `Train`/`TrainStep` take `TensorDataStruct` batches.

@@ -313,12 +313,11 @@ classifier head is a single projection or a hidden-layer MLP:
 
 ```csharp
 using Shorokoo;
-using Shorokoo.Graph;                          // ComputationGraph
-using Shorokoo.Core.Nodes.Processors.Training; // TrainingRig
+using Shorokoo.Graph;                // ComputationGraph
 using Shorokoo.Modules;
-using Shorokoo.Modules.Initializers;           // XavierUniform
-using Shorokoo.Modules.Layers;                 // TransformerEncoderLayer
-using Shorokoo.Modules.Optimizers;             // AdamWOptimizerHyperparameters
+using Shorokoo.Modules.Initializers; // XavierUniform
+using Shorokoo.Modules.Layers;       // TransformerEncoderLayer
+using Shorokoo.Modules.Optimizers;   // AdamWOptimizerHyperparameters
 using static Shorokoo.Globals;
 
 [Module]

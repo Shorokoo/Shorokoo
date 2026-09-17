@@ -211,7 +211,16 @@ namespace Shorokoo
                     container, manifest, optimizerMapping, optimizerStateDef, tensorsByDataKey, filePath);
             }
 
-            return new TrainingCheckpoint(trainable, modelState, optState, step, epoch, batchIndex, rig: null, loss: loss);
+            return new TrainingCheckpoint
+            {
+                TrainableParams = trainable,
+                ModelState = modelState,
+                OptimizerState = optState,
+                Step = step,
+                Epoch = epoch,
+                BatchIndex = batchIndex,
+                Loss = loss,
+            };
         }
 
         /// <summary>The tensors of a model's <c>default</c> mapping set, or null when the manifest

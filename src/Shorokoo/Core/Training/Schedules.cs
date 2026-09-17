@@ -106,6 +106,13 @@ namespace Shorokoo.Core.Training
         /// Prepends a linear warmup of <paramref name="warmupSteps"/> steps that ramps from
         /// <paramref name="startFactor"/>·peak up to this schedule's step-0 value (the peak), then
         /// continues with this schedule (re-based so it starts after the warmup).
+        ///
+        /// <para>The ramp is denominated in <paramref name="warmupSteps"/> and linear in the step
+        /// itself, so the endpoints are the ones a published recipe states: step <c>0</c> is exactly
+        /// <paramref name="startFactor"/>·peak (a true <c>0</c> at the default
+        /// <paramref name="startFactor"/>), and the peak first arrives at step
+        /// <paramref name="warmupSteps"/> — where the re-based inner schedule contributes its own
+        /// step 0, which is the peak by definition, so the two pieces meet continuously.</para>
         /// </summary>
         public Schedule WithWarmup(int warmupSteps, float startFactor = 0f)
         {
@@ -156,9 +163,11 @@ namespace Shorokoo.Core.Training
         }
 
         /// <summary>
-        /// Linear warmup from 0 to <paramref name="baseValue"/> over <paramref name="warmupSteps"/> steps,
-        /// then a cosine decay to ~0 over the remaining steps. Mirrors the cosine schedule used by the
-        /// PyTorch ViT reference. Equivalent to <c>Cosine(baseValue, totalSteps - warmupSteps).WithWarmup(warmupSteps)</c>.
+        /// Linear warmup from 0 to <paramref name="baseValue"/> over <paramref name="warmupSteps"/> steps
+        /// (step <c>0</c> is <c>0</c> and <paramref name="baseValue"/> first arrives at step
+        /// <paramref name="warmupSteps"/>), then a cosine decay to ~0 over the remaining steps. Mirrors
+        /// the cosine schedule used by the PyTorch ViT reference. Equivalent to
+        /// <c>Cosine(baseValue, totalSteps - warmupSteps).WithWarmup(warmupSteps)</c>.
         /// </summary>
         public static Schedule CosineWithWarmup(float baseValue, int warmupSteps, int totalSteps)
         {

@@ -294,19 +294,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// <summary>
         /// True for the failures #208 is about: a managed out-of-memory, or a native allocation
         /// abort the backend reports only as text ("bad allocation", "std::bad_alloc", ...).
+        /// Shares one marker table with the training step's own allocation reporting, so the two
+        /// cannot drift into recognizing different sets of the same backend's failures.
         /// </summary>
         private static bool IsAllocationFailure(System.Exception ex)
-        {
-            string[] markers = ["bad alloc", "bad_alloc", "out of memory", "failed to allocate",
-                "insufficient memory"];
-            for (var e = ex; e is not null; e = e.InnerException)
-            {
-                if (e is System.OutOfMemoryException) return true;
-                if (markers.Any(m => e.Message.Contains(m, System.StringComparison.OrdinalIgnoreCase)))
-                    return true;
-            }
-            return false;
-        }
+            => Core.Utils.AllocationFailureReport.IsAllocationFailure(ex);
 
         /// <summary>
         /// Renders the parameter at <paramref name="failing"/> — the one whose own initialization

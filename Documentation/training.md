@@ -208,7 +208,7 @@ applied to. Every definition below is the exact arithmetic the rig evaluates (in
 | `Constant(float value)` | `value` | unchanging at every step |
 | `Linear(float baseValue, float finalValue, int totalSteps)` | `baseValue + (finalValue - baseValue) · p`, with `p = clamp(s / totalSteps, 0, 1)` | clamped, not extrapolated: `baseValue` at and below step 0, `finalValue` from step `totalSteps` on |
 | `Cosine(float baseValue, int totalSteps)` | `0.5 · baseValue · (1 + cos(π · p))`, same `p` — `baseValue` at step 0, `baseValue/2` at `totalSteps/2`, `0` at `totalSteps` | clamped the same way: held at `0` from step `totalSteps` on |
-| `CosineWithWarmup(float baseValue, int warmupSteps, int totalSteps)` | `Cosine(baseValue, max(1, totalSteps - warmupSteps)).WithWarmup(warmupSteps)`, with both arguments clamped (a negative `warmupSteps` becomes `0`, the cosine's length is never below `1`) — so a linear ramp over the first `warmupSteps` that, per `WithWarmup` below, starts at `baseValue / warmupSteps` (**not** `0`) and reaches `baseValue` at step `warmupSteps - 1`, then a cosine decay reaching `0` at step `totalSteps` | held at `0` afterwards |
+| `CosineWithWarmup(float baseValue, int warmupSteps, int totalSteps)` | `Cosine(baseValue, max(1, totalSteps - warmupSteps)).WithWarmup(warmupSteps)`, with both arguments clamped (a negative `warmupSteps` becomes `0`, the cosine's length is never below `1`) — so a linear ramp over the first `warmupSteps` that, per `WithWarmup` below, starts at `0` and reaches `baseValue` at step `warmupSteps`, then a cosine decay reaching `0` at step `totalSteps` | held at `0` afterwards |
 | `StepDecay(float baseValue, int stepSize, float gamma)` | `baseValue · gamma^(s / stepSize)`, **integer** division — a staircase that drops every `stepSize` steps | never clamps; keeps decaying (or growing, for `gamma > 1`) indefinitely |
 | `Exponential(float baseValue, float gamma)` | `baseValue · gamma^s` | never clamps; unbounded in both directions |
 | `OneCycle(float maxValue, int totalSteps, float pctStart = 0.3f, float divFactor = 25f, float finalDivFactor = 1e4f)` | with `initial = maxValue / divFactor`, `final = initial / finalDivFactor`, `up = max(1, round(totalSteps · clamp(pctStart, 0, 1)))` and `down = max(1, totalSteps - up)`: for `s < up`, `initial + (maxValue - initial) · 0.5 · (1 - cos(π · s / up))`; for `s ≥ up`, `final + (maxValue - final) · 0.5 · (1 + cos(π · clamp((s - up) / down, 0, 1)))` — `initial` at step 0, `maxValue` at step `up`, `final` at step `totalSteps` | held at `final` from step `totalSteps` on |
@@ -224,20 +224,23 @@ otherwise — and so must `StepDecay`'s `stepSize`, which throws on the same rul
 | `Clamp(float min, float max)` | `clamp(f(s), min, max)`; throws if `min > max` |
 | `Shift(int steps)` | `f(s + steps)` — a **positive** `steps` moves the schedule **earlier** (step 0 already sees `f(steps)`); pass a **negative** `steps` to move it later |
 | `PerEpoch(int stepsPerEpoch)` | `f(s / stepsPerEpoch)`, integer division — the value is held for each block of `stepsPerEpoch` steps. The epoch index is derived from the step counter, so no epoch input is needed; `stepsPerEpoch` must be at least 1 |
-| `WithWarmup(int warmupSteps, float startFactor = 0f)` | with `peak = f(0)` captured when the combinator is called: for `s < warmupSteps`, `peak · (startFactor + (1 - startFactor) · (s + 1) / warmupSteps)`; for `s ≥ warmupSteps`, `f(s - warmupSteps)` — the inner schedule is **re-based** to start after the warmup. `warmupSteps == 0` returns the schedule unchanged |
+| `WithWarmup(int warmupSteps, float startFactor = 0f)` | with `peak = f(0)` captured when the combinator is called: for `s < warmupSteps`, `peak · (startFactor + (1 - startFactor) · s / warmupSteps)`; for `s ≥ warmupSteps`, `f(s - warmupSteps)` — the inner schedule is **re-based** to start after the warmup. `warmupSteps == 0` returns the schedule unchanged |
 | `Then(int atStep, Schedule next)` | `f(s)` for `s < atStep`, and `next(s - atStep)` for `s ≥ atStep` — `next` is **re-based**, i.e. evaluated at the step *relative* to `atStep`, never at the absolute step |
 
-Two consequences of `WithWarmup`'s exact form are worth spelling out. `startFactor` multiplies the
-**inner schedule's step-0 value** (`peak`), not the optimizer's declared default; and because the ramp
-is linear in `s + 1`, step 0 is `peak · (startFactor + (1 - startFactor) / warmupSteps)` rather than
-`startFactor · peak`, the ramp first reaches `peak` at step `warmupSteps - 1`, and the inner schedule
-then contributes its own step 0 at step `warmupSteps`.
+One consequence of `WithWarmup`'s exact form is worth spelling out: `startFactor` multiplies the
+**inner schedule's step-0 value** (`peak`), not the optimizer's declared default. The ramp's endpoints
+are otherwise the ones a published recipe states — the ramp is denominated in `warmupSteps` and linear
+in `s`, so step 0 is exactly `startFactor · peak` (a true `0` at the default `startFactor = 0`), and
+`peak` first arrives at step `warmupSteps`, where the re-based inner schedule contributes its own step
+0. That value *is* `peak` by definition, so the ramp and the inner schedule meet continuously: writing
+`Schedules.Constant(peak).WithWarmup(N)` gives a literal linear warm-up from `0` to `peak` over steps
+`0 … N`.
 
 **Worked example: warm up, hold, decay.** Because `Then` re-bases, the second schedule's length is
 stated in its *own* steps and the boundary is stated in absolute steps — the two are independent:
 
 ```csharp
-// Ramp 0 → 1e-3 over steps 0..199, hold 1e-3 to step 3899,
+// Ramp 0 → 1e-3 over steps 0..200, hold 1e-3 to step 3899,
 // then decay 1e-3 → 5e-5 over steps 3900..6000 and hold.
 Schedule lr = Schedules.Constant(1e-3f)
     .WithWarmup(200)                                    // peak = Constant's step-0 value = 1e-3
@@ -246,10 +249,10 @@ Schedule lr = Schedules.Constant(1e-3f)
 
 | step | `lr.At(step)` | why |
 |---|---|---|
-| `0` | `5e-6` | ramp: `1e-3 · 1/200` |
-| `99` | `5.0e-4` | ramp: `1e-3 · 100/200` |
-| `199` | `1e-3` | ramp: `1e-3 · 200/200` — the peak |
-| `200` … `3899` | `1e-3` | the `Constant` inner schedule, re-based past the warmup |
+| `0` | `0` | ramp: `1e-3 · 0/200` |
+| `100` | `5.0e-4` | ramp: `1e-3 · 100/200` |
+| `199` | `9.95e-4` | ramp: `1e-3 · 199/200` — one step short of the peak |
+| `200` … `3899` | `1e-3` | the `Constant` inner schedule, re-based past the warmup — its step 0 *is* the peak, so the ramp arrives there exactly |
 | `3900` | `1e-3` | boundary: `Linear` at *its* step 0 |
 | `4950` | `5.25e-4` | `Linear` at its step 1050, halfway through 2100 |
 | `6000` | `5e-5` | `Linear` at its step 2100 — the final value |
@@ -655,8 +658,30 @@ why a retained step does not go through the rig's collection at all. A `StepToCh
 state back to you instead, so that one is reclaimed like any other.
 
 Result types:
-- `TrainingCheckpoint` → `.TrainableParams`, `.ModelState`, `.OptimizerState`, `.Step` (global step, `long`; advances each `TrainStep`, so schedules resume from a saved checkpoint), and the host-owned run counters `.Epoch` / `.BatchIndex` (`long?`; the training loop advances them — the counter-agnostic `TrainStep` carries them through unchanged). They are `null` when the position is genuinely **unknown** — an initial checkpoint, or one trained without a data loader / explicit counters — rather than a misleading `0`; the loader-driven and explicit-counter paths set concrete values. A scheduled hyperparameter reading the epoch / batch counter sees `0` for a `null` value. `.Step` is always a concrete `long`; all counters are `int64` end to end. It also carries `.Rig` (the `TrainingRig?` that produced it — set on every rig-produced checkpoint, so `checkpoint.ToInferenceModel()` needs no re-supplied graph) and `.Loss` (`float?`; the loss of the `TrainStep` that produced it, `null` on an initial or bare checkpoint). Both are preserved through the counter derivations (`WithCounters`/`WithStep`/`WithEpoch`/`WithBatchIndex`). `TrainStep` returns this checkpoint directly — read the step's loss off `.Loss`. `.Loss` persists as its own `Loss` component, independent of `Counters` (dropping `Loss`, or an initial checkpoint, reloads with `.Loss == null` — never a sentinel `0`).
+- `TrainingCheckpoint` → `.TrainableParams`, `.ModelState`, `.OptimizerState`, `.Step` (global step, `long`; advances each `TrainStep`, so schedules resume from a saved checkpoint), and the host-owned run counters `.Epoch` / `.BatchIndex` (`long?`; the training loop advances them — the counter-agnostic `TrainStep` carries them through unchanged). They are `null` when the position is genuinely **unknown** — an initial checkpoint, or one trained without a data loader / explicit counters — rather than a misleading `0`; the loader-driven and explicit-counter paths set concrete values. A scheduled hyperparameter reading the epoch / batch counter sees `0` for a `null` value. `.Step` is always a concrete `long`; all counters are `int64` end to end. It also carries `.Rig` (the `TrainingRig?` that produced it — set on every rig-produced checkpoint, so `checkpoint.ToInferenceModel()` needs no re-supplied graph) and `.Loss` (`float?`; the loss of the `TrainStep` that produced it, `null` on an initial or bare checkpoint). Both are preserved through the counter derivations (`WithCounters`/`WithStep`/`WithEpoch`/`WithBatchIndex`) and through the state derivations (`WithTrainableParams`/`WithModelState`/`WithOptimizerState`), each of which returns a new checkpoint with one slot replaced and every other slot carried through unchanged — the receiver is never mutated. `TrainStep` returns this checkpoint directly — read the step's loss off `.Loss`. `.Loss` persists as its own `Loss` component, independent of `Counters` (dropping `Loss`, or an initial checkpoint, reloads with `.Loss == null` — never a sentinel `0`).
 - `TrainingResult` → `.FinalCheckpoint`, `.EpochLosses` (the per-epoch mean losses).
+
+**Constructing one directly.** You are normally *handed* a checkpoint — by `CreateInitialCheckpoint`,
+`TrainStep`, `Fit`/`Train`, or a load — and the derivations above cover changing one slot of one you
+already have. When you do need to build one outright, the three tensor-state slots are **required
+object-initializer properties**, so each is named at the call site:
+
+```csharp
+var checkpoint = new TrainingCheckpoint
+{
+    TrainableParams = trainable,
+    ModelState      = modelState,
+    OptimizerState  = optimizerState,
+    Step            = 42,          // Epoch / BatchIndex / Rig / Loss are optional
+};
+```
+
+All three are the same type (`TensorDataStruct`), and for a real model they often have the same field
+shapes too — so a positional form would let the optimizer's moments be passed as the parameters,
+compile, and train to a plausible-looking loss, with the mistake surfacing only much later. Naming
+them removes that: the compiler requires all three and rejects an initializer that omits one. Prefer a
+derivation over re-writing a whole initializer when you are changing one slot of an existing
+checkpoint — `ckpt.WithTrainableParams(next)` cannot drop or transpose the slots it carries through.
 
 `TrainingRig`, `TrainingCheckpoint`, and `TrainingResult` are in
 namespace `Shorokoo` (covered by `using Shorokoo;`).
@@ -770,6 +795,56 @@ vary per training step (the per-step RNG position is saved in the checkpoint, so
 resumed run continues exactly). Pass
 `new RngConfig { MasterSeed = … }` to re-roll all streams coherently, or
 `RngConfig.NonDeterministic()` for per-run variation.
+
+### When a training step runs out of memory
+
+An allocation failure inside a step arrives from the backend as bare text — an ONNX Runtime arena
+message quoting a build-agent source path and a request size, or the two words `bad allocation` — and
+on its own it says neither which memory ran out nor how close the process was to any limit. Shorokoo
+wraps it as a `ComputeContextException` with code `CR009` that adds what the step already knows:
+
+- **Which pool.** `HOST memory` for a C++ allocation the process could not commit, `DEVICE memory`
+  for the accelerator's arena. A bare `bad allocation` is a *host* failure even on a GPU backend, so
+  the two no longer read the same. Where the backend's text names no allocator at all and the session
+  does have device memory, the report says so rather than guessing, and leans on the figures below.
+  Note ONNX Runtime's arena message is execution-provider-agnostic — the same text comes out of the
+  CPU arena — so on a CPU-only session it is read as host memory, never as a device that isn't there.
+- **What the step was holding.** Trainable parameters, model state, optimizer state and the batch
+  itself, each with its tensor count and total size, plus the five largest tensors by size. For a
+  small model on a large batch the batch is the whole of it, and the report says so.
+- **The card's own figures**, where a CUDA runtime is installed to ask (`DeviceMemory.Read()`): used,
+  free and total across all processes, plus this process's arena cap if one is set. A 2.36 MB request
+  refused with gigabytes still free reads as absurd until the free figure is printed beside it.
+- **This process's memory position.** Working set, commit charge and managed heap against the memory
+  limit in force — a cgroup/container limit, a Job Object limit, or the machine's RAM.
+
+The last two together are the discriminator. On Windows/WDDM a device allocation is backed by system
+commit, so a process memory limit meant to bound host RAM silently bounds device memory too, and an
+arena expansion past it fails with **the same message a genuinely full accelerator produces**. The two
+call for opposite responses — shrink the model, versus raise a limit that has nothing to do with the
+model — so the report distinguishes them outright, in three cases: the device is out of memory; the device has
+room but this process is at its own limit (the limit, not the model); or the device has room and so
+does the process, so the arena simply could not extend by the block it wanted.
+
+```
+[CR009] Compute context operation failed in TrainingRig.TrainStep: allocating memory for the training
+step at step 1 failed. The failing allocation was for DEVICE memory — the accelerator's arena (backend
+'Shorokoo.WinGPU'). Training state held for this operation: 296 tensor(s), 1.83 GiB in total (...).
+Device: 12.59 GiB of 23.99 GiB in use across all processes, 11.4 GiB free. Host process: working set
+9.61 GiB, commit 27.4 GiB, managed heap 3.02 GiB; against a configured memory limit of 28 GiB (98%
+used). The device has room, yet this process is close to its own memory limit — and on Windows/WDDM a
+device allocation is backed by system commit, so a limit meant to bound HOST memory bounds DEVICE
+memory too ... This is the limit, not the model: re-run with it raised or removed. Underlying failure:
+[ErrorCode:Fail] ...bfc_arena.cc:358 ...
+```
+
+The backend's own text is preserved verbatim at the end, and the original exception is kept as the
+`InnerException`. Only allocation failures are relabelled — everything else a step can raise keeps its
+type and message.
+
+One failure mode stays outside this: when the host runs out while the **garbage collector** needs
+memory, the runtime fails fast (`Fatal error. 0xE0004743`) before any managed handler runs, so there
+is no exception to wrap. The inventory printed by the last step that did fail is the way in.
 
 ## Feeding data: the data loader
 

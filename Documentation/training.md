@@ -1109,7 +1109,7 @@ rig — every rig-produced checkpoint has one; attach one to a bare checkpoint w
 
 ## Types used by the training API
 
-These are in namespace `Shorokoo` (covered by `using Shorokoo;`), **except the last two**, which are in `Shorokoo.Core.Training` and need `using Shorokoo.Core.Training;`:
+These are in namespace `Shorokoo` (covered by `using Shorokoo;`), except `Schedule` and `Schedules`, which are in `Shorokoo.Core.Training` and need `using Shorokoo.Core.Training;`:
 
 | Type | Role | How to make one |
 |---|---|---|

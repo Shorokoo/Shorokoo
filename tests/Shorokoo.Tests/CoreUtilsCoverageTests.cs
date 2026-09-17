@@ -596,46 +596,40 @@ public class CoreUtilsCoverageTests
         }
     }
 
+    // One root namespace per per-platform backend package. Only the running platform's assembly is
+    // in the test output, so the rest cannot be reflected over and are named here instead.
+    private static readonly string[] PlatformBackendNamespaces =
+        ["Shorokoo.WinCPU", "Shorokoo.WinGPU", "Shorokoo.LinuxCPU", "Shorokoo.LinuxGPU"];
+
     /// <summary>
-    /// Every <c>using Shorokoo…;</c> a Documentation sample opens with must name a namespace that
-    /// carries public API — a public type, for <c>using static</c>. Existing is not enough: a
-    /// namespace whose types are all internal imports nothing a reader can call, so the line is a
-    /// no-op that still asserts, by sitting there and being commented, that the types beside it
-    /// live somewhere they do not. The compiler does not object to one (an internals-only
-    /// namespace is a namespace), which is exactly why it needs a test.
+    /// Every <c>using Shorokoo…;</c> the documentation shows must name a namespace carrying public
+    /// API — a public type, for <c>using static</c>. The compiler accepts an internals-only
+    /// namespace, so only a test catches an import that resolves, reads as documentation, and hands
+    /// the reader nothing it can call.
     /// </summary>
     [Fact]
     public void TestEveryDocumentationUsingNamesPublicApi()
     {
-        Assembly[] product = [.. Directory.GetFiles(AppContext.BaseDirectory, "Shorokoo*.dll").Select(Loaded).OfType<Assembly>()];
-        Type[] exported = [.. product.SelectMany(ExportedTypes)];
+        Type[] exported = [.. ShippedAssemblies().SelectMany(a => a.GetExportedTypes())];
         var namespaces = exported.Select(t => t.Namespace).OfType<string>()
-            .Concat(Directory.GetDirectories(Path.Combine(RepoRoot(), "src", "Backend", "OnnxRuntime"))
-                .Select(Path.GetFileName).OfType<string>())
+            .Concat(PlatformBackendNamespaces).ToHashSet(StringComparer.Ordinal);
+        var types = exported.Select(t => t.FullName?.Replace('+', '.')).OfType<string>()
             .ToHashSet(StringComparer.Ordinal);
-        var types = exported.Select(t => t.FullName).OfType<string>().ToHashSet(StringComparer.Ordinal);
 
         var usings = Directory.GetFiles(Path.Combine(RepoRoot(), "Documentation"), "*.md")
-            .SelectMany(f => Regex.Matches(File.ReadAllText(f), @"^\s*using (static )?(Shorokoo[\w.]*)\s*;", RegexOptions.Multiline)
-                .Select(m => $"{Path.GetFileName(f)}: using {m.Groups[1].Value}{m.Groups[2].Value}; [{(m.Groups[1].Success ? types : namespaces).Contains(m.Groups[2].Value)}]"))
+            .SelectMany(f => Regex.Matches(File.ReadAllText(f), @"(?<![\w.])using (static )?(Shorokoo[\w.]*)\s*;")
+                .Select(m => (At: $"{Path.GetFileName(f)}: {m.Value}", Static: m.Groups[1].Success, Name: m.Groups[2].Value)))
             .Distinct()
             .ToArray();
 
-        Assert.NotEmpty(usings);
-        Assert.Empty(usings.Where(u => u.EndsWith("[False]", StringComparison.Ordinal)));
+        Assert.True(usings.Length >= 40);
+        Assert.Empty(usings.Where(u => !(u.Static ? types : namespaces).Contains(u.Name)).Select(u => u.At));
     }
 
-    private static Assembly? Loaded(string assemblyPath)
-    {
-        try { return Assembly.LoadFrom(assemblyPath); }
-        catch { return null; }
-    }
-
-    private static IEnumerable<Type> ExportedTypes(Assembly assembly)
-    {
-        try { return assembly.GetExportedTypes(); }
-        catch { return []; }
-    }
+    private static Assembly[] ShippedAssemblies() =>
+        [.. Directory.EnumerateFiles(AppContext.BaseDirectory, "Shorokoo*.dll")
+            .Where(f => Path.GetFileName(f) is not ("Shorokoo.Tests.dll" or "Shorokoo.CodeGen.dll"))
+            .Select(Assembly.LoadFrom)];
 
     private static string RepoRoot() => Ancestor(d => File.Exists(Path.Combine(d, "Shorokoo.sln")));
 
@@ -920,9 +914,7 @@ public class CoreUtilsCoverageTests
     [Fact]
     public void TestNoPublicApiPlacesAParamsArrayBehindAnOptionalParameter()
     {
-        var shipped = Directory.EnumerateFiles(AppContext.BaseDirectory, "Shorokoo*.dll")
-            .Where(f => Path.GetFileName(f) is not ("Shorokoo.Tests.dll" or "Shorokoo.CodeGen.dll"))
-            .Select(Assembly.LoadFrom).ToArray();
+        var shipped = ShippedAssemblies();
         var exported = shipped.SelectMany(a => a.GetExportedTypes()).ToArray();
 
         Assert.Equal(4, ParamsBehindOptional(typeof(ParamsBehindOptionalBait)).Count());

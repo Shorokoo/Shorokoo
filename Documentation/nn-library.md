@@ -256,9 +256,10 @@ Two edges to know:
   concretizing. Via `Linear.Call(outFeatures, useBias, x)` the bit is a constant
   in the built subgraph and there is nothing to pass. See
   [What concretization fixes](inference.md#what-concretization-fixes).
-- The scope of the resulting failure is the **whole model graph**, not a layer.
-  `TrainingRig.FromScratch` fails with *"No trainable parameters found in the
-  computation graph."* only when the toggles have left nothing anywhere in the
+- Pruning can leave a graph with no trainable parameters at all, and
+  `TrainingRig.FromScratch` then fails with *"No trainable parameters found in
+  the computation graph."* The scope of that check is the **whole model graph**,
+  not a layer: it fires only when the toggles have left nothing anywhere in the
   graph trainable — a model that *is* the gated layer, or whose every parameter
   block is switched off. A **sub-module** pruned to none is not that case:
   `RMSNorm(affine: false)` beneath a parent carrying its own parameters builds

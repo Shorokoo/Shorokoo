@@ -231,6 +231,8 @@ or an external-data model imported from a stream/bytes without
 With `CompressedFormatUtils`:
 
 ```csharp
+using Shorokoo.Core.Utils;   // CompressedFormatUtils, SrkFileFormat
+
 string path = CompressedFormatUtils.SaveFastGraphToFile("model.zsrk", graph);     // compressed
 ComputationGraph g = CompressedFormatUtils.LoadFastGraphFromFile("model.zsrk");
 byte[] bytes = CompressedFormatUtils.SaveFastGraphToBinary(graph, compressed: true);

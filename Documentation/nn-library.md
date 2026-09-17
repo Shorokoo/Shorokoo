@@ -259,9 +259,9 @@ Two edges to know:
 - Pruning can leave a graph with no trainable parameters at all, and
   `TrainingRig.FromScratch` then fails with *"No trainable parameters found in
   the computation graph."* The scope of that check is the **whole model graph**,
-  not a layer: it fires only when the toggles have left nothing anywhere in the
-  graph trainable — a model that *is* the gated layer, or whose every parameter
-  block is switched off. A **sub-module** pruned to none is not that case:
+  not a layer: it fires when nothing anywhere in the graph is trainable, which
+  the toggles can cause for a model that *is* the gated layer, or whose every
+  parameter block is switched off. A **sub-module** pruned to none is not that case:
   `RMSNorm(affine: false)` beneath a parent carrying its own parameters builds
   normally, the parent's parameters present and the pruned gain absent.
 
@@ -778,8 +778,8 @@ Reaching for it does **not** risk the *"No trainable parameters found in the
 computation graph."* build failure. That check is on the whole model graph, so a
 layer left with none of its own is fine: `RMSNorm(affine: false)` — or
 `GroupNorm(affine: false)` — at every normalization site of a transformer builds
-as long as the model has a trainable parameter somewhere, which any model with a
-projection in it does. Only a model that is *nothing but* gain-free
+as long as some trainable parameter of the model still reaches its output, which
+any model with a projection in it does. Only a model that is *nothing but* gain-free
 normalization hits it. See [An off toggle costs nothing](#gated-parameters).
 
 `GroupNorm` and `InstanceNorm` are the same computation differing only in the

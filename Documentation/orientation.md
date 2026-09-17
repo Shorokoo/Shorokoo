@@ -26,18 +26,19 @@ Other usings are introduced by the page that needs them (for example
 ## `Shorokoo.Core.*` is not all internal
 
 Some of the API you are meant to call sits under `Shorokoo.Core.*`, so the prefix is not a
-"do not touch" marker. Nine of those namespaces carry documented public API:
+"do not touch" marker. Ten of those namespaces carry documented public API:
 
 | Namespace | What it holds | Introduced by |
 |---|---|---|
 | `Shorokoo.Core` | `Module<…>` / `CallbackModule<…>`, `GraphBuilder`, `Variable`, `PrimitiveParam`, the parameter-naming schemes | [core-types.md](core-types.md), [defining-models.md](defining-models.md), [onnx-and-weights.md](onnx-and-weights.md) |
 | `Shorokoo.Core.Training` | `Schedule` and `Schedules` — the learning-rate schedule factories and combinators | [training.md](training.md#schedule-factories-and-combinators) |
 | `Shorokoo.Core.Inference` | `QuickExecutionEngine`, the CPU interpreter used for debugging and shape inference | [inference.md](inference.md#debugging-engine-no-onnxruntime) |
-| `Shorokoo.Core.Inference.Abstractions` | `InferenceBackend`, `ComputeDevice`, `DeviceMemory`, `Float16`/`BFloat16` and the session interfaces | [inference.md](inference.md) |
+| `Shorokoo.Core.Inference.Abstractions` | `InferenceBackend`, `ComputeDevice`, `DeviceMemory`, and the `Float16`/`BFloat16` element types | [inference.md](inference.md), [core-types.md](core-types.md) |
 | `Shorokoo.Core.Factory` | `FastOnnxModelBuilder` | [onnx-and-weights.md](onnx-and-weights.md) |
 | `Shorokoo.Core.Factory.IR` | `ModelProto` and the rest of the ONNX protobuf types | [onnx-and-weights.md](onnx-and-weights.md) |
-| `Shorokoo.Core.Graph` | `ModelId` and `ModelParamIdentifierTemplate` — the parameter identities the naming DSLs match on, and what `ToModelId` hands back | [param-naming-format-dsl.md](param-naming-format-dsl.md), [param-naming-pattern-dsl.md](param-naming-pattern-dsl.md) |
-| `Shorokoo.Core.Nodes.NodeDefinitions` | `DataStructure`, and the low-level `NodeBuilder` / `NodeDefinition` op-authoring surface | [nn-library.md](nn-library.md), [operator-support.md](operator-support.md) |
+| `Shorokoo.Core.Graph` | `ModelId` — the parameter identity the naming DSLs match on, and what `ToModelId` hands back | [param-naming-format-dsl.md](param-naming-format-dsl.md), [param-naming-pattern-dsl.md](param-naming-pattern-dsl.md) |
+| `Shorokoo.Core.Nodes.NodeDefinitions` | `DataStructure`, and `OnnxOp` / `NodeBuilder` — the low-level op-authoring surface | [nn-library.md](nn-library.md), [operator-support.md](operator-support.md) |
+| `Shorokoo.Core.Nodes` | `Ops`, whose public surface is the `IfElse` overloads that build control flow at `Variable` level | [operator-support.md](operator-support.md), [limitations.md](limitations.md) |
 | `Shorokoo.Core.Utils` | `CompressedFormatUtils` and `SrkFileFormat` / `SrkHeader` — Shorokoo's own `.srk` / `.zsrk` graph files | [onnx-and-weights.md](onnx-and-weights.md) |
 
 The rest of `Shorokoo.Core.*` has no documented entry point: nothing here tells you to call it,

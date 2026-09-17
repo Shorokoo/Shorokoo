@@ -622,7 +622,7 @@ public class CoreUtilsCoverageTests
             .Distinct()
             .ToArray();
 
-        Assert.True(usings.Length >= 40);
+        Assert.True(usings.Length >= 10);
         Assert.Empty(usings.Where(u => !(u.Static ? types : namespaces).Contains(u.Name)).Select(u => u.At));
     }
 

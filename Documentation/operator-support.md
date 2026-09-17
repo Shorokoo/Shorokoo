@@ -398,7 +398,7 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
 2. Shape/dtype only; values are not computed.
 3. Quantized operators are non-differentiable — no straight-through estimator
    is provided, so there is no quantization-aware training path.
-4. The opset-23 `precision` attribute is not exposed by `Ops.QuantizeLinear`
+4. The opset-23 `precision` attribute is not exposed by `NN.QuantizeLinear`
    or `OnnxOp.QuantizeLinear`: it only selects float8/float4 quantization
    targets, which Shorokoo does not support. The node definition still
    declares it, so an imported model that carries it round-trips unchanged

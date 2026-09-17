@@ -36,11 +36,13 @@ namespace Shorokoo.Runtime
     public class CompiledGraph
     {
         private readonly IShorokooInferenceSession _session;
+        private readonly IShorokooInferenceSessionFactory _backend;
         private readonly Dictionary<string, string> _onnxInputNameByOriginal;
         private readonly string[] _originalInputNames;
 
         internal CompiledGraph(
             IShorokooInferenceSession session,
+            IShorokooInferenceSessionFactory backend,
             Dictionary<string, string> onnxInputNameByOriginal,
             string[] originalInputNames,
             ShorokooGraphOptimization optimization,
@@ -48,6 +50,7 @@ namespace Shorokoo.Runtime
             RunSettings defaultRunSettings)
         {
             _session = session;
+            _backend = backend;
             _onnxInputNameByOriginal = onnxInputNameByOriginal;
             _originalInputNames = originalInputNames;
             Optimization = optimization;
@@ -63,6 +66,11 @@ namespace Shorokoo.Runtime
         /// one call, so this is a default and never a ceiling.
         /// </summary>
         public RunSettings DefaultRunSettings { get; }
+        /// The backend this graph was compiled on and runs on — fixed when it was compiled, since
+        /// the session belongs to that backend and cannot move. Feeding it data another backend
+        /// built is allowed: the session rebuilds what it must, provided the data is host-resident.
+        /// </summary>
+        public BackendDescription Backend => _backend.Description;
 
         /// <summary>The graph-optimization profile the session was built with (test hook).</summary>
         internal ShorokooGraphOptimization Optimization { get; }
@@ -197,17 +205,40 @@ namespace Shorokoo.Runtime
     /// once via <see cref="Execute(ComputationGraph, IData[])"/>, or repeatedly via a
     /// <see cref="CompiledGraph"/> from <see cref="Compile(ComputationGraph)"/>.
     ///
-    /// A context does not choose the device: every session it creates is built by the one
-    /// process-wide <see cref="Shorokoo.Core.Inference.Abstractions.InferenceBackend.Factory"/>,
-    /// and which device the work goes to is read off <see cref="Backend"/>. What it does carry is
-    /// how those sessions and runs are configured — <see cref="DeviceMemory"/> for the arena each
-    /// session it compiles is built with, and <see cref="RunSettings"/> for what its runs do by
-    /// default. Both are per instance, so two contexts may differ and neither reaches the other's
-    /// sessions.
+    /// A context may name the backend it runs on, and two contexts may name different ones — a CPU
+    /// context and a CUDA context in one process, each compiling and running on its own device:
+    /// <code>
+    /// var cpu  = new ComputeContext(new LinuxCpuInferenceFactory());
+    /// var cuda = new ComputeContext(new LinuxGpuInferenceFactory());
+    /// cpu.Execute(graph, input);   // on the host
+    /// cuda.Execute(graph, input);  // the same graph, on the card
+    /// </code>
+    /// A context constructed without one runs on the process default
+    /// (<see cref="Shorokoo.Core.Inference.Abstractions.InferenceBackend.Factory"/>), which is what
+    /// every context did before backends could differ. Which device a context will use is read off
+    /// <see cref="Backend"/>.
+    ///
+    /// <para>It also carries how its sessions and runs are configured — <see cref="DeviceMemory"/>
+    /// for the arena each session it compiles is built with, and <see cref="RunSettings"/> for what
+    /// its runs do by default. Both are per instance, so two contexts may differ and neither
+    /// reaches the other's sessions.</para>
+    ///
+    /// <para>A context names where the <i>work</i> runs; it does not change where tensors are
+    /// built. Every <c>TensorData</c> in the program is built by the default backend
+    /// (<see cref="Shorokoo.Core.Inference.Abstractions.InferenceBackend.Factory"/>) wherever it is
+    /// built, and a session on another backend converts what it is fed, handing its own outputs
+    /// back. So the same data feeds either context and the same model runs on both, with nothing to
+    /// say at the call site. The conversion costs a host copy per feed, and is possible only for
+    /// data the host can read — see
+    /// <see cref="Shorokoo.Core.Inference.Abstractions.BackendTransfer"/>.</para>
     /// </summary>
     public class ComputeContext
     {
         private static ComputeContext? _defaultComputeContext;
+
+        // Null means the default backend, read when the work runs rather than at construction: a
+        // context built before InferenceBackend.Factory was assigned must still honour it.
+        private readonly IShorokooInferenceSessionFactory? _backend;
 
         /// <summary>
         /// Process-wide default context, created lazily on first access and used wherever no
@@ -233,9 +264,10 @@ namespace Shorokoo.Runtime
             set { _defaultComputeContext = value; }
         }
 
-        /// <summary>Creates a compute context on the shipped defaults. Set
-        /// <see cref="DeviceMemory"/> or <see cref="RunSettings"/> in an object initializer to
-        /// compile and run under something else.</summary>
+        /// <summary>Creates a compute context that runs on the process-wide
+        /// <see cref="Shorokoo.Core.Inference.Abstractions.InferenceBackend.Factory"/>, on the
+        /// shipped defaults. Set <see cref="DeviceMemory"/> or <see cref="RunSettings"/> in an
+        /// object initializer to compile and run under something else.</summary>
         public ComputeContext()
         {
         }
@@ -284,15 +316,38 @@ namespace Shorokoo.Runtime
         }
 
         /// <summary>
+        /// Creates a compute context that compiles and runs on <paramref name="backend"/>, whatever
+        /// the process default is. This is how one program drives two devices: a context per
+        /// backend, each with sessions of its own. The data they run on is shared — see the note on
+        /// the class.
+        /// </summary>
+        /// <param name="backend">The backend its sessions are built by — a platform factory
+        /// (<c>new LinuxGpuInferenceFactory()</c>) where one native ONNX Runtime serves both, or one
+        /// from <see cref="Shorokoo.Core.Inference.Abstractions.IsolatedBackend.Load"/> where each
+        /// backend needs a native of its own.</param>
+        /// <exception cref="ArgumentNullException"><paramref name="backend"/> is null.</exception>
+        public ComputeContext(IShorokooInferenceSessionFactory backend)
+        {
+            ArgumentNullException.ThrowIfNull(backend);
+            _backend = backend;
+        }
+
+        /// <summary>The backend this context's work runs on: the one it was constructed with, or
+        /// the default when it names none.</summary>
+        internal IShorokooInferenceSessionFactory Factory => _backend ?? InferenceBackend.Factory;
+
+        /// <summary>
         /// The backend this context compiles and runs on — its name, its device, and the CUDA device
-        /// it allocates on. Every context in the process reports the same one; it is a property of
-        /// the build, not of the instance. Read it to log the device a run used, or call
+        /// it allocates on. A context constructed with a backend reports that one; a context without
+        /// reports the process default, which is what every context reported when only one could be
+        /// live. Read it to log the device a run used, or call
         /// <see cref="Shorokoo.Core.Inference.Abstractions.InferenceBackend.RequireDevice"/> to
         /// refuse to start on the wrong one.
         ///
-        /// <para>Reading this resolves the backend if none is live yet, exactly as compiling would.</para>
+        /// <para>Reading this resolves the process default if this context names no backend and none
+        /// is live yet, exactly as compiling would.</para>
         /// </summary>
-        public BackendDescription Backend => InferenceBackend.Factory.Description;
+        public BackendDescription Backend => Factory.Description;
 
         /// <summary>
         /// Compiles the graph into a reusable <see cref="CompiledGraph"/>: the ONNX model and
@@ -419,7 +474,7 @@ namespace Shorokoo.Runtime
                 onnxInputNameByOriginal[originalInputNames[i]] = session.InputNames[i];
 
             return new CompiledGraph(
-                session, onnxInputNameByOriginal, originalInputNames, optimization,
+                session, Factory, onnxInputNameByOriginal, originalInputNames, optimization,
                 deviceMemory, RunSettings);
         }
 
@@ -608,7 +663,7 @@ namespace Shorokoo.Runtime
 
         private IShorokooInferenceSession CreateSession(
             byte[] modelData, ShorokooGraphOptimization optimization, DeviceMemorySettings deviceMemory)
-            => InferenceBackend.Factory.CreateSession(
+            => Factory.CreateSession(
                 modelData, optimization, ShorokooLogSeverity.Fatal, deviceMemory);
 
         /// <summary>

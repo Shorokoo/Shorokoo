@@ -717,7 +717,9 @@ public class CoreUtilsCoverageTests
             Assert.Matches(@"cudaDeviceId\s*:\s*null", Source(cpu.Split('/')));
 
         var factory = Source("Shorokoo.OnnxRuntime", "OrtSessionFactory.cs");
-        Assert.Matches(@"new\s+OrtInferenceSession\s*\(\s*session\s*,\s*_cudaDeviceId\s*\)", factory);
+        // Trailing [,)] rather than a closing paren: what this pins is that the device id still
+        // reaches the session, not how many other things travel with it.
+        Assert.Matches(@"new\s+OrtInferenceSession\s*\(\s*session\s*,\s*_cudaDeviceId\s*[,)]", factory);
         Assert.Matches(@"AppendExecutionProvider_CUDA\s*\(\s*cuda\s*\)", factory);
         Assert.Matches(@"CudaProviderOptions\s*\(\s*deviceId\s*,\s*deviceMemory\.LimitBytes\s*,\s*deviceMemory\.ArenaExtend\s*\)", factory);
         Assert.Matches(@"_configureExecutionProvider\s*\(\s*options\s*,\s*deviceMemory\s*\)", factory);

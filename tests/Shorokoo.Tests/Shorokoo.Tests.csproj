@@ -49,6 +49,60 @@
     <ProjectReference Include="..\..\src\Backend\OnnxRuntime\Shorokoo.LinuxCPU\Shorokoo.LinuxCPU.csproj" />
   </ItemGroup>
 
+  <!--
+    A second native ONNX Runtime, deployed under ort/cuda/, for the side-by-side backend tests.
+    They need a runtime separate from the one the default backend above loaded, and a folder of
+    its own is what makes it separate: both packages deliver their library at the same
+    runtimes/<rid>/native/ path, so two of them deployed normally are one of them deployed twice.
+
+    It is the CUDA-flavoured build, which carries the CPU execution provider as well as the CUDA
+    one. So it runs here, on a machine with no GPU, under the CPU provider, and it is the same
+    file that serves the CUDA provider on a machine with a card. Its provider libraries are left
+    out: libonnxruntime_providers_cuda.so alone is some 340 MB, and only the hardware tests
+    append that provider.
+
+    ExcludeAssets="all" keeps this from competing for the output path with the CPU native the
+    ProjectReference above deploys; the package is already restored by the solution, since
+    Shorokoo.LinuxGPU references it, so this costs a file copy and no download.
+  -->
+  <ItemGroup Condition="$([MSBuild]::IsOSPlatform('Linux'))">
+    <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu.Linux" Version="1.26.0"
+                      ExcludeAssets="all" GeneratePathProperty="true" />
+    <ShorokooBackendNatives BackendId="cuda" Condition="'$(ShorokooDeployGpuBackend)' != 'true'"
+      Include="$(PkgMicrosoft_ML_OnnxRuntime_Gpu_Linux)\runtimes\linux-x64\native\libonnxruntime.so;$(PkgMicrosoft_ML_OnnxRuntime_Gpu_Linux)\runtimes\linux-x64\native\libonnxruntime_providers_shared.so" />
+  </ItemGroup>
+
+  <!--
+    -p:ShorokooDeployGpuBackend=true completes ort/cuda/ into a CUDA backend that can actually be
+    loaded: the whole native set (the CUDA provider included, which is why this is opt-in) plus
+    the Shorokoo.LinuxGPU factory assembly. That is what SideBySideBackendHardwareTests needs, and
+    what a program driving the CPU and the card at once deploys.
+
+    The factory goes into ort/cuda/ rather than beside Shorokoo.dll on purpose. Two backend
+    assemblies side by side are exactly what InferenceBackend's discovery refuses, since a program
+    that deployed both and named neither has not said which it means, and every other test here
+    relies on discovery finding the CPU one. Under ort/cuda/ it is out of discovery's way and the
+    spec's ProbeDirectory points at it. It is built through an MSBuild task rather than referenced,
+    for the same reason: a ProjectReference deploys its output beside Shorokoo.dll whatever the
+    metadata says, and brings its native package along to compete for the ordinary output path.
+  -->
+  <ItemGroup Condition="'$(ShorokooDeployGpuBackend)' == 'true' AND $([MSBuild]::IsOSPlatform('Linux'))">
+    <ShorokooBackendNatives BackendId="cuda"
+      Include="$(PkgMicrosoft_ML_OnnxRuntime_Gpu_Linux)\runtimes\linux-x64\native\*" />
+  </ItemGroup>
+
+  <Target Name="ShorokooDeployGpuBackendAssembly" AfterTargets="Build"
+          Condition="'$(ShorokooDeployGpuBackend)' == 'true' AND $([MSBuild]::IsOSPlatform('Linux'))">
+    <MSBuild Projects="..\..\src\Backend\OnnxRuntime\Shorokoo.LinuxGPU\Shorokoo.LinuxGPU.csproj"
+             Targets="Build" Properties="Configuration=$(Configuration)">
+      <Output TaskParameter="TargetOutputs" ItemName="ShorokooGpuBackendAssembly" />
+    </MSBuild>
+    <Copy SourceFiles="@(ShorokooGpuBackendAssembly)" DestinationFolder="$(OutDir)ort\cuda"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+  <Import Project="..\..\src\Backend\OnnxRuntime\Shorokoo.OnnxRuntime\build\Shorokoo.OnnxRuntime.targets" />
+
   <ItemGroup>
     <ProjectReference Include="..\..\src\Shorokoo\Shorokoo.csproj" />
     <ProjectReference Include="..\..\src\Shorokoo.Modules\Shorokoo.Modules.csproj" />

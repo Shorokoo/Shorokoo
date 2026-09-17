@@ -634,16 +634,27 @@ one set of compiled training-step sessions (one per fed input shape) that the `F
 manual `TrainStep` loop all share.
 Every `With…` derivation keeps the same two contexts.
 
-**What the two can usefully differ in: their device memory, and nothing else.** A `ComputeContext`
-carries `DeviceMemory` for the sessions it compiles and `RunSettings` for what its runs do, so the
-merge phase and the training loop can hold different arena budgets — see
-[Device memory](inference.md#device-memory-gpu-backends). What it does not carry is the device, the
-execution provider or the thread count: every session either context creates is built by the one
-process-wide backend factory. In particular you **cannot** merge on one device and train on another:
-[only one backend is live per process](inference.md#backend-selection) and both contexts go through
-it, so the naming does not offer a CPU-build / GPU-train split. Read the two members as a division of
-*phases* — which work is build/merge and which is compile/run — not of hardware. The device both of
-them will use is not a secret, though: read `rig.RuntimeContext.Backend`, or call
+**What the two can usefully differ in: the backend, and how its sessions and runs are
+configured.** A `ComputeContext` carries `DeviceMemory` for the sessions it compiles and
+`RunSettings` for what its runs do, so the merge phase and the training loop can hold different
+arena budgets — see [Device memory](inference.md#device-memory-gpu-backends). It also carries the
+backend: a context constructed with one (`new ComputeContext(new LinuxCpuInferenceFactory())`) runs
+its work there, so a rig **can** build on one device and train on another:
+
+```csharp
+var rig = TrainingRig.FromScratch(
+    model, loss, optimizer,
+    mergeContext:   new ComputeContext(new LinuxCpuInferenceFactory()),
+    runtimeContext: new ComputeContext(new LinuxGpuInferenceFactory()));
+```
+
+Both devices then have to be deployed and reachable from one process — see
+[One model, two devices](inference.md#one-model-two-devices), which is also where the cost is:
+what the merge phase produces is handed to the runtime backend by a host copy per feed. Splitting
+this way is worth it when the build phase is what does not fit on the card, and pointless when it
+is not. Two default-constructed contexts select nothing between them, and the members are then a
+division of *phases*: which work is build/merge and which is compile/run. The device each will use
+is readable either way: `rig.MergeContext.Backend` and `rig.RuntimeContext.Backend`, or call
 `InferenceBackend.RequireDevice(...)` at startup to refuse to train on the wrong one — see
 [Which device am I on?](inference.md#which-device-am-i-on).
 Leaving both `null`, so each defaults to `ComputeContext.Default`, is the normal choice.

@@ -191,25 +191,26 @@ rest of it.
 
 ## Current limitations (could be lifted)
 
-### The backend is process-wide and chosen when you build
+### Data crosses between backends by a host copy
 
-Which device Shorokoo runs on is decided by the backend package a project references, and it holds
-for the whole process — see [Backend selection](inference.md#backend-selection). There is no
-per-call, per-context or per-rig device choice, and no way to use both devices from one program:
-ONNX Runtime binds one native runtime per process.
+A program can run several backends at once — a CPU context and a CUDA context in one process, each
+on its own device; see [One model, two devices](inference.md#one-model-two-devices). What it cannot
+do is move data between them cheaply.
 
-Referencing both packages is not a way around it. Their native libraries occupy the same path, so
-only one is deployed and NuGet's conflict resolution decides which — you would be picking a managed
-backend to sit on whichever native happened to win. That is why discovery refuses such a deployment
-outright rather than choosing for you, and why the escape hatch it names (assigning
-`InferenceBackend.Factory`) is there to make a salvageable build run, not to offer a device switch.
+A `TensorData` is built on the default backend wherever you build it, and stays there. Feeding it to
+a context on another backend works, but the session rebuilds it on its own side first: a host copy
+per feed, every run. For a training loop that means the inputs are copied on every step, and there
+is no way to pin a tensor to the backend that will consume it.
 
-This is not scheduled to change. What is available instead: the device is answerable
-(`ComputeContext.Backend`, `InferenceBackend.Describe()`) and assertable
-(`InferenceBackend.RequireDevice(...)`), and work that genuinely needs both devices is split into
-one executable per device over a shared, backend-free model library —
-[One model, two devices](inference.md#one-model-two-devices). That costs a process, not a second
-copy of the model.
+Two consequences worth planning around. A value an execution provider kept in its own memory
+(`TensorData.IsHostResident` is false — what a
+[resident training run](training.md#keeping-training-state-on-the-device) produces) cannot cross at
+all, since there is no path from one runtime's device allocation to another's; it has to come back
+to the host on the backend that owns it first. And two backends that *do* share a native ONNX
+Runtime — a CPU factory and a CUDA factory over one loaded runtime, which is the usual way to get
+two devices — pay none of this, because a value either makes is a value the other's sessions accept
+directly. Prefer that arrangement where the choice is open, and keep separate native runtimes for
+where they are actually needed: two ONNX Runtime builds, or two versions, in one process.
 
 ### Device-memory readings are the device's, and device 0's
 

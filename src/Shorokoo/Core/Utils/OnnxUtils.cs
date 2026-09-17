@@ -297,17 +297,7 @@ namespace Shorokoo.Core.Utils
         /// that would otherwise leave two owners pointing at one runtime value.
         /// </summary>
         internal static IShorokooTensorValue CopyTensorValue(IShorokooTensorValue value)
-        {
-            var elementType = value.ElementType;
-            if (elementType == ShorokooTensorElementType.String)
-                return InferenceBackend.Factory.CreateStringTensor(value.GetStringTensorData(), value.Shape);
-            var copy = InferenceBackend.Factory.CreateTensorFromRawBytes(
-                elementType, value.GetTensorDataAsSpan<byte>().ToArray(), value.Shape);
-            // Taking the span is the source's last read, so without this the JIT may retire it
-            // before ToArray has copied out of the buffer it points at (Shorokoo/Shorokoo#178).
-            GC.KeepAlive(value);
-            return copy;
-        }
+            => BackendTransfer.CopyTo(InferenceBackend.Factory, value);
 
         public static IData CreateData(IShorokooTensorValue value)
         {

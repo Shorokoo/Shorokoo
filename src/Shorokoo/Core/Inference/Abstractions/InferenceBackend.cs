@@ -1,11 +1,12 @@
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Runtime.Loader;
 
 namespace Shorokoo.Core.Inference.Abstractions;
 
 /// <summary>
-/// Holds the single <see cref="IShorokooInferenceSessionFactory"/> used for all
-/// inference in the process.
+/// Holds the default <see cref="IShorokooInferenceSessionFactory"/>: the backend every tensor
+/// is built on, and the one inference runs on when no <c>ComputeContext</c> names another.
 ///
 /// <para>
 /// The core Shorokoo assembly does not reference ONNX Runtime; the concrete
@@ -24,11 +25,20 @@ namespace Shorokoo.Core.Inference.Abstractions;
 /// only failing that is the folder next to this assembly probed for the known
 /// Shorokoo.{Platform} DLLs. Both steps consider only backends targeting the running
 /// OS, and both <b>refuse</b> two of them rather than choosing between them — see
-/// <see cref="SelectBackend"/>. Only one backend is ever live per process; loading a
-/// second native (e.g. comparing CPU vs CUDA) requires separate processes.
+/// <see cref="SelectBackend"/>. Discovery picks <i>one</i> because a program that has
+/// not said which it means has not said it; it is not a limit on how many can run.
 /// </para>
 /// <para>
-/// Which backend that turned out to be is answerable: <see cref="Current"/> peeks
+/// Several backends <b>can</b> be live at once. A <c>ComputeContext</c> constructed with a
+/// factory compiles and runs on that one, so two contexts on two backends share a process
+/// without sharing a device. Tensors stay out of it: <see cref="IShorokooTensorValue"/> is
+/// built by this default backend wherever it is built, and a session on another backend
+/// converts what it is fed (<see cref="BackendTransfer"/>). Where the second backend needs its
+/// own native ONNX Runtime rather than another execution provider on the same one,
+/// <see cref="IsolatedBackend"/> loads it.
+/// </para>
+/// <para>
+/// Which backend is live is answerable: <see cref="Current"/> peeks
 /// without resolving one, <see cref="Describe"/> names the live one, and
 /// <see cref="RequireDevice"/> asserts it is the device this program meant to run on.
 /// </para>
@@ -39,9 +49,10 @@ public static class InferenceBackend
     private static readonly object _gate = new();
 
     /// <summary>
-    /// The backend used for all inference. Assigning one is optional; if left unset
-    /// it is auto-discovered on first access — an already-loaded backend assembly
-    /// first, otherwise the deployment folder.
+    /// The default backend: the one every tensor the framework builds is built by, and the one a
+    /// <c>ComputeContext</c> that names no backend of its own compiles and runs on. Assigning one
+    /// is optional; if left unset it is auto-discovered on first access — an already-loaded
+    /// backend assembly first, otherwise the deployment folder.
     /// </summary>
     public static IShorokooInferenceSessionFactory Factory
     {
@@ -158,10 +169,10 @@ public static class InferenceBackend
 
     /// <summary>
     /// Chooses the one backend among those deployed for the current OS. Nothing deployed
-    /// returns null; a single candidate is taken as-is. Several are <b>refused</b>: only one
-    /// backend can be live in a process, and the CPU and GPU packages deliver their native
-    /// ONNX Runtime at the same path, so a deployment carrying both is already ambiguous and
-    /// guessing at it silently is how work lands on a device its author did not intend. Pure
+    /// returns null; a single candidate is taken as-is. Several are <b>refused</b>: this is the
+    /// path for a program that named no backend, and guessing silently between two is how work
+    /// lands on a device its author did not intend. The refusal is about the silence, not about
+    /// a limit -- a program that names its backends runs as many as it likes. Pure
     /// (no I/O) so the policy is unit-testable; <paramref name="origin"/> is where the
     /// candidates were found, for the message.
     /// </summary>
@@ -180,12 +191,13 @@ public static class InferenceBackend
         var names = string.Join(", ", candidates.Select(
             c => c.Assembly + (c.Gpu ? " (CUDA)" : " (CPU)")));
         return new InvalidOperationException(
-            $"Several Shorokoo inference backends are {origin}: {names}. Only one can be live " +
-            "in a process, and each package brings its own native ONNX Runtime, so a build " +
-            "carrying both is ambiguous. Reference exactly one backend package -- keeping model " +
-            "code in a library that references no backend, and one executable per device -- or " +
-            "assign InferenceBackend.Factory before the first inference call to say which of " +
-            "these you mean.");
+            $"Several Shorokoo inference backends are {origin}: {names}. Discovery picks the " +
+            "backend for a program that named none, and this deployment gives it no way to " +
+            "choose. Say which you mean: assign InferenceBackend.Factory before the first " +
+            "inference call to make one of them the default. To run several at once, give each " +
+            "ComputeContext its own factory -- new ComputeContext(new LinuxGpuInferenceFactory()) " +
+            "-- and where they need separate native ONNX Runtimes, load them with " +
+            "IsolatedBackend.Load.");
     }
 
     /// <summary>
@@ -205,6 +217,20 @@ public static class InferenceBackend
             .ToList();
     }
 
+    /// <summary>
+    /// The assemblies of <paramref name="assemblies"/> that discovery may choose between: those in
+    /// the default load context.
+    ///
+    /// <para>A backend loaded into isolation (<see cref="IsolatedBackend"/>) lives in a context of
+    /// its own, and it got there by being named — that is the only way one loads. So it is not an
+    /// answer to "which backend did this program mean", and counting it would mean that naming a
+    /// second backend made the first one ambiguous: a program could not load one without losing
+    /// the ability to leave the default undeclared.</para>
+    /// </summary>
+    internal static Assembly[] DiscoverableAssemblies(IEnumerable<Assembly> assemblies)
+        => [.. assemblies.Where(
+            asm => AssemblyLoadContext.GetLoadContext(asm) == AssemblyLoadContext.Default)];
+
     private static string ProbeDirectory()
     {
         var location = typeof(InferenceBackend).Assembly.Location;
@@ -216,7 +242,7 @@ public static class InferenceBackend
 
     private static IShorokooInferenceSessionFactory? TryFindAlreadyLoadedFactory()
     {
-        var assemblies = AppDomain.CurrentDomain.GetAssemblies();
+        var assemblies = DiscoverableAssemblies(AppDomain.CurrentDomain.GetAssemblies());
         var usable = LoadedCandidates(assemblies.Select(asm => asm.GetName().Name ?? ""))
             .Select(candidate => (candidate, Factory: assemblies
                 .Where(asm => string.Equals(

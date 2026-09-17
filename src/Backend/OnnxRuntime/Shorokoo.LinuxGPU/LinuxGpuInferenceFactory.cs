@@ -19,6 +19,12 @@ namespace Shorokoo.LinuxGPU;
 /// <code>
 /// InferenceBackend.Factory = new LinuxGpuInferenceFactory();
 /// </code>
+/// <para>Assigning it names the <i>default</i> backend. To run this one alongside
+/// another — a CPU context and a CUDA context in one process — hand it to a compute
+/// context instead, and leave the default to whichever should have it:</para>
+/// <code>
+/// var context = new ComputeContext(new LinuxGpuInferenceFactory());
+/// </code>
 /// <para>Mind the casing: the package, assembly and namespace spell the device
 /// <c>GPU</c> while the type name spells it <c>Gpu</c>, so the fully qualified name is
 /// <c>Shorokoo.LinuxGPU.LinuxGpuInferenceFactory</c>.</para>

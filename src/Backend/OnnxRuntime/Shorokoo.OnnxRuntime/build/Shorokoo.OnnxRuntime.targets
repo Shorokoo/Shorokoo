@@ -1,0 +1,54 @@
+<Project>
+
+  <!--
+    Deploys more than one native ONNX Runtime into a build, each in a folder of its own, so that
+    IsolatedBackend.Load can bind a backend to each.
+
+    The ONNX Runtime native packages all deliver their library at
+    runtimes/<rid>/native/libonnxruntime.so (onnxruntime.dll on Windows). Referencing two of them
+    normally is therefore not a way to get two runtimes: both want the same output path, one wins
+    silently, and the loser's provider libraries land next to a core that cannot use them.
+    Giving each its own folder is what makes them separate.
+
+    A project opts in by declaring one ShorokooBackendNatives item per backend, pointing at a
+    package's native folder and naming the folder to deploy it under:
+
+      <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.26.0"
+                        ExcludeAssets="all" GeneratePathProperty="true" />
+      <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu.Linux" Version="1.26.0"
+                        ExcludeAssets="all" GeneratePathProperty="true" />
+      <PackageReference Include="Microsoft.ML.OnnxRuntime.Managed" Version="1.26.0" />
+
+      <ShorokooBackendNatives Include="$(PkgMicrosoft_ML_OnnxRuntime)\runtimes\linux-x64\native\*"
+                              BackendId="cpu" />
+      <ShorokooBackendNatives Include="$(PkgMicrosoft_ML_OnnxRuntime_Gpu_Linux)\runtimes\linux-x64\native\*"
+                              BackendId="cuda" />
+
+    ExcludeAssets="all" is what stops the two packages fighting over the output path; the managed
+    wrapper is then referenced directly, since neither native package brings it any more. The
+    natives land in $(OutDir)ort/cpu/ and $(OutDir)ort/cuda/, which is what a spec names:
+
+      NativeRuntimePath = Path.Combine(AppContext.BaseDirectory, "ort", "cuda", "libonnxruntime.so")
+
+    An execution provider's own library must sit beside the core it belongs to (ONNX Runtime
+    looks for it there), so deploy a package's whole native folder, not just the core. Where that
+    is more than the build needs (the CUDA provider is some hundreds of megabytes), narrow it with
+    the item's own Exclude.
+  -->
+
+  <Target Name="ShorokooDeployBackendNatives"
+          BeforeTargets="AssignTargetPaths"
+          Condition="'@(ShorokooBackendNatives)' != ''">
+
+    <Error Condition="'%(ShorokooBackendNatives.BackendId)' == ''"
+           Text="Every ShorokooBackendNatives item needs a BackendId: it names the folder under ort/ that this backend's native ONNX Runtime is deployed into, and is what tells two of them apart." />
+
+    <ItemGroup>
+      <None Include="@(ShorokooBackendNatives)"
+            Link="ort/%(ShorokooBackendNatives.BackendId)/%(Filename)%(Extension)"
+            CopyToOutputDirectory="PreserveNewest"
+            Visible="false" />
+    </ItemGroup>
+  </Target>
+
+</Project>

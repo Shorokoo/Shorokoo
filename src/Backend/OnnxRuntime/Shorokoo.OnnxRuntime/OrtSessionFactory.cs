@@ -110,7 +110,9 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
         Configure(options, graphOptimization, logSeverity);
         _configureExecutionProvider(options, deviceMemory);
         var session = new InferenceSession(modelBytes.ToArray(), options);
-        return new OrtInferenceSession(session, _cudaDeviceId);
+        // The session keeps this factory so it can rebuild a feed that came from another
+        // backend's native runtime -- see OrtInferenceSession.Unwrap.
+        return new OrtInferenceSession(session, _cudaDeviceId, this);
     }
 
     /// <summary>

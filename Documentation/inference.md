@@ -20,14 +20,16 @@ Related: [core-types.md](core-types.md) · [defining-models.md](defining-models.
 - `OnnxEngine.Eval` rebuilds and recreates an ORT session on every call. For repeated
   inference, compile once with `ComputeContext` (below).
 - Reference one platform backend package and it is normally found for you — no setup
-  code. Only one backend is live per process, and two of them for one OS is refused rather
+  code. A program that names none gets one, and two of them for one OS is refused rather
   than guessed at. How it is discovered, and how to override the choice:
   [Backend selection](#backend-selection).
+- A program that *does* name them can run several at once: give a `ComputeContext` a
+  backend and its work goes there, so one process drives the CPU and the card together —
+  [One model, two devices](#one-model-two-devices).
 - Which device the work will run on is invisible at the call site but answerable:
   `ComputeContext.Backend` and `InferenceBackend.Describe()` name it, and
   `InferenceBackend.RequireDevice(...)` refuses to start on the wrong one —
-  [Which device am I on?](#which-device-am-i-on). To run part of the work on another
-  device, [One model, two devices](#one-model-two-devices).
+  [Which device am I on?](#which-device-am-i-on).
 - On a GPU backend the CUDA arena is configured on the `ComputeContext` — `DeviceMemory` for
   the sessions it compiles, `RunSettings` for what its runs do — while the separate static
   `DeviceMemory` class reports how much of the card is gone. The arena strategy departs from
@@ -382,17 +384,17 @@ graph to the next call. `Eval` is the exception: it returns `TensorData` (or
   InferenceBackend.Factory = new LinuxCpuInferenceFactory();
   ```
 
-- Only one backend is live per process. The first factory resolved is cached and reused
-  for every later call; assigning `Factory` afterwards swaps the cached factory but does
-  not unload a native ONNX Runtime already bound, so to compare CPU vs GPU use separate
-  processes. Every `ComputeContext` in the process shares that one backend — including a
-  training rig's two, which for that reason cannot select different devices (see
-  [Compute contexts](training.md#compute-contexts-mergecontext-and-runtimecontext) in the
-  training guide).
-- **Exactly one** is the rule, not a recommendation: a deployment carrying two backends for
-  the same OS is refused rather than resolved by guesswork — see
-  [Auto-discovery](#auto-discovery). To run part of the work on another device, see
+- `InferenceBackend.Factory` is the **default** backend: the one every `TensorData` is
+  built on, and the one a `ComputeContext` that names no backend of its own runs on. The
+  first factory resolved is cached and reused; assigning `Factory` afterwards swaps it but
+  does not unload a native ONNX Runtime already bound.
+- A `ComputeContext` constructed with a factory runs there instead, and two contexts may
+  name different backends — that is how one process uses two devices. See
   [One model, two devices](#one-model-two-devices).
+- **Exactly one deployed** is still the rule for *discovery*: a deployment carrying two
+  backends for the same OS and naming neither is refused rather than resolved by
+  guesswork — see [Auto-discovery](#auto-discovery). It is a rule about silence, not a
+  limit on how many can run.
 - Which backend you ended up on is a question you can ask — `InferenceBackend.Describe()`,
   or `ComputeContext.Backend` where the work is submitted. See
   [Which device am I on?](#which-device-am-i-on).
@@ -423,7 +425,10 @@ once and caches the result:
 1. If one of the four backend assemblies is **already loaded** in the process, its
    factory is used — this avoids pulling a second native in alongside one already bound.
    Only assemblies targeting the running OS count, as in step 2, and only those that
-   actually expose a factory; anything else falls through to step 2.
+   actually expose a factory; anything else falls through to step 2. A backend loaded by
+   `IsolatedBackend.Load` is not a candidate at all: it lives in a load context of its own,
+   and it is there because the program named it, so it is no answer to which backend a
+   program that named none meant.
 2. Otherwise the folder next to `Shorokoo.dll` is probed for the known
    `Shorokoo.{Platform}.dll` files, and only those targeting the current OS count as
    candidates. Nothing else is searched: no other directory, no NuGet cache, and no
@@ -436,17 +441,20 @@ in this process` in place of `deployed in '<folder>'`, and refuses only backends
 actually expose a factory):
 
 > `Several Shorokoo inference backends are deployed in '<folder>': Shorokoo.WinCPU (CPU),
-> Shorokoo.WinGPU (CUDA). Only one can be live in a process, and each package brings its
-> own native ONNX Runtime, so a build carrying both is ambiguous. Reference exactly one
-> backend package -- keeping model code in a library that references no backend, and one
-> executable per device -- or assign InferenceBackend.Factory before the first inference
-> call to say which of these you mean.`
+> Shorokoo.WinGPU (CUDA). Discovery picks the backend for a program that named none, and
+> this deployment gives it no way to choose. Say which you mean: assign
+> InferenceBackend.Factory before the first inference call to make one of them the default.
+> To run several at once, give each ComputeContext its own factory -- new ComputeContext(new
+> LinuxGpuInferenceFactory()) -- and where they need separate native ONNX Runtimes, load
+> them with IsolatedBackend.Load.`
 
 Discovery does not resolve that by looking for a CUDA runtime and preferring the GPU. A
 deployment holding both packages has already had their native ONNX Runtimes collide —
 each ships `libonnxruntime.so` (`onnxruntime.dll`) at the same path, so only one of them is
 deployed and which one is NuGet's conflict resolution to decide — and the managed DLL that
-discovery would pick says nothing about the native that is actually there. Backends for
+discovery would pick says nothing about the native that is actually there. (Separating them
+is exactly what [One model, two devices](#one-model-two-devices) does, and why a program
+running both deploys each native in a folder of its own.) Backends for
 *different* OSes are not ambiguous and are not refused: only those targeting the running one
 are candidates, so a Windows backend alongside a Linux one is no ambiguity at all. Carrying
 all four, on the other hand, is two for whichever OS you run on — and refused on both.
@@ -457,9 +465,12 @@ runs is enough to cause — that one wins and the folder is never probed. The re
 happens when the *deployment* is left to make the choice, not a guarantee that an ambiguous
 build cannot run.
 
-The usual way to arrive at an ambiguous deployment is a shared library that references a
-backend, which flows to everything referencing it;
-[One model, two devices](#one-model-two-devices) is the layout that avoids it.
+The usual way to arrive at an ambiguous deployment by accident is a shared library that
+references a backend, which flows to everything referencing it; keeping the backend in the
+executable is what avoids it — see
+[Or keep it to two processes](#or-keep-it-to-two-processes). Arriving there on purpose,
+because the program really does want both, is
+[Deploying two backends](#deploying-two-backends).
 
 Referencing a backend package is enough for step 2: the package copies its DLL to your
 output folder, so discovery finds it whether or not your code mentions the factory type.
@@ -505,13 +516,95 @@ Two related entry points:
 
 ### One model, two devices
 
-Only one backend is live per process, so running part of the work on the CPU while the rest
-uses the GPU means **two processes**. It does not mean two copies of the model.
+One process can run one model on the CPU and on the card. A `ComputeContext` constructed
+with a backend compiles and runs there, and two contexts may name different backends:
 
-Put the model and its `[Module]`s in a class library that references no backend at all —
-`Shorokoo` (or `Shorokoo.Core` + `Shorokoo.Modules`) carries no ONNX Runtime dependency, so
-such a library compiles and is device-neutral. Then give each device a thin executable that
-references that library plus one backend:
+```csharp
+using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.LinuxCPU;
+using Shorokoo.LinuxGPU;
+
+var cpu  = new ComputeContext(new LinuxCpuInferenceFactory());
+var cuda = new ComputeContext(new LinuxGpuInferenceFactory());
+
+var onHost = cpu.Execute(graph, input);     // the host
+var onCard = cuda.Execute(graph, input);    // the same graph, the same input, the card
+```
+
+The model is compiled once, into one assembly, and both contexts run *that* — so a check on
+the CPU tests the model the GPU run is training, not a second compilation of its source.
+`ComputeContext.Backend` says which device each one will use, and a `CompiledGraph` carries
+the backend it was built on in `CompiledGraph.Backend`.
+
+**Tensors are not tied to a backend.** A `TensorData` is built on the default backend
+wherever you build it, and either context accepts it: a session hands what it is fed to its
+own runtime, converting it first when it came from another. That costs a host copy per feed
+and is possible only for data the host can read — a value an execution provider kept in its
+own memory (`TensorData.IsHostResident` is false, which a
+[resident training run](training.md#keeping-training-state-on-the-device) produces) cannot
+cross, and says so rather than being read as a host address.
+
+#### Deploying two backends
+
+The two packages deliver their native ONNX Runtime at the same path
+(`runtimes/<rid>/native/libonnxruntime.so`), so referencing both normally is not two
+runtimes — it is one of them deployed twice, with the other's provider libraries stranded
+beside a core that cannot use them. Which is exactly why
+[auto-discovery](#auto-discovery) refuses such a deployment.
+
+How you avoid that depends on whether the two backends need separate native runtimes:
+
+**One runtime, two providers — the simple case, and the usual one.** A native ONNX Runtime
+serves every execution provider compiled into it, and the CUDA-flavoured build carries the
+CPU provider too. So deploy the GPU package alone and reference the CPU backend for its
+factory only; both contexts above then run on that one runtime, and nothing further is
+needed.
+
+**Two runtimes.** Two ONNX Runtime *builds*, or two versions, in one process — a vendor
+build beside the stock one, say. Give each native a folder of its own and load the second
+with `IsolatedBackend`:
+
+```xml
+<PackageReference Include="Microsoft.ML.OnnxRuntime.Managed" Version="1.26.0" />
+<PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.26.0"
+                  ExcludeAssets="all" GeneratePathProperty="true" />
+<PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu.Linux" Version="1.26.0"
+                  ExcludeAssets="all" GeneratePathProperty="true" />
+
+<ShorokooBackendNatives BackendId="cpu"
+  Include="$(PkgMicrosoft_ML_OnnxRuntime)\runtimes\linux-x64\native\*" />
+<ShorokooBackendNatives BackendId="cuda"
+  Include="$(PkgMicrosoft_ML_OnnxRuntime_Gpu_Linux)\runtimes\linux-x64\native\*" />
+```
+
+`ShorokooBackendNatives` items are read by a target the `Shorokoo.OnnxRuntime` package
+imports; each lands in `ort/<BackendId>/` in the output. An execution provider's own library
+has to sit beside the core it belongs to, so deploy a package's whole native folder. Then:
+
+```csharp
+var cuda = new ComputeContext(IsolatedBackend.Load(new IsolatedBackendSpec
+{
+    Name = "cuda:0",
+    FactoryAssembly = "Shorokoo.LinuxGPU",
+    NativeRuntimePath = Path.Combine(AppContext.BaseDirectory, "ort", "cuda", "libonnxruntime.so"),
+}));
+```
+
+`Name` is what `Backend.Name` reports — the factory assembly cannot tell two loads of itself
+apart, so give it something a log can act on. A loaded backend lasts for the life of the
+process: its native runtime holds thread pools, arenas and allocators, and nothing unloads
+it. Loading the same spec twice returns the same backend.
+
+Only the ONNX Runtime wrapper, the glue over it and the factory assembly are private to an
+isolated backend; the core Shorokoo assembly and everything your model is written in stay
+shared, which is what lets one context be handed the other's data.
+
+#### Or keep it to two processes
+
+Nothing above is compulsory. Splitting the work across two executables over a shared,
+backend-free model library is still a good answer where the two halves are separate jobs —
+a long training run and an occasional check — and it costs a process rather than the
+coordination of two devices in one:
 
 ```xml
 <!-- Model.csproj — the model, its modules, its losses. No backend. -->
@@ -536,14 +629,10 @@ references that library plus one backend:
 </ItemGroup>
 ```
 
-The model is compiled once, into one assembly, and both hosts run *that* — so a check tests
-the model the run is training, not a second compilation of its source. `[Module]` classes the
-check needs live beside the model they test, in the library.
-
-What breaks this is a backend reference in the shared library — a `PackageReference` or a
-`ProjectReference` to an executable that carries one. Either flows into the referencing
-project's output folder, two backends end up deployed, and
-[auto-discovery](#auto-discovery) refuses to guess between them. Keep the backend in the
+What breaks *this* layout is a backend reference in the shared library — a `PackageReference`
+or a `ProjectReference` to an executable that carries one. Either flows into the referencing
+project's output folder, two backends end up deployed, and, since neither executable named
+one, [auto-discovery](#auto-discovery) refuses to guess between them. Keep the backend in the
 executable, where the device is decided, and let nothing reference an executable.
 
 ### Device memory (GPU backends)

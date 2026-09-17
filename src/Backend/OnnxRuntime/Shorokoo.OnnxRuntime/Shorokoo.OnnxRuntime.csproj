@@ -18,6 +18,13 @@
     <PackageReference Include="Microsoft.ML.OnnxRuntime.Managed" Version="1.26.0" />
   </ItemGroup>
 
+  <!-- build/<PackageId>.targets is imported into consuming projects automatically. It defines
+       nothing unless a project declares ShorokooBackendNatives items, which is how a build asks
+       for more than one native ONNX Runtime deployed side by side. -->
+  <ItemGroup>
+    <None Include="build\Shorokoo.OnnxRuntime.targets" Pack="true" PackagePath="build\" />
+  </ItemGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\..\..\Shorokoo\Shorokoo.csproj" />
   </ItemGroup>

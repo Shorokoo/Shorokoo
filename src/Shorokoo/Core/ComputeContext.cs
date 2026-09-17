@@ -836,9 +836,14 @@ namespace Shorokoo.Runtime
                 }
                 var results = session.Run(sessionInputs, session.OutputNames, RunSettings);
 
-                return Deliver(results.Zip(session.OutputNames).Select(x =>
+                // Nothing retained: this is the one-shot path, which builds a session, feeds it
+                // once and disposes it, so there is no later run for a device-resident output to
+                // be fed into.
+                return Deliver(
+                    results.Zip(session.OutputNames).Select(x =>
                             OnnxUtils.CreateNamedModelParam(x.First, ModelParamType.OutputParam, x.Second, this))
-                            .ToArray());
+                        .ToArray(),
+                    retainedOutputNames: null);
             }
             finally
             {

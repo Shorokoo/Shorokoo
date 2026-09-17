@@ -10,6 +10,16 @@ public interface IShorokooInferenceSessionFactory
     // allocates on. Every session it creates runs there.
     BackendDescription Description { get; }
 
+    // Where this backend's tensors live. Derived from Description by default, which is right for
+    // every backend that allocates on the device it computes on -- i.e. all of them so far -- so
+    // an existing backend need not implement it. Two backends reporting the same space can hand
+    // tensors to each other without copying; see MemorySpace.
+    MemorySpace MemorySpace => Description.Device switch
+    {
+        ComputeDevice.Cuda => MemorySpace.Cuda(Description.CudaDeviceId ?? 0),
+        _ => MemorySpace.Host,
+    };
+
     // deviceMemory configures the arena this one session allocates in. It is a parameter, not
     // process state, because that is what ORT's own shape is: each session gets its own arena,
     // built from the values read here and kept for the session's life.

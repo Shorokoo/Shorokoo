@@ -349,6 +349,10 @@ namespace Shorokoo.Runtime
         /// </summary>
         public BackendDescription Backend => Factory.Description;
 
+        /// <summary>Where this context's tensors live. Two contexts reporting the same space can
+        /// pass a tensor between them without copying it.</summary>
+        public MemorySpace MemorySpace => Factory.MemorySpace;
+
         /// <summary>
         /// Compiles the graph into a reusable <see cref="CompiledGraph"/>: the ONNX model and
         /// inference session are built once, so repeated executions only feed new data.

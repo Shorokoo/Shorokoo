@@ -5,6 +5,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Shorokoo.Core.Inference.Abstractions;
 using Shorokoo.Core.Utils;
+using Shorokoo.Runtime;
 
 namespace Shorokoo
 {
@@ -45,15 +46,37 @@ namespace Shorokoo
 
         /// <summary>Creates a tensor of <paramref name="shape"/> over <paramref name="bytes"/>,
         /// which it takes as its own storage rather than copying.</summary>
-        public HostTensorData(Shape shape, byte[] bytes) : base(shape)
+        public HostTensorData(Shape shape, byte[] bytes)
+            : this(shape, bytes, context: null, ownsMemory: true, storage: null)
+        {
+        }
+
+        internal HostTensorData(Shape shape, byte[] bytes, DType actualDType)
+            : base(shape, actualDType, HostStorage(), null, true)
         {
             _bytes = bytes ?? throw new ArgumentNullException(nameof(bytes));
         }
 
-        internal HostTensorData(Shape shape, byte[] bytes, DType actualDType) : base(shape, actualDType)
+        private HostTensorData(
+            Shape shape, byte[] bytes, ComputeContext? context, bool ownsMemory, TensorStorage? storage)
+            : base(shape, storage ?? HostStorage(), context, ownsMemory)
         {
             _bytes = bytes ?? throw new ArgumentNullException(nameof(bytes));
         }
+
+        /// <summary>A host tensor over <paramref name="bytes"/> belonging to
+        /// <paramref name="context"/>, which must be a host-memory context or null.</summary>
+        internal static HostTensorData<T> Bound(Shape shape, byte[] bytes, ComputeContext? context)
+            => new(shape, bytes, context, ownsMemory: true, storage: null);
+
+        // Managed bytes are the garbage collector's to reclaim, so releasing this storage frees
+        // nothing directly. It still matters: it is what tells a tensor that was given access to
+        // these bytes that the owner has let go of them.
+        private static TensorStorage HostStorage() => new(MemorySpace.Host, static () => { });
+
+        /// <inheritdoc/>
+        internal override TensorData CloneSharing(ComputeContext? context, bool ownsMemory)
+            => new HostTensorData<T>(Shape, _bytes, context, ownsMemory, Storage);
 
         /// <summary>
         /// Creates a tensor of <paramref name="shape"/> holding a copy of
@@ -153,6 +176,7 @@ namespace Shorokoo
         {
             if (IsDisposed) return;
             IsDisposed = true;
+            if (OwnsMemory) Storage.Release();
             if (_materialized is null) return;
             foreach (var value in _materialized.Values) value.Dispose();
             _materialized = null;

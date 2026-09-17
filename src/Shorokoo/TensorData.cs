@@ -8,6 +8,7 @@ using static Shorokoo.Globals;
 using Shorokoo.Core;
 using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Modules;
+using Shorokoo.Runtime;
 
 namespace Shorokoo
 {
@@ -19,6 +20,17 @@ namespace Shorokoo
         where T : IVarType
     {
         internal TensorData(Shape shape) : base(shape, OnnxUtils.GetDType<T>())
+        {
+        }
+
+        internal TensorData(Shape shape, TensorStorage storage, ComputeContext? context, bool ownsMemory)
+            : base(shape, OnnxUtils.GetDType<T>(), storage, context, ownsMemory)
+        {
+        }
+
+        internal TensorData(
+            Shape shape, DType dtype, TensorStorage storage, ComputeContext? context, bool ownsMemory)
+            : base(shape, dtype, storage, context, ownsMemory)
         {
         }
 
@@ -175,7 +187,7 @@ namespace Shorokoo
     /// Concrete tensor value: a shape, a dtype, and raw element storage.
     /// Base of the typed <see cref="TensorData{T}"/> hierarchy.
     /// </summary>
-    public abstract class TensorData : IData, IDisposable
+    public abstract partial class TensorData : IData, IDisposable
     {
         /// <summary>The tensor's shape.</summary>
         public Shape Shape { get; private set; }
@@ -192,10 +204,63 @@ namespace Shorokoo
         }
 
         internal TensorData(Shape shape, DType dtype)
+            : this(shape, dtype, TensorStorage.None, context: null, ownsMemory: true) { }
+
+        internal TensorData(
+            Shape shape, DType dtype, TensorStorage storage, ComputeContext? context, bool ownsMemory)
         {
             this.Shape = shape;
             this.DType = dtype;
+            this.Storage = storage;
+            this.Context = context;
+            this.OwnsMemory = ownsMemory;
+
+            // Invariant: a tensor with no context is the framework's own -- plain host memory that
+            // it owns. There is no other kind, and a context-free tensor in device memory would
+            // have no way to say which device or to reach it.
+            if (context is null && !storage.Space.IsHost && storage.Space.IsKnown)
+                throw new ArgumentException(
+                    $"A tensor with no compute context holds host memory, but this storage is in "
+                    + $"{storage.Space}. Give it the context whose memory that is.", nameof(storage));
+            if (context is null && !ownsMemory)
+                throw new ArgumentException(
+                    "A tensor with no compute context owns its memory: there is no other tensor or "
+                    + "backend that could own it instead.", nameof(ownsMemory));
         }
+
+        /// <summary>
+        /// The bytes, shared with any other tensor naming the same memory. Internal because
+        /// ownership is expressed through <see cref="OwnsMemory"/> and the transfer operations;
+        /// nothing outside needs the handle itself.
+        /// </summary>
+        internal TensorStorage Storage { get; private set; }
+
+        /// <summary>
+        /// The compute context whose memory this tensor's bytes are in, or null when they are in
+        /// ordinary host memory belonging to no backend — which is what every tensor built by the
+        /// convenience constructors is, and what every tensor used as an operator attribute must be.
+        /// </summary>
+        public ComputeContext? Context { get; private set; }
+
+        /// <summary>
+        /// Whether this tensor is the one responsible for releasing its bytes. False for a tensor
+        /// that was only given access to memory another owns; disposing such a tensor frees
+        /// nothing.
+        /// </summary>
+        public bool OwnsMemory { get; private set; }
+
+        /// <summary>Where this tensor's bytes are. Derived from the storage, never set.</summary>
+        public MemorySpace Space => Storage.Space;
+
+        /// <summary>Sets the context and ownership of a freshly cloned tensor.</summary>
+        internal void Rebind(ComputeContext? context, bool ownsMemory)
+        {
+            Context = context;
+            OwnsMemory = ownsMemory;
+        }
+
+        /// <summary>Gives up ownership without releasing anything — the other half of a transfer.</summary>
+        internal void SurrenderOwnership() => OwnsMemory = false;
 
         /// <summary>
         /// True once <see cref="Dispose"/> has released this tensor's storage. Its shape, dtype and
@@ -210,6 +275,16 @@ namespace Shorokoo
                 throw new ObjectDisposedException(GetType().Name,
                     $"Tensor {this} has been disposed; its storage is gone and reading it would " +
                     "read freed memory.");
+
+            // Not the same check. This tensor may be perfectly undisposed and still be pointing at
+            // memory whose owner released it -- that is exactly what a tensor holding borrowed
+            // storage is exposed to, and the whole reason liveness lives on the storage.
+            if (!Storage.IsLive)
+                throw new ObjectDisposedException(GetType().Name,
+                    $"Tensor {this} reads memory owned by something that has since released it -- "
+                    + "the compute context it belonged to was disposed, or the tensor that owned "
+                    + "the memory was. Reading it would read freed memory. Take a CopyTo(...) "
+                    + "while the owner is alive if the data has to outlive it.");
         }
 
         /// <summary>"shape:dtype" diagnostic string.</summary>
@@ -269,6 +344,16 @@ namespace Shorokoo
             return OnnxUtils.CreateTensorDataFromValue(shape, dtype, data);
         }
 
+        /// <summary>A backend-backed tensor bound to the context whose memory it is in.</summary>
+        internal static TensorData Create(
+            Shape shape, DType dtype, IShorokooTensorValue data, ComputeContext? context)
+            => OnnxUtils.CreateTensorDataFromValue(shape, dtype, data, context);
+
+        /// <summary>A host tensor over the given bytes, bound to the given host context.</summary>
+        internal static TensorData NewHostTensor(
+            Shape shape, DType dtype, byte[] bytes, ComputeContext? context)
+            => OnnxUtils.CreateHostTensorData(shape, dtype, bytes, context);
+
         /// <summary>Creates TensorData of the given shape and dtype from raw storage bytes.</summary>
         public static TensorData CreateFromRawBytes(Shape shape, DType dtype, byte[] data)
         {
@@ -307,6 +392,13 @@ namespace Shorokoo
 
         /// <summary>Releases the underlying storage.</summary>
         public abstract void Dispose();
+
+        /// <summary>
+        /// A second tensor over the very same bytes, with the context and ownership given. The
+        /// storage handle is shared, not copied, so releasing it through one of them is visible
+        /// to the other -- which is what makes a reader's access check work.
+        /// </summary>
+        internal abstract TensorData CloneSharing(ComputeContext? context, bool ownsMemory);
     }
 
     /// <summary>TensorData backed by an inference-runtime tensor value.</summary>
@@ -348,15 +440,44 @@ namespace Shorokoo
         }
 
         /// <summary>Creates TensorData of the given shape around an existing runtime tensor value; the dtype is derived from T.</summary>
-        public OnnxTensorData(Shape shape, IShorokooTensorValue value) : base(shape)
+        public OnnxTensorData(Shape shape, IShorokooTensorValue value)
+            : this(shape, value, context: null, ownsMemory: true, storage: null)
+        {
+        }
+
+        internal OnnxTensorData(Shape shape, IShorokooTensorValue value, DType actualDType)
+            : base(shape, actualDType, StorageFor(value, null), null, true)
         {
             this.backing = value;
         }
 
-        internal OnnxTensorData(Shape shape, IShorokooTensorValue value, DType actualDType) : base(shape, actualDType)
+        internal OnnxTensorData(
+            Shape shape, IShorokooTensorValue value, ComputeContext? context, bool ownsMemory,
+            TensorStorage? storage)
+            : base(shape, storage ?? StorageFor(value, context), context, ownsMemory)
         {
             this.backing = value;
         }
+
+        /// <summary>
+        /// Where a runtime value's bytes are. A value the execution provider kept in its own
+        /// memory is in its context's space; anything host-accessible is in host memory, whatever
+        /// backend produced it. Releasing the storage disposes the value, which is what owning it
+        /// means.
+        /// </summary>
+        private static TensorStorage StorageFor(IShorokooTensorValue value, ComputeContext? context)
+        {
+            if (value.IsHostAccessible) return new TensorStorage(MemorySpace.Host, value.Dispose);
+            // A value the provider kept, wrapped without the context that produced it, is somewhere
+            // this cannot name. Recorded as unknown rather than guessed at: a wrong device id would
+            // make two unrelated allocations look like one space and invite a transfer between them.
+            return new TensorStorage(
+                context?.MemorySpace ?? MemorySpace.UnknownDevice, value.Dispose);
+        }
+
+        /// <inheritdoc/>
+        internal override TensorData CloneSharing(ComputeContext? context, bool ownsMemory)
+            => new OnnxTensorData<T>(Shape, backing, context, ownsMemory, Storage);
 
         /// <inheritdoc/>
         public override bool IsHostResident => this.Value.IsHostAccessible;
@@ -414,7 +535,9 @@ namespace Shorokoo
         {
             if (IsDisposed) return;
             IsDisposed = true;
-            backing.Dispose();
+            // Only the owner releases. A tensor that was merely given access to these bytes leaves
+            // them alone; that is the whole content of not owning them.
+            if (OwnsMemory) Storage.Release();
         }
 
         #endregion

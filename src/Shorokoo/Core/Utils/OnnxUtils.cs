@@ -325,6 +325,28 @@ namespace Shorokoo.Core.Utils
         internal static TensorData internalCreateTensorDataFromValue<T>(Shape shape, IShorokooTensorValue value, DType? dtype) where T : IVarType
             => dtype is null ? new OnnxTensorData<T>(shape, value) : new OnnxTensorData<T>(shape, value, dtype);
 
+        /// <summary>A backend-backed tensor bound to the context whose memory it is in.</summary>
+        public static TensorData CreateTensorDataFromValue(
+            Shape shape, DType dtype, IShorokooTensorValue value, Shorokoo.Runtime.ComputeContext? context)
+            => (TensorData)CallGeneric(dtype.ToIVarType(), typeof(OnnxUtils),
+                nameof(internalCreateBoundTensorData), shape, value, context);
+
+        internal static TensorData internalCreateBoundTensorData<T>(
+            Shape shape, IShorokooTensorValue value, Shorokoo.Runtime.ComputeContext? context)
+            where T : IVarType
+            => new OnnxTensorData<T>(shape, value, context, ownsMemory: true, storage: null);
+
+        /// <summary>A host tensor over <paramref name="bytes"/>, bound to <paramref name="context"/>
+        /// (whose memory must be host memory, or null for the framework's own).</summary>
+        public static TensorData CreateHostTensorData(
+            Shape shape, DType dtype, byte[] bytes, Shorokoo.Runtime.ComputeContext? context)
+            => (TensorData)CallGeneric(dtype.ToIVarType(), typeof(OnnxUtils),
+                nameof(internalCreateHostTensorData), shape, bytes, context);
+
+        internal static TensorData internalCreateHostTensorData<T>(
+            Shape shape, byte[] bytes, Shorokoo.Runtime.ComputeContext? context) where T : IVarType
+            => HostTensorData<T>.Bound(shape, bytes, context);
+
         internal static TensorDataSequence internalCreateTensorDataSequenceFromValue<T>(IShorokooTensorValue value) where T : IVarType
             => new OnnxTensorDataSequence<T>(value);
 

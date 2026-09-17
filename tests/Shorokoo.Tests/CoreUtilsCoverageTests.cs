@@ -1318,6 +1318,40 @@ public class CoreUtilsCoverageTests
     }
 
     [Fact]
+    public void TestAtomicFileWriterReportsWhatEachWriteCost()
+    {
+        var dir = NewScratchDir();
+        try
+        {
+            var payload = new byte[1 << 20];
+            var target = Path.Combine(dir, "state.bin");
+            var report = AtomicFileWriter.WriteFile(target, s => s.Write(payload));
+
+            Assert.Equal(payload.Length, report.BytesWritten);
+            Assert.Equal(new FileInfo(target).Length, report.BytesWritten);
+            Assert.Equal(report.Write + report.Flush + report.Commit, report.Elapsed);
+            Assert.True(report.Elapsed > TimeSpan.Zero);
+            Assert.True(report.Write >= TimeSpan.Zero
+                && report.Flush >= TimeSpan.Zero && report.Commit >= TimeSpan.Zero);
+            Assert.Equal(report.BytesWritten / report.Elapsed.TotalSeconds, report.BytesPerSecond);
+
+            var rotated = AtomicFileWriter.WriteFile(
+                Path.Combine(dir, "ckpt-7.bin"), s => s.Write(payload),
+                AtomicFileWriter.RetainPolicy.KeepLast(1, "ckpt-", ".bin"));
+            Assert.Equal(payload.Length, rotated.BytesWritten);
+            Assert.Equal(rotated.Write + rotated.Flush + rotated.Commit, rotated.Elapsed);
+            Assert.True(rotated.Commit > TimeSpan.Zero);
+
+            Assert.Equal(0.0, default(SaveReport).BytesPerSecond);
+            Assert.Equal(
+                "201,327,183 bytes in 0.743s (258 MiB/s): write 0.281s, flush 0.459s, commit 0.003s",
+                new SaveReport(201_327_183, TimeSpan.FromSeconds(0.281),
+                    TimeSpan.FromSeconds(0.459), TimeSpan.FromSeconds(0.003)).ToString());
+        }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
+
+    [Fact]
     public void TestAtomicFileWriterCommitAndValidationCoverage()
     {
         var dir = NewScratchDir();

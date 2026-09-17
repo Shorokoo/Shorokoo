@@ -2709,6 +2709,71 @@ public class TrainingRigCheckpointCoverageTests
         finally { if (File.Exists(adamPath)) File.Delete(adamPath); }
     }
 
+    private static void AssertReportMatches(SaveReport r, string path)
+    {
+        Assert.Equal(new FileInfo(path).Length, r.BytesWritten);
+        Assert.Equal(r.Write + r.Flush + r.Commit, r.Elapsed);
+        Assert.True(r.Elapsed > TimeSpan.Zero);
+        Assert.True(r.Write >= TimeSpan.Zero && r.Flush >= TimeSpan.Zero && r.Commit >= TimeSpan.Zero);
+        Assert.Equal(r.BytesWritten / r.Elapsed.TotalSeconds, r.BytesPerSecond);
+    }
+
+    [Fact]
+    public void TestEveryCheckpointSaveReportsItsBytesAndWhereItsTimeWent()
+    {
+        var rig = AdamRig();
+        var ckpt = SteppedOnce(rig);
+
+        var flat = TempPath("save_report") + ".safetensors";
+        var narrow = TempPath("save_report_narrow") + ".safetensors";
+        var skpt = TempPath("save_report") + ".skpt";
+        try
+        {
+            var full = ckpt.Save(flat);
+            AssertReportMatches(full, flat);
+
+            var weightsOnly = ckpt.Save(narrow, CheckpointComponents.InferenceState);
+            AssertReportMatches(weightsOnly, narrow);
+            Assert.True(weightsOnly.BytesWritten < full.BytesWritten);
+
+            AssertReportMatches(Persistence.SaveTrainingCheckpoint(ckpt, flat), flat);
+            AssertReportMatches(Persistence.SaveTrainingCheckpointToSkpt(ckpt, skpt), skpt);
+            AssertReportMatches(Persistence.ForTrainingCheckpoint(ckpt).Save(skpt), skpt);
+
+            Assert.Equal(FlattenStruct(ckpt.OptimizerState),
+                FlattenStruct(rig.LoadCheckpoint(flat).OptimizerState));
+        }
+        finally
+        {
+            string[] written = [flat, narrow, skpt];
+            foreach (var p in written) if (File.Exists(p)) File.Delete(p);
+        }
+    }
+
+    [Fact]
+    public void TestSavingAParameterSetWritesItsStorageWithoutCopyingIt()
+    {
+        var big = TensorData([2L << 20], new float[2 << 20]);
+        var scalar = TensorData(Array.Empty<long>(), 7f);
+        List<SafeTensor> tensors =
+        [
+            new SafeTensor("w", big, SafeTensorLoader.DTypeToSafeTensorDType(big.DType), big.Shape.Dims),
+            new SafeTensor("s", scalar, SafeTensorLoader.DTypeToSafeTensorDType(scalar.DType), scalar.Shape.Dims),
+        ];
+
+        SafeTensorLoader.SaveSafeTensorsToStream(Stream.Null, tensors);
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        SafeTensorLoader.SaveSafeTensorsToStream(Stream.Null, tensors);
+        Assert.True(GC.GetAllocatedBytesForCurrentThread() - before < 64 * 1024);
+
+        using var buffer = new MemoryStream();
+        SafeTensorLoader.SaveSafeTensorsToStream(buffer, tensors);
+        var read = SafeTensorLoader.ParseSafeTensorBytes(buffer.ToArray());
+        Assert.Equal(["w", "s"], read.Select(t => t.Name));
+        Assert.Equal(big.CopyRawMemory(), read[0].Data.CopyRawMemory());
+        Assert.Equal(scalar.CopyRawMemory(), read[1].Data.CopyRawMemory());
+    }
+
     [Fact]
     public void TestCheckpointSaveAtomicityAndTruncatedLoadFailsLoudlyCoverage()
     {

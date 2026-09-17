@@ -120,14 +120,19 @@ namespace Shorokoo.Onnx
             if (tensors.Count == 0)
                 throw new ArgumentException("Cannot save an empty SafeTensor list.", nameof(tensors));
 
-            // Build header object and collect raw tensor byte blobs
+            // Build the header from each tensor's byte LENGTH, taken off its own storage. Nothing is
+            // copied here: the payload is written straight out of each tensor's storage in the second
+            // pass below, so saving a parameter set costs no second copy of it in managed memory —
+            // which at checkpoint sizes is both the allocation and the collection of a duplicate of
+            // the whole model (Shorokoo/Shorokoo#48, #338).
             var header = new Dictionary<string, object>();
-            var tensorBlobs = new List<byte[]>(tensors.Count);
+            var blobLengths = new int[tensors.Count];
 
             long currentOffset = 0L;
 
-            foreach (var st in tensors)
+            for (int i = 0; i < tensors.Count; i++)
             {
+                var st = tensors[i];
                 if (st == null)
                     throw new InvalidOperationException("SafeTensor list contains a null entry.");
 
@@ -148,12 +153,12 @@ namespace Shorokoo.Onnx
                 var shape = st.Shape;
                 var dtype = st.DataType.ToUpperInvariant();
 
-                // Flatten and convert tensor to raw bytes
-                var blob = st.Data.CopyRawMemory();
-                tensorBlobs.Add(blob);
+                // The tensor's storage as raw bytes — measured, not copied.
+                int blobLength = st.Data.AccessRawMemory().Length;
+                blobLengths[i] = blobLength;
 
                 long startOffset = currentOffset;
-                long endOffset = startOffset + blob.Length;
+                long endOffset = startOffset + blobLength;
                 currentOffset = endOffset;
 
                 // Per-tensor metadata according to SafeTensors spec
@@ -185,8 +190,23 @@ namespace Shorokoo.Onnx
             stream.Write(lengthBytes, 0, lengthBytes.Length);
             stream.Write(headerBytes, 0, headerBytes.Length);
 
-            foreach (var blob in tensorBlobs)
-                stream.Write(blob, 0, blob.Length);
+            // Second pass: each tensor's payload goes from its own storage into the stream. The span
+            // is a window onto storage the tensor owns and roots nothing itself, so the tensor is
+            // kept alive across the write — a local retired at its last read would leave the write
+            // reading freed memory (Shorokoo/Shorokoo#178). Lengths are the ones the header was
+            // built from, so a tensor whose storage changed size under us cannot silently write a
+            // payload the offsets disagree with.
+            for (int i = 0; i < tensors.Count; i++)
+            {
+                var data = tensors[i].Data;
+                var blob = data.AccessRawMemory();
+                if (blob.Length != blobLengths[i])
+                    throw new InvalidOperationException(
+                        $"SafeTensor '{tensors[i].Name}' changed size while it was being written " +
+                        $"({blobLengths[i]} bytes when the header was built, {blob.Length} now).");
+                stream.Write(blob);
+                GC.KeepAlive(data);
+            }
         }
 
         /// <summary>

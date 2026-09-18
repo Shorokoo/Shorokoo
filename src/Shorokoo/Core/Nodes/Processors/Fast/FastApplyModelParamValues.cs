@@ -87,7 +87,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 node.Attributes = OnnxCSharpAttributes.FromCSharpVals(
                     new Dictionary<string, object?>
                     {
-                        [OnnxOpAttributeNames.ShrkAttrTensorData] = paramValue,
+                        // Detached first: the values belong to the caller, who goes on holding
+                        // them -- a training rig keeps the very same tensors as its initial
+                        // checkpoint -- so the graph takes a literal of its own rather than
+                        // spending theirs. A shape-and-dtype stand-in has nothing to copy and
+                        // becomes the values-elided attribute directly.
+                        [OnnxOpAttributeNames.ShrkAttrTensorData] = paramValue.HasValues
+                            ? paramValue.Detach().MoveToAttribute()
+                            : TensorAttribute.WithoutValues(paramValue.Shape, paramValue.DType),
                         [OnnxOpAttributeNames.ShrkAttrIsTrainable] = isTrainable,
                     },
                     modelParamDataAttrDefs);

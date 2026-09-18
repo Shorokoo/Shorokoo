@@ -161,7 +161,7 @@ namespace Shorokoo.Core.Nodes.Processors.Training
         /// through ORT via <paramref name="compute"/> as a fallback for the unresolved
         /// keys.
         /// </summary>
-        private static TensorData[] ResolveIterCountValues(
+        private static TensorAttribute[] ResolveIterCountValues(
             InternalComputationGraph resolverGraph,
             List<FastTensorKey> iterCountKeys,
             ComputeContext compute)
@@ -211,9 +211,9 @@ namespace Shorokoo.Core.Nodes.Processors.Training
                     }
             }
 
-            var result = new TensorData[iterCountKeys.Count];
+            var result = new TensorAttribute[iterCountKeys.Count];
             for (int i = 0; i < iterCountKeys.Count; i++)
-                result[i] = resolved[i]!;
+                result[i] = resolved[i]!.MoveToAttribute();
             return result;
         }
     }

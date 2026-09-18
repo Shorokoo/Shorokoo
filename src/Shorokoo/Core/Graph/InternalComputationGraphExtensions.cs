@@ -264,7 +264,11 @@ namespace Shorokoo.Graph
                 // output key so all downstream consumers remain valid without remapping.
                 node.OpCode = OpCodes.CONSTANT;
                 node.Attributes = OnnxCSharpAttributes.FromCSharpVals(
-                    new Dictionary<string, object?> { [OnnxOpAttributeNames.AttrValue] = td },
+                    new Dictionary<string, object?>
+                    {
+                        // The caller's own values, which it keeps: the graph takes a copy.
+                        [OnnxOpAttributeNames.AttrValue] = td.Detach().MoveToAttribute(),
+                    },
                     constantAttrDefs);
                 node.IdentifierTemplate = null;
                 node.FullInputs = new Dictionary<string, List<FastTensorKey?>>();
@@ -344,8 +348,8 @@ namespace Shorokoo.Graph
         {
             var node = FastWireRngKeyDerivation.FindRngSeedNode(graph);
             if (node is null || node.OpCode != InternalOpCodes.MODEL_PARAM_DATA) return null;
-            var data = node.Attributes.GetTensorVal(OnnxOpAttributeNames.ShrkAttrTensorData);
-            return data?.As<uint64>().CopyMemory<ulong>();
+            var data = node.Attributes.GetAttributeVal(OnnxOpAttributeNames.ShrkAttrTensorData);
+            return data?.Elements<ulong>().ToArray();
         }
 
 
@@ -531,10 +535,10 @@ namespace Shorokoo.Graph
             if (node.Inputs.Count <= 2 || node.Inputs[2] is not FastTensorKey iterKey) return null;
             if (!nodeByKey.TryGetValue(iterKey.FastNodeKey, out var producer)) return null;
             if (producer.OpCode != OpCodes.CONSTANT) return null;
-            if (producer.Attributes.GetTensorVal(OnnxOpAttributeNames.AttrValue) is not { } data
+            if (producer.Attributes.GetAttributeVal(OnnxOpAttributeNames.AttrValue) is not { } data
                 || data.DType != DType.Int64) return null;
 
-            var iterVals = data.As<int64>().CopyMemory<long>();
+            var iterVals = data.Elements<long>().ToArray();
             // One element per slot, every one a real index. Anything else is not the pairing the
             // chain made, and naming a stream the chain does not derive is worse than not naming.
             if (iterVals.Length != depth) return null;

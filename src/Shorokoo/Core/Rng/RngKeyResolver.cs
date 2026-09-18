@@ -89,16 +89,16 @@ internal static class RngKeyResolver
         var roots = new ulong[m];
         for (int j = 0; j < m; j++) roots[j] = specs[group[j]].root;
         var nodes = new List<FastNode>();
-        var keys = AppendConstant(new OnnxTensorData<uint64>(
-            new Shape(m), OnnxUtils.CreateTensorValue(new Shape(m), roots)), nodes);
+        var keys = AppendConstant(
+            Shorokoo.Globals.TensorData([m], roots).MoveToAttribute(), nodes);
 
         var batchSplit = RngAlgorithms.GetFunction(RngAlgorithms.Default, RngAlgorithms.KindSplitBatch);
         for (int level = 0; level < depth; level++)
         {
             var counters = new ulong[m];
             for (int j = 0; j < m; j++) counters[j] = unchecked((ulong)specs[group[j]].foldPath[level]);
-            var countersKey = AppendConstant(new OnnxTensorData<uint64>(
-                new Shape(m), OnnxUtils.CreateTensorValue(new Shape(m), counters)), nodes);
+            var countersKey = AppendConstant(
+                Shorokoo.Globals.TensorData([m], counters).MoveToAttribute(), nodes);
             keys = AppendBatchSplit(keys, countersKey, batchSplit, nodes);
         }
 
@@ -167,7 +167,7 @@ internal static class RngKeyResolver
         return outKey;
     }
 
-    private static FastTensorKey AppendConstant(TensorData data, List<FastNode> nodes)
+    private static FastTensorKey AppendConstant(TensorAttribute data, List<FastNode> nodes)
     {
         var attrDefs = Definitions.NodeDefinitions[OpCodes.CONSTANT].AttributeDefs;
         var nodeKey = FastNodeKey.New();

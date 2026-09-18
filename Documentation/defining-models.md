@@ -570,7 +570,7 @@ of an analyzer.
 public static partial class ConstInit
 {
     public static Tensor<float32> Inline(Vector<int64> shape)
-        => Tensor<float32>.Fill(shape, Globals.TensorData(1, 1.0f));
+        => Tensor<float32>.Fill(shape, Globals.TensorData(1, 1.0f).MoveToAttribute());
 }
 
 [Module]

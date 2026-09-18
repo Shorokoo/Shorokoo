@@ -15,7 +15,7 @@ namespace Shorokoo.Core.Graph
 {
     /// <summary>
     /// Captured trainable-parameter info for a single specific model id: the
-    /// id, its target Function, and the initializer-parameter <see cref="TensorData"/>
+    /// id, its target Function, and the initializer-parameter <see cref="TensorAttribute"/>
     /// values (shape vector + any other initializer inputs) observed at the
     /// call site that produced it.
     /// </summary>
@@ -25,7 +25,7 @@ namespace Shorokoo.Core.Graph
         /// Per initializer input, the constant value the call site folded to, or <c>null</c> where
         /// <see cref="TrainableParamInputSourceIds"/> names another parameter instead.
         /// </summary>
-        public readonly ImmutableArray<TensorData?> TrainableParamInputParamValues { get; init; }
+        public readonly ImmutableArray<TensorAttribute?> TrainableParamInputParamValues { get; init; }
 
         /// <summary>
         /// Per initializer input, the parameter whose initialized value fills it, or <c>null</c>
@@ -72,7 +72,7 @@ namespace Shorokoo.Core.Graph
                 // required-constant, since a parameter's shape has to be known before anything is
                 // initialized (see TrainableParamInputSourceIds).
                 var shapeTensorData = TrainableParamInputParamValues.First().AssertNotNull();
-                var shapeLongs = shapeTensorData.As<int64>().CopyMemory<long>();
+                var shapeLongs = shapeTensorData.Elements<long>().ToArray();
                 return new Shape(shapeLongs);
             }
         }

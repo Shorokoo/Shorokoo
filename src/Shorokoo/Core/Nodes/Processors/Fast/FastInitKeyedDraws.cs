@@ -148,9 +148,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 // (substreamIndex = ordinal) per draw within one initializer. Every node is emitted
                 // per draw so it always sits in the draw's own control-flow scope — the splits in
                 // particular MUST stay inside the loop body, since they read its iteration index.
-                var keyKey = AppendConstant(new OnnxTensorData<uint64>(
-                    new Shape(System.Array.Empty<long>()),
-                    OnnxUtils.CreateTensorValue(new Shape(System.Array.Empty<long>()), (ulong[])[streamKey])), newNodes);
+                var keyKey = AppendConstant(
+                    Shorokoo.Globals.TensorData([], streamKey).MoveToAttribute(), newNodes);
                 // The fold is FastWireRngKeyDerivation's own split, not a look-alike: a per-trip
                 // init key is the same bijection of the key tree a runtime feed's chain applies.
                 //
@@ -174,9 +173,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         FastWireRngKeyDerivation.AppendCastToUInt64(loopOpen.Outputs[0]!.Value, newNodes),
                         newNodes);
 
-                var substreamIndexKey = AppendConstant(new OnnxTensorData<uint64>(
-                    new Shape(Array.Empty<long>()),
-                    OnnxUtils.CreateTensorValue(new Shape(Array.Empty<long>()), (ulong[])[(ulong)randomOrdinal])), newNodes);
+                var substreamIndexKey = AppendConstant(
+                    Shorokoo.Globals.TensorData([], (ulong)randomOrdinal).MoveToAttribute(), newNodes);
 
                 if (isBits)
                 {
@@ -215,12 +213,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 // parameters) carries its parameters as inputs; they go straight to the keyed draw,
                 // which takes them as inputs anyway. Only literals are materialized as constants here.
                 var bounds = FastLowerRandomOps.TensorBounds(node);
-                var aKey = bounds?.low ?? AppendConstant(new OnnxTensorData<float32>(
-                    new Shape(Array.Empty<long>()),
-                    OnnxUtils.CreateTensorValue(new Shape(Array.Empty<long>()), (float[])[a])), newNodes);
-                var bKey = bounds?.high ?? AppendConstant(new OnnxTensorData<float32>(
-                    new Shape(Array.Empty<long>()),
-                    OnnxUtils.CreateTensorValue(new Shape(Array.Empty<long>()), (float[])[b])), newNodes);
+                var aKey = bounds?.low ?? AppendConstant(
+                    Shorokoo.Globals.TensorData([], a).MoveToAttribute(), newNodes);
+                var bKey = bounds?.high ?? AppendConstant(
+                    Shorokoo.Globals.TensorData([], b).MoveToAttribute(), newNodes);
 
                 // Rewrite the random node in place to the keyed draw (inputs
                 // [key, substreamIndex, shape, a, b]), preserving its output key so downstream
@@ -269,7 +265,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 fn.StateOwnership);
         }
 
-        private static FastTensorKey AppendConstant(TensorData data, List<FastNode> newNodes)
+        private static FastTensorKey AppendConstant(TensorAttribute data, List<FastNode> newNodes)
         {
             var constAttrDefs = Definitions.NodeDefinitions[OpCodes.CONSTANT].AttributeDefs;
             var key = FastNodeKey.New();

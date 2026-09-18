@@ -1093,7 +1093,7 @@ namespace Shorokoo
         /// <see cref="Shorokoo.Core.Inference.QuickExecutionEngine"/> (<c>MaxSmallTensorElements</c>),
         /// not QEE's own <c>DefaultMaxDataElements</c>: a placeholder is legal input to QEE only when
         /// its element count is <b>strictly above</b> the threshold QEE reads payloads at — otherwise
-        /// <see cref="Shorokoo.Core.Inference.Helpers.TensorDataConverter.ToRuntimeTensor"/> tries to read
+        /// <see cref="Shorokoo.Core.Inference.Helpers.TensorDataConverter.ToRuntimeTensor(TensorData, int, Variable)"/> tries to read
         /// the placeholder's elided memory and throws, defeating the whole QEE shape-inference pass. Below
         /// the threshold we must therefore carry a real (zero) payload, exactly as the retired
         /// <c>ZeroExemplar</c> did for every size.</para>
@@ -1705,8 +1705,10 @@ namespace Shorokoo
                 if (hyperparameters[h].Kind != HyperparameterKind.Baked) continue;
                 _hyperparamInitialCounterValues[h] = SeedOf(h);
                 PinShape(h, _hyperparamInitialCounterValues[h]!.Shape);
+                // A copy: the rig keeps the seed value as the hyperparameter's own, and the graph
+                // keeps the literal.
                 var node = Shorokoo.Core.Nodes.Processors.Fast.FastInternalOp.Constant(
-                    _hyperparamInitialCounterValues[h]!);
+                    _hyperparamInitialCounterValues[h]!.Detach().MoveToAttribute());
                 fastTraining.Nodes.Add(node);
                 headNodesInOrder.Add(node);
                 hyperparamKeys[h] = new FastTensorKey(node.Key, 0);

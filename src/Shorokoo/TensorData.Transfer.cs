@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using Shorokoo.Core.Inference.Abstractions;
 using Shorokoo.Runtime;
 
@@ -45,8 +46,6 @@ namespace Shorokoo
             ThrowIfDisposed();
             RefuseUnknownSpace(nameof(TransferTo));
             var space = SpaceOf(to);
-
-            RefuseGraphLiteral(to, nameof(TransferTo));
 
             if (space == Space && CanShareWith(to))
             {
@@ -99,6 +98,74 @@ namespace Shorokoo
         public TensorData Detach() => CopyTo(ComputeContext.Host);
 
         /// <summary>
+        /// This tensor's elements as a <see cref="TensorAttribute"/> — a tensor in a graph's
+        /// description rather than a runtime value. The bytes are <b>moved</b>, not copied: this
+        /// tensor surrenders them and is spent afterwards, exactly as a cross-space
+        /// <see cref="TransferTo"/> source is, so binding a 165 M-parameter checkpoint into a graph
+        /// costs no second set of bytes.
+        ///
+        /// <para>Only a tensor in the framework's own host memory can be moved this way. One bound
+        /// to a compute context is refused: an attribute is part of the graph's description, which
+        /// is the same description on every machine, and a tensor bound to a context is bound to
+        /// one backend's memory — a graph that captured it could only be built where that context
+        /// is, and would stop being serializable the moment it was disposed.
+        /// <see cref="Detach"/> takes a copy in the framework's own host memory, and that copy can
+        /// be moved.</para>
+        ///
+        /// <para>An attribute is immutable and shared by every graph that captured it, so there is
+        /// no way back that does not copy: <see cref="TensorAttribute.CopyToTensorData()"/> is it.</para>
+        /// </summary>
+        /// <exception cref="ObjectDisposedException">This tensor, or the memory behind it, is gone.</exception>
+        /// <exception cref="InvalidOperationException">This tensor belongs to a compute context.</exception>
+        public TensorAttribute MoveToAttribute()
+        {
+            if (!ReferenceEquals(Context, ComputeContext.Host))
+                throw new InvalidOperationException(
+                    $"This tensor ({this}) belongs to a compute context ({Context.Backend}), and an "
+                    + "operator's attribute must not. An attribute is part of the graph's "
+                    + "description, which is the same description on every machine; a tensor bound "
+                    + "to a context is bound to one backend's memory, so a graph that captured one "
+                    + "could only be built where that context is. Detach() takes a copy in the "
+                    + "framework's own host memory, and that copy can be moved.");
+
+            // Shape and dtype are all a stripped weight's stand-in carries, and reading its
+            // elements throws -- so ask for them and there would be nothing to move.
+            if (!HasValues)
+            {
+                var elided = TensorAttribute.WithoutValues(Shape, DType);
+                Dispose();
+                return elided;
+            }
+
+            ThrowIfDisposed();
+            var attribute = DType == DType.String
+                ? TensorAttribute.OverStrings(Shape, [.. StringElements()])
+                // The tensor's own array where it has one, so the move really moves; a runtime
+                // value's buffer is native and can only be copied out of.
+                : TensorAttribute.OverBytes(Shape, DType, OwnBytes ?? CopyRawMemory(), StorageDType());
+            Dispose();
+            return attribute;
+        }
+
+        /// <summary>
+        /// The dtype these bytes are laid out at, which for a generic placeholder is not
+        /// <see cref="DType"/>: that names the type parameter the literal stands for, and only the
+        /// runtime value knows what was actually written. Null where there is nothing to add.
+        /// </summary>
+        private DType? StorageDType()
+            => DType.IsGenericType && this is IOnnxData onnx ? (DType)(int)onnx.Value.ElementType : null;
+
+        /// <summary>The elements of a string tensor, however this one holds them.</summary>
+        private IEnumerable<string> StringElements() => this switch
+        {
+            HostStringTensorData host => host.Strings,
+            IOnnxData onnx => onnx.Value.GetStringTensorData(),
+            _ => throw new InvalidOperationException(
+                $"This tensor ({this}) holds strings but carries neither the elements themselves "
+                + "nor a runtime value to read them from."),
+        };
+
+        /// <summary>
         /// A reader for this tensor's bytes, as a tensor of <paramref name="target"/>. The result
         /// never owns the memory and this tensor keeps whatever ownership it had, so disposing the
         /// result frees nothing and disposing this one still frees everything.
@@ -115,7 +182,6 @@ namespace Shorokoo
             ThrowIfDisposed();
             RefuseUnknownSpace(nameof(GiveAccessTo));
             var space = SpaceOf(to);
-            RefuseGraphLiteral(to, nameof(GiveAccessTo));
 
             if (space != Space || !CanShareWith(to))
                 throw new InvalidOperationException(
@@ -138,23 +204,6 @@ namespace Shorokoo
         /// bringing a device tensor home asks that backend for the copy), so such a tensor is one
         /// the API says is usable and nothing will ever reject.</para>
         /// </summary>
-        /// <summary>
-        /// Refuses to bind a tensor a graph has already captured as an operator's attribute. The
-        /// capture itself refuses one that is already bound; this is the other end of the same
-        /// rule, because the attribute is held by reference and binding it afterwards put a graph
-        /// description in one context's memory -- unserializable once that context was disposed,
-        /// and unbuildable anywhere that context is not.
-        /// </summary>
-        private void RefuseGraphLiteral(ComputeContext target, string operation)
-        {
-            if (!IsGraphLiteral || ReferenceEquals(target, ComputeContext.Host)) return;
-            throw new InvalidOperationException(
-                $"This tensor ({this}) is an operator's attribute in a graph, so it cannot be "
-                + $"given to a compute context by {operation}. An attribute is part of the graph's "
-                + "description, which is the same description on every machine. Use CopyTo, which "
-                + "gives the context its own copy and leaves the graph's literal where it is.");
-        }
-
         private void RefuseDisposedTarget(ComputeContext target, string operation)
         {
             if (!target.IsDisposed) return;

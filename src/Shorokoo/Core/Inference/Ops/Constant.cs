@@ -25,7 +25,7 @@ internal sealed class ConstantOp : QuickOp
 
     protected override RuntimeTensor[] Compute(RuntimeTensor?[] inputs, OnnxCSharpAttributes attrs, int maxDataElements)
     {
-        var tensor = attrs.GetTensorVal(OnnxOpAttributeNames.AttrValue);
+        var tensor = attrs.GetAttributeVal(OnnxOpAttributeNames.AttrValue);
         if (tensor is not null)
             return [TensorDataConverter.ToRuntimeTensor(tensor, maxDataElements)];
 

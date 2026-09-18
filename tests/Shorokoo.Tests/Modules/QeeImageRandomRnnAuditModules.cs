@@ -399,9 +399,9 @@ namespace Shorokoo.Tests.Modules
             var rFloat = (Tensor<float32>)OnnxOp.Range(Scalar(0.5f), Scalar(2f), Scalar(0.5f));
 
             var cosInt = (Tensor<int64>)OnnxOp.ConstantOfShape(Vector(2L, 3L),
-                TensorData(DType.Int64, [1L], 5L));
+                TensorData(DType.Int64, [1L], 5L).MoveToAttribute());
             var cosBool = (Tensor<bit>)OnnxOp.ConstantOfShape(Vector(2L, 2L),
-                TensorData(DType.Bool, [1L], true));
+                TensorData(DType.Bool, [1L], true).MoveToAttribute());
 
             var shapeMismatch =
                 ShapeMismatch(rInt, Vector(4L)) +

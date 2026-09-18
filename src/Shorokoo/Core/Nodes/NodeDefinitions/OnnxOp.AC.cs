@@ -130,7 +130,7 @@ public static partial class OnnxOp
 
     public static Variable ConcatFromSequence(Variable inputSequence, long axis, bool newAxis)
         => NodeBuilder.BuildNodeSingleOut(CONCAT_FROM_SEQUENCE, [inputSequence], [(AttrAxis, axis), (AttrNewAxis, newAxis)]);
-    public static Variable Constant(TensorData value) => Constant(value, null, null, null, null, null, null);
+    public static Variable Constant(TensorAttribute value) => Constant(value, null, null, null, null, null, null);
     public static Variable Constant(float value) => Constant(null, value, null, null, null, null, null);
     public static Variable Constant(float[] value) => Constant(null, null, value, null, null, null, null);
     public static Variable Constant(long value) => Constant(null, null, null, value, null, null, null);
@@ -138,7 +138,7 @@ public static partial class OnnxOp
     public static Variable Constant(string value) => Constant(null, null, null, null, null, value, null);
     public static Variable Constant(string[] value) => Constant(null, null, null, null, null, null, value);
 
-    public static Variable Constant(TensorData? value, float? valueFloat, float[]? valueFloats,
+    public static Variable Constant(TensorAttribute? value, float? valueFloat, float[]? valueFloats,
         long? valueInt, long[]? valueInts, string? valueString, string[]? valueStrings)
         => NodeBuilder.BuildNodeSingleOut(CONSTANT, [], [
             (AttrValue, value),
@@ -149,10 +149,10 @@ public static partial class OnnxOp
             (AttrValueString, valueString),
             (AttrValueStrings, valueStrings)]);
 
-    public static Variable ConstantOfShape(Variable shape, TensorData value, int? rank)
+    public static Variable ConstantOfShape(Variable shape, TensorAttribute value, int? rank)
         => Identity(ConstantOfShape(shape, value), rank);
 
-    public static Variable ConstantOfShape(Variable shape, TensorData value)
+    public static Variable ConstantOfShape(Variable shape, TensorAttribute value)
         => NodeBuilder.BuildNodeSingleOut(CONSTANT_OF_SHAPE, [shape], [(AttrValue, value)]);
 
     public static Variable Conv(Variable x, Variable w, Variable b, AutoPad autoPad,

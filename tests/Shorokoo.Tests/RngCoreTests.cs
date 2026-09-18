@@ -347,9 +347,8 @@ public class RngSeedTransportTests
         var seedNode = arch.Nodes.Single(n => n.IdentifierTemplate == Shorokoo.Core.Nodes.Processors.Fast
             .FastWireRngKeyDerivation.RngSeedIdentifierTemplate);
         seedNode.Attributes = seedNode.Attributes.SetAttributes(
-            (OnnxOpAttributeNames.ShrkAttrTensorData, (object?)TensorData.Create(
-                new Shape(seedData.Length), DType.UInt64,
-                OnnxUtils.CreateTensorValue(new Shape(seedData.Length), seedData))));
+            (OnnxOpAttributeNames.ShrkAttrTensorData,
+             (object?)TensorData([seedData.Length], seedData).MoveToAttribute()));
 
         var tampered = ComputationGraph.FromInternal(arch, GraphKind.ConcreteArchitecture);
         Assert.Contains(unknownId.ToString(),

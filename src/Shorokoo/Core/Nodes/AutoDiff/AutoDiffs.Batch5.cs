@@ -289,7 +289,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             // slightly larger spatial output than needed when the original input had odd spatial dims)
             var xShape = OnnxOp.Shape(x);
             var xRank = OnnxOp.Shape(xShape);
-            var zeros = OnnxOp.ConstantOfShape(xRank, Globals.TensorData(1, 0L));
+            var zeros = OnnxOp.ConstantOfShape(xRank, Globals.TensorData(1, 0L).MoveToAttribute());
             gradX = OnnxOp.Slice(gradX, zeros, xShape);
 
             // dw: weight gradient. For a 2-D convolution the weight gradient is itself a
@@ -316,7 +316,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             {
                 var wShape = OnnxOp.Shape(w);
                 var wRank = OnnxOp.Shape(wShape);
-                var wZeros = OnnxOp.ConstantOfShape(wRank, Globals.TensorData(1, 0L));
+                var wZeros = OnnxOp.ConstantOfShape(wRank, Globals.TensorData(1, 0L).MoveToAttribute());
                 gradW = OnnxOp.Slice(gradW, wZeros, wShape);
             }
 
@@ -391,7 +391,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             {
                 var wShape = OnnxOp.Shape(w);
                 var wRank = OnnxOp.Shape(wShape);
-                var wZeros = OnnxOp.ConstantOfShape(wRank, Globals.TensorData(1, 0L));
+                var wZeros = OnnxOp.ConstantOfShape(wRank, Globals.TensorData(1, 0L).MoveToAttribute());
                 gradW = OnnxOp.Slice(gradW, wZeros, wShape);
             }
 

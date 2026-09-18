@@ -522,7 +522,7 @@ public class TensorDataApiCoverageTests
         var value = OnnxEngine.Eval(Scalar(2f) + Scalar(3f));
 
         Assert.Same(ComputeContext.Host, value.Context);
-        Assert.Equal(5f, OnnxEngine.Eval(OnnxOp.Constant(value)).As<float32>().AccessMemory()[0]);
+        Assert.Equal(5f, OnnxEngine.Eval(OnnxOp.Constant(value.MoveToAttribute())).As<float32>().AccessMemory()[0]);
     }
 
     [Fact]
@@ -566,6 +566,106 @@ public class TensorDataApiCoverageTests
         Assert.Equal([2f, 4f], Floats(context.Execute(graph, reader)[0]));
         t.As<float32>().AccessModifiableMemory<float>()[0] = 99f;
         Assert.Equal([198f, 4f], Floats(context.Execute(graph, reader)[0]));
+    }
+
+    [Fact]
+    public void TestTheAttributeSeamsRoundTripDTypeShapeAndBytes()
+    {
+        foreach (var dtype in AllNumericDTypes)
+        {
+            var source = TensorDataWithSmallVals(dtype, [2L, 2L]);
+            var bytes = source.CopyRawMemory();
+            var attribute = source.MoveToAttribute();
+
+            Assert.True(attribute.HasValues);
+            Assert.True(source.IsDisposed);
+            Assert.Equal(dtype, attribute.DType);
+            Assert.Equal((long[])[2L, 2L], attribute.Shape.Dims);
+            Assert.Equal(bytes, attribute.Bytes.ToArray());
+
+            var back = attribute.CopyToTensorData();
+            Assert.Equal(dtype, back.DType);
+            Assert.Equal((long[])[2L, 2L], back.Shape.Dims);
+            Assert.Equal(bytes, back.CopyRawMemory());
+            Assert.Same(ComputeContext.Host, back.Context);
+        }
+    }
+
+    [Fact]
+    public void TestTheMoveHandsOverTheBytesAndTheCopyBackTakesItsOwn()
+    {
+        var source = TensorData([2L], (float[])[1f, 2f]);
+        var sourceBytes = source.OwnBytes;
+        var attribute = source.MoveToAttribute();
+
+        Assert.Same(sourceBytes, attribute.BytesArray);
+        Assert.NotSame(attribute.BytesArray, attribute.CopyToTensorData().OwnBytes);
+        Assert.NotSame(attribute.CopyToTensorData().OwnBytes, attribute.CopyToTensorData().OwnBytes);
+        Assert.Throws<ObjectDisposedException>(() => source.AccessRawMemory());
+        Assert.Throws<ObjectDisposedException>(() => source.MoveToAttribute());
+    }
+
+    [Fact]
+    public void TestAValuesElidedAttributeCarriesShapeAndDTypeAndRefusesEveryRead()
+    {
+        TensorAttribute[] elided =
+        [
+            TensorAttribute.WithoutValues(new Shape([2L, 3L]), DType.Float32),
+            new WeightPlaceholderTensorData(new Shape([2L, 3L]), DType.Float32).MoveToAttribute(),
+        ];
+
+        foreach (var attribute in elided)
+        {
+            Assert.False(attribute.HasValues);
+            Assert.Equal(DType.Float32, attribute.DType);
+            Assert.Equal((long[])[2L, 3L], attribute.Shape.Dims);
+            Assert.Contains("elided", Assert.Throws<InvalidOperationException>(
+                () => { _ = attribute.Bytes.Length; }).Message);
+            Assert.Contains("elided", Assert.Throws<InvalidOperationException>(
+                () => { _ = attribute.Elements<float>().Length; }).Message);
+            Assert.Contains("elided", Assert.Throws<InvalidOperationException>(
+                () => { _ = attribute.Values; }).Message);
+            Assert.Throws<InvalidOperationException>(() => attribute.CopyToTensorData());
+        }
+    }
+
+    [Fact]
+    public void TestAStringAttributeCarriesItsElementsAndRefusesAByteView()
+    {
+        var attribute = TensorData([2L], (string[])["a", "b"]).MoveToAttribute();
+
+        Assert.True(attribute.HasValues);
+        Assert.Equal(DType.String, attribute.DType);
+        Assert.Equal((string[])["a", "b"], attribute.Values);
+        Assert.Throws<InvalidOperationException>(() => { _ = attribute.Bytes.Length; });
+
+        var back = attribute.CopyToTensorData();
+        Assert.Equal((string[])["a", "b"], Assert.IsType<HostStringTensorData>(back).Strings);
+        Assert.Same(ComputeContext.Host, back.Context);
+    }
+
+    [Fact]
+    public void TestAnAttributeBoundIntoAGraphIsTheSameBytesTheTensorHeld()
+    {
+        var source = TensorData([2L], (float[])[3f, 4f]);
+        var sourceBytes = source.OwnBytes;
+        var node = new InternalComputationGraph([], [Globals.Tensor(source.MoveToAttribute())])
+            .Nodes.Single(n => n.OpCode == OpCodes.CONSTANT);
+
+        var bound = node.Attributes.GetAttributeVal(OnnxOpAttributeNames.AttrValue)!;
+        Assert.Same(sourceBytes, bound.BytesArray);
+        Assert.Equal([3f, 4f], bound.Elements<float>().ToArray());
+    }
+
+    // Shorokoo/Shorokoo#369: the export path writes a TensorProto's RawData and has no branch for
+    // a string tensor, which has no flat buffer, so building the Constant node throws before any
+    // session exists. TensorProto.string_data is never written and never read, so the fault is on
+    // both sides. Remove the Skip when #369 is fixed.
+    [Fact(Skip = "Shorokoo/Shorokoo#369 — ONNX string tensors are serialized in neither direction")]
+    public void TestAStringConstantEvaluatesRatherThanBeingAskedForRawBytesItHasNone()
+    {
+        Assert.Equal((object[])["hello"], OnnxEngine.Eval(Scalar("hello")).As<@string>().DebugData);
+        Assert.Equal((object[])["a", "b"], OnnxEngine.Eval(Vector("a", "b")).As<@string>().DebugData);
     }
 
     private static float[] Floats(NamedModelParam param)

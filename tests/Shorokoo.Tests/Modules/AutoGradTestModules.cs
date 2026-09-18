@@ -2730,10 +2730,10 @@ namespace Shorokoo.Tests.Modules
         public static Scalar<bit> Inline(Scalar<float32> a)
         {
             var translationValues = (Tensor<float32>)OnnxOp.Constant(
-                TensorData(12, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f));
+                TensorData(12, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f).MoveToAttribute());
             var thetaConst = (Tensor<float32>)OnnxOp.Reshape(translationValues, Vector(2L, 2L, 3L), allowZero: false);
             var theta = (Tensor<float32>)OnnxOp.Mul(thetaConst, a);
-            var size = (Tensor<int64>)OnnxOp.Constant(TensorData(4, 2L, 1L, 2L, 2L));
+            var size = (Tensor<int64>)OnnxOp.Constant(TensorData(4, 2L, 1L, 2L, 2L).MoveToAttribute());
             var grid = (Tensor<float32>)OnnxOp.AffineGrid(theta, size, alignCorners: true);
             var loss = grid.Reduce(ReduceKind.Sum, keepDims: false).Scalar();
             var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(a, loss);
@@ -4686,7 +4686,7 @@ namespace Shorokoo.Tests.Modules
         public static Scalar<bit> Inline(Scalar<float32> a)
         {
             var shape = Vector(2L, 3L);
-            var ones = (Tensor<float32>)OnnxOp.ConstantOfShape(shape, TensorData(DType.Float32, [1L], 1f));
+            var ones = (Tensor<float32>)OnnxOp.ConstantOfShape(shape, TensorData(DType.Float32, [1L], 1f).MoveToAttribute());
             var aMat = (Tensor<float32>)OnnxOp.Expand(a, Vector(2L, 3L));
             var product = ones * aMat;
             var loss = product.Reduce(ReduceKind.Sum, keepDims: false).Scalar();
@@ -4733,10 +4733,10 @@ namespace Shorokoo.Tests.Modules
         public static Scalar<bit> Inline(Scalar<float32> a)
         {
             var inputVals = (Tensor<float32>)OnnxOp.Constant(
-                TensorData(8, 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f));
+                TensorData(8, 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f).MoveToAttribute());
             var x = (Tensor<float32>)OnnxOp.Mul(
                 (Tensor<float32>)OnnxOp.Reshape(inputVals, Vector(1L, 2L, 2L, 2L), allowZero: false), a);
-            var gridVals = (Tensor<float32>)OnnxOp.Constant(TensorData(2, 0f, 0f));
+            var gridVals = (Tensor<float32>)OnnxOp.Constant(TensorData(2, 0f, 0f).MoveToAttribute());
             var grid = (Tensor<float32>)OnnxOp.Reshape(gridVals, Vector(1L, 1L, 1L, 2L), allowZero: false);
             var output = (Tensor<float32>)OnnxOp.GridSample(x, grid,
                 alignCorners: true, mode: GridSampleMode.Linear, paddingMode: GridSamplePaddingMode.Zeros);
@@ -4840,11 +4840,11 @@ namespace Shorokoo.Tests.Modules
     {
         public static Scalar<bit> Inline(Scalar<float32> a)
         {
-            var input = (Tensor<float32>)OnnxOp.Constant(TensorData(16, 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f, 11f, 12f, 13f, 14f, 15f, 16f));
+            var input = (Tensor<float32>)OnnxOp.Constant(TensorData(16, 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f, 11f, 12f, 13f, 14f, 15f, 16f).MoveToAttribute());
             var x = (Tensor<float32>)OnnxOp.Mul(
                 (Tensor<float32>)OnnxOp.Reshape(input, Vector(1L, 1L, 4L, 4L), allowZero: false), a);
             var rois = (Tensor<float32>)OnnxOp.Reshape(
-                (Tensor<float32>)OnnxOp.Constant(TensorData(5, 0f, 0f, 0f, 3f, 3f)),
+                (Tensor<float32>)OnnxOp.Constant(TensorData(5, 0f, 0f, 0f, 3f, 3f).MoveToAttribute()),
                 Vector(1L, 5L), allowZero: false);
             var output = (Tensor<float32>)OnnxOp.MaxRoiPool(x, rois, pooledShape: [2L, 2L], spatialScale: 1.0f);
             var loss = output.Reduce(ReduceKind.Sum, keepDims: false).Scalar();
@@ -4860,12 +4860,12 @@ namespace Shorokoo.Tests.Modules
         public static Scalar<bit> Inline(Scalar<float32> a)
         {
             // a is unused; kept so the module has a runtime input slot the AutoTester expects.
-            var input = (Tensor<float32>)OnnxOp.Constant(TensorData(16, 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f, 11f, 12f, 13f, 14f, 15f, 16f));
+            var input = (Tensor<float32>)OnnxOp.Constant(TensorData(16, 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f, 11f, 12f, 13f, 14f, 15f, 16f).MoveToAttribute());
             var x = (Tensor<float32>)OnnxOp.Reshape(input, Vector(1L, 1L, 4L, 4L), allowZero: false);
             // Force x to depend on a so the gradient is non-trivially routed (a * 1 + 0*x acts as identity-with-input-dep).
             x = (Tensor<float32>)OnnxOp.Mul(x, a);
             var rois = (Tensor<float32>)OnnxOp.Reshape(
-                (Tensor<float32>)OnnxOp.Constant(TensorData(5, 0f, 0f, 0f, 3f, 3f)),
+                (Tensor<float32>)OnnxOp.Constant(TensorData(5, 0f, 0f, 0f, 3f, 3f).MoveToAttribute()),
                 Vector(1L, 5L), allowZero: false);
             var output = (Tensor<float32>)OnnxOp.MaxRoiPool(x, rois, pooledShape: [2L, 2L], spatialScale: 1.0f);
             var loss = output.Reduce(ReduceKind.Sum, keepDims: false).Scalar();
@@ -4881,11 +4881,11 @@ namespace Shorokoo.Tests.Modules
     {
         public static Scalar<bit> Inline(Scalar<float32> a)
         {
-            var input = (Tensor<float32>)OnnxOp.Constant(TensorData(18, 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f, 11f, 12f, 13f, 14f, 15f, 16f, 17f, 18f));
+            var input = (Tensor<float32>)OnnxOp.Constant(TensorData(18, 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f, 11f, 12f, 13f, 14f, 15f, 16f, 17f, 18f).MoveToAttribute());
             var x = (Tensor<float32>)OnnxOp.Mul(
                 (Tensor<float32>)OnnxOp.Reshape(input, Vector(1L, 2L, 3L, 3L), allowZero: false), a);
             var rois = (Tensor<float32>)OnnxOp.Reshape(
-                (Tensor<float32>)OnnxOp.Constant(TensorData(5, 0f, 0f, 0f, 2f, 2f)),
+                (Tensor<float32>)OnnxOp.Constant(TensorData(5, 0f, 0f, 0f, 2f, 2f).MoveToAttribute()),
                 Vector(1L, 5L), allowZero: false);
             var output = (Tensor<float32>)OnnxOp.MaxRoiPool(x, rois, pooledShape: [1L, 1L], spatialScale: 1.0f);
             var loss = output.Reduce(ReduceKind.Sum, keepDims: false).Scalar();
@@ -4900,11 +4900,11 @@ namespace Shorokoo.Tests.Modules
     {
         public static Scalar<bit> Inline(Scalar<float32> a)
         {
-            var input = (Tensor<float32>)OnnxOp.Constant(TensorData(16, 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f, 11f, 12f, 13f, 14f, 15f, 16f));
+            var input = (Tensor<float32>)OnnxOp.Constant(TensorData(16, 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f, 11f, 12f, 13f, 14f, 15f, 16f).MoveToAttribute());
             var x = (Tensor<float32>)OnnxOp.Mul(
                 (Tensor<float32>)OnnxOp.Reshape(input, Vector(1L, 1L, 4L, 4L), allowZero: false), a);
             var rois = (Tensor<float32>)OnnxOp.Reshape(
-                (Tensor<float32>)OnnxOp.Constant(TensorData(10, 0f, 0f, 0f, 1f, 1f, 0f, 2f, 2f, 3f, 3f)),
+                (Tensor<float32>)OnnxOp.Constant(TensorData(10, 0f, 0f, 0f, 1f, 1f, 0f, 2f, 2f, 3f, 3f).MoveToAttribute()),
                 Vector(2L, 5L), allowZero: false);
             var output = (Tensor<float32>)OnnxOp.MaxRoiPool(x, rois, pooledShape: [1L, 1L], spatialScale: 1.0f);
             var loss = output.Reduce(ReduceKind.Sum, keepDims: false).Scalar();
@@ -4920,10 +4920,10 @@ namespace Shorokoo.Tests.Modules
         public static Scalar<bit> Inline(Scalar<float32> a)
         {
             // a is unused; the AutoTester needs at least one runtime input.
-            var input = (Tensor<float32>)OnnxOp.Constant(TensorData(16, 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f, 11f, 12f, 13f, 14f, 15f, 16f));
+            var input = (Tensor<float32>)OnnxOp.Constant(TensorData(16, 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f, 11f, 12f, 13f, 14f, 15f, 16f).MoveToAttribute());
             var x = (Tensor<float32>)OnnxOp.Reshape(input, Vector(1L, 1L, 4L, 4L), allowZero: false);
             var rois = (Tensor<float32>)OnnxOp.Reshape(
-                (Tensor<float32>)OnnxOp.Constant(TensorData(5, 0f, 0f, 0f, 3f, 3f)),
+                (Tensor<float32>)OnnxOp.Constant(TensorData(5, 0f, 0f, 0f, 3f, 3f).MoveToAttribute()),
                 Vector(1L, 5L), allowZero: false);
             var output = (Tensor<float32>)OnnxOp.MaxRoiPool(x, rois, pooledShape: [2L, 2L], spatialScale: 1.0f);
             var sum = output.Reduce(ReduceKind.Sum, keepDims: false).Scalar();
@@ -4945,13 +4945,13 @@ namespace Shorokoo.Tests.Modules
     {
         public static Scalar<bit> Inline(Scalar<float32> a)
         {
-            var input = (Tensor<float32>)OnnxOp.Constant(TensorData(16, 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f, 11f, 12f, 13f, 14f, 15f, 16f));
+            var input = (Tensor<float32>)OnnxOp.Constant(TensorData(16, 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f, 11f, 12f, 13f, 14f, 15f, 16f).MoveToAttribute());
             var x = (Tensor<float32>)OnnxOp.Mul(
                 (Tensor<float32>)OnnxOp.Reshape(input, Vector(1L, 1L, 4L, 4L), allowZero: false), a);
             var rois = (Tensor<float32>)OnnxOp.Reshape(
-                (Tensor<float32>)OnnxOp.Constant(TensorData(4, 0f, 0f, 3f, 3f)),
+                (Tensor<float32>)OnnxOp.Constant(TensorData(4, 0f, 0f, 3f, 3f).MoveToAttribute()),
                 Vector(1L, 4L), allowZero: false);
-            var batchIdx = (Tensor<int64>)OnnxOp.Constant(TensorData(1, 0L));
+            var batchIdx = (Tensor<int64>)OnnxOp.Constant(TensorData(1, 0L).MoveToAttribute());
             var output = (Tensor<float32>)OnnxOp.RoiAlign(x, rois, batchIdx,
                 mode: RoiAlignMode.Avg, outputHeight: 2, outputWidth: 2,
                 samplingRatio: 2, spatialScale: 1.0f);
@@ -4967,13 +4967,13 @@ namespace Shorokoo.Tests.Modules
     {
         public static Scalar<bit> Inline(Scalar<float32> a)
         {
-            var input = (Tensor<float32>)OnnxOp.Constant(TensorData(9, 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f));
+            var input = (Tensor<float32>)OnnxOp.Constant(TensorData(9, 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f).MoveToAttribute());
             var x = (Tensor<float32>)OnnxOp.Mul(
                 (Tensor<float32>)OnnxOp.Reshape(input, Vector(1L, 1L, 3L, 3L), allowZero: false), a);
             var rois = (Tensor<float32>)OnnxOp.Reshape(
-                (Tensor<float32>)OnnxOp.Constant(TensorData(4, 0f, 0f, 4f, 4f)),
+                (Tensor<float32>)OnnxOp.Constant(TensorData(4, 0f, 0f, 4f, 4f).MoveToAttribute()),
                 Vector(1L, 4L), allowZero: false);
-            var batchIdx = (Tensor<int64>)OnnxOp.Constant(TensorData(1, 0L));
+            var batchIdx = (Tensor<int64>)OnnxOp.Constant(TensorData(1, 0L).MoveToAttribute());
             var output = (Tensor<float32>)OnnxOp.RoiAlign(x, rois, batchIdx,
                 mode: RoiAlignMode.Avg, outputHeight: 1, outputWidth: 1,
                 samplingRatio: 2, spatialScale: 0.5f);
@@ -4989,13 +4989,13 @@ namespace Shorokoo.Tests.Modules
     {
         public static Scalar<bit> Inline(Scalar<float32> a)
         {
-            var input = (Tensor<float32>)OnnxOp.Constant(TensorData(18, 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f, 11f, 12f, 13f, 14f, 15f, 16f, 17f, 18f));
+            var input = (Tensor<float32>)OnnxOp.Constant(TensorData(18, 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f, 11f, 12f, 13f, 14f, 15f, 16f, 17f, 18f).MoveToAttribute());
             var x = (Tensor<float32>)OnnxOp.Mul(
                 (Tensor<float32>)OnnxOp.Reshape(input, Vector(1L, 2L, 3L, 3L), allowZero: false), a);
             var rois = (Tensor<float32>)OnnxOp.Reshape(
-                (Tensor<float32>)OnnxOp.Constant(TensorData(4, 0f, 0f, 2f, 2f)),
+                (Tensor<float32>)OnnxOp.Constant(TensorData(4, 0f, 0f, 2f, 2f).MoveToAttribute()),
                 Vector(1L, 4L), allowZero: false);
-            var batchIdx = (Tensor<int64>)OnnxOp.Constant(TensorData(1, 0L));
+            var batchIdx = (Tensor<int64>)OnnxOp.Constant(TensorData(1, 0L).MoveToAttribute());
             var output = (Tensor<float32>)OnnxOp.RoiAlign(x, rois, batchIdx,
                 mode: RoiAlignMode.Avg, outputHeight: 1, outputWidth: 1,
                 samplingRatio: 2, spatialScale: 1.0f);
@@ -5011,13 +5011,13 @@ namespace Shorokoo.Tests.Modules
     {
         public static Scalar<bit> Inline(Scalar<float32> a)
         {
-            var input = (Tensor<float32>)OnnxOp.Constant(TensorData(16, 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f, 11f, 12f, 13f, 14f, 15f, 16f));
+            var input = (Tensor<float32>)OnnxOp.Constant(TensorData(16, 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f, 11f, 12f, 13f, 14f, 15f, 16f).MoveToAttribute());
             var x = (Tensor<float32>)OnnxOp.Mul(
                 (Tensor<float32>)OnnxOp.Reshape(input, Vector(1L, 1L, 4L, 4L), allowZero: false), a);
             var rois = (Tensor<float32>)OnnxOp.Reshape(
-                (Tensor<float32>)OnnxOp.Constant(TensorData(8, 0f, 0f, 1f, 1f, 2f, 2f, 3f, 3f)),
+                (Tensor<float32>)OnnxOp.Constant(TensorData(8, 0f, 0f, 1f, 1f, 2f, 2f, 3f, 3f).MoveToAttribute()),
                 Vector(2L, 4L), allowZero: false);
-            var batchIdx = (Tensor<int64>)OnnxOp.Constant(TensorData(2, 0L, 0L));
+            var batchIdx = (Tensor<int64>)OnnxOp.Constant(TensorData(2, 0L, 0L).MoveToAttribute());
             var output = (Tensor<float32>)OnnxOp.RoiAlign(x, rois, batchIdx,
                 mode: RoiAlignMode.Avg, outputHeight: 1, outputWidth: 1,
                 samplingRatio: 2, spatialScale: 1.0f);
@@ -5035,13 +5035,13 @@ namespace Shorokoo.Tests.Modules
     {
         public static Scalar<bit> Inline(Scalar<float32> a)
         {
-            var input = (Tensor<float32>)OnnxOp.Constant(TensorData(16, 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f, 11f, 12f, 13f, 14f, 15f, 16f));
+            var input = (Tensor<float32>)OnnxOp.Constant(TensorData(16, 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f, 11f, 12f, 13f, 14f, 15f, 16f).MoveToAttribute());
             var x = (Tensor<float32>)OnnxOp.Mul(
                 (Tensor<float32>)OnnxOp.Reshape(input, Vector(1L, 1L, 4L, 4L), allowZero: false), a);
             var rois = (Tensor<float32>)OnnxOp.Reshape(
-                (Tensor<float32>)OnnxOp.Constant(TensorData(4, 0f, 0f, 3f, 3f)),
+                (Tensor<float32>)OnnxOp.Constant(TensorData(4, 0f, 0f, 3f, 3f).MoveToAttribute()),
                 Vector(1L, 4L), allowZero: false);
-            var batchIdx = (Tensor<int64>)OnnxOp.Constant(TensorData(1, 0L));
+            var batchIdx = (Tensor<int64>)OnnxOp.Constant(TensorData(1, 0L).MoveToAttribute());
             var output = (Tensor<float32>)OnnxOp.RoiAlign(x, rois, batchIdx,
                 coordinateTransformationMode: RoiAlignTransformationMode.Output_half_pixel,
                 mode: RoiAlignMode.Avg, outputHeight: 2, outputWidth: 2,
@@ -5058,12 +5058,12 @@ namespace Shorokoo.Tests.Modules
     {
         public static Scalar<bit> Inline(Scalar<float32> a)
         {
-            var input = (Tensor<float32>)OnnxOp.Constant(TensorData(16, 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f, 11f, 12f, 13f, 14f, 15f, 16f));
+            var input = (Tensor<float32>)OnnxOp.Constant(TensorData(16, 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f, 11f, 12f, 13f, 14f, 15f, 16f).MoveToAttribute());
             var x = (Tensor<float32>)OnnxOp.Reshape(input, Vector(1L, 1L, 4L, 4L), allowZero: false);
             var rois = (Tensor<float32>)OnnxOp.Reshape(
-                (Tensor<float32>)OnnxOp.Constant(TensorData(4, 0f, 0f, 3f, 3f)),
+                (Tensor<float32>)OnnxOp.Constant(TensorData(4, 0f, 0f, 3f, 3f).MoveToAttribute()),
                 Vector(1L, 4L), allowZero: false);
-            var batchIdx = (Tensor<int64>)OnnxOp.Constant(TensorData(1, 0L));
+            var batchIdx = (Tensor<int64>)OnnxOp.Constant(TensorData(1, 0L).MoveToAttribute());
             var output = (Tensor<float32>)OnnxOp.RoiAlign(x, rois, batchIdx,
                 mode: RoiAlignMode.Avg, outputHeight: 2, outputWidth: 2,
                 samplingRatio: 2, spatialScale: 1.0f);
@@ -5572,10 +5572,10 @@ namespace Shorokoo.Tests.Modules
         public static Scalar<bit> Inline(Scalar<float32> a)
         {
             var translationValues = (Tensor<float32>)OnnxOp.Constant(
-                TensorData(12, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f));
+                TensorData(12, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f).MoveToAttribute());
             var thetaConst = (Tensor<float32>)OnnxOp.Reshape(translationValues, Vector(2L, 2L, 3L), allowZero: false);
             var theta = (Tensor<float32>)OnnxOp.Mul(thetaConst, a);
-            var size = (Tensor<int64>)OnnxOp.Constant(TensorData(4, 2L, 1L, 2L, 2L));
+            var size = (Tensor<int64>)OnnxOp.Constant(TensorData(4, 2L, 1L, 2L, 2L).MoveToAttribute());
             var grid = (Tensor<float32>)OnnxOp.AffineGrid(theta, size, alignCorners: false);
             var loss = grid.Reduce(ReduceKind.Sum, keepDims: false).Scalar();
             var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(a, loss);
@@ -5588,10 +5588,10 @@ namespace Shorokoo.Tests.Modules
         public static Scalar<bit> Inline(Scalar<float32> a)
         {
             var inputVals = (Tensor<float32>)OnnxOp.Constant(
-                TensorData(8, 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f));
+                TensorData(8, 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f).MoveToAttribute());
             var x = (Tensor<float32>)OnnxOp.Mul(
                 (Tensor<float32>)OnnxOp.Reshape(inputVals, Vector(1L, 2L, 2L, 2L), allowZero: false), a);
-            var gridVals = (Tensor<float32>)OnnxOp.Constant(TensorData(2, 0f, 0f));
+            var gridVals = (Tensor<float32>)OnnxOp.Constant(TensorData(2, 0f, 0f).MoveToAttribute());
             var grid = (Tensor<float32>)OnnxOp.Reshape(gridVals, Vector(1L, 1L, 1L, 2L), allowZero: false);
             var output = (Tensor<float32>)OnnxOp.GridSample(x, grid,
                 alignCorners: false, mode: GridSampleMode.Linear, paddingMode: GridSamplePaddingMode.Zeros);
@@ -5701,7 +5701,7 @@ namespace Shorokoo.Tests.Modules
         {
             var aMat = (Tensor<float32>)OnnxOp.Expand(a, Vector(2L, 3L));
             var dynShape = (Tensor<int64>)OnnxOp.Shape(aMat);
-            var ones = (Tensor<float32>)OnnxOp.ConstantOfShape(dynShape, TensorData(DType.Float32, [1L], 1f));
+            var ones = (Tensor<float32>)OnnxOp.ConstantOfShape(dynShape, TensorData(DType.Float32, [1L], 1f).MoveToAttribute());
             var product = ones * aMat;
             var loss = product.Reduce(ReduceKind.Sum, keepDims: false).Scalar();
             var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(a, loss);

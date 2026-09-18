@@ -361,13 +361,13 @@ namespace Shorokoo.Core.Factory.IR
         }
 
         /// <summary>
-        /// TensorData for an initializer proto: a metadata-only
-        /// <see cref="WeightPlaceholderTensorData"/> when the proto carries the
-        /// values-elided marker (a checkpoint model definition saved with its weights
-        /// stripped — the real bytes live in the checkpoint's data tree and are bound
-        /// back after load), else the fully materialized tensor.
+        /// The attribute for an initializer proto: a values-elided
+        /// <see cref="TensorAttribute"/> when the proto carries the values-elided marker (a
+        /// checkpoint model definition saved with its weights stripped — the real bytes live in
+        /// the checkpoint's data tree and are bound back after load), else the fully materialized
+        /// one.
         /// </summary>
-        private static TensorData CreateInitializerTensorData(TensorProto initializer)
+        private static TensorAttribute CreateInitializerTensorData(TensorProto initializer)
         {
             var elided = initializer.MetadataProps
                 .FirstOrDefault(x => x.Key == ShrkMetaValuesElided)?.Value;
@@ -378,10 +378,10 @@ namespace Shorokoo.Core.Factory.IR
                     $"Invalid value '{elided}' for '{ShrkMetaValuesElided}' metadata. Expected 'true'.");
 
             Shape shape = initializer.Dims is { Length: > 0 } dims ? dims : (long[])[];
-            return new WeightPlaceholderTensorData(shape, (DType)initializer.data_type);
+            return TensorAttribute.WithoutValues(shape, (DType)initializer.data_type);
         }
 
-        private static TensorData CreateTensorData(TensorProto tensorProto)
+        private static TensorAttribute CreateTensorData(TensorProto tensorProto)
         {
             byte[] rawDataBytes;
 
@@ -408,8 +408,10 @@ namespace Shorokoo.Core.Factory.IR
                 throw new UnsupportedDTypeException(ErrorCodes.FW033, type.ToString(), "TensorProto conversion",
                     $"Data type '{type}' is not supported in TensorProto conversion");
 
-            var tensorData = TensorData.CreateFromRawBytes(shape, type, rawDataBytes);
-            return tensorData;
+            // Through CreateFromRawBytes for its checks -- the shape's worth of bytes, and the
+            // dtypes a flat buffer cannot describe -- then moved, which costs nothing: the tensor
+            // it builds is this method's own and nothing else names it.
+            return TensorData.CreateFromRawBytes(shape, type, rawDataBytes).MoveToAttribute();
         }
 
         /// <summary>

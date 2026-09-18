@@ -399,6 +399,20 @@ namespace Shorokoo.Core.Utils
             Shape shape, byte[] bytes, Shorokoo.Runtime.ComputeContext context) where T : IVarType
             => HostTensorData<T>.Bound(shape, bytes, context);
 
+        /// <summary>
+        /// A host tensor over <paramref name="bytes"/> on <see cref="Shorokoo.Runtime.ComputeContext.Host"/>,
+        /// keeping <paramref name="dtype"/> exactly as given. The overload above derives the dtype
+        /// from the element type instead, which drops the generic parameter name a specialized
+        /// dtype carries -- the one thing a graph literal's dtype is for.
+        /// </summary>
+        internal static TensorData CreateHostTensorData(Shape shape, DType dtype, byte[] bytes)
+            => (TensorData)CallGeneric(dtype.ToIVarType(), typeof(OnnxUtils),
+                nameof(internalCreateHostTensorDataAt), shape, bytes, dtype);
+
+        internal static TensorData internalCreateHostTensorDataAt<T>(
+            Shape shape, byte[] bytes, DType dtype) where T : IVarType
+            => new HostTensorData<T>(shape, bytes, dtype);
+
         internal static TensorDataSequence internalCreateTensorDataSequenceFromValue<T>(IShorokooTensorValue value) where T : IVarType
             => new OnnxTensorDataSequence<T>(value);
 

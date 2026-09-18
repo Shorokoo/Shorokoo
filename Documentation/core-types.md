@@ -69,8 +69,8 @@ kinds).
 | `VectorRange(start, limit, delta)` | `Vector<T>` | Numeric range. |
 | `Tensor([2L,3L], v0, v1, ...)` | `Tensor<T>` | From dims + flat values. |
 | `TensorData([1L,3L,2L,2L], myFloats)` | `TensorData<float32>` | Materialized data from dims + a flat `float[]`. |
-| `TensorFill(shape, TensorData([1], 0f))` | `Tensor<T>` | Constant-filled tensor. |
-| `Tensor<float32>.Fill(shape, TensorData(...))` | `Tensor<float32>` | Static fill on the type. |
+| `TensorFill(shape, 0f)` | `Tensor<T>` | Constant-filled tensor. |
+| `Tensor<float32>.Fill(shape, TensorData(...).MoveToAttribute())` | `Tensor<float32>` | Static fill on the type. The fill value is a graph literal, so it is given as a `TensorAttribute`. |
 | `RandomUniform(shape, low = 0f, high = 1f)` | `Tensor<float32>` | Random feed over the half-open `[low, high)`; all but `shape` are optional. Keyed by the model's [RNG identity](rng-configuration.md) — no per-site seed. What the draw returns: [uniform-draws.md](uniform-draws.md). |
 | `RandomUniform(shape, Scalar<float32> low, Scalar<float32> high)` | `Tensor<float32>` | Same feed over a range computed **in-graph** (both bounds required). The bounds reach the draw itself, so the range is exact at any width; a graph-scalar range needs a keyed (concrete, id-bearing) model. |
 | `RandomNormal(shape, mean = 0f, scale = 1f)` | `Tensor<float32>` | Random feed over N(`mean`, `scale`); all but `shape` are optional. Keyed by the model's [RNG identity](rng-configuration.md) — no per-site seed. What the draw returns: [normal-draws.md](normal-draws.md). |
@@ -227,7 +227,7 @@ using Shorokoo;
 using static Shorokoo.Globals;
 using static Shorokoo.NN;
 
-var x = TensorFill(Vector(1L, 3L, 224L, 224L), TensorData([1], 0.1f)); // [1,3,224,224]
+var x = TensorFill(Vector(1L, 3L, 224L, 224L), 0.1f); // [1,3,224,224]
 var w = RandomNormal(Vector(64L, 3L, 7L, 7L));
 var b = VectorFill(64L, 0f);
 

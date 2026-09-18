@@ -46,7 +46,7 @@ using Shorokoo;
 using static Shorokoo.Globals;
 using static Shorokoo.NN;
 
-var input = TensorFill(Vector(1L, 3L, 224L, 224L), TensorData([1], 0.1f));
+var input = TensorFill(Vector(1L, 3L, 224L, 224L), 0.1f);
 var w     = RandomNormal(Vector(64L, 3L, 7L, 7L));
 var b     = VectorFill(64L, 0f);
 

@@ -317,20 +317,17 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// True once this tensor has been captured as an operator's attribute, which fixes it as
-        /// part of a graph description.
-        ///
-        /// <para>The capture itself refuses a tensor that already belongs to a context; this is the
-        /// other half of that guard, because the dictionary holds the tensor by reference and
-        /// nothing stopped a later <see cref="TransferTo"/> from binding the very same object. The
-        /// graph then held an attribute in a context's memory -- the state the capture exists to
-        /// forbid -- and the context's disposal made the graph unserializable.</para>
+        /// Whether this tensor has elements at all. False only for the shape-and-dtype stand-in a
+        /// parameter's slot holds while its weights are elided, whose every accessor throws.
         /// </summary>
-        internal bool IsGraphLiteral { get; private set; }
+        internal virtual bool HasValues => true;
 
-        /// <summary>Fixes this tensor as part of a graph description, for the reason on
-        /// <see cref="IsGraphLiteral"/>. One way only: a graph that captured it keeps it.</summary>
-        internal void MarkAsGraphLiteral() => IsGraphLiteral = true;
+        /// <summary>
+        /// This tensor's own byte array where it has one, so <see cref="MoveToAttribute"/> can take
+        /// it rather than copy it. Null when the elements are a runtime value's or are strings, in
+        /// which case only a copy can get them out.
+        /// </summary>
+        internal virtual byte[]? OwnBytes => null;
 
         /// <summary>
         /// True once <see cref="Dispose"/> has released this tensor's storage. Its shape, dtype and

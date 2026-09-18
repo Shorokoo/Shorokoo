@@ -996,7 +996,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
                     Shorokoo.Core.Nodes.Processors.Fast.FastWireRngKeyDerivation.RngSeedIdentifierTemplate)
             .ToDictionary(
                 n => n.IdentifierTemplate!,
-                n => n.GetTensorData()!.AccessRawMemory().ToArray(),
+                n => n.GetTensorAttribute()!.Bytes.ToArray(),
                 StringComparer.Ordinal);
 
     /// <summary>Extracts every archive entry through the BCL zip reader — an implementation
@@ -1105,7 +1105,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
             entries[SkptFileFormat.ModelEntryPath], GraphKind.ConcreteModel);
         var originalParams = model.ToInternal().Nodes
             .Where(n => n.OpCode == InternalOpCodes.MODEL_PARAM_DATA)
-            .ToDictionary(n => n.IdentifierTemplate!, n => n.GetTensorData()!, StringComparer.Ordinal);
+            .ToDictionary(n => n.IdentifierTemplate!, n => n.GetTensorAttribute()!, StringComparer.Ordinal);
         var strippedWeightParams = strippedDefinition.ToInternal().Nodes
             .Where(n => n.OpCode == InternalOpCodes.MODEL_PARAM_DATA
                 && n.IdentifierTemplate !=
@@ -1114,13 +1114,14 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         Assert.Equal(originalWeights.Count, strippedWeightParams.Count);
         foreach (var param in strippedWeightParams)
         {
-            var placeholder = Assert.IsType<WeightPlaceholderTensorData>(param.GetTensorData());
+            var placeholder = param.GetTensorAttribute()!;
+            Assert.False(placeholder.HasValues);
             var original = originalParams[param.IdentifierTemplate!];
             Assert.Equal(original.DType.ToIVarType(), placeholder.DType.ToIVarType());
             Assert.Equal(original.Shape.Dims, placeholder.Shape.Dims);
             var exElided = Assert.Throws<InvalidOperationException>(
-                () => { placeholder.AccessRawMemory(); });
-            Assert.Contains("placeholder", exElided.Message);
+                () => { _ = placeholder.Bytes.Length; });
+            Assert.Contains("elided", exElided.Message);
         }
         var strippedAllParams = strippedDefinition.ToInternal().Nodes
             .Where(n => n.OpCode == InternalOpCodes.MODEL_PARAM_DATA)
@@ -1128,7 +1129,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         Assert.Equal(originalParams.Count, strippedAllParams.Count);
         Assert.All(
             strippedAllParams.Where(n => !originalWeights.ContainsKey(n.IdentifierTemplate!)),
-            n => Assert.IsNotType<WeightPlaceholderTensorData>(n.GetTensorData()));
+            n => Assert.True(n.GetTensorAttribute()!.HasValues));
 
         var loaded = Persistence.Load(path);
         Assert.Equal(GraphKind.ConcreteModel, loaded.Kind);
@@ -1147,10 +1148,10 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         {
             if (node.OpCode != InternalOpCodes.MODEL_PARAM_DATA
                 || !originalWeights.ContainsKey(node.IdentifierTemplate ?? "")) continue;
-            var data = node.GetTensorData()!;
+            var data = node.GetTensorAttribute()!;
             node.Attributes = node.Attributes.SetAttributes(
                 (OnnxOpAttributeNames.ShrkAttrTensorData,
-                 (object?)TensorDataWithDefaultVals(data.DType, data.Shape.Dims)));
+                 (object?)TensorDataWithDefaultVals(data.DType, data.Shape.Dims).MoveToAttribute()));
         }
         var zerosModelBytes = CompressedFormatUtils.SaveFastGraphToBinary(
             zerosGraph, GraphKind.ConcreteModel, compressed: true);
@@ -1218,11 +1219,12 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
             if (node.IdentifierTemplate ==
                     Shorokoo.Core.Nodes.Processors.Fast.FastWireRngKeyDerivation.RngSeedIdentifierTemplate)
                 continue;
-            var dims = node.GetTensorData()!.Shape.Dims;
+            var dims = node.GetTensorAttribute()!.Shape.Dims;
             var vals = new float[dims.Aggregate(1L, (a, d) => a * d)];
             for (int i = 0; i < vals.Length; i++) vals[i] = 1.0f + i % 8 * 0.25f;
             node.Attributes = node.Attributes.SetAttributes(
-                (OnnxOpAttributeNames.ShrkAttrTensorData, (object?)TensorData(dims, vals)));
+                (OnnxOpAttributeNames.ShrkAttrTensorData,
+                 (object?)TensorData(dims, vals).MoveToAttribute()));
         }
         return (model, numOut, input);
     }
@@ -1607,14 +1609,14 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         Assert.False(File.Exists(P("evil.bin")));
     }
 
-    /// <summary>The model's weight tensors (TensorData) keyed by parameter identifier, excluding
-    /// the RNG identity parameter — the values an additional mapping set is built over.</summary>
-    private static Dictionary<string, TensorData> WeightDataByParam(ComputationGraph model)
+    /// <summary>The model's weight attributes keyed by parameter identifier, excluding the RNG
+    /// identity parameter — the values an additional mapping set is built over.</summary>
+    private static Dictionary<string, TensorAttribute> WeightDataByParam(ComputationGraph model)
         => model.ToInternal().Nodes
             .Where(n => n.OpCode == InternalOpCodes.MODEL_PARAM_DATA
                 && n.IdentifierTemplate !=
                     Shorokoo.Core.Nodes.Processors.Fast.FastWireRngKeyDerivation.RngSeedIdentifierTemplate)
-            .ToDictionary(n => n.IdentifierTemplate!, n => n.GetTensorData()!, StringComparer.Ordinal);
+            .ToDictionary(n => n.IdentifierTemplate!, n => n.GetTensorAttribute()!, StringComparer.Ordinal);
 
     [Fact]
     public void TestInspectSkptArtifactsAndNamedMappingSets()
@@ -1758,10 +1760,10 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
             }
             else
             {
-                emaValues[id] = data;
+                emaValues[id] = data.CopyToTensorData();
             }
         }
-        Assert.NotEqual(modelData[distinctId].AccessRawMemory().ToArray(),
+        Assert.NotEqual(modelData[distinctId].Bytes.ToArray(),
             emaValues[distinctId].AccessRawMemory().ToArray());
 
         Persistence.From(model).WithModel().WithWeights().WithWeights("ema", emaValues).Save(setsPath);
@@ -1828,7 +1830,9 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         // A set fully shared with the default weights adds no data entry, yet still loads.
         var sharedOnlyPath = P("named-sets-shared-only.skpt");
         Persistence.From(model).WithModel().WithWeights()
-            .WithWeights("shadow", modelData).Save(sharedOnlyPath);
+            .WithWeights("shadow", modelData.ToDictionary(
+                kv => kv.Key, kv => kv.Value.CopyToTensorData(), StringComparer.Ordinal))
+            .Save(sharedOnlyPath);
         var sharedEntries = ReadZipEntries(sharedOnlyPath);
         Assert.DoesNotContain("data/shadow.safetensors", sharedEntries.Keys);
         Assert.Equal(defaultOnlyEntries.Keys.OrderBy(n => n, StringComparer.Ordinal),

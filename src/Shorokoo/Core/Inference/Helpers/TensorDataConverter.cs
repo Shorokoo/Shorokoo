@@ -14,8 +14,9 @@ using static Shorokoo.Globals;
 namespace Shorokoo.Core.Inference.Helpers;
 
 /// <summary>
-/// Converts raw <see cref="TensorData"/> buffers (e.g., from MODEL_PARAM_DATA or CONSTANT
-/// attributes) into the ImmutableArray payloads used by <see cref="RuntimeTensor"/>.
+/// Converts raw <see cref="TensorData"/> and <see cref="TensorAttribute"/> buffers (e.g., from
+/// MODEL_PARAM_DATA or CONSTANT attributes) into the ImmutableArray payloads used by
+/// <see cref="RuntimeTensor"/>.
 /// </summary>
 internal static class TensorDataConverter
 {
@@ -25,9 +26,22 @@ internal static class TensorDataConverter
     /// <paramref name="maxElements"/>.
     /// </summary>
     public static RuntimeTensor ToRuntimeTensor(TensorData data, int maxElements, Variable? reference = null)
+        => ToRuntimeTensor(data.DType, data.Shape, maxElements, static d => d.CopyRawMemory(), data, reference);
+
+    /// <summary>
+    /// The same for a graph literal — an operator's <see cref="TensorAttribute"/>. The engine
+    /// reads the attribute's own bytes rather than materializing a tensor over them: an attribute
+    /// is immutable, so there is nothing to copy it for.
+    /// </summary>
+    public static RuntimeTensor ToRuntimeTensor(TensorAttribute data, int maxElements, Variable? reference = null)
+        => ToRuntimeTensor(
+            data.DType, data.Shape, maxElements,
+            static a => a.HasValues ? a.BytesArray : null, data, reference);
+
+    private static RuntimeTensor ToRuntimeTensor<TSource>(
+        DType dtype, Shape shape, int maxElements, Func<TSource, byte[]?> rawBytes, TSource source,
+        Variable? reference)
     {
-        var dtype = data.DType;
-        var shape = data.Shape;
         var count = (int)shape.Count;
 
         ImmutableArray<float>? fData = null;
@@ -36,10 +50,10 @@ internal static class TensorDataConverter
 
         // DType.String is variable-length UTF-8; the underlying ORT tensor has no flat
         // byte buffer to span over, so AccessRawMemory would throw. QEE shape inference
-        // for the string ops only needs dtype + shape — leave the data fields unset.
-        if (shape.Count <= maxElements && dtype != DType.String)
+        // for the string ops only needs dtype + shape — leave the data fields unset. A
+        // weights-elided attribute has no elements at all and is left the same way.
+        if (shape.Count <= maxElements && dtype != DType.String && rawBytes(source) is { } bytes)
         {
-            var bytes = data.CopyRawMemory();
             if (dtype == DType.Float32)
             {
                 var buf = new float[count];
@@ -216,7 +230,7 @@ internal static class TensorDataConverter
     /// a narrower-typed tensor retypes it, and a host-folded constant then violates its consumer's
     /// type constraint.</para>
     ///
-    /// <para><b>Float64 returns null on purpose.</b> <see cref="ToRuntimeTensor"/> narrows Float64
+    /// <para><b>Float64 returns null on purpose.</b> <see cref="ToRuntimeTensor(TensorData, int, Variable)"/> narrows Float64
     /// to <c>float</c> on the way in, so widening back would stamp <c>Float64</c> on values that
     /// are float32-rounded — and <c>1e300</c> would come back <c>Infinity</c>. A wrong value
     /// wearing the right type is worse than no value: returning null means "no concrete data", so

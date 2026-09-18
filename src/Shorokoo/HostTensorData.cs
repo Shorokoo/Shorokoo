@@ -81,6 +81,9 @@ namespace Shorokoo
         private static TensorStorage HostStorage(MaterializedValues materialized)
             => new(MemorySpace.Host, materialized.Invalidate);
 
+        /// <inheritdoc/>
+        internal override byte[]? OwnBytes => _bytes;
+
         /// <summary>Whether no runtime holds a copy of these bytes -- the seam a test needs to see
         /// that a release freed the materializations rather than merely forgetting the tensor.
         /// </summary>

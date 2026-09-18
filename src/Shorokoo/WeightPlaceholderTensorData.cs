@@ -3,22 +3,28 @@ using System;
 namespace Shorokoo
 {
     /// <summary>
-    /// Metadata-only stand-in for a stripped weight tensor: it carries the weight's
-    /// dtype and shape but allocates no element storage at all. The .skpt save path
-    /// (<see cref="CheckpointBuilder.Save"/>) swaps each weight parameter's tensor for
-    /// one of these before serializing the model definition — so stripping never
-    /// materializes a full-size zero buffer per weight — and the ONNX reader
-    /// reconstructs one when an initializer carries the values-elided marker
-    /// (<see cref="Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkMetaValuesElided"/>).
-    /// <see cref="Persistence.Load(string)"/> replaces every placeholder with the checkpoint's
-    /// real tensor before the model is returned; reading a placeholder's values is a
-    /// bug and fails loudly.
+    /// Metadata-only stand-in for a tensor nothing will read: it carries a dtype and a shape and
+    /// allocates no element storage at all, so a shape-driven pass can be handed one parameter's
+    /// worth of "this shape, this type" without a buffer per parameter.
+    ///
+    /// <para>What it is for is shape inference —
+    /// <see cref="Shorokoo.TrainingRig.RepresentativeInputFor"/> hands these to the
+    /// <see cref="Core.Inference.QuickExecutionEngine"/> for every input too large to be worth
+    /// materializing. Reading its values is a bug and fails loudly.</para>
+    ///
+    /// <para>A stripped weight in a model <i>description</i> is not one of these: it is a
+    /// values-elided <see cref="TensorAttribute"/> (<see cref="TensorAttribute.WithoutValues"/>),
+    /// which is what a description with no values in it is. This type is the runtime-value
+    /// counterpart, and moving one into an attribute gives that.</para>
     /// </summary>
     internal sealed class WeightPlaceholderTensorData : TensorData
     {
         internal WeightPlaceholderTensorData(Shape shape, DType dtype) : base(shape, dtype)
         {
         }
+
+        /// <inheritdoc/>
+        internal override bool HasValues => false;
 
         /// <inheritdoc/>
         public override Span<byte> AccessModifiableRawMemory()

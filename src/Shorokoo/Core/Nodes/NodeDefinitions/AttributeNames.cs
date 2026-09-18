@@ -323,7 +323,7 @@ public static class OnnxOpAttributeNames
     /// <summary>Initializer-level metadata marker ("true") recording that the tensor's
     /// values were deliberately elided — the initializer carries dims/dtype with an empty
     /// payload. Written for weights-stripped checkpoint model definitions; the reader
-    /// reconstructs a metadata-only <see cref="Shorokoo.WeightPlaceholderTensorData"/>
+    /// reconstructs a values-elided <see cref="Shorokoo.TensorAttribute"/>
     /// instead of materializing a zero buffer.</summary>
     public const string ShrkMetaValuesElided = "ValuesElided";
 

@@ -466,7 +466,7 @@ namespace Shorokoo
                         $"'{filePath}': parameter '{paramId}' maps to tensor '{tensorRef.Tensor}' in data " +
                         $"entry '{tensorRef.Data}', but that entry contains no such tensor.");
 
-                var placeholder = node.GetTensorData()
+                var placeholder = node.GetTensorAttribute()
                     ?? throw new InvalidDataException(
                         $"'{filePath}': parameter '{paramId}' in the model definition carries no tensor placeholder.");
                 if (placeholder.DType.ToIVarType() != loaded.DType.ToIVarType()
@@ -476,8 +476,12 @@ namespace Shorokoo
                         $"[{string.Join(",", loaded.Shape.Dims)}]) does not match parameter '{paramId}' " +
                         $"(dtype {placeholder.DType}, shape [{string.Join(",", placeholder.Shape.Dims)}]).");
 
+                // Moved, not copied. This is the big-bytes path -- a 165 M-parameter model is
+                // ~660 MB -- and the loaded tensor was parsed for this bind and nothing else, so
+                // handing its bytes to the attribute costs nothing and copying them would double
+                // the load's peak.
                 node.Attributes = node.Attributes.SetAttributes(
-                    (OnnxOpAttributeNames.ShrkAttrTensorData, (object?)loaded));
+                    (OnnxOpAttributeNames.ShrkAttrTensorData, (object?)loaded.MoveToAttribute()));
             }
 
             if (unboundRefs.Count > 0)
@@ -925,7 +929,7 @@ namespace Shorokoo
             var tensorRefs = new Dictionary<string, SkptTensorRef>(StringComparer.Ordinal);
             foreach (var node in weightNodes)
             {
-                var data = node.GetTensorData()!;
+                var data = node.GetTensorAttribute()!;
                 tensors.Add(new SafeTensor(node.IdentifierTemplate!, data,
                     SafeTensorLoader.DTypeToSafeTensorDType(data.DType), data.Shape.Dims));
                 tensorRefs[node.IdentifierTemplate!] = new SkptTensorRef
@@ -988,7 +992,7 @@ namespace Shorokoo
             var storedByContent = new Dictionary<string, (string DataKey, string Tensor)>(StringComparer.Ordinal);
             if (_extraSets.Count > 0)
                 foreach (var node in weightNodes)
-                    storedByContent.TryAdd(ContentKey(node.GetTensorData()!),
+                    storedByContent.TryAdd(ContentKey(node.GetTensorAttribute()!),
                         (SkptFileFormat.DefaultDataKey, node.IdentifierTemplate!));
 
             foreach (var (setName, values) in _extraSets)
@@ -1006,7 +1010,7 @@ namespace Shorokoo
                             "(the same parameters the default weights span).");
                     extraKeys.Remove(paramId);
 
-                    var modelData = node.GetTensorData()!;
+                    var modelData = node.GetTensorAttribute()!;
                     if (value.DType.ToIVarType() != modelData.DType.ToIVarType()
                         || !value.Shape.Dims.SequenceEqual(modelData.Shape.Dims))
                         throw new InvalidOperationException(
@@ -1127,6 +1131,12 @@ namespace Shorokoo
             return key;
         }
 
+        /// <summary>The same key for a graph literal — an attribute's bytes hash to what a load
+        /// would bind, so the two forms dedup against each other.</summary>
+        private static string ContentKey(TensorAttribute data)
+            => $"{data.DType}|{string.Join(",", data.Shape.Dims)}|"
+               + SkptFileFormat.Sha256Hex(data.Bytes);
+
         /// <summary>
         /// The model's weight parameters: every MODEL_PARAM_DATA node except the RNG identity
         /// parameter (which is model definition, not a weight, and stays embedded). Each must
@@ -1153,7 +1163,7 @@ namespace Shorokoo
                     throw new InvalidOperationException(
                         $"{operation}: two model parameters share the identifier " +
                         $"'{node.IdentifierTemplate}'; parameter identifiers must be unique to map tensors.");
-                if (node.GetTensorData() is null)
+                if (node.GetTensorAttribute() is null)
                     throw new InvalidOperationException(
                         $"{operation}: parameter '{node.IdentifierTemplate}' carries no tensor data; " +
                         "a concrete model must have every parameter materialized.");
@@ -1165,7 +1175,7 @@ namespace Shorokoo
 
         /// <summary>
         /// Returns a copy of the graph with each weight parameter's tensor replaced by a
-        /// dtype/shape-true <see cref="WeightPlaceholderTensorData"/> (the same
+        /// dtype/shape-true values-elided <see cref="TensorAttribute"/> (the same
         /// clone-and-swap <see cref="InternalComputationGraph.WithUpdatedStates"/> uses).
         /// The placeholders are metadata-only — no values array is ever allocated, so
         /// stripping adds no per-weight peak memory — and serialize as empty,
@@ -1182,11 +1192,11 @@ namespace Shorokoo
             var stripped = graph.Clone();
             foreach (var node in weightNodes)
             {
-                var data = node.GetTensorData()!;
+                var data = node.GetTensorAttribute()!;
                 var clonedNode = stripped.Nodes[indexByKey[node.Key]];
                 clonedNode.Attributes = clonedNode.Attributes.SetAttributes(
                     (OnnxOpAttributeNames.ShrkAttrTensorData,
-                     (object?)new WeightPlaceholderTensorData(data.Shape, data.DType)));
+                     (object?)TensorAttribute.WithoutValues(data.Shape, data.DType)));
             }
             return stripped;
         }

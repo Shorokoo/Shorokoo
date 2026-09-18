@@ -317,7 +317,7 @@ public class CSharpModelBuilderCoverageTests
     private static InternalComputationGraph BuildConstantOfShapeGraph()
     {
         long[] dims = [1];
-        var filled = OnnxOp.ConstantOfShape(Vector(2L, 3L), TensorData(DType.Float32, dims, 7.0f));
+        var filled = OnnxOp.ConstantOfShape(Vector(2L, 3L), TensorData(DType.Float32, dims, 7.0f).MoveToAttribute());
         return new InternalComputationGraph([], [filled]);
     }
 

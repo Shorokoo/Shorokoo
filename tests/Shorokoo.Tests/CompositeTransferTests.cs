@@ -200,31 +200,25 @@ public class CompositeTransferCoverageTests
     public void TestAnOperatorAttributeRefusesATensorBoundToAContext()
     {
         var bound = Sample(1f).TransferTo(new ComputeContext());
-        ImmutableList<NodeDefAttributeDef> defs = [new NodeDefAttributeDef
-            { AttributeName = "value", Type = AttributeType.Tensor, DefaultValue = null }];
 
-        var ex = Assert.Throws<ArgumentException>(() => OnnxProtoAttributes.FromCSharpVals(
-            new Dictionary<string, object?> { ["value"] = bound }, defs));
-        Assert.Contains("CopyTo(null)", ex.Message);
+        var ex = Assert.Throws<InvalidOperationException>(() => bound.MoveToAttribute());
+        Assert.Contains("Detach()", ex.Message);
 
         // And the detached form the message names goes through.
-        var detached = bound.CopyTo(null);
-        _ = OnnxProtoAttributes.FromCSharpVals(
-            new Dictionary<string, object?> { ["value"] = detached }, defs);
+        _ = bound.Detach().MoveToAttribute();
     }
 
     [Fact]
-    public void TestATensorAlreadyCapturedAsAnAttributeRefusesToBeBoundToAContext()
+    public void TestATensorCapturedAsAnAttributeIsSpentAndCanNoLongerBeBound()
     {
         var literal = TensorData([2L], (float[])[1f, 2f]);
-        _ = OnnxOp.Constant(value: literal);
+        var attribute = literal.MoveToAttribute();
         using var context = new ComputeContext();
 
-        Assert.Throws<InvalidOperationException>(() => literal.TransferTo(context));
-        Assert.Throws<InvalidOperationException>(() => literal.GiveAccessTo(context));
-        Assert.Same(ComputeContext.Host, literal.Context);
-        Assert.True(literal.OwnsMemory);
-        Assert.Equal([1f, 2f], Floats(literal));
+        Assert.True(literal.IsDisposed);
+        Assert.Throws<ObjectDisposedException>(() => literal.TransferTo(context));
+        Assert.Throws<ObjectDisposedException>(() => literal.GiveAccessTo(context));
+        Assert.Equal([1f, 2f], attribute.Elements<float>().ToArray());
     }
 
     [Fact]

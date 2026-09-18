@@ -22,7 +22,7 @@ internal sealed class ConstantOfShapeOp : QuickOp
     protected override RuntimeTensor[] Compute(RuntimeTensor?[] inputs, OnnxCSharpAttributes attrs, int maxDataElements)
     {
         var shapeInput = inputs[0];
-        var valueTensor = attrs.GetTensorVal(OnnxOpAttributeNames.AttrValue);
+        var valueTensor = attrs.GetAttributeVal(OnnxOpAttributeNames.AttrValue);
         var dtype = valueTensor?.DType ?? DType.Float32;
 
         Shape? outShape = null;
@@ -59,10 +59,10 @@ internal sealed class ConstantOfShapeOp : QuickOp
         return [rt];
     }
 
-    private static float ReadFloatFill(TensorData? valueTensor, DType dtype)
+    private static float ReadFloatFill(TensorAttribute? valueTensor, DType dtype)
     {
         if (valueTensor is null) return 0f;
-        var bytes = valueTensor.CopyRawMemory();
+        var bytes = valueTensor.Bytes;
         if (dtype == DType.Float32) return bytes.Length >= 4 ? MemoryMarshal.Cast<byte, float>(bytes)[0] : 0f;
         if (dtype == DType.Float64) return bytes.Length >= 8 ? (float)MemoryMarshal.Cast<byte, double>(bytes)[0] : 0f;
         if (dtype == DType.Float16) return bytes.Length >= 2 ? (float)MemoryMarshal.Cast<byte, Float16>(bytes)[0] : 0f;
@@ -70,10 +70,10 @@ internal sealed class ConstantOfShapeOp : QuickOp
         return 0f;
     }
 
-    private static long ReadLongFill(TensorData? valueTensor, DType dtype)
+    private static long ReadLongFill(TensorAttribute? valueTensor, DType dtype)
     {
         if (valueTensor is null) return 0L;
-        var bytes = valueTensor.CopyRawMemory();
+        var bytes = valueTensor.Bytes;
         if (dtype == DType.Int8)   return bytes.Length >= 1 ? MemoryMarshal.Cast<byte, sbyte>(bytes)[0] : 0L;
         if (dtype == DType.Int16)  return bytes.Length >= 2 ? MemoryMarshal.Cast<byte, short>(bytes)[0] : 0L;
         if (dtype == DType.Int32)  return bytes.Length >= 4 ? MemoryMarshal.Cast<byte, int>(bytes)[0] : 0L;
@@ -85,10 +85,10 @@ internal sealed class ConstantOfShapeOp : QuickOp
         return 0L;
     }
 
-    private static bool ReadBoolFill(TensorData? valueTensor)
+    private static bool ReadBoolFill(TensorAttribute? valueTensor)
     {
         if (valueTensor is null) return false;
-        var bytes = valueTensor.CopyRawMemory();
+        var bytes = valueTensor.Bytes;
         return bytes.Length >= 1 && bytes[0] != 0;
     }
 }

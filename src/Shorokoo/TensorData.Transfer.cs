@@ -128,15 +128,6 @@ namespace Shorokoo
                     + "could only be built where that context is. Detach() takes a copy in the "
                     + "framework's own host memory, and that copy can be moved.");
 
-            // Shape and dtype are all a stripped weight's stand-in carries, and reading its
-            // elements throws -- so ask for them and there would be nothing to move.
-            if (!HasValues)
-            {
-                var elided = TensorAttribute.WithoutValues(Shape, DType);
-                Dispose();
-                return elided;
-            }
-
             ThrowIfDisposed();
             var attribute = DType == DType.String
                 ? TensorAttribute.OverStrings(Shape, [.. StringElements()])

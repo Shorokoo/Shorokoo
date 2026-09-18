@@ -34,6 +34,26 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         public static InternalComputationGraph Process(
             InternalComputationGraph graph,
             IReadOnlyDictionary<ModelId, TensorData> paramValues)
+            // Detached first: the values belong to the caller, who goes on holding them -- a training
+            // rig keeps the very same tensors as its initial checkpoint -- so the graph takes a
+            // literal of its own rather than spending theirs. Per node, so a value whose parameter is
+            // not in this graph is never copied.
+            => Process(graph, paramValues.ContainsKey, id => paramValues[id].Detach().MoveToAttribute());
+
+        /// <summary>
+        /// The same against parameter <b>descriptions</b> rather than values: what a build binds when
+        /// it has no values yet (Shorokoo/Shorokoo#327), each parameter's slot carrying its declared
+        /// shape and dtype and — above the size a shape pass would read — no elements at all.
+        /// </summary>
+        public static InternalComputationGraph Process(
+            InternalComputationGraph graph,
+            IReadOnlyDictionary<ModelId, TensorAttribute> paramSlots)
+            => Process(graph, paramSlots.ContainsKey, id => paramSlots[id]);
+
+        private static InternalComputationGraph Process(
+            InternalComputationGraph graph,
+            Func<ModelId, bool> isSupplied,
+            Func<ModelId, TensorAttribute> attributeFor)
         {
             var workGraph = graph.Clone();
 
@@ -60,10 +80,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 // used; in practice this fallback only fires for an interchange import that omits
                 // it. The cheap dictionary lookup is tested first so the identifier parse runs only
                 // for a param actually absent from the supplied set (normally just the counter).
-                var paramValue = !paramValues.ContainsKey(modelId)
+                var paramValue = !isSupplied(modelId)
                                  && FastInjectRngDrawCounter.IsExecutionCounter(node.IdentifierTemplate)
-                    ? FastInjectRngDrawCounter.ExecutionCounterInitialValue()
-                    : paramValues[modelId];
+                    ? FastInjectRngDrawCounter.ExecutionCounterInitialValue().Detach().MoveToAttribute()
+                    : attributeFor(modelId);
                 var isTrainable = node.Attributes.GetBoolVal(OnnxOpAttributeNames.ShrkAttrIsTrainable) ?? false;
 
                 // Binding is the last point at which a value and the model that is to use it are
@@ -87,14 +107,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 node.Attributes = OnnxCSharpAttributes.FromCSharpVals(
                     new Dictionary<string, object?>
                     {
-                        // Detached first: the values belong to the caller, who goes on holding
-                        // them -- a training rig keeps the very same tensors as its initial
-                        // checkpoint -- so the graph takes a literal of its own rather than
-                        // spending theirs. A shape-and-dtype stand-in has nothing to copy and
-                        // becomes the values-elided attribute directly.
-                        [OnnxOpAttributeNames.ShrkAttrTensorData] = paramValue.HasValues
-                            ? paramValue.Detach().MoveToAttribute()
-                            : TensorAttribute.WithoutValues(paramValue.Shape, paramValue.DType),
+                        [OnnxOpAttributeNames.ShrkAttrTensorData] = paramValue,
                         [OnnxOpAttributeNames.ShrkAttrIsTrainable] = isTrainable,
                     },
                     modelParamDataAttrDefs);

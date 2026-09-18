@@ -257,8 +257,9 @@ public static class OnnxOpAttributeNames
     /// list, empty for a scalar), recording the shape the model was concretized at — whatever the
     /// input's size — so a concrete architecture is self-describing for training-graph shape inference
     /// without carrying separate sample inputs (never an inline tensor payload, and never the user's
-    /// values). The shape-inference read path re-materializes a representative tensor from these dims
-    /// plus the node's dtype (<see cref="Shorokoo.TrainingRig.RepresentativeInputFor"/>). In the native
+    /// values). The shape-inference read path rebuilds a representative input from these dims plus the
+    /// node's dtype (<see cref="Shorokoo.TrainingRig.RepresentativeInputFor"/>) — shape and dtype, with
+    /// zeros only while they are small enough to be read. In the native
     /// <c>.srk</c> dialect a MODEL_TENSOR_INPUT is serialized as a NodeProto, so this attribute
     /// round-trips on disk (making the saved arch self-describing); the vanilla ONNX export/compile
     /// path keeps the input as a graph input and carries the info in <c>metadata_props</c> instead

@@ -67,10 +67,12 @@ internal class ShapeInferenceInterpreter
         => Infer(graph, requiredKeys: null, sampleInputs);
 
     /// <summary>
-    /// <see cref="IData"/>-shaped overload: a graph whose inputs are not all tensors — one taking an
-    /// <c>OptionalTensor</c>, say — is inferred from the same exemplars its runtime would be fed.
+    /// <see cref="IRuntimeTensor"/>-shaped overload, for a caller with no values to give: a runtime
+    /// tensor states its shape and dtype and leaves its data null, so an input nothing will read is
+    /// described rather than materialized. This is also the shape a graph whose inputs are not all
+    /// tensors takes — one taking an <c>OptionalTensor</c>, say.
     /// </summary>
-    public ShapeInferenceResult Infer(InternalComputationGraph graph, params IData[] sampleInputs)
+    public ShapeInferenceResult Infer(InternalComputationGraph graph, params IRuntimeTensor[] sampleInputs)
         => Infer(graph, requiredKeys: null, sampleInputs);
 
     /// <summary>
@@ -89,21 +91,37 @@ internal class ShapeInferenceInterpreter
         InternalComputationGraph graph,
         IReadOnlyCollection<FastTensorKey>? requiredKeys,
         params TensorData[] sampleInputs)
-        => Infer(graph, requiredKeys, (IData[])sampleInputs);
+        => Infer(graph, requiredKeys, sampleInputs.Length,
+                 static d => (IRuntimeTensor)TensorDataConverter.ToRuntimeTensor(d, MaxSmallTensorElements),
+                 sampleInputs);
 
     /// <summary>
-    /// <see cref="IData"/>-shaped overload of
-    /// <see cref="Infer(InternalComputationGraph, IReadOnlyCollection{FastTensorKey}, TensorData[])"/>.
+    /// <see cref="IRuntimeTensor"/>-shaped overload of
+    /// <see cref="Infer(InternalComputationGraph, IReadOnlyCollection{FastTensorKey}, TensorData[])"/>,
+    /// binding each sample to its graph input as it stands — no value family in between, so a sample
+    /// that carries only a shape and a dtype stays that.
     /// </summary>
     public ShapeInferenceResult Infer(
         InternalComputationGraph graph,
         IReadOnlyCollection<FastTensorKey>? requiredKeys,
-        params IData[] sampleInputs)
+        params IRuntimeTensor[] sampleInputs)
+        => Infer(graph, requiredKeys, sampleInputs.Length, static rt => rt, sampleInputs);
+
+    /// <summary>
+    /// The shared body: bind the samples to the graph's inputs through <paramref name="toRuntime"/>,
+    /// run QEE over them, and resolve whatever it left missing through ORT.
+    /// </summary>
+    private ShapeInferenceResult Infer<TSample>(
+        InternalComputationGraph graph,
+        IReadOnlyCollection<FastTensorKey>? requiredKeys,
+        int sampleCount,
+        Func<TSample, IRuntimeTensor> toRuntime,
+        TSample[] sampleInputs)
     {
         var graphInputs = graph.Inputs;
-        if (sampleInputs.Length != graphInputs.Count)
+        if (sampleCount != graphInputs.Count)
             throw new ArgumentException(
-                $"Expected {graphInputs.Count} sample inputs but got {sampleInputs.Length}.");
+                $"Expected {graphInputs.Count} sample inputs but got {sampleCount}.");
 
         var tensorStore = new Dictionary<FastTensorKey, TensorShapeInfo>();
 
@@ -114,8 +132,11 @@ internal class ShapeInferenceInterpreter
         Dictionary<FastTensorKey, IRuntimeTensor> qeeStore;
         try
         {
+            var initial = new Dictionary<FastTensorKey, IRuntimeTensor>();
+            for (int i = 0; i < graphInputs.Count; i++)
+                initial[graphInputs[i]] = toRuntime(sampleInputs[i]);
             var qee = new QuickExecutionEngine { MaxDataElements = MaxSmallTensorElements };
-            qeeStore = qee.Run(graph, sampleInputs);
+            qeeStore = qee.Run(graph, initial);
         }
         catch
         {

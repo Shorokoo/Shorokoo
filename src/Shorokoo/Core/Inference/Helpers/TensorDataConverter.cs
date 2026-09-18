@@ -23,7 +23,9 @@ internal static class TensorDataConverter
     /// <summary>
     /// Returns a new runtime tensor populated from the given TensorData. Shape/dtype are
     /// always filled in; element data is filled in only when the element count is at most
-    /// <paramref name="maxElements"/>.
+    /// <paramref name="maxElements"/>. The read is unconditional below that count because a
+    /// tensor always has its elements — a value known only by shape and dtype is an attribute
+    /// (<see cref="TensorAttribute.WithoutValues"/>), which the overload below reads.
     /// </summary>
     public static RuntimeTensor ToRuntimeTensor(TensorData data, int maxElements, Variable? reference = null)
         => ToRuntimeTensor(data.DType, data.Shape, maxElements, static d => d.CopyRawMemory(), data, reference);
@@ -51,7 +53,8 @@ internal static class TensorDataConverter
         // DType.String is variable-length UTF-8; the underlying ORT tensor has no flat
         // byte buffer to span over, so AccessRawMemory would throw. QEE shape inference
         // for the string ops only needs dtype + shape — leave the data fields unset. A
-        // weights-elided attribute has no elements at all and is left the same way.
+        // values-elided attribute has no elements at all and is left the same way, whatever
+        // the threshold: that is how an input nothing will read reaches a shape pass.
         if (shape.Count <= maxElements && dtype != DType.String && rawBytes(source) is { } bytes)
         {
             if (dtype == DType.Float32)

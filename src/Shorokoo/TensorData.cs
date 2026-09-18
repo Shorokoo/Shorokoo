@@ -317,12 +317,6 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// Whether this tensor has elements at all. False only for the shape-and-dtype stand-in a
-        /// parameter's slot holds while its weights are elided, whose every accessor throws.
-        /// </summary>
-        internal virtual bool HasValues => true;
-
-        /// <summary>
         /// This tensor's own byte array where it has one, so <see cref="MoveToAttribute"/> can take
         /// it rather than copy it. Null when the elements are a runtime value's or are strings, in
         /// which case only a copy can get them out.

@@ -608,25 +608,18 @@ public class TensorDataApiCoverageTests
     [Fact]
     public void TestAValuesElidedAttributeCarriesShapeAndDTypeAndRefusesEveryRead()
     {
-        TensorAttribute[] elided =
-        [
-            TensorAttribute.WithoutValues(new Shape([2L, 3L]), DType.Float32),
-            new WeightPlaceholderTensorData(new Shape([2L, 3L]), DType.Float32).MoveToAttribute(),
-        ];
+        var attribute = TensorAttribute.WithoutValues(new Shape([2L, 3L]), DType.Float32);
 
-        foreach (var attribute in elided)
-        {
-            Assert.False(attribute.HasValues);
-            Assert.Equal(DType.Float32, attribute.DType);
-            Assert.Equal((long[])[2L, 3L], attribute.Shape.Dims);
-            Assert.Contains("elided", Assert.Throws<InvalidOperationException>(
-                () => { _ = attribute.Bytes.Length; }).Message);
-            Assert.Contains("elided", Assert.Throws<InvalidOperationException>(
-                () => { _ = attribute.Elements<float>().Length; }).Message);
-            Assert.Contains("elided", Assert.Throws<InvalidOperationException>(
-                () => { _ = attribute.Values; }).Message);
-            Assert.Throws<InvalidOperationException>(() => attribute.CopyToTensorData());
-        }
+        Assert.False(attribute.HasValues);
+        Assert.Equal(DType.Float32, attribute.DType);
+        Assert.Equal((long[])[2L, 3L], attribute.Shape.Dims);
+        Assert.Contains("elided", Assert.Throws<InvalidOperationException>(
+            () => { _ = attribute.Bytes.Length; }).Message);
+        Assert.Contains("elided", Assert.Throws<InvalidOperationException>(
+            () => { _ = attribute.Elements<float>().Length; }).Message);
+        Assert.Contains("elided", Assert.Throws<InvalidOperationException>(
+            () => { _ = attribute.Values; }).Message);
+        Assert.Throws<InvalidOperationException>(() => attribute.CopyToTensorData());
     }
 
     [Fact]

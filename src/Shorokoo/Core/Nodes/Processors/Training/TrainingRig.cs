@@ -8,7 +8,9 @@ using Shorokoo.Core.Nodes.AutoDiff;
 using Shorokoo.Core.Training;
 using Shorokoo.Core.Nodes.Processors.Training;
 using Shorokoo.Core.Utils;
+using Shorokoo.Core.Inference;
 using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Inference.Helpers;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -295,15 +297,15 @@ namespace Shorokoo
         /// representative model inputs, and the target at the predicted shape. Shared by the pre- and
         /// post-optimization graphs, so a diagnostic can synthesize a feed and run either against a real
         /// session on exactly the shapes the pass was judged on. Shapes only — the exemplars behind
-        /// them may be value-less placeholders.
+        /// them may carry no values at all.
         ///
         /// <para>An input that is not a tensor — a model's <c>OptionalTensor</c> input, say — has no
         /// shape to report, so this view refuses such a rig rather than inventing one; read
         /// <see cref="OptimizationInputs"/>, which carries the exemplars themselves.</para>
         /// </summary>
         internal (Shape Shape, DType DType)[] OptimizationInputShapes =>
-            [.. OptimizationInputs.Select(d => d is TensorData t
-                ? (t.Shape, t.DType)
+            [.. OptimizationInputs.Select(d => d is RuntimeTensor { Shape: { } shape } t
+                ? (shape, t.DType)
                 : throw new InvalidOperationException(
                     $"Training-step input of structure '{d.GetType().Name}' has no shape; read " +
                     $"{nameof(OptimizationInputs)} for the exemplars themselves."))];
@@ -313,7 +315,7 @@ namespace Shorokoo
         /// <see cref="TrainingStepPureGraph"/> input, as the shape inference behind
         /// <see cref="PreOptimizationEval"/> and <see cref="OptimizationResult"/> saw them.
         /// </summary>
-        internal IData[] OptimizationInputs { get; private set; } = [];
+        internal IRuntimeTensor[] OptimizationInputs { get; private set; } = [];
 
         /// <summary>Struct definition for model state (empty for stateless models). Internal
         /// build/persistence machinery — see <see cref="TrainableParamStructDef"/>.</summary>
@@ -446,11 +448,11 @@ namespace Shorokoo
         internal int UpdatedOptimizerStateFieldCount { get; private set; }
 
         /// <summary>
-        /// Initial trainable parameter values — <b>or</b>, on a deferred build, shape-and-dtype
-        /// stand-ins for them (Shorokoo/Shorokoo#327). Read the field directly only where shape and
-        /// dtype are all that is wanted (the optimization pass, a checkpoint's shape check); read
+        /// Initial trainable parameter values — <b>empty</b> on a deferred build, which has none yet
+        /// (Shorokoo/Shorokoo#327) and describes its fields through
+        /// <see cref="DeferredInitialization.ParamSlots"/> instead. Read
         /// <see cref="InitialParamFields"/> to get values, which runs the initializers if a deferred
-        /// build has not yet.
+        /// build has not yet; read the field directly only where an empty one is the right answer.
         /// </summary>
         private Dictionary<string, IData> _initialParamFields = null!;
 
@@ -486,13 +488,15 @@ namespace Shorokoo
             ComputeContext Context,
             RngConfig? RngConfig,
             ModelId[] TrainableModelIds,
-            ModelId[] StateModelIds);
+            ModelId[] StateModelIds,
+            IReadOnlyDictionary<string, TensorAttribute> ParamSlots,
+            IReadOnlyDictionary<string, TensorAttribute> StateSlots);
 
         /// <summary>
         /// The rig's initial trainable-parameter <b>values</b>, running the deferred initializers on
         /// first use. Everything that hands initial values to a caller goes through here; everything
-        /// that only needs their shape and dtype reads <see cref="_initialParamFields"/> directly, and
-        /// so never triggers the run (Shorokoo/Shorokoo#327).
+        /// that only needs their shape and dtype reads the field descriptions instead, and so never
+        /// triggers the run (Shorokoo/Shorokoo#327).
         /// </summary>
         private Dictionary<string, IData> InitialParamFields
         {
@@ -557,13 +561,13 @@ namespace Shorokoo
                 var optStateFields = OptimizerStateDef.Fields.Length > 0
                     ? ComputeInitialOptStateFields(
                         ResolveStateInitHyperValues(null, throwOnMissingConsumed: false),
-                        deferred.Context, paramFields)
+                        deferred.Context, NameValueOf(paramFields))
                     : _initialOptStateFields;
 
                 // Everything is built into locals and published before the flag is cleared, because
                 // the flag is what every other thread reads to decide the values are ready. Clearing
-                // it first — with the dictionaries still holding stand-ins — handed a concurrent
-                // caller a values-elided placeholder, whose every read throws.
+                // it first — with the dictionaries still empty — handed a concurrent caller a value
+                // family with nothing in it.
                 _initialParamFields = paramFields;
                 _initialStateFields = stateFields;
                 _initialOptStateFields = optStateFields;
@@ -1044,16 +1048,17 @@ namespace Shorokoo
         /// representative-input attributes (in graph-input order) — the derivation-path counterpart of
         /// <see cref="WriteRepresentativeInputs(InternalComputationGraph, NamedModelParam[])"/>. Reads
         /// each node's <see cref="OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape"/> dims plus its
-        /// dtype and re-materializes via <see cref="RepresentativeInputFor"/>, which applies the QEE read
-        /// threshold (real zeros ≤ 1024 elements, a shape+dtype-only placeholder above it, so no large
-        /// buffer is materialized); a node without the attribute fails loud (the arch was not built
-        /// self-describing). Each resulting tensor is fed straight to
-        /// <see cref="ShapeInferenceInterpreter"/>.
+        /// dtype and describes each input via <see cref="RepresentativeInputFor"/> (real zeros while the
+        /// values are small enough to be read, shape and dtype alone above that, so no large buffer is
+        /// materialized); a node without the attribute fails loud (the arch was not built
+        /// self-describing). Each description becomes the runtime tensor
+        /// <see cref="ShapeInferenceInterpreter"/> is fed directly — a values-less one simply arrives
+        /// with its data null, which is what a shape-driven pass wants anyway.
         /// </summary>
-        private static IData[] ReadRepresentativeInputs(InternalComputationGraph concreteArch)
+        private static IRuntimeTensor[] ReadRepresentativeInputs(InternalComputationGraph concreteArch)
         {
             var producerByOutput = BuildProducerByOutputMap(concreteArch);
-            var inputs = new IData[concreteArch.Inputs.Count];
+            var inputs = new IRuntimeTensor[concreteArch.Inputs.Count];
             for (int i = 0; i < concreteArch.Inputs.Count; i++)
             {
                 if (!producerByOutput.TryGetValue(concreteArch.Inputs[i], out var node)
@@ -1076,47 +1081,62 @@ namespace Shorokoo
 
                 inputs[i] = node.OpCode == InternalOpCodes.MODEL_OPTIONAL_INPUT
                     ? (dims.AsSpan().SequenceEqual(AbsentOptionalShape)
-                        ? OptionalTensorData.None(dtype)
-                        : OptionalTensorData.Some(RepresentativeInputFor(new Shape(dims), dtype)))
-                    : RepresentativeInputFor(new Shape(dims), dtype);
+                        ? new RuntimeOptionalTensor { DType = dtype, HasValue = false }
+                        : new RuntimeOptionalTensor
+                        {
+                            DType = dtype,
+                            HasValue = true,
+                            ValueTensor = RepresentativeRuntimeInputFor(new Shape(dims), dtype),
+                        })
+                    : RepresentativeRuntimeInputFor(new Shape(dims), dtype);
             }
             return inputs;
         }
 
         /// <summary>
-        /// A zero-filled representative tensor for shape inference: a real zero payload when the element
-        /// count is within the consuming shape-inference engine's small-tensor threshold
+        /// What a shape-driven pass is handed in place of a value it will not read: shape and dtype
+        /// always, plus a real zero payload while the element count is within the consuming engine's
+        /// small-tensor threshold
         /// (<see cref="Shorokoo.Core.AutoDiffCheckpointing.ShapeInferenceInterpreter.MaxSmallTensorElements"/>),
-        /// else a shape+dtype-only placeholder (no allocation). Holds no sample-input values.
+        /// above which the description carries no elements at all and so costs no allocation. Holds no
+        /// sample-input values either way — the zeros are zeros.
         ///
-        /// <para>The threshold MUST match the one <see cref="ShapeInferenceInterpreter"/> hands its
-        /// <see cref="Shorokoo.Core.Inference.QuickExecutionEngine"/> (<c>MaxSmallTensorElements</c>),
-        /// not QEE's own <c>DefaultMaxDataElements</c>: a placeholder is legal input to QEE only when
-        /// its element count is <b>strictly above</b> the threshold QEE reads payloads at — otherwise
-        /// <see cref="Shorokoo.Core.Inference.Helpers.TensorDataConverter.ToRuntimeTensor(TensorData, int, Variable)"/> tries to read
-        /// the placeholder's elided memory and throws, defeating the whole QEE shape-inference pass. Below
-        /// the threshold we must therefore carry a real (zero) payload, exactly as the retired
-        /// <c>ZeroExemplar</c> did for every size.</para>
+        /// <para>The threshold decides only how faithful the description is, never whether it is legal:
+        /// a values-elided attribute is readable as "shape and dtype, no values" at any threshold, so
+        /// this one and the engines' read thresholds no longer have to agree.</para>
         /// </summary>
-        internal static TensorData RepresentativeInputFor(Shape shape, DType dtype)
+        internal static TensorAttribute RepresentativeInputFor(Shape shape, DType dtype)
         {
             if (shape.Count > Shorokoo.Core.AutoDiffCheckpointing.ShapeInferenceInterpreter.MaxSmallTensorElements)
-                return new WeightPlaceholderTensorData(shape, dtype);
+                return TensorAttribute.WithoutValues(shape, dtype);
             var bytesPerElement = dtype.EncodingBitCount / 8;
-            return TensorData.CreateFromRawBytes(shape, dtype, new byte[shape.Count * bytesPerElement]);
+            return TensorAttribute.OverBytes(shape, dtype, new byte[shape.Count * bytesPerElement]);
         }
+
+        /// <summary>
+        /// <see cref="RepresentativeInputFor"/> as the shape-inference engines take it: a runtime
+        /// tensor stating the shape and dtype, carrying the zeros where there are any and leaving its
+        /// data null where there are not.
+        /// </summary>
+        internal static RuntimeTensor RepresentativeRuntimeInputFor(Shape shape, DType dtype)
+            => TensorDataConverter.ToRuntimeTensor(
+                RepresentativeInputFor(shape, dtype),
+                Shorokoo.Core.AutoDiffCheckpointing.ShapeInferenceInterpreter.MaxSmallTensorElements);
 
         /// <summary>
         /// The zero-element stand-in for a target input the loss never reads (Shorokoo/Shorokoo#331),
         /// at the loss's declared target dtype and — where it declares one — rank, so the dead slot is
         /// fed something of the shape the graph expects to see rather than merely something typed.
         /// Nothing reads its contents, so it carries no elements and costs no allocation worth naming.
+        /// It is fed to a real run, not to a shape pass, so it is an actual tensor.
         /// </summary>
         private static TensorData IgnoredTargetPlaceholder(DType dtype, int? rank)
         {
             long[] dims = new long[rank is int r && r > 1 ? r : 1];
             for (var i = 1; i < dims.Length; i++) dims[i] = 1L;
-            return RepresentativeInputFor(new Shape(dims), dtype);
+            var shape = new Shape(dims);
+            return TensorData.CreateFromRawBytes(
+                shape, dtype, new byte[shape.Count * (dtype.EncodingBitCount / 8)]);
         }
 
         // ───────────────────── Two-layer rig: immutable derivations (§5.8.5) ─────────────────────
@@ -1306,9 +1326,18 @@ namespace Shorokoo
             AssertStructDefCompatible(checkpoint.TrainableParams.Definition, TrainableParamStructDef, "trainable-parameter");
             AssertStructDefCompatible(checkpoint.ModelState.Definition, ModelStateDef, "model-state");
             AssertStructDefCompatible(checkpoint.OptimizerState.Definition, OptimizerStateDef, "optimizer-state");
-            AssertValuesCompatible(checkpoint.TrainableParams, _initialParamFields, "trainable-parameter");
-            AssertValuesCompatible(checkpoint.ModelState, _initialStateFields, "model-state");
-            AssertValuesCompatible(checkpoint.OptimizerState, _initialOptStateFields, "optimizer-state");
+            // Read once: a deferred build describes its parameter and state fields through the
+            // stand-ins it was built with, and a materialized one through the values themselves.
+            var deferred = Volatile.Read(ref _deferredInit);
+            AssertValuesCompatible(
+                checkpoint.TrainableParams,
+                deferred is null ? Described(_initialParamFields) : Described(deferred.ParamSlots),
+                "trainable-parameter");
+            AssertValuesCompatible(
+                checkpoint.ModelState,
+                deferred is null ? Described(_initialStateFields) : Described(deferred.StateSlots),
+                "model-state");
+            AssertValuesCompatible(checkpoint.OptimizerState, Described(_initialOptStateFields), "optimizer-state");
             // Rebuilt against THIS rig's defs, not carried over: the checks above establish the two
             // agree field for field, but a checkpoint read straight from a file carries a def
             // reconstructed from that file, whose field ORDER is the file's. Everything that indexes
@@ -1366,21 +1395,31 @@ namespace Shorokoo
         /// checkpoint from a model of another width matches def-for-def and is adopted, to surface later
         /// as a shape-inference error inside the runtime.</summary>
         private static void AssertValuesCompatible(
-            TensorDataStruct actual, Dictionary<string, IData> expected, string kind)
+            TensorDataStruct actual, IEnumerable<(string Name, Shape Shape, DType DType)> expected, string kind)
         {
-            foreach (var (name, expectedField) in expected)
+            foreach (var (name, shape, dtype) in expected)
             {
-                if (expectedField is not TensorData e) continue;
                 if (!actual.Fields.TryGetValue(name, out var actualField) || actualField is not TensorData a) continue;
-                if (a.DType != e.DType)
+                if (a.DType != dtype)
                     throw new ArgumentException(
-                        $"Checkpoint's {kind} '{name}' is {a.DType}, but this rig's is {e.DType}.");
-                if (a.Shape.Dims.SequenceEqual(e.Shape.Dims)) continue;
+                        $"Checkpoint's {kind} '{name}' is {a.DType}, but this rig's is {dtype}.");
+                if (a.Shape.Dims.SequenceEqual(shape.Dims)) continue;
                 throw new ArgumentException(
                     $"Checkpoint's {kind} '{name}' is shaped [{string.Join(",", a.Shape.Dims)}], but this rig's "
-                    + $"is [{string.Join(",", e.Shape.Dims)}].");
+                    + $"is [{string.Join(",", shape.Dims)}].");
             }
         }
+
+        /// <summary>Shape and dtype per field of a value family that has its values.</summary>
+        private static IEnumerable<(string Name, Shape Shape, DType DType)> Described(
+            Dictionary<string, IData> fields)
+            => fields.Where(kv => kv.Value is TensorData)
+                     .Select(kv => (kv.Key, ((TensorData)kv.Value).Shape, ((TensorData)kv.Value).DType));
+
+        /// <summary>Shape and dtype per field of a family a deferred build has only stand-ins for.</summary>
+        private static IEnumerable<(string Name, Shape Shape, DType DType)> Described(
+            IReadOnlyDictionary<string, TensorAttribute> slots)
+            => slots.Select(kv => (kv.Key, kv.Value.Shape, kv.Value.DType));
 
         /// <summary>The rig's initial trainable-parameter values, as a struct (for load-time defaults).</summary>
         internal TensorDataStruct InitialTrainableStruct => new(TrainableParamStructDef, InitialParamFields);
@@ -3149,7 +3188,7 @@ namespace Shorokoo
             var optState = OptimizerStateDef.Fields.Length > 0
                 ? ComputeInitialOptStateFields(
                     ResolveStateInitHyperValues(hyperparameters, throwOnMissingConsumed: true),
-                    MergeContext, InitialParamFields)
+                    MergeContext, NameValueOf(InitialParamFields))
                 : InitialOptStateFields;
             return new TrainingCheckpoint
             {
@@ -3202,19 +3241,37 @@ namespace Shorokoo
             return values;
         }
 
+        /// <summary>The lookup <see cref="ComputeInitialOptStateFields"/> takes over a value family
+        /// whose values are in hand.</summary>
+        private static Func<string, TensorData> NameValueOf(Dictionary<string, IData> fields)
+            => name => (TensorData)fields[name];
+
+        /// <summary>
+        /// The same lookup over a family a deferred build has only descriptions for: zeros of the
+        /// field's declared shape, which is what a shape-seeding run of the state initializers needs.
+        /// One parameter's worth at a time, and dropped as soon as the run returns.
+        /// </summary>
+        private static Func<string, TensorData> ZerosOf(Dictionary<string, TensorAttribute> slots)
+            => name =>
+            {
+                var slot = slots[name];
+                return TensorData.CreateFromRawBytes(
+                    slot.Shape, slot.DType, new byte[slot.Shape.Count * (slot.DType.EncodingBitCount / 8)]);
+            };
+
         /// <summary>
         /// Runs the optimizer's split-off state-init graph once per trainable parameter, binding its
         /// hyperparameter inputs to <paramref name="hyperSeeds"/> (in optimizer order), the parameter's
-        /// value from <paramref name="paramValues"/>, and a zero gradient; returns the initial
+        /// value from <paramref name="paramValueFor"/>, and a zero gradient; returns the initial
         /// optimizer-state field values.
         ///
-        /// <para>The parameter values are passed in rather than read off the rig because a deferred
+        /// <para>The parameter values come from a lookup rather than off the rig because a deferred
         /// build has none yet (Shorokoo/Shorokoo#327) and must seed shapes without running the
-        /// initializers: it passes its stand-ins, whose elided payload is substituted for zeros here,
-        /// and <see cref="EnsureInitialValues"/> recomputes these seeds from the real values later.</para>
+        /// initializers: it answers with zeros of the field's declared shape, and
+        /// <see cref="EnsureInitialValues"/> recomputes these seeds from the real values later.</para>
         /// </summary>
         private Dictionary<string, IData> ComputeInitialOptStateFields(
-            TensorData[] hyperSeeds, ComputeContext ctx, IReadOnlyDictionary<string, IData> paramValues)
+            TensorData[] hyperSeeds, ComputeContext ctx, Func<string, TensorData> paramValueFor)
         {
             var fields = new Dictionary<string, IData>();
             var stateInitGraph = _optimizerStateInitGraph
@@ -3223,13 +3280,8 @@ namespace Shorokoo
 
             for (var paramIdx = 0; paramIdx < TrainableParamStructDef.Fields.Length; paramIdx++)
             {
-                var paramData = (TensorData)paramValues[TrainableParamStructDef.Fields[paramIdx].Name];
+                var paramData = paramValueFor(TrainableParamStructDef.Fields[paramIdx].Name);
                 var bytesPerElement = paramData.DType.EncodingBitCount / 8;
-                // A stand-in carries no payload to run an initializer over; zeros of its shape are what
-                // a shape-seeding run needs, and the real values arrive with EnsureInitialValues.
-                if (paramData is WeightPlaceholderTensorData)
-                    paramData = TensorData.CreateFromRawBytes(
-                        paramData.Shape, paramData.DType, new byte[paramData.Shape.Count * bytesPerElement]);
                 var zeroGrad = TensorData.CreateFromRawBytes(
                     paramData.Shape, paramData.DType, new byte[paramData.Shape.Count * bytesPerElement]);
 
@@ -3618,8 +3670,8 @@ namespace Shorokoo
 
             // The model inputs for shape inference are read off the concrete arch's own
             // representative-input attributes (recorded once at BuildInitialRig) — no separate
-            // sample-input field. Zero-filled shapes for small inputs; shape+dtype-only placeholders
-            // for large ones (QEE keeps those shape-only anyway), so no big buffer is materialized.
+            // sample-input field. Zero-filled shapes for small inputs; shape and dtype alone for
+            // large ones (QEE keeps those shape-only anyway), so no big buffer is materialized.
             var modelInputExemplars = ReadRepresentativeInputs(concreteArch);
 
             // Step 1: walk concreteArch's MODEL_PARAM nodes in linear order to capture
@@ -3630,7 +3682,7 @@ namespace Shorokoo
             // ModelId → TensorData; reindex by our captured order for alignment.
             var trainableModelIds = new List<ModelId>();
             var stateModelIds = new List<ModelId>();
-            var standInById = new Dictionary<ModelId, TensorData>();
+            var standInById = new Dictionary<ModelId, TensorAttribute>();
             var canDefer = deferInitialization;
             foreach (var node in concreteArch.Nodes)
             {
@@ -3672,7 +3724,7 @@ namespace Shorokoo
             // FastInitializeModelParams keys init noise only when BOTH rngConfig and paramInfos
             // are non-null. Without the infos the rig would silently fall back to unkeyed
             // seeded init, ignoring the config's master seed / algorithm for the weights.
-            IReadOnlyDictionary<ModelId, TensorData> paramValuesById;
+            IReadOnlyDictionary<ModelId, TensorData>? paramValuesById = null;
             if (canDefer)
             {
                 // The run itself is what is deferred, not merely its bookkeeping: nothing below reads
@@ -3681,9 +3733,6 @@ namespace Shorokoo
                 // every value it produces — is left for EnsureInitialValues to run if anything ever
                 // asks (Shorokoo/Shorokoo#327).
                 Stage("DeferModelParamInitialization");
-                paramValuesById = standInById;
-                _deferredInit = new DeferredInitialization(
-                    concreteArch, ctx, rngConfig, [.. trainableModelIds], [.. stateModelIds]);
             }
             else
             {
@@ -3694,13 +3743,42 @@ namespace Shorokoo
                 _deferredInit = null;
             }
 
+            // Shape and dtype of every trainable-parameter and model-state field — read off the value
+            // where the initializers ran, and taken from the field's stand-in description where they
+            // did not. Everything below that wants only a field's description reads these, so a
+            // deferred build answers with no value in hand and no buffer per parameter.
+            var paramSlots = new Dictionary<string, TensorAttribute>(StringComparer.Ordinal);
+            var stateSlots = new Dictionary<string, TensorAttribute>(StringComparer.Ordinal);
             _initialParamFields = new Dictionary<string, IData>();
-            for (var i = 0; i < TrainableParamStructDef.Fields.Length; i++)
-                _initialParamFields[TrainableParamStructDef.Fields[i].Name] = paramValuesById[trainableModelIds[i]];
-
             _initialStateFields = new Dictionary<string, IData>();
-            for (var i = 0; i < ModelStateDef.Fields.Length; i++)
-                _initialStateFields[ModelStateDef.Fields[i].Name] = paramValuesById[stateModelIds[i]];
+            FileFields(TrainableParamStructDef, trainableModelIds, _initialParamFields, paramSlots);
+            FileFields(ModelStateDef, stateModelIds, _initialStateFields, stateSlots);
+
+            void FileFields(
+                TensorStructDef def, List<ModelId> ids,
+                Dictionary<string, IData> fields, Dictionary<string, TensorAttribute> slots)
+            {
+                for (var i = 0; i < def.Fields.Length; i++)
+                {
+                    var name = def.Fields[i].Name;
+                    if (paramValuesById is { } values)
+                    {
+                        var value = values[ids[i]];
+                        fields[name] = value;
+                        slots[name] = TensorAttribute.WithoutValues(value.Shape, value.DType);
+                    }
+                    else
+                    {
+                        // No value to file: the stand-in IS the field until EnsureInitialValues runs.
+                        slots[name] = standInById[ids[i]];
+                    }
+                }
+            }
+
+            if (paramValuesById is null)
+                _deferredInit = new DeferredInitialization(
+                    concreteArch, ctx, rngConfig, [.. trainableModelIds], [.. stateModelIds],
+                    paramSlots, stateSlots);
 
             // Initial optimizer state: run the optimizer's state initializers once per trainable
             // parameter, binding the optimizer's hyperparameter inputs to their value at the initial
@@ -3733,7 +3811,8 @@ namespace Shorokoo
                 // the no-arg CreateInitialCheckpoint fails loud on the _stateInitNeedsRuntimeHypers flag.
                 Stage("InitializeOptimizerState");
                 _initialOptStateFields = ComputeInitialOptStateFields(
-                    ResolveStateInitHyperValues(null, throwOnMissingConsumed: false), ctx, _initialParamFields);
+                    ResolveStateInitHyperValues(null, throwOnMissingConsumed: false), ctx,
+                    paramValuesById is not null ? NameValueOf(_initialParamFields) : ZerosOf(paramSlots));
             }
 
             // Step 2: derive the target tensor's shape from the model's prediction. Reuse
@@ -3742,7 +3821,9 @@ namespace Shorokoo
             // second initializer-execution pass.
             Stage("InferModelShapes");
             var shapeInferencer = new ShapeInferenceInterpreter(ctx);
-            var concreteModel = Shorokoo.Core.Nodes.Processors.Fast.FastApplyModelParamValues.Process(concreteArch, paramValuesById);
+            var concreteModel = paramValuesById is not null
+                ? Shorokoo.Core.Nodes.Processors.Fast.FastApplyModelParamValues.Process(concreteArch, paramValuesById)
+                : Shorokoo.Core.Nodes.Processors.Fast.FastApplyModelParamValues.Process(concreteArch, standInById);
             var modelShapeInfo = shapeInferencer.Infer(concreteModel, modelInputExemplars);
             var modelOutputInfo = modelShapeInfo.GetTensorInfo(concreteModel.Outputs[0])
                 ?? throw new InvalidOperationException(
@@ -3770,40 +3851,52 @@ namespace Shorokoo
                     $"input field), got {modelInputExemplars.Length}.",
                     nameof(modelInputExemplars));
 
-            var allInputs = new IData[graph.Inputs.Count];
+            const int readThreshold = ShapeInferenceInterpreter.MaxSmallTensorElements;
+            var allInputs = new IRuntimeTensor[graph.Inputs.Count];
             var idx = 0;
 
+            // Parameter and model-state fields: their values where the initializers ran, and the
+            // field's description where they did not — which is all a shape-driven pass reads of a
+            // parameter too large to be worth materializing, either way.
             foreach (var f in TrainableParamStructDef.Fields)
-                allInputs[idx++] = (TensorData)_initialParamFields[f.Name];
+                allInputs[idx++] = FieldExemplar(_initialParamFields, paramSlots, f.Name);
             foreach (var f in ModelStateDef.Fields)
-                allInputs[idx++] = (TensorData)_initialStateFields[f.Name];
+                allInputs[idx++] = FieldExemplar(_initialStateFields, stateSlots, f.Name);
             foreach (var f in OptimizerStateDef.Fields)
-                allInputs[idx++] = (TensorData)_initialOptStateFields[f.Name];
+                allInputs[idx++] = TensorDataConverter.ToRuntimeInput(_initialOptStateFields[f.Name], readThreshold);
 
             // Schedule-less runtime hyperparameter fields: seed shape inference / optimization with
             // their default (initial) scalar values. At run time these are supplied per step.
             foreach (var f in HyperparameterStructDef.Fields)
-                allInputs[idx++] = (TensorData)_initialHyperparamFields[f.Name];
+                allInputs[idx++] = TensorDataConverter.ToRuntimeInput(_initialHyperparamFields[f.Name], readThreshold);
 
             // Counter-input fields (int64 scalars): seed shape inference at the initial counters (0);
             // the scheduler math downstream computes the hyperparameter values from them. At run time
             // each is fed the checkpoint's corresponding counter.
             foreach (var _ in _counterInputNames)
-                allInputs[idx++] = (TensorData)Shorokoo.Globals.TensorData(Array.Empty<long>(), 0L);
+                allInputs[idx++] = TensorDataConverter.ToRuntimeTensor(
+                    (TensorData)Shorokoo.Globals.TensorData(Array.Empty<long>(), 0L), readThreshold);
 
-            // Model-input fields: one zero-filled shape exemplar per model input, in the model
-            // graph's input order — shape inference reads only their shapes.
+            // Model-input fields: one shape exemplar per model input, in the model graph's input
+            // order — shape inference reads only their shapes.
             foreach (var exemplar in modelInputExemplars)
                 allInputs[idx++] = exemplar;
 
             // Remaining inputs are target fields (typically one Tensor target for L2/CE losses).
-            // Synthesize zero tensors with the predicted output shape.
-            // Through RepresentativeInputFor, so a large target is a shape-only placeholder rather
-            // than a real zero buffer — the same threshold the model-input exemplars use. These
-            // exemplars outlive the pass on the rig (OptimizationInputs), so a multi-megabyte
-            // target would otherwise stay allocated for as long as the rig does.
+            // Through RepresentativeRuntimeInputFor, so a large target states its shape and dtype
+            // rather than carrying a real zero buffer — the same threshold the model-input exemplars
+            // use. These exemplars outlive the pass on the rig (OptimizationInputs), so a
+            // multi-megabyte target would otherwise stay allocated for as long as the rig does.
             while (idx < graph.Inputs.Count)
-                allInputs[idx++] = RepresentativeInputFor(targetShape, targetDType);
+                allInputs[idx++] = RepresentativeRuntimeInputFor(targetShape, targetDType);
+
+            // The field's value where one is in hand, else its description as the engine reads it:
+            // shape and dtype, and data only where the description carries any.
+            static IRuntimeTensor FieldExemplar(
+                Dictionary<string, IData> values, Dictionary<string, TensorAttribute> slots, string name)
+                => values.TryGetValue(name, out var value)
+                    ? TensorDataConverter.ToRuntimeInput(value, readThreshold)
+                    : TensorDataConverter.ToRuntimeTensor(slots[name], readThreshold);
 
             // Step 4: Shape inference + memory-aware graph optimization. The optimizer
             // alternates Rematerializer and MemoryAwareScheduler under a combined
@@ -3828,7 +3921,7 @@ namespace Shorokoo
                 var field = TrainableParamStructDef.Fields[p];
                 if (shapeInfo.GetTensorInfo(graph.Outputs[p]) is not { } updatedInfo) continue;
                 var updatedDims = updatedInfo.Shape.Dims;
-                var declaredDims = ((TensorData)_initialParamFields[field.Name]).Shape.Dims;
+                var declaredDims = paramSlots[field.Name].Shape.Dims;
                 if (updatedDims.Contains(-1L) || updatedDims.SequenceEqual(declaredDims)) continue;
                 throw new ArgumentException(
                     $"The optimizer returns trainable parameter '{field.Name}' shaped "

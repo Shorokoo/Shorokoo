@@ -255,6 +255,9 @@ Until it is diagnosed, a program that needs sequence outputs on a card should re
 backend by reference rather than by loading it into isolation. That costs the ability to run a
 second ONNX Runtime alongside it, which is the only thing isolation buys.
 
+[#368](https://github.com/Shorokoo/Shorokoo/issues/368) tracks it, and carries the two leads on
+the path worth ruling out first. It has no pinning test: the pin needs a card.
+
 ### Device-memory readings are the device's, and device 0's
 
 Arena configuration is per session and per run — `ComputeContext.DeviceMemory` for the sessions a

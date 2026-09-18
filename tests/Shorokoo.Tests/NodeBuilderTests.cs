@@ -9,8 +9,8 @@ namespace Shorokoo.Tests;
 /// Coverage for the <c>CallCustomOperator&lt;T...&gt;</c> /
 /// <c>CallCustomOperatorArrayOut&lt;T&gt;</c> overloads on <see cref="NodeBuilder"/>,
 /// which <c>CSharpModelBuilder.MakeCustomCodeTemplate</c> emits for custom ops without
-/// a built-in <c>CodeTemplate</c>, and for <see cref="VariableEmitter"/>, which builds
-/// nodes through <see cref="NodeBuilder"/> for an <see cref="OpLowering"/>.
+/// a built-in <c>CodeTemplate</c>, and for <see cref="OpLowering.Trace"/>, which reads the
+/// <see cref="NodeBuilder"/> nodes a lowering built back off its outputs.
 /// </summary>
 [Trait("Domain", "Framework")]
 [Trait("Purpose", "Coverage")]
@@ -61,23 +61,23 @@ public class NodeBuilderCoverageTests
     }
 
     [Fact]
-    public void TestVariableEmitterBuildsTheNodesOfAnOperatorLowering()
+    public void TestAnOperatorLoweringTracesBackToTheNodesItBuilt()
     {
         Variable x = InputTensor<float32>("x", rank: 1);
         Assert.True(OpLoweringRegistry.TryGet(SOFTSIGN, out var lowering));
-        var y = lowering.Lower(new VariableEmitter(), [x],
-            OnnxCSharpAttributes.FromCSharpVals(new(), Definitions.NodeDefinitions[SOFTSIGN].AttributeDefs))[0];
+        var outputs = lowering.Build([x],
+            OnnxCSharpAttributes.FromCSharpVals(new(), Definitions.NodeDefinitions[SOFTSIGN].AttributeDefs));
+        var trace = lowering.Trace(outputs, [x]);
+        var y = outputs[0]!;
 
-        var div = y.OwningNode;
-        var add = div.Inputs[1]!.OwningNode;
-        var castLike = add.Inputs[0]!.OwningNode;
-        var one = castLike.Inputs[0]!.OwningNode;
-        var abs = add.Inputs[1]!.OwningNode;
-
-        Assert.Equal<string>([DIV, ADD, CAST_LIKE, CONSTANT, ABS],
-            [div.OpCode, add.OpCode, castLike.OpCode, one.OpCode, abs.OpCode]);
-        Assert.Equal<Variable>([x, x, x], [div.Inputs[0]!, castLike.Inputs[1]!, abs.Inputs[0]!]);
-        Assert.Equal(1.0f, one.Attributes.GetFloatVal(AttrValueFloat));
+        Assert.Equal<string>([ABS, CONSTANT, CAST_LIKE, ADD, DIV], [.. trace.Select(n => n.OpCode)]);
+        Assert.Equal(trace[^1], y.OwningNode);
+        Assert.Equal(trace.Count, trace.Distinct().Count());
+        Assert.All(trace, n => Assert.All(n.Inputs,
+            i => Assert.True(i is null || i == x || trace.IndexOf(i.OwningNode) < trace.IndexOf(n))));
+        Assert.Equal<Variable>([x, x, x],
+            [trace[^1].Inputs[0]!, trace[2].Inputs[1]!, trace[0].Inputs[0]!]);
+        Assert.Empty(lowering.Trace([x], [x]));
         Assert.Equal(DType.Float32, y.Type);
         Assert.Equal(1, y.Rank);
     }

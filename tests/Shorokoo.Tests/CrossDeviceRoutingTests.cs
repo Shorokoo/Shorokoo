@@ -82,8 +82,9 @@ public class CrossDeviceRoutingCoverageTests
     public void TestAnUnknownMemorySpaceRefusesEveryTransfer()
     {
         // A backend on some other execution provider reports a space nothing can name. Two such
-        // tensors compare equal as spaces without being in the same place, so every operation is
-        // refused rather than guessed at.
+        // tensors compare equal as spaces without being in the same place, so the two operations
+        // that decide from that equality are refused rather than guessed at. A copy is not one of
+        // them: it reads the bytes back through the backend that made them.
         var other = new StubBackend(ComputeDevice.Other, null);
         Assert.Equal(MemoryKind.Unknown, ((IShorokooInferenceBackend)other).MemorySpace.Kind);
 
@@ -92,7 +93,6 @@ public class CrossDeviceRoutingCoverageTests
         Assert.Equal(MemoryKind.Unknown, onUnknown.Space.Kind);
 
         Assert.Throws<InvalidOperationException>(() => onUnknown.TransferTo(null));
-        Assert.Throws<InvalidOperationException>(() => onUnknown.CopyTo(null));
         Assert.Throws<InvalidOperationException>(() => onUnknown.GiveAccessTo(context));
     }
 
@@ -152,6 +152,22 @@ public class CrossDeviceRoutingCoverageTests
 
         Assert.Same(card, delivered[0].ToTensorData().Context);
         Assert.Equal(MemorySpace.Cuda(0), delivered[0].ToTensorData().Space);
+    }
+
+    [Fact]
+    public void TestATensorInAnUnnamedSpaceStillComesHomeThroughTheBackendThatMadeIt()
+    {
+        var other = new StubBackend(ComputeDevice.Other, null);
+        using var context = new ComputeContext(other);
+        Assert.Equal(MemorySpace.UnknownDevice, ((IShorokooInferenceBackend)other).MemorySpace);
+
+        var onDevice = TensorData([2L], (float[])[3f, 4f]).CopyTo(context);
+        Assert.False(onDevice.Space.IsKnown);
+
+        var home = onDevice.CopyTo(null);
+
+        Assert.Equal(1, other.HostCopies);
+        Assert.Equal([3f, 4f], (float[])[.. home.As<float32>().AccessMemory<float>()]);
     }
 
     /// <summary>A backend that answers about itself and records what it was asked to build, so a

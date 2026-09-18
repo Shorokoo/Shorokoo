@@ -60,6 +60,50 @@ public class BackendPackageCoverageTests
     }
 
     [Fact]
+    public void TestAProbeAnswersForEveryFileItIsHandedAndAFailedLoadStrandsNoLoadContext()
+    {
+        var root = NewTempDirectory();
+        try
+        {
+            // Walking a folder of candidates is the documented use, so no entry in one may throw.
+            // A path Path.GetFullPath refuses is the case this can reproduce; the other is a file
+            // the process may not open, which throws UnauthorizedAccessException -- not an
+            // IOException, so it escaped the handler that named that one.
+            (string Path, string Because)[] answered =
+            [
+                (Path.Combine(root, "na\0me.dll"), "a path no filesystem accepts"),
+                (root, "a directory rather than a file"),
+                (Path.Combine(root, "absent.dll"), "nothing there at all"),
+            ];
+            foreach (var (path, _) in answered)
+            {
+                var probe = BackendPackage.Probe(path);
+                Assert.False(probe.Supported);
+                Assert.Equal(BackendRejection.Unreadable, probe.Reason);
+                Assert.False(BackendPackage.TryLoad(path, out _, out _));
+            }
+
+            var before = IsolatedBackend.LoadContexts;
+            for (int i = 0; i < 3; i++)
+                Assert.Throws<InvalidOperationException>(() => IsolatedBackend.Load(
+                    new IsolatedBackendSpec
+                    {
+                        Name = $"not-a-backend-{i}",
+                        BackendAssembly = "Shorokoo",
+                        NativeRuntimePath = BackendPackage.ResolveNative(
+                            AppContext.BaseDirectory, NativeFileName)!,
+                        ProbeDirectory = AppContext.BaseDirectory,
+                    }));
+            // A load context can never be unloaded, so a failing load must not keep building them.
+            Assert.True(IsolatedBackend.LoadContexts - before <= 1);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public void TestABackendForTheOtherOperatingSystemIsRefusedWithAReason()
     {
         var foreign = ForeignBackendAssembly();

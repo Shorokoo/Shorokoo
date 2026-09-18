@@ -270,7 +270,12 @@ namespace Shorokoo
         {
             if (Space.IsHost) return CopyRawMemory();
 
-            if (!Space.IsKnown || Context is null)
+            // The context first, and the space only if there is none. Whether this space has a name
+            // is beside the point when the backend that made the allocation is right here and knows
+            // how to read it: an execution provider Shorokoo has no name for still answers
+            // CopyTensorToHost, and asking the space first refused every such tensor with a message
+            // blaming a missing context it plainly had.
+            if (Context is null)
                 throw new InvalidOperationException(
                     $"This tensor ({this}) is in {Space}, and the context that produced it was not "
                     + "recorded, so there is no backend to ask for a copy of it.");

@@ -34,7 +34,7 @@ namespace Shorokoo.Runtime
     /// via <see cref="Execute(IData[])"/> — each call only feeds new data, with zero graph
     /// rebuilding or session creation overhead.
     /// </summary>
-    public class CompiledGraph
+    public class CompiledGraph : IDisposable
     {
         private readonly IShorokooInferenceSession _session;
         private readonly IShorokooInferenceBackend _backend;
@@ -80,6 +80,24 @@ namespace Shorokoo.Runtime
         /// built is allowed: the session rebuilds what it must, provided the data is host-resident.
         /// </summary>
         public BackendDescription Backend => _backend.Description;
+
+        /// <summary>True once this graph's inference session has been released.</summary>
+        public bool IsDisposed { get; private set; }
+
+        /// <summary>
+        /// Releases the inference session behind this graph. A session is the expensive thing a
+        /// compile produces — on a card it owns the execution provider's whole per-session state
+        /// and its arena, which dwarfs any tensor the run produces — so it is released with the
+        /// context that compiled it rather than left to a finalizer. Disposing twice is harmless,
+        /// and running a disposed graph is refused rather than answered.
+        /// </summary>
+        public void Dispose()
+        {
+            if (IsDisposed) return;
+            IsDisposed = true;
+            _session.Dispose();
+            GC.SuppressFinalize(this);
+        }
 
         /// <summary>The graph-optimization profile the session was built with (test hook).</summary>
         internal ShorokooGraphOptimization Optimization { get; }
@@ -167,6 +185,7 @@ namespace Shorokoo.Runtime
             // never wrapped and so left to their finalizers. The exception also named the context
             // rather than the graph the caller had actually invoked.
             ObjectDisposedException.ThrowIf(_owner.IsDisposed, this);
+            ObjectDisposedException.ThrowIf(IsDisposed, this);
             ArgumentNullException.ThrowIfNull(runSettings);
             var sessionInputs = new Dictionary<string, IShorokooTensorValue>();
             foreach (var input in inputs)
@@ -444,6 +463,12 @@ namespace Shorokoo.Runtime
         public bool DetachesOutputs { get; }
 
         private readonly ConditionalWeakTable<TensorStorage, object> _ownedStorage = new();
+
+        // The graphs this context compiled, so its disposal releases their sessions. Weak, like the
+        // storage tracking and for the same reason: a graph the program has dropped must not be
+        // kept alive waiting for this. A dropped one is the finalizer's, which is what it was
+        // before; what this fixes is the graph the program still holds when the context goes.
+        private readonly ConditionalWeakTable<CompiledGraph, object> _compiled = new();
         private static readonly object OwnedMarker = new();
         // Guards the disposal flag against the two writers that matter: a second Dispose, and a
         // TakeOwnership racing one. Both are ordinary in a design whose premise is several live
@@ -492,6 +517,7 @@ namespace Shorokoo.Runtime
             // enrolled a storage with its new owner but not yet taken it off this context's books
             // would otherwise be found here and released, out from under a context that is alive
             // and now holds freed bytes. Outermost, so the two locks are always taken in one order.
+            List<CompiledGraph> compiled;
             lock (TensorStorage.OwnershipGate)
             lock (_disposalGate)
             {
@@ -500,7 +526,13 @@ namespace Shorokoo.Runtime
 
                 foreach (var (storage, _) in _ownedStorage) storage.Release();
                 _ownedStorage.Clear();
+                compiled = [.. _compiled.Select(entry => entry.Key)];
+                _compiled.Clear();
             }
+
+            // Outside the locks: a session's disposal is a native call into the backend, which has
+            // no business running under a gate every tensor construction in the process takes.
+            foreach (var graph in compiled) graph.Dispose();
 
             // The backend is deliberately left alone. It was handed in, so it may be shared with
             // another context or be the process-wide one -- disposing a backend two contexts were
@@ -543,12 +575,17 @@ namespace Shorokoo.Runtime
                         outputs[i] = new TensorDataSequenceModelParam(
                             sequenceParam.ParamName, sequenceParam.ParamType, freeSequence);
                     }
-                    catch (InvalidOperationException)
+                    catch (InvalidOperationException ex) when (ex is not ObjectDisposedException)
                     {
                         // Elements the execution provider kept cannot be copied to the host from
                         // here. Bound to this context is worse than detached and better than lost.
                         // What the failed copy built is released by the rebuild itself, so there
                         // is nothing to undo here -- see TensorDataSequence's rebuild.
+                        //
+                        // ObjectDisposedException is excluded because it derives from this one and
+                        // means something else entirely: the sequence's storage or its context is
+                        // gone. Swallowing it handed the caller an output bound to a dead context
+                        // with nothing said.
                     }
                     continue;
                 }
@@ -721,9 +758,21 @@ namespace Shorokoo.Runtime
             for (int i = 0; i < originalInputNames.Length && i < session.InputNames.Count; i++)
                 onnxInputNameByOriginal[originalInputNames[i]] = session.InputNames[i];
 
-            return new CompiledGraph(
+            var graph = new CompiledGraph(
                 session, ResolvedBackend, onnxInputNameByOriginal, originalInputNames, optimization,
                 deviceMemory, RunSettings, this);
+            // Enrolled under the same gate a disposal takes, so a compile racing a disposal either
+            // lands before it and is released with everything else, or finds the context gone.
+            lock (_disposalGate)
+            {
+                if (_disposed)
+                {
+                    graph.Dispose();
+                    throw new ObjectDisposedException(GetType().Name);
+                }
+                _compiled.AddOrUpdate(graph, OwnedMarker);
+            }
+            return graph;
         }
 
         private static string[] ResolveOriginalInputNames(InternalComputationGraph graph)

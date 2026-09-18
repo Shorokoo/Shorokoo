@@ -133,7 +133,11 @@ public static class IsolatedBackend
         {
             Name = "",
             NativeRuntimePath = Path.GetFullPath(spec.NativeRuntimePath),
-            ProbeDirectory = spec.ProbeDirectory is { Length: > 0 } dir ? Path.GetFullPath(dir) : null,
+            // Resolved rather than left null, because LoadUncached resolves null to exactly this
+            // directory: leaving the two spellings distinct made a TryLoad of a backend beside the
+            // core assembly and a hand-written Load of the same file two entries and two contexts.
+            ProbeDirectory = spec.ProbeDirectory is { Length: > 0 } dir
+                ? Path.GetFullPath(dir) : ProbeDirectory(),
         };
 
         // Not GetOrAdd: loading is expensive, throws for several distinct reasons, and pins a
@@ -195,8 +199,18 @@ public static class IsolatedBackend
         // The glue and the ONNX Runtime wrapper are looked for beside the backend first and beside
         // the core assembly second, because a backend deployed in a folder of its own normally
         // carries only its backend there and shares the rest with the ordinary build.
-        var context = new BackendLoadContext(spec.Name, [probeDirectory, ProbeDirectory()], native);
-        BindNativeRuntime(context, native);
+        // A load context cannot be unloaded -- it is deliberately non-collectible, because
+        // finalizers releasing ORT handles must not race an assembly teardown -- so one built for a
+        // load that then fails is resident for the life of the process, holding its private copies
+        // of the wrapper and the glue, with nothing referencing it and no way to reclaim it. That
+        // matters because failing is routine here: TryLoad catches everything so a caller can walk
+        // a folder of candidates, and ten unloadable files used to mean ten permanent load contexts.
+        // So the contexts are kept and reused per key, whether or not the backend behind one came
+        // up, and a retry of a spec that failed reuses the context its first attempt built. Walking
+        // a folder of distinct candidates still costs one per candidate that gets this far, which
+        // is inherent: finding out whether a file is a backend means loading it. Probe turns most
+        // away from metadata before any of this.
+        var context = LoadContextFor(spec, probeDirectory, native);
         var backend = InstantiateBackend(context.LoadFromAssemblyPath(backendPath))
             ?? throw new InvalidOperationException(
                 $"'{spec.BackendAssembly}' was loaded from '{backendPath}' for the isolated " +
@@ -229,6 +243,29 @@ public static class IsolatedBackend
     /// <para>A backend that does not sit on ONNX Runtime has no wrapper to bind here, and
     /// its native is left to the load context to resolve.</para>
     /// </summary>
+    // Keyed on the same thing the backend cache is, and held for the same reason a loaded native
+    // is: it can never be released. LoadContexts is the count of them, which is the only way a test
+    // can see that a failed load did not build a second one.
+    private static readonly Dictionary<string, BackendLoadContext> _contexts = [];
+
+    internal static int LoadContexts { get { lock (_loaded) return _contexts.Count; } }
+
+    private static BackendLoadContext LoadContextFor(
+        IsolatedBackendSpec spec, string probeDirectory, string native)
+    {
+        // The backend assembly is part of the key, not just the native and the probe directory. A
+        // load that failed may have loaded assemblies into its context first -- a private copy of
+        // the core assembly, say -- and handing that context to a different backend gives it types
+        // that are not the program's, so the cast to the backend interface fails. Only a retry of
+        // the identical spec can safely reuse one, which is exactly the case that was unbounded.
+        var key = $"{native}|{probeDirectory}|{spec.BackendAssembly}";
+        if (_contexts.TryGetValue(key, out var existing)) return existing;
+        var created = new BackendLoadContext(spec.Name, [probeDirectory, ProbeDirectory()], native);
+        BindNativeRuntime(created, native);
+        _contexts[key] = created;
+        return created;
+    }
+
     private static void BindNativeRuntime(BackendLoadContext context, string nativeRuntimePath)
     {
         if (context.PrivatePathOf(OrtManagedAssembly) is not { } ortPath) return;

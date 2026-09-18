@@ -87,7 +87,17 @@ public static class BackendPackage
         if (string.IsNullOrWhiteSpace(assemblyPath))
             throw new ArgumentException("A backend's path is required.", nameof(assemblyPath));
 
-        var full = Path.GetFullPath(assemblyPath);
+        string full;
+        try
+        {
+            full = Path.GetFullPath(assemblyPath);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return new(false, BackendRejection.Unreadable,
+                $"'{assemblyPath}' is not a usable path: {ex.Message}");
+        }
+
         if (!File.Exists(full))
             return new(false, BackendRejection.Unreadable, $"There is no file at '{full}'.");
 
@@ -101,7 +111,13 @@ public static class BackendPackage
             return new(false, BackendRejection.Unreadable,
                 $"'{full}' is not a managed assembly, so it cannot be a Shorokoo backend.");
         }
-        catch (IOException ex)
+        // Every way a file can fail to be read as an assembly, not the three seen so far. This
+        // method's whole promise is that walking a folder of candidates never throws, and the
+        // caller who most needs that is the one whose folder holds something unexpected:
+        // UnauthorizedAccessException does not derive from IOException, so a DLL this process may
+        // not open came straight out of Probe -- and out of TryLoad, which calls it before its own
+        // try. A module rather than an assembly does the same through InvalidOperationException.
+        catch (Exception ex) when (ex is not OutOfMemoryException)
         {
             return new(false, BackendRejection.Unreadable, $"'{full}' could not be read: {ex.Message}");
         }

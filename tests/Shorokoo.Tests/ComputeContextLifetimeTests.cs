@@ -177,6 +177,22 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
+    public void TestDisposingAContextReleasesTheSessionsItCompiled()
+    {
+        var (graph, a, b, _) = Model();
+        var context = new ComputeContext();
+        var compiled = context.Compile(graph);
+        context.Execute(graph, a, b);
+
+        Assert.False(compiled.IsDisposed);
+
+        context.Dispose();
+
+        Assert.True(compiled.IsDisposed);
+        Assert.Throws<ObjectDisposedException>(() => context.Compile(graph));
+    }
+
+    [Fact]
     public void TestBuildingAndExportingAModelAsksForNoComputeContextAtAll()
     {
         var module = BackendFreeNegate.ComputationGraph;

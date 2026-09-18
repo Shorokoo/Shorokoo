@@ -178,7 +178,7 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
-    public void TestTheHostBackendHoldsTensorsAndBuildsNoSession()
+    public void TestTheHostBackendBuildsNeitherASessionNorAValue()
     {
         IShorokooInferenceBackend backend = HostBackend.Instance;
         var raw = Sample().CopyRawMemory();
@@ -186,23 +186,22 @@ public class ComputeContextLifetimeCoverageTests
         Assert.Equal(MemorySpace.Host, backend.MemorySpace);
         Assert.Equal("Shorokoo.HostMemory", ComputeContext.Host.Backend.Name);
 
-        var ex = Assert.Throws<InvalidOperationException>(() => backend.CreateSession(
+        var session = Assert.Throws<InvalidOperationException>(() => backend.CreateSession(
             default, ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal,
             DeviceMemorySettings.Default));
-        Assert.Contains("Shorokoo.LinuxCPU", ex.Message);
+        Assert.Contains("Shorokoo.LinuxCPU", session.Message);
 
-        float[] expected = [1f, 2f, 3f, 4f];
-        var built = backend.CreateTensor<float>(expected, [4L]);
-        Assert.Equal(expected, built.GetTensorDataAsSpan<float>().ToArray());
-        Assert.Equal(expected, backend
-            .CreateTensorFromRawBytes(ShorokooTensorElementType.Float, raw, [4L])
-            .GetTensorDataAsSpan<float>().ToArray());
-        Assert.Equal(expected, backend
-            .CreateTensorInBackendMemory(ShorokooTensorElementType.Float, raw, [4L])
-            .GetTensorDataAsSpan<float>().ToArray());
-        Assert.Equal(raw, backend.CopyTensorToHost(built));
-        Assert.Equal(["a", "b"], backend.CreateStringTensor(["a", "b"], [2L]).GetStringTensorData());
-        Assert.Equal(2, backend.CreateSequence([built, built]).GetValueCount());
+        Action[] values =
+        [
+            () => backend.CreateTensor<float>([1f, 2f], [2L]),
+            () => backend.CreateTensorFromRawBytes(ShorokooTensorElementType.Float, raw, [4L]),
+            () => backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, raw, [4L]),
+            () => backend.CreateUninitializedTensorInBackendMemory(ShorokooTensorElementType.Float, [4L]),
+            () => backend.CreateStringTensor(["a", "b"], [2L]),
+            () => backend.CreateSequence([]),
+        ];
+        foreach (var build in values)
+            Assert.Contains("builds no runtime values", Assert.Throws<InvalidOperationException>(build).Message);
     }
 
     [Fact]

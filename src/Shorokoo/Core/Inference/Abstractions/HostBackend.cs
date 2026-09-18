@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Runtime.InteropServices;
 
 namespace Shorokoo.Core.Inference.Abstractions;
 
@@ -9,11 +8,12 @@ namespace Shorokoo.Core.Inference.Abstractions;
 /// <see cref="Shorokoo.Runtime.ComputeContext.Host"/> allocates in, and what a tensor belonging to
 /// nobody in particular has always been made of.
 ///
-/// <para>It holds tensors and runs nothing. <see cref="CreateSession"/> throws, because there is
-/// no runtime here to build one — plain managed bytes are what a graph's literals are described
-/// with, and describing a graph is precisely the thing that must not need a deployed inference
-/// runtime. Everything else builds a value in ordinary managed memory, which is what the
-/// framework's host tensors have always been.</para>
+/// <para>It holds tensors and builds nothing. Every member throws, and that is the whole of it:
+/// there is no runtime here to build a session with, and no runtime value to build either,
+/// because the framework's host memory is a managed <c>byte[]</c> that becomes a runtime value
+/// only when a real backend is fed it. Manufacturing values here would put back the thing the
+/// backend-free literal exists to remove — a native allocation behind every tensor a graph is
+/// described with — so this backend is a home for tensors, not a factory for values.</para>
 ///
 /// <para>Attached to <see cref="MemoryDevice.For"/> of <see cref="MemorySpace.Host"/>, alongside
 /// every CPU backend the process loads: they share the memory, which is what lets a tensor pass
@@ -56,144 +56,42 @@ public sealed class HostBackend : IShorokooInferenceBackend
             + "(Shorokoo.LinuxCPU, Shorokoo.LinuxGPU, Shorokoo.WinCPU, Shorokoo.WinGPU), or one "
             + "from IsolatedBackend.Load -- and give a ComputeContext that backend.");
 
-    /// <inheritdoc/>
+    /// <summary>Always throws: there is no runtime here to build a value with.</summary>
+    /// <exception cref="InvalidOperationException">Always.</exception>
     public IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged
-    {
-        ArgumentNullException.ThrowIfNull(data);
-        ArgumentNullException.ThrowIfNull(shape);
-        return new HostTensorValue(
-            ElementTypeOf<T>(), MemoryMarshal.AsBytes(data.AsSpan()).ToArray(), shape);
-    }
+        => throw NoValues();
 
-    /// <inheritdoc/>
+    /// <summary>Always throws: there is no runtime here to build a value with.</summary>
+    /// <exception cref="InvalidOperationException">Always.</exception>
     public IShorokooTensorValue CreateTensorFromRawBytes(
         ShorokooTensorElementType elementType, byte[] data, long[] shape)
-    {
-        ArgumentNullException.ThrowIfNull(data);
-        ArgumentNullException.ThrowIfNull(shape);
-        if (elementType == ShorokooTensorElementType.String)
-            throw new NotSupportedException(
-                "String elements are variable-length, so a flat byte buffer does not describe "
-                + "them. Use CreateStringTensor.");
-        return new HostTensorValue(elementType, data, shape);
-    }
+        => throw NoValues();
 
-    /// <inheritdoc/>
+    /// <summary>Always throws: there is no runtime here to build a value with.</summary>
+    /// <exception cref="InvalidOperationException">Always.</exception>
     public IShorokooTensorValue CreateStringTensor(IReadOnlyList<string> data, long[] shape)
-    {
-        ArgumentNullException.ThrowIfNull(data);
-        ArgumentNullException.ThrowIfNull(shape);
-        return new HostTensorValue([.. data], shape);
-    }
+        => throw NoValues();
 
-    /// <inheritdoc/>
+    /// <summary>Always throws: there is no runtime here to build a value with.</summary>
+    /// <exception cref="InvalidOperationException">Always.</exception>
     public IShorokooTensorValue CreateSequence(IReadOnlyList<IShorokooTensorValue> values)
-    {
-        ArgumentNullException.ThrowIfNull(values);
-        return new HostTensorValue([.. values]);
-    }
+        => throw NoValues();
 
-    private static ShorokooTensorElementType ElementTypeOf<T>() where T : unmanaged
-    {
-        if (typeof(T) == typeof(float)) return ShorokooTensorElementType.Float;
-        if (typeof(T) == typeof(double)) return ShorokooTensorElementType.Double;
-        if (typeof(T) == typeof(bool)) return ShorokooTensorElementType.Bool;
-        if (typeof(T) == typeof(sbyte)) return ShorokooTensorElementType.Int8;
-        if (typeof(T) == typeof(byte)) return ShorokooTensorElementType.UInt8;
-        if (typeof(T) == typeof(short)) return ShorokooTensorElementType.Int16;
-        if (typeof(T) == typeof(ushort)) return ShorokooTensorElementType.UInt16;
-        if (typeof(T) == typeof(int)) return ShorokooTensorElementType.Int32;
-        if (typeof(T) == typeof(uint)) return ShorokooTensorElementType.UInt32;
-        if (typeof(T) == typeof(long)) return ShorokooTensorElementType.Int64;
-        if (typeof(T) == typeof(ulong)) return ShorokooTensorElementType.UInt64;
-        if (typeof(T) == typeof(Float16)) return ShorokooTensorElementType.Float16;
-        if (typeof(T) == typeof(BFloat16)) return ShorokooTensorElementType.BFloat16;
-        throw new NotSupportedException(
-            $"Host memory has no element type for {typeof(T).Name}.");
-    }
-}
+    /// <summary>Always throws, for the reason the others do; overridden rather than left to the
+    /// interface default, which would allocate through a member that throws anyway and say so in
+    /// worse words.</summary>
+    /// <exception cref="InvalidOperationException">Always.</exception>
+    public IShorokooTensorValue CreateUninitializedTensorInBackendMemory(
+        ShorokooTensorElementType elementType, long[] shape)
+        => throw NoValues();
 
-/// <summary>
-/// A tensor value in the framework's own managed memory — no native allocation, no runtime, and
-/// nothing to release. It is what <see cref="HostBackend"/> builds, and the one implementation of
-/// <see cref="IShorokooTensorValue"/> that needs no inference runtime deployed.
-/// </summary>
-internal sealed class HostTensorValue : IShorokooTensorValue
-{
-    private readonly byte[]? _bytes;
-    private readonly string[]? _strings;
-    private readonly IShorokooTensorValue[]? _elements;
-
-    internal HostTensorValue(ShorokooTensorElementType elementType, byte[] bytes, long[] shape)
-    {
-        ElementType = elementType;
-        Shape = shape;
-        _bytes = bytes;
-    }
-
-    internal HostTensorValue(string[] strings, long[] shape)
-    {
-        ElementType = ShorokooTensorElementType.String;
-        Shape = shape;
-        _strings = strings;
-    }
-
-    internal HostTensorValue(IShorokooTensorValue[] elements)
-    {
-        ElementType = elements.Length > 0
-            ? elements[0].ElementType : ShorokooTensorElementType.Float;
-        Shape = [];
-        _elements = elements;
-    }
-
-    /// <inheritdoc/>
-    public ShorokooOnnxValueType ValueType
-        => _elements is null ? ShorokooOnnxValueType.Tensor : ShorokooOnnxValueType.Sequence;
-
-    /// <inheritdoc/>
-    public ShorokooTensorElementType ElementType { get; }
-
-    /// <inheritdoc/>
-    public long[] Shape { get; }
-
-    /// <inheritdoc/>
-    public ReadOnlySpan<T> GetTensorDataAsSpan<T>() where T : unmanaged
-        => MemoryMarshal.Cast<byte, T>(Bytes);
-
-    /// <inheritdoc/>
-    public Span<T> GetTensorMutableDataAsSpan<T>() where T : unmanaged
-        => MemoryMarshal.Cast<byte, T>(Bytes.AsSpan());
-
-    /// <inheritdoc/>
-    public IReadOnlyList<string> GetStringTensorData()
-        => _strings ?? throw new InvalidOperationException(
-            "This host value does not hold strings.");
-
-    /// <inheritdoc/>
-    public int GetValueCount() => Elements.Length;
-
-    /// <inheritdoc/>
-    public IShorokooTensorValue GetValue(int index) => Elements[index];
-
-    /// <inheritdoc/>
-    public ShorokooTensorElementType GetSequenceElementType() => ElementType;
-
-    /// <summary>Releases the elements a sequence was handed, and nothing else: a tensor here is
-    /// managed bytes, which the collector reclaims.</summary>
-    public void Dispose()
-    {
-        if (_elements is null) return;
-        foreach (var element in _elements) element.Dispose();
-    }
-
-    private byte[] Bytes
-        => _bytes ?? throw new InvalidOperationException(
-            _strings is not null
-                ? "A string tensor's elements are variable-length and reference-typed, so there "
-                  + "is no flat buffer to span over. Read them with GetStringTensorData()."
-                : "A sequence has no flat buffer to span over. Read its elements with "
-                  + "GetValue(index).");
-
-    private IShorokooTensorValue[] Elements
-        => _elements ?? throw new InvalidOperationException("This host value is not a sequence.");
+    // One refusal, because there is one reason. A tensor of the framework's own host memory is
+    // managed bytes and nothing else; the runtime value is built when a backend is fed it, by
+    // that backend, and there is no sense in which this one could build a value another runtime
+    // would accept.
+    private static InvalidOperationException NoValues()
+        => new("The framework's host memory holds tensors as managed bytes and builds no runtime "
+            + "values: one belongs to the runtime that made it, and there is no runtime here. A "
+            + "tensor becomes a value when a real backend is fed it. If you meant to read this "
+            + "tensor's contents, the accessors on TensorData do that without any backend.");
 }

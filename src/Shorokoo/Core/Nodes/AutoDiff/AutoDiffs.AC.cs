@@ -290,6 +290,19 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             return retval;
         }
 
+        /// <summary>
+        /// The op codes whose gradient method is flagged <c>UsesOutputs</c>, and so reads the
+        /// forward outputs appended after the inputs. A caller that has those outputs — the
+        /// autograd engine from the graph node, an operator lowering's reverse walk from the
+        /// primitive it recorded — extends the input list with them before calling the rule.
+        /// </summary>
+        public static HashSet<string> GetGradientOpsUsingOutputs()
+            => typeof(AutoDiffs).GetMethods(BindingFlags.Public | BindingFlags.Static)
+                .Select(m => m.GetCustomAttribute<AutoDiffAttribute>())
+                .Where(a => a is { UsesOutputs: true })
+                .Select(a => a!.OpName)
+                .ToHashSet();
+
         // ===== Concat (variadic) =====
 
         private static void RegisterVariadicGradientOps(

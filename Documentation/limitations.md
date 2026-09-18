@@ -531,7 +531,9 @@ supported.
 ### Gradient coverage
 
 Most differentiable operators in the supported set (opset 21 plus the
-post-21 additions) have registered gradients; the rest raise
+post-21 additions) have gradient support — through a gradient rule written for
+the operator, or through a registered decomposition into simpler operators that
+the engine differentiates instead; the rest raise
 `AutoDiffNotSupportedException` with an error code naming the op.
 The current per-operator status is tracked in
 [operator-support.md](operator-support.md).

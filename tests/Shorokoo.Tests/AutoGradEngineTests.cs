@@ -1,10 +1,15 @@
+using Shorokoo.Core.Lowering;
+using static Shorokoo.Core.Nodes.NodeDefinitions.OpCodes;
+
 namespace Shorokoo.Tests;
 
 /// <summary>
-/// Autograd ENGINE path-checking semantics in <c>FastProcessAutoGrad</c> and the AD003
-/// attribute-envelope guards on the gradient implementations. Each scenario drives a module from
-/// <c>Modules/AutoGradEngineModules.cs</c> through <see cref="AutoTest.AdvancedTestGraph{TModule}"/>;
-/// the AD003 <c>AutoDiffNotSupportedException</c> surfaces from the AUTO_GRAD lowering during
+/// Autograd ENGINE path-checking semantics in <c>FastProcessAutoGrad</c>, the AD003
+/// attribute-envelope guards on the gradient implementations, and the operator-lowering fallback
+/// the engine reaches for when an op has no <c>[AutoDiff]</c> rule. Each module scenario drives a
+/// module from <c>Modules/AutoGradEngineModules.cs</c> through
+/// <see cref="AutoTest.AdvancedTestGraph{TModule}"/>; the AD003
+/// <c>AutoDiffNotSupportedException</c> surfaces from the AUTO_GRAD lowering during
 /// concretization, i.e. out of the <c>AdvancedTestGraph</c> call itself.
 /// </summary>
 [Trait("Domain", "AutoDiff")]
@@ -40,5 +45,41 @@ public class AutoGradEngineTests
             hyperparamInputs: [], runtimeInputs: [TensorDataWithSmallVals(DType.Float32, [4L])]));
         Assert.True(AutoTest.AdvancedTestGraph<AutoGradEngineSliceStepsCheck>(
             hyperparamInputs: [], runtimeInputs: [TensorDataWithSmallVals(DType.Float32, [6L])]));
+    }
+
+    // An op with no [AutoDiff] rule but a registered OpLowering is differentiated by a reverse
+    // walk over the primitives that lowering emits; the walk never runs a second lowering, so the
+    // two ways it can fail to reach a rule both refuse rather than recurse.
+    [Fact]
+    public void TestAutoGradEngineDifferentiatesThroughAnOperatorLowering()
+    {
+        Variable x = InputTensor<float32>("x", rank: 1);
+        Variable dy = InputTensor<float32>("dy", rank: 1);
+        var attrs = OnnxCSharpAttributes.FromCSharpVals(
+            new(), Definitions.NodeDefinitions[SOFTSIGN].AttributeDefs);
+        var gradOps = AutoDiffs.GetGradientOps();
+
+        Assert.False(gradOps.ContainsKey(SOFTSIGN));
+        Assert.True(OpLoweringRegistry.TryGet(SOFTSIGN, out var softsign));
+
+        var grads = LoweredGradient.Compute(softsign, [x], [dy], attrs, gradOps);
+        Assert.Single(grads);
+        Assert.NotNull(grads[0]);
+
+        Assert.Equal(ErrorCodes.AD003, Assert.Throws<AutoDiffNotSupportedException>(() =>
+            LoweredGradient.Compute(softsign, [x], [dy], attrs,
+                gradOps.Where(kv => kv.Key != ABS).ToDictionary())).ErrorCode);
+
+        Assert.Throws<InvalidOperationException>(() =>
+            LoweredGradient.Compute(new SelfEmittingLowering(), [x], [dy], attrs, gradOps));
+    }
+
+    private sealed class SelfEmittingLowering : OpLowering
+    {
+        public override string OpCode => SOFTSIGN;
+
+        public override T[] Lower<T>(IOpEmitter<T> emitter, T?[] inputs, OnnxCSharpAttributes attributes)
+            where T : class
+            => emitter.Emit(SOFTSIGN, inputs, [], 1);
     }
 }

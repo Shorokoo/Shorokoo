@@ -91,6 +91,9 @@ public class AutoGradElementwiseOpsCoverageTests
             [], [TensorData(DType.Float32, [3L], -80f, -90f, -95f), TensorData(DType.Float32, [], 1e30f),
                  TensorData(DType.Float32, [3L], 1.8048513e-5f, 8.1940127e-10f, 5.5210823e-12f)]));
         RunTensor<AutoGradSoftsignCheck>([2L], 0.5f, -0.5f);
+        Assert.True(AutoTest.AdvancedTestGraph<AutoGradSoftsignLoweredGradientCheck>(
+            [], [TensorData(DType.Float32, [5L], 0f, 1f, -1f, 3f, -7f),
+                 TensorData(DType.Float32, [5L], 1f, 0.25f, 0.25f, 0.0625f, 0.015625f)]));
         RunTensor<AutoGradThresholdedReluCheck>([2L], 1.0f, 0.0f);
         RunTensor<AutoGradShrinkCheck>([3L], 1.0f, -1.0f, 0.1f);
     }

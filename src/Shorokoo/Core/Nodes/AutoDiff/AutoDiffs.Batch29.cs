@@ -9,7 +9,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
     /// <summary>
     /// Gradient implementations for ONNX activation, normalization, and shape-preserving ops
     /// whose derivative is well-defined on float inputs (HardSigmoid, HardSwish, Mish,
-    /// Softplus, Softsign, ThresholdedRelu, Shrink, LogSoftmax, PRelu,
+    /// Softplus, ThresholdedRelu, Shrink, LogSoftmax, PRelu,
     /// MeanVarianceNormalization). All entries use the [AutoDiff] reflection pattern: one
     /// output tensor and Tensor&lt;T&gt; float inputs only.
     /// </summary>
@@ -93,18 +93,6 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             var zero = TypedConst(0.0f, x);
             Tensor<T> expX = x.Exp();
             return [OnnxOp.Where(x >= zero, grad / (one + (-x).Exp()), grad * expX / (one + expX))];
-        }
-
-        // ===== Softsign =====
-        // y = x / (1 + |x|)
-        // dy/dx = 1 / (1 + |x|)^2.
-
-        [AutoDiff(SOFTSIGN)]
-        public static Variable?[] Softsign<T>(Tensor<T> x, Tensor<T> grad) where T : IVarType
-        {
-            var one = TypedConst(1.0f, x);
-            var denom = one + OnnxOp.Abs(x);
-            return [grad / (denom * denom)];
         }
 
         // ===== ThresholdedRelu =====

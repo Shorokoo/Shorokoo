@@ -366,6 +366,51 @@ plus `Eval<T>(Tensor<T>)` returning a typed `TensorData<T>`),
 graph to the next call. `Eval` is the exception: it returns `TensorData` (or
 `TensorData[]`) directly.
 
+### Stopping a run
+
+A run can be given a `CancellationToken`, on the same `RunSettings` that carries
+`ShrinkArenaAfterRun`, and the call then ends in an `OperationCanceledException` rather than
+returning outputs:
+
+```csharp
+using Shorokoo.Core.Inference.Abstractions;
+
+using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+try
+{
+    var outputs = compiled.Execute(inputs, new RunSettings { CancellationToken = cts.Token });
+}
+catch (OperationCanceledException)
+{
+    // the run was stopped; it produced nothing
+}
+```
+
+A token already cancelled when the call is made is refused before anything is fed, so nothing is
+paid for. One cancelled while the run is in flight sets ONNX Runtime's terminate flag, which its
+executor reads **between nodes** — so what the wait costs is whatever is left of the kernel that
+was running, not what is left of the run. Two consequences are worth planning around, and the
+probe behind the figures below measures both (`TerminateLatencyProbeTests`, `Purpose=Manual`):
+
+- **The wait tracks one kernel.** On a chain of matmuls the run came back within one kernel's
+  duration of the flag being set, and by about as much whether a tenth or nine tenths of the run
+  remained: 0.4-0.6 s on a chain whose kernels were 0.7 s, under 0.1 s on one whose kernels were
+  0.1 s, single-figure milliseconds on one whose kernels were 2 ms — and below about 10 ms the
+  floor is the waiting thread being scheduled again, not ONNX Runtime. So the figure to budget for
+  is the model's **longest single operator**, not the step.
+- **A graph whose work is one kernel cannot be stopped at all.** There is no boundary to stop at:
+  a single 4096x4096 matmul flagged a tenth of the way through still ran the full 0.7 s and
+  returned its outputs. The same holds for any graph's last kernel.
+
+The figures are one four-core CPU box's, so read them as the shape rather than as your machine's
+numbers; what settles your case is running the probe, or your own model, where you deploy.
+
+Stopping is therefore best effort. A run that reaches the end before the flag is read **succeeds**,
+and hands back outputs that are perfectly good — so treat a normal return as a normal return, and
+do not take the absence of an `OperationCanceledException` as a sign the token was ignored. A
+session is unharmed by having one of its runs stopped: the flag is on that run's options, not on
+the session, and the next run of the same compiled graph proceeds normally.
+
 ## Backend selection
 
 - Add a backend package as a dependency: `Shorokoo.LinuxCPU`, `Shorokoo.LinuxGPU`,

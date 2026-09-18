@@ -2,6 +2,7 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
+using Microsoft.ML.OnnxRuntime;
 using Shorokoo.Core.Factory;
 using Shorokoo.Core.Factory.OpsFactories;
 using Shorokoo.Core.Inference;
@@ -19,7 +20,8 @@ namespace Shorokoo.Tests;
 /// <see cref="InferenceBackend"/> deployment-folder discovery and selection policy, the
 /// description a live backend answers with and the device assertion built on it, the
 /// uninitialised tensor allocation on the backend ABI and the zero-filling default behind it, the
-/// <see cref="DeviceMemory"/> settings the CUDA backends map onto ORT's arena options, the typed
+/// <see cref="DeviceMemory"/> settings the CUDA backends map onto ORT's arena options, the
+/// per-run abort token and what both run paths do with one, the typed
 /// value-handle conversions, <c>ShapeUtils</c>' argument validation for <c>Reshape</c>'s
 /// <c>keepAxes</c>, the <see cref="AtomicFileWriter"/> temp-and-rename commit protocol
 /// (crash-window fault injection, stale-temp sweep, retain-last-N rotation), the
@@ -791,6 +793,53 @@ public class CoreUtilsCoverageTests
         RunSettings[] expected = [shrinking, RunSettings.Default, shrinking, RunSettings.Default, shrinking, RunSettings.Default];
         Assert.Equal(expected, session.Seen);
         Assert.Equal(shrinking, compiled.DefaultRunSettings);
+    }
+
+    /// <summary>
+    /// The abort seam, from both ends. A run whose token is already cancelled is refused before
+    /// anything is fed — so one ORT would itself have failed never reaches it — and a token that
+    /// is never cancelled leaves every run as it was and holds nothing once the run returns.
+    /// Without that last part a per-run callback would outlive the options it writes to.
+    /// </summary>
+    [Fact]
+    public void TestACancelledRunIsRefusedBeforeItRunsAndAnUnfiredTokenIsHeldNoLongerThanTheRun()
+    {
+        var x = InputTensor<float32>("x", rank: 1);
+        using var context = new ComputeContext();
+        var compiled = context.Compile(new InternalComputationGraph([x], [x + x]));
+        float[] values = [1f, 2f, 3f];
+        float[] square = [1f, 2f, 3f, 4f];
+        var input = TensorData([3L], values);
+        var wrongRank = TensorData([2L, 2L], square);
+        float[] expected = [2f, 4f, 6f];
+
+        float[] Doubled(NamedModelParam[] outputs)
+            => [.. outputs[0].ToTensorData().As<float32>().AccessMemory<float>()];
+
+        Assert.False(RunSettings.Default.CancellationToken.CanBeCanceled);
+        Assert.Equal(RunSettings.Default, new RunSettings { CancellationToken = CancellationToken.None });
+        Assert.Equal(RunSettings.Default, new ComputeContext().RunSettings);
+
+        using var unfired = new CancellationTokenSource();
+        var watched = new RunSettings { CancellationToken = unfired.Token };
+        Assert.NotEqual(RunSettings.Default, watched);
+        Assert.Equal(expected, Doubled(compiled.Execute([input], RunSettings.Default)));
+        Assert.Equal(expected, Doubled(compiled.Execute([input], watched)));
+        Assert.Equal(expected, Doubled(compiled.Execute([input], watched)));
+        Assert.Equal(expected, Doubled(compiled.Execute([input], [false], watched)));
+        unfired.Cancel();
+
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        var stopped = new RunSettings { CancellationToken = cancelled.Token };
+        var refused = Assert.Throws<OperationCanceledException>(() => compiled.Execute([input], stopped));
+        Assert.Equal(cancelled.Token, refused.CancellationToken);
+        Assert.Null(refused.InnerException);
+        Assert.Throws<OperationCanceledException>(() => compiled.Execute([input], [false], stopped));
+        Assert.Throws<OperationCanceledException>(() => compiled.Execute([input], [true], stopped));
+        Assert.Throws<OperationCanceledException>(() => compiled.Execute([wrongRank], stopped));
+        Assert.IsType<OnnxRuntimeException>(
+            Record.Exception(() => compiled.Execute([wrongRank], RunSettings.Default)));
     }
 
     /// <summary>A reading is null on a machine with no CUDA runtime and a real one where there is

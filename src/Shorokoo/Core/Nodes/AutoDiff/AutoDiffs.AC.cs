@@ -266,6 +266,16 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             return [(Variable)result];
         }
 
+        /// <summary>
+        /// Reflection-invokes a rule written in the <c>[AutoDiff]</c> shape but with no
+        /// output-gradient slots — an operator lowering, whose signature is
+        /// <c>(input0, …, attr0, …)</c> and whose result is the operator's own outputs rather
+        /// than its inputs' cotangents.
+        /// </summary>
+        public static Variable?[] CallRuleWithoutOutputGrads(
+            MethodInfo rule, Variable?[] inputs, OnnxCSharpAttributes attributes)
+            => CallGradientOps(rule, inputs, [], attributes);
+
         public static Dictionary<string, Func<Variable?[], Variable?[], OnnxCSharpAttributes, Variable?[]>> GetGradientOps()
         {
             var retval = new Dictionary<string, Func<Variable?[], Variable?[], OnnxCSharpAttributes, Variable?[]>>();

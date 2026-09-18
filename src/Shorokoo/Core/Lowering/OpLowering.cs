@@ -1,41 +1,30 @@
+using System.Reflection;
+using Shorokoo.Core.Nodes;
+using Shorokoo.Core.Nodes.AutoDiff;
 using Shorokoo.Core.Nodes.NodeDefinitions;
 
 namespace Shorokoo.Core.Lowering;
 
 /// <summary>
-/// The one thing an <see cref="OpLowering"/> is allowed to do: emit a primitive operator. The
-/// engine running the lowering supplies the emitter and so decides what emitting means — the
-/// QuickExecutionEngine computes the primitive's value on the spot
-/// (<see cref="RuntimeTensorEmitter"/>), while the graph side builds a real node for it
-/// (<see cref="VariableEmitter"/>).
-///
-/// <para><typeparamref name="T"/> is whatever that engine calls a value: an
-/// <c>IRuntimeTensor</c> for the QuickExecutionEngine, a <c>Variable</c> for the graph. A
-/// lowering never names either, which is what lets one decomposition serve both.</para>
+/// Marks a static method in <see cref="OpLowerings"/> as the lowering of <see cref="OpName"/>.
 /// </summary>
-/// <typeparam name="T">The emitting engine's value type.</typeparam>
-internal interface IOpEmitter<T> where T : class
+[AttributeUsage(AttributeTargets.Method)]
+internal sealed class OpLoweringAttribute : Attribute
 {
-    /// <summary>
-    /// Emits one <paramref name="opCode"/> operator over <paramref name="inputs"/> (a null entry
-    /// is an omitted optional input) and returns its <paramref name="outputCount"/> outputs.
-    /// <paramref name="attrs"/> are the emitted operator's OWN attributes, named as its node
-    /// definition declares them — never the attribute bag of the operator being lowered.
-    /// Throws when the emitted operator cannot be produced, e.g. because this engine has no
-    /// implementation of that op code.
-    /// </summary>
-    T[] Emit(string opCode, T?[] inputs, (string Name, object? Value)[] attrs, int outputCount);
+    public string OpName { get; }
+
+    public OpLoweringAttribute(string opName) => this.OpName = opName;
 }
 
 /// <summary>
-/// How one operator is computed out of simpler ones — written once here, run by every engine
-/// that lacks a direct implementation of it.
+/// How one operator is computed out of simpler ones — written once in <see cref="OpLowerings"/>,
+/// run by every engine that lacks a direct implementation of it.
 ///
 /// <para><b>Why.</b> An operator that is merely a composition of simpler operators used to be
 /// written up to three times over: as the authoring-layer decomposition that keeps the exported
 /// ONNX at the opset the framework emits, as a QuickExecutionEngine kernel, and as a gradient
 /// rule. Nothing was shared, so the three could drift. A registered lowering is that
-/// decomposition stated once, in terms neither engine owns.</para>
+/// decomposition stated once, in plain Shorokoo code.</para>
 ///
 /// <para><b>Operator lowering is not graph lowering.</b> "Lowering" elsewhere in this codebase
 /// means the graph concretization pipeline — <c>ToConcreteArchitecture</c> and the
@@ -44,29 +33,70 @@ internal interface IOpEmitter<T> where T : class
 /// engine-internal fallback consulted while an engine is already running, and it leaves the
 /// graph exactly as it found it. A <c>Softsign</c> node still exports as a <c>Softsign</c>
 /// node.</para>
-///
-/// <para>A lowering body is ordinary C#, so it may branch and loop over ranks or attributes; it
-/// simply cannot touch any engine's concrete value type — everything it produces comes back
-/// from <see cref="IOpEmitter{T}.Emit"/>.</para>
 /// </summary>
-internal abstract class OpLowering
+/// <param name="OpCode">The op code this lowering expresses (e.g. "Softsign").</param>
+/// <param name="Method">The <see cref="OpLoweringAttribute"/>-marked method that builds it.</param>
+internal sealed record OpLowering(string OpCode, MethodInfo Method)
 {
-    /// <summary>The op code this lowering expresses (e.g. "Softsign").</summary>
-    public abstract string OpCode { get; }
+    /// <summary>
+    /// Builds the decomposition over <paramref name="inputs"/> (a null entry is an omitted
+    /// optional input) and <paramref name="attributes"/>, the bag of the operator BEING lowered,
+    /// and returns one <see cref="Variable"/> per declared output.
+    ///
+    /// <para>Building is inert: <see cref="NodeBuilder"/> constructs nodes and hands back their
+    /// outputs without registering anything anywhere, so the decomposition exists only as the
+    /// values returned here and whatever is reachable from them — which is what
+    /// <see cref="Trace"/> reads back.</para>
+    /// </summary>
+    public Variable?[] Build(Variable?[] inputs, OnnxCSharpAttributes attributes)
+        => AutoDiffs.CallRuleWithoutOutputGrads(this.Method, inputs, attributes);
 
     /// <summary>
-    /// Computes the operator's outputs — one per declared output, in declaration order — from
-    /// <paramref name="inputs"/> (a null entry is an omitted optional input) and
-    /// <paramref name="attributes"/>, the bag of the operator BEING lowered. Every intermediate
-    /// value is obtained from <paramref name="emitter"/>, and intermediates are the lowering's
-    /// own locals: nothing the lowering emits is visible to the engine beyond the outputs it
-    /// returns.
+    /// The nodes <paramref name="outputs"/> were built from, in topological order — every node
+    /// after the ones producing its inputs, so an engine can evaluate the list front to back.
+    /// Each node appears exactly once however many places use its outputs. A lowering says
+    /// nothing about what it is doing, so this is how both engines learn what it built.
     ///
-    /// <para>An override has to restate <c>where T : class</c>. C# normally forbids repeating an
-    /// inherited constraint, but a reference-type one is the exception, and without it the
-    /// compiler reads the <c>T?</c> here as <c>Nullable&lt;T&gt;</c> and finds no method to
-    /// override.</para>
+    /// <para>The walk stops at <paramref name="inputs"/>, the values the lowering was handed, so
+    /// nothing belonging to the caller's own graph is reported — including where a lowering hands
+    /// one of them straight back, which builds nothing and traces to nothing. A value built from
+    /// nothing, such as the literal a constant comes from, has no inputs and ends the walk by
+    /// itself. Identity is by reference throughout: neither <see cref="Variable"/> nor
+    /// <see cref="Node"/> overrides equality.</para>
+    ///
+    /// <para><b>Recursion.</b> A lowering that builds its own op code is refused here, which is
+    /// what keeps a lowering from being defined in terms of itself. Building it could not have
+    /// looped — a node is built, not run — so the refusal is in reading the result back, and it
+    /// covers both engines because both reach their nodes through this one walk.</para>
     /// </summary>
-    public abstract T[] Lower<T>(IOpEmitter<T> emitter, T?[] inputs, OnnxCSharpAttributes attributes)
-        where T : class;
+    public List<Node> Trace(Variable?[] outputs, Variable?[] inputs)
+    {
+        var boundary = new HashSet<Variable>();
+        foreach (var input in inputs)
+            if (input is not null) boundary.Add(input);
+
+        var ordered = new List<Node>();
+        var visited = new HashSet<Node>();
+        var pending = new Stack<(Node Node, bool Expanded)>();
+        foreach (var output in outputs)
+            if (output is not null && !boundary.Contains(output)) pending.Push((output.OwningNode, false));
+
+        while (pending.Count > 0)
+        {
+            var (node, expanded) = pending.Pop();
+            if (expanded) { ordered.Add(node); continue; }
+            if (!visited.Add(node)) continue;
+
+            if (string.Equals(node.OpCode, this.OpCode, StringComparison.Ordinal))
+                throw new InvalidOperationException(
+                    $"Operator lowering for '{this.OpCode}' built '{this.OpCode}', "
+                    + "which it cannot be built from.");
+
+            pending.Push((node, true));
+            foreach (var input in node.Inputs)
+                if (input is not null && !boundary.Contains(input)) pending.Push((input.OwningNode, false));
+        }
+
+        return ordered;
+    }
 }

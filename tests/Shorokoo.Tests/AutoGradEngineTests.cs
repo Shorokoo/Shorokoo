@@ -1,3 +1,4 @@
+using System.Reflection;
 using Shorokoo.Core.Lowering;
 using static Shorokoo.Core.Nodes.NodeDefinitions.OpCodes;
 
@@ -70,16 +71,12 @@ public class AutoGradEngineTests
             LoweredGradient.Compute(softsign, [x], [dy], attrs,
                 gradOps.Where(kv => kv.Key != ABS).ToDictionary())).ErrorCode);
 
+        var selfBuilding = new OpLowering(SOFTSIGN, typeof(AutoGradEngineTests).GetMethod(
+            nameof(BuildsItsOwnOpCode), BindingFlags.NonPublic | BindingFlags.Static)!);
         Assert.Throws<InvalidOperationException>(() =>
-            LoweredGradient.Compute(new SelfEmittingLowering(), [x], [dy], attrs, gradOps));
+            LoweredGradient.Compute(selfBuilding, [x], [dy], attrs, gradOps));
     }
 
-    private sealed class SelfEmittingLowering : OpLowering
-    {
-        public override string OpCode => SOFTSIGN;
-
-        public override T[] Lower<T>(IOpEmitter<T> emitter, T?[] inputs, OnnxCSharpAttributes attributes)
-            where T : class
-            => emitter.Emit(SOFTSIGN, inputs, [], 1);
-    }
+    private static Variable?[] BuildsItsOwnOpCode<T>(Tensor<T> x) where T : IVarType
+        => [OnnxOp.Softsign(x)];
 }

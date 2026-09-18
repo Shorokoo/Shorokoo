@@ -128,14 +128,26 @@ public class QeeOpsCoverageTests
             TensorData(DType.Float32, [5L], 0f, 1f, -1f, 3f, -7f))[0];
         Assert.Equal(DType.Float32, y.DType);
         Assert.Equal<float>([0f, 0.5f, -0.5f, 0.75f, -0.875f], y.FloatData!.Value);
+
+        var y64 = (RuntimeTensor)QeeAudit.Outputs<QeeSoftsignLoweredFloat64>(
+            TensorData(DType.Float64, [5L], 0.0, 1.0, -1.0, 3.0, -7.0))[0];
+        Assert.Equal(DType.Float64, y64.DType);
+        Assert.Equal<float>([0f, 0.5f, -0.5f, 0.75f, -0.875f], y64.FloatData!.Value);
     }
 
     [Fact]
     public void TestALoweringThatCannotBeCarriedOutLeavesTheNodeUnfolded()
     {
-        Assert.Throws<InvalidOperationException>(() =>
-            new RuntimeTensorEmitter(QuickExecutionEngine.DefaultMaxDataElements)
-                .Emit("NotAnOpCode", [], [], 1));
+        var attrs = OnnxCSharpAttributes.FromCSharpVals(
+            new(), Definitions.NodeDefinitions[OpCodes.ABS].AttributeDefs);
+        IRuntimeTensor?[] inputs = [TensorDataConverter.ToRuntimeInput(
+            TensorData(DType.Float32, [2L], 1f, 3f), QuickExecutionEngine.DefaultMaxDataElements)];
+        var buildsSoftsign = new OpLowering(OpCodes.ABS,
+            typeof(QeeOpsCoverageTests).GetMethod(
+                nameof(BuildsAnOpWithNoQuickOp), BindingFlags.NonPublic | BindingFlags.Static)!);
+        Assert.Null(OpRegistry.Get(OpCodes.SOFTSIGN));
+        Assert.Throws<InvalidOperationException>(() => LoweredValue.Compute(
+            buildsSoftsign, inputs, attrs, QuickExecutionEngine.DefaultMaxDataElements));
 
         var x = TensorData(DType.Float32, [2L], 1f, 3f);
         var g = QeeSoftsignLowered.ComputationGraph.ToInternal();
@@ -144,6 +156,9 @@ public class QeeOpsCoverageTests
             Assert.Equal(DType.Invalid,
                 new QuickExecutionEngine().Run(concrete, x)[concrete.Outputs[0]].DType);
     }
+
+    private static Variable?[] BuildsAnOpWithNoQuickOp<T>(Tensor<T> x) where T : IVarType
+        => [OnnxOp.Softsign(x)];
 
     [Fact]
     public void TestNoQuickOpKeepsInstanceState() =>
@@ -222,6 +237,9 @@ public class QeeOpsCoverageTests
 }
 
 [Module] public partial class QeeSoftsignLowered { public static Tensor<float32> Inline(Tensor<float32> x)
+    => x.Softsign(); }
+
+[Module] public partial class QeeSoftsignLoweredFloat64 { public static Tensor<float64> Inline(Tensor<float64> x)
     => x.Softsign(); }
 
 /// <summary>A <c>uint32</c> constant that has to survive host-side constant folding as a

@@ -6,20 +6,19 @@ namespace Shorokoo.Core.Lowering;
 
 /// <summary>
 /// The gradient of an operator that has no <c>[AutoDiff]</c> rule of its own, read off its
-/// <see cref="OpLowering"/>: build the decomposition as real nodes through
-/// <see cref="VariableEmitter"/> while recording each primitive it emits, then run one reverse
-/// pass over that recording, differentiating each primitive with the rule the framework already
-/// has for it.
+/// <see cref="OpLowering"/>: build the decomposition as real nodes,
+/// <see cref="OpLowering.Trace"/> the nodes it built, then run one reverse pass over that trace,
+/// differentiating each primitive with the rule the framework already has for it.
 ///
 /// <para>The result is a vector-Jacobian product and nothing more — a cotangent per forward
 /// input, from a cotangent per forward output. No scalar loss is involved and no nested autograd
 /// runs: the caller's incoming output gradients seed the walk, so what comes back is
 /// indistinguishable from what a hand-written rule would have returned.</para>
 ///
-/// <para><b>Recursion.</b> The reverse walk differentiates a recorded primitive through that
+/// <para><b>Recursion.</b> The reverse walk differentiates a traced primitive through that
 /// primitive's own <c>[AutoDiff]</c> rule and never through a second lowering, so no cycle
-/// between lowerings can form. The one shape that could still spin — a lowering emitting its own
-/// op code — is refused when it is emitted, before any node is built.</para>
+/// between lowerings can form. The one shape that could still spin — a lowering building its own
+/// op code — is refused by the trace.</para>
 ///
 /// <para>The caller passes one distinct value per input slot, as
 /// <c>FastProcessAutoGradProcessor</c> does with its fresh stand-ins; a value shared between two
@@ -34,7 +33,7 @@ internal static class LoweredGradient
     /// that slot — given <paramref name="outputGrads"/>, the cotangents of the lowered
     /// operator's outputs. <paramref name="attributes"/> is the bag of the operator being
     /// lowered, and <paramref name="gradientOps"/> the caller's gradient-rule table, which the
-    /// reverse walk looks the emitted primitives up in.
+    /// reverse walk looks the traced primitives up in.
     /// </summary>
     public static Variable?[] Compute(
         OpLowering lowering,
@@ -43,8 +42,7 @@ internal static class LoweredGradient
         OnnxCSharpAttributes attributes,
         IReadOnlyDictionary<string, Func<Variable?[], Variable?[], OnnxCSharpAttributes, Variable?[]>> gradientOps)
     {
-        var recorder = new RecordingEmitter(lowering.OpCode);
-        var loweredOutputs = lowering.Lower(recorder, inputs, attributes);
+        var loweredOutputs = lowering.Build(inputs, attributes);
 
         // One cotangent seed per output. A decomposition that produced a different number of them
         // than the operator declares would have the surplus seeds dropped and the gradient come
@@ -54,31 +52,38 @@ internal static class LoweredGradient
                 $"Operator lowering for '{lowering.OpCode}' produced {loweredOutputs.Length} output(s) "
                 + $"for {outputGrads.Length} output gradient(s).");
 
-        // Which emitted values a forward input reaches. A step none of them reaches computes
-        // nothing the caller asked for — the Constant a lowering builds its own literals from is
+        var tape = lowering.Trace(loweredOutputs, inputs);
+
+        // Which built values a forward input reaches. A step none of them reaches computes
+        // nothing the caller asked for — the literal a lowering builds its own constants from is
         // the standing example — so the walk leaves it alone rather than emitting dead gradient
         // nodes for it.
         var live = new HashSet<Variable>();
         foreach (var input in inputs)
             if (input is not null) live.Add(input);
-        foreach (var step in recorder.Tape)
+        foreach (var step in tape)
             if (IsLive(step.Inputs, live))
-                foreach (var output in step.Outputs) live.Add(output);
+                foreach (var output in step.Outputs)
+                    if (output is not null) live.Add(output);
 
         var cotangents = new Dictionary<Variable, Variable>();
         for (int i = 0; i < loweredOutputs.Length; i++)
-            if (outputGrads[i] is { } seed) Accumulate(cotangents, loweredOutputs[i], seed);
+            if (loweredOutputs[i] is { } output && outputGrads[i] is { } seed)
+                Accumulate(cotangents, output, seed);
 
-        for (int s = recorder.Tape.Count - 1; s >= 0; s--)
+        for (int s = tape.Count - 1; s >= 0; s--)
         {
-            var step = recorder.Tape[s];
-            if (!IsLive(step.Inputs, live)) continue;
+            var step = tape[s];
+            var stepInputs = step.Inputs;
+            if (!IsLive(stepInputs, live)) continue;
 
-            var stepOutputGrads = new Variable?[step.Outputs.Length];
+            var stepOutputs = step.Outputs;
+            var stepOutputGrads = new Variable?[stepOutputs.Length];
             bool anyOutputGrad = false;
-            for (int i = 0; i < step.Outputs.Length; i++)
+            for (int i = 0; i < stepOutputs.Length; i++)
             {
-                if (!cotangents.TryGetValue(step.Outputs[i], out var g)) continue;
+                if (stepOutputs[i] is not { } output) continue;
+                if (!cotangents.TryGetValue(output, out var g)) continue;
                 stepOutputGrads[i] = g;
                 anyOutputGrad = true;
             }
@@ -92,14 +97,14 @@ internal static class LoweredGradient
 
             // A rule flagged UsesOutputs reads the forward outputs after the inputs, the same
             // extension the engine makes when it calls such a rule on a graph node.
-            var stepInputs = gradientOpsUsingOutputs.Contains(step.OpCode)
-                ? [.. step.Inputs, .. step.Outputs]
-                : step.Inputs;
+            Variable?[] ruleInputs = gradientOpsUsingOutputs.Contains(step.OpCode)
+                ? [.. stepInputs, .. stepOutputs]
+                : [.. stepInputs];
 
-            var stepInputGrads = gradientOp(stepInputs, stepOutputGrads, step.Attributes);
-            for (int i = 0; i < step.Inputs.Length && i < stepInputGrads.Length; i++)
+            var stepInputGrads = gradientOp(ruleInputs, stepOutputGrads, step.Attributes);
+            for (int i = 0; i < stepInputs.Length && i < stepInputGrads.Length; i++)
             {
-                if (step.Inputs[i] is not { } slot || !live.Contains(slot)) continue;
+                if (stepInputs[i] is not { } slot || !live.Contains(slot)) continue;
                 if (stepInputGrads[i] is { } g) Accumulate(cotangents, slot, g);
             }
         }
@@ -110,7 +115,7 @@ internal static class LoweredGradient
         return result;
     }
 
-    private static bool IsLive(Variable?[] values, HashSet<Variable> live)
+    private static bool IsLive(IReadOnlyList<Variable?> values, HashSet<Variable> live)
     {
         foreach (var value in values)
             if (value is not null && live.Contains(value)) return true;
@@ -121,38 +126,4 @@ internal static class LoweredGradient
         => cotangents[value] = cotangents.TryGetValue(value, out var existing)
             ? AutoDiffEngine.AccumulateGradients(existing, grad)
             : grad;
-
-    /// <summary>One primitive the lowering emitted, with the values it was given and produced.</summary>
-    private readonly record struct Step(
-        string OpCode, Variable?[] Inputs, Variable[] Outputs, OnnxCSharpAttributes Attributes);
-
-    /// <summary>
-    /// <see cref="VariableEmitter"/> with a tape: each primitive becomes a real node exactly as it
-    /// otherwise would, and is written down in emission order so the reverse walk can read it back.
-    /// The attributes come off the built node, so they are the ones
-    /// <see cref="NodeBuilder"/> resolved against that operator's own definition — defaults filled
-    /// in — rather than the raw pairs the lowering wrote.
-    /// </summary>
-    private sealed class RecordingEmitter : IOpEmitter<Variable>
-    {
-        private readonly VariableEmitter inner = new();
-        private readonly string loweredOpCode;
-
-        public RecordingEmitter(string loweredOpCode) => this.loweredOpCode = loweredOpCode;
-
-        public List<Step> Tape { get; } = [];
-
-        public Variable[] Emit(
-            string opCode, Variable?[] inputs, (string Name, object? Value)[] attrs, int outputCount)
-        {
-            if (string.Equals(opCode, this.loweredOpCode, StringComparison.Ordinal))
-                throw new InvalidOperationException(
-                    $"Operator lowering for '{opCode}' emitted '{opCode}', which it cannot be built from.");
-
-            var outputs = this.inner.Emit(opCode, inputs, attrs, outputCount);
-            if (outputs.Length > 0)
-                this.Tape.Add(new Step(opCode, inputs, outputs, outputs[0].OwningNode.Attributes));
-            return outputs;
-        }
-    }
 }

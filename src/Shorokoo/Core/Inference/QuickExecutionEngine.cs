@@ -263,9 +263,10 @@ public sealed class QuickExecutionEngine
     /// lowering could not be carried out — the caller then falls back to
     /// <see cref="WriteDeclaredOutputs"/>, exactly as it did before there were lowerings at all.
     ///
+    /// <see cref="LoweredValue"/> does the work; everything it can fail at ends the attempt here.
     /// Note that this is not a graph rewrite, which is what "lowering" means of the
     /// <c>FastLower*</c> passes: the node stays what it is and only this run's values come from
-    /// the decomposition. Nothing the lowering emits along the way enters
+    /// the decomposition. Nothing the lowering builds along the way enters
     /// <paramref name="store"/> — the outputs returned here are all the engine ever sees of it.
     ///
     /// A lowering that fails to produce exactly the node's declared outputs is refused rather
@@ -280,10 +281,8 @@ public sealed class QuickExecutionEngine
         var declaredOutputs = node.Outputs.Count;
         try
         {
-            var results = lowering.Lower(
-                new RuntimeTensorEmitter(MaxDataElements),
-                QuickOp.GatherInputs(node.Inputs, store),
-                node.Attributes);
+            var results = LoweredValue.Compute(
+                lowering, QuickOp.GatherInputs(node.Inputs, store), node.Attributes, MaxDataElements);
             return results.Length == declaredOutputs ? results : null;
         }
         catch

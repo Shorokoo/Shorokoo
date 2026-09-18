@@ -222,6 +222,27 @@ cannot account for this allocator, since it is not a session the program compile
 needs an allocator per (device, settings) and a rule for which context's budget governs a tensor
 more than one has touched.
 
+### A fed input's buffer is not recycled inside the run
+
+ONNX Runtime's memory planner reuses a buffer only where a kernel declares the reuse and the
+input's use count says that kernel is its last reader. It seeds every graph input with one extra
+use count, precisely so that a caller can still read a feed after `Run` returns — so the test can
+never pass for a feed, and no session or run option changes it. Shorokoo's own memory-aware pass
+models it the same way, and correctly: every fed input is resident for the whole step.
+
+That costs nothing on a training step, whose peak is intermediates and whose output is a scalar
+loss. It is felt by the opposite shape — a pipeline over an input so large that it dominates the
+peak, whose output is input-shaped — where the one buffer that can never be recycled is the
+largest in the run.
+
+[`Donate()`](inference.md#feeding-a-large-input-without-a-second-copy) is the lever that does
+exist: it releases the input the instant the run returns instead of when the caller lets go, and
+allocating on the context removes the managed copy beside it. Neither makes the bytes available to
+the run's own intermediates. Doing that means binding an output onto the input through ONNX
+Runtime's I/O binding, which ORT permits and checks nothing about: it buys exactly one
+input-sized buffer, only where an output matches that input's dtype and byte size, and nothing at
+all where the output is a loss.
+
 ### Sequence-valued models on an isolated CUDA backend
 
 A model whose outputs are *sequences* — `SequenceAt`, `SplitToSequence`, anything producing an ONNX

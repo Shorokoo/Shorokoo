@@ -154,6 +154,35 @@ public class TensorContextTransferCoverageTests
     }
 
     [Fact]
+    public void TestDonatingSpendsThisHandleAndLeavesTheBytesToTheDonation()
+    {
+        var t = Sample();
+        var donation = t.Donate();
+
+        Assert.True(t.IsDisposed);
+        Assert.Equal(t.DType, donation.DType);
+        Assert.Equal(t.Shape, donation.Shape);
+        Assert.Throws<ObjectDisposedException>(() => Floats(t));
+        Assert.Throws<ObjectDisposedException>(t.Donate);
+        Assert.Throws<ObjectDisposedException>(() => t.CopyTo(null));
+        Assert.Throws<ObjectDisposedException>(() => t.TransferTo(null));
+
+        var shared = Sample();
+        var reader = shared.GiveAccessTo(null);
+        shared.Donate();
+        Assert.Equal([1f, 2f, 3f, 4f], Floats(reader));
+
+        var unfed = Sample();
+        var taken = unfed.GiveAccessTo(null);
+        var abandoned = unfed.Donate();
+        abandoned.Dispose();
+        abandoned.Dispose();
+        Assert.Equal([1f, 2f, 3f, 4f], Floats(taken));
+        taken.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => Floats(taken));
+    }
+
+    [Fact]
     public void TestCopyToAlwaysCopiesAndLeavesTheSourceAlone()
     {
         var source = Sample();

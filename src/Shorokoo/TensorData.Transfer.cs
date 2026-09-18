@@ -91,6 +91,33 @@ namespace Shorokoo
         public TensorData Detach() => CopyTo(ComputeContext.Host);
 
         /// <summary>
+        /// This tensor given to the next run that is fed the result, rather than lent to it. This
+        /// handle is spent from here on — every read of it throws, exactly as a cross-space
+        /// <see cref="TransferTo"/> source's does — and the donation carries the only handle left
+        /// on these bytes, so once a run has taken its lock on them nothing else names them and
+        /// they go back to the allocator the moment that run returns.
+        ///
+        /// <para>Nothing is copied and nothing moves: it is the same allocation throughout, and
+        /// only the names on it change. What it buys is the end of the wait — a feed a caller
+        /// keeps is held until that caller lets go, which for a batch built per step is until the
+        /// next collection, while a donated one is released with the step that read it.</para>
+        ///
+        /// <para>It gives up <i>this</i> handle and says nothing about any other. Bytes a second
+        /// handle still names — one <see cref="GiveAccessTo"/> handed out — stay alive for that
+        /// handle, and the donation then buys nothing (Shorokoo/Shorokoo#359).</para>
+        /// </summary>
+        /// <exception cref="ObjectDisposedException">This tensor, or the memory behind it, is gone.</exception>
+        public TensorDonation Donate()
+        {
+            ThrowIfDisposed();
+            // The donated handle takes its reference before this one gives it up, so the count
+            // never dips to zero in between and the bytes are never freed by their own donation.
+            var donated = CloneSharing(Context);
+            Dispose();
+            return new TensorDonation(donated);
+        }
+
+        /// <summary>
         /// This tensor's elements as a <see cref="TensorAttribute"/> — a tensor in a graph's
         /// description rather than a runtime value. The bytes are <b>moved</b>, not copied: this
         /// tensor surrenders them and is spent afterwards, exactly as a cross-space

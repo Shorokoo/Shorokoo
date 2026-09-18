@@ -30,6 +30,10 @@ Related: [core-types.md](core-types.md) · [defining-models.md](defining-models.
   `ComputeContext.Backend` and `InferenceBackend.Describe()` name it, and
   `InferenceBackend.RequireDevice(...)` refuses to start on the wrong one —
   [Which device am I on?](#which-device-am-i-on).
+- An input large enough to dominate the step's peak need not exist twice: allocate it on the
+  context and fill the runtime's own buffer in place, then hand it to the run with `Donate()`
+  so its bytes go back to the allocator when the run returns —
+  [Feeding a large input without a second copy](#feeding-a-large-input-without-a-second-copy).
 - On a GPU backend the CUDA arena is configured on the `ComputeContext` — `DeviceMemory` for
   the sessions it compiles, `RunSettings` for what its runs do — while the separate static
   `DeviceMemory` class reports how much of the card is gone. The arena strategy departs from
@@ -662,6 +666,59 @@ built that way.
 
 `TensorDataStruct` and `TensorDataSequence` carry a context and take the same three
 operations, recursing into what they own.
+
+`TryDelete()` and `DeleteAsync(timeout)` are the two that say "free these bytes now", which
+disposing a handle deliberately does not. Both ignore how many handles name the allocation —
+deleting while five other tensors name the bytes renders all five unusable, by design — and
+neither ignores a run reading them: `TryDelete` returns `false` and changes nothing at all while
+a run holds the buffer, and `DeleteAsync` deletes at once, asks that run to stop, and waits up to
+`timeout` for the bytes. Its `false` means the wait ran out, never that the deletion did not
+happen; the bytes come back when the run ends, with no second call.
+
+### Feeding a large input without a second copy
+
+A feed built the ordinary way exists twice at feed time: you fill a managed array, and the
+runtime copies it into a buffer of its own. Where the input dominates the step's peak that is the
+largest thing in the run, doubled. Two operations remove one half each.
+
+`ComputeContext.AllocateUninitialized` hands you the runtime's buffer to fill in place:
+
+```csharp
+using var cpu = new ComputeContext(new LinuxCpuBackend());
+
+var batch = cpu.AllocateUninitialized<float32>([64L, 3L, 224L, 224L]);
+ReadImagesInto(batch.AccessModifiableMemory<float>());   // no managed array in between
+```
+
+Nothing is written into it — the buffer holds whatever was last there, so fill all of it — and
+the tensor belongs to the context exactly as a `CopyTo(context)` result does. The
+`(shape, dtype)` overload is the same thing where the element type is only known at runtime. On
+a CUDA context the buffer is the card's own memory, which the host cannot write through a span at
+all (`TensorData.IsHostResident` is false); getting bytes there is still `CopyTo`.
+
+`TensorData.Donate()` gives a feed to the run rather than lending it:
+
+```csharp
+var loss = compiled.Execute(batch.Donate())[0].ToTensorData();
+// batch is spent: reading it throws, and its buffer went back to the allocator with the run
+```
+
+A donated tensor is spent from the moment you donate it, exactly as a cross-space `TransferTo`
+source is. The donation carries the only handle left on those bytes and the run gives that up too
+once it has taken its own lock, so nothing but the run names the buffer while it runs and the
+bytes are released the moment it returns — where a feed you keep is released when *you* let go of
+it, which for a batch built per step is at the next collection. Donating twice, or feeding one
+donation to two runs, is refused: there is nothing left to give. If another handle still names the
+same bytes — one `GiveAccessTo` handed out — they stay alive for it and the donation buys nothing.
+`Execute` takes a donation as an ordinary input; `Run`, which takes named parameters, takes one as
+`DonatedTensorModelParam`. A donation you build and then never feed is taken back by disposing it,
+which is the handle's own `Dispose` under another name and the only deterministic release it has.
+
+**What donating does not buy.** ONNX Runtime's memory planner gives every graph input one extra
+use count, precisely so that a caller can still read a feed after `Run` returns, so no input's
+buffer is ever recycled *inside* the run and no session or run option changes that. Donation moves
+the release from "whenever the caller lets go" to "the instant the run returns"; it does not hand
+the input's bytes to the run's own intermediates.
 
 ### One model, two devices
 

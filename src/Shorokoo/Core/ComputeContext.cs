@@ -189,6 +189,7 @@ namespace Shorokoo.Runtime
             ArgumentNullException.ThrowIfNull(runSettings);
             var sessionInputs = new Dictionary<string, IShorokooTensorValue>();
             var leases = new List<TensorLease>(inputs.Length);
+            _owner.EnterRun();
             try
             {
                 var fed = 0;
@@ -205,6 +206,9 @@ namespace Shorokoo.Runtime
                     // held in plain managed memory -- every literal in the program -- builds it
                     // here, and this is what decides which runtime builds it.
                     sessionInputs[onnxName] = input.ToTensorValue(_backend);
+                    // A donated feed gives its handle up here, the value having been built through
+                    // it and the lock above holding the bytes. Every other feed keeps its.
+                    input.DropDonatedHandle();
                     fed++;
                 }
                 ComputeContext.RefuseUnleasedFeed(leases.Count, fed);
@@ -241,6 +245,7 @@ namespace Shorokoo.Runtime
                 // dropped here and nowhere else, so a terminated run's feeds are still held right
                 // up to the moment it gives up.
                 foreach (var lease in leases) lease.Dispose();
+                _owner.ExitRun();
             }
         }
 
@@ -568,6 +573,14 @@ namespace Shorokoo.Runtime
         // assumption.
         private int _leases;
 
+        // How many runs of this context are inside a call into the backend. Separate from the
+        // lease count, which answers a different question and does not cover this one: a run fed
+        // nothing but plain host literals leases them all on Host -- the context they are attached
+        // to -- so this context's lease count is zero while its session is mid-call. The tensors
+        // are safe either way, which is what the leases are for; the session is not, and disposing
+        // this context is what releases it.
+        private int _runs;
+
         /// <summary>
         /// The tensors attached to this context and not yet collected — the handles on memory
         /// this context governs. A snapshot: one attached after this returns is not in the list.
@@ -612,6 +625,77 @@ namespace Shorokoo.Runtime
         /// <summary>The memory this context's tensors live in, shared with every other context
         /// whose backend allocates in the same place.</summary>
         public MemoryDevice Device => MemoryDevice.Of(ResolvedBackend);
+
+        /// <summary>
+        /// A tensor of <paramref name="shape"/> and <paramref name="dtype"/> in this context's
+        /// memory with nothing written into it — the buffer holds whatever was last there, and the
+        /// caller fills it in place through <c>AccessModifiableMemory</c>.
+        ///
+        /// <para>This is the tensor a producer wants. Building one from a managed array copies it
+        /// into the runtime's buffer, so the tensor exists twice for as long as the caller holds
+        /// the array it was built from — and for a feed built fresh per step that array is the
+        /// whole input. Filling the runtime's buffer directly never has the second copy at all
+        /// (Shorokoo/Shorokoo#359). It is not a way to wrap a managed array you already have:
+        /// the buffer stays the runtime's, which is what lets it be released like every other
+        /// tensor the runtime hands back.</para>
+        ///
+        /// <para>On <see cref="Host"/> the buffer is a managed array, since that is what the
+        /// framework's own host memory is; on a real backend it is the memory that backend
+        /// allocates in, which on a CUDA one is the card's and so is not writable through a span
+        /// at all. <see cref="TensorData.IsHostResident"/> says which.</para>
+        /// </summary>
+        /// <exception cref="ArgumentNullException"><paramref name="dtype"/> is null.</exception>
+        /// <exception cref="NotSupportedException"><paramref name="dtype"/> is
+        /// <see cref="DType.String"/>, whose elements are variable-length, or has no whole-byte
+        /// element stride, or <paramref name="shape"/> has no known element count.</exception>
+        /// <exception cref="ObjectDisposedException">This context has been disposed.</exception>
+        public TensorData AllocateUninitialized(Shape shape, DType dtype)
+        {
+            ArgumentNullException.ThrowIfNull(dtype);
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            // Refused here rather than left to the backend, so the same dtype is refused in the
+            // same words wherever it is asked for -- and so that a shape with no element count is
+            // caught while it can still be said what is wrong with it.
+            if (dtype == DType.String)
+                throw new NotSupportedException(
+                    "String tensors are variable-length and not byte-stride, so there is no buffer "
+                    + "of a fixed size to allocate. Build one from its elements with "
+                    + "TensorData(dims, string[]).");
+            var bits = dtype.EncodingBitCount;
+            if (bits < 8 || shape.Count < 0)
+                throw new NotSupportedException(
+                    $"A tensor of {shape}:{dtype} cannot be allocated as a flat buffer: its "
+                    + "elements have no whole-byte stride, or its shape has no known element count.");
+
+            if (_isHost)
+                return TensorData.NewHostTensor(
+                    shape, dtype, new byte[checked(shape.Count * (bits / 8))], this);
+
+            var value = ResolvedBackend.CreateUninitializedTensorInBackendMemory(
+                (ShorokooTensorElementType)(int)dtype, (long[])shape);
+            try
+            {
+                return TensorData.Create(shape, dtype, value, this);
+            }
+            catch
+            {
+                // Nothing else names it yet, and on a card it is a device allocation that would
+                // otherwise sit on the finalizer queue.
+                value.Dispose();
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// <see cref="AllocateUninitialized(Shape, DType)"/> typed, so that the result's
+        /// <c>AccessModifiableMemory</c> can be reached without a cast:
+        /// <c>context.AllocateUninitialized&lt;float32&gt;([64L, 768L]).AccessModifiableMemory()</c>.
+        /// </summary>
+        /// <exception cref="NotSupportedException">The element type has no flat byte
+        /// buffer — see the overload above.</exception>
+        /// <exception cref="ObjectDisposedException">This context has been disposed.</exception>
+        public TensorData<T> AllocateUninitialized<T>(Shape shape) where T : IVarType
+            => (TensorData<T>)AllocateUninitialized(shape, OnnxUtils.GetDType<T>());
 
         /// <summary>
         /// Locks <paramref name="tensor"/>'s allocation for as long as this context is reading it,
@@ -772,6 +856,33 @@ namespace Shorokoo.Runtime
         }
 
         /// <summary>
+        /// Records that a run of this context has started, so that disposing it is refused until
+        /// the run returns. Paired with <see cref="ExitRun"/> in a <c>finally</c>, in both run
+        /// paths and nowhere else.
+        /// </summary>
+        /// <exception cref="ObjectDisposedException">This context has been disposed, so its
+        /// sessions are already gone and there is nothing left to run on.</exception>
+        internal void EnterRun()
+        {
+            // The host context runs nothing -- Compile, Execute and Run all refuse there -- and
+            // cannot be disposed, so there is no question here for a count to answer.
+            if (_isHost) return;
+            lock (_disposalGate)
+            {
+                ObjectDisposedException.ThrowIf(_disposed, this);
+                _runs++;
+            }
+        }
+
+        /// <summary>Records that a run of this context has returned, however it ended. Called from
+        /// the <c>finally</c> that pairs with <see cref="EnterRun"/> and nowhere else.</summary>
+        internal void ExitRun()
+        {
+            if (_isHost) return;
+            lock (_disposalGate) _runs--;
+        }
+
+        /// <summary>
         /// Lets go of everything attached to this context, and releases the sessions it compiled.
         /// The backend is left alone.
         ///
@@ -783,9 +894,9 @@ namespace Shorokoo.Runtime
         /// <para>The tracking is weak, so a tensor the program has already dropped does not keep
         /// its allocation alive waiting for this.</para>
         /// </summary>
-        /// <exception cref="InvalidOperationException">A lease this context handed out is still
-        /// outstanding, so it is reading something it is about to release. Disposing a context
-        /// while it is processing is invalid; wait for the run to return.</exception>
+        /// <exception cref="InvalidOperationException">A run of this context is in flight, or a
+        /// lease it handed out is still outstanding. Disposing a context while it is processing is
+        /// invalid; wait for the run to return.</exception>
         public void Dispose()
         {
             // The host context is not disposable, and this is the whole of it: its tensors are
@@ -802,10 +913,20 @@ namespace Shorokoo.Runtime
             lock (_disposalGate)
             {
                 if (_disposed) return;
-                // Before the flag, so a refusal leaves a context that still works. A lease
-                // outstanding means a run of this context is reading something attached to it, and
-                // there is no answer to releasing those bytes under it -- so this is the one place
-                // the invalid program is told rather than silently accommodated.
+                // Before the flag, so a refusal leaves a context that still works. Two refusals,
+                // because there are two things a disposal would pull away and they are not the
+                // same thing: the session a run is inside, and the bytes a lease is holding. A run
+                // fed nothing but host literals leases them on Host, so the lease count below
+                // would be zero while this context's session was mid-call -- which is a
+                // use-after-free of the session rather than of any tensor, and says so.
+                if (_runs > 0)
+                    throw new InvalidOperationException(
+                        $"This compute context has {_runs} run(s) in flight: disposing it would "
+                        + "release the inference session they are inside, under a live call into "
+                        + "the backend. Wait for the run to return.");
+                // A lease outstanding means a run of this context is reading something attached to
+                // it, and there is no answer to releasing those bytes under it -- so this is the
+                // one place the invalid program is told rather than silently accommodated.
                 if (_leases > 0)
                     throw new InvalidOperationException(
                         $"This compute context still holds {_leases} lease(s): a run of it is "
@@ -1257,11 +1378,16 @@ namespace Shorokoo.Runtime
             ProtoBuf.Serializer.Serialize(memoryStream, model);
             var modelData = memoryStream.ToArray();
 
-            var session = CreateSession(
-                modelData, HasOptionalOps(model.Graph) || IsFullyConstant(model.Graph));
             var leases = new List<TensorLease>(inputs.Length);
+            // Before the session, so that everything this context is about to build is inside the
+            // window its disposal is refused in -- the session most of all, since disposing the
+            // context is what would release it.
+            EnterRun();
+            IShorokooInferenceSession? session = null;
             try
             {
+                session = CreateSession(
+                    modelData, HasOptionalOps(model.Graph) || IsFullyConstant(model.Graph));
                 var onnxInputNameByOriginal = new Dictionary<string, string>();
                 for (int i = 0; i < originalInputNames.Length && i < session.InputNames.Count; i++)
                     onnxInputNameByOriginal[originalInputNames[i]] = session.InputNames[i];
@@ -1277,6 +1403,7 @@ namespace Shorokoo.Runtime
                     // This context's backend: the one that just built the session above, and so
                     // the runtime that is about to read what it is fed.
                     sessionInputs[onnxName] = input.ToTensorValue(ResolvedBackend);
+                    input.DropDonatedHandle();
                     fed++;
                 }
                 RefuseUnleasedFeed(leases.Count, fed);
@@ -1320,7 +1447,11 @@ namespace Shorokoo.Runtime
                 // retains that session's arena — see `FastProcessorHelper.RehostOffSession` for
                 // what a caller that must not does, and Shorokoo/Shorokoo#180 for the general
                 // question.
-                session.Dispose();
+                session?.Dispose();
+
+                // Last, so that this context is answerable for its session right up to the moment
+                // the session is gone.
+                ExitRun();
             }
         }
 

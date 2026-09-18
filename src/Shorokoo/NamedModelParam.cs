@@ -64,6 +64,27 @@ namespace Shorokoo
 
     }
 
+    /// <summary>
+    /// A feed the caller has given away rather than lent — <see cref="TensorData.Donate"/>'s, as a
+    /// model parameter. It feeds exactly as <see cref="TensorDataModelParam"/> does, is locked by
+    /// the run exactly as one is, and differs in one step afterwards: the run drops the donated
+    /// handle once it has built the value, leaving its own lock as the only thing naming the
+    /// allocation (Shorokoo/Shorokoo#359).
+    /// </summary>
+    public sealed class DonatedTensorModelParam : TensorDataModelParam
+    {
+        /// <summary>Wraps <paramref name="donation"/>'s handle as the parameter named
+        /// <paramref name="name"/>.</summary>
+        /// <exception cref="ArgumentNullException"><paramref name="donation"/> is null.</exception>
+        public DonatedTensorModelParam(string name, ModelParamType paramType, TensorDonation donation)
+            : base(name, paramType, (donation ?? throw new ArgumentNullException(nameof(donation))).Tensor)
+        {
+        }
+
+        /// <inheritdoc/>
+        internal override void DropDonatedHandle() => ToTensorData().Dispose();
+    }
+
     public class TensorDataSequenceModelParam : NamedModelParam
     {
         private TensorDataSequence data;
@@ -251,6 +272,20 @@ namespace Shorokoo
         internal virtual IShorokooTensorValue ToTensorValue(IShorokooInferenceBackend backend)
             => ToTensorValue();
 
+        /// <summary>
+        /// Gives up the handle a donated feed carries, once the run has built the value from it.
+        /// Does nothing for every other kind of parameter, which the caller keeps.
+        ///
+        /// <para>Called after the value and after the lock, never before either: the value is
+        /// built through this handle, and the lock is what stops the drop from freeing the bytes
+        /// the run is about to read. What is left holding them is the run's own lock, so they go
+        /// back to the allocator when it is released rather than when the caller gets round to
+        /// it.</para>
+        /// </summary>
+        internal virtual void DropDonatedHandle()
+        {
+        }
+
         public abstract TensorData ToTensorData();
 
         public abstract TensorData<T> ToTensorData<T>() where T : IVarType;
@@ -262,6 +297,8 @@ namespace Shorokoo
         {
             if (data is TensorData td)
                 return new TensorDataModelParam(name, paramType, td);
+            else if (data is TensorDonation donation)
+                return new DonatedTensorModelParam(name, paramType, donation);
             else if (data is OptionalTensorData otd)
                 return new OptionalTensorDataModelParam(name, paramType, otd);
             else if (data is TensorDataSequence tds)

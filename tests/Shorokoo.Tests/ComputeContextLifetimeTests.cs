@@ -519,6 +519,108 @@ public class ComputeContextLifetimeCoverageTests
         else Assert.IsAssignableFrom<OperationCanceledException>(stopped);
     }
 
+    [Fact]
+    public void TestDisposingAContextIsRefusedForARunInFlightAsWellAsForALease()
+    {
+        var context = new ComputeContext();
+        var (graph, expected) = Chain();
+        var compiled = context.Compile(graph);
+        using var reached = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+
+        var run = Task.Run(() =>
+            Floats(compiled.Run(new HeldFeed(Wide32(), reached, release))[0].ToTensorData()));
+        Assert.True(reached.Wait(TimeSpan.FromSeconds(10)));
+
+        Assert.Contains("in flight", Assert.Throws<InvalidOperationException>(context.Dispose).Message);
+        Assert.False(context.IsDisposed);
+        release.Set();
+        Assert.Equal(expected, run.Result);
+
+        var lease = context.Lock(Sample().TransferTo(context));
+        Assert.Contains("lease(s)", Assert.Throws<InvalidOperationException>(context.Dispose).Message);
+        lease.Dispose();
+        context.Dispose();
+        Assert.True(context.IsDisposed);
+    }
+
+    [Fact]
+    public void TestARunOverADonatedFeedAnswersAsAKeptOneAndGivesTheBytesBackWithTheRun()
+    {
+        using var context = new ComputeContext();
+        var (graph, expected) = Chain();
+        var compiled = context.Compile(graph);
+
+        var kept = Wide32();
+        Assert.Equal(expected, Floats(compiled.Execute(kept)[0].ToTensorData()));
+        Assert.False(kept.MaterializationsAreEmpty);
+
+        var donated = Wide32();
+        var donation = donated.Donate();
+        Assert.Equal(expected, Floats(compiled.Execute(donation)[0].ToTensorData()));
+        Assert.True(donated.MaterializationsAreEmpty);
+        Assert.Throws<ObjectDisposedException>(() => Floats(donated));
+        Assert.Throws<ObjectDisposedException>(() => compiled.Execute(donation));
+    }
+
+    [Fact]
+    public void TestAnAllocatedTensorIsFilledInPlaceAndFeedsAsACopiedOneDoes()
+    {
+        using var context = new ComputeContext();
+        var a = InputVector<float32>("a");
+        var graph = new InternalComputationGraph([a], [a + a]);
+        float[] values = [1f, 2f, 3f, 4f];
+
+        var allocated = context.AllocateUninitialized<float32>((long[])[4L]);
+        values.CopyTo(allocated.AccessModifiableMemory<float>());
+
+        Assert.Same(context, allocated.Context);
+        Assert.Equal(values, Floats(allocated));
+        Assert.Equal(Floats(Sample().CopyTo(context)), Floats(allocated));
+        Assert.Equal(
+            Floats(context.Execute(graph, Sample().CopyTo(context))[0].ToTensorData()),
+            Floats(context.Execute(graph, allocated)[0].ToTensorData()));
+
+        long[] pair = [2L, 3L];
+        Assert.Equal(DType.Float32, context.AllocateUninitialized(pair, DType.Float32).DType);
+        Assert.Equal(new Shape(pair), context.AllocateUninitialized(pair, DType.Float32).Shape);
+        Assert.Equal(24, ComputeContext.Host.AllocateUninitialized(pair, DType.Float32).CopyRawMemory().Length);
+        Assert.Throws<NotSupportedException>(() => context.AllocateUninitialized(pair, DType.String));
+        Assert.Throws<ArgumentNullException>(() => context.AllocateUninitialized(pair, null!));
+    }
+
+    [Fact]
+    public void TestADonatedFeedFreesItsBytesWhileAKeptOneStillReads()
+    {
+        using var context = new ComputeContext();
+        var a = InputVector<float32>("a");
+        var graph = new InternalComputationGraph([a], [a + a]);
+
+        var donated = (HostTensorData<float32>)Sample();
+        context.Run(graph, new DonatedTensorModelParam("a", ModelParamType.InputParam, donated.Donate()));
+        Assert.True(donated.MaterializationsAreEmpty);
+
+        var shared = (HostTensorData<float32>)Sample();
+        using var reader = shared.GiveAccessTo(context);
+        context.Execute(graph, shared.Donate());
+        Assert.False(shared.MaterializationsAreEmpty);
+        Assert.Equal([1f, 2f, 3f, 4f], Floats(reader));
+    }
+
+    /// <summary>Holds a run open where the value is built: inside the window a disposal has to be
+    /// refused in, and leased on <c>Host</c> rather than on the running context.</summary>
+    private sealed class HeldFeed(
+        TensorData data, ManualResetEventSlim reached, ManualResetEventSlim release)
+        : TensorDataModelParam("a", ModelParamType.InputParam, data)
+    {
+        internal override IShorokooTensorValue ToTensorValue(IShorokooInferenceBackend backend)
+        {
+            reached.Set();
+            release.Wait(TimeSpan.FromSeconds(30));
+            return base.ToTensorValue(backend);
+        }
+    }
+
     internal sealed class StubBackend(ComputeDevice device, int? cudaDeviceId)
         : IShorokooInferenceBackend
     {

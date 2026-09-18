@@ -9,7 +9,8 @@ dotnet add package Shorokoo.WinGPU
 ```
 
 Requires a CUDA-capable GPU and the CUDA/cuDNN versions matching the bundled
-ONNX Runtime release. Reference exactly one backend package per application;
-Shorokoo discovers the backend at first use.
+ONNX Runtime release. Referenced on its own, this backend is discovered at first use.
+An application that runs on the card and the host references a backend for each and
+names the one it wants.
 
 Documentation: https://github.com/Shorokoo/Shorokoo

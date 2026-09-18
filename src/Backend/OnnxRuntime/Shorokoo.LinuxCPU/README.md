@@ -8,7 +8,8 @@ dotnet add package Shorokoo
 dotnet add package Shorokoo.LinuxCPU
 ```
 
-Reference exactly one backend package per application. Shorokoo discovers the
-backend at first use — no configuration needed.
+Referenced on its own, this backend is discovered at first use and needs no
+configuration. An application that runs on more than one device references a backend
+per device and names the one it wants.
 
 Documentation: https://github.com/Shorokoo/Shorokoo

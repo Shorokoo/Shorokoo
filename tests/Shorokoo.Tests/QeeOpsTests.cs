@@ -3,6 +3,7 @@ using Shorokoo.Runtime;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 using Shorokoo.Core.Inference;
 using Shorokoo.Core.Inference.Helpers;
+using Shorokoo.Core.Lowering;
 using static Shorokoo.Tests.FoldForcing;
 
 namespace Shorokoo.Tests;
@@ -116,6 +117,35 @@ public class QeeOpsCoverageTests
             TensorData(DType.Float32, [], 3f)]));
 
     [Fact]
+    public void TestSoftsignIsComputedFromItsLoweringRatherThanAnOpOfItsOwn()
+    {
+        Assert.Null(OpRegistry.Get(OpCodes.SOFTSIGN));
+        Assert.True(OpLoweringRegistry.TryGet(OpCodes.SOFTSIGN, out var lowering));
+        Assert.Equal(OpCodes.SOFTSIGN, lowering.OpCode);
+        Assert.False(OpLoweringRegistry.TryGet("NotAnOpCode", out _));
+
+        var y = (RuntimeTensor)QeeAudit.Outputs<QeeSoftsignLowered>(
+            TensorData(DType.Float32, [5L], 0f, 1f, -1f, 3f, -7f))[0];
+        Assert.Equal(DType.Float32, y.DType);
+        Assert.Equal<float>([0f, 0.5f, -0.5f, 0.75f, -0.875f], y.FloatData!.Value);
+    }
+
+    [Fact]
+    public void TestALoweringThatCannotBeCarriedOutLeavesTheNodeUnfolded()
+    {
+        Assert.Throws<InvalidOperationException>(() =>
+            new RuntimeTensorEmitter(QuickExecutionEngine.DefaultMaxDataElements)
+                .Emit("NotAnOpCode", [], [], 1));
+
+        var x = TensorData(DType.Float32, [2L], 1f, 3f);
+        var g = QeeSoftsignLowered.ComputationGraph.ToInternal();
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x])).ToConcreteModel();
+        using (OpRegistry.Override(new ThrowingAbsStub()))
+            Assert.Equal(DType.Invalid,
+                new QuickExecutionEngine().Run(concrete, x)[concrete.Outputs[0]].DType);
+    }
+
+    [Fact]
     public void TestNoQuickOpKeepsInstanceState() =>
         Assert.Empty(typeof(QuickOp).Assembly.GetTypes()
             .Where(typeof(QuickOp).IsAssignableFrom)
@@ -144,6 +174,14 @@ public class QeeOpsCoverageTests
     private sealed class ThrowingLoopCloseStub : QuickOp
     {
         public override string OpCode => OpCodes.LOOP_CLOSE;
+        protected override RuntimeTensor[] Compute(
+            RuntimeTensor?[] inputs, OnnxCSharpAttributes attrs, int maxDataElements)
+            => throw new InvalidOperationException();
+    }
+
+    private sealed class ThrowingAbsStub : QuickOp
+    {
+        public override string OpCode => OpCodes.ABS;
         protected override RuntimeTensor[] Compute(
             RuntimeTensor?[] inputs, OnnxCSharpAttributes attrs, int maxDataElements)
             => throw new InvalidOperationException();
@@ -182,6 +220,9 @@ public class QeeOpsCoverageTests
         }
     }
 }
+
+[Module] public partial class QeeSoftsignLowered { public static Tensor<float32> Inline(Tensor<float32> x)
+    => x.Softsign(); }
 
 /// <summary>A <c>uint32</c> constant that has to survive host-side constant folding as a
 /// <c>uint32</c>: the folded value feeds an <c>Add</c> whose other operand is runtime-valued,

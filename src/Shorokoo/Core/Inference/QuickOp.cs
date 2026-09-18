@@ -84,6 +84,28 @@ internal abstract class QuickOp
     }
 
     /// <summary>
+    /// <see cref="RunCompute"/> for a caller that has no <see cref="FastNode"/>: the operator
+    /// lowering path, where the inputs are a lowering's own intermediates and the attributes are
+    /// built for this operator alone rather than read off a node. It runs the same
+    /// <c>Compute</c> + <see cref="FinalizeOutputs"/> pair, so a chain of lowered steps stays
+    /// dtype- and size-correct exactly as a chain of graph nodes would.
+    ///
+    /// Skipping the node also decides which operators may appear in a lowering: an op that
+    /// overrides <see cref="Execute"/> to read its node — <c>SplitOp</c>, which takes its output
+    /// count from the node's declared outputs, and the control-flow close ops, which reach their
+    /// paired open node — is not reachable this way and must not be emitted by one.
+    /// </summary>
+    internal IRuntimeTensor[] Invoke(
+        IRuntimeTensor?[] inputs,
+        OnnxCSharpAttributes attributes,
+        int maxDataElements)
+    {
+        var results = Compute(inputs, attributes, maxDataElements);
+        FinalizeOutputs(results, maxDataElements);
+        return results;
+    }
+
+    /// <summary>
     /// The per-output tail every op's results must pass through, in place: enforce the data-size
     /// limit first (a discarded buffer needs no further work), then narrow each surviving integer
     /// buffer to its declared width — see <see cref="RuntimeTensorFactory.NarrowToDeclaredWidth(IRuntimeTensor)"/>.
@@ -102,9 +124,11 @@ internal abstract class QuickOp
     }
 
     /// <summary>
-    /// Resolves a list of tensor keys to runtime tensors. Null keys stay null.
+    /// Resolves a list of tensor keys to runtime tensors. Null keys stay null. Internal rather
+    /// than protected because the engine gathers a node's inputs itself when it computes that
+    /// node from an <see cref="Lowering.OpLowering"/> instead of from an op.
     /// </summary>
-    protected static IRuntimeTensor?[] GatherInputs(
+    internal static IRuntimeTensor?[] GatherInputs(
         System.Collections.Generic.IReadOnlyList<FastTensorKey?> keys,
         Dictionary<FastTensorKey, IRuntimeTensor> store)
     {

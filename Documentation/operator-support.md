@@ -43,6 +43,15 @@ Symbols: ✅ full support · 🟡 partial (see the family's notes) · ❌ not
 supported (see notes) · N/A not applicable (non-differentiable output, leaf
 operator, or operator not available).
 
+A ✅ in the last two columns does not always mean the engine has an
+implementation of that operator written out for it. Some operators are instead
+registered as a **decomposition into simpler operators**, and an engine with no
+implementation of its own computes — or differentiates — the decomposition. The
+result is the same either way, which is why the table does not distinguish them:
+the decomposition is an internal detail of how an engine runs the node, not a
+change to your graph. The node keeps its identity and is exported as itself, so
+a `Softsign` in your model is still a `Softsign` in the ONNX written from it.
+
 ## Elementwise math & activations
 
 | Op | Build & run | QEE | Gradient |

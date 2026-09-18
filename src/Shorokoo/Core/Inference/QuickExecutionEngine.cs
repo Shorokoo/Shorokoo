@@ -13,6 +13,7 @@ using Shorokoo.Core.Nodes.Processors.AutoGrad;
 using Shorokoo.Core.Nodes.Processors.Fast;
 using Shorokoo.Core.Inference.Helpers;
 using Shorokoo.Core.Nodes.AutoDiff;
+using Shorokoo.Core.Lowering;
 
 namespace Shorokoo.Core.Inference;
 
@@ -29,7 +30,8 @@ namespace Shorokoo.Core.Inference;
 ///   - Concrete values are only stored for tensors with at most <see cref="MaxDataElements"/>
 ///     elements. All larger tensors keep only shape information.
 ///   - Operators live as standalone classes under <c>Ops/</c>, one per op code, auto-discovered
-///     via <see cref="OpRegistry"/>.
+///     via <see cref="OpRegistry"/>. An op code with no operator of its own may still be
+///     computed, out of ones that have: see <see cref="OpLoweringRegistry"/>.
 ///   - <c>If</c> is supported by recursing into its subgraph when the condition value is known
 ///     and merging both branches' shapes when it is not.
 ///   - <c>Loop</c> is executed as a real iteration: the engine walks the body, then the close
@@ -205,8 +207,10 @@ public sealed class QuickExecutionEngine
         var op = OpRegistry.Get(node.OpCode);
         if (op is null)
         {
-            WriteDeclaredOutputs(node, store);
+            var lowered = TryLower(node, store);
             PopLoopFrame(node, state);
+            if (lowered is null) WriteDeclaredOutputs(node, store);
+            else StoreResults(outputKeys, lowered, store, state);
             return null;
         }
 
@@ -250,6 +254,42 @@ public sealed class QuickExecutionEngine
         PopLoopFrame(node, state);
         StoreResults(outputKeys, results, store, state);
         return null;
+    }
+
+    /// <summary>
+    /// The second thing the engine tries for a node no <see cref="QuickOp"/> claims: an
+    /// <see cref="OpLowering"/> saying how to compute that operator out of ones the engine does
+    /// implement. Returns its outputs, or null when there is no lowering for the op code or the
+    /// lowering could not be carried out — the caller then falls back to
+    /// <see cref="WriteDeclaredOutputs"/>, exactly as it did before there were lowerings at all.
+    ///
+    /// Note that this is not a graph rewrite, which is what "lowering" means of the
+    /// <c>FastLower*</c> passes: the node stays what it is and only this run's values come from
+    /// the decomposition. Nothing the lowering emits along the way enters
+    /// <paramref name="store"/> — the outputs returned here are all the engine ever sees of it.
+    ///
+    /// A lowering that fails to produce exactly the node's declared outputs is refused rather
+    /// than stored short: a missing output would otherwise land in the store as a
+    /// <see cref="DType.Invalid"/> placeholder indistinguishable from a node the engine never
+    /// ran.
+    /// </summary>
+    private IRuntimeTensor[]? TryLower(FastNode node, Dictionary<FastTensorKey, IRuntimeTensor> store)
+    {
+        if (!OpLoweringRegistry.TryGet(node.OpCode, out var lowering)) return null;
+
+        var declaredOutputs = node.Outputs.Count;
+        try
+        {
+            var results = lowering.Lower(
+                new RuntimeTensorEmitter(MaxDataElements),
+                QuickOp.GatherInputs(node.Inputs, store),
+                node.Attributes);
+            return results.Length == declaredOutputs ? results : null;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     /// <summary>

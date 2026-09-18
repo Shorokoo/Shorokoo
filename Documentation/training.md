@@ -673,11 +673,14 @@ later shape shares. That step really does see growing shapes, so `Auto` gives it
 the strategy that does not strand a region each time an input outgrows it. Feeding a handful of
 stable batch shapes keeps every step on the tighter arena.
 
-Both are fixed when a step is compiled, and so is `ShrinkArenaAfterRun`: `TrainStep` takes no
-per-call override, so hand `FromScratch` a `runtimeContext` carrying what you want before the first
-step. On a run close to the card's limit, put a budget on that context and sample the peak inside
-your `TrainStep` loop; the readings come from the separate static `DeviceMemory` class. See
-[Device memory](inference.md#device-memory-gpu-backends).
+Both are fixed when a step is compiled, and so is `ShrinkArenaAfterRun` — and so is the
+`CancellationToken` that stops a step early, which is the way to make a long `Fit` or `Train`
+abandon a run: `TrainStep` takes no per-call override, so hand `FromScratch` a `runtimeContext`
+carrying what you want before the first step
+([Stopping a run](inference.md#stopping-a-run) says what stopping costs and what it does not
+promise). On a run close to the card's limit, put a budget on that context and sample the peak
+inside your `TrainStep` loop; the readings come from the separate static `DeviceMemory` class.
+See [Device memory](inference.md#device-memory-gpu-backends).
 
 **Mind which memory is which.** A `TrainStep` loop's checkpoints are fetched to the host, so the
 rig's budgeted collection governs *host* memory there, while a context's `DeviceMemory` settings

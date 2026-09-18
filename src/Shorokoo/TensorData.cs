@@ -628,8 +628,10 @@ namespace Shorokoo
         private readonly IShorokooTensorValue backing;
 
         /// <summary>
-        /// The backing inference-runtime tensor value, which this tensor owns: disposing the
-        /// tensor releases it, and nothing else may hold or free it (Shorokoo/Shorokoo#180).
+        /// The backing inference-runtime tensor value, which the allocation owns: it is released
+        /// when the last handle and the last lock on that allocation let go, and nothing else may
+        /// hold or free it (Shorokoo/Shorokoo#180). Disposing <i>this</i> tensor drops one handle,
+        /// which releases the value only when it was the last.
         /// </summary>
         public IShorokooTensorValue Value
         {

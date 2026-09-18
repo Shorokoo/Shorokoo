@@ -660,6 +660,25 @@ public class TensorDataApiCoverageTests
         Assert.Equal((object[])["a", "b"], OnnxEngine.Eval(Vector("a", "b")).As<@string>().DebugData);
     }
 
+    // A factory that takes your tensor gives it back usable. TensorFill's signature did not
+    // change when its body started building a graph attribute, so a move there would have spent
+    // the caller's tensor with nothing to catch it at compile time.
+    [Fact]
+    public void TestAFactoryTakingATensorLeavesTheCallersCopyUsable()
+    {
+        var fill = (TensorData<float32>)TensorData([1L], 7f);
+        var filled = TensorFill((Vector<int64>)[Scalar(3L)], fill);
+
+        Assert.False(fill.IsDisposed);
+        Assert.Equal([7f], fill.AccessMemory().ToArray());
+        Assert.Equal([7f, 7f, 7f], OnnxEngine.Eval(filled).As<float32>().CopyMemory<float>());
+
+        // Usable a second time is the whole point: the first call must not have consumed it.
+        Assert.Equal([7f, 7f], OnnxEngine.Eval(TensorFill((Vector<int64>)[Scalar(2L)], fill))
+            .As<float32>().CopyMemory<float>());
+        Assert.False(fill.IsDisposed);
+    }
+
     private static float[] Floats(NamedModelParam param)
         => [.. param.ToTensorData().As<float32>().AccessMemory<float>()];
 

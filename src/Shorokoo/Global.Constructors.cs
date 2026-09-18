@@ -516,8 +516,19 @@ namespace Shorokoo
         public static Tensor<float32> TensorFill(Vector<int64> shape, float val) => OnnxOp.ConstantOfShape(shape, OnnxTensorData(1, val).MoveToAttribute());
         /// <summary>Creates a tensor of the given runtime shape filled with the value (ONNX ConstantOfShape).</summary>
         public static Tensor<float64> TensorFill(Vector<int64> shape, double val) => OnnxOp.ConstantOfShape(shape, OnnxTensorData(1, val).MoveToAttribute());
-        /// <summary>Creates a tensor of the given runtime shape filled with the value (ONNX ConstantOfShape).</summary>
-        public static Tensor<T> TensorFill<T>(Vector<int64> shape, TensorData<T> val) where T : IVarType => OnnxOp.ConstantOfShape(shape, val.MoveToAttribute());
+        /// <summary>
+        /// Creates a tensor of the given runtime shape filled with the value (ONNX ConstantOfShape).
+        ///
+        /// <para>The fill value goes into the graph's description, which is immutable and must
+        /// mean the same thing on every machine, so <paramref name="val"/> is copied rather than
+        /// taken: the caller keeps its tensor and may pass it again. The copy is a fill value --
+        /// one element -- so it costs nothing worth naming. Where a description is being built
+        /// from a tensor the caller is finished with, <see cref="TensorData.MoveToAttribute"/>
+        /// hands the bytes over instead, and
+        /// <see cref="Shorokoo.Tensor{T}.Fill(Vector{int64}, TensorAttribute)"/> takes the
+        /// resulting <see cref="TensorAttribute"/> directly.</para>
+        /// </summary>
+        public static Tensor<T> TensorFill<T>(Vector<int64> shape, TensorData<T> val) where T : IVarType => OnnxOp.ConstantOfShape(shape, val.Detach().MoveToAttribute());
 
         /// <summary>
         /// Creates a tensor filled with a constant value using generic type T.

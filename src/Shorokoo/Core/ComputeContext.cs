@@ -689,7 +689,9 @@ namespace Shorokoo.Runtime
         /// <summary>
         /// <see cref="AllocateUninitialized(Shape, DType)"/> typed, so that the result's
         /// <c>AccessModifiableMemory</c> can be reached without a cast:
-        /// <c>context.AllocateUninitialized&lt;float32&gt;([64L, 768L]).AccessModifiableMemory()</c>.
+        /// <c>context.AllocateUninitialized&lt;float32&gt;(new Shape(64L, 768L)).AccessModifiableMemory()</c>.
+        /// <see cref="Shape"/> is not a collection type, so a bare <c>[64L, 768L]</c> literal does
+        /// not convert to it; pass <c>new Shape(...)</c> or a <c>long[]</c>.
         /// </summary>
         /// <exception cref="NotSupportedException">The element type has no flat byte
         /// buffer — see the overload above.</exception>
@@ -1252,7 +1254,7 @@ namespace Shorokoo.Runtime
         }
 
         /// <summary>
-        /// <paramref name="result"/> belonging to nobody, so it outlives every context and can go
+        /// <paramref name="result"/> on <see cref="Host"/>, so it outlives every context and can go
         /// straight back into a graph as a literal.
         ///
         /// <para>Eval is the eager-evaluation API: its answer is a value for the caller to use, and
@@ -1554,7 +1556,7 @@ namespace Shorokoo.Runtime
             /// <summary>Lifts the tensor data into a tensor variable.</summary>
             public Tensor<T> Get<T>(TensorData<T> tensorData) where T : IVarType
             {
-                return (Variable)Globals.Tensor(tensorData.MoveToAttribute());
+                return (Variable)Globals.Tensor(tensorData.Detach().MoveToAttribute());
             }
         }
 

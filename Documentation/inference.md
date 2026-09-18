@@ -614,9 +614,11 @@ without sharing a native runtime.
 
 ### Moving data between contexts
 
-A `TensorData` belongs to a compute context — `Context`, which is `ComputeContext.Host` for the
-framework's own host memory — and says whether it owns its bytes, in `OwnsMemory`. `Space` says
-where those bytes are: host memory, or a particular CUDA device.
+A `TensorData` is a handle on an allocation, attached to a compute context — `Context`, which is
+`ComputeContext.Host` for the framework's own host memory. `Space` says where those bytes are: host
+memory, or a particular CUDA device. More than one handle may name the same allocation, which
+counts them: the bytes go when the last handle lets go of them, so disposing one tensor never
+leaves another reading freed memory.
 
 `ComputeContext.Host` holds tensors and runs nothing: it is where a tensor that names no backend
 lives, so every literal you build starts there. It compiles and runs nothing — `Compile`,
@@ -625,13 +627,13 @@ is what lets a tensor there outlive every context in the program. Passing `null`
 operations below still means it.
 
 Three operations move a tensor between contexts. They differ in what happens to the
-ownership rather than to the bytes:
+handles rather than to the bytes:
 
 | | Same memory space | Different memory space |
 |---|---|---|
-| `TransferTo` | nothing is copied; ownership moves to the result | the bytes are copied and the source is spent — owner only |
-| `CopyTo` | an independent copy, owned by the result | the same |
-| `GiveAccessTo` | a reader that owns nothing; the source keeps what it had | refused — use `CopyTo` |
+| `TransferTo` | nothing is copied; this handle moves to the target and the result takes its place | the bytes are copied and the source handle is dropped |
+| `CopyTo` | an independent copy with an allocation of its own | the same |
+| `GiveAccessTo` | a second handle on the same allocation; both read until both let go | refused — use `CopyTo` |
 
 `Detach()` is `CopyTo(ComputeContext.Host)` under its readable name: a copy in the framework's own
 host memory, which is what a result you mean to keep has to be.

@@ -534,7 +534,6 @@ public class TensorDataApiCoverageTests
         var detached = onContext.Detach();
 
         Assert.Same(ComputeContext.Host, detached.Context);
-        Assert.True(detached.OwnsMemory);
         Assert.NotSame(onContext, detached);
 
         context.Dispose();

@@ -1393,6 +1393,68 @@ public class CoreUtilsCoverageTests
         Assert.All(spansMustNotFlag, s => Assert.Empty(SpansUsedWithoutKeepingTheTensorAlive(s)));
     }
 
+    /// <summary>
+    /// Every <c>RunOptions</c> the product builds is armed to abort. ONNX Runtime reads its
+    /// terminate flag before each node and a run's options are otherwise a local no other thread
+    /// can reach, so an unarmed one is a run nothing can stop — and nothing behavioural notices,
+    /// because a lease makes a deliberate delete slow rather than unsafe. Deleting the
+    /// registration therefore leaves the whole suite green, which is what this is here for.
+    /// </summary>
+    [Fact]
+    public void TestEveryRunOptionsIsArmedToAbortAndTheGuardStillDetectsEveryEvasion()
+    {
+        var sources = ProductSources();
+        Assert.Contains(sources, s => RunOptionsConstruction.IsMatch(StripCommentsAndStrings(s)));
+        Assert.Empty(sources.SelectMany(UnarmedRunOptions));
+
+        string[] mustFlag =
+        [
+            "class C { void M() { using var o = new RunOptions(); _s.Run(o, i, n); } }",
+            "class C { void M() { using var o = new RunOptions(); using var a = AbortWhenCancelled(other, t); } }",
+            "class C { void M() { using var o = new RunOptions(); } void N() { using var a = AbortWhenCancelled(o, t); } }",
+            "class C { void M() { _s.Run(new RunOptions(), i, n); } }",
+            "class C { void M() { using var o = new RunOptions(); } /* AbortWhenCancelled(o, t) */ }",
+        ];
+        string[] mustNotFlag =
+        [
+            "class C { void M() { using var o = new RunOptions(); using var a = AbortWhenCancelled(o, t); } }",
+            "class C { void M() { using RunOptions o = new RunOptions(); using var a = AbortWhenCancelled(o, token); } }",
+            "class C { void M() { using var o = new RunOptions(); if (c) { using var a = AbortWhenCancelled(o, t); } } }",
+        ];
+        Assert.All(mustFlag, s => Assert.NotEmpty(UnarmedRunOptions(s)));
+        Assert.All(mustNotFlag, s => Assert.Empty(UnarmedRunOptions(s)));
+    }
+
+    private static readonly Regex RunOptionsConstruction = new(
+        @"new\s+RunOptions\s*\(", RegexOptions.Compiled);
+
+    // Armed means the registration names THIS options object and sits in the same member: one
+    // naming another local writes the flag on options no run is using, and one in a neighbouring
+    // member never runs for this construction at all.
+    private static string[] UnarmedRunOptions(string source)
+    {
+        var code = StripCommentsAndStrings(source);
+        var flagged = new List<string>();
+        foreach (Match m in RunOptionsConstruction.Matches(code))
+        {
+            var named = Regex.Match(code[..m.Index], @"(\w+)\s*=\s*$");
+            var member = code[m.Index..MemberEndFrom(code, m.Index)];
+            if (named.Success && Regex.IsMatch(
+                    member,
+                    @"AbortWhenCancelled\s*\(\s*" + Regex.Escape(named.Groups[1].Value) + @"\s*,"))
+                continue;
+            flagged.Add(member[..Math.Min(member.Length, 80)].Trim());
+        }
+        return [.. flagged];
+    }
+
+    private static string[] ProductSources() =>
+        [.. Directory
+            .EnumerateFiles(ProductSourceRoot(), "*.cs", SearchOption.AllDirectories)
+            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}") &&
+                        !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}"))
+            .Select(File.ReadAllText)];
+
     [Fact]
     public void TestVariableHandleConversionCoverage()
     {

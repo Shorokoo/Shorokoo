@@ -57,31 +57,40 @@ internal sealed class MaterializedValues
     }
 
     /// <summary>
-    /// Drops every runtime's copy of these contents, because the contents are about to change or
-    /// have just been handed out for writing. Each copy was taken at the moment it was built, so
-    /// contents mutated after being fed would otherwise keep feeding the old ones -- silently,
-    /// since the tensor itself reads back the new ones.
+    /// Drops every runtime's copy of these contents, freeing each one, because the contents are
+    /// gone. Each copy was taken at the moment it was built, so contents mutated after being fed
+    /// would otherwise keep feeding the old ones -- silently, since the tensor itself reads back
+    /// the new ones.
     ///
-    /// <para><b>It frees them, and freeing is not something a run can be protected from.</b> A
-    /// value handed to a session is a bare native pointer from that moment on: ORT holds no
-    /// reference this side could see, and the feed path takes the value out of this cache once and
-    /// then runs with no further reference to it. So a caller who mutates or disposes a tensor on
-    /// one thread while another thread is inside a run on that same tensor frees the buffer the run
-    /// is reading. Nothing here can detect it -- this is an explicit release, not a collection, so
-    /// the rooting discipline that keeps values alive across a native call does not apply.</para>
-    ///
-    /// <para>That is a rule for the caller, stated on <see cref="TensorData"/>: a tensor being fed
-    /// to a run must not be written to or disposed until the run returns. Making it safe instead of
-    /// stated needs the values to be reference-counted for the length of a run, which is
-    /// Shorokoo/Shorokoo#366.</para>
+    /// <para>This is the allocation's release action, so it runs when the last handle and the last
+    /// lock on those contents have let go: a value handed to a session is a bare native pointer
+    /// from that moment on, and freeing one while a run is reading it is a read of freed memory
+    /// that nothing on this side could detect. Where the contents are merely being <i>written</i>
+    /// rather than released, the copies come off the cache without being freed --
+    /// <see cref="Retire"/> -- and the caller frees them once the readers are done.</para>
     /// </summary>
     internal void Invalidate()
     {
+        Retire()?.Invoke();
+    }
+
+    /// <summary>
+    /// Takes every runtime's copy off the cache without freeing it, and hands back the free as an
+    /// action for the caller to run when it is safe to. Null when there was nothing cached.
+    ///
+    /// <para>The two halves come apart because they answer to different things. Retiring has to be
+    /// immediate -- the next feed must rebuild from the contents as they now are -- while freeing
+    /// has to wait for the last run still reading the old copies.</para>
+    /// </summary>
+    internal Action? Retire()
+    {
+        IShorokooTensorValue[] retired;
         lock (_gate)
         {
-            if (_byBackend is null) return;
-            foreach (var value in _byBackend.Values) value.Dispose();
+            if (_byBackend is null) return null;
+            retired = [.. _byBackend.Values];
             _byBackend = null;
         }
+        return () => { foreach (var value in retired) value.Dispose(); };
     }
 }

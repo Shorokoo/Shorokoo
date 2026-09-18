@@ -33,26 +33,26 @@ public class CompositeTransferCoverageTests
     }
 
     [Fact]
-    public void TestASequenceCopyLeavesTheOriginalOwningItsElements()
+    public void TestASequenceCopyIsIndependentOfTheOriginal()
     {
         var sequence = TensorDataSequence.Create([Sample(1f)], DType.Float32);
 
         var copy = sequence.CopyTo(new ComputeContext());
+        sequence.Dispose();
 
-        Assert.True(sequence[0].OwnsMemory);
-        Assert.True(copy[0].OwnsMemory);
         Assert.Equal([1f, 2f], Floats(copy[0]));
     }
 
     [Fact]
-    public void TestASequenceGivesAccessWithoutTakingOwnership()
+    public void TestASequenceGivesASecondHandleOnTheSameElements()
     {
         var sequence = TensorDataSequence.Create([Sample(1f)], DType.Float32);
 
         var readers = sequence.GiveAccessTo(new ComputeContext());
 
-        Assert.False(readers[0].OwnsMemory);
-        Assert.True(sequence[0].OwnsMemory);
+        Assert.NotSame(sequence[0], readers[0]);
+        readers.Dispose();
+        Assert.Equal([1f, 2f], Floats(sequence[0]));
     }
 
     [Fact]
@@ -232,7 +232,7 @@ public class CompositeTransferCoverageTests
         var sequence = TensorDataSequence.OfElements([good, doomed], DType.Float32);
         Assert.ThrowsAny<Exception>(() => sequence.TransferTo(target));
         Assert.Equal([1f, 2f], Floats(sequence[0]));
-        Assert.True(sequence[0].OwnsMemory);
+        Assert.Same(ComputeContext.Host, sequence[0].Context);
 
         TensorStructFieldDef[] fields =
         [
@@ -247,7 +247,7 @@ public class CompositeTransferCoverageTests
             new Dictionary<string, IData> { { "a", first }, { "b", second } });
 
         Assert.ThrowsAny<Exception>(() => composite.TransferTo(target));
-        Assert.True(first.OwnsMemory);
+        Assert.Equal([5f, 6f], Floats(first));
         Assert.Same(ComputeContext.Host, first.Context);
     }
 
@@ -262,9 +262,6 @@ public class CompositeTransferCoverageTests
             new TensorStructDef(fields, "S"),
             new Dictionary<string, IData> { { "f", Sample(5f) } }).TransferTo(source);
 
-        // A reader owns none of its elements, which is the case the ownership gate on the transfer
-        // operations is for -- and the case a copy must not be gated by, since a copy is exactly
-        // what a caller holding no ownership has to reach for.
         var sequenceReader = sequence.GiveAccessTo(source);
         var structReader = struc.GiveAccessTo(source);
 
@@ -272,10 +269,9 @@ public class CompositeTransferCoverageTests
         var keptStruct = structReader.CopyTo(null);
 
         Assert.NotSame(sequenceReader[0], keptSequence[0]);
-        Assert.True(keptSequence[0].OwnsMemory);
         Assert.Same(ComputeContext.Host, keptSequence[0].Context);
         Assert.NotSame(StructField(structReader), StructField(keptStruct));
-        Assert.True(StructField(keptStruct).OwnsMemory);
+        Assert.Same(ComputeContext.Host, StructField(keptStruct).Context);
 
         // The point of the copy: it outlives the context the elements were read from.
         source.Dispose();

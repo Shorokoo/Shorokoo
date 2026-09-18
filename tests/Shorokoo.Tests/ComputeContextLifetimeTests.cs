@@ -65,7 +65,7 @@ public class ComputeContextLifetimeCoverageTests
         source.Dispose();
 
         Assert.Equal([1f, 2f, 3f, 4f], Floats(onTarget));
-        Assert.True(onTarget.OwnsMemory);
+        Assert.Same(target, onTarget.Context);
 
         // And the target still governs it.
         target.Dispose();
@@ -216,7 +216,6 @@ public class ComputeContextLifetimeCoverageTests
         // Detached: the result is in the framework's own host memory, which is what makes the
         // next line safe.
         Assert.Same(ComputeContext.Host, result.Context);
-        Assert.True(result.OwnsMemory);
 
         context.Dispose();
         Assert.Equal(expected, Floats(result));
@@ -334,6 +333,190 @@ public class ComputeContextLifetimeCoverageTests
             if (File.Exists(onnx)) File.Delete(onnx);
         }
 
+    }
+
+    // A graph of many cheap kernels over a big-enough buffer: long enough for another thread to
+    // land inside the native run, and made of enough nodes that ORT has a boundary to stop at --
+    // a graph that is one kernel cannot be stopped at all.
+    private const int Wide = 1 << 20;
+    private const int Deep = 48;
+
+    private static (InternalComputationGraph Graph, float[] Expected) Chain()
+    {
+        var a = InputVector<float32>("a");
+        var y = a;
+        for (int i = 0; i < Deep; i++) y = y + a;
+        return (new InternalComputationGraph([a], [y]), [.. Feed().Select(v => (Deep + 1) * v)]);
+    }
+
+    private static float[] Feed() => [.. Enumerable.Range(0, Wide).Select(i => (float)(i % 7))];
+
+    private static HostTensorData<float32> Wide32() => (HostTensorData<float32>)TensorData([(long)Wide], Feed());
+
+    /// <summary>
+    /// Shorokoo/Shorokoo#366: feeding a tensor on one thread while another disposes it, or writes
+    /// to it, used to free the buffer the execution provider was reading. The run now holds what it
+    /// reads, and the bytes go when it returns rather than under it.
+    /// </summary>
+    [Fact]
+    public void TestATensorDisposedOrWrittenOnAnotherThreadStaysValidForTheRunFeedingIt()
+    {
+        using var context = new ComputeContext();
+        var (graph, expected) = Chain();
+        var compiled = context.Compile(graph);
+
+        foreach (var interfere in (Action<HostTensorData<float32>>[])[
+            static t => t.Dispose(),
+            static t => t.AccessModifiableMemory<float>()[0] = 99f])
+        {
+            for (int round = 0; round < 3; round++)
+            {
+                var fed = Wide32();
+                var other = Task.Run(() =>
+                {
+                    SpinWait.SpinUntil(() => !fed.MaterializationsAreEmpty, TimeSpan.FromSeconds(10));
+                    interfere(fed);
+                });
+
+                var result = Floats(compiled.Execute(fed)[0].ToTensorData());
+                other.Wait();
+
+                Assert.Equal(expected, result);
+            }
+        }
+    }
+
+    [Fact]
+    public void TestATensorDisposedWhileARunFeedsItIsFreedWhenThatRunReturns()
+    {
+        using var context = new ComputeContext();
+        var (graph, _) = Chain();
+        var compiled = context.Compile(graph);
+        var fed = Wide32();
+
+        var disposer = Task.Run(() =>
+        {
+            SpinWait.SpinUntil(() => !fed.MaterializationsAreEmpty, TimeSpan.FromSeconds(10));
+            fed.Dispose();
+            return fed.MaterializationsAreEmpty;
+        });
+
+        compiled.Execute(fed);
+
+        Assert.False(disposer.Result);
+        Assert.True(fed.MaterializationsAreEmpty);
+    }
+
+    [Fact]
+    public void TestASecondHandleSurvivesTheDisposalOfTheContextTheFirstWasAttachedTo()
+    {
+        var first = new ComputeContext();
+        var second = new ComputeContext();
+        var onFirst = Sample().TransferTo(first);
+        var onSecond = onFirst.GiveAccessTo(second);
+
+        first.Dispose();
+
+        Assert.Equal([1f, 2f, 3f, 4f], Floats(onSecond));
+        second.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => Floats(onSecond));
+    }
+
+    [Fact]
+    public void TestALockIsRefusedByEveryContextButTheOneTheTensorIsAttachedTo()
+    {
+        using var owner = new ComputeContext();
+        using var other = new ComputeContext();
+        var t = Sample().TransferTo(owner);
+
+        Assert.Throws<InvalidOperationException>(() => other.Lock(t));
+        using (var lease = owner.Lock(t)) Assert.False(lease.Eviction.IsCancellationRequested);
+
+        var detached = Sample();
+        Assert.Throws<InvalidOperationException>(() => owner.Lock(detached));
+        using (ComputeContext.Host.Lock(detached)) Assert.False(detached.TryDelete());
+
+        Assert.True(t.TryDelete());
+        Assert.Throws<ObjectDisposedException>(() => owner.Lock(t));
+    }
+
+    [Fact]
+    public void TestDisposingAContextWithALeaseOutstandingThrowsAndLeavesItUsable()
+    {
+        var context = new ComputeContext();
+        var t = Sample().TransferTo(context);
+        var lease = context.Lock(t);
+
+        Assert.Throws<InvalidOperationException>(context.Dispose);
+        Assert.False(context.IsDisposed);
+        Assert.Equal([1f, 2f, 3f, 4f], Floats(t));
+
+        lease.Dispose();
+        context.Dispose();
+        Assert.True(context.IsDisposed);
+    }
+
+    [Fact]
+    public void TestTryDeleteRefusesWhileALeaseIsOutstandingAndSucceedsOnceItDrops()
+    {
+        using var context = new ComputeContext();
+        var t = Sample().TransferTo(context);
+        var lease = context.Lock(t);
+
+        Assert.False(t.TryDelete());
+        Assert.False(lease.Eviction.IsCancellationRequested);
+        Assert.Equal([1f, 2f, 3f, 4f], Floats(t));
+
+        lease.Dispose();
+        Assert.True(t.TryDelete());
+        Assert.True(t.TryDelete());
+        Assert.Throws<ObjectDisposedException>(() => Floats(t));
+    }
+
+    [Fact]
+    public async Task TestDeleteAsyncDeletesAtOnceAndReclaimsWhenTheLockDrops()
+    {
+        using var context = new ComputeContext();
+        var a = InputVector<float32>("a");
+        var graph = new InternalComputationGraph([a], [a + a]);
+        var t = (HostTensorData<float32>)Sample().CopyTo(context);
+        context.Execute(graph, t);
+        Assert.False(t.MaterializationsAreEmpty);
+
+        using var lease = context.Lock(t);
+        Assert.False(await t.DeleteAsync(TimeSpan.FromMilliseconds(20)));
+
+        // Deleted already, and said so: only the reclamation was still waiting.
+        Assert.Throws<ObjectDisposedException>(() => Floats(t));
+        Assert.True(lease.Eviction.IsCancellationRequested);
+        Assert.False(t.MaterializationsAreEmpty);
+        Assert.False(await t.DeleteAsync(TimeSpan.Zero));
+
+        lease.Dispose();
+        Assert.True(t.MaterializationsAreEmpty);
+        Assert.True(await t.DeleteAsync(TimeSpan.Zero));
+    }
+
+    [Fact]
+    public async Task TestDeleteAsyncCompletesOnceTheRunReadingTheTensorHasStopped()
+    {
+        using var context = new ComputeContext();
+        var (graph, expected) = Chain();
+        var compiled = context.Compile(graph);
+        var fed = Wide32();
+
+        var run = Task.Run(() => Floats(compiled.Execute(fed)[0].ToTensorData()));
+        Assert.True(SpinWait.SpinUntil(() => !fed.MaterializationsAreEmpty, TimeSpan.FromSeconds(10)));
+
+        Assert.True(await fed.DeleteAsync(TimeSpan.FromSeconds(30)));
+        Assert.True(fed.MaterializationsAreEmpty);
+        Assert.Throws<ObjectDisposedException>(() => Floats(fed));
+
+        // Stopped or finished, never a wrong answer: a run that reaches its last kernel before the
+        // flag is read returns what it computed, and one stopped short says so.
+        var stopped = await Record.ExceptionAsync(() => run);
+        if (stopped is null) Assert.Equal(expected, run.Result);
+        else Assert.IsAssignableFrom<OperationCanceledException>(stopped);
     }
 
     internal sealed class StubBackend(ComputeDevice device, int? cudaDeviceId)

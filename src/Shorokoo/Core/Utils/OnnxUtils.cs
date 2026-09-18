@@ -386,7 +386,7 @@ namespace Shorokoo.Core.Utils
         internal static TensorData internalCreateBoundTensorData<T>(
             Shape shape, IShorokooTensorValue value, Shorokoo.Runtime.ComputeContext context)
             where T : IVarType
-            => new OnnxTensorData<T>(shape, value, context, ownsMemory: true, storage: null);
+            => new OnnxTensorData<T>(shape, value, context, storage: null);
 
         /// <summary>A host tensor over <paramref name="bytes"/>, bound to <paramref name="context"/>
         /// (whose memory must be host memory).</summary>

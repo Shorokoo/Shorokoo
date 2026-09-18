@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using Shorokoo.Core.Utils;
 using Shorokoo.Runtime;
@@ -34,8 +35,12 @@ public sealed class MemoryDevice
 {
     // Interning table. Never pruned, and does not need to be: there is one entry per memory space
     // a process has touched -- the host, a card, the unnamed one -- not one per backend.
-    private static readonly Dictionary<MemorySpace, MemoryDevice> Interned = [];
-    private static readonly object InternGate = new();
+    //
+    // Concurrent rather than a Dictionary behind a monitor, because every allocation asks which
+    // device it is in as it is built: a process-wide lock here would serialize tensor construction
+    // across the whole program, on the very two-device workload this layering is for. GetAdd may
+    // build a device twice under a race and keeps only one, which is all reference identity needs.
+    private static readonly ConcurrentDictionary<MemorySpace, MemoryDevice> Interned = new();
 
     private readonly WeakSet<IShorokooInferenceBackend> _backends = new();
 
@@ -51,13 +56,7 @@ public sealed class MemoryDevice
     /// memory".
     /// </summary>
     public static MemoryDevice For(MemorySpace space)
-    {
-        lock (InternGate)
-        {
-            if (Interned.TryGetValue(space, out var interned)) return interned;
-            return Interned[space] = new MemoryDevice(space);
-        }
-    }
+        => Interned.GetOrAdd(space, static s => new MemoryDevice(s));
 
     /// <summary>
     /// The device <paramref name="backend"/> allocates in, recording it there as one of that

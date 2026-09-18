@@ -168,17 +168,16 @@ public class SideBySideBackendHardwareTests
         var onHost = onCard.TransferTo(firstHost);
 
         Assert.Equal(MemorySpace.Host, onHost.Space);
-        Assert.True(onHost.OwnsMemory);
         SideBySideModel.AssertAgree(expected, Floats(onHost), SideBySideModel.DeviceTolerance);
 
         // The move spent the source, which is what a move across spaces means.
         Assert.True(onCard.IsDisposed);
 
-        // Between two host contexts nothing moves but the ownership...
+        // Between two host contexts nothing moves but which context the handle is attached to...
         var secondHost = new ComputeContext();
         var shared = onHost.TransferTo(secondHost);
-        Assert.False(onHost.OwnsMemory);
-        Assert.True(shared.OwnsMemory);
+        Assert.Same(secondHost, shared.Context);
+        Assert.Same(secondHost, onHost.Context);
 
         // ...and the result runs on the second one, which is where it now lives. Fed back through
         // the same graph, so the answer is the model applied twice rather than the first answer.
@@ -255,7 +254,6 @@ public class SideBySideBackendHardwareTests
 
         Assert.Equal(MemorySpace.Cuda(0), onCard.Space);
         Assert.Same(cuda, onCard.Context);
-        Assert.True(onCard.OwnsMemory);
         Assert.False(onCard.IsHostResident);
         Assert.Throws<InvalidOperationException>(() => onCard.As<float32>().AccessMemory<float>());
 

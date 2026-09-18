@@ -61,6 +61,15 @@ namespace Shorokoo
         /// whoever had it. Exactly one context is on the hook at a time.</summary>
         internal void TransferOwnershipTo(Shorokoo.Runtime.ComputeContext? context)
         {
+            // Outside the lock, because this is the overwhelmingly common case and the gate is
+            // process-wide: every literal a graph build creates is a tensor with no context whose
+            // storage has no owner, and taking a shared monitor to discover that serialized model
+            // construction across the whole process -- on the very two-device workload this design
+            // is for. Volatile-free is fine here: the only transition this can miss is one that
+            // would have to be racing this storage's construction, and a storage nobody else has a
+            // reference to yet has no other writer.
+            if (ReferenceEquals(Owner, context)) return;
+
             lock (OwnershipGate)
             {
                 if (ReferenceEquals(Owner, context)) return;

@@ -157,7 +157,19 @@ internal sealed class OrtInferenceSession : IShorokooInferenceSession
                 byName[boundNames[i]] = results[i];
 
             var wrapped = new List<IShorokooTensorValue>(outputNames.Count);
-            foreach (var name in outputNames) wrapped.Add(new OrtTensorValue(byName[name]));
+            foreach (var name in outputNames)
+            {
+                // Same reason as the count check above, and the same handling: a name that does not
+                // come back is a bad run, not an excuse to drop every device allocation it made.
+                if (!byName.TryGetValue(name, out var value))
+                {
+                    foreach (var orphan in results) orphan.Dispose();
+                    throw new InvalidOperationException(
+                        $"The run bound no output named '{name}'; it bound "
+                        + $"{string.Join(", ", boundNames)}.");
+                }
+                wrapped.Add(new OrtTensorValue(value));
+            }
             return wrapped;
         }
         finally

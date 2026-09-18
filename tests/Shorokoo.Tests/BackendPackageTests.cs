@@ -33,7 +33,10 @@ public class BackendPackageCoverageTests
         Assert.True(probe.Supported);
         Assert.Equal(BackendRejection.None, probe.Reason);
         Assert.Equal(Windows ? "windows" : "linux", probe.Os);
-        Assert.Equal("x64", probe.Architecture);
+        // What the backend declares, which is what the projects build for -- not a claim about the
+        // machine. Asserting the literal made an arm64 host fail here rather than at the one place
+        // that would explain it.
+        Assert.Equal(RuntimeInformation.ProcessArchitecture.ToString().ToLowerInvariant(), probe.Architecture);
         Assert.Equal("cpu", probe.Device);
     }
 

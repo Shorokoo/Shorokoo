@@ -46,6 +46,11 @@ public interface IShorokooInferenceBackend
     // UTF-8 and reference-typed, so they get their own constructor.
     IShorokooTensorValue CreateStringTensor(IReadOnlyList<string> data, long[] shape);
 
+    // Takes <paramref name="values"/> over: on success the sequence owns them and the caller must
+    // not dispose them, and on failure this method disposes them before it throws. Both halves are
+    // load-bearing -- BackendTransfer and the sequence builder both call this outside the catch
+    // that would otherwise free the elements, precisely because a failure here has already freed
+    // them -- so a backend that throws without disposing leaks every element it was handed.
     IShorokooTensorValue CreateSequence(IReadOnlyList<IShorokooTensorValue> values);
 
     // This value's contents as host bytes, whatever memory it is in. The default serves a value

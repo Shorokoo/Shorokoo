@@ -250,6 +250,17 @@ namespace Shorokoo
         /// — so the copy is asked of the backend that owns the allocation, which is the only thing
         /// that knows how to reach it.</para>
         /// </summary>
+        /// <summary>
+        /// A copy of this string tensor's elements, belonging to <paramref name="target"/> but held
+        /// in host memory whatever memory that context names.
+        ///
+        /// <para>Strings have no device representation to copy into — ONNX Runtime allocates every
+        /// string tensor on the host, on every execution provider — so this is the one case where a
+        /// tensor's <see cref="TensorData.Space"/> is Host while its
+        /// <see cref="TensorData.Context"/> names a card. That is the honest description of where
+        /// the bytes are rather than a gap: a device context feeding one still feeds host memory,
+        /// and there is nothing else for it to feed.</para>
+        /// </summary>
         private TensorData CopyStringsAcross(ComputeContext? target)
         {
             var strings = this switch

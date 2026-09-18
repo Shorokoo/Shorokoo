@@ -295,8 +295,14 @@ public static class InferenceBackend
     /// <para>A backend loaded into isolation (<see cref="IsolatedBackend"/>) lives in a context of
     /// its own, and it got there by being named — that is the only way one loads. So it is not an
     /// answer to "which backend did this program mean", and counting it would mean that naming a
-    /// second backend made the first one ambiguous: a program could not load one without losing
-    /// the ability to leave the default undeclared.</para>
+    /// second backend made the first one ambiguous.</para>
+    ///
+    /// <para>This covers the already-loaded step only. The folder probe that runs when that step
+    /// finds nothing reads files rather than assemblies, and a file has no load context to filter
+    /// on — so an isolated backend whose assembly sits in the probe directory is still a candidate
+    /// there. Deploying it in a folder of its own, which is what
+    /// <see cref="IsolatedBackendSpec.ProbeDirectory"/> is for and what the deployment guidance
+    /// requires, is what keeps it out of that count.</para>
     /// </summary>
     internal static Assembly[] DiscoverableAssemblies(IEnumerable<Assembly> assemblies)
         => [.. assemblies.Where(

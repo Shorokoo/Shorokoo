@@ -286,7 +286,7 @@ public abstract class OrtBackend : IShorokooInferenceBackend
     {
         ArgumentNullException.ThrowIfNull(data);
         ArgumentNullException.ThrowIfNull(shape);
-        if (_cudaDeviceId is not { } deviceId)
+        if (_cudaDeviceId is null)
             return CreateTensorFromRawBytes(elementType, data, shape);
 
         var ortElementType = FixedStrideElementType(elementType, nameof(CreateTensorInBackendMemory));
@@ -299,8 +299,7 @@ public abstract class OrtBackend : IShorokooInferenceBackend
                 $"Supplied data of {data.Length} bytes is less than shape size {byteCount} bytes.",
                 nameof(data));
 
-        var wrapped = new OrtTensorValue(OrtValue.CreateAllocatedTensorValue(
-            CudaDeviceAllocator.For(deviceId, _configureExecutionProvider), ortElementType, shape));
+        var wrapped = AllocateInBackendMemory(ortElementType, shape);
         try
         {
             // ORT's managed surface has no host-to-device copy, so this goes through the CUDA
@@ -327,9 +326,36 @@ public abstract class OrtBackend : IShorokooInferenceBackend
     }
 
     /// <summary>
+    /// A tensor of <paramref name="elementType"/> and <paramref name="shape"/> in the memory this
+    /// backend's tensors live in, with nothing written into it: the buffer holds whatever ORT's
+    /// allocator last left there, and the caller fills it.
+    ///
+    /// <para>The same allocation <see cref="CreateTensorInBackendMemory"/> makes, and no copy —
+    /// which is the point. That one starts from a managed array, so the tensor exists twice for as
+    /// long as the caller holds the array it was built from; a producer writing the buffer itself
+    /// never has the second copy at all (Shorokoo/Shorokoo#359).</para>
+    ///
+    /// <para>On a host backend the buffer is host memory and
+    /// <see cref="IShorokooTensorValue.GetTensorMutableDataAsSpan{T}"/> is what fills it. On a CUDA
+    /// backend it is the card's own memory, which the host cannot write through a span at all:
+    /// filling it means a copy across the bus, or a run that produces into it.</para>
+    /// </summary>
+    /// <exception cref="ArgumentNullException"><paramref name="shape"/> is null.</exception>
+    /// <exception cref="NotSupportedException">The element type has no fixed byte stride.</exception>
+    public IShorokooTensorValue CreateUninitializedTensorInBackendMemory(
+        ShorokooTensorElementType elementType,
+        long[] shape)
+    {
+        ArgumentNullException.ThrowIfNull(shape);
+        return AllocateInBackendMemory(
+            FixedStrideElementType(elementType, nameof(CreateUninitializedTensorInBackendMemory)),
+            shape);
+    }
+
+    /// <summary>
     /// The ORT element type <paramref name="elementType"/> is laid down as, refusing the ones a
     /// flat byte buffer cannot express. <paramref name="operation"/> names the caller, so a
-    /// refusal says which of the two byte-wise constructors was asked.
+    /// refusal says which byte-wise constructor was asked.
     /// </summary>
     /// <exception cref="NotSupportedException">
     /// The element type has no fixed byte stride — <see cref="ShorokooTensorElementType.String"/>
@@ -491,6 +517,22 @@ public abstract class OrtBackend : IShorokooInferenceBackend
         _ => throw new InvalidOperationException(
             $"A {type} tensor has no fixed element size, so it cannot be copied back by bytes."),
     };
+
+    /// <summary>
+    /// An ORT-allocated buffer of this element type and shape in the memory this backend's tensors
+    /// live in, with nothing written into it: host memory on a host backend, the card's own on a
+    /// CUDA one.
+    /// </summary>
+    private OrtTensorValue AllocateInBackendMemory(TensorElementType elementType, long[] shape)
+        => new(OrtValue.CreateAllocatedTensorValue(
+            // The one place the host-or-card decision is made, so the two constructors that build
+            // in this backend's own memory cannot come to differ on it. A CUDA backend allocating
+            // from the default allocator would hand back host memory wearing the card's name, which
+            // the execution provider then copies over on every run.
+            _cudaDeviceId is { } deviceId
+                ? CudaDeviceAllocator.For(deviceId, _configureExecutionProvider)
+                : OrtAllocator.DefaultInstance,
+            elementType, shape));
 
     /// <summary>
     /// Builds an ORT tensor on a buffer ORT itself allocates, in host memory, and copies

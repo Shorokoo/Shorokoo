@@ -18,6 +18,7 @@ namespace Shorokoo.Tests;
 /// OpsFactories <see cref="Helpers"/> dtype sets and attribute-type mapping, the
 /// <see cref="InferenceBackend"/> deployment-folder discovery and selection policy, the
 /// description a live backend answers with and the device assertion built on it, the
+/// uninitialised tensor allocation on the backend ABI and the zero-filling default behind it, the
 /// <see cref="DeviceMemory"/> settings the CUDA backends map onto ORT's arena options, the typed
 /// value-handle conversions, <c>ShapeUtils</c>' argument validation for <c>Reshape</c>'s
 /// <c>keepAxes</c>, the <see cref="AtomicFileWriter"/> temp-and-rename commit protocol
@@ -332,6 +333,126 @@ public class CoreUtilsCoverageTests
         Assert.Contains(live.ToString(), Assert.Throws<InvalidOperationException>(
             () => InferenceBackend.RequireDevice(other)).Message);
         Assert.Throws<ArgumentOutOfRangeException>(() => InferenceBackend.RequireDevice((ComputeDevice)7));
+    }
+
+    private static readonly ShorokooTensorElementType[] FixedStrideElementTypes =
+    [
+        ShorokooTensorElementType.Bool,
+        ShorokooTensorElementType.Int8, ShorokooTensorElementType.UInt8,
+        ShorokooTensorElementType.Int16, ShorokooTensorElementType.UInt16,
+        ShorokooTensorElementType.Float16, ShorokooTensorElementType.BFloat16,
+        ShorokooTensorElementType.Int32, ShorokooTensorElementType.UInt32,
+        ShorokooTensorElementType.Float,
+        ShorokooTensorElementType.Int64, ShorokooTensorElementType.UInt64,
+        ShorokooTensorElementType.Double,
+    ];
+
+    [Fact]
+    public void TestAnUninitializedTensorIsWhatTheCopyingPathBuildsWithoutTheCopy()
+    {
+        var backend = InferenceBackend.Default;
+        long[][] shapes = [[4L], [2L, 3L], [2L, 1L, 5L]];
+
+        foreach (var elementType in FixedStrideElementTypes)
+            foreach (var shape in shapes)
+            {
+                using var copied = backend.CreateTensorInBackendMemory(
+                    elementType, new byte[Elements(shape) * sizeof(double)], shape);
+                using var fresh = backend.CreateUninitializedTensorInBackendMemory(elementType, shape);
+                Assert.Equal(copied.ElementType, fresh.ElementType);
+                Assert.Equal(copied.Shape, fresh.Shape);
+                Assert.Equal(
+                    copied.GetTensorDataAsSpan<byte>().Length, fresh.GetTensorDataAsSpan<byte>().Length);
+            }
+
+        Assert.Equal(
+            (float[])[1.5f, -2.5f, 3f],
+            Written(backend, ShorokooTensorElementType.Float, [3L], (float[])[1.5f, -2.5f, 3f]));
+        Assert.Equal(
+            (long[])[1L, -2L], Written(backend, ShorokooTensorElementType.Int64, [1L, 2L], (long[])[1L, -2L]));
+        Assert.Equal(
+            (byte[])[7, 9, 0], Written(backend, ShorokooTensorElementType.UInt8, [3L], (byte[])[7, 9, 0]));
+
+        Assert.Equal(
+            Assert.Throws<NotSupportedException>(() => backend.CreateTensorFromRawBytes(
+                ShorokooTensorElementType.String, [], [2L])).Message,
+            Assert.Throws<NotSupportedException>(() => backend.CreateUninitializedTensorInBackendMemory(
+                ShorokooTensorElementType.String, [2L])).Message);
+        Assert.Throws<NotSupportedException>(() => backend.CreateUninitializedTensorInBackendMemory(
+            ShorokooTensorElementType.Complex64, [2L]));
+        Assert.Throws<ArgumentNullException>(() => backend.CreateUninitializedTensorInBackendMemory(
+            ShorokooTensorElementType.Float, null!));
+    }
+
+    [Fact]
+    public void TestABackendThatDoesNotOverrideTheUninitializedAllocationStillGetsAZeroFilledOne()
+    {
+        IShorokooInferenceBackend defaulting = new ByteWiseOnlyBackend();
+
+        Assert.Equal(new float[6], Zeroed<float>(defaulting, ShorokooTensorElementType.Float, [2L, 3L]));
+        Assert.Equal(new long[3], Zeroed<long>(defaulting, ShorokooTensorElementType.Int64, [3L]));
+        Assert.Equal(new byte[5], Zeroed<byte>(defaulting, ShorokooTensorElementType.UInt8, [5L]));
+        Assert.Equal(new short[4], Zeroed<short>(defaulting, ShorokooTensorElementType.Int16, [2L, 2L]));
+        Assert.Equal(new double[2], Zeroed<double>(defaulting, ShorokooTensorElementType.Double, [2L]));
+
+        Assert.Contains("CreateStringTensor", Assert.Throws<NotSupportedException>(
+            () => defaulting.CreateUninitializedTensorInBackendMemory(
+                ShorokooTensorElementType.String, [2L])).Message);
+        Assert.Throws<NotSupportedException>(() => defaulting.CreateUninitializedTensorInBackendMemory(
+            ShorokooTensorElementType.Complex64, [2L]));
+        Assert.Throws<ArgumentNullException>(() => defaulting.CreateUninitializedTensorInBackendMemory(
+            ShorokooTensorElementType.Float, null!));
+    }
+
+    private static long Elements(long[] shape)
+    {
+        var elements = 1L;
+        foreach (var dim in shape) elements *= dim;
+        return elements;
+    }
+
+    private static T[] Written<T>(
+        IShorokooInferenceBackend backend, ShorokooTensorElementType elementType, long[] shape, T[] values)
+        where T : unmanaged
+    {
+        using var fresh = backend.CreateUninitializedTensorInBackendMemory(elementType, shape);
+        values.CopyTo(fresh.GetTensorMutableDataAsSpan<T>());
+        return [.. fresh.GetTensorDataAsSpan<T>()];
+    }
+
+    private static T[] Zeroed<T>(
+        IShorokooInferenceBackend backend, ShorokooTensorElementType elementType, long[] shape)
+        where T : unmanaged
+    {
+        using var value = backend.CreateUninitializedTensorInBackendMemory(elementType, shape);
+        Assert.Equal(elementType, value.ElementType);
+        Assert.Equal(shape, value.Shape);
+        return [.. value.GetTensorDataAsSpan<T>()];
+    }
+
+    /// <summary>A backend answering only the byte-wise constructor, so what serves everything built
+    /// on it is the interface's own default bodies rather than a backend's.</summary>
+    private sealed class ByteWiseOnlyBackend : IShorokooInferenceBackend
+    {
+        public BackendDescription Description { get; } = new("byte-wise-only", ComputeDevice.Cpu, null);
+
+        public IShorokooTensorValue CreateTensorFromRawBytes(
+            ShorokooTensorElementType elementType, byte[] data, long[] shape)
+            => InferenceBackend.Default.CreateTensorFromRawBytes(elementType, data, shape);
+
+        public IShorokooInferenceSession CreateSession(
+            ReadOnlyMemory<byte> modelBytes, ShorokooGraphOptimization graphOptimization,
+            ShorokooLogSeverity logSeverity, DeviceMemorySettings deviceMemory)
+            => throw new NotSupportedException();
+
+        public IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged
+            => throw new NotSupportedException();
+
+        public IShorokooTensorValue CreateStringTensor(IReadOnlyList<string> data, long[] shape)
+            => throw new NotSupportedException();
+
+        public IShorokooTensorValue CreateSequence(IReadOnlyList<IShorokooTensorValue> values)
+            => throw new NotSupportedException();
     }
 
     [Fact]

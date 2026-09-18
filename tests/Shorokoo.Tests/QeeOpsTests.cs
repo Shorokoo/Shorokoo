@@ -133,6 +133,16 @@ public class QeeOpsCoverageTests
             TensorData(DType.Float64, [5L], 0.0, 1.0, -1.0, 3.0, -7.0))[0];
         Assert.Equal(DType.Float64, y64.DType);
         Assert.Equal<float>([0f, 0.5f, -0.5f, 0.75f, -0.875f], y64.FloatData!.Value);
+
+        var attrs = OnnxCSharpAttributes.FromCSharpVals(
+            new(), Definitions.NodeDefinitions[OpCodes.SOFTSIGN].AttributeDefs);
+        IRuntimeTensor?[] inputs = [TensorDataConverter.ToRuntimeInput(
+            TensorData(DType.Float32, [2L], 1f, 3f), QuickExecutionEngine.DefaultMaxDataElements)];
+        var concurrent = new float[64][];
+        Parallel.For(0, concurrent.Length, new ParallelOptions { MaxDegreeOfParallelism = 4 },
+            i => concurrent[i] = [.. ((RuntimeTensor)LoweredValue.Compute(
+                lowering, inputs, attrs, QuickExecutionEngine.DefaultMaxDataElements)[0]).FloatData!.Value]);
+        Assert.All(concurrent, r => Assert.Equal<float>([0.5f, 0.75f], r));
     }
 
     [Fact]
@@ -145,9 +155,19 @@ public class QeeOpsCoverageTests
         var buildsSoftsign = new OpLowering(OpCodes.ABS,
             typeof(QeeOpsCoverageTests).GetMethod(
                 nameof(BuildsAnOpWithNoQuickOp), BindingFlags.NonPublic | BindingFlags.Static)!);
+        var buildsItself = new OpLowering(OpCodes.ABS,
+            typeof(QeeOpsCoverageTests).GetMethod(
+                nameof(BuildsItsOwnOpCode), BindingFlags.NonPublic | BindingFlags.Static)!);
         Assert.Null(OpRegistry.Get(OpCodes.SOFTSIGN));
-        Assert.Throws<InvalidOperationException>(() => LoweredValue.Compute(
-            buildsSoftsign, inputs, attrs, QuickExecutionEngine.DefaultMaxDataElements));
+
+        string Refusal(OpLowering l) => Assert.Throws<InvalidOperationException>(() => LoweredValue.Compute(
+            l, inputs, attrs, QuickExecutionEngine.DefaultMaxDataElements)).Message;
+
+        for (int i = 0; i < 2; i++)
+        {
+            Assert.Contains("has no operator for", Refusal(buildsSoftsign));
+            Assert.Contains("which it cannot be built from", Refusal(buildsItself));
+        }
 
         var x = TensorData(DType.Float32, [2L], 1f, 3f);
         var g = QeeSoftsignLowered.ComputationGraph.ToInternal();
@@ -159,6 +179,32 @@ public class QeeOpsCoverageTests
 
     private static Variable?[] BuildsAnOpWithNoQuickOp<T>(Tensor<T> x) where T : IVarType
         => [OnnxOp.Softsign(x)];
+
+    private static Variable?[] BuildsItsOwnOpCode<T>(Tensor<T> x) where T : IVarType
+        => [x.Abs()];
+
+    [Fact]
+    public void TestALoweringsPlanIsKeptPerAttributeValueAndNotJustPerOperator()
+    {
+        var lowering = new OpLowering(OpCodes.LEAKY_RELU,
+            typeof(QeeOpsCoverageTests).GetMethod(
+                nameof(BranchesOnItsAttribute), BindingFlags.NonPublic | BindingFlags.Static)!);
+        IRuntimeTensor?[] inputs = [TensorDataConverter.ToRuntimeInput(
+            TensorData(DType.Float32, [2L], -2f, 3f), QuickExecutionEngine.DefaultMaxDataElements)];
+
+        float[] Run(float alpha) => [.. ((RuntimeTensor)LoweredValue.Compute(
+            lowering, inputs,
+            OnnxCSharpAttributes.FromCSharpVals(new() { [OnnxOpAttributeNames.AttrAlpha] = alpha },
+                Definitions.NodeDefinitions[OpCodes.LEAKY_RELU].AttributeDefs),
+            QuickExecutionEngine.DefaultMaxDataElements)[0]).FloatData!.Value];
+
+        Assert.Equal<float>([-4f, 6f], Run(1f));
+        Assert.Equal<float>([2f, 3f], Run(0f));
+        Assert.Equal<float>([-4f, 6f], Run(1f));
+    }
+
+    private static Variable?[] BranchesOnItsAttribute<T>(Tensor<T> x, float? alpha) where T : IVarType
+        => [alpha == 1f ? x + x : x.Abs()];
 
     [Fact]
     public void TestNoQuickOpKeepsInstanceState() =>

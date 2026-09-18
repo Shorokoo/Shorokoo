@@ -1618,6 +1618,29 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
                     Shorokoo.Core.Nodes.Processors.Fast.FastWireRngKeyDerivation.RngSeedIdentifierTemplate)
             .ToDictionary(n => n.IdentifierTemplate!, n => n.GetTensorAttribute()!, StringComparer.Ordinal);
 
+    // The saver is content-addressed, so two parameters of one shape holding identical bytes are
+    // stored once and both mapping entries name that tensor. The reader must be able to bind one
+    // stored tensor to more than one parameter.
+    [Fact]
+    public void TestANamedSetBindsOneStoredTensorToEveryParameterThatSharesIt()
+    {
+        var input = TensorDataWithSmallVals(DType.Float32, [1L]);
+        var g = StaticAndInputShapedParamsLayer.ComputationGraph;
+        var model = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
+
+        var ids = WeightDataByParam(model).Keys.ToArray();
+        Assert.Equal(2, ids.Length);
+
+        var tied = ids.ToDictionary(id => id, _ => (TensorData)TensorData([1L], 7f), StringComparer.Ordinal);
+        var path = P("named-set-tied.skpt");
+        Persistence.From(model).WithModel().WithWeights().WithWeights("tied", tied).Save(path);
+
+        // One data entry, because the two values are byte-identical and stored once.
+        var bound = WeightDataByParam(Persistence.Load(path, "tied"));
+        Assert.Equal(2, bound.Count);
+        Assert.All(ids, id => Assert.Equal([7f], bound[id].Elements<float>().ToArray()));
+    }
+
     [Fact]
     public void TestInspectSkptArtifactsAndNamedMappingSets()
     {

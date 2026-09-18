@@ -439,6 +439,11 @@ namespace Shorokoo
             var tensorRefs = mappingSet.Tensors ?? new Dictionary<string, SkptTensorRef>();
 
             var tensorsByDataKey = new Dictionary<string, Dictionary<string, TensorData>>(StringComparer.Ordinal);
+            // One attribute per stored tensor, because one stored tensor can serve several
+            // parameters: the saver is content-addressed, so two parameters whose values are
+            // byte-identical are written once and both mapping entries name it. The bind below
+            // spends the tensor, so without this the second parameter would find it gone.
+            var attributeByStoredTensor = new Dictionary<string, TensorAttribute>(StringComparer.Ordinal);
             var unboundRefs = new HashSet<string>(tensorRefs.Keys, StringComparer.Ordinal);
 
             foreach (var node in graph.Nodes)
@@ -477,11 +482,18 @@ namespace Shorokoo
                         $"(dtype {placeholder.DType}, shape [{string.Join(",", placeholder.Shape.Dims)}]).");
 
                 // Moved, not copied. This is the big-bytes path -- a 165 M-parameter model is
-                // ~660 MB -- and the loaded tensor was parsed for this bind and nothing else, so
+                // ~660 MB -- and the loaded tensor is parsed for these binds and nothing else, so
                 // handing its bytes to the attribute costs nothing and copying them would double
-                // the load's peak.
+                // the load's peak. Sharing the one attribute between the parameters that name the
+                // same stored tensor is safe for the reason an attribute exists: it is immutable,
+                // so there is nothing for two parameters to disagree about. Shape and dtype stay
+                // readable on the spent tensor, so the check above still holds for the second.
+                var storedTensorKey = $"{tensorRef.Data}\0{tensorRef.Tensor}";
+                if (!attributeByStoredTensor.TryGetValue(storedTensorKey, out var bound))
+                    attributeByStoredTensor[storedTensorKey] = bound = loaded.MoveToAttribute();
+
                 node.Attributes = node.Attributes.SetAttributes(
-                    (OnnxOpAttributeNames.ShrkAttrTensorData, (object?)loaded.MoveToAttribute()));
+                    (OnnxOpAttributeNames.ShrkAttrTensorData, (object?)bound));
             }
 
             if (unboundRefs.Count > 0)

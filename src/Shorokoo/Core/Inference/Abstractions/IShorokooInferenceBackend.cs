@@ -102,38 +102,14 @@ public interface IShorokooInferenceBackend
     // nothing: it is here because this interface is an ABI, and a member without a body is a
     // backend outside this repository that no longer compiles. A backend that does not override
     // this keeps paying the copy it always paid; overriding it is what stops paying.
+    //
+    // Sizing that buffer is TensorElementLayout's table -- the same one a backend's own byte-wise
+    // constructor reads -- so the element types CreateTensorFromRawBytes turns away are turned
+    // away here too, and in the same words. The two paths differing on which types exist would be
+    // a worse answer than either.
     IShorokooTensorValue CreateUninitializedTensorInBackendMemory(
         ShorokooTensorElementType elementType,
         long[] shape)
         => CreateTensorInBackendMemory(
-            elementType, new byte[FixedStrideByteCount(elementType, shape)], shape);
-
-    // How many bytes such a tensor covers, which the default above has to know to size the buffer
-    // it zeroes. Only an element type laid down at a fixed byte stride has an answer, so the ones
-    // CreateTensorFromRawBytes turns away are turned away here too, and in the same words: a
-    // backend overriding the member refuses them at its own byte-wise constructor, and the two
-    // paths differing on which types exist would be a worse answer than either.
-    private static int FixedStrideByteCount(ShorokooTensorElementType elementType, long[] shape)
-    {
-        ArgumentNullException.ThrowIfNull(shape);
-        var elements = 1L;
-        foreach (var dim in shape) elements *= dim;
-        return checked((int)(elements * ElementSize(elementType)));
-    }
-
-    private static int ElementSize(ShorokooTensorElementType elementType) => elementType switch
-    {
-        ShorokooTensorElementType.Int8 or ShorokooTensorElementType.UInt8
-            or ShorokooTensorElementType.Bool => 1,
-        ShorokooTensorElementType.Int16 or ShorokooTensorElementType.UInt16
-            or ShorokooTensorElementType.Float16 or ShorokooTensorElementType.BFloat16 => 2,
-        ShorokooTensorElementType.Float or ShorokooTensorElementType.Int32
-            or ShorokooTensorElementType.UInt32 => 4,
-        ShorokooTensorElementType.Double or ShorokooTensorElementType.Int64
-            or ShorokooTensorElementType.UInt64 => 8,
-        ShorokooTensorElementType.String => throw new NotSupportedException(
-            "String tensors are variable-length and not byte-stride; use CreateStringTensor instead."),
-        _ => throw new NotSupportedException(
-            $"CreateUninitializedTensorInBackendMemory does not support element type {elementType}."),
-    };
+            elementType, new byte[TensorElementLayout.ByteCount(elementType, shape)], shape);
 }

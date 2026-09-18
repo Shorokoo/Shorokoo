@@ -290,7 +290,7 @@ public abstract class OrtBackend : IShorokooInferenceBackend
             return CreateTensorFromRawBytes(elementType, data, shape);
 
         var ortElementType = FixedStrideElementType(elementType, nameof(CreateTensorInBackendMemory));
-        var byteCount = ByteCount(elementType, shape);
+        var byteCount = TensorElementLayout.ByteCount(elementType, shape);
         // A caller may hand over a buffer longer than the shape covers -- the node-definition
         // tables do -- in which case the surplus was never part of the tensor. Shorter is a
         // mistake, and on this path it would leave the tail of a device allocation unwritten.
@@ -458,7 +458,7 @@ public abstract class OrtBackend : IShorokooInferenceBackend
             throw new InvalidOperationException(
                 $"Only a tensor can be read back from device memory; this is a {value.ValueType}.");
 
-        var destination = new byte[ByteCount(value.ElementType, value.Shape)];
+        var destination = new byte[TensorElementLayout.ByteCount(value.ElementType, value.Shape)];
         var copied = CudaInterop.CopyDeviceToHost(DevicePointer(value), destination);
         GC.KeepAlive(value);
         if (!copied)
@@ -494,29 +494,6 @@ public abstract class OrtBackend : IShorokooInferenceBackend
         GC.KeepAlive(ort);
         return address;
     }
-
-    /// <summary>How many bytes a tensor of this element type and shape occupies — the size of the
-    /// buffer on either side of a copy between the host and the card.</summary>
-    private static int ByteCount(ShorokooTensorElementType elementType, long[] shape)
-    {
-        var elements = 1L;
-        foreach (var dim in shape) elements *= dim;
-        return checked((int)(elements * ElementSize(elementType)));
-    }
-
-    private static int ElementSize(ShorokooTensorElementType type) => type switch
-    {
-        ShorokooTensorElementType.Float => 4,
-        ShorokooTensorElementType.Double => 8,
-        ShorokooTensorElementType.Int8 or ShorokooTensorElementType.UInt8
-            or ShorokooTensorElementType.Bool => 1,
-        ShorokooTensorElementType.Int16 or ShorokooTensorElementType.UInt16
-            or ShorokooTensorElementType.Float16 or ShorokooTensorElementType.BFloat16 => 2,
-        ShorokooTensorElementType.Int32 or ShorokooTensorElementType.UInt32 => 4,
-        ShorokooTensorElementType.Int64 or ShorokooTensorElementType.UInt64 => 8,
-        _ => throw new InvalidOperationException(
-            $"A {type} tensor has no fixed element size, so it cannot be copied back by bytes."),
-    };
 
     /// <summary>
     /// An ORT-allocated buffer of this element type and shape in the memory this backend's tensors

@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Runtime.InteropServices;
 using Shorokoo.Core.Inference.Abstractions;
 using Shorokoo.Modules.Losses;
@@ -271,6 +272,67 @@ public class SideBySideBackendHardwareTests
         Assert.Equal(MemorySpace.Host, home.Space);
         Assert.True(home.IsHostResident);
         Assert.Equal(av, Floats(home));
+    }
+
+    [SideBySideCudaFact]
+    public void TestAnUninitializedTensorAllocatedOnTheCardLivesThereAndTakesWhatIsWrittenToIt()
+    {
+        var cuda = LoadCuda();
+        long[] shape = [2L, 3L];
+        var byteCount = TensorElementLayout.ByteCount(ShorokooTensorElementType.Float, shape);
+        byte[] written = [.. Enumerable.Range(1, byteCount).Select(i => (byte)i)];
+
+        using var device = cuda.CreateUninitializedTensorInBackendMemory(
+            ShorokooTensorElementType.Float, shape);
+
+        Assert.Equal(ShorokooTensorElementType.Float, device.ElementType);
+        Assert.Equal(shape, device.Shape);
+        Assert.False(device.IsHostAccessible);
+        Assert.Throws<InvalidOperationException>(() => _ = device.GetTensorDataAsSpan<float>().Length);
+        Assert.Throws<InvalidOperationException>(() => _ = device.GetTensorMutableDataAsSpan<float>().Length);
+
+        Assert.NotNull(cuda.Description.CudaDeviceId);
+        Assert.Equal(("Cuda", cuda.Description.CudaDeviceId!.Value), AllocatorOf(device));
+
+        Assert.True(FillOnDevice(device, written));
+        var home = cuda.CopyTensorToHost(device);
+        Assert.Equal(byteCount, home.Length);
+        Assert.Equal(written, home);
+
+        using var empty = cuda.CreateUninitializedTensorInBackendMemory(
+            ShorokooTensorElementType.Float, [0L, 3L]);
+        Assert.Equal((long[])[0L, 3L], empty.Shape);
+        Assert.False(empty.IsHostAccessible);
+        Assert.Equal(("Cuda", cuda.Description.CudaDeviceId!.Value), AllocatorOf(empty));
+        Assert.Empty(cuda.CopyTensorToHost(empty));
+    }
+
+    /// <summary>The allocator ONNX Runtime made this value's buffer from, and the device it is on.
+    /// Through the backend's own types, which an isolated backend loads privately, so the route to
+    /// them is reflection rather than a cast.</summary>
+    private static (string Allocator, int DeviceId) AllocatorOf(IShorokooTensorValue value)
+    {
+        var inner = value.GetType()
+            .GetProperty("Inner", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(value)!;
+        using var info = (IDisposable)inner.GetType()
+            .GetMethod("GetTensorMemoryInfo")!.Invoke(inner, null)!;
+        return ((string)info.GetType().GetProperty("Name")!.GetValue(info)!,
+                (int)info.GetType().GetProperty("Id")!.GetValue(info)!);
+    }
+
+    /// <summary>Writes <paramref name="bytes"/> across the bus into the value's own allocation,
+    /// through the address and the copy the backend itself uses.</summary>
+    private static bool FillOnDevice(IShorokooTensorValue value, byte[] bytes)
+    {
+        var backend = value.GetType().Assembly;
+        var address = backend.GetType("Shorokoo.OnnxRuntime.OrtBackend")!
+            .GetMethod("DevicePointer", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [value])!;
+        var copied = (bool)backend.GetType("Shorokoo.OnnxRuntime.CudaInterop")!
+            .GetMethod("CopyHostToDevice", BindingFlags.Static | BindingFlags.Public)!
+            .Invoke(null, [bytes, address, bytes.Length])!;
+        GC.KeepAlive(value);
+        return copied;
     }
 
     private static float[] Floats(TensorData data)

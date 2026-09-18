@@ -350,6 +350,30 @@ public class CoreUtilsCoverageTests
     ];
 
     [Fact]
+    public void TestTheFixedStrideTableSizesEveryElementTypeTheByteWisePathsAccept()
+    {
+        Assert.Equal(
+            (int[])[1, 1, 1, 2, 2, 2, 2, 4, 4, 4, 8, 8, 8],
+            [.. FixedStrideElementTypes.Select(TensorElementLayout.ElementSizeInBytes)]);
+
+        Assert.Equal(24, TensorElementLayout.ByteCount(ShorokooTensorElementType.Float, [2L, 3L]));
+        Assert.Equal(16, TensorElementLayout.ByteCount(ShorokooTensorElementType.Int64, [2L]));
+        Assert.Equal(0, TensorElementLayout.ByteCount(ShorokooTensorElementType.Double, [0L, 3L]));
+        Assert.Equal(1, TensorElementLayout.ByteCount(ShorokooTensorElementType.Bool, []));
+
+        Assert.Contains("CreateStringTensor", Assert.Throws<NotSupportedException>(
+            () => TensorElementLayout.ElementSizeInBytes(ShorokooTensorElementType.String)).Message);
+        Assert.Throws<NotSupportedException>(
+            () => TensorElementLayout.ElementSizeInBytes(ShorokooTensorElementType.Complex64));
+        Assert.Throws<NotSupportedException>(
+            () => TensorElementLayout.ByteCount(ShorokooTensorElementType.UInt4, [8L]));
+        Assert.Throws<ArgumentNullException>(
+            () => TensorElementLayout.ByteCount(ShorokooTensorElementType.Float, null!));
+        Assert.Throws<OverflowException>(
+            () => TensorElementLayout.ByteCount(ShorokooTensorElementType.Float, [long.MaxValue]));
+    }
+
+    [Fact]
     public void TestAnUninitializedTensorIsWhatTheCopyingPathBuildsWithoutTheCopy()
     {
         var backend = InferenceBackend.Default;

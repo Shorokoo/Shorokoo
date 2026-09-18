@@ -450,7 +450,7 @@ public class MemoryPassBenchmarkTests
         private static SessionOptions RigSessionOptions()
         {
             var options = new SessionOptions();
-            OrtSessionFactory.Configure(options, ShorokooGraphOptimization.TrainingStep, ShorokooLogSeverity.Fatal);
+            OrtBackend.Configure(options, ShorokooGraphOptimization.TrainingStep, ShorokooLogSeverity.Fatal);
             return options;
         }
 

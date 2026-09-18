@@ -109,8 +109,9 @@ The full documentation index — which page covers what — lives in
 
 ## Installation
 
-Shorokoo ships as NuGet packages. Install the meta-package plus **one** backend for
-your platform:
+Shorokoo ships as NuGet packages. Install the meta-package plus a backend for your
+platform — one is enough, and a program that names its backends may use several, or
+load them at runtime and reference none:
 
 ```bash
 dotnet add package Shorokoo               # runtime + NN library + source generator

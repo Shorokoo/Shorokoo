@@ -12,7 +12,7 @@
     <IsPackable>true</IsPackable>
     <!-- Published as "Shorokoo.Core"; the assembly/namespace stay "Shorokoo". -->
     <ShorokooPackageName>Shorokoo.Core</ShorokooPackageName>
-    <Description>Core runtime for Shorokoo: a .NET deep-learning framework with strongly typed tensors, reverse-mode autodiff, and ONNX interop (export .onnx, load .safetensors). Most users want the 'Shorokoo' meta-package (which also brings the [Module] source generator); then add exactly one backend: Shorokoo.LinuxCPU, Shorokoo.LinuxGPU, Shorokoo.WinCPU, or Shorokoo.WinGPU.</Description>
+    <Description>Core runtime for Shorokoo: a .NET deep-learning framework with strongly typed tensors, reverse-mode autodiff, and ONNX interop (export .onnx, load .safetensors). Most users want the 'Shorokoo' meta-package (which also brings the [Module] source generator); then add a backend for each device you want to run on: Shorokoo.LinuxCPU, Shorokoo.LinuxGPU, Shorokoo.WinCPU, or Shorokoo.WinGPU. One is enough, and a program that names its backends may load several.</Description>
     <PackageTags>machine-learning;deep-learning;neural-network;tensor;autodiff;onnx;training;ai</PackageTags>
   </PropertyGroup>
 

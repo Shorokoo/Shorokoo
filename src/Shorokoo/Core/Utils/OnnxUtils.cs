@@ -182,8 +182,14 @@ namespace Shorokoo.Core.Utils
                 method = method.MakeGenericMethod(genericType);
             }
 
-            // Invoke the method
-            var result = method.Invoke(null, parameters);
+            // DoNotWrapExceptions, because everything reached this way is ordinary framework code
+            // whose failures are part of its contract: a disposed compute context refusing to take
+            // ownership, an argument that does not cover its shape. Wrapped in a
+            // TargetInvocationException, none of them could be caught as the type they are
+            // documented to be, and the call being generic is the caller's business rather than
+            // theirs.
+            var result = method.Invoke(
+                null, BindingFlags.DoNotWrapExceptions, binder: null, parameters, culture: null);
 
             // Assert that the return value is not null
             Debug.Assert(result != null, "The method's return value should not be null.");
@@ -239,14 +245,19 @@ namespace Shorokoo.Core.Utils
 
         public static IShorokooTensorValue CreateTensorValue<T>(Shape shape, T[] data)
             where T : unmanaged
-            => InferenceBackend.Factory.CreateTensor<T>(data, (long[])shape);
+            => InferenceBackend.Default.CreateTensor<T>(data, (long[])shape);
 
         public static IShorokooTensorValue CreateTensorValue(Shape shape, byte[] data)
-            => InferenceBackend.Factory.CreateTensor<byte>(data, (long[])shape);
+            => InferenceBackend.Default.CreateTensor<byte>(data, (long[])shape);
 
         public static IShorokooTensorValue CreateTensorValue(Shape shape, string[] data)
-            => InferenceBackend.Factory.CreateStringTensor(data, (long[])shape);
+            => InferenceBackend.Default.CreateStringTensor(data, (long[])shape);
 
+        /// <summary>
+        /// A tensor over <paramref name="value"/> with no context: the framework's own host memory,
+        /// which is what a value it built itself is in. The overload taking a
+        /// <c>ComputeContext</c> is the one for a value a session produced.
+        /// </summary>
         public static TensorData CreateTensorDataFromValue(IShorokooTensorValue value)
         {
             var shape = new Shape(value.Shape);
@@ -281,7 +292,7 @@ namespace Shorokoo.Core.Utils
             try
             {
                 foreach (var d in data) inner.Add(CopyTensorValue(d.ToTensorValue()));
-                var sequence = InferenceBackend.Factory.CreateSequence(inner);
+                var sequence = InferenceBackend.Default.CreateSequence(inner);
                 return CreateTensorDataSequenceFromValue(dtype, sequence);
             }
             catch
@@ -297,32 +308,61 @@ namespace Shorokoo.Core.Utils
         /// that would otherwise leave two owners pointing at one runtime value.
         /// </summary>
         internal static IShorokooTensorValue CopyTensorValue(IShorokooTensorValue value)
-        {
-            var elementType = value.ElementType;
-            if (elementType == ShorokooTensorElementType.String)
-                return InferenceBackend.Factory.CreateStringTensor(value.GetStringTensorData(), value.Shape);
-            var copy = InferenceBackend.Factory.CreateTensorFromRawBytes(
-                elementType, value.GetTensorDataAsSpan<byte>().ToArray(), value.Shape);
-            // Taking the span is the source's last read, so without this the JIT may retire it
-            // before ToArray has copied out of the buffer it points at (Shorokoo/Shorokoo#178).
-            GC.KeepAlive(value);
-            return copy;
-        }
+            => BackendTransfer.CopyTo(InferenceBackend.Default, value);
 
+        /// <summary>
+        /// Wraps a runtime value whose producer is not known — the framework's own paths all know
+        /// theirs and call the overload below.
+        ///
+        /// <para>A value an execution provider kept in its own memory has no way to say <i>which</i>
+        /// memory when it arrives here, so it lands in <see cref="MemoryKind.Unknown"/> and can be
+        /// read but not moved. That is the honest answer rather than a useful one: pass the
+        /// context that produced it and it names a real place.</para>
+        /// </summary>
         public static IData CreateData(IShorokooTensorValue value)
+            => CreateData(value, context: null);
+
+        /// <summary>
+        /// Wraps a runtime value as the data it holds, belonging to <paramref name="context"/> —
+        /// the context whose session produced it, and so whose memory it is in. Null means it came
+        /// from outside any context, which can only be the framework's own host memory.
+        ///
+        /// <para>A sequence is bound the same way a tensor is. Its elements are copied out of it
+        /// one at a time, on demand, by the runtime that holds it, so they are in that context's
+        /// memory too and <see cref="OnnxTensorDataSequence{T}"/> hands each of them this same
+        /// context.</para>
+        /// </summary>
+        public static IData CreateData(IShorokooTensorValue value, Shorokoo.Runtime.ComputeContext? context)
         {
             if (value.ValueType == ShorokooOnnxValueType.Tensor)
-                return CreateTensorDataFromValue(value);
+                return context is null
+                    ? CreateTensorDataFromValue(value)
+                    : CreateTensorDataFromValue(
+                        new Shape(value.Shape), (DType)(int)value.ElementType, value, context);
             else if (value.ValueType == ShorokooOnnxValueType.Sequence)
-                return CreateTensorDataSequenceFromValue(value);
+            {
+                var sequence = CreateTensorDataSequenceFromValue(value);
+                sequence.BindTo(context);
+                return sequence;
+            }
 
             throw new UnsupportedDTypeException(ErrorCodes.OU002, value.ValueType.ToString(), "CreateData",
                 $"ONNX value type '{value.ValueType}' is not supported. Only TENSOR and SEQUENCE types are supported");
         }
 
+        /// <summary>A named parameter over a runtime value with no known producer; see
+        /// <see cref="CreateData(IShorokooTensorValue)"/> for what that costs.</summary>
         public static NamedModelParam CreateNamedModelParam(IShorokooTensorValue value, ModelParamType paramType, string name)
+            => CreateNamedModelParam(value, paramType, name, context: null);
+
+        /// <summary>A named parameter over a runtime value produced by <paramref name="context"/>.
+        /// This is the shape every session output takes, so that an output can say where it is and
+        /// be moved from there.</summary>
+        public static NamedModelParam CreateNamedModelParam(
+            IShorokooTensorValue value, ModelParamType paramType, string name,
+            Shorokoo.Runtime.ComputeContext? context)
         {
-            var data = CreateData(value);
+            var data = CreateData(value, context);
             if (data is TensorDataSequence sequenceData)
                 return new TensorDataSequenceModelParam(name, paramType, sequenceData);
             if (data is TensorData tensorData)
@@ -335,11 +375,33 @@ namespace Shorokoo.Core.Utils
         internal static TensorData internalCreateTensorDataFromValue<T>(Shape shape, IShorokooTensorValue value, DType? dtype) where T : IVarType
             => dtype is null ? new OnnxTensorData<T>(shape, value) : new OnnxTensorData<T>(shape, value, dtype);
 
+        /// <summary>A backend-backed tensor bound to the context whose memory it is in.</summary>
+        public static TensorData CreateTensorDataFromValue(
+            Shape shape, DType dtype, IShorokooTensorValue value, Shorokoo.Runtime.ComputeContext? context)
+            => (TensorData)CallGeneric(dtype.ToIVarType(), typeof(OnnxUtils),
+                nameof(internalCreateBoundTensorData), shape, value, context);
+
+        internal static TensorData internalCreateBoundTensorData<T>(
+            Shape shape, IShorokooTensorValue value, Shorokoo.Runtime.ComputeContext? context)
+            where T : IVarType
+            => new OnnxTensorData<T>(shape, value, context, ownsMemory: true, storage: null);
+
+        /// <summary>A host tensor over <paramref name="bytes"/>, bound to <paramref name="context"/>
+        /// (whose memory must be host memory, or null for the framework's own).</summary>
+        public static TensorData CreateHostTensorData(
+            Shape shape, DType dtype, byte[] bytes, Shorokoo.Runtime.ComputeContext? context)
+            => (TensorData)CallGeneric(dtype.ToIVarType(), typeof(OnnxUtils),
+                nameof(internalCreateHostTensorData), shape, bytes, context);
+
+        internal static TensorData internalCreateHostTensorData<T>(
+            Shape shape, byte[] bytes, Shorokoo.Runtime.ComputeContext? context) where T : IVarType
+            => HostTensorData<T>.Bound(shape, bytes, context);
+
         internal static TensorDataSequence internalCreateTensorDataSequenceFromValue<T>(IShorokooTensorValue value) where T : IVarType
             => new OnnxTensorDataSequence<T>(value);
 
         public static IShorokooTensorValue CreateTensorValueFromRawData(Shape shape, DType type, byte[] data)
-            => InferenceBackend.Factory.CreateTensorFromRawBytes(
+            => InferenceBackend.Default.CreateTensorFromRawBytes(
                 (ShorokooTensorElementType)(int)type.ProtoTypeNum, data, (long[])shape);
 
         public static string ToJson(this InternalComputationGraph fastGraph)

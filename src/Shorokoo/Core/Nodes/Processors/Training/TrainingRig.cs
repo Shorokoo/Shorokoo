@@ -68,7 +68,7 @@ namespace Shorokoo
         /// <see cref="Shorokoo.Core.Inference.Abstractions.ShorokooGraphOptimization.TrainingStep"/>. A caller compiling this graph
         /// to observe what the rig runs needs that profile, which <see cref="ComputeContext"/> does
         /// not expose: build the model with <c>FastOnnxModelBuilder</c> and hand it to
-        /// <c>InferenceBackend.Factory.CreateSession</c> with that level.</para>
+        /// <c>InferenceBackend.Default.CreateSession</c> with that level.</para>
         /// </summary>
         public ComputationGraph TrainingStepPureGraph { get; private set; } = null!;
 
@@ -206,15 +206,25 @@ namespace Shorokoo
         /// <summary>
         /// The compute context used for the rig's <b>build/merge phase</b>: concretizing the model and
         /// the hyperparameters, building scheduler modules, shape-inferring, lowering, memory-optimizing
-        /// and initializing the training-step graph and the optimizer state. It selects no backend or
-        /// device either — see <see cref="RuntimeContext"/> for why the rig's two contexts divide phases
-        /// rather than hardware. Supplied at construction (defaults to <see cref="ComputeContext.Default"/>);
+        /// and initializing the training-step graph and the optimizer state. Which backend it merges on
+        /// is its own — see <see cref="RuntimeContext"/>. Supplied at construction (defaults to <see cref="ComputeContext.Default"/>);
         /// every <c>With…</c> derivation carries it forward by reference. It is <b>runtime configuration,
         /// never persisted</b> — no checkpoint (flat or <c>.skpt</c>) or manifest records it, so a
         /// reloaded rig receives a fresh one via <see cref="FromScratch(ComputationGraph, ComputationGraph,
         /// ComputationGraph, NamedModelParam[], IOptimizerHyperparameters, RngConfig?, ComputeContext?, ComputeContext?, IProgress{BuildProgress})"/>.
+        ///
+        /// <para>The default is taken on the first READ, not at construction. Reading
+        /// <see cref="ComputeContext.Default"/> resolves an inference backend, so a field
+        /// initializer here made merely constructing a rig require one deployed — including when the
+        /// caller supplied both contexts explicitly and the default was overwritten unread.</para>
         /// </summary>
-        public ComputeContext MergeContext { get; private set; } = ComputeContext.Default;
+        public ComputeContext MergeContext
+        {
+            get => _mergeContext ??= ComputeContext.Default;
+            private set => _mergeContext = value;
+        }
+
+        private ComputeContext? _mergeContext;
 
         /// <summary>
         /// The compute context used to <b>compile the merged <see cref="TrainingStepPureGraph"/> into an
@@ -227,14 +237,27 @@ namespace Shorokoo
         /// forward by reference and, like <see cref="MergeContext"/>, it is runtime configuration that is
         /// <b>never persisted</b>.
         ///
-        /// <para><b>It selects no backend or device</b> (see <see cref="ComputeContext"/>): this context
-        /// and <see cref="MergeContext"/> divide <i>phases</i>, not hardware. You <b>cannot</b> merge on
-        /// one device and train on another — one backend is live per process and both contexts go
-        /// through it. What the two <i>can</i> differ in is their device memory: this context's
-        /// <see cref="ComputeContext.DeviceMemory"/> configures the arena of every training-step
-        /// session, and its <see cref="ComputeContext.RunSettings"/> what each step's run does.</para>
+        /// <para>Left unset, this context and <see cref="MergeContext"/> are both
+        /// <see cref="ComputeContext.Default"/> and divide <i>phases</i> rather than hardware: which
+        /// work is build/merge and which is compile/run. They may differ, though. A context carries
+        /// the backend it runs on (see <see cref="ComputeContext"/>), so a rig <b>can</b> merge on one
+        /// device and train on another, at the cost of a host copy per feed — both backends then have
+        /// to be deployed and reachable from the one process. They may also differ in their device
+        /// memory: this context's <see cref="ComputeContext.DeviceMemory"/> configures the arena of
+        /// every training-step session, and its <see cref="ComputeContext.RunSettings"/> what each
+        /// step's run does. Which device each will use is readable either way, off
+        /// <see cref="ComputeContext.Backend"/>.</para>
+        ///
+        /// <para>Resolved on first read rather than at construction, for the reason given on
+        /// <see cref="MergeContext"/>.</para>
         /// </summary>
-        public ComputeContext RuntimeContext { get; private set; } = ComputeContext.Default;
+        public ComputeContext RuntimeContext
+        {
+            get => _runtimeContext ??= ComputeContext.Default;
+            private set => _runtimeContext = value;
+        }
+
+        private ComputeContext? _runtimeContext;
 
         /// <summary>Struct definition for trainable parameters. Internal build/persistence machinery —
         /// persistence sources the defs from the rig directly, and callers drive training through the

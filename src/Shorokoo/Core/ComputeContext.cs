@@ -6,6 +6,7 @@ using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using Shorokoo;
 using Shorokoo.Core;
@@ -33,21 +34,30 @@ namespace Shorokoo.Runtime
     /// via <see cref="Execute(IData[])"/> — each call only feeds new data, with zero graph
     /// rebuilding or session creation overhead.
     /// </summary>
-    public class CompiledGraph
+    public class CompiledGraph : IDisposable
     {
         private readonly IShorokooInferenceSession _session;
+        private readonly IShorokooInferenceBackend _backend;
+        // The context that compiled this graph: outputs belong to it, and it decides whether they
+        // leave it. A compiled graph runs on the backend it was built with whatever happens to the
+        // context afterwards, so this is about the results and not about where the work runs.
+        private readonly ComputeContext _owner;
         private readonly Dictionary<string, string> _onnxInputNameByOriginal;
         private readonly string[] _originalInputNames;
 
         internal CompiledGraph(
             IShorokooInferenceSession session,
+            IShorokooInferenceBackend backend,
             Dictionary<string, string> onnxInputNameByOriginal,
             string[] originalInputNames,
             ShorokooGraphOptimization optimization,
             DeviceMemorySettings deviceMemory,
-            RunSettings defaultRunSettings)
+            RunSettings defaultRunSettings,
+            ComputeContext owner)
         {
+            _owner = owner;
             _session = session;
+            _backend = backend;
             _onnxInputNameByOriginal = onnxInputNameByOriginal;
             _originalInputNames = originalInputNames;
             Optimization = optimization;
@@ -63,6 +73,31 @@ namespace Shorokoo.Runtime
         /// one call, so this is a default and never a ceiling.
         /// </summary>
         public RunSettings DefaultRunSettings { get; }
+
+        /// <summary>
+        /// The backend this graph was compiled on and runs on — fixed when it was compiled, since
+        /// the session belongs to that backend and cannot move. Feeding it data another backend
+        /// built is allowed: the session rebuilds what it must, provided the data is host-resident.
+        /// </summary>
+        public BackendDescription Backend => _backend.Description;
+
+        /// <summary>True once this graph's inference session has been released.</summary>
+        public bool IsDisposed { get; private set; }
+
+        /// <summary>
+        /// Releases the inference session behind this graph. A session is the expensive thing a
+        /// compile produces — on a card it owns the execution provider's whole per-session state
+        /// and its arena, which dwarfs any tensor the run produces — so it is released with the
+        /// context that compiled it rather than left to a finalizer. Disposing twice is harmless,
+        /// and running a disposed graph is refused rather than answered.
+        /// </summary>
+        public void Dispose()
+        {
+            if (IsDisposed) return;
+            IsDisposed = true;
+            _session.Dispose();
+            GC.SuppressFinalize(this);
+        }
 
         /// <summary>The graph-optimization profile the session was built with (test hook).</summary>
         internal ShorokooGraphOptimization Optimization { get; }
@@ -144,13 +179,24 @@ namespace Shorokoo.Runtime
         private NamedModelParam[] Run(
             NamedModelParam[] inputs, IReadOnlySet<string>? retainedOutputNames, RunSettings runSettings)
         {
+            // Before the work, not after it. The outputs are handed to the owning context as they
+            // are wrapped, so a disposed one threw from inside the wrap of output 0 -- with the
+            // native run already paid for, on a card a whole step's allocation, and outputs 1..n
+            // never wrapped and so left to their finalizers. The exception also named the context
+            // rather than the graph the caller had actually invoked.
+            ObjectDisposedException.ThrowIf(_owner.IsDisposed, this);
+            ObjectDisposedException.ThrowIf(IsDisposed, this);
             ArgumentNullException.ThrowIfNull(runSettings);
             var sessionInputs = new Dictionary<string, IShorokooTensorValue>();
             foreach (var input in inputs)
             {
                 var onnxName = _onnxInputNameByOriginal.TryGetValue(input.ParamName, out var mapped)
                     ? mapped : input.ParamName;
-                sessionInputs[onnxName] = input.ToTensorValue();
+                // On this graph's own backend, because that is the runtime about to read the
+                // value. An input that already holds one hands it over whatever is passed; one
+                // held in plain managed memory -- every literal in the program -- builds it here,
+                // and this is what decides which runtime builds it.
+                sessionInputs[onnxName] = input.ToTensorValue(_backend);
             }
 
             var results = retainedOutputNames is null
@@ -158,9 +204,12 @@ namespace Shorokoo.Runtime
                 : _session.RunRetainingOutputs(
                     sessionInputs, _session.OutputNames, retainedOutputNames, runSettings);
 
-            return results.Zip(_session.OutputNames)
-                .Select(x => OnnxUtils.CreateNamedModelParam(x.First, ModelParamType.OutputParam, x.Second))
-                .ToArray();
+            return _owner.Deliver(
+                results.Zip(_session.OutputNames)
+                    .Select(x => OnnxUtils.CreateNamedModelParam(
+                        x.First, ModelParamType.OutputParam, x.Second, _owner))
+                    .ToArray(),
+                retainedOutputNames);
         }
 
         /// <summary>Pairs the expanded inputs with the graph's input names, positionally.</summary>
@@ -197,17 +246,71 @@ namespace Shorokoo.Runtime
     /// once via <see cref="Execute(ComputationGraph, IData[])"/>, or repeatedly via a
     /// <see cref="CompiledGraph"/> from <see cref="Compile(ComputationGraph)"/>.
     ///
-    /// A context does not choose the device: every session it creates is built by the one
-    /// process-wide <see cref="Shorokoo.Core.Inference.Abstractions.InferenceBackend.Factory"/>,
-    /// and which device the work goes to is read off <see cref="Backend"/>. What it does carry is
-    /// how those sessions and runs are configured — <see cref="DeviceMemory"/> for the arena each
-    /// session it compiles is built with, and <see cref="RunSettings"/> for what its runs do by
-    /// default. Both are per instance, so two contexts may differ and neither reaches the other's
-    /// sessions.
+    /// A context may name the backend it runs on, and two contexts may name different ones — a CPU
+    /// context and a CUDA context in one process, each compiling and running on its own device:
+    /// <code>
+    /// var cpu  = new ComputeContext(new LinuxCpuBackend());
+    /// var cuda = new ComputeContext(new LinuxGpuBackend());
+    /// cpu.Execute(graph, input);   // on the host
+    /// cuda.Execute(graph, input);  // the same graph, on the card
+    /// </code>
+    /// A context constructed without one runs on the process default
+    /// (<see cref="Shorokoo.Core.Inference.Abstractions.InferenceBackend.Default"/>), which is what
+    /// every context did before backends could differ. Which device a context will use is read off
+    /// <see cref="Backend"/>.
+    ///
+    /// <para>It also carries how its sessions and runs are configured — <see cref="DeviceMemory"/>
+    /// for the arena each session it compiles is built with, and <see cref="RunSettings"/> for what
+    /// its runs do by default. Both are per instance, so two contexts may differ and neither
+    /// reaches the other's sessions.</para>
+    ///
+    /// <para>The same data feeds either context and the same model runs on both, with nothing to
+    /// say at the call site. A literal costs nothing to share: it is managed bytes until something
+    /// runs (<see cref="Shorokoo.HostTensorData{T}"/>), and the context that feeds it to a session
+    /// is the one that materialises it, on its own backend. What a context cannot do is change
+    /// where an existing runtime value lives — a tensor another backend produced is that backend's,
+    /// so a session here converts it as it is fed and hands its own outputs back. That conversion
+    /// costs a host copy per feed and is possible only for data the host can read; see
+    /// <see cref="Shorokoo.Core.Inference.Abstractions.BackendTransfer"/>.</para>
     /// </summary>
-    public class ComputeContext
+    public class ComputeContext : IDisposable
     {
-        private static ComputeContext? _defaultComputeContext;
+        private static volatile ComputeContext? _defaultComputeContext;
+        private static readonly object _defaultGate = new();
+
+        // Null means the default backend, read when the work runs rather than at construction: a
+        // context built before InferenceBackend.Default was assigned must still honour it.
+        private readonly IShorokooInferenceBackend? _backend;
+
+        // Counts reads of Default made inside a CountDefaultReads call, and nothing else. It is an
+        // AsyncLocal rather than a static counter because the callers that care run in parallel
+        // with the rest of a test suite: a process-wide count would also see everything else
+        // running at the time. An AsyncLocal flows into whatever the measured call does — a thread
+        // it starts included — and no further; the box is what makes an increment made down there
+        // visible back up here.
+        private static readonly AsyncLocal<StrongBox<int>?> _defaultReads = new();
+
+        /// <summary>
+        /// Runs <paramref name="work"/> and returns how many times it read <see cref="Default"/>.
+        ///
+        /// <para>The seam a test needs to hold the graph-building path to "requires no inference
+        /// backend". It counts <i>asks</i> rather than backends resolved, because a resolution is
+        /// unobservable in the process that can observe anything: a host with a backend loaded —
+        /// every test host — answers a wrongly eager read in silence, and the failure shows up only
+        /// where no backend was deployed, which is exactly the program that describes a model and
+        /// exports it as ONNX rather than running it. Reads that hit the cached default count too:
+        /// the question is whether the path reached for the default at all, not whether this
+        /// particular process had already paid for one.</para>
+        /// </summary>
+        internal static int CountDefaultReads(Action work)
+        {
+            var outer = _defaultReads.Value;
+            var counter = new StrongBox<int>(0);
+            _defaultReads.Value = counter;
+            try { work(); }
+            finally { _defaultReads.Value = outer; }
+            return Volatile.Read(ref counter.Value);
+        }
 
         /// <summary>
         /// Process-wide default context, created lazily on first access and used wherever no
@@ -219,25 +322,59 @@ namespace Shorokoo.Runtime
         /// and cannot reach a session that has already been compiled — including those compiled by
         /// the context being replaced. Code that wants a configuration of its own should hold its
         /// own context rather than assign this one.</para>
+        /// <para>Reading this resolves an inference backend, and refuses — naming the packages to
+        /// deploy — when there is none. So it belongs at the point work actually runs: a
+        /// <c>compute ??= ComputeContext.Default</c> at the top of a graph pass turns that whole
+        /// pass into a backend requirement, including for the graphs it has nothing to execute
+        /// for. Thread the nullable context through and resolve it where the execution is.</para>
         /// </summary>
         public static ComputeContext Default
         {
             get
             {
-                if (_defaultComputeContext == null)
-                    _defaultComputeContext = new ComputeContext();
+                if (_defaultReads.Value is { } counter) Interlocked.Increment(ref counter.Value);
+                // A disposed one is not handed back. Default is a cached singleton and is now
+                // disposable, so `using var ctx = ComputeContext.Default;` would otherwise poison
+                // the process: every later read returns the same dead object and every run through
+                // it throws, with no way back short of assigning the setter.
+                // Under a lock, and the field is volatile: the getter now resolves a backend and
+                // constructs a context, so two threads racing it each handed their caller a
+                // different default. Harmless while both detach, but it is process-wide lazily
+                // initialized state in a suite that runs four tests at once.
+                if (_defaultComputeContext is { IsDisposed: false } live) return live;
+                lock (_defaultGate)
+                {
+                    if (_defaultComputeContext is { IsDisposed: false } bound) return bound;
 
-                return _defaultComputeContext;
+                // The backend a process loaded, under the rule that a CPU one wins: the unnamed
+                // default should not be the card. Reading InferenceBackend.Default is what
+                // discovers and records one when nothing has been loaded yet, and what refuses --
+                // naming the packages to deploy -- when there is nothing to discover.
+                var backend = InferenceBackend.Remembered ?? InferenceBackend.Default;
+
+                // Its outputs leave it. The default context is the one nobody named and nobody
+                // disposes, so a result that belonged to it would be tied to a lifetime the caller
+                // never sees; detached, a result is the caller's and outlives everything here.
+                    return _defaultComputeContext = new ComputeContext(backend, detachesOutputs: true);
+                }
             }
 
-            set { _defaultComputeContext = value; }
+            set { lock (_defaultGate) _defaultComputeContext = value; }
         }
 
-        /// <summary>Creates a compute context on the shipped defaults. Set
-        /// <see cref="DeviceMemory"/> or <see cref="RunSettings"/> in an object initializer to
-        /// compile and run under something else.</summary>
-        public ComputeContext()
+        /// <summary>Creates a compute context that runs on the process-wide
+        /// <see cref="Shorokoo.Core.Inference.Abstractions.InferenceBackend.Default"/>, on the
+        /// shipped defaults. Set <see cref="DeviceMemory"/> or <see cref="RunSettings"/> in an
+        /// object initializer to compile and run under something else.</summary>
+        public ComputeContext() : this(detachesOutputs: false)
         {
+        }
+
+        /// <summary>Creates a compute context on the process-wide backend, detaching its outputs
+        /// or not — see <see cref="DetachesOutputs"/>.</summary>
+        public ComputeContext(bool detachesOutputs)
+        {
+            DetachesOutputs = detachesOutputs;
         }
 
         private readonly DeviceMemorySettings _deviceMemory = DeviceMemorySettings.Default;
@@ -284,15 +421,218 @@ namespace Shorokoo.Runtime
         }
 
         /// <summary>
+        /// Creates a compute context that compiles and runs on <paramref name="backend"/>, whatever
+        /// the process default is. This is how one program drives two devices: a context per
+        /// backend, each with sessions of its own. The data they run on is shared — see the note on
+        /// the class.
+        /// </summary>
+        /// <param name="backend">The backend its sessions are built by — a platform backend
+        /// (<c>new LinuxGpuBackend()</c>) where one native ONNX Runtime serves both, or one
+        /// from <see cref="Shorokoo.Core.Inference.Abstractions.IsolatedBackend.Load"/> where each
+        /// backend needs a native of its own.</param>
+        /// <exception cref="ArgumentNullException"><paramref name="backend"/> is null.</exception>
+        public ComputeContext(IShorokooInferenceBackend backend)
+            : this(backend, detachesOutputs: false)
+        {
+        }
+
+        /// <summary>
+        /// Creates a compute context on <paramref name="backend"/>, detaching its outputs or not —
+        /// see <see cref="DetachesOutputs"/>.
+        /// </summary>
+        /// <exception cref="ArgumentNullException"><paramref name="backend"/> is null.</exception>
+        public ComputeContext(IShorokooInferenceBackend backend, bool detachesOutputs)
+        {
+            ArgumentNullException.ThrowIfNull(backend);
+            _backend = backend;
+            DetachesOutputs = detachesOutputs;
+        }
+
+        /// <summary>
+        /// Whether a run's output tensors leave this context behind.
+        ///
+        /// <para>With it set, every tensor a run produces is transferred to the null context — the
+        /// framework's own host memory — and the tensor the session handed back is disposed. That
+        /// disposal frees nothing, by construction: a transfer within one memory space moves the
+        /// ownership off the original, and one across spaces has already released it. What the
+        /// caller gets back is a tensor that outlives this context, which is what a context that
+        /// is disposed per run needs its results to do.</para>
+        ///
+        /// <para>Without it, outputs belong to this context and disposing it takes them with it.</para>
+        /// </summary>
+        public bool DetachesOutputs { get; }
+
+        private readonly ConditionalWeakTable<TensorStorage, object> _ownedStorage = new();
+
+        // The graphs this context compiled, so its disposal releases their sessions. Weak, like the
+        // storage tracking and for the same reason: a graph the program has dropped must not be
+        // kept alive waiting for this. A dropped one is the finalizer's, which is what it was
+        // before; what this fixes is the graph the program still holds when the context goes.
+        private readonly ConditionalWeakTable<CompiledGraph, object> _compiled = new();
+        private static readonly object OwnedMarker = new();
+        // Guards the disposal flag against the two writers that matter: a second Dispose, and a
+        // TakeOwnership racing one. Both are ordinary in a design whose premise is several live
+        // contexts driven at once, and the flag alone settled neither -- two threads could both
+        // pass the check and run the release loop, or a storage could be enrolled just after the
+        // loop had passed it, ending up on nobody's books and never released.
+        private readonly object _disposalGate = new();
+        // Volatile: read by IsDisposed from threads that never took _disposalGate -- the Default
+        // getter's liveness check among them.
+        private volatile bool _disposed;
+
+        /// <summary>Whether this context has been disposed, and so has released what it owned.</summary>
+        public bool IsDisposed => _disposed;
+
+        /// <summary>Puts a storage on this context's books; its disposal will release it.</summary>
+        internal void TakeOwnership(TensorStorage storage)
+        {
+            lock (_disposalGate)
+            {
+                ObjectDisposedException.ThrowIf(_disposed, this);
+                _ownedStorage.AddOrUpdate(storage, OwnedMarker);
+            }
+        }
+
+        /// <summary>Takes a storage off this context's books, because something else owns it now.
+        /// Called only from <see cref="TensorStorage.TransferOwnershipTo"/>, under
+        /// <see cref="TensorStorage.OwnershipGate"/>, which is what keeps it from racing a
+        /// disposal.</summary>
+        internal void ReleaseOwnership(TensorStorage storage) => _ownedStorage.Remove(storage);
+
+        /// <summary>
+        /// Releases everything this context still owns. The backend is left alone.
+        ///
+        /// <para>Every tensor whose bytes were on this context's books is invalidated: reading one
+        /// afterwards throws rather than reading freed memory, whether or not that tensor was
+        /// itself disposed. Bytes that were transferred away are not touched — they belong to the
+        /// context that took them, and the whole point of a same-space transfer is that disposing
+        /// the source leaves them standing.</para>
+        ///
+        /// <para>The tracking is weak, so a tensor the program has already dropped does not keep
+        /// its storage alive waiting for this.</para>
+        /// </summary>
+        public void Dispose()
+        {
+            // The ownership gate first, and the same one every hand-off takes: a transfer that had
+            // enrolled a storage with its new owner but not yet taken it off this context's books
+            // would otherwise be found here and released, out from under a context that is alive
+            // and now holds freed bytes. Outermost, so the two locks are always taken in one order.
+            List<CompiledGraph> compiled;
+            lock (TensorStorage.OwnershipGate)
+            lock (_disposalGate)
+            {
+                if (_disposed) return;
+                _disposed = true;
+
+                foreach (var (storage, _) in _ownedStorage) storage.Release();
+                _ownedStorage.Clear();
+                compiled = [.. _compiled.Select(entry => entry.Key)];
+                _compiled.Clear();
+            }
+
+            // Outside the locks: a session's disposal is a native call into the backend, which has
+            // no business running under a gate every tensor construction in the process takes.
+            foreach (var graph in compiled) graph.Dispose();
+
+            // The backend is deliberately left alone. It was handed in, so it may be shared with
+            // another context or be the process-wide one -- disposing a backend two contexts were
+            // given would kill the second, which is the arrangement this whole design is for.
+
+            GC.SuppressFinalize(this);
+        }
+
+        /// <summary>
+        /// Hands a run's outputs to the caller the way this context was asked to: as they are, or
+        /// detached from it.
+        /// </summary>
+        internal NamedModelParam[] Deliver(
+            NamedModelParam[] outputs, IReadOnlySet<string>? retainedOutputNames)
+        {
+            if (!DetachesOutputs) return outputs;
+
+            for (int i = 0; i < outputs.Length; i++)
+            {
+                if (outputs[i] is TensorDataSequenceModelParam sequenceParam)
+                {
+                    // Retention first, as for a tensor below. The caller passes one flag per
+                    // output with no restriction on its value type, so a sequence can be named in
+                    // retainOnDevice -- and copying it home anyway honoured the flag for one kind
+                    // of output and silently ignored it for the other.
+                    if (retainedOutputNames?.Contains(sequenceParam.ParamName) == true) continue;
+
+                    // Detached by being moved, not by forgetting this context. Simply clearing the
+                    // context strands an element the provider kept on the card: the indexer then
+                    // wraps it with no context, which records an unknown space, and an unknown
+                    // space can be neither read nor moved -- the data is there with no call left
+                    // that reaches it. A real move brings the elements home, and where it cannot,
+                    // the sequence stays bound so they remain reachable through the context that
+                    // owns them.
+                    var boundSequence = sequenceParam.ToTensorDataSequence();
+                    try
+                    {
+                        var freeSequence = boundSequence.CopyTo(null);
+                        boundSequence.Dispose();
+                        outputs[i] = new TensorDataSequenceModelParam(
+                            sequenceParam.ParamName, sequenceParam.ParamType, freeSequence);
+                    }
+                    catch (InvalidOperationException ex) when (ex is not ObjectDisposedException)
+                    {
+                        // Elements the execution provider kept cannot be copied to the host from
+                        // here. Bound to this context is worse than detached and better than lost.
+                        // What the failed copy built is released by the rebuild itself, so there
+                        // is nothing to undo here -- see TensorDataSequence's rebuild.
+                        //
+                        // ObjectDisposedException is excluded because it derives from this one and
+                        // means something else entirely: the sequence's storage or its context is
+                        // gone. Swallowing it handed the caller an output bound to a dead context
+                        // with nothing said.
+                    }
+                    continue;
+                }
+                if (outputs[i] is not TensorDataModelParam tensorParam) continue;
+                var original = tensorParam.ToTensorData();
+
+                // An output the caller asked to keep on the device, and that really is there, is
+                // the one thing detaching must not touch: bringing it home is exactly what
+                // retaining it was meant to avoid, and this context would otherwise copy a
+                // resident run's whole state across the bus and free the device buffer on every
+                // step. A session with no device memory retains nothing, so its outputs are host
+                // ones and detach as any other output does.
+                if (!original.Space.IsHost
+                    && retainedOutputNames?.Contains(tensorParam.ParamName) == true)
+                    continue;
+
+                var detached = original.TransferTo(null);
+                original.Dispose();
+                outputs[i] = new TensorDataModelParam(
+                    tensorParam.ParamName, tensorParam.ParamType, detached);
+            }
+            return outputs;
+        }
+
+        /// <summary>The backend this context's work runs on: the one it was constructed with, or
+        /// the default when it names none.</summary>
+        internal IShorokooInferenceBackend ResolvedBackend => _backend ?? InferenceBackend.Default;
+
+        /// <summary>
         /// The backend this context compiles and runs on — its name, its device, and the CUDA device
-        /// it allocates on. Every context in the process reports the same one; it is a property of
-        /// the build, not of the instance. Read it to log the device a run used, or call
+        /// it allocates on. A context constructed with a backend reports that one; a context without
+        /// reports the process default, which is what every context reported when only one could be
+        /// live. Read it to log the device a run used, or call
         /// <see cref="Shorokoo.Core.Inference.Abstractions.InferenceBackend.RequireDevice"/> to
         /// refuse to start on the wrong one.
         ///
-        /// <para>Reading this resolves the backend if none is live yet, exactly as compiling would.</para>
+        /// <para>Reading this resolves the process default if this context names no backend and none
+        /// is live yet, exactly as compiling would.</para>
         /// </summary>
-        public BackendDescription Backend => InferenceBackend.Factory.Description;
+        public BackendDescription Backend => ResolvedBackend.Description;
+
+        /// <summary>Where this context's tensors live. The same space is necessary for passing a
+        /// tensor between two contexts without copying it, and sufficient only on the host: a
+        /// device allocation means nothing to a runtime that did not make it, so two contexts on
+        /// one card share it when they share a backend's runtime and copy through the host when
+        /// they do not.</summary>
+        public MemorySpace MemorySpace => ResolvedBackend.MemorySpace;
 
         /// <summary>
         /// Compiles the graph into a reusable <see cref="CompiledGraph"/>: the ONNX model and
@@ -418,9 +758,21 @@ namespace Shorokoo.Runtime
             for (int i = 0; i < originalInputNames.Length && i < session.InputNames.Count; i++)
                 onnxInputNameByOriginal[originalInputNames[i]] = session.InputNames[i];
 
-            return new CompiledGraph(
-                session, onnxInputNameByOriginal, originalInputNames, optimization,
-                deviceMemory, RunSettings);
+            var graph = new CompiledGraph(
+                session, ResolvedBackend, onnxInputNameByOriginal, originalInputNames, optimization,
+                deviceMemory, RunSettings, this);
+            // Enrolled under the same gate a disposal takes, so a compile racing a disposal either
+            // lands before it and is released with everything else, or finds the context gone.
+            lock (_disposalGate)
+            {
+                if (_disposed)
+                {
+                    graph.Dispose();
+                    throw new ObjectDisposedException(GetType().Name);
+                }
+                _compiled.AddOrUpdate(graph, OwnedMarker);
+            }
+            return graph;
         }
 
         private static string[] ResolveOriginalInputNames(InternalComputationGraph graph)
@@ -442,9 +794,27 @@ namespace Shorokoo.Runtime
         {
             var graph = new InternalComputationGraph([], [.. outputs]);
             graph.RequireRunnableOps("ComputeContext.Eval");
-            var results = this.Execute(graph).Select(x => x.ToTensorData()).ToArray();
+            var results = this.Execute(graph).Select(x => Detached(x.ToTensorData())).ToArray();
 
             return results;
+        }
+
+        /// <summary>
+        /// <paramref name="result"/> belonging to nobody, so it outlives every context and can go
+        /// straight back into a graph as a literal.
+        ///
+        /// <para>Eval is the eager-evaluation API: its answer is a value for the caller to use, and
+        /// the first thing callers do with one is build it into the next graph — which an operator
+        /// attribute refuses of a tensor bound to a context. A context that detaches its outputs
+        /// already hands one back this way, so without this the same call on the same graph
+        /// produced a usable result or an unusable one depending on which context ran it.</para>
+        /// </summary>
+        private static TensorData Detached(TensorData result)
+        {
+            if (result.Context is null) return result;
+            var free = result.TransferTo(null);
+            result.Dispose();
+            return free;
         }
 
         /// <summary>Params convenience over <see cref="Eval(Variable[])"/> for two or more outputs.</summary>
@@ -544,6 +914,11 @@ namespace Shorokoo.Runtime
 
         private NamedModelParam[] RunFromModel(Func<ModelProto> buildModel, string[] originalInputNames, NamedModelParam[] inputs)
         {
+            // Before the work, for the reason CompiledGraph.Run refuses before its own: the outputs
+            // are handed to this context as they are wrapped, so a disposed one threw from inside
+            // the wrap of output 0 with the native run already paid for -- on a card a whole step's
+            // allocation -- and outputs 1..n never wrapped and so left to their finalizers.
+            ObjectDisposedException.ThrowIf(IsDisposed, this);
             var model = buildModel();
 
             var memoryStream = new MemoryStream();
@@ -563,13 +938,20 @@ namespace Shorokoo.Runtime
                 {
                     var onnxName = onnxInputNameByOriginal.TryGetValue(input.ParamName, out var mapped)
                         ? mapped : input.ParamName;
-                    sessionInputs[onnxName] = input.ToTensorValue();
+                    // This context's backend: the one that just built the session above, and so
+                    // the runtime that is about to read what it is fed.
+                    sessionInputs[onnxName] = input.ToTensorValue(ResolvedBackend);
                 }
                 var results = session.Run(sessionInputs, session.OutputNames, RunSettings);
 
-                return results.Zip(session.OutputNames).Select(x =>
-                            OnnxUtils.CreateNamedModelParam(x.First, ModelParamType.OutputParam, x.Second))
-                            .ToArray();
+                // Nothing retained: this is the one-shot path, which builds a session, feeds it
+                // once and disposes it, so there is no later run for a device-resident output to
+                // be fed into.
+                return Deliver(
+                    results.Zip(session.OutputNames).Select(x =>
+                            OnnxUtils.CreateNamedModelParam(x.First, ModelParamType.OutputParam, x.Second, this))
+                        .ToArray(),
+                    retainedOutputNames: null);
             }
             finally
             {
@@ -608,7 +990,7 @@ namespace Shorokoo.Runtime
 
         private IShorokooInferenceSession CreateSession(
             byte[] modelData, ShorokooGraphOptimization optimization, DeviceMemorySettings deviceMemory)
-            => InferenceBackend.Factory.CreateSession(
+            => ResolvedBackend.CreateSession(
                 modelData, optimization, ShorokooLogSeverity.Fatal, deviceMemory);
 
         /// <summary>
@@ -790,14 +1172,49 @@ namespace Shorokoo.Runtime
     /// <summary>Extension entry points for eager evaluation and data conversion.</summary>
     public static class ComputeContextExtensions
     {
-        /// <summary>Unwraps the backend tensor value carried by <paramref name="data"/>.</summary>
+        /// <summary>
+        /// The runtime value of <paramref name="data"/>, on the process-wide default backend —
+        /// <see cref="InferenceBackend.Default"/>, resolved here if nothing has resolved one yet.
+        /// Use <see cref="ToTensorValue(IData, IShorokooInferenceBackend)"/> wherever the
+        /// backend that is going to read the value is known, since a value belongs to the runtime
+        /// that made it.
+        ///
+        /// <para>The value returned belongs to <paramref name="data"/>: read it, do not dispose
+        /// it.</para>
+        /// </summary>
         public static IShorokooTensorValue ToTensorValue(this IData data)
-        {
-            if (data is IOnnxData onnxData)
-                return onnxData.Value;
+            => data.ToTensorValue(InferenceBackend.Default);
 
-            throw new UnsupportedDTypeException(ErrorCodes.CR006, data?.GetType()?.Name ?? "null", "ToTensorValue",
-                "Data type is not supported for tensor value conversion");
+        /// <summary>
+        /// The runtime value of <paramref name="data"/> as a value of
+        /// <paramref name="backend"/>'s runtime, built there if it does not exist yet.
+        ///
+        /// <para>This used to unwrap <see cref="IOnnxData"/> and throw at everything else, which
+        /// made it a hole rather than an entry point: a tensor literal is held as managed bytes
+        /// (<see cref="HostTensorData{T}"/>), a string literal as managed strings
+        /// (<see cref="HostStringTensorData"/>) and a transferred sequence as the tensors it was
+        /// handed, and none of the three carries a runtime value until something asks for one.
+        /// Asking each of them is what this does now; a value a runtime already made is still
+        /// handed straight over.</para>
+        ///
+        /// <para>The value returned belongs to <paramref name="data"/>: read it, do not dispose
+        /// it.</para>
+        /// </summary>
+        public static IShorokooTensorValue ToTensorValue(
+            this IData data, IShorokooInferenceBackend backend)
+        {
+            ArgumentNullException.ThrowIfNull(backend);
+            return data switch
+            {
+                TensorData tensor => tensor.ToTensorValue(backend),
+                TensorDataSequence sequence => sequence.ToTensorValue(backend),
+                // Nothing in the framework is IOnnxData without being one of the two above. A
+                // caller's own IData may be, and unwrapping it is what this method promised.
+                IOnnxData onnxData => onnxData.Value,
+                _ => throw new UnsupportedDTypeException(
+                    ErrorCodes.CR006, data?.GetType()?.Name ?? "null", "ToTensorValue",
+                    "Data type is not supported for tensor value conversion"),
+            };
         }
 
         /// <summary>Starts a fluent eager evaluation: <c>inputs.Eval(outputs).With(data)</c>.</summary>

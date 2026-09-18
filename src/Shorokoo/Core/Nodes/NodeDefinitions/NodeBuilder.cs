@@ -66,7 +66,22 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 else if (kvp.Value is string strVal)
                     convertedAttrs[kvp.Key] = (string?)strVal;
                 else
+                {
+                    if (kvp.Value is TensorData attached && attached.Context is not null)
+                        throw new ArgumentException(
+                            $"The tensor given for attribute '{kvp.Key}' belongs to a compute "
+                            + $"context ({attached.Context.Backend}), and an operator's attribute "
+                            + "must not. An attribute is part of the graph's description, which is "
+                            + "the same description on every machine; a tensor bound to a context "
+                            + "is bound to one backend's memory, so a graph that captured one could "
+                            + "only be built where that context is. Detach it first -- "
+                            + "CopyTo(null) takes a copy in the framework's own host memory.",
+                            nameof(attrs));
+                    // Held by reference from here on, so the check above is only half the guard:
+                    // the other half is refusing to bind it to a context afterwards.
+                    (kvp.Value as TensorData)?.MarkAsGraphLiteral();
                     convertedAttrs[kvp.Key] = kvp.Value;
+                }
             }
 
             foreach (var def in defs)

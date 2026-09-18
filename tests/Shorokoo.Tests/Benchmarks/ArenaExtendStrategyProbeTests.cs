@@ -85,7 +85,7 @@ public class ArenaExtendStrategyProbeTests
         try
         {
             using var options = new SessionOptions();
-            OrtSessionFactory.Configure(options, ShorokooGraphOptimization.EnableBasic, ShorokooLogSeverity.Fatal);
+            OrtBackend.Configure(options, ShorokooGraphOptimization.EnableBasic, ShorokooLogSeverity.Fatal);
             options.AddSessionConfigEntry("session.use_env_allocators", "1");
             using var session = new InferenceSession(model, options);
             var before = NativeHeldBytes();

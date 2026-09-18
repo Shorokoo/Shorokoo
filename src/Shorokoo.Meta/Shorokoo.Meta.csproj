@@ -15,7 +15,7 @@
     <IncludeBuildOutput>false</IncludeBuildOutput>
     <!-- Deps-only package legitimately has no lib/ for its TFM. -->
     <NoWarn>$(NoWarn);NU5128</NoWarn>
-    <Description>Define, train, and run neural networks in pure C#. Meta-package that brings the Shorokoo runtime (Shorokoo.Core), ready-made layers (Shorokoo.Modules), and the [Module] source generator (Shorokoo.CodeGen). Add exactly one backend: Shorokoo.LinuxCPU, Shorokoo.LinuxGPU, Shorokoo.WinCPU, or Shorokoo.WinGPU.</Description>
+    <Description>Define, train, and run neural networks in pure C#. Meta-package that brings the Shorokoo runtime (Shorokoo.Core), ready-made layers (Shorokoo.Modules), and the [Module] source generator (Shorokoo.CodeGen). Add a backend for each device you want to run on: Shorokoo.LinuxCPU, Shorokoo.LinuxGPU, Shorokoo.WinCPU, or Shorokoo.WinGPU. One is enough, and a program that names its backends may load several.</Description>
     <PackageTags>machine-learning;deep-learning;neural-network;tensor;autodiff;onnx;training;ai</PackageTags>
   </PropertyGroup>
 

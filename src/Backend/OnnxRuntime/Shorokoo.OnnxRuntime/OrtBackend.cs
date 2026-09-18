@@ -11,7 +11,7 @@ using TensorElementType = Microsoft.ML.OnnxRuntime.Tensors.TensorElementType;
 namespace Shorokoo.OnnxRuntime;
 
 /// <summary>
-/// The <see cref="IShorokooInferenceSessionFactory"/> implementation backed by ONNX
+/// The <see cref="IShorokooInferenceBackend"/> implementation backed by ONNX
 /// Runtime: it builds ORT sessions and ORT-backed tensor values for Shorokoo's inference
 /// pipeline. It is platform-neutral and abstract — each platform package
 /// (<c>Shorokoo.WinCPU</c>, <c>Shorokoo.WinGPU</c>, <c>Shorokoo.LinuxCPU</c>,
@@ -20,17 +20,17 @@ namespace Shorokoo.OnnxRuntime;
 ///
 /// <para>You do not normally reference this type, or the <c>Shorokoo.OnnxRuntime</c>
 /// package that carries it, directly: reference one platform package instead and let
-/// <see cref="Shorokoo.Core.Inference.Abstractions.InferenceBackend"/> find its factory.
+/// <see cref="Shorokoo.Core.Inference.Abstractions.InferenceBackend"/> find its backend.
 /// Subclass this only to drive a different ONNX Runtime execution provider than the four
 /// shipped packages offer.</para>
 /// </summary>
-public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
+public abstract class OrtBackend : IShorokooInferenceBackend
 {
     private readonly Action<SessionOptions, DeviceMemorySettings> _configureExecutionProvider;
     private readonly int? _cudaDeviceId;
 
     /// <param name="configureExecutionProvider">
-    /// Applied to the <see cref="SessionOptions"/> of every session this factory creates,
+    /// Applied to the <see cref="SessionOptions"/> of every session this backend creates,
     /// after the log-severity and graph-optimization settings and before the session is
     /// constructed. This is where a subclass appends its execution provider; a CPU backend
     /// leaves ORT on its default provider and does nothing here. It is handed the
@@ -53,12 +53,12 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
     /// </param>
     /// <exception cref="ArgumentException"><paramref name="cudaDeviceId"/> disagrees with
     /// <paramref name="device"/>, or is negative.</exception>
-    protected OrtSessionFactory(
+    protected OrtBackend(
         Action<SessionOptions, DeviceMemorySettings> configureExecutionProvider,
         ComputeDevice device,
         int? cudaDeviceId)
     {
-        // Built here rather than on each read of Description, so a factory that could only
+        // Built here rather than on each read of Description, so a backend that could only
         // describe itself incoherently cannot be constructed at all.
         Description = new BackendDescription(GetType().Assembly.GetName().Name ?? GetType().Name, device, cudaDeviceId);
         _configureExecutionProvider = configureExecutionProvider;
@@ -71,18 +71,18 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
     /// that session is built with, and honours <see cref="RunSettings.ShrinkArenaAfterRun"/> for
     /// that device's arena on each run.
     /// </summary>
-    protected OrtSessionFactory(int cudaDeviceId)
+    protected OrtBackend(int cudaDeviceId)
         : this((opts, mem) => AppendCuda(opts, cudaDeviceId, mem), ComputeDevice.Cuda, cudaDeviceId) { }
 
     /// <summary>
-    /// This backend: the assembly the concrete factory lives in, and the device the constructor
+    /// This backend: the assembly the concrete backend lives in, and the device the constructor
     /// named. Fixed at construction, so every read agrees and none can contradict the provider
     /// the subclass actually appended.
     /// </summary>
     public BackendDescription Description { get; }
 
     /// <summary>
-    /// Creates an ORT inference session over a serialized ONNX model, on this factory's
+    /// Creates an ORT inference session over a serialized ONNX model, on this backend's
     /// execution provider.
     /// </summary>
     /// <param name="modelBytes">The serialized ONNX model.</param>
@@ -110,11 +110,13 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
         Configure(options, graphOptimization, logSeverity);
         _configureExecutionProvider(options, deviceMemory);
         var session = new InferenceSession(modelBytes.ToArray(), options);
-        return new OrtInferenceSession(session, _cudaDeviceId);
+        // The session keeps this backend so it can rebuild a feed that came from another
+        // backend's native runtime -- see OrtInferenceSession.Unwrap.
+        return new OrtInferenceSession(session, _cudaDeviceId, this);
     }
 
     /// <summary>
-    /// Applies the settings every session this factory creates runs with — the log severity
+    /// Applies the settings every session this backend creates runs with — the log severity
     /// and the graph-optimization level, plus the session configuration entry that
     /// <see cref="ShorokooGraphOptimization.TrainingStep"/> stands for — to
     /// <paramref name="options"/>. Public so a diagnostic can build an ORT session with exactly
@@ -243,6 +245,10 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
     /// <summary>
     /// Builds an ORT tensor of <paramref name="elementType"/> and
     /// <paramref name="shape"/> by reinterpreting a fixed-stride byte buffer.
+    ///
+    /// <para>In host memory, whatever device this backend computes on — ORT's default allocator is
+    /// the CPU one on every execution provider. <see cref="CreateTensorInBackendMemory"/> is the
+    /// one that builds it where this backend's tensors are meant to live.</para>
     /// </summary>
     /// <exception cref="NotSupportedException">
     /// The element type has no fixed byte stride — <see cref="ShorokooTensorElementType.String"/>
@@ -253,6 +259,85 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
         ShorokooTensorElementType elementType,
         byte[] data,
         long[] shape)
+        => Allocate(
+            FixedStrideElementType(elementType, nameof(CreateTensorFromRawBytes)),
+            data.AsSpan(),
+            shape);
+
+    /// <summary>
+    /// A tensor of this backend holding <paramref name="data"/>, in the memory this backend's
+    /// tensors live in.
+    ///
+    /// <para>On a host backend that is where <see cref="CreateTensorFromRawBytes"/> already builds
+    /// it, so this defers to it. On a CUDA backend it is the card's own memory: the buffer comes
+    /// from that device's ORT allocator and the bytes cross the bus once, here — rather than being
+    /// left on the host for the execution provider to copy over on every run of every session they
+    /// are fed to, which is what a tensor "moved onto the card" used to mean.</para>
+    /// </summary>
+    /// <exception cref="ArgumentException"><paramref name="data"/> holds fewer bytes than
+    /// <paramref name="shape"/> covers.</exception>
+    /// <exception cref="InvalidOperationException">The CUDA runtime is not available to make the
+    /// copy with.</exception>
+    /// <exception cref="NotSupportedException">The element type has no fixed byte stride.</exception>
+    public IShorokooTensorValue CreateTensorInBackendMemory(
+        ShorokooTensorElementType elementType,
+        byte[] data,
+        long[] shape)
+    {
+        ArgumentNullException.ThrowIfNull(data);
+        ArgumentNullException.ThrowIfNull(shape);
+        if (_cudaDeviceId is not { } deviceId)
+            return CreateTensorFromRawBytes(elementType, data, shape);
+
+        var ortElementType = FixedStrideElementType(elementType, nameof(CreateTensorInBackendMemory));
+        var byteCount = ByteCount(elementType, shape);
+        // A caller may hand over a buffer longer than the shape covers -- the node-definition
+        // tables do -- in which case the surplus was never part of the tensor. Shorter is a
+        // mistake, and on this path it would leave the tail of a device allocation unwritten.
+        if (data.Length < byteCount)
+            throw new ArgumentException(
+                $"Supplied data of {data.Length} bytes is less than shape size {byteCount} bytes.",
+                nameof(data));
+
+        var wrapped = new OrtTensorValue(OrtValue.CreateAllocatedTensorValue(
+            CudaDeviceAllocator.For(deviceId, _configureExecutionProvider), ortElementType, shape));
+        try
+        {
+            // ORT's managed surface has no host-to-device copy, so this goes through the CUDA
+            // runtime, to the address the value carries -- which is the one thing that may be done
+            // with a device allocation here. An empty tensor has nothing to copy, and CUDA is
+            // entitled to refuse the address ORT hands back for a zero-byte one.
+            var copied = byteCount == 0
+                || CudaInterop.CopyHostToDevice(data, DevicePointer(wrapped), byteCount);
+            GC.KeepAlive(wrapped);
+            if (!copied)
+                throw new InvalidOperationException(
+                    $"Filling this tensor ({string.Join('x', shape)}:{elementType}) in "
+                    + $"{Description}'s device memory failed. The CUDA runtime is what performs the "
+                    + "copy, so a machine without it cannot put a tensor on the card.");
+        }
+        catch
+        {
+            // The value owns a device allocation from the moment ORT returns it, and nothing else
+            // has a reference to free it by.
+            wrapped.Dispose();
+            throw;
+        }
+        return wrapped;
+    }
+
+    /// <summary>
+    /// The ORT element type <paramref name="elementType"/> is laid down as, refusing the ones a
+    /// flat byte buffer cannot express. <paramref name="operation"/> names the caller, so a
+    /// refusal says which of the two byte-wise constructors was asked.
+    /// </summary>
+    /// <exception cref="NotSupportedException">
+    /// The element type has no fixed byte stride — <see cref="ShorokooTensorElementType.String"/>
+    /// is variable-length, so use <see cref="CreateStringTensor"/> for it — or is not one these
+    /// methods handle at all.
+    /// </exception>
+    private static TensorElementType FixedStrideElementType(
+        ShorokooTensorElementType elementType, string operation)
     {
         return elementType switch
         {
@@ -263,11 +348,11 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
                 or ShorokooTensorElementType.Float16 or ShorokooTensorElementType.Double
                 or ShorokooTensorElementType.UInt32 or ShorokooTensorElementType.UInt64
                 or ShorokooTensorElementType.BFloat16
-                => Allocate((TensorElementType)(int)elementType, data.AsSpan(), shape),
+                => (TensorElementType)(int)elementType,
             ShorokooTensorElementType.String => throw new NotSupportedException(
                 "String tensors are variable-length and not byte-stride; use CreateStringTensor instead."),
             _ => throw new NotSupportedException(
-                $"CreateTensorFromRawBytes does not support element type {elementType}."),
+                $"{operation} does not support element type {elementType}."),
         };
     }
 
@@ -278,8 +363,19 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
     public IShorokooTensorValue CreateStringTensor(IReadOnlyList<string> data, long[] shape)
     {
         var ortValue = OrtValue.CreateTensorWithEmptyStrings(OrtAllocator.DefaultInstance, shape);
-        for (int i = 0; i < data.Count; i++)
-            ortValue.StringTensorSetElementAt(data[i].AsSpan(), i);
+        try
+        {
+            for (int i = 0; i < data.Count; i++)
+                ortValue.StringTensorSetElementAt(data[i].AsSpan(), i);
+        }
+        catch
+        {
+            // A null element, or more elements than the shape covers, throws part-way through --
+            // and nothing references the value yet, so it would sit on the finalizer queue. Every
+            // sibling on this path already brackets its fill this way.
+            ortValue.Dispose();
+            throw;
+        }
         return new OrtTensorValue(ortValue);
     }
 
@@ -294,9 +390,13 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
     public IShorokooTensorValue CreateSequence(IReadOnlyList<IShorokooTensorValue> values)
     {
         var inner = new List<OrtValue>(values.Count);
-        foreach (var v in values) inner.Add(((OrtTensorValue)v).Inner);
         try
         {
+            // Inside the try, not before it: this method documents itself as taking ownership, so
+            // an element that is not this backend's value -- one from another runtime, or a foreign
+            // implementation -- throws on the cast with the earlier elements already unwrapped and
+            // the caller already committed to having given them up.
+            foreach (var v in values) inner.Add(((OrtTensorValue)v).Inner);
             return new OrtTensorValue(OrtValue.CreateSequence(inner));
         }
         catch
@@ -309,8 +409,92 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
     }
 
     /// <summary>
-    /// Builds an ORT tensor on a buffer ORT itself allocates and copies <paramref name="bytes"/>
-    /// into it.
+    /// <paramref name="value"/>'s contents as host bytes, including when it is in the execution
+    /// provider's own memory and so cannot be read here at all.
+    ///
+    /// <para>ONNX Runtime's managed surface has no device-to-host copy to call here: a value it
+    /// left on the card hands out a pointer and no way to read it. So the copy is made through the
+    /// CUDA runtime directly, from the address the value carries — the same address the runtime
+    /// would use, since there is only one allocation and this backend is the one that made it.</para>
+    /// </summary>
+    public byte[] CopyTensorToHost(IShorokooTensorValue value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+
+        if (value.IsHostAccessible)
+        {
+            var hostBytes = value.GetTensorDataAsSpan<byte>().ToArray();
+            GC.KeepAlive(value);
+            return hostBytes;
+        }
+
+        if (value.ValueType != ShorokooOnnxValueType.Tensor)
+            throw new InvalidOperationException(
+                $"Only a tensor can be read back from device memory; this is a {value.ValueType}.");
+
+        var destination = new byte[ByteCount(value.ElementType, value.Shape)];
+        var copied = CudaInterop.CopyDeviceToHost(DevicePointer(value), destination);
+        GC.KeepAlive(value);
+        if (!copied)
+            throw new InvalidOperationException(
+                $"Reading this tensor ({string.Join('x', value.Shape)}:{value.ElementType}) back "
+                + $"from {Description}'s device memory failed. The CUDA runtime is what performs "
+                + "the copy, so a machine without it cannot bring a device-resident value home.");
+        return destination;
+    }
+
+    /// <summary>
+    /// The address the value's buffer is at, without reading it — which for a device allocation is
+    /// the one thing that may be done with it here.
+    ///
+    /// <para>Through the ORT value rather than through <see cref="IShorokooTensorValue"/>, whose
+    /// span accessors refuse a value the provider kept precisely so that nobody dereferences a
+    /// device address as a host one. Taking the address is not dereferencing it, and this is the
+    /// backend that made the allocation.</para>
+    /// </summary>
+    private static unsafe IntPtr DevicePointer(IShorokooTensorValue value)
+    {
+        if (value is not OrtTensorValue ort)
+            throw new InvalidOperationException(
+                $"A {value.GetType().Name} did not come from this backend, so its device memory "
+                + "cannot be read here.");
+
+        var span = ort.Inner.GetTensorMutableRawData();
+        IntPtr address;
+        fixed (byte* p = span) address = (IntPtr)p;
+        // Taking the span is the value's last read here, so without this the JIT may retire the
+        // local and a collection on any thread free the allocation before the address is used.
+        // The caller keeps it alive across the copy itself (Shorokoo/Shorokoo#178).
+        GC.KeepAlive(ort);
+        return address;
+    }
+
+    /// <summary>How many bytes a tensor of this element type and shape occupies — the size of the
+    /// buffer on either side of a copy between the host and the card.</summary>
+    private static int ByteCount(ShorokooTensorElementType elementType, long[] shape)
+    {
+        var elements = 1L;
+        foreach (var dim in shape) elements *= dim;
+        return checked((int)(elements * ElementSize(elementType)));
+    }
+
+    private static int ElementSize(ShorokooTensorElementType type) => type switch
+    {
+        ShorokooTensorElementType.Float => 4,
+        ShorokooTensorElementType.Double => 8,
+        ShorokooTensorElementType.Int8 or ShorokooTensorElementType.UInt8
+            or ShorokooTensorElementType.Bool => 1,
+        ShorokooTensorElementType.Int16 or ShorokooTensorElementType.UInt16
+            or ShorokooTensorElementType.Float16 or ShorokooTensorElementType.BFloat16 => 2,
+        ShorokooTensorElementType.Int32 or ShorokooTensorElementType.UInt32 => 4,
+        ShorokooTensorElementType.Int64 or ShorokooTensorElementType.UInt64 => 8,
+        _ => throw new InvalidOperationException(
+            $"A {type} tensor has no fixed element size, so it cannot be copied back by bytes."),
+    };
+
+    /// <summary>
+    /// Builds an ORT tensor on a buffer ORT itself allocates, in host memory, and copies
+    /// <paramref name="bytes"/> into it.
     ///
     /// <para>The obvious alternative — <c>OrtValue.CreateTensorValueFromMemory</c> over a managed
     /// array — is why this is a copy. That API pins the array for the value's lifetime and releases
@@ -320,7 +504,8 @@ public abstract class OrtSessionFactory : IShorokooInferenceSessionFactory
     /// a training loop that fed a fresh batch each step leaked one batch per step, permanently, and
     /// no collection could ever get it back. An ORT-allocated buffer is released by the value's
     /// finalizer along with the value, so it behaves like every other tensor the runtime hands
-    /// back.</para>
+    /// back — which is why <see cref="CreateTensorInBackendMemory"/> allocates device memory the
+    /// same way rather than calling <c>cudaMalloc</c> and owning the result itself.</para>
     /// </summary>
     private static OrtTensorValue Allocate(TensorElementType elementType, ReadOnlySpan<byte> bytes, long[] shape)
     {

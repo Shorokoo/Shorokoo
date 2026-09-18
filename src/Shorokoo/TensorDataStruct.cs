@@ -109,5 +109,103 @@ namespace Shorokoo
         {
             return GetEnumerator();
         }
+
+        /// <summary>
+        /// The compute context this struct's fields belong to, or null for the framework's own
+        /// host memory. Set by the transfer operations below.
+        /// </summary>
+        public Shorokoo.Runtime.ComputeContext? Context { get; private set; }
+
+        /// <summary>Moves this struct's owned tensors to <paramref name="target"/>, recursing
+        /// through nested structs and sequences. A field it only has access to is left where it
+        /// is, since moving what you do not own is what the non-owning case forbids.</summary>
+        public TensorDataStruct TransferTo(Shorokoo.Runtime.ComputeContext? target)
+            => Rebuild(target, (d, c) => Move(d, c, static (t, x) => t.TransferTo(x),
+                static (q, x) => q.TransferTo(x), static (u, x) => u.TransferTo(x), ownedOnly: true));
+
+        /// <summary>Copies this struct's owned tensors into <paramref name="target"/>'s memory,
+        /// leaving this struct untouched.</summary>
+        public TensorDataStruct CopyTo(Shorokoo.Runtime.ComputeContext? target)
+            => Rebuild(target, (d, c) => Move(d, c, static (t, x) => t.CopyTo(x),
+                static (q, x) => q.CopyTo(x), static (u, x) => u.CopyTo(x), ownedOnly: false));
+
+        /// <summary>Hands <paramref name="target"/> readers for this struct's owned tensors,
+        /// taking no ownership of any of them.</summary>
+        public TensorDataStruct GiveAccessTo(Shorokoo.Runtime.ComputeContext? target)
+            => Rebuild(target, (d, c) => Move(d, c, static (t, x) => t.GiveAccessTo(x),
+                static (q, x) => q.GiveAccessTo(x), static (u, x) => u.GiveAccessTo(x), ownedOnly: true));
+
+        private TensorDataStruct Rebuild(
+            Shorokoo.Runtime.ComputeContext? target,
+            Func<IData, Shorokoo.Runtime.ComputeContext?, IData> operation)
+        {
+            // Materialized as it goes rather than left lazy, so a field that throws can be caught
+            // here at all: Select would defer every operation into the constructor, past any
+            // cleanup this method could do.
+            List<KeyValuePair<string, IData>> moved = new(Fields.Count);
+            List<TensorData> allocated = [];
+            // What each source field was before the move, so a failure can put it back: otherwise a
+            // failed transfer left the fields it had reached surrendered to a context the caller
+            // never received a struct for.
+            List<(TensorData Field, Shorokoo.Runtime.ComputeContext? Context)> surrendered = [];
+            try
+            {
+                foreach (var field in Fields)
+                {
+                    var owned = field.Value is TensorData before && before.OwnsMemory;
+                    var wasOn = (field.Value as TensorData)?.Context;
+                    var rebuilt = operation(field.Value, target);
+                    if (owned && field.Value is TensorData after && !after.OwnsMemory)
+                        surrendered.Add((after, wasOn));
+                    moved.Add(new KeyValuePair<string, IData>(field.Key, rebuilt));
+                    // Only storage this rebuild allocated: one that shares the source field's is
+                    // the source's bytes under a second name, and freeing it would destroy data a
+                    // failed transfer is supposed to leave alone.
+                    if (rebuilt is TensorData t && field.Value is TensorData original
+                        && !ReferenceEquals(t, original) && !ReferenceEquals(t.Storage, original.Storage))
+                        allocated.Add(t);
+                }
+                return new TensorDataStruct(Definition, moved) { Context = target };
+            }
+            catch
+            {
+                // The struct that would have owned these is never constructed, so without this
+                // each is a runtime value -- a device allocation on a card -- left to a finalizer.
+                foreach (var t in allocated)
+                    if (t.OwnsMemory) t.Dispose();
+                foreach (var (field, wasOn) in surrendered) field.ReclaimOwnership(wasOn);
+                throw;
+            }
+        }
+
+        /// <summary>Applies the right one of three operations to whichever kind of field this is,
+        /// and leaves anything else -- a tensor that owns nothing included -- alone.</summary>
+        /// <param name="field">The field to move.</param>
+        /// <param name="target">The context the rebuilt field belongs to, or null.</param>
+        /// <param name="onTensor">What to do with a tensor field.</param>
+        /// <param name="onSequence">What to do with a sequence field.</param>
+        /// <param name="onStruct">What to do with a nested struct field.</param>
+        /// <param name="ownedOnly">Whether a tensor this struct does not own is left alone. True of
+        /// the two operations that move ownership around; false of <see cref="CopyTo"/>, which takes
+        /// nothing and gives the target its own -- see the same parameter on
+        /// <see cref="TensorDataSequence"/>'s rebuild for why a copy must not be gated on it.</param>
+        private static IData Move(
+            IData field, Shorokoo.Runtime.ComputeContext? target,
+            Func<TensorData, Shorokoo.Runtime.ComputeContext?, TensorData> onTensor,
+            Func<TensorDataSequence, Shorokoo.Runtime.ComputeContext?, TensorDataSequence> onSequence,
+            Func<TensorDataStruct, Shorokoo.Runtime.ComputeContext?, TensorDataStruct> onStruct,
+            bool ownedOnly)
+            => field switch
+            {
+                TensorData t => !ownedOnly || t.OwnsMemory ? onTensor(t, target) : t,
+                TensorDataSequence q => onSequence(q, target),
+                TensorDataStruct u => onStruct(u, target),
+                // A present optional holds a tensor like any other field does. Left alone, it
+                // stayed in the memory of the context the struct had just left -- inside a struct
+                // reporting the target's -- and went when that context did.
+                OptionalTensorData { HasValue: true, Value: { } v } when !ownedOnly || v.OwnsMemory
+                    => OptionalTensorData.Some(onTensor(v, target)),
+                _ => field,
+            };
     }
 }

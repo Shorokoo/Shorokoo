@@ -450,7 +450,9 @@ namespace Shorokoo.Graph
         /// </summary>
         /// <param name="graph">The concrete architecture whose initializers to run.</param>
         /// <param name="namingScheme">Optional scheme for the returned parameter names; defaults to Shorokoo's.</param>
-        /// <param name="computeContext">Optional context used to evaluate the initializers.</param>
+        /// <param name="computeContext">Optional context used to evaluate the initializers; defaults
+        /// to <see cref="ComputeContext.Default"/> <i>at the point an initializer actually runs</i>.
+        /// A graph with no trainable parameter evaluates nothing and so resolves no backend.</param>
         /// <param name="rngConfig">
         /// Optional RNG configuration. Each random initializer draws in-graph keyed noise on
         /// its parameter's own stream (so same-shape parameters get distinct values,
@@ -471,7 +473,10 @@ namespace Shorokoo.Graph
             RngConfig? rngConfig = null)
         {
             AssertConcreteArchitecture(graph, nameof(InitializeTrainableParams));
-            computeContext ??= ComputeContext.Default;
+            // The context stays null here and is resolved by FastInitializeModelParams when it has
+            // an initializer to run: resolving it resolves an inference backend, and a model with
+            // no trainable parameter has no initializer and needs none.
+
             if (rngConfig is null && graph.TryGetRngSeed() is { } rngSeedData)
             {
                 var identity = Core.Rng.RngRuntimeIdentity.Decode(rngSeedData);

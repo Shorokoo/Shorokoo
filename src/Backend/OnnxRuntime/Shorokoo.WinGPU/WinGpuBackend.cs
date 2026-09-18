@@ -17,19 +17,25 @@ namespace Shorokoo.WinGPU;
 /// between), to get a failure at startup instead of on the first inference call, or when
 /// the backend DLL is not deployed next to <c>Shorokoo.dll</c>:</para>
 /// <code>
-/// InferenceBackend.Factory = new WinGpuInferenceFactory();
+/// InferenceBackend.Default = new WinGpuBackend();
+/// </code>
+/// <para>Assigning it names the <i>default</i> backend. To run this one alongside
+/// another — a CPU context and a CUDA context in one process — hand it to a compute
+/// context instead, and leave the default to whichever should have it:</para>
+/// <code>
+/// var context = new ComputeContext(new WinGpuBackend());
 /// </code>
 /// <para>Mind the casing: the package, assembly and namespace spell the device
 /// <c>GPU</c> while the type name spells it <c>Gpu</c>, so the fully qualified name is
-/// <c>Shorokoo.WinGPU.WinGpuInferenceFactory</c>.</para>
+/// <c>Shorokoo.WinGPU.WinGpuBackend</c>.</para>
 /// </summary>
-public sealed class WinGpuInferenceFactory : OrtSessionFactory
+public sealed class WinGpuBackend : OrtBackend
 {
     /// <summary>
-    /// Creates the factory. Every session it builds gets the CUDA execution provider on
+    /// Creates the backend. Every session it builds gets the CUDA execution provider on
     /// device 0, configured with the
     /// <see cref="Shorokoo.Core.Inference.Abstractions.DeviceMemorySettings"/> that session is
     /// built with.
     /// </summary>
-    public WinGpuInferenceFactory() : base(cudaDeviceId: 0) { }
+    public WinGpuBackend() : base(cudaDeviceId: 0) { }
 }

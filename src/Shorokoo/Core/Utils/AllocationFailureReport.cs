@@ -177,7 +177,7 @@ namespace Shorokoo.Core.Utils
         /// <summary>The assembly name of the loaded backend, or null when it cannot be determined.</summary>
         internal static string? BackendAssemblyName()
         {
-            try { return InferenceBackend.Factory.GetType().Assembly.GetName().Name; }
+            try { return InferenceBackend.Default.GetType().Assembly.GetName().Name; }
             catch { return null; }
         }
 

@@ -1,4 +1,5 @@
 using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Runtime;
 
 namespace Shorokoo.Tests;
 
@@ -33,7 +34,7 @@ public class DTypeStringCoverageTests
         string[] values = ["hello", "", "shoroko̅o", "with\nnewline", "🦀"];
         long[] shape = [values.Length];
 
-        using (var tensor = InferenceBackend.Factory.CreateStringTensor(values, shape))
+        using (var tensor = InferenceBackend.Default.CreateStringTensor(values, shape))
         {
             Assert.Equal(ShorokooOnnxValueType.Tensor, tensor.ValueType);
             Assert.Equal(ShorokooTensorElementType.String, tensor.ElementType);
@@ -42,8 +43,50 @@ public class DTypeStringCoverageTests
         }
 
         var rawBytesEx = Assert.Throws<NotSupportedException>(() =>
-            InferenceBackend.Factory.CreateTensorFromRawBytes(
+            InferenceBackend.Default.CreateTensorFromRawBytes(
                 ShorokooTensorElementType.String, [], [0L]));
         Assert.Contains("CreateStringTensor", rawBytesEx.Message);
+
+        var hostRawEx = Assert.Throws<NotSupportedException>(() =>
+            TensorData.CreateFromRawBytes(new Shape(0L), DType.String, []));
+        Assert.Contains("variable-length", hostRawEx.Message);
+    }
+
+    [Fact]
+    public void TestAStringLiteralIsBuiltWithNoBackendAndRoundTripsThroughOne()
+    {
+        string[] values = ["hello", "", "with\nnewline", "shorokoo"];
+        long[] dims = [2L, 2L];
+
+        TensorData literal = null!;
+        // The AsyncLocal seam rather than a before/after read of the process-wide slot: this suite
+        // runs four tests at once, so any of them may settle that slot inside the window.
+        Assert.Equal(0, InferenceBackend.CountDefaultReads(() => literal = TensorData(dims, values)));
+
+        Assert.IsType<HostStringTensorData>(literal);
+        // Nothing of a runtime's is in it -- which is the whole of "no backend was needed".
+        Assert.False(literal is IOnnxData);
+        Assert.Same(DType.String, literal.DType);
+        Assert.Equal(new Shape(2L, 2L), literal.Shape);
+        Assert.Equal(values, ((HostStringTensorData)literal).Strings);
+
+        var value = literal.ToTensorValue();
+        Assert.Equal(ShorokooTensorElementType.String, value.ElementType);
+        Assert.Equal(dims, value.Shape);
+        Assert.Equal(values, value.GetStringTensorData());
+
+        // The tensor's own, kept per backend rather than rebuilt per ask: two feeds of one
+        // backend must not be handed two values, nor one the other has released.
+        Assert.Same(value, literal.ToTensorValue());
+        Assert.Same(value, ((IData)literal).ToTensorValue());
+
+        // There is no flat buffer under a string tensor here or in ONNX Runtime, and the refusal
+        // names the reads that do work rather than handing back a span of nothing.
+        var spanEx = Assert.Throws<InvalidOperationException>(() => { literal.AccessRawMemory(); });
+        Assert.Contains("Strings", spanEx.Message);
+
+        literal.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => _ = ((HostStringTensorData)literal).Strings);
+        Assert.Throws<ObjectDisposedException>(() => literal.ToTensorValue());
     }
 }

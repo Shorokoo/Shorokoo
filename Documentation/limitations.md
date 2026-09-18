@@ -191,25 +191,72 @@ rest of it.
 
 ## Current limitations (could be lifted)
 
-### The backend is process-wide and chosen when you build
+### Moving a tensor between memory spaces copies it
 
-Which device Shorokoo runs on is decided by the backend package a project references, and it holds
-for the whole process — see [Backend selection](inference.md#backend-selection). There is no
-per-call, per-context or per-rig device choice, and no way to use both devices from one program:
-ONNX Runtime binds one native runtime per process.
+A `TensorData` belongs to a compute context and says whether it owns its bytes, and
+`TransferTo` / `CopyTo` / `GiveAccessTo` move it between contexts; see
+[Moving data between contexts](inference.md#moving-data-between-contexts). Any two host contexts
+share host bytes without copying. Two CUDA contexts on one device share the allocation only when
+they share a native ONNX Runtime — a device allocation means nothing to a runtime that did not make
+it, so two *isolated* backends over one card copy through the host like any other crossing. Crossing
+from the host to a device or back is a real copy, once per crossing. There is no way to have a
+tensor be in two spaces at once, and there is no direct device-to-device path: a tensor moving
+between two different cards goes through the host.
 
-Referencing both packages is not a way around it. Their native libraries occupy the same path, so
-only one is deployed and NuGet's conflict resolution decides which — you would be picking a managed
-backend to sit on whichever native happened to win. That is why discovery refuses such a deployment
-outright rather than choosing for you, and why the escape hatch it names (assigning
-`InferenceBackend.Factory`) is there to make a salvageable build run, not to offer a device switch.
+A tensor that came back from a session without the context that produced it being recorded reports
+its space as unknown, and cannot be transferred at all — there is no telling whether another
+context shares it. Bring such a value home on the backend that owns it first.
 
-This is not scheduled to change. What is available instead: the device is answerable
-(`ComputeContext.Backend`, `InferenceBackend.Describe()`) and assertable
-(`InferenceBackend.RequireDevice(...)`), and work that genuinely needs both devices is split into
-one executable per device over a shared, backend-free model library —
-[One model, two devices](inference.md#one-model-two-devices). That costs a process, not a second
-copy of the model.
+### A tensor being fed to a run is not yours until the run returns
+
+Feeding a `TensorData` to a run builds a runtime value from its contents and hands the execution
+provider a pointer into it. Writing through `AccessModifiableMemory` / `AccessModifiableRawMemory`,
+or disposing the tensor, releases that value — so doing either while a run on that tensor is still
+going leaves the provider reading freed memory.
+
+Within one thread this is hard to hit: the run has returned before you get the chance. It becomes
+reachable the moment a program runs two contexts at once, which is the arrangement
+[One model, two devices](inference.md#one-model-two-devices) exists for — staging the next batch
+into a tensor while the other device is still reading it is the natural thing to write, and it is
+the unsafe thing. Give the concurrent run a tensor of its own (`CopyTo`) or wait for it to return.
+
+Nothing detects a violation. The release is explicit rather than a collection, so no rooting
+discipline on this side can see that a native call is in flight, and the failure is a read of freed
+memory rather than an exception. Making it enforceable rather than stated needs the runtime values
+reference-counted for the length of a run — [#366](https://github.com/Shorokoo/Shorokoo/issues/366).
+
+### A tensor moved onto a card is not covered by any device-memory budget
+
+`ComputeContext.DeviceMemory` bounds the arenas of the sessions that context compiles. It does not
+bound `TransferTo` / `CopyTo` onto that context: placing a tensor in device memory allocates out of
+a separate, process-wide allocator held per CUDA device, built with the defaults and no limit.
+
+So a context configured with `LimitBytes` can still put an arbitrarily large tensor on the card, and
+`CompiledGraph.DeviceMemory` reports a budget that does not describe that context's whole device
+footprint. Counting live sessions against a card — which `DeviceMemorySettings.LimitBytes` advises —
+cannot account for this allocator, since it is not a session the program compiled.
+
+[#367](https://github.com/Shorokoo/Shorokoo/issues/367) tracks bringing it under a budget, which
+needs an allocator per (device, settings) and a rule for which context's budget governs a tensor
+more than one has touched.
+
+### Sequence-valued models on an isolated CUDA backend
+
+A model whose outputs are *sequences* — `SequenceAt`, `SplitToSequence`, anything producing an ONNX
+sequence type — faults ONNX Runtime when it runs on a backend loaded through
+`IsolatedBackend.Load` or `BackendPackage.TryLoad` onto a CUDA device. The crash is an access
+violation inside ORT's own `OrtValue.GetValue`, so it takes the process down rather than raising.
+
+It is specific to the combination. The same model runs on an isolated *CPU* backend, and on a CUDA
+backend reached the ordinary way — by referencing `Shorokoo.LinuxGPU` or `Shorokoo.WinGPU` and
+letting discovery find it. Tensor and string values are unaffected in every combination.
+
+Until it is diagnosed, a program that needs sequence outputs on a card should reach its CUDA
+backend by reference rather than by loading it into isolation. That costs the ability to run a
+second ONNX Runtime alongside it, which is the only thing isolation buys.
+
+[#368](https://github.com/Shorokoo/Shorokoo/issues/368) tracks it, and carries the two leads on
+the path worth ruling out first. It has no pinning test: the pin needs a card.
 
 ### Device-memory readings are the device's, and device 0's
 

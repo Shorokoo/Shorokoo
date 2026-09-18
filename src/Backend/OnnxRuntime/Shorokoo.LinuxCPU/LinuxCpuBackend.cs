@@ -6,7 +6,7 @@ namespace Shorokoo.LinuxCPU;
 /// <summary>
 /// The Shorokoo inference backend for Linux x64 on the CPU. It creates ONNX Runtime
 /// sessions on ORT's default (CPU) execution provider — the CPU EP needs no
-/// configuration, so this factory adds none. It ships in the <c>Shorokoo.LinuxCPU</c>
+/// configuration, so this backend adds none. It ships in the <c>Shorokoo.LinuxCPU</c>
 /// package, which also brings the native ONNX Runtime for the platform.
 ///
 /// <para>Naming it in your code is <b>optional</b>. Referencing the package copies
@@ -17,18 +17,24 @@ namespace Shorokoo.LinuxCPU;
 /// between), to get a failure at startup instead of on the first inference call, or when
 /// the backend DLL is not deployed next to <c>Shorokoo.dll</c>:</para>
 /// <code>
-/// InferenceBackend.Factory = new LinuxCpuInferenceFactory();
+/// InferenceBackend.Default = new LinuxCpuBackend();
+/// </code>
+/// <para>Assigning it names the <i>default</i> backend. To run this one alongside
+/// another — a CPU context and a CUDA context in one process — hand it to a compute
+/// context instead, and leave the default to whichever should have it:</para>
+/// <code>
+/// var context = new ComputeContext(new LinuxCpuBackend());
 /// </code>
 /// <para>Mind the casing: the package, assembly and namespace spell the device
 /// <c>CPU</c> while the type name spells it <c>Cpu</c>, so the fully qualified name is
-/// <c>Shorokoo.LinuxCPU.LinuxCpuInferenceFactory</c>.</para>
+/// <c>Shorokoo.LinuxCPU.LinuxCpuBackend</c>.</para>
 /// </summary>
-public sealed class LinuxCpuInferenceFactory : OrtSessionFactory
+public sealed class LinuxCpuBackend : OrtBackend
 {
     /// <summary>
-    /// Creates the factory. CPU is ORT's default execution provider, so this factory's
+    /// Creates the backend. CPU is ORT's default execution provider, so its
     /// execution-provider step does nothing; sessions still get the usual log-severity
     /// and graph-optimization options.
     /// </summary>
-    public LinuxCpuInferenceFactory() : base(static (_, _) => { }, ComputeDevice.Cpu, cudaDeviceId: null) { }
+    public LinuxCpuBackend() : base(static (_, _) => { }, ComputeDevice.Cpu, cudaDeviceId: null) { }
 }

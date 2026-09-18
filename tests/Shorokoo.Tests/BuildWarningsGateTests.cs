@@ -17,14 +17,22 @@ namespace Shorokoo.Tests;
 /// </para>
 ///
 /// <para>
-/// It shells out to a fresh <c>dotnet build -c Release</c> of
-/// <c>src/Shorokoo.Modules/Shorokoo.Modules.csproj</c> with <c>-warnaserror</c>.
-/// Building Modules transitively recompiles the two other projects that carry
-/// real product C# — <c>Shorokoo</c> (Core) and the <c>Shorokoo.CodeGen</c>
-/// analyzer — so a single build covers every project where the 7 warnings lived
-/// and where new warnings would realistically arise. The backend wrappers and
-/// the deps-only meta-package carry no compiled C#, so they are out of scope; if
-/// that ever changes, add their csprojs to <see cref="ProductProjects"/>.
+/// It shells out to a fresh <c>dotnet build -c Release</c> with <c>-warnaserror</c>
+/// for each project in <see cref="ProductProjects"/>, which between them recompile
+/// every line of product C# that ships.
+/// </para>
+///
+/// <para>
+/// That list used to be <c>Shorokoo.Modules</c> alone, on the reasoning that
+/// building it pulls in <c>Shorokoo</c> (Core) and the <c>Shorokoo.CodeGen</c>
+/// analyzer, and that the backends carried no compiled C#. The second half stopped
+/// being true: <c>Shorokoo.OnnxRuntime</c> holds <c>OrtBackend</c>,
+/// <c>OrtInferenceSession</c>, <c>OrtTensorValue</c> and the glue around them, and
+/// each platform package holds its <c>[ShorokooBackend]</c> manifest and a factory
+/// of its own. A <c>CS1734</c> lived there unnoticed for exactly as long as the gate
+/// looked away, which is the argument for naming projects here rather than relying on
+/// one of them to reach the rest. The deps-only meta-package still ships no assembly,
+/// so it stays out.
 /// </para>
 ///
 /// <para>
@@ -40,12 +48,21 @@ public class BuildWarningsGateTests
 {
     /// <summary>
     /// Product projects whose compilation must be warning-free, relative to the repo
-    /// root. Building Modules pulls in Core + the CodeGen analyzer, so this one entry
-    /// covers all three code-bearing product projects.
+    /// root. Modules pulls in Core and the CodeGen analyzer; each platform backend
+    /// pulls in the ONNX Runtime glue, which is named anyway because it carries the
+    /// most of it. The four platform packages are all listed rather than one standing
+    /// for the rest: each compiles a manifest and a factory that only it has, and all
+    /// four build on either operating system, since only their natives are
+    /// platform-bound.
     /// </summary>
     private static readonly string[] ProductProjects =
     [
         Path.Combine("src", "Shorokoo.Modules", "Shorokoo.Modules.csproj"),
+        Path.Combine("src", "Backend", "OnnxRuntime", "Shorokoo.OnnxRuntime", "Shorokoo.OnnxRuntime.csproj"),
+        Path.Combine("src", "Backend", "OnnxRuntime", "Shorokoo.WinCPU", "Shorokoo.WinCPU.csproj"),
+        Path.Combine("src", "Backend", "OnnxRuntime", "Shorokoo.WinGPU", "Shorokoo.WinGPU.csproj"),
+        Path.Combine("src", "Backend", "OnnxRuntime", "Shorokoo.LinuxCPU", "Shorokoo.LinuxCPU.csproj"),
+        Path.Combine("src", "Backend", "OnnxRuntime", "Shorokoo.LinuxGPU", "Shorokoo.LinuxGPU.csproj"),
     ];
 
     private static readonly TimeSpan BuildTimeout = TimeSpan.FromMinutes(5);

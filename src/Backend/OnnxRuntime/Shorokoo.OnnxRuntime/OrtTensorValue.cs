@@ -26,7 +26,21 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
     // Pinned host memory ("CudaPinned") is readable too, but nothing here ever asks for it,
     // so the narrow test is the safe one: an unrecognized allocator reads as device memory
     // and is copied rather than dereferenced. A value never moves, so this is asked once.
-    public bool IsHostAccessible => _isHostAccessible ??= ProbeHostAccessible();
+    public bool IsHostAccessible
+    {
+        get
+        {
+            if (_probed) return _hostAccessible;
+            // Payload before the flag, both volatile: a Nullable<bool> is two fields written
+            // non-atomically, so a reader on a weakly ordered target could see HasValue true ahead
+            // of the value it stands for. The wrong answer in that direction is a device pointer
+            // reported as host-readable and then dereferenced. At worst two threads probe once each
+            // and agree -- a value never changes where it lives.
+            _hostAccessible = ProbeHostAccessible();
+            _probed = true;
+            return _hostAccessible;
+        }
+    }
 
     private bool ProbeHostAccessible()
     {
@@ -38,7 +52,8 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
         return info.Name == CpuAllocatorName;
     }
 
-    private bool? _isHostAccessible;
+    private volatile bool _hostAccessible;
+    private volatile bool _probed;
 
     /// <summary>ORT's name for the host allocator, on every execution provider.</summary>
     internal const string CpuAllocatorName = "Cpu";

@@ -1017,6 +1017,23 @@ namespace Shorokoo.Tests.Modules
             => AutoGradCheckHelpers.ElementwiseDirectionalDerivCheck(x, z => z.Softsign());
     }
 
+    /// <summary>
+    /// softsign' = 1/(1+|x|)² against values supplied from outside, so the gradient the engine
+    /// builds out of the registered Softsign lowering — Softsign has no <c>[AutoDiff]</c> rule of
+    /// its own — is checked against numbers rather than against another expression of itself.
+    /// </summary>
+    [Module]
+    public partial class AutoGradSoftsignLoweredGradientCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x, Tensor<float32> expected)
+        {
+            var loss = x.Softsign().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            var grad = (Tensor<float32>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, loss);
+            var slack = Scalar(1e-6f) - (grad - expected).Abs();
+            return slack.Reduce(ReduceKind.Min, keepDims: false).Scalar() > Scalar(0f);
+        }
+    }
+
     /// <summary>loss = Σ thresholdedRelu(x, 0.5). Vector input spans above and below the threshold.</summary>
     [Module]
     public partial class AutoGradThresholdedReluCheck

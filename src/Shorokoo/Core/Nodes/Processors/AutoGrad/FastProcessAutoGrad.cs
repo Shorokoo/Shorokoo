@@ -1,5 +1,6 @@
 using Shorokoo.Core.Nodes.AutoDiff;
 using Shorokoo.Core.Graph;
+using Shorokoo.Core.Lowering;
 using Shorokoo.Graph;
 using Shorokoo.Core.Nodes;
 using Shorokoo.Core.Nodes.Processors.Helpers;
@@ -42,6 +43,12 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
     ///         (Constant/Random subgraphs) are legitimate gradient leaves and are cut.</item>
     /// </list>
     /// </para>
+    ///
+    /// <para>An op with no <c>[AutoDiff]</c> method is not necessarily undifferentiable: if it
+    /// has a registered <see cref="OpLowering"/>, its gradient comes from that decomposition
+    /// instead, through <see cref="LoweredGradient"/>. That is a fallback and not a preference —
+    /// a hand-written rule wins wherever one exists, since it can state a form the decomposition
+    /// cannot, such as a numerically stable branch.</para>
     /// </summary>
     internal static class FastProcessAutoGradProcessor
     {
@@ -52,7 +59,7 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
         /// for ConstantOfShape's <c>shape</c> parameter rather than the default float32).
         /// </summary>
         private static readonly Dictionary<string, MethodInfo> gradientMethodInfos = BuildGradientMethodInfos();
-        private static readonly HashSet<string> outputUsingGradientOps = BuildOutputUsingGradientOps();
+        private static readonly HashSet<string> outputUsingGradientOps = AutoDiffs.GetGradientOpsUsingOutputs();
 
         /// <summary>
         /// Maps every C# IVarType class (e.g. <c>typeof(int64)</c>) back to its <see cref="DType"/>
@@ -397,8 +404,17 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
             // A gradient flows into this node and an AUTO_GRAD parameter sits behind it
             // (ComputeForwardTopoOrder only admits unregistered nodes when a param is
             // reachable through them). Cutting silently here would freeze that parameter
-            // with a zeros gradient, so fail loudly instead.
-            if (!gradOpsMap.TryGetValue(node.OpCode, out var gradOp))
+            // with a zeros gradient, so fail loudly instead — but only once the registry of
+            // operator lowerings has been asked too: an op that is a composition of
+            // differentiable primitives is differentiable through that composition, and
+            // LoweredGradient builds the same chain rule out of it that a hand-written rule
+            // would have stated. Nothing else in this method changes for such an op: the
+            // stand-ins below are built the same way (with no gradient method to read slot
+            // dtypes off, so every slot is float32 at the host tensor's rank), and what comes
+            // back is a cotangent per input slot either way.
+            OpLowering? lowering = null;
+            if (!gradOpsMap.TryGetValue(node.OpCode, out var gradOp)
+                && !OpLoweringRegistry.TryGet(node.OpCode, out lowering))
             {
                 var isLoopOp = node.OpCode is OpCodes.LOOP_OPEN or OpCodes.LOOP_CLOSE
                     or OpCodes.LOOP_FAKE_INPUT or OpCodes.LOOP_SCAN_VARIABLE
@@ -487,7 +503,10 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
             Variable?[] inputGrads;
             try
             {
-                inputGrads = gradOp(inputIValues, outputGrads, node.Attributes);
+                inputGrads = gradOp is not null
+                    ? gradOp(inputIValues, outputGrads, node.Attributes)
+                    : LoweredGradient.Compute(
+                        lowering!, inputIValues, outputGrads, node.Attributes, gradOpsMap);
             }
             catch (AutoDiffNotSupportedException)
             {
@@ -602,13 +621,6 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
             }
             return map;
         }
-
-        private static HashSet<string> BuildOutputUsingGradientOps()
-            => typeof(AutoDiffs).GetMethods(BindingFlags.Public | BindingFlags.Static)
-                .Select(m => m.GetCustomAttribute<AutoDiffAttribute>())
-                .Where(a => a is { UsesOutputs: true })
-                .Select(a => a!.OpName)
-                .ToHashSet();
 
         private static Dictionary<Type, DType> BuildDTypeByIVarType()
         {

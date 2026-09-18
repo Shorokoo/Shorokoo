@@ -77,6 +77,9 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                             + "only be built where that context is. Detach it first -- "
                             + "CopyTo(null) takes a copy in the framework's own host memory.",
                             nameof(attrs));
+                    // Held by reference from here on, so the check above is only half the guard:
+                    // the other half is refusing to bind it to a context afterwards.
+                    (kvp.Value as TensorData)?.MarkAsGraphLiteral();
                     convertedAttrs[kvp.Key] = kvp.Value;
                 }
             }

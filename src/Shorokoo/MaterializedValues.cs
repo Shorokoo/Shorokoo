@@ -31,6 +31,14 @@ internal sealed class MaterializedValues
     /// The value <paramref name="backend"/>'s runtime holds for these contents, built by
     /// <paramref name="build"/> the first time that backend asks and kept for the next time.
     /// </summary>
+    /// <summary>Whether no runtime currently holds a copy of these contents. The test seam for
+    /// the release paths: nothing else can observe that a value was freed rather than forgotten.
+    /// </summary>
+    internal bool IsEmpty
+    {
+        get { lock (_gate) return _byBackend is not { Count: > 0 }; }
+    }
+
     internal IShorokooTensorValue Get(
         IShorokooInferenceBackend backend,
         Func<IShorokooInferenceBackend, IShorokooTensorValue> build)

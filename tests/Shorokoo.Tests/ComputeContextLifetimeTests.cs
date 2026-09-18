@@ -149,6 +149,34 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
+    public void TestADisposedContextRefusesToRunBeforeItRunsAnything()
+    {
+        var (graph, a, b, _) = Model();
+        var context = new ComputeContext();
+        var compiled = context.Compile(graph);
+        context.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(() => compiled.Execute(a, b));
+        Assert.Throws<ObjectDisposedException>(() => context.Execute(graph, a, b));
+        Assert.Throws<ObjectDisposedException>(() => context.Eval(InputVector<float32>("a") * 2f));
+    }
+
+    [Fact]
+    public void TestDisposingAContextDropsTheRuntimeValuesItsHostTensorsWereFedAs()
+    {
+        var (graph, a, b, _) = Model();
+        var context = new ComputeContext();
+        var onContext = (HostTensorData<float32>)a.CopyTo(context);
+
+        context.Execute(graph, onContext, b);
+        Assert.False(onContext.MaterializationsAreEmpty);
+
+        context.Dispose();
+
+        Assert.True(onContext.MaterializationsAreEmpty);
+    }
+
+    [Fact]
     public void TestBuildingAndExportingAModelAsksForNoComputeContextAtAll()
     {
         var module = BackendFreeNegate.ComputationGraph;

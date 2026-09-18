@@ -44,6 +44,8 @@ namespace Shorokoo
             RefuseUnknownSpace(nameof(TransferTo));
             var to = SpaceOf(target);
 
+            RefuseGraphLiteral(target, nameof(TransferTo));
+
             if (to == Space && CanShareWith(target))
             {
                 RefuseUnownedNullContext(target, wouldOwn: OwnsMemory, operation: nameof(TransferTo));
@@ -96,6 +98,8 @@ namespace Shorokoo
             ThrowIfDisposed();
             RefuseUnknownSpace(nameof(GiveAccessTo));
             var to = SpaceOf(target);
+            RefuseGraphLiteral(target, nameof(GiveAccessTo));
+
             if (to != Space || !CanShareWith(target))
                 throw new InvalidOperationException(
                     $"This tensor ({this}) is in {Space} and cannot be reached from {to} without "
@@ -117,6 +121,23 @@ namespace Shorokoo
         /// bringing a device tensor home asks that backend for the copy), so such a tensor is one
         /// the API says is usable and nothing will ever reject.</para>
         /// </summary>
+        /// <summary>
+        /// Refuses to bind a tensor a graph has already captured as an operator's attribute. The
+        /// capture itself refuses one that is already bound; this is the other end of the same
+        /// rule, because the attribute is held by reference and binding it afterwards put a graph
+        /// description in one context's memory -- unserializable once that context was disposed,
+        /// and unbuildable anywhere that context is not.
+        /// </summary>
+        private void RefuseGraphLiteral(ComputeContext? target, string operation)
+        {
+            if (!IsGraphLiteral || target is null) return;
+            throw new InvalidOperationException(
+                $"This tensor ({this}) is an operator's attribute in a graph, so it cannot be "
+                + $"given to a compute context by {operation}. An attribute is part of the graph's "
+                + "description, which is the same description on every machine. Use CopyTo, which "
+                + "gives the context its own copy and leaves the graph's literal where it is.");
+        }
+
         private void RefuseDisposedTarget(ComputeContext? target, string operation)
         {
             if (target is not { IsDisposed: true }) return;

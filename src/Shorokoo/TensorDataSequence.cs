@@ -347,6 +347,16 @@ namespace Shorokoo
         {
             ThrowIfDisposed();
             List<TensorData> moved = new(Count);
+            // Only what this rebuild allocated may be released if it fails. A same-space move
+            // hands the rebuilt element the source's own storage, so disposing it on the way out
+            // would free bytes the source element still names -- turning a failed transfer into
+            // destroyed data, which is worse than the straddling it was cleaning up after.
+            List<TensorData> allocated = new(Count);
+            // What each source element was before the move, so a failure can put it back. Without
+            // it a failed transfer left the source elements surrendered -- not owning, naming the
+            // target -- and their storage on the target's books, so the caller's sequence died
+            // with a context it was never given to.
+            List<(TensorData Element, Shorokoo.Runtime.ComputeContext? Context)> surrendered = [];
             TensorData? minted = null;
             try
             {
@@ -356,11 +366,18 @@ namespace Shorokoo
                     // per read hands this loop a tensor nobody else will ever see, and an operation
                     // that throws on it would otherwise leave that one to a finalizer too.
                     minted = MintsElementsPerRead ? element : null;
+                    var before = element.Context;
+                    var owned = element.OwnsMemory;
                     var rebuiltElement = !ownedOnly || element.OwnsMemory
                         ? operation(element, target)
                         : element;
+                    if (owned && !element.OwnsMemory && !MintsElementsPerRead)
+                        surrendered.Add((element, before));
                     minted = null;
                     moved.Add(rebuiltElement);
+                    if (!ReferenceEquals(rebuiltElement, element)
+                        && !ReferenceEquals(rebuiltElement.Storage, element.Storage))
+                        allocated.Add(rebuiltElement);
                     // A sequence whose elements are copied out per read hands this loop a tensor
                     // nobody else will ever see again, so releasing it here is the only chance --
                     // otherwise every rebuild of a session's sequence output leaves one runtime
@@ -382,8 +399,9 @@ namespace Shorokoo
                 // them: a transfer that fails part-way leaves the source straddling two contexts,
                 // which is a real loose end and not one a cleanup here can tie.
                 minted?.Dispose();
-                foreach (var element in moved)
+                foreach (var element in allocated)
                     if (element.OwnsMemory) element.Dispose();
+                foreach (var (element, before) in surrendered) element.ReclaimOwnership(before);
                 throw;
             }
             var rebuilt = OfElements(moved, DType);
@@ -418,7 +436,7 @@ namespace Shorokoo
         {
             get
             {
-                ThrowIfDisposed();
+                ThrowIfGone();
                 return backing;
             }
         }

@@ -117,6 +117,10 @@ public class CompositeTransferCoverageTests
 
         Assert.Throws<ObjectDisposedException>(() => sequence.Count);
         Assert.Throws<ObjectDisposedException>(() => sequence[0]);
+        Assert.Throws<ObjectDisposedException>(() => ((IOnnxData)sequence).Value);
+        Assert.Throws<ObjectDisposedException>(
+            () => new ComputeContext().Execute(
+                new InternalComputationGraph([x], [OnnxOp.SequenceAt(x, Scalar(0L))]), sequence));
     }
 
     [Fact]
@@ -207,6 +211,50 @@ public class CompositeTransferCoverageTests
         var detached = bound.CopyTo(null);
         _ = OnnxProtoAttributes.FromCSharpVals(
             new Dictionary<string, object?> { ["value"] = detached }, defs);
+    }
+
+    [Fact]
+    public void TestATensorAlreadyCapturedAsAnAttributeRefusesToBeBoundToAContext()
+    {
+        var literal = TensorData([2L], (float[])[1f, 2f]);
+        _ = OnnxOp.Constant(value: literal);
+        using var context = new ComputeContext();
+
+        Assert.Throws<InvalidOperationException>(() => literal.TransferTo(context));
+        Assert.Throws<InvalidOperationException>(() => literal.GiveAccessTo(context));
+        Assert.Null(literal.Context);
+        Assert.True(literal.OwnsMemory);
+        Assert.Equal([1f, 2f], Floats(literal));
+    }
+
+    [Fact]
+    public void TestAFailedCompositeTransferLeavesTheSourceIntact()
+    {
+        using var target = new ComputeContext();
+
+        var good = Sample(1f);
+        var doomed = Sample(7f);
+        doomed.Dispose();
+        var sequence = TensorDataSequence.OfElements([good, doomed], DType.Float32);
+        Assert.ThrowsAny<Exception>(() => sequence.TransferTo(target));
+        Assert.Equal([1f, 2f], Floats(sequence[0]));
+        Assert.True(sequence[0].OwnsMemory);
+
+        TensorStructFieldDef[] fields =
+        [
+            new TensorStructFieldDef("a", DataStructure.Tensor, 1, DType.Float32),
+            new TensorStructFieldDef("b", DataStructure.Tensor, 1, DType.Float32),
+        ];
+        var first = Sample(5f);
+        var second = Sample(8f);
+        second.Dispose();
+        var composite = new TensorDataStruct(
+            new TensorStructDef(fields, "Pair"),
+            new Dictionary<string, IData> { { "a", first }, { "b", second } });
+
+        Assert.ThrowsAny<Exception>(() => composite.TransferTo(target));
+        Assert.True(first.OwnsMemory);
+        Assert.Null(first.Context);
     }
 
     [Fact]

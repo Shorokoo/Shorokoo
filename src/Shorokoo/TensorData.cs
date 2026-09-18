@@ -288,6 +288,35 @@ namespace Shorokoo
         }
 
         /// <summary>
+        /// Puts an ownership this tensor surrendered back, storage and all. For a move that failed
+        /// after this element had been handed over: the result was dropped rather than returned, so
+        /// leaving the surrender in place would leave the source naming a context that never gave
+        /// it back and the bytes on a context nobody told the caller about.
+        /// </summary>
+        internal void ReclaimOwnership(Shorokoo.Runtime.ComputeContext? original)
+        {
+            OwnsMemory = true;
+            Context = original;
+            Storage.TransferOwnershipTo(original);
+        }
+
+        /// <summary>
+        /// True once this tensor has been captured as an operator's attribute, which fixes it as
+        /// part of a graph description.
+        ///
+        /// <para>The capture itself refuses a tensor that already belongs to a context; this is the
+        /// other half of that guard, because the dictionary holds the tensor by reference and
+        /// nothing stopped a later <see cref="TransferTo"/> from binding the very same object. The
+        /// graph then held an attribute in a context's memory -- the state the capture exists to
+        /// forbid -- and the context's disposal made the graph unserializable.</para>
+        /// </summary>
+        internal bool IsGraphLiteral { get; private set; }
+
+        /// <summary>Fixes this tensor as part of a graph description, for the reason on
+        /// <see cref="IsGraphLiteral"/>. One way only: a graph that captured it keeps it.</summary>
+        internal void MarkAsGraphLiteral() => IsGraphLiteral = true;
+
+        /// <summary>
         /// True once <see cref="Dispose"/> has released this tensor's storage. Its shape, dtype and
         /// <see cref="ToString"/> stay readable as metadata; every path to the elements throws.
         /// </summary>

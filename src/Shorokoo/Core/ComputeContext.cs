@@ -865,6 +865,11 @@ namespace Shorokoo.Runtime
 
         private NamedModelParam[] RunFromModel(Func<ModelProto> buildModel, string[] originalInputNames, NamedModelParam[] inputs)
         {
+            // Before the work, for the reason CompiledGraph.Run refuses before its own: the outputs
+            // are handed to this context as they are wrapped, so a disposed one threw from inside
+            // the wrap of output 0 with the native run already paid for -- on a card a whole step's
+            // allocation -- and outputs 1..n never wrapped and so left to their finalizers.
+            ObjectDisposedException.ThrowIf(IsDisposed, this);
             var model = buildModel();
 
             var memoryStream = new MemoryStream();

@@ -139,9 +139,43 @@ namespace Shorokoo
             Shorokoo.Runtime.ComputeContext? target,
             Func<IData, Shorokoo.Runtime.ComputeContext?, IData> operation)
         {
-            var moved = Fields.Select(f =>
-                new KeyValuePair<string, IData>(f.Key, operation(f.Value, target)));
-            return new TensorDataStruct(Definition, moved) { Context = target };
+            // Materialized as it goes rather than left lazy, so a field that throws can be caught
+            // here at all: Select would defer every operation into the constructor, past any
+            // cleanup this method could do.
+            List<KeyValuePair<string, IData>> moved = new(Fields.Count);
+            List<TensorData> allocated = [];
+            // What each source field was before the move, so a failure can put it back: otherwise a
+            // failed transfer left the fields it had reached surrendered to a context the caller
+            // never received a struct for.
+            List<(TensorData Field, Shorokoo.Runtime.ComputeContext? Context)> surrendered = [];
+            try
+            {
+                foreach (var field in Fields)
+                {
+                    var owned = field.Value is TensorData before && before.OwnsMemory;
+                    var wasOn = (field.Value as TensorData)?.Context;
+                    var rebuilt = operation(field.Value, target);
+                    if (owned && field.Value is TensorData after && !after.OwnsMemory)
+                        surrendered.Add((after, wasOn));
+                    moved.Add(new KeyValuePair<string, IData>(field.Key, rebuilt));
+                    // Only storage this rebuild allocated: one that shares the source field's is
+                    // the source's bytes under a second name, and freeing it would destroy data a
+                    // failed transfer is supposed to leave alone.
+                    if (rebuilt is TensorData t && field.Value is TensorData original
+                        && !ReferenceEquals(t, original) && !ReferenceEquals(t.Storage, original.Storage))
+                        allocated.Add(t);
+                }
+                return new TensorDataStruct(Definition, moved) { Context = target };
+            }
+            catch
+            {
+                // The struct that would have owned these is never constructed, so without this
+                // each is a runtime value -- a device allocation on a card -- left to a finalizer.
+                foreach (var t in allocated)
+                    if (t.OwnsMemory) t.Dispose();
+                foreach (var (field, wasOn) in surrendered) field.ReclaimOwnership(wasOn);
+                throw;
+            }
         }
 
         /// <summary>Applies the right one of three operations to whichever kind of field this is,

@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using Shorokoo.Core.Lowering;
 using static Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames;
 using static Shorokoo.Core.Nodes.NodeDefinitions.OpCodes;
 
@@ -8,7 +9,8 @@ namespace Shorokoo.Tests;
 /// Coverage for the <c>CallCustomOperator&lt;T...&gt;</c> /
 /// <c>CallCustomOperatorArrayOut&lt;T&gt;</c> overloads on <see cref="NodeBuilder"/>,
 /// which <c>CSharpModelBuilder.MakeCustomCodeTemplate</c> emits for custom ops without
-/// a built-in <c>CodeTemplate</c>.
+/// a built-in <c>CodeTemplate</c>, and for <see cref="VariableEmitter"/>, which builds
+/// nodes through <see cref="NodeBuilder"/> for an <see cref="OpLowering"/>.
 /// </summary>
 [Trait("Domain", "Framework")]
 [Trait("Purpose", "Coverage")]
@@ -56,6 +58,28 @@ public class NodeBuilderCoverageTests
             SPLIT, [sData, null], splitAttrs);
         Assert.Equal(2, pieces.Length);
         Assert.All(pieces, p => Assert.NotNull(p));
+    }
+
+    [Fact]
+    public void TestVariableEmitterBuildsTheNodesOfAnOperatorLowering()
+    {
+        Variable x = InputTensor<float32>("x", rank: 1);
+        Assert.True(OpLoweringRegistry.TryGet(SOFTSIGN, out var lowering));
+        var y = lowering.Lower(new VariableEmitter(), [x],
+            OnnxCSharpAttributes.FromCSharpVals(new(), Definitions.NodeDefinitions[SOFTSIGN].AttributeDefs))[0];
+
+        var div = y.OwningNode;
+        var add = div.Inputs[1]!.OwningNode;
+        var castLike = add.Inputs[0]!.OwningNode;
+        var one = castLike.Inputs[0]!.OwningNode;
+        var abs = add.Inputs[1]!.OwningNode;
+
+        Assert.Equal<string>([DIV, ADD, CAST_LIKE, CONSTANT, ABS],
+            [div.OpCode, add.OpCode, castLike.OpCode, one.OpCode, abs.OpCode]);
+        Assert.Equal<Variable>([x, x, x], [div.Inputs[0]!, castLike.Inputs[1]!, abs.Inputs[0]!]);
+        Assert.Equal(1.0f, one.Attributes.GetFloatVal(AttrValueFloat));
+        Assert.Equal(DType.Float32, y.Type);
+        Assert.Equal(1, y.Rank);
     }
 
     [Fact]

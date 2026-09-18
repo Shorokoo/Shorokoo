@@ -133,8 +133,8 @@ public class CompositeTransferCoverageTests
         using (var context = new ComputeContext(detachesOutputs: true))
             sequence = context.Execute(graph, TensorData([2L], (float[])[1f, 2f]))[0].ToTensorDataSequence();
 
-        Assert.Null(sequence.Context);
-        Assert.All(sequence, e => Assert.Null(e.Context));
+        Assert.Same(ComputeContext.Host, sequence.Context);
+        Assert.All(sequence, e => Assert.Same(ComputeContext.Host, e.Context));
         Assert.Equal([2f, 4f], Floats(sequence[1]));
     }
 
@@ -222,7 +222,7 @@ public class CompositeTransferCoverageTests
 
         Assert.Throws<InvalidOperationException>(() => literal.TransferTo(context));
         Assert.Throws<InvalidOperationException>(() => literal.GiveAccessTo(context));
-        Assert.Null(literal.Context);
+        Assert.Same(ComputeContext.Host, literal.Context);
         Assert.True(literal.OwnsMemory);
         Assert.Equal([1f, 2f], Floats(literal));
     }
@@ -254,7 +254,7 @@ public class CompositeTransferCoverageTests
 
         Assert.ThrowsAny<Exception>(() => composite.TransferTo(target));
         Assert.True(first.OwnsMemory);
-        Assert.Null(first.Context);
+        Assert.Same(ComputeContext.Host, first.Context);
     }
 
     [Fact]
@@ -279,7 +279,7 @@ public class CompositeTransferCoverageTests
 
         Assert.NotSame(sequenceReader[0], keptSequence[0]);
         Assert.True(keptSequence[0].OwnsMemory);
-        Assert.Null(keptSequence[0].Context);
+        Assert.Same(ComputeContext.Host, keptSequence[0].Context);
         Assert.NotSame(StructField(structReader), StructField(keptStruct));
         Assert.True(StructField(keptStruct).OwnsMemory);
 

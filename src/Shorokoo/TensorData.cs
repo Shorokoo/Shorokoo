@@ -23,13 +23,13 @@ namespace Shorokoo
         {
         }
 
-        internal TensorData(Shape shape, TensorStorage storage, ComputeContext? context, bool ownsMemory)
+        internal TensorData(Shape shape, TensorStorage storage, ComputeContext context, bool ownsMemory)
             : base(shape, OnnxUtils.GetDType<T>(), storage, context, ownsMemory)
         {
         }
 
         internal TensorData(
-            Shape shape, DType dtype, TensorStorage storage, ComputeContext? context, bool ownsMemory)
+            Shape shape, DType dtype, TensorStorage storage, ComputeContext context, bool ownsMemory)
             : base(shape, dtype, storage, context, ownsMemory)
         {
         }
@@ -216,33 +216,36 @@ namespace Shorokoo
         }
 
         internal TensorData(Shape shape, DType dtype)
-            : this(shape, dtype, TensorStorage.None, context: null, ownsMemory: true) { }
+            : this(shape, dtype, TensorStorage.None, ComputeContext.Host, ownsMemory: true) { }
 
         internal TensorData(
-            Shape shape, DType dtype, TensorStorage storage, ComputeContext? context, bool ownsMemory)
+            Shape shape, DType dtype, TensorStorage storage, ComputeContext context, bool ownsMemory)
         {
+            ArgumentNullException.ThrowIfNull(context);
             this.Shape = shape;
             this.DType = dtype;
             this.Storage = storage;
             this.Context = context;
             this.OwnsMemory = ownsMemory;
 
-            // Invariant: a tensor with no context is the framework's own -- plain host memory that
-            // it owns. There is no other kind, and a context-free tensor in device memory would
-            // have no way to say which device or to reach it.
-            if (context is null && !storage.Space.IsHost && storage.Space.IsKnown)
+            // Invariant: a tensor on the host context is the framework's own -- plain host memory
+            // that it owns. There is no other kind, and such a tensor in device memory would have
+            // no way to say which device or to reach it.
+            var onHost = ReferenceEquals(context, ComputeContext.Host);
+            if (onHost && !storage.Space.IsHost && storage.Space.IsKnown)
                 throw new ArgumentException(
-                    $"A tensor with no compute context holds host memory, but this storage is in "
+                    $"A tensor on ComputeContext.Host holds host memory, but this storage is in "
                     + $"{storage.Space}. Give it the context whose memory that is.", nameof(storage));
-            if (context is null && !ownsMemory)
+            if (onHost && !ownsMemory)
                 throw new ArgumentException(
-                    "A tensor with no compute context owns its memory: there is no other tensor or "
+                    "A tensor on ComputeContext.Host owns its memory: there is no other tensor or "
                     + "backend that could own it instead.", nameof(ownsMemory));
 
             // Taking ownership puts the bytes on this context's books, so disposing the context
             // releases them -- and takes them off whoever had them before, so disposing that one
             // does not.
             if (ownsMemory) storage.TransferOwnershipTo(context);
+            context.AttachTensor(this);
         }
 
         /// <summary>
@@ -253,11 +256,12 @@ namespace Shorokoo
         internal TensorStorage Storage { get; private set; }
 
         /// <summary>
-        /// The compute context whose memory this tensor's bytes are in, or null when they are in
-        /// ordinary host memory belonging to no backend — which is what every tensor built by the
-        /// convenience constructors is, and what every tensor used as an operator attribute must be.
+        /// The compute context whose memory this tensor's bytes are in.
+        /// <see cref="ComputeContext.Host"/> means ordinary host memory belonging to no backend —
+        /// which is what every tensor built by the convenience constructors is, and what every
+        /// tensor used as an operator attribute must be.
         /// </summary>
-        public ComputeContext? Context { get; private set; }
+        public ComputeContext Context { get; private set; }
 
         /// <summary>
         /// Whether this tensor is the one responsible for releasing its bytes. False for a tensor
@@ -281,10 +285,11 @@ namespace Shorokoo
         /// second, and one transferred out of the framework's own host memory named no context at
         /// all while depending on one.</para>
         /// </summary>
-        internal void SurrenderOwnership(Shorokoo.Runtime.ComputeContext? newOwner)
+        internal void SurrenderOwnership(Shorokoo.Runtime.ComputeContext newOwner)
         {
+            ArgumentNullException.ThrowIfNull(newOwner);
             OwnsMemory = false;
-            Context = newOwner;
+            Reattach(newOwner);
         }
 
         /// <summary>
@@ -293,11 +298,22 @@ namespace Shorokoo
         /// leaving the surrender in place would leave the source naming a context that never gave
         /// it back and the bytes on a context nobody told the caller about.
         /// </summary>
-        internal void ReclaimOwnership(Shorokoo.Runtime.ComputeContext? original)
+        internal void ReclaimOwnership(Shorokoo.Runtime.ComputeContext original)
         {
+            ArgumentNullException.ThrowIfNull(original);
             OwnsMemory = true;
-            Context = original;
+            Reattach(original);
             Storage.TransferOwnershipTo(original);
+        }
+
+        /// <summary>Moves this tensor from the context it names to <paramref name="context"/>, on
+        /// both their books.</summary>
+        private void Reattach(Shorokoo.Runtime.ComputeContext context)
+        {
+            if (ReferenceEquals(Context, context)) return;
+            Context.DetachTensor(this);
+            Context = context;
+            context.AttachTensor(this);
         }
 
         /// <summary>
@@ -393,11 +409,11 @@ namespace Shorokoo
         public TensorData<T> As<T>() where T : IVarType => (TensorData<T>)this;
 
         /// <summary>
-        /// Creates TensorData backed by an existing inference-runtime tensor value, belonging to no
-        /// compute context — the framework's own host memory, which is where a value it built
-        /// itself is. A value a session produced comes with the context that produced it instead,
-        /// so that it can say where it is; that is the internal overload below, and every path
-        /// through <c>ComputeContext</c> takes it.
+        /// Creates TensorData backed by an existing inference-runtime tensor value, belonging to
+        /// <see cref="ComputeContext.Host"/> — the framework's own host memory, which is where a
+        /// value it built itself is. A value a session produced comes with the context that
+        /// produced it instead, so that it can say where it is; that is the internal overload
+        /// below, and every path through <c>ComputeContext</c> takes it.
         /// </summary>
         public static TensorData Create(Shape shape, DType dtype, IShorokooTensorValue data)
         {
@@ -406,18 +422,18 @@ namespace Shorokoo
 
         /// <summary>A backend-backed tensor bound to the context whose memory it is in.</summary>
         internal static TensorData Create(
-            Shape shape, DType dtype, IShorokooTensorValue data, ComputeContext? context)
+            Shape shape, DType dtype, IShorokooTensorValue data, ComputeContext context)
             => OnnxUtils.CreateTensorDataFromValue(shape, dtype, data, context);
 
         /// <summary>A host tensor over the given bytes, bound to the given host context.</summary>
         internal static TensorData NewHostTensor(
-            Shape shape, DType dtype, byte[] bytes, ComputeContext? context)
+            Shape shape, DType dtype, byte[] bytes, ComputeContext context)
             => OnnxUtils.CreateHostTensorData(shape, dtype, bytes, context);
 
         /// <summary>A host string tensor over the given elements, bound to the given host
         /// context.</summary>
         internal static TensorData NewHostStringTensor(
-            Shape shape, string[] values, ComputeContext? context)
+            Shape shape, string[] values, ComputeContext context)
             => HostStringTensorData.Bound(shape, values, context);
 
         /// <summary>
@@ -479,7 +495,7 @@ namespace Shorokoo
             // held the contents of its last read. Through a span rather than the range indexer,
             // which allocates one array of its own and then hands it to LINQ for a second.
             return NewHostTensor(
-                shape, dtype, data.AsSpan(0, (int)required).ToArray(), context: null);
+                shape, dtype, data.AsSpan(0, (int)required).ToArray(), ComputeContext.Host);
         }
 
         /// <summary>
@@ -519,7 +535,7 @@ namespace Shorokoo
         /// storage handle is shared, not copied, so releasing it through one of them is visible
         /// to the other -- which is what makes a reader's access check work.
         /// </summary>
-        internal abstract TensorData CloneSharing(ComputeContext? context, bool ownsMemory);
+        internal abstract TensorData CloneSharing(ComputeContext context, bool ownsMemory);
     }
 
     /// <summary>TensorData backed by an inference-runtime tensor value.</summary>
@@ -562,24 +578,26 @@ namespace Shorokoo
 
         /// <summary>
         /// Creates TensorData of the given shape around an existing runtime tensor value; the dtype
-        /// is derived from T. The tensor belongs to no compute context, so its value must be one
-        /// the host can read — every path that wraps a session's output hands over the context that
-        /// produced it, and a value in a provider's own memory needs that context to say which
-        /// memory it is (see <see cref="StorageFor"/>).
+        /// is derived from T. The tensor belongs to <see cref="ComputeContext.Host"/>, so its value
+        /// must be one the host can read — every path that wraps a session's output hands over the
+        /// context that produced it, and a value in a provider's own memory needs that context to
+        /// say which memory it is (see <see cref="StorageFor"/>).
         /// </summary>
         public OnnxTensorData(Shape shape, IShorokooTensorValue value)
-            : this(shape, value, context: null, ownsMemory: true, storage: null)
+            : this(shape, value, ComputeContext.Host, ownsMemory: true, storage: null)
         {
         }
 
         internal OnnxTensorData(Shape shape, IShorokooTensorValue value, DType actualDType)
-            : base(shape, actualDType, StorageFor(value, null), null, true)
+            : base(
+                shape, actualDType, StorageFor(value, ComputeContext.Host), ComputeContext.Host,
+                ownsMemory: true)
         {
             this.backing = value;
         }
 
         internal OnnxTensorData(
-            Shape shape, IShorokooTensorValue value, ComputeContext? context, bool ownsMemory,
+            Shape shape, IShorokooTensorValue value, ComputeContext context, bool ownsMemory,
             TensorStorage? storage)
             : base(shape, storage ?? StorageFor(value, context), context, ownsMemory)
         {
@@ -603,7 +621,7 @@ namespace Shorokoo
         /// brought home — as living on the card it came from, and every later hand-off of it would
         /// copy bytes that were already where they were wanted.</para>
         /// </summary>
-        private static TensorStorage StorageFor(IShorokooTensorValue value, ComputeContext? context)
+        private static TensorStorage StorageFor(IShorokooTensorValue value, ComputeContext context)
         {
             if (value.IsHostAccessible) return new TensorStorage(MemorySpace.Host, value.Dispose);
             // A value the provider kept, wrapped without the context that produced it, is somewhere
@@ -611,13 +629,17 @@ namespace Shorokoo
             // make two unrelated allocations look like one space and invite a transfer between them.
             // Nothing the framework runs arrives here without one -- a session's outputs, a
             // sequence's elements and a transfer's results all carry theirs -- so this is reached
-            // only by a caller wrapping a value of its own.
+            // only by a caller wrapping a value of its own. The host context is that caller: it is
+            // the absence of a producing context, and host memory is the one place this value is
+            // known not to be.
             return new TensorStorage(
-                context?.MemorySpace ?? MemorySpace.UnknownDevice, value.Dispose);
+                ReferenceEquals(context, ComputeContext.Host)
+                    ? MemorySpace.UnknownDevice : context.MemorySpace,
+                value.Dispose);
         }
 
         /// <inheritdoc/>
-        internal override TensorData CloneSharing(ComputeContext? context, bool ownsMemory)
+        internal override TensorData CloneSharing(ComputeContext context, bool ownsMemory)
             => new OnnxTensorData<T>(Shape, backing, context, ownsMemory, Storage);
 
         /// <inheritdoc/>

@@ -67,7 +67,8 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                     convertedAttrs[kvp.Key] = (string?)strVal;
                 else
                 {
-                    if (kvp.Value is TensorData attached && attached.Context is not null)
+                    if (kvp.Value is TensorData attached
+                        && !ReferenceEquals(attached.Context, Shorokoo.Runtime.ComputeContext.Host))
                         throw new ArgumentException(
                             $"The tensor given for attribute '{kvp.Key}' belongs to a compute "
                             + $"context ({attached.Context.Backend}), and an operator's attribute "

@@ -521,8 +521,24 @@ public class TensorDataApiCoverageTests
     {
         var value = OnnxEngine.Eval(Scalar(2f) + Scalar(3f));
 
-        Assert.Null(value.Context);
+        Assert.Same(ComputeContext.Host, value.Context);
         Assert.Equal(5f, OnnxEngine.Eval(OnnxOp.Constant(value)).As<float32>().AccessMemory()[0]);
+    }
+
+    [Fact]
+    public void TestDetachIsACopyInHostMemoryThatOutlivesTheContextItCameFrom()
+    {
+        var context = new ComputeContext();
+        var onContext = TensorData([2L], (float[])[1f, 2f]).CopyTo(context);
+
+        var detached = onContext.Detach();
+
+        Assert.Same(ComputeContext.Host, detached.Context);
+        Assert.True(detached.OwnsMemory);
+        Assert.NotSame(onContext, detached);
+
+        context.Dispose();
+        Assert.Equal([1f, 2f], detached.As<float32>().AccessMemory<float>().ToArray());
     }
 
     [Fact]

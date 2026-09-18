@@ -24,10 +24,42 @@ public class TensorContextTransferCoverageTests
     {
         var t = Sample();
 
-        Assert.Null(t.Context);
+        Assert.Same(ComputeContext.Host, t.Context);
         Assert.True(t.OwnsMemory);
         Assert.Equal(MemorySpace.Host, t.Space);
         Assert.True(t.IsHostResident);
+    }
+
+    [Fact]
+    public void TestTheHostContextIsExactlyWhatTheNullContextWas()
+    {
+        Assert.Equal(MemorySpace.Host, ComputeContext.Host.MemorySpace);
+
+        foreach (var round in (Func<TensorData, TensorData>[])[
+            static t => t.TransferTo(null),
+            static t => t.TransferTo(ComputeContext.Host),
+            static t => t.CopyTo(null),
+            static t => t.CopyTo(ComputeContext.Host),
+            static t => t.Detach(),
+            static t => t.TransferTo(new ComputeContext()).TransferTo(null),
+            static t => t.TransferTo(new ComputeContext()).TransferTo(ComputeContext.Host),
+            static t => t.GiveAccessTo(new ComputeContext()).CopyTo(null),
+            static t => t.GiveAccessTo(new ComputeContext()).CopyTo(ComputeContext.Host)])
+        {
+            var result = round(Sample());
+            Assert.Same(ComputeContext.Host, result.Context);
+            Assert.Equal(MemorySpace.Host, result.Space);
+            Assert.True(result.OwnsMemory);
+            Assert.Equal([1f, 2f, 3f, 4f], Floats(result));
+        }
+
+        var owner = Sample();
+        var reader = owner.GiveAccessTo(new ComputeContext());
+        foreach (var refused in (Func<TensorData>[])[
+            () => owner.GiveAccessTo(ComputeContext.Host),
+            () => reader.TransferTo(ComputeContext.Host)])
+            Assert.Contains(
+                "CopyTo(null)", Assert.Throws<InvalidOperationException>(refused).Message);
     }
 
     [Fact]
@@ -169,7 +201,7 @@ public class TensorContextTransferCoverageTests
 
         var t = Sample().TransferTo(first).TransferTo(second).TransferTo(null);
 
-        Assert.Null(t.Context);
+        Assert.Same(ComputeContext.Host, t.Context);
         Assert.True(t.OwnsMemory);
         Assert.Equal([1f, 2f, 3f, 4f], Floats(t));
     }
@@ -212,7 +244,7 @@ public class TensorContextTransferCoverageTests
     {
         var context = new ComputeContext();
         var tensor = Sample();
-        Assert.Null(tensor.Context);
+        Assert.Same(ComputeContext.Host, tensor.Context);
 
         tensor.TransferTo(context);
 

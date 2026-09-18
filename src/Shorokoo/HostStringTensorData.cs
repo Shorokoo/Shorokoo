@@ -42,12 +42,12 @@ namespace Shorokoo
         /// <summary>Creates a string tensor of <paramref name="shape"/> over
         /// <paramref name="values"/>, which it takes as its own storage rather than copying.</summary>
         public HostStringTensorData(Shape shape, string[] values)
-            : this(shape, values, context: null, ownsMemory: true, storage: null, materialized: null)
+            : this(shape, values, ComputeContext.Host, ownsMemory: true, storage: null, materialized: null)
         {
         }
 
         private HostStringTensorData(
-            Shape shape, string[] values, ComputeContext? context, bool ownsMemory, TensorStorage? storage,
+            Shape shape, string[] values, ComputeContext context, bool ownsMemory, TensorStorage? storage,
             MaterializedValues? materialized)
             : base(shape, storage ?? HostStorage(), context, ownsMemory)
         {
@@ -80,8 +80,8 @@ namespace Shorokoo
         }
 
         /// <summary>A host string tensor over <paramref name="values"/> belonging to
-        /// <paramref name="context"/>, which must be a host-memory context or null.</summary>
-        internal static HostStringTensorData Bound(Shape shape, string[] values, ComputeContext? context)
+        /// <paramref name="context"/>, which must be a host-memory context.</summary>
+        internal static HostStringTensorData Bound(Shape shape, string[] values, ComputeContext context)
             => new(shape, values, context, ownsMemory: true, storage: null, materialized: null);
 
         // The strings are the garbage collector's to reclaim, so releasing this storage frees
@@ -90,7 +90,7 @@ namespace Shorokoo
         private static TensorStorage HostStorage() => new(MemorySpace.Host, static () => { });
 
         /// <inheritdoc/>
-        internal override TensorData CloneSharing(ComputeContext? context, bool ownsMemory)
+        internal override TensorData CloneSharing(ComputeContext context, bool ownsMemory)
             => new HostStringTensorData(Shape, _values, context, ownsMemory, Storage, _materialized);
 
         /// <summary>

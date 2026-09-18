@@ -569,9 +569,15 @@ without sharing a native runtime.
 
 ### Moving data between contexts
 
-A `TensorData` belongs to a compute context — `Context`, null for the framework's own host
-memory — and says whether it owns its bytes, in `OwnsMemory`. `Space` says where those bytes
-are: host memory, or a particular CUDA device.
+A `TensorData` belongs to a compute context — `Context`, which is `ComputeContext.Host` for the
+framework's own host memory — and says whether it owns its bytes, in `OwnsMemory`. `Space` says
+where those bytes are: host memory, or a particular CUDA device.
+
+`ComputeContext.Host` holds tensors and runs nothing: it is where a tensor that names no backend
+lives, so every literal you build starts there. It compiles and runs nothing — `Compile`,
+`Execute`, `Run` and `Eval` all refuse, naming a real context — and it cannot be disposed, which
+is what lets a tensor there outlive every context in the program. Passing `null` to the three
+operations below still means it.
 
 Three operations move a tensor between contexts. They differ in what happens to the
 ownership rather than to the bytes:
@@ -581,6 +587,9 @@ ownership rather than to the bytes:
 | `TransferTo` | nothing is copied; ownership moves to the result | the bytes are copied and the source is spent — owner only |
 | `CopyTo` | an independent copy, owned by the result | the same |
 | `GiveAccessTo` | a reader that owns nothing; the source keeps what it had | refused — use `CopyTo` |
+
+`Detach()` is `CopyTo(ComputeContext.Host)` under its readable name: a copy in the framework's own
+host memory, which is what a result you mean to keep has to be.
 
 Whether the bytes move is decided by the space **and** by whether the two contexts share a
 native runtime. Host memory is host memory whoever allocated it, so any two host contexts
@@ -601,7 +610,7 @@ var shared  = onHost.TransferTo(otherCpu);                   // no copy: same sp
 Disposing a context releases every tensor it still owns, and reading one afterwards throws
 rather than reading freed memory. Bytes that were transferred away are not touched — they
 belong to the context that took them. A context constructed with `detachesOutputs: true`
-hands its results out belonging to nobody, so they outlive it; `ComputeContext.Default` is
+hands its results out on `ComputeContext.Host`, so they outlive it; `ComputeContext.Default` is
 built that way.
 
 `TensorDataStruct` and `TensorDataSequence` carry a context and take the same three

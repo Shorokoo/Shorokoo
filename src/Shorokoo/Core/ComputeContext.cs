@@ -362,6 +362,26 @@ namespace Shorokoo.Runtime
             set { lock (_defaultGate) _defaultComputeContext = value; }
         }
 
+        /// <summary>
+        /// The framework's own host memory, as a context: where a tensor that belongs to no
+        /// backend lives, and what <see cref="TensorData.Context"/> reports for one.
+        ///
+        /// <para>It holds tensors and runs nothing. <see cref="Compile(ComputationGraph)"/>,
+        /// <see cref="Execute(ComputationGraph, IData[])"/>,
+        /// <see cref="Run(ComputationGraph, NamedModelParam[])"/> and <c>Eval</c> all throw,
+        /// naming a real context as the fix. It deliberately does
+        /// <i>not</i> fall back to the process-wide backend: that would put back the implicit
+        /// resolution that made merely describing a graph require a deployed inference runtime.</para>
+        ///
+        /// <para>It cannot be disposed. <see cref="Dispose"/> does nothing and
+        /// <see cref="IsDisposed"/> is always false, because a tensor here outlives every compute
+        /// context — its bytes are managed, which the collector reclaims, or a runtime value with
+        /// a finalizer of its own, which is what reclaims a tensor nobody disposes. This context
+        /// adds no release obligation; it gives the existing one a name.</para>
+        /// </summary>
+        public static ComputeContext Host { get; } =
+            new(HostBackend.Instance, detachesOutputs: false, isHost: true);
+
         /// <summary>Creates a compute context that runs on the process-wide
         /// <see cref="Shorokoo.Core.Inference.Abstractions.InferenceBackend.Default"/>, on the
         /// shipped defaults. Set <see cref="DeviceMemory"/> or <see cref="RunSettings"/> in an
@@ -442,17 +462,37 @@ namespace Shorokoo.Runtime
         /// </summary>
         /// <exception cref="ArgumentNullException"><paramref name="backend"/> is null.</exception>
         public ComputeContext(IShorokooInferenceBackend backend, bool detachesOutputs)
+            : this(backend, detachesOutputs, isHost: false)
+        {
+        }
+
+        private ComputeContext(IShorokooInferenceBackend backend, bool detachesOutputs, bool isHost)
         {
             ArgumentNullException.ThrowIfNull(backend);
             _backend = backend;
+            _isHost = isHost;
             DetachesOutputs = detachesOutputs;
+            // Eagerly, because the backend is already in hand: a context that names one is on that
+            // backend's books from the moment it exists. One that names none registers when
+            // something first resolves the default for it -- see ResolvedBackend -- rather than
+            // resolving a backend here just to be listed.
+            BackendRegistry.Attach(backend, this);
+            _registeredOn = backend;
         }
+
+        // Whether this is the host context: the one that holds tensors, compiles nothing and
+        // cannot be disposed.
+        private readonly bool _isHost;
+
+        // The backend this context was last recorded against, so ResolvedBackend can enrol a
+        // default-backend context without a table write per call.
+        private IShorokooInferenceBackend? _registeredOn;
 
         /// <summary>
         /// Whether a run's output tensors leave this context behind.
         ///
-        /// <para>With it set, every tensor a run produces is transferred to the null context — the
-        /// framework's own host memory — and the tensor the session handed back is disposed. That
+        /// <para>With it set, every tensor a run produces is transferred to <see cref="Host"/> —
+        /// the framework's own host memory — and the tensor the session handed back is disposed. That
         /// disposal frees nothing, by construction: a transfer within one memory space moves the
         /// ownership off the original, and one across spaces has already released it. What the
         /// caller gets back is a tensor that outlives this context, which is what a context that
@@ -480,8 +520,32 @@ namespace Shorokoo.Runtime
         // getter's liveness check among them.
         private volatile bool _disposed;
 
-        /// <summary>Whether this context has been disposed, and so has released what it owned.</summary>
+        /// <summary>Whether this context has been disposed, and so has released what it owned.
+        /// Always false for <see cref="Host"/>, which cannot be disposed.</summary>
         public bool IsDisposed => _disposed;
+
+        private readonly WeakSet<TensorData> _attachedTensors = new();
+
+        /// <summary>
+        /// The tensors attached to this context and not yet collected — the handles on memory
+        /// this context governs. A snapshot: one attached after this returns is not in the list.
+        ///
+        /// <para>Weak, like everything else a context tracks, so a tensor the program has dropped
+        /// is not held alive by the context it named.</para>
+        /// </summary>
+        public IReadOnlyList<TensorData> Tensors => _attachedTensors.Snapshot();
+
+        /// <summary>Records that <paramref name="tensor"/>'s bytes are in this context's memory.
+        /// Called from the tensor's constructor and from each re-attachment.</summary>
+        internal void AttachTensor(TensorData tensor) => _attachedTensors.Add(tensor);
+
+        /// <summary>Forgets <paramref name="tensor"/>, because it is attached elsewhere
+        /// now.</summary>
+        internal void DetachTensor(TensorData tensor) => _attachedTensors.Remove(tensor);
+
+        /// <summary>The memory this context's tensors live in, shared with every other context
+        /// whose backend allocates in the same place.</summary>
+        public MemoryDevice Device => MemoryDevice.Of(ResolvedBackend);
 
         /// <summary>Puts a storage on this context's books; its disposal will release it.</summary>
         internal void TakeOwnership(TensorStorage storage)
@@ -513,6 +577,14 @@ namespace Shorokoo.Runtime
         /// </summary>
         public void Dispose()
         {
+            // The host context is not disposable, and this is the whole of it: its tensors are
+            // managed bytes the collector reclaims, or runtime values with finalizers of their
+            // own, so there is nothing here whose release anyone could be waiting for. Disposing
+            // it would instead invalidate every detached tensor in the process -- the one thing
+            // detaching exists to prevent -- and `using var c = ComputeContext.Host;` would do it
+            // by accident.
+            if (_isHost) return;
+
             // The ownership gate first, and the same one every hand-off takes: a transfer that had
             // enrolled a storage with its new owner but not yet taken it off this context's books
             // would otherwise be found here and released, out from under a context that is alive
@@ -562,7 +634,7 @@ namespace Shorokoo.Runtime
 
                     // Detached by being moved, not by forgetting this context. Simply clearing the
                     // context strands an element the provider kept on the card: the indexer then
-                    // wraps it with no context, which records an unknown space, and an unknown
+                    // wraps it on the host context, which records an unknown space, and an unknown
                     // space can be neither read nor moved -- the data is there with no call left
                     // that reaches it. A real move brings the elements home, and where it cannot,
                     // the sequence stays bound so they remain reachable through the context that
@@ -570,7 +642,7 @@ namespace Shorokoo.Runtime
                     var boundSequence = sequenceParam.ToTensorDataSequence();
                     try
                     {
-                        var freeSequence = boundSequence.CopyTo(null);
+                        var freeSequence = boundSequence.CopyTo(Host);
                         boundSequence.Dispose();
                         outputs[i] = new TensorDataSequenceModelParam(
                             sequenceParam.ParamName, sequenceParam.ParamType, freeSequence);
@@ -602,7 +674,7 @@ namespace Shorokoo.Runtime
                     && retainedOutputNames?.Contains(tensorParam.ParamName) == true)
                     continue;
 
-                var detached = original.TransferTo(null);
+                var detached = original.TransferTo(Host);
                 original.Dispose();
                 outputs[i] = new TensorDataModelParam(
                     tensorParam.ParamName, tensorParam.ParamType, detached);
@@ -612,7 +684,44 @@ namespace Shorokoo.Runtime
 
         /// <summary>The backend this context's work runs on: the one it was constructed with, or
         /// the default when it names none.</summary>
-        internal IShorokooInferenceBackend ResolvedBackend => _backend ?? InferenceBackend.Default;
+        internal IShorokooInferenceBackend ResolvedBackend
+        {
+            get
+            {
+                if (_backend is { } named) return named;
+                var backend = InferenceBackend.Default;
+                // A context that named no backend is on the default one's books from the first
+                // time anything resolves it. Guarded by the last backend seen rather than written
+                // every time: this is read once per feed, and a table write per feed would be a
+                // process-wide lock on the hot path. The default can be reassigned, which is why
+                // the guard compares rather than latching.
+                if (!ReferenceEquals(_registeredOn, backend))
+                {
+                    BackendRegistry.Attach(backend, this);
+                    _registeredOn = backend;
+                }
+                return backend;
+            }
+        }
+
+        /// <summary>
+        /// Refuses the host context, which holds tensors and runs nothing.
+        ///
+        /// <para>It refuses rather than forwarding to <see cref="InferenceBackend.Default"/>. A
+        /// host context that quietly resolved the process-wide backend would put back the implicit
+        /// resolution that made describing a graph require a deployed runtime — the thing giving a
+        /// tensor a context was for.</para>
+        /// </summary>
+        private void RefuseHostContext(string operation)
+        {
+            if (!_isHost) return;
+            throw new InvalidOperationException(
+                $"ComputeContext.Host holds tensors and runs nothing, so it cannot {operation} a "
+                + "graph. It is the framework's own host memory, which is where a tensor that "
+                + "belongs to no backend lives. Compile and run on a context over a real backend "
+                + "-- new ComputeContext() takes the process-wide one, and "
+                + "new ComputeContext(backend) takes the one you name.");
+        }
 
         /// <summary>
         /// The backend this context compiles and runs on — its name, its device, and the CUDA device
@@ -742,6 +851,7 @@ namespace Shorokoo.Runtime
             bool trainingStep,
             bool reusedAcrossShapes)
         {
+            RefuseHostContext("compile");
             var model = buildModel();
 
             var memoryStream = new MemoryStream();
@@ -811,8 +921,8 @@ namespace Shorokoo.Runtime
         /// </summary>
         private static TensorData Detached(TensorData result)
         {
-            if (result.Context is null) return result;
-            var free = result.TransferTo(null);
+            if (ReferenceEquals(result.Context, Host)) return result;
+            var free = result.TransferTo(Host);
             result.Dispose();
             return free;
         }
@@ -918,6 +1028,7 @@ namespace Shorokoo.Runtime
             // are handed to this context as they are wrapped, so a disposed one threw from inside
             // the wrap of output 0 with the native run already paid for -- on a card a whole step's
             // allocation -- and outputs 1..n never wrapped and so left to their finalizers.
+            RefuseHostContext("run");
             ObjectDisposedException.ThrowIf(IsDisposed, this);
             var model = buildModel();
 

@@ -309,30 +309,34 @@ namespace Shorokoo
 
 
         /// <summary>
-        /// The compute context these elements belong to, or null for the framework's own host
-        /// memory. Set by the transfer operations; a sequence built any other way inherits nothing
-        /// and reports null.
+        /// The compute context these elements belong to.
+        /// <see cref="Shorokoo.Runtime.ComputeContext.Host"/> is the framework's own host memory.
+        /// Set by the transfer operations; a sequence built any other way inherits nothing and
+        /// reports the host context.
         /// </summary>
-        public Shorokoo.Runtime.ComputeContext? Context { get; internal set; }
+        public Shorokoo.Runtime.ComputeContext Context { get; internal set; }
+            = Shorokoo.Runtime.ComputeContext.Host;
 
         /// <summary>Moves this sequence's owned elements to <paramref name="target"/>, element by
         /// element and under each element's own rules. Elements it only has access to are left
         /// where they are: moving what you do not own is what the non-owning case forbids.</summary>
         public TensorDataSequence TransferTo(Shorokoo.Runtime.ComputeContext? target)
-            => Rebuild(target, static (t, c) => t.TransferTo(c), ownedOnly: true);
+            => Rebuild(target ?? Shorokoo.Runtime.ComputeContext.Host,
+                static (t, c) => t.TransferTo(c), ownedOnly: true);
 
         /// <summary>Copies this sequence's owned elements into <paramref name="target"/>'s memory,
         /// leaving this sequence untouched.</summary>
         public TensorDataSequence CopyTo(Shorokoo.Runtime.ComputeContext? target)
-            => Rebuild(target, static (t, c) => t.CopyTo(c), ownedOnly: false);
+            => Rebuild(target ?? Shorokoo.Runtime.ComputeContext.Host,
+                static (t, c) => t.CopyTo(c), ownedOnly: false);
 
         /// <summary>Hands <paramref name="target"/> a reader for this sequence's owned elements,
         /// taking no ownership of any of them.</summary>
         public TensorDataSequence GiveAccessTo(Shorokoo.Runtime.ComputeContext? target)
-            => Rebuild(target, static (t, c) => t.GiveAccessTo(c), ownedOnly: true);
+            => Rebuild(target ?? Shorokoo.Runtime.ComputeContext.Host,
+                static (t, c) => t.GiveAccessTo(c), ownedOnly: true);
 
-        /// <param name="target">The context the rebuilt sequence belongs to, or null for the
-        /// framework's own host memory.</param>
+        /// <param name="target">The context the rebuilt sequence belongs to.</param>
         /// <param name="operation">The per-element operation to apply.</param>
         /// <param name="ownedOnly">Whether an element this sequence does not own is left alone.
         /// True of the two operations that move ownership around, which cannot speak for an element
@@ -341,8 +345,8 @@ namespace Shorokoo
         /// and gating that on ownership handed them back the very elements they were copying to
         /// escape, to die with the context they were read from.</param>
         private TensorDataSequence Rebuild(
-            Shorokoo.Runtime.ComputeContext? target,
-            Func<TensorData, Shorokoo.Runtime.ComputeContext?, TensorData> operation,
+            Shorokoo.Runtime.ComputeContext target,
+            Func<TensorData, Shorokoo.Runtime.ComputeContext, TensorData> operation,
             bool ownedOnly)
         {
             ThrowIfDisposed();
@@ -356,7 +360,7 @@ namespace Shorokoo
             // it a failed transfer left the source elements surrendered -- not owning, naming the
             // target -- and their storage on the target's books, so the caller's sequence died
             // with a context it was never given to.
-            List<(TensorData Element, Shorokoo.Runtime.ComputeContext? Context)> surrendered = [];
+            List<(TensorData Element, Shorokoo.Runtime.ComputeContext Context)> surrendered = [];
             TensorData? minted = null;
             try
             {
@@ -418,7 +422,7 @@ namespace Shorokoo
 
         /// <summary>Records which context this sequence belongs to. Overridden where there is a
         /// runtime value for that context to own.</summary>
-        internal virtual void BindTo(Shorokoo.Runtime.ComputeContext? context) => Context = context;
+        internal virtual void BindTo(Shorokoo.Runtime.ComputeContext context) => Context = context;
 
         public abstract void Dispose();
     }
@@ -481,11 +485,12 @@ namespace Shorokoo
         /// elements and left the sequence, which then answered about data it could no longer
         /// reach.
         /// </summary>
-        internal override void BindTo(Shorokoo.Runtime.ComputeContext? context)
+        internal override void BindTo(Shorokoo.Runtime.ComputeContext context)
         {
             base.BindTo(context);
-            if (context is null) return;
             _storage = new TensorStorage(context.MemorySpace, backing.Dispose);
+            // A no-op for the host context, which owns every storage by default and releases
+            // none: such a sequence still frees its own value on Dispose, through the storage.
             _storage.TransferOwnershipTo(context);
         }
 

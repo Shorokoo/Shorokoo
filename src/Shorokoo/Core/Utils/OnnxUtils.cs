@@ -320,22 +320,24 @@ namespace Shorokoo.Core.Utils
         /// context that produced it and it names a real place.</para>
         /// </summary>
         public static IData CreateData(IShorokooTensorValue value)
-            => CreateData(value, context: null);
+            => CreateData(value, Shorokoo.Runtime.ComputeContext.Host);
 
         /// <summary>
         /// Wraps a runtime value as the data it holds, belonging to <paramref name="context"/> —
-        /// the context whose session produced it, and so whose memory it is in. Null means it came
-        /// from outside any context, which can only be the framework's own host memory.
+        /// the context whose session produced it, and so whose memory it is in.
+        /// <see cref="Shorokoo.Runtime.ComputeContext.Host"/> means it came from outside any
+        /// context, which can only be the framework's own host memory.
         ///
         /// <para>A sequence is bound the same way a tensor is. Its elements are copied out of it
         /// one at a time, on demand, by the runtime that holds it, so they are in that context's
         /// memory too and <see cref="OnnxTensorDataSequence{T}"/> hands each of them this same
         /// context.</para>
         /// </summary>
-        public static IData CreateData(IShorokooTensorValue value, Shorokoo.Runtime.ComputeContext? context)
+        public static IData CreateData(IShorokooTensorValue value, Shorokoo.Runtime.ComputeContext context)
         {
+            ArgumentNullException.ThrowIfNull(context);
             if (value.ValueType == ShorokooOnnxValueType.Tensor)
-                return context is null
+                return ReferenceEquals(context, Shorokoo.Runtime.ComputeContext.Host)
                     ? CreateTensorDataFromValue(value)
                     : CreateTensorDataFromValue(
                         new Shape(value.Shape), (DType)(int)value.ElementType, value, context);
@@ -353,14 +355,14 @@ namespace Shorokoo.Core.Utils
         /// <summary>A named parameter over a runtime value with no known producer; see
         /// <see cref="CreateData(IShorokooTensorValue)"/> for what that costs.</summary>
         public static NamedModelParam CreateNamedModelParam(IShorokooTensorValue value, ModelParamType paramType, string name)
-            => CreateNamedModelParam(value, paramType, name, context: null);
+            => CreateNamedModelParam(value, paramType, name, Shorokoo.Runtime.ComputeContext.Host);
 
         /// <summary>A named parameter over a runtime value produced by <paramref name="context"/>.
         /// This is the shape every session output takes, so that an output can say where it is and
         /// be moved from there.</summary>
         public static NamedModelParam CreateNamedModelParam(
             IShorokooTensorValue value, ModelParamType paramType, string name,
-            Shorokoo.Runtime.ComputeContext? context)
+            Shorokoo.Runtime.ComputeContext context)
         {
             var data = CreateData(value, context);
             if (data is TensorDataSequence sequenceData)
@@ -377,24 +379,24 @@ namespace Shorokoo.Core.Utils
 
         /// <summary>A backend-backed tensor bound to the context whose memory it is in.</summary>
         public static TensorData CreateTensorDataFromValue(
-            Shape shape, DType dtype, IShorokooTensorValue value, Shorokoo.Runtime.ComputeContext? context)
+            Shape shape, DType dtype, IShorokooTensorValue value, Shorokoo.Runtime.ComputeContext context)
             => (TensorData)CallGeneric(dtype.ToIVarType(), typeof(OnnxUtils),
                 nameof(internalCreateBoundTensorData), shape, value, context);
 
         internal static TensorData internalCreateBoundTensorData<T>(
-            Shape shape, IShorokooTensorValue value, Shorokoo.Runtime.ComputeContext? context)
+            Shape shape, IShorokooTensorValue value, Shorokoo.Runtime.ComputeContext context)
             where T : IVarType
             => new OnnxTensorData<T>(shape, value, context, ownsMemory: true, storage: null);
 
         /// <summary>A host tensor over <paramref name="bytes"/>, bound to <paramref name="context"/>
-        /// (whose memory must be host memory, or null for the framework's own).</summary>
+        /// (whose memory must be host memory).</summary>
         public static TensorData CreateHostTensorData(
-            Shape shape, DType dtype, byte[] bytes, Shorokoo.Runtime.ComputeContext? context)
+            Shape shape, DType dtype, byte[] bytes, Shorokoo.Runtime.ComputeContext context)
             => (TensorData)CallGeneric(dtype.ToIVarType(), typeof(OnnxUtils),
                 nameof(internalCreateHostTensorData), shape, bytes, context);
 
         internal static TensorData internalCreateHostTensorData<T>(
-            Shape shape, byte[] bytes, Shorokoo.Runtime.ComputeContext? context) where T : IVarType
+            Shape shape, byte[] bytes, Shorokoo.Runtime.ComputeContext context) where T : IVarType
             => HostTensorData<T>.Bound(shape, bytes, context);
 
         internal static TensorDataSequence internalCreateTensorDataSequenceFromValue<T>(IShorokooTensorValue value) where T : IVarType

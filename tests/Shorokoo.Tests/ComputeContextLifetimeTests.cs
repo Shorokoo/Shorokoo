@@ -96,6 +96,116 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
+    public void TestTheHostContextRefusesToCompileOrRunAndResolvesNoBackendDoingIt()
+    {
+        var (graph, a, b, _) = Model();
+
+        foreach (var refused in (Action[])[
+            () => ComputeContext.Host.Compile(graph),
+            () => ComputeContext.Host.Execute(graph, a, b),
+            () => ComputeContext.Host.Run(graph),
+            () => ComputeContext.Host.Eval(InputVector<float32>("a") * 2f),
+            () => ComputeContext.Host.ExecuteWithState(graph, a, b)])
+        {
+            var ex = Assert.Throws<InvalidOperationException>(refused);
+            Assert.Contains("new ComputeContext(", ex.Message);
+        }
+
+        var backendReads = 0;
+        var contextReads = ComputeContext.CountDefaultReads(() =>
+            backendReads = InferenceBackend.CountDefaultReads(
+                () => Assert.Throws<InvalidOperationException>(
+                    () => ComputeContext.Host.Compile(graph))));
+        Assert.Equal(0, contextReads);
+        Assert.Equal(0, backendReads);
+    }
+
+    [Fact]
+    public void TestTheHostContextCannotBeDisposed()
+    {
+        var detached = Sample();
+
+        ComputeContext.Host.Dispose();
+        ComputeContext.Host.Dispose();
+
+        Assert.False(ComputeContext.Host.IsDisposed);
+        Assert.Equal([1f, 2f, 3f, 4f], Floats(detached));
+        Assert.Equal([1f, 2f, 3f, 4f], Floats(Sample().TransferTo(ComputeContext.Host)));
+    }
+
+    [Fact]
+    public void TestAContextListsTheTensorsAttachedToItAndTheHostContextTheDetachedOnes()
+    {
+        using var first = new ComputeContext();
+        using var second = new ComputeContext();
+        var detached = Sample();
+        var onFirst = detached.CopyTo(first);
+
+        Assert.Contains(onFirst, first.Tensors);
+        Assert.DoesNotContain(onFirst, second.Tensors);
+        Assert.Contains(detached, ComputeContext.Host.Tensors);
+
+        var onSecond = onFirst.TransferTo(second);
+
+        Assert.Contains(onSecond, second.Tensors);
+        Assert.DoesNotContain(onFirst, first.Tensors);
+    }
+
+    [Fact]
+    public void TestAMemoryDeviceIsOnePerSpaceAndListsTheBackendsAndContextsOnIt()
+    {
+        var cpu = new StubBackend(ComputeDevice.Cpu, null);
+        var alsoCpu = new StubBackend(ComputeDevice.Cpu, null);
+        var card = new StubBackend(ComputeDevice.Cuda, 0);
+        var host = MemoryDevice.For(MemorySpace.Host);
+
+        Assert.Same(host, MemoryDevice.Of(cpu));
+        Assert.Same(host, MemoryDevice.Of(alsoCpu));
+        Assert.Same(MemoryDevice.For(MemorySpace.Cuda(0)), MemoryDevice.Of(card));
+        Assert.NotSame(host, MemoryDevice.Of(card));
+        Assert.Equal(MemorySpace.Host, host.Space);
+
+        Assert.Contains(cpu, host.Backends);
+        Assert.Contains(alsoCpu, host.Backends);
+        Assert.Contains(HostBackend.Instance, host.Backends);
+        Assert.DoesNotContain(card, host.Backends);
+
+        using var context = new ComputeContext(cpu);
+        Assert.Contains(context, cpu.ContextsOn());
+        Assert.DoesNotContain(context, alsoCpu.ContextsOn());
+        Assert.Same(host, context.Device);
+        Assert.Same(host, ComputeContext.Host.Device);
+    }
+
+    [Fact]
+    public void TestTheHostBackendHoldsTensorsAndBuildsNoSession()
+    {
+        IShorokooInferenceBackend backend = HostBackend.Instance;
+        var raw = Sample().CopyRawMemory();
+
+        Assert.Equal(MemorySpace.Host, backend.MemorySpace);
+        Assert.Equal("Shorokoo.HostMemory", ComputeContext.Host.Backend.Name);
+
+        var ex = Assert.Throws<InvalidOperationException>(() => backend.CreateSession(
+            default, ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal,
+            DeviceMemorySettings.Default));
+        Assert.Contains("Shorokoo.LinuxCPU", ex.Message);
+
+        float[] expected = [1f, 2f, 3f, 4f];
+        var built = backend.CreateTensor<float>(expected, [4L]);
+        Assert.Equal(expected, built.GetTensorDataAsSpan<float>().ToArray());
+        Assert.Equal(expected, backend
+            .CreateTensorFromRawBytes(ShorokooTensorElementType.Float, raw, [4L])
+            .GetTensorDataAsSpan<float>().ToArray());
+        Assert.Equal(expected, backend
+            .CreateTensorInBackendMemory(ShorokooTensorElementType.Float, raw, [4L])
+            .GetTensorDataAsSpan<float>().ToArray());
+        Assert.Equal(raw, backend.CopyTensorToHost(built));
+        Assert.Equal(["a", "b"], backend.CreateStringTensor(["a", "b"], [2L]).GetStringTensorData());
+        Assert.Equal(2, backend.CreateSequence([built, built]).GetValueCount());
+    }
+
+    [Fact]
     public void TestAContextThatDetachesOutputsHandsBackResultsThatOutliveIt()
     {
         var (graph, a, b, expected) = Model();
@@ -104,8 +214,9 @@ public class ComputeContextLifetimeCoverageTests
         Assert.True(context.DetachesOutputs);
         var result = context.Execute(graph, a, b)[0].ToTensorData();
 
-        // Detached: the result belongs to nobody, which is what makes the next line safe.
-        Assert.Null(result.Context);
+        // Detached: the result is in the framework's own host memory, which is what makes the
+        // next line safe.
+        Assert.Same(ComputeContext.Host, result.Context);
         Assert.True(result.OwnsMemory);
 
         context.Dispose();
@@ -134,7 +245,7 @@ public class ComputeContextLifetimeCoverageTests
         var compiled = context.Compile(graph);
 
         var result = compiled.Execute(a, b)[0].ToTensorData();
-        Assert.Null(result.Context);
+        Assert.Same(ComputeContext.Host, result.Context);
 
         context.Dispose();
         Assert.Equal(expected, Floats(result));

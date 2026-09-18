@@ -41,7 +41,7 @@ namespace Shorokoo
         /// <summary>Creates a tensor of <paramref name="shape"/> over <paramref name="bytes"/>,
         /// which it takes as its own storage rather than copying.</summary>
         public HostTensorData(Shape shape, byte[] bytes)
-            : this(shape, bytes, context: null, ownsMemory: true, storage: null, new MaterializedValues())
+            : this(shape, bytes, ComputeContext.Host, ownsMemory: true, storage: null, new MaterializedValues())
         {
         }
 
@@ -51,7 +51,7 @@ namespace Shorokoo
         }
 
         private HostTensorData(Shape shape, byte[] bytes, DType actualDType, MaterializedValues materialized)
-            : base(shape, actualDType, HostStorage(materialized), null, true)
+            : base(shape, actualDType, HostStorage(materialized), ComputeContext.Host, true)
         {
             _bytes = bytes ?? throw new ArgumentNullException(nameof(bytes));
             _materialized = materialized;
@@ -60,7 +60,7 @@ namespace Shorokoo
         // The materializations are built by the caller rather than defaulted here, because the
         // storage's release action closes over them and so needs them before the base call.
         private HostTensorData(
-            Shape shape, byte[] bytes, ComputeContext? context, bool ownsMemory, TensorStorage? storage,
+            Shape shape, byte[] bytes, ComputeContext context, bool ownsMemory, TensorStorage? storage,
             MaterializedValues materialized)
             : base(shape, storage ?? HostStorage(materialized), context, ownsMemory)
         {
@@ -69,8 +69,8 @@ namespace Shorokoo
         }
 
         /// <summary>A host tensor over <paramref name="bytes"/> belonging to
-        /// <paramref name="context"/>, which must be a host-memory context or null.</summary>
-        internal static HostTensorData<T> Bound(Shape shape, byte[] bytes, ComputeContext? context)
+        /// <paramref name="context"/>, which must be a host-memory context.</summary>
+        internal static HostTensorData<T> Bound(Shape shape, byte[] bytes, ComputeContext context)
             => new(shape, bytes, context, ownsMemory: true, storage: null, new MaterializedValues());
 
         // Managed bytes are the garbage collector's to reclaim, so releasing this storage frees no
@@ -87,7 +87,7 @@ namespace Shorokoo
         internal bool MaterializationsAreEmpty => _materialized.IsEmpty;
 
         /// <inheritdoc/>
-        internal override TensorData CloneSharing(ComputeContext? context, bool ownsMemory)
+        internal override TensorData CloneSharing(ComputeContext context, bool ownsMemory)
             => new HostTensorData<T>(Shape, _bytes, context, ownsMemory, Storage, _materialized);
 
         /// <summary>

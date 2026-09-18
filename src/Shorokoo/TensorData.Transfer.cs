@@ -22,7 +22,8 @@ namespace Shorokoo
     {
         /// <summary>
         /// This tensor's bytes, as a tensor of <paramref name="target"/>, with ownership moved to
-        /// the result. Null means the framework's own host memory.
+        /// the result. Null means <see cref="ComputeContext.Host"/> — the framework's own host
+        /// memory.
         ///
         /// <para>Within one memory space nothing is copied: the result names the same bytes. If
         /// this tensor owned them the result owns them now and this one does not; if it did not
@@ -40,29 +41,30 @@ namespace Shorokoo
         /// own its bytes.</exception>
         public TensorData TransferTo(ComputeContext? target)
         {
+            var to = target ?? ComputeContext.Host;
             ThrowIfDisposed();
             RefuseUnknownSpace(nameof(TransferTo));
-            var to = SpaceOf(target);
+            var space = SpaceOf(to);
 
-            RefuseGraphLiteral(target, nameof(TransferTo));
+            RefuseGraphLiteral(to, nameof(TransferTo));
 
-            if (to == Space && CanShareWith(target))
+            if (space == Space && CanShareWith(to))
             {
-                RefuseUnownedNullContext(target, wouldOwn: OwnsMemory, operation: nameof(TransferTo));
-                RefuseDisposedTarget(target, nameof(TransferTo));
+                RefuseUnownedHostContext(to, wouldOwn: OwnsMemory, operation: nameof(TransferTo));
+                RefuseDisposedTarget(to, nameof(TransferTo));
                 // The bytes stay exactly where they are; only the names on them change.
-                var moved = CloneSharing(target, OwnsMemory);
-                SurrenderOwnership(target);
+                var moved = CloneSharing(to, OwnsMemory);
+                SurrenderOwnership(to);
                 return moved;
             }
 
             if (!OwnsMemory)
                 throw new InvalidOperationException(
                     $"This tensor ({this}) is in {Space} and does not own its memory, so it cannot "
-                    + $"be moved to {to}: the move would free bytes that belong to something else. "
-                    + "Use CopyTo to take a copy of them there instead.");
+                    + $"be moved to {space}: the move would free bytes that belong to something "
+                    + "else. Use CopyTo to take a copy of them there instead.");
 
-            var relocated = CopyAcross(target, to);
+            var relocated = CopyAcross(to, space);
             Dispose();
             return relocated;
         }
@@ -78,9 +80,23 @@ namespace Shorokoo
         /// <exception cref="ObjectDisposedException">This tensor, or the memory behind it, is gone.</exception>
         public TensorData CopyTo(ComputeContext? target)
         {
+            var to = target ?? ComputeContext.Host;
             ThrowIfDisposed();
-            return CopyAcross(target, SpaceOf(target));
+            return CopyAcross(to, SpaceOf(to));
         }
+
+        /// <summary>
+        /// A copy of this tensor in the framework's own host memory, belonging to
+        /// <see cref="ComputeContext.Host"/> and so outliving every compute context — the readable
+        /// spelling of <c>CopyTo(ComputeContext.Host)</c>.
+        ///
+        /// <para>This is what a caller means by "give me a result I can keep": a tensor a run
+        /// produced belongs to the context that ran it and dies with it, and a detached one is the
+        /// caller's for as long as it holds it. It is also what an operator attribute must be,
+        /// since a graph's description is the same description on every machine.</para>
+        /// </summary>
+        /// <exception cref="ObjectDisposedException">This tensor, or the memory behind it, is gone.</exception>
+        public TensorData Detach() => CopyTo(ComputeContext.Host);
 
         /// <summary>
         /// A reader for this tensor's bytes, as a tensor of <paramref name="target"/>. The result
@@ -95,20 +111,21 @@ namespace Shorokoo
         /// <exception cref="InvalidOperationException">The spaces differ.</exception>
         public TensorData GiveAccessTo(ComputeContext? target)
         {
+            var to = target ?? ComputeContext.Host;
             ThrowIfDisposed();
             RefuseUnknownSpace(nameof(GiveAccessTo));
-            var to = SpaceOf(target);
-            RefuseGraphLiteral(target, nameof(GiveAccessTo));
+            var space = SpaceOf(to);
+            RefuseGraphLiteral(to, nameof(GiveAccessTo));
 
-            if (to != Space || !CanShareWith(target))
+            if (space != Space || !CanShareWith(to))
                 throw new InvalidOperationException(
-                    $"This tensor ({this}) is in {Space} and cannot be reached from {to} without "
+                    $"This tensor ({this}) is in {Space} and cannot be reached from {space} without "
                     + "allocating there, which would make the result an owner. GiveAccessTo never "
                     + "takes ownership; use CopyTo, which does.");
 
-            RefuseUnownedNullContext(target, wouldOwn: false, operation: nameof(GiveAccessTo));
-            RefuseDisposedTarget(target, nameof(GiveAccessTo));
-            return CloneSharing(target, ownsMemory: false);
+            RefuseUnownedHostContext(to, wouldOwn: false, operation: nameof(GiveAccessTo));
+            RefuseDisposedTarget(to, nameof(GiveAccessTo));
+            return CloneSharing(to, ownsMemory: false);
         }
 
         /// <summary>
@@ -128,9 +145,9 @@ namespace Shorokoo
         /// description in one context's memory -- unserializable once that context was disposed,
         /// and unbuildable anywhere that context is not.
         /// </summary>
-        private void RefuseGraphLiteral(ComputeContext? target, string operation)
+        private void RefuseGraphLiteral(ComputeContext target, string operation)
         {
-            if (!IsGraphLiteral || target is null) return;
+            if (!IsGraphLiteral || ReferenceEquals(target, ComputeContext.Host)) return;
             throw new InvalidOperationException(
                 $"This tensor ({this}) is an operator's attribute in a graph, so it cannot be "
                 + $"given to a compute context by {operation}. An attribute is part of the graph's "
@@ -138,9 +155,9 @@ namespace Shorokoo
                 + "gives the context its own copy and leaves the graph's literal where it is.");
         }
 
-        private void RefuseDisposedTarget(ComputeContext? target, string operation)
+        private void RefuseDisposedTarget(ComputeContext target, string operation)
         {
-            if (target is not { IsDisposed: true }) return;
+            if (!target.IsDisposed) return;
             throw new ObjectDisposedException(
                 nameof(ComputeContext),
                 $"{operation} was given a compute context that has been disposed, so the tensor it "
@@ -149,23 +166,24 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// Refuses the one combination the two invariants forbid between them: a tensor with no
+        /// Refuses the one combination the two invariants forbid between them: a tensor on the host
         /// context that does not own its bytes.
         ///
-        /// <para>The null context is not a context at all — it is the framework's own host memory,
-        /// and a tensor there owns what it holds, because there is no context whose lifetime could
-        /// own it instead. So memory can arrive there only by being owned. That rules out giving
-        /// the null context access to someone else's bytes, and transferring to it from a tensor
+        /// <para>The host context is the framework's own host memory, and a tensor there owns what
+        /// it holds, because there is no context whose lifetime could own it instead — that one is
+        /// never disposed. So memory can arrive there only by being owned. That rules out giving
+        /// the host context access to someone else's bytes, and transferring to it from a tensor
         /// that has none to give; both mean <see cref="CopyTo"/>, which owns what it makes.</para>
         /// </summary>
-        private void RefuseUnownedNullContext(ComputeContext? target, bool wouldOwn, string operation)
+        private void RefuseUnownedHostContext(ComputeContext target, bool wouldOwn, string operation)
         {
-            if (target is not null || wouldOwn) return;
+            if (!ReferenceEquals(target, ComputeContext.Host) || wouldOwn) return;
             throw new InvalidOperationException(
-                $"{operation}(null) would leave this tensor's bytes in the framework's own host "
-                + "memory with nothing owning them. A tensor with no compute context owns what it "
-                + "holds -- there is no context whose lifetime could own it instead -- so memory "
-                + "reaches it only by being owned. Use CopyTo(null), which makes a copy it owns.");
+                $"{operation} to ComputeContext.Host would leave this tensor's bytes in the "
+                + "framework's own host memory with nothing owning them. A tensor there owns what "
+                + "it holds -- there is no context whose lifetime could own it instead -- so "
+                + "memory reaches it only by being owned. Use CopyTo(null), or Detach(), which "
+                + "makes a copy it owns.");
         }
 
         /// <summary>
@@ -194,13 +212,12 @@ namespace Shorokoo
         /// context it now belongs to cannot feed. Host bytes have no such problem — anything can
         /// rebuild them — and the same backend trivially accepts its own.</para>
         /// </summary>
-        private bool CanShareWith(ComputeContext? target)
+        private bool CanShareWith(ComputeContext target)
             => Space.IsHost
-               || ReferenceEquals(Context?.ResolvedBackend, target?.ResolvedBackend);
+               || ReferenceEquals(Context.ResolvedBackend, target.ResolvedBackend);
 
-        /// <summary>Where a context's tensors live; null is the framework's own host memory.</summary>
-        private static MemorySpace SpaceOf(ComputeContext? context)
-            => context?.MemorySpace ?? MemorySpace.Host;
+        /// <summary>Where a context's tensors live.</summary>
+        private static MemorySpace SpaceOf(ComputeContext context) => context.MemorySpace;
 
         /// <summary>
         /// A fresh, owned tensor holding this one's contents in <paramref name="to"/>. Goes through
@@ -214,7 +231,7 @@ namespace Shorokoo
         /// difference between a tensor that is on the card and one an execution provider has to
         /// copy there on every run.</para>
         /// </summary>
-        private TensorData CopyAcross(ComputeContext? target, MemorySpace to)
+        private TensorData CopyAcross(ComputeContext target, MemorySpace to)
         {
             // Strings have no flat buffer to copy, so they take the route their own literals take:
             // the elements themselves, rebuilt on the other side. A backend holding them is asked
@@ -226,7 +243,7 @@ namespace Shorokoo
             if (to.IsHost)
                 return NewHostTensor(Shape, DType, bytes, target);
 
-            var value = target!.ResolvedBackend.CreateTensorInBackendMemory(
+            var value = target.ResolvedBackend.CreateTensorInBackendMemory(
                 (ShorokooTensorElementType)(int)DType, bytes, (long[])Shape);
             try
             {
@@ -261,7 +278,7 @@ namespace Shorokoo
         /// the bytes are rather than a gap: a device context feeding one still feeds host memory,
         /// and there is nothing else for it to feed.</para>
         /// </summary>
-        private TensorData CopyStringsAcross(ComputeContext? target)
+        private TensorData CopyStringsAcross(ComputeContext target)
         {
             var strings = this switch
             {
@@ -286,7 +303,7 @@ namespace Shorokoo
             // how to read it: an execution provider Shorokoo has no name for still answers
             // CopyTensorToHost, and asking the space first refused every such tensor with a message
             // blaming a missing context it plainly had.
-            if (Context is null)
+            if (ReferenceEquals(Context, ComputeContext.Host))
                 throw new InvalidOperationException(
                     $"This tensor ({this}) is in {Space}, and the context that produced it was not "
                     + "recorded, so there is no backend to ask for a copy of it.");

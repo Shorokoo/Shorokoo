@@ -24,6 +24,10 @@ namespace Shorokoo
         internal TensorStorage(MemorySpace space, Action release)
         {
             Space = space;
+            // The framework's own host memory until something takes it over. That is what a
+            // storage nobody has handed to a context is, and the host context never releases, so
+            // starting here is exactly the "no owner" this used to spell as null.
+            Owner = Shorokoo.Runtime.ComputeContext.Host;
             _release = release ?? throw new ArgumentNullException(nameof(release));
         }
 
@@ -34,14 +38,16 @@ namespace Shorokoo
         internal MemorySpace Space { get; }
 
         /// <summary>
-        /// The context whose disposal releases these bytes, or null when they belong to the
-        /// framework's own host memory and outlive every context.
+        /// The context whose disposal releases these bytes.
+        /// <see cref="Shorokoo.Runtime.ComputeContext.Host"/> — the default — means they belong to
+        /// the framework's own host memory and outlive every context, that one never being
+        /// disposed.
         ///
         /// <para>It follows the ownership, not the allocation. A tensor transferred out of the
         /// context that allocated it takes the bytes with it, and disposing that first context
         /// must then leave them alone — they are the target's now.</para>
         /// </summary>
-        internal Shorokoo.Runtime.ComputeContext? Owner { get; private set; }
+        internal Shorokoo.Runtime.ComputeContext Owner { get; private set; }
 
         /// <summary>
         /// The one lock every change of ownership is made under, and that a context's disposal
@@ -59,15 +65,15 @@ namespace Shorokoo
 
         /// <summary>Moves responsibility for these bytes to <paramref name="context"/>, off
         /// whoever had it. Exactly one context is on the hook at a time.</summary>
-        internal void TransferOwnershipTo(Shorokoo.Runtime.ComputeContext? context)
+        internal void TransferOwnershipTo(Shorokoo.Runtime.ComputeContext context)
         {
             // Outside the lock, because this is the overwhelmingly common case and the gate is
-            // process-wide: every literal a graph build creates is a tensor with no context whose
-            // storage has no owner, and taking a shared monitor to discover that serialized model
-            // construction across the whole process -- on the very two-device workload this design
-            // is for. Volatile-free is fine here: the only transition this can miss is one that
-            // would have to be racing this storage's construction, and a storage nobody else has a
-            // reference to yet has no other writer.
+            // process-wide: every literal a graph build creates is a tensor on the host context,
+            // which is where a storage starts, and taking a shared monitor to discover that
+            // serialized model construction across the whole process -- on the very two-device
+            // workload this design is for. Volatile-free is fine here: the only transition this
+            // can miss is one that would have to be racing this storage's construction, and a
+            // storage nobody else has a reference to yet has no other writer.
             if (ReferenceEquals(Owner, context)) return;
 
             lock (OwnershipGate)
@@ -76,8 +82,8 @@ namespace Shorokoo
                 // The new owner first: TakeOwnership refuses a disposed context, and a hand-off
                 // that fails after the old owner has let go would leave these bytes on nobody's
                 // books -- freed by neither context, which is the leak disposal exists to prevent.
-                context?.TakeOwnership(this);
-                Owner?.ReleaseOwnership(this);
+                context.TakeOwnership(this);
+                Owner.ReleaseOwnership(this);
                 Owner = context;
             }
         }

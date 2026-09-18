@@ -206,7 +206,8 @@ namespace Shorokoo.Core.Nodes.Processors.Training
                         // needs nothing. (Copying is also the only route that works when the
                         // context is a card's: the copy is made by the backend that allocated it.)
                         var fromOrt = ortResolved[i].ToTensorData();
-                        resolved[i] = fromOrt.Context is null ? fromOrt : fromOrt.CopyTo(null);
+                        resolved[i] = ReferenceEquals(fromOrt.Context, ComputeContext.Host)
+                            ? fromOrt : fromOrt.Detach();
                     }
             }
 

@@ -36,7 +36,7 @@ namespace Shorokoo
 
         /// <inheritdoc/>
         /// <summary>A placeholder holds no bytes, so there is nothing to share a name for.</summary>
-        internal override TensorData CloneSharing(Shorokoo.Runtime.ComputeContext? context, bool ownsMemory)
+        internal override TensorData CloneSharing(Shorokoo.Runtime.ComputeContext context, bool ownsMemory)
             => throw new InvalidOperationException(
                 "A weight placeholder carries shape and dtype but no data, so it cannot be "
                 + "transferred to a compute context.");

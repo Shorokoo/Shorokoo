@@ -546,10 +546,10 @@ internal class ShapeInferenceInterpreter
     /// </summary>
     private static TensorData? Detached(TensorData data)
     {
-        if (data.Context is null) return data;
+        if (ReferenceEquals(data.Context, ComputeContext.Host)) return data;
         try
         {
-            return data.CopyTo(null);
+            return data.Detach();
         }
         catch (Exception) when (CatchShapeInferenceErrors())
         {

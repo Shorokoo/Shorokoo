@@ -478,14 +478,14 @@ because the program really does want both, is
 [Deploying two backends](#deploying-two-backends).
 
 Referencing a backend package is enough for step 2: the package copies its DLL to your
-output folder, so discovery finds it whether or not your code mentions the factory type.
+output folder, so discovery finds it whether or not your code mentions the backend type.
 On a Linux sandbox that ships only `Shorokoo.LinuxCPU`, discovery picks it with no setup.
 
 If no backend is found, the first inference call throws `InvalidOperationException`:
 
 > `No Shorokoo inference backend is set and none was found in '<folder>'. Set one at
 > startup -- e.g. InferenceBackend.Default = new LinuxCpuBackend(); (or the
-> factory from whichever Shorokoo.{WinCPU,WinGPU,LinuxCPU,LinuxGPU} package you
+> backend from whichever Shorokoo.{WinCPU,WinGPU,LinuxCPU,LinuxGPU} package you
 > reference) -- or add such a package as a dependency.`
 
 ### Which device am I on?
@@ -507,7 +507,7 @@ device produced its numbers has lost something it cannot reconstruct later.
 
 Two related entry points:
 
-- `InferenceBackend.Current` is the live backend **or null**, and — unlike `Factory` and
+- `InferenceBackend.Current` is the live backend **or null**, and — unlike `Default` and
   `Describe()` — reading it does not resolve one. Use it to tell "nothing chosen yet" from
   "already bound" without settling the question by asking it.
 - `InferenceBackend.RequireDevice(ComputeDevice.Cpu)` throws unless the live backend is on
@@ -540,12 +540,18 @@ else
 }
 ```
 
-`BackendPackage.Probe` answers the same question without loading anything: it reads the
-backend's own declaration out of the file's metadata, so a backend for another operating
+`BackendPackage.Probe` answers the same question without loading the *backend*: it reads its
+declaration out of the file's metadata, so a backend for another operating
 system, another architecture, or one whose native libraries are not deployed with it is
-refused before any native code is touched. `BackendProbe.Reason` says which it was
-(`WrongOperatingSystem`, `MissingNative`, `MissingCudaRuntime`, …) and `Detail` names the
-file or library that is wrong.
+refused without the backend or its ONNX Runtime being loaded. `BackendProbe.Reason` says
+which it was (`WrongOperatingSystem`, `MissingNative`, `MissingCudaRuntime`, …) and `Detail`
+names the file or library that is wrong.
+
+One check is not free of native code: a backend declaring a CUDA requirement is verified by
+binding the CUDA runtime and asking it for the device's memory, which initialises this
+process's CUDA context on the card if it has none yet. So probing a GPU backend touches the
+driver even when the answer turns out to be no. Every other rejection — wrong OS, wrong
+architecture, a native that is not deployed — is decided from metadata and file paths alone.
 
 A backend's natives are looked for in both of the places a .NET build puts them: flat
 beside the backend assembly, and under `runtimes/<rid>/native/` next to it. Which one a
@@ -587,7 +593,7 @@ come back on the host unless you asked for them to be retained
 the card or kept there deliberately.
 
 ```csharp
-var onCard  = cuda.Execute(model, input, [true])[0].ToTensorData();  // retained: device memory
+var onCard  = cuda.Compile(model).Execute([input], [true])[0].ToTensorData();  // device memory
 var onHost  = onCard.TransferTo(cpu);                        // one copy across the bus
 var shared  = onHost.TransferTo(otherCpu);                   // no copy: same space
 ```
@@ -626,9 +632,14 @@ the backend it was built on in `CompiledGraph.Backend`.
 **Tensors are not tied to a backend.** A `TensorData` you build holds managed bytes and no
 backend at all, so building a model and exporting it needs no runtime; a backend enters only
 when the tensor is fed to one, and then either context accepts it — a session hands what it
-is fed to its own runtime, building it there if it does not have it yet. Those built values
-are cached per backend, so the cost is one copy per (tensor, backend) pair rather than per
-run. It is possible only for data the host can read: a value an execution provider kept in
+is fed to its own runtime, building it there if it does not have it yet.
+
+How often that costs a copy depends on which kind of tensor it is. One holding managed bytes
+— anything you built — caches what each backend made of it, so it is one copy per (tensor,
+backend) pair however many runs follow. One a *session* produced belongs to the runtime that
+produced it, and the other runtime rebuilds it as it is fed and releases the rebuild when the
+run returns: that is a host copy per feed, so a value handed back and forth between two
+backends pays on every run. Either way it is possible only for data the host can read: a value an execution provider kept in
 its own memory (`TensorData.IsHostResident` is false, which a
 [resident training run](training.md#keeping-training-state-on-the-device) produces) cannot
 cross, and says so rather than being read as a host address.
@@ -670,21 +681,33 @@ build beside the stock one, say. Give each native a folder of its own and load t
 with `IsolatedBackend`:
 
 ```xml
-<PackageReference Include="Microsoft.ML.OnnxRuntime.Managed" Version="1.26.0" />
+<!-- The glue, referenced directly: it carries the target that reads the items below, and
+     it is the assembly every isolated backend loads. Coming in through a platform package
+     is the usual route, and this recipe cuts that route on purpose. -->
+<PackageReference Include="Shorokoo.OnnxRuntime" Version="..." />
+
 <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.26.0"
                   ExcludeAssets="all" GeneratePathProperty="true" />
 <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu.Linux" Version="1.26.0"
                   ExcludeAssets="all" GeneratePathProperty="true" />
 
 <ShorokooBackendNatives BackendId="cpu"
-  Include="$(PkgMicrosoft_ML_OnnxRuntime)\runtimes\linux-x64\native\*" />
+  Include="$(PkgMicrosoft_ML_OnnxRuntime)/runtimes/linux-x64/native/*" />
 <ShorokooBackendNatives BackendId="cuda"
-  Include="$(PkgMicrosoft_ML_OnnxRuntime_Gpu_Linux)\runtimes\linux-x64\native\*" />
+  Include="$(PkgMicrosoft_ML_OnnxRuntime_Gpu_Linux)/runtimes/linux-x64/native/*" />
 ```
 
 `ShorokooBackendNatives` items are read by a target the `Shorokoo.OnnxRuntime` package
 imports; each lands in `ort/<BackendId>/` in the output. An execution provider's own library
 has to sit beside the core it belongs to, so deploy a package's whole native folder.
+
+The direct reference to `Shorokoo.OnnxRuntime` is what makes the rest of this work, and it
+is easy to leave out because every other deployment gets it for free. Reaching the backend
+package with `ExcludeAssets="all"`, as the next block does, cuts off the only route the glue
+normally takes — so without this line the target never loads, the items above are silently
+ignored, `ort/` is empty, and the first `IsolatedBackend.Load` fails with a
+`FileNotFoundException` naming a native nothing ever copied. The package is not a backend
+and never becomes a discovery candidate.
 
 **The backend's own assembly has to be somewhere too, and not beside `Shorokoo.dll`** — two
 backend assemblies there is the ambiguity [auto-discovery](#auto-discovery) refuses. Put it
@@ -693,8 +716,7 @@ in the same folder as its native and point `ProbeDirectory` at it:
 ```xml
 <PackageReference Include="Shorokoo.LinuxGPU" Version="..." ExcludeAssets="all"
                   GeneratePathProperty="true" />
-<None Include="$(PkgShorokoo_LinuxGPU)\lib
-et10.0\Shorokoo.LinuxGPU.dll"
+<None Include="$(PkgShorokoo_LinuxGPU)/lib/net10.0/Shorokoo.LinuxGPU.dll"
       Link="ort/cuda/Shorokoo.LinuxGPU.dll" CopyToOutputDirectory="PreserveNewest" />
 ```
 

@@ -182,7 +182,6 @@ public class ComputeContextLifetimeCoverageTests
         var module = BackendFreeNegate.ComputationGraph;
         var sample = TensorData([8L], new float[8]);
         var onnx = Path.Combine(Path.GetTempPath(), $"shorokoo-backend-free-{Guid.NewGuid():N}.onnx");
-        var liveBackend = InferenceBackend.Current;
 
         try
         {
@@ -209,7 +208,6 @@ public class ComputeContextLifetimeCoverageTests
             if (File.Exists(onnx)) File.Delete(onnx);
         }
 
-        Assert.Same(liveBackend, InferenceBackend.Current);
     }
 
     internal sealed class StubBackend(ComputeDevice device, int? cudaDeviceId)
@@ -291,7 +289,10 @@ public class ProcessWideBackendCoverageTests
     [Fact]
     public void TestAssigningTheDefaultBackendSettlesBothTheLiveAndTheRememberedSlot()
     {
-        var liveDefault = InferenceBackend.Current;
+        // Default rather than Current, which is null until something resolves one: capturing null
+        // here and restoring nothing in the finally left this test's throwing stub as the process's
+        // backend, and every later test that ran anything failed inside it.
+        var liveDefault = InferenceBackend.Default;
         var liveRemembered = InferenceBackend.Remembered;
         try
         {
@@ -307,7 +308,7 @@ public class ProcessWideBackendCoverageTests
         finally
         {
             InferenceBackend.ForgetRemembered();
-            if (liveDefault is not null) InferenceBackend.Default = liveDefault;
+            InferenceBackend.Default = liveDefault;
             InferenceBackend.ForgetRemembered();
             if (liveRemembered is not null) InferenceBackend.Remember(liveRemembered);
         }

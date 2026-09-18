@@ -58,9 +58,10 @@ public class DTypeStringCoverageTests
         string[] values = ["hello", "", "with\nnewline", "shorokoo"];
         long[] dims = [2L, 2L];
 
-        var backendBefore = InferenceBackend.Current;
-        var literal = TensorData(dims, values);
-        Assert.Same(backendBefore, InferenceBackend.Current);
+        TensorData literal = null!;
+        // The AsyncLocal seam rather than a before/after read of the process-wide slot: this suite
+        // runs four tests at once, so any of them may settle that slot inside the window.
+        Assert.Equal(0, InferenceBackend.CountDefaultReads(() => literal = TensorData(dims, values)));
 
         Assert.IsType<HostStringTensorData>(literal);
         // Nothing of a runtime's is in it -- which is the whole of "no backend was needed".

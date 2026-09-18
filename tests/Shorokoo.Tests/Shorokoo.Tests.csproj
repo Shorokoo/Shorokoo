@@ -54,6 +54,26 @@
   </ItemGroup>
 
   <!--
+    The OTHER platform's backend, built but not deployed. BackendPackageTests probes it to prove a
+    backend for the wrong operating system is turned away with a reason rather than an exception,
+    which needs the assembly to exist and needs it kept out of the output folder (deployed, it
+    would be a second discovery candidate). ReferenceOutputAssembly="false" gives exactly that:
+    the project is built, nothing of it is copied.
+
+    Without this the tests read a bin/ that a plain checkout never fills, so they failed on any
+    machine that had not happened to build the whole solution (CI included), saying nothing
+    about the product.
+  -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Backend\OnnxRuntime\Shorokoo.WinCPU\Shorokoo.WinCPU.csproj"
+                      Condition="$([MSBuild]::IsOSPlatform('Linux'))"
+                      ReferenceOutputAssembly="false" Private="false" />
+    <ProjectReference Include="..\..\src\Backend\OnnxRuntime\Shorokoo.LinuxCPU\Shorokoo.LinuxCPU.csproj"
+                      Condition="$([MSBuild]::IsOSPlatform('Windows'))"
+                      ReferenceOutputAssembly="false" Private="false" />
+  </ItemGroup>
+
+  <!--
     A second native ONNX Runtime, deployed under ort/cuda/, for the side-by-side backend tests.
     They need a runtime separate from the one the default backend above loaded, and a folder of
     its own is what makes it separate: both packages deliver their library at the same
@@ -89,10 +109,10 @@
   <!--
     -p:ShorokooDeployGpuBackend=true completes ort/cuda/ into a CUDA backend that can actually be
     loaded: the whole native set (the CUDA provider included, which is why this is opt-in) plus
-    the Shorokoo.LinuxGPU factory assembly. That is what SideBySideBackendHardwareTests needs, and
+    the Shorokoo.LinuxGPU backend assembly. That is what SideBySideBackendHardwareTests needs, and
     what a program driving the CPU and the card at once deploys.
 
-    The factory goes into ort/cuda/ rather than beside Shorokoo.dll on purpose. Two backend
+    The backend goes into ort/cuda/ rather than beside Shorokoo.dll on purpose. Two backend
     assemblies side by side are exactly what InferenceBackend's discovery refuses, since a program
     that deployed both and named neither has not said which it means, and every other test here
     relies on discovery finding the CPU one. Under ort/cuda/ it is out of discovery's way and the

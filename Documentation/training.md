@@ -644,6 +644,7 @@ its work there, so a rig **can** build on one device and train on another:
 ```csharp
 var rig = TrainingRig.FromScratch(
     model, loss, optimizer,
+    sampleInputs, new AdamWOptimizerHyperparameters { LearningRate = 0.001f },
     mergeContext:   new ComputeContext(new LinuxCpuBackend()),
     runtimeContext: new ComputeContext(new LinuxGpuBackend()));
 ```

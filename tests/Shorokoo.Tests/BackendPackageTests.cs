@@ -213,11 +213,7 @@ public class BackendPackageCoverageTests
         try
         {
             var foreign = Path.Combine(root, ForeignBackendName + ".dll");
-            File.Copy(
-                Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..",
-                    "src", "Backend", "OnnxRuntime", ForeignBackendName, "bin", "Release", "net10.0",
-                    ForeignBackendName + ".dll"),
-                foreign);
+            File.Copy(ForeignBackendAssembly(), foreign);
 
             // A folder with no native of any kind, for either platform.
             var probe = BackendPackage.Probe(foreign);

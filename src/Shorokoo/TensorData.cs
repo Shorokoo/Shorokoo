@@ -44,6 +44,26 @@ namespace Shorokoo
         public abstract Span<V> AccessModifiableMemory<V>() where V : unmanaged;
 
         /// <summary>
+        /// Fills the buffer through <paramref name="write"/>, with the tensor kept alive for the
+        /// length of the call. This is <see cref="AccessModifiableMemory{V}"/> done safely, and it
+        /// is the write counterpart of <see cref="CopyMemory{V}"/>.
+        ///
+        /// <para>Taking the span is the tensor's last read, so a buffer filled through a bare
+        /// <c>AccessModifiableMemory</c> races the collection that frees what the span points at:
+        /// the tensor is unreachable from that call onwards, and on a backend-allocated buffer the
+        /// runtime value's finalizer hands the block back while the caller is still writing into
+        /// it (Shorokoo/Shorokoo#178). Scope is not reachability. Whatever fills a tensor should
+        /// fill it here.</para>
+        /// </summary>
+        /// <exception cref="ArgumentNullException"><paramref name="write"/> is null.</exception>
+        public void WriteMemory<V>(SpanWriter<V> write) where V : unmanaged
+        {
+            ArgumentNullException.ThrowIfNull(write);
+            write(AccessModifiableMemory<V>());
+            GC.KeepAlive(this);
+        }
+
+        /// <summary>
         /// The elements copied into an array of V the caller owns, valid however long the caller
         /// keeps it. This is <see cref="AccessMemory{V}"/> plus the copy, done safely: taking a
         /// span is the tensor's last read, so copying out of one by hand races the collection that
@@ -172,6 +192,12 @@ namespace Shorokoo
         /// <summary>Writable span over the elements of a <c>float64</c> tensor as <c>double</c>.</summary>
         public static Span<double> AccessModifiableMemory(this TensorData<float64> data) => data.AccessModifiableMemory<double>();
     }
+
+    /// <summary>
+    /// Fills a tensor's buffer in place. Used by <see cref="TensorData{T}.WriteMemory{V}"/>, which
+    /// keeps the tensor reachable for the length of the call — which a bare span does not.
+    /// </summary>
+    public delegate void SpanWriter<V>(Span<V> destination) where V : unmanaged;
 
     /// <summary>A data value with an associated <see cref="DType"/>.</summary>
     public interface IData

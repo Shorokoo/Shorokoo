@@ -762,11 +762,24 @@ largest thing in the run, doubled. Two operations remove one half each.
 using var cpu = new ComputeContext(new LinuxCpuBackend());
 
 var batch = cpu.AllocateUninitialized<float32>(new Shape(64L, 3L, 224L, 224L));
-ReadImagesInto(batch.AccessModifiableMemory<float>());   // no managed array in between
+batch.WriteMemory<float>(ReadImagesInto);   // no managed array in between
 ```
 
 `Shape` is a class rather than a collection type, so the shape is `new Shape(…)` or a `long[]`,
 not a `[…]` collection literal.
+
+**Fill it through `WriteMemory`, not through a bare span.** On a real backend the buffer belongs
+to the runtime and the tensor is the only thing keeping it alive. Taking a span is the tensor's
+*last read*, so
+
+```csharp
+ReadImagesInto(batch.AccessModifiableMemory<float>());   // wrong: nothing roots `batch`
+```
+
+leaves no reachable tensor for the whole of `ReadImagesInto`, and the runtime value's finalizer
+can hand the block back while you are still writing into it. Being in scope is not being
+reachable. `WriteMemory` keeps the tensor alive across the call, the way `CopyMemory` does on the
+reading side.
 
 Nothing is written into it — the buffer holds whatever was last there, so fill all of it — and
 the tensor belongs to the context exactly as a `CopyTo(context)` result does. The

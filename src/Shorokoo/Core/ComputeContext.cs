@@ -687,11 +687,17 @@ namespace Shorokoo.Runtime
         }
 
         /// <summary>
-        /// <see cref="AllocateUninitialized(Shape, DType)"/> typed, so that the result's
-        /// <c>AccessModifiableMemory</c> can be reached without a cast:
-        /// <c>context.AllocateUninitialized&lt;float32&gt;(new Shape(64L, 768L)).AccessModifiableMemory()</c>.
+        /// <see cref="AllocateUninitialized(Shape, DType)"/> typed, so the result can be filled
+        /// without a cast:
+        /// <c>context.AllocateUninitialized&lt;float32&gt;(new Shape(64L, 768L)).WriteMemory&lt;float&gt;(dst =&gt; …)</c>.
         /// <see cref="Shape"/> is not a collection type, so a bare <c>[64L, 768L]</c> literal does
         /// not convert to it; pass <c>new Shape(...)</c> or a <c>long[]</c>.
+        ///
+        /// <para>Fill it through <see cref="TensorData{T}.WriteMemory{V}"/> rather than by taking
+        /// a bare <c>AccessModifiableMemory</c> span. On a real backend the buffer is the
+        /// runtime's, and the tensor is the only thing keeping it alive: taking the span is the
+        /// tensor's last read, so a fill written as one expression has no reachable tensor for its
+        /// whole duration and writes into a block the finalizer may already have handed back.</para>
         /// </summary>
         /// <exception cref="NotSupportedException">The element type has no flat byte
         /// buffer — see the overload above.</exception>

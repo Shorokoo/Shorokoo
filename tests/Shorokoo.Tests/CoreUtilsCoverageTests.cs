@@ -1106,6 +1106,11 @@ public class CoreUtilsCoverageTests
     // Forwarding the span straight out (`return Inner.GetTensorDataAsSpan<T>();`) is not this
     // shape — the caller owns the lifetime from there. CopyMemory / CopyRawMemory / ValueAt do
     // the copy with the tensor kept alive, and are what a call site should reach for instead.
+    // The leading `\.` is a real limitation, not an oversight: it keys on a receiver, so a span
+    // taken through an implicit `this` inside TensorData itself -- `write(AccessModifiableMemory
+    // <V>())` in WriteMemory -- is invisible to this guard. Relaxing the dot matches every
+    // declaration of those members too. Those helpers keep their tensor alive by convention and
+    // by review; removing a GC.KeepAlive(this) from one of them leaves the suite green.
     private static readonly Regex SpanOutOfTensor = new(
         @"\.\s*(GetTensorMutableRawData|GetTensorDataAsSpan|GetTensorMutableDataAsSpan"
         + @"|AccessRawMemory|AccessModifiableRawMemory|AccessMemory|AccessModifiableMemory)"

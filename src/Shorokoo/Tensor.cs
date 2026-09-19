@@ -440,12 +440,11 @@ namespace Shorokoo
                 OnnxOp.Cast(this, saturate ? null : saturate, OnnxUtils.GetDType<V>());
 
         /// <summary>Creates a tensor of the given shape filled with the scalar value <paramref name="val"/> (ONNX ConstantOfShape).</summary>
-        public static Tensor<T> Fill(Vector<int64> shape, TensorData val)
+        public static Tensor<T> Fill(Vector<int64> shape, TensorAttribute val)
         {
             // ConstantOfShape expects:
             // - shape: A 1D tensor indicating the shape of the output
-            // - val: A scalar TensorData that will be broadcasted to fill the entire output
-            // The issue was using pre-shaped TensorData instead of scalar fill value
+            // - val: A scalar attribute that will be broadcast to fill the entire output
             return OnnxOp.ConstantOfShape(shape, val);
         }
         

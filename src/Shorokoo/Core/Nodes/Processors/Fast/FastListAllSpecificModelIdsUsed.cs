@@ -654,32 +654,32 @@ internal static partial class FastListAllSpecificModelIdsUsed
         long n = ctx.NumModelIds;
 
         var emptyBools = new bool[n];
-        var emptyData = Shorokoo.Globals.TensorData(new long[] { n }, emptyBools);
+        var emptyData = Shorokoo.Globals.TensorData(new long[] { n }, emptyBools).MoveToAttribute();
         var emptyKey = FastNodeKey.New();
         ctx.EmptyMaskKey = new FastTensorKey(emptyKey, 0);
         ctx.NewNodes.Add(CreateConstantTensorDataNode(emptyKey, emptyData));
 
         var indicesArr = new long[n];
         for (int i = 0; i < n; i++) indicesArr[i] = i;
-        var indicesData = Shorokoo.Globals.TensorData(new long[] { n }, indicesArr);
+        var indicesData = Shorokoo.Globals.TensorData(new long[] { n }, indicesArr).MoveToAttribute();
         var idxKey = FastNodeKey.New();
         ctx.IndicesKey = new FastTensorKey(idxKey, 0);
         ctx.NewNodes.Add(CreateConstantTensorDataNode(idxKey, indicesData));
 
         var transformData = Shorokoo.Globals.TensorData(
-            new long[] { ctx.TransformLen }, ctx.TransformArr);
+            new long[] { ctx.TransformLen }, ctx.TransformArr).MoveToAttribute();
         var trKey = FastNodeKey.New();
         ctx.TransformVecKey = new FastTensorKey(trKey, 0);
         ctx.NewNodes.Add(CreateConstantTensorDataNode(trKey, transformData));
 
         // Scalar 0L (shape []) for Pad's constant_value input.
-        var zeroScalarData = Shorokoo.Globals.TensorData(new long[0], new long[] { 0L });
+        var zeroScalarData = Shorokoo.Globals.TensorData(new long[0], new long[] { 0L }).MoveToAttribute();
         var zsKey = FastNodeKey.New();
         ctx.ZeroScalarLongKey = new FastTensorKey(zsKey, 0);
         ctx.NewNodes.Add(CreateConstantTensorDataNode(zsKey, zeroScalarData));
 
         // [0L] (shape [1]) used to build the Pad's pads vector (a 1-D tensor).
-        var zeroVecData = Shorokoo.Globals.TensorData(new long[] { 1 }, new long[] { 0L });
+        var zeroVecData = Shorokoo.Globals.TensorData(new long[] { 1 }, new long[] { 0L }).MoveToAttribute();
         var zuKey = FastNodeKey.New();
         ctx.ZeroUnsqueezedKey = new FastTensorKey(zuKey, 0);
         ctx.NewNodes.Add(CreateConstantTensorDataNode(zuKey, zeroVecData));
@@ -761,7 +761,7 @@ internal static partial class FastListAllSpecificModelIdsUsed
         var axesKey = FastNodeKey.New();
         var axesTk = new FastTensorKey(axesKey, 0);
         newNodes.Add(CreateConstantTensorDataNode(axesKey,
-            Shorokoo.Globals.TensorData(new long[] { 1 }, new long[] { 0L })));
+            Shorokoo.Globals.TensorData(new long[] { 1 }, new long[] { 0L }).MoveToAttribute()));
 
         var unsqKey = FastNodeKey.New();
         var unsqTk = new FastTensorKey(unsqKey, 0);
@@ -811,7 +811,7 @@ internal static partial class FastListAllSpecificModelIdsUsed
         var axesKey = FastNodeKey.New();
         var axesTk = new FastTensorKey(axesKey, 0);
         newNodes.Add(CreateConstantTensorDataNode(axesKey,
-            Shorokoo.Globals.TensorData(new long[] { 1 }, new long[] { 0L })));
+            Shorokoo.Globals.TensorData(new long[] { 1 }, new long[] { 0L }).MoveToAttribute()));
 
         var nodeKey = FastNodeKey.New();
         var outputKey = new FastTensorKey(nodeKey, 0);
@@ -831,7 +831,7 @@ internal static partial class FastListAllSpecificModelIdsUsed
         var axesKey = FastNodeKey.New();
         var axesTk = new FastTensorKey(axesKey, 0);
         newNodes.Add(CreateConstantTensorDataNode(axesKey,
-            Shorokoo.Globals.TensorData(new long[] { 1 }, new long[] { 0L })));
+            Shorokoo.Globals.TensorData(new long[] { 1 }, new long[] { 0L }).MoveToAttribute()));
 
         var nodeKey = FastNodeKey.New();
         var outputKey = new FastTensorKey(nodeKey, 0);
@@ -896,8 +896,8 @@ internal static partial class FastListAllSpecificModelIdsUsed
         return outputKey;
     }
 
-    /// <summary>Builds a CONSTANT FastNode producing the given TensorData as its output.</summary>
-    private static FastNode CreateConstantTensorDataNode(FastNodeKey nodeKey, TensorData td)
+    /// <summary>Builds a CONSTANT FastNode producing the given literal as its output.</summary>
+    private static FastNode CreateConstantTensorDataNode(FastNodeKey nodeKey, TensorAttribute td)
     {
         var tensorKey = new FastTensorKey(nodeKey, 0);
         var attrDefs = Definitions.NodeDefinitions[OpCodes.CONSTANT].AttributeDefs;

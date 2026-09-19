@@ -1429,9 +1429,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     continue;
                 }
                 if (producer.OpCode != OpCodes.CONSTANT) return null;
-                var tensorVal = producer.Attributes.GetTensorVal(OnnxOpAttributeNames.AttrValue);
+                var tensorVal = producer.Attributes.GetAttributeVal(OnnxOpAttributeNames.AttrValue);
                 if (tensorVal is null || tensorVal.DType != DType.Int64) return null;
-                var vals = tensorVal.As<int64>().CopyMemory<long>();
+                var vals = tensorVal.Elements<long>().ToArray();
                 return vals.Length == 1 ? vals[0] : null;
             }
             return null;
@@ -1458,9 +1458,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     continue;
                 }
                 if (producer.OpCode != OpCodes.CONSTANT) return false;
-                var tensorVal = producer.Attributes.GetTensorVal(OnnxOpAttributeNames.AttrValue);
+                var tensorVal = producer.Attributes.GetAttributeVal(OnnxOpAttributeNames.AttrValue);
                 if (tensorVal is null || tensorVal.DType != DType.Bool) return false;
-                var vals = tensorVal.As<bit>().CopyMemory<bool>();
+                var vals = tensorVal.Elements<bool>().ToArray();
                 return vals.Length == 1 && vals[0];
             }
             return false;
@@ -1598,9 +1598,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 }
                 if (producer.OpCode != OpCodes.CONSTANT) return null;
 
-                var tensorVal = producer.Attributes.GetTensorVal(OnnxOpAttributeNames.AttrValue);
+                var tensorVal = producer.Attributes.GetAttributeVal(OnnxOpAttributeNames.AttrValue);
                 if (tensorVal is null || tensorVal.DType != DType.Int64) return null;
-                var vals = tensorVal.As<int64>().CopyMemory<long>();
+                var vals = tensorVal.Elements<long>().ToArray();
                 if (vals.Length != 1) return null;
                 var position = vals[0];
                 return position is >= int.MinValue and <= int.MaxValue ? (int)position : null;
@@ -2169,7 +2169,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var n = graph.Nodes[i];
                 if (n.Key == key.FastNodeKey && n.OpCode == OpCodes.CONSTANT)
                 {
-                    var tensorVal = n.Attributes.GetTensorVal(OnnxOpAttributeNames.AttrValue);
+                    var tensorVal = n.Attributes.GetAttributeVal(OnnxOpAttributeNames.AttrValue);
                     return tensorVal != null && tensorVal.Shape.Count == 0;
                 }
             }
@@ -2180,7 +2180,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         {
             if (!nodeByKey.TryGetValue(key.FastNodeKey, out var node)) return false;
             if (node.OpCode != OpCodes.CONSTANT) return false;
-            var tensorVal = node.Attributes.GetTensorVal(OnnxOpAttributeNames.AttrValue);
+            var tensorVal = node.Attributes.GetAttributeVal(OnnxOpAttributeNames.AttrValue);
             return tensorVal != null && tensorVal.Shape.Count == 0;
         }
     }
@@ -4207,17 +4207,17 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 {
                     var zeroKey = FastNodeKey.New();
                     newNodes.Add(CreateConstantTensorDataNode(zeroKey,
-                        Globals.TensorDataWithDefaultVals(dtype, dims)));
+                        Globals.TensorDataWithDefaultVals(dtype, dims).MoveToAttribute()));
                     deadZeroKeyByModelId[modelId] = new FastTensorKey(zeroKey, 0);
                     continue;
                 }
 
                 var oneKey = FastNodeKey.New();
                 newNodes.Add(CreateConstantTensorDataNode(oneKey,
-                    Globals.TensorDataWithDefaultVals(dtype, [1L])));
+                    Globals.TensorDataWithDefaultVals(dtype, [1L]).MoveToAttribute()));
                 var shapeKey = FastNodeKey.New();
                 newNodes.Add(CreateConstantTensorDataNode(shapeKey,
-                    Globals.TensorData([(long)dims.Length], dims)));
+                    Globals.TensorData([(long)dims.Length], dims).MoveToAttribute()));
 
                 var expandKey = FastNodeKey.New();
                 var expandTensorKey = new FastTensorKey(expandKey, 0);
@@ -4241,7 +4241,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 if (!emptyVectorKeys.TryGetValue(dtype, out var k))
                 {
                     var evKey = FastNodeKey.New();
-                    newNodes.Add(CreateConstantTensorDataNode(evKey, Globals.TensorData(dtype)));
+                    newNodes.Add(CreateConstantTensorDataNode(evKey, Globals.TensorData(dtype).MoveToAttribute()));
                     k = new FastTensorKey(evKey, 0);
                     emptyVectorKeys[dtype] = k;
                 }
@@ -4353,7 +4353,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var transformVecKey = FastNodeKey.New();
                 var transformVecTK = new FastTensorKey(transformVecKey, 0);
                 newNodes.Add(CreateConstantTensorDataNode(transformVecKey,
-                    Globals.TensorData([idLen], transformArray)));
+                    Globals.TensorData([idLen], transformArray).MoveToAttribute()));
 
                 var perReplacement = new List<FastNode>(3);
 
@@ -4583,7 +4583,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             {
                 var constKey = FastNodeKey.New();
                 graph.Nodes.Insert(graph.Nodes.IndexOf(openNode), CreateConstantTensorDataNode(
-                    constKey, Globals.TensorData([], condVal)));
+                    constKey, Globals.TensorData([], condVal).MoveToAttribute()));
                 openNode.FullInputs[""][0] = new FastTensorKey(constKey, 0);
             }
             return true;
@@ -4676,7 +4676,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// </summary>
         private const long DenseDeadFillerElementLimit = 64;
 
-        private static FastNode CreateConstantTensorDataNode(FastNodeKey nodeKey, TensorData td)
+        private static FastNode CreateConstantTensorDataNode(FastNodeKey nodeKey, TensorAttribute td)
         {
             var tensorKey = new FastTensorKey(nodeKey, 0);
             var attrDefs = Definitions.NodeDefinitions[OpCodes.CONSTANT].AttributeDefs;
@@ -4766,7 +4766,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     if (filteredId.Length == 0) continue;
                     var modelId = ModelId.FromLongVals(filteredId);
 
-                    var paramValues = ImmutableArray.CreateBuilder<TensorData?>(initParamIterations.Count);
+                    var paramValues = ImmutableArray.CreateBuilder<TensorAttribute?>(initParamIterations.Count);
                     bool allAvailable = true;
                     for (int p = 0; p < initParamIterations.Count; p++)
                     {
@@ -4777,7 +4777,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         RuntimeTensor? paramRt = iterIdx < paramList.Count ? paramList[iterIdx]
                             : paramList.Count == 1 ? paramList[0]
                             : null;
-                        var td = paramRt is not null ? TensorDataConverter.ToTensorData(paramRt) : null;
+                        // Folded here and used only as a graph literal from now on, so the move
+                        // into the description costs nothing.
+                        var td = paramRt is not null
+                            ? TensorDataConverter.ToTensorData(paramRt)?.MoveToAttribute() : null;
                         if (td is null) { allAvailable = false; break; }
                         paramValues.Add(td);
                     }
@@ -5051,10 +5054,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 if (!producerByOutput.TryGetValue(condKey, out var producer)) continue;
                 if (producer.OpCode != OpCodes.CONSTANT) continue;
 
-                var tensorVal = producer.Attributes.GetTensorVal(OnnxOpAttributeNames.AttrValue);
+                var tensorVal = producer.Attributes.GetAttributeVal(OnnxOpAttributeNames.AttrValue);
                 if (tensorVal is null || tensorVal.DType != DType.Bool) continue;
 
-                bool boolVal = tensorVal.As<bit>().ValueAt<bool>(0);
+                bool boolVal = tensorVal.Elements<bool>()[0];
 
                 if (!closeNode.FullInputs.TryGetValue(OnnxOpAttributeNames.AttrThenBranch, out var thenInputs)) continue;
                 if (!closeNode.FullInputs.TryGetValue(OnnxOpAttributeNames.AttrElseBranch, out var elseInputs)) continue;
@@ -5359,11 +5362,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             if (!attrs.IsDefaultValue(OnnxOpAttributeNames.AttrValueInt))
                 return attrs.GetLongVal(OnnxOpAttributeNames.AttrValueInt);
 
-            var tensorVal = attrs.GetTensorVal(OnnxOpAttributeNames.AttrValue);
+            var tensorVal = attrs.GetAttributeVal(OnnxOpAttributeNames.AttrValue);
             if (tensorVal is null) return null;
             if (tensorVal.DType != DType.Int64) return null;
             if (tensorVal.Shape.Dims.Length != 0) return null; // require scalar
-            return tensorVal.As<int64>().ValueAt<long>(0);
+            return tensorVal.Elements<long>()[0];
         }
     }
 
@@ -5724,10 +5727,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             if (condKey is null || condKey.Value.IsEmpty) return true;
             if (!producerByOutput.TryGetValue(condKey.Value, out var prod)) return false;
             if (prod.OpCode != OpCodes.CONSTANT) return false;
-            var tv = prod.Attributes.GetTensorVal(OnnxOpAttributeNames.AttrValue);
+            var tv = prod.Attributes.GetAttributeVal(OnnxOpAttributeNames.AttrValue);
             if (tv is null || tv.DType != DType.Bool) return false;
             if (tv.Shape.Dims.Length != 0) return false;
-            return tv.As<bit>().ValueAt<bool>(0);
+            return tv.Elements<bool>()[0];
         }
 
         /// <summary>
@@ -5990,7 +5993,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     var seedAttrs = OnnxCSharpAttributes.FromCSharpVals(
                         new Dictionary<string, object?>
                         {
-                            [OnnxOpAttributeNames.AttrValue] = Globals.TensorData(new long[0], true),
+                            [OnnxOpAttributeNames.AttrValue] = Globals.TensorData(new long[0], true).MoveToAttribute(),
                         },
                         Definitions.NodeDefinitions[OpCodes.CONSTANT].AttributeDefs);
                     var seedNode = new FastNode
@@ -6027,7 +6030,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var trueAttrs = OnnxCSharpAttributes.FromCSharpVals(
                     new Dictionary<string, object?>
                     {
-                        [OnnxOpAttributeNames.AttrValue] = Globals.TensorData(new long[0], true),
+                        [OnnxOpAttributeNames.AttrValue] = Globals.TensorData(new long[0], true).MoveToAttribute(),
                     },
                     Definitions.NodeDefinitions[OpCodes.CONSTANT].AttributeDefs);
                 var trueNode = new FastNode
@@ -6393,11 +6396,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             if (!attrs.IsDefaultValue(OnnxOpAttributeNames.AttrValueInt))
                 return attrs.GetLongVal(OnnxOpAttributeNames.AttrValueInt);
 
-            var tensorVal = attrs.GetTensorVal(OnnxOpAttributeNames.AttrValue);
+            var tensorVal = attrs.GetAttributeVal(OnnxOpAttributeNames.AttrValue);
             if (tensorVal is null) return null;
             if (tensorVal.DType != DType.Int64) return null;
             if (tensorVal.Shape.Dims.Length != 0) return null;
-            return tensorVal.As<int64>().ValueAt<long>(0);
+            return tensorVal.Elements<long>()[0];
         }
     }
 
@@ -6508,14 +6511,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             var store = new QuickExecutionEngine().Run(subgraph);
 
-            var foldedTensorData = new Dictionary<FastTensorKey, TensorData>();
+            var foldedTensorData = new Dictionary<FastTensorKey, TensorAttribute>();
             foreach (var key in requiredConstantTensors)
             {
                 if (store.TryGetValue(key, out var rt)
                     && rt is RuntimeTensor plain
                     && TensorDataConverter.ToTensorData(plain) is { } td)
                 {
-                    foldedTensorData[key] = td;
+                    // The folded value is this pass's own and goes straight into the description.
+                    foldedTensorData[key] = td.MoveToAttribute();
                 }
             }
 
@@ -6593,7 +6597,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             opCode == InternalOpCodes.SEQUENCE_CONCAT ||
             opCode == InternalOpCodes.SEQUENCE_SLICE;
 
-        private static FastNode CreateConstantTensorDataNode(FastNodeKey nodeKey, TensorData td)
+        private static FastNode CreateConstantTensorDataNode(FastNodeKey nodeKey, TensorAttribute td)
         {
             var tensorKey = new FastTensorKey(nodeKey, 0);
             var attrDefs = Definitions.NodeDefinitions[OpCodes.CONSTANT].AttributeDefs;
@@ -6767,7 +6771,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         public static FastNode CreateConstantNode(FastNodeKey nodeKey, long[] dims, long value)
         {
             var tensorKey = new FastTensorKey(nodeKey, 0);
-            var td = Globals.TensorData(dims, value);
+            var td = Globals.TensorData(dims, value).MoveToAttribute();
             var attrDefs = Definitions.NodeDefinitions[OpCodes.CONSTANT].AttributeDefs;
             var attrs = OnnxCSharpAttributes.FromCSharpVals(
                 new Dictionary<string, object?> { [OnnxOpAttributeNames.AttrValue] = td }, attrDefs);

@@ -161,7 +161,7 @@ namespace Shorokoo.Core.Nodes.Processors.Training
         /// through ORT via <paramref name="compute"/> as a fallback for the unresolved
         /// keys.
         /// </summary>
-        private static TensorData[] ResolveIterCountValues(
+        private static TensorAttribute[] ResolveIterCountValues(
             InternalComputationGraph resolverGraph,
             List<FastTensorKey> iterCountKeys,
             ComputeContext compute)
@@ -206,13 +206,14 @@ namespace Shorokoo.Core.Nodes.Processors.Training
                         // needs nothing. (Copying is also the only route that works when the
                         // context is a card's: the copy is made by the backend that allocated it.)
                         var fromOrt = ortResolved[i].ToTensorData();
-                        resolved[i] = fromOrt.Context is null ? fromOrt : fromOrt.CopyTo(null);
+                        resolved[i] = ReferenceEquals(fromOrt.Context, ComputeContext.Host)
+                            ? fromOrt : fromOrt.Detach();
                     }
             }
 
-            var result = new TensorData[iterCountKeys.Count];
+            var result = new TensorAttribute[iterCountKeys.Count];
             for (int i = 0; i < iterCountKeys.Count; i++)
-                result[i] = resolved[i]!;
+                result[i] = resolved[i]!.MoveToAttribute();
             return result;
         }
     }

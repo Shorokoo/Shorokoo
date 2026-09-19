@@ -33,26 +33,26 @@ public class CompositeTransferCoverageTests
     }
 
     [Fact]
-    public void TestASequenceCopyLeavesTheOriginalOwningItsElements()
+    public void TestASequenceCopyIsIndependentOfTheOriginal()
     {
         var sequence = TensorDataSequence.Create([Sample(1f)], DType.Float32);
 
         var copy = sequence.CopyTo(new ComputeContext());
+        sequence.Dispose();
 
-        Assert.True(sequence[0].OwnsMemory);
-        Assert.True(copy[0].OwnsMemory);
         Assert.Equal([1f, 2f], Floats(copy[0]));
     }
 
     [Fact]
-    public void TestASequenceGivesAccessWithoutTakingOwnership()
+    public void TestASequenceGivesASecondHandleOnTheSameElements()
     {
         var sequence = TensorDataSequence.Create([Sample(1f)], DType.Float32);
 
         var readers = sequence.GiveAccessTo(new ComputeContext());
 
-        Assert.False(readers[0].OwnsMemory);
-        Assert.True(sequence[0].OwnsMemory);
+        Assert.NotSame(sequence[0], readers[0]);
+        readers.Dispose();
+        Assert.Equal([1f, 2f], Floats(sequence[0]));
     }
 
     [Fact]
@@ -133,8 +133,8 @@ public class CompositeTransferCoverageTests
         using (var context = new ComputeContext(detachesOutputs: true))
             sequence = context.Execute(graph, TensorData([2L], (float[])[1f, 2f]))[0].ToTensorDataSequence();
 
-        Assert.Null(sequence.Context);
-        Assert.All(sequence, e => Assert.Null(e.Context));
+        Assert.Same(ComputeContext.Host, sequence.Context);
+        Assert.All(sequence, e => Assert.Same(ComputeContext.Host, e.Context));
         Assert.Equal([2f, 4f], Floats(sequence[1]));
     }
 
@@ -200,31 +200,25 @@ public class CompositeTransferCoverageTests
     public void TestAnOperatorAttributeRefusesATensorBoundToAContext()
     {
         var bound = Sample(1f).TransferTo(new ComputeContext());
-        ImmutableList<NodeDefAttributeDef> defs = [new NodeDefAttributeDef
-            { AttributeName = "value", Type = AttributeType.Tensor, DefaultValue = null }];
 
-        var ex = Assert.Throws<ArgumentException>(() => OnnxProtoAttributes.FromCSharpVals(
-            new Dictionary<string, object?> { ["value"] = bound }, defs));
-        Assert.Contains("CopyTo(null)", ex.Message);
+        var ex = Assert.Throws<InvalidOperationException>(() => bound.MoveToAttribute());
+        Assert.Contains("Detach()", ex.Message);
 
         // And the detached form the message names goes through.
-        var detached = bound.CopyTo(null);
-        _ = OnnxProtoAttributes.FromCSharpVals(
-            new Dictionary<string, object?> { ["value"] = detached }, defs);
+        _ = bound.Detach().MoveToAttribute();
     }
 
     [Fact]
-    public void TestATensorAlreadyCapturedAsAnAttributeRefusesToBeBoundToAContext()
+    public void TestATensorCapturedAsAnAttributeIsSpentAndCanNoLongerBeBound()
     {
         var literal = TensorData([2L], (float[])[1f, 2f]);
-        _ = OnnxOp.Constant(value: literal);
+        var attribute = literal.MoveToAttribute();
         using var context = new ComputeContext();
 
-        Assert.Throws<InvalidOperationException>(() => literal.TransferTo(context));
-        Assert.Throws<InvalidOperationException>(() => literal.GiveAccessTo(context));
-        Assert.Null(literal.Context);
-        Assert.True(literal.OwnsMemory);
-        Assert.Equal([1f, 2f], Floats(literal));
+        Assert.True(literal.IsDisposed);
+        Assert.Throws<ObjectDisposedException>(() => literal.TransferTo(context));
+        Assert.Throws<ObjectDisposedException>(() => literal.GiveAccessTo(context));
+        Assert.Equal([1f, 2f], attribute.Elements<float>().ToArray());
     }
 
     [Fact]
@@ -238,7 +232,7 @@ public class CompositeTransferCoverageTests
         var sequence = TensorDataSequence.OfElements([good, doomed], DType.Float32);
         Assert.ThrowsAny<Exception>(() => sequence.TransferTo(target));
         Assert.Equal([1f, 2f], Floats(sequence[0]));
-        Assert.True(sequence[0].OwnsMemory);
+        Assert.Same(ComputeContext.Host, sequence[0].Context);
 
         TensorStructFieldDef[] fields =
         [
@@ -253,8 +247,8 @@ public class CompositeTransferCoverageTests
             new Dictionary<string, IData> { { "a", first }, { "b", second } });
 
         Assert.ThrowsAny<Exception>(() => composite.TransferTo(target));
-        Assert.True(first.OwnsMemory);
-        Assert.Null(first.Context);
+        Assert.Equal([5f, 6f], Floats(first));
+        Assert.Same(ComputeContext.Host, first.Context);
     }
 
     [Fact]
@@ -268,9 +262,6 @@ public class CompositeTransferCoverageTests
             new TensorStructDef(fields, "S"),
             new Dictionary<string, IData> { { "f", Sample(5f) } }).TransferTo(source);
 
-        // A reader owns none of its elements, which is the case the ownership gate on the transfer
-        // operations is for -- and the case a copy must not be gated by, since a copy is exactly
-        // what a caller holding no ownership has to reach for.
         var sequenceReader = sequence.GiveAccessTo(source);
         var structReader = struc.GiveAccessTo(source);
 
@@ -278,10 +269,9 @@ public class CompositeTransferCoverageTests
         var keptStruct = structReader.CopyTo(null);
 
         Assert.NotSame(sequenceReader[0], keptSequence[0]);
-        Assert.True(keptSequence[0].OwnsMemory);
-        Assert.Null(keptSequence[0].Context);
+        Assert.Same(ComputeContext.Host, keptSequence[0].Context);
         Assert.NotSame(StructField(structReader), StructField(keptStruct));
-        Assert.True(StructField(keptStruct).OwnsMemory);
+        Assert.Same(ComputeContext.Host, StructField(keptStruct).Context);
 
         // The point of the copy: it outlives the context the elements were read from.
         source.Dispose();

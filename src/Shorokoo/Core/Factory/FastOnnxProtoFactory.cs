@@ -140,7 +140,7 @@ namespace Shorokoo.Core.Factory
                     $"FastOnnxProtoFactory.CreateInitializer: node {paramDataNode.OpCode} is not MODEL_PARAM_DATA.");
 
             var attrs = paramDataNode.Attributes;
-            var data = attrs.GetTensorVal(OnnxOpAttributeNames.ShrkAttrTensorData)
+            var data = attrs.GetAttributeVal(OnnxOpAttributeNames.ShrkAttrTensorData)
                 ?? throw new InvalidOperationException(
                     $"FastOnnxProtoFactory.CreateInitializer: MODEL_PARAM_DATA node has no {OnnxOpAttributeNames.ShrkAttrTensorData} attribute.");
             bool isTrainable = attrs.GetBoolVal(OnnxOpAttributeNames.ShrkAttrIsTrainable)
@@ -151,14 +151,14 @@ namespace Shorokoo.Core.Factory
             // values: emit a dims/dtype-true initializer with an empty payload plus the
             // values-elided marker, so serialization never materializes a full-size
             // zero buffer and the reader reconstructs the placeholder as metadata-only.
-            bool valuesElided = data is WeightPlaceholderTensorData;
+            bool valuesElided = !data.HasValues;
             var tensor = OnnxIRFactory.CreateTensor(
                 dims: data.Shape.Dims,
                 name: outputKey.ToString(),
                 type: data.DType,
                 identifierTemplate: paramDataNode.IdentifierTemplate,
                 isTrainable: isTrainable,
-                data: valuesElided ? [] : data.CopyRawMemory());
+                data: valuesElided ? [] : data.Bytes.ToArray());
             if (valuesElided)
             {
                 tensor.MetadataProps.Add(new StringStringEntryProto

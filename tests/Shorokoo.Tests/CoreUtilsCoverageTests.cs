@@ -2,6 +2,7 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
+using Microsoft.ML.OnnxRuntime;
 using Shorokoo.Core.Factory;
 using Shorokoo.Core.Factory.OpsFactories;
 using Shorokoo.Core.Inference;
@@ -18,7 +19,9 @@ namespace Shorokoo.Tests;
 /// OpsFactories <see cref="Helpers"/> dtype sets and attribute-type mapping, the
 /// <see cref="InferenceBackend"/> deployment-folder discovery and selection policy, the
 /// description a live backend answers with and the device assertion built on it, the
-/// <see cref="DeviceMemory"/> settings the CUDA backends map onto ORT's arena options, the typed
+/// uninitialised tensor allocation on the backend ABI and the zero-filling default behind it, the
+/// <see cref="DeviceMemory"/> settings the CUDA backends map onto ORT's arena options, the
+/// per-run abort token and what both run paths do with one, the typed
 /// value-handle conversions, <c>ShapeUtils</c>' argument validation for <c>Reshape</c>'s
 /// <c>keepAxes</c>, the <see cref="AtomicFileWriter"/> temp-and-rename commit protocol
 /// (crash-window fault injection, stale-temp sweep, retain-last-N rotation), the
@@ -332,6 +335,150 @@ public class CoreUtilsCoverageTests
         Assert.Contains(live.ToString(), Assert.Throws<InvalidOperationException>(
             () => InferenceBackend.RequireDevice(other)).Message);
         Assert.Throws<ArgumentOutOfRangeException>(() => InferenceBackend.RequireDevice((ComputeDevice)7));
+    }
+
+    private static readonly ShorokooTensorElementType[] FixedStrideElementTypes =
+    [
+        ShorokooTensorElementType.Bool,
+        ShorokooTensorElementType.Int8, ShorokooTensorElementType.UInt8,
+        ShorokooTensorElementType.Int16, ShorokooTensorElementType.UInt16,
+        ShorokooTensorElementType.Float16, ShorokooTensorElementType.BFloat16,
+        ShorokooTensorElementType.Int32, ShorokooTensorElementType.UInt32,
+        ShorokooTensorElementType.Float,
+        ShorokooTensorElementType.Int64, ShorokooTensorElementType.UInt64,
+        ShorokooTensorElementType.Double,
+    ];
+
+    [Fact]
+    public void TestTheFixedStrideTableSizesEveryElementTypeTheByteWisePathsAccept()
+    {
+        Assert.Equal(
+            (int[])[1, 1, 1, 2, 2, 2, 2, 4, 4, 4, 8, 8, 8],
+            [.. FixedStrideElementTypes.Select(TensorElementLayout.ElementSizeInBytes)]);
+
+        Assert.Equal(24, TensorElementLayout.ByteCount(ShorokooTensorElementType.Float, [2L, 3L]));
+        Assert.Equal(16, TensorElementLayout.ByteCount(ShorokooTensorElementType.Int64, [2L]));
+        Assert.Equal(0, TensorElementLayout.ByteCount(ShorokooTensorElementType.Double, [0L, 3L]));
+        Assert.Equal(1, TensorElementLayout.ByteCount(ShorokooTensorElementType.Bool, []));
+
+        Assert.Contains("CreateStringTensor", Assert.Throws<NotSupportedException>(
+            () => TensorElementLayout.ElementSizeInBytes(ShorokooTensorElementType.String)).Message);
+        Assert.Throws<NotSupportedException>(
+            () => TensorElementLayout.ElementSizeInBytes(ShorokooTensorElementType.Complex64));
+        Assert.Throws<NotSupportedException>(
+            () => TensorElementLayout.ByteCount(ShorokooTensorElementType.UInt4, [8L]));
+        Assert.Throws<ArgumentNullException>(
+            () => TensorElementLayout.ByteCount(ShorokooTensorElementType.Float, null!));
+        Assert.Throws<OverflowException>(
+            () => TensorElementLayout.ByteCount(ShorokooTensorElementType.Float, [long.MaxValue]));
+    }
+
+    [Fact]
+    public void TestAnUninitializedTensorIsWhatTheCopyingPathBuildsWithoutTheCopy()
+    {
+        var backend = InferenceBackend.Default;
+        long[][] shapes = [[4L], [2L, 3L], [2L, 1L, 5L]];
+
+        foreach (var elementType in FixedStrideElementTypes)
+            foreach (var shape in shapes)
+            {
+                using var copied = backend.CreateTensorInBackendMemory(
+                    elementType, new byte[Elements(shape) * sizeof(double)], shape);
+                using var fresh = backend.CreateUninitializedTensorInBackendMemory(elementType, shape);
+                Assert.Equal(copied.ElementType, fresh.ElementType);
+                Assert.Equal(copied.Shape, fresh.Shape);
+                Assert.Equal(
+                    copied.GetTensorDataAsSpan<byte>().Length, fresh.GetTensorDataAsSpan<byte>().Length);
+            }
+
+        Assert.Equal(
+            (float[])[1.5f, -2.5f, 3f],
+            Written(backend, ShorokooTensorElementType.Float, [3L], (float[])[1.5f, -2.5f, 3f]));
+        Assert.Equal(
+            (long[])[1L, -2L], Written(backend, ShorokooTensorElementType.Int64, [1L, 2L], (long[])[1L, -2L]));
+        Assert.Equal(
+            (byte[])[7, 9, 0], Written(backend, ShorokooTensorElementType.UInt8, [3L], (byte[])[7, 9, 0]));
+
+        Assert.Equal(
+            Assert.Throws<NotSupportedException>(() => backend.CreateTensorFromRawBytes(
+                ShorokooTensorElementType.String, [], [2L])).Message,
+            Assert.Throws<NotSupportedException>(() => backend.CreateUninitializedTensorInBackendMemory(
+                ShorokooTensorElementType.String, [2L])).Message);
+        Assert.Throws<NotSupportedException>(() => backend.CreateUninitializedTensorInBackendMemory(
+            ShorokooTensorElementType.Complex64, [2L]));
+        Assert.Throws<ArgumentNullException>(() => backend.CreateUninitializedTensorInBackendMemory(
+            ShorokooTensorElementType.Float, null!));
+    }
+
+    [Fact]
+    public void TestABackendThatDoesNotOverrideTheUninitializedAllocationStillGetsAZeroFilledOne()
+    {
+        IShorokooInferenceBackend defaulting = new ByteWiseOnlyBackend();
+
+        Assert.Equal(new float[6], Zeroed<float>(defaulting, ShorokooTensorElementType.Float, [2L, 3L]));
+        Assert.Equal(new long[3], Zeroed<long>(defaulting, ShorokooTensorElementType.Int64, [3L]));
+        Assert.Equal(new byte[5], Zeroed<byte>(defaulting, ShorokooTensorElementType.UInt8, [5L]));
+        Assert.Equal(new short[4], Zeroed<short>(defaulting, ShorokooTensorElementType.Int16, [2L, 2L]));
+        Assert.Equal(new double[2], Zeroed<double>(defaulting, ShorokooTensorElementType.Double, [2L]));
+
+        Assert.Contains("CreateStringTensor", Assert.Throws<NotSupportedException>(
+            () => defaulting.CreateUninitializedTensorInBackendMemory(
+                ShorokooTensorElementType.String, [2L])).Message);
+        Assert.Throws<NotSupportedException>(() => defaulting.CreateUninitializedTensorInBackendMemory(
+            ShorokooTensorElementType.Complex64, [2L]));
+        Assert.Throws<ArgumentNullException>(() => defaulting.CreateUninitializedTensorInBackendMemory(
+            ShorokooTensorElementType.Float, null!));
+    }
+
+    private static long Elements(long[] shape)
+    {
+        var elements = 1L;
+        foreach (var dim in shape) elements *= dim;
+        return elements;
+    }
+
+    private static T[] Written<T>(
+        IShorokooInferenceBackend backend, ShorokooTensorElementType elementType, long[] shape, T[] values)
+        where T : unmanaged
+    {
+        using var fresh = backend.CreateUninitializedTensorInBackendMemory(elementType, shape);
+        values.CopyTo(fresh.GetTensorMutableDataAsSpan<T>());
+        return [.. fresh.GetTensorDataAsSpan<T>()];
+    }
+
+    private static T[] Zeroed<T>(
+        IShorokooInferenceBackend backend, ShorokooTensorElementType elementType, long[] shape)
+        where T : unmanaged
+    {
+        using var value = backend.CreateUninitializedTensorInBackendMemory(elementType, shape);
+        Assert.Equal(elementType, value.ElementType);
+        Assert.Equal(shape, value.Shape);
+        return [.. value.GetTensorDataAsSpan<T>()];
+    }
+
+    /// <summary>A backend answering only the byte-wise constructor, so what serves everything built
+    /// on it is the interface's own default bodies rather than a backend's.</summary>
+    private sealed class ByteWiseOnlyBackend : IShorokooInferenceBackend
+    {
+        public BackendDescription Description { get; } = new("byte-wise-only", ComputeDevice.Cpu, null);
+
+        public IShorokooTensorValue CreateTensorFromRawBytes(
+            ShorokooTensorElementType elementType, byte[] data, long[] shape)
+            => InferenceBackend.Default.CreateTensorFromRawBytes(elementType, data, shape);
+
+        public IShorokooInferenceSession CreateSession(
+            ReadOnlyMemory<byte> modelBytes, ShorokooGraphOptimization graphOptimization,
+            ShorokooLogSeverity logSeverity, DeviceMemorySettings deviceMemory)
+            => throw new NotSupportedException();
+
+        public IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged
+            => throw new NotSupportedException();
+
+        public IShorokooTensorValue CreateStringTensor(IReadOnlyList<string> data, long[] shape)
+            => throw new NotSupportedException();
+
+        public IShorokooTensorValue CreateSequence(IReadOnlyList<IShorokooTensorValue> values)
+            => throw new NotSupportedException();
     }
 
     [Fact]
@@ -672,6 +819,53 @@ public class CoreUtilsCoverageTests
         Assert.Equal(shrinking, compiled.DefaultRunSettings);
     }
 
+    /// <summary>
+    /// The abort seam, from both ends. A run whose token is already cancelled is refused before
+    /// anything is fed — so one ORT would itself have failed never reaches it — and a token that
+    /// is never cancelled leaves every run as it was and holds nothing once the run returns.
+    /// Without that last part a per-run callback would outlive the options it writes to.
+    /// </summary>
+    [Fact]
+    public void TestACancelledRunIsRefusedBeforeItRunsAndAnUnfiredTokenIsHeldNoLongerThanTheRun()
+    {
+        var x = InputTensor<float32>("x", rank: 1);
+        using var context = new ComputeContext();
+        var compiled = context.Compile(new InternalComputationGraph([x], [x + x]));
+        float[] values = [1f, 2f, 3f];
+        float[] square = [1f, 2f, 3f, 4f];
+        var input = TensorData([3L], values);
+        var wrongRank = TensorData([2L, 2L], square);
+        float[] expected = [2f, 4f, 6f];
+
+        float[] Doubled(NamedModelParam[] outputs)
+            => [.. outputs[0].ToTensorData().As<float32>().AccessMemory<float>()];
+
+        Assert.False(RunSettings.Default.CancellationToken.CanBeCanceled);
+        Assert.Equal(RunSettings.Default, new RunSettings { CancellationToken = CancellationToken.None });
+        Assert.Equal(RunSettings.Default, new ComputeContext().RunSettings);
+
+        using var unfired = new CancellationTokenSource();
+        var watched = new RunSettings { CancellationToken = unfired.Token };
+        Assert.NotEqual(RunSettings.Default, watched);
+        Assert.Equal(expected, Doubled(compiled.Execute([input], RunSettings.Default)));
+        Assert.Equal(expected, Doubled(compiled.Execute([input], watched)));
+        Assert.Equal(expected, Doubled(compiled.Execute([input], watched)));
+        Assert.Equal(expected, Doubled(compiled.Execute([input], [false], watched)));
+        unfired.Cancel();
+
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        var stopped = new RunSettings { CancellationToken = cancelled.Token };
+        var refused = Assert.Throws<OperationCanceledException>(() => compiled.Execute([input], stopped));
+        Assert.Equal(cancelled.Token, refused.CancellationToken);
+        Assert.Null(refused.InnerException);
+        Assert.Throws<OperationCanceledException>(() => compiled.Execute([input], [false], stopped));
+        Assert.Throws<OperationCanceledException>(() => compiled.Execute([input], [true], stopped));
+        Assert.Throws<OperationCanceledException>(() => compiled.Execute([wrongRank], stopped));
+        Assert.IsType<OnnxRuntimeException>(
+            Record.Exception(() => compiled.Execute([wrongRank], RunSettings.Default)));
+    }
+
     /// <summary>A reading is null on a machine with no CUDA runtime and a real one where there is
     /// a card, so the first assertion holds either way; the fold into the peak is driven through
     /// the seam so it is pinned on both.</summary>
@@ -912,6 +1106,11 @@ public class CoreUtilsCoverageTests
     // Forwarding the span straight out (`return Inner.GetTensorDataAsSpan<T>();`) is not this
     // shape — the caller owns the lifetime from there. CopyMemory / CopyRawMemory / ValueAt do
     // the copy with the tensor kept alive, and are what a call site should reach for instead.
+    // The leading `\.` is a real limitation, not an oversight: it keys on a receiver, so a span
+    // taken through an implicit `this` inside TensorData itself -- `write(AccessModifiableMemory
+    // <V>())` in WriteMemory -- is invisible to this guard. Relaxing the dot matches every
+    // declaration of those members too. Those helpers keep their tensor alive by convention and
+    // by review; removing a GC.KeepAlive(this) from one of them leaves the suite green.
     private static readonly Regex SpanOutOfTensor = new(
         @"\.\s*(GetTensorMutableRawData|GetTensorDataAsSpan|GetTensorMutableDataAsSpan"
         + @"|AccessRawMemory|AccessModifiableRawMemory|AccessMemory|AccessModifiableMemory)"
@@ -1222,6 +1421,68 @@ public class CoreUtilsCoverageTests
         Assert.All(spansMustFlag, s => Assert.NotEmpty(SpansUsedWithoutKeepingTheTensorAlive(s)));
         Assert.All(spansMustNotFlag, s => Assert.Empty(SpansUsedWithoutKeepingTheTensorAlive(s)));
     }
+
+    /// <summary>
+    /// Every <c>RunOptions</c> the product builds is armed to abort. ONNX Runtime reads its
+    /// terminate flag before each node and a run's options are otherwise a local no other thread
+    /// can reach, so an unarmed one is a run nothing can stop — and nothing behavioural notices,
+    /// because a lease makes a deliberate delete slow rather than unsafe. Deleting the
+    /// registration therefore leaves the whole suite green, which is what this is here for.
+    /// </summary>
+    [Fact]
+    public void TestEveryRunOptionsIsArmedToAbortAndTheGuardStillDetectsEveryEvasion()
+    {
+        var sources = ProductSources();
+        Assert.Contains(sources, s => RunOptionsConstruction.IsMatch(StripCommentsAndStrings(s)));
+        Assert.Empty(sources.SelectMany(UnarmedRunOptions));
+
+        string[] mustFlag =
+        [
+            "class C { void M() { using var o = new RunOptions(); _s.Run(o, i, n); } }",
+            "class C { void M() { using var o = new RunOptions(); using var a = AbortWhenCancelled(other, t); } }",
+            "class C { void M() { using var o = new RunOptions(); } void N() { using var a = AbortWhenCancelled(o, t); } }",
+            "class C { void M() { _s.Run(new RunOptions(), i, n); } }",
+            "class C { void M() { using var o = new RunOptions(); } /* AbortWhenCancelled(o, t) */ }",
+        ];
+        string[] mustNotFlag =
+        [
+            "class C { void M() { using var o = new RunOptions(); using var a = AbortWhenCancelled(o, t); } }",
+            "class C { void M() { using RunOptions o = new RunOptions(); using var a = AbortWhenCancelled(o, token); } }",
+            "class C { void M() { using var o = new RunOptions(); if (c) { using var a = AbortWhenCancelled(o, t); } } }",
+        ];
+        Assert.All(mustFlag, s => Assert.NotEmpty(UnarmedRunOptions(s)));
+        Assert.All(mustNotFlag, s => Assert.Empty(UnarmedRunOptions(s)));
+    }
+
+    private static readonly Regex RunOptionsConstruction = new(
+        @"new\s+RunOptions\s*\(", RegexOptions.Compiled);
+
+    // Armed means the registration names THIS options object and sits in the same member: one
+    // naming another local writes the flag on options no run is using, and one in a neighbouring
+    // member never runs for this construction at all.
+    private static string[] UnarmedRunOptions(string source)
+    {
+        var code = StripCommentsAndStrings(source);
+        var flagged = new List<string>();
+        foreach (Match m in RunOptionsConstruction.Matches(code))
+        {
+            var named = Regex.Match(code[..m.Index], @"(\w+)\s*=\s*$");
+            var member = code[m.Index..MemberEndFrom(code, m.Index)];
+            if (named.Success && Regex.IsMatch(
+                    member,
+                    @"AbortWhenCancelled\s*\(\s*" + Regex.Escape(named.Groups[1].Value) + @"\s*,"))
+                continue;
+            flagged.Add(member[..Math.Min(member.Length, 80)].Trim());
+        }
+        return [.. flagged];
+    }
+
+    private static string[] ProductSources() =>
+        [.. Directory
+            .EnumerateFiles(ProductSourceRoot(), "*.cs", SearchOption.AllDirectories)
+            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}") &&
+                        !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}"))
+            .Select(File.ReadAllText)];
 
     [Fact]
     public void TestVariableHandleConversionCoverage()

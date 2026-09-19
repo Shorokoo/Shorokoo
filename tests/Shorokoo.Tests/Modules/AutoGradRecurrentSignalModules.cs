@@ -373,7 +373,7 @@ namespace Shorokoo.Tests.Modules
                 OnnxOp.Cast(OnnxOp.Range(Scalar(1L), Scalar(13L), Scalar(1L)), saturate: null, to: DType.Float32),
                 Vector(1L, 3L, 4L), allowZero: false);
             var theta = thetaBase * a * Scalar(0.1f);
-            var size = (Tensor<int64>)OnnxOp.Constant(TensorData(5, 1L, 1L, 2L, 2L, 2L));
+            var size = (Tensor<int64>)OnnxOp.Constant(TensorData(5, 1L, 1L, 2L, 2L, 2L).MoveToAttribute());
             var grid = (Tensor<float32>)OnnxOp.AffineGrid(theta, size, alignCorners: false); // [1,2,2,2,3]
             var w = (Tensor<float32>)OnnxOp.Reshape(
                 OnnxOp.Cast(OnnxOp.Range(Scalar(1L), Scalar(25L), Scalar(1L)), saturate: null, to: DType.Float32),

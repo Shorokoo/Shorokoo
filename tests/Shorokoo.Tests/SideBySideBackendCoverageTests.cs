@@ -306,6 +306,10 @@ public class SideBySideBackendCoverageTests
         public IShorokooTensorValue CreateTensorInBackendMemory(
             ShorokooTensorElementType elementType, byte[] data, long[] shape)
             => inner.CreateTensorInBackendMemory(elementType, data, shape);
+
+        public IShorokooTensorValue CreateUninitializedTensorInBackendMemory(
+            ShorokooTensorElementType elementType, long[] shape)
+            => inner.CreateUninitializedTensorInBackendMemory(elementType, shape);
     }
 
     /// <summary>A session that notes what it was fed on its way to running it.</summary>

@@ -45,7 +45,7 @@ namespace Shorokoo.Core.Nodes
 
         public BestGraphAttribute[] Subgraphs => this.GraphAttributeNames.Order().Select(Attributes.GetGraphVal).AssertNotNulls().ToArray();
 
-        public TensorData? GetTensorData() => this.NodeDef.OpName != InternalOpCodes.MODEL_PARAM_DATA ? null : Attributes.GetTensorVal(OnnxOpAttributeNames.ShrkAttrTensorData);
+        public TensorAttribute? GetTensorAttribute() => this.NodeDef.OpName != InternalOpCodes.MODEL_PARAM_DATA ? null : Attributes.GetAttributeVal(OnnxOpAttributeNames.ShrkAttrTensorData);
 
         /// <summary>
         /// Gets the IsTrainable value for MODEL_PARAM_DATA, MODEL_PARAM_X_REF nodes, and function call nodes.

@@ -53,7 +53,6 @@ public class CrossDeviceRoutingCoverageTests
         Assert.Equal(1, firstCard.HostCopies);
         Assert.Equal(1, secondCard.BackendMemoryBuilds);
         Assert.Equal(MemorySpace.Cuda(1), onSecond.Space);
-        Assert.True(onSecond.OwnsMemory);
         Assert.True(onFirst.IsDisposed);
     }
 
@@ -70,7 +69,7 @@ public class CrossDeviceRoutingCoverageTests
 
         var onCard = TensorData([2L], (float[])[5f, 6f]).TransferTo(one);
         var shared = onCard.GiveAccessTo(alsoOne);
-        Assert.False(shared.OwnsMemory);
+        Assert.Same(alsoOne, shared.Context);
         Assert.Equal(0, backend.HostCopies);
 
         // The same request across runtimes cannot be served without allocating, which is what
@@ -111,7 +110,6 @@ public class CrossDeviceRoutingCoverageTests
         // being handed the allocation, which is the only thing that can cross a space boundary.
         Assert.Equal(1, target.BackendMemoryBuilds);
         Assert.Equal(MemorySpace.Cuda(1), moved.Space);
-        Assert.True(moved.OwnsMemory);
         Assert.True(onHost.IsDisposed);
     }
 
@@ -126,7 +124,6 @@ public class CrossDeviceRoutingCoverageTests
 
         Assert.Equal(1, target.BackendMemoryBuilds);
         Assert.Equal(MemorySpace.Cuda(1), copy.Space);
-        Assert.True(onHost.OwnsMemory);
         Assert.Equal([7f, 8f], onHost.As<float32>().AccessMemory<float>().ToArray());
     }
 

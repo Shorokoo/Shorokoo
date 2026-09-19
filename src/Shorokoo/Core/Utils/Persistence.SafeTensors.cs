@@ -100,7 +100,7 @@ namespace Shorokoo
                         "overwrite the other.");
                 paramIdByName[name] = paramId;
 
-                var data = node.GetTensorData()!;
+                var data = node.GetTensorAttribute()!;
                 tensors.Add(new SafeTensor(
                     name, data, SafeTensorLoader.DTypeToSafeTensorDType(data.DType), data.Shape.Dims));
             }

@@ -67,10 +67,12 @@ internal class ShapeInferenceInterpreter
         => Infer(graph, requiredKeys: null, sampleInputs);
 
     /// <summary>
-    /// <see cref="IData"/>-shaped overload: a graph whose inputs are not all tensors — one taking an
-    /// <c>OptionalTensor</c>, say — is inferred from the same exemplars its runtime would be fed.
+    /// <see cref="IRuntimeTensor"/>-shaped overload, for a caller with no values to give: a runtime
+    /// tensor states its shape and dtype and leaves its data null, so an input nothing will read is
+    /// described rather than materialized. This is also the shape a graph whose inputs are not all
+    /// tensors takes — one taking an <c>OptionalTensor</c>, say.
     /// </summary>
-    public ShapeInferenceResult Infer(InternalComputationGraph graph, params IData[] sampleInputs)
+    public ShapeInferenceResult Infer(InternalComputationGraph graph, params IRuntimeTensor[] sampleInputs)
         => Infer(graph, requiredKeys: null, sampleInputs);
 
     /// <summary>
@@ -89,21 +91,37 @@ internal class ShapeInferenceInterpreter
         InternalComputationGraph graph,
         IReadOnlyCollection<FastTensorKey>? requiredKeys,
         params TensorData[] sampleInputs)
-        => Infer(graph, requiredKeys, (IData[])sampleInputs);
+        => Infer(graph, requiredKeys, sampleInputs.Length,
+                 static d => (IRuntimeTensor)TensorDataConverter.ToRuntimeTensor(d, MaxSmallTensorElements),
+                 sampleInputs);
 
     /// <summary>
-    /// <see cref="IData"/>-shaped overload of
-    /// <see cref="Infer(InternalComputationGraph, IReadOnlyCollection{FastTensorKey}, TensorData[])"/>.
+    /// <see cref="IRuntimeTensor"/>-shaped overload of
+    /// <see cref="Infer(InternalComputationGraph, IReadOnlyCollection{FastTensorKey}, TensorData[])"/>,
+    /// binding each sample to its graph input as it stands — no value family in between, so a sample
+    /// that carries only a shape and a dtype stays that.
     /// </summary>
     public ShapeInferenceResult Infer(
         InternalComputationGraph graph,
         IReadOnlyCollection<FastTensorKey>? requiredKeys,
-        params IData[] sampleInputs)
+        params IRuntimeTensor[] sampleInputs)
+        => Infer(graph, requiredKeys, sampleInputs.Length, static rt => rt, sampleInputs);
+
+    /// <summary>
+    /// The shared body: bind the samples to the graph's inputs through <paramref name="toRuntime"/>,
+    /// run QEE over them, and resolve whatever it left missing through ORT.
+    /// </summary>
+    private ShapeInferenceResult Infer<TSample>(
+        InternalComputationGraph graph,
+        IReadOnlyCollection<FastTensorKey>? requiredKeys,
+        int sampleCount,
+        Func<TSample, IRuntimeTensor> toRuntime,
+        TSample[] sampleInputs)
     {
         var graphInputs = graph.Inputs;
-        if (sampleInputs.Length != graphInputs.Count)
+        if (sampleCount != graphInputs.Count)
             throw new ArgumentException(
-                $"Expected {graphInputs.Count} sample inputs but got {sampleInputs.Length}.");
+                $"Expected {graphInputs.Count} sample inputs but got {sampleCount}.");
 
         var tensorStore = new Dictionary<FastTensorKey, TensorShapeInfo>();
 
@@ -114,8 +132,11 @@ internal class ShapeInferenceInterpreter
         Dictionary<FastTensorKey, IRuntimeTensor> qeeStore;
         try
         {
+            var initial = new Dictionary<FastTensorKey, IRuntimeTensor>();
+            for (int i = 0; i < graphInputs.Count; i++)
+                initial[graphInputs[i]] = toRuntime(sampleInputs[i]);
             var qee = new QuickExecutionEngine { MaxDataElements = MaxSmallTensorElements };
-            qeeStore = qee.Run(graph, sampleInputs);
+            qeeStore = qee.Run(graph, initial);
         }
         catch
         {
@@ -207,7 +228,9 @@ internal class ShapeInferenceInterpreter
             (r.FloatData is { } fd && fd.Length == elementCount) ||
             (r.IntData is { } id && id.Length == elementCount) ||
             (r.BoolData is { } bd && bd.Length == elementCount);
-        var data = dataMatchesShape ? TensorDataConverter.ToTensorData(r) : null;
+        // The materialized tensor is this method's own and nothing else names it, so the move
+        // into the description costs no copy.
+        var data = dataMatchesShape ? TensorDataConverter.ToTensorData(r)?.MoveToAttribute() : null;
         return new TensorShapeInfo(r.Shape, r.DType, data);
     }
 
@@ -280,7 +303,7 @@ internal class ShapeInferenceInterpreter
 
     private void ProcessModelParamData(FastNode node, Dictionary<FastTensorKey, TensorShapeInfo> tensorStore)
     {
-        var tensorData = node.Attributes.GetTensorVal(ShrkAttrTensorData);
+        var tensorData = node.Attributes.GetAttributeVal(ShrkAttrTensorData);
         if (tensorData is null)
             return;
 
@@ -295,7 +318,7 @@ internal class ShapeInferenceInterpreter
         if (output is null) return;
 
         // Try to get TensorData from the value attribute
-        var tensorData = node.Attributes.GetTensorVal(AttrValue);
+        var tensorData = node.Attributes.GetAttributeVal(AttrValue);
         if (tensorData is not null)
         {
             StoreTensorInfo(tensorStore, output.Value, tensorData);
@@ -306,14 +329,14 @@ internal class ShapeInferenceInterpreter
         if (!node.Attributes.IsDefaultValue("value_int"))
         {
             var intVal = node.Attributes.GetLongVal("value_int")!.Value;
-            var data = TensorData.CreateFromRawBytes(new Shape(Array.Empty<long>()), DType.Int64, BitConverter.GetBytes(intVal));
+            var data = TensorAttribute.Create(new Shape(Array.Empty<long>()), DType.Int64, BitConverter.GetBytes(intVal));
             StoreTensorInfo(tensorStore, output.Value, data);
             return;
         }
         if (!node.Attributes.IsDefaultValue("value_float"))
         {
             var floatVal = node.Attributes.GetFloatVal("value_float")!.Value;
-            var data = TensorData.CreateFromRawBytes(new Shape(Array.Empty<long>()), DType.Float32, BitConverter.GetBytes(floatVal));
+            var data = TensorAttribute.Create(new Shape(Array.Empty<long>()), DType.Float32, BitConverter.GetBytes(floatVal));
             StoreTensorInfo(tensorStore, output.Value, data);
             return;
         }
@@ -514,6 +537,16 @@ internal class ShapeInferenceInterpreter
     private static void StoreTensorInfo(
         Dictionary<FastTensorKey, TensorShapeInfo> store,
         FastTensorKey key,
+        TensorAttribute data)
+    {
+        if (HasUnknownDim(data.Shape)) return;
+        var isSmall = data.Shape.Count <= MaxSmallTensorElements;
+        store[key] = new TensorShapeInfo(data.Shape, data.DType, isSmall ? data : null);
+    }
+
+    private static void StoreTensorInfo(
+        Dictionary<FastTensorKey, TensorShapeInfo> store,
+        FastTensorKey key,
         TensorData data)
     {
         if (HasUnknownDim(data.Shape)) return;
@@ -521,35 +554,28 @@ internal class ShapeInferenceInterpreter
         store[key] = new TensorShapeInfo(
             data.Shape,
             data.DType,
-            isSmall ? Detached(data) : null);
+            isSmall ? Retained(data) : null);
     }
 
     /// <summary>
-    /// The value as a <see cref="ShapeInferenceResult"/> may keep it: in the framework's own host
-    /// memory, belonging to no compute context. A tensor that already belongs to none — an
-    /// attribute's, or one QEE materialized — is kept as it stands.
+    /// The value as a <see cref="ShapeInferenceResult"/> may keep it: a
+    /// <see cref="TensorAttribute"/>, which belongs to no compute context and has no lifetime at
+    /// all. The result is handed back to a caller who keeps it long after this run, and the values
+    /// go back into a graph — <see cref="ExecuteNode"/> feeds each resolved input to the next
+    /// node's mini-graph as a CONSTANT attribute — so a runtime value on its way back into a
+    /// description has to be converted, and the conversion is what this is.
     ///
-    /// <para>A tensor a session produced belongs to the context that ran it, and two things here
-    /// outlive that. The result is handed back to a caller who keeps it long after this run, and
-    /// disposing the context in the meantime would leave every retained value reading freed
-    /// memory. And the values go back into a graph: <see cref="ExecuteNode"/> feeds each resolved
-    /// input to the next node's mini-graph as a CONSTANT attribute, and an attribute is part of a
-    /// graph's description — the same description on every machine — so one naming a particular
-    /// backend's memory is refused outright. That refusal is what made a multi-input fallback
-    /// (TopK over an ORT-resolved <c>k</c>) resolve nothing at all.</para>
-    ///
-    /// <para><see cref="TensorData.CopyTo"/> rather than a transfer, because the copy is the point:
-    /// it lands in managed memory the collector reclaims, where moving the runtime value here
-    /// would tie a native allocation to a record nothing ever disposes. Only small tensors are
-    /// retained at all, so the copy is bounded by
-    /// <see cref="MaxSmallTensorElements"/> elements.</para>
+    /// <para><see cref="TensorData.Detach"/> first, because a tensor a session produced belongs to
+    /// the context that ran it and the move refuses one that does: the copy lands in managed
+    /// memory the collector reclaims, where moving the runtime value here would tie a native
+    /// allocation to a record nothing ever disposes. Only small tensors are retained at all, so
+    /// the copy is bounded by <see cref="MaxSmallTensorElements"/> elements.</para>
     /// </summary>
-    private static TensorData? Detached(TensorData data)
+    private static TensorAttribute? Retained(TensorData data)
     {
-        if (data.Context is null) return data;
         try
         {
-            return data.CopyTo(null);
+            return data.Detach().MoveToAttribute();
         }
         catch (Exception) when (CatchShapeInferenceErrors())
         {
@@ -561,7 +587,7 @@ internal class ShapeInferenceInterpreter
         }
     }
 
-    private static TensorData CreateZeroTensorData(Shape shape, DType dtype)
+    private static TensorAttribute CreateZeroTensorData(Shape shape, DType dtype)
     {
         var bitsPerElement = dtype.EncodingBitCount;
         if (bitsPerElement < 8)
@@ -569,8 +595,6 @@ internal class ShapeInferenceInterpreter
                 $"Data type {dtype} with {bitsPerElement}-bit encoding is not supported for zero tensor creation.");
 
         var bytesPerElement = bitsPerElement / 8;
-        var totalBytes = shape.Count * bytesPerElement;
-        var zeroBytes = new byte[totalBytes];
-        return TensorData.CreateFromRawBytes(shape, dtype, zeroBytes);
+        return TensorAttribute.Create(shape, dtype, new byte[shape.Count * bytesPerElement]);
     }
 }

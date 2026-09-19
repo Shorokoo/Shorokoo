@@ -238,7 +238,7 @@ public class AutoDiffCheckpointingCoverageTests
 
         var det = OnnxOp.Det(x);
         var (topVals, topIdx) = OnnxOp.TopK(v, OnnxOp.Constant((long[])[2L]), axis: -1, largest: true, sorted: true);
-        var constTensor = OnnxOp.Constant(Globals.TensorData(DType.Float32, [2L], 5f, 6f));
+        var constTensor = OnnxOp.Constant(Globals.TensorData(DType.Float32, [2L], 5f, 6f).MoveToAttribute());
         var constInt = OnnxOp.Constant(7L);
         var constFloat = OnnxOp.Constant(2.5f);
 

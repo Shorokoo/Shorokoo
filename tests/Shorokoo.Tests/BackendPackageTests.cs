@@ -147,7 +147,7 @@ public class BackendPackageCoverageTests
 
         // Detached, so it is still readable once the context that made it is gone.
         context.Dispose();
-        Assert.Null(result.Context);
+        Assert.Same(ComputeContext.Host, result.Context);
         Assert.Equal(4, result.As<float32>().AccessMemory<float>().Length);
     }
 

@@ -41,7 +41,7 @@ namespace Shorokoo
         /// <summary>Creates a tensor of <paramref name="shape"/> over <paramref name="bytes"/>,
         /// which it takes as its own storage rather than copying.</summary>
         public HostTensorData(Shape shape, byte[] bytes)
-            : this(shape, bytes, context: null, ownsMemory: true, storage: null, new MaterializedValues())
+            : this(shape, bytes, ComputeContext.Host, storage: null, new MaterializedValues())
         {
         }
 
@@ -51,7 +51,7 @@ namespace Shorokoo
         }
 
         private HostTensorData(Shape shape, byte[] bytes, DType actualDType, MaterializedValues materialized)
-            : base(shape, actualDType, HostStorage(materialized), null, true)
+            : base(shape, actualDType, HostStorage(materialized), ComputeContext.Host)
         {
             _bytes = bytes ?? throw new ArgumentNullException(nameof(bytes));
             _materialized = materialized;
@@ -60,26 +60,28 @@ namespace Shorokoo
         // The materializations are built by the caller rather than defaulted here, because the
         // storage's release action closes over them and so needs them before the base call.
         private HostTensorData(
-            Shape shape, byte[] bytes, ComputeContext? context, bool ownsMemory, TensorStorage? storage,
+            Shape shape, byte[] bytes, ComputeContext context, TensorStorage? storage,
             MaterializedValues materialized)
-            : base(shape, storage ?? HostStorage(materialized), context, ownsMemory)
+            : base(shape, storage ?? HostStorage(materialized), context)
         {
             _bytes = bytes ?? throw new ArgumentNullException(nameof(bytes));
             _materialized = materialized;
         }
 
         /// <summary>A host tensor over <paramref name="bytes"/> belonging to
-        /// <paramref name="context"/>, which must be a host-memory context or null.</summary>
-        internal static HostTensorData<T> Bound(Shape shape, byte[] bytes, ComputeContext? context)
-            => new(shape, bytes, context, ownsMemory: true, storage: null, new MaterializedValues());
+        /// <paramref name="context"/>, which must be a host-memory context.</summary>
+        internal static HostTensorData<T> Bound(Shape shape, byte[] bytes, ComputeContext context)
+            => new(shape, bytes, context, storage: null, new MaterializedValues());
 
-        // Managed bytes are the garbage collector's to reclaim, so releasing this storage frees no
+        // Managed bytes are the garbage collector's to reclaim, so freeing this allocation frees no
         // host memory. What it does free is each runtime's copy of them, which is native and can be
-        // a device allocation -- and a context's disposal releases the storage rather than calling
-        // Dispose, so leaving that to Dispose alone meant a context released a tensor's bytes,
-        // marked it unreadable, and left every value it had been fed as allocated and reachable.
+        // a device allocation. It happens when the last handle and the last lock let go, which is
+        // what keeps a run reading a tensor its caller has just disposed.
         private static TensorStorage HostStorage(MaterializedValues materialized)
             => new(MemorySpace.Host, materialized.Invalidate);
+
+        /// <inheritdoc/>
+        internal override byte[]? OwnBytes => _bytes;
 
         /// <summary>Whether no runtime holds a copy of these bytes -- the seam a test needs to see
         /// that a release freed the materializations rather than merely forgetting the tensor.
@@ -87,8 +89,8 @@ namespace Shorokoo
         internal bool MaterializationsAreEmpty => _materialized.IsEmpty;
 
         /// <inheritdoc/>
-        internal override TensorData CloneSharing(ComputeContext? context, bool ownsMemory)
-            => new HostTensorData<T>(Shape, _bytes, context, ownsMemory, Storage, _materialized);
+        internal override TensorData CloneSharing(ComputeContext context)
+            => new HostTensorData<T>(Shape, _bytes, context, Storage, _materialized);
 
         /// <summary>
         /// Creates a tensor of <paramref name="shape"/> holding a copy of
@@ -130,7 +132,7 @@ namespace Shorokoo
         public override Span<V> AccessModifiableMemory<V>()
         {
             ThrowIfDisposed();
-            _materialized.Invalidate();
+            RetireMaterializations();
             return MemoryMarshal.Cast<byte, V>(_bytes.AsSpan());
         }
 
@@ -145,8 +147,21 @@ namespace Shorokoo
         public override Span<byte> AccessModifiableRawMemory()
         {
             ThrowIfDisposed();
-            _materialized.Invalidate();
+            RetireMaterializations();
             return _bytes;
+        }
+
+        /// <summary>
+        /// Drops every runtime's copy of these contents, because they are about to be written to.
+        /// The copies are taken off the cache at once, so the next feed rebuilds them from what
+        /// was written; freeing them waits for the last run reading them to return, because a
+        /// value handed to a session is a bare pointer from that moment on and freeing one under
+        /// a running read is the use-after-free the reference count exists to stop
+        /// (Shorokoo/Shorokoo#366).
+        /// </summary>
+        private void RetireMaterializations()
+        {
+            if (_materialized.Retire() is { } free) Storage.FreeWhenUnlocked(free);
         }
 
         /// <inheritdoc/>
@@ -170,25 +185,12 @@ namespace Shorokoo
                 (ShorokooTensorElementType)(int)this.DType, _bytes, (long[])this.Shape));
         }
 
-        /// <summary>
-        /// Releases the values this tensor had built on backends. The bytes themselves are managed
-        /// and need no release; what needs one is each runtime's copy of them.
-        ///
-        /// <para>No finalizer, for the reason <see cref="OnnxTensorData{T}"/> has none: a
-        /// finalizer must not touch another managed object that may already have been finalized,
-        /// and each materialized value has its own.</para>
-        /// </summary>
-        public override void Dispose()
-        {
-            if (IsDisposed) return;
-            IsDisposed = true;
-            // Only the owner tears the materializations down: they are shared with every clone
-            // over these bytes, and a reader letting go of its name for them frees nothing.
-            if (OwnsMemory)
-            {
-                Storage.Release();
-                _materialized.Invalidate();
-            }
-        }
+        // Disposal is the base class's: drop this handle's reference, and the allocation tears the
+        // materializations down when the last reference goes. They are shared with every clone
+        // over these bytes, so one handle letting go of its name for them frees nothing.
+        //
+        // No finalizer, for the reason OnnxTensorData<T> has none: a finalizer must not touch
+        // another managed object that may already have been finalized, and each materialized value
+        // has its own.
     }
 }

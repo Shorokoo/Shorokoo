@@ -42,7 +42,7 @@ namespace RetinaNet.Models
     {
         public static Tensor<float32> Inline(Vector<int64> shape)
         {
-            return Tensor<float32>.Fill(shape, Globals.TensorData(1, 1.0f));
+            return Tensor<float32>.Fill(shape, Globals.TensorData(1, 1.0f).MoveToAttribute());
         }
     }
 
@@ -56,7 +56,7 @@ namespace RetinaNet.Models
         {
             // Xavier/Glorot initialization - using 0.02f which is a common standard
             // This approximates Xavier init for common layer sizes (similar to PyTorch's default)
-            return Tensor<float32>.Fill(shape, Globals.TensorData(1, 0.02f));
+            return Tensor<float32>.Fill(shape, Globals.TensorData(1, 0.02f).MoveToAttribute());
         }
     }
 
@@ -68,7 +68,7 @@ namespace RetinaNet.Models
     {
         public static Tensor<float32> Inline(Vector<int64> shape)
         {
-            return Tensor<float32>.Fill(shape, Globals.TensorData(1, 0.0f));
+            return Tensor<float32>.Fill(shape, Globals.TensorData(1, 0.0f).MoveToAttribute());
         }
     }
 
@@ -87,7 +87,7 @@ namespace RetinaNet.Models
             // = -log(0.99 / 0.01) = -log(99) ≈ -4.595
             const float priorProbability = 0.01f;
             var bias = -(float)Math.Log((1.0 - priorProbability) / priorProbability);
-            return Tensor<float32>.Fill(shape, Globals.TensorData(1, bias));
+            return Tensor<float32>.Fill(shape, Globals.TensorData(1, bias).MoveToAttribute());
         }
     }
 

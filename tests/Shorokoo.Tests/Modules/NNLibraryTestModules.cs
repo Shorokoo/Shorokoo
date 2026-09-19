@@ -2889,7 +2889,7 @@ public partial class NNStaticWrapperPoolMathCheck
 public static partial class AnalyticInitHalf
 {
     public static Tensor<float32> Inline(Vector<int64> shape)
-        => Tensor<float32>.Fill(shape, Globals.TensorData(1, 0.5f));
+        => Tensor<float32>.Fill(shape, Globals.TensorData(1, 0.5f).MoveToAttribute());
 }
 
 /// <summary>Every element 1.0 (shape-driven fill).</summary>
@@ -2897,7 +2897,7 @@ public static partial class AnalyticInitHalf
 public static partial class AnalyticInitOne
 {
     public static Tensor<float32> Inline(Vector<int64> shape)
-        => Tensor<float32>.Fill(shape, Globals.TensorData(1, 1.0f));
+        => Tensor<float32>.Fill(shape, Globals.TensorData(1, 1.0f).MoveToAttribute());
 }
 
 /// <summary>Constant [1,2,3,4] — per-element-distinct so permutation/slice
@@ -2906,7 +2906,7 @@ public static partial class AnalyticInitOne
 public static partial class AnalyticInitRange4
 {
     public static Tensor<float32> Inline(Vector<int64> shape)
-        => Tensor<float32>.Fill(shape, Globals.TensorData(1, 1.0f)) * Tensor([4L], 1f, 2f, 3f, 4f);
+        => Tensor<float32>.Fill(shape, Globals.TensorData(1, 1.0f).MoveToAttribute()) * Tensor([4L], 1f, 2f, 3f, 4f);
 }
 
 /// <summary>Constant [[1,2],[3,4]].</summary>
@@ -2914,7 +2914,7 @@ public static partial class AnalyticInitRange4
 public static partial class AnalyticInitRange22
 {
     public static Tensor<float32> Inline(Vector<int64> shape)
-        => Tensor<float32>.Fill(shape, Globals.TensorData(1, 1.0f)) * Tensor([2L, 2L], 1f, 2f, 3f, 4f);
+        => Tensor<float32>.Fill(shape, Globals.TensorData(1, 1.0f).MoveToAttribute()) * Tensor([2L, 2L], 1f, 2f, 3f, 4f);
 }
 
 /// <summary>y = w[1] · x (broadcast): grad_w must sum-reduce over the broadcast axis.</summary>

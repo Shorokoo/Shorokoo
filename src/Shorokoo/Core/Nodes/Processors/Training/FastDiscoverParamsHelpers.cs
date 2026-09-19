@@ -78,7 +78,7 @@ namespace Shorokoo.Core.Nodes.Processors.Training
         {
             if (node.OpCode == InternalOpCodes.MODEL_PARAM_DATA)
             {
-                var data = node.Attributes.GetTensorVal(OnnxOpAttributeNames.ShrkAttrTensorData);
+                var data = node.Attributes.GetAttributeVal(OnnxOpAttributeNames.ShrkAttrTensorData);
                 if (data is null) return (null, null);
                 return (data.DType, data.Shape.Dims.Length);
             }

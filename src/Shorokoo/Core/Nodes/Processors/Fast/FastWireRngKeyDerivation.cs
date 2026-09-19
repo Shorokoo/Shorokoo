@@ -184,7 +184,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             if (producer.OpCode == OpCodes.CONCAT) return producer.Inputs.Count;
             if (producer.OpCode == OpCodes.CONSTANT)
             {
-                var data = producer.Attributes.GetTensorVal(AttrValue);
+                var data = producer.Attributes.GetAttributeVal(AttrValue);
                 return data is null ? 0 : (int)data.Shape.Count;
             }
             return 0;
@@ -275,10 +275,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// <summary>A rank-0 uint64 constant (a split counter).</summary>
         private static FastTensorKey AppendScalarUInt64(ulong value, List<FastNode> newNodes)
         {
-            var data = new OnnxTensorData<uint64>(
-                new Shape(Array.Empty<long>()),
-                OnnxUtils.CreateTensorValue(new Shape(Array.Empty<long>()), (ulong[])[value]));
-            return AppendConstant(data, newNodes);
+            return AppendConstant(
+                Shorokoo.Globals.TensorData([], value).MoveToAttribute(), newNodes);
         }
 
         /// <summary>Casts a value to uint64 — the width every key, split counter and draw
@@ -384,13 +382,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
         private static FastTensorKey AppendScalarInt64(long value, List<FastNode> newNodes)
         {
-            var data = new OnnxTensorData<int64>(
-                new Shape(Array.Empty<long>()),
-                OnnxUtils.CreateTensorValue(new Shape(Array.Empty<long>()), (long[])[value]));
-            return AppendConstant(data, newNodes);
+            return AppendConstant(
+                Shorokoo.Globals.TensorData([], value).MoveToAttribute(), newNodes);
         }
 
-        private static FastTensorKey AppendConstant(TensorData data, List<FastNode> newNodes)
+        private static FastTensorKey AppendConstant(TensorAttribute data, List<FastNode> newNodes)
         {
             var constAttrDefs = Definitions.NodeDefinitions[OpCodes.CONSTANT].AttributeDefs;
             var key = FastNodeKey.New();

@@ -662,25 +662,25 @@ public static class " + modelName + @"
             if (attributes.IsDefaultValue(AttrValue))
                 return null;
 
-            var tensorDataAttribute = attributes.GetTensorVal(AttrValue).AssertNotNull();
-            if (tensorDataAttribute.AccessRawMemory().Length > 500)
+            var tensorDataAttribute = attributes.GetAttributeVal(AttrValue).AssertNotNull();
+            if (tensorDataAttribute.Bytes.Length > 500)
                 return null;
 
             string dataParams;
             var dtype = tensorDataAttribute.DType;
             if (tensorDataAttribute.DType == DType.Float32)
             {
-                var paramList = tensorDataAttribute.As<float32>().CopyMemory<float>().Select(x => $"{x}f");
+                var paramList = tensorDataAttribute.Elements<float>().ToArray().Select(x => $"{x}f");
                 dataParams = string.Join(", ", paramList);
             }
             else if (tensorDataAttribute.DType == DType.Float64)
             {
-                var paramList = tensorDataAttribute.As<float64>().CopyMemory<double>().Select(x => $"{x}d");
+                var paramList = tensorDataAttribute.Elements<double>().ToArray().Select(x => $"{x}d");
                 dataParams = string.Join(", ", paramList);
             }
             else if (tensorDataAttribute.DType == DType.Int16)
             {
-                var paramList = tensorDataAttribute.As<int16>().CopyMemory<short>().Select(x => $"{x}").ToList();
+                var paramList = tensorDataAttribute.Elements<short>().ToArray().Select(x => $"{x}").ToList();
                 var useCollectionExpression = (paramList.Count >= 4);
                 if (!useCollectionExpression)
                     paramList = paramList.Select(x => $"(short){x}").ToList();
@@ -691,17 +691,17 @@ public static class " + modelName + @"
             }
             else if (tensorDataAttribute.DType == DType.Int32)
             {
-                var paramList = tensorDataAttribute.As<int32>().CopyMemory<int>().Select(x => $"{x}");
+                var paramList = tensorDataAttribute.Elements<int>().ToArray().Select(x => $"{x}");
                 dataParams = string.Join(", ", paramList);
             }
             else if (tensorDataAttribute.DType == DType.Int64)
             {
-                var paramList = tensorDataAttribute.As<int64>().CopyMemory<long>().Select(x => $"{x}L");
+                var paramList = tensorDataAttribute.Elements<long>().ToArray().Select(x => $"{x}L");
                 dataParams = string.Join(", ", paramList);
             }
             else if (tensorDataAttribute.DType == DType.UInt16)
             {
-                var paramList = tensorDataAttribute.As<uint16>().CopyMemory<ushort>().Select(x => $"{x}").ToList();
+                var paramList = tensorDataAttribute.Elements<ushort>().ToArray().Select(x => $"{x}").ToList();
                 var useCollectionExpression = (paramList.Count >= 4);
                 if (!useCollectionExpression)
                     paramList = paramList.Select(x => $"(ushort){x}").ToList();
@@ -712,7 +712,7 @@ public static class " + modelName + @"
             }
             else if (tensorDataAttribute.DType == DType.UInt32)
             {
-                var paramList = tensorDataAttribute.As<uint32>().CopyMemory<uint>().Select(x => $"{x}").ToList();
+                var paramList = tensorDataAttribute.Elements<uint>().ToArray().Select(x => $"{x}").ToList();
                 var useCollectionExpression = (paramList.Count >= 4);
                 if (!useCollectionExpression)
                     paramList = paramList.Select(x => $"(uint){x}").ToList();
@@ -723,12 +723,12 @@ public static class " + modelName + @"
             }
             else if (tensorDataAttribute.DType == DType.UInt64)
             {
-                var paramList = tensorDataAttribute.As<uint64>().CopyMemory<ulong>().Select(x => $"{x}UL");
+                var paramList = tensorDataAttribute.Elements<ulong>().ToArray().Select(x => $"{x}UL");
                 dataParams = string.Join(", ", paramList);
             }
             else if (tensorDataAttribute.DType == DType.Bool)
             {
-                var paramList = tensorDataAttribute.As<bit>().CopyMemory<bool>().Select(x => $"{x.ToString().ToLower()}");
+                var paramList = tensorDataAttribute.Elements<bool>().ToArray().Select(x => $"{x.ToString().ToLower()}");
                 dataParams = string.Join(", ", paramList);
             }
             else
@@ -903,8 +903,8 @@ public static class " + modelName + @"
                         var constantAttributes = parentNode.Attributes;
                         if (!constantAttributes.IsDefaultValue(AttrValue))
                         {
-                            var tensorDataAttribute = constantAttributes.GetTensorVal(AttrValue).AssertNotNull();
-                            if (tensorDataAttribute.DType == DType.Bool && tensorDataAttribute.As<bit>().ValueAt<bool>(0) == true)
+                            var tensorDataAttribute = constantAttributes.GetAttributeVal(AttrValue).AssertNotNull();
+                            if (tensorDataAttribute.DType == DType.Bool && tensorDataAttribute.Elements<bool>()[0] == true)
                             {
                                 // LoopAPI.Iterate will automatically add the ctx.Break(Scalar(true)) when ctx.Break is not explicitly called.
                                 // So we neither need the Break call, nor the creation of the Scalar(true) constant.
@@ -1448,8 +1448,8 @@ public static class " + modelName + @"
                         attrValue = '"' + EscapeString(attributes.GetStringVal(attrName).AssertNotNull()) + '"';
                     else if (attrType is AttributeType.Tensor)
                     {
-                        var tensor = attributes.GetTensorVal(attrName).AssertNotNull();
-                        var base64Data = Convert.ToBase64String(tensor.CopyRawMemory());
+                        var tensor = attributes.GetAttributeVal(attrName).AssertNotNull();
+                        var base64Data = Convert.ToBase64String(tensor.Bytes);
                         var dimsCSharp = $"[{String.Join(", ", tensor.Shape.Dims.Select(x => $"{x}L"))}]";
                         if (keyword == "base64string")
                             attrValue = base64Data;
@@ -1457,7 +1457,9 @@ public static class " + modelName + @"
                             attrValue = dimsCSharp;
                         else
                         {
-                            attrValue = $"Shorokoo.Globals.TensorData(DType.{tensor.DType}, {dimsCSharp}, \"{base64Data}\")";
+                            attrValue =
+                                $"Shorokoo.Globals.TensorData(DType.{tensor.DType}, {dimsCSharp}, "
+                                + $"\"{base64Data}\").MoveToAttribute()";
                         }
                     }
                     else if (attrType is AttributeType.Enum)

@@ -320,9 +320,8 @@ public class RngAlgorithmSwitchTests
             n.IdentifierTemplate == Shorokoo.Core.Nodes.Processors.Fast
                 .FastWireRngKeyDerivation.RngSeedIdentifierTemplate);
         seedNode.Attributes = seedNode.Attributes.SetAttributes(
-            (ShrkAttrTensorData, (object?)Shorokoo.TensorData.Create(
-                new Shape(identity.Length), DType.UInt64,
-                Shorokoo.Core.Utils.OnnxUtils.CreateTensorValue(new Shape(identity.Length), identity))));
+            (ShrkAttrTensorData,
+             (object?)Shorokoo.Globals.TensorData([identity.Length], identity).MoveToAttribute()));
 
         var ex = Assert.Throws<NotSupportedException>(() => arch.InitializeTrainableParams());
         Assert.Contains(unknownId.ToString(), ex.Message);

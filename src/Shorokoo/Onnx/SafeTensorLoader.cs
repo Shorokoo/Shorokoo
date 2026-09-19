@@ -143,9 +143,6 @@ namespace Shorokoo.Onnx
                 if (st.Shape == null)
                     throw new InvalidOperationException($"SafeTensor '{st.Name}' has no valid Shape.");
 
-                if (st.Data == null)
-                    throw new InvalidOperationException($"SafeTensor '{st.Name}' has no Data.");
-
                 if (string.IsNullOrWhiteSpace(st.DataType))
                     throw new InvalidOperationException($"SafeTensor '{st.Name}' has no valid DType.");
 
@@ -153,7 +150,7 @@ namespace Shorokoo.Onnx
                 var dtype = st.DataType.ToUpperInvariant();
 
                 // The tensor's storage as raw bytes — measured, not copied.
-                int blobLength = st.Data.AccessRawMemory().Length;
+                int blobLength = st.RawBytes.Length;
 
                 long startOffset = currentOffset;
                 long endOffset = startOffset + blobLength;
@@ -199,9 +196,9 @@ namespace Shorokoo.Onnx
             // reading memory a collection could already have freed (Shorokoo/Shorokoo#178).
             for (int i = 0; i < tensors.Count; i++)
             {
-                var data = tensors[i].Data;
-                stream.Write(data.AccessRawMemory());
-                GC.KeepAlive(data);
+                var record = tensors[i];
+                stream.Write(record.RawBytes);
+                GC.KeepAlive(record);
             }
         }
 

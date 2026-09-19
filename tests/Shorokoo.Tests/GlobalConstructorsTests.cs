@@ -263,19 +263,19 @@ public partial class PureDataConstructorModel
         Scalar<float32> acc = Scalar(0f);
 
         // TensorData(DType, dims, params object[]) -> materialize each as a constant and fold.
-        acc = acc + NanAny((Tensor<bit>)Tensor(TensorData(DType.Bool, dims, (object)true)));
-        acc = acc + NanAny((Tensor<int8>)Tensor(TensorData(DType.Int8, dims, (object)(sbyte)1)));
-        acc = acc + NanAny((Tensor<int16>)Tensor(TensorData(DType.Int16, dims, (object)(short)2)));
-        acc = acc + NanAny((Tensor<int32>)Tensor(TensorData(DType.Int32, dims, (object)3)));
-        acc = acc + NanAny((Tensor<int64>)Tensor(TensorData(DType.Int64, dims, (object)4L)));
-        acc = acc + NanAny((Tensor<uint8>)Tensor(TensorData(DType.UInt8, dims, (object)(byte)5)));
-        acc = acc + NanAny((Tensor<uint16>)Tensor(TensorData(DType.UInt16, dims, (object)(ushort)6)));
-        acc = acc + NanAny((Tensor<uint32>)Tensor(TensorData(DType.UInt32, dims, (object)7u)));
-        acc = acc + NanAny((Tensor<uint64>)Tensor(TensorData(DType.UInt64, dims, (object)8UL)));
-        acc = acc + NanAny((Tensor<bfloat16>)Tensor(TensorData(DType.BFloat16, dims, (object)(BFloat16)0.5f)));
-        acc = acc + NanAny((Tensor<float16>)Tensor(TensorData(DType.Float16, dims, (object)(Float16)0.5f)));
-        acc = acc + NanAny((Tensor<float32>)Tensor(TensorData(DType.Float32, dims, (object)9f)));
-        acc = acc + NanAny((Tensor<float64>)Tensor(TensorData(DType.Float64, dims, (object)10.0)));
+        acc = acc + NanAny((Tensor<bit>)Tensor(TensorData(DType.Bool, dims, (object)true).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<int8>)Tensor(TensorData(DType.Int8, dims, (object)(sbyte)1).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<int16>)Tensor(TensorData(DType.Int16, dims, (object)(short)2).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<int32>)Tensor(TensorData(DType.Int32, dims, (object)3).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<int64>)Tensor(TensorData(DType.Int64, dims, (object)4L).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<uint8>)Tensor(TensorData(DType.UInt8, dims, (object)(byte)5).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<uint16>)Tensor(TensorData(DType.UInt16, dims, (object)(ushort)6).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<uint32>)Tensor(TensorData(DType.UInt32, dims, (object)7u).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<uint64>)Tensor(TensorData(DType.UInt64, dims, (object)8UL).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<bfloat16>)Tensor(TensorData(DType.BFloat16, dims, (object)(BFloat16)0.5f).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<float16>)Tensor(TensorData(DType.Float16, dims, (object)(Float16)0.5f).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<float32>)Tensor(TensorData(DType.Float32, dims, (object)9f).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<float64>)Tensor(TensorData(DType.Float64, dims, (object)10.0).MoveToAttribute()));
 
         // Enc/Dec round-trip — value-checked: encode then decode preserves the original values.
         acc = acc + (Vector(Dec<bool>(Enc<bool>([true]))).Cast<float32>().Reduce(ReduceKind.Sum) - Scalar(1f)).Abs();
@@ -294,53 +294,53 @@ public partial class PureDataConstructorModel
 
         // TensorData(DType, dims, byte[]) and TensorData(DType, dims, base64IR) per DType — both
         // route through Dec<T>; materialize each via Tensor(data) and fold.
-        acc = acc + NanAny((Tensor<bit>)Tensor(TensorData(DType.Bool, dims, Enc<bool>([true]))));
-        acc = acc + NanAny((Tensor<int8>)Tensor(TensorData(DType.Int8, dims, Enc<sbyte>([1]))));
-        acc = acc + NanAny((Tensor<int16>)Tensor(TensorData(DType.Int16, dims, Enc<short>([2]))));
-        acc = acc + NanAny((Tensor<int32>)Tensor(TensorData(DType.Int32, dims, Enc<int>([3]))));
-        acc = acc + NanAny((Tensor<int64>)Tensor(TensorData(DType.Int64, dims, Enc<long>([4]))));
-        acc = acc + NanAny((Tensor<uint8>)Tensor(TensorData(DType.UInt8, dims, Enc<byte>([5]))));
-        acc = acc + NanAny((Tensor<uint16>)Tensor(TensorData(DType.UInt16, dims, Enc<ushort>([6]))));
-        acc = acc + NanAny((Tensor<uint32>)Tensor(TensorData(DType.UInt32, dims, Enc<uint>([7]))));
-        acc = acc + NanAny((Tensor<uint64>)Tensor(TensorData(DType.UInt64, dims, Enc<ulong>([8]))));
-        acc = acc + NanAny((Tensor<bfloat16>)Tensor(TensorData(DType.BFloat16, dims, Enc<BFloat16>([(BFloat16)0.5f]))));
-        acc = acc + NanAny((Tensor<float16>)Tensor(TensorData(DType.Float16, dims, Enc<Float16>([(Float16)0.5f]))));
-        acc = acc + NanAny((Tensor<float32>)Tensor(TensorData(DType.Float32, dims, Enc<float>([9f]))));
-        acc = acc + NanAny((Tensor<float64>)Tensor(TensorData(DType.Float64, dims, Enc<double>([10.0]))));
+        acc = acc + NanAny((Tensor<bit>)Tensor(TensorData(DType.Bool, dims, Enc<bool>([true])).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<int8>)Tensor(TensorData(DType.Int8, dims, Enc<sbyte>([1])).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<int16>)Tensor(TensorData(DType.Int16, dims, Enc<short>([2])).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<int32>)Tensor(TensorData(DType.Int32, dims, Enc<int>([3])).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<int64>)Tensor(TensorData(DType.Int64, dims, Enc<long>([4])).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<uint8>)Tensor(TensorData(DType.UInt8, dims, Enc<byte>([5])).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<uint16>)Tensor(TensorData(DType.UInt16, dims, Enc<ushort>([6])).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<uint32>)Tensor(TensorData(DType.UInt32, dims, Enc<uint>([7])).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<uint64>)Tensor(TensorData(DType.UInt64, dims, Enc<ulong>([8])).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<bfloat16>)Tensor(TensorData(DType.BFloat16, dims, Enc<BFloat16>([(BFloat16)0.5f])).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<float16>)Tensor(TensorData(DType.Float16, dims, Enc<Float16>([(Float16)0.5f])).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<float32>)Tensor(TensorData(DType.Float32, dims, Enc<float>([9f])).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<float64>)Tensor(TensorData(DType.Float64, dims, Enc<double>([10.0])).MoveToAttribute()));
 
         // base64 IR form (string overload) for a representative dtype.
-        acc = acc + NanAny((Tensor<float32>)Tensor(TensorData(DType.Float32, dims, Convert.ToBase64String(Enc<float>([9f])))));
+        acc = acc + NanAny((Tensor<float32>)Tensor(TensorData(DType.Float32, dims, Convert.ToBase64String(Enc<float>([9f]))).MoveToAttribute()));
 
         // TensorDataWithDefaultVals / TensorDataWithSmallVals / TensorDataForConstantOfShapeFill —
         // materialize via Tensor(data) (cast to the concrete element type) and fold, for the DTypes
         // whose constants round-trip cleanly (bool folded explicitly).
-        acc = acc + NanAny((Tensor<bit>)Tensor(TensorDataWithDefaultVals(DType.Bool, dims)));
-        acc = acc + NanAny((Tensor<int8>)Tensor(TensorDataWithDefaultVals(DType.Int8, dims)));
-        acc = acc + NanAny((Tensor<uint8>)Tensor(TensorDataWithDefaultVals(DType.UInt8, dims)));
-        acc = acc + NanAny((Tensor<int16>)Tensor(TensorDataWithDefaultVals(DType.Int16, dims)));
-        acc = acc + NanAny((Tensor<int32>)Tensor(TensorDataWithDefaultVals(DType.Int32, dims)));
-        acc = acc + NanAny((Tensor<int64>)Tensor(TensorDataWithDefaultVals(DType.Int64, dims)));
-        acc = acc + NanAny((Tensor<uint16>)Tensor(TensorDataWithDefaultVals(DType.UInt16, dims)));
-        acc = acc + NanAny((Tensor<uint32>)Tensor(TensorDataWithDefaultVals(DType.UInt32, dims)));
-        acc = acc + NanAny((Tensor<uint64>)Tensor(TensorDataWithDefaultVals(DType.UInt64, dims)));
-        acc = acc + NanAny((Tensor<bfloat16>)Tensor(TensorDataWithDefaultVals(DType.BFloat16, dims)));
-        acc = acc + NanAny((Tensor<float16>)Tensor(TensorDataWithDefaultVals(DType.Float16, dims)));
-        acc = acc + NanAny((Tensor<float32>)Tensor(TensorDataWithDefaultVals(DType.Float32, dims)));
-        acc = acc + NanAny((Tensor<float64>)Tensor(TensorDataWithDefaultVals(DType.Float64, dims)));
+        acc = acc + NanAny((Tensor<bit>)Tensor(TensorDataWithDefaultVals(DType.Bool, dims).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<int8>)Tensor(TensorDataWithDefaultVals(DType.Int8, dims).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<uint8>)Tensor(TensorDataWithDefaultVals(DType.UInt8, dims).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<int16>)Tensor(TensorDataWithDefaultVals(DType.Int16, dims).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<int32>)Tensor(TensorDataWithDefaultVals(DType.Int32, dims).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<int64>)Tensor(TensorDataWithDefaultVals(DType.Int64, dims).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<uint16>)Tensor(TensorDataWithDefaultVals(DType.UInt16, dims).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<uint32>)Tensor(TensorDataWithDefaultVals(DType.UInt32, dims).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<uint64>)Tensor(TensorDataWithDefaultVals(DType.UInt64, dims).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<bfloat16>)Tensor(TensorDataWithDefaultVals(DType.BFloat16, dims).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<float16>)Tensor(TensorDataWithDefaultVals(DType.Float16, dims).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<float32>)Tensor(TensorDataWithDefaultVals(DType.Float32, dims).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<float64>)Tensor(TensorDataWithDefaultVals(DType.Float64, dims).MoveToAttribute()));
 
-        acc = acc + NanAny((Tensor<bit>)Tensor(TensorDataWithSmallVals(DType.Bool, dims)));
-        acc = acc + NanAny((Tensor<int8>)Tensor(TensorDataWithSmallVals(DType.Int8, dims)));
-        acc = acc + NanAny((Tensor<uint8>)Tensor(TensorDataWithSmallVals(DType.UInt8, dims)));
-        acc = acc + NanAny((Tensor<int16>)Tensor(TensorDataWithSmallVals(DType.Int16, dims)));
-        acc = acc + NanAny((Tensor<int32>)Tensor(TensorDataWithSmallVals(DType.Int32, dims)));
-        acc = acc + NanAny((Tensor<int64>)Tensor(TensorDataWithSmallVals(DType.Int64, dims)));
-        acc = acc + NanAny((Tensor<uint16>)Tensor(TensorDataWithSmallVals(DType.UInt16, dims)));
-        acc = acc + NanAny((Tensor<uint32>)Tensor(TensorDataWithSmallVals(DType.UInt32, dims)));
-        acc = acc + NanAny((Tensor<uint64>)Tensor(TensorDataWithSmallVals(DType.UInt64, dims)));
-        acc = acc + NanAny((Tensor<bfloat16>)Tensor(TensorDataWithSmallVals(DType.BFloat16, dims)));
-        acc = acc + NanAny((Tensor<float16>)Tensor(TensorDataWithSmallVals(DType.Float16, dims)));
-        acc = acc + NanAny((Tensor<float32>)Tensor(TensorDataWithSmallVals(DType.Float32, dims)));
-        acc = acc + NanAny((Tensor<float64>)Tensor(TensorDataWithSmallVals(DType.Float64, dims)));
+        acc = acc + NanAny((Tensor<bit>)Tensor(TensorDataWithSmallVals(DType.Bool, dims).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<int8>)Tensor(TensorDataWithSmallVals(DType.Int8, dims).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<uint8>)Tensor(TensorDataWithSmallVals(DType.UInt8, dims).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<int16>)Tensor(TensorDataWithSmallVals(DType.Int16, dims).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<int32>)Tensor(TensorDataWithSmallVals(DType.Int32, dims).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<int64>)Tensor(TensorDataWithSmallVals(DType.Int64, dims).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<uint16>)Tensor(TensorDataWithSmallVals(DType.UInt16, dims).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<uint32>)Tensor(TensorDataWithSmallVals(DType.UInt32, dims).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<uint64>)Tensor(TensorDataWithSmallVals(DType.UInt64, dims).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<bfloat16>)Tensor(TensorDataWithSmallVals(DType.BFloat16, dims).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<float16>)Tensor(TensorDataWithSmallVals(DType.Float16, dims).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<float32>)Tensor(TensorDataWithSmallVals(DType.Float32, dims).MoveToAttribute()));
+        acc = acc + NanAny((Tensor<float64>)Tensor(TensorDataWithSmallVals(DType.Float64, dims).MoveToAttribute()));
 
         // TensorDataForConstantOfShapeFill — pure data (no graph node); exercised at build time for
         // every DType arm (its single-element fill value is what ConstantOfShape would broadcast).
@@ -425,8 +425,8 @@ public partial class VariableAndInputConstructorsModel
         acc = acc + NanAny(DefaultVector<float32>(3L));
 
         // TrainableTensor materializes its initializer data ([1,2]); fold both overloads.
-        acc = acc + NanAny((Tensor<float32>)TrainableTensor(TensorData([2L], 1.0f, 2.0f)));
-        acc = acc + NanAny(TrainableTensor<float32>(TensorData([2L], 1.0f, 2.0f)));
+        acc = acc + NanAny((Tensor<float32>)TrainableTensor(TensorData([2L], 1.0f, 2.0f).MoveToAttribute()));
+        acc = acc + NanAny(TrainableTensor<float32>(TensorData([2L], 1.0f, 2.0f).MoveToAttribute()));
 
         return (acc + Nan(input)) < Scalar(1e-3f);
     }

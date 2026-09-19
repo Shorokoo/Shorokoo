@@ -275,7 +275,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         if (attrs.GetDTypesVal(def.AttributeName)?.Any(x => x.IsGenericTypeReference) == true) return true;
                         break;
                     case AttributeType.Tensor:
-                        if (attrs.GetTensorVal(def.AttributeName)?.DType.IsGenericTypeReference == true) return true;
+                        if (attrs.GetAttributeVal(def.AttributeName)?.DType.IsGenericTypeReference == true) return true;
                         break;
                 }
             }
@@ -309,10 +309,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     }
                     case AttributeType.Tensor:
                     {
-                        var td = attrs.GetTensorVal(def.AttributeName);
+                        var td = attrs.GetAttributeVal(def.AttributeName);
                         if (td is null || !td.DType.IsGenericTypeReference) continue;
                         rebuilt[def.AttributeName] =
-                            TensorDataConversion.ConvertTensorDataType(td, td.DType.ToNonGenericType());
+                            TensorDataConversion.ConvertAttributeType(td, td.DType.ToNonGenericType());
                         break;
                     }
                 }

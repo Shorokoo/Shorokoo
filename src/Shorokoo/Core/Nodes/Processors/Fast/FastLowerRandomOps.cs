@@ -65,8 +65,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             {
                 if (seedNode.OpCode == InternalOpCodes.MODEL_PARAM)
                     WriteDefaultIdentity(seedNode);
-                var rngSeedData = seedNode.Attributes.GetTensorVal(ShrkAttrTensorData)
-                    ?.As<uint64>().CopyMemory<ulong>();
+                var rngSeedData = seedNode.Attributes.GetAttributeVal(ShrkAttrTensorData)
+                    ?.Elements<ulong>().ToArray();
                 if (rngSeedData is not null)
                 {
                     var identity = RngRuntimeIdentity.Decode(rngSeedData);
@@ -163,9 +163,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         private static void WriteDefaultIdentity(FastNode seedNode)
         {
             var identity = RngRuntimeIdentity.Build(RngConfig.Default);
-            var data = new OnnxTensorData<uint64>(
-                new Shape(identity.Length),
-                OnnxUtils.CreateTensorValue(new Shape(identity.Length), identity));
+            var data = Shorokoo.Globals.TensorData([identity.Length], identity).MoveToAttribute();
             var attrDefs = Definitions.NodeDefinitions[InternalOpCodes.MODEL_PARAM_DATA].AttributeDefs;
             seedNode.OpCode = InternalOpCodes.MODEL_PARAM_DATA;
             seedNode.Attributes = OnnxCSharpAttributes.FromCSharpVals(
@@ -353,10 +351,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
         private static FastTensorKey AppendScalarUInt64(ulong value, List<FastNode> newNodes)
         {
-            var data = new OnnxTensorData<uint64>(
-                new Shape(Array.Empty<long>()),
-                OnnxUtils.CreateTensorValue(new Shape(Array.Empty<long>()), (ulong[])[value]));
-            return AppendConstant(data, newNodes);
+            return AppendConstant(
+                Shorokoo.Globals.TensorData([], value).MoveToAttribute(), newNodes);
         }
 
         /// <summary>Casts the framework's int64 execution counter to the RNG interface's
@@ -380,13 +376,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
         private static FastTensorKey AppendScalarFloat32(float value, List<FastNode> newNodes)
         {
-            var data = new OnnxTensorData<float32>(
-                new Shape(Array.Empty<long>()),
-                OnnxUtils.CreateTensorValue(new Shape(Array.Empty<long>()), (float[])[value]));
-            return AppendConstant(data, newNodes);
+            return AppendConstant(
+                Shorokoo.Globals.TensorData([], value).MoveToAttribute(), newNodes);
         }
 
-        private static FastTensorKey AppendConstant(TensorData data, List<FastNode> newNodes)
+        private static FastTensorKey AppendConstant(TensorAttribute data, List<FastNode> newNodes)
         {
             var constAttrDefs = Definitions.NodeDefinitions[OpCodes.CONSTANT].AttributeDefs;
             var key = FastNodeKey.New();
@@ -403,8 +397,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             return outKey;
         }
 
-        private static readonly TensorData ZeroScalar = new OnnxTensorData<float32>(
-            new Shape(1), OnnxUtils.CreateTensorValue((long[])[1], (float[])[0f]));
+        // One literal, shared by every graph this pass lowers: an attribute is immutable and
+        // belongs to no context, so there is nothing for two graphs holding it to fight over.
+        private static readonly TensorAttribute ZeroScalar =
+            TensorAttribute.Create(new Shape(1), DType.Float32, BitConverter.GetBytes(0f));
 
         /// <summary>
         /// Lowers an unkeyed SHRK_RANDOM_* node to <c>ConstantOfShape(shape, 0f)</c> +

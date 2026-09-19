@@ -222,7 +222,7 @@ namespace Shorokoo.Core
         internal static Variable OptionalTensor(DType dtype, Node owningNode, Function? moduleFn, string? name = null)
             => new Variable(dtype, owningNode, moduleFn, name, DataStructure.Optional);
 
-        internal static Variable EmptyVector(DType type) => (Variable)Shorokoo.Core.Nodes.NodeDefinitions.OnnxOp.Constant(Globals.TensorData(type));
+        internal static Variable EmptyVector(DType type) => (Variable)Shorokoo.Core.Nodes.NodeDefinitions.OnnxOp.Constant(Globals.TensorData(type).MoveToAttribute());
 
         /// <summary>
         /// Creates a TensorStruct for a given DType (which must be a TensorStruct type).

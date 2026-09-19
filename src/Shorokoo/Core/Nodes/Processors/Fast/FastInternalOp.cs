@@ -147,10 +147,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         /// <summary>
-        /// Mirrors <c>OnnxOp.Constant(TensorData)</c>: emits a CONSTANT node with the supplied
-        /// <see cref="TensorData"/> attached as the <c>value</c> attribute.
+        /// Mirrors <c>OnnxOp.Constant(TensorAttribute)</c>: emits a CONSTANT node with the supplied
+        /// <see cref="TensorAttribute"/> attached as the <c>value</c> attribute.
         /// </summary>
-        public static FastNode Constant(TensorData value)
+        public static FastNode Constant(TensorAttribute value)
         {
             var nodeKey = FastNodeKey.New();
             var attrDefs = Definitions.NodeDefinitions[OpCodes.CONSTANT].AttributeDefs;

@@ -96,9 +96,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         {
             if (!nodeByKey.TryGetValue(shapeKey.FastNodeKey, out var shapeNode)) return false;
             if (shapeNode.OpCode != OpCodes.CONSTANT) return false;
-            var data = shapeNode.Attributes.GetTensorVal(OnnxOpAttributeNames.AttrValue);
+            var data = shapeNode.Attributes.GetAttributeVal(OnnxOpAttributeNames.AttrValue);
             if (data is null || data.DType != DType.Int64 || data.Shape.Dims.Length != 1) return false;
-            var dims = data.As<int64>().CopyMemory<long>();
+            var dims = data.Elements<long>().ToArray();
             int negOnes = 0;
             foreach (var d in dims)
             {

@@ -294,7 +294,7 @@ namespace Shorokoo.Core
         {
             get
             {
-                var tensorData = this.OwningNode.GetTensorData();
+                var tensorData = this.OwningNode.GetTensorAttribute();
                 if (tensorData is not null)
                     return tensorData.Shape.Dims.Select(x => new TensorDim(x)).ToArray();
                 return this.Rank is int r ? Enumerable.Range(1, r).Select(_ => new TensorDim()).ToArray() : null;

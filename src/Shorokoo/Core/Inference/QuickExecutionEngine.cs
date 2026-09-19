@@ -192,7 +192,7 @@ public sealed class QuickExecutionEngine
         {
             var outKey = outputKeys.FirstOrDefault(k => k is not null);
             if (outKey is null) return null;
-            var data = node.Attributes.GetTensorVal(OnnxOpAttributeNames.ShrkAttrTensorData);
+            var data = node.Attributes.GetAttributeVal(OnnxOpAttributeNames.ShrkAttrTensorData);
             store[outKey.Value] = data is not null
                 ? TensorDataConverter.ToRuntimeTensor(data, MaxDataElements)
                 : RuntimeTensorFactory.Create(DType.Invalid, null);

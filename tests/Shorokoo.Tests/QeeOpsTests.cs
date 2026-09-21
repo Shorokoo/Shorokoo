@@ -273,7 +273,8 @@ public class QeeOpsCoverageTests
         Assert.NotEqual(Key(f32r1, 1f), FastLowerRegisteredOps.TryBuildKey(lowering, f32r1, Attrs(1f), 2));
         Assert.Null(FastLowerRegisteredOps.TryBuildKey(lowering, f32r1,
             OnnxCSharpAttributes.FromCSharpVals(
-                new() { [OnnxOpAttributeNames.ShrkAttrTensorData] = TensorData(DType.Float32, [1L], 1f) },
+                new() { [OnnxOpAttributeNames.ShrkAttrTensorData] =
+                    TensorData(DType.Float32, [1L], 1f).MoveToAttribute() },
                 Definitions.NodeDefinitions[InternalOpCodes.MODEL_PARAM_DATA].AttributeDefs), 1));
     }
 

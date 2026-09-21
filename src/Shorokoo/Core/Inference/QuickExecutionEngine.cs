@@ -160,10 +160,10 @@ public sealed class QuickExecutionEngine
         // out of the nodes it is folding — and lowering in place would rewrite that caller's
         // graph. Cloning preserves every key, so the store this returns is keyed exactly as the
         // caller's graph is, and the caller's Softsign stays a Softsign.
-        if (FastLowerRegisteredOps.HasLowerableOp(graph))
+        if (FastLowerRegisteredOps.HasLowerableOp(graph, HasQuickOp))
         {
             graph = graph.Clone();
-            FastLowerRegisteredOps.Process(graph);
+            FastLowerRegisteredOps.Process(graph, HasQuickOp);
         }
 
         var nodeByKey = FastProcessorHelper.BuildNodeByKey(graph);
@@ -179,6 +179,12 @@ public sealed class QuickExecutionEngine
 
         return store;
     }
+
+    /// <summary>
+    /// Whether this engine runs <paramref name="opCode"/> as it stands, which is what decides
+    /// the operators it needs a lowering for.
+    /// </summary>
+    private static bool HasQuickOp(string opCode) => OpRegistry.Get(opCode) is not null;
 
     /// <summary>
     /// Processes one node and returns an optional next-node index. A null return means "proceed

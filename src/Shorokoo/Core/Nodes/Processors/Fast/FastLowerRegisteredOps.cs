@@ -13,16 +13,22 @@ using Shorokoo.Graph;
 namespace Shorokoo.Core.Nodes.Processors.Fast
 {
     /// <summary>
-    /// Rewrites every node whose operator has a registered <see cref="OpLowering"/> but no
-    /// <see cref="QuickOp"/> into that lowering's decomposition, in one walk over the graph.
+    /// Rewrites every node whose operator has a registered <see cref="OpLowering"/> but that the
+    /// caller cannot carry out itself into that lowering's decomposition, in one walk over the
+    /// graph.
     ///
-    /// <para>An operator with a kernel of its own keeps it: a lowering is the fallback for an
-    /// operator the QuickExecutionEngine cannot run directly, not a preferred spelling of one it
-    /// can.</para>
+    /// <para>Which operators those are is the caller's to say, and the two callers say different
+    /// things: the QuickExecutionEngine lowers what it has no <see cref="QuickOp"/> for, the
+    /// autodiff engine what it has no <c>[AutoDiff]</c> rule for. An operator the caller can
+    /// carry out keeps it either way: a lowering is the fallback for an operator that cannot be,
+    /// not a preferred spelling of one that can.</para>
     ///
-    /// <para><b>The graph this rewrites is the engine's own copy.</b> The engine clones before
-    /// calling here, so the decomposition is private to one run: the caller's graph keeps its
-    /// <c>Softsign</c> node and the exported ONNX still says <c>Softsign</c>.</para>
+    /// <para><b>This rewrites the graph it is handed</b>, and what that costs the caller is the
+    /// caller's to decide. The QuickExecutionEngine clones first, so the decomposition is private
+    /// to one run and the graph handed to it keeps its <c>Softsign</c>; the autodiff pass lowers
+    /// the training graph it is expanding, which from then on carries the decomposition in place
+    /// of the operator. A graph with no <c>AUTO_GRAD</c> node never reaches the autodiff pass, so
+    /// an inference model still exports its <c>Softsign</c> as a <c>Softsign</c>.</para>
     ///
     /// <para><b>Keys are preserved.</b> Like the other <c>FastLower*</c> passes, this one does not
     /// rewire consumers. The decomposition's non-terminal nodes are inserted at the lowered node's
@@ -48,26 +54,30 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         private const char Group = '\u0002';
 
         /// <summary>
-        /// Whether <paramref name="graph"/> holds anything this pass would rewrite. A caller runs
-        /// this first so a graph with no lowerable operator — the overwhelming majority — pays one
-        /// linear scan instead of a clone and a Variable-level rebuild of every tensor.
+        /// Whether <paramref name="graph"/> holds anything this pass would rewrite for a caller
+        /// that carries out the operators <paramref name="handledDirectly"/> accepts. A caller
+        /// runs this first so a graph with no lowerable operator — the overwhelming majority —
+        /// pays one linear scan instead of a clone and a Variable-level rebuild of every tensor.
         /// </summary>
-        public static bool HasLowerableOp(InternalComputationGraph graph)
+        public static bool HasLowerableOp(InternalComputationGraph graph, Func<string, bool> handledDirectly)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
+            if (handledDirectly is null) throw new ArgumentNullException(nameof(handledDirectly));
 
             foreach (var node in graph.Nodes)
-                if (IsLowerable(node)) return true;
+                if (IsLowerable(node, handledDirectly)) return true;
             return false;
         }
 
         /// <summary>
-        /// Lowers every lowerable node in <paramref name="graph"/> in place.
+        /// Lowers every node in <paramref name="graph"/> that has a lowering and that
+        /// <paramref name="handledDirectly"/> says the caller cannot carry out as it stands.
         /// </summary>
-        public static void Process(InternalComputationGraph graph)
+        public static void Process(InternalComputationGraph graph, Func<string, bool> handledDirectly)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
-            if (!HasLowerableOp(graph)) return;
+            if (handledDirectly is null) throw new ArgumentNullException(nameof(handledDirectly));
+            if (!HasLowerableOp(graph, handledDirectly)) return;
 
             var tensorInfo = BuildTensorInfo(graph);
 
@@ -79,7 +89,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var newNodes = new List<FastNode>(graph.Nodes.Count);
             foreach (var node in graph.Nodes)
             {
-                var plan = IsLowerable(node) && OpLoweringRegistry.TryGet(node.OpCode, out var lowering)
+                var plan = IsLowerable(node, handledDirectly) && OpLoweringRegistry.TryGet(node.OpCode, out var lowering)
                     ? TryPlan(lowering, node, tensorInfo, plans)
                     : null;
 
@@ -105,9 +115,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         ///
         /// <para>Throws when the decomposition is wrong rather than merely unusable: a lowering
         /// that builds its own op code cannot be built from itself, and one that builds an
-        /// operator the engine has no <see cref="QuickOp"/> for has not reached the primitives —
-        /// lowering is a single step down and never consults
-        /// <see cref="OpLoweringRegistry"/> again.</para>
+        /// operator with no <see cref="QuickOp"/> has not reached the framework's primitives —
+        /// <see cref="OpRegistry"/> is the roster of those, whichever caller is lowering, and a
+        /// lowering is a single step down that never consults <see cref="OpLoweringRegistry"/>
+        /// again.</para>
         /// </summary>
         internal static LoweredPlan? Decompose(
             OpLowering lowering,
@@ -162,8 +173,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// </summary>
         internal sealed record LoweredPlan(List<FastNode> Body, FastTensorKey?[] StandInKeyBySlot);
 
-        private static bool IsLowerable(FastNode node)
-            => OpLoweringRegistry.TryGet(node.OpCode, out _) && OpRegistry.Get(node.OpCode) is null;
+        private static bool IsLowerable(FastNode node, Func<string, bool> handledDirectly)
+            => OpLoweringRegistry.TryGet(node.OpCode, out _) && !handledDirectly(node.OpCode);
 
         private static bool ProducesAny(FastNode node, HashSet<FastTensorKey> keys)
         {

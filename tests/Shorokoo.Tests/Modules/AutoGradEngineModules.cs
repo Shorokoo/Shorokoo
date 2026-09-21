@@ -93,6 +93,30 @@ namespace Shorokoo.Tests.Modules
     }
 
     // ===================================================================
+    //  An op lowered into its decomposition inside an IfElse arm
+    // ===================================================================
+
+    /// <summary>
+    /// <c>loss = Σ IfElse(c &gt; 0, softsign(x), 3x)</c>, with the condition runtime-valued so the
+    /// branch survives to autograd. Softsign has no <c>[AutoDiff]</c> rule, so the arm is
+    /// rewritten into its decomposition before the reverse walk, and a decomposition spliced
+    /// outside the arm it came from would be gated on the wrong condition. Checked against
+    /// <c>1/(1+|x|)²</c> supplied from outside rather than against another expression of itself.
+    /// </summary>
+    [Module]
+    public partial class AutoGradEngineSoftsignInIfArmCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x, Scalar<float32> c, Tensor<float32> expected)
+        {
+            var loss = (c > Scalar(0f)).IfElse(x.Softsign(), x * Scalar(3f))
+                .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            var grad = (Tensor<float32>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, loss);
+            var slack = Scalar(1e-6f) - (grad - expected).Abs();
+            return slack.Reduce(ReduceKind.Min, keepDims: false).Scalar() > Scalar(0f);
+        }
+    }
+
+    // ===================================================================
     //  AD003 guards: unsupported attribute combinations must throw loudly
     //  (asserted via Assert.Throws in AutoGradEngineTests — the modules just
     //  put the offending op on a loss→param path)

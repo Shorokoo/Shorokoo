@@ -185,6 +185,8 @@ public class QeeOpsCoverageTests
         }
     }
 
+    private static bool HasQuickOp(string opCode) => OpRegistry.Get(opCode) is not null;
+
     private static MethodInfo LoweringMethod(string name) => typeof(QeeOpsCoverageTests)
         .GetMethod(name, BindingFlags.NonPublic | BindingFlags.Static)!;
 
@@ -240,7 +242,7 @@ public class QeeOpsCoverageTests
         var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x, y])).ToConcreteModel();
 
         var lowered = concrete.Clone();
-        FastLowerRegisteredOps.Process(lowered);
+        FastLowerRegisteredOps.Process(lowered, HasQuickOp);
 
         Assert.Equal(2, concrete.Nodes.Count(n => n.OpCode == OpCodes.SOFTSIGN));
         Assert.DoesNotContain(lowered.Nodes, n => n.OpCode == OpCodes.SOFTSIGN);
@@ -261,7 +263,7 @@ public class QeeOpsCoverageTests
         var g = QeeSoftsignInLoopAuditCheck.ComputationGraph.ToInternal();
         var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x])).ToConcreteModel();
         var lowered = concrete.Clone();
-        FastLowerRegisteredOps.Process(lowered);
+        FastLowerRegisteredOps.Process(lowered, HasQuickOp);
 
         int open = lowered.Nodes.FindIndex(n => n.OpCode == OpCodes.LOOP_OPEN);
         int close = lowered.Nodes.FindIndex(n => n.OpCode == OpCodes.LOOP_CLOSE);

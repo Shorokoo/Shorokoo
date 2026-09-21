@@ -1,5 +1,7 @@
 using System.Collections.Immutable;
+using Shorokoo.Core.Graph;
 using Shorokoo.Core.Lowering;
+using Shorokoo.Core.Nodes.Processors.Fast;
 using static Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames;
 using static Shorokoo.Core.Nodes.NodeDefinitions.OpCodes;
 
@@ -9,8 +11,8 @@ namespace Shorokoo.Tests;
 /// Coverage for the <c>CallCustomOperator&lt;T...&gt;</c> /
 /// <c>CallCustomOperatorArrayOut&lt;T&gt;</c> overloads on <see cref="NodeBuilder"/>,
 /// which <c>CSharpModelBuilder.MakeCustomCodeTemplate</c> emits for custom ops without
-/// a built-in <c>CodeTemplate</c>, and for <see cref="OpLowering.Trace"/>, which reads the
-/// <see cref="NodeBuilder"/> nodes a lowering built back off its outputs.
+/// a built-in <c>CodeTemplate</c>, and for <see cref="FastLowerRegisteredOps.Decompose"/>, which
+/// reads the <see cref="NodeBuilder"/> nodes a lowering built back off its outputs.
 /// </summary>
 [Trait("Domain", "Framework")]
 [Trait("Purpose", "Coverage")]
@@ -61,25 +63,25 @@ public class NodeBuilderCoverageTests
     }
 
     [Fact]
-    public void TestAnOperatorLoweringTracesBackToTheNodesItBuilt()
+    public void TestAnOperatorLoweringReadsBackAsTheNodesItBuilt()
     {
-        Variable x = InputTensor<float32>("x", rank: 1);
         Assert.True(OpLoweringRegistry.TryGet(SOFTSIGN, out var lowering));
-        var outputs = lowering.Build([x],
-            OnnxCSharpAttributes.FromCSharpVals(new(), Definitions.NodeDefinitions[SOFTSIGN].AttributeDefs));
-        var trace = lowering.Trace(outputs, [x]);
-        var y = outputs[0]!;
+        var plan = FastLowerRegisteredOps.Decompose(lowering, [(DType.Float32, 1)],
+            OnnxCSharpAttributes.FromCSharpVals(new(), Definitions.NodeDefinitions[SOFTSIGN].AttributeDefs),
+            declaredOutputs: 1)!;
+        var x = plan.StandInKeyBySlot[0]!.Value;
 
-        Assert.Equal<string>([ABS, CONSTANT, CAST_LIKE, ADD, DIV], [.. trace.Select(n => n.OpCode)]);
-        Assert.Equal(trace[^1], y.OwningNode);
-        Assert.Equal(trace.Count, trace.Distinct().Count());
-        Assert.All(trace, n => Assert.All(n.Inputs,
-            i => Assert.True(i is null || i == x || trace.IndexOf(i.OwningNode) < trace.IndexOf(n))));
-        Assert.Equal<Variable>([x, x, x],
-            [trace[^1].Inputs[0]!, trace[2].Inputs[1]!, trace[0].Inputs[0]!]);
-        Assert.Empty(lowering.Trace([x], [x]));
-        Assert.Equal(DType.Float32, y.Type);
-        Assert.Equal(1, y.Rank);
+        Assert.Equal<string>([CONSTANT, CAST_LIKE, ABS, ADD, DIV], [.. plan.Body.Select(n => n.OpCode)]);
+        Assert.Equal(plan.Body.Count, plan.Body.Select(n => n.Key).Distinct().Count());
+
+        HashSet<FastTensorKey> built = [x];
+        foreach (var node in plan.Body)
+        {
+            Assert.All(node.Inputs, i => Assert.True(i is null || built.Contains(i.Value)));
+            foreach (var output in node.Outputs) built.Add(output!.Value);
+        }
+        Assert.Equal<FastTensorKey>([x, x, x],
+            [plan.Body[^1].Inputs[0]!.Value, plan.Body[1].Inputs[1]!.Value, plan.Body[2].Inputs[0]!.Value]);
     }
 
     [Fact]

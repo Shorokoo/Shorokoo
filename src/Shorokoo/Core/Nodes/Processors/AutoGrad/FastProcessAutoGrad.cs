@@ -45,10 +45,11 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
     /// </para>
     ///
     /// <para>An op with no <c>[AutoDiff]</c> method is not necessarily undifferentiable: if it
-    /// has a registered <see cref="OpLowering"/>, its gradient comes from that decomposition
-    /// instead, through <see cref="LoweredGradient"/>. That is a fallback and not a preference —
-    /// a hand-written rule wins wherever one exists, since it can state a form the decomposition
-    /// cannot, such as a numerically stable branch.</para>
+    /// has a registered <see cref="OpLowering"/>, <see cref="FastLowerRegisteredOps"/> rewrites
+    /// it into that decomposition before the walk starts, and the walk differentiates the
+    /// primitives it decomposed into. That is a fallback and not a preference — a hand-written
+    /// rule wins wherever one exists, since it can state a form the decomposition cannot, such as
+    /// a numerically stable branch.</para>
     /// </summary>
     internal static class FastProcessAutoGradProcessor
     {
@@ -60,6 +61,7 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
         /// </summary>
         private static readonly Dictionary<string, MethodInfo> gradientMethodInfos = BuildGradientMethodInfos();
         private static readonly HashSet<string> outputUsingGradientOps = AutoDiffs.GetGradientOpsUsingOutputs();
+        private static readonly HashSet<string> gradientOpCodes = [.. AutoDiffs.GetGradientOps().Keys];
 
         /// <summary>
         /// Maps every C# IVarType class (e.g. <c>typeof(int64)</c>) back to its <see cref="DType"/>
@@ -82,6 +84,13 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
                 .ToList();
             if (autoGradNodes.Count == 0) return;
 
+            // An op with no rule of its own but a registered lowering is differentiated through
+            // its decomposition: the graph is rewritten into primitives the reverse walk does
+            // have rules for, and from there nothing about the walk is special. Before the
+            // unscoping below, so the splice sees the scope structure it was written against —
+            // a decomposition of an op inside an IfElse arm belongs inside that arm.
+            FastLowerRegisteredOps.Process(graph, HasGradientRule);
+
             // The backward reads what the forward computed, so it cannot leave those values on a
             // branch that may not run. Flatten the branches, emit at module scope, and let the
             // simplify after this pass scope them again with the gradient nodes among the
@@ -97,6 +106,13 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
             System.Diagnostics.Debug.Assert(graph.TryValidateLinearOrder(out var orderError),
                 "graph.IsLinearOrderValid(): " + orderError);
         }
+
+        /// <summary>
+        /// Whether <paramref name="opCode"/> has an <c>[AutoDiff]</c> rule. That is what decides
+        /// which operators this pass has lowered out of the graph first — and, read the other
+        /// way, it is why a hand-written rule wins over a decomposition wherever one exists.
+        /// </summary>
+        internal static bool HasGradientRule(string opCode) => gradientOpCodes.Contains(opCode);
 
         private static void ProcessOne(InternalComputationGraph graph, FastNode autoGradNode)
         {
@@ -404,17 +420,10 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
             // A gradient flows into this node and an AUTO_GRAD parameter sits behind it
             // (ComputeForwardTopoOrder only admits unregistered nodes when a param is
             // reachable through them). Cutting silently here would freeze that parameter
-            // with a zeros gradient, so fail loudly instead — but only once the registry of
-            // operator lowerings has been asked too: an op that is a composition of
-            // differentiable primitives is differentiable through that composition, and
-            // LoweredGradient builds the same chain rule out of it that a hand-written rule
-            // would have stated. Nothing else in this method changes for such an op: the
-            // stand-ins below are built the same way (with no gradient method to read slot
-            // dtypes off, so every slot is float32 at the host tensor's rank), and what comes
-            // back is a cotangent per input slot either way.
-            OpLowering? lowering = null;
-            if (!gradOpsMap.TryGetValue(node.OpCode, out var gradOp)
-                && !OpLoweringRegistry.TryGet(node.OpCode, out lowering))
+            // with a zeros gradient, so fail loudly instead. An op that is a composition of
+            // differentiable primitives has already been rewritten into them by the lowering
+            // pass Process runs, so what is left here genuinely has no gradient.
+            if (!gradOpsMap.TryGetValue(node.OpCode, out var gradOp))
             {
                 var isLoopOp = node.OpCode is OpCodes.LOOP_OPEN or OpCodes.LOOP_CLOSE
                     or OpCodes.LOOP_FAKE_INPUT or OpCodes.LOOP_SCAN_VARIABLE
@@ -503,10 +512,7 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
             Variable?[] inputGrads;
             try
             {
-                inputGrads = gradOp is not null
-                    ? gradOp(inputIValues, outputGrads, node.Attributes)
-                    : LoweredGradient.Compute(
-                        lowering!, inputIValues, outputGrads, node.Attributes, gradOpsMap);
+                inputGrads = gradOp(inputIValues, outputGrads, node.Attributes);
             }
             catch (AutoDiffNotSupportedException)
             {

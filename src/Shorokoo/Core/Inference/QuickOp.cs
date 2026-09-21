@@ -102,11 +102,9 @@ internal abstract class QuickOp
     }
 
     /// <summary>
-    /// Resolves a list of tensor keys to runtime tensors. Null keys stay null. Internal rather
-    /// than protected because the engine gathers a node's inputs itself when it computes that
-    /// node from an <see cref="Lowering.OpLowering"/> instead of from an op.
+    /// Resolves a list of tensor keys to runtime tensors. Null keys stay null.
     /// </summary>
-    internal static IRuntimeTensor?[] GatherInputs(
+    protected static IRuntimeTensor?[] GatherInputs(
         System.Collections.Generic.IReadOnlyList<FastTensorKey?> keys,
         Dictionary<FastTensorKey, IRuntimeTensor> store)
     {

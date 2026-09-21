@@ -232,8 +232,8 @@ public sealed class QuickExecutionEngine
         var op = OpRegistry.Get(node.OpCode);
         if (op is null)
         {
-            PopLoopFrame(node, state);
             WriteDeclaredOutputs(node, store);
+            PopLoopFrame(node, state);
             return null;
         }
 

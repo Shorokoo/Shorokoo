@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using System.Reflection;
 using Shorokoo.Runtime;
 using Shorokoo.Core.Factory;
@@ -184,6 +185,54 @@ public class QeeOpsCoverageTests
             Assert.Null(failed.Shape);
             Assert.Null(failed.FloatData);
         }
+    }
+
+    // A node subset with a dangling input reference — the shape a caller that folds part of a
+    // graph hands over — has no Variable-level rebuild, so nothing says what any slot holds.
+    private static RuntimeTensor OnAPartialGraph(
+        InternalComputationGraph graph, int output, params TensorData[] feed)
+    {
+        var partial = new InternalComputationGraph
+        {
+            Nodes = [.. graph.Nodes.Where(n => n.OpCode != InternalOpCodes.MODEL_TENSOR_INPUT)],
+            Inputs = graph.Inputs,
+            Outputs = graph.Outputs,
+        };
+        var seeded = new Dictionary<Core.Graph.FastTensorKey, IRuntimeTensor>();
+        for (int i = 0; i < feed.Length; i++)
+            seeded[graph.Inputs[i]] = TensorDataConverter.ToRuntimeInput(
+                feed[i], QuickExecutionEngine.DefaultMaxDataElements);
+        return (RuntimeTensor)new QuickExecutionEngine().Run(partial, seeded)[partial.Outputs[output]];
+    }
+
+    [Fact]
+    public void TestALoweredOperatorIsStillComputedWhenTheGraphHasNoTensorInfoToBuildFrom()
+    {
+        var x32 = InputTensor<float32>(defaultName: "x", rank: 1);
+        var g32 = new InternalComputationGraph([x32], [x32.Softsign(), x32.Abs()]);
+        var f32 = TensorData(DType.Float32, [3L], 0f, 1f, 3f);
+
+        var x64 = InputTensor<float64>(defaultName: "x", rank: 1);
+        var g64 = new InternalComputationGraph([x64], [x64.Softsign()]);
+
+        var past = InputTensor<float32>(defaultName: "past", rank: 2);
+        var update = InputTensor<float32>(defaultName: "update", rank: 2);
+        var starts = InputTensor<int64>(defaultName: "starts", rank: 1);
+        ImmutableArray<Variable> scatterInputs = [past, update, starts];
+        var scatter = new InternalComputationGraph(
+            scatterInputs, [OnnxOp.TensorScatter(past, update, starts, axis: 1L)]);
+
+        var softsign32 = OnAPartialGraph(g32, 0, f32);
+        var softsign64 = OnAPartialGraph(g64, 0, TensorData(DType.Float64, [3L], 0.0, 1.0, 3.0));
+        Assert.Equal(DType.Float32, softsign32.DType);
+        Assert.Equal<float>([0f, 0.5f, 0.75f], softsign32.FloatData!.Value);
+        Assert.Equal(DType.Float64, softsign64.DType);
+        Assert.Equal<float>([0f, 0.5f, 0.75f], softsign64.FloatData!.Value);
+        Assert.Equal<float>([0f, 1f, 3f], OnAPartialGraph(g32, 1, f32).FloatData!.Value);
+        Assert.Equal<float>([1f, 100f, 101f, 4f], OnAPartialGraph(scatter, 0,
+            TensorData(DType.Float32, [1L, 4L], 1f, 2f, 3f, 4f),
+            TensorData(DType.Float32, [1L, 2L], 100f, 101f),
+            TensorData(DType.Int64, [1L], 1L)).FloatData!.Value);
     }
 
     private static MethodInfo LoweringMethod(string name) => typeof(QeeOpsCoverageTests)

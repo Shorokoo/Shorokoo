@@ -123,6 +123,18 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// <see cref="OpRegistry"/> is the roster of those, whichever caller is lowering, and a
         /// lowering is a single step down that never consults <see cref="OpLoweringRegistry"/>
         /// again.</para>
+        ///
+        /// <para>That second test asks whether the QuickExecutionEngine has a kernel for the
+        /// operator, which is its own question rather than every caller's: the exporter's is
+        /// whether the operator can be emitted. The two answers agree over every operator the
+        /// framework defines today, so the one test serves all three callers.</para>
+        ///
+        /// <para>It also happens to stop a lowering being built out of another lowerable
+        /// operator, since no operator a caller lowers has a kernel today. That is a coincidence
+        /// and not a guard: a caller's list is stated rather than derived from the kernel table,
+        /// so it may name an operator that does have one, and such an operator would pass this
+        /// test, be spliced in, and stay — <see cref="Process"/> walks the node list once and
+        /// never revisits what it splices. Nothing reaches that shape today.</para>
         /// </summary>
         internal static LoweredPlan? Decompose(
             OpLowering lowering,
@@ -191,8 +203,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// <summary>
         /// Dtype and rank for every tensor in <paramref name="graph"/>, or nothing when the graph
         /// cannot be rebuilt at the Variable level — a partial graph handed to the engine mid-pass
-        /// is one the engine still runs as far as it can, so a lookup that cannot be built leaves
-        /// each stand-in untyped rather than failing the run.
+        /// is one the engine still runs as far as it can, so a lookup that cannot be built falls
+        /// back to <see cref="StandInDType"/> per slot rather than failing the run.
         /// </summary>
         private static Dictionary<FastTensorKey, FastTensorInfo> BuildTensorInfo(
             InternalComputationGraph graph)
@@ -223,7 +235,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 if (inputs[i] is not { } key || key.IsEmpty) continue;
                 descriptors[i] = tensorInfo.TryGetValue(key, out var info)
                     ? (info.DType, info.Rank)
-                    : (DType.Invalid, null);
+                    : (StandInDType(lowering, i), null);
             }
 
             var cacheKey = TryBuildKey(lowering, descriptors, node.Attributes, declaredOutputs);
@@ -235,6 +247,45 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             if (plan is not null && cacheKey is not null) plans[cacheKey] = plan;
             return plan;
+        }
+
+        /// <summary>
+        /// The dtype to build slot <paramref name="slot"/>'s stand-in at when the graph does not
+        /// say what that slot holds — every slot of every node, when the tensor-info lookup could
+        /// not be built at all.
+        ///
+        /// <para><see cref="DType.Invalid"/> is the reading a missing entry invites and it is the
+        /// wrong one: <c>invalid</c> is not the absence of a type but a type that fails every
+        /// constraint, so a decomposition whose operands must be numeric throws before it builds
+        /// anything, the node is left as it stands, and the engine — which now has no kernel for
+        /// it — writes a placeholder. That loses a value the engine can perfectly well compute,
+        /// which is the opposite of running a partial graph as far as it can.</para>
+        ///
+        /// <para>The lowering's own signature answers the question instead. A slot it declares as
+        /// <c>Tensor&lt;int64&gt;</c> holds int64 whatever the graph says; a slot it declares
+        /// generically is one it is written to handle at any dtype, so any concrete dtype builds
+        /// the same decomposition and float32 — which satisfies every type constraint a lowering's
+        /// operands carry — is the one taken.</para>
+        ///
+        /// <para>What a stand-in's dtype decides is what can be BUILT, not what is computed. A
+        /// <see cref="FastNode"/> carries no per-tensor dtype, and the engine computes each node
+        /// from the runtime dtypes of the tensors actually in its store, so building a
+        /// <c>Softsign</c>'s decomposition at float32 does not make a float64 <c>Softsign</c>
+        /// compute in float32. That holds only because a decomposition reads its operands' types
+        /// at runtime rather than in C# — see <see cref="OpLowerings"/>.</para>
+        /// </summary>
+        private static DType StandInDType(OpLowering lowering, int slot)
+        {
+            var parameters = lowering.Method.GetParameters();
+            if (slot >= parameters.Length) return DType.Float32;
+
+            var declared = Nullable.GetUnderlyingType(parameters[slot].ParameterType)
+                ?? parameters[slot].ParameterType;
+            return declared.IsGenericType
+                && declared.GenericTypeArguments.Length == 1
+                && Shorokoo.Core.Utils.OnnxUtils.GetDType(declared.GenericTypeArguments[0]) is { } dtype
+                ? dtype
+                : DType.Float32;
         }
 
         /// <summary>

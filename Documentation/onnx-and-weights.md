@@ -112,7 +112,7 @@ to 24. No post-21 **operator** raises it, because none survives to emission:
 `Attention`, `AttentionWithKVCache`, `RotaryEmbedding`, `BitCast` and
 `CumProd` throw `NotImplementedException` at their `OnnxOp` entry points,
 `Swish` and `RMSNormalization` lower inline to opset-21 primitives, and
-`TensorScatter` — built and run as itself — is decomposed into opset-21
+`TensorScatter` — built and kept as itself — is decomposed into opset-21
 primitives by this pre-pass, so no post-21 operator node is ever emitted from
 an authored graph (the exporter's per-operator floors are kept as the restore
 point for when a runtime registers the remaining operators at a usable opset,

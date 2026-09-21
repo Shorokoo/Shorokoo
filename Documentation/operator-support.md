@@ -48,13 +48,20 @@ A ✅ in the last two columns does not always mean the engine has an
 implementation of that operator written out for it. Some operators are instead
 registered as a **decomposition into simpler operators**, and an engine with no
 implementation of its own computes — or differentiates — the decomposition. The
-result is the same either way, which is why the table does not distinguish them:
-the decomposition is an internal detail of how an engine runs the node, not a
-change to your graph, and the node keeps its identity — a `Softsign` in your
-model is still a `Softsign`. Whether the **exporter** decomposes it too is a
-separate question, answered by the first column's notes: `TensorScatter` is the
-only operator it decomposes today, because opset 21 has no node for it, and a
-`Softsign` is therefore still a `Softsign` in the ONNX written from your model.
+result is the same either way, which is why the table does not distinguish them.
+
+Computing one costs your graph nothing: the decomposition is an internal detail
+of how the engine runs the node, carried out on a copy the run owns, so the
+model you built keeps its `Softsign`. **Differentiating one is the exception.**
+Autodiff expands the training graph in place, so the training graph it hands
+back carries the decomposition where the forward operator stood — differentiate
+a `Softsign` and the forward pass you train with is an `Abs`, an `Add` and a
+`Div`. The inference model you built is untouched.
+
+Whether the **exporter** decomposes it too is a separate question, answered by
+the first column's notes: `TensorScatter` is the only operator it decomposes
+today, because opset 21 has no node for it, and a `Softsign` is therefore still
+a `Softsign` in the ONNX written from an inference model.
 
 ## Elementwise math & activations
 
@@ -272,7 +279,7 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
 13. Exact whenever a `steps` input is wired (any stride, including negative);
     the faster path used when `steps` is absent retains an approximate
     clamping of negative starts/ends.
-14. Built and run as itself, but opset 21 has no `TensorScatter` node, so the
+14. Built and kept as itself, but opset 21 has no `TensorScatter` node, so the
     exported ONNX carries its registered lowering instead: `update`
     concatenated onto `past_cache` along the sequence axis, and one
     `GatherElements` that takes each cache position from whichever half the
@@ -282,7 +289,7 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
     opset-24 `TensorScatter` kernel, over both modes, `write_indices` present
     and absent, every legal `axis` at ranks 2 to 4, window lengths from 1 to
     `max_sequence_length`, empty batches, windows and caches, and every element
-    type Shorokoo can express — bool and bfloat16 included, since the selection
+    type the operator accepts — bool and bfloat16 included, since the selection
     is made on the gather's index rather than on the values. Outside that domain the spec's own preconditions
     are taken as given rather than enforced, and what Shorokoo produces for one
     is undefined: `sequence_length <= max_sequence_length`; in `linear` mode
@@ -292,6 +299,13 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
     refuses a literal 0, but the constraint is on the axis *after* it is
     normalized against the rank, which is not known until the graph runs: a
     rank-2 cache has to name axis 1 or −1, since the default −2 normalizes to 0.
+    Undefined here means quietly wrong, not an error: a runtime that has the
+    fused kernel rejects each of those inputs outright, while the decomposition
+    computes something — an over-long window returns garbage, a write index at
+    or past `max_sequence_length` drops that batch's write entirely, a negative
+    one shifts it, and a single-entry `write_indices` is broadcast over every
+    batch rather than refused. Check the preconditions yourself when the window
+    or the indices are computed rather than fixed.
 15. Values computed through that same lowering — the engine has no
     `TensorScatter` kernel of its own.
 16. Differentiated through that same lowering: `present_cache`'s gradient

@@ -10,10 +10,18 @@ namespace Shorokoo.Core.Lowering;
 ///
 /// <para>A lowering is ordinary Shorokoo code, written exactly as a <c>[Module]</c> function or an
 /// <c>[AutoDiff]</c> gradient rule is: it takes the operator's inputs and attributes and combines
-/// them with normal Shorokoo operations. It may therefore branch and loop over ranks or
-/// attributes like any other C#. What it must not do is compute: the values it returns are graph
-/// values, and which engine evaluates them — the QuickExecutionEngine on the spot, the autodiff
-/// engine as nodes to differentiate — is not its concern.</para>
+/// them with normal Shorokoo operations. It may therefore branch and loop like any other C#. What
+/// it must not do is compute: the values it returns are graph values, and which engine evaluates
+/// them — the QuickExecutionEngine on the spot, the autodiff engine as nodes to differentiate —
+/// is not its concern.</para>
+///
+/// <para>What it must not branch on is the dtype or rank of an operand. Those come from the
+/// caller's stand-in for the tensor, not from the tensor: a stand-in carries what the graph could
+/// say about that slot, and where the graph cannot say — a node subset with a dangling input
+/// reference, say — it carries a default instead. Take both at runtime — <c>CastLike</c> for a
+/// dtype, <c>Shape</c> for a rank — and the decomposition is right whatever the stand-in happened
+/// to carry. The operator's own attributes are a different matter: every caller states those
+/// truthfully, so branching on one is exactly right.</para>
 /// </summary>
 internal static class OpLowerings
 {
@@ -21,9 +29,10 @@ internal static class OpLowerings
     /// <c>Softsign(x) = x / (1 + |x|)</c>.
     ///
     /// <para>The <c>1</c> is cast to x's type rather than built at x's type: casting is a runtime
-    /// step, so it follows whatever dtype x actually turns out to have. Reading
-    /// <c>x.Type</c> in C# instead would fix the constant at whatever the engine's stand-in for x
-    /// happened to carry, which on the autodiff path is float32 for every input — a float64
+    /// step, so it follows whatever dtype x actually turns out to have. Reading <c>x.Type</c> in
+    /// C# instead would fix the constant at the dtype of the stand-in this was handed — a fact
+    /// about the stand-in rather than about the tensor. Where the graph states what the slot
+    /// holds the two agree, and where it cannot the stand-in falls back to a default: a float64
     /// Softsign would then add a float32 one to a float64 magnitude.</para>
     /// </summary>
     [OpLowering(SOFTSIGN)]
@@ -68,7 +77,7 @@ internal static class OpLowerings
     /// <c>QeeOpset26AuditTests.TestTensorScatterLoweringMatchesTheOrtKernel*</c>: both modes,
     /// <c>write_indices</c> present or absent, every legal <c>axis</c> at ranks 2 to 4, window
     /// lengths from 1 to <c>S</c>, an empty batch, an empty window, an empty cache and every
-    /// element type Shorokoo can express. What it does not cover is what the spec
+    /// element type the operator accepts. What it does not cover is what the spec
     /// places outside its domain, and the companion test holds that same reference kernel to
     /// refusing each one: <c>L &gt; S</c>; in <c>linear</c> mode <c>write_indices + L &gt; S</c>;
     /// a negative or out-of-range <c>write_indices</c>; and an <c>axis</c> that does not

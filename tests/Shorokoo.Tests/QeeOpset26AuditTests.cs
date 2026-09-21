@@ -20,8 +20,8 @@ namespace Shorokoo.Tests;
 /// primitives by their <see cref="OnnxOp"/> entry points, so their value audits run
 /// normally (the Swish audit is QEE-only only to match the audit-module style — its lowered
 /// graph carries no Swish node and loads anywhere). TensorScatter (@24) is decomposed by
-/// its registered lowering instead, which is a different arrangement: the node is built,
-/// run and differentiated as itself, and only the exported file carries the decomposition.
+/// its registered lowering instead, which is a different arrangement: the node is built
+/// and kept as itself, and only the exported file carries the decomposition.
 /// The ops with no opset-21 equivalent — Attention / AttentionWithKVCache /
 /// RotaryEmbedding (opset 23), BitCast / CumProd (opset 26) — cannot be emitted into an
 /// opset-21 model, so their entry points throw at authoring time; their op definitions and
@@ -107,6 +107,28 @@ public class QeeOpset26AuditTests
         }
     }
 
+    // An operator on the export list is one opset 21 has no node for, so a node that reaches the
+    // exporter past OnnxOp's authoring guard — through the raw NodeBuilder surface, or from an
+    // imported model — has to stop the export. Giving up on it silently stamps the file at 24 and
+    // ships a model ONNX Runtime's CPU provider cannot load.
+    [Fact]
+    public void TestAnExportListedOperatorThatCannotBeDecomposedFailsTheExport()
+    {
+        var past = Globals.InputTensor<float32>(defaultName: "past", rank: 3);
+        var update = Globals.InputTensor<float32>(defaultName: "update", rank: 3);
+        ImmutableArray<Variable> inputs = [past, update];
+        var graph = new InternalComputationGraph(inputs, [
+            NodeBuilder.BuildNodeSingleOut(OpCodes.TENSOR_SCATTER, [past, update, null],
+                [(OnnxOpAttributeNames.AttrAxis, 0L), (OnnxOpAttributeNames.AttrMode, null)])]);
+
+        Assert.Contains(OpCodes.TENSOR_SCATTER, Assert.Throws<InvalidOperationException>(
+            () => FastOnnxModelBuilder.BuildInternalOnnxModel(
+                graph, prepForOnnx: true, inputDims: [[2L, 3L, 2L], [2L, 1L, 2L]])).Message);
+        Assert.Contains(
+            FastOnnxModelBuilder.BuildInternalOnnxModel(graph, applyExecutionLowerings: false).Graph.Nodes,
+            n => n.OpType == OpCodes.TENSOR_SCATTER);
+    }
+
     // TensorScatter is the one lowered operator with a reference implementation to hand: ORT
     // 1.26's CPU provider registers a native kernel for it at opset 24. The export list is
     // thread-scoped, so the same graph can be written out fused — one opset-24 TensorScatter node
@@ -148,9 +170,9 @@ public class QeeOpset26AuditTests
             Scatter(true, DType.Float32, past, update, writeIndices, axis, mode);
             return false;
         }
-        catch (Exception)
+        catch (Microsoft.ML.OnnxRuntime.OnnxRuntimeException ex)
         {
-            return true;
+            return ex.Message.Contains(OpCodes.TENSOR_SCATTER, StringComparison.Ordinal);
         }
     }
 
@@ -186,6 +208,7 @@ public class QeeOpset26AuditTests
         Assert.True(Matches(DType.Float32, [2, 1, 4, 5], [2, 1, 4, 5], [0, 0], axis: 1L));
         Assert.True(Matches(DType.Float32, [2, 1, 4, 5], [2, 1, 4, 5], [0, 0], axis: -3L));
         Assert.True(Matches(DType.Float32, [2, 1, 4, 5], [2, 1, 4, 2], [3, 0], axis: -1L));
+        Assert.True(Matches(DType.Float32, [2, 1, 4, 5], [2, 1, 4, 2], [3, 0], axis: 3L));
     }
 
     [Fact]
@@ -236,6 +259,7 @@ public class QeeOpset26AuditTests
         Assert.True(Matches(DType.Float32, [2, 0, 2], [2, 0, 2], [0, 0]));
         Assert.True(Matches(DType.Float32, [2, 0, 2], [2, 0, 2], [0, 0], mode: TensorScatterMode.Circular));
         Assert.True(Matches(DType.Float32, [2, 3, 0], [2, 1, 0], [0, 1]));
+        Assert.True(Matches(DType.Float32, [2, 3, 0], [2, 3, 0], [0, 0], axis: 2L));
     }
 
     // The far side of the same comparison: every shape the lowering does not cover is one the

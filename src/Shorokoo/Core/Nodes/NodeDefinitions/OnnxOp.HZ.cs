@@ -666,7 +666,7 @@ public static partial class OnnxOp
     }
 
     /// <summary>Writes <paramref name="update"/> into <paramref name="pastCache"/> along the sequence axis at the per-batch write indices (ONNX TensorScatter, opset 24+).
-    /// The node is built, run and differentiated as itself; only the exported file decomposes it,
+    /// The node is built and kept as itself; only the exported file decomposes it,
     /// since opset 21 — the single opset Shorokoo writes — has no node for it. See the registered
     /// TensorScatter lowering for the decomposition and what of the spec it covers.
     /// <paramref name="axis"/> names the sequence dimension and so cannot be 0, the batch one.</summary>

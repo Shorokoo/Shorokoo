@@ -1180,6 +1180,32 @@ namespace Shorokoo.Core.Factory
         }
 
         /// <summary>
+        /// Decomposes every operator on <see cref="ExportLoweredOpCodes"/>, and refuses the export
+        /// when one survives the pass.
+        ///
+        /// <para>Unlike the engines, this caller has no graceful degradation to fall back on. An
+        /// operator on this list is one the single opset Shorokoo writes has no node for, so a node
+        /// left in place is emitted as itself and <see cref="FastOpsetResolver.RaiseToRequired"/> —
+        /// which runs after the pre-passes — raises the file's stamp to that operator's own opset.
+        /// What ships is then a model ONNX Runtime's CPU provider will not load, with nothing said
+        /// about why. The pass reports a decomposition it merely cannot use by leaving the node
+        /// alone and one that is wrong by throwing; here the two mean the same thing — there is
+        /// nothing to emit — so both stop the export.</para>
+        /// </summary>
+        private static void LowerForExport(InternalComputationGraph graph)
+        {
+            FastLowerRegisteredOps.Process(graph, ExportLoweredOpCodes);
+
+            foreach (var node in graph.Nodes)
+                if (ExportLoweredOpCodes.Contains(node.OpCode))
+                    throw new InvalidOperationException(
+                        $"FastOnnxModelBuilder: '{node.OpCode}' has no node at the opset Shorokoo emits, "
+                        + "and its registered lowering could not be built for this node, so there is "
+                        + "nothing to export. Check the node's inputs and attributes against what the "
+                        + "operator's documented domain covers.");
+        }
+
+        /// <summary>
         /// Runs every Fast pre-pass on <paramref name="graph"/> in the canonical
         /// pre-pass order. Mutates the graph in place.
         /// </summary>
@@ -1205,7 +1231,7 @@ namespace Shorokoo.Core.Factory
             // off — because a saved architecture must load back as the operator it was authored
             // with rather than as its decomposition; the export that later runs over the reloaded
             // graph decomposes it then.
-            if (applyExecutionLowerings) FastLowerRegisteredOps.Process(graph, ExportLoweredOpCodes);
+            if (applyExecutionLowerings) LowerForExport(graph);
             FastAddIdentityForOuterScopeValues.Process(graph);
             if (prepForOnnx) FastPrepForOnnx.Process(graph);
             FastStripCallStacks.Process(graph);
@@ -1229,7 +1255,7 @@ namespace Shorokoo.Core.Factory
             if (applyExecutionLowerings) FastLowerStateUpdateLinksForInference.Process(graph);
             if (applyExecutionLowerings) FastLowerRandomOps.Process(graph);
             // Same position, and for the same reasons, as in RunPrePasses above.
-            if (applyExecutionLowerings) FastLowerRegisteredOps.Process(graph, ExportLoweredOpCodes);
+            if (applyExecutionLowerings) LowerForExport(graph);
             FastAddIdentityForOuterScopeValues.Process(graph);
             if (prepForOnnx) FastPrepForOnnx.Process(graph);
             FastStripCallStacks.Process(graph);

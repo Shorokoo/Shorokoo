@@ -74,8 +74,12 @@ namespace Shorokoo.Graph
                 var originalNode = stateParamNodes[s];
                 var idx = indexInGraph[originalNode.Key];
                 var clonedNode = copy.Nodes[idx];
+                // Detached first: these are a run's outputs, which belong to the context that
+                // produced them, and the caller goes on holding them. The graph gets a literal of
+                // its own; only the copy is spent into it.
                 clonedNode.Attributes = clonedNode.Attributes.SetAttributes(
-                    (OnnxOpAttributeNames.ShrkAttrTensorData, (object?)tensorDatas[s]));
+                    (OnnxOpAttributeNames.ShrkAttrTensorData,
+                     (object?)tensorDatas[s].Detach().MoveToAttribute()));
             }
 
             return copy;

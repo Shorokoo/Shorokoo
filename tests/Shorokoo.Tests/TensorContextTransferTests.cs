@@ -4,12 +4,12 @@ using Shorokoo.Runtime;
 namespace Shorokoo.Tests;
 
 /// <summary>
-/// A tensor belongs to a compute context, says whether it owns its bytes, and moves between
+/// A tensor is a handle on an allocation that counts what names it, and moves between compute
 /// contexts by <c>TransferTo</c> / <c>CopyTo</c> / <c>GiveAccessTo</c>.
 ///
 /// <para>Everything here is host memory and two host contexts, which is the case the rules are
-/// hardest to see working: nothing crashes when ownership is wrong, so only the assertions show
-/// it. The device pairing is <c>SideBySideBackendHardwareTests</c>'s.</para>
+/// hardest to see working: nothing crashes when a reference is miscounted, so only the assertions
+/// show it. The device pairing is <c>SideBySideBackendHardwareTests</c>'s.</para>
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
@@ -20,37 +20,60 @@ public class TensorContextTransferCoverageTests
     private static float[] Floats(TensorData t) => [.. t.As<float32>().AccessMemory<float>()];
 
     [Fact]
-    public void TestATensorWithNoContextOwnsHostMemory()
+    public void TestATensorWithNoContextHoldsHostMemory()
     {
         var t = Sample();
 
-        Assert.Null(t.Context);
-        Assert.True(t.OwnsMemory);
+        Assert.Same(ComputeContext.Host, t.Context);
         Assert.Equal(MemorySpace.Host, t.Space);
+        Assert.Same(MemoryDevice.For(MemorySpace.Host), t.Device);
         Assert.True(t.IsHostResident);
     }
 
     [Fact]
-    public void TestTransferWithinOneSpaceMovesOwnershipAndNotTheBytes()
+    public void TestTheHostContextIsExactlyWhatTheNullContextWas()
+    {
+        Assert.Equal(MemorySpace.Host, ComputeContext.Host.MemorySpace);
+
+        foreach (var round in (Func<TensorData, TensorData>[])[
+            static t => t.TransferTo(null),
+            static t => t.TransferTo(ComputeContext.Host),
+            static t => t.CopyTo(null),
+            static t => t.CopyTo(ComputeContext.Host),
+            static t => t.Detach(),
+            static t => t.TransferTo(new ComputeContext()).TransferTo(null),
+            static t => t.TransferTo(new ComputeContext()).TransferTo(ComputeContext.Host),
+            static t => t.GiveAccessTo(new ComputeContext()).CopyTo(null),
+            static t => t.GiveAccessTo(new ComputeContext()).CopyTo(ComputeContext.Host)])
+        {
+            var result = round(Sample());
+            Assert.Same(ComputeContext.Host, result.Context);
+            Assert.Equal(MemorySpace.Host, result.Space);
+            Assert.Equal([1f, 2f, 3f, 4f], Floats(result));
+        }
+    }
+
+    [Fact]
+    public void TestTransferWithinOneSpaceMovesTheHandleAndNotTheBytes()
     {
         var source = Sample();
         var cpu = new ComputeContext();
 
         var moved = source.TransferTo(cpu);
 
-        // The whole point: the data did not go anywhere, the ownership did.
+        // The whole point: the data did not go anywhere, the handle did.
         Assert.Equal(MemorySpace.Host, moved.Space);
         Assert.Same(cpu, moved.Context);
-        Assert.True(moved.OwnsMemory);
-        Assert.False(source.OwnsMemory);
+        Assert.Same(cpu, source.Context);
         Assert.Equal([1f, 2f, 3f, 4f], Floats(moved));
 
-        // And the source is still readable -- it stopped owning the bytes, it did not lose them.
+        // And the source is still readable -- it handed its reference over, it did not lose the
+        // bytes.
         Assert.Equal([1f, 2f, 3f, 4f], Floats(source));
     }
 
     [Fact]
-    public void TestTransferringTwiceInOneSpaceLeavesExactlyOneOwner()
+    public void TestTransferringTwiceInOneSpaceLeavesExactlyOneReference()
     {
         var first = new ComputeContext();
         var second = new ComputeContext();
@@ -59,75 +82,118 @@ public class TensorContextTransferCoverageTests
         var a = source.TransferTo(first);
         var b = a.TransferTo(second);
 
-        Assert.False(source.OwnsMemory);
-        Assert.False(a.OwnsMemory);
-        Assert.True(b.OwnsMemory);
         Assert.Equal([1f, 2f, 3f, 4f], Floats(b));
+
+        // Each transfer handed its own reference over rather than adding one, so the last handle
+        // alone is what the bytes are waiting on.
+        b.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => Floats(source));
+        Assert.Throws<ObjectDisposedException>(() => Floats(a));
     }
 
     [Fact]
-    public void TestTransferFromANonOwnerGivesANonOwner()
+    public void TestTransferringASecondHandleOnwardLeavesTheFirstReading()
     {
         var owner = Sample();
         var reader = owner.GiveAccessTo(new ComputeContext());
 
         var onward = reader.TransferTo(new ComputeContext());
+        onward.Dispose();
 
-        // Neither of them owns: a transfer cannot invent an ownership its source never had.
-        Assert.False(reader.OwnsMemory);
-        Assert.False(onward.OwnsMemory);
-        Assert.True(owner.OwnsMemory);
+        Assert.Equal([1f, 2f, 3f, 4f], Floats(owner));
     }
 
     [Fact]
-    public void TestTheNullContextCannotHoldMemoryItDoesNotOwn()
+    public void TestTheHostContextTakesASecondHandleOnBytesAnotherTensorHolds()
     {
         var owner = Sample();
         var reader = owner.GiveAccessTo(new ComputeContext());
 
-        foreach (var refused in (Func<TensorData>[])[
-            () => owner.GiveAccessTo(null),
-            () => reader.TransferTo(null)])
+        foreach (var onHost in (TensorData[])[owner.GiveAccessTo(null), reader.TransferTo(null)])
         {
-            var ex = Assert.Throws<InvalidOperationException>(() => refused());
-            Assert.Contains("CopyTo(null)", ex.Message);
+            Assert.Same(ComputeContext.Host, onHost.Context);
+            Assert.Equal([1f, 2f, 3f, 4f], Floats(onHost));
         }
-
-        // And the way through is the one the message names.
-        Assert.True(reader.CopyTo(null).OwnsMemory);
     }
 
     [Fact]
-    public void TestGiveAccessToNeverTakesOwnershipAndLeavesTheSourceOwning()
+    public void TestGiveAccessToLeavesBothHandlesReadingUntilTheLastOneGoes()
     {
         var owner = Sample();
         var cpu = new ComputeContext();
 
         var reader = owner.GiveAccessTo(cpu);
 
-        Assert.False(reader.OwnsMemory);
-        Assert.True(owner.OwnsMemory);
         Assert.Same(cpu, reader.Context);
+        Assert.Same(ComputeContext.Host, owner.Context);
         Assert.Equal([1f, 2f, 3f, 4f], Floats(reader));
 
-        // Disposing a reader frees nothing, so the owner reads on.
+        // Either one may go first and the other reads on; the bytes wait for the second.
         reader.Dispose();
         Assert.Equal([1f, 2f, 3f, 4f], Floats(owner));
+        owner.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => Floats(reader));
     }
 
     [Fact]
-    public void TestReleasingTheOwnerMakesEveryReaderThrowRatherThanReadFreedMemory()
+    public void TestDisposingOneHandleLeavesTheOtherReadingAndDeletingStopsThemBoth()
     {
         var owner = Sample();
         var reader = owner.GiveAccessTo(new ComputeContext());
 
         owner.Dispose();
 
-        // The reader was never disposed. It is pointing at memory whose owner let go, which is
-        // the case a raw pointer cannot detect and this is here to make impossible.
+        // The case that was a use-after-free: a second name for a buffer whose first name was
+        // disposed is now a buffer that is simply still alive.
         Assert.False(reader.IsDisposed);
-        var ex = Assert.Throws<ObjectDisposedException>(() => Floats(reader));
-        Assert.Contains("released it", ex.Message);
+        Assert.Equal([1f, 2f, 3f, 4f], Floats(reader));
+
+        // Deletion still invalidates every handle, which is what makes it deletion.
+        Assert.True(reader.TryDelete());
+        Assert.Contains("deleted", Assert.Throws<ObjectDisposedException>(() => Floats(reader)).Message);
+    }
+
+    [Fact]
+    public void TestDonatingSpendsThisHandleAndLeavesTheBytesToTheDonation()
+    {
+        var t = Sample();
+        var donation = t.Donate();
+
+        Assert.True(t.IsDisposed);
+        Assert.Equal(t.DType, donation.DType);
+        Assert.Equal(t.Shape, donation.Shape);
+        Assert.Throws<ObjectDisposedException>(() => Floats(t));
+        Assert.Throws<ObjectDisposedException>(t.Donate);
+        Assert.Throws<ObjectDisposedException>(() => t.CopyTo(null));
+        Assert.Throws<ObjectDisposedException>(() => t.TransferTo(null));
+
+        var shared = Sample();
+        var reader = shared.GiveAccessTo(null);
+        shared.Donate();
+        Assert.Equal([1f, 2f, 3f, 4f], Floats(reader));
+
+        var unfed = Sample();
+        var taken = unfed.GiveAccessTo(null);
+        var abandoned = unfed.Donate();
+        abandoned.Dispose();
+        abandoned.Dispose();
+        Assert.Equal([1f, 2f, 3f, 4f], Floats(taken));
+        taken.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => Floats(taken));
+    }
+
+    [Fact]
+    public void TestASecondHandleIsRefusedOverAnAllocationThatIsAlreadyGone()
+    {
+        var deleted = Sample();
+        Assert.True(deleted.TryDelete());
+        Assert.Throws<ObjectDisposedException>(() => deleted.CloneSharing(ComputeContext.Host));
+
+        var released = Sample();
+        var reader = released.GiveAccessTo(null);
+        released.Dispose();
+        reader.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => reader.CloneSharing(ComputeContext.Host));
     }
 
     [Fact]
@@ -138,8 +204,6 @@ public class TensorContextTransferCoverageTests
 
         var copy = source.CopyTo(cpu);
 
-        Assert.True(copy.OwnsMemory);
-        Assert.True(source.OwnsMemory);
         Assert.Same(cpu, copy.Context);
         Assert.Equal([1f, 2f, 3f, 4f], Floats(copy));
 
@@ -150,14 +214,15 @@ public class TensorContextTransferCoverageTests
     }
 
     [Fact]
-    public void TestCopyToWorksFromATensorThatOwnsNothing()
+    public void TestCopyToWorksFromASecondHandleAndOutlivesBoth()
     {
         var owner = Sample();
         var reader = owner.GiveAccessTo(new ComputeContext());
 
         var copy = reader.CopyTo(null);
+        owner.Dispose();
+        reader.Dispose();
 
-        Assert.True(copy.OwnsMemory);
         Assert.Equal([1f, 2f, 3f, 4f], Floats(copy));
     }
 
@@ -169,8 +234,7 @@ public class TensorContextTransferCoverageTests
 
         var t = Sample().TransferTo(first).TransferTo(second).TransferTo(null);
 
-        Assert.Null(t.Context);
-        Assert.True(t.OwnsMemory);
+        Assert.Same(ComputeContext.Host, t.Context);
         Assert.Equal([1f, 2f, 3f, 4f], Floats(t));
     }
     [Fact]
@@ -189,16 +253,15 @@ public class TensorContextTransferCoverageTests
     [Fact]
     public void TestATransferredFromTensorNamesTheContextThatWillFreeItsBytes()
     {
-        // A same-space transfer leaves the source readable and owning nothing -- that is the
-        // documented contract. What it must not leave behind is a source whose Context names a
-        // context that no longer governs its bytes: Context is the only thing on the object that
+        // A same-space transfer leaves the source readable with its reference handed over -- that
+        // is the documented contract. What it must not leave behind is a source whose Context names
+        // a context that no longer governs its bytes: Context is the only thing on the object that
         // says whose disposal takes them away.
         var first = new ComputeContext();
         var second = new ComputeContext();
         var tensor = Sample().TransferTo(first);
         tensor.TransferTo(second);
 
-        Assert.False(tensor.OwnsMemory);
         Assert.Same(second, tensor.Context);
 
         first.Dispose();
@@ -212,11 +275,10 @@ public class TensorContextTransferCoverageTests
     {
         var context = new ComputeContext();
         var tensor = Sample();
-        Assert.Null(tensor.Context);
+        Assert.Same(ComputeContext.Host, tensor.Context);
 
         tensor.TransferTo(context);
 
-        Assert.False(tensor.OwnsMemory);
         Assert.Same(context, tensor.Context);
         context.Dispose();
         Assert.Throws<ObjectDisposedException>(() => Floats(tensor));

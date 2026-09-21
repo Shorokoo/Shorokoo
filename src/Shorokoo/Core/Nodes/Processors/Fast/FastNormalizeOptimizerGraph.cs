@@ -463,7 +463,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var inputNode = nodesByKey[workGraph.Inputs[i].FastNodeKey];
                 inputNode.OpCode = OpCodes.CONSTANT;
                 inputNode.Attributes = OnnxCSharpAttributes.FromCSharpVals(
-                    new Dictionary<string, object?> { [OnnxOpAttributeNames.AttrValue] = boundInputs[i] },
+                    new Dictionary<string, object?>
+                    {
+                        // The caller's values, which it keeps and reuses for the next parameter.
+                        [OnnxOpAttributeNames.AttrValue] = boundInputs[i].Detach().MoveToAttribute(),
+                    },
                     constantAttrDefs);
                 inputNode.FullInputs = new Dictionary<string, List<FastTensorKey?>>();
                 inputNode.FriendlyName = null;

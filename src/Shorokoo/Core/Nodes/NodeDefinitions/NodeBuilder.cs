@@ -66,23 +66,10 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 else if (kvp.Value is string strVal)
                     convertedAttrs[kvp.Key] = (string?)strVal;
                 else
-                {
-                    if (kvp.Value is TensorData attached && attached.Context is not null)
-                        throw new ArgumentException(
-                            $"The tensor given for attribute '{kvp.Key}' belongs to a compute "
-                            + $"context ({attached.Context.Backend}), and an operator's attribute "
-                            + "must not. An attribute is part of the graph's description, which is "
-                            + "the same description on every machine; a tensor bound to a context "
-                            + "is bound to one backend's memory, so a graph that captured one could "
-                            + "only be built where that context is. Detach it first -- "
-                            + "CopyTo(null) takes a copy in the framework's own host memory.",
-                            nameof(attrs));
-                    // Held by reference from here on, so the check above is only half the guard:
-                    // the other half is refusing to bind it to a context afterwards.
-                    (kvp.Value as TensorData)?.MarkAsGraphLiteral();
                     convertedAttrs[kvp.Key] = kvp.Value;
-                }
             }
+
+            RefuseUntypedTensorValues(convertedAttrs, defs);
 
             foreach (var def in defs)
             {
@@ -226,13 +213,38 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
             return tproto;
         }
 
+        /// <summary>
+        /// Refuses anything but a <see cref="TensorAttribute"/> in a tensor-typed slot.
+        ///
+        /// <para>Attribute values are stored untyped, so a write site still handing over a runtime
+        /// <see cref="TensorData"/> compiles and fails later, as an InvalidCastException in
+        /// whichever pass happens to read that op. This turns it into an error at the write, where
+        /// the mistake is, and names the conversion that was meant.</para>
+        /// </summary>
+        internal static void RefuseUntypedTensorValues(
+            Dictionary<string, object?> vals, ImmutableList<NodeDefAttributeDef> defs)
+        {
+            foreach (var def in defs)
+            {
+                if (def.Type != AttributeType.Tensor) continue;
+                if (!vals.TryGetValue(def.AttributeName, out var val) || val is null) continue;
+                if (val is TensorAttribute) continue;
+                throw new ArgumentException(
+                    $"Attribute '{def.AttributeName}' is a tensor in a graph's description, so it "
+                    + $"takes a {nameof(TensorAttribute)}, not a {val.GetType().Name}. A runtime "
+                    + "tensor becomes one with MoveToAttribute(), which hands its bytes over and "
+                    + "spends it -- Detach().MoveToAttribute() where the tensor is still needed.",
+                    nameof(vals));
+            }
+        }
+
         public float? GetFloatVal(string name) => (float?)this.attributeVals[name];
         public float[]? GetFloatsVal(string name) => (float[]?)this.attributeVals[name];
         public long? GetLongVal(string name) => (long?)this.attributeVals[name];
         public long[]? GetLongsVal(string name) => (long[]?)this.attributeVals[name];
         public string? GetStringVal(string name) => (string?)this.attributeVals[name];
         public string[]? GetStringsVal(string name) => (string[]?)this.attributeVals[name];
-        public TensorData? GetTensorVal(string name) => (TensorData?)this.attributeVals[name];
+        public TensorAttribute? GetAttributeVal(string name) => (TensorAttribute?)this.attributeVals[name];
         public TypeProto? GetTypeProtoVal(string name) => (TypeProto?)this.attributeVals[name];
         public DType? GetDTypeVal(string name) => (DType?)this.attributeVals[name];
         public DType[]? GetDTypesVal(string name) => (DType[]?)this.attributeVals[name];
@@ -313,9 +325,9 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                     else if (convertedAttrs[kvp.Key] is string[])
                         Debug.Assert(def.Type == AttributeType.Strings,
                             $"string[] attribute '{def.AttributeName}': expected AttributeType.Strings but got {def.Type}");
-                    else if (convertedAttrs[kvp.Key] is TensorData)
+                    else if (convertedAttrs[kvp.Key] is TensorAttribute)
                         Debug.Assert(def.Type == AttributeType.Tensor,
-                            $"TensorData attribute '{def.AttributeName}': expected AttributeType.Tensor but got {def.Type}");
+                            $"TensorAttribute attribute '{def.AttributeName}': expected AttributeType.Tensor but got {def.Type}");
                     else if (convertedAttrs[kvp.Key] is DType)
                         Debug.Assert(def.Type == AttributeType.DType,
                             $"DType attribute '{def.AttributeName}': expected AttributeType.DType but got {def.Type}");
@@ -331,6 +343,8 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                             $"unknown type attribute '{def.AttributeName}': expected Enum, Enums, or Graph but got {def.Type}");
                 }
             }
+
+            OnnxProtoAttributes.RefuseUntypedTensorValues(convertedAttrs, defs);
 
             foreach (var def in defs)
             {
@@ -418,7 +432,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
         public long[]? GetLongsVal(string name) => (long[]?)this.attributeVals[name];
         public string? GetStringVal(string name) => (string?)this.attributeVals[name];
         public string[]? GetStringsVal(string name) => (string[]?)this.attributeVals[name];
-        public TensorData? GetTensorVal(string name) => (TensorData?)this.attributeVals[name];
+        public TensorAttribute? GetAttributeVal(string name) => (TensorAttribute?)this.attributeVals[name];
         public (DataStructure structure, DType dtype)? GetTypeProtoVal(string name) => ((DataStructure, DType)?)this.attributeVals[name];
         public BestGraphAttribute? GetGraphVal(string name) => (BestGraphAttribute?)this.attributeVals[name];
         public object? GetAttributeObj(string name) => this.attributeVals[name]; 
@@ -627,7 +641,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 }
                 else if (attributeDef.Type == AttributeType.Tensor)
                 {
-                    var dtype = attributes.GetTensorVal(attributeDef.AttributeName)?.DType;
+                    var dtype = attributes.GetAttributeVal(attributeDef.AttributeName)?.DType;
                     if (dtype is null) return null;
 
                     return [dtype];
@@ -740,7 +754,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 }
                 else if (attributeDef.Type == AttributeType.Tensor)
                 {
-                    var rank = attributes.GetTensorVal(attributeDef.AttributeName)?.Shape.Dims.Length;
+                    var rank = attributes.GetAttributeVal(attributeDef.AttributeName)?.Shape.Dims.Length;
                     if (rank is null) return null;
 
                     Debug.Assert(rank <= int.MaxValue,

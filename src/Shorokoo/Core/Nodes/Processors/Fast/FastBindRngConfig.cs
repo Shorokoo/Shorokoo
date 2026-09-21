@@ -184,9 +184,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         private static RngRuntimeIdentity? DecodeCurrentIdentity(FastNode seedNode)
         {
             if (seedNode.OpCode != InternalOpCodes.MODEL_PARAM_DATA) return null;
-            var data = seedNode.Attributes.GetTensorVal(ShrkAttrTensorData);
+            var data = seedNode.Attributes.GetAttributeVal(ShrkAttrTensorData);
             if (data is null) return null;
-            return RngRuntimeIdentity.Decode(data.As<uint64>().CopyMemory<ulong>());
+            return RngRuntimeIdentity.Decode(data.Elements<ulong>().ToArray());
         }
 
         private static bool SamePathSet(int[][] a, int[][] b)
@@ -202,9 +202,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// consumers (the chains) stay wired.</summary>
         private static void WriteIdentity(FastNode seedNode, ulong[] identity)
         {
-            var data = new OnnxTensorData<uint64>(
-                new Shape(identity.Length),
-                OnnxUtils.CreateTensorValue(new Shape(identity.Length), identity));
+            var data = Shorokoo.Globals.TensorData([identity.Length], identity).MoveToAttribute();
             var attrDefs = Definitions.NodeDefinitions[InternalOpCodes.MODEL_PARAM_DATA].AttributeDefs;
             seedNode.OpCode = InternalOpCodes.MODEL_PARAM_DATA;
             seedNode.Attributes = OnnxCSharpAttributes.FromCSharpVals(

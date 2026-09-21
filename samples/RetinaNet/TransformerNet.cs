@@ -22,7 +22,7 @@ namespace RetinaNet.Models
         public static Tensor<float32> Inline(Vector<int64> shape)
         {
             // Xavier/Glorot initialization approximation using simple fill
-            return Tensor<float32>.Fill(shape, Globals.TensorData(1, 0.02f));
+            return Tensor<float32>.Fill(shape, Globals.TensorData(1, 0.02f).MoveToAttribute());
         }
     }
 
@@ -34,7 +34,7 @@ namespace RetinaNet.Models
     {
         public static Tensor<float32> Inline(Vector<int64> shape)
         {
-            return Tensor<float32>.Fill(shape, Globals.TensorData(1, 0.0f));
+            return Tensor<float32>.Fill(shape, Globals.TensorData(1, 0.0f).MoveToAttribute());
         }
     }
 

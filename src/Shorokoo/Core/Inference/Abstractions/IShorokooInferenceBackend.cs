@@ -90,4 +90,26 @@ public interface IShorokooInferenceBackend
         byte[] data,
         long[] shape)
         => CreateTensorFromRawBytes(elementType, data, shape);
+
+    // The same tensor as CreateTensorInBackendMemory builds -- same element type, same shape, same
+    // memory -- with nothing put into it: the buffer holds whatever was there, and whoever asked
+    // for it writes the contents. It is for a producer that fills a tensor element by element
+    // rather than copying one it is already holding, which is the case where the managed array a
+    // copy starts from is a second copy of the whole tensor, live for as long as both are
+    // (Shorokoo/Shorokoo#359).
+    //
+    // The default fills it after all, from a zeroed buffer through the member above, and so buys
+    // nothing: it is here because this interface is an ABI, and a member without a body is a
+    // backend outside this repository that no longer compiles. A backend that does not override
+    // this keeps paying the copy it always paid; overriding it is what stops paying.
+    //
+    // Sizing that buffer is TensorElementLayout's table -- the same one a backend's own byte-wise
+    // constructor reads -- so the element types CreateTensorFromRawBytes turns away are turned
+    // away here too, and in the same words. The two paths differing on which types exist would be
+    // a worse answer than either.
+    IShorokooTensorValue CreateUninitializedTensorInBackendMemory(
+        ShorokooTensorElementType elementType,
+        long[] shape)
+        => CreateTensorInBackendMemory(
+            elementType, new byte[TensorElementLayout.ByteCount(elementType, shape)], shape);
 }

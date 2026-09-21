@@ -193,7 +193,7 @@ rest of it.
 
 ### Moving a tensor between memory spaces copies it
 
-A `TensorData` belongs to a compute context and says whether it owns its bytes, and
+A `TensorData` is a handle on an allocation, attached to a compute context, and
 `TransferTo` / `CopyTo` / `GiveAccessTo` move it between contexts; see
 [Moving data between contexts](inference.md#moving-data-between-contexts). Any two host contexts
 share host bytes without copying. Two CUDA contexts on one device share the allocation only when
@@ -207,23 +207,32 @@ A tensor that came back from a session without the context that produced it bein
 its space as unknown, and cannot be transferred at all — there is no telling whether another
 context shares it. Bring such a value home on the backend that owns it first.
 
-### A tensor being fed to a run is not yours until the run returns
+### A feed disposed while a run is starting loses that run
 
-Feeding a `TensorData` to a run builds a runtime value from its contents and hands the execution
-provider a pointer into it. Writing through `AccessModifiableMemory` / `AccessModifiableRawMemory`,
-or disposing the tensor, releases that value — so doing either while a run on that tensor is still
-going leaves the provider reading freed memory.
+A run locks every tensor it is fed and holds the lock until it returns, so a feed disposed from
+another thread *while the run holds it* is safe: the handle goes, the run reads on, and the bytes
+come back when the run lets go — see
+[A tensor's lifetime](inference.md#a-tensors-lifetime-handles-locks-and-deletion). The lock is
+taken inside the run, one feed at a time, and everything before that is unprotected: the
+`Execute` / `Run` call itself, the expansion and naming of its inputs, and the locking of
+whichever feeds come first. A disposal landing in that window drops the last handle on the
+allocation, so the lock the run then asks for is refused and the call throws
+`ObjectDisposedException`.
 
-Within one thread this is hard to hit: the run has returned before you get the chance. It becomes
-reachable the moment a program runs two contexts at once, which is the arrangement
-[One model, two devices](inference.md#one-model-two-devices) exists for — staging the next batch
-into a tensor while the other device is still reading it is the natural thing to write, and it is
-the unsafe thing. Give the concurrent run a tensor of its own (`CopyTo`) or wait for it to return.
+The failure is clean — nothing reads freed memory, and no run returns a wrong answer — but the
+run is lost, and it is not a narrow race to be got away with: measured on a loop that handed a
+feed to `Execute` on one thread and disposed it from another as the call was made, 499 of 500
+runs ended that way. It is also the arrangement that
+[One model, two devices](inference.md#one-model-two-devices) invites — staging the next batch
+while the other device is still reading the last one — which is exactly where it is easy to
+write by accident. Give the concurrent run a tensor of its own (`CopyTo`) or wait for it to
+return.
 
-Nothing detects a violation. The release is explicit rather than a collection, so no rooting
-discipline on this side can see that a native call is in flight, and the failure is a read of freed
-memory rather than an exception. Making it enforceable rather than stated needs the runtime values
-reference-counted for the length of a run — [#366](https://github.com/Shorokoo/Shorokoo/issues/366).
+Nothing detects the disposal *coming*; what the lock gives is a refusal at the moment the run
+reaches for bytes that are gone. Closing the window rather than reporting it means taking the
+lock where the caller still holds the handle — at the entry point, before the inputs are
+expanded — which also has to hold for `Run`, for `Eval`, and for the one-shot paths that build
+a session of their own.
 
 ### A tensor moved onto a card is not covered by any device-memory budget
 
@@ -239,6 +248,27 @@ cannot account for this allocator, since it is not a session the program compile
 [#367](https://github.com/Shorokoo/Shorokoo/issues/367) tracks bringing it under a budget, which
 needs an allocator per (device, settings) and a rule for which context's budget governs a tensor
 more than one has touched.
+
+### A fed input's buffer is not recycled inside the run
+
+ONNX Runtime's memory planner reuses a buffer only where a kernel declares the reuse and the
+input's use count says that kernel is its last reader. It seeds every graph input with one extra
+use count, precisely so that a caller can still read a feed after `Run` returns — so the test can
+never pass for a feed, and no session or run option changes it. Shorokoo's own memory-aware pass
+models it the same way, and correctly: every fed input is resident for the whole step.
+
+That costs nothing on a training step, whose peak is intermediates and whose output is a scalar
+loss. It is felt by the opposite shape — a pipeline over an input so large that it dominates the
+peak, whose output is input-shaped — where the one buffer that can never be recycled is the
+largest in the run.
+
+[`Donate()`](inference.md#feeding-a-large-input-without-a-second-copy) is the lever that does
+exist: it releases the input the instant the run returns instead of when the caller lets go, and
+allocating on the context removes the managed copy beside it. Neither makes the bytes available to
+the run's own intermediates. Doing that means binding an output onto the input through ONNX
+Runtime's I/O binding, which ORT permits and checks nothing about: it buys exactly one
+input-sized buffer, only where an output matches that input's dtype and byte size, and nothing at
+all where the output is a loss.
 
 ### Sequence-valued models on an isolated CUDA backend
 

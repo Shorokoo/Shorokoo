@@ -25,7 +25,14 @@ Related: [defining-models.md](defining-models.md) · [inference.md](inference.md
   runtime/untyped APIs.
 - A graph value is symbolic. To get concrete numbers you must evaluate it — see
   [inference.md](inference.md).
-- `TensorData` / `TensorData<T>` hold concrete (materialized) values, not graph nodes.
+- `TensorData` / `TensorData<T>` hold concrete (materialized) values, not graph nodes —
+  what you feed a run, and what a run gives back.
+- `TensorAttribute` holds concrete values too, but the ones written into a graph's own
+  *description*: a `Constant`'s value, a `ConstantOfShape`'s fill, a trainable parameter's
+  weights. It is immutable, belongs to no compute context and is not disposable.
+  `TensorData.MoveToAttribute()` and `TensorAttribute.CopyToTensorData()` convert between the
+  two, and the first **spends** its source — see
+  [Two kinds of concrete tensor](#two-kinds-of-concrete-tensor-tensordata-and-tensorattribute).
 - `OptionalTensorData` is the concrete value of an `OptionalTensor` input:
   `OptionalTensorData.Some(tensor)` for a present value, `OptionalTensorData.None(dtype)`
   for an absent one. Both are `IData`, so they feed execution like any other input (see
@@ -69,8 +76,8 @@ kinds).
 | `VectorRange(start, limit, delta)` | `Vector<T>` | Numeric range. |
 | `Tensor([2L,3L], v0, v1, ...)` | `Tensor<T>` | From dims + flat values. |
 | `TensorData([1L,3L,2L,2L], myFloats)` | `TensorData<float32>` | Materialized data from dims + a flat `float[]`. |
-| `TensorFill(shape, TensorData([1], 0f))` | `Tensor<T>` | Constant-filled tensor. |
-| `Tensor<float32>.Fill(shape, TensorData(...))` | `Tensor<float32>` | Static fill on the type. |
+| `TensorFill(shape, 0f)` | `Tensor<T>` | Constant-filled tensor. |
+| `Tensor<float32>.Fill(shape, TensorData(...).MoveToAttribute())` | `Tensor<float32>` | Static fill on the type. The fill value is written into the graph, so it is a [`TensorAttribute`](#two-kinds-of-concrete-tensor-tensordata-and-tensorattribute) — and `MoveToAttribute()` spends the `TensorData` it is taken from. |
 | `RandomUniform(shape, low = 0f, high = 1f)` | `Tensor<float32>` | Random feed over the half-open `[low, high)`; all but `shape` are optional. Keyed by the model's [RNG identity](rng-configuration.md) — no per-site seed. What the draw returns: [uniform-draws.md](uniform-draws.md). |
 | `RandomUniform(shape, Scalar<float32> low, Scalar<float32> high)` | `Tensor<float32>` | Same feed over a range computed **in-graph** (both bounds required). The bounds reach the draw itself, so the range is exact at any width; a graph-scalar range needs a keyed (concrete, id-bearing) model. |
 | `RandomNormal(shape, mean = 0f, scale = 1f)` | `Tensor<float32>` | Random feed over N(`mean`, `scale`); all but `shape` are optional. Keyed by the model's [RNG identity](rng-configuration.md) — no per-site seed. What the draw returns: [normal-draws.md](normal-draws.md). |
@@ -227,7 +234,7 @@ using Shorokoo;
 using static Shorokoo.Globals;
 using static Shorokoo.NN;
 
-var x = TensorFill(Vector(1L, 3L, 224L, 224L), TensorData([1], 0.1f)); // [1,3,224,224]
+var x = TensorFill(Vector(1L, 3L, 224L, 224L), 0.1f); // [1,3,224,224]
 var w = RandomNormal(Vector(64L, 3L, 7L, 7L));
 var b = VectorFill(64L, 0f);
 
@@ -247,7 +254,7 @@ cast to the typed `TensorData<T>` and call `AccessMemory()`, which returns a
 TensorData result = OnnxEngine.Eval(y);
 ReadOnlySpan<float> values = ((TensorData<float32>)result).AccessMemory();
 float first = values[0];
-GC.KeepAlive(result);   // see "What a TensorData owns" below — the span is a window, not a copy
+GC.KeepAlive(result);   // see "What a TensorData holds" below — the span is a window, not a copy
 ```
 
 `AccessMemory()` maps each dtype marker to its CLR primitive: `float32`→`float`,
@@ -255,26 +262,171 @@ GC.KeepAlive(result);   // see "What a TensorData owns" below — the span is a 
 `bfloat16`→`BFloat16`, etc. A boxed `TensorData.Data` (`object[]`) also exists; prefer
 `AccessMemory()`.
 
-## What a `TensorData` owns, and when its values go away
+## Two kinds of concrete tensor: `TensorData` and `TensorAttribute`
 
-A `TensorData` **owns its storage**. Disposing it frees that storage immediately, and every
-way of reading the values afterwards — `AccessMemory()`, `AccessRawMemory()`, `.Data`,
-`.DebugData` — throws `ObjectDisposedException` rather than reading freed memory. `.Shape`,
-`.DType`, `.ToString()` and `.IsDisposed` keep working, so a disposed tensor can still say
-what it was. Disposing twice is fine.
+Concrete numbers reach Shorokoo in two roles, and each role has its own type.
 
-Disposing is optional. A tensor you simply drop is reclaimed like any other object, and
-nothing in the framework hands you a tensor you are obliged to dispose. Dispose when you want
-the memory back at a known moment — a long loop that produces large tensors is the case that
-motivates it — and when you do, that tensor is finished: nothing else shares its storage.
-Operations that build one tensor from another copy, so the source keeps what it owns — unless
-they say otherwise in so many words. `TensorDataSequence.Create(...)` copies the tensors you pass
-it, and disposing the sequence releases only the sequence's own copies.
+| | `TensorData` | `TensorAttribute` |
+|---|---|---|
+| What it is | a **run's** data: an input you feed, an output you read, training state | a **graph's** data: a literal written into the description itself |
+| Where the bytes are | in one compute context's memory — the host, or a particular card | nowhere in particular: a shape, a dtype and the elements |
+| Lifetime | a handle on an allocation; `IDisposable` | none — immutable, shared, not disposable |
+| Where you meet it | `Eval`, `Execute`, `Run`, `TrainStep`, a checkpoint's tensors | `Constant`, `ConstantOfShape`, a trainable parameter's initial value |
+
+The split is not bookkeeping. A description has to mean the same thing everywhere: a graph you
+build here, export to `.onnx`, and read back on a machine with a different card must be the
+same graph. A `TensorData` cannot promise that — it names memory that belongs to one compute
+context, so a graph holding one could only be built where that context is — and it has a
+lifetime, which a description does not. Nothing frees a literal, and a graph whose constant
+could be disposed out from under it is not a description of anything.
+
+So the slots that take a tensor-valued *operator attribute* take a `TensorAttribute`:
+
+- `OnnxOp.Constant(value)` — a graph constant;
+- `OnnxOp.ConstantOfShape(shape, value)`, and `Tensor<T>.Fill(shape, value)` on top of it —
+  the fill value;
+- `Globals.TrainableTensor(value, name)` — a trainable parameter's value, which is also where
+  a checkpoint's weights land when they are bound into a model.
+
+Everything else that takes concrete numbers — feeding a run, reading a result, a training
+batch, a `TrainingCheckpoint`'s state — still takes and returns `TensorData`.
+
+### Building one
+
+Most of the time you never name the type. `Scalar(1L)`, `Vector(1L, 2L)`,
+`Tensor([2L, 2L], …)`, `TensorFill(shape, 0f)` and `VectorFill(64L, 0f)` build their literal
+for you and hand back a graph value. You name it when you are holding the numbers already:
+
+```csharp
+using System.Runtime.InteropServices;   // MemoryMarshal, for the second form
+
+// From a TensorData you are finished with — the usual case.
+TensorAttribute weights = TensorData([64L, 3L, 7L, 7L], myFloats).MoveToAttribute();
+
+// Or straight from the bytes, with no TensorData in between.
+TensorAttribute fill = TensorAttribute.Create(
+    new Shape(1L), DType.Float32, MemoryMarshal.AsBytes<float>([0.1f]));
+
+Variable w = Globals.TrainableTensor(weights, "conv1.weight");
+```
+
+`Shape` is a class rather than a collection type, so the shape argument is `new Shape(…)` or a
+`long[]` — a bare `[1L]` collection literal does not convert to it.
+
+An attribute answers `Shape`, `DType`, `HasValues`, `Bytes` (or `Values` for `DType.String`),
+`Elements<V>()` and `CopyToTensorData()`, and that is the whole of it: there is no `Dispose`, no
+`Context`, no `Space`. `HasValues` is false for one case only — a model definition saved
+*without* its weights, whose parameter slots keep dtype and shape and no elements until a
+checkpoint is bound back onto them. Reading the elements of one of those throws, and says so.
+
+### The two conversions, and which one spends its source
+
+| | Costs | Afterwards |
+|---|---|---|
+| `TensorData.MoveToAttribute()` | nothing, where the tensor holds its own array and is the only handle on it; a copy otherwise | **the tensor is spent**: it is disposed, and reading it throws `ObjectDisposedException` |
+| `TensorAttribute.CopyToTensorData()` | a copy, always | both usable; the attribute is unchanged, and the copy is on `ComputeContext.Host` |
+
+The asymmetry is about size. Binding a checkpoint's weights into a graph is the direction that
+runs hot — a 165 M-parameter model is some 660 MB — so it moves, and moving means the source is
+gone. The other direction copies because an attribute is immutable and shared by every graph
+that captured it: a writable tensor over the same bytes would be a way to edit a description
+through the back door.
+
+That is also why the move falls back to a copy wherever handing the array over would leave
+somebody else able to write it, or wherever there is no array to hand over in the first place:
+
+- **A second handle names the same bytes.** `GiveAccessTo` hands out another handle, and
+  surrendering yours says nothing about that one — it could still write through
+  `AccessModifiableMemory`, and the description the graph captured would change under it. An
+  attribute taken while you are the only handle cannot be written by anyone.
+- **The elements are a runtime value's, or strings.** There is no managed array to give: the
+  bytes are a runtime's own buffer, or a string tensor's variable-length elements, and only a
+  copy gets them out.
+
+The case the no-copy path exists for — a checkpoint's tensor, parsed for the bind and named by
+nothing else — is the sole-handle case, so the size argument above is untouched.
+
+`MoveToAttribute()` refuses a tensor attached to a compute context, and says which call fixes
+it. A result that came back from `Execute` on a context of your own belongs to that context,
+so send it home first:
+
+```csharp
+TensorData result = compiled.Execute(input)[0].ToTensorData();
+Variable literal = Globals.Tensor(result.Detach().MoveToAttribute());
+```
+
+`OnnxEngine.Eval`, `ComputeContext.Eval` and `ComputeContext.Default` already hand their
+results back on `ComputeContext.Host`, so those need no `Detach()` — see
+[Moving data between contexts](inference.md#moving-data-between-contexts).
+
+### Changing code that passed a `TensorData` as an attribute
+
+The slots listed above used to take a `TensorData`. Code that passed one does not compile any
+more, and the fix is a `.MoveToAttribute()` at the call site:
+
+```csharp
+// before
+Tensor<float32>.Fill(shape, Globals.TensorData(1, 1.0f));
+Globals.TrainableTensor(myWeights, "w");
+
+// after
+Tensor<float32>.Fill(shape, Globals.TensorData(1, 1.0f).MoveToAttribute());
+Globals.TrainableTensor(myWeights.MoveToAttribute(), "w");     // myWeights is spent
+```
+
+One trap, from the move:
+
+- **A literal you meant to reuse has to be built twice, or converted once.** `MoveToAttribute()`
+  spends its tensor, so one `TensorData` cannot serve two call sites. Convert once and pass the
+  `TensorAttribute` to both — an attribute *is* shareable, being immutable — or build a fresh
+  `TensorData` per site.
+
+A factory that takes a `TensorData` for you does **not** spend it. `Globals.TensorFill<T>(shape,
+TensorData<T>)` copies, so the tensor you passed is still yours and may be passed again:
+
+```csharp
+var fill = (TensorData<float32>)TensorData([1L], 0.5f);
+var a = TensorFill((Vector<int64>)[Scalar(2L)], fill);
+var b = TensorFill((Vector<int64>)[Scalar(3L)], fill);   // fine: fill is untouched
+```
+
+A fill value is one element, so the copy costs nothing. Spending a tensor is something you ask
+for by name, never something a factory does to an argument you handed it.
+
+## What a `TensorData` holds, and when its values go away
+
+A `TensorData` is a **handle** on an allocation, not the allocation itself. More than one
+handle can name the same bytes, and the allocation is released when the last one lets go — so
+disposing a tensor means letting go of your own name for the memory, never pulling it away from
+something else that is reading it. The whole model — handles, what a run holds while it runs,
+and the two calls that do mean "free these bytes now" — is in
+[A tensor's lifetime](inference.md#a-tensors-lifetime-handles-locks-and-deletion). What matters
+while you are reading a result is this:
+
+- **Disposing is optional.** A tensor you simply drop is reclaimed like any other object, and
+  nothing in the framework hands you a tensor you are obliged to dispose. Dispose when you want
+  the memory back at a known moment — a long loop that produces large tensors is the case that
+  motivates it.
+- **Disposing is about this handle.** It is idempotent, it leaves every other handle on the
+  same bytes reading, and it frees nothing while a run is still reading them.
+- **The disposed handle stops reading.** `AccessMemory()`, `AccessRawMemory()`, `.Data` and
+  `.DebugData` throw `ObjectDisposedException` rather than reading freed memory. `.Shape`,
+  `.DType`, `.ToString()` and `.IsDisposed` keep working, so a disposed tensor can still say
+  what it was.
+
+Operations that build one tensor from another copy, so the source keeps its values — unless
+they say otherwise in so many words. Three say otherwise, and each **spends** the tensor it is
+called on: `MoveToAttribute()`
+([above](#the-two-conversions-and-which-one-spends-its-source)), `Donate()`, and `TransferTo`
+across memory spaces — the last two in
+[inference.md](inference.md#feeding-a-large-input-without-a-second-copy).
+`TensorDataSequence.Create(...)` copies the tensors you pass it, and disposing the sequence
+releases only the sequence's own copies.
 
 **A span is a window, not a copy.** `AccessMemory()` and `AccessRawMemory()` point straight
-into the tensor's storage, and nothing ties the span's lifetime to the tensor's. A span
-outlives its tensor's storage if you dispose the tensor, and also if the tensor simply becomes
-unreachable while you are still reading.
+into the allocation, and nothing ties the span's lifetime to the tensor's. A span outlives the
+bytes it points at if you let go of the last handle on them — by disposing the tensor, and also
+by letting it simply become unreachable while you are still reading.
 
 That second one catches people out, because being *in scope* is not the same as being
 *reachable*: the runtime retires a local at its last read, and taking the span **is** the

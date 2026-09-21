@@ -87,14 +87,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     }
                     case AttributeType.Tensor:
                     {
-                        var tensorData = attrs.GetTensorVal(def.AttributeName);
+                        var tensorData = attrs.GetAttributeVal(def.AttributeName);
                         var paramName = tensorData?.DType.GenericTypeParamName;
                         if (paramName is null) continue;
 
                         if (specializedDTypesWithParam.TryGetValue(paramName, out var targetDType))
                         {
                             rebuilt[def.AttributeName] =
-                                TensorDataConversion.ConvertTensorDataType(tensorData!, targetDType);
+                                TensorDataConversion.ConvertAttributeType(tensorData!, targetDType);
                             anyUpdated = true;
                         }
                         break;

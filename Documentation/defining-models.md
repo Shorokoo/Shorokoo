@@ -570,7 +570,7 @@ of an analyzer.
 public static partial class ConstInit
 {
     public static Tensor<float32> Inline(Vector<int64> shape)
-        => Tensor<float32>.Fill(shape, Globals.TensorData(1, 1.0f));
+        => Tensor<float32>.Fill(shape, Globals.TensorData(1, 1.0f).MoveToAttribute());
 }
 
 [Module]
@@ -594,6 +594,14 @@ public partial class DenseBasic
 // `Call` shortcut keeps hyperparameters first (then the input), so call sites are unchanged:
 var logits = DenseBasic.Call(Scalar(10L), Scalar(true), features);
 ```
+
+`MoveToAttribute()` in `ConstInit` is the graph-literal conversion. `Tensor<T>.Fill`'s value is
+written into the graph's description rather than fed to a run, so it takes a
+[`TensorAttribute`](core-types.md#two-kinds-of-concrete-tensor-tensordata-and-tensorattribute)
+and not a `TensorData` — and the conversion **spends** the tensor it is called on, so build a
+fresh one per call rather than hoisting it to a field. Most initializer bodies never need the
+call at all: `TensorFill(shape, 1.0f)`, `VectorFill(…)` and the `RandomNormal` / `RandomUniform`
+families take a primitive and build their own literal.
 
 ## Without the source generator
 

@@ -32,14 +32,14 @@ internal class TensorShapeInfo
     /// The actual tensor data, retained only for small tensors (fewer than 1024 elements).
     /// Null for large tensors where values were discarded to save memory.
     /// </summary>
-    public TensorData? Data { get; }
+    public TensorAttribute? Data { get; }
 
     /// <summary>
     /// Whether the actual tensor values are available.
     /// </summary>
     public bool HasData => Data is not null;
 
-    public TensorShapeInfo(Shape shape, DType dtype, TensorData? data)
+    public TensorShapeInfo(Shape shape, DType dtype, TensorAttribute? data)
     {
         Shape = shape;
         DType = dtype;

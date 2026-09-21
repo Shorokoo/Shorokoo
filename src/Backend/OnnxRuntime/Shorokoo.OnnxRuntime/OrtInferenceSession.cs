@@ -62,6 +62,8 @@ internal sealed class OrtInferenceSession : IShorokooInferenceSession
         RunSettings runSettings)
     {
         ArgumentNullException.ThrowIfNull(runSettings);
+        var abortToken = runSettings.CancellationToken;
+        abortToken.ThrowIfCancellationRequested();
         List<IShorokooTensorValue>? borrowed = null;
         try
         {
@@ -71,14 +73,28 @@ internal sealed class OrtInferenceSession : IShorokooInferenceSession
 
             using var runOptions = new RunOptions();
             ConfigureRun(runOptions, runSettings);
-            var results = _session.Run(runOptions, ortInputs, outputNames);
+            using var abort = AbortWhenCancelled(runOptions, abortToken);
 
-            // ORT snapshots each input's handle into an IntPtr[] and keeps no reference to the OrtValue
-            // wrappers, so from that point on `ortInputs` is their only root -- and the JIT retires it
-            // at the call. OrtValue has an ordinary finalizer that calls OrtReleaseValue, so a GC inside
-            // the native Run would free the feeds while it is still reading them. `_session` is rooted
-            // by this instance and `runOptions` by the using; the inputs need this.
-            GC.KeepAlive(ortInputs);
+            IDisposableReadOnlyCollection<OrtValue> results;
+            try
+            {
+                results = _session.Run(runOptions, ortInputs, outputNames);
+            }
+            catch (OnnxRuntimeException cause) when (WasStopped(cause, abortToken))
+            {
+                throw Aborted(cause, abortToken);
+            }
+            finally
+            {
+                // ORT snapshots each input's handle into an IntPtr[] and keeps no reference to the OrtValue
+                // wrappers, so from that point on `ortInputs` is their only root -- and the JIT retires it
+                // at the call. OrtValue has an ordinary finalizer that calls OrtReleaseValue, so a GC inside
+                // the native Run would free the feeds while it is still reading them. `_session` is rooted
+                // by this instance and `runOptions` by the using; the inputs need this. In the finally
+                // rather than after the call, so it is reached however the run ends -- a terminated one
+                // is still reading those buffers right up to the moment it gives up.
+                GC.KeepAlive(ortInputs);
+            }
 
             // `results` is deliberately not disposed. It is a container whose Dispose would dispose
             // the values inside it, and those are exactly what this returns: each one is handed to an
@@ -104,6 +120,8 @@ internal sealed class OrtInferenceSession : IShorokooInferenceSession
         RunSettings runSettings)
     {
         ArgumentNullException.ThrowIfNull(runSettings);
+        var abortToken = runSettings.CancellationToken;
+        abortToken.ThrowIfCancellationRequested();
 
         // Nothing to retain, or nowhere to retain it: an unbound Run is the same thing and
         // costs one native call less.
@@ -128,13 +146,25 @@ internal sealed class OrtInferenceSession : IShorokooInferenceSession
 
             using var runOptions = new RunOptions();
             ConfigureRun(runOptions, runSettings);
-            var results = _session.RunWithBoundResults(runOptions, binding);
+            using var abort = AbortWhenCancelled(runOptions, abortToken);
 
-            // Same rooting hazard as Run: the binding holds the feeds' raw handles, not the managed
-            // wrappers, so nothing but `inputs` keeps them alive across the native run. `borrowed`
-            // roots any feed that had to be rebuilt here, which `inputs` does not hold.
-            GC.KeepAlive(inputs);
-            GC.KeepAlive(borrowed);
+            IDisposableReadOnlyCollection<OrtValue> results;
+            try
+            {
+                results = _session.RunWithBoundResults(runOptions, binding);
+            }
+            catch (OnnxRuntimeException cause) when (WasStopped(cause, abortToken))
+            {
+                throw Aborted(cause, abortToken);
+            }
+            finally
+            {
+                // Same rooting hazard as Run: the binding holds the feeds' raw handles, not the managed
+                // wrappers, so nothing but `inputs` keeps them alive across the native run. `borrowed`
+                // roots any feed that had to be rebuilt here, which `inputs` does not hold.
+                GC.KeepAlive(inputs);
+                GC.KeepAlive(borrowed);
+            }
 
             // RunWithBoundResults returns the bound outputs in the binding's own order, which is the
             // order they were bound in -- ask it rather than assume, and hand them back in the order
@@ -202,6 +232,62 @@ internal sealed class OrtInferenceSession : IShorokooInferenceSession
         catch (Exception) { }
         return null;
     }
+
+    /// <summary>
+    /// Arms <paramref name="runOptions"/> so that cancelling <paramref name="token"/> sets ORT's
+    /// terminate flag on it, which is what makes a run abortable at all: ORT reads that flag
+    /// before each node, and a run's options are otherwise a local no other thread can reach.
+    /// Disarmed by disposing the registration, which is why the caller's <c>using</c> for it sits
+    /// <i>after</i> the one for the options: disposal runs in reverse, so the registration is gone
+    /// — and a callback already running on the cancelling thread waited out, which
+    /// <see cref="CancellationTokenRegistration.Dispose"/> does — before the native handle it
+    /// writes to is released.
+    ///
+    /// <para>The registration also roots <paramref name="runOptions"/> for its own lifetime, since
+    /// the token source holds it as the callback's state. That is belt and braces: the caller's
+    /// <c>using</c> reads the local in its <c>finally</c>, which already keeps it alive across the
+    /// native call.</para>
+    ///
+    /// <para>A token that can never be cancelled gets no registration at all — the default
+    /// <see cref="CancellationTokenRegistration"/> disposes to nothing — so an ordinary run pays
+    /// nothing for this.</para>
+    /// </summary>
+    private static CancellationTokenRegistration AbortWhenCancelled(
+        RunOptions runOptions, CancellationToken token)
+        => token.CanBeCanceled
+            ? token.Register(static state => ((RunOptions)state!).Terminate = true, runOptions)
+            : default;
+
+    /// <summary>
+    /// Whether <paramref name="cause"/> is ORT reporting the run <paramref name="token"/> stopped,
+    /// rather than a failure that merely happened while that token was cancelled. A stopped run and
+    /// a broken model come back as the same exception type, so what tells them apart is ORT naming
+    /// the flag; reading every failure as a cancellation because one was asked for reports a model
+    /// that cannot run as a run the caller stopped, and a caller told that retries rather than
+    /// fixing the model.
+    ///
+    /// <para>The window is narrow — ORT reads the flag between nodes and stops there, so a genuine
+    /// failure can only outrun a cancellation from the kernel that was already running — which is
+    /// also why nothing pins this from the outside: reaching the failing node with the flag already
+    /// set is the race itself.</para>
+    /// </summary>
+    private static bool WasStopped(OnnxRuntimeException cause, CancellationToken token)
+        => token.IsCancellationRequested
+            && cause.Message.Contains("terminate flag", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// What a run that was stopped throws. ORT reports a terminated run as a plain failed one —
+    /// an <see cref="OnnxRuntimeException"/> naming the flag — which is indistinguishable at a
+    /// glance from a model that is broken, so it is translated here into the one exception .NET
+    /// gives this meaning. The cause is kept as the inner exception, and the token is carried so
+    /// that a caller racing several runs can tell which cancellation stopped this one.
+    /// </summary>
+    private static OperationCanceledException Aborted(Exception cause, CancellationToken token)
+        => new(
+            "The run was stopped before it finished: the RunSettings.CancellationToken it was "
+            + "given was cancelled while it was running, so it produced no outputs.",
+            cause,
+            token);
 
     /// <summary>Applies what <i>this</i> run runs with. The settings arrive per call rather than
     /// being held by the session, which is ORT's own shape for them: turning arena shrinkage on

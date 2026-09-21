@@ -246,14 +246,14 @@ namespace Shorokoo.Core.Factory.IR
                             attribute.Floats = attributes.GetFloatsVal(attribute.Name).AssertNotNull();
                             break;
                         case AttributeProto.AttributeType.Tensor:
-                            var tensor = attributes.GetTensorVal(attribute.Name).AssertNotNull();
+                            var tensor = attributes.GetAttributeVal(attribute.Name).AssertNotNull();
                             attribute.T = (TensorProto)OnnxIRFactory.CreateTensor(
                                 tensor.Shape.Dims,
                                 name: null, // $"{name}_Tensor",
                                 tensor.DType,
                                 identifierTemplate: null,
                                 isTrainable: true,  // Tensor attributes are not state params
-                                tensor.CopyRawMemory());
+                                tensor.Bytes.ToArray());
                             attribute.Type = AttributeProto.AttributeType.Tensor;
                             break;
                         case AttributeProto.AttributeType.Tensors:

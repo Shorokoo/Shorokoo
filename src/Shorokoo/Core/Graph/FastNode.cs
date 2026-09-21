@@ -107,13 +107,13 @@ namespace Shorokoo.Core.Graph
         public override string ToString() => $"FastNode({OpCode})";
 
         /// <summary>
-        /// Returns the <see cref="TensorData"/> stored on this node's
+        /// Returns the <see cref="TensorAttribute"/> stored on this node's
         /// <see cref="Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrTensorData"/>
         /// attribute when the node is a MODEL_PARAM_DATA node, or null otherwise.
-        /// Mirrors <see cref="Node.GetTensorData"/>.
+        /// Mirrors <see cref="Node.GetTensorAttribute"/>.
         /// </summary>
-        public TensorData? GetTensorData() => this.OpCode != Shorokoo.Core.Nodes.NodeDefinitions.InternalOpCodes.MODEL_PARAM_DATA
+        public TensorAttribute? GetTensorAttribute() => this.OpCode != Shorokoo.Core.Nodes.NodeDefinitions.InternalOpCodes.MODEL_PARAM_DATA
             ? null
-            : this.Attributes.GetTensorVal(Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrTensorData);
+            : this.Attributes.GetAttributeVal(Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames.ShrkAttrTensorData);
     }
 }

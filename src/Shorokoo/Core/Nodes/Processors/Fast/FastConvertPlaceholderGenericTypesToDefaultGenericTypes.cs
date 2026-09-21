@@ -108,32 +108,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     }
                     case AttributeType.Tensor:
                     {
-                        var tensorData = attrs.GetTensorVal(def.AttributeName);
-                        if (tensorData is null) continue;
+                        var attribute = attrs.GetAttributeVal(def.AttributeName);
+                        if (attribute?.DType.GenericTypeIndex is not { } genericIndex) continue;
 
-                        // Detect TensorData<IGenericTypeN> via the runtime element type, mirroring
-                        // the CG-side ProcessTensorDataWithGenericTypes path.
-                        var tensorDataType = tensorData.GetType();
-                        if (!tensorDataType.IsGenericType) continue;
-                        var genericArgs = tensorDataType.GetGenericArguments();
-                        if (genericArgs.Length == 0) continue;
-                        var typeParam = genericArgs[0];
-                        if (!typeof(IGenericType).IsAssignableFrom(typeParam)) continue;
-
-                        int genericIndex;
-                        if (typeParam == typeof(IGenericType1)) genericIndex = 1;
-                        else if (typeParam == typeof(IGenericType2)) genericIndex = 2;
-                        else if (typeParam == typeof(IGenericType3)) genericIndex = 3;
-                        else if (typeParam == typeof(IGenericType4)) genericIndex = 4;
-                        else if (typeParam == typeof(IGenericType5)) genericIndex = 5;
-                        else if (typeParam == typeof(IGenericType6)) genericIndex = 6;
-                        else if (typeParam == typeof(IGenericType7)) genericIndex = 7;
-                        else if (typeParam == typeof(IGenericType8)) genericIndex = 8;
-                        else continue;
-
-                        var defaultDType = defaultTypes[genericIndex];
                         rebuilt[def.AttributeName] =
-                            TensorDataConversion.ConvertTensorDataType(tensorData, defaultDType);
+                            TensorDataConversion.ConvertAttributeType(attribute, defaultTypes[genericIndex]);
                         anyUpdated = true;
                         break;
                     }

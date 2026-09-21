@@ -249,7 +249,7 @@ public class ModulesCoverageTests
         foreach (var n in arch.ToInternal().Nodes)
         {
             if (n.OpCode != OpCodes.CONSTANT) continue;
-            if (n.Attributes?.GetAttributeVals().GetValueOrDefault(OnnxOpAttributeNames.AttrValue) is not TensorData td) continue;
+            if (n.Attributes?.GetAttributeVals().GetValueOrDefault(OnnxOpAttributeNames.AttrValue) is not TensorAttribute td) continue;
             long count = 1;
             foreach (var d in td.Shape.Dims) count *= d;
             biggest = Math.Max(biggest, count);

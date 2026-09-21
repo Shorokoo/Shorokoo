@@ -7,7 +7,9 @@
 | `Tensor<T>` / `Scalar<T>` / `Vector<T>` | Symbolic graph values of rank N / 0 / 1, generic over dtype marker `T`. | `core-types.md` |
 | dtype marker (`float32`, `int64`, `bit`, …) | The generic type argument naming a tensor's element type. | `core-types.md` |
 | `DType` | Runtime dtype descriptor (`DType.Float32`, …). | `core-types.md` |
-| `TensorData` / `TensorData<T>` | Concrete materialized values (results, constants, weights). | `inference.md` |
+| `TensorData` / `TensorData<T>` | The concrete values a *run* takes and gives back: inputs, outputs, training state. A handle on an allocation, attached to a `ComputeContext`, and disposable. | `core-types.md`, `inference.md` |
+| `TensorAttribute` | The concrete values written into a *graph's description*: a `Constant`'s value, a `ConstantOfShape`'s fill, a trainable parameter's weights. Immutable, attached to no context, not disposable. `TensorData.MoveToAttribute()` converts one way and spends the tensor; `TensorAttribute.CopyToTensorData()` converts back and copies. | `core-types.md` |
+| `ComputeContext.Host` | The framework's own host memory as a context — where every tensor that names no backend lives. It holds tensors, compiles and runs nothing, and cannot be disposed. `TensorData.Detach()` is a copy there. | `inference.md` |
 | `AccessMemory()` | Reads a `TensorData<T>`'s values as a `ReadOnlySpan<primitive>`. | `core-types.md` |
 | `IData` | Interface implemented by `TensorData`; the input type `ComputeContext.Execute` accepts. | `inference.md` |
 | `[Module]` | Attribute marking a `partial class` whose `Inline` becomes a computation graph. | `defining-models.md` |

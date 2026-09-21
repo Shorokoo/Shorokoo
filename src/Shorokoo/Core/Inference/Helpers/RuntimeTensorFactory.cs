@@ -87,7 +87,7 @@ internal static class RuntimeTensorFactory
     /// to remember to narrow; it is idempotent for the ops that already do.
     ///
     /// <para>Unsigned widths land in <c>[0, 2^w)</c> and signed widths sign-extend, matching
-    /// how <see cref="TensorDataConverter.ToRuntimeTensor"/> loads them. <c>Int64</c> and
+    /// how <see cref="TensorDataConverter.ToRuntimeTensor(TensorData, int, Variable)"/> loads them. <c>Int64</c> and
     /// <c>UInt64</c> are the buffer's own width and pass through untouched — so a <c>UInt64</c>
     /// value above <c>long.MaxValue</c> stays a negative bit-pattern long. Narrowing is what
     /// makes signed C# operators correct for the sub-64-bit unsigned widths; at 64 bits there is

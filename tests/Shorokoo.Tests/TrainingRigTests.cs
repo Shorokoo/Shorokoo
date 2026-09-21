@@ -1,6 +1,7 @@
 using System.Globalization;
 using Microsoft.ML.OnnxRuntime;
 using Shorokoo.Core.Factory;
+using Shorokoo.Core.Inference;
 using Shorokoo.Core.Factory.IR;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 using Shorokoo.Modules.Initializers;
@@ -216,6 +217,19 @@ public partial class ParamShapeWideModel
     {
         var w = NormalDist.Init(Vector(4L, 8L), Scalar(0f), Scalar(1f));
         return x.MatMul(w);
+    }
+}
+
+/// <summary>One weight over the representative-input threshold and one under it, so a rig built
+/// from this describes the first and materializes the second.</summary>
+[Module]
+public partial class WideAndNarrowWeightsModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var wide = InitXavier.Init([Scalar(32L), Scalar(64L)]);
+        var narrow = InitZeroBias.Init([Scalar(32L)]).Vec();
+        return input.MatMul(wide.Transpose(1, 0)) + narrow;
     }
 }
 
@@ -670,6 +684,74 @@ public class TrainingRigRepresentativeInputCoverageTests
             Assert.Equal(setShape, node.Attributes.GetLongsVal(ReprShapeAttr));
         }
         finally { if (File.Exists(onnxPath)) File.Delete(onnxPath); }
+    }
+
+    [Fact]
+    public void TestAShapeExemplarCarriesValuesOnlyWhileAnEngineWouldReadThemCoverage()
+    {
+        (long[] Dims, bool Values)[] cases =
+        [
+            ([], true), ([1L], true), ([32L, 32L], true), ([1024L], true),
+            ([1025L], false), ([2048L], false), ([64L, 64L], false), ([1L << 20], false),
+        ];
+        foreach (var (dims, values) in cases)
+        {
+            var shape = new Shape(dims);
+            var slot = TrainingRig.RepresentativeInputFor(shape, DType.Float32);
+            Assert.Equal(values, slot.HasValues);
+            Assert.Equal(dims, slot.Shape.Dims);
+            Assert.Equal(DType.Float32, slot.DType);
+
+            var exemplar = TrainingRig.RepresentativeRuntimeInputFor(shape, DType.Float32);
+            Assert.Equal(values, exemplar.HasAnyData);
+            Assert.Equal(dims, exemplar.Shape!.Dims);
+            Assert.Equal(DType.Float32, exemplar.DType);
+            Assert.Equal(values ? new float[ProductOf(dims)] : null, exemplar.FloatData?.ToArray());
+        }
+    }
+
+    [Fact]
+    public void TestALargeModelInputReachesTheOptimizationPassAsShapeAndDTypeOnlyCoverage()
+    {
+        (long N, bool Values)[] cases = [(4L, true), (1024L, true), (1025L, false), (2048L, false)];
+        foreach (var (n, values) in cases)
+        {
+            var exemplars = RigWithInputShape([n]).OptimizationInputs
+                .OfType<RuntimeTensor>().Where(t => t.Shape!.Dims.SequenceEqual((long[])[n])).ToList();
+            Assert.Equal(2, exemplars.Count);
+            Assert.All(exemplars, t => Assert.Equal(values, t.HasAnyData));
+            Assert.All(exemplars, t => Assert.Equal(values ? new float[n] : null, t.FloatData?.ToArray()));
+        }
+    }
+
+    [Fact]
+    public void TestADeferredBuildDescribesItsLargeParametersRatherThanMaterializingThemCoverage()
+    {
+        var rig = TrainingRig.FromScratch(
+            WideAndNarrowWeightsModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([4L, 64L], new float[256]))],
+            0.01f);
+        var path = TempPath("repin_defer") + ".skpt";
+        try
+        {
+            Persistence.SaveTrainingCheckpointToSkpt(rig.CreateInitialCheckpoint(), path);
+            var (deferred, _) = TrainingRig.Load(path);
+
+            foreach (var inputs in (IRuntimeTensor[][])[rig.OptimizationInputs, deferred.OptimizationInputs])
+            {
+                var byShape = inputs.OfType<RuntimeTensor>()
+                    .ToDictionary(t => string.Join(",", t.Shape!.Dims), t => t.HasAnyData);
+                Assert.False(byShape["32,64"]);
+                Assert.True(byShape["32"]);
+                Assert.True(byShape["4,64"]);
+                Assert.True(byShape["4,32"]);
+            }
+
+            Assert.Equal(
+                FlattenStruct(rig.CreateInitialCheckpoint().TrainableParams),
+                FlattenStruct(deferred.CreateInitialCheckpoint().TrainableParams));
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
     }
 
     [Fact]

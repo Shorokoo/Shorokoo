@@ -102,7 +102,7 @@ namespace Shorokoo
         {
             get
             {
-                var tensorData = this.OwningNode.GetTensorData();
+                var tensorData = this.OwningNode.GetTensorAttribute();
                 if (tensorData is not null)
                     return tensorData.Shape.Dims.Select(x => new TensorDim(x)).ToArray();
 

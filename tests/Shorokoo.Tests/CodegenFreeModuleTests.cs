@@ -205,8 +205,8 @@ public class CodegenFreeModuleTests
 
     private static float StateValue(ComputationGraph graph) =>
         graph.ToInternal().GetStateParamDataNodes()[0].Attributes
-            .GetTensorVal(OnnxOpAttributeNames.ShrkAttrTensorData)!
-            .As<float32>().AccessMemory()[0];
+            .GetAttributeVal(OnnxOpAttributeNames.ShrkAttrTensorData)!
+            .Elements<float>()[0];
 
     private static ComputationGraph Concretize(
         Func<Tensor<float32>, Tensor<float32>> body, string? name, TensorData input)

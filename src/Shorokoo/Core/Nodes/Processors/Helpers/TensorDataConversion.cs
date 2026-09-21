@@ -18,6 +18,30 @@ namespace Shorokoo.Core.Nodes.Processors.Helpers
     internal static class TensorDataConversion
     {
         /// <summary>
+        /// The same conversion for a graph literal — an operator's <see cref="TensorAttribute"/>.
+        ///
+        /// <para>A dtype that differs only in its generic parameter name is answered here outright:
+        /// an attribute is immutable, so the one at the new dtype shares its bytes and costs
+        /// nothing — where the tensor form has to copy, and has to resolve a backend to do it. A
+        /// real conversion goes through the tensor path, on a copy, which is what a description
+        /// changing its element type is.</para>
+        /// </summary>
+        internal static TensorAttribute ConvertAttributeType(TensorAttribute original, DType targetDType)
+        {
+            if (original.DType.ProtoTypeNum == targetDType.ProtoTypeNum)
+                return original.DType.GenericTypeParamName == targetDType.GenericTypeParamName
+                    ? original : original.WithDType(targetDType);
+
+            // At the dtype the bytes are laid out at: a generic placeholder describes no layout,
+            // so reading through it is what the tensor form did by way of its runtime value.
+            var source = original.CopyToTensorData(atStorageDType: true);
+            // Every remaining branch of ConvertTensorDataType builds a tensor of its own, so this
+            // copy is nobody's once it has been read.
+            try { return ConvertTensorDataType(source, targetDType).MoveToAttribute(); }
+            finally { source.Dispose(); }
+        }
+
+        /// <summary>
         /// Converts TensorData from one data type to another by reading values and creating new TensorData.
         /// Used when processing generic constants that need type conversion during specialization.
         /// </summary>

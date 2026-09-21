@@ -38,4 +38,26 @@ public sealed record RunSettings
     /// <para>Only a session on a CUDA backend has such an arena; a CPU session ignores this.</para>
     /// </summary>
     public bool ShrinkArenaAfterRun { get; init; }
+
+    /// <summary>
+    /// Asks the run to stop early. A run whose token is already cancelled when it is handed over
+    /// is refused before it costs anything; one cancelled while it is running is stopped at the
+    /// next point the backend can stop at. A run stopped either way throws an
+    /// <see cref="OperationCanceledException"/> carrying this token, so it is never mistaken for
+    /// one whose outputs are real. <see cref="CancellationToken.None"/> by default, which is a run
+    /// nothing can stop.
+    ///
+    /// <para>Stopping is an optimisation, not a guarantee, and every guarantee around a run is
+    /// written so as not to need it: a backend that ignores this token runs to completion and
+    /// returns its outputs, so whatever waits on the run waits longer and learns the same thing.
+    /// A run that reaches its last kernel before the cancellation is seen therefore succeeds, and
+    /// hands back the outputs it computed.</para>
+    ///
+    /// <para>What a backend can stop at is its own business. The ONNX Runtime backend stops
+    /// between kernels — it sets ORT's <c>RunOptions.Terminate</c>, which the executor reads
+    /// before each node — so the wait is whatever is left of the kernel that was running, and one
+    /// kernel can be a whole matmul over a large batch. A graph that <i>is</i> one such kernel has
+    /// no boundary to stop at and cannot be stopped at all.</para>
+    /// </summary>
+    public CancellationToken CancellationToken { get; init; }
 }

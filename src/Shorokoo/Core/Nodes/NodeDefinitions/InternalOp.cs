@@ -82,7 +82,7 @@ internal static partial class InternalOp
         return NodeBuilder.BuildNodeSingleOut(GENERIC_TYPE_INPUT, [], [.. attributes], outputNames: defaultName is null ? null : [defaultName]);
     }
 
-    public static Variable ModelParamData(TensorData data, bool isTrainable, string? identifierTemplateString, string? defaultName)
+    public static Variable ModelParamData(TensorAttribute data, bool isTrainable, string? identifierTemplateString, string? defaultName)
         => NodeBuilder.BuildNodeSingleOut(MODEL_PARAM_DATA, [], [(ShrkAttrTensorData, data), (ShrkAttrIsTrainable, isTrainable)], identifierTemplateString: identifierTemplateString, outputNames: defaultName is null ? null : [defaultName]);
     public static Variable ModuleSetHyperparams(Variable inputModule, Variable?[] moduleParams, Variable? iterationIndices, int[]? localModelId, string? identifierTemplateString)
         => NodeBuilder.BuildNodeSingleOut(MODULE_SET_HYPERPARAMS, [inputModule, iterationIndices, .. moduleParams], [(ShrkAttrLocalModelId, localModelId)], identifierTemplateString: identifierTemplateString);

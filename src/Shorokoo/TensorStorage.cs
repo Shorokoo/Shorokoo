@@ -123,6 +123,17 @@ namespace Shorokoo
             get { lock (_gate) return _locks > 0; }
         }
 
+        /// <summary>
+        /// Whether the asking handle is the only name for these bytes, so taking them away from
+        /// the allocation takes them away from nobody else. What a move has to know: surrendering
+        /// this handle's name says nothing about another's, and an attribute that took an array a
+        /// second handle can still write would not be immutable.
+        /// </summary>
+        internal bool IsSoleHandle
+        {
+            get { lock (_gate) return _refs == 1 && _locks == 0; }
+        }
+
         /// <summary>Records one more name for these bytes. Called by every handle as it is
         /// built.</summary>
         internal void AddHandleReference()

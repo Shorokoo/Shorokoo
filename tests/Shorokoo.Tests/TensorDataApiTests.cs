@@ -679,6 +679,22 @@ public class TensorDataApiCoverageTests
         Assert.False(fill.IsDisposed);
     }
 
+    // An attribute is immutable, and the move takes the tensor's own array -- so it may only take
+    // it when nothing else can still write it. GiveAccessTo hands out a second handle over the
+    // same bytes, and surrendering this handle's name says nothing about that one's.
+    [Fact]
+    public void TestAMovedAttributeDoesNotShareBytesWithAHandleThatSurvivesTheMove()
+    {
+        var owner = (TensorData<float32>)TensorData([2L], 1f, 2f);
+        var second = (TensorData<float32>)owner.GiveAccessTo(ComputeContext.Host);
+
+        var attribute = owner.MoveToAttribute();
+        second.AccessModifiableMemory<float>()[0] = 99f;
+
+        Assert.Equal([1f, 2f], attribute.Elements<float>().ToArray());
+        Assert.Equal([99f, 2f], second.AccessMemory().ToArray());
+    }
+
     private static float[] Floats(NamedModelParam param)
         => [.. param.ToTensorData().As<float32>().AccessMemory<float>()];
 

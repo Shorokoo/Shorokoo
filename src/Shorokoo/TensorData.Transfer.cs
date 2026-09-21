@@ -139,6 +139,11 @@ namespace Shorokoo
         /// <exception cref="InvalidOperationException">This tensor belongs to a compute context.</exception>
         public TensorAttribute MoveToAttribute()
         {
+            // Disposal first: a tensor whose context has been disposed still names that context,
+            // so checking the context first answered a dead tensor with advice -- take a Detach()
+            // copy -- that throws when followed.
+            ThrowIfDisposed();
+
             if (!ReferenceEquals(Context, ComputeContext.Host))
                 throw new InvalidOperationException(
                     $"This tensor ({this}) belongs to a compute context ({Context.Backend}), and an "
@@ -148,12 +153,16 @@ namespace Shorokoo
                     + "could only be built where that context is. Detach() takes a copy in the "
                     + "framework's own host memory, and that copy can be moved.");
 
-            ThrowIfDisposed();
             var attribute = DType == DType.String
                 ? TensorAttribute.OverStrings(Shape, [.. StringElements()])
-                // The tensor's own array where it has one, so the move really moves; a runtime
-                // value's buffer is native and can only be copied out of.
-                : TensorAttribute.OverBytes(Shape, DType, OwnBytes ?? CopyRawMemory(), StorageDType());
+                // The tensor's own array where it has one AND where it is the only name for it, so
+                // the move really moves. Surrendering this handle says nothing about another's, and
+                // a second handle can still write the array through AccessModifiableMemory -- an
+                // attribute over it would be mutable, which is the one thing it must not be. A
+                // runtime value's buffer is native and can only be copied out of either way.
+                : TensorAttribute.OverBytes(
+                    Shape, DType,
+                    (Storage.IsSoleHandle ? OwnBytes : null) ?? CopyRawMemory(), StorageDType());
             Dispose();
             return attribute;
         }

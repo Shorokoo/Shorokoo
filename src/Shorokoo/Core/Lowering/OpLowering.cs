@@ -29,10 +29,11 @@ internal sealed class OpLoweringAttribute : Attribute
 /// <para><b>Operator lowering is not graph lowering.</b> "Lowering" elsewhere in this codebase
 /// means the graph concretization pipeline — <c>ToConcreteArchitecture</c> and the
 /// <c>FastLower*</c> passes, which rewrite the graph that is then exported (see
-/// <c>Documentation/debugging.md</c>). Operator lowering rewrites nothing: it is an
-/// engine-internal fallback consulted while an engine is already running, and it leaves the
-/// graph exactly as it found it. A <c>Softsign</c> node still exports as a <c>Softsign</c>
-/// node.</para>
+/// <c>Documentation/debugging.md</c>). Operator lowering rewrites nothing the caller can see. An
+/// engine that needs it applies it to a copy it owns and throws away: the QuickExecutionEngine
+/// clones the graph and runs <c>FastLowerRegisteredOps</c> over the clone, and the autodiff
+/// engine reads the decomposition off values it builds for itself. The graph handed in keeps its
+/// <c>Softsign</c> node, and a <c>Softsign</c> still exports as a <c>Softsign</c>.</para>
 /// </summary>
 /// <param name="OpCode">The op code this lowering expresses (e.g. "Softsign").</param>
 /// <param name="Method">The <see cref="OpLoweringAttribute"/>-marked method that builds it.</param>

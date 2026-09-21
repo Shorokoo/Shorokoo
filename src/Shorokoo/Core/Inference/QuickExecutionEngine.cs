@@ -31,7 +31,9 @@ namespace Shorokoo.Core.Inference;
 ///     elements. All larger tensors keep only shape information.
 ///   - Operators live as standalone classes under <c>Ops/</c>, one per op code, auto-discovered
 ///     via <see cref="OpRegistry"/>. An op code with no operator of its own may still be
-///     computed, out of ones that have: see <see cref="OpLoweringRegistry"/>.
+///     computed, out of ones that have: <see cref="FastLowerRegisteredOps"/> rewrites it into
+///     its registered <see cref="OpLoweringRegistry"/> decomposition on a private copy of the
+///     graph before the walk starts.
 ///   - <c>If</c> is supported by recursing into its subgraph when the condition value is known
 ///     and merging both branches' shapes when it is not.
 ///   - <c>Loop</c> is executed as a real iteration: the engine walks the body, then the close
@@ -152,6 +154,18 @@ public sealed class QuickExecutionEngine
             foreach (var kvp in initialInputs)
                 store[kvp.Key] = kvp.Value;
 
+        // An operator with no QuickOp but a registered lowering is rewritten into the operators
+        // that do have one, on a copy this run owns. The copy is not hygiene: a caller may hand
+        // over a graph whose FastNodes are its own live nodes — the constant folder assembles one
+        // out of the nodes it is folding — and lowering in place would rewrite that caller's
+        // graph. Cloning preserves every key, so the store this returns is keyed exactly as the
+        // caller's graph is, and the caller's Softsign stays a Softsign.
+        if (FastLowerRegisteredOps.HasLowerableOp(graph))
+        {
+            graph = graph.Clone();
+            FastLowerRegisteredOps.Process(graph);
+        }
+
         var nodeByKey = FastProcessorHelper.BuildNodeByKey(graph);
         var state = new QuickRunState();
         var nodes = graph.Nodes;
@@ -207,10 +221,8 @@ public sealed class QuickExecutionEngine
         var op = OpRegistry.Get(node.OpCode);
         if (op is null)
         {
-            var lowered = TryLower(node, store);
             PopLoopFrame(node, state);
-            if (lowered is null) WriteDeclaredOutputs(node, store);
-            else StoreResults(outputKeys, lowered, store, state);
+            WriteDeclaredOutputs(node, store);
             return null;
         }
 
@@ -254,41 +266,6 @@ public sealed class QuickExecutionEngine
         PopLoopFrame(node, state);
         StoreResults(outputKeys, results, store, state);
         return null;
-    }
-
-    /// <summary>
-    /// The second thing the engine tries for a node no <see cref="QuickOp"/> claims: an
-    /// <see cref="OpLowering"/> saying how to compute that operator out of ones the engine does
-    /// implement. Returns its outputs, or null when there is no lowering for the op code or the
-    /// lowering could not be carried out — the caller then falls back to
-    /// <see cref="WriteDeclaredOutputs"/>, exactly as it did before there were lowerings at all.
-    ///
-    /// <see cref="LoweredValue"/> does the work; everything it can fail at ends the attempt here.
-    /// Note that this is not a graph rewrite, which is what "lowering" means of the
-    /// <c>FastLower*</c> passes: the node stays what it is and only this run's values come from
-    /// the decomposition. Nothing the lowering builds along the way enters
-    /// <paramref name="store"/> — the outputs returned here are all the engine ever sees of it.
-    ///
-    /// A lowering that fails to produce exactly the node's declared outputs is refused rather
-    /// than stored short: a missing output would otherwise land in the store as a
-    /// <see cref="DType.Invalid"/> placeholder indistinguishable from a node the engine never
-    /// ran.
-    /// </summary>
-    private IRuntimeTensor[]? TryLower(FastNode node, Dictionary<FastTensorKey, IRuntimeTensor> store)
-    {
-        if (!OpLoweringRegistry.TryGet(node.OpCode, out var lowering)) return null;
-
-        var declaredOutputs = node.Outputs.Count;
-        try
-        {
-            var results = LoweredValue.Compute(
-                lowering, QuickOp.GatherInputs(node.Inputs, store), node.Attributes, MaxDataElements);
-            return results.Length == declaredOutputs ? results : null;
-        }
-        catch
-        {
-            return null;
-        }
     }
 
     /// <summary>

@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using Shorokoo.Core.Inference.Abstractions;
 using Shorokoo.Runtime;
 
 namespace Shorokoo.Tests;
@@ -565,6 +566,53 @@ public class TensorDataApiCoverageTests
         Assert.Equal([2f, 4f], Floats(context.Execute(graph, reader)[0]));
         t.As<float32>().AccessModifiableMemory<float>()[0] = 99f;
         Assert.Equal([198f, 4f], Floats(context.Execute(graph, reader)[0]));
+    }
+
+    [Fact]
+    public void TestTheValueWiseAttributeFactoriesCoverEveryDTypeWithoutResolvingABackend()
+    {
+        static void Case<V>(DType expected, params V[] values) where V : unmanaged
+        {
+            var attribute = TensorAttribute.Create(new Shape(values.Length), values);
+            Assert.Equal(expected, attribute.DType);
+            Assert.Equal((long[])[values.Length], attribute.Shape.Dims);
+            Assert.Equal(values, attribute.Elements<V>().ToArray());
+        }
+
+        var reads = InferenceBackend.CountDefaultReads(() =>
+        {
+            Case(DType.Bool, true, false);
+            Case(DType.Int8, (sbyte)1, (sbyte)2);
+            Case(DType.Int16, (short)1, (short)2);
+            Case(DType.Int32, 1, 2);
+            Case(DType.Int64, 1L, 2L);
+            Case(DType.UInt8, (byte)1, (byte)2);
+            Case(DType.UInt16, (ushort)1, (ushort)2);
+            Case(DType.UInt32, 1u, 2u);
+            Case(DType.UInt64, 1UL, 2UL);
+            Case(DType.Float16, (Float16)1f, (Float16)2f);
+            Case(DType.BFloat16, (BFloat16)1f, (BFloat16)2f);
+            Case(DType.Float32, 1f, 2f);
+            Case(DType.Float64, 1.0, 2.0);
+            Assert.Equal((string[])["a", "b"], TensorAttribute.Create(new Shape(2), "a", "b").Values);
+        });
+
+        Assert.Equal(0, reads);
+    }
+
+    [Fact]
+    public void TestAnAttributeFactoryRefusesTooFewValuesTrimsASurplusAndCarriesAStandInsWidth()
+    {
+        Assert.Throws<ArgumentException>(() => TensorAttribute.Create(new Shape(3), (float[])[1f, 2f]));
+        Assert.Throws<ArgumentException>(() => TensorAttribute.Create(new Shape(3), "a", "b"));
+        Assert.Equal([1f, 2f], TensorAttribute.Create(new Shape(2), (float[])[1f, 2f, 3f]).Elements<float>().ToArray());
+        Assert.Equal((string[])["a", "b"], TensorAttribute.Create(new Shape(2), "a", "b", "c").Values);
+
+        var standIn = TensorAttribute.CreateStandIn(new Shape(1), DType.GenericType1, (ushort)7);
+        Assert.Equal(DType.GenericType1, standIn.DType);
+        Assert.Equal([(ushort)7], standIn.Elements<ushort>().ToArray());
+        Assert.Equal(DType.UInt16, standIn.CopyToTensorData(atStorageDType: true).DType);
+        Assert.Equal(DType.GenericType1, standIn.CopyToTensorData().DType);
     }
 
     [Fact]

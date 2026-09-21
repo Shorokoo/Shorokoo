@@ -250,9 +250,6 @@ namespace Shorokoo.Core.Utils
         public static IShorokooTensorValue CreateTensorValue(Shape shape, byte[] data)
             => InferenceBackend.Default.CreateTensor<byte>(data, (long[])shape);
 
-        public static IShorokooTensorValue CreateTensorValue(Shape shape, string[] data)
-            => InferenceBackend.Default.CreateStringTensor(data, (long[])shape);
-
         /// <summary>
         /// A tensor over <paramref name="value"/> with no context: the framework's own host memory,
         /// which is what a value it built itself is in. The overload taking a

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Shorokoo.Core.Utils;
 using Shorokoo.Runtime;
@@ -96,12 +97,66 @@ namespace Shorokoo
         public static TensorAttribute Create(Shape shape, DType dtype, ReadOnlySpan<byte> bytes)
             => new(shape, dtype, bytes.ToArray(), null);
 
+        /// <summary>
+        /// An attribute of <paramref name="shape"/> over a copy of <paramref name="values"/>, at
+        /// the dtype <typeparamref name="V"/> stands for — the description counterpart of
+        /// <c>Globals.TensorData(dims, vals)</c>, and what every typed graph literal is built with.
+        ///
+        /// <para>A shape, a dtype and the bytes is all an attribute is, so this goes straight to
+        /// the bytes: no tensor is built on the way, and so no inference backend is resolved. A
+        /// program that only describes a model and exports it therefore needs no deployed
+        /// runtime.</para>
+        ///
+        /// <para>Too few values is an error; a surplus is not, and is ignored — the same asymmetry
+        /// <see cref="HostTensorData{T}.From{V}"/> keeps, because the node-definition tables hand
+        /// over a buffer longer than the shape covers.</para>
+        /// </summary>
+        /// <exception cref="ArgumentException"><paramref name="values"/> does not cover
+        /// <paramref name="shape"/>.</exception>
+        public static TensorAttribute Create<V>(Shape shape, params V[] values) where V : unmanaged
+            => new(shape, OnnxUtils.GetDType<V>(), PackBytes(shape, values), null);
+
         /// <summary>An attribute of <paramref name="shape"/> over a copy of
-        /// <paramref name="values"/>, at <see cref="DType.String"/>.</summary>
-        public static TensorAttribute Create(Shape shape, string[] values)
+        /// <paramref name="values"/>, at <see cref="DType.String"/>. Same coverage rule as
+        /// <see cref="Create{V}"/>.</summary>
+        /// <exception cref="ArgumentException"><paramref name="values"/> does not cover
+        /// <paramref name="shape"/>.</exception>
+        public static TensorAttribute Create(Shape shape, params string[] values)
         {
             ArgumentNullException.ThrowIfNull(values);
-            return new TensorAttribute(shape, DType.String, null, [.. values]);
+            var required = checked((int)shape.Count);
+            if (values.Length < required)
+                throw new ArgumentException(
+                    $"Supplied data of {values.Length} strings is less than shape size {required} "
+                    + "strings.", nameof(values));
+            return new TensorAttribute(shape, DType.String, null, values[..required]);
+        }
+
+        /// <summary>
+        /// A literal standing for a generic type parameter: declared at <paramref name="dtype"/>,
+        /// which is a placeholder (<c>DType.GenericType1</c>..<c>8</c>), while its elements are
+        /// laid out at <typeparamref name="V"/>'s width and recorded in <see cref="StorageDType"/>.
+        ///
+        /// <para>The placeholder describes no byte layout, so nothing could be read through it
+        /// alone — the width the elements were written at has to travel with them until type
+        /// inference replaces the placeholder with a real dtype.</para>
+        /// </summary>
+        /// <exception cref="ArgumentException"><paramref name="values"/> does not cover
+        /// <paramref name="shape"/>.</exception>
+        internal static TensorAttribute CreateStandIn<V>(Shape shape, DType dtype, params V[] values)
+            where V : unmanaged
+            => new(shape, dtype, PackBytes(shape, values), null, OnnxUtils.GetDType<V>());
+
+        private static byte[] PackBytes<V>(Shape shape, V[] values) where V : unmanaged
+        {
+            ArgumentNullException.ThrowIfNull(values);
+            var required = checked((int)shape.Count * Unsafe.SizeOf<V>());
+            var supplied = MemoryMarshal.AsBytes(values.AsSpan());
+            if (supplied.Length < required)
+                throw new ArgumentException(
+                    $"Supplied data of {supplied.Length} bytes is less than shape size {required} "
+                    + "bytes.", nameof(values));
+            return supplied[..required].ToArray();
         }
 
         /// <summary>

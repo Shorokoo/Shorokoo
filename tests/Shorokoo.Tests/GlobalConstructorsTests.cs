@@ -31,6 +31,32 @@ public class GlobalConstructorsCoverageTests
     }
 
     [Fact]
+    public void TestBuildingAndExportingTypedAndGenericLiteralsAsksForNoInferenceBackendAtAll()
+    {
+        var sample = TensorDataWithDefaultVals(DType.Float32, [2L, 3L]);
+        var onnx = Path.Combine(Path.GetTempPath(), $"shorokoo-literal-free-{Guid.NewGuid():N}.onnx");
+
+        try
+        {
+            var reads = InferenceBackend.CountDefaultReads(() =>
+            {
+                var module = BackendFreeLiterals.ComputationGraph;
+                var concrete = module
+                    .ToConcreteArchitecture(module.FromOrderedInputs([sample]))
+                    .ToConcreteModel();
+                Persistence.ExportOnnx(concrete, onnx);
+            });
+
+            Assert.Equal(0, reads);
+            Assert.True(new FileInfo(onnx).Length > 0);
+        }
+        finally
+        {
+            if (File.Exists(onnx)) File.Delete(onnx);
+        }
+    }
+
+    [Fact]
     public void TestAShapeTooLargeForOneArrayIsNamedRatherThanWrappedToAWrongLength()
     {
         var tooLong = Assert.Throws<InvalidTensorOperationException>(
@@ -40,6 +66,32 @@ public class GlobalConstructorsCoverageTests
         var overflowing = Assert.Throws<InvalidTensorOperationException>(
             () => TensorDataWithSmallVals(DType.Float32, [1L << 32, 1L << 32]));
         Assert.Contains("overflows Int64", overflowing.Message);
+    }
+}
+
+/// <summary>
+/// Every shape of graph literal the constructor catalog builds — scalar, vector, tensor, fill and
+/// default, typed and over an <c>IGenericType</c> placeholder — in one model, so that
+/// <see cref="GlobalConstructorsCoverageTests.TestBuildingAndExportingTypedAndGenericLiteralsAsksForNoInferenceBackendAtAll"/>
+/// can describe and export all of them and count the asks for an inference backend.
+/// </summary>
+[Module]
+public partial class BackendFreeLiterals
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        Assert.NotNull(Scalar<IGenericType1>((object)9f));
+        Assert.NotNull(TensorFill<IGenericType2>(Vector(2L, 3L), (Float16)0.5f));
+        Assert.NotNull(Vector("a", "b"));
+        Assert.NotNull(Scalar("s"));
+
+        return x * Scalar(2f)
+             + Vector(1f, 2f, 3f)
+             + VectorFill(3L, 0.25f)
+             + Tensor([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)
+             + TensorFill(Vector(2L, 3L), 0.5f)
+             + DefaultTensor<float32>([2L, 3L])
+             + MakeTensor<float32>([3L], Convert.ToBase64String(Enc<float>([1f, 2f, 3f])));
     }
 }
 

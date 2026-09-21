@@ -507,8 +507,8 @@ reaches one of those floors today, by three different routes. `Attention`,
 be authored at all. `Swish` and `RMSNormalization` lower inline to opset-21
 primitives (`Mul`/`Sigmoid` and `ReduceMean`/`Sqrt`/`Div`/`Mul`), so the node
 is never built either. `TensorScatter` is built, run and differentiated as
-itself, but the exporter decomposes it on the way out into a window mask, a
-`GatherElements` and a `Where` — see
+itself, but the exporter decomposes it on the way out into a `Concat` of the
+cache and the update and one `GatherElements` over the pair — see
 [operator-support.md](operator-support.md) — so the file still stamps at 21.
 Either way no post-21 operator node is emitted from an authored graph. The
 floors are kept for the ops that cannot be authored, as the restore point for

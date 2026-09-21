@@ -1140,7 +1140,7 @@ namespace Shorokoo.Core.Factory
         /// so absent here — is why exporting an inference model still yields a <c>Softsign</c>.
         ///
         /// <para><c>TensorScatter</c> is the one entry: ONNX introduced it at opset 24 and
-        /// opset 21 has no node for it, so a graph carrying one is written out as the mask and
+        /// opset 21 has no node for it, so a graph carrying one is written out as the concat and
         /// gather its lowering decomposes it into. The pass tests the list before it walks
         /// anything, so a graph with no such node pays nothing beyond one scan.</para>
         /// </summary>

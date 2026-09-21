@@ -11,7 +11,7 @@ namespace Shorokoo.Tests;
 /// The Swish check is QEE-only only to match the audit-module style — its lowered graph
 /// carries no Swish node and loads anywhere. TensorScatter @24 has no gradient rule either,
 /// and is not meant to: the autodiff pass lowers it before it walks backwards, so what is
-/// differentiated is the mask and gather of its registered lowering. The batch's
+/// differentiated is the concat and gather of its registered lowering. The batch's
 /// non-decomposable ops (Attention, RotaryEmbedding, BitCast, CumProd) throw
 /// from their <c>OnnxOp</c> entry point before any graph — gradient path included — exists,
 /// so no autodiff code runs for them; that authoring throw is pinned in

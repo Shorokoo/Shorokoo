@@ -8,7 +8,7 @@ namespace Shorokoo.Tests.Modules
     /// two-sided-directional-derivative self-checks (same pattern as
     /// <c>AutoGradStructuralModules.cs</c>). TensorScatter (@24) is decomposed by its
     /// registered lowering instead of at its entry point, so the reverse walk sees the
-    /// mask and gather it is made of; its two checks below take the expected gradients
+    /// concat and gather it is made of; its two checks below take the expected gradients
     /// from outside the graph, which is what keeps them a check against numbers rather
     /// than against another expression of the same rule. The non-decomposable ops
     /// (Attention, RotaryEmbedding, BitCast, CumProd) throw

@@ -31,32 +31,51 @@ internal static class OpLowerings
         => [x / (OneLike(x) + x.Abs())];
 
     /// <summary>
-    /// <c>TensorScatter</c> — ONNX opset 24's KV-cache window write — as a mask and a gather.
+    /// <c>TensorScatter</c> — ONNX opset 24's KV-cache window write — as one gather from the
+    /// cache and the update laid end to end.
     ///
     /// <para>Call the batch coordinate <c>b</c>, the sequence axis's coordinate <c>p</c>, the
     /// cache's length along that axis <c>S</c> and the update's <c>L</c>. Which element of the
     /// update window lands on <c>p</c> is <c>rel = p - write_indices[b]</c>: in <c>linear</c>
     /// mode the window is <c>0 &lt;= rel &lt; L</c>, in <c>circular</c> mode the same test on
-    /// <c>rel</c> taken modulo <c>S</c>. The spec's loop is therefore one expression,
-    /// <c>present[… p …] = inWindow ? update[… rel …] : past[… p …]</c> — a
-    /// <c>GatherElements</c> along the axis, whose index tensor carries <c>rel</c>, chosen
-    /// between by a <c>Where</c> on the mask. Both index and mask depend on <c>b</c> and
-    /// <c>p</c> only, so they are built at <c>[batch, sequence]</c> and broadcast over the
-    /// other dimensions.</para>
+    /// <c>rel</c> taken modulo <c>S</c>. Concatenating <c>update</c> onto <c>past_cache</c>
+    /// along the axis puts both candidates for <c>p</c> in one tensor — <c>past</c>'s at
+    /// <c>p</c>, <c>update</c>'s at <c>S + rel</c> — so the spec's loop becomes a single
+    /// <c>GatherElements</c> whose index is <c>inWindow ? S + rel : p</c>. The index depends on
+    /// <c>b</c> and <c>p</c> only, so it is built at <c>[batch, sequence]</c> and broadcast over
+    /// the other dimensions.</para>
+    ///
+    /// <para>Selecting on the index rather than on the gathered values is what keeps the
+    /// decomposition element-type agnostic: the element type reaches <c>Concat</c> and
+    /// <c>GatherElements</c> and nothing else. A <c>Where</c> over the values would put the
+    /// selection on the element type instead, and ONNX Runtime's CPU provider registers
+    /// <c>Where</c> for six element types only — the exported file would then refuse to run for
+    /// the seven others the fused operator accepts, bool and bfloat16 among them. It also
+    /// removes the need to clamp: an out-of-window index is never the one selected, so no index
+    /// has to be kept in range for a gather that will discard it.</para>
     ///
     /// <para><c>B</c>, <c>S</c>, <c>L</c> and the rank all come from <c>Shape</c> at runtime.
     /// The rank in particular is not read off the input in C#: what a lowering is handed is the
     /// engine's stand-in for the operand, so a rank read there is a fact about the stand-in
-    /// rather than about the tensor. The vector the <c>[batch, sequence]</c> mask is reshaped
+    /// rather than about the tensor. The vector the <c>[batch, sequence]</c> index is reshaped
     /// by — <c>B</c> at dim 0, <c>S</c> at the sequence axis, 1 everywhere else — is assembled
     /// from <c>Shape(past_cache)</c> instead, which makes the decomposition rank-agnostic. The
     /// only C# branches are on the operator's own attributes and on whether the optional
     /// <c>write_indices</c> slot is filled; every domain states both truthfully.</para>
     ///
-    /// <para>The spec's own preconditions are taken as given rather than enforced:
-    /// <c>L &lt;= S</c>, and, in <c>linear</c> mode, <c>write_indices + L &lt;= S</c>. A linear
-    /// window that runs past the end writes only the part that fits. <c>axis</c> may not name
-    /// the batch dimension, which the spec forbids outright.</para>
+    /// <para>What this covers is every input the spec calls valid, checked element for element
+    /// against ONNX Runtime's own opset-24 kernel by
+    /// <c>QeeOpset26AuditTests.TestTensorScatterLoweringMatchesTheOrtKernel*</c>: both modes,
+    /// <c>write_indices</c> present or absent, every legal <c>axis</c> at ranks 2 to 4, window
+    /// lengths from 1 to <c>S</c>, an empty batch, an empty window, an empty cache and every
+    /// element type Shorokoo can express. What it does not cover is what the spec
+    /// places outside its domain, and the companion test holds that same reference kernel to
+    /// refusing each one: <c>L &gt; S</c>; in <c>linear</c> mode <c>write_indices + L &gt; S</c>;
+    /// a negative or out-of-range <c>write_indices</c>; and an <c>axis</c> that does not
+    /// normalize into <c>[1, rank)</c> — the spec forbids the batch dimension outright, so a
+    /// rank-2 cache has to name axis 1 or −1 rather than take the default −2. Only the literal
+    /// <c>axis == 0</c> is refused here, since the rank a negative axis normalizes against is
+    /// not known until the graph runs.</para>
     /// </summary>
     [OpLowering(TENSOR_SCATTER)]
     public static Variable?[] TensorScatter<T>(
@@ -82,32 +101,31 @@ internal static class OpLowerings
             ? OnnxOp.Reshape(indices, Vector(-1L, 1L), allowZero: false)
             : Scalar(0L);
         var rel = OnnxOp.Sub(positions, writeStart);
-        var lastInWindow = OnnxOp.Sub(windowLen, Scalar(1L));
 
-        Variable inWindow, source;
+        Variable inWindow, offset;
         if (mode == TensorScatterMode.Circular)
         {
-            var wrapped = OnnxOp.Mod(rel, cacheLen);
-            inWindow = OnnxOp.Less(wrapped, windowLen);
-            // Already non-negative, so only the upper clamp is needed to keep the masked-out
-            // positions' indices inside update's axis — GatherElements rejects the rest.
-            source = OnnxOp.Min(wrapped, lastInWindow);
+            // An empty cache has no position to take a remainder for, but ONNX Runtime reads the
+            // scalar divisor before the element loop, so it has to be kept off zero regardless.
+            offset = OnnxOp.Mod(rel, OnnxOp.Max(cacheLen, Scalar(1L)));
+            inWindow = OnnxOp.Less(offset, windowLen);
         }
         else
         {
+            offset = rel;
             inWindow = OnnxOp.And(
                 OnnxOp.GreaterOrEqual(rel, Scalar(0L)), OnnxOp.Less(rel, windowLen));
-            source = OnnxOp.Max(OnnxOp.Min(rel, lastInWindow), Scalar(0L));
         }
+        var source = OnnxOp.Where(inWindow, OnnxOp.Add(cacheLen, offset), positions);
 
         var dims = OnnxOp.Range(Scalar(0L), rank, Scalar(1L));
         var batchLen = OnnxOp.Gather(OnnxOp.Shape(rel), Scalar(0L));
         var spread = OnnxOp.Where(OnnxOp.Equal(dims, seqAxisPos), cacheLen,
             OnnxOp.Where(OnnxOp.Equal(dims, Scalar(0L)), batchLen, Scalar(1L)));
 
-        var gathered = OnnxOp.GatherElements(
-            update, OnnxOp.Expand(OnnxOp.Reshape(source, spread, allowZero: true), pastShape), seqAxis);
-        return [OnnxOp.Where(OnnxOp.Reshape(inWindow, spread, allowZero: true), gathered, pastCache)];
+        return [OnnxOp.GatherElements(
+            OnnxOp.Concat([pastCache, update], seqAxis),
+            OnnxOp.Expand(OnnxOp.Reshape(source, spread, allowZero: true), pastShape), seqAxis)];
     }
 
     private static Tensor<T> OneLike<T>(Tensor<T> like) where T : IVarType

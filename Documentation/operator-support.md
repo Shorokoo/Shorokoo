@@ -245,7 +245,7 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
 | SpaceToDepth | ✅ | ✅ | ✅ |
 | Split | ✅ | ✅ | ✅ |
 | Squeeze | ✅ | ✅ | ✅ |
-| TensorScatter | 🟡 [14] | ✅ [15] | ✅ [16] |
+| TensorScatter | ✅ [14] | ✅ [15] | ✅ [16] |
 | Tile | ✅ | ✅ | ✅ |
 | TopK | ✅ | ✅ [17] | ✅ |
 | Transpose | ✅ | ✅ | ✅ |
@@ -273,19 +273,25 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
     the faster path used when `steps` is absent retains an approximate
     clamping of negative starts/ends.
 14. Built and run as itself, but opset 21 has no `TensorScatter` node, so the
-    exported ONNX carries its registered lowering instead: a per-batch window
-    mask over the sequence axis, a `GatherElements` that pulls each cache
-    position's element out of `update`, and a `Where` that keeps `past_cache`
-    everywhere outside the window. The model still stamps at opset 21; a saved
-    architecture, which must reload as authored, keeps the operator. 🟡 is
-    inherited from that final `Where`: ONNX Runtime's CPU provider has no
-    bool-element `Where` kernel, so a bool cache computes in QEE only (footnote
-    2 of the logical family). `axis` names the sequence dimension and so cannot
-    be 0, the batch one — the spec forbids it and `OnnxOp.TensorScatter`
-    refuses it. The spec's own preconditions are taken as given rather than
-    enforced: `sequence_length <= max_sequence_length`, and, in `linear` mode,
-    `write_indices + sequence_length <= max_sequence_length`; a linear window
-    that runs off the end writes only the part that fits.
+    exported ONNX carries its registered lowering instead: `update`
+    concatenated onto `past_cache` along the sequence axis, and one
+    `GatherElements` that takes each cache position from whichever half the
+    per-batch write window puts it in. The model still stamps at opset 21; a
+    saved architecture, which must reload as authored, keeps the operator.
+    The decomposition is checked element for element against ONNX Runtime's own
+    opset-24 `TensorScatter` kernel, over both modes, `write_indices` present
+    and absent, every legal `axis` at ranks 2 to 4, window lengths from 1 to
+    `max_sequence_length`, empty batches, windows and caches, and every element
+    type Shorokoo can express — bool and bfloat16 included, since the selection
+    is made on the gather's index rather than on the values. Outside that domain the spec's own preconditions
+    are taken as given rather than enforced, and what Shorokoo produces for one
+    is undefined: `sequence_length <= max_sequence_length`; in `linear` mode
+    `write_indices + sequence_length <= max_sequence_length`; each write index
+    non-negative, with one per batch. `axis` names the sequence dimension and so
+    cannot be 0, the batch one — the spec forbids it. `OnnxOp.TensorScatter`
+    refuses a literal 0, but the constraint is on the axis *after* it is
+    normalized against the rank, which is not known until the graph runs: a
+    rank-2 cache has to name axis 1 or −1, since the default −2 normalizes to 0.
 15. Values computed through that same lowering — the engine has no
     `TensorScatter` kernel of its own.
 16. Differentiated through that same lowering: `present_cache`'s gradient

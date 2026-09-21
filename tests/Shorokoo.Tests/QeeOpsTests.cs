@@ -215,6 +215,8 @@ public class QeeOpsCoverageTests
         Assert.Contains(OpCodes.SOFTSIGN, QuickExecutionEngine.LoweredOpCodes);
         Assert.Contains(OpCodes.SOFTSIGN, FastProcessAutoGradProcessor.LoweredOpCodes);
         Assert.DoesNotContain(OpCodes.SOFTSIGN, FastOnnxModelBuilder.ExportLoweredOpCodes);
+        Assert.All(lists, list => Assert.Contains(OpCodes.TENSOR_SCATTER, list));
+        Assert.Null(OpRegistry.Get(OpCodes.TENSOR_SCATTER));
     }
 
     // The export list is its own question — what cannot be emitted — so an operator on it is

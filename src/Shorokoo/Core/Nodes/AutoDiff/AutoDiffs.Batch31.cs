@@ -12,8 +12,10 @@ namespace Shorokoo.Core.Nodes.AutoDiff
     /// Real gradients for Swish, CumProd and RMSNormalization via the [AutoDiff]
     /// reflection pattern; AD003 guards (DeformConv pattern — registered in
     /// <c>RegisterVariadicGradientOps</c> so the engine's unregistered-op path
-    /// check doesn't fire first) for Attention, RotaryEmbedding and TensorScatter,
-    /// whose adjoints are not implemented. BitCast is registered as a ZERO-class
+    /// check doesn't fire first) for Attention and RotaryEmbedding, whose adjoints
+    /// are not implemented. TensorScatter needs no entry either way: it is lowered
+    /// before the reverse walk starts, so what gets differentiated is the mask and
+    /// gather its decomposition is made of. BitCast is registered as a ZERO-class
     /// <c>NullInputGradient</c> (bitwise reinterpretation is non-differentiable).
     /// </summary>
     internal static partial class AutoDiffs
@@ -150,28 +152,6 @@ namespace Shorokoo.Core.Nodes.AutoDiff
                 + "implementation limitation, not a mathematical one. Compose the rotation "
                 + "from Mul/Add/Slice/Concat primitives when it must be trained "
                 + "end-to-end, or detach the RotaryEmbedding op from the loss path.");
-        }
-
-        // ===== TensorScatter (AD003 guard) =====
-        //
-        // The windowed-write adjoint (route dPresent back to past_cache outside the
-        // written window and to update inside it, per-batch via write_indices, for
-        // both linear and circular modes) is not implemented; fail loudly.
-
-        internal static Variable?[] TensorScatterGradient(
-            Variable?[] inputs, Variable?[] outputGrads, OnnxCSharpAttributes attributes)
-        {
-            _ = inputs;
-            _ = outputGrads;
-            _ = attributes;
-            throw new AutoDiffNotSupportedException(ErrorCodes.AD003, TENSOR_SCATTER,
-                "the TensorScatter gradient (routing the present_cache gradient back to "
-                + "past_cache outside the written window and to update inside it, at the "
-                + "per-batch write_indices offsets for both linear and circular modes) is "
-                + "not implemented — training through it would silently freeze the "
-                + "parameters behind it. This is an implementation limitation, not a "
-                + "mathematical one. Use ScatterND/ScatterElements when the cache update "
-                + "must be trained through, or detach TensorScatter from the loss path.");
         }
     }
 }

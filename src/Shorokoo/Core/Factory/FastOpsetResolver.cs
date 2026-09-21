@@ -41,15 +41,18 @@ namespace Shorokoo.Core.Factory
     /// Exports are opset 21 in practice: the builder requests
     /// <see cref="OpSetVersion.OPS_21"/> as the baseline and <see cref="RaiseToRequired"/>
     /// only bumps it for ops/attributes actually present in the graph. The post-21 ops in
-    /// <see cref="MinimumOpsetByOpCode"/> never reach emission today — Swish and
-    /// RMSNormalization lower inline to opset-21 primitives in their <c>OnnxOp</c> entry
-    /// points, and Attention / RotaryEmbedding / TensorScatter / BitCast / CumProd throw
-    /// <c>NotImplementedException</c> there — so those floors are presently unreachable and
-    /// kept only as the documented restore point for when a runtime registers the ops at a
-    /// usable opset. The attribute floors in <see cref="MinimumOpsetByAttribute"/> remain
-    /// live, primarily for imported models: no <c>Ops</c>/<c>OnnxOp</c> entry point accepts
-    /// any of those attributes, so a graph built through the public op surface always
-    /// exports at 21, and only a foreign <c>.onnx</c> carrying one of them (or a node
+    /// <see cref="MinimumOpsetByOpCode"/> never reach emission from an exported graph today —
+    /// Swish and RMSNormalization lower inline to opset-21 primitives in their <c>OnnxOp</c>
+    /// entry points, Attention / RotaryEmbedding / BitCast / CumProd throw
+    /// <c>NotImplementedException</c> there, and TensorScatter is decomposed by the export
+    /// pre-pass that runs before this raise — so the ops' floors are unreachable from an ONNX
+    /// export and kept as the documented restore point for when a runtime registers them at a
+    /// usable opset. TensorScatter's floor is live for the persistence dialect, which turns
+    /// that pre-pass off so a saved architecture reloads as authored. The attribute floors in
+    /// <see cref="MinimumOpsetByAttribute"/> remain live, primarily for imported models: no
+    /// <c>Ops</c>/<c>OnnxOp</c> entry point accepts any of those attributes, so a graph built
+    /// through the public op surface always exports at 21, and only a foreign
+    /// <c>.onnx</c> carrying one of them (or a node
     /// stamped through the raw <c>NodeBuilder</c> surface) re-exports higher.
     /// </para>
     /// </summary>

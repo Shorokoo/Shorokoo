@@ -6,8 +6,12 @@ namespace Shorokoo.Tests.Modules
     /// RMSNormalization (@23) lower inline to opset-21 primitives, so their gradients
     /// flow through those primitives and are checked here by closed-form /
     /// two-sided-directional-derivative self-checks (same pattern as
-    /// <c>AutoGradStructuralModules.cs</c>). The non-decomposable ops (Attention,
-    /// RotaryEmbedding, TensorScatter, BitCast, CumProd) throw
+    /// <c>AutoGradStructuralModules.cs</c>). TensorScatter (@24) is decomposed by its
+    /// registered lowering instead of at its entry point, so the reverse walk sees the
+    /// mask and gather it is made of; its two checks below take the expected gradients
+    /// from outside the graph, which is what keeps them a check against numbers rather
+    /// than against another expression of the same rule. The non-decomposable ops
+    /// (Attention, RotaryEmbedding, BitCast, CumProd) throw
     /// <c>NotImplementedException</c> from their <see cref="OnnxOp"/> entry point, so
     /// there is no graph to differentiate — <c>AutoGradOpset26Tests</c> asserts that
     /// authoring throw directly rather than through a module.
@@ -105,5 +109,58 @@ namespace Shorokoo.Tests.Modules
             var weights = Vector(1f, 2f, 3f).Tensor();
             return (y * weights).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
         }
+    }
+
+    // ===================================================================
+    //  TensorScatter: the written window routes the output gradient to
+    //  `update`, everything else to `past_cache`. past = [[1,2,3],[4,5,6]],
+    //  loss = Σ present ⊙ [[1,2,3],[4,5,6]], sequence axis −1.
+    // ===================================================================
+
+    /// <summary>
+    /// Linear mode, write_indices [0,2], one-wide window: `update` claims (0,0) and (1,2), so
+    /// dUpdate = [[1],[6]] and dPast is the weights with those two positions zeroed.
+    /// </summary>
+    [Module]
+    public partial class AutoGradTensorScatterLinearGradientCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> past, Tensor<float32> update,
+            Tensor<float32> expectedPast, Tensor<float32> expectedUpdate)
+            => TensorScatterGradientCheck.Verdict(past, update, expectedPast, expectedUpdate,
+                Vector(0L, 2L), null);
+    }
+
+    /// <summary>
+    /// Circular mode, write_indices [2,1], two-wide window: batch 0's window wraps off the end
+    /// onto (0,2) and (0,0), batch 1's stays at (1,1) and (1,2), so dUpdate = [[3,1],[5,6]] and
+    /// dPast keeps only (0,1) and (1,0).
+    /// </summary>
+    [Module]
+    public partial class AutoGradTensorScatterCircularGradientCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> past, Tensor<float32> update,
+            Tensor<float32> expectedPast, Tensor<float32> expectedUpdate)
+            => TensorScatterGradientCheck.Verdict(past, update, expectedPast, expectedUpdate,
+                Vector(2L, 1L), TensorScatterMode.Circular);
+    }
+
+    internal static class TensorScatterGradientCheck
+    {
+        internal static Scalar<bit> Verdict(Tensor<float32> past, Tensor<float32> update,
+            Tensor<float32> expectedPast, Tensor<float32> expectedUpdate,
+            Vector<int64> writeIndices, TensorScatterMode? mode)
+        {
+            var weights = Vector(1f, 2f, 3f, 4f, 5f, 6f).Reshape(Vector(2L, 3L));
+            var present = (Tensor<float32>)OnnxOp.TensorScatter(past, update, writeIndices, -1L, mode);
+            var loss = (present * weights).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            var (gradPast, gradUpdate) =
+                Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad<Tensor<float32>, Tensor<float32>, float32>(
+                    past, update, loss);
+            var off = Worst(gradPast, expectedPast) + Worst(gradUpdate, expectedUpdate);
+            return off < Scalar(1e-6f);
+        }
+
+        private static Scalar<float32> Worst(Tensor<float32>? actual, Tensor<float32> expected)
+            => (actual!.Value - expected).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
     }
 }

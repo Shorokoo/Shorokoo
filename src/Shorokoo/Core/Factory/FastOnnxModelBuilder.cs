@@ -1139,12 +1139,13 @@ namespace Shorokoo.Core.Factory
         /// operator may be on one, the other, both or neither, and <c>Softsign</c> — emittable,
         /// so absent here — is why exporting an inference model still yields a <c>Softsign</c>.
         ///
-        /// <para>Empty: every operator Shorokoo can build, it can currently also emit. The pass
-        /// tests the list before it walks anything, so an empty one costs nothing per graph — not
-        /// even the scan — and the pre-pass stays a no-op until an op code is added here.</para>
+        /// <para><c>TensorScatter</c> is the one entry: ONNX introduced it at opset 24 and
+        /// opset 21 has no node for it, so a graph carrying one is written out as the mask and
+        /// gather its lowering decomposes it into. The pass tests the list before it walks
+        /// anything, so a graph with no such node pays nothing beyond one scan.</para>
         /// </summary>
         private static readonly ImmutableHashSet<string> DefaultExportLoweredOpCodes =
-            ImmutableHashSet.Create<string>(StringComparer.Ordinal);
+            ImmutableHashSet.Create(StringComparer.Ordinal, OpCodes.TENSOR_SCATTER);
 
         /// <summary>Thread-scoped substitute installed by <see cref="OverrideExportLoweredOpCodes"/>.</summary>
         [ThreadStatic]

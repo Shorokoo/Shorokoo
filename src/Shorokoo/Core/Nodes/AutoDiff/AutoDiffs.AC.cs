@@ -375,10 +375,11 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             // Opset 23/24 ops whose adjoints are not implemented: registered AD003
             // guards (DeformConv pattern, see AutoDiffs.Batch31.cs) so a loss→param
             // path through them fails with the op-specific message instead of the
-            // engine's generic unregistered-op AD003.
+            // engine's generic unregistered-op AD003. TensorScatter, the third of that
+            // batch, has no guard: it is lowered before the reverse walk, so the walk
+            // sees its decomposition and never asks for a rule.
             retval[ATTENTION] = AttentionGradient;
             retval[ROTARY_EMBEDDING] = RotaryEmbeddingGradient;
-            retval[TENSOR_SCATTER] = TensorScatterGradient;
 
             // Non-differentiable / structural ops whose inputs receive no gradient.
             // Each just returns nulls of the right arity so the autograd dispatcher

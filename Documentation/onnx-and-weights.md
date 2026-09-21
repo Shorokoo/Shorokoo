@@ -108,13 +108,16 @@ The default `OPS_21` is the export **baseline**: the exporter scans the graph
 it actually requires. In practice that raise is driven by post-21 **attributes**
 carried by an imported model — `DequantizeLinear.output_dtype` and
 `QuantizeLinear.precision` raise the stamp to 23, `Cast`/`CastLike.round_mode`
-to 24. No post-21 **operator** raises it, because none can reach the exporter:
-`Attention`, `AttentionWithKVCache`, `RotaryEmbedding`, `TensorScatter`,
-`BitCast` and `CumProd` throw `NotImplementedException` at their `OnnxOp` entry
-points, and `Swish` and `RMSNormalization` lower inline to opset-21 primitives,
-so no post-21 operator node is ever emitted from an authored graph (the
-exporter's per-operator floors are kept as the restore point for when a runtime
-registers those operators at a usable opset). A graph built through
+to 24. No post-21 **operator** raises it, because none survives to emission:
+`Attention`, `AttentionWithKVCache`, `RotaryEmbedding`, `BitCast` and
+`CumProd` throw `NotImplementedException` at their `OnnxOp` entry points,
+`Swish` and `RMSNormalization` lower inline to opset-21 primitives, and
+`TensorScatter` — built and run as itself — is decomposed into opset-21
+primitives by this pre-pass, so no post-21 operator node is ever emitted from
+an authored graph (the exporter's per-operator floors are kept as the restore
+point for when a runtime registers the remaining operators at a usable opset,
+and stay live for the `.srk` format below, which keeps every operator as
+authored and so stamps a saved `TensorScatter` at 24). A graph built through
 `Ops`/`OnnxOp` therefore always exports at opset 21 — the low-level
 `NodeBuilder` surface is the exception, since it can stamp one of those
 attributes directly, and a node built that way raises the stamp exactly as an

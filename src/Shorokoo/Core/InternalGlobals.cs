@@ -287,20 +287,6 @@ namespace Shorokoo.Core
             throw new UnsupportedDTypeException(ErrorCodes.FW002, type.Name, "DefaultVariable", $"Unsupported type for default value creation. Supported types: Tensor<T>, OptionalTensor<T>, TensorSequence<T>, TensorStruct<T>. Received: {type.Name}");
         }
 
-        internal static OnnxTensorData<bit> OnnxTensorData(Shape shape, params bool[] data) => new OnnxTensorData<bit>(shape, OnnxUtils.CreateTensorValue<bool>(shape, data));
-        internal static OnnxTensorData<int8> OnnxTensorData(Shape shape, params sbyte[] data) => new OnnxTensorData<int8>(shape, OnnxUtils.CreateTensorValue<sbyte>(shape, data));
-        internal static OnnxTensorData<int16> OnnxTensorData(Shape shape, params short[] data) => new OnnxTensorData<int16>(shape, OnnxUtils.CreateTensorValue<short>(shape, data));
-        internal static OnnxTensorData<int32> OnnxTensorData(Shape shape, params int[] data) => new OnnxTensorData<int32>(shape, OnnxUtils.CreateTensorValue<int>(shape, data));
-        internal static OnnxTensorData<int64> OnnxTensorData(Shape shape, params long[] data) => new OnnxTensorData<int64>(shape, OnnxUtils.CreateTensorValue<long>(shape, data));
-        internal static OnnxTensorData<uint8> OnnxTensorData(Shape shape, params byte[] data) => new OnnxTensorData<uint8>(shape, OnnxUtils.CreateTensorValue<byte>(shape, data));
-        internal static OnnxTensorData<uint16> OnnxTensorData(Shape shape, params ushort[] data) => new OnnxTensorData<uint16>(shape, OnnxUtils.CreateTensorValue<ushort>(shape, data));
-        internal static OnnxTensorData<uint32> OnnxTensorData(Shape shape, params uint[] data) => new OnnxTensorData<uint32>(shape, OnnxUtils.CreateTensorValue<uint>(shape, data));
-        internal static OnnxTensorData<uint64> OnnxTensorData(Shape shape, params ulong[] data) => new OnnxTensorData<uint64>(shape, OnnxUtils.CreateTensorValue<ulong>(shape, data));
-        internal static OnnxTensorData<bfloat16> OnnxTensorData(Shape shape, params BFloat16[] data) => new OnnxTensorData<bfloat16>(shape, OnnxUtils.CreateTensorValue<BFloat16>(shape, data));
-        internal static OnnxTensorData<float16> OnnxTensorData(Shape shape, params Float16[] data) => new OnnxTensorData<float16>(shape, OnnxUtils.CreateTensorValue<Float16>(shape, data));
-        internal static OnnxTensorData<float32> OnnxTensorData(Shape shape, params float[] data) => new OnnxTensorData<float32>(shape, OnnxUtils.CreateTensorValue<float>(shape, data));
-        internal static OnnxTensorData<float64> OnnxTensorData(Shape shape, params double[] data) => new OnnxTensorData<float64>(shape, OnnxUtils.CreateTensorValue<double>(shape, data));
-
         internal static T IdentityOp<T>(T var) where T : Variable
             => (T)OnnxOp.Identity(var, var.Rank);
     }

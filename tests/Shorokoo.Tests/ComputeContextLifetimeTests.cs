@@ -563,6 +563,72 @@ public class ComputeContextLifetimeCoverageTests
         Assert.Throws<ObjectDisposedException>(() => compiled.Execute(donation));
     }
 
+    [Fact]
+    public void TestAnAlreadyCancelledRunIsRefusedBeforeItTakesWhatItWasFed()
+    {
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        var settings = new RunSettings { CancellationToken = cancelled.Token };
+        var (graph, expected) = Chain();
+        using var context = new ComputeContext();
+        var compiled = context.Compile(graph);
+
+        var fed = Wide32().Donate();
+        Assert.Throws<OperationCanceledException>(() => compiled.Run(
+            [NamedModelParam.FromIData("a", ModelParamType.InputParam, fed)], settings));
+        Assert.Equal(expected, Floats(compiled.Execute(fed)[0].ToTensorData()));
+
+        using var stopped = new ComputeContext { RunSettings = settings };
+        var oneShot = Wide32().Donate();
+        Assert.Throws<OperationCanceledException>(() => stopped.Run(
+            graph, new DonatedTensorModelParam("a", ModelParamType.InputParam, oneShot)));
+        Assert.Equal(expected, Floats(context.Run(
+            graph, new DonatedTensorModelParam("a", ModelParamType.InputParam, oneShot))[0].ToTensorData()));
+    }
+
+    [Fact]
+    public void TestAFeedNothingKnowsHowToLockIsRefusedAndSoIsAnInputThatWasNotLocked()
+    {
+        Assert.Throws<InvalidOperationException>(() => ComputeContext.LeaseFeed(new UnlockableParam()));
+        Assert.Throws<InvalidOperationException>(() => ComputeContext.RefuseUnleasedFeed(1, 2));
+        ComputeContext.RefuseUnleasedFeed(2, 2);
+    }
+
+    [Fact]
+    public async Task TestAnAllocationThatHoldsNothingIsNeverDeadAndNeverDeleted()
+    {
+        Assert.False(TensorStorage.None.TryDelete());
+        Assert.False(await TensorStorage.None.DeleteAsync(TimeSpan.Zero, default));
+        Assert.True(TensorStorage.None.IsLive);
+    }
+
+    [Fact]
+    public void TestFeedingADonationTwiceIsRefusedInTheTensorsOwnWords()
+    {
+        using var context = new ComputeContext();
+        var (graph, _) = Chain();
+        var compiled = context.Compile(graph);
+        var fed = Wide32();
+        var donation = fed.Donate();
+        compiled.Execute(donation);
+
+        var refused = Assert.Throws<ObjectDisposedException>(() => compiled.Execute(donation));
+
+        Assert.Contains(fed.ToString(), refused.Message);
+        Assert.DoesNotContain(nameof(TensorStorage), refused.Message);
+    }
+
+    /// <summary>A parameter of a kind no lock knows about, which is what <c>LeaseFeed</c>'s
+    /// refusal is for.</summary>
+    private sealed class UnlockableParam : NamedModelParam
+    {
+        public override IShorokooTensorValue ToTensorValue() => throw new NotSupportedException();
+        public override TensorData ToTensorData() => throw new NotSupportedException();
+        public override TensorData<T> ToTensorData<T>() => throw new NotSupportedException();
+        public override TensorDataSequence ToTensorDataSequence() => throw new NotSupportedException();
+        public override TensorDataSequence<T> ToTensorDataSequence<T>() => throw new NotSupportedException();
+    }
+
     // A context lists the tensors attached to it, so a handle the caller has let go of must come
     // off. Disposal used to leave it on, and the list then answered which tensors had ever been
     // attached rather than which are -- a graph literal moved into an attribute is disposed by the

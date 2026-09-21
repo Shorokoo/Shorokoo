@@ -46,13 +46,22 @@ public class CompositeTransferCoverageTests
     [Fact]
     public void TestASequenceGivesASecondHandleOnTheSameElements()
     {
-        var sequence = TensorDataSequence.Create([Sample(1f)], DType.Float32);
+        var held = TensorDataSequence.OfElements([Sample(1f)], DType.Float32);
 
-        var readers = sequence.GiveAccessTo(new ComputeContext());
+        var readers = held.GiveAccessTo(new ComputeContext());
 
-        Assert.NotSame(sequence[0], readers[0]);
-        readers.Dispose();
-        Assert.Equal([1f, 2f], Floats(sequence[0]));
+        Assert.NotSame(held[0], readers[0]);
+        Assert.Same(held[0].Storage, readers[0].Storage);
+        held[0].As<float32>().AccessModifiableMemory<float>()[0] = 9f;
+        Assert.Equal([9f, 2f], Floats(readers[0]));
+
+        held.Dispose();
+        Assert.Equal([9f, 2f], Floats(readers[0]));
+
+        var produced = TensorDataSequence.Create([Sample(3f)], DType.Float32);
+        var producedReaders = produced.GiveAccessTo(new ComputeContext());
+        produced.Dispose();
+        Assert.Equal([3f, 4f], Floats(producedReaders[0]));
     }
 
     [Fact]
@@ -226,29 +235,78 @@ public class CompositeTransferCoverageTests
     {
         using var target = new ComputeContext();
 
-        var good = Sample(1f);
-        var doomed = Sample(7f);
-        doomed.Dispose();
-        var sequence = TensorDataSequence.OfElements([good, doomed], DType.Float32);
+        var element = Sample(1f);
+        var spentElement = Sample(7f);
+        spentElement.Dispose();
+        var sequence = TensorDataSequence.OfElements([element, spentElement], DType.Float32);
         Assert.ThrowsAny<Exception>(() => sequence.TransferTo(target));
-        Assert.Equal([1f, 2f], Floats(sequence[0]));
-        Assert.Same(ComputeContext.Host, sequence[0].Context);
+        Assert.Equal([1f, 2f], Floats(element));
+        Assert.Same(ComputeContext.Host, element.Context);
+        Assert.True(element.Storage.IsSoleHandle);
 
+        // Both assignments of the two keys, because a struct's fields are walked in hash order:
+        // one of them reaches the field that survives before the one that throws.
+        foreach (var spentIsA in (bool[])[false, true])
+            foreach (var optional in (bool[])[false, true])
+            {
+                var kept = Sample(5f);
+                var spent = Sample(8f);
+                spent.Dispose();
+                Assert.ThrowsAny<Exception>(() => Pair(kept, spent, spentIsA, optional).TransferTo(target));
+                Assert.Equal([5f, 6f], Floats(kept));
+                Assert.Same(ComputeContext.Host, kept.Context);
+                Assert.True(kept.Storage.IsSoleHandle);
+            }
+    }
+
+    private static TensorDataStruct Pair(TensorData kept, TensorData spent, bool spentIsA, bool optional)
+    {
+        var keptKind = optional ? DataStructure.Optional : DataStructure.Tensor;
         TensorStructFieldDef[] fields =
         [
-            new TensorStructFieldDef("a", DataStructure.Tensor, 1, DType.Float32),
-            new TensorStructFieldDef("b", DataStructure.Tensor, 1, DType.Float32),
+            new TensorStructFieldDef("a", spentIsA ? DataStructure.Tensor : keptKind, 1, DType.Float32),
+            new TensorStructFieldDef("b", spentIsA ? keptKind : DataStructure.Tensor, 1, DType.Float32),
         ];
-        var first = Sample(5f);
-        var second = Sample(8f);
-        second.Dispose();
-        var composite = new TensorDataStruct(
+        IData keptField = optional ? OptionalTensorData.Some(kept) : kept;
+        return new TensorDataStruct(
             new TensorStructDef(fields, "Pair"),
-            new Dictionary<string, IData> { { "a", first }, { "b", second } });
+            new Dictionary<string, IData>
+            {
+                { "a", spentIsA ? spent : keptField },
+                { "b", spentIsA ? keptField : spent },
+            });
+    }
 
-        Assert.ThrowsAny<Exception>(() => composite.TransferTo(target));
-        Assert.Equal([5f, 6f], Floats(first));
-        Assert.Same(ComputeContext.Host, first.Context);
+    [Fact]
+    public void TestASequenceTheProviderKeptIsInItsContextsMemory()
+    {
+        using var card = new ComputeContext(
+            new ComputeContextLifetimeCoverageTests.StubBackend(ComputeDevice.Cuda, 0));
+        var sequence = new OnnxTensorDataSequence<float32>(new StubSequenceValue());
+
+        Assert.Equal(MemorySpace.Host, sequence.Storage.Space);
+
+        sequence.BindTo(card);
+
+        Assert.Equal(MemorySpace.Cuda(0), sequence.Storage.Space);
+        Assert.Same(MemoryDevice.For(MemorySpace.Cuda(0)), sequence.Storage.Device);
+    }
+
+    /// <summary>A sequence value belonging to no runtime, which is enough to ask a sequence where
+    /// it is.</summary>
+    private sealed class StubSequenceValue : IShorokooTensorValue
+    {
+        public bool IsHostAccessible => false;
+        public ShorokooOnnxValueType ValueType => ShorokooOnnxValueType.Sequence;
+        public ShorokooTensorElementType ElementType => ShorokooTensorElementType.Float;
+        public long[] Shape => [];
+        public ReadOnlySpan<T> GetTensorDataAsSpan<T>() where T : unmanaged => throw new NotSupportedException();
+        public Span<T> GetTensorMutableDataAsSpan<T>() where T : unmanaged => throw new NotSupportedException();
+        public IReadOnlyList<string> GetStringTensorData() => throw new NotSupportedException();
+        public int GetValueCount() => 0;
+        public IShorokooTensorValue GetValue(int index) => throw new NotSupportedException();
+        public ShorokooTensorElementType GetSequenceElementType() => ShorokooTensorElementType.Float;
+        public void Dispose() { }
     }
 
     [Fact]

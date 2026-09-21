@@ -187,12 +187,16 @@ namespace Shorokoo.Runtime
             ObjectDisposedException.ThrowIf(_owner.IsDisposed, this);
             ObjectDisposedException.ThrowIf(IsDisposed, this);
             ArgumentNullException.ThrowIfNull(runSettings);
+            // Before the feeds, which is the only place it can be checked and still mean anything.
+            // The backend refuses an already-cancelled run too, but by then every feed has been
+            // leased, every value built and every donated handle given up -- so the caller who
+            // caught the cancellation and meant to retry had nothing left to retry with.
+            runSettings.CancellationToken.ThrowIfCancellationRequested();
             var sessionInputs = new Dictionary<string, IShorokooTensorValue>();
             var leases = new List<TensorLease>(inputs.Length);
             _owner.EnterRun();
             try
             {
-                var fed = 0;
                 foreach (var input in inputs)
                 {
                     var onnxName = _onnxInputNameByOriginal.TryGetValue(input.ParamName, out var mapped)
@@ -209,9 +213,8 @@ namespace Shorokoo.Runtime
                     // A donated feed gives its handle up here, the value having been built through
                     // it and the lock above holding the bytes. Every other feed keeps its.
                     input.DropDonatedHandle();
-                    fed++;
                 }
-                ComputeContext.RefuseUnleasedFeed(leases.Count, fed);
+                ComputeContext.RefuseUnleasedFeed(leases.Count, inputs.Length);
 
                 using var eviction = ComputeContext.LinkEvictions(leases, runSettings.CancellationToken);
                 var settings = eviction is null
@@ -732,6 +735,11 @@ namespace Shorokoo.Runtime
                     $"This tensor ({tensor}) is attached to another compute context, so this one "
                     + "cannot lock it. Only the context a tensor is attached to may, which is what "
                     + "makes that context's disposal answerable for it.");
+            // In the tensor's own words, which name it and say which way it is gone. The
+            // allocation refuses a dead lock too, but it can only speak for itself -- and the
+            // ordinary way to arrive here is feeding a donation a second time, which is a mistake
+            // about a tensor.
+            tensor.ThrowIfDisposed();
             return Lock(tensor.Storage);
         }
 
@@ -746,6 +754,7 @@ namespace Shorokoo.Runtime
                 throw new InvalidOperationException(
                     $"This sequence ({sequence}) is attached to another compute context, so this "
                     + "one cannot lock it.");
+            sequence.ThrowIfGone();
             return Lock(sequence.Storage);
         }
 
@@ -805,21 +814,28 @@ namespace Shorokoo.Runtime
             => sequence.Context.Lock(sequence);
 
         /// <summary>
-        /// Refuses a run that fed more than it locked.
+        /// Refuses a run that did not lock every input it was given.
         ///
         /// <para>Checked here rather than only in a test, because there is nothing behind a lease:
         /// past asking the backend to stop there is no further escalation, so a feed path that
         /// forgets one is Shorokoo/Shorokoo#366 again with the machinery sitting unused beside it.
         /// The locker is this repository's own run path rather than a caller, which is exactly what
         /// makes the count checkable at all.</para>
+        ///
+        /// <para>Against the inputs the run was handed, and deliberately not against a counter the
+        /// feed loop keeps: such a counter is incremented beside the lease with no branch in
+        /// between, so it agreed with the lease count by construction and could not fail. What
+        /// actually enforces the rule for a kind of input nothing knows how to lock is
+        /// <see cref="LeaseFeed"/>'s own refusal; this catches the other shape, a feed path that
+        /// learns to skip an input and takes the lease with it.</para>
         /// </summary>
-        internal static void RefuseUnleasedFeed(int leases, int fed)
+        internal static void RefuseUnleasedFeed(int leases, int inputs)
         {
-            if (leases == fed) return;
+            if (leases == inputs) return;
             throw new InvalidOperationException(
-                $"This run fed {fed} input(s) and locked {leases} of them. Every fed input is held "
-                + "for the length of the run; one that is not can have its memory freed under the "
-                + "run by another thread.");
+                $"This run was given {inputs} input(s) and locked {leases} of them. Every fed input "
+                + "is held for the length of the run; one that is not can have its memory freed "
+                + "under the run by another thread.");
         }
 
         /// <summary>
@@ -1380,6 +1396,9 @@ namespace Shorokoo.Runtime
             // allocation -- and outputs 1..n never wrapped and so left to their finalizers.
             RefuseHostContext("run");
             ObjectDisposedException.ThrowIf(IsDisposed, this);
+            // Before the model is built, the session created and the feeds leased -- see
+            // CompiledGraph.Run. This path pays for a whole model build and a session on top.
+            RunSettings.CancellationToken.ThrowIfCancellationRequested();
             var model = buildModel();
 
             var memoryStream = new MemoryStream();
@@ -1401,7 +1420,6 @@ namespace Shorokoo.Runtime
                     onnxInputNameByOriginal[originalInputNames[i]] = session.InputNames[i];
 
                 var sessionInputs = new Dictionary<string, IShorokooTensorValue>();
-                var fed = 0;
                 foreach (var input in inputs)
                 {
                     var onnxName = onnxInputNameByOriginal.TryGetValue(input.ParamName, out var mapped)
@@ -1412,9 +1430,8 @@ namespace Shorokoo.Runtime
                     // the runtime that is about to read what it is fed.
                     sessionInputs[onnxName] = input.ToTensorValue(ResolvedBackend);
                     input.DropDonatedHandle();
-                    fed++;
                 }
-                RefuseUnleasedFeed(leases.Count, fed);
+                RefuseUnleasedFeed(leases.Count, inputs.Length);
 
                 using var eviction = LinkEvictions(leases, RunSettings.CancellationToken);
                 var settings = eviction is null
@@ -1548,22 +1565,6 @@ namespace Shorokoo.Runtime
                     node.OpType.StartsWith("Optional", StringComparison.Ordinal));
             });
             return found;
-        }
-
-        /// <summary>Lifts concrete tensor data into graph variables.</summary>
-        public class ArgsProcessor
-        {
-            /// <summary>Lifts each element of the data sequence into a tensor variable.</summary>
-            public TensorSequence<T> Get<T>(TensorDataSequence<T> sequence) where T : IVarType
-            {
-                return Globals.TensorSequence<T>(sequence.AsList.Select(x => Get(x)).ToArray());
-            }
-
-            /// <summary>Lifts the tensor data into a tensor variable.</summary>
-            public Tensor<T> Get<T>(TensorData<T> tensorData) where T : IVarType
-            {
-                return (Variable)Globals.Tensor(tensorData.Detach().MoveToAttribute());
-            }
         }
 
         /// <summary>

@@ -147,7 +147,12 @@ namespace Shorokoo
             // here at all: Select would defer every operation into the constructor, past any
             // cleanup this method could do.
             List<KeyValuePair<string, IData>> moved = new(Fields.Count);
-            List<TensorData> allocated = [];
+            // Every tensor this rebuild produced, to be released if it fails: each holds a
+            // reference of its own, including where it shares the source field's allocation, so
+            // letting go of one drops that tensor's name for the bytes and nothing else. Skipping
+            // the shared ones was true of ownership and is not true of a count -- it left the
+            // allocation one reference above zero with nothing left that could ever drop it.
+            List<TensorData> rebuiltFields = [];
             // What each source field was before the move, so a failure can put it back: otherwise a
             // failed transfer left the fields it had reached handed over to a context the caller
             // never received a struct for.
@@ -156,18 +161,13 @@ namespace Shorokoo
             {
                 foreach (var field in Fields)
                 {
-                    var wasOn = (field.Value as TensorData)?.Context
-                        ?? Shorokoo.Runtime.ComputeContext.Host;
+                    var source = TensorIn(field.Value);
+                    var wasOn = source?.Context ?? Shorokoo.Runtime.ComputeContext.Host;
                     var rebuilt = operation(field.Value, target);
-                    if (field.Value is TensorData after && !ReferenceEquals(after.Context, wasOn))
-                        handedOver.Add((after, wasOn));
+                    if (source is { HasHandedOverReference: true }) handedOver.Add((source, wasOn));
                     moved.Add(new KeyValuePair<string, IData>(field.Key, rebuilt));
-                    // Only storage this rebuild allocated: one that shares the source field's is
-                    // the source's bytes under a second name, and freeing it would destroy data a
-                    // failed transfer is supposed to leave alone.
-                    if (rebuilt is TensorData t && field.Value is TensorData original
-                        && !ReferenceEquals(t, original) && !ReferenceEquals(t.Storage, original.Storage))
-                        allocated.Add(t);
+                    if (TensorIn(rebuilt) is { } t && !ReferenceEquals(t, source))
+                        rebuiltFields.Add(t);
                 }
                 return new TensorDataStruct(Definition, moved) { Context = target };
             }
@@ -175,11 +175,24 @@ namespace Shorokoo
             {
                 // The struct that would have owned these is never constructed, so without this
                 // each is a runtime value -- a device allocation on a card -- left to a finalizer.
-                foreach (var t in allocated) t.Dispose();
+                // The sources first: a field that handed its reference over is holding none, so
+                // releasing the rebuilt tensor that took it would free the bytes underneath the
+                // source before it could be given its own back.
                 foreach (var (field, wasOn) in handedOver) field.ReclaimReference(wasOn);
+                foreach (var t in rebuiltFields) t.Dispose();
                 throw;
             }
         }
+
+        /// <summary>The tensor a field holds, however it holds it, and null for a field that is
+        /// not one tensor — what the rollback has to reach to put a field back or to let go of
+        /// one, and an optional carries its tensor as plainly as a bare field does.</summary>
+        private static TensorData? TensorIn(IData field) => field switch
+        {
+            TensorData t => t,
+            OptionalTensorData { HasValue: true, Value: { } v } => v,
+            _ => null,
+        };
 
         /// <summary>Applies the right one of three operations to whichever kind of field this is,
         /// and leaves anything else alone.</summary>

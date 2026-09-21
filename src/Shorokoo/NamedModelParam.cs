@@ -73,16 +73,22 @@ namespace Shorokoo
     /// </summary>
     public sealed class DonatedTensorModelParam : TensorDataModelParam
     {
+        private readonly TensorDonation _donation;
+
         /// <summary>Wraps <paramref name="donation"/>'s handle as the parameter named
         /// <paramref name="name"/>.</summary>
         /// <exception cref="ArgumentNullException"><paramref name="donation"/> is null.</exception>
         public DonatedTensorModelParam(string name, ModelParamType paramType, TensorDonation donation)
             : base(name, paramType, (donation ?? throw new ArgumentNullException(nameof(donation))).Tensor)
         {
+            _donation = donation;
         }
 
         /// <inheritdoc/>
-        internal override void DropDonatedHandle() => ToTensorData().Dispose();
+        // Through the donation rather than past it. The two say the same thing today -- taking a
+        // donation back is letting go of the handle it carries -- and a parameter that took a
+        // donation and then let go of something else would stop being one the moment they differed.
+        internal override void DropDonatedHandle() => _donation.Dispose();
     }
 
     public class TensorDataSequenceModelParam : NamedModelParam

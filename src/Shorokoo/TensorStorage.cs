@@ -88,7 +88,22 @@ namespace Shorokoo
 
         /// <summary>The memory these bytes are in, shared with every other allocation in the same
         /// <see cref="MemorySpace"/>.</summary>
-        internal MemoryDevice Device { get; }
+        internal MemoryDevice Device { get; private set; }
+
+        /// <summary>
+        /// Records which memory these bytes are really in, for an allocation built before the
+        /// context that produced it is known — a sequence's, which is built around a runtime value
+        /// and handed its context afterwards. Called once, on that hand-over, and before the
+        /// allocation is reachable from anywhere else.
+        ///
+        /// <para>It matters because the device is what says whether another context can be handed
+        /// these bytes as they stand. A sequence the execution provider kept on its card, labelled
+        /// with the host's memory, is one every such question is answered wrongly about.</para>
+        /// </summary>
+        internal void PlaceIn(MemorySpace space)
+        {
+            lock (_gate) Device = MemoryDevice.For(space);
+        }
 
         /// <summary>Where these bytes are — <see cref="MemoryDevice.Space"/>, kept here for
         /// call-site brevity.</summary>
@@ -134,11 +149,26 @@ namespace Shorokoo
             get { lock (_gate) return _refs == 1 && _locks == 0; }
         }
 
-        /// <summary>Records one more name for these bytes. Called by every handle as it is
-        /// built.</summary>
-        internal void AddHandleReference()
+        /// <summary>
+        /// Records one more name for these bytes, unless there are no bytes left to name. Called
+        /// by every handle as it is built.
+        ///
+        /// <para>Refused under the same gate the count is kept under, for the reason
+        /// <see cref="Lock"/> is: a caller that asks whether the allocation is alive and then
+        /// takes its reference has a window in between, and another thread's disposal inside it
+        /// leaves the new handle naming freed memory — reporting success while doing it, which is
+        /// the one outcome worse than throwing.</para>
+        /// </summary>
+        /// <returns>False when the allocation has been deleted or freed, nothing having been
+        /// counted.</returns>
+        internal bool TryAddHandleReference()
         {
-            lock (_gate) _refs++;
+            lock (_gate)
+            {
+                if (_deleted || _freed) return false;
+                _refs++;
+                return true;
+            }
         }
 
         /// <summary>
@@ -166,11 +196,20 @@ namespace Shorokoo
         {
             lock (_gate)
             {
+                // Named for a caller who has never heard of this class: what it holds is a handle,
+                // and this is the exception an ordinary mistake -- feeding a donation a second
+                // time -- arrives at. TensorData.ThrowIfDisposed says the same two things, and the
+                // callers that know which tensor it is say them first.
                 if (_deleted || _freed)
-                    throw new ObjectDisposedException(nameof(TensorStorage),
+                    throw new ObjectDisposedException(nameof(TensorData),
                         _deleted
-                            ? "This allocation has been deleted, so nothing may read it."
-                            : "This allocation has been freed, so nothing may read it.");
+                            ? "This tensor names an allocation that has been deleted, so its bytes "
+                              + "are gone and nothing may read it. Deletion ignores how many "
+                              + "handles name the allocation, which is what makes it deletion."
+                            : "This tensor names an allocation nothing holds any more -- every "
+                              + "handle on it was disposed, the compute context they were attached "
+                              + "to was, or it was donated to a run that has already given the "
+                              + "donated handle up. Nothing may read it.");
                 _refs++;
                 _locks++;
                 return (_eviction ??= new CancellationTokenSource()).Token;
@@ -231,10 +270,14 @@ namespace Shorokoo
         /// Deletes these bytes if nothing is reading them: frees them now, marks the allocation
         /// dead and returns true. If any lock is held nothing at all changes — no eviction is
         /// signalled, no run is aborted, every handle stays readable — and it returns false.
+        ///
+        /// <para>False too for a storage that holds nothing, which is shared and so cannot be
+        /// taken away from anyone: it says the allocation is dead, and this one is not — it stays
+        /// live and every tensor over it stays readable.</para>
         /// </summary>
         internal bool TryDelete()
         {
-            if (_holdsNothing) return true;
+            if (_holdsNothing) return false;
             Action? free;
             lock (_gate)
             {
@@ -253,7 +296,8 @@ namespace Shorokoo
         /// </summary>
         internal async Task<bool> DeleteAsync(TimeSpan timeout, CancellationToken cancellationToken)
         {
-            if (_holdsNothing) return true;
+            // Nothing to delete and nothing reclaimed, for the reason TryDelete answers the same.
+            if (_holdsNothing) return false;
             Action? free;
             CancellationTokenSource? eviction;
             Task? reclaimed = null;

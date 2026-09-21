@@ -260,9 +260,23 @@ namespace Shorokoo
                     $"A tensor on ComputeContext.Host holds host memory, but this storage is in "
                     + $"{storage.Space}. Give it the context whose memory that is.", nameof(storage));
 
-            // One more name for the bytes, which is what a handle is. Attaching can be refused --
-            // a disposed context takes nothing on -- so the reference comes back off if it is.
-            storage.AddHandleReference();
+            // One more name for the bytes, which is what a handle is -- and refused outright where
+            // there are no bytes left to name. Every clone path reaches this constructor after
+            // checking that its source is alive, and the check and the clone are two steps: a
+            // context disposed on another thread in between frees the allocation, and taking the
+            // reference regardless minted a handle over freed memory and handed it back as a
+            // success (Shorokoo/Shorokoo#366 in the transfer paths).
+            if (!storage.TryAddHandleReference())
+                throw new ObjectDisposedException(GetType().Name,
+                    storage.IsDeleted
+                        ? $"Tensor {shape}:{dtype} cannot be built over an allocation that has "
+                          + "been deleted, so its bytes are gone and reading it would read freed "
+                          + "memory. Deletion ignores how many handles name the allocation, which "
+                          + "is what makes it deletion."
+                        : $"Tensor {shape}:{dtype} cannot be built over an allocation nothing "
+                          + "holds any more -- every handle on it was disposed, or the compute "
+                          + "context they were attached to was. Take a CopyTo(...) while a handle "
+                          + "is still alive if the data has to outlive them.");
             try
             {
                 context.AttachTensor(this);
@@ -317,14 +331,33 @@ namespace Shorokoo
         }
 
         /// <summary>
+        /// Whether this handle has given its reference up without having been disposed — what a
+        /// same-space <see cref="TransferTo"/> leaves behind, and the one state a rolled-back
+        /// composite transfer has to put back.
+        ///
+        /// <para>Asked of the handle rather than derived from its context. A transfer to the
+        /// context the tensor is already on hands the reference over without moving anything, so
+        /// reading it off <see cref="Context"/> missed exactly the case where the source keeps a
+        /// name for bytes it no longer holds a reference on.</para>
+        /// </summary>
+        internal bool HasHandedOverReference
+            => !IsDisposed && Volatile.Read(ref _referenceDropped) != 0;
+
+        /// <summary>
         /// Hands this handle's reference back after it was dropped by a step that has since been
         /// rolled back — a composite transfer that failed part-way and is putting its source
         /// elements back where they were.
+        ///
+        /// <para>Refused where the allocation has gone in the meantime, which leaves this handle
+        /// saying so rather than naming bytes that are not there: a rollback puts back what it
+        /// can, and it runs on the way out of an exception that must not be replaced.</para>
         /// </summary>
         internal void ReclaimReference(Shorokoo.Runtime.ComputeContext original)
         {
             ArgumentNullException.ThrowIfNull(original);
-            if (Interlocked.Exchange(ref _referenceDropped, 0) != 0) Storage.AddHandleReference();
+            if (Interlocked.Exchange(ref _referenceDropped, 0) != 0
+                && !Storage.TryAddHandleReference())
+                Interlocked.Exchange(ref _referenceDropped, 1);
             Reattach(original);
         }
 
@@ -370,8 +403,14 @@ namespace Shorokoo
         /// </summary>
         public bool IsDisposed { get; protected set; }
 
-        /// <summary>Guards every path to the tensor's elements. Call it before touching storage.</summary>
-        protected void ThrowIfDisposed()
+        /// <summary>
+        /// Guards every path to the tensor's elements. Call it before touching storage.
+        ///
+        /// <para>Visible to the framework as well as to subclasses, so that a caller holding the
+        /// tensor refuses in these words rather than leaving it to the allocation, which knows
+        /// only itself and cannot name the tensor or say which of them the caller has.</para>
+        /// </summary>
+        protected internal void ThrowIfDisposed()
         {
             if (IsDisposed)
                 throw new ObjectDisposedException(GetType().Name,

@@ -183,6 +183,20 @@ public class TensorContextTransferCoverageTests
     }
 
     [Fact]
+    public void TestASecondHandleIsRefusedOverAnAllocationThatIsAlreadyGone()
+    {
+        var deleted = Sample();
+        Assert.True(deleted.TryDelete());
+        Assert.Throws<ObjectDisposedException>(() => deleted.CloneSharing(ComputeContext.Host));
+
+        var released = Sample();
+        var reader = released.GiveAccessTo(null);
+        released.Dispose();
+        reader.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => reader.CloneSharing(ComputeContext.Host));
+    }
+
+    [Fact]
     public void TestCopyToAlwaysCopiesAndLeavesTheSourceAlone()
     {
         var source = Sample();

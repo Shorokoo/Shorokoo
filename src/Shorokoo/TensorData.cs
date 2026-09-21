@@ -576,6 +576,11 @@ namespace Shorokoo
         {
             if (IsDisposed) return;
             IsDisposed = true;
+            // Off the context's books as well as off the allocation's. A context lists the tensors
+            // attached to it, and a handle the caller has let go of is not one -- left on, the list
+            // grew with every tensor that had ever been attached and only shrank when the collector
+            // got round to it, so it answered "which tensors are attached" with "which were".
+            Context.DetachTensor(this);
             DropReference();
         }
 

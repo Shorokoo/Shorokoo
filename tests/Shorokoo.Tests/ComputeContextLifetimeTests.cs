@@ -563,6 +563,27 @@ public class ComputeContextLifetimeCoverageTests
         Assert.Throws<ObjectDisposedException>(() => compiled.Execute(donation));
     }
 
+    // A context lists the tensors attached to it, so a handle the caller has let go of must come
+    // off. Disposal used to leave it on, and the list then answered which tensors had ever been
+    // attached rather than which are -- a graph literal moved into an attribute is disposed by the
+    // move, so describing a graph alone grew it.
+    [Fact]
+    public void TestATensorComesOffItsContextsListWhenItIsDisposedOrMovedAway()
+    {
+        using var context = new ComputeContext();
+
+        var held = context.AllocateUninitialized<float32>((long[])[2L]);
+        Assert.Contains(held, context.Tensors);
+
+        var spent = (TensorData<float32>)TensorData([2L], 1f, 2f);
+        Assert.Contains(spent, ComputeContext.Host.Tensors);
+        _ = spent.MoveToAttribute();
+        Assert.DoesNotContain(spent, ComputeContext.Host.Tensors);
+
+        held.Dispose();
+        Assert.DoesNotContain(held, context.Tensors);
+    }
+
     [Fact]
     public void TestAnAllocatedTensorIsFilledInPlaceAndFeedsAsACopiedOneDoes()
     {

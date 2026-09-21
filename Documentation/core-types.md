@@ -323,7 +323,7 @@ checkpoint is bound back onto them. Reading the elements of one of those throws,
 
 | | Costs | Afterwards |
 |---|---|---|
-| `TensorData.MoveToAttribute()` | nothing — the bytes are handed over | **the tensor is spent**: it is disposed, and reading it throws `ObjectDisposedException` |
+| `TensorData.MoveToAttribute()` | nothing, where the tensor holds its own array and is the only handle on it; a copy otherwise | **the tensor is spent**: it is disposed, and reading it throws `ObjectDisposedException` |
 | `TensorAttribute.CopyToTensorData()` | a copy, always | both usable; the attribute is unchanged, and the copy is on `ComputeContext.Host` |
 
 The asymmetry is about size. Binding a checkpoint's weights into a graph is the direction that
@@ -331,6 +331,20 @@ runs hot — a 165 M-parameter model is some 660 MB — so it moves, and moving 
 gone. The other direction copies because an attribute is immutable and shared by every graph
 that captured it: a writable tensor over the same bytes would be a way to edit a description
 through the back door.
+
+That is also why the move falls back to a copy wherever handing the array over would leave
+somebody else able to write it, or wherever there is no array to hand over in the first place:
+
+- **A second handle names the same bytes.** `GiveAccessTo` hands out another handle, and
+  surrendering yours says nothing about that one — it could still write through
+  `AccessModifiableMemory`, and the description the graph captured would change under it. An
+  attribute taken while you are the only handle cannot be written by anyone.
+- **The elements are a runtime value's, or strings.** There is no managed array to give: the
+  bytes are a runtime's own buffer, or a string tensor's variable-length elements, and only a
+  copy gets them out.
+
+The case the no-copy path exists for — a checkpoint's tensor, parsed for the bind and named by
+nothing else — is the sole-handle case, so the size argument above is untouched.
 
 `MoveToAttribute()` refuses a tensor attached to a compute context, and says which call fixes
 it. A result that came back from `Execute` on a context of your own belongs to that context,

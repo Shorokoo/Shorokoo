@@ -220,6 +220,19 @@ public partial class ParamShapeWideModel
     }
 }
 
+/// <summary>One weight over the representative-input threshold and one under it, so a rig built
+/// from this describes the first and materializes the second.</summary>
+[Module]
+public partial class WideAndNarrowWeightsModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var wide = InitXavier.Init([Scalar(32L), Scalar(64L)]);
+        var narrow = InitZeroBias.Init([Scalar(32L)]).Vec();
+        return input.MatMul(wide.Transpose(1, 0)) + narrow;
+    }
+}
+
 internal static class TrainingRigHelpers
 {
     // A fresh array per call: a static readonly long[] is still mutable, and this suite
@@ -693,7 +706,7 @@ public class TrainingRigRepresentativeInputCoverageTests
             Assert.Equal(values, exemplar.HasAnyData);
             Assert.Equal(dims, exemplar.Shape!.Dims);
             Assert.Equal(DType.Float32, exemplar.DType);
-            Assert.All(exemplar.FloatData ?? [], v => Assert.Equal(0f, v));
+            Assert.Equal(values ? new float[ProductOf(dims)] : null, exemplar.FloatData?.ToArray());
         }
     }
 
@@ -707,7 +720,7 @@ public class TrainingRigRepresentativeInputCoverageTests
                 .OfType<RuntimeTensor>().Where(t => t.Shape!.Dims.SequenceEqual((long[])[n])).ToList();
             Assert.Equal(2, exemplars.Count);
             Assert.All(exemplars, t => Assert.Equal(values, t.HasAnyData));
-            Assert.All(exemplars, t => Assert.All(t.FloatData ?? [], v => Assert.Equal(0f, v)));
+            Assert.All(exemplars, t => Assert.Equal(values ? new float[n] : null, t.FloatData?.ToArray()));
         }
     }
 
@@ -715,7 +728,7 @@ public class TrainingRigRepresentativeInputCoverageTests
     public void TestADeferredBuildDescribesItsLargeParametersRatherThanMaterializingThemCoverage()
     {
         var rig = TrainingRig.FromScratch(
-            DigitClassifier.ComputationGraph, SoftmaxL2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            WideAndNarrowWeightsModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
             [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([4L, 64L], new float[256]))],
             0.01f);
         var path = TempPath("repin_defer") + ".skpt";
@@ -729,9 +742,9 @@ public class TrainingRigRepresentativeInputCoverageTests
                 var byShape = inputs.OfType<RuntimeTensor>()
                     .ToDictionary(t => string.Join(",", t.Shape!.Dims), t => t.HasAnyData);
                 Assert.False(byShape["32,64"]);
-                Assert.True(byShape["10,32"]);
                 Assert.True(byShape["32"]);
-                Assert.True(byShape["10"]);
+                Assert.True(byShape["4,64"]);
+                Assert.True(byShape["4,32"]);
             }
 
             Assert.Equal(

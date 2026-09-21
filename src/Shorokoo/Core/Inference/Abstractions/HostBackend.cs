@@ -44,43 +44,43 @@ public sealed class HostBackend : IShorokooInferenceBackend
     public MemorySpace MemorySpace => MemorySpace.Host;
 
     /// <summary>Always throws: host memory holds tensors and computes nothing.</summary>
-    /// <exception cref="InvalidOperationException">Always.</exception>
+    /// <exception cref="NotSupportedException">Always.</exception>
     public IShorokooInferenceSession CreateSession(
         ReadOnlyMemory<byte> modelBytes,
         ShorokooGraphOptimization graphOptimization,
         ShorokooLogSeverity logSeverity,
         DeviceMemorySettings deviceMemory)
-        => throw new InvalidOperationException(
+        => throw new NotSupportedException(
             "The framework's host memory holds tensors and runs nothing, so it cannot build an "
             + "inference session. Compile and run on a real backend -- a platform package "
             + "(Shorokoo.LinuxCPU, Shorokoo.LinuxGPU, Shorokoo.WinCPU, Shorokoo.WinGPU), or one "
             + "from IsolatedBackend.Load -- and give a ComputeContext that backend.");
 
     /// <summary>Always throws: there is no runtime here to build a value with.</summary>
-    /// <exception cref="InvalidOperationException">Always.</exception>
+    /// <exception cref="NotSupportedException">Always.</exception>
     public IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged
         => throw NoValues();
 
     /// <summary>Always throws: there is no runtime here to build a value with.</summary>
-    /// <exception cref="InvalidOperationException">Always.</exception>
+    /// <exception cref="NotSupportedException">Always.</exception>
     public IShorokooTensorValue CreateTensorFromRawBytes(
         ShorokooTensorElementType elementType, byte[] data, long[] shape)
         => throw NoValues();
 
     /// <summary>Always throws: there is no runtime here to build a value with.</summary>
-    /// <exception cref="InvalidOperationException">Always.</exception>
+    /// <exception cref="NotSupportedException">Always.</exception>
     public IShorokooTensorValue CreateStringTensor(IReadOnlyList<string> data, long[] shape)
         => throw NoValues();
 
     /// <summary>Always throws: there is no runtime here to build a value with.</summary>
-    /// <exception cref="InvalidOperationException">Always.</exception>
+    /// <exception cref="NotSupportedException">Always.</exception>
     public IShorokooTensorValue CreateSequence(IReadOnlyList<IShorokooTensorValue> values)
         => throw NoValues();
 
     /// <summary>Always throws, for the reason the others do; overridden rather than left to the
     /// interface default, which would allocate through a member that throws anyway and say so in
     /// worse words.</summary>
-    /// <exception cref="InvalidOperationException">Always.</exception>
+    /// <exception cref="NotSupportedException">Always.</exception>
     public IShorokooTensorValue CreateUninitializedTensorInBackendMemory(
         ShorokooTensorElementType elementType, long[] shape)
         => throw NoValues();
@@ -89,7 +89,7 @@ public sealed class HostBackend : IShorokooInferenceBackend
     // managed bytes and nothing else; the runtime value is built when a backend is fed it, by
     // that backend, and there is no sense in which this one could build a value another runtime
     // would accept.
-    private static InvalidOperationException NoValues()
+    private static NotSupportedException NoValues()
         => new("The framework's host memory holds tensors as managed bytes and builds no runtime "
             + "values: one belongs to the runtime that made it, and there is no runtime here. A "
             + "tensor becomes a value when a real backend is fed it. If you meant to read this "

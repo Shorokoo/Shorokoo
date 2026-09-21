@@ -42,14 +42,28 @@ public static class TensorElementLayout
     /// covers: the size of the buffer on either side of a copy, and of the one an uninitialized
     /// allocation hands out.</summary>
     /// <exception cref="ArgumentNullException"><paramref name="shape"/> is null.</exception>
-    /// <exception cref="NotSupportedException">The element type has no fixed byte stride.</exception>
+    /// <exception cref="NotSupportedException">The element type has no fixed byte stride, or
+    /// <paramref name="shape"/> has no known element count.</exception>
     /// <exception cref="OverflowException">The tensor covers more bytes than an <see cref="int"/>
     /// holds, which is more than any buffer here can address.</exception>
     public static int ByteCount(ShorokooTensorElementType elementType, long[] shape)
     {
         ArgumentNullException.ThrowIfNull(shape);
         var elements = 1L;
-        foreach (var dim in shape) elements *= dim;
+        foreach (var dim in shape)
+        {
+            // Refused per dimension rather than on the product, which would read a pair of them
+            // as a count of 1 and lay out a buffer that fits nothing. A negative count would in
+            // turn reach `new byte[...]` through the uninitialized allocation the interface
+            // defaults to, where the fault is a shape nobody can see rather than this one.
+            if (dim < 0)
+                throw new NotSupportedException(
+                    $"A [{string.Join(", ", shape)}] tensor has no known element count: a negative "
+                    + "dimension stands for one the runtime works out while it runs, not for a "
+                    + "size, so there is no buffer to lay out. Size it from the arrangement the "
+                    + "run resolved.");
+            elements *= dim;
+        }
         return checked((int)(elements * ElementSizeInBytes(elementType)));
     }
 }

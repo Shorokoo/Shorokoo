@@ -207,6 +207,33 @@ A tensor that came back from a session without the context that produced it bein
 its space as unknown, and cannot be transferred at all — there is no telling whether another
 context shares it. Bring such a value home on the backend that owns it first.
 
+### A feed disposed while a run is starting loses that run
+
+A run locks every tensor it is fed and holds the lock until it returns, so a feed disposed from
+another thread *while the run holds it* is safe: the handle goes, the run reads on, and the bytes
+come back when the run lets go — see
+[A tensor's lifetime](inference.md#a-tensors-lifetime-handles-locks-and-deletion). The lock is
+taken inside the run, one feed at a time, and everything before that is unprotected: the
+`Execute` / `Run` call itself, the expansion and naming of its inputs, and the locking of
+whichever feeds come first. A disposal landing in that window drops the last handle on the
+allocation, so the lock the run then asks for is refused and the call throws
+`ObjectDisposedException`.
+
+The failure is clean — nothing reads freed memory, and no run returns a wrong answer — but the
+run is lost, and it is not a narrow race to be got away with: measured on a loop that handed a
+feed to `Execute` on one thread and disposed it from another as the call was made, 499 of 500
+runs ended that way. It is also the arrangement that
+[One model, two devices](inference.md#one-model-two-devices) invites — staging the next batch
+while the other device is still reading the last one — which is exactly where it is easy to
+write by accident. Give the concurrent run a tensor of its own (`CopyTo`) or wait for it to
+return.
+
+Nothing detects the disposal *coming*; what the lock gives is a refusal at the moment the run
+reaches for bytes that are gone. Closing the window rather than reporting it means taking the
+lock where the caller still holds the handle — at the entry point, before the inputs are
+expanded — which also has to hold for `Run`, for `Eval`, and for the one-shot paths that build
+a session of their own.
+
 ### A tensor moved onto a card is not covered by any device-memory budget
 
 `ComputeContext.DeviceMemory` bounds the arenas of the sessions that context compiles. It does not

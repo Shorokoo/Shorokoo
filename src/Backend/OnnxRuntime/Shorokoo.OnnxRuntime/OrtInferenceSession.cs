@@ -80,7 +80,7 @@ internal sealed class OrtInferenceSession : IShorokooInferenceSession
             {
                 results = _session.Run(runOptions, ortInputs, outputNames);
             }
-            catch (Exception cause) when (abortToken.IsCancellationRequested)
+            catch (OnnxRuntimeException cause) when (WasStopped(cause, abortToken))
             {
                 throw Aborted(cause, abortToken);
             }
@@ -153,7 +153,7 @@ internal sealed class OrtInferenceSession : IShorokooInferenceSession
             {
                 results = _session.RunWithBoundResults(runOptions, binding);
             }
-            catch (Exception cause) when (abortToken.IsCancellationRequested)
+            catch (OnnxRuntimeException cause) when (WasStopped(cause, abortToken))
             {
                 throw Aborted(cause, abortToken);
             }
@@ -257,6 +257,23 @@ internal sealed class OrtInferenceSession : IShorokooInferenceSession
         => token.CanBeCanceled
             ? token.Register(static state => ((RunOptions)state!).Terminate = true, runOptions)
             : default;
+
+    /// <summary>
+    /// Whether <paramref name="cause"/> is ORT reporting the run <paramref name="token"/> stopped,
+    /// rather than a failure that merely happened while that token was cancelled. A stopped run and
+    /// a broken model come back as the same exception type, so what tells them apart is ORT naming
+    /// the flag; reading every failure as a cancellation because one was asked for reports a model
+    /// that cannot run as a run the caller stopped, and a caller told that retries rather than
+    /// fixing the model.
+    ///
+    /// <para>The window is narrow — ORT reads the flag between nodes and stops there, so a genuine
+    /// failure can only outrun a cancellation from the kernel that was already running — which is
+    /// also why nothing pins this from the outside: reaching the failing node with the flag already
+    /// set is the race itself.</para>
+    /// </summary>
+    private static bool WasStopped(OnnxRuntimeException cause, CancellationToken token)
+        => token.IsCancellationRequested
+            && cause.Message.Contains("terminate flag", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// What a run that was stopped throws. ORT reports a terminated run as a plain failed one —

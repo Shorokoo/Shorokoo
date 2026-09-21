@@ -186,7 +186,7 @@ public class ComputeContextLifetimeCoverageTests
         Assert.Equal(MemorySpace.Host, backend.MemorySpace);
         Assert.Equal("Shorokoo.HostMemory", ComputeContext.Host.Backend.Name);
 
-        var session = Assert.Throws<InvalidOperationException>(() => backend.CreateSession(
+        var session = Assert.Throws<NotSupportedException>(() => backend.CreateSession(
             default, ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal,
             DeviceMemorySettings.Default));
         Assert.Contains("Shorokoo.LinuxCPU", session.Message);
@@ -201,7 +201,7 @@ public class ComputeContextLifetimeCoverageTests
             () => backend.CreateSequence([]),
         ];
         foreach (var build in values)
-            Assert.Contains("builds no runtime values", Assert.Throws<InvalidOperationException>(build).Message);
+            Assert.Contains("builds no runtime values", Assert.Throws<NotSupportedException>(build).Message);
     }
 
     [Fact]

@@ -394,11 +394,13 @@ catch (OperationCanceledException)
 }
 ```
 
-A token already cancelled when the call is made is refused before anything is fed, so nothing is
-paid for. One cancelled while the run is in flight sets ONNX Runtime's terminate flag, which its
-executor reads **between nodes** — so what the wait costs is whatever is left of the kernel that
-was running, not what is left of the run. Two consequences are worth planning around, and the
-probe behind the figures below measures both (`TerminateLatencyProbeTests`, `Purpose=Manual`):
+A token already cancelled when the call is made is refused before anything is fed: no input is
+built into a runtime value, no feed is locked, and a donation passed to the call still carries its
+handle, so the refused call spends nothing. One cancelled while the run is in flight sets ONNX
+Runtime's terminate flag, which its executor reads **between nodes** — so what the wait costs is
+whatever is left of the kernel that was running, not what is left of the run. Two consequences are
+worth planning around, and the probe behind the figures below measures both
+(`TerminateLatencyProbeTests`, `Purpose=Manual`):
 
 - **The wait tracks one kernel.** On a chain of matmuls the run came back within one kernel's
   duration of the flag being set, and by about as much whether a tenth or nine tenths of the run
@@ -661,11 +663,19 @@ reclaim whatever you do; what releasing *that* frees is each runtime's copy of t
 which is native and can itself be on a card.
 
 **What a run holds.** A run takes a lock of its own on every tensor it is fed, for as long as
-it runs, and gives it up when it returns however it returns. Feeding a tensor on one thread and
-disposing it on another is therefore safe: your handle goes, the run reads on, and the bytes
-come back when the run lets go. A context is held the same way — disposing a `ComputeContext`
-throws, rather than proceeding, while a run of it is in flight or while it holds a lock on
-anything attached to it.
+it runs, and gives it up when it returns however it returns. Once a run holds that lock,
+disposing the tensor on another thread is safe: your handle goes, the run reads on, and the
+bytes come back when the run lets go.
+
+The lock is taken inside the run, one feed at a time, so it is not held yet while the call is
+being set up — and a disposal landing in that window frees the allocation before the run can
+claim it, which costs you the run: the lock it then asks for is refused and `Execute` throws
+`ObjectDisposedException`. Nothing reads freed memory and no run returns a wrong answer, but
+disposing a feed from a second thread is not something to do while a run of it is starting; see
+[A feed disposed while a run is starting loses that run](limitations.md#a-feed-disposed-while-a-run-is-starting-loses-that-run).
+
+A context is held the same way — disposing a `ComputeContext` throws, rather than proceeding,
+while a run of it is in flight or while it holds a lock on anything attached to it.
 
 **Deletion is not disposal.** Disposing says "I am done with this". Two calls say "free these
 bytes now", and they are the ones that can take memory away from a reader:

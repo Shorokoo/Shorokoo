@@ -371,6 +371,9 @@ public class CoreUtilsCoverageTests
             () => TensorElementLayout.ByteCount(ShorokooTensorElementType.Float, null!));
         Assert.Throws<OverflowException>(
             () => TensorElementLayout.ByteCount(ShorokooTensorElementType.Float, [long.MaxValue]));
+        Assert.All((long[][])[[-1L], [2L, -1L], [-1L, -1L], [-2L]],
+            shape => Assert.Throws<NotSupportedException>(
+                () => TensorElementLayout.ByteCount(ShorokooTensorElementType.Float, shape)));
     }
 
     [Fact]
@@ -428,6 +431,10 @@ public class CoreUtilsCoverageTests
             ShorokooTensorElementType.Complex64, [2L]));
         Assert.Throws<ArgumentNullException>(() => defaulting.CreateUninitializedTensorInBackendMemory(
             ShorokooTensorElementType.Float, null!));
+        Assert.All((long[][])[[-1L], [2L, -1L], [-1L, -1L]],
+            shape => Assert.Throws<NotSupportedException>(
+                () => defaulting.CreateUninitializedTensorInBackendMemory(
+                    ShorokooTensorElementType.Float, shape)));
     }
 
     private static long Elements(long[] shape)
@@ -821,9 +828,9 @@ public class CoreUtilsCoverageTests
 
     /// <summary>
     /// The abort seam, from both ends. A run whose token is already cancelled is refused before
-    /// anything is fed — so one ORT would itself have failed never reaches it — and a token that
-    /// is never cancelled leaves every run as it was and holds nothing once the run returns.
-    /// Without that last part a per-run callback would outlive the options it writes to.
+    /// anything is fed or spent — so one ORT would itself have failed never reaches it — and a
+    /// token that is never cancelled leaves every run as it was and holds nothing once the run
+    /// returns. Without that last part a per-run callback would outlive the options it writes to.
     /// </summary>
     [Fact]
     public void TestACancelledRunIsRefusedBeforeItRunsAndAnUnfiredTokenIsHeldNoLongerThanTheRun()
@@ -842,7 +849,7 @@ public class CoreUtilsCoverageTests
 
         Assert.False(RunSettings.Default.CancellationToken.CanBeCanceled);
         Assert.Equal(RunSettings.Default, new RunSettings { CancellationToken = CancellationToken.None });
-        Assert.Equal(RunSettings.Default, new ComputeContext().RunSettings);
+        Assert.Equal(RunSettings.Default, context.RunSettings);
 
         using var unfired = new CancellationTokenSource();
         var watched = new RunSettings { CancellationToken = unfired.Token };

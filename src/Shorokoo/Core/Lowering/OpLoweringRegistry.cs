@@ -24,10 +24,43 @@ internal static class OpLoweringRegistry
                 StringComparer.Ordinal);
 
     /// <summary>
+    /// Thread-scoped lowerings installed by <see cref="Override"/>. Consulted ahead of the
+    /// process-wide table so a caller can add or swap a decomposition without other threads
+    /// observing it.
+    /// </summary>
+    [ThreadStatic]
+    private static ImmutableDictionary<string, OpLowering>? overrides;
+
+    /// <summary>
     /// Finds the lowering for <paramref name="opCode"/>, or returns false when the operator has
-    /// none — which is the ordinary case and not an error: an engine that cannot compute the
-    /// operator directly either has a lowering to fall back on or gives up on the node.
+    /// none — which is the ordinary case and not an error: a domain that names an operator it
+    /// cannot handle either has a lowering to fall back on or gives up on the node.
     /// </summary>
     public static bool TryGet(string opCode, [MaybeNullWhen(false)] out OpLowering lowering)
-        => ByOpCode.TryGetValue(opCode, out lowering);
+    {
+        if (overrides is { } o && o.TryGetValue(opCode, out lowering)) return true;
+        return ByOpCode.TryGetValue(opCode, out lowering);
+    }
+
+    /// <summary>
+    /// Adds or replaces <paramref name="lowerings"/> on the calling thread only, until the
+    /// returned scope is disposed. Overrides are invisible to other threads, so concurrent
+    /// callers keep seeing the decompositions the framework ships.
+    /// </summary>
+    public static IDisposable Override(params OpLowering[] lowerings) => new OverrideScope(lowerings);
+
+    private sealed class OverrideScope : IDisposable
+    {
+        private readonly ImmutableDictionary<string, OpLowering>? previous;
+
+        internal OverrideScope(OpLowering[] lowerings)
+        {
+            this.previous = overrides;
+            var next = this.previous ?? ImmutableDictionary.Create<string, OpLowering>(StringComparer.Ordinal);
+            foreach (var lowering in lowerings) next = next.SetItem(lowering.OpCode, lowering);
+            overrides = next;
+        }
+
+        public void Dispose() => overrides = this.previous;
+    }
 }

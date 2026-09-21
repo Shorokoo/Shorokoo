@@ -18,13 +18,30 @@ internal sealed class OpLoweringAttribute : Attribute
 
 /// <summary>
 /// How one operator is computed out of simpler ones — written once in <see cref="OpLowerings"/>,
-/// run by every engine that lacks a direct implementation of it.
+/// run by every domain that cannot take the operator as it stands.
 ///
 /// <para><b>Why.</b> An operator that is merely a composition of simpler operators used to be
 /// written up to three times over: as the authoring-layer decomposition that keeps the exported
 /// ONNX at the opset the framework emits, as a QuickExecutionEngine kernel, and as a gradient
 /// rule. Nothing was shared, so the three could drift. A registered lowering is that
 /// decomposition stated once, in plain Shorokoo code.</para>
+///
+/// <para><b>Three domains ask for it, each from its own list.</b> A lowering is registered here
+/// once; which operators get decomposed is decided per domain, by an explicit list of op codes
+/// that domain owns and declares at its own call site:</para>
+/// <list type="bullet">
+///   <item><c>QuickExecutionEngine.LoweredOpCodes</c> — what the engine cannot <b>compute</b>.</item>
+///   <item><c>FastProcessAutoGradProcessor.LoweredOpCodes</c> — what the autodiff pass cannot
+///         <b>differentiate</b>.</item>
+///   <item><c>FastOnnxModelBuilder.ExportLoweredOpCodes</c> — what the builder cannot
+///         <b>emit</b> at the single opset Shorokoo writes.</item>
+/// </list>
+/// <para>The three questions are independent, so the three lists are: an operator may be on one,
+/// on all, or on none. <c>Softsign</c> is on the first two (no kernel, no gradient rule) and not
+/// the third, which is why exporting an inference model still yields a <c>Softsign</c> node. The
+/// lists are stated and not derived from the kernel or gradient tables, because an entry in
+/// either may exist only to infer a shape or to report the operator unsupported — deriving the
+/// set would then refuse to lower exactly the operator that most needs it.</para>
 ///
 /// <para><b>Operator lowering is not graph lowering.</b> "Lowering" elsewhere in this codebase
 /// means the graph concretization pipeline — <c>ToConcreteArchitecture</c> and the
@@ -34,8 +51,9 @@ internal sealed class OpLoweringAttribute : Attribute
 /// QuickExecutionEngine runs it over a clone it owns and throws away, so the graph handed to it
 /// keeps its <c>Softsign</c> node. The autodiff pass runs it over the training graph it is
 /// expanding, since a decomposition it cannot see is one it cannot differentiate — and a graph
-/// with no <c>AUTO_GRAD</c> node never reaches that pass, so an inference model still exports a
-/// <c>Softsign</c> as a <c>Softsign</c>.</para>
+/// with no <c>AUTO_GRAD</c> node never reaches that pass. The ONNX builder runs it over the copy
+/// it already takes of the caller's graph, so the operator survives in memory and only the
+/// written file carries the decomposition.</para>
 /// </summary>
 /// <param name="OpCode">The op code this lowering expresses (e.g. "Softsign").</param>
 /// <param name="Method">The <see cref="OpLoweringAttribute"/>-marked method that builds it.</param>

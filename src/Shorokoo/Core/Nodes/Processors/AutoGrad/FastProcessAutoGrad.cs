@@ -44,12 +44,14 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
     /// </list>
     /// </para>
     ///
-    /// <para>An op with no <c>[AutoDiff]</c> method is not necessarily undifferentiable: if it
-    /// has a registered <see cref="OpLowering"/>, <see cref="FastLowerRegisteredOps"/> rewrites
-    /// it into that decomposition before the walk starts, and the walk differentiates the
+    /// <para>An op this pass cannot differentiate is not necessarily undifferentiable: if it is
+    /// named on <see cref="FastProcessAutoGradProcessor.LoweredOpCodes"/>,
+    /// <see cref="FastLowerRegisteredOps"/> rewrites it into its registered
+    /// <see cref="OpLowering"/> before the walk starts, and the walk differentiates the
     /// primitives it decomposed into. That is a fallback and not a preference — a hand-written
     /// rule wins wherever one exists, since it can state a form the decomposition cannot, such as
-    /// a numerically stable branch.</para>
+    /// a numerically stable branch, and an operator carrying such a rule is simply left off the
+    /// list.</para>
     /// </summary>
     internal static class FastProcessAutoGradProcessor
     {
@@ -61,7 +63,6 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
         /// </summary>
         private static readonly Dictionary<string, MethodInfo> gradientMethodInfos = BuildGradientMethodInfos();
         private static readonly HashSet<string> outputUsingGradientOps = AutoDiffs.GetGradientOpsUsingOutputs();
-        private static readonly HashSet<string> gradientOpCodes = [.. AutoDiffs.GetGradientOps().Keys];
 
         /// <summary>
         /// Maps every C# IVarType class (e.g. <c>typeof(int64)</c>) back to its <see cref="DType"/>
@@ -84,12 +85,12 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
                 .ToList();
             if (autoGradNodes.Count == 0) return;
 
-            // An op with no rule of its own but a registered lowering is differentiated through
-            // its decomposition: the graph is rewritten into primitives the reverse walk does
-            // have rules for, and from there nothing about the walk is special. Before the
-            // unscoping below, so the splice sees the scope structure it was written against —
-            // a decomposition of an op inside an IfElse arm belongs inside that arm.
-            FastLowerRegisteredOps.Process(graph, HasGradientRule);
+            // An op this pass cannot differentiate but has a registered lowering for is
+            // differentiated through its decomposition: the graph is rewritten into primitives the
+            // reverse walk does have rules for, and from there nothing about the walk is special.
+            // Before the unscoping below, so the splice sees the scope structure it was written
+            // against — a decomposition of an op inside an IfElse arm belongs inside that arm.
+            FastLowerRegisteredOps.Process(graph, LoweredOpCodes);
 
             // The backward reads what the forward computed, so it cannot leave those values on a
             // branch that may not run. Flatten the branches, emit at module scope, and let the
@@ -108,11 +109,16 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
         }
 
         /// <summary>
-        /// Whether <paramref name="opCode"/> has an <c>[AutoDiff]</c> rule. That is what decides
-        /// which operators this pass has lowered out of the graph first — and, read the other
-        /// way, it is why a hand-written rule wins over a decomposition wherever one exists.
+        /// What this pass lowers before it walks backwards: the operators it cannot differentiate.
+        /// <c>Softsign</c> is here because no <c>[AutoDiff]</c> rule covers it at all; an operator
+        /// whose rule exists only to raise <c>AD003</c> belongs here too, since its decomposition
+        /// is the only derivative there is. The list is stated rather than derived from the
+        /// gradient table for exactly that second case — a rule's presence does not mean the rule
+        /// differentiates the operator. A hand-written rule still wins wherever one is meant to,
+        /// by the operator simply not appearing here.
         /// </summary>
-        internal static bool HasGradientRule(string opCode) => gradientOpCodes.Contains(opCode);
+        internal static readonly ImmutableHashSet<string> LoweredOpCodes =
+            ImmutableHashSet.Create(StringComparer.Ordinal, OpCodes.SOFTSIGN);
 
         private static void ProcessOne(InternalComputationGraph graph, FastNode autoGradNode)
         {

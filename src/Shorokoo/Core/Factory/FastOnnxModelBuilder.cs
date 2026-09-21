@@ -1132,6 +1132,53 @@ namespace Shorokoo.Core.Factory
         // ----------- pre-passes -----------
 
         /// <summary>
+        /// What this builder lowers on the way out: the operators it cannot emit — ones the rest
+        /// of the framework builds, runs and differentiates as themselves, but that the single
+        /// opset Shorokoo writes has no node for. That is a different question from the engines',
+        /// which is what they cannot compute or differentiate, so this is a different list: an
+        /// operator may be on one, the other, both or neither, and <c>Softsign</c> — emittable,
+        /// so absent here — is why exporting an inference model still yields a <c>Softsign</c>.
+        ///
+        /// <para>Empty: every operator Shorokoo can build, it can currently also emit. The pass
+        /// tests the list before it walks anything, so an empty one costs nothing per graph — not
+        /// even the scan — and the pre-pass stays a no-op until an op code is added here.</para>
+        /// </summary>
+        private static readonly ImmutableHashSet<string> DefaultExportLoweredOpCodes =
+            ImmutableHashSet.Create<string>(StringComparer.Ordinal);
+
+        /// <summary>Thread-scoped substitute installed by <see cref="OverrideExportLoweredOpCodes"/>.</summary>
+        [ThreadStatic]
+        private static ImmutableHashSet<string>? exportLoweredOpCodesOverride;
+
+        /// <summary>
+        /// The op codes the export pre-pass decomposes on the calling thread — see
+        /// <see cref="DefaultExportLoweredOpCodes"/>.
+        /// </summary>
+        internal static IReadOnlySet<string> ExportLoweredOpCodes
+            => exportLoweredOpCodesOverride ?? DefaultExportLoweredOpCodes;
+
+        /// <summary>
+        /// Replaces the export list with <paramref name="opCodes"/> on the calling thread only,
+        /// until the returned scope is disposed — so a caller exercising the export lowering over
+        /// a decomposition of its own leaves concurrent builds reading the real list.
+        /// </summary>
+        internal static IDisposable OverrideExportLoweredOpCodes(params string[] opCodes)
+            => new ExportLoweredOpCodesScope(opCodes);
+
+        private sealed class ExportLoweredOpCodesScope : IDisposable
+        {
+            private readonly ImmutableHashSet<string>? previous;
+
+            internal ExportLoweredOpCodesScope(string[] opCodes)
+            {
+                this.previous = exportLoweredOpCodesOverride;
+                exportLoweredOpCodesOverride = ImmutableHashSet.Create(StringComparer.Ordinal, opCodes);
+            }
+
+            public void Dispose() => exportLoweredOpCodesOverride = this.previous;
+        }
+
+        /// <summary>
         /// Runs every Fast pre-pass on <paramref name="graph"/> in the canonical
         /// pre-pass order. Mutates the graph in place.
         /// </summary>
@@ -1140,6 +1187,24 @@ namespace Shorokoo.Core.Factory
             FastLowerAttributeTensorOps.Process(graph);
             if (applyExecutionLowerings) FastLowerStateUpdateLinksForInference.Process(graph);
             if (applyExecutionLowerings) FastLowerRandomOps.Process(graph);
+            // Decompose what this builder cannot emit, here and not elsewhere in the list:
+            //   - after the lowerings above, so an operator one of THEM produces is still offered
+            //     to this one, and so the attribute-tensor pass resolves its geometry against the
+            //     graph as authored;
+            //   - before FastPrepForOnnx, whose reshape composition (the ORT ReshapeFusion
+            //     workaround) and close-input identity wrapping must see the decomposition's
+            //     nodes, not just the operator they replaced;
+            //   - before FastStripCallStacks, because a decomposition is built through
+            //     NodeBuilder, which captures a stack trace per node — left after the strip, the
+            //     export would embed a fresh one each time and stop being byte-for-byte
+            //     reproducible;
+            //   - before FastUseUniqueNames and the tensor-info lookup below, so the spliced
+            //     nodes are named and typed with the rest of the graph.
+            // Off for the persistence dialect — the one caller that turns the execution lowerings
+            // off — because a saved architecture must load back as the operator it was authored
+            // with rather than as its decomposition; the export that later runs over the reloaded
+            // graph decomposes it then.
+            if (applyExecutionLowerings) FastLowerRegisteredOps.Process(graph, ExportLoweredOpCodes);
             FastAddIdentityForOuterScopeValues.Process(graph);
             if (prepForOnnx) FastPrepForOnnx.Process(graph);
             FastStripCallStacks.Process(graph);
@@ -1162,6 +1227,8 @@ namespace Shorokoo.Core.Factory
             FastLowerAttributeTensorOps.Process(graph);
             if (applyExecutionLowerings) FastLowerStateUpdateLinksForInference.Process(graph);
             if (applyExecutionLowerings) FastLowerRandomOps.Process(graph);
+            // Same position, and for the same reasons, as in RunPrePasses above.
+            if (applyExecutionLowerings) FastLowerRegisteredOps.Process(graph, ExportLoweredOpCodes);
             FastAddIdentityForOuterScopeValues.Process(graph);
             if (prepForOnnx) FastPrepForOnnx.Process(graph);
             FastStripCallStacks.Process(graph);

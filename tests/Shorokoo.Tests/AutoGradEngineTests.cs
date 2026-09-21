@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using Shorokoo.Core.Nodes.Processors.AutoGrad;
 using Shorokoo.Core.Nodes.Processors.Fast;
 using static Shorokoo.Core.Nodes.NodeDefinitions.OpCodes;
@@ -65,9 +66,8 @@ public class AutoGradEngineTests
         var rules = AutoDiffs.GetGradientOps();
         string[] primitives = [ABS, ADD, DIV, CAST_LIKE];
         Assert.False(rules.ContainsKey(SOFTSIGN));
-        Assert.False(FastProcessAutoGradProcessor.HasGradientRule(SOFTSIGN));
+        Assert.Contains(SOFTSIGN, FastProcessAutoGradProcessor.LoweredOpCodes);
         Assert.All(primitives, op => Assert.True(rules.ContainsKey(op)));
-        Assert.All(rules.Keys, op => Assert.True(FastProcessAutoGradProcessor.HasGradientRule(op)));
 
         var x = TensorData(DType.Float32, [5L], 0f, 1f, -1f, 3f, -7f);
         var expected = TensorData(DType.Float32, [5L], 1f, 0.25f, 0.25f, 0.0625f, 0.015625f);
@@ -83,23 +83,23 @@ public class AutoGradEngineTests
         Assert.Equal(1, exported.Nodes.Count(n => n.OpCode == SOFTSIGN));
     }
 
-    // A lowering is what an op with no gradient rule falls back on, never a replacement for a
-    // rule: the same graph through the same pass keeps its operator as soon as the caller says it
-    // has a rule for it.
+    // Only what the domain's list names is lowered. A lowering is the fallback for an operator
+    // the pass cannot differentiate, so an operator kept off the list — one whose hand-written
+    // rule states a form the decomposition cannot — reaches the reverse walk as itself.
     [Fact]
-    public void TestAHandWrittenGradientRuleWinsOverALowering()
+    public void TestOnlyAnOperatorTheAutodiffListNamesIsLowered()
     {
         var x = TensorData(DType.Float32, [5L], 0f, 1f, -1f, 3f, -7f);
         var g = QeeSoftsignLowered.ComputationGraph.ToInternal();
         var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x])).ToConcreteModel();
 
-        var asIfItHadARule = concrete.Clone();
-        FastLowerRegisteredOps.Process(asIfItHadARule, op => op == SOFTSIGN);
-        var asItIs = concrete.Clone();
-        FastLowerRegisteredOps.Process(asItIs, FastProcessAutoGradProcessor.HasGradientRule);
+        var offTheList = concrete.Clone();
+        FastLowerRegisteredOps.Process(offTheList, ImmutableHashSet<string>.Empty);
+        var onIt = concrete.Clone();
+        FastLowerRegisteredOps.Process(onIt, FastProcessAutoGradProcessor.LoweredOpCodes);
 
-        Assert.Equal(1, asIfItHadARule.Nodes.Count(n => n.OpCode == SOFTSIGN));
-        Assert.DoesNotContain(asItIs.Nodes, n => n.OpCode == SOFTSIGN);
-        Assert.Equal(1, asItIs.Nodes.Count(n => n.OpCode == DIV));
+        Assert.Equal(1, offTheList.Nodes.Count(n => n.OpCode == SOFTSIGN));
+        Assert.DoesNotContain(onIt.Nodes, n => n.OpCode == SOFTSIGN);
+        Assert.Equal(1, onIt.Nodes.Count(n => n.OpCode == DIV));
     }
 }

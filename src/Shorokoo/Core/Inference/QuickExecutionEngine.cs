@@ -30,10 +30,10 @@ namespace Shorokoo.Core.Inference;
 ///   - Concrete values are only stored for tensors with at most <see cref="MaxDataElements"/>
 ///     elements. All larger tensors keep only shape information.
 ///   - Operators live as standalone classes under <c>Ops/</c>, one per op code, auto-discovered
-///     via <see cref="OpRegistry"/>. An op code with no operator of its own may still be
-///     computed, out of ones that have: <see cref="FastLowerRegisteredOps"/> rewrites it into
-///     its registered <see cref="OpLoweringRegistry"/> decomposition on a private copy of the
-///     graph before the walk starts.
+///     via <see cref="OpRegistry"/>. An op code this engine cannot compute may still be run, out
+///     of ones it can: every op code on <see cref="LoweredOpCodes"/> is rewritten by
+///     <see cref="FastLowerRegisteredOps"/> into its registered <see cref="OpLoweringRegistry"/>
+///     decomposition, on a private copy of the graph, before the walk starts.
 ///   - <c>If</c> is supported by recursing into its subgraph when the condition value is known
 ///     and merging both branches' shapes when it is not.
 ///   - <c>Loop</c> is executed as a real iteration: the engine walks the body, then the close
@@ -154,16 +154,16 @@ public sealed class QuickExecutionEngine
             foreach (var kvp in initialInputs)
                 store[kvp.Key] = kvp.Value;
 
-        // An operator with no QuickOp but a registered lowering is rewritten into the operators
-        // that do have one, on a copy this run owns. The copy is not hygiene: a caller may hand
-        // over a graph whose FastNodes are its own live nodes — the constant folder assembles one
-        // out of the nodes it is folding — and lowering in place would rewrite that caller's
-        // graph. Cloning preserves every key, so the store this returns is keyed exactly as the
-        // caller's graph is, and the caller's Softsign stays a Softsign.
-        if (FastLowerRegisteredOps.HasLowerableOp(graph, HasQuickOp))
+        // An operator this engine cannot compute but has a registered lowering for is rewritten
+        // into the operators it can, on a copy this run owns. The copy is not hygiene: a caller
+        // may hand over a graph whose FastNodes are its own live nodes — the constant folder
+        // assembles one out of the nodes it is folding — and lowering in place would rewrite that
+        // caller's graph. Cloning preserves every key, so the store this returns is keyed exactly
+        // as the caller's graph is, and the caller's Softsign stays a Softsign.
+        if (FastLowerRegisteredOps.HasLowerableOp(graph, LoweredOpCodes))
         {
             graph = graph.Clone();
-            FastLowerRegisteredOps.Process(graph, HasQuickOp);
+            FastLowerRegisteredOps.Process(graph, LoweredOpCodes);
         }
 
         var nodeByKey = FastProcessorHelper.BuildNodeByKey(graph);
@@ -181,10 +181,15 @@ public sealed class QuickExecutionEngine
     }
 
     /// <summary>
-    /// Whether this engine runs <paramref name="opCode"/> as it stands, which is what decides
-    /// the operators it needs a lowering for.
+    /// What this engine lowers before it walks a graph: the operators it cannot compute itself.
+    /// <c>Softsign</c> is here because no <see cref="QuickOp"/> implements it at all; an operator
+    /// whose <see cref="QuickOp"/> only infers a shape belongs here too, since the engine still
+    /// cannot produce its values. The list is stated rather than derived from
+    /// <see cref="OpRegistry"/> for exactly that second case — a kernel's presence does not mean
+    /// the kernel computes the operator.
     /// </summary>
-    private static bool HasQuickOp(string opCode) => OpRegistry.Get(opCode) is not null;
+    internal static readonly ImmutableHashSet<string> LoweredOpCodes =
+        ImmutableHashSet.Create(StringComparer.Ordinal, OpCodes.SOFTSIGN);
 
     /// <summary>
     /// Processes one node and returns an optional next-node index. A null return means "proceed

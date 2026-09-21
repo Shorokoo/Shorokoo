@@ -1,6 +1,7 @@
 using System.Reflection;
 using Shorokoo.Runtime;
 using Shorokoo.Core.Factory;
+using Shorokoo.Core.Nodes.Processors.AutoGrad;
 using Shorokoo.Core.Nodes.Processors.Fast;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 using Shorokoo.Core.Inference;
@@ -185,8 +186,6 @@ public class QeeOpsCoverageTests
         }
     }
 
-    private static bool HasQuickOp(string opCode) => OpRegistry.Get(opCode) is not null;
-
     private static MethodInfo LoweringMethod(string name) => typeof(QeeOpsCoverageTests)
         .GetMethod(name, BindingFlags.NonPublic | BindingFlags.Static)!;
 
@@ -198,6 +197,52 @@ public class QeeOpsCoverageTests
 
     private static Variable?[] HandsItsInputBack<T>(Tensor<T> x) where T : IVarType
         => [x];
+
+    private static Variable?[] AbsAsRootOfSquare<T>(Tensor<T> x) where T : IVarType
+        => [OnnxOp.Sqrt(x * x)];
+
+    // Each domain names what it lowers; an op code named there with no registered lowering would
+    // quietly do nothing at all.
+    [Fact]
+    public void TestEveryOpCodeADomainListsForLoweringHasOne()
+    {
+        IReadOnlySet<string>[] lists = [
+            QuickExecutionEngine.LoweredOpCodes,
+            FastProcessAutoGradProcessor.LoweredOpCodes,
+            FastOnnxModelBuilder.ExportLoweredOpCodes];
+
+        Assert.All(lists, list => Assert.All(list, op => Assert.True(OpLoweringRegistry.TryGet(op, out _))));
+        Assert.Contains(OpCodes.SOFTSIGN, QuickExecutionEngine.LoweredOpCodes);
+        Assert.Contains(OpCodes.SOFTSIGN, FastProcessAutoGradProcessor.LoweredOpCodes);
+        Assert.DoesNotContain(OpCodes.SOFTSIGN, FastOnnxModelBuilder.ExportLoweredOpCodes);
+    }
+
+    // The export list is its own question — what cannot be emitted — so an operator on it is
+    // decomposed in the written ONNX while a lowerable operator off it stays fused, the
+    // decomposition brings no stack trace back into a file that must stay reproducible, and the
+    // persistence dialect keeps the operator as authored.
+    [Fact]
+    public void TestOnlyAnOperatorTheExportListNamesIsDecomposedOnTheWayOut()
+    {
+        var x = TensorData(DType.Float32, [5L], 0f, 1f, -1f, 3f, -7f);
+        var g = QeeSoftsignThenAbsLowered.ComputationGraph.ToInternal();
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x])).ToConcreteModel();
+        long[][] inputDims = [[5L]];
+
+        using var registered = OpLoweringRegistry.Override(
+            new OpLowering(OpCodes.ABS, LoweringMethod(nameof(AbsAsRootOfSquare))));
+        using var listed = FastOnnxModelBuilder.OverrideExportLoweredOpCodes(OpCodes.ABS);
+
+        var exported = FastOnnxModelBuilder.BuildInternalOnnxModel(
+            concrete, prepForOnnx: true, inputDims: inputDims);
+        var persisted = FastOnnxModelBuilder.BuildInternalOnnxModel(concrete, applyExecutionLowerings: false);
+
+        Assert.DoesNotContain(exported.Graph.Nodes, n => n.OpType == OpCodes.ABS);
+        Assert.Contains(exported.Graph.Nodes, n => n.OpType == OpCodes.SQRT);
+        Assert.Contains(exported.Graph.Nodes, n => n.OpType == OpCodes.SOFTSIGN);
+        Assert.All(exported.Graph.Nodes, n => Assert.DoesNotContain(n.MetadataProps, p => p.Key == "StackTrace"));
+        Assert.Contains(persisted.Graph.Nodes, n => n.OpType == OpCodes.ABS);
+    }
 
     [Fact]
     public void TestALoweringsPlanIsKeptPerAttributeValueAndNotJustPerOperator()
@@ -242,7 +287,7 @@ public class QeeOpsCoverageTests
         var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x, y])).ToConcreteModel();
 
         var lowered = concrete.Clone();
-        FastLowerRegisteredOps.Process(lowered, HasQuickOp);
+        FastLowerRegisteredOps.Process(lowered, QuickExecutionEngine.LoweredOpCodes);
 
         Assert.Equal(2, concrete.Nodes.Count(n => n.OpCode == OpCodes.SOFTSIGN));
         Assert.DoesNotContain(lowered.Nodes, n => n.OpCode == OpCodes.SOFTSIGN);
@@ -263,7 +308,7 @@ public class QeeOpsCoverageTests
         var g = QeeSoftsignInLoopAuditCheck.ComputationGraph.ToInternal();
         var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x])).ToConcreteModel();
         var lowered = concrete.Clone();
-        FastLowerRegisteredOps.Process(lowered, HasQuickOp);
+        FastLowerRegisteredOps.Process(lowered, QuickExecutionEngine.LoweredOpCodes);
 
         int open = lowered.Nodes.FindIndex(n => n.OpCode == OpCodes.LOOP_OPEN);
         int close = lowered.Nodes.FindIndex(n => n.OpCode == OpCodes.LOOP_CLOSE);
@@ -370,6 +415,9 @@ public class QeeOpsCoverageTests
 
 [Module] public partial class QeeSoftsignLoweredFloat64 { public static Tensor<float64> Inline(Tensor<float64> x)
     => x.Softsign(); }
+
+[Module] public partial class QeeSoftsignThenAbsLowered { public static Tensor<float32> Inline(Tensor<float32> x)
+    => x.Softsign().Abs(); }
 
 [Module] public partial class QeeTwoSoftsignsLowered
 {

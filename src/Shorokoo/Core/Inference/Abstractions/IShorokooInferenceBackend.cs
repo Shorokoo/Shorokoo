@@ -35,6 +35,22 @@ public interface IShorokooInferenceBackend
         ShorokooLogSeverity logSeverity,
         DeviceMemorySettings deviceMemory);
 
+    // The same session, told what the caller wants recorded about it -- today, whether it keeps a
+    // per-node record of which execution provider ran what. Like deviceMemory this is read while
+    // the session is built and kept for its life, so it is a parameter rather than process state.
+    //
+    // The default drops the diagnostics and builds the ordinary session, so a backend outside this
+    // repository keeps compiling. That is not papering over: a backend that does not implement
+    // this records nothing, and a session that records nothing is exactly what
+    // IShorokooInferenceSession.ReadNodePlacement's own default answers -- null.
+    IShorokooInferenceSession CreateSession(
+        ReadOnlyMemory<byte> modelBytes,
+        ShorokooGraphOptimization graphOptimization,
+        ShorokooLogSeverity logSeverity,
+        DeviceMemorySettings deviceMemory,
+        DiagnosticSettings diagnostics)
+        => CreateSession(modelBytes, graphOptimization, logSeverity, deviceMemory);
+
     IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged;
 
     IShorokooTensorValue CreateTensorFromRawBytes(

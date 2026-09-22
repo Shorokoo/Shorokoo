@@ -21,7 +21,9 @@ namespace Shorokoo.Tests;
 /// description a live backend answers with and the device assertion built on it, the
 /// uninitialised tensor allocation on the backend ABI and the zero-filling default behind it, the
 /// <see cref="DeviceMemory"/> settings the CUDA backends map onto ORT's arena options, the
-/// per-run abort token and what both run paths do with one, the typed
+/// reflection that reaches ORT's per-session arena figures and the
+/// <see cref="ArenaStatistics"/>/<see cref="RunStatistics"/>/<see cref="NodePlacement"/> surface
+/// built on it, the per-run abort token and what both run paths do with one, the typed
 /// value-handle conversions, <c>ShapeUtils</c>' argument validation for <c>Reshape</c>'s
 /// <c>keepAxes</c>, the <see cref="AtomicFileWriter"/> temp-and-rename commit protocol
 /// (crash-window fault injection, stale-temp sweep, retain-last-N rotation), the
@@ -894,6 +896,295 @@ public class CoreUtilsCoverageTests
         Assert.Equal(8192L, DeviceMemory.PeakUsedBytes);
         DeviceMemory.ResetPeak();
         Assert.Equal(0L, DeviceMemory.PeakUsedBytes);
+    }
+
+    private static byte[] DoublingModel()
+    {
+        var x = InputTensor<float32>("x", rank: 1);
+        var proto = FastOnnxModelBuilder.BuildInternalOnnxModel(
+            new InternalComputationGraph([x], [x + x]), prepForOnnx: true);
+        var model = new MemoryStream();
+        ProtoBuf.Serializer.Serialize(model, proto);
+        return model.ToArray();
+    }
+
+    private static CompiledGraph Doubling(ComputeContext context)
+    {
+        var x = InputTensor<float32>("x", rank: 1);
+        return context.Compile(new InternalComputationGraph([x], [x + x]));
+    }
+
+    private static TensorData<float32> ThreeFloats() => TensorData([3L], 1f, 2f, 3f);
+
+    /// <summary>
+    /// The arena figures are reached through reflection, so nothing but this says the reflection
+    /// still lands where it thinks it does. The hazard it guards is not a missing feature but a
+    /// wrong one — a field that moved hands back some other pointer, which the binding then calls
+    /// as a function — so it names every step: the internal type holding the one <c>OrtApi</c>, the
+    /// field on it, each entry point by name and type, and the nine figures a real session
+    /// allocator answers with. ORT's own default allocator implements none of them, which is the
+    /// other half of why the allocator has to come from the session.
+    /// </summary>
+    [Fact]
+    public void TestTheOrtArenaStatisticsBindingStillResolvesAndAnswers()
+    {
+        var holder = typeof(OrtAllocator).Assembly.GetType(OrtArenaStats.ApiHolderTypeName);
+        Assert.NotNull(holder);
+        var field = holder.GetField(
+            OrtArenaStats.ApiFieldName, BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+        Assert.NotNull(field);
+        var api = field.GetValue(null);
+        Assert.NotNull(api);
+        foreach (var entry in OrtArenaStats.ApiEntryPointNames)
+        {
+            var pointer = api.GetType().GetField(entry);
+            Assert.NotNull(pointer);
+            Assert.Equal(typeof(IntPtr), pointer.FieldType);
+            Assert.NotEqual(IntPtr.Zero, Assert.IsType<IntPtr>(pointer.GetValue(api)));
+        }
+        Assert.True(OrtArenaStats.IsBound);
+
+        using var session = new InferenceSession(DoublingModel());
+        using var allocator = new OrtAllocator(session, OrtMemoryInfo.DefaultInstance);
+        var pairs = OrtArenaStats.ReadRaw(allocator);
+        Assert.NotNull(pairs);
+        Assert.Equal(OrtArenaStats.StatisticNames.Order(), pairs.Keys.Order());
+        Assert.Empty(OrtArenaStats.ReadRaw(OrtAllocator.DefaultInstance)!);
+
+        var figures = Assert.IsType<ArenaStatistics>(OrtArenaStats.Read(allocator));
+        Assert.Equal(-1L, figures.LimitBytes);
+        Assert.Equal(0L, figures.MaxInUseBytes);
+    }
+
+    /// <summary>
+    /// A session's own arena, read back through the public surface: zeroed before it has run, and
+    /// carrying what the run took afterwards. A backend answering the interface's default reports
+    /// nothing rather than zeroes, which is the difference between "no figures" and "no memory".
+    /// </summary>
+    [Fact]
+    public void TestACompiledGraphReportsItsOwnArenaAndABackendWithoutOneReportsNothing()
+    {
+        using var context = new ComputeContext();
+        var compiled = Doubling(context);
+
+        var before = Assert.IsType<ArenaStatistics>(compiled.ReadArenaStatistics());
+        Assert.Equal(0L, before.MaxInUseBytes);
+        Assert.Equal(0L, before.AllocationCount);
+        Assert.Equal(-1L, before.LimitBytes);
+
+        compiled.Execute(ThreeFloats());
+        var after = Assert.IsType<ArenaStatistics>(compiled.ReadArenaStatistics());
+        Assert.True(after.MaxInUseBytes > 0);
+        Assert.True(after.AllocationCount > 0);
+        Assert.True(after.TotalAllocatedBytes >= after.MaxInUseBytes);
+        Assert.True(after.MaxAllocSizeBytes > 0);
+
+        IShorokooInferenceSession unanswering = new RunSettingsRecorder();
+        Assert.Null(unanswering.ReadArenaStatistics());
+        Assert.Null(unanswering.ReadNodePlacement());
+        Assert.Equal(SessionOutputPlacement.Unknown, unanswering.OutputPlacement);
+
+        compiled.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => compiled.ReadArenaStatistics());
+        Assert.Throws<ObjectDisposedException>(() => compiled.ReadNodePlacement());
+    }
+
+    /// <summary>
+    /// Collection is off until it is asked for, and then every run lands in the aggregates. The
+    /// per-run peak says which of the two things it is: the run that pushed the arena's high-water
+    /// mark up measured its own peak, and one that stayed under it is bounded by a mark some
+    /// earlier run set.
+    /// </summary>
+    [Fact]
+    public void TestRunStatisticsAreOffUntilAskedForAndThenRecordEveryRun()
+    {
+        using var silent = new ComputeContext();
+        Doubling(silent).Execute(ThreeFloats());
+        Assert.Equal(RunStatistics.Empty, silent.RunStats);
+        Assert.Equal(DiagnosticSettings.Default, silent.Diagnostics);
+        Assert.False(DiagnosticSettings.Default.CollectRunStatistics);
+        Assert.False(DiagnosticSettings.Default.TraceNodePlacement);
+        Assert.Equal(1000, DiagnosticSettings.Default.RecentRunCapacity);
+
+        using var counting = new ComputeContext
+        {
+            Diagnostics = new DiagnosticSettings { CollectRunStatistics = true },
+        };
+        var compiled = Doubling(counting);
+        for (int run = 0; run < 3; run++) compiled.Execute(ThreeFloats());
+
+        var stats = counting.RunStats;
+        Assert.Equal(3L, stats.RunCount);
+        Assert.True(stats.PeakBytes > 0);
+        Assert.True(stats.ArenaBytes >= stats.PeakBytes);
+        Assert.True(stats.LargestAllocationBytes > 0);
+        Assert.True(stats.AllocationCount > 0);
+        Assert.Equal(0L, stats.ArenaShrinkageCount);
+        Assert.Equal([1L, 2L, 3L], stats.RecentRuns.Select(run => run.RunNumber));
+        Assert.Equal(MemoryFigureKind.Measured, stats.RecentRuns[0].PeakKind);
+        Assert.Equal(stats.PeakBytes, stats.RecentRuns[2].PeakBytes);
+        Assert.Equal(stats.PeakBytes, stats.RecentRuns[2].Arena.MaxInUseBytes);
+        Assert.Equal([.. stats.RecentRuns.Select(run => run.PeakBytes).Order()],
+            stats.RecentRuns.Select(run => run.PeakBytes));
+
+        // The snapshot is one moment, not a live view of a context that keeps running.
+        compiled.Execute(ThreeFloats());
+        Assert.Equal(3L, stats.RunCount);
+        Assert.Equal(4L, counting.RunStats.RunCount);
+
+        Assert.Throws<ArgumentNullException>(() => new ComputeContext { Diagnostics = null! });
+        Assert.Throws<ArgumentOutOfRangeException>(() => new DiagnosticSettings { RecentRunCapacity = -1 });
+    }
+
+    /// <summary>
+    /// The ring bounds the detail and nothing else: the aggregates are folded as each run finishes,
+    /// so they stay exact over every run a context ever made while the retained window holds only
+    /// the last N. A capacity of zero keeps no detail and still counts.
+    /// </summary>
+    [Fact]
+    public void TestTheRecentRunRingIsBoundedWhileTheAggregatesStayExactOverEveryRun()
+    {
+        static ArenaStatistics Arena(long maxInUse, long allocs) =>
+            new(0, -1, 16, maxInUse, allocs, allocs, 0, 0, maxInUse * 2);
+
+        static RunStatistics Fold(int capacity, params long[] peaks)
+        {
+            var collector = new RunStatisticsCollector(capacity);
+            long high = 0;
+            for (int i = 0; i < peaks.Length; i++)
+            {
+                var before = Arena(high, i);
+                high = Math.Max(high, peaks[i]);
+                collector.Record(before, Arena(high, i + 1));
+            }
+            return collector.Snapshot();
+        }
+
+        var bounded = Fold(3, 10, 40, 20, 30, 50);
+        Assert.Equal(5L, bounded.RunCount);
+        Assert.Equal(50L, bounded.PeakBytes);
+        Assert.Equal(100L, bounded.ArenaBytes);
+        Assert.Equal(5L, bounded.AllocationCount);
+        Assert.Equal(5L, bounded.ArenaExtensionCount);
+        Assert.Equal(16L, bounded.LargestAllocationBytes);
+        Assert.Equal([3L, 4L, 5L], bounded.RecentRuns.Select(run => run.RunNumber));
+        Assert.Equal([40L, 40L, 50L], bounded.RecentRuns.Select(run => run.PeakBytes));
+        MemoryFigureKind[] kinds = [MemoryFigureKind.UpperBound, MemoryFigureKind.UpperBound, MemoryFigureKind.Measured];
+        Assert.Equal(kinds, bounded.RecentRuns.Select(run => run.PeakKind));
+
+        var detailless = Fold(0, 10, 40, 20);
+        Assert.Equal(3L, detailless.RunCount);
+        Assert.Equal(40L, detailless.PeakBytes);
+        Assert.Empty(detailless.RecentRuns);
+
+        Assert.Equal(1L, Fold(4, 7).RunCount);
+        Assert.Equal(7L, Assert.Single(Fold(4, 7).RecentRuns).PeakBytes);
+        Assert.Equal(0L, RunStatistics.Empty.RunCount);
+        Assert.Empty(RunStatistics.Empty.RecentRuns);
+    }
+
+    /// <summary>
+    /// Where a session's outputs land, and — only when asked for — which provider ran each node.
+    /// The placement is free and always there; the trace costs the session a profiler for its whole
+    /// life, so a context that did not ask gets null rather than an empty trace it might read as
+    /// "nothing ran on the host".
+    /// </summary>
+    [Fact]
+    public void TestOutputPlacementIsFreeAndTheNodeTraceOnlyArrivesWhenItIsAskedFor()
+    {
+        using var plain = new ComputeContext();
+        var untraced = Doubling(plain);
+        untraced.Execute(ThreeFloats());
+        Assert.Equal(SessionOutputPlacement.Host, untraced.OutputPlacement);
+        Assert.False(untraced.HasDeviceMemory);
+        Assert.Null(untraced.ReadNodePlacement());
+
+        using var traced = new ComputeContext
+        {
+            Diagnostics = new DiagnosticSettings { TraceNodePlacement = true },
+        };
+        var compiled = Doubling(traced);
+        compiled.Execute(ThreeFloats());
+        compiled.Execute(ThreeFloats());
+
+        var placement = Assert.IsType<NodePlacement>(compiled.ReadNodePlacement());
+        Assert.NotEmpty(placement.Nodes);
+        var share = Assert.Single(placement.Providers);
+        Assert.Equal("CPUExecutionProvider", share.Provider);
+        Assert.Equal(placement.Nodes.Count, share.NodeCount);
+        Assert.Equal(placement.Nodes.Count, placement.NodesOn("CPUExecutionProvider").Count);
+        Assert.Empty(placement.NodesOn("CUDAExecutionProvider"));
+        Assert.True(share.OutputBytes > 0);
+        Assert.Same(placement, compiled.ReadNodePlacement());
+    }
+
+    /// <summary>
+    /// The grouping, on a shape no CPU-only machine can produce: a graph ORT split across two
+    /// providers. Busiest provider first, byte counts summed per provider, and the nodes in
+    /// execution order.
+    /// </summary>
+    [Fact]
+    public void TestNodePlacementGroupsEveryNodeUnderTheProviderThatRanIt()
+    {
+        static NodeExecution Node(string name, string provider, long index, long output)
+            => new(name, "Add", provider, index, output * 2, 8, output);
+
+        var placement = new NodePlacement(
+        [
+            Node("c", "CUDAExecutionProvider", 2, 400),
+            Node("a", "CUDAExecutionProvider", 0, 100),
+            Node("b", "CPUExecutionProvider", 1, 200),
+        ]);
+
+        Assert.Equal(["a", "b", "c"], placement.Nodes.Select(node => node.Name));
+        Assert.Equal(["CUDAExecutionProvider", "CPUExecutionProvider"], placement.Providers.Select(p => p.Provider));
+        Assert.Equal([2, 1], placement.Providers.Select(p => p.NodeCount));
+        Assert.Equal([500L, 200L], placement.Providers.Select(p => p.OutputBytes));
+        Assert.Equal([1000L, 400L], placement.Providers.Select(p => p.ActivationBytes));
+        Assert.Equal([16L, 8L], placement.Providers.Select(p => p.ParameterBytes));
+        Assert.Equal(["b"], placement.NodesOn("CPUExecutionProvider").Select(node => node.Name));
+        Assert.Empty(new NodePlacement([]).Providers);
+        Assert.Throws<ArgumentNullException>(() => new NodePlacement(null!));
+        Assert.Throws<ArgumentNullException>(() => placement.NodesOn(null!));
+    }
+
+    /// <summary>
+    /// The profiler's output prefix is read when profiling is switched on and a later change is
+    /// ignored, so a session built to trace its nodes has to set the prefix first or write its
+    /// profile into whatever directory the program happens to be running from — one stray file per
+    /// session, under ORT's own default name, that nothing then deletes.
+    /// </summary>
+    [Fact]
+    public void TestATracedSessionWritesItsProfileWhereItWasToldAndNotIntoTheWorkingDirectory()
+    {
+        string[] Strays() => [.. Directory.GetFiles(
+            Directory.GetCurrentDirectory(), "onnxruntime_profile_*.json").Order()];
+        var before = Strays();
+        using (var traced = new ComputeContext
+        {
+            Diagnostics = new DiagnosticSettings { TraceNodePlacement = true },
+        })
+        {
+            var compiled = Doubling(traced);
+            compiled.Execute(ThreeFloats());
+            Assert.NotNull(compiled.ReadNodePlacement());
+        }
+        Assert.Equal(before, Strays());
+
+        using var options = new SessionOptions();
+        var directory = Path.Combine(Path.GetTempPath(), "shorokoo-profile-order-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            options.ProfileOutputPathPrefix = Path.Combine(directory, "profile");
+            options.EnableProfiling = true;
+            using var session = new InferenceSession(DoublingModel(), options);
+            Assert.StartsWith(directory, session.EndProfiling(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
     }
 
     /// <summary>

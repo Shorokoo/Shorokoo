@@ -221,6 +221,9 @@ namespace Shorokoo.Runtime
                     ? runSettings : runSettings with { CancellationToken = eviction.Token };
 
                 IReadOnlyList<IShorokooTensorValue> results;
+                // Either side of the native call and nothing else: the arena figures are about
+                // what the run allocates, and the wrapping above allocates nowhere near it.
+                var arenaBefore = _owner.StartRunStats(_session);
                 try
                 {
                     results = retainedOutputNames is null
@@ -233,6 +236,12 @@ namespace Shorokoo.Runtime
                 {
                     throw new OperationCanceledException(
                         stopped.Message, stopped.InnerException, runSettings.CancellationToken);
+                }
+                finally
+                {
+                    // However the run ended. A run that failed for want of memory is the one whose
+                    // figures are worth most, so it is recorded like any other.
+                    _owner.FinishRunStats(_session, arenaBefore);
                 }
 
                 return _owner.Deliver(
@@ -274,6 +283,53 @@ namespace Shorokoo.Runtime
         /// <see cref="Execute(IData[], bool[])"/> has somewhere to retain them.
         /// </summary>
         public bool HasDeviceMemory => _session.HasDeviceMemory;
+
+        /// <summary>
+        /// Where this graph's session produces its outputs, which on a GPU backend is the one
+        /// signal for "did part of this graph run on the host" that costs nothing: the session
+        /// already knows, so there is no profiling and no extra run behind this.
+        ///
+        /// <para><see cref="SessionOutputPlacement.Mixed"/> on a GPU backend says outright that
+        /// some of this graph ran on the host and its results crossed the bus to get back;
+        /// <see cref="SessionOutputPlacement.Host"/> on one says all of it did. For <i>which</i>
+        /// nodes, and what they cost, see <see cref="ReadNodePlacement"/> — which is not free.</para>
+        /// </summary>
+        public SessionOutputPlacement OutputPlacement => _session.OutputPlacement;
+
+        /// <summary>
+        /// This session's own memory arena, as its runtime reports it, or <c>null</c> on a backend
+        /// that reports none. Unlike <see cref="Shorokoo.Core.Inference.Abstractions.DeviceMemory"/>,
+        /// which reads the whole device across every process on it, this is this session's
+        /// allocator and nobody else's.
+        ///
+        /// <para>It is a reading, so it costs a call into the backend and nothing is remembered.
+        /// For a record per run, folded as the runs happen, set
+        /// <see cref="DiagnosticSettings.CollectRunStatistics"/> on the compiling context and read
+        /// <see cref="ComputeContext.RunStats"/>.</para>
+        /// </summary>
+        /// <exception cref="ObjectDisposedException">This graph's session has been released.</exception>
+        public ArenaStatistics? ReadArenaStatistics()
+        {
+            ObjectDisposedException.ThrowIf(IsDisposed, this);
+            return _session.ReadArenaStatistics();
+        }
+
+        /// <summary>
+        /// Which execution provider ran each node of this graph, with the bytes each moved — or
+        /// <c>null</c> unless the context that compiled this graph carried
+        /// <see cref="DiagnosticSettings.TraceNodePlacement"/>, which is off by default because
+        /// recording costs every run the session makes.
+        ///
+        /// <para><b>Reading it stops the recording.</b> The trace covers every run made up to this
+        /// call, runs after it are not recorded, and a second read hands back the same trace. So
+        /// call it once, after the runs you are asking about.</para>
+        /// </summary>
+        /// <exception cref="ObjectDisposedException">This graph's session has been released.</exception>
+        public NodePlacement? ReadNodePlacement()
+        {
+            ObjectDisposedException.ThrowIf(IsDisposed, this);
+            return _session.ReadNodePlacement();
+        }
 
         /// <summary>How many outputs this graph's session produces — the length
         /// <see cref="Execute(IData[], bool[])"/> requires of a retention array, so a caller can
@@ -478,6 +534,74 @@ namespace Shorokoo.Runtime
         {
             get => _runSettings;
             init => _runSettings = value ?? throw new ArgumentNullException(nameof(value));
+        }
+
+        private readonly DiagnosticSettings _diagnostics = DiagnosticSettings.Default;
+
+        // Non-null exactly when this context was asked to collect run statistics. Built here
+        // rather than in the constructor because the setting arrives through an object
+        // initializer, which runs after it -- an init accessor is still construction, so the
+        // field stays readonly and no later assignment can turn collection on or off under a run.
+        private readonly RunStatisticsCollector? _runStatistics;
+
+        /// <summary>
+        /// What this context records about the sessions it compiles and the runs they make.
+        /// Everything in it is off by default, and a context that leaves it alone pays nothing:
+        /// no figures are read, no session is built differently, and <see cref="RunStats"/> stays
+        /// empty.
+        ///
+        /// <para><see cref="DiagnosticSettings.TraceNodePlacement"/> is read when a session is
+        /// built, exactly as <see cref="DeviceMemory"/> is, so a graph already compiled keeps what
+        /// its context carried then — to trace a graph's node placement, compile it on a context
+        /// that asks for it. <see cref="DiagnosticSettings.CollectRunStatistics"/> settles with the
+        /// context itself, so <see cref="RunStats"/> covers every run this context ever makes,
+        /// sessions compiled later included.</para>
+        /// </summary>
+        /// <exception cref="ArgumentNullException">A null settings object.</exception>
+        public DiagnosticSettings Diagnostics
+        {
+            get => _diagnostics;
+            init
+            {
+                _diagnostics = value ?? throw new ArgumentNullException(nameof(value));
+                _runStatistics = value.CollectRunStatistics
+                    ? new RunStatisticsCollector(value.RecentRunCapacity)
+                    : null;
+            }
+        }
+
+        /// <summary>
+        /// What every run this context has made did to the memory of the sessions it ran in.
+        /// Empty unless <see cref="Diagnostics"/> carries
+        /// <see cref="DiagnosticSettings.CollectRunStatistics"/>, and empty too on a backend that
+        /// reports no arena figures.
+        ///
+        /// <para>A snapshot: the aggregates and the retained window as they stand at this read,
+        /// unaffected by runs that come after it.</para>
+        /// </summary>
+        public RunStatistics RunStats => _runStatistics?.Snapshot() ?? RunStatistics.Empty;
+
+        /// <summary>
+        /// The arena figures <paramref name="session"/> reports before a run, or <c>null</c> when
+        /// nothing is collecting or the backend reports none. Paired with
+        /// <see cref="FinishRunStats"/> in a <c>finally</c>, either side of the call into the
+        /// backend and nowhere else.
+        /// </summary>
+        internal ArenaStatistics? StartRunStats(IShorokooInferenceSession session)
+            => _runStatistics is null ? null : session.ReadArenaStatistics();
+
+        /// <summary>
+        /// Folds what the run did into this context's aggregates and its recent-run ring.
+        ///
+        /// <para>Folded as the run finishes rather than gathered on read, because the sessions
+        /// cannot be relied on to still be there: this context tracks its compiled graphs weakly,
+        /// so one the program has dropped is collected and everything it did would vanish from a
+        /// figure computed by walking the live ones — silently, and downwards.</para>
+        /// </summary>
+        internal void FinishRunStats(IShorokooInferenceSession session, ArenaStatistics? before)
+        {
+            if (_runStatistics is null || before is not { } start) return;
+            if (session.ReadArenaStatistics() is { } end) _runStatistics.Record(start, end);
         }
 
         /// <summary>
@@ -1437,6 +1561,7 @@ namespace Shorokoo.Runtime
                 var settings = eviction is null
                     ? RunSettings : RunSettings with { CancellationToken = eviction.Token };
                 IReadOnlyList<IShorokooTensorValue> results;
+                var arenaBefore = StartRunStats(session);
                 try
                 {
                     results = session.Run(sessionInputs, session.OutputNames, settings);
@@ -1446,6 +1571,12 @@ namespace Shorokoo.Runtime
                 {
                     throw new OperationCanceledException(
                         stopped.Message, stopped.InnerException, RunSettings.CancellationToken);
+                }
+                finally
+                {
+                    // Before the session goes, in the finally below: its arena is what is being
+                    // read, and a disposed session has none.
+                    FinishRunStats(session, arenaBefore);
                 }
 
                 // Nothing retained: this is the one-shot path, which builds a session, feeds it
@@ -1504,7 +1635,7 @@ namespace Shorokoo.Runtime
         private IShorokooInferenceSession CreateSession(
             byte[] modelData, ShorokooGraphOptimization optimization, DeviceMemorySettings deviceMemory)
             => ResolvedBackend.CreateSession(
-                modelData, optimization, ShorokooLogSeverity.Fatal, deviceMemory);
+                modelData, optimization, ShorokooLogSeverity.Fatal, deviceMemory, Diagnostics);
 
         /// <summary>
         /// Whether the model takes no runtime input, so every node's value is already

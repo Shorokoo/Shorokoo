@@ -9,20 +9,47 @@ internal sealed class OrtInferenceSession : IShorokooInferenceSession
     private readonly int? _cudaDeviceId;
     private readonly IShorokooInferenceBackend _backend;
 
-    // ORT's memory info for this session's own (non-host) output memory, or null when it
-    // produces everything on the host. Held in a field, not a local: OrtMemoryInfo owns a
-    // native handle and the binding below takes it as a bare pointer. Probed on first ask,
-    // because most sessions never retain anything and a session is a common object here --
-    // parameter initialization and every eager Eval build one.
-    private readonly Lazy<OrtMemoryInfo?> _deviceMemoryInfo;
+    // What one probe of the session's outputs answers: ORT's memory info for this session's own
+    // (non-host) output memory, or null when it produces everything on the host, and where the
+    // outputs land as a whole. One Lazy for both, because one native call answers both and two
+    // would build two OrtMemoryInfo collections for one answer. Held in a field, not a local:
+    // OrtMemoryInfo owns a native handle and the binding below takes it as a bare pointer. Probed
+    // on first ask, because most sessions never retain anything and a session is a common object
+    // here -- parameter initialization and every eager Eval build one.
+    private readonly Lazy<OutputMemory> _outputMemory;
+
+    // This session's own allocator for the arena the figures come from, and the memory info naming
+    // it. Both in fields for the reason the one above is: they own native handles that go over as
+    // bare pointers. Built on first ask, because no session needs them unless something asked for
+    // run statistics.
+    private readonly Lazy<OrtAllocator?> _arenaAllocator;
+    private OrtMemoryInfo? _ownedArenaMemoryInfo;
+
+    // The folder ORT writes this session's profile into, or null when it was not built to record
+    // one -- which is the default. Deleted with the session.
+    private readonly string? _profileDirectory;
+    private readonly object _profileGate = new();
+    private NodePlacement? _nodePlacement;
+    private bool _profilingEnded;
 
     public OrtInferenceSession(
         InferenceSession session, int? cudaDeviceId, IShorokooInferenceBackend backend)
+        : this(session, cudaDeviceId, backend, profileDirectory: null)
+    {
+    }
+
+    public OrtInferenceSession(
+        InferenceSession session,
+        int? cudaDeviceId,
+        IShorokooInferenceBackend backend,
+        string? profileDirectory)
     {
         _session = session;
         _cudaDeviceId = cudaDeviceId;
         _backend = backend;
-        _deviceMemoryInfo = new Lazy<OrtMemoryInfo?>(() => DiscoverDeviceMemoryInfo(session));
+        _profileDirectory = profileDirectory;
+        _outputMemory = new Lazy<OutputMemory>(() => DiscoverOutputMemory(session));
+        _arenaAllocator = new Lazy<OrtAllocator?>(CreateArenaAllocator);
     }
 
     /// <summary>
@@ -54,7 +81,7 @@ internal sealed class OrtInferenceSession : IShorokooInferenceSession
     public IReadOnlyList<string> InputNames => _session.InputNames;
     public IReadOnlyList<string> OutputNames => _session.OutputNames;
 
-    public bool HasDeviceMemory => _deviceMemoryInfo.Value is not null;
+    public bool HasDeviceMemory => _outputMemory.Value.DeviceMemoryInfo is not null;
 
     public IReadOnlyList<IShorokooTensorValue> Run(
         IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
@@ -125,7 +152,7 @@ internal sealed class OrtInferenceSession : IShorokooInferenceSession
 
         // Nothing to retain, or nowhere to retain it: an unbound Run is the same thing and
         // costs one native call less.
-        var deviceMemoryInfo = _deviceMemoryInfo.Value;
+        var deviceMemoryInfo = _outputMemory.Value.DeviceMemoryInfo;
         if (deviceMemoryInfo is null || retainedOutputNames.Count == 0)
             return Run(inputs, outputNames, runSettings);
 
@@ -208,29 +235,129 @@ internal sealed class OrtInferenceSession : IShorokooInferenceSession
         }
     }
 
+    /// <summary>What one probe of the session's output memory answers: the memory a retained
+    /// output can be bound to, and where the outputs land.</summary>
+    private readonly record struct OutputMemory(
+        OrtMemoryInfo? DeviceMemoryInfo, SessionOutputPlacement Placement);
+
     /// <summary>
     /// The memory the session's execution provider produces its outputs in, when that is not host
-    /// memory; null when every output lands on the host (a CPU provider), and null too when the
-    /// native build does not answer the question — which costs the retention, never correctness.
-    /// The infos ORT reports are owned by the collection it returns, so this copies the one it
-    /// keeps rather than outliving its source.
+    /// memory — null when every output lands on the host (a CPU provider), and null too when the
+    /// native build does not answer the question, which costs the retention and never correctness
+    /// — and, from the same infos, where the outputs land as a whole. The infos ORT reports are
+    /// owned by the collection it returns, so this copies the one it keeps rather than outliving
+    /// its source.
+    ///
+    /// <para>The placement is the cheap fallback signal: a session that reports host memory for
+    /// some outputs and its own for others has a graph ORT partitioned across the two, and one on
+    /// a device backend reporting host memory for all of them ran the whole graph there.</para>
     /// </summary>
-    private static OrtMemoryInfo? DiscoverDeviceMemoryInfo(InferenceSession session)
+    private static OutputMemory DiscoverOutputMemory(InferenceSession session)
     {
         try
         {
+            OrtMemoryInfo? device = null;
+            var host = 0;
+            var onDevice = 0;
             using var infos = session.GetMemoryInfosForOutputs();
             foreach (var info in infos)
             {
-                if (info.Name == OrtTensorValue.CpuAllocatorName) continue;
-                return new OrtMemoryInfo(info.Name, info.GetAllocatorType(), info.Id, info.GetMemoryType());
+                if (info.Name == OrtTensorValue.CpuAllocatorName) { host++; continue; }
+                onDevice++;
+                device ??= CopyOf(info);
             }
+
+            var placement = (host, onDevice) switch
+            {
+                (0, 0) => SessionOutputPlacement.Unknown,
+                (_, 0) => SessionOutputPlacement.Host,
+                (0, _) => SessionOutputPlacement.Device,
+                _ => SessionOutputPlacement.Mixed,
+            };
+            return new OutputMemory(device, placement);
         }
         // Catching broadly is the point: the doc above promises a failed probe costs the retention
         // and nothing else, and Lazy caches an escaping exception and rethrows it on every later
         // access -- which would fail every run of this session rather than fall back to the host.
         catch (Exception) { }
-        return null;
+        return new OutputMemory(null, SessionOutputPlacement.Unknown);
+    }
+
+    /// <summary>An info of our own with the same contents, since the one ORT handed over belongs
+    /// to the collection it came in and dies with it.</summary>
+    private static OrtMemoryInfo CopyOf(OrtMemoryInfo info)
+    {
+        return new OrtMemoryInfo(info.Name, info.GetAllocatorType(), info.Id, info.GetMemoryType());
+    }
+
+    public SessionOutputPlacement OutputPlacement => _outputMemory.Value.Placement;
+
+    /// <summary>
+    /// This session's own allocator for the arena the figures come from: the CUDA device arena on
+    /// a GPU backend, the session's CPU arena otherwise. It has to come from the session —
+    /// <c>OrtAllocator.DefaultInstance</c> is the plain CPU allocator, which implements no
+    /// statistics and answers with nothing at all.
+    ///
+    /// <para>Null on a build that has no such allocator to give, which is what a CUDA arena asked
+    /// for on a session with no CUDA provider is: ORT refuses it by name, and that refusal is a
+    /// backend without the figures rather than a failure of the run.</para>
+    /// </summary>
+    private OrtAllocator? CreateArenaAllocator()
+    {
+        OrtMemoryInfo? owned = null;
+        try
+        {
+            if (_cudaDeviceId is { } device) owned = CudaArenaMemoryInfo(device);
+            var allocator = new OrtAllocator(_session, owned ?? OrtMemoryInfo.DefaultInstance);
+            // The field assignment is what roots `owned` across the constructor above: ORT takes
+            // the info as a bare IntPtr, so without a read of the local after the call the JIT
+            // retires it at the .Handle read and its critical finalizer can free the info while
+            // OrtCreateAllocator is still reading it. It is also why it is assigned only here --
+            // a refusal above leaves nothing for the disposal to have to skip -- and never
+            // DefaultInstance, which is ORT's own shared singleton and not ours to release.
+            _ownedArenaMemoryInfo = owned;
+            return allocator;
+        }
+        catch (Exception)
+        {
+            owned?.Dispose();
+            return null;
+        }
+    }
+
+    /// <summary>ORT's memory info for a CUDA device arena. <c>CudaPinned</c> is the pinned host
+    /// arena that host-to-device copies stage through and is a different allocator.</summary>
+    private static OrtMemoryInfo CudaArenaMemoryInfo(int deviceId)
+    {
+        return new OrtMemoryInfo("Cuda", OrtAllocatorType.ArenaAllocator, deviceId, OrtMemType.Default);
+    }
+
+    public ArenaStatistics? ReadArenaStatistics()
+        => _arenaAllocator.Value is { } allocator ? OrtArenaStats.Read(allocator) : null;
+
+    /// <summary>
+    /// Which execution provider ran each node, read out of the profile ORT has been writing since
+    /// this session was built — or null when it was not built to write one.
+    ///
+    /// <para>Reading it ends the profiling: that is ORT's own shape, since the events are buffered
+    /// and the file is only complete once profiling stops. So the trace covers every run up to
+    /// this call, later runs are not in it, and the answer is kept so a second call gets the same
+    /// one rather than asking a session that is no longer recording.</para>
+    /// </summary>
+    public NodePlacement? ReadNodePlacement()
+    {
+        if (_profileDirectory is null) return null;
+        lock (_profileGate)
+        {
+            if (_profilingEnded) return _nodePlacement;
+            _profilingEnded = true;
+            try
+            {
+                _nodePlacement = OrtProfile.Read(_session.EndProfiling());
+            }
+            catch (Exception) { _nodePlacement = null; }
+            return _nodePlacement;
+        }
     }
 
     /// <summary>
@@ -304,7 +431,24 @@ internal sealed class OrtInferenceSession : IShorokooInferenceSession
 
     public void Dispose()
     {
-        if (_deviceMemoryInfo.IsValueCreated) _deviceMemoryInfo.Value?.Dispose();
+        // Off the probe's own Lazy, not off whichever question was asked of it: the info is built
+        // by the probe, so a session asked only where its outputs land has one to release too.
+        if (_outputMemory.IsValueCreated) _outputMemory.Value.DeviceMemoryInfo?.Dispose();
+        if (_arenaAllocator.IsValueCreated)
+        {
+            // The allocator first: it was built over this memory info and takes it as a bare
+            // pointer, so the info outlives it by one statement rather than the other way round.
+            _arenaAllocator.Value?.Dispose();
+            _ownedArenaMemoryInfo?.Dispose();
+        }
         _session.Dispose();
+        // After the session, which is what closes the profile file it has been writing.
+        if (_profileDirectory is not null)
+        {
+            try { Directory.Delete(_profileDirectory, recursive: true); }
+            // A temp folder that will not delete is not worth failing a disposal over; the
+            // platform reclaims it, and there is nothing a caller could do here.
+            catch (Exception) { }
+        }
     }
 }

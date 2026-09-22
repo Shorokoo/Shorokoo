@@ -44,6 +44,13 @@ Related: [core-types.md](core-types.md) · [defining-models.md](defining-models.
   exact-size extension only for a session Shorokoo knows is reused across differing shapes, so a
   long training loop does not end up holding far more of the card than it uses:
   [Device memory](#device-memory-gpu-backends).
+- What a *session* holds, what a *run* peaked at, and whether a GPU run quietly did some of its
+  work on the host are all answerable, and all off by default:
+  `CompiledGraph.ReadArenaStatistics()` reads one session's own allocator,
+  `ComputeContext.RunStats` folds every run the context makes into exact aggregates plus a bounded
+  window of per-run detail, and `CompiledGraph.OutputPlacement` costs nothing while
+  `CompiledGraph.ReadNodePlacement()` names the nodes that fell back —
+  [What one session's arena did](#what-one-sessions-arena-did) onwards.
 
 ## Workflow: one-shot evaluation
 
@@ -1155,6 +1162,129 @@ context each rather than picking one arena strategy for both.
 The readings are the exception, and they are readings rather than settings: `Read()` and `Sample()`
 go to whichever CUDA device is current for the calling thread — device 0, because that is what the
 shipped GPU backends use — and `PeakUsedBytes` is one process's record of its own run.
+
+### What one session's arena did
+
+`DeviceMemory` reads the card. To read **this session's own allocator** instead — its bytes, nobody
+else's, and on a CPU backend as well as a GPU one — ask the compiled graph:
+
+```csharp
+using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Runtime;
+
+var compiled = ctx.Compile(graph);
+compiled.Execute(inputs);
+
+if (compiled.ReadArenaStatistics() is { } arena)
+    Console.WriteLine($"{arena.InUseBytes} in use, {arena.MaxInUseBytes} at its highest, "
+                    + $"{arena.TotalAllocatedBytes} held from the device");
+```
+
+`ArenaStatistics` is nine figures: `InUseBytes`, `MaxInUseBytes`, `MaxAllocSizeBytes`,
+`TotalAllocatedBytes`, `LimitBytes` (`-1` when `DeviceMemorySettings.LimitBytes` set no cap),
+`AllocationCount`, `ArenaExtensionCount`, `ArenaShrinkageCount` and `ReserveCount`. It is `null`
+on a backend that reports none, the way `DeviceMemory.Read()` is `null` with no card.
+
+**`MaxInUseBytes` is cumulative over the arena's whole life, not the last run's.** It is a
+high-water mark the arena never lowers and there is no reset — asking for arena shrinkage does not
+move it — so reading it once tells you the largest this session has ever been. For a figure per
+run, let the context collect them.
+
+### Per-run statistics on the context
+
+Persisted tensors belong to a `ComputeContext`, so what its runs cost is answerable there.
+Collection is **off by default** and costs nothing until asked for:
+
+```csharp
+using var ctx = new ComputeContext
+{
+    Diagnostics = new DiagnosticSettings { CollectRunStatistics = true },
+};
+
+var rig = TrainingRig.FromScratch(model, loss, optimizer, sample, hypers, runtimeContext: ctx);
+for (int step = 0; step < steps; step++)
+    checkpoint = rig.TrainStep(checkpoint, inputs);
+
+var stats = ctx.RunStats;
+Console.WriteLine($"{stats.RunCount} runs, peak {stats.PeakBytes / (1024 * 1024)} MiB, "
+                + $"{stats.ArenaExtensionCount} arena extensions");
+
+foreach (var run in stats.RecentRuns.TakeLast(5))
+    Console.WriteLine($"run {run.RunNumber}: {run.PeakBytes} ({run.PeakKind})");
+```
+
+`RunStats` is a snapshot of every run the context has made, across **all** its sessions — the rig's
+compiled steps, any graph you compiled on it, and the one-shot entry points. Two things to know
+about the shape:
+
+- **The aggregates are exact over the whole history; the per-run detail is bounded.**
+  `PeakBytes`, `RunCount`, `AllocationCount`, `ArenaExtensionCount`, `ArenaShrinkageCount`,
+  `LargestAllocationBytes` and `ArenaBytes` are folded in as each run finishes, so a hundred
+  thousand steps are all in them. `RecentRuns` keeps the last `DiagnosticSettings.RecentRunCapacity`
+  (1000 by default; zero keeps none), because one record per run held for the context's life is a
+  leak in any real training loop.
+- **A per-run peak says whether it was measured or bounded.** The arena's high-water mark is read
+  either side of each run: a run that pushed it up set the record, and its `PeakKind` is
+  `MemoryFigureKind.Measured`. A run that stayed under a mark some earlier run set is
+  `MemoryFigureKind.UpperBound` — it used no more than that, and how much less is not something the
+  arena records. The two are never reported as the same thing.
+
+`PeakBytes` is the largest mark any one of the context's arenas reached. A context runs its graphs
+one session at a time, so that is the peak; where two of its sessions really do run together, read
+it as the largest of them rather than their total.
+
+### Did part of my GPU graph run on the host?
+
+A CUDA session that meets an operator the provider cannot run leaves that part to the host, and the
+results cross the bus to get back. Two signals, one free and one not:
+
+```csharp
+switch (compiled.OutputPlacement)
+{
+    case SessionOutputPlacement.Device: break;               // all of it stayed on the card
+    case SessionOutputPlacement.Mixed:                       // some of it did not
+    case SessionOutputPlacement.Host: break;                 // none of it did
+    case SessionOutputPlacement.Unknown: break;              // this backend does not say
+}
+```
+
+`OutputPlacement` costs nothing — the session already knows where it puts its outputs — and is
+there on every run. A CPU session reports `Host`, which is what it is.
+
+For **which** nodes fell back, and what they moved, ask the context to trace them. This one is not
+free: it builds the session with ONNX Runtime's profiler on, which costs every run that session
+then makes, so it is off by default and belongs in a diagnosis rather than in a training loop.
+
+```csharp
+using var traced = new ComputeContext
+{
+    Diagnostics = new DiagnosticSettings { TraceNodePlacement = true },
+};
+var compiled = traced.Compile(graph);
+compiled.Execute(inputs);
+
+if (compiled.ReadNodePlacement() is { } placement)
+{
+    foreach (var share in placement.Providers)
+        Console.WriteLine($"{share.Provider}: {share.NodeCount} nodes, {share.OutputBytes} bytes out");
+
+    foreach (var node in placement.NodesOn("CPUExecutionProvider"))
+        Console.WriteLine($"  {node.Name} ({node.OpType}) fell back, {node.ActivationBytes} bytes in");
+}
+```
+
+`Providers` has one entry per execution provider that ran anything, busiest first; more than one
+entry on a GPU session *is* the fallback, with the bytes attached. **Reading the trace stops the
+recording**: it covers every run up to that call, later runs are not in it, and a second read hands
+back the same trace. So run what you are asking about, then read once.
+
+| what | where | cost | null / none when |
+|---|---|---|---|
+| `DeviceMemory.Read()` | static, the whole card | a microsecond | no CUDA runtime |
+| `CompiledGraph.ReadArenaStatistics()` | one session's allocator | a call into the backend | the backend reports no arena |
+| `ComputeContext.RunStats` | every run of the context | two arena reads per run, once switched on | `CollectRunStatistics` is off |
+| `CompiledGraph.OutputPlacement` | one session | nothing | the backend does not report it (`Unknown`) |
+| `CompiledGraph.ReadNodePlacement()` | one session, per node | a profiler on every run of that session | `TraceNodePlacement` is off |
 
 ## Debugging engine (no OnnxRuntime)
 

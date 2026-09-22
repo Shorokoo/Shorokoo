@@ -372,8 +372,12 @@ public class MemoryPassBenchmarkTests
             try
             {
                 using var options = RigSessionOptions();
-                options.EnableProfiling = true;
+                // The prefix before the switch: ORT reads it when profiling is enabled and
+                // ignores a later change, so the other order writes the profile into the process's
+                // working directory under ORT's own name and the cleanup below deletes an empty
+                // folder.
                 options.ProfileOutputPathPrefix = Path.Combine(dir, "profile");
+                options.EnableProfiling = true;
                 using var session = new InferenceSession(_model, options);
                 var feeds = Feeds(session, _inputShapes);
                 using var runOptions = new RunOptions();

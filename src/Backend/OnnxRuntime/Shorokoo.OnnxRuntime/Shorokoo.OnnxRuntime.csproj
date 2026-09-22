@@ -33,4 +33,11 @@
   <ItemGroup>
     <ProjectReference Include="..\..\..\Shorokoo\Shorokoo.csproj" />
   </ItemGroup>
+
+  <!-- The arena-statistics binding reaches ONNX Runtime by reflection, so the guard that fails
+       loudly on an ORT upgrade has to name the very strings the binding uses rather than a copy
+       of them that could drift. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="Shorokoo.Tests" />
+  </ItemGroup>
 </Project>

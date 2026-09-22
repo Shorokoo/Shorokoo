@@ -35,4 +35,27 @@ public interface IShorokooInferenceSession : IDisposable
         IReadOnlyList<string> outputNames,
         IReadOnlySet<string> retainedOutputNames,
         RunSettings runSettings) => Run(inputs, outputNames, runSettings);
+
+    // This session's own memory arena as its runtime reports it, or null when the backend has no
+    // such figures to give. Cheap enough to call either side of a run, which is how a run's peak
+    // is attributed; see ArenaStatistics for why MaxInUseBytes alone cannot be.
+    //
+    // Defaulted, like HasDeviceMemory above, so a backend outside this repository keeps compiling:
+    // a backend that does not answer has no arena figures, and null is what no figures reads as
+    // everywhere else here -- DeviceMemory.Read on a machine with no card answers the same way.
+    ArenaStatistics? ReadArenaStatistics() => null;
+
+    // Where this session produces its outputs. The free half of the placement question: the
+    // session already knows, so no profiling and no extra run is needed, and on a device backend a
+    // host-memory output is the tail of a graph that ran on the host.
+    //
+    // Defaulted to Unknown rather than Host: a backend that does not answer has not said its
+    // outputs are host-resident, and reading silence as Host would report a device backend's
+    // fallback as a deliberate CPU session.
+    SessionOutputPlacement OutputPlacement => SessionOutputPlacement.Unknown;
+
+    // Which execution provider ran each node, or null when this session was not built to record it
+    // -- which is the default, since recording costs every run the session makes. Asked for
+    // through DiagnosticSettings.TraceNodePlacement on the context that compiles the session.
+    NodePlacement? ReadNodePlacement() => null;
 }

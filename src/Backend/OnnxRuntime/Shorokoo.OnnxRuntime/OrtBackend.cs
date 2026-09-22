@@ -96,8 +96,30 @@ public abstract class OrtBackend : IShorokooInferenceBackend
         ShorokooGraphOptimization graphOptimization,
         ShorokooLogSeverity logSeverity,
         DeviceMemorySettings deviceMemory)
+        => CreateSession(
+            modelBytes, graphOptimization, logSeverity, deviceMemory, DiagnosticSettings.Default);
+
+    /// <summary>
+    /// <see cref="CreateSession(ReadOnlyMemory{byte}, ShorokooGraphOptimization, ShorokooLogSeverity, DeviceMemorySettings)"/>,
+    /// also recording what <paramref name="diagnostics"/> asks for. ORT reads both the arena
+    /// settings and the profiler switch while the session is being created and the session keeps
+    /// them for life, which is why they arrive here and not per run.
+    /// </summary>
+    /// <param name="modelBytes">The serialized ONNX model.</param>
+    /// <param name="graphOptimization">The ORT graph-optimization level to apply.</param>
+    /// <param name="logSeverity">The minimum severity ORT logs at.</param>
+    /// <param name="deviceMemory">The arena settings this session is built with.</param>
+    /// <param name="diagnostics">What the session records about itself. Its default records
+    /// nothing, which is what every session gets unless a context asked otherwise.</param>
+    public IShorokooInferenceSession CreateSession(
+        ReadOnlyMemory<byte> modelBytes,
+        ShorokooGraphOptimization graphOptimization,
+        ShorokooLogSeverity logSeverity,
+        DeviceMemorySettings deviceMemory,
+        DiagnosticSettings diagnostics)
     {
         ArgumentNullException.ThrowIfNull(deviceMemory);
+        ArgumentNullException.ThrowIfNull(diagnostics);
         // The `using` is load-bearing, not tidiness. SessionOptions is a SafeHandle, so it
         // carries a critical finalizer that calls OrtReleaseSessionOptions, and ORT takes its
         // handle as a bare IntPtr -- the P/Invoke does no SafeHandle ref-counting, and the
@@ -108,11 +130,51 @@ public abstract class OrtBackend : IShorokooInferenceBackend
         // process. Disposing in a finally keeps them rooted across the constructor.
         using var options = new SessionOptions();
         Configure(options, graphOptimization, logSeverity);
-        _configureExecutionProvider(options, deviceMemory);
-        var session = new InferenceSession(modelBytes.ToArray(), options);
-        // The session keeps this backend so it can rebuild a feed that came from another
-        // backend's native runtime -- see OrtInferenceSession.Unwrap.
-        return new OrtInferenceSession(session, _cudaDeviceId, this);
+        var profileDirectory = EnableProfiling(options, diagnostics);
+        try
+        {
+            _configureExecutionProvider(options, deviceMemory);
+            var session = new InferenceSession(modelBytes.ToArray(), options);
+            // The session keeps this backend so it can rebuild a feed that came from another
+            // backend's native runtime -- see OrtInferenceSession.Unwrap.
+            return new OrtInferenceSession(session, _cudaDeviceId, this, profileDirectory);
+        }
+        catch
+        {
+            // No session to own the folder, so nothing would ever delete it.
+            DeleteProfileDirectory(profileDirectory);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Turns ORT's profiler on when <paramref name="diagnostics"/> asks for a node-placement
+    /// trace, and answers with the folder it will write into — null when nothing asked.
+    ///
+    /// <para><b>The prefix is set before the switch is thrown, and the order is load-bearing.</b>
+    /// ORT reads the prefix at the moment profiling is enabled and ignores any later change, so
+    /// setting it afterwards writes the profile into the process's working directory under ORT's
+    /// own default name — a stray file per session, in whatever folder the program happens to be
+    /// running from, that nothing then cleans up.</para>
+    /// </summary>
+    private static string? EnableProfiling(SessionOptions options, DiagnosticSettings diagnostics)
+    {
+        if (!diagnostics.TraceNodePlacement) return null;
+        // A folder of its own per session: two sessions profiling at once would otherwise agree on
+        // a prefix and ORT distinguishes files by timestamp alone.
+        var directory = Path.Combine(
+            Path.GetTempPath(), "shorokoo-node-placement-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        options.ProfileOutputPathPrefix = Path.Combine(directory, "profile");
+        options.EnableProfiling = true;
+        return directory;
+    }
+
+    private static void DeleteProfileDirectory(string? directory)
+    {
+        if (directory is null) return;
+        try { Directory.Delete(directory, recursive: true); }
+        catch (Exception) { }
     }
 
     /// <summary>

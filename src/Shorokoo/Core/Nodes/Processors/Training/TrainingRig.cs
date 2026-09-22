@@ -294,10 +294,11 @@ namespace Shorokoo
         /// Shape and dtype of every <see cref="TrainingStepPureGraph"/> input, in input order, as the
         /// shape inference behind <see cref="PreOptimizationEval"/> and <see cref="OptimizationResult"/>
         /// saw them: parameter / state / optimizer-state fields, hyperparameter and counter seeds, the
-        /// representative model inputs, and the target at the predicted shape. Shared by the pre- and
-        /// post-optimization graphs, so a diagnostic can synthesize a feed and run either against a real
-        /// session on exactly the shapes the pass was judged on. Shapes only — the exemplars behind
-        /// them may carry no values at all.
+        /// representative model inputs, and the target at the shape and dtype the loss declares for
+        /// it (<see cref="DeriveTargetExemplar"/>). Shared by the pre- and post-optimization graphs,
+        /// so a diagnostic can synthesize a feed and run either against a real session on exactly the
+        /// shapes the pass was judged on. Shapes only — the exemplars behind them may carry no values
+        /// at all.
         ///
         /// <para>An input that is not a tensor — a model's <c>OptionalTensor</c> input, say — has no
         /// shape to report, so this view refuses such a rig rather than inventing one; read
@@ -967,10 +968,15 @@ namespace Shorokoo
                 MergeContext = mergeContext,
                 RuntimeContext = runtimeContext,
             };
+            // One thaw of the loss, read by both halves of the build: composition splices a clone of
+            // it into the training graph and leaves it as it found it, and the initialization half
+            // reads its target declaration back off it (see DeriveTargetExemplar).
+            var lossGraph = c.Loss.ToInternal();
             rig.BuildTrainingStepPureGraph(
-                concreteArch, c.Loss.ToInternal(), c.Optimizer.ToInternal(), c.Hyperparameters, c.Names,
+                concreteArch, lossGraph, c.Optimizer.ToInternal(), c.Hyperparameters, c.Names,
                 progress);
-            rig.InitializeAndOptimize(concreteArch, mergeContext, c.RngConfig, progress, deferInitialization);
+            rig.InitializeAndOptimize(
+                concreteArch, lossGraph, mergeContext, c.RngConfig, progress, deferInitialization);
             if (completesBuild) progress?.ReportComplete(BuildPhase.Initialize);
             return rig;
         }
@@ -1137,6 +1143,80 @@ namespace Shorokoo
             var shape = new Shape(dims);
             return TensorData.CreateFromRawBytes(
                 shape, dtype, new byte[shape.Count * (dtype.EncodingBitCount / 8)]);
+        }
+
+        /// <summary>
+        /// The shape and dtype the composed step's target input is seeded with for shape inference
+        /// and the memory-aware pass — the <b>loss's own target</b>, rather than the model's
+        /// prediction standing in for it.
+        ///
+        /// <para>The two coincide for a distance loss: L2, L1, Huber, BCE and the rest score a
+        /// prediction against a target of exactly its shape and dtype, so the prediction is the right
+        /// answer and is what this falls back to wherever the loss declares nothing more specific.
+        /// They do not coincide for a class-index loss. ONNX's <c>SoftmaxCrossEntropyLoss</c> and
+        /// <c>NegativeLogLikelihoodLoss</c> score <c>[N, C, d…]</c> float scores against
+        /// <c>[N, d…]</c> int64 class indices, so a prediction standing in for that target makes the
+        /// one-hot the gradient builds <c>[N, C, C]</c> where it should be <c>[N, C]</c> — a factor of
+        /// C too large. At ten classes that is a rounding error, which is why every cross-entropy rig
+        /// in the suite was judged on the wrong target without anyone noticing; at a language model's
+        /// 50,257 it is ten billion elements for a batch of four, and the build dies inferring shapes
+        /// over it.</para>
+        ///
+        /// <para>The scores are the prediction only where the loss hands it straight over, so they
+        /// are inferred rather than assumed: a loss that folds <c>[N, T, C]</c> into <c>[N*T, C]</c>
+        /// before scoring takes a target of <c>[N*T]</c>, which no dimension of the prediction names.
+        /// That inference is seeded with the prediction-shaped target this derivation exists to
+        /// replace, which is the pair the whole composed graph was inferred with before, so it can
+        /// choke on nothing the build did not already choke on.</para>
+        /// </summary>
+        private static (Shape Shape, DType DType) DeriveTargetExemplar(
+            InternalComputationGraph lossGraph,
+            ShapeInferenceInterpreter shapeInferencer,
+            Shape predictionShape,
+            DType predictionDType)
+        {
+            var targetKey = lossGraph.Inputs[1];
+            var declared = BuildProducerByOutputMap(lossGraph).TryGetValue(targetKey, out var producer)
+                ? producer.Attributes.GetDTypeVal(OnnxOpAttributeNames.AttrDtype)
+                : null;
+            // An unspecialized dtype names no width, so it is nothing to build an exemplar out of. A
+            // generic loss does not reach a rig today — its type-placeholder slot makes a third graph
+            // input, which the two-input requirement refuses — so this is the declaration being
+            // missing rather than a case with an answer of its own.
+            var dtype = declared is { IsGenericType: false } d ? d : predictionDType;
+
+            if (ClassIndexScoresOf(lossGraph, targetKey) is not { } scoresKey)
+                return (predictionShape, dtype);
+
+            var lossShapes = shapeInferencer.Infer(lossGraph, [scoresKey],
+                RepresentativeRuntimeInputFor(predictionShape, predictionDType),
+                RepresentativeRuntimeInputFor(predictionShape, dtype));
+            if (lossShapes.GetTensorInfo(scoresKey) is not { Shape.Dims.Length: >= 2 } scores)
+                return (predictionShape, dtype);
+
+            // Scores [N, C, d…] against indices [N, d…]: the class axis is axis 1, and dropping it is
+            // the whole of the difference between the two shapes.
+            return (new Shape([.. scores.Shape.Dims[..1], .. scores.Shape.Dims[2..]]), dtype);
+        }
+
+        /// <summary>
+        /// The scores input of the class-index loss op that reads <paramref name="targetKey"/> as its
+        /// class indices, or <c>null</c> where none does. ONNX names exactly two such ops and both
+        /// take the indices second. Every other way a loss reads a target broadcasts it against the
+        /// prediction, where the prediction's own shape is the answer and always was.
+        /// </summary>
+        private static FastTensorKey? ClassIndexScoresOf(
+            InternalComputationGraph lossGraph, FastTensorKey targetKey)
+        {
+            foreach (var node in lossGraph.Nodes)
+            {
+                if (node.OpCode is not (OpCodes.SOFTMAX_CROSS_ENTROPY_LOSS
+                                        or OpCodes.NEGATIVE_LOG_LIKELIHOOD_LOSS)) continue;
+                var inputs = node.Inputs;
+                if (inputs.Count < 2 || inputs[1] != targetKey) continue;
+                if (inputs[0] is { IsEmpty: false } scores) return scores;
+            }
+            return null;
         }
 
         // ───────────────────── Two-layer rig: immutable derivations (§5.8.5) ─────────────────────
@@ -3651,12 +3731,14 @@ namespace Shorokoo
         /// <summary>
         /// Phase 2: read the concrete-architecture graph for initial trainable / state
         /// parameter values, run the optimizer's state initializers per trainable parameter,
-        /// derive the target tensor shape by shape-inferring the concrete model, and run shape
-        /// inference + <see cref="MemoryAwareGraphOptimizer"/> on the lowered training-step
+        /// derive the target exemplar from <paramref name="lossGraph"/>'s own target input
+        /// (<see cref="DeriveTargetExemplar"/>) against the shape-inferred prediction, and run
+        /// shape inference + <see cref="MemoryAwareGraphOptimizer"/> on the lowered training-step
         /// graph.
         /// </summary>
         private void InitializeAndOptimize(
             InternalComputationGraph concreteArch,
+            InternalComputationGraph lossGraph,
             ComputeContext ctx,
             RngConfig? rngConfig = null,
             BuildProgressReporter? progress = null,
@@ -3815,10 +3897,11 @@ namespace Shorokoo
                     paramValuesById is not null ? NameValueOf(_initialParamFields) : ZerosOf(paramSlots));
             }
 
-            // Step 2: derive the target tensor's shape from the model's prediction. Reuse
-            // the already-computed paramValuesById via FastApplyModelParamValues — this
-            // rewrites MODEL_PARAM → MODEL_PARAM_DATA in place without a
-            // second initializer-execution pass.
+            // Step 2: shape-infer the model to get its prediction, then derive the target exemplar
+            // from the loss's own target input (see DeriveTargetExemplar — the prediction answers
+            // for it only where the loss declares nothing else). Reuse the already-computed
+            // paramValuesById via FastApplyModelParamValues — this rewrites MODEL_PARAM →
+            // MODEL_PARAM_DATA in place without a second initializer-execution pass.
             Stage("InferModelShapes");
             var shapeInferencer = new ShapeInferenceInterpreter(ctx);
             var concreteModel = paramValuesById is not null
@@ -3828,8 +3911,8 @@ namespace Shorokoo
             var modelOutputInfo = modelShapeInfo.GetTensorInfo(concreteModel.Outputs[0])
                 ?? throw new InvalidOperationException(
                     "Shape inference of concrete model graph failed to produce an output shape.");
-            var targetShape = modelOutputInfo.Shape;
-            var targetDType = modelOutputInfo.DType;
+            var (targetShape, targetDType) = DeriveTargetExemplar(
+                lossGraph, shapeInferencer, modelOutputInfo.Shape, modelOutputInfo.DType);
 
             // Step 3: Assemble inputs in TrainingStepPureGraph order.
             // Layout: [param_fields, state_fields, opt_state_fields, hyperparam_fields, counter_inputs..., model_input_fields, target_fields].

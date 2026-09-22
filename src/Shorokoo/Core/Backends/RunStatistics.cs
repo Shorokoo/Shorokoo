@@ -53,8 +53,16 @@ public sealed record RunStatistics
     /// <summary>The largest single allocation any of those runs asked for.</summary>
     public long LargestAllocationBytes { get; init; }
 
-    /// <summary>The most an arena of this context ever held from its device, in use or not. Above
-    /// <see cref="PeakBytes"/> by whatever the arena keeps spare.</summary>
+    /// <summary>
+    /// The most an arena of this context ever held from its device, in use or not — usually above
+    /// <see cref="PeakBytes"/> by whatever the arena keeps spare.
+    ///
+    /// <para>Not an invariant, though. This is the high-water mark of a figure that falls when the
+    /// arena hands blocks back, which <see cref="RunSettings.ShrinkArenaAfterRun"/> asks it to do
+    /// at the end of a run — before this is read — while <see cref="PeakBytes"/> comes from a mark
+    /// the runtime never lowers. A shrinking run can therefore leave this below the peak it
+    /// reached, so treat the difference as spare capacity only where nothing is shrinking.</para>
+    /// </summary>
     public long ArenaBytes { get; init; }
 
     /// <summary>Allocations those runs made between them.</summary>

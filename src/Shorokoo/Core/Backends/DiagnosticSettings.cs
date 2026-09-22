@@ -44,6 +44,11 @@ public sealed record DiagnosticSettings
     /// <see cref="RunStatistics.PeakBytes"/>, the counts, the totals — are folded in as each run
     /// finishes and stay exact over every run the context has ever made, not just the retained
     /// window. Zero keeps no per-run detail at all and leaves those aggregates untouched.</para>
+    ///
+    /// <para>The ring is allocated whole when collection starts rather than grown, so the capacity
+    /// is paid for up front whether or not that many runs ever happen — about a hundred bytes a
+    /// slot. A capacity in the millions is therefore a memory decision, not just a retention
+    /// one.</para>
     /// </summary>
     /// <exception cref="ArgumentOutOfRangeException">A negative capacity.</exception>
     public int RecentRunCapacity

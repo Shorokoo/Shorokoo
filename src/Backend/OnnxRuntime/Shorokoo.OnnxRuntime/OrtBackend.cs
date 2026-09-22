@@ -130,9 +130,12 @@ public abstract class OrtBackend : IShorokooBackend
         // process. Disposing in a finally keeps them rooted across the constructor.
         using var options = new SessionOptions();
         Configure(options, graphOptimization, logSeverity);
-        var profileDirectory = EnableProfiling(options, diagnostics);
+        string? profileDirectory = null;
         try
         {
+            // Inside the try: the folder exists before the two setters that follow it call into
+            // the runtime, so a throw from either would otherwise leave it behind.
+            profileDirectory = EnableProfiling(options, diagnostics);
             _configureExecutionProvider(options, deviceMemory);
             var session = new InferenceSession(modelBytes.ToArray(), options);
             // The session keeps this backend so it can rebuild a feed that came from another

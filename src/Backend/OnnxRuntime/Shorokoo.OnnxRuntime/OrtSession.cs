@@ -48,6 +48,9 @@ internal sealed class OrtSession : IShorokooSession
         _cudaDeviceId = cudaDeviceId;
         _backend = backend;
         _profileDirectory = profileDirectory;
+        // Nothing to clean up, so nothing to finalize -- every untraced session would otherwise
+        // join the finalization queue to run an early return.
+        if (profileDirectory is null) GC.SuppressFinalize(this);
         _outputMemory = new Lazy<OutputMemory>(() => DiscoverOutputMemory(session));
         _arenaAllocator = new Lazy<OrtAllocator?>(CreateArenaAllocator);
     }
@@ -262,10 +265,16 @@ internal sealed class OrtSession : IShorokooSession
             using var infos = session.GetMemoryInfosForOutputs();
             foreach (var info in infos)
             {
-                if (info.Name == OrtTensorValue.CpuAllocatorName) { host++; continue; }
+                if (OrtTensorValue.IsHostAllocator(info.Name)) { host++; continue; }
                 onDevice++;
                 device ??= CopyOf(info);
             }
+
+            // The session is a bare argument whose last read is the call above, so without this
+            // the JIT may retire it before the native call returns and a GC on any thread runs
+            // ~InferenceSession underneath it. Nothing else roots it: a CompiledGraph is held
+            // weakly by its context.
+            GC.KeepAlive(session);
 
             var placement = (host, onDevice) switch
             {
@@ -443,12 +452,30 @@ internal sealed class OrtSession : IShorokooSession
         }
         _session.Dispose();
         // After the session, which is what closes the profile file it has been writing.
-        if (_profileDirectory is not null)
-        {
-            try { Directory.Delete(_profileDirectory, recursive: true); }
-            // A temp folder that will not delete is not worth failing a disposal over; the
-            // platform reclaims it, and there is nothing a caller could do here.
-            catch (Exception) { }
-        }
+        DeleteProfileDirectory();
+        GC.SuppressFinalize(this);
+    }
+
+    /// <summary>
+    /// Deletes the trace folder for a session nobody disposed. A compiled graph is held weakly by
+    /// the context that made it, so one that is used and dropped is collected with no disposal
+    /// ever running — and each traced session owns a folder, so without this a program that
+    /// compiles as it goes leaves one behind per compile for as long as it runs.
+    ///
+    /// <para>Only the folder. Nothing native is touched here: the session and everything built
+    /// over it own their own handles and are finalized in their own time, and reaching for one of
+    /// them from this thread is exactly the use-after-free this backend takes such care to avoid.
+    /// A session built without tracing suppresses this in its constructor rather than joining the
+    /// finalization queue to do nothing.</para>
+    /// </summary>
+    ~OrtSession() => DeleteProfileDirectory();
+
+    private void DeleteProfileDirectory()
+    {
+        if (_profileDirectory is null) return;
+        try { Directory.Delete(_profileDirectory, recursive: true); }
+        // A temp folder that will not delete is not worth failing a disposal over; the platform
+        // reclaims it, and there is nothing a caller could do here.
+        catch (Exception) { }
     }
 }

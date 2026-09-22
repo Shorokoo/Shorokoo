@@ -33,10 +33,15 @@ public enum SessionOutputPlacement
 /// <param name="OpType">The operator the node runs.</param>
 /// <param name="Provider">The execution provider that ran it, in the runtime's own spelling —
 /// <c>CPUExecutionProvider</c>, <c>CUDAExecutionProvider</c>.</param>
-/// <param name="NodeIndex">The node's index in the runtime's execution order.</param>
-/// <param name="ActivationBytes">Bytes of activations the node read.</param>
-/// <param name="ParameterBytes">Bytes of weights the node read.</param>
-/// <param name="OutputBytes">Bytes the node produced.</param>
+/// <param name="NodeIndex">The node's index in the runtime's resolved graph. Not its position
+/// in the execution order: a runtime's fusion passes append the nodes they create at the end of
+/// the index space while leaving them where they were in the plan, so on any graph that fuses,
+/// the two disagree. Read <see cref="NodePlacement.Nodes"/> for the order things ran in.</param>
+/// <param name="ActivationBytes">Bytes of activations the node read, on the first run of it the
+/// trace recorded. A graph whose shapes vary per run moves these; the provider does not, which is
+/// what the placement is read for.</param>
+/// <param name="ParameterBytes">Bytes of weights the node read, on that same run.</param>
+/// <param name="OutputBytes">Bytes the node produced, on that same run.</param>
 public readonly record struct NodeExecution(
     string Name,
     string OpType,
@@ -81,11 +86,14 @@ public sealed class NodePlacement
     public NodePlacement(IReadOnlyList<NodeExecution> nodes)
     {
         ArgumentNullException.ThrowIfNull(nodes);
-        // Ordered here rather than left to whoever produced the list: a runtime writes its trace
-        // as it runs and a graph run out of order is what this type exists to show, so the one
-        // thing the caller cannot be asked to have done first is put it back in order. The sort is
-        // stable, so nodes a runtime reports without an index keep the order it gave them.
-        Nodes = [.. nodes.OrderBy(node => node.NodeIndex)];
+        // Kept in the order given, which is the order they ran: a runtime writes its trace as each
+        // node completes. Sorting by NodeIndex looks like the same thing and is not -- that is the
+        // index in the resolved graph, and a fusion pass appends what it creates at the end of the
+        // index space without moving it in the plan, so sorting by it takes a correct order and
+        // scrambles it. On a partitioned graph it is worse than cosmetic: the copy nodes a runtime
+        // inserts at a provider boundary get the highest indices, so exactly the nodes that mark
+        // the fallback would sort away from where the fallback happened.
+        Nodes = [.. nodes];
         Providers =
         [
             .. Nodes.GroupBy(node => node.Provider, StringComparer.Ordinal)

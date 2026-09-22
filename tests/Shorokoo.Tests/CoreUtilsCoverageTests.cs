@@ -1129,14 +1129,16 @@ public class CoreUtilsCoverageTests
         static NodeExecution Node(string name, string provider, long index, long output)
             => new(name, "Add", provider, index, output * 2, 8, output);
 
+        // Given in the order they ran, with the fused node carrying the high graph index a fusion
+        // pass hands out -- sorting by that index is what would move it to the end.
         var placement = new NodePlacement(
         [
-            Node("c", "CUDAExecutionProvider", 2, 400),
             Node("a", "CUDAExecutionProvider", 0, 100),
+            Node("c", "CUDAExecutionProvider", 6, 400),
             Node("b", "CPUExecutionProvider", 1, 200),
         ]);
 
-        Assert.Equal(["a", "b", "c"], placement.Nodes.Select(node => node.Name));
+        Assert.Equal(["a", "c", "b"], placement.Nodes.Select(node => node.Name));
         Assert.Equal(["CUDAExecutionProvider", "CPUExecutionProvider"], placement.Providers.Select(p => p.Provider));
         Assert.Equal([2, 1], placement.Providers.Select(p => p.NodeCount));
         Assert.Equal([500L, 200L], placement.Providers.Select(p => p.OutputBytes));

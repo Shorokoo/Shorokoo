@@ -3,7 +3,7 @@ using Shorokoo.Core;
 using Shorokoo.Graph;
 using Shorokoo.Core.Nodes;
 using Shorokoo.Core.Nodes.OnnxNodes;
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 using Shorokoo.Core.Nodes.AutoDiff;
 using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Modules;

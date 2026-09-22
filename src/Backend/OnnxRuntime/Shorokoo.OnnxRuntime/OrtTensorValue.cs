@@ -1,10 +1,10 @@
 using System.Runtime.InteropServices;
 using Microsoft.ML.OnnxRuntime;
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 using OrtFloat16 = Microsoft.ML.OnnxRuntime.Float16;
 using OrtBFloat16 = Microsoft.ML.OnnxRuntime.BFloat16;
-using ShoFloat16 = Shorokoo.Core.Inference.Abstractions.Float16;
-using ShoBFloat16 = Shorokoo.Core.Inference.Abstractions.BFloat16;
+using ShoFloat16 = Shorokoo.Core.Backends.Float16;
+using ShoBFloat16 = Shorokoo.Core.Backends.BFloat16;
 
 namespace Shorokoo.OnnxRuntime;
 
@@ -57,6 +57,16 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
 
     /// <summary>ORT's name for the host allocator, on every execution provider.</summary>
     internal const string CpuAllocatorName = "Cpu";
+
+    /// <summary>
+    /// Whether <paramref name="allocatorName"/> names memory the host owns. Beyond the plain CPU
+    /// allocator that is the pinned host arenas a device provider stages copies through: a
+    /// device EP serves an output it was asked to leave on the host from its pinned allocator, so
+    /// treating that name as device memory reports a graph that partly ran on the host as one that
+    /// did not.
+    /// </summary>
+    internal static bool IsHostAllocator(string? allocatorName) =>
+        allocatorName is CpuAllocatorName or "CudaPinned" or "HipPinned";
 
     /// <summary>Refuses a span over memory the host cannot read. The span accessors hand out a
     /// pointer without checking where it points, so this is the difference between an exception

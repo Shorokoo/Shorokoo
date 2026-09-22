@@ -325,13 +325,13 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Output("output_sequence", ["T", "S"], "R3"),
 
             Op(STRING_CONCAT)
-                .Tensor<@string>("T")
+                .Tensor<utf8>("T")
                 .Input("X", "T", "R1")
                 .Input("Y", "T", "R2")
                 .Output("Z", "T", rankBroadcast: "R"),
 
             Op(STRING_NORMALIZER)
-                .Tensor<@string>("T")
+                .Tensor<utf8>("T")
                 .AttributeString(AttrCaseChangeAction)
                 .AttributeLong(AttrIsCaseSensitive)
                 .AttributeString(AttrLocale)
@@ -340,7 +340,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Output("Y", "T", "R"),
 
             Op(STRING_SPLIT)
-                .Tensor<@string>("T1")
+                .Tensor<utf8>("T1")
                 .Tensor<int64>("T2")
                 .AttributeString(AttrDelimiter)
                 .AttributeLong(AttrMaxsplit)

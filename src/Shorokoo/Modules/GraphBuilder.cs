@@ -55,7 +55,7 @@ namespace Shorokoo.Core
             
             // Other types
             typeof(bit),        // Boolean-like
-            typeof(@string),   // String type
+            typeof(utf8),       // Utf8 type
         };
 
         /// <summary>

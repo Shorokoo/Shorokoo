@@ -11,7 +11,7 @@ using Shorokoo.Core.Utils;
 using Shorokoo.Tests.Benchmarks;
 using Shorokoo.Core.Graph;
 using Shorokoo.Core.AutoDiffCheckpointing.OpsPerf;
-using Shorokoo.Core.Inference;
+using Shorokoo.Core.Interpreter;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 
 namespace Shorokoo.Tests;

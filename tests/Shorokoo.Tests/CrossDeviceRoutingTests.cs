@@ -1,4 +1,4 @@
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 using Shorokoo.Runtime;
 
 namespace Shorokoo.Tests;
@@ -24,8 +24,8 @@ public class CrossDeviceRoutingCoverageTests
         Assert.Equal(MemorySpace.Cuda(0), MemorySpace.Cuda(0));
         Assert.NotEqual(MemorySpace.Host, MemorySpace.Cuda(0));
 
-        IShorokooInferenceBackend first = new StubBackend(ComputeDevice.Cuda, 0);
-        IShorokooInferenceBackend second = new StubBackend(ComputeDevice.Cuda, 0);
+        IShorokooBackend first = new StubBackend(ComputeDevice.Cuda, 0);
+        IShorokooBackend second = new StubBackend(ComputeDevice.Cuda, 0);
         Assert.Equal(first.MemorySpace, second.MemorySpace);
         Assert.Equal(MemorySpace.Cuda(0), first.MemorySpace);
     }
@@ -85,7 +85,7 @@ public class CrossDeviceRoutingCoverageTests
         // that decide from that equality are refused rather than guessed at. A copy is not one of
         // them: it reads the bytes back through the backend that made them.
         var other = new StubBackend(ComputeDevice.Other, null);
-        Assert.Equal(MemoryKind.Unknown, ((IShorokooInferenceBackend)other).MemorySpace.Kind);
+        Assert.Equal(MemoryKind.Unknown, ((IShorokooBackend)other).MemorySpace.Kind);
 
         using var context = new ComputeContext(other);
         var onUnknown = TensorData([2L], (float[])[1f, 2f]).TransferTo(context);
@@ -156,7 +156,7 @@ public class CrossDeviceRoutingCoverageTests
     {
         var other = new StubBackend(ComputeDevice.Other, null);
         using var context = new ComputeContext(other);
-        Assert.Equal(MemorySpace.UnknownDevice, ((IShorokooInferenceBackend)other).MemorySpace);
+        Assert.Equal(MemorySpace.UnknownDevice, ((IShorokooBackend)other).MemorySpace);
 
         var onDevice = TensorData([2L], (float[])[3f, 4f]).CopyTo(context);
         Assert.False(onDevice.Space.IsKnown);
@@ -170,7 +170,7 @@ public class CrossDeviceRoutingCoverageTests
     /// <summary>A backend that answers about itself and records what it was asked to build, so a
     /// transfer's route can be read off it without a session, a native runtime or a card.</summary>
     private sealed class StubBackend(ComputeDevice device, int? cudaDeviceId)
-        : IShorokooInferenceBackend
+        : IShorokooBackend
     {
         public int BackendMemoryBuilds { get; private set; }
 
@@ -195,7 +195,7 @@ public class CrossDeviceRoutingCoverageTests
             return ((StubValue)value).Bytes;
         }
 
-        public IShorokooInferenceSession CreateSession(
+        public IShorokooSession CreateSession(
             ReadOnlyMemory<byte> modelBytes, ShorokooGraphOptimization graphOptimization,
             ShorokooLogSeverity logSeverity,
             DeviceMemorySettings deviceMemory) => throw new NotSupportedException();

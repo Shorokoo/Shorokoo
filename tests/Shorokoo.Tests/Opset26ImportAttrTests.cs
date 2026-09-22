@@ -1,6 +1,6 @@
 using System.IO;
 using Shorokoo.Core.Factory.IR;
-using Shorokoo.Core.Inference;
+using Shorokoo.Core.Interpreter;
 using Shorokoo.Core.Graph;
 using Shorokoo.Runtime;
 using static Shorokoo.Tests.OnnxProtoBuilders;

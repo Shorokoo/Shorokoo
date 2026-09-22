@@ -1,6 +1,6 @@
 using System;
 using System.Collections.Generic;
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 using Shorokoo.Core.Training;
 using Shorokoo.Graph;
 

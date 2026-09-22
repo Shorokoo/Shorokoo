@@ -5,7 +5,7 @@ using Shorokoo.Core.AutoDiffCheckpointing;
 using Shorokoo.Core.AutoDiffCheckpointing.OpsPerf;
 using Shorokoo.Core.Factory;
 using Shorokoo.Core.Graph;
-using Shorokoo.Core.Inference;
+using Shorokoo.Core.Interpreter;
 using Shorokoo.Core.Nodes.Processors.Fast;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 using Shorokoo.Graph;
@@ -208,8 +208,12 @@ public class OpsPerfCalibrationTests
             using var options = new SessionOptions();
             options.LogSeverityLevel = OrtLoggingLevel.ORT_LOGGING_LEVEL_FATAL;
             options.GraphOptimizationLevel = level;
-            options.EnableProfiling = true;
+            // The prefix before the switch: ORT reads it when profiling is enabled and
+            // ignores a later change, so the other order writes the profile into the process's
+            // working directory under ORT's own name and the cleanup below deletes an empty
+            // folder.
             options.ProfileOutputPathPrefix = Path.Combine(dir, "profile");
+            options.EnableProfiling = true;
             if (Environment.GetEnvironmentVariable("SHOROKOO_OPSPERF_DENORMAL_AS_ZERO") is "1")
                 options.AddSessionConfigEntry("session.set_denormal_as_zero", "1");
             using var session = new InferenceSession(model, options);

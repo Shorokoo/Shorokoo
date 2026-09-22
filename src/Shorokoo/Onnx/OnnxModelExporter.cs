@@ -61,13 +61,24 @@ namespace Shorokoo.Onnx
         {
             if (model is null) throw new ArgumentNullException(nameof(model));
 
-            long totalTensorBytes = OnnxExternalData.EnumerateAllTensors(model)
-                .Sum(TensorPayloadBytes);
+            var allTensors = OnnxExternalData.EnumerateAllTensors(model).ToList();
+            long totalTensorBytes = allTensors.Sum(TensorPayloadBytes);
             if (totalTensorBytes > maxTensorBytes)
+            {
+                // External data is defined over raw bytes, and ONNX forbids raw_data for STRING,
+                // so a string initializer can never move to a side file. Where the payload is
+                // mostly strings, naming SaveWithExternalData would send the caller in a circle.
+                long stringBytes = allTensors.Sum(t => t.StringDatas.Sum(s => (long)(s?.Length ?? 0)));
+                string remedy = stringBytes > totalTensorBytes / 2
+                    ? "Most of it is string data, which ONNX keeps in string_data rather than "
+                      + "raw_data and so cannot be moved to an external-data side file at all: "
+                      + "the model has to hold fewer or shorter strings."
+                    : "Use OnnxModelExporter.SaveWithExternalData to store large initializers in a side file.";
                 throw new ModelException(ErrorCodes.XD007, $"model '{filePath}'",
                     $"the model's tensor data totals {totalTensorBytes:N0} bytes, which exceeds the " +
                     $"{maxTensorBytes:N0}-byte protobuf message ceiling for a self-contained .onnx file. " +
-                    "Use OnnxModelExporter.SaveWithExternalData to store large initializers in a side file.");
+                    remedy);
+            }
 
             AtomicFileWriter.WriteFile(
                 filePath, stream => ProtoBuf.Serializer.Serialize(stream, model));

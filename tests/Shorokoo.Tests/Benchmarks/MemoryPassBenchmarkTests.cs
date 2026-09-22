@@ -3,7 +3,7 @@ using Newtonsoft.Json;
 using Shorokoo.Core.Factory;
 using Shorokoo.Graph;
 using Shorokoo.OnnxRuntime;
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 using Shorokoo.Core.Factory.IR;
 using Shorokoo.Modules.Initializers;
 using Shorokoo.Modules.Layers;
@@ -372,8 +372,12 @@ public class MemoryPassBenchmarkTests
             try
             {
                 using var options = RigSessionOptions();
-                options.EnableProfiling = true;
+                // The prefix before the switch: ORT reads it when profiling is enabled and
+                // ignores a later change, so the other order writes the profile into the process's
+                // working directory under ORT's own name and the cleanup below deletes an empty
+                // folder.
                 options.ProfileOutputPathPrefix = Path.Combine(dir, "profile");
+                options.EnableProfiling = true;
                 using var session = new InferenceSession(_model, options);
                 var feeds = Feeds(session, _inputShapes);
                 using var runOptions = new RunOptions();

@@ -1,6 +1,6 @@
 using System.Reflection;
 using Shorokoo.Core.Graph;
-using Shorokoo.Core.Inference;
+using Shorokoo.Core.Interpreter;
 using Shorokoo.Core.Nodes.Processors.Fast;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 using Shorokoo.Runtime;

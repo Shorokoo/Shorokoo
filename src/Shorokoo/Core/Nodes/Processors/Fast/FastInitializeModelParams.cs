@@ -36,7 +36,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// <param name="graph">The concrete architecture whose initializers to run.</param>
         /// <param name="computeContext">The context the initializers run on, or null for
         /// <see cref="ComputeContext.Default"/>. Resolved only once there is an initializer to
-        /// run — resolving the default context resolves an inference backend, and a graph with no
+        /// run — resolving the default context resolves a backend, and a graph with no
         /// trainable parameter returns empty below without executing anything. Building and
         /// exporting such a model must not require a backend be deployed.</param>
         /// <param name="rngConfig">The RNG configuration the per-parameter init streams derive

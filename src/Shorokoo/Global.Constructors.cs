@@ -1,4 +1,4 @@
-﻿using Shorokoo.Core.Inference.Abstractions;
+﻿using Shorokoo.Core.Backends;
 using Shorokoo;
 using Shorokoo.Core;
 using Shorokoo.Core.Nodes;
@@ -154,7 +154,7 @@ namespace Shorokoo
         /// <summary>Creates a constant scalar holding the given value.</summary>
         public static Scalar<float64> Scalar(double val) => OnnxOp.Constant(TensorAttribute.Create(new Shape(), val));
         /// <summary>Creates a constant scalar holding the given value.</summary>
-        public static Scalar<@string> Scalar(string val) => OnnxOp.Constant(TensorAttribute.Create(new Shape(), val));
+        public static Scalar<utf8> Scalar(string val) => OnnxOp.Constant(TensorAttribute.Create(new Shape(), val));
 
         /// <summary>Creates a constant scalar holding the default value of T (zero / false).</summary>
         public static Scalar<T> DefaultScalar<T>() where T : IVarType => OnnxOp.Constant(TensorAttributeWithDefaultVals(OnnxUtils.GetDType<T>(), []));
@@ -209,7 +209,7 @@ namespace Shorokoo
         /// <summary>Creates a constant vector from the given values.</summary>
         public static Vector<float64> Vector(params double[] val) => OnnxOp.Constant(TensorAttribute.Create(val.Length, val));
         /// <summary>Creates a constant vector holding the given values.</summary>
-        public static Vector<@string> Vector(params string[] val) => OnnxOp.Constant(TensorAttribute.Create(val.Length, val));
+        public static Vector<utf8> Vector(params string[] val) => OnnxOp.Constant(TensorAttribute.Create(val.Length, val));
 
         /// <summary>Creates a constant-filled vector of the given length.</summary>
         public static Vector<bit> VectorFill(long length, bool val) => OnnxOp.ConstantOfShape(Vector(length), TensorAttribute.Create(1, val), rank: 1);
@@ -456,7 +456,7 @@ namespace Shorokoo
         /// <summary>Creates TensorData with the given dims from the flat values.</summary>
         public static TensorData<float64> TensorData(long[] dims, params double[] val) => HostTensorData<float64>.From(dims, val);
         /// <summary>Creates TensorData with the given dims from the flat values.</summary>
-        public static TensorData<@string> TensorData(long[] dims, params string[] val) => HostStringTensorData.From(dims, val);
+        public static TensorData<utf8> TensorData(long[] dims, params string[] val) => HostStringTensorData.From(dims, val);
 
         /// <summary>Creates rank-1 TensorData of the given length from the values.</summary>
         public static TensorData<bit> TensorData(long dims, params bool[] val) => HostTensorData<bit>.From(dims, val);
@@ -485,7 +485,7 @@ namespace Shorokoo
         /// <summary>Creates rank-1 TensorData of the given length from the values.</summary>
         public static TensorData<float64> TensorData(long dims, params double[] val) => HostTensorData<float64>.From(dims, val);
         /// <summary>Creates rank-1 TensorData of the given length from the values.</summary>
-        public static TensorData<@string> TensorData(long dims, params string[] val) => HostStringTensorData.From(dims, val);
+        public static TensorData<utf8> TensorData(long dims, params string[] val) => HostStringTensorData.From(dims, val);
 
         /// <summary>Creates a tensor of the given runtime shape filled with the value (ONNX ConstantOfShape).</summary>
         public static Tensor<bit> TensorFill(Vector<int64> shape, bool val) => OnnxOp.ConstantOfShape(shape, TensorAttribute.Create(1, val));
@@ -710,7 +710,7 @@ namespace Shorokoo
             if (type.ToIVarType() == typeof(bfloat16)) return TensorData(dims, vals.Cast<BFloat16>().ToArray());
             if (type.ToIVarType() == typeof(float32)) return TensorData(dims, vals.Cast<float>().ToArray());
             if (type.ToIVarType() == typeof(float64)) return TensorData(dims, vals.Cast<double>().ToArray());
-            if (type.ToIVarType() == typeof(@string)) return TensorData(dims, vals.Cast<string>().ToArray());
+            if (type.ToIVarType() == typeof(utf8)) return TensorData(dims, vals.Cast<string>().ToArray());
             throw new UnsupportedDTypeException(ErrorCodes.GC006, type.ToString(), "TensorData",
                 $"DType '{type}' is not supported for tensor data creation with values");
         }

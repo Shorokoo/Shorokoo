@@ -1,5 +1,5 @@
 using Microsoft.ML.OnnxRuntime;
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 
 namespace Shorokoo.Tests.Utils;
 

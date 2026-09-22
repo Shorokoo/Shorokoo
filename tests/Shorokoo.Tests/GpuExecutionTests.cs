@@ -1,4 +1,4 @@
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 using Shorokoo.Modules.Losses;
 using Shorokoo.Modules.Optimizers;
@@ -28,7 +28,7 @@ public class GpuExecutionTests
     {
         // [CudaFact] already gates on a GPU backend being loaded; confirm the
         // bound factory really is a CUDA one rather than a silent CPU fallback.
-        var backend = InferenceBackend.Default.GetType().Assembly.GetName().Name ?? "";
+        var backend = DefaultBackend.Instance.GetType().Assembly.GetName().Name ?? "";
         Assert.EndsWith("GPU", backend);
 
         var result = AddTwoScalars(new ComputeContext(), 2.0f, 3.0f);

@@ -247,13 +247,13 @@ namespace Shorokoo.Core.Factory.IR
                             break;
                         case AttributeProto.AttributeType.Tensor:
                             var tensor = attributes.GetAttributeVal(attribute.Name).AssertNotNull();
-                            attribute.T = (TensorProto)OnnxIRFactory.CreateTensor(
+                            attribute.T = OnnxIRFactory.CreateTensor(
                                 tensor.Shape.Dims,
                                 name: null, // $"{name}_Tensor",
                                 tensor.DType,
                                 identifierTemplate: null,
                                 isTrainable: true,  // Tensor attributes are not state params
-                                tensor.Bytes.ToArray());
+                                tensor);
                             attribute.Type = AttributeProto.AttributeType.Tensor;
                             break;
                         case AttributeProto.AttributeType.Tensors:
@@ -339,7 +339,16 @@ namespace Shorokoo.Core.Factory.IR
             return node;
         }
 
-        public static TensorProto CreateTensor(long[]? dims, string? name, DType type, string? identifierTemplate, bool isTrainable, byte[] data)
+        /// <summary>
+        /// The <see cref="TensorProto"/> for <paramref name="values"/>, or -- when they are null --
+        /// a dtype-and-shape-true tensor carrying no payload, which is what a weights-stripped
+        /// model definition writes.
+        ///
+        /// <para>Strings take the other field. ONNX forbids <c>raw_data</c> for STRING and gives
+        /// string elements <c>string_data</c> instead, one UTF-8 blob apiece, so which field is
+        /// written follows from the dtype rather than from the caller.</para>
+        /// </summary>
+        public static TensorProto CreateTensor(long[]? dims, string? name, DType type, string? identifierTemplate, bool isTrainable, TensorAttribute? values)
         {
             var tensor = new TensorProto();
             
@@ -349,7 +358,16 @@ namespace Shorokoo.Core.Factory.IR
             if (name is not null)
                 tensor.Name = name;
 
-            tensor.RawData = data;
+            if (values is null)
+                tensor.RawData = [];
+            else if (type.IsSameElementTypeAs(DType.Utf8))
+                for (int i = 0; i < values.Values.Count; i++)
+                    tensor.StringDatas.Add(Encoding.UTF8.GetBytes(
+                        values.Values[i] ?? throw new InvalidOperationException(
+                            $"Element {i} of string tensor '{name}' is null. A string tensor's "
+                            + "elements are its storage, and ONNX has no null element to write.")));
+            else
+                tensor.RawData = values.Bytes.ToArray();
             tensor.data_type = type.ProtoTypeNum;
             
             if (identifierTemplate is not null)

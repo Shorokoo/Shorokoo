@@ -17,7 +17,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// <see cref="InternalComputationGraph"/>. Scope membership in the Fast pipeline is
     /// positional: every node whose index in <see cref="InternalComputationGraph.Nodes"/>
     /// falls between a <c>LOOP_OPEN</c> and its paired <c>LOOP_CLOSE</c> is treated as
-    /// a body node by <see cref="Shorokoo.Core.Inference.QuickExecutionEngine"/>'s
+    /// a body node by <see cref="Shorokoo.Core.Interpreter.QuickExecutionEngine"/>'s
     /// linear loop-back model. Shrinking a scope moves nodes that positionally fall
     /// inside it but do not actually depend on the loop's body outputs to just before
     /// the <c>LOOP_OPEN</c>, reducing the re-execution range on loop-back and

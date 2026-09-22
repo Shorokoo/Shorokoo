@@ -445,7 +445,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Output("Y", "T", "R"),
 
             Op(REGEX_FULL_MATCH)
-                .Tensor<@string>("T1")
+                .Tensor<utf8>("T1")
                 .Tensor<bit>("T2")
                 .AttributeString(AttrPattern)
                 .Input("X", "T1", "R")

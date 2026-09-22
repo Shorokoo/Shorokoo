@@ -425,10 +425,10 @@ namespace Shorokoo.Tests.Modules
     [Module]
     public partial class QeeConstantStringCheck
     {
-        public static (Tensor<@string>, Tensor<@string>) Inline()
+        public static (Tensor<utf8>, Tensor<utf8>) Inline()
         {
-            var cs = (Tensor<@string>)OnnxOp.Constant("hello");
-            var css = (Tensor<@string>)OnnxOp.Constant((string[])["a", "b", "c"]);
+            var cs = (Tensor<utf8>)OnnxOp.Constant("hello");
+            var css = (Tensor<utf8>)OnnxOp.Constant((string[])["a", "b", "c"]);
             return (cs, css);
         }
     }

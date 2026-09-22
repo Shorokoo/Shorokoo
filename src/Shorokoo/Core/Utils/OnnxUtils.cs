@@ -11,7 +11,7 @@ using Shorokoo.Core.Training;
 using Shorokoo.Core.Factory;
 using Shorokoo.Core.Factory.IR;
 using Shorokoo.Core.Nodes.Processors.Helpers;
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 using ProtoBuf;
 using System;
 using System.Collections.Generic;
@@ -88,7 +88,7 @@ namespace Shorokoo.Core.Utils
             else if (type == typeof(bfloat16)) return DType.BFloat16;
             else if (type == typeof(float32)) return DType.Float32;
             else if (type == typeof(float64)) return DType.Float64;
-            else if (type == typeof(@string) || type == typeof(string)) return DType.String;
+            else if (type == typeof(utf8) || type == typeof(string)) return DType.Utf8;
             else if (type == typeof(IModuleVarType)) return DType.Module;
             else if (type == typeof(IModelVarType)) return DType.Model;
             else if (type == typeof(invalid)) return DType.Invalid;
@@ -122,7 +122,7 @@ namespace Shorokoo.Core.Utils
             else if (typeof(T) == typeof(BFloat16) || typeof(T) == typeof(bfloat16)) return DType.BFloat16;
             else if (typeof(T) == typeof(float) || typeof(T) == typeof(float32)) return DType.Float32;
             else if (typeof(T) == typeof(double) || typeof(T) == typeof(float64)) return DType.Float64;
-            else if (typeof(T) == typeof(string) || typeof(T) == typeof(@string)) return DType.String;
+            else if (typeof(T) == typeof(string) || typeof(T) == typeof(utf8)) return DType.Utf8;
             else if (typeof(T) == typeof(IModuleVarType)) return DType.Module;
             else if (typeof(T) == typeof(IModelVarType)) return DType.Model;
             else if (typeof(T) == typeof(invalid)) return DType.Invalid;
@@ -245,10 +245,10 @@ namespace Shorokoo.Core.Utils
 
         public static IShorokooTensorValue CreateTensorValue<T>(Shape shape, T[] data)
             where T : unmanaged
-            => InferenceBackend.Default.CreateTensor<T>(data, (long[])shape);
+            => DefaultBackend.Instance.CreateTensor<T>(data, (long[])shape);
 
         public static IShorokooTensorValue CreateTensorValue(Shape shape, byte[] data)
-            => InferenceBackend.Default.CreateTensor<byte>(data, (long[])shape);
+            => DefaultBackend.Instance.CreateTensor<byte>(data, (long[])shape);
 
         /// <summary>
         /// A tensor over <paramref name="value"/> with no context: the framework's own host memory,
@@ -289,7 +289,7 @@ namespace Shorokoo.Core.Utils
             try
             {
                 foreach (var d in data) inner.Add(CopyTensorValue(d.ToTensorValue()));
-                var sequence = InferenceBackend.Default.CreateSequence(inner);
+                var sequence = DefaultBackend.Instance.CreateSequence(inner);
                 return CreateTensorDataSequenceFromValue(dtype, sequence);
             }
             catch
@@ -305,7 +305,7 @@ namespace Shorokoo.Core.Utils
         /// that would otherwise leave two owners pointing at one runtime value.
         /// </summary>
         internal static IShorokooTensorValue CopyTensorValue(IShorokooTensorValue value)
-            => BackendTransfer.CopyTo(InferenceBackend.Default, value);
+            => BackendTransfer.CopyTo(DefaultBackend.Instance, value);
 
         /// <summary>
         /// Wraps a runtime value whose producer is not known — the framework's own paths all know
@@ -414,7 +414,7 @@ namespace Shorokoo.Core.Utils
             => new OnnxTensorDataSequence<T>(value);
 
         public static IShorokooTensorValue CreateTensorValueFromRawData(Shape shape, DType type, byte[] data)
-            => InferenceBackend.Default.CreateTensorFromRawBytes(
+            => DefaultBackend.Instance.CreateTensorFromRawBytes(
                 (ShorokooTensorElementType)(int)type.ProtoTypeNum, data, (long[])shape);
 
         public static string ToJson(this InternalComputationGraph fastGraph)

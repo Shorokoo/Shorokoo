@@ -1,5 +1,5 @@
 using System.Collections.Immutable;
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Runtime;
 

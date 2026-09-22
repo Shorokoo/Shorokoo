@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.CompilerServices;
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 using Shorokoo.Runtime;
 
 namespace Shorokoo
@@ -11,18 +11,18 @@ namespace Shorokoo
     /// A string tensor held as an ordinary managed <c>string[]</c>, owned by this object and
     /// belonging to no backend.
     ///
-    /// <para><see cref="HostTensorData{T}"/>'s counterpart for <c>@string</c>, and here for
+    /// <para><see cref="HostTensorData{T}"/>'s counterpart for <c>utf8</c>, and here for
     /// the same reason. <c>TensorData([2], "a", "b")</c> and <c>Scalar("hello")</c> describe a
     /// graph; they do not run one, so building one should need no execution provider, no native
     /// runtime and no deployed backend. Each of them went through
-    /// <c>InferenceBackend.Default.CreateStringTensor</c> instead, which resolved the process-wide
+    /// <c>DefaultBackend.Instance.CreateStringTensor</c> instead, which resolved the process-wide
     /// backend the moment a model mentioned a string literal.</para>
     ///
     /// <para>Strings stayed out of <see cref="HostTensorData{T}"/> because its storage is a flat
     /// byte buffer and a string element is variable-length and reference-typed. That is an
     /// argument about the storage and not about when the value is built: the storage differs here,
     /// the deferral does not. The runtime value is built the first time a backend asks for one, in
-    /// <see cref="ToTensorValue(IShorokooInferenceBackend)"/>, and kept per backend from
+    /// <see cref="ToTensorValue(IShorokooBackend)"/>, and kept per backend from
     /// then on.</para>
     ///
     /// <para>There is no byte view of these elements, and there was none before: an ONNX Runtime
@@ -31,7 +31,7 @@ namespace Shorokoo
     /// <see cref="Strings"/> is the read that needs no backend at all;
     /// <c>ToTensorValue(...).GetStringTensorData()</c> is the same answer by way of a runtime.</para>
     /// </summary>
-    public sealed class HostStringTensorData : TensorData<@string>, IDisposable
+    public sealed class HostStringTensorData : TensorData<utf8>, IDisposable
     {
         private readonly string[] _values;
 
@@ -163,7 +163,7 @@ namespace Shorokoo
         /// that backend asks and kept for the next time. The value is this tensor's, like
         /// <see cref="OnnxTensorData{T}"/>'s is: the caller reads it and does not dispose it.
         /// </summary>
-        internal override IShorokooTensorValue ToTensorValue(IShorokooInferenceBackend backend)
+        internal override IShorokooTensorValue ToTensorValue(IShorokooBackend backend)
         {
             ArgumentNullException.ThrowIfNull(backend);
             ThrowIfDisposed();

@@ -467,7 +467,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
             Op(CONSTANT)
                 .Tensor<float32>("T1")
                 .Tensor<int64>("T2")
-                .Tensor<@string>("T3")
+                .Tensor<utf8>("T3")
                 .Tensor<AnyLike>("T4")
                 .AttributeTensor(AttrValue, "T4", "R")
                 // .AttributeSparseTensor(AttrSparseValue)

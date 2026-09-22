@@ -1,4 +1,4 @@
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 using Shorokoo;
 using Shorokoo.Core;
 using Shorokoo.Core.Nodes.NodeDefinitions;

@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 using Shorokoo.Core.Utils;
 using Shorokoo.Runtime;
 
@@ -20,11 +20,11 @@ namespace Shorokoo
     /// provider, no native runtime, and no deployed backend at all.</para>
     ///
     /// <para>It did before. Every literal went through
-    /// <c>InferenceBackend.Default.CreateTensor</c>, so the node definition table's own tensors
+    /// <c>DefaultBackend.Instance.CreateTensor</c>, so the node definition table's own tensors
     /// resolved the process-wide backend the first time anything touched a graph — which meant a
     /// program that only wanted to build a model and export it as ONNX still had to deploy a
     /// runtime to do it. The tensor arrives on a backend when it is fed to a session, in
-    /// <see cref="TensorData.ToTensorValue(IShorokooInferenceBackend)"/>, and not before.</para>
+    /// <see cref="TensorData.ToTensorValue(IShorokooBackend)"/>, and not before.</para>
     ///
     /// <para>String tensors are not held here: their elements are variable-length and
     /// reference-typed, so they do not fit a flat byte buffer and keep the backend-backed path.</para>
@@ -176,7 +176,7 @@ namespace Shorokoo
         /// first time that backend asks and kept for the next time. The value is this tensor's,
         /// like <see cref="OnnxTensorData{T}"/>'s is: the caller reads it and does not dispose it.
         /// </summary>
-        internal override IShorokooTensorValue ToTensorValue(IShorokooInferenceBackend backend)
+        internal override IShorokooTensorValue ToTensorValue(IShorokooBackend backend)
         {
             ArgumentNullException.ThrowIfNull(backend);
             ThrowIfDisposed();

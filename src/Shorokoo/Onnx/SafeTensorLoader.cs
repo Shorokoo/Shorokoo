@@ -13,7 +13,7 @@ using Shorokoo.Modules;
 using Shorokoo.Graph;
 using Shorokoo.Core.Nodes.OnnxNodes;
 using static Shorokoo.Globals;
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 
 namespace Shorokoo.Onnx
 {

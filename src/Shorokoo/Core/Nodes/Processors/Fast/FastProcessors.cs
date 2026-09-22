@@ -5,8 +5,8 @@ using Shorokoo.Graph;
 using Shorokoo.Core.Nodes;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 using Shorokoo.Core.Nodes.OnnxNodes;
-using Shorokoo.Core.Inference;
-using Shorokoo.Core.Inference.Helpers;
+using Shorokoo.Core.Interpreter;
+using Shorokoo.Core.Interpreter.Helpers;
 using Shorokoo.Core.Nodes.AutoDiff;
 using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Modules;
@@ -64,7 +64,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// </summary>
         public static TensorData RehostOffSession(TensorData data)
         {
-            if (data.DType.ProtoTypeNum == DType.String.ProtoTypeNum) return data;
+            if (data.DType.ProtoTypeNum == DType.Utf8.ProtoTypeNum) return data;
             // Read the bytes before disposing: that invalidates the buffer they came from.
             var copy = TensorData.CreateFromRawBytes(data.Shape, data.DType, data.CopyRawMemory());
             // Taking the span is data's last read, so keep it alive until the copy is out of the

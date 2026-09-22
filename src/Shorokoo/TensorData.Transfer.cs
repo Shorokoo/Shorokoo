@@ -1,6 +1,6 @@
 using System;
 using System.Collections.Generic;
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 using Shorokoo.Runtime;
 
 namespace Shorokoo
@@ -153,7 +153,7 @@ namespace Shorokoo
                     + "could only be built where that context is. Detach() takes a copy in the "
                     + "framework's own host memory, and that copy can be moved.");
 
-            var attribute = DType == DType.String
+            var attribute = DType.IsSameElementTypeAs(DType.Utf8)
                 ? TensorAttribute.OverStrings(Shape, [.. StringElements()])
                 // The tensor's own array where it has one AND where it is the only name for it, so
                 // the move really moves. Surrendering this handle says nothing about another's, and
@@ -176,10 +176,18 @@ namespace Shorokoo
             => DType.IsGenericType && this is IOnnxData onnx ? (DType)(int)onnx.Value.ElementType : null;
 
         /// <summary>The elements of a string tensor, however this one holds them.</summary>
-        private IEnumerable<string> StringElements() => this switch
+        private protected IEnumerable<string> StringElements() => this switch
         {
             HostStringTensorData host => host.Strings,
-            IOnnxData onnx => onnx.Value.GetStringTensorData(),
+            // Guarded like every other read of a backend-held tensor: a value in the provider's
+            // own memory is not the host's to read, and saying so beats handing back whatever
+            // the elements happen to collide with.
+            IOnnxData onnx => onnx.Value.IsHostAccessible
+                ? onnx.Value.GetStringTensorData()
+                : throw new InvalidOperationException(
+                    $"This tensor ({Shape}:{DType}) lives in the execution provider's own memory, "
+                    + "not host memory, so its elements cannot be read here. Take a host copy of "
+                    + "the state with StepToCheckpoint(...) on the step you want to read or save."),
             _ => throw new InvalidOperationException(
                 $"This tensor ({this}) holds strings but carries neither the elements themselves "
                 + "nor a runtime value to read them from."),
@@ -272,7 +280,7 @@ namespace Shorokoo
         /// the runtime that made it, so the target has to be handed contents rather than a pointer.
         ///
         /// <para>The target allocates them itself, through
-        /// <see cref="IShorokooInferenceBackend.CreateTensorInBackendMemory"/> rather than
+        /// <see cref="IShorokooBackend.CreateTensorInBackendMemory"/> rather than
         /// <c>CreateTensorFromRawBytes</c>, so the bytes land in the memory
         /// <paramref name="to"/> names instead of in host memory wearing its name. That is the
         /// difference between a tensor that is on the card and one an execution provider has to
@@ -283,7 +291,7 @@ namespace Shorokoo
             // Strings have no flat buffer to copy, so they take the route their own literals take:
             // the elements themselves, rebuilt on the other side. A backend holding them is asked
             // for them the same way, through the value it made.
-            if (DType == DType.String) return CopyStringsAcross(target);
+            if (DType.IsSameElementTypeAs(DType.Utf8)) return CopyStringsAcross(target);
 
             var bytes = HostBytes();
 

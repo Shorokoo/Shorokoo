@@ -1,0 +1,14 @@
+using Shorokoo.Core.Interpreter.Helpers;
+using Shorokoo.Core.Nodes.AutoDiff;
+using Shorokoo.Core.Nodes.NodeDefinitions;
+using Shorokoo.Modules;
+
+namespace Shorokoo.Core.Interpreter.Ops;
+
+internal sealed class ReduceMinOp : ReduceOpBase
+{
+    public override string OpCode => OpCodes.REDUCE_MIN;
+    protected override float Reduce(IEnumerable<float> values) => values.Min();
+    protected override long ReduceInt(IEnumerable<long> values, DType dtype) => values.Min();
+    protected override ulong ReduceUInt(IEnumerable<ulong> values, DType dtype) => values.Min();
+}

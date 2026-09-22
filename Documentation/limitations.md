@@ -406,7 +406,7 @@ as unsupported and do not build on them.
 
 That warning is about this one namespace, not about the `Shorokoo.Core.*` prefix.
 Ten namespaces under it carry documented public API — among them
-`Shorokoo.Core.Inference`, where `QuickExecutionEngine` lives, and
+`Shorokoo.Core.Interpreter`, where `QuickExecutionEngine` lives, and
 `Shorokoo.Core.Training`, where the learning-rate `Schedule` / `Schedules` API
 does. [orientation.md](orientation.md#public-core-namespaces) lists them.
 

@@ -1,5 +1,5 @@
 ﻿
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 using Shorokoo;
 using Shorokoo.Core;
 using Shorokoo.Core.Nodes.NodeDefinitions;
@@ -17,7 +17,7 @@ using System.Diagnostics;
 namespace Shorokoo
 {
     /// <summary>
-    /// Runtime element data-type descriptor: the standard numeric/String/Bool types,
+    /// Runtime element data-type descriptor: the standard numeric/Utf8/Bool types,
     /// Module/Model markers, generic-type placeholders (GenericType1..8), and
     /// dynamically registered TensorStruct types. Compares by type id and generic
     /// parameter name.
@@ -91,7 +91,7 @@ namespace Shorokoo
         /// <summary>The 64-bit unsigned integer data type.</summary>
         public static DType UInt64 { get; private set; } = new DType("UInt64", 13, default(ulong));
         /// <summary>The UTF-8 string data type.</summary>
-        public static DType String { get; private set; } = new DType("String", 8, string.Empty);
+        public static DType Utf8 { get; private set; } = new DType("Utf8", 8, string.Empty);
         /// <summary>The boolean data type.</summary>
         public static DType Bool { get; private set; } = new DType("Bool", 9, default(sbyte));
         /// <summary>The 64-bit complex data type.</summary>
@@ -277,7 +277,7 @@ namespace Shorokoo
                         { 04, DType.UInt16 },
                         { 12, DType.UInt32 },
                         { 13, DType.UInt64 },
-                        { 08, DType.String },
+                        { 08, DType.Utf8 },
                         { 09, DType.Bool },
                         { 14, DType.Complex64 },
                         { 15, DType.Complex128 },
@@ -362,7 +362,7 @@ namespace Shorokoo
             else if (this == DType.UInt16) return typeof(uint16);
             else if (this == DType.UInt32) return typeof(uint32);
             else if (this == DType.UInt64) return typeof(uint64);
-            else if (this == DType.String) return typeof(@string);
+            else if (this == DType.Utf8) return typeof(utf8);
             else if (this == DType.Bool) return typeof(bit);
             else if (this == DType.Complex64) 
                 throw new UnsupportedDTypeException(ErrorCodes.DT007, this.sType, "ToIVarType", "Complex64 numbers are not supported for variable type conversion");
@@ -407,7 +407,7 @@ namespace Shorokoo
             else if (this == DType.UInt16) return typeof(ushort);
             else if (this == DType.UInt32) return typeof(uint);
             else if (this == DType.UInt64) return typeof(ulong);
-            else if (this == DType.String) return typeof(string);
+            else if (this == DType.Utf8) return typeof(string);
             else if (this == DType.Bool) return typeof(bool);
             else if (this == DType.Complex64) 
                 throw new UnsupportedDTypeException(ErrorCodes.DT013, this.sType, "ToPrimitiveType", "Complex64 numbers are not supported for primitive type conversion");
@@ -459,8 +459,8 @@ namespace Shorokoo
                 else if (this == DType.UInt16) return 16;
                 else if (this == DType.UInt32) return 32;
                 else if (this == DType.UInt64) return 64;
-                else if (this == DType.String)
-                    throw new UnsupportedDTypeException(ErrorCodes.DT020, this.sType, "EncodingBitCount", "String DType has variable bit count and is not supported");
+                else if (this == DType.Utf8)
+                    throw new UnsupportedDTypeException(ErrorCodes.DT020, this.sType, "EncodingBitCount", "Utf8 DType has variable bit count and is not supported");
                 else if (this == DType.Bool) return 8;
                 else if (this == DType.Complex64) 
                     throw new UnsupportedDTypeException(ErrorCodes.DT021, this.sType, "EncodingBitCount", "Complex64 numbers are not supported for bit count encoding");
@@ -493,6 +493,15 @@ namespace Shorokoo
             }
             return this.sType;
         }
+
+        /// <summary>
+        /// Whether this is the same element type as <paramref name="other"/>, ignoring any generic
+        /// type-parameter tag. A literal standing for a type parameter describes the same storage
+        /// as the dtype it stands for, so a read that cares only what the elements are wants this
+        /// rather than reference identity — which a tagged dtype, being a distinct instance, fails
+        /// against the untagged one it was made from.
+        /// </summary>
+        public bool IsSameElementTypeAs(DType? other) => other is not null && this.iType == other.iType;
 
         /// <summary>True if this DType's IVarType is assignable to T (e.g. <c>DType.Float32.Is&lt;FloatLike&gt;()</c>).</summary>
         public bool Is<T>() where T : IVarType

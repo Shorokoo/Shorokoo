@@ -1,7 +1,7 @@
 using System.Runtime.InteropServices;
 using Microsoft.ML.OnnxRuntime;
 using Shorokoo.Core.Factory;
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 using Shorokoo.OnnxRuntime;
 
 namespace Shorokoo.Tests.Benchmarks;

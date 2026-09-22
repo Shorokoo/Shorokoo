@@ -8,9 +8,9 @@ using Shorokoo.Core.Nodes.AutoDiff;
 using Shorokoo.Core.Training;
 using Shorokoo.Core.Nodes.Processors.Training;
 using Shorokoo.Core.Utils;
-using Shorokoo.Core.Inference;
-using Shorokoo.Core.Inference.Abstractions;
-using Shorokoo.Core.Inference.Helpers;
+using Shorokoo.Core.Interpreter;
+using Shorokoo.Core.Backends;
+using Shorokoo.Core.Interpreter.Helpers;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -67,10 +67,10 @@ namespace Shorokoo
         /// <see cref="ComputeContext.Compile(ComputationGraph)"/> runs ONNX Runtime's
         /// common-subexpression pass over it, which merges every recomputation back into the
         /// tensor it exists to free — the rig's own sessions therefore use
-        /// <see cref="Shorokoo.Core.Inference.Abstractions.ShorokooGraphOptimization.TrainingStep"/>. A caller compiling this graph
+        /// <see cref="Shorokoo.Core.Backends.ShorokooGraphOptimization.TrainingStep"/>. A caller compiling this graph
         /// to observe what the rig runs needs that profile, which <see cref="ComputeContext"/> does
         /// not expose: build the model with <c>FastOnnxModelBuilder</c> and hand it to
-        /// <c>InferenceBackend.Default.CreateSession</c> with that level.</para>
+        /// <c>DefaultBackend.Instance.CreateSession</c> with that level.</para>
         /// </summary>
         public ComputationGraph TrainingStepPureGraph { get; private set; } = null!;
 
@@ -216,7 +216,7 @@ namespace Shorokoo
         /// ComputationGraph, NamedModelParam[], IOptimizerHyperparameters, RngConfig?, ComputeContext?, ComputeContext?, IProgress{BuildProgress})"/>.
         ///
         /// <para>The default is taken on the first READ, not at construction. Reading
-        /// <see cref="ComputeContext.Default"/> resolves an inference backend, so a field
+        /// <see cref="ComputeContext.Default"/> resolves a backend, so a field
         /// initializer here made merely constructing a rig require one deployed — including when the
         /// caller supplied both contexts explicitly and the default was overwritten unread.</para>
         /// </summary>
@@ -1934,7 +1934,7 @@ namespace Shorokoo
 
         /// <summary>
         /// Evaluates a scheduler graph (built-in lowering or user module) at the <b>initial counters</b>
-        /// — every counter input bound to 0 — via the pure managed <see cref="Shorokoo.Core.Inference.QuickExecutionEngine"/>,
+        /// — every counter input bound to 0 — via the pure managed <see cref="Shorokoo.Core.Interpreter.QuickExecutionEngine"/>,
         /// returning the scalar value at the scheduler's own (declared) dtype. This is the single value route (§2.5) for optimizer state init:
         /// the scheduler graph is normative, so its build-time value comes from evaluating it, not from
         /// a host closure or a hardcoded placeholder. The graph is pure (enforced, D4), so all-zero
@@ -1945,7 +1945,7 @@ namespace Shorokoo
             var inputs = new IData[schedulerGraph.Inputs.Count];
             for (int i = 0; i < inputs.Length; i++)
                 inputs[i] = Shorokoo.Globals.TensorData(Array.Empty<long>(), 0L);
-            var result = new Shorokoo.Core.Inference.QuickExecutionEngine().Execute(schedulerGraph, inputs);
+            var result = new Shorokoo.Core.Interpreter.QuickExecutionEngine().Execute(schedulerGraph, inputs);
             return (TensorData)result[0];
         }
 

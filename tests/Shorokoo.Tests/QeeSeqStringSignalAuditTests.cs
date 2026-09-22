@@ -1,4 +1,4 @@
-using Shorokoo.Core.Inference;
+using Shorokoo.Core.Interpreter;
 using static Shorokoo.Tests.Utils.QeeAudit;
 
 namespace Shorokoo.Tests;
@@ -7,7 +7,7 @@ namespace Shorokoo.Tests;
 /// Phase 4 QEE-A6 audit batch: sequence, optional, string, signal and control-flow
 /// families (ONNX opset 21). Each module in QeeSeqStringSignalAuditModules.cs is
 /// self-checking on values (where QEE computes them) and on inferred shapes (via
-/// ShapeTensor). Modules built on Shorokoo-internal op codes or @string runtime inputs
+/// ShapeTensor). Modules built on Shorokoo-internal op codes or utf8 runtime inputs
 /// have no ORT-comparable data path, so they run through
 /// <see cref="QeeAudit.QeeOnlyTyped{TModule}"/>.
 /// </summary>

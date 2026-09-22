@@ -1,6 +1,6 @@
 using System.Runtime.InteropServices;
 using System.Runtime.Loader;
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 using Shorokoo.Modules.Losses;
 using Shorokoo.Modules.Optimizers;
 using Shorokoo.Runtime;
@@ -41,7 +41,7 @@ public class SideBySideBackendCoverageTests
 
     // One isolated backend for the whole class: loading pins a native library for the life of the
     // process, and Load caches on the spec, so a per-test load would return this one anyway.
-    private static readonly Lazy<IShorokooInferenceBackend> Alt = new(() =>
+    private static readonly Lazy<IShorokooBackend> Alt = new(() =>
         IsolatedBackend.Load(new IsolatedBackendSpec
         {
             Name = "alt-runtime",
@@ -85,14 +85,14 @@ public class SideBySideBackendCoverageTests
         var defaultContext = new ComputeContext();
         var alt = new ComputeContext(Alt.Value);
 
-        Assert.Equal(InferenceBackend.Describe(), defaultContext.Backend);
+        Assert.Equal(DefaultBackend.Describe(), defaultContext.Backend);
         Assert.Equal("alt-runtime", alt.Backend.Name);
         Assert.NotEqual(defaultContext.Backend, alt.Backend);
         Assert.Equal(ComputeDevice.Cpu, alt.Backend.Device);
         Assert.Null(alt.Backend.CudaDeviceId);
 
-        Assert.Same(InferenceBackend.Default, InferenceBackend.Current);
-        Assert.Equal(InferenceBackend.Describe(), ComputeContext.Default.Backend);
+        Assert.Same(DefaultBackend.Instance, DefaultBackend.Current);
+        Assert.Equal(DefaultBackend.Describe(), ComputeContext.Default.Backend);
     }
 
     [Fact]
@@ -102,7 +102,7 @@ public class SideBySideBackendCoverageTests
             .GetNestedType("RenamedBackend", System.Reflection.BindingFlags.NonPublic);
         Assert.NotNull(wrapper);
 
-        var map = wrapper!.GetInterfaceMap(typeof(IShorokooInferenceBackend));
+        var map = wrapper!.GetInterfaceMap(typeof(IShorokooBackend));
         for (int i = 0; i < map.InterfaceMethods.Length; i++)
             Assert.Equal(wrapper, map.TargetMethods[i].DeclaringType);
     }
@@ -118,16 +118,16 @@ public class SideBySideBackendCoverageTests
             .GetValue(alt)!;
         var innerContext = AssemblyLoadContext.GetLoadContext(inner.GetType().Assembly);
         var defaultContext = AssemblyLoadContext.GetLoadContext(
-            InferenceBackend.Default.GetType().Assembly);
+            DefaultBackend.Instance.GetType().Assembly);
 
         Assert.NotNull(innerContext);
         Assert.NotSame(AssemblyLoadContext.Default, innerContext);
         Assert.Same(AssemblyLoadContext.Default, defaultContext);
 
         Assert.Equal(
-            InferenceBackend.Default.GetType().Assembly.GetName().Name,
+            DefaultBackend.Instance.GetType().Assembly.GetName().Name,
             inner.GetType().Assembly.GetName().Name);
-        Assert.NotSame(InferenceBackend.Default.GetType().Assembly, inner.GetType().Assembly);
+        Assert.NotSame(DefaultBackend.Instance.GetType().Assembly, inner.GetType().Assembly);
 
         var stock = AvailableProviders(AssemblyLoadContext.Default);
         Assert.Contains("CPUExecutionProvider", stock);
@@ -152,15 +152,15 @@ public class SideBySideBackendCoverageTests
         var loaded = AppDomain.CurrentDomain.GetAssemblies();
 
         Assert.Contains(isolated, loaded);
-        Assert.DoesNotContain(isolated, InferenceBackend.DiscoverableAssemblies(loaded));
+        Assert.DoesNotContain(isolated, DefaultBackend.DiscoverableAssemblies(loaded));
         Assert.Contains(
-            InferenceBackend.Default.GetType().Assembly,
-            InferenceBackend.DiscoverableAssemblies(loaded));
+            DefaultBackend.Instance.GetType().Assembly,
+            DefaultBackend.DiscoverableAssemblies(loaded));
 
-        var candidates = InferenceBackend.LoadedCandidates(
-            InferenceBackend.DiscoverableAssemblies(loaded).Select(a => a.GetName().Name ?? ""));
+        var candidates = DefaultBackend.LoadedCandidates(
+            DefaultBackend.DiscoverableAssemblies(loaded).Select(a => a.GetName().Name ?? ""));
         Assert.Single(candidates);
-        Assert.Equal(InferenceBackend.Default.GetType().Assembly.GetName().Name, candidates[0].Assembly);
+        Assert.Equal(DefaultBackend.Instance.GetType().Assembly.GetName().Name, candidates[0].Assembly);
     }
 
     [Fact]
@@ -268,8 +268,8 @@ public class SideBySideBackendCoverageTests
         public void Dispose() { }
     }
 
-    private sealed class RecordingBackend(IShorokooInferenceBackend inner)
-        : IShorokooInferenceBackend
+    private sealed class RecordingBackend(IShorokooBackend inner)
+        : IShorokooBackend
     {
         internal List<IShorokooTensorValue> Fed { get; } = [];
 
@@ -279,7 +279,7 @@ public class SideBySideBackendCoverageTests
 
         public MemorySpace MemorySpace => inner.MemorySpace;
 
-        public IShorokooInferenceSession CreateSession(
+        public IShorokooSession CreateSession(
             ReadOnlyMemory<byte> modelBytes, ShorokooGraphOptimization graphOptimization,
             ShorokooLogSeverity logSeverity, DeviceMemorySettings deviceMemory)
         {
@@ -314,7 +314,7 @@ public class SideBySideBackendCoverageTests
 
     /// <summary>A session that notes what it was fed on its way to running it.</summary>
     private sealed class RecordingSession(
-        IShorokooInferenceSession inner, List<IShorokooTensorValue> fed) : IShorokooInferenceSession
+        IShorokooSession inner, List<IShorokooTensorValue> fed) : IShorokooSession
     {
         public IReadOnlyList<string> InputNames => inner.InputNames;
         public IReadOnlyList<string> OutputNames => inner.OutputNames;
@@ -365,7 +365,7 @@ public class SideBySideBackendCoverageTests
     public void TestBackendTransferRebuildsATensorAStringTensorAndASequenceOnTheOtherBackend()
     {
         var target = Alt.Value;
-        var source = InferenceBackend.Default;
+        var source = DefaultBackend.Instance;
 
         float[] floats = [1.5f, -2.5f, 3.5f];
         var tensor = source.CreateTensor(floats, [3L]);
@@ -433,7 +433,7 @@ public class SideBySideBackendCoverageTests
         // Recording backends, because the claim is about WHERE each phase ran. Asserting that the
         // rig kept the two contexts and that the loss fell says nothing about it: a rig that used
         // RuntimeContext for the merge as well, or ignored MergeContext entirely, passes both.
-        var mergeBackend = new RecordingBackend(InferenceBackend.Default);
+        var mergeBackend = new RecordingBackend(DefaultBackend.Instance);
         var runtimeBackend = new RecordingBackend(Alt.Value);
         using var merge = new ComputeContext(mergeBackend);
         using var runtime = new ComputeContext(runtimeBackend);

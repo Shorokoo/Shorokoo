@@ -49,8 +49,20 @@
     <ProjectReference Include="..\..\src\Backend\OnnxRuntime\Shorokoo.LinuxCPU\Shorokoo.LinuxCPU.csproj" />
   </ItemGroup>
 
-  <ItemGroup Condition="$([MSBuild]::IsOSPlatform('Windows'))">
+  <ItemGroup Condition="$([MSBuild]::IsOSPlatform('Windows')) AND '$(ShorokooGpuTests)' != 'true'">
     <ProjectReference Include="..\..\src\Backend\OnnxRuntime\Shorokoo.WinCPU\Shorokoo.WinCPU.csproj" />
+  </ItemGroup>
+
+  <!--
+    -p:ShorokooGpuTests=true deploys Shorokoo.WinGPU as the default backend instead of
+    Shorokoo.WinCPU, which is what CudaFactAttribute gates on: it skips unless the discovered
+    backend's assembly name ends in "GPU". Opt-in rather than the default, because a CPU-only
+    Windows box (CI included) has no card and would fail every one of those tests instead of
+    skipping them. Exactly one of the two deploys, since two backend assemblies side by side are
+    what DefaultBackend's discovery refuses.
+  -->
+  <ItemGroup Condition="$([MSBuild]::IsOSPlatform('Windows')) AND '$(ShorokooGpuTests)' == 'true'">
+    <ProjectReference Include="..\..\src\Backend\OnnxRuntime\Shorokoo.WinGPU\Shorokoo.WinGPU.csproj" />
   </ItemGroup>
 
   <!--

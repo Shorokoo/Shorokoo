@@ -5,8 +5,8 @@ using Shorokoo.Core.Factory;
 using Shorokoo.Core.Nodes.Processors.AutoGrad;
 using Shorokoo.Core.Nodes.Processors.Fast;
 using Shorokoo.Core.Nodes.Processors.Helpers;
-using Shorokoo.Core.Inference;
-using Shorokoo.Core.Inference.Helpers;
+using Shorokoo.Core.Interpreter;
+using Shorokoo.Core.Interpreter.Helpers;
 using Shorokoo.Core.Lowering;
 using static Shorokoo.Tests.FoldForcing;
 

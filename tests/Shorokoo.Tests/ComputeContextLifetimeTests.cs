@@ -1,4 +1,4 @@
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 using Shorokoo.Runtime;
 
 namespace Shorokoo.Tests;
@@ -6,7 +6,7 @@ namespace Shorokoo.Tests;
 /// <summary>
 /// <c>y = -x</c>, the whole model: one node, no trainable parameter, no randomness, nothing whose
 /// geometry has to be resolved by running anything. A model this small is the one that most
-/// obviously needs no inference backend to describe, which is what makes it the subject of
+/// obviously needs no backend to describe, which is what makes it the subject of
 /// <see cref="ComputeContextLifetimeCoverageTests.TestBuildingAndExportingAModelAsksForNoComputeContextAtAll"/>.
 /// </summary>
 [Module]
@@ -113,7 +113,7 @@ public class ComputeContextLifetimeCoverageTests
 
         var backendReads = 0;
         var contextReads = ComputeContext.CountDefaultReads(() =>
-            backendReads = InferenceBackend.CountDefaultReads(
+            backendReads = DefaultBackend.CountDefaultReads(
                 () => Assert.Throws<InvalidOperationException>(
                     () => ComputeContext.Host.Compile(graph))));
         Assert.Equal(0, contextReads);
@@ -180,7 +180,7 @@ public class ComputeContextLifetimeCoverageTests
     [Fact]
     public void TestTheHostBackendBuildsNeitherASessionNorAValue()
     {
-        IShorokooInferenceBackend backend = HostBackend.Instance;
+        IShorokooBackend backend = HostBackend.Instance;
         var raw = Sample().CopyRawMemory();
 
         Assert.Equal(MemorySpace.Host, backend.MemorySpace);
@@ -208,7 +208,7 @@ public class ComputeContextLifetimeCoverageTests
     public void TestAContextThatDetachesOutputsHandsBackResultsThatOutliveIt()
     {
         var (graph, a, b, expected) = Model();
-        var context = new ComputeContext(InferenceBackend.Default, detachesOutputs: true);
+        var context = new ComputeContext(DefaultBackend.Instance, detachesOutputs: true);
 
         Assert.True(context.DetachesOutputs);
         var result = context.Execute(graph, a, b)[0].ToTensorData();
@@ -225,7 +225,7 @@ public class ComputeContextLifetimeCoverageTests
     public void TestAContextThatDoesNotDetachTakesItsOutputsWithIt()
     {
         var (graph, a, b, _) = Model();
-        var context = new ComputeContext(InferenceBackend.Default, detachesOutputs: false);
+        var context = new ComputeContext(DefaultBackend.Instance, detachesOutputs: false);
 
         Assert.False(context.DetachesOutputs);
         var result = context.Execute(graph, a, b)[0].ToTensorData();
@@ -239,7 +239,7 @@ public class ComputeContextLifetimeCoverageTests
     public void TestACompiledGraphDetachesItsOutputsWhenItsContextDoes()
     {
         var (graph, a, b, expected) = Model();
-        var context = new ComputeContext(InferenceBackend.Default, detachesOutputs: true);
+        var context = new ComputeContext(DefaultBackend.Instance, detachesOutputs: true);
         var compiled = context.Compile(graph);
 
         var result = compiled.Execute(a, b)[0].ToTensorData();
@@ -312,7 +312,7 @@ public class ComputeContextLifetimeCoverageTests
         {
             var backendReads = 0;
             var reads = ComputeContext.CountDefaultReads(() =>
-                backendReads = InferenceBackend.CountDefaultReads(() =>
+                backendReads = DefaultBackend.CountDefaultReads(() =>
                 {
                     var concrete = module
                         .ToConcreteArchitecture(module.FromOrderedInputs([sample]))
@@ -322,7 +322,7 @@ public class ComputeContextLifetimeCoverageTests
 
             Assert.Equal(0, reads);
             // Both seams, because they are two independent ways to a backend: a graph pass reaches
-            // InferenceBackend.Default without going through any compute context -- every
+            // DefaultBackend.Instance without going through any compute context -- every
             // OnnxUtils.CreateTensorValue does -- so counting only the context's reads would let a
             // regression that rebuilt a literal on the default backend through at zero.
             Assert.Equal(0, backendReads);
@@ -672,7 +672,7 @@ public class ComputeContextLifetimeCoverageTests
         Assert.Equal(DType.Float32, context.AllocateUninitialized(pair, DType.Float32).DType);
         Assert.Equal(new Shape(pair), context.AllocateUninitialized(pair, DType.Float32).Shape);
         Assert.Equal(24, ComputeContext.Host.AllocateUninitialized(pair, DType.Float32).CopyRawMemory().Length);
-        Assert.Throws<NotSupportedException>(() => context.AllocateUninitialized(pair, DType.String));
+        Assert.Throws<NotSupportedException>(() => context.AllocateUninitialized(pair, DType.Utf8));
         Assert.Throws<ArgumentNullException>(() => context.AllocateUninitialized(pair, null!));
     }
 
@@ -700,7 +700,7 @@ public class ComputeContextLifetimeCoverageTests
         TensorData data, ManualResetEventSlim reached, ManualResetEventSlim release)
         : TensorDataModelParam("a", ModelParamType.InputParam, data)
     {
-        internal override IShorokooTensorValue ToTensorValue(IShorokooInferenceBackend backend)
+        internal override IShorokooTensorValue ToTensorValue(IShorokooBackend backend)
         {
             reached.Set();
             release.Wait(TimeSpan.FromSeconds(30));
@@ -709,12 +709,12 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     internal sealed class StubBackend(ComputeDevice device, int? cudaDeviceId)
-        : IShorokooInferenceBackend
+        : IShorokooBackend
     {
         public BackendDescription Description { get; } =
             new($"stub-{device}", device, cudaDeviceId);
 
-        public IShorokooInferenceSession CreateSession(
+        public IShorokooSession CreateSession(
             ReadOnlyMemory<byte> modelBytes, ShorokooGraphOptimization graphOptimization,
             ShorokooLogSeverity logSeverity,
             DeviceMemorySettings deviceMemory) => throw new NotSupportedException();
@@ -746,38 +746,38 @@ public class ProcessWideBackendCoverageTests
     [Fact]
     public void TestACpuBackendWinsTheRememberedSlotAndAGpuOneDoesNotTakeItBack()
     {
-        var live = InferenceBackend.Remembered;
+        var live = DefaultBackend.Remembered;
         try
         {
-            InferenceBackend.ForgetRemembered();
+            DefaultBackend.ForgetRemembered();
             var gpu = new ComputeContextLifetimeCoverageTests.StubBackend(ComputeDevice.Cuda, 0);
             var cpu = new ComputeContextLifetimeCoverageTests.StubBackend(ComputeDevice.Cpu, null);
 
-            InferenceBackend.Remember(gpu);
-            Assert.Same(gpu, InferenceBackend.Remembered);
+            DefaultBackend.Remember(gpu);
+            Assert.Same(gpu, DefaultBackend.Remembered);
 
             // The CPU one displaces it...
-            InferenceBackend.Remember(cpu);
-            Assert.Same(cpu, InferenceBackend.Remembered);
+            DefaultBackend.Remember(cpu);
+            Assert.Same(cpu, DefaultBackend.Remembered);
 
             // ...and is not displaced back, by that GPU backend or another.
-            InferenceBackend.Remember(gpu);
-            InferenceBackend.Remember(new ComputeContextLifetimeCoverageTests.StubBackend(ComputeDevice.Cuda, 1));
-            Assert.Same(cpu, InferenceBackend.Remembered);
+            DefaultBackend.Remember(gpu);
+            DefaultBackend.Remember(new ComputeContextLifetimeCoverageTests.StubBackend(ComputeDevice.Cuda, 1));
+            Assert.Same(cpu, DefaultBackend.Remembered);
 
             // Nor by a second CPU one: the first backend loaded is the one that counts.
-            InferenceBackend.Remember(new ComputeContextLifetimeCoverageTests.StubBackend(ComputeDevice.Cpu, null));
-            Assert.Same(cpu, InferenceBackend.Remembered);
+            DefaultBackend.Remember(new ComputeContextLifetimeCoverageTests.StubBackend(ComputeDevice.Cpu, null));
+            Assert.Same(cpu, DefaultBackend.Remembered);
         }
         finally
         {
-            InferenceBackend.ForgetRemembered();
-            if (live is not null) InferenceBackend.Remember(live);
+            DefaultBackend.ForgetRemembered();
+            if (live is not null) DefaultBackend.Remember(live);
         }
     }
 
     /// <summary>
-    /// Assigning <see cref="InferenceBackend.Default"/> settles both slots outright — the live one
+    /// Assigning <see cref="DefaultBackend.Instance"/> settles both slots outright — the live one
     /// and the remembered one — rather than going through the first-CPU-wins rule that governs a
     /// backend the process merely loaded. It does not say anything about
     /// <see cref="ComputeContext.Default"/>, which caches the backend it resolves on first read and
@@ -790,25 +790,25 @@ public class ProcessWideBackendCoverageTests
         // Default rather than Current, which is null until something resolves one: capturing null
         // here and restoring nothing in the finally left this test's throwing stub as the process's
         // backend, and every later test that ran anything failed inside it.
-        var liveDefault = InferenceBackend.Default;
-        var liveRemembered = InferenceBackend.Remembered;
+        var liveDefault = DefaultBackend.Instance;
+        var liveRemembered = DefaultBackend.Remembered;
         try
         {
-            InferenceBackend.ForgetRemembered();
-            InferenceBackend.Remember(new ComputeContextLifetimeCoverageTests.StubBackend(ComputeDevice.Cpu, null));
+            DefaultBackend.ForgetRemembered();
+            DefaultBackend.Remember(new ComputeContextLifetimeCoverageTests.StubBackend(ComputeDevice.Cpu, null));
 
             var named = new ComputeContextLifetimeCoverageTests.StubBackend(ComputeDevice.Cuda, 0);
-            InferenceBackend.Default = named;
+            DefaultBackend.Instance = named;
 
-            Assert.Same(named, InferenceBackend.Remembered);
-            Assert.Same(named, InferenceBackend.Current);
+            Assert.Same(named, DefaultBackend.Remembered);
+            Assert.Same(named, DefaultBackend.Current);
         }
         finally
         {
-            InferenceBackend.ForgetRemembered();
-            InferenceBackend.Default = liveDefault;
-            InferenceBackend.ForgetRemembered();
-            if (liveRemembered is not null) InferenceBackend.Remember(liveRemembered);
+            DefaultBackend.ForgetRemembered();
+            DefaultBackend.Instance = liveDefault;
+            DefaultBackend.ForgetRemembered();
+            if (liveRemembered is not null) DefaultBackend.Remember(liveRemembered);
         }
     }
 }

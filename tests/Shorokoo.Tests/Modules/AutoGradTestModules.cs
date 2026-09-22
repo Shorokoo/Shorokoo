@@ -4692,7 +4692,7 @@ namespace Shorokoo.Tests.Modules
     //  Previously blocked because the QEE ConstantOfShape op ignored the
     //  value attribute and emitted a zero tensor regardless of the fill
     //  value — see commit history for the fix in
-    //  Inference/QuickExecutionEngine/Ops/ConstantOfShape.cs.
+    //  Interpreter/QuickExecutionEngine/Ops/ConstantOfShape.cs.
     //  Exercises the gradient method whose only input is the non-
     //  differentiable shape — see AC.cs:87-92.
     // ===================================================================

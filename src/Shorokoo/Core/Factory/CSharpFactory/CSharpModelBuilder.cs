@@ -3,7 +3,7 @@ using Shorokoo.Core.Nodes;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 using Shorokoo;
 using Shorokoo.Core;
 using Shorokoo.Core.Nodes.NodeDefinitions;
@@ -126,11 +126,7 @@ namespace Shorokoo.Core.Factory.CSharpFactory
                 }
             }
 
-            // @string is the only IVarType whose name is also a C# keyword, so source has to escape
-            // it or the emitted Vector<string> would mean System.String.
             var typeName = variable.Type.ToIVarType().Name;
-            if (typeName == "string")
-                typeName = "@string";
 
             if (rank == 0)
                 return $"Scalar<{typeName}>";
@@ -319,7 +315,7 @@ using static Shorokoo.Globals;
 using static Shorokoo.Globals;
 using static Shorokoo.Globals;
 using static Shorokoo.Globals;
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 
 namespace GeneratedFromOnnx;
 

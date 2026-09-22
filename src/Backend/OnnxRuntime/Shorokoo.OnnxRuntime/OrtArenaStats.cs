@@ -2,7 +2,7 @@ using System.Globalization;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using Microsoft.ML.OnnxRuntime;
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 
 namespace Shorokoo.OnnxRuntime;
 

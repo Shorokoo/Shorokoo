@@ -1,13 +1,13 @@
 using Microsoft.ML.OnnxRuntime;
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 
 namespace Shorokoo.OnnxRuntime;
 
-internal sealed class OrtInferenceSession : IShorokooInferenceSession
+internal sealed class OrtInferenceSession : IShorokooSession
 {
     private readonly InferenceSession _session;
     private readonly int? _cudaDeviceId;
-    private readonly IShorokooInferenceBackend _backend;
+    private readonly IShorokooBackend _backend;
 
     // What one probe of the session's outputs answers: ORT's memory info for this session's own
     // (non-host) output memory, or null when it produces everything on the host, and where the
@@ -33,7 +33,7 @@ internal sealed class OrtInferenceSession : IShorokooInferenceSession
     private bool _profilingEnded;
 
     public OrtInferenceSession(
-        InferenceSession session, int? cudaDeviceId, IShorokooInferenceBackend backend)
+        InferenceSession session, int? cudaDeviceId, IShorokooBackend backend)
         : this(session, cudaDeviceId, backend, profileDirectory: null)
     {
     }
@@ -41,7 +41,7 @@ internal sealed class OrtInferenceSession : IShorokooInferenceSession
     public OrtInferenceSession(
         InferenceSession session,
         int? cudaDeviceId,
-        IShorokooInferenceBackend backend,
+        IShorokooBackend backend,
         string? profileDirectory)
     {
         _session = session;

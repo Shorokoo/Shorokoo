@@ -394,7 +394,7 @@ namespace Shorokoo.Core.Factory.IR
 
             // Strings are the one dtype ONNX keeps out of raw_data: string_data holds one UTF-8
             // blob per element, so they are read here and never reach the flat-buffer path below.
-            if (type == DType.String)
+            if (type == DType.Utf8)
             {
                 var values = new string[tensorProto.StringDatas.Count];
                 for (int i = 0; i < values.Length; i++)

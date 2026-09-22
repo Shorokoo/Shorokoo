@@ -4,7 +4,7 @@ using Shorokoo.Core.Nodes.OnnxNodes;
 using Shorokoo.Core.Utils;
 using Shorokoo.Onnx;
 using Shorokoo;
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 using static Shorokoo.Globals;
 using System.Collections;
 using Shorokoo.Core;
@@ -101,7 +101,7 @@ namespace Shorokoo
         /// This sequence as a value of the process-wide backend's runtime, for a caller with no
         /// context to name. <see cref="TensorData.ToTensorValue()"/>'s counterpart.
         /// </summary>
-        internal IShorokooTensorValue ToTensorValue() => ToTensorValue(InferenceBackend.Default);
+        internal IShorokooTensorValue ToTensorValue() => ToTensorValue(DefaultBackend.Instance);
 
         /// <summary>
         /// This sequence as a value of <paramref name="backend"/>'s runtime — the form the feed
@@ -112,13 +112,13 @@ namespace Shorokoo
         ///
         /// <para>The value returned is the sequence's own: read it, do not dispose it.</para>
         /// </summary>
-        internal virtual IShorokooTensorValue ToTensorValue(IShorokooInferenceBackend backend)
+        internal virtual IShorokooTensorValue ToTensorValue(IShorokooBackend backend)
         {
             ThrowIfDisposed();
             // The empty sequence, and only it: ONNX Runtime's binding cannot build a zero-element
             // sequence value, which is why the empty case is represented on the managed side alone.
             throw new InvalidTensorOperationException(ErrorCodes.FW007, "ToTensorValue", ToString(),
-                "This sequence has no inference-runtime value to feed a session, and none can be "
+                "This sequence has no backend-runtime value to feed a session, and none can be "
                 + "built: ONNX Runtime cannot represent a zero-element sequence. Build an empty one "
                 + "inside the graph with the SequenceEmpty op instead of passing one in.");
         }
@@ -216,7 +216,7 @@ namespace Shorokoo
         /// <para>It is not <see cref="IOnnxData"/>, for the same reason
         /// <see cref="HostTensorData{T}"/> is not: there is no runtime value here until something
         /// asks for one. Feeding such a sequence to a session builds it then, on that session's
-        /// backend -- see <see cref="ToTensorValue(IShorokooInferenceBackend)"/>.</para>
+        /// backend -- see <see cref="ToTensorValue(IShorokooBackend)"/>.</para>
         /// </summary>
         private sealed class ListTensorDataSequence<T> : TensorDataSequence<T>
             where T : IVarType
@@ -268,7 +268,7 @@ namespace Shorokoo
             /// (Shorokoo/Shorokoo#180). The copy is the same one <c>TensorDataSequence.Create</c>
             /// makes for the same reason, taken on this backend rather than the process default.</para>
             /// </summary>
-            internal override IShorokooTensorValue ToTensorValue(IShorokooInferenceBackend backend)
+            internal override IShorokooTensorValue ToTensorValue(IShorokooBackend backend)
             {
                 ArgumentNullException.ThrowIfNull(backend);
                 ThrowIfDisposed();
@@ -278,7 +278,7 @@ namespace Shorokoo
 
             /// <summary>Builds this sequence's elements into one sequence value of
             /// <paramref name="backend"/>'s runtime.</summary>
-            private IShorokooTensorValue Build(IShorokooInferenceBackend backend)
+            private IShorokooTensorValue Build(IShorokooBackend backend)
             {
                 var inner = new List<IShorokooTensorValue>(_elements.Count);
                 try
@@ -462,7 +462,7 @@ namespace Shorokoo
         private readonly IShorokooTensorValue backing;
 
         /// <summary>
-        /// The backing inference-runtime sequence value, which this sequence owns: disposing the
+        /// The backing backend-runtime sequence value, which this sequence owns: disposing the
         /// sequence releases it, and nothing else may hold or free it.
         /// </summary>
         public IShorokooTensorValue Value
@@ -554,7 +554,7 @@ namespace Shorokoo
         /// one runtime and belongs to it; a session of another rebuilds it as it is fed, which is
         /// a thing only that session can do.
         /// </summary>
-        internal override IShorokooTensorValue ToTensorValue(IShorokooInferenceBackend backend)
+        internal override IShorokooTensorValue ToTensorValue(IShorokooBackend backend)
             => Value;
 
         public override IEnumerator<TensorData<T>> GetEnumerator()

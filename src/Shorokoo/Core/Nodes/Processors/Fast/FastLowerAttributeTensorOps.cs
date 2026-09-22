@@ -2,8 +2,8 @@ using Shorokoo;
 using Shorokoo.Core.Graph;
 using Shorokoo.Runtime;
 using Shorokoo.Graph;
-using Shorokoo.Core.Inference;
-using Shorokoo.Core.Inference.Helpers;
+using Shorokoo.Core.Interpreter;
+using Shorokoo.Core.Interpreter.Helpers;
 using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 using Shorokoo.Modules;
@@ -283,7 +283,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             TensorData[] samples, ComputeContext? compute)
         {
             // The one point in this pass that runs a graph, and so the one point that may require
-            // an inference backend. Everything above resolves without one.
+            // a backend. Everything above resolves without one.
             var results = (compute ?? ComputeContext.Default).Execute(resolver, samples);
             for (int i = 0; i < keys.Count; i++)
                 if (resolved[i] is null)

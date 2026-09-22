@@ -313,7 +313,7 @@ Variable w = Globals.TrainableTensor(weights, "conv1.weight");
 `Shape` is a class rather than a collection type, so the shape argument is `new Shape(…)` or a
 `long[]` — a bare `[1L]` collection literal does not convert to it.
 
-An attribute answers `Shape`, `DType`, `HasValues`, `Bytes` (or `Values` for `DType.String`),
+An attribute answers `Shape`, `DType`, `HasValues`, `Bytes` (or `Values` for `DType.Utf8`),
 `Elements<V>()` and `CopyToTensorData()`, and that is the whole of it: there is no `Dispose`, no
 `Context`, no `Space`. `HasValues` is false for one case only — a model definition saved
 *without* its weights, whose parameter slots keep dtype and shape and no elements until a

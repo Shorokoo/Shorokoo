@@ -360,7 +360,7 @@ namespace Shorokoo.Core.Factory.IR
 
             if (values is null)
                 tensor.RawData = [];
-            else if (type == DType.String)
+            else if (type == DType.Utf8)
                 foreach (var element in values.Values)
                     tensor.StringDatas.Add(Encoding.UTF8.GetBytes(element));
             else

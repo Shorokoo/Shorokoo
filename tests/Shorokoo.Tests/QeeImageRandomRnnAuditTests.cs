@@ -1,5 +1,5 @@
 using Shorokoo.Runtime;
-using Shorokoo.Core.Inference;
+using Shorokoo.Core.Interpreter;
 using static Shorokoo.Tests.Utils.QeeAudit;
 
 namespace Shorokoo.Tests;
@@ -80,11 +80,11 @@ public class QeeImageRandomRnnAuditTests
 
         var strings = QeeAudit.Outputs<QeeConstantStringCheck>();
         var cs = Assert.IsType<RuntimeTensor>(strings[0]);
-        Assert.Equal(DType.String, cs.DType);
+        Assert.Equal(DType.Utf8, cs.DType);
         Assert.Empty(cs.Shape!.Dims);
         Assert.Equal(["hello"], cs.StringData!.Value.ToArray());
         var css = Assert.IsType<RuntimeTensor>(strings[1]);
-        Assert.Equal(DType.String, css.DType);
+        Assert.Equal(DType.Utf8, css.DType);
         Assert.Equal([3L], css.Shape!.Dims);
         Assert.Equal(["a", "b", "c"], css.StringData!.Value.ToArray());
 

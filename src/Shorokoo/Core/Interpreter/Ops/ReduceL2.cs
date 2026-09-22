@@ -1,0 +1,13 @@
+using Shorokoo.Core.Interpreter.Helpers;
+using Shorokoo.Core.Nodes.AutoDiff;
+using Shorokoo.Core.Nodes.NodeDefinitions;
+using Shorokoo.Modules;
+
+namespace Shorokoo.Core.Interpreter.Ops;
+
+internal sealed class ReduceL2Op : ReduceOpBase
+{
+    public override string OpCode => OpCodes.REDUCE_L2;
+    protected override bool CanFoldEmptyGroup => true;
+    protected override float Reduce(IEnumerable<float> values) => MathF.Sqrt(values.Select(v => v * v).Sum());
+}

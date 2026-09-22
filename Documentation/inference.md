@@ -27,8 +27,8 @@ Related: [core-types.md](core-types.md) · [defining-models.md](defining-models.
   backend and its work goes there, so one process drives the CPU and the card together —
   [One model, two devices](#one-model-two-devices).
 - Which device the work will run on is invisible at the call site but answerable:
-  `ComputeContext.Backend` and `InferenceBackend.Describe()` name it, and
-  `InferenceBackend.RequireDevice(...)` refuses to start on the wrong one —
+  `ComputeContext.Backend` and `DefaultBackend.Describe()` name it, and
+  `DefaultBackend.RequireDevice(...)` refuses to start on the wrong one —
   [Which device am I on?](#which-device-am-i-on).
 - A `TensorData` is a handle on an allocation that counts its handles: disposing one lets go of
   your name for the bytes rather than pulling them away, and a run holds what it is reading for
@@ -388,7 +388,7 @@ A run can be given a `CancellationToken`, on the same `RunSettings` that carries
 returning outputs:
 
 ```csharp
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 
 using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
 try
@@ -455,22 +455,22 @@ one is how a long `Fit` is stopped — see
   reference several, or load them at runtime and reference none — see
   [Loading a backend at runtime](#loading-a-backend-at-runtime).
 - With exactly one backend package referenced you normally need no setup at all:
-  auto-discovery (below) finds it on the first inference call. Set the backend
+  auto-discovery (below) finds it on the first run. Set the backend
   explicitly to name which one you mean when a deployment holds more than one (which
   discovery otherwise refuses), when you want a startup failure instead of one on the
-  first inference call, or when the backend DLL is not deployed next to `Shorokoo.dll`:
+  first run, or when the backend DLL is not deployed next to `Shorokoo.dll`:
 
   ```csharp
-  using Shorokoo.Core.Inference.Abstractions;
+  using Shorokoo.Core.Backends;
   using Shorokoo.LinuxCPU;                                // the package you referenced
 
-  InferenceBackend.Default = new LinuxCpuBackend();
+  DefaultBackend.Instance = new LinuxCpuBackend();
   ```
 
-- `InferenceBackend.Default` is the **default** backend: the one a `ComputeContext` that
+- `DefaultBackend.Instance` is the **default** backend: the one a `ComputeContext` that
   names no backend of its own runs on, and the one a tensor is built for when it is fed
   without a context naming another. The first backend resolved is cached and reused;
-  assigning `Default` afterwards swaps it but does not unload a native ONNX Runtime already
+  assigning `Instance` afterwards swaps it but does not unload a native ONNX Runtime already
   bound, and does not reach a `ComputeContext.Default` that has already resolved — so assign
   it at startup, before anything runs.
 - A `ComputeContext` constructed with a backend runs there instead, and two contexts may
@@ -480,7 +480,7 @@ one is how a long `Fit` is stopped — see
   backends for the same OS and naming neither is refused rather than resolved by
   guesswork — see [Auto-discovery](#auto-discovery). It is a rule about silence, not a
   limit on how many can run.
-- Which backend you ended up on is a question you can ask — `InferenceBackend.Describe()`,
+- Which backend you ended up on is a question you can ask — `DefaultBackend.Describe()`,
   or `ComputeContext.Backend` where the work is submitted. See
   [Which device am I on?](#which-device-am-i-on).
 
@@ -498,14 +498,14 @@ assembly spell it `CPU`/`GPU`** — so `Shorokoo.WinGPU` contains
 | `Shorokoo.WinCPU` | `WinCpuBackend` | `Shorokoo.WinCPU.WinCpuBackend` |
 | `Shorokoo.WinGPU` | `WinGpuBackend` | `Shorokoo.WinGPU.WinGpuBackend` |
 
-All four implement `IShorokooInferenceBackend`, take a parameterless constructor, and
+All four implement `IShorokooBackend`, take a parameterless constructor, and
 differ only in the execution provider
 they configure: the GPU ones append the CUDA provider on device 0, the CPU ones leave
 ORT on its default provider.
 
 ### Auto-discovery
 
-If you never assign `InferenceBackend.Default`, the first read of it resolves a backend
+If you never assign `DefaultBackend.Instance`, the first read of it resolves a backend
 once and caches the result:
 
 1. If one of the four backend assemblies is **already loaded** in the process, its
@@ -526,10 +526,10 @@ runtime is present. **Two or more are refused**, in either step, with an
 in this process` in place of `deployed in '<folder>'`, and refuses only backends that
 actually expose a backend):
 
-> `Several Shorokoo inference backends are deployed in '<folder>': Shorokoo.WinCPU (CPU),
+> `Several Shorokoo backends are deployed in '<folder>': Shorokoo.WinCPU (CPU),
 > Shorokoo.WinGPU (CUDA). Discovery picks the backend for a program that named none, and
 > this deployment gives it no way to choose. Say which you mean: assign
-> InferenceBackend.Default before the first inference call to make one of them the default.
+> DefaultBackend.Instance before the first run to make one of them the default.
 > To run several at once, give each ComputeContext its own backend -- new ComputeContext(new
 > LinuxGpuBackend()) -- and where they need separate native ONNX Runtimes, load
 > them with IsolatedBackend.Load.`
@@ -546,7 +546,7 @@ are candidates, so a Windows backend alongside a Linux one is no ambiguity at al
 all four, on the other hand, is two for whichever OS you run on — and refused on both.
 
 Mind that step 1 settles it first. If exactly one backend assembly is already loaded when the
-first inference call happens — which naming its backend type anywhere in a method your program
+first run happens — which naming its backend type anywhere in a method your program
 runs is enough to cause — that one wins and the folder is never probed. The refusal is what
 happens when the *deployment* is left to make the choice, not a guarantee that an ambiguous
 build cannot run.
@@ -562,10 +562,10 @@ Referencing a backend package is enough for step 2: the package copies its DLL t
 output folder, so discovery finds it whether or not your code mentions the backend type.
 On a Linux sandbox that ships only `Shorokoo.LinuxCPU`, discovery picks it with no setup.
 
-If no backend is found, the first inference call throws `InvalidOperationException`:
+If no backend is found, the first run throws `InvalidOperationException`:
 
-> `No Shorokoo inference backend is set and none was found in '<folder>'. Set one at
-> startup -- e.g. InferenceBackend.Default = new LinuxCpuBackend(); (or the
+> `No Shorokoo backend is set and none was found in '<folder>'. Set one at
+> startup -- e.g. DefaultBackend.Instance = new LinuxCpuBackend(); (or the
 > backend from whichever Shorokoo.{WinCPU,WinGPU,LinuxCPU,LinuxGPU} package you
 > reference) -- or add such a package as a dependency.`
 
@@ -575,9 +575,9 @@ Nothing at a call site says which device the work will go to — `Compile(...)` 
 `Execute(...)` look the same on a CPU build and a GPU one. Ask instead:
 
 ```csharp
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 
-Console.WriteLine(InferenceBackend.Describe());       // Shorokoo.WinGPU (CUDA device 0)
+Console.WriteLine(DefaultBackend.Describe());         // Shorokoo.WinGPU (CUDA device 0)
 Console.WriteLine(ComputeContext.Default.Backend);    // the same, at the point work is submitted
 ```
 
@@ -588,16 +588,16 @@ device produced its numbers has lost something it cannot reconstruct later.
 
 Two related entry points:
 
-- `InferenceBackend.Current` is the live backend **or null**, and — unlike `Default` and
+- `DefaultBackend.Current` is the live backend **or null**, and — unlike `Instance` and
   `Describe()` — reading it does not resolve one. Use it to tell "nothing chosen yet" from
   "already bound" without settling the question by asking it.
-- `InferenceBackend.RequireDevice(ComputeDevice.Cpu)` throws unless the live backend is on
+- `DefaultBackend.RequireDevice(ComputeDevice.Cpu)` throws unless the live backend is on
   that device. Put it at the top of a program whose correctness depends on where it runs —
   a check that must not contend with a training run holding the card — and it fails at
   startup, with the live backend named, instead of quietly sharing the GPU:
 
   ```csharp
-  InferenceBackend.RequireDevice(ComputeDevice.Cpu);   // before any inference call
+  DefaultBackend.RequireDevice(ComputeDevice.Cpu);   // before anything runs
   ```
 
 ### Loading a backend at runtime
@@ -608,7 +608,7 @@ back as a reason rather than an exception — so one executable can carry backen
 several platforms and pick at startup.
 
 ```csharp
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 
 if (BackendPackage.TryLoad("plugins/Shorokoo.WinGPU.dll", out var gpu, out var why))
 {
@@ -834,7 +834,7 @@ One process can run one model on the CPU and on the card. A `ComputeContext` con
 with a backend compiles and runs there, and two contexts may name different backends:
 
 ```csharp
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 using Shorokoo.LinuxCPU;
 using Shorokoo.LinuxGPU;
 
@@ -887,13 +887,13 @@ type only, with `ExcludeAssets="native"` so it brings no second runtime:
 
 **Then name the default explicitly, before anything runs.** Both backend assemblies are now
 deployed, so [auto-discovery](#auto-discovery) has two candidates and refuses — and it is
-the *first* read of `InferenceBackend.Default` that refuses, which may be some framework
+the *first* read of `DefaultBackend.Instance` that refuses, which may be some framework
 call you did not write. Constructing a backend does not settle the question; assigning does:
 
 ```csharp
-InferenceBackend.Default = new LinuxCpuBackend();   // startup, before any inference call
+DefaultBackend.Instance = new LinuxCpuBackend();   // startup, before anything runs
 
-var cpu  = new ComputeContext(InferenceBackend.Default);
+var cpu  = new ComputeContext(DefaultBackend.Instance);
 var cuda = new ComputeContext(new LinuxGpuBackend());
 ```
 
@@ -1072,7 +1072,7 @@ feeds arrive, and this is the case worth overriding. Naming a strategy applies t
 context compiles and no others, and `CompiledGraph.DeviceMemory` reports what a graph actually got:
 
 ```csharp
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 using Shorokoo.Runtime;
 
 var ctx = new ComputeContext
@@ -1169,7 +1169,7 @@ shipped GPU backends use — and `PeakUsedBytes` is one process's record of its 
 else's, and on a CPU backend as well as a GPU one — ask the compiled graph:
 
 ```csharp
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 using Shorokoo.Runtime;
 
 var compiled = ctx.Compile(graph);
@@ -1289,7 +1289,7 @@ back the same trace. So run what you are asking about, then read once.
 ## Debugging engine (no OnnxRuntime)
 
 ```csharp
-using Shorokoo.Core.Inference;   // QuickExecutionEngine
+using Shorokoo.Core.Interpreter;   // QuickExecutionEngine
 ```
 
 `QuickExecutionEngine` is a CPU-only interpreter used for debugging, shape inference,

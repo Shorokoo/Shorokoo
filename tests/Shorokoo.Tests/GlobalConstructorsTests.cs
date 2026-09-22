@@ -1,4 +1,4 @@
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 using static Shorokoo.Tests.Utils.SelfCheck;
 
 namespace Shorokoo.Tests;
@@ -31,14 +31,14 @@ public class GlobalConstructorsCoverageTests
     }
 
     [Fact]
-    public void TestBuildingAndExportingTypedAndGenericLiteralsAsksForNoInferenceBackendAtAll()
+    public void TestBuildingAndExportingTypedAndGenericLiteralsAsksForNoBackendAtAll()
     {
         var sample = TensorDataWithDefaultVals(DType.Float32, [2L, 3L]);
         var onnx = Path.Combine(Path.GetTempPath(), $"shorokoo-literal-free-{Guid.NewGuid():N}.onnx");
 
         try
         {
-            var reads = InferenceBackend.CountDefaultReads(() =>
+            var reads = DefaultBackend.CountDefaultReads(() =>
             {
                 var module = BackendFreeLiterals.ComputationGraph;
                 var concrete = module
@@ -72,8 +72,8 @@ public class GlobalConstructorsCoverageTests
 /// <summary>
 /// Every shape of graph literal the constructor catalog builds — scalar, vector, tensor, fill and
 /// default, typed and over an <c>IGenericType</c> placeholder — in one model, so that
-/// <see cref="GlobalConstructorsCoverageTests.TestBuildingAndExportingTypedAndGenericLiteralsAsksForNoInferenceBackendAtAll"/>
-/// can describe and export all of them and count the asks for an inference backend.
+/// <see cref="GlobalConstructorsCoverageTests.TestBuildingAndExportingTypedAndGenericLiteralsAsksForNoBackendAtAll"/>
+/// can describe and export all of them and count the asks for a backend.
 /// </summary>
 [Module]
 public partial class BackendFreeLiterals

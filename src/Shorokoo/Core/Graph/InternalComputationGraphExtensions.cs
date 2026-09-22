@@ -478,7 +478,7 @@ namespace Shorokoo.Graph
         {
             AssertConcreteArchitecture(graph, nameof(InitializeTrainableParams));
             // The context stays null here and is resolved by FastInitializeModelParams when it has
-            // an initializer to run: resolving it resolves an inference backend, and a model with
+            // an initializer to run: resolving it resolves a backend, and a model with
             // no trainable parameter has no initializer and needs none.
 
             if (rngConfig is null && graph.TryGetRngSeed() is { } rngSeedData)

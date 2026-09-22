@@ -1,10 +1,10 @@
 using System.Runtime.InteropServices;
 using Microsoft.ML.OnnxRuntime;
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 using OrtFloat16 = Microsoft.ML.OnnxRuntime.Float16;
 using OrtBFloat16 = Microsoft.ML.OnnxRuntime.BFloat16;
-using ShoFloat16 = Shorokoo.Core.Inference.Abstractions.Float16;
-using ShoBFloat16 = Shorokoo.Core.Inference.Abstractions.BFloat16;
+using ShoFloat16 = Shorokoo.Core.Backends.Float16;
+using ShoBFloat16 = Shorokoo.Core.Backends.BFloat16;
 
 namespace Shorokoo.OnnxRuntime;
 

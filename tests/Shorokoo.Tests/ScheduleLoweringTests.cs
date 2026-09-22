@@ -1,4 +1,4 @@
-using Shorokoo.Core.Inference;
+using Shorokoo.Core.Interpreter;
 using Shorokoo.Runtime;
 
 namespace Shorokoo.Tests;

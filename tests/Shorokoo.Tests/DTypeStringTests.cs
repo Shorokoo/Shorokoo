@@ -1,5 +1,5 @@
 using Shorokoo.Core.Factory;
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 using Shorokoo.Core.Nodes;
 using Shorokoo.Onnx;
 using Shorokoo.Runtime;
@@ -7,7 +7,7 @@ using Shorokoo.Runtime;
 namespace Shorokoo.Tests;
 
 /// <summary>
-/// Coverage for <see cref="DType.String"/> — the lone DType for ONNX
+/// Coverage for <see cref="DType.Utf8"/> — the lone DType for ONNX
 /// <c>TensorProto.DataType.STRING</c> (proto num 8): its conversion arms and the
 /// ORT-backed variable-length string tensor construct/read path.
 /// </summary>
@@ -18,26 +18,26 @@ public class DTypeStringCoverageTests
     [Fact]
     public void TestDTypeStringConversionArmsAndOrtStringTensorRoundtrip()
     {
-        Assert.Equal(8, DType.String.ProtoTypeNum);
-        Assert.Equal("String", DType.String.ToString());
-        Assert.Same(DType.String, DType.FromProtoTypeNum(8));
-        Assert.Same(DType.String, (DType)8);
+        Assert.Equal(8, DType.Utf8.ProtoTypeNum);
+        Assert.Equal("Utf8", DType.Utf8.ToString());
+        Assert.Same(DType.Utf8, DType.FromProtoTypeNum(8));
+        Assert.Same(DType.Utf8, (DType)8);
 
-        Assert.Equal(typeof(@string), DType.String.ToIVarType());
-        Assert.Equal(typeof(string), DType.String.ToPrimitiveType());
+        Assert.Equal(typeof(utf8), DType.Utf8.ToIVarType());
+        Assert.Equal(typeof(string), DType.Utf8.ToPrimitiveType());
 
-        var bitCountEx = Assert.Throws<UnsupportedDTypeException>(() => DType.String.EncodingBitCount);
+        var bitCountEx = Assert.Throws<UnsupportedDTypeException>(() => DType.Utf8.EncodingBitCount);
         Assert.Equal(ErrorCodes.DT020, bitCountEx.ErrorCode);
 
-        Assert.Same(DType.String, OnnxUtils.GetDType<@string>());
-        Assert.Same(DType.String, OnnxUtils.GetDType<string>());
-        Assert.Same(DType.String, OnnxUtils.GetDType(typeof(@string)));
-        Assert.Same(DType.String, OnnxUtils.GetDType(typeof(string)));
+        Assert.Same(DType.Utf8, OnnxUtils.GetDType<utf8>());
+        Assert.Same(DType.Utf8, OnnxUtils.GetDType<string>());
+        Assert.Same(DType.Utf8, OnnxUtils.GetDType(typeof(utf8)));
+        Assert.Same(DType.Utf8, OnnxUtils.GetDType(typeof(string)));
 
         string[] values = ["hello", "", "shoroko̅o", "with\nnewline", "🦀"];
         long[] shape = [values.Length];
 
-        using (var tensor = InferenceBackend.Default.CreateStringTensor(values, shape))
+        using (var tensor = DefaultBackend.Instance.CreateStringTensor(values, shape))
         {
             Assert.Equal(ShorokooOnnxValueType.Tensor, tensor.ValueType);
             Assert.Equal(ShorokooTensorElementType.String, tensor.ElementType);
@@ -46,12 +46,12 @@ public class DTypeStringCoverageTests
         }
 
         var rawBytesEx = Assert.Throws<NotSupportedException>(() =>
-            InferenceBackend.Default.CreateTensorFromRawBytes(
+            DefaultBackend.Instance.CreateTensorFromRawBytes(
                 ShorokooTensorElementType.String, [], [0L]));
         Assert.Contains("CreateStringTensor", rawBytesEx.Message);
 
         var hostRawEx = Assert.Throws<NotSupportedException>(() =>
-            TensorData.CreateFromRawBytes(new Shape(0L), DType.String, []));
+            TensorData.CreateFromRawBytes(new Shape(0L), DType.Utf8, []));
         Assert.Contains("variable-length", hostRawEx.Message);
     }
 
@@ -64,12 +64,12 @@ public class DTypeStringCoverageTests
         TensorData literal = null!;
         // The AsyncLocal seam rather than a before/after read of the process-wide slot: this suite
         // runs four tests at once, so any of them may settle that slot inside the window.
-        Assert.Equal(0, InferenceBackend.CountDefaultReads(() => literal = TensorData(dims, values)));
+        Assert.Equal(0, DefaultBackend.CountDefaultReads(() => literal = TensorData(dims, values)));
 
         Assert.IsType<HostStringTensorData>(literal);
         // Nothing of a runtime's is in it -- which is the whole of "no backend was needed".
         Assert.False(literal is IOnnxData);
-        Assert.Same(DType.String, literal.DType);
+        Assert.Same(DType.Utf8, literal.DType);
         Assert.Equal(new Shape(2L, 2L), literal.Shape);
         Assert.Equal(values, ((HostStringTensorData)literal).Strings);
 
@@ -116,7 +116,7 @@ public class DTypeStringCoverageTests
 
         var bound = reread.Nodes.Single(n => n.OpCode == OpCodes.CONSTANT)
             .Attributes.GetAttributeVal(OnnxOpAttributeNames.AttrValue)!;
-        Assert.Same(DType.String, bound.DType);
+        Assert.Same(DType.Utf8, bound.DType);
         Assert.Equal(new Shape(2L, 2L), bound.Shape);
         Assert.Equal(values, bound.Values);
     }

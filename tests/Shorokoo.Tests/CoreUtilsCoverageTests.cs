@@ -5,8 +5,8 @@ using System.Text.RegularExpressions;
 using Microsoft.ML.OnnxRuntime;
 using Shorokoo.Core.Factory;
 using Shorokoo.Core.Factory.OpsFactories;
-using Shorokoo.Core.Inference;
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Interpreter;
+using Shorokoo.Core.Backends;
 using Shorokoo.OnnxRuntime;
 using Shorokoo.Runtime;
 
@@ -17,7 +17,7 @@ namespace Shorokoo.Tests;
 /// internal LINQ-ish helpers in <c>Shorokoo.Core.Utils.Extensions</c>, the <see cref="NodeKey"/> /
 /// <see cref="TensorKey"/> identity structs, the <see cref="ShorokooException"/> hierarchy, the
 /// OpsFactories <see cref="Helpers"/> dtype sets and attribute-type mapping, the
-/// <see cref="InferenceBackend"/> deployment-folder discovery and selection policy, the
+/// <see cref="DefaultBackend"/> deployment-folder discovery and selection policy, the
 /// description a live backend answers with and the device assertion built on it, the
 /// uninitialised tensor allocation on the backend ABI and the zero-filling default behind it, the
 /// <see cref="DeviceMemory"/> settings the CUDA backends map onto ORT's arena options, the
@@ -260,7 +260,7 @@ public class CoreUtilsCoverageTests
         Assert.Contains(DType.Float32, Helpers.Numeric13);
         Assert.Contains(DType.Float32, Helpers.Numeric6);
         Assert.Contains(DType.Float32, Helpers.Numeric1);
-        Assert.Contains(DType.String, Helpers.All2);
+        Assert.Contains(DType.Utf8, Helpers.All2);
         Assert.Contains(DType.BFloat16, Helpers.All13);
 
         Assert.Equal(Core.Factory.IR.AttributeProto.AttributeType.Int, AttributeType.Bool.ToProto());
@@ -282,18 +282,18 @@ public class CoreUtilsCoverageTests
     }
 
     [Fact]
-    public void TestInferenceBackendDiscoveryAndSelectionPolicyCoverage()
+    public void TestDefaultBackendDiscoveryAndSelectionPolicyCoverage()
     {
         // No backend is set explicitly in this suite, so reading Default exercises the
         // deployment-folder auto-discovery fallback; the platform backend is derived from the
         // running OS, so this holds on Windows and Linux alike.
-        var backend = InferenceBackend.Default;
+        var backend = DefaultBackend.Instance;
         Assert.NotNull(backend);
         var name = backend.GetType().Assembly.GetName().Name ?? "";
         Assert.StartsWith(RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Shorokoo.Win" : "Shorokoo.Linux", name);
 
         // Discovery is sticky, and the discovered backend actually executes.
-        Assert.Same(backend, InferenceBackend.Default);
+        Assert.Same(backend, DefaultBackend.Instance);
         Assert.Equal(5f, OnnxEngine.Eval(Scalar(2f) + Scalar(3f)).As<float32>().AccessMemory()[0]);
 
         // The candidate policy, driven directly since the suite ships one backend: nothing
@@ -301,11 +301,11 @@ public class CoreUtilsCoverageTests
         // for another OS is not a candidate at all.
         var cpu = ("Shorokoo.LinuxCPU", false);
         var gpu = ("Shorokoo.LinuxGPU", true);
-        Assert.Null(InferenceBackend.SelectBackend([], "deployed in '/app'"));
-        Assert.Equal(cpu, InferenceBackend.SelectBackend([cpu], "deployed in '/app'")!.Value);
-        Assert.Equal(gpu, InferenceBackend.SelectBackend([gpu], "deployed in '/app'")!.Value);
+        Assert.Null(DefaultBackend.SelectBackend([], "deployed in '/app'"));
+        Assert.Equal(cpu, DefaultBackend.SelectBackend([cpu], "deployed in '/app'")!.Value);
+        Assert.Equal(gpu, DefaultBackend.SelectBackend([gpu], "deployed in '/app'")!.Value);
         var refused = Assert.Throws<InvalidOperationException>(
-            () => InferenceBackend.SelectBackend([cpu, gpu], "deployed in '/app'"));
+            () => DefaultBackend.SelectBackend([cpu, gpu], "deployed in '/app'"));
         Assert.Contains("Shorokoo.LinuxCPU (CPU), Shorokoo.LinuxGPU (CUDA)", refused.Message);
         Assert.Contains("deployed in '/app'", refused.Message);
 
@@ -314,29 +314,29 @@ public class CoreUtilsCoverageTests
         (string, bool)[] bothDevicesInOrder = windows
             ? [("Shorokoo.WinCPU", false), ("Shorokoo.WinGPU", true)]
             : [("Shorokoo.LinuxCPU", false), ("Shorokoo.LinuxGPU", true)];
-        Assert.Equal(thisOsOnly, InferenceBackend.LoadedCandidates(
+        Assert.Equal(thisOsOnly, DefaultBackend.LoadedCandidates(
             ["System.Private.CoreLib", "Shorokoo.WinCPU", "Shorokoo.LinuxCPU"]));
-        Assert.Empty(InferenceBackend.LoadedCandidates(["System.Private.CoreLib"]));
-        Assert.Equal(bothDevicesInOrder, InferenceBackend.LoadedCandidates(
+        Assert.Empty(DefaultBackend.LoadedCandidates(["System.Private.CoreLib"]));
+        Assert.Equal(bothDevicesInOrder, DefaultBackend.LoadedCandidates(
             windows ? ["Shorokoo.WinGPU", "Shorokoo.WinCPU"] : ["Shorokoo.LinuxGPU", "Shorokoo.LinuxCPU"]));
     }
 
     [Fact]
     public void TestTheLiveBackendNamesItsDeviceAndCanBeRequired()
     {
-        var live = InferenceBackend.Describe();
-        Assert.Same(InferenceBackend.Default, InferenceBackend.Current);
+        var live = DefaultBackend.Describe();
+        Assert.Same(DefaultBackend.Instance, DefaultBackend.Current);
         Assert.StartsWith(
             RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Shorokoo.Win" : "Shorokoo.Linux", live.Name);
         Assert.Equal(live.Name.EndsWith("GPU", StringComparison.Ordinal) ? ComputeDevice.Cuda : ComputeDevice.Cpu,
             live.Device);
         Assert.Equal(live, ComputeContext.Default.Backend);
 
-        InferenceBackend.RequireDevice(live.Device);
+        DefaultBackend.RequireDevice(live.Device);
         var other = live.Device == ComputeDevice.Cpu ? ComputeDevice.Cuda : ComputeDevice.Cpu;
         Assert.Contains(live.ToString(), Assert.Throws<InvalidOperationException>(
-            () => InferenceBackend.RequireDevice(other)).Message);
-        Assert.Throws<ArgumentOutOfRangeException>(() => InferenceBackend.RequireDevice((ComputeDevice)7));
+            () => DefaultBackend.RequireDevice(other)).Message);
+        Assert.Throws<ArgumentOutOfRangeException>(() => DefaultBackend.RequireDevice((ComputeDevice)7));
     }
 
     private static readonly ShorokooTensorElementType[] FixedStrideElementTypes =
@@ -381,7 +381,7 @@ public class CoreUtilsCoverageTests
     [Fact]
     public void TestAnUninitializedTensorIsWhatTheCopyingPathBuildsWithoutTheCopy()
     {
-        var backend = InferenceBackend.Default;
+        var backend = DefaultBackend.Instance;
         long[][] shapes = [[4L], [2L, 3L], [2L, 1L, 5L]];
 
         foreach (var elementType in FixedStrideElementTypes)
@@ -418,7 +418,7 @@ public class CoreUtilsCoverageTests
     [Fact]
     public void TestABackendThatDoesNotOverrideTheUninitializedAllocationStillGetsAZeroFilledOne()
     {
-        IShorokooInferenceBackend defaulting = new ByteWiseOnlyBackend();
+        IShorokooBackend defaulting = new ByteWiseOnlyBackend();
 
         Assert.Equal(new float[6], Zeroed<float>(defaulting, ShorokooTensorElementType.Float, [2L, 3L]));
         Assert.Equal(new long[3], Zeroed<long>(defaulting, ShorokooTensorElementType.Int64, [3L]));
@@ -447,7 +447,7 @@ public class CoreUtilsCoverageTests
     }
 
     private static T[] Written<T>(
-        IShorokooInferenceBackend backend, ShorokooTensorElementType elementType, long[] shape, T[] values)
+        IShorokooBackend backend, ShorokooTensorElementType elementType, long[] shape, T[] values)
         where T : unmanaged
     {
         using var fresh = backend.CreateUninitializedTensorInBackendMemory(elementType, shape);
@@ -456,7 +456,7 @@ public class CoreUtilsCoverageTests
     }
 
     private static T[] Zeroed<T>(
-        IShorokooInferenceBackend backend, ShorokooTensorElementType elementType, long[] shape)
+        IShorokooBackend backend, ShorokooTensorElementType elementType, long[] shape)
         where T : unmanaged
     {
         using var value = backend.CreateUninitializedTensorInBackendMemory(elementType, shape);
@@ -467,15 +467,15 @@ public class CoreUtilsCoverageTests
 
     /// <summary>A backend answering only the byte-wise constructor, so what serves everything built
     /// on it is the interface's own default bodies rather than a backend's.</summary>
-    private sealed class ByteWiseOnlyBackend : IShorokooInferenceBackend
+    private sealed class ByteWiseOnlyBackend : IShorokooBackend
     {
         public BackendDescription Description { get; } = new("byte-wise-only", ComputeDevice.Cpu, null);
 
         public IShorokooTensorValue CreateTensorFromRawBytes(
             ShorokooTensorElementType elementType, byte[] data, long[] shape)
-            => InferenceBackend.Default.CreateTensorFromRawBytes(elementType, data, shape);
+            => DefaultBackend.Instance.CreateTensorFromRawBytes(elementType, data, shape);
 
-        public IShorokooInferenceSession CreateSession(
+        public IShorokooSession CreateSession(
             ReadOnlyMemory<byte> modelBytes, ShorokooGraphOptimization graphOptimization,
             ShorokooLogSeverity logSeverity, DeviceMemorySettings deviceMemory)
             => throw new NotSupportedException();
@@ -520,18 +520,18 @@ public class CoreUtilsCoverageTests
         var cpu = new BackendDescription("B", ComputeDevice.Cpu, null);
         var cuda = new BackendDescription("B", ComputeDevice.Cuda, 0);
         var dml = new BackendDescription("B", ComputeDevice.Other, null);
-        Assert.Null(InferenceBackend.DeviceRefusal(cpu, ComputeDevice.Cpu));
-        Assert.Null(InferenceBackend.DeviceRefusal(cuda, ComputeDevice.Cuda));
-        Assert.Null(InferenceBackend.DeviceRefusal(dml, ComputeDevice.Other));
+        Assert.Null(DefaultBackend.DeviceRefusal(cpu, ComputeDevice.Cpu));
+        Assert.Null(DefaultBackend.DeviceRefusal(cuda, ComputeDevice.Cuda));
+        Assert.Null(DefaultBackend.DeviceRefusal(dml, ComputeDevice.Other));
         Assert.Contains("requires a CUDA backend, but B (CPU) is live",
-            InferenceBackend.DeviceRefusal(cpu, ComputeDevice.Cuda));
+            DefaultBackend.DeviceRefusal(cpu, ComputeDevice.Cuda));
         Assert.Contains("requires a CPU backend, but B (CUDA device 0) is live",
-            InferenceBackend.DeviceRefusal(cuda, ComputeDevice.Cpu));
+            DefaultBackend.DeviceRefusal(cuda, ComputeDevice.Cpu));
         Assert.Contains("requires a CPU backend, but B (Other) is live",
-            InferenceBackend.DeviceRefusal(dml, ComputeDevice.Cpu));
+            DefaultBackend.DeviceRefusal(dml, ComputeDevice.Cpu));
         Assert.Contains("Shorokoo.{WinCPU,WinGPU,LinuxCPU,LinuxGPU}",
-            InferenceBackend.DeviceRefusal(dml, ComputeDevice.Cpu));
-        var noShippedBackend = InferenceBackend.DeviceRefusal(cpu, ComputeDevice.Other)!;
+            DefaultBackend.DeviceRefusal(dml, ComputeDevice.Cpu));
+        var noShippedBackend = DefaultBackend.DeviceRefusal(cpu, ComputeDevice.Other)!;
         Assert.Contains("requires a backend on some other execution provider", noShippedBackend);
         Assert.DoesNotContain("Shorokoo.{WinCPU,WinGPU,LinuxCPU,LinuxGPU}", noShippedBackend);
     }
@@ -596,7 +596,7 @@ public class CoreUtilsCoverageTests
 
     /// <summary>Records the settings each run was handed. No outputs, so both run paths return
     /// nothing and every overload can be driven without a model.</summary>
-    private sealed class RunSettingsRecorder : IShorokooInferenceSession
+    private sealed class RunSettingsRecorder : IShorokooSession
     {
         public List<RunSettings> Seen { get; } = [];
         public IReadOnlyList<string> InputNames => [];
@@ -979,7 +979,7 @@ public class CoreUtilsCoverageTests
         Assert.True(after.TotalAllocatedBytes >= after.MaxInUseBytes);
         Assert.True(after.MaxAllocSizeBytes > 0);
 
-        IShorokooInferenceSession unanswering = new RunSettingsRecorder();
+        IShorokooSession unanswering = new RunSettingsRecorder();
         Assert.Null(unanswering.ReadArenaStatistics());
         Assert.Null(unanswering.ReadNodePlacement());
         Assert.Equal(SessionOutputPlacement.Unknown, unanswering.OutputPlacement);

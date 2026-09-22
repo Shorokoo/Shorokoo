@@ -1,4 +1,4 @@
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 using Shorokoo;
 using Shorokoo.Core;
 using Shorokoo.Core.Nodes;
@@ -109,7 +109,7 @@ namespace Shorokoo
                     else if (type == DType.UInt16) unit = (Vector<T>)(object)Vector((ushort)1);
                     else if (type == DType.UInt32) unit = (Vector<T>)(object)Vector((uint)1);
                     else if (type == DType.UInt64) unit = (Vector<T>)(object)Vector((ulong)1);
-                    else if (type == DType.String)
+                    else if (type == DType.Utf8)
                         throw new UnsupportedDTypeException(ErrorCodes.VT003, type.ToString(), "Unit Vector", "String type is not supported for unit vector creation");
                     else if (type == DType.Bool) unit = (Vector<T>)(object)Vector(true);
                     else if (type == DType.Complex64) 
@@ -155,7 +155,7 @@ namespace Shorokoo
                     else if (type == DType.UInt16) empty = (Vector<T>)(object)Vector((ushort[])[]);
                     else if (type == DType.UInt32) empty = (Vector<T>)(object)Vector((uint[])[]);
                     else if (type == DType.UInt64) empty = (Vector<T>)(object)Vector((ulong[])[]);
-                    else if (type == DType.String)
+                    else if (type == DType.Utf8)
                         throw new UnsupportedDTypeException(ErrorCodes.VT008, type.ToString(), "Empty Vector", "String type is not supported for empty vector creation");
                     else if (type == DType.Bool) empty = (Vector<T>)(object)Vector((bool[])[]);
                     else if (type == DType.Complex64) 

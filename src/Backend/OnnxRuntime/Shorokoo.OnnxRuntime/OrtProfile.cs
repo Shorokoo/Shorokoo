@@ -1,6 +1,6 @@
 using System.Globalization;
 using System.Text.Json;
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 
 namespace Shorokoo.OnnxRuntime;
 

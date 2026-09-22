@@ -3,7 +3,7 @@ using Shorokoo.Core.Nodes;
 using Shorokoo.Core.Nodes.OnnxNodes;
 using Shorokoo.Core.Utils;
 using Shorokoo.Onnx;
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 using static Shorokoo.Globals;
 using Shorokoo.Core;
 using Shorokoo.Core.Nodes.NodeDefinitions;
@@ -101,7 +101,7 @@ namespace Shorokoo
             {
                 switch(typeof(T))
                 {
-                    case Type t when t == typeof(@string):
+                    case Type t when t == typeof(utf8):
                         return [.. StringElements()];
                     case Type t when t == typeof(bit):
                         return this.CopyMemory<bool>().Cast<object>().ToArray();
@@ -238,7 +238,7 @@ namespace Shorokoo
             {
                 // Strings are the one dtype with no flat buffer to box out of; their elements are
                 // the storage, so they are read as themselves.
-                if (DType == DType.String) return [.. StringElements()];
+                if (DType == DType.Utf8) return [.. StringElements()];
                 return this.CopyRawMemory().Cast<object>().ToArray();
             }
         }
@@ -489,7 +489,7 @@ namespace Shorokoo
         public TensorData<T> As<T>() where T : IVarType => (TensorData<T>)this;
 
         /// <summary>
-        /// Creates TensorData backed by an existing inference-runtime tensor value, belonging to
+        /// Creates TensorData backed by an existing backend-runtime tensor value, belonging to
         /// <see cref="ComputeContext.Host"/> — the framework's own host memory, which is where a
         /// value it built itself is. A value a session produced comes with the context that
         /// produced it instead, so that it can say where it is; that is the internal overload
@@ -522,10 +522,10 @@ namespace Shorokoo
         ///
         /// <para>Raw bytes are what a tensor read out of a model file, or zeroed for a gradient
         /// buffer, already is; wrapping them describes data rather than running anything. This
-        /// went through <c>InferenceBackend.Default</c> instead, so reading an <c>.onnx</c> file
+        /// went through <c>DefaultBackend.Instance</c> instead, so reading an <c>.onnx</c> file
         /// resolved the process-wide backend and put a native allocation behind every initializer
         /// in it. The value is built when a session is fed this tensor, in
-        /// <see cref="ToTensorValue(IShorokooInferenceBackend)"/>, and not before.</para>
+        /// <see cref="ToTensorValue(IShorokooBackend)"/>, and not before.</para>
         ///
         /// <para>Exactly <paramref name="shape"/>'s worth of <paramref name="data"/> becomes the
         /// tensor: too few bytes is an error, a surplus is not and is dropped. That asymmetry is
@@ -537,7 +537,7 @@ namespace Shorokoo
         /// <exception cref="ArgumentException"><paramref name="data"/> does not cover
         /// <paramref name="shape"/>.</exception>
         /// <exception cref="NotSupportedException"><paramref name="dtype"/> is
-        /// <see cref="DType.String"/>, or <paramref name="shape"/> has no known element
+        /// <see cref="DType.Utf8"/>, or <paramref name="shape"/> has no known element
         /// count.</exception>
         /// <exception cref="UnsupportedDTypeException"><paramref name="dtype"/> has no whole-byte
         /// element stride, so no flat buffer can describe it.</exception>
@@ -546,8 +546,8 @@ namespace Shorokoo
             ArgumentNullException.ThrowIfNull(data);
             // The refusal the backend used to give, kept where it can still be given eagerly: a
             // string element is variable-length, so a flat byte buffer does not describe one and
-            // a HostTensorData<@string> over these bytes would be a tensor of nothing.
-            if (dtype == DType.String)
+            // a HostTensorData<utf8> over these bytes would be a tensor of nothing.
+            if (dtype == DType.Utf8)
                 throw new NotSupportedException(
                     "String tensors are variable-length and not byte-stride, so raw bytes cannot "
                     + "describe one. Build it from its elements with TensorData(dims, string[]).");
@@ -579,10 +579,10 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// Returns the backing inference-runtime tensor value, on the process-wide backend;
+        /// Returns the backing backend-runtime tensor value, on the process-wide backend;
         /// throws if this instance has none and none can be built.
         /// </summary>
-        public IShorokooTensorValue ToTensorValue() => ToTensorValue(InferenceBackend.Default);
+        public IShorokooTensorValue ToTensorValue() => ToTensorValue(DefaultBackend.Instance);
 
         /// <summary>
         /// This tensor as a value of <paramref name="backend"/>'s runtime. A tensor that already
@@ -592,12 +592,12 @@ namespace Shorokoo
         ///
         /// <para>The value returned is the tensor's own: read it, do not dispose it.</para>
         /// </summary>
-        internal virtual IShorokooTensorValue ToTensorValue(IShorokooInferenceBackend backend)
+        internal virtual IShorokooTensorValue ToTensorValue(IShorokooBackend backend)
         {
             ThrowIfDisposed();
             if (this is IOnnxData od) return od.Value;
             throw new InvalidOperationException(
-                $"TensorData of type {this.GetType().Name} does not expose an inference-runtime tensor value.");
+                $"TensorData of type {this.GetType().Name} does not expose a backend-runtime tensor value.");
         }
 
         /// <summary>Creates int32 TensorData of the given shape holding 0, 1, ..., Count-1 in row-major order.</summary>
@@ -686,15 +686,15 @@ namespace Shorokoo
         internal abstract TensorData CloneSharing(ComputeContext context);
     }
 
-    /// <summary>TensorData backed by an inference-runtime tensor value.</summary>
+    /// <summary>TensorData backed by a backend-runtime tensor value.</summary>
     public interface IOnnxData
     {
-        /// <summary>The backing inference-runtime tensor value.</summary>
+        /// <summary>The backing backend-runtime tensor value.</summary>
         public IShorokooTensorValue Value { get; }
     }
 
     /// <summary>
-    /// <see cref="TensorData{T}"/> implementation backed by an inference-runtime
+    /// <see cref="TensorData{T}"/> implementation backed by a backend-runtime
     /// (ONNX) tensor value; span access reads the runtime tensor's buffer directly.
     /// </summary>
     public sealed class OnnxTensorData<T> : TensorData<T>, IOnnxData, IDisposable
@@ -703,7 +703,7 @@ namespace Shorokoo
         private readonly IShorokooTensorValue backing;
 
         /// <summary>
-        /// The backing inference-runtime tensor value, which the allocation owns: it is released
+        /// The backing backend-runtime tensor value, which the allocation owns: it is released
         /// when the last handle and the last lock on that allocation let go, and nothing else may
         /// hold or free it (Shorokoo/Shorokoo#180). Disposing <i>this</i> tensor drops one handle,
         /// which releases the value only when it was the last.
@@ -722,7 +722,7 @@ namespace Shorokoo
         {
             get
             {
-                if (DType == DType.String) return [.. StringElements()];
+                if (DType == DType.Utf8) return [.. StringElements()];
                 return this.CopyMemory<byte>().Cast<object>().ToArray();
             }
         }

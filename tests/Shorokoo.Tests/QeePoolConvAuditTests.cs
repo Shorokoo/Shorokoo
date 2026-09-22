@@ -1,4 +1,4 @@
-using Shorokoo.Core.Inference;
+using Shorokoo.Core.Interpreter;
 using static Shorokoo.Tests.Utils.QeeAudit;
 
 namespace Shorokoo.Tests;

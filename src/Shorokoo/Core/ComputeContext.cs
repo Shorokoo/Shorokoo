@@ -19,7 +19,7 @@ using Shorokoo.Core.Nodes.Processors.Helpers;
 using Shorokoo.Core.Nodes.Processors.AutoGrad;
 using Shorokoo.Core.Nodes.Processors.Fast;
 using Shorokoo.Core.Nodes.OnnxNodes;
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 using Shorokoo.Core.Utils;
 using Shorokoo.Core.Nodes.AutoDiff;
 using Shorokoo.Core.Training;
@@ -29,15 +29,15 @@ namespace Shorokoo.Runtime
 {
 
     /// <summary>
-    /// A compiled computation graph backed by a Shorokoo inference session.
+    /// A compiled computation graph backed by a Shorokoo session.
     /// Created once via <see cref="ComputeContext.Compile(ComputationGraph)"/>, then invoked repeatedly
     /// via <see cref="Execute(IData[])"/> — each call only feeds new data, with zero graph
     /// rebuilding or session creation overhead.
     /// </summary>
     public class CompiledGraph : IDisposable
     {
-        private readonly IShorokooInferenceSession _session;
-        private readonly IShorokooInferenceBackend _backend;
+        private readonly IShorokooSession _session;
+        private readonly IShorokooBackend _backend;
         // The context that compiled this graph: outputs belong to it, and it decides whether they
         // leave it. A compiled graph runs on the backend it was built with whatever happens to the
         // context afterwards, so this is about the results and not about where the work runs.
@@ -46,8 +46,8 @@ namespace Shorokoo.Runtime
         private readonly string[] _originalInputNames;
 
         internal CompiledGraph(
-            IShorokooInferenceSession session,
-            IShorokooInferenceBackend backend,
+            IShorokooSession session,
+            IShorokooBackend backend,
             Dictionary<string, string> onnxInputNameByOriginal,
             string[] originalInputNames,
             ShorokooGraphOptimization optimization,
@@ -69,7 +69,7 @@ namespace Shorokoo.Runtime
         /// What a run of this graph uses when the call names nothing: the
         /// <see cref="ComputeContext.RunSettings"/> of the context that compiled it, taken when
         /// it was compiled. Each <c>Execute</c> / <c>Run</c> overload has a sibling taking a
-        /// <see cref="Shorokoo.Core.Inference.Abstractions.RunSettings"/> that overrides it for
+        /// <see cref="Shorokoo.Core.Backends.RunSettings"/> that overrides it for
         /// one call, so this is a default and never a ceiling.
         /// </summary>
         public RunSettings DefaultRunSettings { get; }
@@ -81,11 +81,11 @@ namespace Shorokoo.Runtime
         /// </summary>
         public BackendDescription Backend => _backend.Description;
 
-        /// <summary>True once this graph's inference session has been released.</summary>
+        /// <summary>True once this graph's session has been released.</summary>
         public bool IsDisposed { get; private set; }
 
         /// <summary>
-        /// Releases the inference session behind this graph. A session is the expensive thing a
+        /// Releases the session behind this graph. A session is the expensive thing a
         /// compile produces — on a card it owns the execution provider's whole per-session state
         /// and its arena, which dwarfs any tensor the run produces — so it is released with the
         /// context that compiled it rather than left to a finalizer. Disposing twice is harmless,
@@ -298,7 +298,7 @@ namespace Shorokoo.Runtime
 
         /// <summary>
         /// This session's own memory arena, as its runtime reports it, or <c>null</c> on a backend
-        /// that reports none. Unlike <see cref="Shorokoo.Core.Inference.Abstractions.DeviceMemory"/>,
+        /// that reports none. Unlike <see cref="Shorokoo.Core.Backends.DeviceMemory"/>,
         /// which reads the whole device across every process on it, this is this session's
         /// allocator and nobody else's.
         ///
@@ -338,7 +338,7 @@ namespace Shorokoo.Runtime
     }
 
     /// <summary>
-    /// The runtime that turns a <see cref="ComputationGraph"/> into an inference session and runs it —
+    /// The runtime that turns a <see cref="ComputationGraph"/> into a session and runs it —
     /// once via <see cref="Execute(ComputationGraph, IData[])"/>, or repeatedly via a
     /// <see cref="CompiledGraph"/> from <see cref="Compile(ComputationGraph)"/>.
     ///
@@ -351,7 +351,7 @@ namespace Shorokoo.Runtime
     /// cuda.Execute(graph, input);  // the same graph, on the card
     /// </code>
     /// A context constructed without one runs on the process default
-    /// (<see cref="Shorokoo.Core.Inference.Abstractions.InferenceBackend.Default"/>), which is what
+    /// (<see cref="Shorokoo.Core.Backends.DefaultBackend.Instance"/>), which is what
     /// every context did before backends could differ. Which device a context will use is read off
     /// <see cref="Backend"/>.
     ///
@@ -367,7 +367,7 @@ namespace Shorokoo.Runtime
     /// where an existing runtime value lives — a tensor another backend produced is that backend's,
     /// so a session here converts it as it is fed and hands its own outputs back. That conversion
     /// costs a host copy per feed and is possible only for data the host can read; see
-    /// <see cref="Shorokoo.Core.Inference.Abstractions.BackendTransfer"/>.</para>
+    /// <see cref="Shorokoo.Core.Backends.BackendTransfer"/>.</para>
     /// </summary>
     public class ComputeContext : IDisposable
     {
@@ -375,8 +375,8 @@ namespace Shorokoo.Runtime
         private static readonly object _defaultGate = new();
 
         // Null means the default backend, read when the work runs rather than at construction: a
-        // context built before InferenceBackend.Default was assigned must still honour it.
-        private readonly IShorokooInferenceBackend? _backend;
+        // context built before DefaultBackend.Instance was assigned must still honour it.
+        private readonly IShorokooBackend? _backend;
 
         // Counts reads of Default made inside a CountDefaultReads call, and nothing else. It is an
         // AsyncLocal rather than a static counter because the callers that care run in parallel
@@ -418,7 +418,7 @@ namespace Shorokoo.Runtime
         /// and cannot reach a session that has already been compiled — including those compiled by
         /// the context being replaced. Code that wants a configuration of its own should hold its
         /// own context rather than assign this one.</para>
-        /// <para>Reading this resolves an inference backend, and refuses — naming the packages to
+        /// <para>Reading this resolves a backend, and refuses — naming the packages to
         /// deploy — when there is none. So it belongs at the point work actually runs: a
         /// <c>compute ??= ComputeContext.Default</c> at the top of a graph pass turns that whole
         /// pass into a backend requirement, including for the graphs it has nothing to execute
@@ -443,10 +443,10 @@ namespace Shorokoo.Runtime
                     if (_defaultComputeContext is { IsDisposed: false } bound) return bound;
 
                 // The backend a process loaded, under the rule that a CPU one wins: the unnamed
-                // default should not be the card. Reading InferenceBackend.Default is what
+                // default should not be the card. Reading DefaultBackend.Instance is what
                 // discovers and records one when nothing has been loaded yet, and what refuses --
                 // naming the packages to deploy -- when there is nothing to discover.
-                var backend = InferenceBackend.Remembered ?? InferenceBackend.Default;
+                var backend = DefaultBackend.Remembered ?? DefaultBackend.Instance;
 
                 // Its outputs leave it. The default context is the one nobody named and nobody
                 // disposes, so a result that belonged to it would be tied to a lifetime the caller
@@ -467,7 +467,7 @@ namespace Shorokoo.Runtime
         /// <see cref="Run(ComputationGraph, NamedModelParam[])"/> and <c>Eval</c> all throw,
         /// naming a real context as the fix. It deliberately does
         /// <i>not</i> fall back to the process-wide backend: that would put back the implicit
-        /// resolution that made merely describing a graph require a deployed inference runtime.</para>
+        /// resolution that made merely describing a graph require a deployed backend.</para>
         ///
         /// <para>It cannot be disposed. <see cref="Dispose"/> does nothing and
         /// <see cref="IsDisposed"/> is always false, because a tensor here outlives every compute
@@ -479,7 +479,7 @@ namespace Shorokoo.Runtime
             new(HostBackend.Instance, detachesOutputs: false, isHost: true);
 
         /// <summary>Creates a compute context that runs on the process-wide
-        /// <see cref="Shorokoo.Core.Inference.Abstractions.InferenceBackend.Default"/>, on the
+        /// <see cref="Shorokoo.Core.Backends.DefaultBackend.Instance"/>, on the
         /// shipped defaults. Set <see cref="DeviceMemory"/> or <see cref="RunSettings"/> in an
         /// object initializer to compile and run under something else.</summary>
         public ComputeContext() : this(detachesOutputs: false)
@@ -522,7 +522,7 @@ namespace Shorokoo.Runtime
         /// <see cref="CompiledGraph"/> takes a copy of this when it is compiled
         /// (<see cref="CompiledGraph.DefaultRunSettings"/>), and every <see cref="CompiledGraph"/>
         /// run entry point also takes a
-        /// <see cref="Shorokoo.Core.Inference.Abstractions.RunSettings"/> to override it for one
+        /// <see cref="Shorokoo.Core.Backends.RunSettings"/> to override it for one
         /// call, because ORT reads these off the run rather than the session. This context's own
         /// one-shot entry points — <see cref="Execute(ComputationGraph, IData[])"/>,
         /// <see cref="Run(ComputationGraph, NamedModelParam[])"/>, <c>Eval</c> and
@@ -587,7 +587,7 @@ namespace Shorokoo.Runtime
         /// <see cref="FinishRunStats"/> in a <c>finally</c>, either side of the call into the
         /// backend and nowhere else.
         /// </summary>
-        internal ArenaStatistics? StartRunStats(IShorokooInferenceSession session)
+        internal ArenaStatistics? StartRunStats(IShorokooSession session)
             => _runStatistics is null ? null : session.ReadArenaStatistics();
 
         /// <summary>
@@ -598,7 +598,7 @@ namespace Shorokoo.Runtime
         /// so one the program has dropped is collected and everything it did would vanish from a
         /// figure computed by walking the live ones — silently, and downwards.</para>
         /// </summary>
-        internal void FinishRunStats(IShorokooInferenceSession session, ArenaStatistics? before)
+        internal void FinishRunStats(IShorokooSession session, ArenaStatistics? before)
         {
             if (_runStatistics is null || before is not { } start) return;
             if (session.ReadArenaStatistics() is { } end) _runStatistics.Record(start, end);
@@ -612,10 +612,10 @@ namespace Shorokoo.Runtime
         /// </summary>
         /// <param name="backend">The backend its sessions are built by — a platform backend
         /// (<c>new LinuxGpuBackend()</c>) where one native ONNX Runtime serves both, or one
-        /// from <see cref="Shorokoo.Core.Inference.Abstractions.IsolatedBackend.Load"/> where each
+        /// from <see cref="Shorokoo.Core.Backends.IsolatedBackend.Load"/> where each
         /// backend needs a native of its own.</param>
         /// <exception cref="ArgumentNullException"><paramref name="backend"/> is null.</exception>
-        public ComputeContext(IShorokooInferenceBackend backend)
+        public ComputeContext(IShorokooBackend backend)
             : this(backend, detachesOutputs: false)
         {
         }
@@ -625,12 +625,12 @@ namespace Shorokoo.Runtime
         /// see <see cref="DetachesOutputs"/>.
         /// </summary>
         /// <exception cref="ArgumentNullException"><paramref name="backend"/> is null.</exception>
-        public ComputeContext(IShorokooInferenceBackend backend, bool detachesOutputs)
+        public ComputeContext(IShorokooBackend backend, bool detachesOutputs)
             : this(backend, detachesOutputs, isHost: false)
         {
         }
 
-        private ComputeContext(IShorokooInferenceBackend backend, bool detachesOutputs, bool isHost)
+        private ComputeContext(IShorokooBackend backend, bool detachesOutputs, bool isHost)
         {
             ArgumentNullException.ThrowIfNull(backend);
             _backend = backend;
@@ -650,7 +650,7 @@ namespace Shorokoo.Runtime
 
         // The backend this context was last recorded against, so ResolvedBackend can enrol a
         // default-backend context without a table write per call.
-        private IShorokooInferenceBackend? _registeredOn;
+        private IShorokooBackend? _registeredOn;
 
         /// <summary>
         /// Whether a run's output tensors leave this context behind.
@@ -773,7 +773,7 @@ namespace Shorokoo.Runtime
         /// </summary>
         /// <exception cref="ArgumentNullException"><paramref name="dtype"/> is null.</exception>
         /// <exception cref="NotSupportedException"><paramref name="dtype"/> is
-        /// <see cref="DType.String"/>, whose elements are variable-length, or has no whole-byte
+        /// <see cref="DType.Utf8"/>, whose elements are variable-length, or has no whole-byte
         /// element stride, or <paramref name="shape"/> has no known element count.</exception>
         /// <exception cref="ObjectDisposedException">This context has been disposed.</exception>
         public TensorData AllocateUninitialized(Shape shape, DType dtype)
@@ -783,7 +783,7 @@ namespace Shorokoo.Runtime
             // Refused here rather than left to the backend, so the same dtype is refused in the
             // same words wherever it is asked for -- and so that a shape with no element count is
             // caught while it can still be said what is wrong with it.
-            if (dtype == DType.String)
+            if (dtype == DType.Utf8)
                 throw new NotSupportedException(
                     "String tensors are variable-length and not byte-stride, so there is no buffer "
                     + "of a fixed size to allocate. Build one from its elements with "
@@ -988,7 +988,7 @@ namespace Shorokoo.Runtime
         /// Whether a stopped run was stopped by what its caller asked with, rather than by an
         /// eviction the run linked in. The backend is handed the linked signal, so what it throws
         /// carries a token the caller has never seen — and
-        /// <see cref="Shorokoo.Core.Inference.Abstractions.RunSettings.CancellationToken"/>
+        /// <see cref="Shorokoo.Core.Backends.RunSettings.CancellationToken"/>
         /// promises the caller's own back, which is what lets a program racing several runs tell
         /// which cancellation stopped this one.
         /// </summary>
@@ -1070,7 +1070,7 @@ namespace Shorokoo.Runtime
                 if (_runs > 0)
                     throw new InvalidOperationException(
                         $"This compute context has {_runs} run(s) in flight: disposing it would "
-                        + "release the inference session they are inside, under a live call into "
+                        + "release the session they are inside, under a live call into "
                         + "the backend. Wait for the run to return.");
                 // A lease outstanding means a run of this context is reading something attached to
                 // it, and there is no answer to releasing those bytes under it -- so this is the
@@ -1174,12 +1174,12 @@ namespace Shorokoo.Runtime
 
         /// <summary>The backend this context's work runs on: the one it was constructed with, or
         /// the default when it names none.</summary>
-        internal IShorokooInferenceBackend ResolvedBackend
+        internal IShorokooBackend ResolvedBackend
         {
             get
             {
                 if (_backend is { } named) return named;
-                var backend = InferenceBackend.Default;
+                var backend = DefaultBackend.Instance;
                 // A context that named no backend is on the default one's books from the first
                 // time anything resolves it. Guarded by the last backend seen rather than written
                 // every time: this is read once per feed, and a table write per feed would be a
@@ -1197,7 +1197,7 @@ namespace Shorokoo.Runtime
         /// <summary>
         /// Refuses the host context, which holds tensors and runs nothing.
         ///
-        /// <para>It refuses rather than forwarding to <see cref="InferenceBackend.Default"/>. A
+        /// <para>It refuses rather than forwarding to <see cref="DefaultBackend.Instance"/>. A
         /// host context that quietly resolved the process-wide backend would put back the implicit
         /// resolution that made describing a graph require a deployed runtime — the thing giving a
         /// tensor a context was for.</para>
@@ -1218,7 +1218,7 @@ namespace Shorokoo.Runtime
         /// it allocates on. A context constructed with a backend reports that one; a context without
         /// reports the process default, which is what every context reported when only one could be
         /// live. Read it to log the device a run used, or call
-        /// <see cref="Shorokoo.Core.Inference.Abstractions.InferenceBackend.RequireDevice"/> to
+        /// <see cref="Shorokoo.Core.Backends.DefaultBackend.RequireDevice"/> to
         /// refuse to start on the wrong one.
         ///
         /// <para>Reading this resolves the process default if this context names no backend and none
@@ -1235,7 +1235,7 @@ namespace Shorokoo.Runtime
 
         /// <summary>
         /// Compiles the graph into a reusable <see cref="CompiledGraph"/>: the ONNX model and
-        /// inference session are built once, so repeated executions only feed new data.
+        /// session are built once, so repeated executions only feed new data.
         /// </summary>
         public CompiledGraph Compile(ComputationGraph graph)
         {
@@ -1260,7 +1260,7 @@ namespace Shorokoo.Runtime
 
         /// <summary>
         /// Executes the graph with pre-built named inputs. Builds the ONNX model and a fresh
-        /// inference session per call (disposed afterwards); use <see cref="Compile(ComputationGraph)"/>
+        /// session per call (disposed afterwards); use <see cref="Compile(ComputationGraph)"/>
         /// for repeated runs.
         /// </summary>
         public NamedModelParam[] Run(ComputationGraph graph, params NamedModelParam[] inputs)
@@ -1500,7 +1500,7 @@ namespace Shorokoo.Runtime
 
         /// <summary>
         /// Executes the graph with pre-built named inputs. Builds the ONNX model and a fresh
-        /// inference session per call (disposed afterwards); use <see cref="Compile(ComputationGraph)"/> for repeated runs.
+        /// session per call (disposed afterwards); use <see cref="Compile(ComputationGraph)"/> for repeated runs.
         /// </summary>
         internal NamedModelParam[] Run(InternalComputationGraph graph, params NamedModelParam[] inputs)
         {
@@ -1534,7 +1534,7 @@ namespace Shorokoo.Runtime
             // window its disposal is refused in -- the session most of all, since disposing the
             // context is what would release it.
             EnterRun();
-            IShorokooInferenceSession? session = null;
+            IShorokooSession? session = null;
             try
             {
                 session = CreateSession(
@@ -1626,13 +1626,13 @@ namespace Shorokoo.Runtime
         }
 
         // A one-shot session: built, fed once, and disposed, so no differing shapes can reach it.
-        private IShorokooInferenceSession CreateSession(byte[] modelData, bool disableOptimizations = false)
+        private IShorokooSession CreateSession(byte[] modelData, bool disableOptimizations = false)
             => CreateSession(
                 modelData,
                 SessionOptimization(disableOptimizations, trainingStep: false),
                 DeviceMemory.Resolve(reusedAcrossShapes: false));
 
-        private IShorokooInferenceSession CreateSession(
+        private IShorokooSession CreateSession(
             byte[] modelData, ShorokooGraphOptimization optimization, DeviceMemorySettings deviceMemory)
             => ResolvedBackend.CreateSession(
                 modelData, optimization, ShorokooLogSeverity.Fatal, deviceMemory, Diagnostics);
@@ -1802,8 +1802,8 @@ namespace Shorokoo.Runtime
     {
         /// <summary>
         /// The runtime value of <paramref name="data"/>, on the process-wide default backend —
-        /// <see cref="InferenceBackend.Default"/>, resolved here if nothing has resolved one yet.
-        /// Use <see cref="ToTensorValue(IData, IShorokooInferenceBackend)"/> wherever the
+        /// <see cref="DefaultBackend.Instance"/>, resolved here if nothing has resolved one yet.
+        /// Use <see cref="ToTensorValue(IData, IShorokooBackend)"/> wherever the
         /// backend that is going to read the value is known, since a value belongs to the runtime
         /// that made it.
         ///
@@ -1811,7 +1811,7 @@ namespace Shorokoo.Runtime
         /// it.</para>
         /// </summary>
         public static IShorokooTensorValue ToTensorValue(this IData data)
-            => data.ToTensorValue(InferenceBackend.Default);
+            => data.ToTensorValue(DefaultBackend.Instance);
 
         /// <summary>
         /// The runtime value of <paramref name="data"/> as a value of
@@ -1829,7 +1829,7 @@ namespace Shorokoo.Runtime
         /// it.</para>
         /// </summary>
         public static IShorokooTensorValue ToTensorValue(
-            this IData data, IShorokooInferenceBackend backend)
+            this IData data, IShorokooBackend backend)
         {
             ArgumentNullException.ThrowIfNull(backend);
             return data switch

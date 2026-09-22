@@ -1,6 +1,6 @@
 using System;
 using System.Collections.Generic;
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 using Shorokoo.Runtime;
 
 namespace Shorokoo
@@ -153,7 +153,7 @@ namespace Shorokoo
                     + "could only be built where that context is. Detach() takes a copy in the "
                     + "framework's own host memory, and that copy can be moved.");
 
-            var attribute = DType == DType.String
+            var attribute = DType == DType.Utf8
                 ? TensorAttribute.OverStrings(Shape, [.. StringElements()])
                 // The tensor's own array where it has one AND where it is the only name for it, so
                 // the move really moves. Surrendering this handle says nothing about another's, and
@@ -272,7 +272,7 @@ namespace Shorokoo
         /// the runtime that made it, so the target has to be handed contents rather than a pointer.
         ///
         /// <para>The target allocates them itself, through
-        /// <see cref="IShorokooInferenceBackend.CreateTensorInBackendMemory"/> rather than
+        /// <see cref="IShorokooBackend.CreateTensorInBackendMemory"/> rather than
         /// <c>CreateTensorFromRawBytes</c>, so the bytes land in the memory
         /// <paramref name="to"/> names instead of in host memory wearing its name. That is the
         /// difference between a tensor that is on the card and one an execution provider has to
@@ -283,7 +283,7 @@ namespace Shorokoo
             // Strings have no flat buffer to copy, so they take the route their own literals take:
             // the elements themselves, rebuilt on the other side. A backend holding them is asked
             // for them the same way, through the value it made.
-            if (DType == DType.String) return CopyStringsAcross(target);
+            if (DType == DType.Utf8) return CopyStringsAcross(target);
 
             var bytes = HostBytes();
 

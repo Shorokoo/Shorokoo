@@ -1,7 +1,7 @@
 using Shorokoo.Core.AutoDiffCheckpointing;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 using Shorokoo.Core.Nodes.Processors.Fast;
-using Shorokoo.Core.Inference;
+using Shorokoo.Core.Interpreter;
 using Shorokoo.Core.Graph;
 using Shorokoo.Core.Factory;
 using Shorokoo.Core.Factory.IR;

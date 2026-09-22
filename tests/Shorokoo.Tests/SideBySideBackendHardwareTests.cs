@@ -1,6 +1,6 @@
 using System.Reflection;
 using System.Runtime.InteropServices;
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 using Shorokoo.Modules.Losses;
 using Shorokoo.Modules.Optimizers;
 using Shorokoo.Runtime;
@@ -52,7 +52,7 @@ public class SideBySideBackendHardwareTests
             : null;
     }
 
-    private static IShorokooInferenceBackend LoadCuda() => IsolatedBackend.Load(
+    private static IShorokooBackend LoadCuda() => IsolatedBackend.Load(
         new IsolatedBackendSpec
         {
             Name = "cuda:0",

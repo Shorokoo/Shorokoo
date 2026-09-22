@@ -1,6 +1,6 @@
 using System.Text;
 using Shorokoo.Core.Factory.IR;
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 
 namespace Shorokoo.Tests;

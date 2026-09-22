@@ -9,7 +9,7 @@ using Shorokoo.Graph;
 using Shorokoo.Core.Nodes;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 using Shorokoo.Core.Nodes.OnnxNodes;
-using Shorokoo.Core.Inference;
+using Shorokoo.Core.Interpreter;
 using Shorokoo.Core.Nodes.AutoDiff;
 using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Modules;
@@ -395,7 +395,7 @@ internal static partial class FastListAllSpecificModelIdsUsed
     /// The passthrough mask outputs are assigned TensorKeys under the LOOP_OPEN's FastNodeKey
     /// with fresh output indices (appended after the originals).
     ///
-    /// QEE's <see cref="Shorokoo.Core.Inference.Ops.LoopOpenOp"/> treats any
+    /// QEE's <see cref="Shorokoo.Core.Interpreter.Ops.LoopOpenOp"/> treats any
     /// Inputs past index 1 as loop variables and mirrors them into body outputs — so the
     /// extra carries get handled correctly without any QEE changes.
     /// </summary>
@@ -933,7 +933,7 @@ internal static partial class FastListAllSpecificModelIdsUsed
         {
             var data = FastProcessorHelper.HintValue(inputHints.ModelParams[i]);
             if (data is null) continue;
-            dict[graphInputKeys[i]] = Shorokoo.Core.Inference.Helpers.TensorDataConverter.ToRuntimeInput(
+            dict[graphInputKeys[i]] = Shorokoo.Core.Interpreter.Helpers.TensorDataConverter.ToRuntimeInput(
                 data, engine.MaxDataElements);
         }
         return dict.Count == 0 ? null : dict;

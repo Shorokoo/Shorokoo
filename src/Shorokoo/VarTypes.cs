@@ -48,9 +48,9 @@ namespace Shorokoo
     public interface uint32 : UnsignedIntLike, SimpleNumLike2;
     public interface uint64 : UnsignedIntLike, SimpleNumLike2;
     // Variable-length UTF-8 string tensor element. Maps to ONNX
-    // TensorProto.DataType.STRING (8). Element-of, not array-of: a Tensor<@string>
+    // TensorProto.DataType.STRING (8). Element-of, not array-of: a Tensor<utf8>
     // is a tensor whose individual elements are .NET strings.
-    public interface @string : IVarType;
+    public interface utf8 : IVarType;
     public interface bit : CommonLike;
     public interface complex64 : ComplexLike;
     public interface complex128 : ComplexLike;

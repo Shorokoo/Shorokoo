@@ -65,7 +65,7 @@ namespace Shorokoo
         /// to be read safely.
         /// </summary>
         /// <exception cref="InvalidOperationException">The values were elided, or the dtype is
-        /// <see cref="DType.String"/>, whose elements are variable-length.</exception>
+        /// <see cref="DType.Utf8"/>, whose elements are variable-length.</exception>
         public ReadOnlySpan<byte> Bytes => BytesArray;
 
         /// <summary>
@@ -76,7 +76,7 @@ namespace Shorokoo
             => MemoryMarshal.Cast<byte, V>(BytesArray);
 
         /// <summary>
-        /// The elements of a <see cref="DType.String"/> attribute, in row-major order. Strings are
+        /// The elements of a <see cref="DType.Utf8"/> attribute, in row-major order. Strings are
         /// variable-length and reference-typed, so they have no byte view — this is their
         /// <see cref="Bytes"/>.
         /// </summary>
@@ -103,7 +103,7 @@ namespace Shorokoo
         /// <c>Globals.TensorData(dims, vals)</c>, and what every typed graph literal is built with.
         ///
         /// <para>A shape, a dtype and the bytes is all an attribute is, so this goes straight to
-        /// the bytes: no tensor is built on the way, and so no inference backend is resolved. A
+        /// the bytes: no tensor is built on the way, and so no backend is resolved. A
         /// program that only describes a model and exports it therefore needs no deployed
         /// runtime.</para>
         ///
@@ -117,7 +117,7 @@ namespace Shorokoo
             => new(shape, OnnxUtils.GetDType<V>(), PackBytes(shape, values), null);
 
         /// <summary>An attribute of <paramref name="shape"/> over a copy of
-        /// <paramref name="values"/>, at <see cref="DType.String"/>. Same coverage rule as
+        /// <paramref name="values"/>, at <see cref="DType.Utf8"/>. Same coverage rule as
         /// <see cref="Create{V}"/>.</summary>
         /// <exception cref="ArgumentException"><paramref name="values"/> does not cover
         /// <paramref name="shape"/>.</exception>
@@ -129,7 +129,7 @@ namespace Shorokoo
                 throw new ArgumentException(
                     $"Supplied data of {values.Length} strings is less than shape size {required} "
                     + "strings.", nameof(values));
-            return new TensorAttribute(shape, DType.String, null, values[..required]);
+            return new TensorAttribute(shape, DType.Utf8, null, values[..required]);
         }
 
         /// <summary>
@@ -178,7 +178,7 @@ namespace Shorokoo
         /// <summary>The attribute over <paramref name="values"/> itself, not a copy of them; see
         /// <see cref="OverBytes"/>.</summary>
         internal static TensorAttribute OverStrings(Shape shape, string[] values)
-            => new(shape, DType.String, null, values ?? throw new ArgumentNullException(nameof(values)));
+            => new(shape, DType.Utf8, null, values ?? throw new ArgumentNullException(nameof(values)));
 
         /// <summary>The same elements at <paramref name="dtype"/>. The bytes are shared, which
         /// costs nothing and is safe: both attributes are immutable.</summary>

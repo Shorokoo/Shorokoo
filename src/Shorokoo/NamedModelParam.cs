@@ -2,7 +2,7 @@ using Shorokoo.Core.Factory.IR;
 using Shorokoo.Graph;
 using Shorokoo.Core.Nodes;
 using Shorokoo.Core.Nodes.OnnxNodes;
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 using Shorokoo.Core.Nodes.AutoDiff;
 using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Modules;
@@ -39,7 +39,7 @@ namespace Shorokoo
         }
 
         /// <inheritdoc/>
-        internal override IShorokooTensorValue ToTensorValue(IShorokooInferenceBackend backend)
+        internal override IShorokooTensorValue ToTensorValue(IShorokooBackend backend)
             => data.ToTensorValue(backend);
 
         public override TensorData ToTensorData() => data;
@@ -110,7 +110,7 @@ namespace Shorokoo
         public override IShorokooTensorValue ToTensorValue() => data.ToTensorValue();
 
         /// <inheritdoc/>
-        internal override IShorokooTensorValue ToTensorValue(IShorokooInferenceBackend backend)
+        internal override IShorokooTensorValue ToTensorValue(IShorokooBackend backend)
             => data.ToTensorValue(backend);
 
         public override TensorData ToTensorData() =>
@@ -150,10 +150,10 @@ namespace Shorokoo
             base.Structure = DataStructure.Optional;
         }
 
-        public override IShorokooTensorValue ToTensorValue() => ToTensorValue(InferenceBackend.Default);
+        public override IShorokooTensorValue ToTensorValue() => ToTensorValue(DefaultBackend.Instance);
 
         /// <inheritdoc/>
-        internal override IShorokooTensorValue ToTensorValue(IShorokooInferenceBackend backend)
+        internal override IShorokooTensorValue ToTensorValue(IShorokooBackend backend)
         {
             // ONNX Runtime accepts a plain tensor where an optional input is expected (opset 18+),
             // so a present optional feeds its inner tensor directly.
@@ -275,7 +275,7 @@ namespace Shorokoo
         ///
         /// <para>The value returned is the parameter's own: read it, do not dispose it.</para>
         /// </summary>
-        internal virtual IShorokooTensorValue ToTensorValue(IShorokooInferenceBackend backend)
+        internal virtual IShorokooTensorValue ToTensorValue(IShorokooBackend backend)
             => ToTensorValue();
 
         /// <summary>

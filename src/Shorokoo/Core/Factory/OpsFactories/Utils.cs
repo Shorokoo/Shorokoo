@@ -47,7 +47,7 @@ namespace Shorokoo.Core.Factory.OpsFactories
             DType.UInt8, DType.UInt16, DType.UInt32, DType.UInt64,
             DType.Int8, DType.Int16, DType.Int32, DType.Int64,
             DType.Float16, DType.Float32, DType.Float64,
-            DType.Bool, DType.String, 
+            DType.Bool, DType.Utf8, 
             DType.Complex64, DType.Complex128
         };
 
@@ -56,7 +56,7 @@ namespace Shorokoo.Core.Factory.OpsFactories
             DType.UInt8, DType.UInt16, DType.UInt32, DType.UInt64,
             DType.Int8, DType.Int16, DType.Int32, DType.Int64,
             DType.Float16, DType.Float32, DType.Float64, DType.BFloat16,
-            DType.Bool, DType.String,
+            DType.Bool, DType.Utf8,
             DType.Complex64, DType.Complex128
         };
 

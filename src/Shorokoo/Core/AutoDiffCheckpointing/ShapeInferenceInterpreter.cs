@@ -10,8 +10,8 @@ using Shorokoo.Graph;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 using Shorokoo.Core.Nodes.Processors.AutoGrad;
 using Shorokoo.Core.Nodes.Processors.Fast;
-using Shorokoo.Core.Inference;
-using Shorokoo.Core.Inference.Helpers;
+using Shorokoo.Core.Interpreter;
+using Shorokoo.Core.Interpreter.Helpers;
 using Shorokoo.Core.Nodes.NodeDefinitions;
 using System.Collections.Generic;
 using System.Collections.Immutable;
@@ -126,7 +126,7 @@ internal class ShapeInferenceInterpreter
         var tensorStore = new Dictionary<FastTensorKey, TensorShapeInfo>();
 
         // Step 1: QEE-based pure-C# execution. Covers ~all ONNX ops (138 op
-        // implementations under Inference/QuickExecutionEngine/Ops), plus Shorokoo
+        // implementations under Interpreter/QuickExecutionEngine/Ops), plus Shorokoo
         // internals like MODEL_PARAM_DATA. Produces shape, dtype, and small-tensor
         // values in one pass without spinning up ORT sessions.
         Dictionary<FastTensorKey, IRuntimeTensor> qeeStore;

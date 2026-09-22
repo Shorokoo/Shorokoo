@@ -13,7 +13,7 @@ namespace Shorokoo.Tests.Modules
     //  Driven by QeeSeqStringSignalAuditTests: ORT-runnable modules go
     //  through AdvancedTestGraph (validating the expectations against
     //  real ONNX Runtime) plus the strict QeeAudit strict-QEE; modules built on
-    //  Shorokoo-internal ops or @string runtime inputs (which carry no
+    //  Shorokoo-internal ops or utf8 runtime inputs (which carry no
     //  data into QEE/ORT result comparison) use the QeeOnly-style strict
     //  check instead.
     //
@@ -304,7 +304,7 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
-    /// <summary>@string-input ops (QeeOnly-strict: string runtime data never reaches QEE or
+    /// <summary>utf8-input ops (QeeOnly-strict: string runtime data never reaches QEE or
     /// the result comparator, so these are shape/dtype checks): StringConcat broadcast
     /// shape, StringNormalizer WITHOUT stopwords (pure case change → exact passthrough
     /// shape; used to degrade the last dim), RegexFullMatch (bool, same shape), StringSplit
@@ -314,11 +314,11 @@ namespace Shorokoo.Tests.Modules
     [Module]
     public partial class QeeStringOpsAuditCheck
     {
-        public static (Scalar<bit>, Tensor<@string>, Tensor<@string>) Inline(Tensor<@string> x, Tensor<@string> y)
+        public static (Scalar<bit>, Tensor<utf8>, Tensor<utf8>) Inline(Tensor<utf8> x, Tensor<utf8> y)
         {
-            var concat = (Tensor<@string>)OnnxOp.StringConcat(x, y);
-            var norm = (Tensor<@string>)OnnxOp.StringNormalizer(x, caseChangeAction: "LOWER");
-            var normStop = (Tensor<@string>)OnnxOp.StringNormalizer(x,
+            var concat = (Tensor<utf8>)OnnxOp.StringConcat(x, y);
+            var norm = (Tensor<utf8>)OnnxOp.StringNormalizer(x, caseChangeAction: "LOWER");
+            var normStop = (Tensor<utf8>)OnnxOp.StringNormalizer(x,
                 caseChangeAction: "LOWER", isCaseSensitive: 0L, locale: "en_US",
                 stopwords: ["the"]);
             var regex = (Tensor<bit>)OnnxOp.RegexFullMatch(concat, pattern: ".*");
@@ -329,7 +329,7 @@ namespace Shorokoo.Tests.Modules
                 ShapeMismatch(norm, Vector(2L)) +
                 ShapeMismatch(regex, Vector(2L)) +
                 ShapeMismatch((Tensor<int64>)numSplits, Vector(2L));
-            return (mismatch < Scalar(1L), normStop, (Tensor<@string>)splitY);
+            return (mismatch < Scalar(1L), normStop, (Tensor<utf8>)splitY);
         }
     }
 

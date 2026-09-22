@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using Shorokoo.Core.Inference;
+using Shorokoo.Core.Interpreter;
 using Shorokoo.Core.Rng;
 using Shorokoo.Runtime;
 using static Shorokoo.Tests.RngDrawRunners;

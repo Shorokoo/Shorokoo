@@ -4,7 +4,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 
 namespace Shorokoo.Core.Utils
 {
@@ -177,7 +177,7 @@ namespace Shorokoo.Core.Utils
         /// <summary>The assembly name of the loaded backend, or null when it cannot be determined.</summary>
         internal static string? BackendAssemblyName()
         {
-            try { return InferenceBackend.Default.GetType().Assembly.GetName().Name; }
+            try { return DefaultBackend.Instance.GetType().Assembly.GetName().Name; }
             catch { return null; }
         }
 

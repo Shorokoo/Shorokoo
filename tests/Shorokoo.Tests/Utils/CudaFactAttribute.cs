@@ -1,10 +1,10 @@
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 
 namespace Shorokoo.Tests.Utils;
 
 /// <summary>
-/// Marks a test that requires a CUDA-capable Shorokoo inference provider.
-/// Consults <see cref="InferenceBackend.Default"/>: if the loaded
+/// Marks a test that requires a CUDA-capable Shorokoo backend.
+/// Consults <see cref="DefaultBackend.Instance"/>: if the loaded
 /// platform DLL's assembly name ends in "GPU" (e.g. Shorokoo.WinGPU), the
 /// test runs; otherwise it is skipped with a clear message.
 ///
@@ -21,7 +21,7 @@ public sealed class CudaFactAttribute : FactAttribute
         string assemblyName;
         try
         {
-            assemblyName = InferenceBackend.Default.GetType().Assembly.GetName().Name ?? "?";
+            assemblyName = DefaultBackend.Instance.GetType().Assembly.GetName().Name ?? "?";
         }
         catch (Exception ex)
         {
@@ -30,7 +30,7 @@ public sealed class CudaFactAttribute : FactAttribute
 
         if (!assemblyName.EndsWith("GPU", StringComparison.OrdinalIgnoreCase))
         {
-            var msg = $"CUDA EP not available -- loaded inference provider is '{assemblyName}'. " +
+            var msg = $"CUDA EP not available -- loaded backend is '{assemblyName}'. " +
                       "Reference a GPU backend (Shorokoo.WinGPU on Windows, Shorokoo.LinuxGPU on " +
                       "Linux) with CUDA Toolkit 12.x + cuDNN 9.x to run.";
             if (!string.IsNullOrEmpty(extraNote)) msg += " " + extraNote;

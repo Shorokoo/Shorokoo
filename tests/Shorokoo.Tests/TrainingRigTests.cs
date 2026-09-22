@@ -1,7 +1,7 @@
 using System.Globalization;
 using Microsoft.ML.OnnxRuntime;
 using Shorokoo.Core.Factory;
-using Shorokoo.Core.Inference;
+using Shorokoo.Core.Interpreter;
 using Shorokoo.Core.Factory.IR;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 using Shorokoo.Modules.Initializers;

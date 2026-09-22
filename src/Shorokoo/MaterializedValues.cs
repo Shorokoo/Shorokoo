@@ -1,4 +1,4 @@
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 
 namespace Shorokoo;
 
@@ -25,7 +25,7 @@ internal sealed class MaterializedValues
 
     // Null until something is actually fed: most tensors never are -- a graph literal is read by
     // the builder and that is the end of it.
-    private Dictionary<IShorokooInferenceBackend, IShorokooTensorValue>? _byBackend;
+    private Dictionary<IShorokooBackend, IShorokooTensorValue>? _byBackend;
 
     /// <summary>Whether no runtime currently holds a copy of these contents. The test seam for
     /// the release paths: nothing else can observe that a value was freed rather than forgotten.
@@ -40,12 +40,12 @@ internal sealed class MaterializedValues
     /// <paramref name="build"/> the first time that backend asks and kept for the next time.
     /// </summary>
     internal IShorokooTensorValue Get(
-        IShorokooInferenceBackend backend,
-        Func<IShorokooInferenceBackend, IShorokooTensorValue> build)
+        IShorokooBackend backend,
+        Func<IShorokooBackend, IShorokooTensorValue> build)
     {
         lock (_gate)
         {
-            _byBackend ??= new Dictionary<IShorokooInferenceBackend, IShorokooTensorValue>(
+            _byBackend ??= new Dictionary<IShorokooBackend, IShorokooTensorValue>(
                 ReferenceEqualityComparer.Instance);
 
             if (_byBackend.TryGetValue(backend, out var existing)) return existing;

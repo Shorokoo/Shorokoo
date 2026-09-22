@@ -5,7 +5,7 @@ using Shorokoo.Core.Nodes.Processors.Fast;
 using Shorokoo.Modules.Losses;
 using Shorokoo.Modules.Optimizers;
 using Shorokoo.Core.Factory.IR;
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 using Shorokoo.OnnxRuntime;
 using Shorokoo.Runtime;
 using Shorokoo.Tests.Benchmarks;

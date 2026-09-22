@@ -1,5 +1,5 @@
 using System.Runtime.CompilerServices;
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 using Shorokoo.Runtime;
 
 namespace Shorokoo.Tests;
@@ -126,7 +126,7 @@ public class TensorDataApiCoverageTests
 
         // The dtypes a flat buffer cannot describe are refused rather than silently mis-sized.
         var stringEx = Assert.Throws<NotSupportedException>(
-            () => TensorData.CreateFromRawBytes(new Shape(1L), DType.String, new byte[8]));
+            () => TensorData.CreateFromRawBytes(new Shape(1L), DType.Utf8, new byte[8]));
         Assert.Contains("variable-length", stringEx.Message);
         Assert.Throws<UnsupportedDTypeException>(
             () => TensorData.CreateFromRawBytes(new Shape(1L), DType.Complex64, new byte[8]));
@@ -319,7 +319,7 @@ public class TensorDataApiCoverageTests
         // is named or left to the default, because there is only one backend to name here.
         Assert.Same(value, literal.ToTensorValue());
         Assert.Same(value, literal.ToTensorValue(
-            Shorokoo.Core.Inference.Abstractions.InferenceBackend.Default));
+            Shorokoo.Core.Backends.DefaultBackend.Instance));
 
         // A transfer rebuilds a sequence as a plain list of the tensors it moved, so there is no
         // runtime sequence value left in it either; asking builds one over its elements.
@@ -330,10 +330,10 @@ public class TensorDataApiCoverageTests
 
         var sequence = moved.ToTensorValue();
         Assert.Equal(
-            Shorokoo.Core.Inference.Abstractions.ShorokooOnnxValueType.Sequence, sequence.ValueType);
+            Shorokoo.Core.Backends.ShorokooOnnxValueType.Sequence, sequence.ValueType);
         Assert.Equal(2, sequence.GetValueCount());
         Assert.Same(sequence, moved.ToTensorValue(
-            Shorokoo.Core.Inference.Abstractions.InferenceBackend.Default));
+            Shorokoo.Core.Backends.DefaultBackend.Instance));
 
         Assert.Throws<ArgumentNullException>(() => literal.ToTensorValue(null!));
 
@@ -476,7 +476,7 @@ public class TensorDataApiCoverageTests
     }
 
     /// <summary>Records disposal; every other member is unreachable in these tests.</summary>
-    private sealed class SpyTensorValue : Shorokoo.Core.Inference.Abstractions.IShorokooTensorValue
+    private sealed class SpyTensorValue : Shorokoo.Core.Backends.IShorokooTensorValue
     {
         public int Disposals { get; private set; }
         public void Dispose() => Disposals++;
@@ -486,15 +486,15 @@ public class TensorDataApiCoverageTests
         // only reachable with a card.
         public bool IsHostAccessible { get; init; } = true;
 
-        public Shorokoo.Core.Inference.Abstractions.ShorokooOnnxValueType ValueType => throw new NotSupportedException();
-        public Shorokoo.Core.Inference.Abstractions.ShorokooTensorElementType ElementType => throw new NotSupportedException();
+        public Shorokoo.Core.Backends.ShorokooOnnxValueType ValueType => throw new NotSupportedException();
+        public Shorokoo.Core.Backends.ShorokooTensorElementType ElementType => throw new NotSupportedException();
         public long[] Shape => throw new NotSupportedException();
         public ReadOnlySpan<T> GetTensorDataAsSpan<T>() where T : unmanaged => throw new NotSupportedException();
         public Span<T> GetTensorMutableDataAsSpan<T>() where T : unmanaged => throw new NotSupportedException();
         public IReadOnlyList<string> GetStringTensorData() => throw new NotSupportedException();
         public int GetValueCount() => throw new NotSupportedException();
-        public Shorokoo.Core.Inference.Abstractions.IShorokooTensorValue GetValue(int index) => throw new NotSupportedException();
-        public Shorokoo.Core.Inference.Abstractions.ShorokooTensorElementType GetSequenceElementType() => throw new NotSupportedException();
+        public Shorokoo.Core.Backends.IShorokooTensorValue GetValue(int index) => throw new NotSupportedException();
+        public Shorokoo.Core.Backends.ShorokooTensorElementType GetSequenceElementType() => throw new NotSupportedException();
     }
     [Fact]
     public void TestStringTensorsTakeExactlyTheirShapeAndRefuseAShortfall()
@@ -579,7 +579,7 @@ public class TensorDataApiCoverageTests
             Assert.Equal(values, attribute.Elements<V>().ToArray());
         }
 
-        var reads = InferenceBackend.CountDefaultReads(() =>
+        var reads = DefaultBackend.CountDefaultReads(() =>
         {
             Case(DType.Bool, true, false);
             Case(DType.Int8, (sbyte)1, (sbyte)2);
@@ -675,7 +675,7 @@ public class TensorDataApiCoverageTests
         var attribute = TensorData([2L], (string[])["a", "b"]).MoveToAttribute();
 
         Assert.True(attribute.HasValues);
-        Assert.Equal(DType.String, attribute.DType);
+        Assert.Equal(DType.Utf8, attribute.DType);
         Assert.Equal((string[])["a", "b"], attribute.Values);
         Assert.Throws<InvalidOperationException>(() => { _ = attribute.Bytes.Length; });
 
@@ -700,15 +700,15 @@ public class TensorDataApiCoverageTests
     [Fact]
     public void TestAStringConstantEvaluatesRatherThanBeingAskedForRawBytesItHasNone()
     {
-        Assert.Equal((object[])["hello"], OnnxEngine.Eval(Scalar("hello")).As<@string>().DebugData);
-        Assert.Equal((object[])["a", "b"], OnnxEngine.Eval(Vector("a", "b")).As<@string>().DebugData);
+        Assert.Equal((object[])["hello"], OnnxEngine.Eval(Scalar("hello")).As<utf8>().DebugData);
+        Assert.Equal((object[])["a", "b"], OnnxEngine.Eval(Vector("a", "b")).As<utf8>().DebugData);
     }
 
     [Fact]
     public void TestAStringConstantSurvivesEveryShapeAndEncodingItCanCarry()
     {
-        static object[] Eval(TensorData<@string> t) =>
-            OnnxEngine.Eval(Globals.Tensor(t.MoveToAttribute())).As<@string>().DebugData;
+        static object[] Eval(TensorData<utf8> t) =>
+            OnnxEngine.Eval(Globals.Tensor(t.MoveToAttribute())).As<utf8>().DebugData;
 
         Assert.Equal((object[])["héllo", "", "日本語"], Eval(TensorData([3L], "héllo", "", "日本語")));
         Assert.Equal((object[])["a", "b", "c", "d"], Eval(TensorData([2L, 2L], "a", "b", "c", "d")));
@@ -721,13 +721,13 @@ public class TensorDataApiCoverageTests
     [Fact]
     public void TestAStringTensorsElementsAreReadableThroughBothDebugAccessors()
     {
-        var host = (TensorData<@string>)TensorData([2L], (string[])["a", "b"]);
-        var backed = TensorData.Create((long[])[2L], DType.String, host.ToTensorValue());
+        var host = (TensorData<utf8>)TensorData([2L], (string[])["a", "b"]);
+        var backed = TensorData.Create((long[])[2L], DType.Utf8, host.ToTensorValue());
 
         Assert.Equal((object[])["a", "b"], host.Data);
         Assert.Equal((object[])["a", "b"], host.DebugData);
         Assert.Equal((object[])["a", "b"], backed.Data);
-        Assert.Equal((object[])["a", "b"], backed.As<@string>().DebugData);
+        Assert.Equal((object[])["a", "b"], backed.As<utf8>().DebugData);
     }
 
     // A factory that takes your tensor gives it back usable. TensorFill's signature did not

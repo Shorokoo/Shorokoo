@@ -4,7 +4,7 @@ using System.Linq;
 using Shorokoo.Core.Utils;
 using Shorokoo.Core.Factory;
 using Shorokoo.Core.Factory.IR;
-using Shorokoo.Core.Inference;
+using Shorokoo.Core.Interpreter;
 using Shorokoo.Runtime;
 using static Shorokoo.Tests.OnnxProtoBuilders;
 

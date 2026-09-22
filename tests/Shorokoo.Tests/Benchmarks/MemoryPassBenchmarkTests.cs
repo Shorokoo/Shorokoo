@@ -3,7 +3,7 @@ using Newtonsoft.Json;
 using Shorokoo.Core.Factory;
 using Shorokoo.Graph;
 using Shorokoo.OnnxRuntime;
-using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Backends;
 using Shorokoo.Core.Factory.IR;
 using Shorokoo.Modules.Initializers;
 using Shorokoo.Modules.Layers;

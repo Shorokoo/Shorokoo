@@ -450,7 +450,7 @@ namespace Shorokoo
                 autoPad, dilations, group, kernelShape, pads, strides);
 
         /// <summary>Whether each string element fully matches the regex pattern (ONNX RegexFullMatch).</summary>
-        public static Tensor<bit> RegexFullMatch(Tensor<@string> x, string? pattern = null)
+        public static Tensor<bit> RegexFullMatch(Tensor<utf8> x, string? pattern = null)
             => OnnxOp.RegexFullMatch(x, pattern);
 
         /// <summary>Softmax cross-entropy loss over scores and label indices, optionally returning the log-probabilities (ONNX SoftmaxCrossEntropyLoss).</summary>
@@ -475,11 +475,11 @@ namespace Shorokoo
             => OnnxOp.STFT(signal, frameStep, window, frameLength, onesided);
 
         /// <summary>Element-wise string concatenation (ONNX StringConcat).</summary>
-        public static Tensor<@string> StringConcat(Tensor<@string> x, Tensor<@string> y)
+        public static Tensor<utf8> StringConcat(Tensor<utf8> x, Tensor<utf8> y)
             => OnnxOp.StringConcat(x, y);
 
         /// <summary>Case normalization and stopword removal on string elements (ONNX StringNormalizer).</summary>
-        public static Tensor<@string> StringNormalizer(Tensor<@string> x,
+        public static Tensor<utf8> StringNormalizer(Tensor<utf8> x,
             string? caseChangeAction = null, bool? isCaseSensitive = null,
             string? locale = null, string[]? stopwords = null)
             => OnnxOp.StringNormalizer(
@@ -488,7 +488,7 @@ namespace Shorokoo
                 locale, stopwords);
 
         /// <summary>Splits each string by a delimiter, returning the parts and per-element split counts (ONNX StringSplit).</summary>
-        public static (Tensor<@string> y, Tensor<int64> numSplits) StringSplit(Tensor<@string> x, string? delimiter = null, long? maxsplit = null)
+        public static (Tensor<utf8> y, Tensor<int64> numSplits) StringSplit(Tensor<utf8> x, string? delimiter = null, long? maxsplit = null)
         {
             var retval = OnnxOp.StringSplit(x, delimiter, maxsplit);
             return ((Variable)retval.y, (Variable)retval.numSplits);

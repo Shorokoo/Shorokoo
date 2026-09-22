@@ -656,7 +656,7 @@ this way is worth it when the build phase is what does not fit on the card, and 
 is not. Two default-constructed contexts select nothing between them, and the members are then a
 division of *phases*: which work is build/merge and which is compile/run. The device each will use
 is readable either way: `rig.MergeContext.Backend` and `rig.RuntimeContext.Backend`, or call
-`InferenceBackend.RequireDevice(...)` at startup to refuse to train on the wrong one — see
+`DefaultBackend.RequireDevice(...)` at startup to refuse to train on the wrong one — see
 [Which device am I on?](inference.md#which-device-am-i-on).
 Leaving both `null`, so each defaults to `ComputeContext.Default`, is the normal choice.
 

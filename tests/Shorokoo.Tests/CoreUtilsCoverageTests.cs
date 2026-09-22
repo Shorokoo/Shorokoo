@@ -1887,6 +1887,7 @@ public class CoreUtilsCoverageTests
             "class C { void M() { GC.KeepAlive(Inner); var c = Inner.GetValueCount(); } }",
             "class C { void M() { var s = ort.Inner.GetTensorMutableRawData(); Use(s); } }",
             "class C { void M() { GC.KeepAlive(ort); } void N() { var s = ort.Inner.GetTensorMutableRawData(); } }",
+            "class C { bool M() { using var i = Inner.GetTensorMemoryInfo(); GC.KeepAlive(Inner); return i.Name == \"Cpu\"; } }",
         ];
         string[] mustNotFlag =
         [
@@ -1896,6 +1897,7 @@ public class CoreUtilsCoverageTests
             "class C { void M() { var s = ort.Inner.GetTensorMutableRawData(); Use(s); GC.KeepAlive(ort); } }",
             "class C { void M() { if (c) { var s = Inner.GetValue(0); } GC.KeepAlive(Inner); } }",
             "class C { void M() { foreach (var v in xs) inner.Add(((OrtTensorValue)v).Inner); } }",
+            "class C { bool M() { using var i = Inner.GetTensorMemoryInfo(); var h = i.Name == \"Cpu\"; GC.KeepAlive(Inner); return h; } }",
         ];
         Assert.All(mustFlag, s => Assert.NotEmpty(OrtValuesUsedWithoutKeepingThemAlive(s)));
         Assert.All(mustNotFlag, s => Assert.Empty(OrtValuesUsedWithoutKeepingThemAlive(s)));
@@ -1921,9 +1923,35 @@ public class CoreUtilsCoverageTests
             if (Regex.IsMatch(before, @"(\breturn\b|=>)\s*$") && ReturnsTheHandleItself(code, m))
                 continue;
             var name = m.Groups[1].Success ? m.Groups[1].Value : "Inner";
-            if (!RootedAfter(code, m.Index + m.Length, name)) flagged.Add(m.Value.Trim());
+            if (!RootedAfter(code, LastUseOfResult(code, m), name)) flagged.Add(m.Value.Trim());
         }
         return [.. flagged];
+    }
+
+    // Where the rooting has to reach: past the call, and past every later read of a RESOURCE the
+    // call handed back. Some of what ORT returns is borrowed rather than owned --
+    // GetTensorMemoryInfo gives a non-owning pointer into the value's own state -- so each read of
+    // it is another native read through the value, and a keep-alive before the last of them roots
+    // nothing that matters. Measuring from the call alone accepted exactly that shape.
+    //
+    // `using` is the discriminator, and it is the right one: it marks the results that are
+    // resources rather than copies. A plain `var c = Inner.GetValueCount()` hands back an int, and
+    // reading c later goes nowhere near the value, so a keep-alive straight after that call is
+    // correctly placed.
+    private static int LastUseOfResult(string code, Match m)
+    {
+        int after = m.Index + m.Length;
+        var before = code[(code.LastIndexOfAny([';', '{', '}'], m.Index) + 1)..m.Index];
+        var bound = Regex.Match(
+            before, @"\busing\s+(?:\bvar\b|[\w<>\[\],]+)\s+([A-Za-z_]\w*)\s*=\s*$");
+        if (!bound.Success) return after;
+        int limit = MemberEndFrom(code, after);
+        if (limit <= after) return after;
+        int last = after;
+        foreach (Match use in Regex.Matches(
+            code[after..limit], @"\b" + Regex.Escape(bound.Groups[1].Value) + @"\b"))
+            last = after + use.Index + use.Length;
+        return last;
     }
 
     private static string[] ProductSources() =>
@@ -2301,6 +2329,15 @@ public class CoreUtilsCoverageTests
             Assert.True(report.Write > TimeSpan.Zero
                 && report.Flush > TimeSpan.Zero && report.Commit > TimeSpan.Zero);
             Assert.True(report.Elapsed <= outer);
+
+            // What the measurement covers, pinned by making the content production take a known
+            // time rather than by comparing against the caller's clock. Contention can only make a
+            // measured phase longer, so a lower bound on it never fails for being busy -- which is
+            // what the ratio this replaced could not say.
+            var delayed = AtomicFileWriter.WriteFile(
+                Path.Combine(dir, "slow.bin"),
+                s => { Thread.Sleep(50); s.Write(payload); });
+            Assert.True(delayed.Write >= TimeSpan.FromMilliseconds(40));
 
             // Rotation runs inside the call, so the report still fits inside the caller's clock.
             clock = System.Diagnostics.Stopwatch.StartNew();

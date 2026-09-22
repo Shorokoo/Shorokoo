@@ -64,8 +64,16 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
         // puts an object on the finalization queue for every tensor anyone reads -- the cost
         // OnnxTensorData deliberately refuses to pay by having no finalizer of its own.
         using var info = Inner.GetTensorMemoryInfo();
+        // The info ORT hands back does not own what it points at -- it is the tensor's own
+        // location, a sub-object of the native value, which OrtReleaseValue frees. So reading
+        // info.Name is a native read through Inner's memory, and the keep-alive belongs after it,
+        // not after the call that produced the info. Rooted only across the first call, a
+        // collection in between frees the value and this reads a dangling pointer -- returning
+        // garbage that may compare equal to "Cpu", which is the direction that hands out a span
+        // over device memory.
+        var host = info.Name == CpuAllocatorName;
         GC.KeepAlive(Inner);
-        return info.Name == CpuAllocatorName;
+        return host;
     }
 
     private volatile bool _hostAccessible;
@@ -105,8 +113,11 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
         {
             if (!Inner.IsTensor) return false;
             using var info = Inner.GetTensorMemoryInfo();
+            // After the name read, for the reason ProbeHostAccessible gives: the info points into
+            // the native value rather than owning anything.
+            var onDevice = !IsHostAllocator(info.Name);
             GC.KeepAlive(Inner);
-            return !IsHostAllocator(info.Name);
+            return onDevice;
         }
     }
 

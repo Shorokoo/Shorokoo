@@ -2826,9 +2826,10 @@ public class TrainingRigCheckpointCoverageTests
         finally { if (File.Exists(adamPath)) File.Delete(adamPath); }
     }
 
-    /// <summary>Runs one save and holds it to the whole contract: the bytes are the file's own, each
-    /// phase is measured, and Elapsed accounts for the caller's wall clock — the last of which is
-    /// what a save that leaves its content production outside the measurement fails.</summary>
+    /// <summary>Runs one save and holds it to the bytes and the phases. That the measurement covers
+    /// the content production is pinned by
+    /// <see cref="CoreUtilsCoverageTests.TestAtomicFileWriterReportsWhatEachWriteCost"/> against an
+    /// injected delay, which is the direction contention cannot break.</summary>
     private static SaveReport Saved(Func<SaveReport> save, string path)
     {
         var clock = System.Diagnostics.Stopwatch.StartNew();
@@ -2836,7 +2837,7 @@ public class TrainingRigCheckpointCoverageTests
         var outer = clock.Elapsed;
         Assert.Equal(new FileInfo(path).Length, r.BytesWritten);
         Assert.True(r.Write > TimeSpan.Zero && r.Flush > TimeSpan.Zero && r.Commit > TimeSpan.Zero);
-        Assert.True(r.Elapsed <= outer && r.Elapsed >= outer * 0.5);
+        Assert.True(r.Elapsed <= outer);
         return r;
     }
 

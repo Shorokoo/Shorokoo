@@ -549,23 +549,32 @@ public abstract class OrtBackend : IShorokooBackend
     /// write-only, so this refuses to make one (Shorokoo/Shorokoo#368).</para>
     /// </summary>
     /// <exception cref="InvalidOperationException">An element is in the execution provider's own
-    /// memory rather than the host's. Nothing has been taken over when this is thrown: the advice
-    /// to bring the tensor home means nothing if the refusal has already freed it.</exception>
+    /// memory rather than the host's. Every value handed over is disposed first, as this method's
+    /// contract requires of any failure; the tensor the caller copied them from is untouched, and
+    /// it is that one the message's advice is about.</exception>
     public IShorokooTensorValue CreateSequence(IReadOnlyList<IShorokooTensorValue> values)
     {
-        // Before the ownership transfer below, and outside its try, which is the whole difference
-        // between this and the cast failure there: a value whose memory is wrong is one the caller
-        // can still do something about, and the message says what. A pattern match rather than a
-        // cast, so a value that is not this backend's still fails where it did.
+        // Before the ownership transfer below, so the message can still name the offending
+        // tensor's shape and type. A pattern match rather than a cast, so a value that is not this
+        // backend's still fails where it did, on the cast inside the try.
         foreach (var v in values)
             if (v is OrtTensorValue { IsInDeviceMemory: true } onDevice)
-                throw new InvalidOperationException(
+            {
+                // Built before the disposal, which invalidates what it reads.
+                var refusal =
                     $"A tensor ({string.Join('x', onDevice.Shape)}:{onDevice.ElementType}) in "
-                    + $"{Description}'s own device memory cannot be an element of a sequence: "
+                    + $"{Description.Name}'s own device memory cannot be an element of a sequence: "
                     + "ONNX Runtime can pack it into one but reads an element back with a host "
                     + "copy, so nothing could ever read it again. Bring the tensor into host "
                     + "memory first -- CopyTensorToHost does that, and TensorData.CopyTo(null) "
-                    + "is the same move on a tensor a context owns.");
+                    + "is the same move on a tensor a context owns.";
+                // This method's contract is that a failure disposes what it was handed, and both
+                // in-tree callers rely on it by calling outside the catch that would otherwise
+                // free these. A refusal is a failure like any other. What the caller keeps is the
+                // tensor these were copied from, which is what it has to move.
+                foreach (var owned in values) owned.Dispose();
+                throw new InvalidOperationException(refusal);
+            }
 
         var inner = new List<OrtValue>(values.Count);
         try

@@ -708,6 +708,21 @@ public class TensorDataApiCoverageTests
         Assert.Equal((object[])["a", "b"], OnnxEngine.Eval(Vector("a", "b")).As<@string>().DebugData);
     }
 
+    // Both debug reads go through the flat-buffer path, which a string tensor has none of:
+    // HostStringTensorData.Data overrides its way out, DebugData does not, and a backend-held
+    // string tensor overrides neither. Separate from #369 -- no export is involved.
+    [Fact]
+    public void TestAStringTensorsElementsAreReadableThroughBothDebugAccessors()
+    {
+        var host = (TensorData<@string>)TensorData([2L], (string[])["a", "b"]);
+        var backed = TensorData.Create((long[])[2L], DType.String, host.ToTensorValue());
+
+        Assert.Equal((object[])["a", "b"], host.Data);
+        Assert.Equal((object[])["a", "b"], host.DebugData);
+        Assert.Equal((object[])["a", "b"], backed.Data);
+        Assert.Equal((object[])["a", "b"], backed.As<@string>().DebugData);
+    }
+
     // A factory that takes your tensor gives it back usable. TensorFill's signature did not
     // change when its body started building a graph attribute, so a move there would have spent
     // the caller's tensor with nothing to catch it at compile time.

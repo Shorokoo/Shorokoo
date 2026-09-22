@@ -500,16 +500,22 @@ graph actually requires.
 The exporter holds a floor for each post-21 operator (`RMSNormalization` and
 `RotaryEmbedding` at 23; `Attention`, `Swish` and `TensorScatter` at 24 —
 `Attention` is defined at 23, but ORT 1.26's CPU provider only registers its
-kernel at 24+; `BitCast` and `CumProd` at 26). None of those floors is
-reachable from the `Ops`/`OnnxOp` authoring surface today, though:
-`Attention`, `AttentionWithKVCache`, `RotaryEmbedding`, `TensorScatter`,
-`BitCast` and `CumProd` throw `NotImplementedException` at their `OnnxOp`
-entry points, and `Swish` and `RMSNormalization` lower inline to opset-21
-primitives (`Mul`/`Sigmoid` and `ReduceMean`/`Sqrt`/`Div`/`Mul`), so no
-post-21 operator node is ever emitted from an authored graph. The floors are
-kept as the restore point for when a runtime registers those operators at a
-usable opset. In practice the raise you will see is the attribute-driven one
-described below, on an imported model.
+kernel at 24+; `BitCast` and `CumProd` at 26). Nothing you export as ONNX
+reaches one of those floors today, by three different routes. `Attention`,
+`AttentionWithKVCache`, `RotaryEmbedding`, `BitCast` and `CumProd` throw
+`NotImplementedException` at their `OnnxOp` entry points, so the node cannot
+be authored at all. `Swish` and `RMSNormalization` lower inline to opset-21
+primitives (`Mul`/`Sigmoid` and `ReduceMean`/`Sqrt`/`Div`/`Mul`), so the node
+is never built either. `TensorScatter` is built and kept as itself, but the
+exporter decomposes it on the way out into a `Concat` of the cache and the
+update and one `GatherElements` over the pair — see
+[operator-support.md](operator-support.md) — so the file still stamps at 21.
+Either way no post-21 operator node is emitted from an authored graph. The
+floors are kept for the ops that cannot be authored, as the restore point for
+when a runtime registers them at a usable opset, and are live for a saved
+architecture, which keeps `TensorScatter` as authored and so stamps at 24. In
+practice the raise you will see is the attribute-driven one described below,
+on an imported model.
 
 The baseline stays at 21 rather than 26: the opset stamp selects
 kernel versions in ONNX Runtime, and ORT's CPU provider has gaps at the
@@ -561,7 +567,9 @@ supported.
 ### Gradient coverage
 
 Most differentiable operators in the supported set (opset 21 plus the
-post-21 additions) have registered gradients; the rest raise
-`AutoDiffNotSupportedException` with an error code naming the op.
+post-21 additions) have gradient support: either a gradient rule written for the
+operator, or a registered decomposition into simpler operators that the engine
+differentiates instead. The rest raise `AutoDiffNotSupportedException` with an
+error code naming the op.
 The current per-operator status is tracked in
 [operator-support.md](operator-support.md).

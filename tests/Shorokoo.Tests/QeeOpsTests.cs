@@ -1,8 +1,13 @@
+using System.Collections.Immutable;
 using System.Reflection;
 using Shorokoo.Runtime;
+using Shorokoo.Core.Factory;
+using Shorokoo.Core.Nodes.Processors.AutoGrad;
+using Shorokoo.Core.Nodes.Processors.Fast;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 using Shorokoo.Core.Inference;
 using Shorokoo.Core.Inference.Helpers;
+using Shorokoo.Core.Lowering;
 using static Shorokoo.Tests.FoldForcing;
 
 namespace Shorokoo.Tests;
@@ -116,6 +121,272 @@ public class QeeOpsCoverageTests
             TensorData(DType.Float32, [], 3f)]));
 
     [Fact]
+    public void TestSoftsignIsComputedFromItsLoweringRatherThanAnOpOfItsOwn()
+    {
+        Assert.Null(OpRegistry.Get(OpCodes.SOFTSIGN));
+        Assert.True(OpLoweringRegistry.TryGet(OpCodes.SOFTSIGN, out var lowering));
+        Assert.Equal(OpCodes.SOFTSIGN, lowering.OpCode);
+        Assert.False(OpLoweringRegistry.TryGet("NotAnOpCode", out _));
+
+        var y = (RuntimeTensor)QeeAudit.Outputs<QeeSoftsignLowered>(
+            TensorData(DType.Float32, [5L], 0f, 1f, -1f, 3f, -7f))[0];
+        Assert.Equal(DType.Float32, y.DType);
+        Assert.Equal<float>([0f, 0.5f, -0.5f, 0.75f, -0.875f], y.FloatData!.Value);
+
+        var y64 = (RuntimeTensor)QeeAudit.Outputs<QeeSoftsignLoweredFloat64>(
+            TensorData(DType.Float64, [5L], 0.0, 1.0, -1.0, 3.0, -7.0))[0];
+        Assert.Equal(DType.Float64, y64.DType);
+        Assert.Equal<float>([0f, 0.5f, -0.5f, 0.75f, -0.875f], y64.FloatData!.Value);
+
+        var x = TensorData(DType.Float32, [2L], 1f, 3f);
+        var g = QeeSoftsignLowered.ComputationGraph.ToInternal();
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x])).ToConcreteModel();
+        var concurrent = new float[64][];
+        Parallel.For(0, concurrent.Length, new ParallelOptions { MaxDegreeOfParallelism = 4 },
+            i => concurrent[i] = [.. ((RuntimeTensor)new QuickExecutionEngine()
+                .Run(concrete, x)[concrete.Outputs[0]]).FloatData!.Value]);
+        Assert.All(concurrent, r => Assert.Equal<float>([0.5f, 0.75f], r));
+        Assert.Equal(1, concrete.Nodes.Count(n => n.OpCode == OpCodes.SOFTSIGN));
+    }
+
+    [Fact]
+    public void TestALoweringThatCannotBeCarriedOutIsRefusedAndAStepThatThrowsComputesNoValue()
+    {
+        var attrs = OnnxCSharpAttributes.FromCSharpVals(
+            new(), Definitions.NodeDefinitions[OpCodes.ABS].AttributeDefs);
+        (DType DType, int? Rank)?[] inputs = [(DType.Float32, 1)];
+        var buildsSoftsign = new OpLowering(OpCodes.ABS, LoweringMethod(nameof(BuildsAnOpWithNoQuickOp)));
+        var buildsItself = new OpLowering(OpCodes.ABS, LoweringMethod(nameof(BuildsItsOwnOpCode)));
+        var handsItsInputBack = new OpLowering(OpCodes.ABS, LoweringMethod(nameof(HandsItsInputBack)));
+        Assert.Null(OpRegistry.Get(OpCodes.SOFTSIGN));
+
+        string Refusal(OpLowering l) => Assert.Throws<InvalidOperationException>(
+            () => FastLowerRegisteredOps.Decompose(l, inputs, attrs, 1)).Message;
+
+        for (int i = 0; i < 2; i++)
+        {
+            Assert.Contains("has no operator for", Refusal(buildsSoftsign));
+            Assert.Contains("which it cannot be built from", Refusal(buildsItself));
+        }
+
+        Assert.Null(FastLowerRegisteredOps.Decompose(handsItsInputBack, inputs, attrs, 1));
+        Assert.True(OpLoweringRegistry.TryGet(OpCodes.SOFTSIGN, out var softsign));
+        Assert.Null(FastLowerRegisteredOps.Decompose(softsign, inputs,
+            OnnxCSharpAttributes.FromCSharpVals(
+                new(), Definitions.NodeDefinitions[OpCodes.SOFTSIGN].AttributeDefs), 2));
+
+        var x = TensorData(DType.Float32, [2L], 1f, 3f);
+        var g = QeeSoftsignLowered.ComputationGraph.ToInternal();
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x])).ToConcreteModel();
+        using (OpRegistry.Override(new ThrowingAbsStub()))
+        {
+            var failed = (RuntimeTensor)new QuickExecutionEngine().Run(concrete, x)[concrete.Outputs[0]];
+            Assert.Equal(DType.Float32, failed.DType);
+            Assert.Null(failed.Shape);
+            Assert.Null(failed.FloatData);
+        }
+    }
+
+    // A node subset with a dangling input reference — the shape a caller that folds part of a
+    // graph hands over — has no Variable-level rebuild, so nothing says what any slot holds.
+    private static RuntimeTensor OnAPartialGraph(
+        InternalComputationGraph graph, int output, params TensorData[] feed)
+    {
+        var partial = new InternalComputationGraph
+        {
+            Nodes = [.. graph.Nodes.Where(n => n.OpCode != InternalOpCodes.MODEL_TENSOR_INPUT)],
+            Inputs = graph.Inputs,
+            Outputs = graph.Outputs,
+        };
+        var seeded = new Dictionary<Core.Graph.FastTensorKey, IRuntimeTensor>();
+        for (int i = 0; i < feed.Length; i++)
+            seeded[graph.Inputs[i]] = TensorDataConverter.ToRuntimeInput(
+                feed[i], QuickExecutionEngine.DefaultMaxDataElements);
+        return (RuntimeTensor)new QuickExecutionEngine().Run(partial, seeded)[partial.Outputs[output]];
+    }
+
+    [Fact]
+    public void TestALoweredOperatorIsStillComputedWhenTheGraphHasNoTensorInfoToBuildFrom()
+    {
+        var x32 = InputTensor<float32>(defaultName: "x", rank: 1);
+        var g32 = new InternalComputationGraph([x32], [x32.Softsign(), x32.Abs()]);
+        var f32 = TensorData(DType.Float32, [3L], 0f, 1f, 3f);
+
+        var x64 = InputTensor<float64>(defaultName: "x", rank: 1);
+        var g64 = new InternalComputationGraph([x64], [x64.Softsign()]);
+
+        var past = InputTensor<float32>(defaultName: "past", rank: 2);
+        var update = InputTensor<float32>(defaultName: "update", rank: 2);
+        var starts = InputTensor<int64>(defaultName: "starts", rank: 1);
+        ImmutableArray<Variable> scatterInputs = [past, update, starts];
+        var scatter = new InternalComputationGraph(
+            scatterInputs, [OnnxOp.TensorScatter(past, update, starts, axis: 1L)]);
+
+        var softsign32 = OnAPartialGraph(g32, 0, f32);
+        var softsign64 = OnAPartialGraph(g64, 0, TensorData(DType.Float64, [3L], 0.0, 1.0, 3.0));
+        Assert.Equal(DType.Float32, softsign32.DType);
+        Assert.Equal<float>([0f, 0.5f, 0.75f], softsign32.FloatData!.Value);
+        Assert.Equal(DType.Float64, softsign64.DType);
+        Assert.Equal<float>([0f, 0.5f, 0.75f], softsign64.FloatData!.Value);
+        Assert.Equal<float>([0f, 1f, 3f], OnAPartialGraph(g32, 1, f32).FloatData!.Value);
+        Assert.Equal<float>([1f, 100f, 101f, 4f], OnAPartialGraph(scatter, 0,
+            TensorData(DType.Float32, [1L, 4L], 1f, 2f, 3f, 4f),
+            TensorData(DType.Float32, [1L, 2L], 100f, 101f),
+            TensorData(DType.Int64, [1L], 1L)).FloatData!.Value);
+    }
+
+    private static MethodInfo LoweringMethod(string name) => typeof(QeeOpsCoverageTests)
+        .GetMethod(name, BindingFlags.NonPublic | BindingFlags.Static)!;
+
+    private static Variable?[] BuildsAnOpWithNoQuickOp<T>(Tensor<T> x) where T : IVarType
+        => [OnnxOp.Softsign(x)];
+
+    private static Variable?[] BuildsItsOwnOpCode<T>(Tensor<T> x) where T : IVarType
+        => [x.Abs()];
+
+    private static Variable?[] HandsItsInputBack<T>(Tensor<T> x) where T : IVarType
+        => [x];
+
+    private static Variable?[] AbsAsRootOfSquare<T>(Tensor<T> x) where T : IVarType
+        => [OnnxOp.Sqrt(x * x)];
+
+    // Each domain names what it lowers; an op code named there with no registered lowering would
+    // quietly do nothing at all.
+    [Fact]
+    public void TestEveryOpCodeADomainListsForLoweringHasOne()
+    {
+        IReadOnlySet<string>[] lists = [
+            QuickExecutionEngine.LoweredOpCodes,
+            FastProcessAutoGradProcessor.LoweredOpCodes,
+            FastOnnxModelBuilder.ExportLoweredOpCodes];
+
+        Assert.All(lists, list => Assert.All(list, op => Assert.True(OpLoweringRegistry.TryGet(op, out _))));
+        Assert.Contains(OpCodes.SOFTSIGN, QuickExecutionEngine.LoweredOpCodes);
+        Assert.Contains(OpCodes.SOFTSIGN, FastProcessAutoGradProcessor.LoweredOpCodes);
+        Assert.DoesNotContain(OpCodes.SOFTSIGN, FastOnnxModelBuilder.ExportLoweredOpCodes);
+        Assert.All(lists, list => Assert.Contains(OpCodes.TENSOR_SCATTER, list));
+        Assert.Null(OpRegistry.Get(OpCodes.TENSOR_SCATTER));
+    }
+
+    // The export list is its own question — what cannot be emitted — so an operator on it is
+    // decomposed in the written ONNX while a lowerable operator off it stays fused, the
+    // decomposition brings no stack trace back into a file that must stay reproducible, and the
+    // persistence dialect keeps the operator as authored.
+    [Fact]
+    public void TestOnlyAnOperatorTheExportListNamesIsDecomposedOnTheWayOut()
+    {
+        var x = TensorData(DType.Float32, [5L], 0f, 1f, -1f, 3f, -7f);
+        var g = QeeSoftsignThenAbsLowered.ComputationGraph.ToInternal();
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x])).ToConcreteModel();
+        long[][] inputDims = [[5L]];
+
+        using var registered = OpLoweringRegistry.Override(
+            new OpLowering(OpCodes.ABS, LoweringMethod(nameof(AbsAsRootOfSquare))));
+        using var listed = FastOnnxModelBuilder.OverrideExportLoweredOpCodes(OpCodes.ABS);
+
+        var exported = FastOnnxModelBuilder.BuildInternalOnnxModel(
+            concrete, prepForOnnx: true, inputDims: inputDims);
+        var persisted = FastOnnxModelBuilder.BuildInternalOnnxModel(concrete, applyExecutionLowerings: false);
+
+        Assert.DoesNotContain(exported.Graph.Nodes, n => n.OpType == OpCodes.ABS);
+        Assert.Contains(exported.Graph.Nodes, n => n.OpType == OpCodes.SQRT);
+        Assert.Contains(exported.Graph.Nodes, n => n.OpType == OpCodes.SOFTSIGN);
+        Assert.All(exported.Graph.Nodes, n => Assert.DoesNotContain(n.MetadataProps, p => p.Key == "StackTrace"));
+        Assert.Contains(persisted.Graph.Nodes, n => n.OpType == OpCodes.ABS);
+    }
+
+    [Fact]
+    public void TestALoweringsPlanIsKeptPerAttributeValueAndNotJustPerOperator()
+    {
+        var lowering = new OpLowering(OpCodes.LEAKY_RELU, LoweringMethod(nameof(BranchesOnItsAttribute)));
+        (DType DType, int? Rank)?[] f32r1 = [(DType.Float32, 1)];
+        (DType DType, int? Rank)?[] f64r1 = [(DType.Float64, 1)];
+        (DType DType, int? Rank)?[] f32r2 = [(DType.Float32, 2)];
+        (DType DType, int? Rank)?[] absent = [null];
+
+        OnnxCSharpAttributes Attrs(float alpha) => OnnxCSharpAttributes.FromCSharpVals(
+            new() { [OnnxOpAttributeNames.AttrAlpha] = alpha },
+            Definitions.NodeDefinitions[OpCodes.LEAKY_RELU].AttributeDefs);
+        string Built(float alpha) =>
+            FastLowerRegisteredOps.Decompose(lowering, f32r1, Attrs(alpha), 1)!.Body[^1].OpCode;
+        string? Key((DType DType, int? Rank)?[] slots, float alpha) =>
+            FastLowerRegisteredOps.TryBuildKey(lowering, slots, Attrs(alpha), 1);
+
+        Assert.Equal(OpCodes.ADD, Built(1f));
+        Assert.Equal(OpCodes.ABS, Built(0f));
+        Assert.Equal(Key(f32r1, 1f), Key(f32r1, 1f));
+        Assert.NotEqual(Key(f32r1, 1f), Key(f32r1, 0f));
+        Assert.NotEqual(Key(f32r1, 1f), Key(f64r1, 1f));
+        Assert.NotEqual(Key(f32r1, 1f), Key(f32r2, 1f));
+        Assert.NotEqual(Key(f32r1, 1f), Key(absent, 1f));
+        Assert.NotEqual(Key(f32r1, 1f), FastLowerRegisteredOps.TryBuildKey(lowering, f32r1, Attrs(1f), 2));
+        Assert.Null(FastLowerRegisteredOps.TryBuildKey(lowering, f32r1,
+            OnnxCSharpAttributes.FromCSharpVals(
+                new() { [OnnxOpAttributeNames.ShrkAttrTensorData] =
+                    TensorData(DType.Float32, [1L], 1f).MoveToAttribute() },
+                Definitions.NodeDefinitions[InternalOpCodes.MODEL_PARAM_DATA].AttributeDefs), 1));
+    }
+
+    private static Variable?[] BranchesOnItsAttribute<T>(Tensor<T> x, float? alpha) where T : IVarType
+        => [alpha == 1f ? x + x : x.Abs()];
+
+    [Fact]
+    public void TestEveryLoweredNodeIsRekeyedWhenAnOperatorAppearsMoreThanOnce()
+    {
+        var x = TensorData(DType.Float32, [3L], 1f, 3f, 7f);
+        var y = TensorData(DType.Float32, [3L], 1f, 1f, 1f);
+        var g = QeeTwoSoftsignsLowered.ComputationGraph.ToInternal();
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x, y])).ToConcreteModel();
+
+        var lowered = concrete.Clone();
+        FastLowerRegisteredOps.Process(lowered, QuickExecutionEngine.LoweredOpCodes);
+
+        Assert.Equal(2, concrete.Nodes.Count(n => n.OpCode == OpCodes.SOFTSIGN));
+        Assert.DoesNotContain(lowered.Nodes, n => n.OpCode == OpCodes.SOFTSIGN);
+        Assert.Equal(2, lowered.Nodes.Count(n => n.OpCode == OpCodes.DIV));
+        Assert.Equal(lowered.Nodes.Count, lowered.Nodes.Select(n => n.Key).Distinct().Count());
+        Assert.True(lowered.IsLinearOrderValid());
+
+        var out0 = (RuntimeTensor)new QuickExecutionEngine().Run(concrete, x, y)[concrete.Outputs[0]];
+        Assert.Equal<float>([1f, 1.25f, 1.375f], out0.FloatData!.Value);
+    }
+
+    [Fact]
+    public void TestALoweredOperatorInsideALoopBodyIsSplicedInsideIt()
+    {
+        var x = TensorData(DType.Float32, [3L], 3f, 4f, 5f);
+        Assert.True(QeeAudit.Check<QeeSoftsignInLoopAuditCheck>(x));
+
+        var g = QeeSoftsignInLoopAuditCheck.ComputationGraph.ToInternal();
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x])).ToConcreteModel();
+        var lowered = concrete.Clone();
+        FastLowerRegisteredOps.Process(lowered, QuickExecutionEngine.LoweredOpCodes);
+
+        int open = lowered.Nodes.FindIndex(n => n.OpCode == OpCodes.LOOP_OPEN);
+        int close = lowered.Nodes.FindIndex(n => n.OpCode == OpCodes.LOOP_CLOSE);
+        var spliced = lowered.Nodes.Select((n, i) => (n.OpCode, i))
+            .Where(t => t.OpCode == OpCodes.CAST_LIKE).ToList();
+
+        Assert.Single(spliced);
+        Assert.InRange(spliced[0].i, open + 1, close - 1);
+        Assert.True(lowered.IsLinearOrderValid());
+    }
+
+    [Fact]
+    public void TestALoweredOperatorIsStillExportedAsItself()
+    {
+        var x = TensorData(DType.Float32, [5L], 0f, 1f, -1f, 3f, -7f);
+        var g = QeeSoftsignLowered.ComputationGraph.ToInternal();
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x])).ToConcreteModel();
+        Assert.Equal(DType.Float32, new QuickExecutionEngine().Run(concrete, x)[concrete.Outputs[0]].DType);
+
+        long[][] inputDims = [[5L]];
+        var proto = FastOnnxModelBuilder.BuildInternalOnnxModel(concrete, prepForOnnx: true, inputDims: inputDims);
+        Assert.Contains(proto.Graph.Nodes, n => n.OpType == OpCodes.SOFTSIGN);
+        Assert.DoesNotContain(proto.Graph.Nodes, n => n.OpType == OpCodes.CAST_LIKE);
+    }
+
+    [Fact]
     public void TestNoQuickOpKeepsInstanceState() =>
         Assert.Empty(typeof(QuickOp).Assembly.GetTypes()
             .Where(typeof(QuickOp).IsAssignableFrom)
@@ -144,6 +415,14 @@ public class QeeOpsCoverageTests
     private sealed class ThrowingLoopCloseStub : QuickOp
     {
         public override string OpCode => OpCodes.LOOP_CLOSE;
+        protected override RuntimeTensor[] Compute(
+            RuntimeTensor?[] inputs, OnnxCSharpAttributes attrs, int maxDataElements)
+            => throw new InvalidOperationException();
+    }
+
+    private sealed class ThrowingAbsStub : QuickOp
+    {
+        public override string OpCode => OpCodes.ABS;
         protected override RuntimeTensor[] Compute(
             RuntimeTensor?[] inputs, OnnxCSharpAttributes attrs, int maxDataElements)
             => throw new InvalidOperationException();
@@ -180,6 +459,38 @@ public class QeeOpsCoverageTests
             Assert.Equal(DType.Invalid, rt.DType);
             Assert.Null(rt.IterationIndices);
         }
+    }
+}
+
+[Module] public partial class QeeSoftsignLowered { public static Tensor<float32> Inline(Tensor<float32> x)
+    => x.Softsign(); }
+
+[Module] public partial class QeeSoftsignLoweredFloat64 { public static Tensor<float64> Inline(Tensor<float64> x)
+    => x.Softsign(); }
+
+[Module] public partial class QeeSoftsignThenAbsLowered { public static Tensor<float32> Inline(Tensor<float32> x)
+    => x.Softsign().Abs(); }
+
+[Module] public partial class QeeTwoSoftsignsLowered
+{
+    public static Tensor<float32> Inline(Tensor<float32> x, Tensor<float32> y)
+        => x.Softsign() + y.Softsign();
+}
+
+[Module] public partial class QeeSoftsignInLoopAuditCheck
+{
+    public static Scalar<bit> Inline(Tensor<float32> x)
+    {
+        var a = x;
+        var b = x;
+        var trips = x.Reduce(ReduceKind.Min, keepDims: false).Scalar().Cast<int64>();
+        foreach (var ctx in LoopAPI.Iterate(trips))
+        {
+            a = a.Softsign() * Scalar(2f);
+            b = b / (Scalar(1f) + b.Abs()) * Scalar(2f);
+        }
+        return ((Tensor<bit>)OnnxOp.Not((a - b).Abs() <= Scalar(1e-3f))).Cast<int64>()
+            .Reduce(ReduceKind.Sum, keepDims: false).Scalar() < Scalar(1L);
     }
 }
 

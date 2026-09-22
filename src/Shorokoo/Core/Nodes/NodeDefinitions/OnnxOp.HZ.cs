@@ -666,16 +666,15 @@ public static partial class OnnxOp
     }
 
     /// <summary>Writes <paramref name="update"/> into <paramref name="pastCache"/> along the sequence axis at the per-batch write indices (ONNX TensorScatter, opset 24+).
-    /// Not emittable today: Shorokoo exports a single opset-21 ONNX model, and a faithful lowering of
-    /// the fused op (per-batch write indices, windowed/circular modes) is intricate enough to belong in
-    /// core (deferred core work) — so this throws rather than force a
-    /// higher model opset. The TENSOR_SCATTER op definition and (shape-only) QEE kernel are retained;
-    /// restore the fused emission here once a runtime supports it.</summary>
+    /// The node is built and kept as itself; only the exported file decomposes it,
+    /// since opset 21 — the single opset Shorokoo writes — has no node for it. See the registered
+    /// TensorScatter lowering for the decomposition and what of the spec it covers.
+    /// <paramref name="axis"/> names the sequence dimension and so cannot be 0, the batch one.</summary>
     public static Variable TensorScatter(Variable pastCache, Variable update,
         Variable? writeIndices = null, long? axis = null, TensorScatterMode? mode = null)
-        => throw new System.NotImplementedException(
-            "TensorScatter (ONNX opset 24) has no opset-21 equivalent, and Shorokoo emits a single " +
-            "opset-21 model. A faithful lowering (per-batch write indices, windowed/circular modes) is " +
-            "deferred to the core project. The op definition is retained; " +
-            "re-enable the fused emission here when a runtime supports it.");
+        => axis == 0
+            ? throw new System.ArgumentOutOfRangeException(nameof(axis),
+                "TensorScatter's axis names the sequence dimension and cannot be 0, the batch dimension.")
+            : NodeBuilder.BuildNodeSingleOut(TENSOR_SCATTER, [pastCache, update, writeIndices],
+                [(AttrAxis, axis), (AttrMode, mode)]);
 }

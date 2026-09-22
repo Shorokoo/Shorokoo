@@ -1,4 +1,7 @@
 using System.Collections.Immutable;
+using Shorokoo.Core.Graph;
+using Shorokoo.Core.Lowering;
+using Shorokoo.Core.Nodes.Processors.Fast;
 using static Shorokoo.Core.Nodes.NodeDefinitions.OnnxOpAttributeNames;
 using static Shorokoo.Core.Nodes.NodeDefinitions.OpCodes;
 
@@ -8,7 +11,8 @@ namespace Shorokoo.Tests;
 /// Coverage for the <c>CallCustomOperator&lt;T...&gt;</c> /
 /// <c>CallCustomOperatorArrayOut&lt;T&gt;</c> overloads on <see cref="NodeBuilder"/>,
 /// which <c>CSharpModelBuilder.MakeCustomCodeTemplate</c> emits for custom ops without
-/// a built-in <c>CodeTemplate</c>.
+/// a built-in <c>CodeTemplate</c>, and for <see cref="FastLowerRegisteredOps.Decompose"/>, which
+/// reads the <see cref="NodeBuilder"/> nodes a lowering built back off its outputs.
 /// </summary>
 [Trait("Domain", "Framework")]
 [Trait("Purpose", "Coverage")]
@@ -56,6 +60,28 @@ public class NodeBuilderCoverageTests
             SPLIT, [sData, null], splitAttrs);
         Assert.Equal(2, pieces.Length);
         Assert.All(pieces, p => Assert.NotNull(p));
+    }
+
+    [Fact]
+    public void TestAnOperatorLoweringReadsBackAsTheNodesItBuilt()
+    {
+        Assert.True(OpLoweringRegistry.TryGet(SOFTSIGN, out var lowering));
+        var plan = FastLowerRegisteredOps.Decompose(lowering, [(DType.Float32, 1)],
+            OnnxCSharpAttributes.FromCSharpVals(new(), Definitions.NodeDefinitions[SOFTSIGN].AttributeDefs),
+            declaredOutputs: 1)!;
+        var x = plan.StandInKeyBySlot[0]!.Value;
+
+        Assert.Equal<string>([CONSTANT, CAST_LIKE, ABS, ADD, DIV], [.. plan.Body.Select(n => n.OpCode)]);
+        Assert.Equal(plan.Body.Count, plan.Body.Select(n => n.Key).Distinct().Count());
+
+        HashSet<FastTensorKey> built = [x];
+        foreach (var node in plan.Body)
+        {
+            Assert.All(node.Inputs, i => Assert.True(i is null || built.Contains(i.Value)));
+            foreach (var output in node.Outputs) built.Add(output!.Value);
+        }
+        Assert.Equal<FastTensorKey>([x, x, x],
+            [plan.Body[^1].Inputs[0]!.Value, plan.Body[1].Inputs[1]!.Value, plan.Body[2].Inputs[0]!.Value]);
     }
 
     [Fact]

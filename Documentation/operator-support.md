@@ -7,13 +7,14 @@ model's opset stamp only as far as the graph actually requires. In practice
 that raise is driven by post-21 **attributes** carried by an imported model:
 `DequantizeLinear.output_dtype` and `QuantizeLinear.precision` raise the stamp
 to 23, `Cast`/`CastLike.round_mode` to 24. No post-21 **operator** raises it,
-because none can reach the exporter — `RMSNormalization` and `Swish` lower
-inline to opset-21 primitives, so no such node is ever emitted, and the
-remaining post-21 operators throw at authoring time (see the family notes
-below). A graph you build through `Ops`/`OnnxOp`/`NN` therefore always exports
-at opset 21 — the low-level `NodeBuilder` surface is the exception, since it
-can stamp any attribute a node definition declares, and a node built that way
-raises the stamp exactly as an imported one does. See
+because none survives to emission — `RMSNormalization` and `Swish` lower inline
+to opset-21 primitives, so no such node is ever built; `TensorScatter` is built
+and run as itself but decomposed into opset-21 primitives as the file is
+written; and the remaining post-21 operators throw at authoring time (see the
+family notes below). A graph you build through `Ops`/`OnnxOp`/`NN` therefore
+always exports at opset 21 — the low-level `NodeBuilder` surface is the
+exception, since it can stamp any attribute a node definition declares, and a
+node built that way raises the stamp exactly as an imported one does. See
 [limitations.md](limitations.md) for why the baseline stays at 21. Every
 operator Shorokoo has a definition for is listed below — the full opset-21 set
 plus the post-21 additions, each at the opset the ONNX spec introduces it
@@ -42,6 +43,25 @@ The three columns mean:
 Symbols: ✅ full support · 🟡 partial (see the family's notes) · ❌ not
 supported (see notes) · N/A not applicable (non-differentiable output, leaf
 operator, or operator not available).
+
+A ✅ in the last two columns does not always mean the engine has an
+implementation of that operator written out for it. Some operators are instead
+registered as a **decomposition into simpler operators**, and an engine with no
+implementation of its own computes — or differentiates — the decomposition. The
+result is the same either way, which is why the table does not distinguish them.
+
+Computing one costs your graph nothing: the decomposition is an internal detail
+of how the engine runs the node, carried out on a copy the run owns, so the
+model you built keeps its `Softsign`. **Differentiating one is the exception.**
+Autodiff expands the training graph in place, so the training graph it hands
+back carries the decomposition where the forward operator stood — differentiate
+a `Softsign` and the forward pass you train with is an `Abs`, an `Add` and a
+`Div`. The inference model you built is untouched.
+
+Whether the **exporter** decomposes it too is a separate question, answered by
+the first column's notes: `TensorScatter` is the only operator it decomposes
+today, because opset 21 has no node for it, and a `Softsign` is therefore still
+a `Softsign` in the ONNX written from an inference model.
 
 ## Elementwise math & activations
 
@@ -232,7 +252,7 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
 | SpaceToDepth | ✅ | ✅ | ✅ |
 | Split | ✅ | ✅ | ✅ |
 | Squeeze | ✅ | ✅ | ✅ |
-| TensorScatter | ❌ [14] | 🟡 [15] | ❌ [16] |
+| TensorScatter | ✅ [14] | ✅ [15] | ✅ [16] |
 | Tile | ✅ | ✅ | ✅ |
 | TopK | ✅ | ✅ [17] | ✅ |
 | Transpose | ✅ | ✅ | ✅ |
@@ -259,16 +279,39 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
 13. Exact whenever a `steps` input is wired (any stride, including negative);
     the faster path used when `steps` is absent retains an approximate
     clamping of negative starts/ends.
-14. Cannot be constructed today: `OnnxOp.TensorScatter` throws
-    `NotImplementedException` and has no `NN.*` wrapper. The operator has no
-    opset-21 equivalent and Shorokoo emits a single opset-21 model, so it
-    cannot be lowered — a faithful lowering of the per-batch write indices and
-    the windowed/circular modes is deferred. The op definition and QEE kernel
-    are retained; the entry point is re-enabled once a runtime registers the
-    operator at a usable opset.
-15. Shape/dtype inference only; values are not computed.
-16. Gradient is not implemented; differentiation raises
-    `AutoDiffNotSupportedException` (error code `AD003`).
+14. Built and kept as itself, but opset 21 has no `TensorScatter` node, so the
+    exported ONNX carries its registered lowering instead: `update`
+    concatenated onto `past_cache` along the sequence axis, and one
+    `GatherElements` that takes each cache position from whichever half the
+    per-batch write window puts it in. The model still stamps at opset 21; a
+    saved architecture, which must reload as authored, keeps the operator.
+    The decomposition is checked element for element against ONNX Runtime's own
+    opset-24 `TensorScatter` kernel, over both modes, `write_indices` present
+    and absent, every legal `axis` at ranks 2 to 4, window lengths from 1 to
+    `max_sequence_length`, empty batches, windows and caches, and every element
+    type the operator accepts — bool and bfloat16 included, since the selection
+    is made on the gather's index rather than on the values. Outside that domain the spec's own preconditions
+    are taken as given rather than enforced, and what Shorokoo produces for one
+    is undefined: `sequence_length <= max_sequence_length`; in `linear` mode
+    `write_indices + sequence_length <= max_sequence_length`; each write index
+    non-negative, with one per batch. `axis` names the sequence dimension and so
+    cannot be 0, the batch one — the spec forbids it. `OnnxOp.TensorScatter`
+    refuses a literal 0, but the constraint is on the axis *after* it is
+    normalized against the rank, which is not known until the graph runs: a
+    rank-2 cache has to name axis 1 or −1, since the default −2 normalizes to 0.
+    Undefined here means quietly wrong, not an error: a runtime that has the
+    fused kernel rejects each of those inputs outright, while the decomposition
+    computes something — an over-long window returns garbage, a write index at
+    or past `max_sequence_length` drops that batch's write entirely, a negative
+    one shifts it, and a single-entry `write_indices` is broadcast over every
+    batch rather than refused. Check the preconditions yourself when the window
+    or the indices are computed rather than fixed.
+15. Values computed through that same lowering — the engine has no
+    `TensorScatter` kernel of its own.
+16. Differentiated through that same lowering: `present_cache`'s gradient
+    reaches `past_cache` everywhere outside the written window and `update`
+    inside it, per batch and for both modes. `write_indices` is an integer
+    index input and non-differentiable.
 17. Values computed for small tensors honoring `largest` (ties resolved to the
     lower index); when `k` is wired but unknown the shape degrades to a bounded
     rank-only claim.

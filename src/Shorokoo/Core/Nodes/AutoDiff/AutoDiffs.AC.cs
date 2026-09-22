@@ -266,6 +266,16 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             return [(Variable)result];
         }
 
+        /// <summary>
+        /// Reflection-invokes a rule written in the <c>[AutoDiff]</c> shape but with no
+        /// output-gradient slots — an operator lowering, whose signature is
+        /// <c>(input0, …, attr0, …)</c> and whose result is the operator's own outputs rather
+        /// than its inputs' cotangents.
+        /// </summary>
+        public static Variable?[] CallRuleWithoutOutputGrads(
+            MethodInfo rule, Variable?[] inputs, OnnxCSharpAttributes attributes)
+            => CallGradientOps(rule, inputs, [], attributes);
+
         public static Dictionary<string, Func<Variable?[], Variable?[], OnnxCSharpAttributes, Variable?[]>> GetGradientOps()
         {
             var retval = new Dictionary<string, Func<Variable?[], Variable?[], OnnxCSharpAttributes, Variable?[]>>();
@@ -289,6 +299,19 @@ namespace Shorokoo.Core.Nodes.AutoDiff
 
             return retval;
         }
+
+        /// <summary>
+        /// The op codes whose gradient method is flagged <c>UsesOutputs</c>, and so reads the
+        /// forward outputs appended after the inputs. A caller that has those outputs — the
+        /// autograd engine from the graph node, an operator lowering's reverse walk from the
+        /// primitive it recorded — extends the input list with them before calling the rule.
+        /// </summary>
+        public static HashSet<string> GetGradientOpsUsingOutputs()
+            => typeof(AutoDiffs).GetMethods(BindingFlags.Public | BindingFlags.Static)
+                .Select(m => m.GetCustomAttribute<AutoDiffAttribute>())
+                .Where(a => a is { UsesOutputs: true })
+                .Select(a => a!.OpName)
+                .ToHashSet();
 
         // ===== Concat (variadic) =====
 
@@ -352,10 +375,11 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             // Opset 23/24 ops whose adjoints are not implemented: registered AD003
             // guards (DeformConv pattern, see AutoDiffs.Batch31.cs) so a loss→param
             // path through them fails with the op-specific message instead of the
-            // engine's generic unregistered-op AD003.
+            // engine's generic unregistered-op AD003. TensorScatter, the third of that
+            // batch, has no guard: it is lowered before the reverse walk, so the walk
+            // sees its decomposition and never asks for a rule.
             retval[ATTENTION] = AttentionGradient;
             retval[ROTARY_EMBEDDING] = RotaryEmbeddingGradient;
-            retval[TENSOR_SCATTER] = TensorScatterGradient;
 
             // Non-differentiable / structural ops whose inputs receive no gradient.
             // Each just returns nulls of the right arity so the autograd dispatcher

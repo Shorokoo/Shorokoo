@@ -635,9 +635,10 @@ manual `TrainStep` loop all share.
 Every `With…` derivation keeps the same two contexts.
 
 **What the two can usefully differ in: the backend, and how its sessions and runs are
-configured.** A `ComputeContext` carries `DeviceMemory` for the sessions it compiles and
-`RunSettings` for what its runs do, so the merge phase and the training loop can hold different
-arena budgets — see [Device memory](inference.md#device-memory-gpu-backends). It also carries the
+configured.** A `ComputeContext` carries `DeviceMemory` for the sessions it compiles and the
+tensors it holds on the card, and `RunSettings` for what its runs do, so the merge phase and the
+training loop can hold different arena budgets — see
+[Device memory](inference.md#device-memory-gpu-backends). It also carries the
 backend: a context constructed with one (`new ComputeContext(new LinuxCpuBackend())`) runs
 its work there, so a rig **can** build on one device and train on another:
 

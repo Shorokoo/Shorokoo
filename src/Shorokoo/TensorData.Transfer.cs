@@ -280,11 +280,18 @@ namespace Shorokoo
         /// the runtime that made it, so the target has to be handed contents rather than a pointer.
         ///
         /// <para>The target allocates them itself, through
-        /// <see cref="IShorokooBackend.CreateTensorInBackendMemory"/> rather than
+        /// <c>CreateTensorInBackendMemory</c> rather than
         /// <c>CreateTensorFromRawBytes</c>, so the bytes land in the memory
         /// <paramref name="to"/> names instead of in host memory wearing its name. That is the
         /// difference between a tensor that is on the card and one an execution provider has to
         /// copy there on every run.</para>
+        ///
+        /// <para>It allocates under <paramref name="target"/>'s own
+        /// <see cref="ComputeContext.DeviceMemory"/>, so a context carrying a budget bounds what
+        /// can be placed in its memory and not only what the sessions it compiles may take. That
+        /// budget is settled here, once: the context that allocates a tensor is the context that
+        /// owns it, and the only transfer that changes owners afterwards is the re-wrap within one
+        /// memory space, which allocates nothing and so has nothing to re-charge.</para>
         /// </summary>
         private TensorData CopyAcross(ComputeContext target, MemorySpace to)
         {
@@ -299,7 +306,7 @@ namespace Shorokoo
                 return NewHostTensor(Shape, DType, bytes, target);
 
             var value = target.ResolvedBackend.CreateTensorInBackendMemory(
-                (ShorokooTensorElementType)(int)DType, bytes, (long[])Shape);
+                (ShorokooTensorElementType)(int)DType, bytes, (long[])Shape, target.DeviceMemory);
             try
             {
                 return Create(Shape, DType, value, target);

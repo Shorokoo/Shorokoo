@@ -307,9 +307,21 @@ public class SideBySideBackendCoverageTests
             ShorokooTensorElementType elementType, byte[] data, long[] shape)
             => inner.CreateTensorInBackendMemory(elementType, data, shape);
 
+        public IShorokooTensorValue CreateTensorInBackendMemory(
+            ShorokooTensorElementType elementType, byte[] data, long[] shape,
+            DeviceMemorySettings deviceMemory)
+            => inner.CreateTensorInBackendMemory(elementType, data, shape, deviceMemory);
+
         public IShorokooTensorValue CreateUninitializedTensorInBackendMemory(
             ShorokooTensorElementType elementType, long[] shape)
             => inner.CreateUninitializedTensorInBackendMemory(elementType, shape);
+
+        public IShorokooTensorValue CreateUninitializedTensorInBackendMemory(
+            ShorokooTensorElementType elementType, long[] shape, DeviceMemorySettings deviceMemory)
+            => inner.CreateUninitializedTensorInBackendMemory(elementType, shape, deviceMemory);
+
+        public ArenaStatistics? ReadTransferArenaStatistics(DeviceMemorySettings deviceMemory)
+            => inner.ReadTransferArenaStatistics(deviceMemory);
     }
 
     /// <summary>A session that notes what it was fed on its way to running it.</summary>

@@ -501,6 +501,15 @@ namespace Shorokoo.Runtime
         /// for life, so this configures the sessions to come and never the ones already built —
         /// to run a graph under a different budget, compile it on a context that carries one.
         ///
+        /// <para>It also bounds what can be <i>placed</i> in this context's memory. A tensor moved
+        /// onto its card — <see cref="TensorData.CopyTo"/>, <see cref="TensorData.TransferTo"/>,
+        /// <see cref="AllocateUninitialized(Shape, DType)"/> — is allocated out of an arena built
+        /// with these same settings, so a <see cref="DeviceMemorySettings.LimitBytes"/> here is a
+        /// ceiling on the tensors as well as on the sessions, and what those tensors are actually
+        /// holding is reported by <see cref="ReadTransferArenaStatistics"/>. A tensor is charged to
+        /// the context that allocated it, once: handing it to a second context on the same card
+        /// re-wraps it without copying, so there is nothing there to re-charge.</para>
+        ///
         /// <para>Its default <see cref="ArenaExtendStrategy.Auto"/> resolves per session, so one
         /// context can still give a session it knows is reused across shapes a different arena
         /// strategy from the rest; <see cref="CompiledGraph.DeviceMemory"/> reports which one a
@@ -580,6 +589,28 @@ namespace Shorokoo.Runtime
         /// unaffected by runs that come after it.</para>
         /// </summary>
         public RunStatistics RunStats => _runStatistics?.Snapshot() ?? RunStatistics.Empty;
+
+        /// <summary>
+        /// The arena the tensors this context has placed in its backend's own memory came out of —
+        /// the other half of its device footprint, beside the sessions
+        /// <see cref="CompiledGraph.ReadArenaStatistics"/> reports.
+        ///
+        /// <para><c>null</c> when there is nothing to report: a backend with no device memory, or
+        /// one this context has not yet been asked to place a tensor on. It is built with
+        /// <see cref="DeviceMemory"/>, so <see cref="ArenaStatistics.LimitBytes"/> is this
+        /// context's own budget — and it is shared with every other context on the same device
+        /// carrying the same settings, which is exactly the set of contexts that share the
+        /// allocation.</para>
+        ///
+        /// <para>It is a reading, so it costs a call into the backend and nothing is
+        /// remembered.</para>
+        /// </summary>
+        /// <exception cref="ObjectDisposedException">This context has been disposed.</exception>
+        public ArenaStatistics? ReadTransferArenaStatistics()
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            return ResolvedBackend.ReadTransferArenaStatistics(DeviceMemory);
+        }
 
         /// <summary>
         /// The arena figures <paramref name="session"/> reports before a run, or <c>null</c> when
@@ -799,7 +830,7 @@ namespace Shorokoo.Runtime
                     shape, dtype, new byte[checked(shape.Count * (bits / 8))], this);
 
             var value = ResolvedBackend.CreateUninitializedTensorInBackendMemory(
-                (ShorokooTensorElementType)(int)dtype, (long[])shape);
+                (ShorokooTensorElementType)(int)dtype, (long[])shape, DeviceMemory);
             try
             {
                 return TensorData.Create(shape, dtype, value, this);

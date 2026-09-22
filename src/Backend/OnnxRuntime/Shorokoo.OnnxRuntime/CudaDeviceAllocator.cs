@@ -1,3 +1,4 @@
+using System.Globalization;
 using Microsoft.ML.OnnxRuntime;
 using Shorokoo.Core.Backends;
 using Shorokoo.Core.Factory.IR;
@@ -5,8 +6,9 @@ using Shorokoo.Core.Factory.IR;
 namespace Shorokoo.OnnxRuntime;
 
 /// <summary>
-/// ONNX Runtime's allocator for a CUDA device: what an allocation in that card's own memory has
-/// to come from, and the one thing a backend cannot simply ask the runtime for.
+/// ONNX Runtime's allocator for a CUDA device under one device-memory configuration: what an
+/// allocation in that card's own memory has to come from, and the one thing a backend cannot
+/// simply ask the runtime for.
 ///
 /// <para>The obstacle is that <see cref="OrtAllocator"/> is created <i>from a session</i> — ORT
 /// looks the device's allocator up in the session's registered execution providers — and a
@@ -15,8 +17,8 @@ namespace Shorokoo.OnnxRuntime;
 /// CUDA execution provider's allocator, which a session does whether or not any node was placed on
 /// the card.</para>
 ///
-/// <para>Both are then held for the life of the process, per device, and that is the point rather
-/// than an oversight. ORT's tensor keeps a <i>raw</i> pointer to the allocator it was made from and
+/// <para>Both are then held for the life of the process, and that is the point rather than an
+/// oversight. ORT's tensor keeps a <i>raw</i> pointer to the allocator it was made from and
 /// frees itself through it, so an allocator released while any of its tensors is still alive turns
 /// every later collection of one into a use-after-free; and the arena the allocator draws on
 /// belongs to the session, so the session has to outlive the allocator in turn. A tensor's lifetime
@@ -24,21 +26,28 @@ namespace Shorokoo.OnnxRuntime;
 /// long enough is the process's. Holding it here rather than on the backend matters for the same
 /// reason: a backend is an ordinary object a program may drop while its tensors live on.</para>
 ///
-/// <para>The cost is bounded and deferred — one session per CUDA device, built on the first tensor
-/// actually allocated on that device, so a program that never puts one there never pays it. An
-/// isolated backend gets its own, because it gets its own copy of this assembly along with the
-/// native runtime it binds, which is exactly right: its allocator belongs to its runtime.</para>
+/// <para><b>The key is the device and the <see cref="DeviceMemorySettings"/> together</b>, and
+/// that is what puts a tensor a transfer places on the card inside the budget of the context that
+/// placed it. The session is built with that context's settings, so its arena carries that
+/// context's <c>gpu_mem_limit</c> and extend strategy, and a copy onto the card that does not fit
+/// the ceiling fails the way a step past it does instead of quietly eating the rest of the device.
+/// Which budget governs a tensor settles when it is allocated and never moves: a tensor's owning
+/// context is recorded at creation, and the one transfer that changes owners without reallocating
+/// — between two contexts that share a memory space — promises not to copy, so re-homing what it
+/// is charged to is not something it could do.</para>
 ///
-/// <para><b>Its arena is not covered by any context's
-/// <see cref="DeviceMemorySettings"/>.</b> This session is built with the defaults — no
-/// <c>LimitBytes</c> — and every tensor a transfer places in device memory is allocated out of it
-/// rather than out of a session the caller compiled. So a context given a budget bounds the
-/// sessions it compiles and not the tensors moved onto its card, and
-/// <c>DeviceMemorySettings.LimitBytes</c>' advice to count the live sessions sharing a card cannot
-/// account for this one, which the caller never asked for and cannot see. Honouring a per-context
-/// budget here needs an allocator per (device, settings) rather than per device, and a rule for
-/// which context's budget governs a tensor that several have touched — see
-/// Shorokoo/Shorokoo#367.</para>
+/// <para>The cost is one session per (device, configuration), built on the first tensor actually
+/// allocated that way: a program that puts none on a card pays nothing, and one that leaves the
+/// settings alone pays it once per card as it always did. Each costs the execution provider's
+/// per-session state on that device plus an arena of its own, and none of them is ever released,
+/// so the count is capped at <see cref="MaxConfigurationsPerDevice"/> per device and a further
+/// configuration is refused rather than opened. A program that trips the cap is configuring its
+/// device memory per call rather than per component; the fix is to share one settings instance
+/// between the contexts that mean the same thing by it.</para>
+///
+/// <para>An isolated backend gets its own set, because it gets its own copy of this assembly along
+/// with the native runtime it binds, which is exactly right: its allocators belong to its
+/// runtime.</para>
 /// </summary>
 internal static class CudaDeviceAllocator
 {
@@ -47,56 +56,139 @@ internal static class CudaDeviceAllocator
     private const int OnnxIrVersion = 10;
     private const int OnnxOpset = 21;
 
+    /// <summary>
+    /// How many device-memory configurations one card may hold an allocator for. Each is a session
+    /// that lives until the process ends, so this is the ceiling on what a program can be made to
+    /// hold by asking for transfers under settings it keeps varying.
+    /// </summary>
+    internal const int MaxConfigurationsPerDevice = 8;
+
     /// <summary>A device's allocator and the session it was taken from, which has to outlive
     /// it.</summary>
     private sealed record Binding(InferenceSession Session, OrtAllocator Allocator);
 
+    /// <summary>A card and the arena settings tensors are placed on it under. The settings are a
+    /// record, so two contexts asking for the same budget ask for the same allocator.</summary>
+    private readonly record struct Placement(int DeviceId, DeviceMemorySettings Settings);
+
     private static readonly object _gate = new();
-    private static readonly Dictionary<int, Binding> _byDevice = [];
+    private static readonly Dictionary<Placement, Binding> _byPlacement = [];
 
     /// <summary>
-    /// The allocator for CUDA device <paramref name="deviceId"/>, built on first use through a
-    /// session configured by <paramref name="configureExecutionProvider"/> — the very step the
-    /// asking backend puts its own sessions on that card with.
+    /// The allocator for CUDA device <paramref name="deviceId"/> under
+    /// <paramref name="deviceMemory"/>, built on first use through a session configured by
+    /// <paramref name="configureExecutionProvider"/> — the very step the asking backend puts its
+    /// own sessions on that card with.
     ///
-    /// <para>Keyed on the device alone: a card's memory is the card's memory, so a second backend
-    /// on the same one is asking for the same allocator, and the provider options that differ
-    /// between them would only have configured a second arena over the same device.</para>
+    /// <para>Keyed on the device <i>and</i> the settings. A card's memory is the card's memory, so
+    /// two backends on one card under one configuration are asking for the same allocator; two
+    /// configurations are not, because the budget is a property of the arena and an arena belongs
+    /// to the session that built it.</para>
     ///
     /// <para>The lock is held across the session build, which is slow. Deliberately: two threads
     /// racing here would otherwise each build a session, and the loser's would be dropped after
     /// having initialized the execution provider — the expensive half — for nothing.</para>
     /// </summary>
+    /// <exception cref="InvalidOperationException">This card already holds
+    /// <see cref="MaxConfigurationsPerDevice"/> configurations.</exception>
     /// <exception cref="OnnxRuntimeException">There is no such CUDA device, or this build of ONNX
     /// Runtime cannot load its CUDA execution provider.</exception>
     internal static OrtAllocator For(
-        int deviceId, Action<SessionOptions, DeviceMemorySettings> configureExecutionProvider)
+        int deviceId,
+        DeviceMemorySettings deviceMemory,
+        Action<SessionOptions, DeviceMemorySettings> configureExecutionProvider)
     {
+        var placement = PlacementOf(deviceId, deviceMemory);
         lock (_gate)
         {
-            if (_byDevice.TryGetValue(deviceId, out var existing)) return existing.Allocator;
-            var bound = Bind(deviceId, configureExecutionProvider);
-            _byDevice[deviceId] = bound;
+            if (_byPlacement.TryGetValue(placement, out var existing)) return existing.Allocator;
+            RefuseBeyondTheCap(placement);
+            var bound = Bind(placement, configureExecutionProvider);
+            _byPlacement[placement] = bound;
             return bound.Allocator;
         }
     }
 
+    /// <summary>
+    /// The allocator tensors placed on <paramref name="deviceId"/> under
+    /// <paramref name="deviceMemory"/> come from, or <c>null</c> when nothing has been placed that
+    /// way yet.
+    ///
+    /// <para>It never builds one, which is what makes it safe to ask from a reporting path: a
+    /// context that has moved nothing onto the card has no arena to report, and opening a session
+    /// to say so would cost the very thing the figures are being read to watch.</para>
+    /// </summary>
+    internal static OrtAllocator? Existing(int deviceId, DeviceMemorySettings deviceMemory)
+    {
+        var placement = PlacementOf(deviceId, deviceMemory);
+        lock (_gate)
+            return _byPlacement.TryGetValue(placement, out var existing) ? existing.Allocator : null;
+    }
+
+    /// <summary>
+    /// The cache key. The settings are resolved first, because <see cref="ArenaExtendStrategy.Auto"/>
+    /// is Shorokoo's choice between ORT's two strategies rather than one of them: keying on the
+    /// unresolved value would open a second session for a configuration identical to one already
+    /// held, and <c>AppendCuda</c> refuses <c>Auto</c> anyway.
+    /// </summary>
+    private static Placement PlacementOf(int deviceId, DeviceMemorySettings deviceMemory)
+    {
+        ArgumentNullException.ThrowIfNull(deviceMemory);
+        return new Placement(deviceId, deviceMemory.Resolve(reusedAcrossShapes: false));
+    }
+
+    /// <summary>
+    /// Refuses a configuration past the cap, under <c>_gate</c>. Counted rather than tracked,
+    /// because the count is at most <see cref="MaxConfigurationsPerDevice"/> per device and this
+    /// runs once per configuration ever opened.
+    /// </summary>
+    private static void RefuseBeyondTheCap(Placement placement)
+    {
+        var held = 0;
+        foreach (var key in _byPlacement.Keys)
+            if (key.DeviceId == placement.DeviceId) held++;
+        if (CapacityRefusal(placement.DeviceId, held, placement.Settings) is { } refusal)
+            throw refusal;
+    }
+
+    /// <summary>
+    /// The refusal a card holding <paramref name="held"/> configurations answers a further one
+    /// with, or <c>null</c> while there is room. Pure, and separated from the cache for the reason
+    /// <see cref="OrtBackend.CudaProviderOptions"/> is: the rule can then be read and asserted
+    /// without a CUDA machine to fill a cache on.
+    /// </summary>
+    internal static InvalidOperationException? CapacityRefusal(
+        int deviceId, int held, DeviceMemorySettings settings)
+    {
+        if (held < MaxConfigurationsPerDevice) return null;
+        return new InvalidOperationException(
+            $"Placing a tensor on CUDA device {deviceId.ToString(CultureInfo.InvariantCulture)} "
+            + "under these device-memory settings (limit "
+            + $"{settings.LimitBytes?.ToString(CultureInfo.InvariantCulture) ?? "none"}, "
+            + $"{settings.ArenaExtend}) needs an ONNX Runtime session of its own to allocate from, "
+            + $"and this device already holds {held.ToString(CultureInfo.InvariantCulture)} such "
+            + "sessions -- the most it may. A session that has served a tensor can never be "
+            + "released, because the tensor frees itself through it, so each one is held until the "
+            + "process ends. Share one DeviceMemorySettings instance between the compute contexts "
+            + "that mean the same budget by it, rather than building a new one per call.");
+    }
+
     private static Binding Bind(
-        int deviceId, Action<SessionOptions, DeviceMemorySettings> configureExecutionProvider)
+        Placement placement, Action<SessionOptions, DeviceMemorySettings> configureExecutionProvider)
     {
         // The `using` is the same load-bearing one as in OrtBackend.CreateSession: ORT takes
         // the options as a bare IntPtr and does no ref-counting, so a plain local is collectible --
         // and its critical finalizer free-able -- while the session constructor is still reading it.
         using var options = new SessionOptions();
-        // The shipped settings, and no caller's: this session is never run, and the allocator it
-        // registers is the device's rather than any one session's -- the same reason the cache is
-        // keyed on the device alone. Resolved because AppendCuda refuses ArenaExtendStrategy.Auto.
-        configureExecutionProvider(options, DeviceMemorySettings.Default.Resolve(reusedAcrossShapes: false));
+        // The settings of the context whose tensors this session will allocate, already resolved
+        // by PlacementOf because AppendCuda refuses ArenaExtendStrategy.Auto. They are what the
+        // arena is built with, and so what bounds every tensor taken out of it.
+        configureExecutionProvider(options, placement.Settings);
         var session = new InferenceSession(MinimalModel(), options);
         try
         {
             using var info = new OrtMemoryInfo(
-                OrtMemoryInfo.allocatorCUDA, OrtAllocatorType.DeviceAllocator, deviceId,
+                OrtMemoryInfo.allocatorCUDA, OrtAllocatorType.DeviceAllocator, placement.DeviceId,
                 OrtMemType.Default);
             // ORT reads the memory info to find the allocator and keeps nothing pointing at it --
             // the allocator reports its own -- so disposing it here is safe and a session's worth

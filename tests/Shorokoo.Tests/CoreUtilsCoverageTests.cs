@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -20,7 +21,9 @@ namespace Shorokoo.Tests;
 /// <see cref="DefaultBackend"/> deployment-folder discovery and selection policy, the
 /// description a live backend answers with and the device assertion built on it, the
 /// uninitialised tensor allocation on the backend ABI and the zero-filling default behind it, the
-/// <see cref="DeviceMemory"/> settings the CUDA backends map onto ORT's arena options, the
+/// device-memory budget the same ABI threads to a placed tensor and the cap on how many arenas
+/// one card will open for it, the <see cref="DeviceMemory"/> settings the CUDA backends map onto
+/// ORT's arena options, the
 /// reflection that reaches ORT's per-session arena figures and the
 /// <see cref="ArenaStatistics"/>/<see cref="RunStatistics"/>/<see cref="NodePlacement"/> surface
 /// built on it, the per-run abort token and what both run paths do with one, the typed
@@ -437,6 +440,41 @@ public class CoreUtilsCoverageTests
             shape => Assert.Throws<NotSupportedException>(
                 () => defaulting.CreateUninitializedTensorInBackendMemory(
                     ShorokooTensorElementType.Float, shape)));
+    }
+
+    [Fact]
+    public void TestABackendThatNeverHeardOfADeviceMemoryBudgetStillBuildsTheTensorAndReportsNoArena()
+    {
+        IShorokooBackend defaulting = new ByteWiseOnlyBackend();
+        var budget = new DeviceMemorySettings { LimitBytes = 1L << 20 };
+
+        using var copied = defaulting.CreateTensorInBackendMemory(
+            ShorokooTensorElementType.Float, new byte[8], [2L], budget);
+        Assert.Equal((float[])[0f, 0f], [.. copied.GetTensorDataAsSpan<float>()]);
+
+        using var fresh = defaulting.CreateUninitializedTensorInBackendMemory(
+            ShorokooTensorElementType.Int64, [3L], budget);
+        Assert.Equal(new long[3], [.. fresh.GetTensorDataAsSpan<long>()]);
+
+        Assert.Null(defaulting.ReadTransferArenaStatistics(budget));
+        Assert.Null(defaulting.ReadTransferArenaStatistics(DeviceMemorySettings.Default));
+    }
+
+    [Fact]
+    public void TestACardRefusesToHoldMoreDeviceMemoryConfigurationsThanItsCap()
+    {
+        var settings = new DeviceMemorySettings { LimitBytes = 4L << 30 };
+        var cap = CudaDeviceAllocator.MaxConfigurationsPerDevice;
+
+        Assert.Null(CudaDeviceAllocator.CapacityRefusal(0, 0, settings));
+        Assert.Null(CudaDeviceAllocator.CapacityRefusal(0, cap - 1, settings));
+
+        var refused = CudaDeviceAllocator.CapacityRefusal(3, cap, settings);
+        Assert.NotNull(refused);
+        Assert.Contains("CUDA device 3", refused!.Message);
+        Assert.Contains(cap.ToString(CultureInfo.InvariantCulture), refused.Message);
+        Assert.Contains("4294967296", refused.Message);
+        Assert.NotNull(CudaDeviceAllocator.CapacityRefusal(0, cap + 1, DeviceMemorySettings.Default));
     }
 
     private static long Elements(long[] shape)

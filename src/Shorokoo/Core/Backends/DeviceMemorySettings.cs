@@ -52,17 +52,22 @@ public enum ArenaExtendStrategy
 }
 
 /// <summary>
-/// The device-memory configuration a session is built with — ONNX Runtime's
-/// <c>gpu_mem_limit</c> and <c>arena_extend_strategy</c> for the CUDA arena that session
-/// allocates in. Both are ignored by the CPU backends, which have no device arena.
+/// The device-memory configuration a CUDA arena is built with — ONNX Runtime's
+/// <c>gpu_mem_limit</c> and <c>arena_extend_strategy</c>. It governs both arenas a compute
+/// context has: the one each session it compiles allocates in, and the one the tensors it places
+/// on its card come out of. Both are ignored by the CPU backends, which have no device arena.
 ///
-/// <para><b>This is session-scoped, and that is ORT's own shape, not a convention layered on
+/// <para><b>This is arena-scoped, and that is ORT's own shape, not a convention layered on
 /// top.</b> ORT gives each session its own arena and reads both values once, while the session
 /// is being created, after which the session keeps them for life. So an instance held by a
 /// <see cref="Shorokoo.Runtime.ComputeContext"/> configures the sessions that context compiles
 /// from then on, two contexts can differ, and a session already compiled is unaffected by any
-/// later change. Nothing here is process-wide, and there is no way to reach a session that has
-/// already been built: to run under a different budget, compile under a different one.</para>
+/// later change: to run under a different budget, compile under a different one.</para>
+///
+/// <para>The same values settle the arena that context's <i>transfers</i> allocate from — the one
+/// a tensor moved onto its card comes out of, which is not a session the program compiled and
+/// which lives until the process ends. Assigning here reaches neither kind after the fact; both
+/// read these values when they are built and never again.</para>
 ///
 /// <para>It is a record, so a variation is a <c>with</c> expression off an existing one rather
 /// than a mutation of shared state:</para>
@@ -96,9 +101,21 @@ public sealed record DeviceMemorySettings
     /// too-large configuration fail early and visibly instead of starving everything else
     /// on the machine.
     ///
-    /// <para>It caps <b>one session's</b> arena. A process holding several live sessions — a
-    /// compiled graph plus a rig, say — can hold this much more than once, so read it as the
-    /// ceiling on any one of them and halve it accordingly when two must coexist.</para>
+    /// <para>It caps <b>one arena</b>, and a card carries one per live session compiled against
+    /// it plus one per set of these settings a tensor has been placed on it under. So read it as
+    /// the ceiling on any one of them and divide accordingly: a context that compiles a graph and
+    /// a rig and also holds tensors moved onto its card can be holding this much three times over.
+    /// Both kinds are countable from the program's own side — the sessions it compiled, and the
+    /// configurations it placed tensors under — which is what makes the division possible; what
+    /// each is actually holding is reported by
+    /// <see cref="Shorokoo.Runtime.CompiledGraph.ReadArenaStatistics"/> and
+    /// <see cref="Shorokoo.Runtime.ComputeContext.ReadTransferArenaStatistics"/>.</para>
+    ///
+    /// <para>They differ in how long they last. A session's arena goes when that session does; the
+    /// arena a transfer allocates from is held until the process ends, because the tensors in it
+    /// free themselves through it and can outlive every context. So a program that keeps building
+    /// fresh settings objects for the same budget keeps opening arenas it can never close, which
+    /// is why a card refuses to hold more than a handful of distinct configurations at once.</para>
     /// </summary>
     /// <exception cref="ArgumentOutOfRangeException">A limit of zero or less.</exception>
     public long? LimitBytes

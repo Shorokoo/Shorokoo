@@ -1,3 +1,4 @@
+using Microsoft.ML.OnnxRuntime;
 using Shorokoo.Core.Backends;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 using Shorokoo.Modules.Losses;
@@ -71,6 +72,42 @@ public class GpuExecutionTests
         {
             DeviceMemory.ResetPeak();
         }
+    }
+
+    /// <summary>
+    /// A tensor moved onto the card is allocated under the owning context's budget, so one that
+    /// does not fit fails instead of taking the rest of the device — and what it is holding is
+    /// reported against that budget rather than against a session's.
+    /// </summary>
+    [CudaFact]
+    public void CudaProvider_ATensorMovedOntoTheCardIsBoundedByItsContextsDeviceMemoryBudget()
+    {
+        const long limit = 64L * 1024 * 1024;
+        using var budgeted = new ComputeContext
+        {
+            DeviceMemory = new DeviceMemorySettings { LimitBytes = limit },
+        };
+        using var uncapped = new ComputeContext();
+
+        Assert.Null(budgeted.ReadTransferArenaStatistics());
+
+        var fits = TensorData([4L * 1024 * 1024], new float[4 * 1024 * 1024]).CopyTo(budgeted);
+        Assert.False(fits.IsHostResident);
+
+        var arena = budgeted.ReadTransferArenaStatistics();
+        Assert.NotNull(arena);
+        Assert.Equal(limit, arena!.Value.LimitBytes);
+        Assert.True(arena.Value.InUseBytes >= 16L * 1024 * 1024);
+
+        var tooBig = TensorData([32L * 1024 * 1024], new float[32 * 1024 * 1024]);
+        var refused = Assert.ThrowsAny<OnnxRuntimeException>(() => tooBig.CopyTo(budgeted));
+        Assert.Contains("BFCArena", refused.Message);
+
+        // The same tensor fits a context that named no ceiling, so what refused it was the budget
+        // and not the card.
+        var elsewhere = tooBig.CopyTo(uncapped);
+        Assert.False(elsewhere.IsHostResident);
+        Assert.NotEqual(limit, uncapped.ReadTransferArenaStatistics()!.Value.LimitBytes);
     }
 
     /// <summary>

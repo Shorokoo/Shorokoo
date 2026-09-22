@@ -5,7 +5,8 @@ namespace Shorokoo.Core.Backends;
 /// every byte-wise path has to answer before it can allocate a buffer or copy one back.
 ///
 /// <para>Public because a backend written outside this repository needs exactly this to implement
-/// <see cref="IShorokooBackend.CreateTensorInBackendMemory"/> and the uninitialized
+/// <see cref="IShorokooBackend.CreateTensorInBackendMemory(ShorokooTensorElementType, byte[], long[], DeviceMemorySettings)"/>
+/// and the uninitialized
 /// allocation beside it. Without it every such backend writes the table out again, and a table
 /// written twice is a table that drifts: a dtype added to one copy and not the other is not a
 /// compile error but a buffer of the wrong size.</para>

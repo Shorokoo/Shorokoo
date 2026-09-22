@@ -39,7 +39,8 @@ Related: [core-types.md](core-types.md) · [defining-models.md](defining-models.
   so its bytes go back to the allocator when the run returns —
   [Feeding a large input without a second copy](#feeding-a-large-input-without-a-second-copy).
 - On a GPU backend the CUDA arena is configured on the `ComputeContext` — `DeviceMemory` for
-  the sessions it compiles, `RunSettings` for what its runs do — while the separate static
+  the sessions it compiles and the tensors it holds on the card, `RunSettings` for what its runs
+  do — while the separate static
   `DeviceMemory` class reports how much of the card is gone. The arena strategy departs from
   exact-size extension only for a session Shorokoo knows is reused across differing shapes, so a
   long training loop does not end up holding far more of the card than it uses:
@@ -1095,8 +1096,8 @@ Console.WriteLine(compiled.DeviceMemory.ArenaExtend);              // what this 
 
 | setting | on | ORT option | default | read |
 |---|---|---|---|---|
-| `LimitBytes` | `DeviceMemorySettings` | `gpu_mem_limit` | `null` — no cap | when a session is created |
-| `ArenaExtend` | `DeviceMemorySettings` | `arena_extend_strategy` | `Auto` — `SameAsRequested`, except ORT's `NextPowerOfTwo` for a session Shorokoo knows is reused across differing shapes | when a session is created |
+| `LimitBytes` | `DeviceMemorySettings` | `gpu_mem_limit` | `null` — no cap | when an arena is created — a session, or the context's own tensor arena |
+| `ArenaExtend` | `DeviceMemorySettings` | `arena_extend_strategy` | `Auto` — `SameAsRequested`, except ORT's `NextPowerOfTwo` for a session Shorokoo knows is reused across differing shapes | the same |
 | `ShrinkArenaAfterRun` | `RunSettings` | `memory.enable_memory_arena_shrinkage` | `false` | on every run |
 
 The other two are unset by default for their own reasons. `ShrinkArenaAfterRun` costs a
@@ -1109,9 +1110,12 @@ budget, not a hint: a step that needs more than it fails with ORT's `BFCArena ..
 allocate memory for requested buffer` rather than eating the rest of the device, so a figure set
 too low fails a run that would have fitted.
 
-Note that the budget caps **each session's** arena, not the process. ORT gives a session its own
-CUDA arena, so a process holding a compiled graph and a training rig at once can hold the limit
-more than once over; read it as the ceiling on any one session.
+Note that the budget caps **each arena**, not the process. ORT gives a session its own CUDA arena,
+so a process holding a compiled graph and a training rig at once can hold the limit more than once
+over; read it as the ceiling on any one of them. A context's tensors get one too — see
+[A tensor placed on the card](#a-tensor-placed-on-the-card-is-budgeted-too) below — so a context
+that compiles those two graphs and also holds tensors moved onto its card can be holding the limit
+three times over.
 
 The first two are read **when a session is built** — the first inference call, or a training rig's
 first `TrainStep` for a given input shape — so the context has to carry them before the graph is
@@ -1149,13 +1153,16 @@ things to know about the numbers:
   the device if it has none — itself a few hundred MiB. Take the first reading after the backend is
   up, not before, or that cost lands inside your baseline.
 
-**Scope: the session and the run, never the process.** That is ONNX Runtime's own shape, not a
+**Scope: the arena and the run, never the process.** That is ONNX Runtime's own shape, not a
 convention layered on top. ORT gives each session its own arena and reads `DeviceMemorySettings`
 once while building it, after which the session keeps them for life — so a context configures the
 sessions it compiles from then on, two contexts may differ, and a graph already compiled is
 untouched by any later change. To run something under a different budget, compile it on a context
 that carries one. `RunSettings` ORT reads off the run instead, so those are settled per call and a
 compiled graph can shrink its arena on one run and not the next.
+
+The arena a context's *tensors* come out of is built from the same settings and read the same way —
+once, when it is first needed — so assigning to a context afterwards reaches neither kind.
 
 Where one process must serve both a training loop and a variable-shape inference path, give them a
 context each rather than picking one arena strategy for both.
@@ -1190,6 +1197,40 @@ on a backend that reports none, the way `DeviceMemory.Read()` is `null` with no 
 high-water mark the arena never lowers and there is no reset — asking for arena shrinkage does not
 move it — so reading it once tells you the largest this session has ever been. For a figure per
 run, let the context collect them.
+
+### A tensor placed on the card is budgeted too
+
+A session is not the only thing on a context's books. `CopyTo`, `TransferTo` and
+`AllocateUninitialized` put a tensor in the context's own memory, which on a GPU backend is the
+card's, and those allocations answer to the same `DeviceMemory` the context compiles under:
+
+```csharp
+using var ctx = new ComputeContext(gpu)
+{
+    DeviceMemory = new DeviceMemorySettings { LimitBytes = 2L * 1024 * 1024 * 1024 },
+};
+
+var onCard = big.CopyTo(ctx);        // allocated under ctx's 2 GiB ceiling
+
+if (ctx.ReadTransferArenaStatistics() is { } arena)
+    Console.WriteLine($"{arena.InUseBytes} of {arena.LimitBytes} in use by this context's tensors");
+```
+
+`LimitBytes` is a budget here too: a tensor that does not fit fails with ORT's `BFCArena` allocation
+error rather than eating the rest of the device. `ReadTransferArenaStatistics()` is the
+`CompiledGraph.ReadArenaStatistics()` of that arena — the same nine figures, `null` on a backend
+with no device memory and on a context that has placed nothing yet.
+
+**Which budget a tensor answers to is fixed when it is allocated.** The context that allocated it is
+the context that owns it, and passing it to a second context on the same card re-wraps it without
+copying, so it stays charged where it was made whatever the second context's budget says — see
+[Known limitations](limitations.md#a-tensor-on-a-card-is-charged-to-the-context-that-placed-it-and-stays-charged-there).
+To hold a tensor under a different budget, `CopyTo` a context carrying that one.
+
+The arena itself is shared by every context on that card carrying the same settings, and is held for
+the life of the process, because a tensor frees itself through the allocator that made it and can
+outlive every context. So use one `DeviceMemorySettings` instance for the contexts that mean the same
+budget rather than building a fresh one per call: a card will open no more than eight distinct ones.
 
 ### Per-run statistics on the context
 

@@ -234,20 +234,29 @@ lock where the caller still holds the handle — at the entry point, before the 
 expanded — which also has to hold for `Run`, for `Eval`, and for the one-shot paths that build
 a session of their own.
 
-### A tensor moved onto a card is not covered by any device-memory budget
+### A tensor on a card is charged to the context that placed it, and stays charged there
 
-`ComputeContext.DeviceMemory` bounds the arenas of the sessions that context compiles. It does not
-bound `TransferTo` / `CopyTo` onto that context: placing a tensor in device memory allocates out of
-a separate, process-wide allocator held per CUDA device, built with the defaults and no limit.
+`ComputeContext.DeviceMemory` bounds the arenas of the sessions that context compiles *and* the
+arena the tensors placed in its memory come out of, so a `CopyTo` / `TransferTo` onto a budgeted
+context fails when the tensor does not fit rather than taking what is left of the card. What that
+arena is holding is read with `ComputeContext.ReadTransferArenaStatistics()`, beside
+`CompiledGraph.ReadArenaStatistics()` for each session — between them a context's whole device
+footprint is readable rather than inferred.
 
-So a context configured with `LimitBytes` can still put an arbitrarily large tensor on the card, and
-`CompiledGraph.DeviceMemory` reports a budget that does not describe that context's whole device
-footprint. Counting live sessions against a card — which `DeviceMemorySettings.LimitBytes` advises —
-cannot account for this allocator, since it is not a session the program compiled.
+What is settled at the moment of the allocation is *which* budget, and it never moves afterwards.
+Handing the tensor to a second context on the same card re-wraps it without copying — that is what
+`TransferTo` and `GiveAccessTo` within one memory space are for — and the allocation stays charged
+to the budget it was made under, whatever the receiving context carries. Re-homing it would mean
+copying it, which those two operations promise not to do. To hold a tensor under a different budget,
+`CopyTo` a context that carries that budget and let the original go.
 
-[#367](https://github.com/Shorokoo/Shorokoo/issues/367) tracks bringing it under a budget, which
-needs an allocator per (device, settings) and a rule for which context's budget governs a tensor
-more than one has touched.
+Two costs follow from the arena outliving everything that uses it. It is held for the life of the
+process, unlike a session's, which goes when its context does: an ONNX Runtime tensor frees itself
+through the allocator that made it, so that allocator has to outlive every tensor it ever served,
+and the session its arena belongs to has to outlive it in turn. And there is one such arena per card
+per distinct `DeviceMemorySettings`, of which a card will open no more than eight — a program that
+reaches that is building a fresh settings object per call, and the fix is to share one between the
+contexts that mean the same budget by it.
 
 ### A fed input's buffer is not recycled inside the run
 

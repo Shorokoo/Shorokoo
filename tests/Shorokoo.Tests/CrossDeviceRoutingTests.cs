@@ -12,6 +12,10 @@ namespace Shorokoo.Tests;
 /// two CUDA devices to <i>report</i>, not two to exist — and a machine with one card could not run
 /// this at all otherwise. What a second card would add is confidence that the copy itself lands
 /// correctly on a device this process has not been using, which no stub can stand in for.</para>
+///
+/// <para>The same stubs cover which context's <see cref="DeviceMemorySettings"/> a placed tensor is
+/// allocated under, for the same reason: what decides it is the settings the transfer reads off the
+/// target context and hands the backend, and a stub is what makes that handoff observable.</para>
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
@@ -167,6 +171,36 @@ public class CrossDeviceRoutingCoverageTests
         Assert.Equal([3f, 4f], (float[])[.. home.As<float32>().AccessMemory<float>()]);
     }
 
+    [Fact]
+    public void TestATensorPlacedOnACardIsAllocatedUnderTheOwningContextsBudgetAndStaysThere()
+    {
+        var card = new StubBackend(ComputeDevice.Cuda, 0);
+        var tight = new DeviceMemorySettings { LimitBytes = 1L << 20 };
+        var wide = new DeviceMemorySettings { LimitBytes = 1L << 30 };
+        using var small = new ComputeContext(card) { DeviceMemory = tight };
+        using var large = new ComputeContext(card) { DeviceMemory = wide };
+        using var unbudgeted = new ComputeContext(card);
+
+        var onCard = TensorData([2L], (float[])[1f, 2f]).CopyTo(small);
+        TensorData([2L], (float[])[3f, 4f]).TransferTo(large);
+        TensorData([2L], (float[])[5f, 6f]).CopyTo(unbudgeted);
+        small.AllocateUninitialized<float32>(new Shape(2L));
+
+        Assert.Equal([tight, wide, DeviceMemorySettings.Default, tight], card.Budgets);
+        Assert.Equal(tight.LimitBytes, small.ReadTransferArenaStatistics()!.Value.LimitBytes);
+        Assert.Equal(wide.LimitBytes, large.ReadTransferArenaStatistics()!.Value.LimitBytes);
+        Assert.Equal(-1, unbudgeted.ReadTransferArenaStatistics()!.Value.LimitBytes);
+        Assert.Null(ComputeContext.Host.ReadTransferArenaStatistics());
+
+        // The re-wrap allocates nothing, so there is nothing to re-charge: the bytes stay on the
+        // budget they were allocated under however many contexts hold them afterwards.
+        var moved = onCard.TransferTo(large);
+        var shared = moved.GiveAccessTo(unbudgeted);
+        Assert.Equal(4, card.Budgets.Count);
+        Assert.Same(large, moved.Context);
+        Assert.Same(unbudgeted, shared.Context);
+    }
+
     /// <summary>A backend that answers about itself and records what it was asked to build, so a
     /// transfer's route can be read off it without a session, a native runtime or a card.</summary>
     private sealed class StubBackend(ComputeDevice device, int? cudaDeviceId)
@@ -174,14 +208,27 @@ public class CrossDeviceRoutingCoverageTests
     {
         public int BackendMemoryBuilds { get; private set; }
 
+        internal List<DeviceMemorySettings> Budgets { get; } = [];
+
         public BackendDescription Description { get; } = new($"stub-{device}", device, cudaDeviceId);
 
         public IShorokooTensorValue CreateTensorInBackendMemory(
-            ShorokooTensorElementType elementType, byte[] data, long[] shape)
+            ShorokooTensorElementType elementType, byte[] data, long[] shape,
+            DeviceMemorySettings deviceMemory)
         {
             BackendMemoryBuilds++;
+            Budgets.Add(deviceMemory);
             return new StubValue(elementType, data, shape, hostAccessible: device == ComputeDevice.Cpu);
         }
+
+        public IShorokooTensorValue CreateUninitializedTensorInBackendMemory(
+            ShorokooTensorElementType elementType, long[] shape, DeviceMemorySettings deviceMemory)
+            => CreateTensorInBackendMemory(
+                elementType, new byte[TensorElementLayout.ByteCount(elementType, shape)], shape,
+                deviceMemory);
+
+        public ArenaStatistics? ReadTransferArenaStatistics(DeviceMemorySettings deviceMemory)
+            => new ArenaStatistics(0, deviceMemory.LimitBytes ?? -1, 0, 0, 0, 0, 0, 0, 0);
 
         public int HostCopies { get; private set; }
 

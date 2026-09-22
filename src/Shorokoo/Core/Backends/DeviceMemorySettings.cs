@@ -114,9 +114,13 @@ public sealed record DeviceMemorySettings
     ///
     /// <para>They differ in how long they last. A session's arena goes when that session does; the
     /// arena a transfer allocates from is held until the process ends, because the tensors in it
-    /// free themselves through it and can outlive every context. So a program that keeps building
-    /// fresh settings objects for the same budget keeps opening arenas it can never close, which
-    /// is why a card refuses to hold more than a handful of distinct configurations at once.</para>
+    /// free themselves through it and can outlive every context. What opens one is a distinct pair
+    /// of values rather than a distinct object — these settings are a record, so two built
+    /// separately from the same budget are one key and one arena — so a program pays for the
+    /// budgets it names, not for the objects it builds. A program that keeps <i>varying</i> the
+    /// budget keeps opening arenas it can never close, which is why a card refuses to hold more
+    /// than a handful of distinct configurations at once; rounding the figure to a few fixed sizes
+    /// is what keeps it bounded.</para>
     /// </summary>
     /// <exception cref="ArgumentOutOfRangeException">A limit of zero or less.</exception>
     public long? LimitBytes

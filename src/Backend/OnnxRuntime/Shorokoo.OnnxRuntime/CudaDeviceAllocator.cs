@@ -169,8 +169,10 @@ internal static class CudaDeviceAllocator
             + $"and this device already holds {held.ToString(CultureInfo.InvariantCulture)} such "
             + "sessions -- the most it may. A session that has served a tensor can never be "
             + "released, because the tensor frees itself through it, so each one is held until the "
-            + "process ends. Share one DeviceMemorySettings instance between the compute contexts "
-            + "that mean the same budget by it, rather than building a new one per call.");
+            + "process ends. What costs a session is a distinct pair of values, not a distinct "
+            + "object: settings equal by value already share one, so building a fresh "
+            + "DeviceMemorySettings per call is free and only varying the limit is not. Round the "
+            + "budget to a few fixed sizes, or size it once per component rather than per model.");
     }
 
     private static Binding Bind(

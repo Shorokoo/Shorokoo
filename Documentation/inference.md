@@ -1043,8 +1043,14 @@ The measurement is a test in the Shorokoo repository
 (`ArenaExtendStrategyProbeTests`, `Purpose=Manual`) rather than something you can run against the
 package, and it is taken on the **CPU** arena — the same `BFCArena` with the same strategy enum the
 CUDA provider uses. It reads the arena back off glibc's `mallinfo2`, so it runs on Linux only and
-says "unavailable" anywhere else; the card figures below were therefore taken on a different
-machine, and the two tables are not a like-for-like pair.
+says "unavailable" anywhere else.
+
+Both tables here were taken on **one machine**: the host rows under Linux, the card rows below
+under Windows on the same box, same CPU and same RTX 4090. So the hardware is common to them and
+the operating system is not — enough for the ratios to be compared, not enough to call them a
+like-for-like pair. The host rows reproduced on that machine within the ranges shown, and more
+steadily than the spread above suggests: across four consecutive runs the settled-series row did
+not move at all.
 
 A second probe (`ArenaExtendStrategyCudaProbeTests`, `Purpose=Manual`) answers what the host one
 cannot: what each strategy costs **one real training step on a card**. A 49,214,208-parameter
@@ -1314,7 +1320,7 @@ Console.WriteLine($"{stats.RunCount} runs, peak {stats.PeakBytes / (1024 * 1024)
 
 foreach (var run in stats.RecentRuns.TakeLast(5))
     Console.WriteLine($"run {run.RunNumber}: {run.PeakBytes} ({run.PeakKind}), "
-                    + $"{run.PeakBytes - run.PriorPeakBytes} of it this run's own");
+                    + $"arena stood at {run.PriorPeakBytes} before it");
 ```
 
 `RunStats` is a snapshot of every run the context has made, across **all** its sessions — the rig's
@@ -1332,18 +1338,22 @@ about the shape:
   `MemoryFigureKind.Measured`. A run that stayed under a mark some earlier run set is
   `MemoryFigureKind.UpperBound` — it used no more than that, and how much less is not something the
   arena records. The two are never reported as the same thing.
-- **A per-run peak also says what the run found there.** `PriorPeakBytes` is the mark the run
-  started from, so `PeakBytes - PriorPeakBytes` is what the run itself added and the rest is the
-  weights and whatever the session was already holding. A `Measured` peak is where the arena stood
-  at this run's high point, not the run's own cost: on a card, a first run of a four-mebibyte model
-  read 4,202,496, of which 8,192 was the run.
+- **A per-run peak also says what the run found there.** `PriorPeakBytes` is the arena's high-water
+  mark as the run found it, so a `Measured` peak is where the arena stood at this run's high point
+  rather than the run's own cost: on a card, the **first** run of a four-mebibyte model read
+  4,202,496 against a prior mark of 4,194,304, of which 8,192 was the run. Read the difference as
+  the run's own only on that first run, where the prior mark is the weights and nothing else. Later
+  it is the previous *highest* run's mark, so the difference is how far this run exceeded the
+  record — zero for every `UpperBound` run, which in a settled loop is most of them.
 
 `PeakBytes` is the largest mark any one of the context's arenas reached. A context runs its graphs
 one session at a time, so that is the peak; where two of its sessions really do run together, read
 it as the largest of them rather than their total.
 
-**`ArenaBytes` sits above `PeakBytes` until something shrinks.** It tracks what the arenas hold from
-the device, which usually exceeds what is in use by whatever they keep spare —
+**`ArenaBytes` sits above `PeakBytes` until something shrinks.** It tracks what the arenas have
+*taken* from the device, which usually exceeds what is in use by whatever they keep spare — though
+it is not a bound on what the device holds, and on a card pressed to its edge it has read above the
+card's own capacity —
 but `RunSettings.ShrinkArenaAfterRun` hands blocks back at the end of a run, before these are read,
 while the peak comes from a mark the runtime never lowers. Three shrinking runs of a matmul on a
 card left `ArenaBytes` at 0 against a `PeakBytes` of 3,145,728. On the same graph without shrinkage

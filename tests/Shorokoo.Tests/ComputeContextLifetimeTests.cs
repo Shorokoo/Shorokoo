@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Shorokoo.Core.Backends;
 using Shorokoo.Runtime;
 
@@ -392,19 +393,35 @@ public class ComputeContextLifetimeCoverageTests
         using var context = new ComputeContext();
         var (graph, _) = Chain();
         var compiled = context.Compile(graph);
-        var fed = Wide32();
+        var deferred = 0;
 
-        var disposer = Task.Run(() =>
+        // A round whose disposing thread reached the tensor only after the run had returned put
+        // nothing to the product and is retried rather than asserted on. Timing it is what tells
+        // the two apart: without it a lost race reads exactly like a run that freed the bytes it
+        // was still using, and the test failed on this machine two runs in five.
+        for (int round = 0; round < 20 && deferred == 0; round++)
         {
-            SpinWait.SpinUntil(() => !fed.MaterializationsAreEmpty, TimeSpan.FromSeconds(10));
-            fed.Dispose();
-            return fed.MaterializationsAreEmpty;
-        });
+            var fed = Wide32();
+            var clock = Stopwatch.StartNew();
+            var disposer = Task.Run(() =>
+            {
+                SpinWait.SpinUntil(() => !fed.MaterializationsAreEmpty, TimeSpan.FromSeconds(10));
+                fed.Dispose();
+                var empty = fed.MaterializationsAreEmpty;
+                return (Read: clock.Elapsed, Empty: empty);
+            });
 
-        compiled.Execute(fed);
+            compiled.Execute(fed);
+            var ran = clock.Elapsed;
+            var (read, empty) = disposer.Result;
 
-        Assert.False(disposer.Result);
-        Assert.True(fed.MaterializationsAreEmpty);
+            Assert.True(fed.MaterializationsAreEmpty);
+            if (read > ran) continue;
+            Assert.False(empty);
+            deferred++;
+        }
+
+        Assert.Equal(1, deferred);
     }
 
     [Fact]

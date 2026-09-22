@@ -459,6 +459,12 @@ public class TrainingRigFromScratchCoverageTests
             NNLibraryTrainingFixtures.MakeBatch("input", "ModelInput", TensorData([4L, 8L], new float[32])),
             NNLibraryTrainingFixtures.MakeBatch("targets", "Target", TensorData([4L], [0L, 1L, 2L, 3L])));
         Assert.True(float.IsFinite(step.Loss!.Value));
+
+        var nll = TrainingRig.FromScratch(
+            DigitClassifier.ComputationGraph, NLLLoss.ComputationGraph,
+            SGDOptimizer.ComputationGraph, narrow, 0.01f).OptimizationInputShapes[^1];
+        Assert.Equal(DType.Int64, nll.DType);
+        Assert.Equal([4L], nll.Shape.Dims);
     }
 
     [Fact]

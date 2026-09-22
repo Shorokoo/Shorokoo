@@ -1954,6 +1954,24 @@ public class CoreUtilsCoverageTests
         return last;
     }
 
+    /// <summary>
+    /// The predicate two signals rest on: whether a graph is reported as having partly run on the
+    /// host, and whether a tensor may be an element of a sequence. Both invert if a pinned host
+    /// arena stops counting as host, and neither says so from a machine without a card.
+    /// </summary>
+    [Fact]
+    public void TestThePinnedHostArenasCountAsHostMemoryAndTheProvidersOwnDoesNot()
+    {
+        Assert.True(OrtTensorValue.IsHostAllocator("Cpu"));
+        Assert.True(OrtTensorValue.IsHostAllocator("CudaPinned"));
+        Assert.True(OrtTensorValue.IsHostAllocator("HipPinned"));
+        Assert.False(OrtTensorValue.IsHostAllocator("Cuda"));
+        Assert.False(OrtTensorValue.IsHostAllocator("Hip"));
+        Assert.False(OrtTensorValue.IsHostAllocator(null));
+        Assert.False(OrtTensorValue.IsHostAllocator(""));
+        Assert.False(OrtTensorValue.IsHostAllocator("cpu"));
+    }
+
     private static string[] ProductSources() =>
         [.. Directory
             .EnumerateFiles(ProductSourceRoot(), "*.cs", SearchOption.AllDirectories)

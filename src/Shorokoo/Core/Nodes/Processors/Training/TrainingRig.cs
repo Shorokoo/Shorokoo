@@ -1204,19 +1204,51 @@ namespace Shorokoo
         /// class indices, or <c>null</c> where none does. ONNX names exactly two such ops and both
         /// take the indices second. Every other way a loss reads a target broadcasts it against the
         /// prediction, where the prediction's own shape is the answer and always was.
+        ///
+        /// <para>The target is followed through the shape and type ops a loss puts between its own
+        /// input and the labels slot — flattening <c>[N, T]</c> to <c>[N·T]</c> is the ordinary way
+        /// to write a sequence model's loss, and casting an integer target is the ordinary way to
+        /// write one whose caller feeds int32. Matching only a direct edge would fall back to the
+        /// prediction's shape for those, which is the one-hot blow-up this derivation exists to
+        /// avoid, and it would do it silently.</para>
         /// </summary>
         private static FastTensorKey? ClassIndexScoresOf(
             InternalComputationGraph lossGraph, FastTensorKey targetKey)
         {
+            var reaches = TargetReaches(lossGraph, targetKey);
             foreach (var node in lossGraph.Nodes)
             {
                 if (node.OpCode is not (OpCodes.SOFTMAX_CROSS_ENTROPY_LOSS
                                         or OpCodes.NEGATIVE_LOG_LIKELIHOOD_LOSS)) continue;
                 var inputs = node.Inputs;
-                if (inputs.Count < 2 || inputs[1] != targetKey) continue;
+                if (inputs.Count < 2) continue;
+                if (inputs[1] is not { IsEmpty: false } labels || !reaches.Contains(labels)) continue;
                 if (inputs[0] is { IsEmpty: false } scores) return scores;
             }
             return null;
+        }
+
+        /// <summary>
+        /// <paramref name="targetKey"/> and everything a chain of element-preserving shape or type
+        /// ops turns it into. Only the data edge is followed — <c>Reshape</c>'s second input is a
+        /// shape, not a target — and only ops that carry every element through, so the class axis
+        /// cannot have been introduced or removed along the way.
+        /// </summary>
+        private static HashSet<FastTensorKey> TargetReaches(
+            InternalComputationGraph lossGraph, FastTensorKey targetKey)
+        {
+            var reaches = new HashSet<FastTensorKey> { targetKey };
+            // A node's inputs are produced before it, so one pass in graph order closes the chain.
+            foreach (var node in lossGraph.Nodes)
+            {
+                if (node.OpCode is not (OpCodes.CAST or OpCodes.RESHAPE or OpCodes.SQUEEZE
+                                        or OpCodes.UNSQUEEZE or OpCodes.FLATTEN)) continue;
+                if (node.Inputs.Count == 0) continue;
+                if (node.Inputs[0] is not { IsEmpty: false } from || !reaches.Contains(from)) continue;
+                foreach (var output in node.Outputs)
+                    if (output is { IsEmpty: false } produced) reaches.Add(produced);
+            }
+            return reaches;
         }
 
         // ───────────────────── Two-layer rig: immutable derivations (§5.8.5) ─────────────────────

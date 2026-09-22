@@ -84,11 +84,14 @@ public sealed record RunStatistics
     /// Blocks those runs made an arena take fresh from its device, counted as the rise in
     /// <see cref="ArenaStatistics.ArenaExtensionCount"/> across each run.
     ///
-    /// <para>An undercount where something is shrinking, and unavoidably so: the figure this is
-    /// built from is the blocks an arena is <i>holding</i> rather than a tally of extensions ever
-    /// made, so a run that takes two blocks and hands three back reads as no extension at all. Read
-    /// it as blocks the arena kept, not as trips to the device, on a context carrying
-    /// <see cref="RunSettings.ShrinkArenaAfterRun"/>.</para>
+    /// <para><b>Carries no information at all on a context that shrinks, and
+    /// <see cref="ArenaShrinkageCount"/> is what says so: read that first, and read this only
+    /// where it is zero.</b> The figure this is built from is the blocks an arena is
+    /// <i>holding</i> rather than a tally of extensions ever made, and each run's contribution is
+    /// its rise clamped at zero — so a run that takes two blocks and hands three back contributes
+    /// nothing, and a context asking for <see cref="RunSettings.ShrinkArenaAfterRun"/> can report
+    /// zero extensions over runs that measurably made several. Zero there does not mean the arena
+    /// never extended; it means this cannot tell.</para>
     /// </summary>
     public long ArenaExtensionCount { get; init; }
 

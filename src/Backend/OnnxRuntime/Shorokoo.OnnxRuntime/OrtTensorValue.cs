@@ -102,10 +102,15 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
     /// Whether this value is a tensor in memory the host cannot read — the execution provider's
     /// own. A value that is not a tensor answers false: it has no buffer of its own to place.
     ///
-    /// <para>Distinct from <see cref="IsHostAccessible"/>, which asks whether <i>this wrapper</i>
-    /// may hand out a span: that answers false for a sequence too, because a sequence has no
-    /// element buffer of its own, and the question here is about memory rather than about shape.
-    /// Not cached either, because it is asked once per value, where a sequence is built.</para>
+    /// <para>Deliberately not the negation of <see cref="IsHostAccessible"/>, and the two differ
+    /// in both directions. That one answers false for a sequence, which has no element buffer of
+    /// its own, where this one asks only about memory; and that one admits the plain CPU allocator
+    /// alone, where this one counts the pinned host arenas as host too. The pinned difference is
+    /// the load-bearing one: a pinned element is host memory, so ONNX Runtime's host copy reads it
+    /// back correctly and there is nothing to refuse — while handing out a span over it is a
+    /// wider promise this backend has never measured and does not make.</para>
+    ///
+    /// <para>Not cached, because it is asked once per value, where a sequence is built.</para>
     /// </summary>
     internal bool IsInDeviceMemory
     {

@@ -697,15 +697,22 @@ public class TensorDataApiCoverageTests
         Assert.Equal([3f, 4f], bound.Elements<float>().ToArray());
     }
 
-    // Shorokoo/Shorokoo#369: the export path writes a TensorProto's RawData and has no branch for
-    // a string tensor, which has no flat buffer, so building the Constant node throws before any
-    // session exists. TensorProto.string_data is never written and never read, so the fault is on
-    // both sides. Remove the Skip when #369 is fixed.
-    [Fact(Skip = "Shorokoo/Shorokoo#369 — ONNX string tensors are serialized in neither direction")]
+    [Fact]
     public void TestAStringConstantEvaluatesRatherThanBeingAskedForRawBytesItHasNone()
     {
         Assert.Equal((object[])["hello"], OnnxEngine.Eval(Scalar("hello")).As<@string>().DebugData);
         Assert.Equal((object[])["a", "b"], OnnxEngine.Eval(Vector("a", "b")).As<@string>().DebugData);
+    }
+
+    [Fact]
+    public void TestAStringConstantSurvivesEveryShapeAndEncodingItCanCarry()
+    {
+        static object[] Eval(TensorData<@string> t) =>
+            OnnxEngine.Eval(Globals.Tensor(t.MoveToAttribute())).As<@string>().DebugData;
+
+        Assert.Equal((object[])["héllo", "", "日本語"], Eval(TensorData([3L], "héllo", "", "日本語")));
+        Assert.Equal((object[])["a", "b", "c", "d"], Eval(TensorData([2L, 2L], "a", "b", "c", "d")));
+        Assert.Equal((object[])["x"], Eval(TensorData([1L], "x")));
     }
 
     // Both debug reads go through the flat-buffer path, which a string tensor has none of:

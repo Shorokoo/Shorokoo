@@ -1,4 +1,7 @@
+using Shorokoo.Core.Factory;
 using Shorokoo.Core.Inference.Abstractions;
+using Shorokoo.Core.Nodes;
+using Shorokoo.Onnx;
 using Shorokoo.Runtime;
 
 namespace Shorokoo.Tests;
@@ -88,5 +91,33 @@ public class DTypeStringCoverageTests
         literal.Dispose();
         Assert.Throws<ObjectDisposedException>(() => _ = ((HostStringTensorData)literal).Strings);
         Assert.Throws<ObjectDisposedException>(() => literal.ToTensorValue());
+    }
+
+    // Export writes string_data and import reads it. Both directions in one test on purpose:
+    // they were absent together, and either alone would have gone unnoticed the same way.
+    [Fact]
+    public void TestAStringConstantSurvivesAnOnnxRoundTrip()
+    {
+        string[] values = ["hello", "", "with\nnewline", "日本語"];
+        var graph = new InternalComputationGraph(
+            [], [Globals.Tensor(TensorData([2L, 2L], values).MoveToAttribute())]);
+
+        var model = FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true);
+        var written = model.Graph.Nodes.Single(n => n.OpType == OpCodes.CONSTANT)
+            .Attributes.Single(a => a.Name == OnnxOpAttributeNames.AttrValue).T;
+
+        Assert.Equal(8, written.data_type);
+        Assert.Null(written.RawData);
+        Assert.Equal(values, written.StringDatas.Select(System.Text.Encoding.UTF8.GetString));
+
+        using var stream = new MemoryStream();
+        ProtoBuf.Serializer.Serialize(stream, model);
+        var reread = OnnxModelImporter.FromOnnxModelToInternalGraph(stream.ToArray());
+
+        var bound = reread.Nodes.Single(n => n.OpCode == OpCodes.CONSTANT)
+            .Attributes.GetAttributeVal(OnnxOpAttributeNames.AttrValue)!;
+        Assert.Same(DType.String, bound.DType);
+        Assert.Equal(new Shape(2L, 2L), bound.Shape);
+        Assert.Equal(values, bound.Values);
     }
 }

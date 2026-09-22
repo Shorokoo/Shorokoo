@@ -167,12 +167,12 @@ public class DTypeF16CoverageTests
         Assert.Equal(4, OnnxModelReader.ConvertInt32PackedData(DType.Int32, [42]).Length);
 
         var f16Proto = OnnxIRFactory.CreateTensor([4L], "w_f16", DType.Float16,
-            identifierTemplate: null, isTrainable: true, f16FromPacked.AccessRawMemory().ToArray());
+            identifierTemplate: null, isTrainable: true, f16FromPacked.MoveToAttribute());
         Assert.Equal((int)TensorProto.DataType.Float16, f16Proto.data_type);
         Assert.Equal(f16Packed, f16Proto.RawData);
 
         var bf16Proto = OnnxIRFactory.CreateTensor([4L], "w_bf16", DType.BFloat16,
-            identifierTemplate: null, isTrainable: true, bf16FromPacked.AccessRawMemory().ToArray());
+            identifierTemplate: null, isTrainable: true, bf16FromPacked.MoveToAttribute());
         Assert.Equal((int)TensorProto.DataType.Bfloat16, bf16Proto.data_type);
         Assert.Equal(bf16Packed, bf16Proto.RawData);
     }

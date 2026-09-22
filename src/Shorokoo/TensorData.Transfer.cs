@@ -176,7 +176,7 @@ namespace Shorokoo
             => DType.IsGenericType && this is IOnnxData onnx ? (DType)(int)onnx.Value.ElementType : null;
 
         /// <summary>The elements of a string tensor, however this one holds them.</summary>
-        private IEnumerable<string> StringElements() => this switch
+        private protected IEnumerable<string> StringElements() => this switch
         {
             HostStringTensorData host => host.Strings,
             IOnnxData onnx => onnx.Value.GetStringTensorData(),

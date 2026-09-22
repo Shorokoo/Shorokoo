@@ -101,6 +101,8 @@ namespace Shorokoo
             {
                 switch(typeof(T))
                 {
+                    case Type t when t == typeof(@string):
+                        return [.. StringElements()];
                     case Type t when t == typeof(bit):
                         return this.CopyMemory<bool>().Cast<object>().ToArray();
                     case Type t when t == typeof(int8):
@@ -234,6 +236,9 @@ namespace Shorokoo
         {
             get
             {
+                // Strings are the one dtype with no flat buffer to box out of; their elements are
+                // the storage, so they are read as themselves.
+                if (DType == DType.String) return [.. StringElements()];
                 return this.CopyRawMemory().Cast<object>().ToArray();
             }
         }
@@ -717,6 +722,7 @@ namespace Shorokoo
         {
             get
             {
+                if (DType == DType.String) return [.. StringElements()];
                 return this.CopyMemory<byte>().Cast<object>().ToArray();
             }
         }

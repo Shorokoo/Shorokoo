@@ -307,6 +307,55 @@ public class SideBySideBackendHardwareTests
         Assert.Empty(cuda.CopyTensorToHost(empty));
     }
 
+    [SideBySideCudaFact]
+    public void TestASequenceValuedModelRunsOnTheCardAndItsElementsComeBackFromTheHost()
+    {
+        var x = InputVector<float32>("x");
+        var split = new InternalComputationGraph(
+            [x], [OnnxOp.SplitToSequence(x * Scalar(2f), split: Vector(2L, 2L), axis: 0)]);
+        var pick = new InternalComputationGraph(
+            [x], [OnnxOp.SequenceAt(OnnxOp.SplitToSequence(x, split: Vector(2L, 2L), axis: 0), Scalar(1L))]);
+        var input = TensorData([4L], (float[])[1f, 2f, 3f, 4f]);
+
+        using var cuda = new ComputeContext(LoadCuda());
+        var sequence = cuda.Execute(split, input)[0].ToTensorDataSequence();
+
+        Assert.IsType<OnnxTensorDataSequence<float32>>(sequence);
+        Assert.Equal(2, sequence.Count);
+        Assert.Equal([2f, 4f], Floats(sequence[0]));
+        Assert.Equal([6f, 8f], Floats(sequence[1]));
+        Assert.All(sequence, e => Assert.Equal(MemorySpace.Host, e.Space));
+        Assert.Equal([3f, 4f], Floats(cuda.Execute(pick, input)[0]));
+
+        // And the sequence crosses back to a host context, element by element.
+        Assert.Equal([2f, 4f], Floats(sequence.CopyTo(new ComputeContext())[0]));
+    }
+
+    [SideBySideCudaFact]
+    public void TestASequenceRefusesTensorsTheCardHoldsRatherThanBecomingUnreadable()
+    {
+        var cuda = LoadCuda();
+        using var onCard = cuda.CreateUninitializedTensorInBackendMemory(
+            ShorokooTensorElementType.Float, [2L]);
+        var onHost = cuda.CreateTensor<float>([1f, 2f], [2L]);
+
+        var refused = Assert.Throws<InvalidOperationException>(
+            () => cuda.CreateSequence([onHost, onCard]));
+        Assert.Contains("CopyTensorToHost", refused.Message);
+        Assert.Throws<InvalidOperationException>(() => cuda.CreateSequence([onCard]));
+
+        // Refused before anything was taken over, so both tensors are still the caller's and the
+        // advice the message gives can still be followed.
+        Assert.Equal([1f, 2f], onHost.GetTensorDataAsSpan<float>().ToArray());
+        var home = cuda.CreateTensorFromRawBytes(
+            ShorokooTensorElementType.Float, cuda.CopyTensorToHost(onCard), [2L]);
+
+        using var sequence = cuda.CreateSequence([onHost, home]);
+        Assert.Equal(2, sequence.GetValueCount());
+        using var element = sequence.GetValue(0);
+        Assert.Equal([1f, 2f], element.GetTensorDataAsSpan<float>().ToArray());
+    }
+
     /// <summary>The allocator ONNX Runtime made this value's buffer from, and the device it is on.
     /// Through the backend's own types, which an isolated backend loads privately, so the route to
     /// them is reflection rather than a cast.</summary>

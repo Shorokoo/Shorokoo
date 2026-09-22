@@ -270,23 +270,33 @@ Runtime's I/O binding, which ORT permits and checks nothing about: it buys exact
 input-sized buffer, only where an output matches that input's dtype and byte size, and nothing at
 all where the output is a loss.
 
-### Sequence-valued models on an isolated CUDA backend
+### A sequence's elements live in host memory
 
-A model whose outputs are *sequences* — `SequenceAt`, `SplitToSequence`, anything producing an ONNX
-sequence type — faults ONNX Runtime when it runs on a backend loaded through
-`IsolatedBackend.Load` or `BackendPackage.TryLoad` onto a CUDA device. The crash is an access
-violation inside ORT's own `OrtValue.GetValue`, so it takes the process down rather than raising.
+A sequence holds host-memory tensors, on every backend. ONNX Runtime will pack a tensor an
+execution provider left on a card into one, and then cannot read it back out: its `GetValue`
+copies an element with a plain host `memcpy` whatever allocator it is handed, so the first read
+of such an element dereferences a device address from the host and takes the process down with an
+access violation that nothing can catch. A sequence built that way is write-only.
 
-It is specific to the combination. The same model runs on an isolated *CPU* backend, and on a CUDA
-backend reached the ordinary way — by referencing `Shorokoo.LinuxGPU` or `Shorokoo.WinGPU` and
-letting discovery find it. Tensor and string values are unaffected in every combination.
+So `IShorokooBackend.CreateSequence` refuses an element that is in the provider's own memory,
+while the caller still holds the tensor and can bring it home —
+`CopyTensorToHost`, or `TensorData.CopyTo(null)` for a tensor a context owns. The refusal names
+the tensor:
 
-Until it is diagnosed, a program that needs sequence outputs on a card should reach its CUDA
-backend by reference rather than by loading it into isolation. That costs the ability to run a
-second ONNX Runtime alongside it, which is the only thing isolation buys.
+```
+A tensor (2:Float) in Shorokoo.WinGPU's own device memory cannot be an element of a sequence:
+ONNX Runtime can pack it into one but reads an element back with a host copy, so nothing could
+ever read it again. ...
+```
 
-[#368](https://github.com/Shorokoo/Shorokoo/issues/368) tracks it, and carries the two leads on
-the path worth ruling out first. It has no pinning test: the pin needs a card.
+None of this touches a model whose *outputs* are sequences — `SequenceAt`, `SplitToSequence`,
+anything producing an ONNX sequence type. ONNX Runtime materializes a run's sequence output in
+host memory whichever execution provider produced it, so such a model runs on a CUDA backend, and
+on one loaded through `IsolatedBackend.Load` or `BackendPackage.TryLoad`, like any other; its
+elements read, and the sequence moves to another context element by element.
+
+What would lift this is a device-aware copy inside ONNX Runtime's own `GetValue`, which would
+make a device-resident sequence readable and this refusal unnecessary.
 
 ### Device-memory readings are the device's, and device 0's
 

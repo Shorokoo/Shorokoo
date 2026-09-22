@@ -68,6 +68,25 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
     internal static bool IsHostAllocator(string? allocatorName) =>
         allocatorName is CpuAllocatorName or "CudaPinned" or "HipPinned";
 
+    /// <summary>
+    /// Whether this value is a tensor in memory the host cannot read — the execution provider's
+    /// own. A value that is not a tensor answers false: it has no buffer of its own to place.
+    ///
+    /// <para>Distinct from <see cref="IsHostAccessible"/>, which asks whether <i>this wrapper</i>
+    /// may hand out a span: that answers false for a sequence too, because a sequence has no
+    /// element buffer of its own, and the question here is about memory rather than about shape.
+    /// Not cached either, because it is asked once per value, where a sequence is built.</para>
+    /// </summary>
+    internal bool IsInDeviceMemory
+    {
+        get
+        {
+            if (!Inner.IsTensor) return false;
+            using var info = Inner.GetTensorMemoryInfo();
+            return !IsHostAllocator(info.Name);
+        }
+    }
+
     /// <summary>Refuses a span over memory the host cannot read. The span accessors hand out a
     /// pointer without checking where it points, so this is the difference between an exception
     /// and a wild read of a device address — and it belongs here rather than only on the tensor
@@ -108,17 +127,51 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
         return Inner.GetTensorMutableDataAsSpan<T>();
     }
 
-    public IReadOnlyList<string> GetStringTensorData() => Inner.GetStringTensorAsArray();
+    // Each of the four accessors below hands ORT a bare handle off `Inner` and then has no further
+    // use for it, so the JIT retires the local at that read -- before the native call even starts.
+    // OrtValue is a plain class with an ordinary finalizer that calls OrtReleaseValue, so a
+    // collection on any thread during the call would free the native value underneath it. Being in
+    // scope roots nothing; this does (Shorokoo/Shorokoo#178). The callers happen to keep these
+    // values reachable today, which is safety by reachability rather than by construction, and a
+    // lifetime changed anywhere above here would quietly take it away.
 
-    public int GetValueCount() => Inner.GetValueCount();
+    public IReadOnlyList<string> GetStringTensorData()
+    {
+        var strings = Inner.GetStringTensorAsArray();
+        GC.KeepAlive(Inner);
+        return strings;
+    }
 
-    public IShorokooTensorValue GetValue(int index) =>
-        new OrtTensorValue(Inner.GetValue(index, OrtAllocator.DefaultInstance));
+    public int GetValueCount()
+    {
+        var count = Inner.GetValueCount();
+        GC.KeepAlive(Inner);
+        return count;
+    }
+
+    /// <summary>
+    /// The element at <paramref name="index"/>, copied out of this sequence into host memory.
+    ///
+    /// <para>Host memory unconditionally, because ONNX Runtime offers nothing else: its
+    /// <c>GetValue</c> copies the element with a plain host <c>memcpy</c> whatever allocator it is
+    /// handed, so an element the execution provider left on a card is read through a device
+    /// address by the host and takes the process down with an access violation. That is why
+    /// <see cref="OrtBackend.CreateSequence"/> refuses to pack device tensors into a sequence:
+    /// the sequence this reads is a host one by construction.</para>
+    /// </summary>
+    public IShorokooTensorValue GetValue(int index)
+    {
+        var element = new OrtTensorValue(Inner.GetValue(index, OrtAllocator.DefaultInstance));
+        GC.KeepAlive(Inner);
+        return element;
+    }
 
     public ShorokooTensorElementType GetSequenceElementType()
     {
         var info = Inner.GetTypeInfo();
-        return (ShorokooTensorElementType)(int)info.SequenceTypeInfo.ElementType.TensorTypeAndShapeInfo.ElementDataType;
+        var elementType = info.SequenceTypeInfo.ElementType.TensorTypeAndShapeInfo.ElementDataType;
+        GC.KeepAlive(Inner);
+        return (ShorokooTensorElementType)(int)elementType;
     }
 
     public void Dispose() => Inner.Dispose();

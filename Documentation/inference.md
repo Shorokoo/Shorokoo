@@ -966,9 +966,10 @@ Only the ONNX Runtime wrapper, the glue over it and the backend assembly are pri
 isolated backend; the core Shorokoo assembly and everything your model is written in stay
 shared, which is what lets one context be handed the other's data.
 
-One combination does not work: a model with *sequence* outputs on an isolated backend running
-on a card faults ONNX Runtime outright. See
-[Sequence-valued models on an isolated CUDA backend](limitations.md#sequence-valued-models-on-an-isolated-cuda-backend).
+A model with *sequence* outputs runs here like any other, on a card as on the host: ONNX Runtime
+materializes a run's sequence output in host memory whichever execution provider produced it. What
+a sequence cannot hold is a tensor left in device memory — see
+[A sequence's elements live in host memory](limitations.md#a-sequences-elements-live-in-host-memory).
 
 #### Or keep it to two processes
 

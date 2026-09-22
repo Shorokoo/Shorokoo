@@ -477,9 +477,33 @@ public abstract class OrtBackend : IShorokooBackend
     /// sequence's own member list and the sequence frees them when it is disposed, so a caller
     /// that still needs them must pass copies. Shorokoo's <c>TensorDataSequence.Create</c> does
     /// exactly that.</para>
+    ///
+    /// <para><b>Every element must be in host memory.</b> ONNX Runtime will happily pack a tensor
+    /// the execution provider left on a card into a sequence, and then cannot read it back out:
+    /// its <c>GetValue</c> copies an element with a plain host <c>memcpy</c> whatever allocator it
+    /// is given, so the first read of one dereferences a device address from the host and takes
+    /// the process down with an access violation that nothing can catch. Such a sequence is
+    /// write-only, so this refuses to make one (Shorokoo/Shorokoo#368).</para>
     /// </summary>
+    /// <exception cref="InvalidOperationException">An element is in the execution provider's own
+    /// memory rather than the host's. Nothing has been taken over when this is thrown: the advice
+    /// to bring the tensor home means nothing if the refusal has already freed it.</exception>
     public IShorokooTensorValue CreateSequence(IReadOnlyList<IShorokooTensorValue> values)
     {
+        // Before the ownership transfer below, and outside its try, which is the whole difference
+        // between this and the cast failure there: a value whose memory is wrong is one the caller
+        // can still do something about, and the message says what. A pattern match rather than a
+        // cast, so a value that is not this backend's still fails where it did.
+        foreach (var v in values)
+            if (v is OrtTensorValue { IsInDeviceMemory: true } onDevice)
+                throw new InvalidOperationException(
+                    $"A tensor ({string.Join('x', onDevice.Shape)}:{onDevice.ElementType}) in "
+                    + $"{Description}'s own device memory cannot be an element of a sequence: "
+                    + "ONNX Runtime can pack it into one but reads an element back with a host "
+                    + "copy, so nothing could ever read it again. Bring the tensor into host "
+                    + "memory first -- CopyTensorToHost does that, and TensorData.CopyTo(null) "
+                    + "is the same move on a tensor a context owns.");
+
         var inner = new List<OrtValue>(values.Count);
         try
         {

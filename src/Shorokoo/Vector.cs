@@ -110,7 +110,7 @@ namespace Shorokoo
                     else if (type == DType.UInt32) unit = (Vector<T>)(object)Vector((uint)1);
                     else if (type == DType.UInt64) unit = (Vector<T>)(object)Vector((ulong)1);
                     else if (type == DType.Utf8)
-                        throw new UnsupportedDTypeException(ErrorCodes.VT003, type.ToString(), "Unit Vector", "String type is not supported for unit vector creation");
+                        throw new UnsupportedDTypeException(ErrorCodes.VT003, type.ToString(), "Unit Vector", "Utf8 type is not supported for unit vector creation");
                     else if (type == DType.Bool) unit = (Vector<T>)(object)Vector(true);
                     else if (type == DType.Complex64) 
                         throw new UnsupportedDTypeException(ErrorCodes.VT004, type.ToString(), "Unit Vector", "Complex64 numbers are not supported for unit vector creation");
@@ -156,7 +156,7 @@ namespace Shorokoo
                     else if (type == DType.UInt32) empty = (Vector<T>)(object)Vector((uint[])[]);
                     else if (type == DType.UInt64) empty = (Vector<T>)(object)Vector((ulong[])[]);
                     else if (type == DType.Utf8)
-                        throw new UnsupportedDTypeException(ErrorCodes.VT008, type.ToString(), "Empty Vector", "String type is not supported for empty vector creation");
+                        throw new UnsupportedDTypeException(ErrorCodes.VT008, type.ToString(), "Empty Vector", "Utf8 type is not supported for empty vector creation");
                     else if (type == DType.Bool) empty = (Vector<T>)(object)Vector((bool[])[]);
                     else if (type == DType.Complex64) 
                         throw new UnsupportedDTypeException(ErrorCodes.VT009, type.ToString(), "Empty Vector", "Complex64 numbers are not supported for empty vector creation");

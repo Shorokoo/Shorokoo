@@ -284,7 +284,7 @@ public class CoreUtilsCoverageTests
     [Fact]
     public void TestDefaultBackendDiscoveryAndSelectionPolicyCoverage()
     {
-        // No backend is set explicitly in this suite, so reading Default exercises the
+        // No backend is set explicitly in this suite, so reading Instance exercises the
         // deployment-folder auto-discovery fallback; the platform backend is derived from the
         // running OS, so this holds on Windows and Linux alike.
         var backend = DefaultBackend.Instance;
@@ -1213,7 +1213,7 @@ public class CoreUtilsCoverageTests
         var source = Source("Shorokoo.OnnxRuntime", "OrtBackend.cs");
         // Trailing [,)] rather than a closing paren: what this pins is that the device id still
         // reaches the session, not how many other things travel with it.
-        Assert.Matches(@"new\s+OrtInferenceSession\s*\(\s*session\s*,\s*_cudaDeviceId\s*[,)]", source);
+        Assert.Matches(@"new\s+OrtSession\s*\(\s*session\s*,\s*_cudaDeviceId\s*[,)]", source);
         Assert.Matches(@"AppendExecutionProvider_CUDA\s*\(\s*cuda\s*\)", source);
         Assert.Matches(@"CudaProviderOptions\s*\(\s*deviceId\s*,\s*deviceMemory\.LimitBytes\s*,\s*deviceMemory\.ArenaExtend\s*\)", source);
         Assert.Matches(@"_configureExecutionProvider\s*\(\s*options\s*,\s*deviceMemory\s*\)", source);
@@ -1223,9 +1223,9 @@ public class CoreUtilsCoverageTests
         Assert.Matches(@"CreateSession\s*\(\s*modelData\s*,\s*optimization\s*,\s*deviceMemory\s*\)", context);
         Assert.Matches(@"DeviceMemory\.Resolve\s*\(\s*reusedAcrossShapes\s*\)", context);
 
-        var session = Source("Shorokoo.OnnxRuntime", "OrtInferenceSession.cs");
+        var session = Source("Shorokoo.OnnxRuntime", "OrtSession.cs");
         Assert.Contains("memory.enable_memory_arena_shrinkage", File.ReadAllText(
-            Path.Combine(backend, "Shorokoo.OnnxRuntime", "OrtInferenceSession.cs")));
+            Path.Combine(backend, "Shorokoo.OnnxRuntime", "OrtSession.cs")));
         Assert.Matches(@"ArenaShrinkageRunConfig\s*\(\s*_cudaDeviceId\s*,\s*runSettings\.ShrinkArenaAfterRun\s*\)", session);
         Assert.Matches(@"AddRunConfigEntry\s*\(", session);
 

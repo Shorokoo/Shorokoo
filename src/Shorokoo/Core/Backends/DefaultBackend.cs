@@ -60,7 +60,7 @@ public static class DefaultBackend
     {
         get
         {
-            if (_defaultReads.Value is { } counter) Interlocked.Increment(ref counter.Value);
+            if (_instanceReads.Value is { } counter) Interlocked.Increment(ref counter.Value);
             if (_instance is not null) return _instance;
             lock (_gate) { return _instance ??= Discover(); }
         }
@@ -87,12 +87,12 @@ public static class DefaultBackend
     /// </summary>
     public static IShorokooBackend? Current => _instance;
 
-    // Counts reads of Instance made inside a CountDefaultReads call, and nothing else -- the same
-    // seam ComputeContext.Default carries, and for the same reason. The two are distinct paths to a
+    // Counts reads of Instance made inside a CountInstanceReads call, and nothing else -- the
+    // same seam ComputeContext.Default carries, and for the same reason. The two are distinct paths to a
     // backend: a graph pass can reach one without ever touching a compute context (every
     // OnnxUtils.CreateTensorValue does), so counting only the context's reads left half the
     // question unasked.
-    private static readonly AsyncLocal<System.Runtime.CompilerServices.StrongBox<int>?> _defaultReads = new();
+    private static readonly AsyncLocal<System.Runtime.CompilerServices.StrongBox<int>?> _instanceReads = new();
 
     /// <summary>
     /// Runs <paramref name="work"/> and returns how many times it read <see cref="Instance"/>.
@@ -100,13 +100,13 @@ public static class DefaultBackend
     /// asks rather than backends resolved, because every test host has one deployed and answers a
     /// wrongly eager read in silence.
     /// </summary>
-    internal static int CountDefaultReads(Action work)
+    internal static int CountInstanceReads(Action work)
     {
-        var outer = _defaultReads.Value;
+        var outer = _instanceReads.Value;
         var counter = new System.Runtime.CompilerServices.StrongBox<int>(0);
-        _defaultReads.Value = counter;
+        _instanceReads.Value = counter;
         try { work(); }
-        finally { _defaultReads.Value = outer; }
+        finally { _instanceReads.Value = outer; }
         return counter.Value;
     }
 

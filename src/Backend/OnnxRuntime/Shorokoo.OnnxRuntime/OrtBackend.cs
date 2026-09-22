@@ -136,8 +136,8 @@ public abstract class OrtBackend : IShorokooBackend
             _configureExecutionProvider(options, deviceMemory);
             var session = new InferenceSession(modelBytes.ToArray(), options);
             // The session keeps this backend so it can rebuild a feed that came from another
-            // backend's native runtime -- see OrtInferenceSession.Unwrap.
-            return new OrtInferenceSession(session, _cudaDeviceId, this, profileDirectory);
+            // backend's native runtime -- see OrtSession.Unwrap.
+            return new OrtSession(session, _cudaDeviceId, this, profileDirectory);
         }
         catch
         {

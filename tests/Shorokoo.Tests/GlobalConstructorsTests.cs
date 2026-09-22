@@ -38,7 +38,7 @@ public class GlobalConstructorsCoverageTests
 
         try
         {
-            var reads = DefaultBackend.CountDefaultReads(() =>
+            var reads = DefaultBackend.CountInstanceReads(() =>
             {
                 var module = BackendFreeLiterals.ComputationGraph;
                 var concrete = module

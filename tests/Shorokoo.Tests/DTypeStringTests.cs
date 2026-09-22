@@ -1,3 +1,6 @@
+using Shorokoo.Core.Nodes.Processors.Helpers;
+using Shorokoo.Core.Factory.IR;
+using Shorokoo.Core.Utils;
 using Shorokoo.Core.Factory;
 using Shorokoo.Core.Backends;
 using Shorokoo.Core.Nodes;
@@ -64,7 +67,7 @@ public class DTypeStringCoverageTests
         TensorData literal = null!;
         // The AsyncLocal seam rather than a before/after read of the process-wide slot: this suite
         // runs four tests at once, so any of them may settle that slot inside the window.
-        Assert.Equal(0, DefaultBackend.CountDefaultReads(() => literal = TensorData(dims, values)));
+        Assert.Equal(0, DefaultBackend.CountInstanceReads(() => literal = TensorData(dims, values)));
 
         Assert.IsType<HostStringTensorData>(literal);
         // Nothing of a runtime's is in it -- which is the whole of "no backend was needed".
@@ -91,6 +94,68 @@ public class DTypeStringCoverageTests
         literal.Dispose();
         Assert.Throws<ObjectDisposedException>(() => _ = ((HostStringTensorData)literal).Strings);
         Assert.Throws<ObjectDisposedException>(() => literal.ToTensorValue());
+    }
+
+    // A string initializer whose string_data does not cover its dims is refused, as the numeric
+    // path refuses a short raw_data -- not padded out with empty strings that read as model data.
+    [Fact]
+    public void TestAStringInitializerIsRefusedWhenItsDataDoesNotCoverItsDims()
+    {
+        static TensorProto Proto(long[] dims, params string[] values)
+        {
+            var t = new TensorProto { Dims = dims, data_type = 8 };
+            foreach (var v in values) t.StringDatas.Add(System.Text.Encoding.UTF8.GetBytes(v));
+            return t;
+        }
+
+        static InternalComputationGraph Read(TensorProto initializer)
+        {
+            var g = new GraphProto { Name = "g" };
+            g.Initializers.Add(initializer);
+            var model = new ModelProto { IrVersion = 10, Graph = g };
+            model.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = 21 });
+            using var ms = new MemoryStream();
+            ProtoBuf.Serializer.Serialize(ms, model);
+            return OnnxModelImporter.FromOnnxModelToInternalGraph(ms.ToArray());
+        }
+
+        var init = Proto([2L, 2L], "a", "b");
+        init.Name = "w";
+        Assert.Throws<ArgumentException>(() => Read(init));
+
+        var none = Proto([2L]);
+        none.Name = "w";
+        Assert.Throws<ArgumentException>(() => Read(none));
+
+        // ONNX forbids raw_data for STRING, so a tensor carrying it is refused by name rather
+        // than silently read as holding nothing.
+        var raw = new TensorProto { Dims = [2L], data_type = 8, RawData = [0x61, 0x62], Name = "w" };
+        Assert.Throws<NotSupportedException>(() => Read(raw));
+
+        // A zero-element string tensor carries no elements and is not a shortfall.
+        var empty = Proto([0L]);
+        empty.Name = "w";
+        Read(empty);
+    }
+
+    // A literal standing for a generic type parameter describes the same storage as the dtype it
+    // stands for, so every read of its elements has to agree about what it holds.
+    [Fact]
+    public void TestAStringTensorTaggedWithAGenericParameterReadsLikeAnUntaggedOne()
+    {
+        static TensorData<utf8> Tagged() => (TensorData<utf8>)TensorDataConversion.ConvertTensorDataType(
+            TensorData([2L], (string[])["a", "b"]), DType.CreateWithGenericParam(DType.Utf8, "T"));
+
+        Assert.Equal((object[])["a", "b"], Tagged().DebugData);
+        Assert.Equal((object[])["a", "b"], Tagged().Data);
+        Assert.Equal((string[])["a", "b"], [.. Tagged().MoveToAttribute().Values]);
+
+        var attribute = TensorData([2L], (string[])["a", "b"]).MoveToAttribute()
+            .WithDType(DType.CreateWithGenericParam(DType.Utf8, "T"));
+        var proto = OnnxIRFactory.CreateTensor(
+            [2L], "w", attribute.DType, identifierTemplate: null, isTrainable: true, attribute);
+        Assert.Equal((string[])["a", "b"],
+            [.. proto.StringDatas.Select(System.Text.Encoding.UTF8.GetString)]);
     }
 
     // Export writes string_data and import reads it. Both directions in one test on purpose:

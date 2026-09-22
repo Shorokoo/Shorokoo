@@ -394,10 +394,25 @@ namespace Shorokoo.Core.Factory.IR
 
             // Strings are the one dtype ONNX keeps out of raw_data: string_data holds one UTF-8
             // blob per element, so they are read here and never reach the flat-buffer path below.
-            if (type == DType.Utf8)
+            if (type.IsSameElementTypeAs(DType.Utf8))
             {
-                var values = new string[tensorProto.StringDatas.Count];
-                for (int i = 0; i < values.Length; i++)
+                if (tensorProto.RawData is { Length: > 0 })
+                    throw new NotSupportedException(
+                        $"Tensor '{tensorProto.Name}' is a string tensor carrying raw_data. ONNX "
+                        + "keeps string elements in string_data, one UTF-8 blob each, and forbids "
+                        + "raw_data for them, so these bytes describe no elements.");
+
+                // Checked against the shape exactly as the flat-buffer path below is: a shortfall
+                // is refused rather than padded out with empty strings that would read as model
+                // data. A surplus is trimmed, which is the asymmetry the string literals keep.
+                var required = checked((int)shape.Count);
+                if (tensorProto.StringDatas.Count < required)
+                    throw new ArgumentException(
+                        $"Supplied data of {tensorProto.StringDatas.Count} strings is less than "
+                        + $"shape size {required} strings.");
+
+                var values = new string[required];
+                for (int i = 0; i < required; i++)
                     values[i] = Encoding.UTF8.GetString(tensorProto.StringDatas[i]);
                 return TensorAttribute.OverStrings(shape, values);
             }

@@ -378,13 +378,13 @@ namespace Shorokoo.Runtime
         // context built before DefaultBackend.Instance was assigned must still honour it.
         private readonly IShorokooBackend? _backend;
 
-        // Counts reads of Default made inside a CountDefaultReads call, and nothing else. It is an
+        // Counts reads of Default made inside a CountInstanceReads call, and nothing else. It is an
         // AsyncLocal rather than a static counter because the callers that care run in parallel
         // with the rest of a test suite: a process-wide count would also see everything else
         // running at the time. An AsyncLocal flows into whatever the measured call does — a thread
         // it starts included — and no further; the box is what makes an increment made down there
         // visible back up here.
-        private static readonly AsyncLocal<StrongBox<int>?> _defaultReads = new();
+        private static readonly AsyncLocal<StrongBox<int>?> _instanceReads = new();
 
         /// <summary>
         /// Runs <paramref name="work"/> and returns how many times it read <see cref="Default"/>.
@@ -398,13 +398,13 @@ namespace Shorokoo.Runtime
         /// the question is whether the path reached for the default at all, not whether this
         /// particular process had already paid for one.</para>
         /// </summary>
-        internal static int CountDefaultReads(Action work)
+        internal static int CountInstanceReads(Action work)
         {
-            var outer = _defaultReads.Value;
+            var outer = _instanceReads.Value;
             var counter = new StrongBox<int>(0);
-            _defaultReads.Value = counter;
+            _instanceReads.Value = counter;
             try { work(); }
-            finally { _defaultReads.Value = outer; }
+            finally { _instanceReads.Value = outer; }
             return Volatile.Read(ref counter.Value);
         }
 
@@ -428,7 +428,7 @@ namespace Shorokoo.Runtime
         {
             get
             {
-                if (_defaultReads.Value is { } counter) Interlocked.Increment(ref counter.Value);
+                if (_instanceReads.Value is { } counter) Interlocked.Increment(ref counter.Value);
                 // A disposed one is not handed back. Default is a cached singleton and is now
                 // disposable, so `using var ctx = ComputeContext.Default;` would otherwise poison
                 // the process: every later read returns the same dead object and every run through

@@ -126,7 +126,7 @@ internal class ShapeInferenceInterpreter
         var tensorStore = new Dictionary<FastTensorKey, TensorShapeInfo>();
 
         // Step 1: QEE-based pure-C# execution. Covers ~all ONNX ops (138 op
-        // implementations under Interpreter/QuickExecutionEngine/Ops), plus Shorokoo
+        // implementations under Core/Interpreter/Ops), plus Shorokoo
         // internals like MODEL_PARAM_DATA. Produces shape, dtype, and small-tensor
         // values in one pass without spinning up ORT sessions.
         Dictionary<FastTensorKey, IRuntimeTensor> qeeStore;

@@ -238,7 +238,7 @@ namespace Shorokoo
             {
                 // Strings are the one dtype with no flat buffer to box out of; their elements are
                 // the storage, so they are read as themselves.
-                if (DType == DType.Utf8) return [.. StringElements()];
+                if (DType.IsSameElementTypeAs(DType.Utf8)) return [.. StringElements()];
                 return this.CopyRawMemory().Cast<object>().ToArray();
             }
         }
@@ -722,7 +722,7 @@ namespace Shorokoo
         {
             get
             {
-                if (DType == DType.Utf8) return [.. StringElements()];
+                if (DType.IsSameElementTypeAs(DType.Utf8)) return [.. StringElements()];
                 return this.CopyMemory<byte>().Cast<object>().ToArray();
             }
         }

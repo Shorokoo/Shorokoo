@@ -112,8 +112,8 @@ public class ComputeContextLifetimeCoverageTests
         }
 
         var backendReads = 0;
-        var contextReads = ComputeContext.CountDefaultReads(() =>
-            backendReads = DefaultBackend.CountDefaultReads(
+        var contextReads = ComputeContext.CountInstanceReads(() =>
+            backendReads = DefaultBackend.CountInstanceReads(
                 () => Assert.Throws<InvalidOperationException>(
                     () => ComputeContext.Host.Compile(graph))));
         Assert.Equal(0, contextReads);
@@ -311,8 +311,8 @@ public class ComputeContextLifetimeCoverageTests
         try
         {
             var backendReads = 0;
-            var reads = ComputeContext.CountDefaultReads(() =>
-                backendReads = DefaultBackend.CountDefaultReads(() =>
+            var reads = ComputeContext.CountInstanceReads(() =>
+                backendReads = DefaultBackend.CountInstanceReads(() =>
                 {
                     var concrete = module
                         .ToConcreteArchitecture(module.FromOrderedInputs([sample]))

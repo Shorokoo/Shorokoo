@@ -579,7 +579,7 @@ public class TensorDataApiCoverageTests
             Assert.Equal(values, attribute.Elements<V>().ToArray());
         }
 
-        var reads = DefaultBackend.CountDefaultReads(() =>
+        var reads = DefaultBackend.CountInstanceReads(() =>
         {
             Case(DType.Bool, true, false);
             Case(DType.Int8, (sbyte)1, (sbyte)2);
@@ -710,14 +710,12 @@ public class TensorDataApiCoverageTests
         static object[] Eval(TensorData<utf8> t) =>
             OnnxEngine.Eval(Globals.Tensor(t.MoveToAttribute())).As<utf8>().DebugData;
 
-        Assert.Equal((object[])["héllo", "", "日本語"], Eval(TensorData([3L], "héllo", "", "日本語")));
+        Assert.Equal((object[])["héllo", "", "日本語", "𝄞"], Eval(TensorData([4L], "héllo", "", "日本語", "𝄞")));
         Assert.Equal((object[])["a", "b", "c", "d"], Eval(TensorData([2L, 2L], "a", "b", "c", "d")));
         Assert.Equal((object[])["x"], Eval(TensorData([1L], "x")));
+        Assert.Equal((object[])["s"], Eval(TensorData((long[])[], "s")));
     }
 
-    // Both debug reads go through the flat-buffer path, which a string tensor has none of:
-    // HostStringTensorData.Data overrides its way out, DebugData does not, and a backend-held
-    // string tensor overrides neither. Separate from #369 -- no export is involved.
     [Fact]
     public void TestAStringTensorsElementsAreReadableThroughBothDebugAccessors()
     {

@@ -265,7 +265,7 @@ namespace Shorokoo
         /// sites take, so that a literal is materialised by the backend whose session is about to
         /// read it rather than by whichever one the process happens to default to. A value belongs
         /// to the runtime that made it, and feeding one built elsewhere costs a rebuild per run at
-        /// best (<c>OrtInferenceSession.Unwrap</c>) and is not possible at all for data that has
+        /// best (<c>OrtSession.Unwrap</c>) and is not possible at all for data that has
         /// left host memory.
         ///
         /// <para>The default answers the same as the no-argument form, which is right for a

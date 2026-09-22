@@ -360,9 +360,12 @@ namespace Shorokoo.Core.Factory.IR
 
             if (values is null)
                 tensor.RawData = [];
-            else if (type == DType.Utf8)
-                foreach (var element in values.Values)
-                    tensor.StringDatas.Add(Encoding.UTF8.GetBytes(element));
+            else if (type.IsSameElementTypeAs(DType.Utf8))
+                for (int i = 0; i < values.Values.Count; i++)
+                    tensor.StringDatas.Add(Encoding.UTF8.GetBytes(
+                        values.Values[i] ?? throw new InvalidOperationException(
+                            $"Element {i} of string tensor '{name}' is null. A string tensor's "
+                            + "elements are its storage, and ONNX has no null element to write.")));
             else
                 tensor.RawData = values.Bytes.ToArray();
             tensor.data_type = type.ProtoTypeNum;

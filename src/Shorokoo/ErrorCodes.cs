@@ -49,7 +49,7 @@ namespace Shorokoo
         /// <summary>UInt4 precision is not supported for bit count encoding</summary>
         public const string DT019 = "DT019";
         
-        /// <summary>String DType has variable bit count and is not supported for bit count encoding</summary>
+        /// <summary>Utf8 DType has variable bit count and is not supported for bit count encoding</summary>
         public const string DT020 = "DT020";
         
         /// <summary>Complex64 numbers are not supported for bit count encoding</summary>
@@ -77,7 +77,7 @@ namespace Shorokoo
         /// <summary>UInt4 precision is not supported for unit vector creation</summary>
         public const string VT002 = "VT002";
         
-        /// <summary>String DType is not supported for unit vector creation</summary>
+        /// <summary>Utf8 DType is not supported for unit vector creation</summary>
         public const string VT003 = "VT003";
         
         /// <summary>Complex64 numbers are not supported for unit vector creation</summary>
@@ -92,7 +92,7 @@ namespace Shorokoo
         /// <summary>UInt4 precision is not supported for empty vector creation</summary>
         public const string VT007 = "VT007";
         
-        /// <summary>String DType is not supported for empty vector creation</summary>
+        /// <summary>Utf8 DType is not supported for empty vector creation</summary>
         public const string VT008 = "VT008";
         
         /// <summary>Complex64 numbers are not supported for empty vector creation</summary>

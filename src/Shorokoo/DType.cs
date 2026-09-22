@@ -494,6 +494,15 @@ namespace Shorokoo
             return this.sType;
         }
 
+        /// <summary>
+        /// Whether this is the same element type as <paramref name="other"/>, ignoring any generic
+        /// type-parameter tag. A literal standing for a type parameter describes the same storage
+        /// as the dtype it stands for, so a read that cares only what the elements are wants this
+        /// rather than reference identity — which a tagged dtype, being a distinct instance, fails
+        /// against the untagged one it was made from.
+        /// </summary>
+        public bool IsSameElementTypeAs(DType? other) => other is not null && this.iType == other.iType;
+
         /// <summary>True if this DType's IVarType is assignable to T (e.g. <c>DType.Float32.Is&lt;FloatLike&gt;()</c>).</summary>
         public bool Is<T>() where T : IVarType
         {

@@ -3,7 +3,7 @@ using Shorokoo.Core.Backends;
 
 namespace Shorokoo.OnnxRuntime;
 
-internal sealed class OrtInferenceSession : IShorokooSession
+internal sealed class OrtSession : IShorokooSession
 {
     private readonly InferenceSession _session;
     private readonly int? _cudaDeviceId;
@@ -32,13 +32,13 @@ internal sealed class OrtInferenceSession : IShorokooSession
     private NodePlacement? _nodePlacement;
     private bool _profilingEnded;
 
-    public OrtInferenceSession(
+    public OrtSession(
         InferenceSession session, int? cudaDeviceId, IShorokooBackend backend)
         : this(session, cudaDeviceId, backend, profileDirectory: null)
     {
     }
 
-    public OrtInferenceSession(
+    public OrtSession(
         InferenceSession session,
         int? cudaDeviceId,
         IShorokooBackend backend,

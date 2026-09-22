@@ -97,7 +97,7 @@ namespace Shorokoo
                     else if (type == DType.UInt16) unit = (Scalar<T>)(object)Shorokoo.Globals.Scalar((ushort)1);
                     else if (type == DType.UInt32) unit = (Scalar<T>)(object)Shorokoo.Globals.Scalar(1u);
                     else if (type == DType.UInt64) unit = (Scalar<T>)(object)Shorokoo.Globals.Scalar(1ul);
-                    else if (type == DType.Utf8) throw new UnsupportedDTypeException(ErrorCodes.CR005, type.ToString(), "Unit Scalar", "String type is not supported for unit scalar creation");
+                    else if (type == DType.Utf8) throw new UnsupportedDTypeException(ErrorCodes.CR005, type.ToString(), "Unit Scalar", "Utf8 type is not supported for unit scalar creation");
                     else if (type == DType.Bool) unit = (Scalar<T>)(object)Shorokoo.Globals.Scalar(true);
                     else if (type == DType.Complex64) throw new UnsupportedDTypeException(ErrorCodes.CR005, type.ToString(), "Unit Scalar", "Complex64 numbers are not supported for unit scalar creation");
                     else if (type == DType.Complex128) throw new UnsupportedDTypeException(ErrorCodes.CR005, type.ToString(), "Unit Scalar", "Complex128 numbers are not supported for unit scalar creation");

@@ -60,6 +60,22 @@
     Windows box (CI included) has no card and would fail every one of those tests instead of
     skipping them. Exactly one of the two deploys, since two backend assemblies side by side are
     what DefaultBackend's discovery refuses.
+
+    PAIR IT WITH THE Purpose=Hardware FILTER, AND NOTHING ELSE. It changes the PROCESS-WIDE default
+    backend, and the coverage suite is written against a host one: a literal built with TensorData
+    is a host tensor, an Execute output is read back with a span, CompiledGraph.OutputPlacement is
+    Host, and SideBySideBackendCoverageTests deliberately pairs the stock CPU backend against an
+    isolated runtime, naming Shorokoo.WinCPU, which does not deploy here at all. Run the coverage
+    filter under this flag and about twenty of those tests fail, every one of them correctly: the
+    product is refusing to read device memory from the host, or refusing a GiveAccessTo that would
+    have to allocate on the card. They are the suite's own CPU-shaped assumptions, not a fault on
+    the device, and making them device-agnostic would buy nothing: the card's behaviour is what
+    Purpose=Hardware is for, and CI has no card to run either half on.
+
+    Within Purpose=Hardware it is GpuExecutionTests that wants it. SideBySideBackendHardwareTests
+    wants the opposite, a host default backend beside an isolated CUDA one, so it needs
+    ShorokooDeployGpuBackend on its own. Each class skips out of the other's build and says why, so
+    a Purpose=Hardware run is green either way; to run both, run it twice.
   -->
   <ItemGroup Condition="$([MSBuild]::IsOSPlatform('Windows')) AND '$(ShorokooGpuTests)' == 'true'">
     <ProjectReference Include="..\..\src\Backend\OnnxRuntime\Shorokoo.WinGPU\Shorokoo.WinGPU.csproj" />

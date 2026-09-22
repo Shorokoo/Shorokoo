@@ -25,6 +25,12 @@ internal sealed class OrtSession : IShorokooSession
     private readonly Lazy<OrtAllocator?> _arenaAllocator;
     private OrtMemoryInfo? _ownedArenaMemoryInfo;
 
+    // The same pair for the pinned host arena a CUDA session stages its crossings through. A
+    // second allocator rather than a second reading of the first: they are different arenas with
+    // different figures, and a session with no CUDA provider has no second one at all.
+    private readonly Lazy<OrtAllocator?> _pinnedAllocator;
+    private OrtMemoryInfo? _ownedPinnedMemoryInfo;
+
     // The folder ORT writes this session's profile into, or null when it was not built to record
     // one -- which is the default. Deleted with the session.
     private readonly string? _profileDirectory;
@@ -53,6 +59,7 @@ internal sealed class OrtSession : IShorokooSession
         if (profileDirectory is null) GC.SuppressFinalize(this);
         _outputMemory = new Lazy<OutputMemory>(() => DiscoverOutputMemory(session));
         _arenaAllocator = new Lazy<OrtAllocator?>(CreateArenaAllocator);
+        _pinnedAllocator = new Lazy<OrtAllocator?>(CreatePinnedAllocator);
     }
 
     /// <summary>
@@ -272,8 +279,18 @@ internal sealed class OrtSession : IShorokooSession
 
             // The session is a bare argument whose last read is the call above, so without this
             // the JIT may retire it before the native call returns and a GC on any thread runs
-            // ~InferenceSession underneath it. Nothing else roots it: a CompiledGraph is held
-            // weakly by its context.
+            // ~InferenceSession underneath it -- a CompiledGraph is held weakly by its context, so
+            // there is no strong reference above this one to fall back on.
+            //
+            // Measured rather than assumed, and the measurement is worth recording: removing this
+            // does NOT reproduce a fault. Four hundred probes of a freshly compiled graph held only
+            // in a local, in Release on a card, against a thread collecting and draining
+            // finalizers, all came back with the placement and none took the process down -- because
+            // the caller reaches this through a Lazy whose factory closure holds the session for as
+            // long as the factory runs. That is what roots it today. This line is what makes the
+            // rooting the method's own rather than a property of how it happens to be invoked
+            // (Shorokoo/Shorokoo#178), which is exactly the kind of thing a refactor takes away
+            // silently.
             GC.KeepAlive(session);
 
             var placement = (host, onDevice) switch
@@ -335,14 +352,50 @@ internal sealed class OrtSession : IShorokooSession
     }
 
     /// <summary>ORT's memory info for a CUDA device arena. <c>CudaPinned</c> is the pinned host
-    /// arena that host-to-device copies stage through and is a different allocator.</summary>
+    /// arena that host-to-device copies stage through and is a different allocator —
+    /// <see cref="CudaPinnedArenaMemoryInfo"/>.</summary>
     private static OrtMemoryInfo CudaArenaMemoryInfo(int deviceId)
     {
         return new OrtMemoryInfo("Cuda", OrtAllocatorType.ArenaAllocator, deviceId, OrtMemType.Default);
     }
 
+    /// <summary>ORT's memory info for the pinned host arena of the same device. The memory type is
+    /// what tells it from the device arena above; the name is spelled the way ORT reports it on an
+    /// output it serves from there.</summary>
+    private static OrtMemoryInfo CudaPinnedArenaMemoryInfo(int deviceId)
+    {
+        return new OrtMemoryInfo(
+            "CudaPinned", OrtAllocatorType.ArenaAllocator, deviceId, OrtMemType.CpuOutput);
+    }
+
+    /// <summary>
+    /// The pinned host arena of this session's device, or null on a session with no CUDA provider
+    /// — which has no such arena rather than an empty one.
+    /// </summary>
+    private OrtAllocator? CreatePinnedAllocator()
+    {
+        if (_cudaDeviceId is not { } device) return null;
+        OrtMemoryInfo? owned = null;
+        try
+        {
+            owned = CudaPinnedArenaMemoryInfo(device);
+            var allocator = new OrtAllocator(_session, owned);
+            // The field assignment roots `owned` across the constructor, exactly as above.
+            _ownedPinnedMemoryInfo = owned;
+            return allocator;
+        }
+        catch (Exception)
+        {
+            owned?.Dispose();
+            return null;
+        }
+    }
+
     public ArenaStatistics? ReadArenaStatistics()
         => _arenaAllocator.Value is { } allocator ? OrtArenaStats.Read(allocator) : null;
+
+    public ArenaStatistics? ReadPinnedArenaStatistics()
+        => _pinnedAllocator.Value is { } allocator ? OrtArenaStats.Read(allocator) : null;
 
     /// <summary>
     /// Which execution provider ran each node, read out of the profile ORT has been writing since
@@ -449,6 +502,11 @@ internal sealed class OrtSession : IShorokooSession
             // pointer, so the info outlives it by one statement rather than the other way round.
             _arenaAllocator.Value?.Dispose();
             _ownedArenaMemoryInfo?.Dispose();
+        }
+        if (_pinnedAllocator.IsValueCreated)
+        {
+            _pinnedAllocator.Value?.Dispose();
+            _ownedPinnedMemoryInfo?.Dispose();
         }
         _session.Dispose();
         // After the session, which is what closes the profile file it has been writing.

@@ -47,7 +47,8 @@ Related: [core-types.md](core-types.md) · [defining-models.md](defining-models.
   [Device memory](#device-memory-gpu-backends).
 - What a *session* holds, what a *run* peaked at, and whether a GPU run quietly did some of its
   work on the host are all answerable, and all off by default:
-  `CompiledGraph.ReadArenaStatistics()` reads one session's own allocator,
+  `CompiledGraph.ReadArenaStatistics()` reads one session's own allocator and
+  `CompiledGraph.ReadPinnedArenaStatistics()` the pinned host memory its crossings went through,
   `ComputeContext.RunStats` folds every run the context makes into exact aggregates plus a bounded
   window of per-run detail, and `CompiledGraph.OutputPlacement` costs nothing while
   `CompiledGraph.ReadNodePlacement()` names the nodes that fell back —
@@ -1198,6 +1199,28 @@ high-water mark the arena never lowers and there is no reset — asking for aren
 move it — so reading it once tells you the largest this session has ever been. For a figure per
 run, let the context collect them.
 
+**A session's weights come out of this arena too**, on the CPU and on a card alike, so a session
+holds them before it has run anything: a graph whose only parameter is four mebibytes reads back
+`MaxInUseBytes` of exactly 4,194,304 at construction. Two consequences. The first run's peak is
+weights plus what that run added — `RunMemoryRecord.PriorPeakBytes` below is what separates them.
+And `ReserveCount` and `ArenaExtensionCount` do not compare across devices: the host arena takes a
+weight as a reserve, the CUDA arena as a block of its own.
+
+### What crossed the bus
+
+A device session that has to give part of a graph to the host stages the crossings through a
+**pinned host arena**, which is a second allocator with figures of its own:
+
+```csharp
+if (compiled.ReadPinnedArenaStatistics() is { } pinned)
+    Console.WriteLine($"{pinned.MaxInUseBytes} of pinned host memory at its highest");
+```
+
+Same nine figures, and `null` on a backend with no such arena — every CPU one, which stages
+nothing. They are bytes of *host* memory the provider pinned, so they are deliberately not added
+into `ReadArenaStatistics()`: a graph that stays on the card leaves this one at zero, and one the
+runtime split pays here for every value that crosses.
+
 ### A tensor placed on the card is budgeted too
 
 A session is not the only thing on a context's books. `CopyTo`, `TransferTo` and
@@ -1252,7 +1275,8 @@ Console.WriteLine($"{stats.RunCount} runs, peak {stats.PeakBytes / (1024 * 1024)
                 + $"{stats.ArenaExtensionCount} arena extensions");
 
 foreach (var run in stats.RecentRuns.TakeLast(5))
-    Console.WriteLine($"run {run.RunNumber}: {run.PeakBytes} ({run.PeakKind})");
+    Console.WriteLine($"run {run.RunNumber}: {run.PeakBytes} ({run.PeakKind}), "
+                    + $"{run.PeakBytes - run.PriorPeakBytes} of it this run's own");
 ```
 
 `RunStats` is a snapshot of every run the context has made, across **all** its sessions — the rig's
@@ -1270,10 +1294,24 @@ about the shape:
   `MemoryFigureKind.Measured`. A run that stayed under a mark some earlier run set is
   `MemoryFigureKind.UpperBound` — it used no more than that, and how much less is not something the
   arena records. The two are never reported as the same thing.
+- **A per-run peak also says what the run found there.** `PriorPeakBytes` is the mark the run
+  started from, so `PeakBytes - PriorPeakBytes` is what the run itself added and the rest is the
+  weights and whatever the session was already holding. A `Measured` peak is where the arena stood
+  at this run's high point, not the run's own cost: on a card, a first run of a four-mebibyte model
+  read 4,202,496, of which 8,192 was the run.
 
 `PeakBytes` is the largest mark any one of the context's arenas reached. A context runs its graphs
 one session at a time, so that is the peak; where two of its sessions really do run together, read
 it as the largest of them rather than their total.
+
+**`ArenaBytes` sits above `PeakBytes` until something shrinks.** It tracks what the arenas hold from
+the device, which usually exceeds what is in use by whatever they keep spare —
+but `RunSettings.ShrinkArenaAfterRun` hands blocks back at the end of a run, before these are read,
+while the peak comes from a mark the runtime never lowers. Three shrinking runs of a matmul on a
+card left `ArenaBytes` at 0 against a `PeakBytes` of 3,145,728. On the same graph without shrinkage
+the two were equal. `ArenaExtensionCount` is the same figure's other half and undercounts for the
+same reason: it is the blocks the arena is *holding*, so a shrinking run can end below where it
+started and the aggregate loses the difference.
 
 ### Did part of my GPU graph run on the host?
 
@@ -1292,6 +1330,13 @@ switch (compiled.OutputPlacement)
 
 `OutputPlacement` costs nothing — the session already knows where it puts its outputs — and is
 there on every run. A CPU session reports `Host`, which is what it is.
+
+On a card the three answers separate the three cases exactly. A graph the CUDA provider runs whole
+reports `Device`. A graph with one operator it has no kernel for — `Det`, say — reports `Mixed`
+when an output is left on each side, and `Host` when every output came back. Note that an output
+the card computed and the host then consumed is reported as host memory, because that is where the
+runtime put it: it lands in the pinned host arena, and `ReadPinnedArenaStatistics()` is what it
+cost.
 
 For **which** nodes fell back, and what they moved, ask the context to trace them. This one is not
 free: it builds the session with ONNX Runtime's profiler on, which costs every run that session
@@ -1320,10 +1365,18 @@ entry on a GPU session *is* the fallback, with the bytes attached. **Reading the
 recording**: it covers every run up to that call, later runs are not in it, and a second read hands
 back the same trace. So run what you are asking about, then read once.
 
+`Nodes` is in the order the runtime ran them, which on a split graph is not the order of
+`NodeExecution.NodeIndex`. ONNX Runtime inserts a `MemcpyToHost` / `MemcpyFromHost` node at each
+provider boundary and gives it a fresh index above every other node's, while leaving it where it
+belongs in the plan — so on a two-provider graph the copy carries the highest index of all and
+still appears immediately before the host node it feeds. Read `Nodes` for what happened, and
+`NodeIndex` only as a name.
+
 | what | where | cost | null / none when |
 |---|---|---|---|
 | `DeviceMemory.Read()` | static, the whole card | a microsecond | no CUDA runtime |
 | `CompiledGraph.ReadArenaStatistics()` | one session's allocator | a call into the backend | the backend reports no arena |
+| `CompiledGraph.ReadPinnedArenaStatistics()` | one session's pinned host arena | a call into the backend | the backend stages nothing (every CPU one) |
 | `ComputeContext.RunStats` | every run of the context | two arena reads per run, once switched on | `CollectRunStatistics` is off |
 | `CompiledGraph.OutputPlacement` | one session | nothing | the backend does not report it (`Unknown`) |
 | `CompiledGraph.ReadNodePlacement()` | one session, per node | a profiler on every run of that session | `TraceNodePlacement` is off |

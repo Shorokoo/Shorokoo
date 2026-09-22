@@ -30,6 +30,14 @@ public enum MemoryFigureKind
 /// session has ever been; attributing a peak to a <i>run</i> takes a read either side of that run,
 /// which is what <see cref="RunMemoryRecord"/> is and why its peak carries a
 /// <see cref="MemoryFigureKind"/>.</para>
+///
+/// <para><b>A session's initializers come out of this arena</b>, on a CPU backend and on a CUDA
+/// one alike, so a session is already holding its weights before it has run anything: a graph whose
+/// only weight is four mebibytes reads back 4,194,304 bytes of <see cref="MaxInUseBytes"/> at
+/// construction. How they are held differs, though — the CPU arena takes the weight as a reserve
+/// (<see cref="ReserveCount"/>) and the CUDA arena as a block of its own
+/// (<see cref="ArenaExtensionCount"/>) — so those two counts are not comparable between the
+/// devices.</para>
 /// </summary>
 /// <param name="InUseBytes">Bytes the arena has handed out and not taken back.</param>
 /// <param name="LimitBytes">The arena's cap — <see cref="DeviceMemorySettings.LimitBytes"/> —
@@ -38,8 +46,12 @@ public enum MemoryFigureKind
 /// <param name="MaxInUseBytes">The most that was ever in use at once, over the arena's whole
 /// life.</param>
 /// <param name="AllocationCount">Allocations the arena has served.</param>
-/// <param name="ArenaExtensionCount">Times the arena took a fresh block from the device.</param>
-/// <param name="ArenaShrinkageCount">Times the arena handed blocks back to the device.</param>
+/// <param name="ArenaExtensionCount">Blocks the arena holds from the device. It rises as the arena
+/// takes fresh ones and <b>falls when it hands them back</b>, so it is the standing count and not a
+/// tally of every extension ever made — on a run asking for
+/// <see cref="RunSettings.ShrinkArenaAfterRun"/> it can end below where it started.</param>
+/// <param name="ArenaShrinkageCount">Times the arena handed blocks back to the device. This one
+/// only ever rises.</param>
 /// <param name="ReserveCount">Allocations made outside the arena's own blocks.</param>
 /// <param name="TotalAllocatedBytes">Bytes the arena holds from the device, in use or not.</param>
 public readonly record struct ArenaStatistics(

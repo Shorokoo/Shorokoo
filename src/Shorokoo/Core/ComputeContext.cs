@@ -315,6 +315,26 @@ namespace Shorokoo.Runtime
         }
 
         /// <summary>
+        /// The pinned host arena this session's execution provider stages its host-device crossings
+        /// through, or <c>null</c> on a backend that has no such arena — every CPU one, which
+        /// stages nothing.
+        ///
+        /// <para>Separate from <see cref="ReadArenaStatistics"/> rather than added into it: these
+        /// are bytes of host memory the provider pinned, not bytes of the device, and a graph ORT
+        /// gave partly to the host pays here for every output that crosses back. A CUDA session
+        /// whose graph never crosses answers with a record of zeros, which is the arena saying it
+        /// was never asked for anything.</para>
+        ///
+        /// <para>A reading, like its sibling: a call into the backend, nothing remembered.</para>
+        /// </summary>
+        /// <exception cref="ObjectDisposedException">This graph's session has been released.</exception>
+        public ArenaStatistics? ReadPinnedArenaStatistics()
+        {
+            ObjectDisposedException.ThrowIf(IsDisposed, this);
+            return _session.ReadPinnedArenaStatistics();
+        }
+
+        /// <summary>
         /// Which execution provider ran each node of this graph, with the bytes each moved — or
         /// <c>null</c> unless the context that compiled this graph carried
         /// <see cref="DiagnosticSettings.TraceNodePlacement"/>, which is off by default because

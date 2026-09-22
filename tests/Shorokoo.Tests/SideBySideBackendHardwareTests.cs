@@ -17,6 +17,11 @@ namespace Shorokoo.Tests;
 /// 340 MB. Build with <c>-p:ShorokooDeployGpuBackend=true</c> to get them, then run with
 /// <c>--filter "Purpose=Hardware"</c>. Without that deployment each test here skips and says
 /// so rather than failing.</para>
+///
+/// <para><b>Without <c>-p:ShorokooGpuTests=true</c>, though</b>: that one makes the process-wide
+/// default backend a CUDA one, which is what <c>GpuExecutionTests</c> needs and the opposite of
+/// what the host half of this pairing needs. The two classes therefore want different builds, and
+/// each skips out of the other's.</para>
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Hardware")]
@@ -46,9 +51,20 @@ public class SideBySideBackendHardwareTests
         // The deployment is only half of what these need. Without this, a machine with the files
         // and no card ran every test here and failed inside ORT's session creation instead of
         // skipping -- which says nothing about the product and reads like a real regression.
-        return DeviceMemory.Read() is null
-            ? "No CUDA device answers on this machine, so the card half of the CPU-and-CUDA pairing "
-              + "cannot run. The deployment is in place; run this on a CUDA machine."
+        if (DeviceMemory.Read() is null)
+            return "No CUDA device answers on this machine, so the card half of the CPU-and-CUDA "
+                + "pairing cannot run. The deployment is in place; run this on a CUDA machine.";
+
+        // And the host half needs the process-wide default backend to be the host one, which is
+        // what -p:ShorokooGpuTests=true takes away: under it `new ComputeContext()` is a CUDA
+        // context, so the pairing is a card against a card and four of these fail on assertions
+        // about where a tensor lives. That switch is for GpuExecutionTests; this class wants the
+        // deployment without it.
+        var backend = DefaultBackend.Instance.GetType().Assembly.GetName().Name ?? "";
+        return backend.EndsWith("GPU", StringComparison.OrdinalIgnoreCase)
+            ? $"The process-wide default backend is '{backend}', so the host half of the "
+              + "CPU-and-CUDA pairing would run on the card as well. Build without "
+              + "-p:ShorokooGpuTests=true to run these."
             : null;
     }
 

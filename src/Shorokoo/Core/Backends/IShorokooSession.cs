@@ -45,6 +45,15 @@ public interface IShorokooSession : IDisposable
     // everywhere else here -- DeviceMemory.Read on a machine with no card answers the same way.
     ArenaStatistics? ReadArenaStatistics() => null;
 
+    // The pinned host arena this session's execution provider stages its host-device crossings
+    // through, where it has one -- a separate arena with figures of its own, never folded into the
+    // ones above, since a byte of pinned host memory and a byte of device memory are not the same
+    // thing and adding them would quietly change what either figure means.
+    //
+    // Defaulted to null, which is also what a backend with no such arena answers: a CPU session
+    // stages nothing, so there is nothing to report rather than an arena that read as empty.
+    ArenaStatistics? ReadPinnedArenaStatistics() => null;
+
     // Where this session produces its outputs. The free half of the placement question: the
     // session already knows, so no profiling and no extra run is needed, and on a device backend a
     // host-memory output is the tail of a graph that ran on the host.

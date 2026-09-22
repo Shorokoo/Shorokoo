@@ -16,10 +16,25 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
 
     public ShorokooOnnxValueType ValueType => (ShorokooOnnxValueType)(int)Inner.OnnxType;
 
-    public ShorokooTensorElementType ElementType =>
-        (ShorokooTensorElementType)(int)Inner.GetTensorTypeAndShape().ElementDataType;
+    public ShorokooTensorElementType ElementType
+    {
+        get
+        {
+            var elementType = Inner.GetTensorTypeAndShape().ElementDataType;
+            GC.KeepAlive(Inner);
+            return (ShorokooTensorElementType)(int)elementType;
+        }
+    }
 
-    public long[] Shape => Inner.GetTensorTypeAndShape().Shape;
+    public long[] Shape
+    {
+        get
+        {
+            var shape = Inner.GetTensorTypeAndShape().Shape;
+            GC.KeepAlive(Inner);
+            return shape;
+        }
+    }
 
     // ORT names the allocator a value was made by on its memory info, and "Cpu" is the one
     // that names host memory -- every other name ("Cuda", "Hip", ...) is the provider's own.
@@ -49,6 +64,7 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
         // puts an object on the finalization queue for every tensor anyone reads -- the cost
         // OnnxTensorData deliberately refuses to pay by having no finalizer of its own.
         using var info = Inner.GetTensorMemoryInfo();
+        GC.KeepAlive(Inner);
         return info.Name == CpuAllocatorName;
     }
 
@@ -64,6 +80,12 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
     /// device EP serves an output it was asked to leave on the host from its pinned allocator, so
     /// treating that name as device memory reports a graph that partly ran on the host as one that
     /// did not.
+    ///
+    /// <para>Measured on a CUDA card rather than read off the source. A graph whose tail ORT gave
+    /// to the host reports its crossing output as <c>CudaPinned</c> and the host node's own output
+    /// as <c>Cpu</c>; a graph that stayed on the card reports <c>Cuda</c> for every output. So the
+    /// name appears exactly where the memory is host-readable, and never on an output the provider
+    /// kept — the inversion this predicate would suffer from if the premise were backwards.</para>
     /// </summary>
     internal static bool IsHostAllocator(string? allocatorName) =>
         allocatorName is CpuAllocatorName or "CudaPinned" or "HipPinned";
@@ -83,6 +105,7 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
         {
             if (!Inner.IsTensor) return false;
             using var info = Inner.GetTensorMemoryInfo();
+            GC.KeepAlive(Inner);
             return !IsHostAllocator(info.Name);
         }
     }
@@ -127,13 +150,15 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
         return Inner.GetTensorMutableDataAsSpan<T>();
     }
 
-    // Each of the four accessors below hands ORT a bare handle off `Inner` and then has no further
-    // use for it, so the JIT retires the local at that read -- before the native call even starts.
-    // OrtValue is a plain class with an ordinary finalizer that calls OrtReleaseValue, so a
-    // collection on any thread during the call would free the native value underneath it. Being in
-    // scope roots nothing; this does (Shorokoo/Shorokoo#178). The callers happen to keep these
-    // values reachable today, which is safety by reachability rather than by construction, and a
-    // lifetime changed anywhere above here would quietly take it away.
+    // Each of the four accessors below, and the four reads above them, hands ORT a bare handle off
+    // `Inner` and then has no further use for it, so the JIT retires the local at that read --
+    // before the native call even starts. OrtValue is a plain class with an ordinary finalizer that
+    // calls OrtReleaseValue, so a collection on any thread during the call would free the native
+    // value underneath it. Being in scope roots nothing; this does (Shorokoo/Shorokoo#178). The
+    // callers happen to keep these values reachable today, which is safety by reachability rather
+    // than by construction, and a lifetime changed anywhere above here would quietly take it away.
+    // `CoreUtilsCoverageTests.TestEveryNativeCallThroughAnOrtValueKeepsItAliveAndTheGuardStillDetectsEveryEvasion`
+    // is what keeps the next such call from being written without one.
 
     public IReadOnlyList<string> GetStringTensorData()
     {

@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using Microsoft.ML.OnnxRuntime;
 using Shorokoo.Core.Backends;
 using Shorokoo.Core.Nodes.Processors.Helpers;
@@ -8,13 +9,17 @@ using Shorokoo.Runtime;
 namespace Shorokoo.Tests;
 
 /// <summary>
-/// Smoke tests that actually execute a small Shorokoo computation graph on the
-/// local machine's GPU (NOT skipped).
+/// What the CUDA execution provider actually does, run rather than read: a graph on the card, the
+/// device-memory budget and the shrinking arena a resident training loop needs, and the memory
+/// statistics and node placement of
+/// <see href="https://github.com/Shorokoo/Shorokoo/issues/377">Shorokoo/Shorokoo#377</see>, every
+/// CUDA path of which had been reviewed on a machine with no card.
 ///
-/// These tests assume the host has an ONNX Runtime–compatible GPU available.
-/// On a machine without one they will fail with a clear EP-loading error.
-/// They are deliberately excluded from the coverage suite (no
-/// Purpose=Coverage); run them on a CUDA machine with --filter "Purpose=Hardware".
+/// <para>Excluded from the coverage suite. These need the process-wide default backend to be a
+/// GPU one, which the test project deploys under <c>-p:ShorokooGpuTests=true</c>; without it
+/// <see cref="CudaFactAttribute"/> skips each of them and says so rather than failing on a box
+/// with no card. Run with <c>--filter "Purpose=Hardware"</c>, and with that switch and nothing
+/// else — it changes the backend every test in the process discovers.</para>
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Hardware")]
@@ -142,6 +147,246 @@ public class GpuExecutionTests
         Assert.Equal(expected.Length, actual.Length);
         for (int i = 0; i < expected.Length; i++)
             Assert.Equal(expected[i], actual[i], precision: 4);
+    }
+
+    /// <summary>
+    /// The nine arena figures off a CUDA allocator, which is what the whole statistics surface
+    /// rests on and what no CPU machine can ask for: the allocator is built by name and a box
+    /// without a card refuses it, so only the failure path has ever run. And what the arena holds
+    /// before the first run — the session's weights, out of this same arena, so run 1's peak is
+    /// them plus what the run added and the record has to carry both.
+    /// </summary>
+    [CudaFact]
+    public void CudaProvider_TheDeviceArenaAnswersAndAlreadyHoldsTheWeightsBeforeTheFirstRun()
+    {
+        using var ctx = new ComputeContext
+        {
+            Diagnostics = new DiagnosticSettings { CollectRunStatistics = true },
+        };
+        var compiled = ArenaProbeModels.Weighted(ctx);
+
+        var built = Assert.IsType<ArenaStatistics>(compiled.ReadArenaStatistics());
+        Assert.Equal(ArenaProbeModels.WeightBytes, built.MaxInUseBytes);
+        Assert.Equal(ArenaProbeModels.WeightBytes, built.InUseBytes);
+        Assert.Equal(ArenaProbeModels.WeightBytes, built.MaxAllocSizeBytes);
+        Assert.Equal(ArenaProbeModels.WeightBytes, built.TotalAllocatedBytes);
+        Assert.Equal(1L, built.AllocationCount);
+        Assert.Equal(-1L, built.LimitBytes);
+        // The card takes the weight as a block of its own where the host arena reserves it, so
+        // these two counts mean different things on the two devices and do not compare.
+        Assert.Equal(1L, built.ArenaExtensionCount);
+        Assert.Equal(0L, built.ReserveCount);
+
+        compiled.Execute(ArenaProbeModels.WeightedInput());
+        var run = Assert.Single(ctx.RunStats.RecentRuns);
+        Assert.Equal(ArenaProbeModels.WeightBytes, run.PriorPeakBytes);
+        Assert.Equal(MemoryFigureKind.Measured, run.PeakKind);
+        Assert.True(run.PeakBytes > run.PriorPeakBytes);
+        Assert.True(run.PeakBytes - run.PriorPeakBytes < ArenaProbeModels.WeightBytes / 16);
+    }
+
+    /// <summary>
+    /// A graph the provider cannot run whole: one output stays on the card and one comes back from
+    /// the host, which is what <see cref="SessionOutputPlacement.Mixed"/ > is for, and the crossing
+    /// is charged to the pinned host arena rather than to the device one. A graph with no node the
+    /// provider can run is <see cref="SessionOutputPlacement.Host"/>, and one it runs whole is
+    /// <see cref="SessionOutputPlacement.Device"/>.
+    /// </summary>
+    [CudaFact]
+    public void CudaProvider_OutputPlacementSeparatesADeviceGraphAPartitionedOneAndOneThatFellBack()
+    {
+        using var ctx = new ComputeContext();
+
+        var partitioned = ArenaProbeModels.Partitioned(ctx);
+        Assert.Equal(SessionOutputPlacement.Mixed, partitioned.OutputPlacement);
+        Assert.True(partitioned.HasDeviceMemory);
+
+        var pinnedBefore = Assert.IsType<ArenaStatistics>(partitioned.ReadPinnedArenaStatistics());
+        Assert.Equal(0L, pinnedBefore.AllocationCount);
+
+        partitioned.Execute(ArenaProbeModels.Square());
+        var pinned = Assert.IsType<ArenaStatistics>(partitioned.ReadPinnedArenaStatistics());
+        var device = Assert.IsType<ArenaStatistics>(partitioned.ReadArenaStatistics());
+        Assert.True(pinned.AllocationCount > 0);
+        Assert.True(pinned.MaxInUseBytes > 0);
+        Assert.NotEqual(device, pinned);
+
+        var host = ArenaProbeModels.HostOnly(ctx);
+        host.Execute(ArenaProbeModels.Square());
+        Assert.Equal(SessionOutputPlacement.Host, host.OutputPlacement);
+        Assert.False(host.HasDeviceMemory);
+        Assert.Equal(0L, Assert.IsType<ArenaStatistics>(host.ReadArenaStatistics()).AllocationCount);
+
+        var onCard = ArenaProbeModels.MatMul(ctx);
+        onCard.Execute(ArenaProbeModels.MatMulOperand(8), ArenaProbeModels.MatMulOperand(8));
+        Assert.Equal(SessionOutputPlacement.Device, onCard.OutputPlacement);
+        Assert.True(onCard.HasDeviceMemory);
+    }
+
+    /// <summary>
+    /// The node trace of a genuinely partitioned graph: two providers, the fallen-back node named,
+    /// and the copy node the runtime inserts at the boundary sitting <i>at</i> the boundary. That
+    /// last one is the whole point — the copy carries the highest graph index of the four, so
+    /// ordering the trace by index would move exactly the node that marks the fallback to the end,
+    /// past the node it feeds.
+    /// </summary>
+    [CudaFact]
+    public void CudaProvider_APartitionedTraceNamesBothProvidersAndKeepsTheCopyAtTheBoundary()
+    {
+        using var ctx = new ComputeContext
+        {
+            Diagnostics = new DiagnosticSettings { TraceNodePlacement = true },
+        };
+        var compiled = ArenaProbeModels.Partitioned(ctx);
+        compiled.Execute(ArenaProbeModels.Square());
+
+        var placement = Assert.IsType<NodePlacement>(compiled.ReadNodePlacement());
+        Assert.Equal(["CUDAExecutionProvider", "CPUExecutionProvider"],
+            placement.Providers.Select(share => share.Provider));
+
+        var onHost = Assert.Single(placement.NodesOn("CPUExecutionProvider"));
+        Assert.Equal("Det", onHost.OpType);
+        Assert.Equal(placement.Nodes.Count, placement.Providers.Sum(share => share.NodeCount));
+
+        var ran = placement.Nodes.ToList();
+        var copy = Assert.Single(ran.Where(node => node.OpType.StartsWith("Memcpy", StringComparison.Ordinal)));
+        Assert.Equal("MemcpyToHost", copy.OpType);
+        Assert.Equal(ran.Max(node => node.NodeIndex), copy.NodeIndex);
+        Assert.True(copy.NodeIndex > onHost.NodeIndex);
+        Assert.Equal(ran.IndexOf(onHost) - 1, ran.IndexOf(copy));
+        Assert.NotEqual(ran.Count - 1, ran.IndexOf(copy));
+    }
+
+    /// <summary>
+    /// Shrinkage, asked for and observed: the arena hands blocks back at the end of every run, and
+    /// what it is holding afterwards drops below the high-water mark it reached — which is the one
+    /// case where <see cref="RunStatistics.ArenaBytes"/> sits under
+    /// <see cref="RunStatistics.PeakBytes"/> rather than above it. Nothing had ever seen it
+    /// happen; the CPU arena never shrank in testing.
+    /// </summary>
+    [CudaFact]
+    public void CudaProvider_AShrinkingRunHandsBlocksBackAndEndsBelowThePeakItReached()
+    {
+        static RunStatistics Runs(bool shrink)
+        {
+            using var ctx = new ComputeContext
+            {
+                Diagnostics = new DiagnosticSettings { CollectRunStatistics = true },
+                RunSettings = new RunSettings { ShrinkArenaAfterRun = shrink },
+            };
+            var compiled = ArenaProbeModels.MatMul(ctx);
+            var operand = ArenaProbeModels.MatMulOperand(512);
+            for (int run = 0; run < 3; run++) compiled.Execute(operand, operand);
+            return ctx.RunStats;
+        }
+
+        var shrinking = Runs(shrink: true);
+        Assert.True(shrinking.ArenaShrinkageCount >= 3);
+        Assert.True(shrinking.PeakBytes > 0);
+        Assert.True(shrinking.ArenaBytes < shrinking.PeakBytes);
+
+        var keeping = Runs(shrink: false);
+        Assert.Equal(0L, keeping.ArenaShrinkageCount);
+        Assert.Equal(shrinking.PeakBytes, keeping.PeakBytes);
+        Assert.True(keeping.ArenaBytes >= keeping.PeakBytes);
+        // The blocks figure falls when they go back, so a shrinking context undercounts them.
+        Assert.True(keeping.ArenaExtensionCount > shrinking.ArenaExtensionCount);
+    }
+
+    /// <summary>
+    /// The comparison #198 asked for and no CPU machine can make: what this context's own sessions
+    /// took, against what the card reports for every process on it. The session figure is the
+    /// smaller of the two and accounts for part of the rise — the rest is the provider's context,
+    /// its libraries and whatever else holds the device.
+    /// </summary>
+    [CudaFact]
+    public void CudaProvider_TheContextsRunStatisticsAccountForPartOfWhatTheCardReports()
+    {
+        DeviceMemory.ResetPeak();
+        try
+        {
+            using var ctx = new ComputeContext
+            {
+                Diagnostics = new DiagnosticSettings { CollectRunStatistics = true },
+            };
+            var compiled = ArenaProbeModels.MatMul(ctx);
+            var operand = ArenaProbeModels.MatMulOperand(1024);
+
+            var idle = DeviceMemory.Sample();
+            Assert.NotNull(idle);
+            for (int run = 0; run < 5; run++)
+            {
+                compiled.Execute(operand, operand);
+                DeviceMemory.Sample();
+            }
+
+            var stats = ctx.RunStats;
+            Assert.Equal(5L, stats.RunCount);
+            Assert.True(stats.PeakBytes > 0);
+            var device = Assert.IsType<ArenaStatistics>(compiled.ReadArenaStatistics());
+            Assert.Equal(stats.PeakBytes, device.MaxInUseBytes);
+
+            var grew = DeviceMemory.PeakUsedBytes - idle!.Value.UsedBytes;
+            Assert.True(grew >= stats.PeakBytes);
+            Assert.True(DeviceMemory.PeakUsedBytes < idle.Value.TotalBytes);
+        }
+        finally
+        {
+            DeviceMemory.ResetPeak();
+        }
+    }
+
+    /// <summary>
+    /// The placement probe hands ONNX Runtime the session as a bare handle, and a compiled graph is
+    /// held weakly by its context, so this reads the placement off a graph nothing else holds while
+    /// another thread collects and drains finalizers. <b>It means something only in Release</b>:
+    /// unoptimized code roots a local to the end of its scope, so the hazard cannot arise in Debug
+    /// at all.
+    ///
+    /// <para>What it pins is the path, not the <c>GC.KeepAlive</c> in it — removing that does not
+    /// reproduce a fault, because the probe is reached through a <c>Lazy</c> whose factory closure
+    /// holds the session while the factory runs. A change that takes the closure away is what this
+    /// would catch.</para>
+    /// </summary>
+    [CudaFact]
+    public void CudaProvider_OutputPlacementReadsFromAGraphHeldOnlyInALocalWhileAnotherThreadCollects()
+    {
+        using var collecting = new CancellationTokenSource();
+        var churn = Task.Run(() =>
+        {
+            // The finalizers are the hazard, not the collection: a session the collector frees is
+            // only released once ~InferenceSession runs. Throttled, because a bare collect loop
+            // starves the thread compiling the sessions and buys no extra collections per probe.
+            while (!collecting.IsCancellationRequested)
+            {
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                Thread.Sleep(1);
+            }
+        });
+        try
+        {
+            for (int round = 0; round < 20; round++)
+                Assert.Equal(SessionOutputPlacement.Device, PlacementOfAGraphNothingElseHolds());
+        }
+        finally
+        {
+            collecting.Cancel();
+            churn.Wait();
+        }
+    }
+
+    /// <summary>The graph, its context and the session under both are unreachable from the moment
+    /// the placement is asked for: every one of them is a local at its last read. Not inlined, so
+    /// the caller's frame cannot keep them alive either.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static SessionOutputPlacement PlacementOfAGraphNothingElseHolds()
+    {
+        var a = InputVector<float32>();
+        var b = InputVector<float32>();
+        var context = new ComputeContext();
+        var compiled = context.Compile(new InternalComputationGraph([a, b], [a * b + a]));
+        return compiled.OutputPlacement;
     }
 
     private static TrainingRig ScalarRig(ComputeContext? runtimeContext = null) => TrainingRig.FromScratch(

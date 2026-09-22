@@ -7,16 +7,24 @@ namespace Shorokoo.Core.Backends;
 /// <param name="PeakBytes">The most the arena held at once, as far as a read either side of this
 /// run can tell — see <paramref name="PeakKind"/>.</param>
 /// <param name="PeakKind">
-/// <see cref="MemoryFigureKind.Measured"/> when this run pushed the arena's high-water mark up,
-/// so the mark is this run's own peak and exact. <see cref="MemoryFigureKind.UpperBound"/> when it
-/// did not: some earlier run holds the mark, this run stayed under it, and how far under is not
-/// something the arena records.
+/// <see cref="MemoryFigureKind.Measured"/> when this run pushed the arena's high-water mark up, so
+/// the mark is where the arena stood at this run's own high point — weights and everything else it
+/// was already holding included, which is <see cref="PriorPeakBytes"/>, so only the difference
+/// belongs to this run. <see cref="MemoryFigureKind.UpperBound"/> when it did not: some earlier run
+/// holds the mark, this run stayed under it, and how far under is not something the arena records.
+/// </param>
+/// <param name="PriorPeakBytes">
+/// The arena's high-water mark as this run found it, read just before it started. A session's
+/// initializers are allocated from this same arena, so on the first run of a graph with weights in
+/// it this is the weights and <see cref="PeakBytes"/> minus this is what the run itself added; on a
+/// later run it is whatever the highest run before it reached.
 /// </param>
 /// <param name="Arena">The arena's figures as the run left them.</param>
 public readonly record struct RunMemoryRecord(
     long RunNumber,
     long PeakBytes,
     MemoryFigureKind PeakKind,
+    long PriorPeakBytes,
     ArenaStatistics Arena);
 
 /// <summary>
@@ -68,7 +76,16 @@ public sealed record RunStatistics
     /// <summary>Allocations those runs made between them.</summary>
     public long AllocationCount { get; init; }
 
-    /// <summary>Times those runs made an arena take a fresh block from its device.</summary>
+    /// <summary>
+    /// Blocks those runs made an arena take fresh from its device, counted as the rise in
+    /// <see cref="ArenaStatistics.ArenaExtensionCount"/> across each run.
+    ///
+    /// <para>An undercount where something is shrinking, and unavoidably so: the figure this is
+    /// built from is the blocks an arena is <i>holding</i> rather than a tally of extensions ever
+    /// made, so a run that takes two blocks and hands three back reads as no extension at all. Read
+    /// it as blocks the arena kept, not as trips to the device, on a context carrying
+    /// <see cref="RunSettings.ShrinkArenaAfterRun"/>.</para>
+    /// </summary>
     public long ArenaExtensionCount { get; init; }
 
     /// <summary>Times those runs made an arena hand blocks back —
@@ -119,6 +136,12 @@ internal sealed class RunStatisticsCollector
     /// belongs to some earlier run and bounds this one from above without measuring it. The record
     /// carries which, so the two are never read as the same thing.</para>
     ///
+    /// <para>The mark the run found is carried too, because the arena a run allocates from is the
+    /// one holding the session's weights: a rise from 4,194,304 to 4,202,496 is a run that cost
+    /// 8,192 bytes, not one that cost four megabytes. Subtracting it from the peak would be the
+    /// wrong fix — <see cref="RunStatistics.PeakBytes"/> is the largest an arena of this context
+    /// ever held at once, and a figure with the weights taken out of it stops being that.</para>
+    ///
     /// <para>The counts are differences across the same arena, so they are this run's own.</para>
     /// </summary>
     internal void Record(in ArenaStatistics before, in ArenaStatistics after)
@@ -129,6 +152,7 @@ internal sealed class RunStatisticsCollector
             after.MaxInUseBytes > before.MaxInUseBytes
                 ? MemoryFigureKind.Measured
                 : MemoryFigureKind.UpperBound,
+            before.MaxInUseBytes,
             after);
 
         lock (_gate)
@@ -138,9 +162,9 @@ internal sealed class RunStatisticsCollector
             _largestAllocationBytes = Math.Max(_largestAllocationBytes, after.MaxAllocSizeBytes);
             _arenaBytes = Math.Max(_arenaBytes, after.TotalAllocatedBytes);
             // Differences, and clamped at zero. Two runs of one session overlapping read each
-            // other's allocations into both their differences, which overcounts; only a session
-            // reporting a counter that went backwards could make one negative, and a negative
-            // count is worse than a lost one.
+            // other's allocations into both their differences, which overcounts; and the extension
+            // figure really does go backwards -- it is the blocks the arena holds, so a shrinking
+            // run lowers it -- which the clamp turns into a lost count rather than a negative one.
             _allocationCount += Math.Max(0, after.AllocationCount - before.AllocationCount);
             _arenaExtensionCount += Math.Max(0, after.ArenaExtensionCount - before.ArenaExtensionCount);
             _arenaShrinkageCount += Math.Max(0, after.ArenaShrinkageCount - before.ArenaShrinkageCount);

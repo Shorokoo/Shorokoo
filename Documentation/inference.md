@@ -1356,8 +1356,9 @@ it is not a bound on what the device holds, and on a card pressed to its edge it
 card's own capacity —
 but `RunSettings.ShrinkArenaAfterRun` hands blocks back at the end of a run, before these are read,
 while the peak comes from a mark the runtime never lowers. Three shrinking runs of a matmul on a
-card left `ArenaBytes` at 0 against a `PeakBytes` of 3,145,728. On the same graph without shrinkage
-the two were equal. `ArenaExtensionCount` is the same figure's other half and undercounts for the
+card left `ArenaBytes` below a `PeakBytes` of 3,145,728; on the same graph without shrinkage the
+two were equal. How far below depends on how many sessions the context compiled, so read the
+ordering rather than a figure. `ArenaExtensionCount` is the same figure's other half and undercounts for the
 same reason: it is the blocks the arena is *holding*, so a shrinking run can end below where it
 started and the aggregate loses the difference.
 
@@ -1415,9 +1416,11 @@ back the same trace. So run what you are asking about, then read once.
 
 `Nodes` is in the order the runtime ran them, which on a split graph is not the order of
 `NodeExecution.NodeIndex`. ONNX Runtime inserts a `MemcpyToHost` / `MemcpyFromHost` node at each
-provider boundary and gives it a fresh index above every other node's, while leaving it where it
-belongs in the plan — so on a two-provider graph the copy carries the highest index of all and
-still appears immediately before the host node it feeds. Read `Nodes` for what happened, and
+provider boundary and gives it a fresh index above every node of the original graph, while leaving
+it where it belongs in the plan — so each inserted copy still appears immediately before the node
+it feeds while sorting to the end. On a graph with one crossing, measured, that copy carried the
+highest index of all and ran third of four. A graph with several crossings has several such
+copies, which sort among themselves and after everything else. Read `Nodes` for what happened, and
 `NodeIndex` only as a name.
 
 | what | where | cost | null / none when |
@@ -1425,6 +1428,7 @@ still appears immediately before the host node it feeds. Read `Nodes` for what h
 | `DeviceMemory.Read()` | static, the whole card | a microsecond | no CUDA runtime |
 | `CompiledGraph.ReadArenaStatistics()` | one session's allocator | a call into the backend | the backend reports no arena |
 | `CompiledGraph.ReadPinnedArenaStatistics()` | one session's pinned host arena | a call into the backend | the backend stages nothing (every CPU one) |
+| `ComputeContext.ReadTransferArenaStatistics()` | the arena its tensors were placed from | a call into the backend | no device memory, or nothing placed under these settings yet |
 | `ComputeContext.RunStats` | every run of the context | two arena reads per run, once switched on | `CollectRunStatistics` is off |
 | `CompiledGraph.OutputPlacement` | one session | nothing | the backend does not report it (`Unknown`) |
 | `CompiledGraph.ReadNodePlacement()` | one session, per node | a profiler on every run of that session | `TraceNodePlacement` is off |

@@ -616,11 +616,18 @@ namespace Shorokoo.Runtime
         /// <see cref="CompiledGraph.ReadArenaStatistics"/> reports.
         ///
         /// <para><c>null</c> when there is nothing to report: a backend with no device memory, or
-        /// one this context has not yet been asked to place a tensor on. It is built with
+        /// a device nothing has yet been placed on <i>under these settings</i> — by this context
+        /// or by any other. It fills as soon as one of them places a tensor, because the arena is
+        /// keyed on the device and the settings rather than on the context: it is built with
         /// <see cref="DeviceMemory"/>, so <see cref="ArenaStatistics.LimitBytes"/> is this
-        /// context's own budget — and it is shared with every other context on the same device
-        /// carrying the same settings, which is exactly the set of contexts that share the
-        /// allocation.</para>
+        /// context's own budget, and every context naming the same budget on the same card reads
+        /// this same arena and shares that one ceiling between them. Settings differing only by
+        /// <see cref="ArenaExtendStrategy.Auto"/> against what it resolves to are the same
+        /// settings here.</para>
+        ///
+        /// <para>A backend written before budgets existed reports <c>null</c> too, having no
+        /// budgeted arena to answer for — so <c>null</c> does not on its own distinguish "nothing
+        /// placed yet" from "this backend does not honour a budget".</para>
         ///
         /// <para>It is a reading, so it costs a call into the backend and nothing is
         /// remembered.</para>

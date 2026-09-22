@@ -134,8 +134,15 @@ public class ArenaExtendStrategyCudaProbeTests
     /// <summary>
     /// Runs <paramref name="steps"/> training steps of <paramref name="model"/> under one arena
     /// configuration and hands back what the step's own arena did on each, or null with the reason
-    /// where a step failed to allocate. The context is disposed either way, so nothing holds the
-    /// card past the leg.
+    /// where a step failed to allocate. The context is disposed either way, so the leg's own
+    /// sessions go with it.
+    ///
+    /// <para>That is not the same as the card being clear. A tensor placed on a card comes out of
+    /// an arena keyed on (device, settings) and held for the life of the process, so a leg that
+    /// places one leaves that arena behind for every later leg, and each leg here names different
+    /// settings. Nothing in this probe places one — the rig is fed host tensors and moves them
+    /// itself — but the <c>device</c> column is a whole-card reading, so read it as the card
+    /// during that leg rather than as the leg alone.</para>
     /// </summary>
     private static (List<StepReading> Steps, long Parameters, string? Failure) Probe(
         ComputationGraph model, ArenaExtendStrategy strategy, long? limitBytes, int steps = Steps)
@@ -160,7 +167,11 @@ public class ArenaExtendStrategyCudaProbeTests
                 AdamWOptimizer.ComputationGraph, sample,
                 new AdamWOptimizerHyperparameters { LearningRate = 0.0003f },
                 runtimeContext: ctx);
-            Assert.False(rig.HasTargets);
+            // Not an assertion: this method reports failures rather than throwing them, and one
+            // raised here would be caught below and printed as a Failure like any other. The rig
+            // is target-free because the loss forwards the model's own, which is the shape a
+            // language model wants anyway, and a leg that lost that would say so in its own row.
+            if (rig.HasTargets) return ([], 0, "the rig grew a target slot; the loss is not forwarding");
 
             var ckpt = rig.CreateInitialCheckpoint();
             foreach (var field in rig.TrainableParamStructDef.Fields)

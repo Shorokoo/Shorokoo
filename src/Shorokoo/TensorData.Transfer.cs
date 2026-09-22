@@ -37,7 +37,13 @@ namespace Shorokoo
         /// case they stay alive for it.</para>
         /// </summary>
         /// <exception cref="ObjectDisposedException">This tensor, or the memory behind it, is gone.</exception>
-        /// <exception cref="InvalidOperationException">This tensor's space cannot be named.</exception>
+        /// <exception cref="InvalidOperationException">This tensor's space cannot be named, or the
+        /// target's card already holds as many distinct device-memory configurations as it may —
+        /// see <see cref="Shorokoo.Core.Backends.DeviceMemorySettings.LimitBytes"/>, which says
+        /// what opens one and how to keep the count down.</exception>
+        /// <remarks>A transfer onto a card is charged to the target context's device-memory
+        /// budget, so one that does not fit fails with the backend runtime's own allocation error.
+        /// That is the budget working rather than failing.</remarks>
         public TensorData TransferTo(ComputeContext? target)
         {
             var to = target ?? ComputeContext.Host;
@@ -70,6 +76,11 @@ namespace Shorokoo
         /// reach for when the data has to outlive the context that produced it.</para>
         /// </summary>
         /// <exception cref="ObjectDisposedException">This tensor, or the memory behind it, is gone.</exception>
+        /// <exception cref="InvalidOperationException">The target's card already holds as many
+        /// distinct device-memory configurations as it may — see
+        /// <see cref="Shorokoo.Core.Backends.DeviceMemorySettings.LimitBytes"/>.</exception>
+        /// <remarks>The copy is charged to the target context's device-memory budget, so one that
+        /// does not fit fails with the backend runtime's own allocation error.</remarks>
         public TensorData CopyTo(ComputeContext? target)
         {
             var to = target ?? ComputeContext.Host;

@@ -70,6 +70,10 @@ public sealed record RunStatistics
     /// at the end of a run — before this is read — while <see cref="PeakBytes"/> comes from a mark
     /// the runtime never lowers. A shrinking run can therefore leave this below the peak it
     /// reached, so treat the difference as spare capacity only where nothing is shrinking.</para>
+    ///
+    /// <para>Nor is it a bound on what the device holds — see
+    /// <see cref="ArenaStatistics.TotalAllocatedBytes"/>, the figure this is the high-water mark
+    /// of.</para>
     /// </summary>
     public long ArenaBytes { get; init; }
 

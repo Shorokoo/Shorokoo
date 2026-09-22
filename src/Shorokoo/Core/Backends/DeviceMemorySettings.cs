@@ -8,9 +8,10 @@ public enum ArenaExtendStrategy
     /// <summary>
     /// Let Shorokoo choose per session — the default. Which strategy wastes less depends on
     /// whether a session's allocation sizes settle: on a series that settles, exact-size
-    /// extension holds about 1.3-1.45x less; on shapes that keep growing, ORT's doubling holds
-    /// about 1.5x less and fits on a capped arena where exact-size extension does not. Between
-    /// those lies a band where the two are within about 1.1x, or tie.
+    /// extension holds less — about 1.3-1.45x on a host arena, and 1.12x measured on a CUDA card
+    /// over a real training step; on shapes that keep growing, ORT's doubling holds about 1.5x
+    /// less and fits on a capped arena where exact-size extension does not. Between those lies a
+    /// band where the two are within about 1.1x, or tie.
     ///
     /// <para>Whether a given session's sizes settle is a property of how its caller feeds it, so
     /// Shorokoo does not guess at it. <see cref="Auto"/> is <see cref="SameAsRequested"/> except
@@ -141,13 +142,19 @@ public sealed record DeviceMemorySettings
     ///
     /// <para>Neither concrete strategy is better in general. A training run feeds one input shape
     /// to one compiled step for its whole length, and on that shape exact-size extension holds
-    /// about 1.3-1.45x less than ORT's doubling. (A separate figure from the same report: under
-    /// ORT's doubling the arena settled at roughly 1.8x what the run's own steps used — that is
-    /// the waste being removed, not a ratio between the two strategies.) Where several allocation
+    /// less: about 1.3-1.45x on a host arena over four chained matmuls, and 1.12x measured on a
+    /// CUDA card over a 49 M-parameter transformer's training step. Where several allocation
     /// sizes are in play it is the doubling that holds less, but by 1.06-1.13x. The case it wins
     /// outright is input shapes that keep growing without settling, where each outgrown region is
     /// stranded: there the doubling holds about 1.5x less and fits on a capped arena where
     /// exact-size extension does not. Name a strategy here to decide it yourself.</para>
+    ///
+    /// <para><b>The strategy is the smaller half of what a training step's arena costs.</b> On the
+    /// card, that step's arena roughly doubles between its first run and its second under
+    /// <i>either</i> strategy — 1.75x and 1.89x — in one extension, and ends up holding about
+    /// twice what its steps use (1.94x and 2.15x). The strategy trims that one block; only
+    /// <see cref="LimitBytes"/> stops it being taken, and a budget near what the step uses keeps
+    /// the run identical while giving back what the doubling would have held.</para>
     /// </summary>
     /// <exception cref="ArgumentOutOfRangeException">Not one of the strategies.</exception>
     public ArenaExtendStrategy ArenaExtend

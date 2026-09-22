@@ -53,7 +53,11 @@ public enum MemoryFigureKind
 /// <param name="ArenaShrinkageCount">Times the arena handed blocks back to the device. This one
 /// only ever rises.</param>
 /// <param name="ReserveCount">Allocations made outside the arena's own blocks.</param>
-/// <param name="TotalAllocatedBytes">Bytes the arena holds from the device, in use or not.</param>
+/// <param name="TotalAllocatedBytes">Bytes the arena has taken from the device, in use or not —
+/// and <b>not</b> a bound on what the device is holding. A CUDA run that filled a 24,564 MiB card
+/// reported 32,462 MiB here; the likeliest reading is that an arena pressed to the card's edge
+/// gives regions back and takes others while this counter does not follow all the way down. For
+/// what the card is carrying, read <see cref="DeviceMemory"/>.</param>
 public readonly record struct ArenaStatistics(
     long InUseBytes,
     long LimitBytes,

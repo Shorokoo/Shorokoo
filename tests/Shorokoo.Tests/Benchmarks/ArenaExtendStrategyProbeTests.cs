@@ -17,8 +17,11 @@ namespace Shorokoo.Tests.Benchmarks;
 /// <c>mallinfo2</c>, and says so rather than failing anywhere else.</para>
 ///
 /// <para>The CPU and CUDA arenas are the same <c>BFCArena</c> with the same strategy enum, so the
-/// shape of the result carries over; the figures do not, and the ratio grows with the number of
-/// distinct allocation sizes a step makes. The strategy reaches the CPU arena only through an
+/// shape of the result carries over; the figures do not. It was predicted here that the ratio
+/// would grow with the number of distinct allocation sizes a step makes, and it does not:
+/// <see cref="ArenaExtendStrategyCudaProbeTests"/> put a real training step on a card and the
+/// settled row came back at 1.12x, below this table's 1.3-1.45x rather than above it. The
+/// strategy reaches the CPU arena only through an
 /// env-registered allocator, which is why this drives ORT directly rather than going through
 /// <see cref="ComputeContext"/>. The figures this prints, and what they decide, are recorded once
 /// — in <c>Documentation/inference.md</c> under "Device memory (GPU backends)" — rather than also

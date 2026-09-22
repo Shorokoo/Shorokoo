@@ -1042,21 +1042,49 @@ MiB of each other, so read every ratio below as approximate and the near-ties as
 The measurement is a test in the Shorokoo repository
 (`ArenaExtendStrategyProbeTests`, `Purpose=Manual`) rather than something you can run against the
 package, and it is taken on the **CPU** arena — the same `BFCArena` with the same strategy enum the
-CUDA provider uses, so the shape carries over but the numbers do not
-([#357](https://github.com/Shorokoo/Shorokoo/issues/357) tracks confirming them on a card). Treat
-these as indicative of the shape, not as your machine's numbers — what settles your case is
-`DeviceMemory.Sample()` around your own run.
+CUDA provider uses. It reads the arena back off glibc's `mallinfo2`, so it runs on Linux only and
+says "unavailable" anywhere else; the card figures below were therefore taken on a different
+machine, and the two tables are not a like-for-like pair.
+
+A second probe (`ArenaExtendStrategyCudaProbeTests`, `Purpose=Manual`) answers what the host one
+cannot: what each strategy costs **one real training step on a card**. A 49,214,208-parameter
+decoder-only transformer — 6 layers, width 384, 6 heads of 64, sequence 1024, vocabulary 50,257,
+fp32, `AdamWOptimizer` — at batch 8 on a 24,564 MiB RTX 4090, read off the step's own session arena
+through `ComputeContext.RunStats` rather than off the device:
+
+| the training step's own arena | `SameAsRequested` | `NextPowerOfTwo` |
+|---|---|---|
+| in use at its highest, settled | **8,009 MiB** | 8,043–8,101 MiB |
+| taken from the device, step 0 | **8,864 MiB** | 9,233–9,249 MiB |
+| taken from the device, step 1 onwards | **15,508 MiB** | 17,425–17,441 MiB |
+| blocks held, settled | 278 | 14–15 |
+
+Two runs, and this time the `SameAsRequested` column repeated to the byte while `NextPowerOfTwo`
+moved by 16 MiB and one block — the reverse of the host table above, where both columns move by a
+MiB or two. Treat both tables as indicative of the shape rather than as your machine's numbers:
+what settles your case is `ComputeContext.RunStats`, or `DeviceMemory.Sample()`, around your own
+run.
 
 Neither column wins outright, and which one wins is decided by something Shorokoo knows about each
 session: whether its allocation sizes settle. A training run feeds one input shape to one compiled
-step for its whole length — the first row — and there exact-size extension holds about 1.3–1.45x
-less. On the card that prompted this, a step whose first step showed 12,877 MiB ended up with the
-arena holding all 24,563 MiB — the whole of a 24 GiB card — and a smaller batch of the same model
-settled at roughly 1.8x what its steps used. Two allocation sizes still favour exact-size extension
-(row 2, by 1.2–1.6x depending on the run); it is once several are in play that ORT's doubling holds
-less, by about 1.1x, or ties (rows 3 to 5). The last two rows are the other end: input shapes that
-grow without settling, where each outgrown region is stranded, the doubling holds around 1.5x less
-and — on a card with no room to spare — fits where exact-size extension does not.
+step for its whole length — the first row of the host table — and there exact-size extension holds
+about 1.3–1.45x less; on the card, on a real training step, it holds **1.12x** less. Two allocation
+sizes still favour exact-size extension (row 2, by 1.2–1.6x depending on the run); it is once
+several are in play that ORT's doubling holds less, by about 1.1x, or ties (rows 3 to 5). The last
+two rows are the other end: input shapes that grow without settling, where each outgrown region is
+stranded, the doubling holds around 1.5x less and — on a card with no room to spare — fits where
+exact-size extension does not.
+
+**What the card adds is that the strategy is the smaller half of the story.** The arena roughly
+doubles between step 0 and step 1 whichever strategy it is on — 1.75x under exact-size extension,
+1.89x under ORT's — and it is a single extension either way: one block of 6,644 MiB where the
+region is exactly the request, of 8,192 MiB where it is rounded up to the next power of two. The
+step never gives that block back, so a settled training step holds about twice what its steps
+actually use under **both** strategies (1.94x and 2.15x here). Choosing the strategy trims that
+block; it does not stop it being taken. `LimitBytes` does — see below. A larger model of the same
+family (12 layers, width 768, 162,129,408 parameters) at the same batch reached the card's whole
+24,564 MiB at step 1 under both strategies and went on training there, which is what having no
+headroom looks like rather than a failure.
 
 Which of those a given session is turns on **how its caller feeds it**, and that is not knowable
 when the session is built: a compiled graph fed one batch shape for its whole life and one fed a new
@@ -1109,7 +1137,11 @@ names has no arena allocator registered — an arena disabled through `ORT_DISAB
 turn it on with a short run before a long one. `LimitBytes` is a
 budget, not a hint: a step that needs more than it fails with ORT's `BFCArena ... Failed to
 allocate memory for requested buffer` rather than eating the rest of the device, so a figure set
-too low fails a run that would have fitted.
+too low fails a run that would have fitted. Set near what a step actually uses, it is also the one
+lever that reaches the step-1 expansion above: the same batch-8 transformer under a 10 GiB cap ran
+every step inside 8,864 MiB (exact-size extension) or 9,217–9,233 MiB (ORT's), never took the extra
+block at all, and kept its in-use peak at 7,305 / 7,469–7,485 MiB — the same run it was, on roughly
+half the card.
 
 Note that the budget caps **each arena**, not the process. ORT gives a session its own CUDA arena,
 so a process holding a compiled graph and a training rig at once can hold the limit more than once
@@ -1186,13 +1218,19 @@ compiled.Execute(inputs);
 
 if (compiled.ReadArenaStatistics() is { } arena)
     Console.WriteLine($"{arena.InUseBytes} in use, {arena.MaxInUseBytes} at its highest, "
-                    + $"{arena.TotalAllocatedBytes} held from the device");
+                    + $"{arena.TotalAllocatedBytes} taken from the device");
 ```
 
 `ArenaStatistics` is nine figures: `InUseBytes`, `MaxInUseBytes`, `MaxAllocSizeBytes`,
 `TotalAllocatedBytes`, `LimitBytes` (`-1` when `DeviceMemorySettings.LimitBytes` set no cap),
 `AllocationCount`, `ArenaExtensionCount`, `ArenaShrinkageCount` and `ReserveCount`. It is `null`
 on a backend that reports none, the way `DeviceMemory.Read()` is `null` with no card.
+
+**`TotalAllocatedBytes` is not a bound on what the card is holding.** On a run that filled a
+24,564 MiB card it read 32,462 MiB — more than the device has. The likeliest reading is that an
+arena pressed to the card's edge gives regions back and takes others while this counter does not
+follow all the way down; either way, read it as the arena's own account of what it has taken, and
+`DeviceMemory.Read()` for what the card is actually carrying.
 
 **`MaxInUseBytes` is cumulative over the arena's whole life, not the last run's.** It is a
 high-water mark the arena never lowers and there is no reset — asking for arena shrinkage does not

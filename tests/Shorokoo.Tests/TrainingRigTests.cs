@@ -426,6 +426,41 @@ public class TrainingRigFromScratchCoverageTests
         Assert.NotNull(step.Loss);
     }
 
+    /// <summary>
+    /// A class-index loss takes a target of another shape and dtype than the model's output —
+    /// <c>[N]</c> int64 against <c>[N, C]</c> float32 — and the rig stands the model's output in
+    /// for it when it seeds shape inference and the memory-aware pass. The pass is then judged on
+    /// a one-hot of <c>[N, C, C]</c>, which is harmless while C is a handful and is why every
+    /// existing cross-entropy rig passes; at a language model's vocabulary it is 10 T elements,
+    /// and building the rig fails outright.
+    /// </summary>
+    [Fact]
+    public void TestAClassIndexLossIsOptimizedAgainstItsOwnTargetRatherThanThePrediction()
+    {
+        NamedModelParam[] narrow =
+        [
+            new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([4L, 64L], new float[256])),
+        ];
+        var rig = TrainingRig.FromScratch(
+            DigitClassifier.ComputationGraph, CrossEntropyLoss.ComputationGraph,
+            SGDOptimizer.ComputationGraph, narrow, 0.01f);
+        var target = rig.OptimizationInputShapes[^1];
+        Assert.Equal(DType.Int64, target.DType);
+        Assert.Equal([4L], target.Shape.Dims);
+
+        NamedModelParam[] wide =
+        [
+            new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([4L, 8L], new float[32])),
+        ];
+        var wideRig = TrainingRig.FromScratch(
+            WideLogitClassifier.ComputationGraph, CrossEntropyLoss.ComputationGraph,
+            SGDOptimizer.ComputationGraph, wide, 0.01f);
+        var step = wideRig.TrainStep(wideRig.CreateInitialCheckpoint(),
+            NNLibraryTrainingFixtures.MakeBatch("input", "ModelInput", TensorData([4L, 8L], new float[32])),
+            NNLibraryTrainingFixtures.MakeBatch("targets", "Target", TensorData([4L], [0L, 1L, 2L, 3L])));
+        Assert.True(float.IsFinite(step.Loss!.Value));
+    }
+
     [Fact]
     public void TestPositionalHyperparametersPrecedeTheRngConfigAndContextsCoverage()
     {

@@ -344,14 +344,12 @@ public class CrossDeviceRoutingCoverageTests
     }
 
     [Fact]
-    public void TestABudgetedContextRunsOneAtATimeAndPlacesNothingWhileItRunsWhereAnUnbudgetedOneOverlaps()
+    public void TestABudgetedContextRunsOneAtATimeAndPlacesAndCompilesNothingWhileItRunsWhereAnUnbudgetedOneOverlaps()
     {
-        // How many of two runs were inside the session at once, and whether a placement onto the
-        // context landed while the first was. Waits long for what is expected to happen and briefly
-        // for what is expected not to.
-        static (int MostAtOnce, bool PlacedDuringRun) Overlap(ComputeContext context, StubBackend card, bool overlaps)
+        static (int MostAtOnce, bool PlacedDuringRun, bool CompiledDuringRun) Overlap(
+            ComputeContext context, StubBackend card, bool expectingOverlap)
         {
-            var patience = overlaps ? TimeSpan.FromSeconds(10) : TimeSpan.FromMilliseconds(200);
+            var patience = expectingOverlap ? TimeSpan.FromSeconds(10) : TimeSpan.FromMilliseconds(200);
             var compiled = context.Compile(Echo());
             using var inside = new SemaphoreSlim(0);
             using var release = new ManualResetEventSlim();
@@ -368,19 +366,73 @@ public class CrossDeviceRoutingCoverageTests
             Assert.True(inside.Wait(TimeSpan.FromSeconds(10)));
             inside.Wait(patience);
             var placement = Task.Run(() => Floats(1).CopyTo(context));
+            var compile = Task.Run(() => context.Compile(Echo()));
             var placed = placement.Wait(patience);
+            var compiledDuringRun = compile.Wait(patience);
             release.Set();
-            Assert.True(Task.WaitAll([.. runs, placement], TimeSpan.FromSeconds(10)));
-            return (most, placed);
+            Assert.True(Task.WaitAll([.. runs, placement, compile], TimeSpan.FromSeconds(10)));
+            return (most, placed, compiledDuringRun);
         }
 
         var budgetedCard = new StubBackend(ComputeDevice.Cuda, 0);
         using var budgeted = new ComputeContext(budgetedCard) { DeviceMemory = Budget(1L << 20) };
-        Assert.Equal((1, false), Overlap(budgeted, budgetedCard, overlaps: false));
+        Assert.Equal((1, false, false), Overlap(budgeted, budgetedCard, expectingOverlap: false));
 
         var unbudgetedCard = new StubBackend(ComputeDevice.Cuda, 0);
         using var unbudgeted = new ComputeContext(unbudgetedCard);
-        Assert.Equal((2, true), Overlap(unbudgeted, unbudgetedCard, overlaps: true));
+        Assert.Equal((2, true, true), Overlap(unbudgeted, unbudgetedCard, expectingOverlap: true));
+    }
+
+    [Fact]
+    public void TestABudgetedRunWaitingForTheOneInFlightStopsWhenCancelledHavingTakenNothing()
+    {
+        var card = new StubBackend(ComputeDevice.Cuda, 0);
+        using var cancel = new CancellationTokenSource();
+        using var context = new ComputeContext(card)
+        {
+            DeviceMemory = Budget(1L << 20),
+            RunSettings = new RunSettings { CancellationToken = cancel.Token },
+        };
+        var compiled = context.Compile(Echo());
+        using var inside = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        card.DuringRun = () => { inside.Set(); release.Wait(TimeSpan.FromSeconds(10)); };
+        var inFlight = Task.Run(() => compiled.Run(
+            [NamedModelParam.FromIData("a", ModelParamType.InputParam, Floats(1))], RunSettings.Default));
+        Assert.True(inside.Wait(TimeSpan.FromSeconds(10)));
+
+        var (compiledFeed, oneShotFeed) = (Floats(1), Floats(1));
+        Task[] waiting = [Task.Run(() => compiled.Execute(compiledFeed)), Task.Run(() => context.Execute(Echo(), oneShotFeed))];
+        Assert.Equal(-1, Task.WaitAny(waiting, TimeSpan.FromMilliseconds(200)));
+        cancel.Cancel();
+        Assert.All(waiting, stopped => Assert.IsAssignableFrom<OperationCanceledException>(
+            Assert.Throws<AggregateException>(() => stopped.Wait(TimeSpan.FromSeconds(10))).InnerException));
+        Assert.False(inFlight.IsCompleted);
+        Assert.False(compiledFeed.IsDisposed || oneShotFeed.IsDisposed);
+
+        release.Set();
+        Assert.True(inFlight.Wait(TimeSpan.FromSeconds(10)));
+    }
+
+    [Fact]
+    public void TestASequencePlacedOnABudgetedCardAttachesAllItsElementsOrNone()
+    {
+        var card = new StubBackend(ComputeDevice.Cuda, 0);
+        using var budgeted = new ComputeContext(card) { DeviceMemory = Budget(32) };
+        using var unbudgeted = new ComputeContext(card);
+        var held = Floats(4).CopyTo(budgeted);
+        TensorData[] elements = [Floats(2).CopyTo(unbudgeted), Floats(3).CopyTo(unbudgeted)];
+        var sequence = TensorDataSequence.OfElements([.. elements], DType.Float32);
+
+        Assert.Contains("To(context) of a sequence of 2 tensors asks this compute context for 20 bytes",
+            Assert.Throws<InvalidOperationException>(() => sequence.To(budgeted)).Message);
+        Assert.All(elements, e => Assert.DoesNotContain(e, budgeted.Tensors));
+        Assert.Equal(new DeviceMemoryUse(16, 1, 32), budgeted.ReadDeviceMemoryUse());
+
+        held.Delete();
+        Assert.Same(sequence, sequence.To(budgeted));
+        Assert.Same(sequence, sequence.To(budgeted));
+        Assert.Equal(new DeviceMemoryUse(20, 2, 32), budgeted.ReadDeviceMemoryUse());
     }
 
     [Fact]

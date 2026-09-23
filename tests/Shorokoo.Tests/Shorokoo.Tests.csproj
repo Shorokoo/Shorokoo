@@ -67,8 +67,7 @@
     Host, and SideBySideBackendCoverageTests deliberately pairs the stock CPU backend against an
     isolated runtime, naming Shorokoo.WinCPU, which does not deploy here at all. Run the coverage
     filter under this flag and about twenty of those tests fail, every one of them correctly: the
-    product is refusing to read device memory from the host, or refusing a GiveAccessTo that would
-    have to allocate on the card. They are the suite's own CPU-shaped assumptions, not a fault on
+    product is refusing to read device memory from the host. They are the suite's own CPU-shaped assumptions, not a fault on
     the device, and making them device-agnostic would buy nothing: the card's behaviour is what
     Purpose=Hardware is for, and CI has no card to run either half on.
 

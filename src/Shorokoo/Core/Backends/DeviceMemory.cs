@@ -25,13 +25,14 @@ public readonly record struct DeviceMemoryReading(long UsedBytes, long FreeBytes
 /// <para>The peak is process-wide because it is an observation of one process's run, and it
 /// moves only when you call <see cref="Sample"/>. For the settings that <i>configure</i>
 /// device memory, which are not process-wide, see <see cref="DeviceMemorySettings"/> (per
-/// session) and <see cref="RunSettings"/> (per run).</para>
+/// context, and per session) and <see cref="RunSettings"/> (per run); for what a context holds on
+/// its card against its budget, <see cref="Shorokoo.Runtime.ComputeContext.ReadDeviceMemoryUse"/>.</para>
 ///
 /// <code>
 /// using Shorokoo.Core.Backends;
 /// using Shorokoo.Runtime;
 ///
-/// // The budget belongs to the sessions the rig compiles, so it goes on the rig's runtime context.
+/// // The budget is the context's, and the rig's steps run on its runtime context.
 /// var ctx = new ComputeContext
 /// {
 ///     DeviceMemory = new DeviceMemorySettings { LimitBytes = 16L * 1024 * 1024 * 1024 },

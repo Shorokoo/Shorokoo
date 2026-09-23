@@ -234,30 +234,40 @@ lock where the caller still holds the tensor — at the entry point, before the 
 expanded — which also has to hold for `Run`, for `Eval`, and for the one-shot paths that build
 a session of their own.
 
-### A tensor on a card is charged to the context that placed it, and stays charged there
+### A device-memory budget counts tensors, not arenas
 
-`ComputeContext.DeviceMemory` bounds the arenas of the sessions that context compiles *and* the
-arena the tensors placed in its memory come out of, so a `CopyTo` — or a `To` that has to copy —
-onto a budgeted context fails when the tensor does not fit rather than taking what is left of the
-card. What that
-arena is holding is read with `ComputeContext.ReadTransferArenaStatistics()`, beside
-`CompiledGraph.ReadArenaStatistics()` for each session — between them a context's whole device
-footprint is readable rather than inferred.
+A context's `DeviceMemorySettings.LimitBytes` is kept by counting what is on its books: the bytes of
+the tensors attached to it in the card's memory, and the arena limit of whichever of its runs is
+executing, which is cut to what those tensors leave — see
+[A context's device-memory budget](inference.md#a-contexts-device-memory-budget). What it counts is
+exact. What it does not count is memory the card is holding all the same:
 
-What is settled at the moment of the allocation is *which* budget, and it never moves afterwards.
-`To` a second context on the same card whose backend can read the allocation hands over the very
-same tensor without copying, and the allocation stays charged to the budget it was made under,
-whatever the receiving context carries. Re-homing it would mean copying it, which `To` does only
-when the target cannot read the memory as it stands. To hold a tensor under a different budget,
-`CopyTo` a context that carries that budget and let the original go.
+- **The allocator tensors are placed from.** A tensor put on a card — by `To`, `CopyTo`,
+  `AllocateUninitialized`, or a run copying a host tensor there to read it — comes out of one
+  allocator per card, shared by every context in the process and held for the life of the process:
+  an ONNX Runtime tensor frees itself through the allocator that made it, so that allocator has to
+  outlive every tensor it ever served. Nothing ever asks it to shrink, so the blocks it has taken
+  stay taken: a deleted tensor's bytes go back to it rather than to the card, and it goes on holding
+  the most that was ever on the card through it at once, whatever any budget counts now.
+- **What an arena keeps spare.** An arena takes blocks, not bytes, and a block part in use cannot be
+  handed back. Every run under a budget hands back what it can as it ends, but a session's arena can
+  hold more than what is in use in it.
+- **A session's weights between its runs.** A compiled graph's weights live in its session's arena
+  for as long as the session does, and count only against that session's own runs. A context that
+  has compiled several graphs with large weights holds all of them at once, which the budget sees
+  only one at a time. A session rebuilt for a lower limit leaves its old arena alive for as long as
+  outputs its runs left there are.
 
-Two costs follow from the arena outliving everything that uses it. It is held for the life of the
-process, unlike a session's, which goes when its context does: an ONNX Runtime tensor frees itself
-through the allocator that made it, so that allocator has to outlive every tensor it ever served,
-and the session its arena belongs to has to outlive it in turn. And there is one such arena per card
-per distinct `DeviceMemorySettings`, of which a card will open no more than eight — a program that
-reaches that is building a fresh settings object per call, and the fix is to share one between the
-contexts that mean the same budget by it.
+So a budget is a ceiling on what the context counts, and the card can be holding more: leave it
+headroom, and read `DeviceMemory.Read()` for what the card is really carrying.
+
+Two consequences of how it is kept are costs rather than gaps. A session's arena limit only ever
+comes down: a context that lets go of what it held keeps the smaller arenas its graphs were rebuilt
+with, until the graph is compiled again. And under a budget a context does one thing at a time —
+a transfer onto it waits for its run in flight — so staging the next batch onto a budgeted context
+from another thread does not overlap the step it is staged for. Staging it through a second context
+over the same backend keeps the overlap: the budgeted run reads the batch where it is, and counts it
+then.
 
 ### A fed input's buffer is not recycled inside the run
 
@@ -291,8 +301,7 @@ access violation that nothing can catch. A sequence built that way is write-only
 
 So `IShorokooBackend.CreateSequence` refuses an element that is in the provider's own memory,
 while the caller still holds the tensor and can bring it home —
-`CopyTensorToHost`, or `TensorData.CopyTo(null)` for a tensor a context owns. The refusal names
-the tensor:
+`CopyTensorToHost`, or `TensorData.ToHost()` for a tensor. The refusal names the tensor:
 
 ```
 A tensor (2:Float) in Shorokoo.WinGPU's own device memory cannot be an element of a sequence:
@@ -311,10 +320,10 @@ make a device-resident sequence readable and this refusal unnecessary.
 
 ### Device-memory readings are the device's, and device 0's
 
-Arena configuration is per session and per run — `ComputeContext.DeviceMemory` for the sessions a
-context compiles, `RunSettings` for what a run does, see
-[Device memory](inference.md#device-memory-gpu-backends). Two contexts may differ, and a host
-running two models can give them separate budgets and separate arena strategies.
+Device-memory configuration is per context, per session and per run — `ComputeContext.DeviceMemory`
+for the budget a context keeps on its card and the sessions it compiles, `RunSettings` for what a
+run does, see [Device memory](inference.md#device-memory-gpu-backends). Two contexts may differ, and
+a host running two models can give them separate budgets and separate arena strategies.
 
 What remains process-wide is the *reporting*. `DeviceMemory.Read()` and `Sample()` go to whichever
 CUDA device is current for the calling thread — device 0, because that is what the shipped GPU

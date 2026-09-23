@@ -40,8 +40,9 @@ public enum MemoryFigureKind
 /// devices.</para>
 /// </summary>
 /// <param name="InUseBytes">Bytes the arena has handed out and not taken back.</param>
-/// <param name="LimitBytes">The arena's cap — <see cref="DeviceMemorySettings.LimitBytes"/> —
-/// or <c>-1</c> when it has none.</param>
+/// <param name="LimitBytes">The arena's cap — the session's <c>gpu_mem_limit</c>, which on a
+/// context under a device-memory budget is what <see cref="DeviceMemorySettings.LimitBytes"/> left
+/// it — or <c>-1</c> when it has none.</param>
 /// <param name="MaxAllocSizeBytes">The largest single allocation the arena has served.</param>
 /// <param name="MaxInUseBytes">The most that was ever in use at once, over the arena's whole
 /// life.</param>

@@ -700,9 +700,9 @@ manual `TrainStep` loop all share.
 Every `With…` derivation keeps the same two contexts.
 
 **What the two can usefully differ in: the backend, and how its sessions and runs are
-configured.** A `ComputeContext` carries `DeviceMemory` for the sessions it compiles and the
-tensors it holds on the card, and `RunSettings` for what its runs do, so the merge phase and the
-training loop can hold different arena budgets — see
+configured.** A `ComputeContext` carries `DeviceMemory` — a budget on what it holds on the card,
+and the arena settings of the sessions it compiles — and `RunSettings` for what its runs do, so
+the merge phase and the training loop can hold different budgets — see
 [Device memory](inference.md#device-memory-gpu-backends). It also carries the
 backend: a context constructed with one (`new ComputeContext(new LinuxCpuBackend())`) runs
 its work there, so a rig **can** build on one device and train on another:
@@ -727,11 +727,16 @@ is readable either way: `rig.MergeContext.Backend` and `rig.RuntimeContext.Backe
 Leaving both `null`, so each defaults to `ComputeContext.Default`, is the normal choice.
 
 What *is* configurable — on the GPU backends — is **device** memory, on the context the rig compiles
-and runs on: an arena budget and extend strategy in its `DeviceMemory`, per-step arena shrinkage in
-its `RunSettings`. The arena strategy needs no setting for this loop: a step compiled for one batch
-shape repeats it for the length of the run, and the default `Auto` leaves it on exact-size
-extension — the arena tracks what the step asks for rather than doubling past it, which is what
-otherwise leaves a long run holding far more of the card than its steps use.
+and runs on: a budget and an arena extend strategy in its `DeviceMemory`, per-step arena shrinkage
+in its `RunSettings`. The budget covers what the context holds on the card — the state and batches
+the steps read there or copy there to read, and whatever the steps leave there — plus the arena of
+the step that is running, whose limit is what the rest leaves; a step that finds the context
+holding more than its session left room for is rebuilt with less before it runs — see
+[A context's device-memory budget](inference.md#a-contexts-device-memory-budget). The arena
+strategy needs no setting for this loop: a step compiled for one batch shape repeats it for the
+length of the run, and the default `Auto` leaves it on exact-size extension — the arena tracks what
+the step asks for rather than doubling past it, which is what otherwise leaves a long run holding
+far more of the card than its steps use.
 
 The one place it departs is worth knowing: the rig keeps a compiled step per input shape **up to a
 limit**, and a run that feeds more distinct shapes than that falls back to a single step every
@@ -739,19 +744,21 @@ later shape shares. That step really does see growing shapes, so `Auto` gives it
 the strategy that does not strand a region each time an input outgrows it. Feeding a handful of
 stable batch shapes keeps every step on the tighter arena.
 
-Both are fixed when a step is compiled, and so is `ShrinkArenaAfterRun` — and so is the
+All of these are the context's, and a context's settings are fixed when it is built: the budget and
+the strategy, `ShrinkArenaAfterRun` — which a budget turns on for every step anyway — and the
 `CancellationToken` that stops a step early, which is the way to make a long `Fit` or `Train`
 abandon a run: `TrainStep` takes no per-call override, so hand `FromScratch` a `runtimeContext`
 carrying what you want before the first step
 ([Stopping a run](inference.md#stopping-a-run) says what stopping costs and what it does not
 promise). On a run close to the card's limit, put a budget on that context and sample the peak
-inside your `TrainStep` loop; the readings come from the separate static `DeviceMemory` class.
+inside your `TrainStep` loop; the readings come from the separate static `DeviceMemory` class, and
+what the context holds against its budget from `ReadDeviceMemoryUse()`.
 See [Device memory](inference.md#device-memory-gpu-backends).
 
 **Mind which memory is which.** A `TrainStep` loop's checkpoints are fetched to the host, so the
 rig's budgeted collection governs *host* memory there, while a context's `DeviceMemory` settings
-reach only the CUDA arena: a process whose RSS climbs is not helped by an arena budget, and a card that fills
-up is not helped by the rig's reclamation. A resident run is the case where the two meet — its state
+reach only device memory: a process whose RSS climbs is not helped by a device-memory budget, and a
+card that fills up is not helped by the rig's reclamation. A resident run is the case where the two meet — its state
 stays in the arena, and the run releases it deterministically as each step supersedes it, which is
 why a retained step does not go through the rig's collection at all. A `StepToCheckpoint` step hands
 state back to you instead, so that one is reclaimed like any other.

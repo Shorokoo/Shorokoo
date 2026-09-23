@@ -256,10 +256,10 @@ namespace Shorokoo
         /// the backend it runs on (see <see cref="ComputeContext"/>), so a rig <b>can</b> merge on one
         /// device and train on another, at the cost of a host copy per feed — both backends then have
         /// to be deployed and reachable from the one process. They may also differ in their device
-        /// memory: this context's <see cref="ComputeContext.DeviceMemory"/> configures the arena of
-        /// every training-step session, and its <see cref="ComputeContext.RunSettings"/> what each
-        /// step's run does. Which device each will use is readable either way, off
-        /// <see cref="ComputeContext.Backend"/>.</para>
+        /// memory: this context's <see cref="ComputeContext.DeviceMemory"/> is the budget on what the
+        /// training steps hold on the card and configures the arena of every training-step session,
+        /// and its <see cref="ComputeContext.RunSettings"/> what each step's run does. Which device
+        /// each will use is readable either way, off <see cref="ComputeContext.Backend"/>.</para>
         ///
         /// <para>Resolved on first read rather than at construction, for the reason given on
         /// <see cref="MergeContext"/>.</para>

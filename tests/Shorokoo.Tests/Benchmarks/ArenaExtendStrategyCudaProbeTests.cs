@@ -138,11 +138,18 @@ public class ArenaExtendStrategyCudaProbeTests
     /// sessions go with it.
     ///
     /// <para>That is not the same as the card being clear. A tensor placed on a card comes out of
-    /// an arena keyed on (device, settings) and held for the life of the process, so a leg that
-    /// places one leaves that arena behind for every later leg, and each leg here names different
-    /// settings. Nothing in this probe places one — the rig is fed host tensors and moves them
-    /// itself — but the <c>device</c> column is a whole-card reading, so read it as the card
-    /// during that leg rather than as the leg alone.</para>
+    /// one allocator per card, shared by every context in the process whatever its settings, held
+    /// for the life of the process and never asked to shrink — and every leg here places them: the
+    /// rig is fed host tensors, and a run on the card reads each through a copy on the card from
+    /// that allocator. So the first leg leaves the allocator holding the most any leg has placed at
+    /// once, for every later one; the <c>device</c> column is a whole-card reading, so read it as the
+    /// card during that leg rather than as the leg alone.</para>
+    ///
+    /// <para>A leg given a limit runs under a context budget: the step's arena is capped at the
+    /// limit less what the context holds on the card for the step — the state and batch copies —
+    /// and shrinks after every step. The capped figures recorded from this probe were taken with the
+    /// limit capping the step's arena alone, so a capped leg run now measures a different
+    /// arrangement from the one they record.</para>
     /// </summary>
     private static (List<StepReading> Steps, long Parameters, string? Failure) Probe(
         ComputationGraph model, ArenaExtendStrategy strategy, long? limitBytes, int steps = Steps)

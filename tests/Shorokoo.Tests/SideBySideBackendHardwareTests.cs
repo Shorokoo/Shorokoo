@@ -293,6 +293,32 @@ public class SideBySideBackendHardwareTests
         Assert.Equal(av, Floats(home));
     }
 
+    /// <summary>A tensor on the card, fed to a run on the host: read through one host copy, held
+    /// and reused while it is read, and consumed through that copy when it is fed as it is — the
+    /// card's own memory released at the feed.</summary>
+    [SideBySideCudaFact]
+    public void TestATensorOnTheCardIsReadByAHostRunThroughOneCopyAndConsumedThroughIt()
+    {
+        var a = InputVector<float32>("a");
+        var b = InputVector<float32>("b");
+        using var cuda = new ComputeContext(LoadCuda());
+        using var cpu = new ComputeContext();
+        var compiled = cpu.Compile(new InternalComputationGraph([a, b], [a * b + a]));
+        TensorData Run(IData x) => compiled.Execute(x, TensorData([2L], 10f, 20f))[0].ToTensorData();
+        var onCard = TensorData([2L], 1f, 2f).To(cuda);
+        Assert.Equal(MemorySpace.Cuda(0), onCard.Space);
+
+        var first = Run(onCard.Shared());
+        var copy = Assert.Single(cpu.Tensors.Except([first, onCard]));
+        Assert.Equal(MemorySpace.Host, copy.Space);
+        var second = Run(onCard.Shared());
+        Assert.Same(copy, Assert.Single(cpu.Tensors.Except([first, second, onCard])));
+
+        var third = Run(onCard);
+        Assert.True(onCard.IsDisposed && copy.IsDisposed);
+        Assert.All((TensorData[])[first, second, third], t => Assert.Equal([11f, 42f], Floats(t)));
+    }
+
     [SideBySideCudaFact]
     public void TestAnUninitializedTensorAllocatedOnTheCardLivesThereAndTakesWhatIsWrittenToIt()
     {

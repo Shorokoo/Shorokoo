@@ -212,6 +212,52 @@ public class CompositeTransferCoverageTests
     }
 
     [Fact]
+    public void TestASequenceFedAsItIsIsConsumedWithItsElementsAndOneFedSharedIsRead()
+    {
+        using var context = new ComputeContext();
+        var join = context.Compile(Join());
+        float[] Run(IData feed) => Floats(join.Execute(feed)[0].ToTensorData());
+        TensorDataSequence Pair() => TensorDataSequence.OfElements([Sample(1f), Sample(3f)], DType.Float32);
+        var (bare, shared, tried) = (Pair(), Pair(), Pair());
+        var element = bare[0];
+
+        Assert.Equal([1f, 2f, 3f, 4f], Run(shared.Shared()));
+        Assert.Equal([1f, 2f, 3f, 4f], Run(bare));
+        Assert.Equal([1f, 2f, 3f, 4f], Run(tried.TryConsume()));
+        Assert.False(shared.IsDisposed || shared[0].IsDisposed);
+        Assert.True(bare.IsDisposed && element.IsDisposed && tried.IsDisposed);
+        Assert.Contains("consumed by a run of the graph (seq)", Assert.Throws<ObjectDisposedException>(() => bare.Count).Message);
+        Assert.Contains("pass it there as .Shared()", Assert.Throws<ObjectDisposedException>(() => Floats(element)).Message);
+        Assert.Contains("consumed by a run of the graph (seq)", Assert.Throws<ObjectDisposedException>(() => Run(bare)).Message);
+    }
+
+    [Fact]
+    public void TestASequenceAnotherRunIsReadingIsReadWhenTriedAndRefusedWhenFedAsItIs()
+    {
+        using var context = new ComputeContext();
+        var join = context.Compile(Join());
+        var sequence = TensorDataSequence.OfElements([Sample(1f), Sample(3f)], DType.Float32);
+        using var reached = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var holding = Task.Run(() => join.Run(
+            new HeldSequence(sequence, reached, release) { Sharing = SharedInputMode.Shared }));
+        Assert.True(reached.Wait(TimeSpan.FromSeconds(10)));
+
+        Assert.Equal([1f, 2f, 3f, 4f], Floats(join.Execute(sequence.TryConsume())[0].ToTensorData()));
+        Assert.Contains("is being read by a run of the graph (seq)",
+            Assert.Throws<InvalidOperationException>(() => join.Execute(sequence)).Message);
+        release.Set();
+        holding.Wait();
+        Assert.False(sequence.IsDisposed);
+    }
+
+    private static InternalComputationGraph Join()
+    {
+        var seq = InternalOp.ModuleSequenceInput(DType.Float32, null, null, "seq");
+        return new InternalComputationGraph([seq], [OnnxOp.ConcatFromSequence(seq, axis: 0, newAxis: false)]);
+    }
+
+    [Fact]
     public void TestATensorOnAContextMovesIntoAnAttributeAndDiesSayingSo()
     {
         using var context = new ComputeContext();

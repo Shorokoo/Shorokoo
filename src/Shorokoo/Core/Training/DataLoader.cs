@@ -108,11 +108,21 @@ namespace Shorokoo
                 _ => throw new ArgumentException(
                     $"A training step takes this as a TensorDataStruct -- fed as it is, and consumed by "
                     + "the step, or passed through .Shared() or .TryConsume() -- but was given "
-                    + $"{(feed is SharedInput wrapped ? $"a shared {wrapped.Value.GetType().Name}" : $"a {feed.GetType().Name}")}. "
+                    + $"{(feed is SharedInput wrapped ? $"a shared {KindOf(wrapped.Value)}" : $"a {KindOf(feed)}")}. "
                     + "Build the struct from the rig's definition: rig.InputDef.FromOrderedData(...) or "
                     + "rig.TargetDef.FromOrderedData(...).", paramName),
             };
         }
+
+        /// <summary>What a refusal calls <paramref name="data"/>: the public type a caller built it
+        /// as, not the implementation behind it.</summary>
+        private static string KindOf(IData data) => data switch
+        {
+            TensorData => nameof(TensorData),
+            TensorDataSequence => nameof(TensorDataSequence),
+            OptionalTensorData => nameof(OptionalTensorData),
+            _ => data.GetType().Name,
+        };
     }
 
     /// <summary>

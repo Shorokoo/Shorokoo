@@ -193,9 +193,96 @@ public class CrossDeviceRoutingCoverageTests
         Assert.Contains(onCard, unbudgeted.Tensors);
     }
 
+    [Fact]
+    public void TestAConsumedFeedIsReleasedOnceByTheBackendItWasHandedToWhetherTheRunReturnsOrFails()
+    {
+        var card = new StubBackend(ComputeDevice.Cuda, 0) { ReleasesWhatItConsumes = true };
+        using var context = new ComputeContext(card);
+        var compiled = context.Compile(Sum());
+        var (taken, read, failed) = (OnCard(context, 1f), OnCard(context, 3f), OnCard(context, 5f));
+
+        compiled.Execute(taken, read.Shared());
+        card.FailsRuns = true;
+        Assert.Throws<InvalidOperationException>(() => compiled.Execute(failed, read.Shared()));
+
+        Assert.Equal([card.Built[0], card.Built[2]], card.Handed);
+        Assert.Equal([card.Built[0], card.Built[2]], card.Released);
+        Assert.True(taken.IsDisposed && failed.IsDisposed);
+        Assert.False(read.IsDisposed);
+        Assert.All(card.Built, v => Assert.Equal(0, ((StubValue)v).Disposals));
+    }
+
+    [Fact]
+    public void TestASessionThatLeavesConsumedFeedsToTheDefaultDisposesEachOnceAndNothingElseReleasesThem()
+    {
+        var card = new StubBackend(ComputeDevice.Cuda, 0);
+        using var context = new ComputeContext(card);
+        var compiled = context.Compile(Sum());
+        var (taken, read, failed) = (OnCard(context, 1f), OnCard(context, 3f), OnCard(context, 5f));
+
+        compiled.Execute(taken, read.Shared());
+        card.FailsRuns = true;
+        Assert.Throws<InvalidOperationException>(() => compiled.Execute(failed, read.Shared()));
+
+        Assert.Equal([1, 0, 1], card.Built.Select(v => ((StubValue)v).Disposals));
+        Assert.Empty(card.Released);
+        Assert.True(taken.IsDisposed && failed.IsDisposed);
+    }
+
+    [Fact]
+    public void TestAHostTensorACardRunReadsIsCopiedOnceUntilWrittenAndConsumedThroughTheCopyItHolds()
+    {
+        var card = new StubBackend(ComputeDevice.Cuda, 0) { ReleasesWhatItConsumes = true };
+        var budget = new DeviceMemorySettings { LimitBytes = 1L << 20 };
+        using var context = new ComputeContext(card) { DeviceMemory = budget };
+        var compiled = context.Compile(Echo());
+        float[] Run(IData feed) => [.. compiled.Execute(feed)[0].ToTensorData().As<float32>().AccessMemory<float>()];
+        var source = TensorData([2L], (float[])[1f, 2f]);
+
+        Assert.Equal([1f, 2f], Run(source.Shared()));
+        Assert.Equal([1f, 2f], Run(source.Shared()));
+        var copy = Assert.Single(context.Tensors, t => t.Space == MemorySpace.Cuda(0));
+        Assert.Single(card.Built);
+        Assert.Empty(card.Handed);
+
+        source.As<float32>().AccessModifiableMemory<float>()[0] = 7f;
+        Assert.True(copy.IsDisposed);
+        Assert.Equal([card.Built[0]], card.Released);
+        Assert.Equal([7f, 2f], Run(source.Shared()));
+
+        Assert.Equal([7f, 2f], Run(source));
+        Assert.True(source.IsDisposed);
+        Assert.Equal(2, card.Built.Count);
+        Assert.Equal([card.Built[1]], card.Handed);
+
+        var fresh = TensorData([2L], (float[])[4f, 6f]);
+        Assert.Equal([4f, 6f], Run(fresh));
+        Assert.True(fresh.IsDisposed);
+        Assert.Equal([card.Built[1], card.Built[2]], card.Handed);
+        Assert.Equal([card.Built[0], card.Built[1], card.Built[2]], card.Released);
+        Assert.Equal([budget, budget, budget], card.Budgets);
+    }
+
+    private static TensorData OnCard(ComputeContext context, float first)
+        => TensorData([2L], (float[])[first, first + 1f]).To(context);
+
+    private static InternalComputationGraph Sum()
+    {
+        var a = InputVector<float32>("a");
+        var b = InputVector<float32>("b");
+        return new InternalComputationGraph([a, b], [a + b]);
+    }
+
+    private static InternalComputationGraph Echo()
+    {
+        var a = InputVector<float32>("a");
+        return new InternalComputationGraph([a], [OnnxOp.Identity(a, rank: 1)]);
+    }
+
     /// <summary>A backend that answers about itself and records what it was asked to build, what it
     /// was asked whether it could address, and what it released — so a transfer's route can be read
-    /// off it without a session, a native runtime or a card.</summary>
+    /// off it without a native runtime or a card. Its sessions run nothing (see
+    /// <see cref="StubSession"/>), which is all a test of who owns a feed needs of them.</summary>
     private sealed class StubBackend(ComputeDevice device, int? cudaDeviceId)
         : IShorokooBackend
     {
@@ -208,6 +295,16 @@ public class CrossDeviceRoutingCoverageTests
         internal List<DeviceMemorySettings> Budgets { get; } = [];
 
         internal List<MemoryLocation> AskedAbout { get; } = [];
+
+        /// <summary>What its sessions were handed to consume, over every run.</summary>
+        internal List<IShorokooTensorValue> Handed { get; } = [];
+
+        /// <summary>Whether its sessions release what they consume through this backend, as a
+        /// native one does, rather than leaving it to the interface's default.</summary>
+        internal bool ReleasesWhatItConsumes { get; init; }
+
+        /// <summary>Whether its sessions' runs throw.</summary>
+        internal bool FailsRuns { get; set; }
 
         /// <summary>What <see cref="CanAddress"/> answers, where a test decides; the interface's own
         /// answer otherwise.</summary>
@@ -260,7 +357,16 @@ public class CrossDeviceRoutingCoverageTests
         public IShorokooSession CreateSession(
             ReadOnlyMemory<byte> modelBytes, ShorokooGraphOptimization graphOptimization,
             ShorokooLogSeverity logSeverity,
-            DeviceMemorySettings deviceMemory) => throw new NotSupportedException();
+            DeviceMemorySettings deviceMemory)
+        {
+            var graph = ProtoBuf.Serializer
+                .Deserialize<Shorokoo.Core.Factory.IR.ModelProto>(new MemoryStream(modelBytes.ToArray())).Graph;
+            string[] inputs = [.. graph.Inputs.Select(i => i.Name)];
+            string[] outputs = [.. graph.Outputs.Select(o => o.Name)];
+            return ReleasesWhatItConsumes
+                ? new ReleasingStubSession(this, inputs, outputs)
+                : new StubSession(this, inputs, outputs);
+        }
 
         public IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged
             => throw new NotSupportedException();
@@ -272,13 +378,61 @@ public class CrossDeviceRoutingCoverageTests
             => throw new NotSupportedException();
     }
 
-    /// <summary>A tensor value belonging to no runtime, which says whether the host may read it —
-    /// enough for a routing test, which never runs anything on it.</summary>
+    /// <summary>A session that runs nothing: every output is a host copy of its first input. It
+    /// leaves what it consumes to the interface's default, which disposes each value.</summary>
+    private class StubSession(StubBackend backend, string[] inputNames, string[] outputNames)
+        : IShorokooSession
+    {
+        private protected StubBackend Backend => backend;
+
+        public IReadOnlyList<string> InputNames => inputNames;
+
+        public IReadOnlyList<string> OutputNames => outputNames;
+
+        public IReadOnlyList<IShorokooTensorValue> Run(
+            IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
+            IReadOnlyList<string> outputNames, RunSettings runSettings)
+        {
+            if (backend.FailsRuns) throw new InvalidOperationException("The stub run failed.");
+            var first = (StubValue)inputs[inputNames[0]];
+            return [.. outputNames.Select(_ => (IShorokooTensorValue)new StubValue(
+                first.ElementType, [.. first.Bytes], first.Shape, hostAccessible: true))];
+        }
+
+        public void Dispose() { }
+    }
+
+    /// <summary>A session that releases what it consumes through its backend once the run is over,
+    /// however it ends — as a native one does.</summary>
+    private sealed class ReleasingStubSession(StubBackend backend, string[] inputNames, string[] outputNames)
+        : StubSession(backend, inputNames, outputNames), IShorokooSession
+    {
+        IReadOnlyList<IShorokooTensorValue> IShorokooSession.RunConsuming(
+            IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
+            IReadOnlyCollection<IShorokooTensorValue> consumed, IReadOnlyList<string> outputNames,
+            IReadOnlySet<string> retainedOutputNames, RunSettings runSettings)
+        {
+            Backend.Handed.AddRange(consumed);
+            try
+            {
+                return Run(inputs, outputNames, runSettings);
+            }
+            finally
+            {
+                foreach (var value in consumed) Backend.Release(value);
+            }
+        }
+    }
+
+    /// <summary>A tensor value belonging to no runtime, which says whether the host may read it and
+    /// counts its disposals.</summary>
     private sealed class StubValue(
         ShorokooTensorElementType elementType, byte[] data, long[] shape, bool hostAccessible)
         : IShorokooTensorValue
     {
         internal byte[] Bytes => data;
+
+        internal int Disposals { get; private set; }
 
         public bool IsHostAccessible => hostAccessible;
 
@@ -296,6 +450,6 @@ public class CrossDeviceRoutingCoverageTests
         public int GetValueCount() => throw new NotSupportedException();
         public IShorokooTensorValue GetValue(int index) => throw new NotSupportedException();
         public ShorokooTensorElementType GetSequenceElementType() => throw new NotSupportedException();
-        public void Dispose() { }
+        public void Dispose() => Disposals++;
     }
 }

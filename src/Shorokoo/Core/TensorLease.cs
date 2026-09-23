@@ -488,8 +488,7 @@ namespace Shorokoo.Runtime
             internal Exception Refusal() => Subject switch
             {
                 TensorData tensor => tensor.Death!.Refusal(tensor, tensor.Describe()),
-                TensorDataSequence sequence => new ObjectDisposedException(
-                    nameof(TensorDataSequence), $"{sequence.Describe()} is dead and cannot be fed."),
+                TensorDataSequence sequence => sequence.Death!.Refusal(sequence, sequence.Describe()),
                 _ => throw new UnreachableException(),
             };
 

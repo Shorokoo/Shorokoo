@@ -103,6 +103,9 @@ namespace Shorokoo
         /// </summary>
         public bool IsDisposed => Volatile.Read(ref _death) is not null;
 
+        /// <summary>How this sequence died, or null while it lives.</summary>
+        internal TensorDeath? Death => Volatile.Read(ref _death);
+
         /// <summary>How a refusal names this sequence.</summary>
         internal string Describe() => $"Sequence {this}";
 
@@ -562,14 +565,20 @@ namespace Shorokoo
             }
 
             /// <summary>
-            /// Deletes the elements, which are this sequence's own: a copy of a sequence is made of
-            /// copies. An element a run is reading on its own is retired instead — dead from here,
-            /// and released when that run returns — since this sequence is gone either way.
+            /// Ends the elements, which are this sequence's own — a copy of a sequence is made of
+            /// copies — the way this sequence ended, so that an element read afterwards says which:
+            /// consumed by a run, say, rather than merely gone. An element a run is reading on its
+            /// own is retired instead — dead from here, and released when that run returns — since
+            /// this sequence is gone either way.
             /// </summary>
             private protected override void ReleaseMemory()
             {
+                var death = Death ?? TensorDeath.Deleted;
                 foreach (var element in _elements)
-                    if (!element.TryDelete()) element.Retire(TensorDeath.Deleted);
+                {
+                    if (element.TryTake(death) == TakeOutcome.Taken) element.ReleaseTaken();
+                    else element.Retire(death);
+                }
             }
 
             private protected override bool AddressableBy(ComputeContext target)

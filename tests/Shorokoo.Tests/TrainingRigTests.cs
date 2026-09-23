@@ -2344,6 +2344,70 @@ public class TrainingRigTrainingLoopCoverageTests
     }
 
     [Fact]
+    public void TestACheckpointIsConsumedByTheStepItFeedsUnlessSharedAndSaysWhichStepTookIt()
+    {
+        var rig = AdamWScalarRig();
+        var (input, target) = (InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f));
+        var first = rig.TrainStep(rig.CreateInitialCheckpoint(), input.Shared(), target.Shared());
+
+        Assert.Null(first.FeedMode);
+        Assert.Equal(SharedInputMode.Shared, first.Shared().WithStep(7).FeedMode);
+        Assert.Equal(SharedInputMode.TryConsume, first.TryConsume().FeedMode);
+        var read = rig.TrainStep(first.Shared(), input.Shared(), target.Shared());
+        Assert.Null(read.FeedMode);
+        Assert.DoesNotContain(Tensors(first), t => t.IsDisposed);
+        rig.TrainStep(read.TryConsume(), input.Shared(), target.Shared());
+        Assert.All(Tensors(read), t => Assert.True(t.IsDisposed));
+
+        rig.TrainStep(first, input.Shared(), target.Shared());
+        var refused = Assert.Throws<ObjectDisposedException>(() => FlattenStruct(first.TrainableParams)).Message;
+        Assert.Contains("consumed by a run of a TrainingRig's training step", refused);
+        Assert.Contains("the checkpoint's trainable parameter", refused);
+    }
+
+    [Fact]
+    public void TestAResidentRunWhoseStepFailsAfterTakingItsOwnStateIsLostAndOneThatOnlyReadAPublishedCheckpointGoesOn()
+    {
+        var rig = AdamWScalarRig();
+        var (input, target) = (InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f));
+        TensorDataStruct Mistyped() => new(
+            new TensorStructDef([new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float64)], "Target"),
+            new Dictionary<string, IData> { { "targets", TensorData([4L], 2.0, 4.0, 6.0, 8.0) } });
+        using var run = rig.BeginResidentRun();
+
+        run.Step(input.Shared(), target.Shared());
+        var published = run.StepToCheckpoint(input.Shared(), target.Shared());
+        Assert.Throws<OnnxRuntimeException>(() => run.Step(input.Shared(), Mistyped()));
+        Assert.True(float.IsFinite(run.Step(input.Shared(), target.Shared())));
+        Assert.Throws<OnnxRuntimeException>(() => run.Step(input.Shared(), Mistyped()));
+        Assert.Contains("StepToCheckpoint", Assert.Throws<InvalidOperationException>(
+            () => run.Step(input.Shared(), target.Shared())).Message);
+        Assert.DoesNotContain(Tensors(published), t => t.IsDisposed);
+    }
+
+    [Fact]
+    public void TestABatchIsConsumedByTheStepItFeedsUnlessSharedAndAnythingButAStructIsRefused()
+    {
+        var rig = AdamWScalarRig();
+        var (input, target) = (InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f));
+        var at = new DataLoaderPosition(0, 0);
+        var loose = TensorData([4L], 1f, 2f, 3f, 4f);
+        static TensorData Field(TensorDataStruct batch) => (TensorData)batch.Fields.Values.Single();
+        using var run = rig.BeginResidentRun();
+
+        run.Step(new DataBatch(input.Shared(), target.Shared(), at));
+        Assert.False(Field(input).IsDisposed || Field(target).IsDisposed);
+        run.Step(new DataBatch(input, target, at));
+        Assert.True(Field(input).IsDisposed && Field(target).IsDisposed);
+
+        Assert.Contains("rig.InputDef.FromOrderedData",
+            Assert.Throws<ArgumentException>(() => new DataBatch(loose, TargetBatch(1f), at)).Message);
+        Assert.Contains("a shared TensorData", Assert.Throws<ArgumentException>(() => rig.TrainStep(
+            rig.CreateInitialCheckpoint(), loose.Shared(), TargetBatch(2f, 4f, 6f, 8f))).Message);
+        Assert.False(loose.IsDisposed);
+    }
+
+    [Fact]
     public void TestAResidentRunAppliesRuntimeHyperparametersAndRefusesThemMissing()
     {
         var rig = TrainingRig.FromScratch(

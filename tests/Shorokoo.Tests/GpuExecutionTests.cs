@@ -116,6 +116,40 @@ public class GpuExecutionTests
     }
 
     /// <summary>
+    /// A tensor fed to a run on the card as it is goes to that run: one in the card's memory is
+    /// handed over where it is, and one in host memory is copied into the card's and the copy
+    /// handed over — dead afterwards either way. Fed <c>.Shared()</c>, a host tensor is copied onto
+    /// the card once, attached to the context that read it, and read there by every run after
+    /// until it is written.
+    /// </summary>
+    [CudaFact]
+    public void CudaProvider_AFeedIsConsumedOnTheCardAndAHostOneIsReadThroughOneCopyUntilWritten()
+    {
+        using var ctx = new ComputeContext();
+        var a = InputVector<float32>();
+        var b = InputVector<float32>();
+        var compiled = ctx.Compile(new InternalComputationGraph([a, b], [a * b + a]));
+        float[] Run(IData x, IData y) => [.. compiled.Execute(x, y)[0].ToTensorData().As<float32>().AccessMemory<float>()];
+        var onHost = TensorData([2L], 10f, 20f);
+        var onCard = TensorData([2L], 1f, 2f).To(ctx);
+        Assert.False(onCard.IsHostResident);
+
+        Assert.Equal([11f, 42f], Run(onCard, onHost.Shared()));
+        Assert.True(onCard.IsDisposed);
+        var copy = Assert.Single(ctx.Tensors, t => !t.IsHostResident);
+        Assert.Equal(MemorySpace.Cuda(0), copy.Space);
+        Assert.Equal([11f, 42f], Run(TensorData([2L], 1f, 2f), onHost.Shared()));
+        Assert.Same(copy, Assert.Single(ctx.Tensors, t => !t.IsHostResident));
+
+        onHost.As<float32>().AccessModifiableMemory<float>()[0] = 30f;
+        Assert.True(copy.IsDisposed);
+        Assert.Equal([31f, 42f], Run(TensorData([2L], 1f, 2f), onHost.Shared()));
+        Assert.Equal([31f, 42f], Run(TensorData([2L], 1f, 2f), onHost));
+        Assert.True(onHost.IsDisposed);
+        Assert.DoesNotContain(ctx.Tensors, t => !t.IsHostResident);
+    }
+
+    /// <summary>
     /// The interaction the whole integration turns on, and the one no CPU test can reach: state
     /// left in the provider's own memory across steps, while the arena it lives in is budgeted,
     /// extends by request, and is handed back after every run. The trained result has to be the

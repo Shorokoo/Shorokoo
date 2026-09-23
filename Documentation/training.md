@@ -713,17 +713,18 @@ Steady-state *memory* is flat. `cp = rig.TrainStep(cp, in, out);` feeds the chec
 so the step consumes the state it supersedes and that state goes back as the step returns —
 there is nothing left over for a collection to find. What a step supersedes without consuming it —
 a checkpoint fed `.Shared()`, or through `.TryConsume()` while something else was reading it —
-is alive after the step, and garbage only once you drop it. A checkpoint holds the trainable
-parameters and every optimizer moment in backend buffers behind managed handles of a few dozen bytes
-each, far too little managed garbage to prompt a collection on its own; left to the runtime, a loop
-that drops such checkpoints would accumulate them until the process died. The rig therefore collects
-for you, once more than 32 MiB of that state has piled up — a running total across steps, not a
-per-step test. A model whose whole checkpoint is a few kilobytes only reaches that after thousands
-of steps, so it pays essentially nothing; a model producing a few MiB a step pays one collection
-every few steps; one producing hundreds of MiB a step pays one per step, which is what a run of that
-size has to pay to survive at all. Collecting in your own loop is normally unnecessary and changes
-nothing but the timing. An initial checkpoint is state like any other here: its tensors are copies,
-yours to drop.
+is alive after the step, and garbage only once you drop it. A checkpoint a step returns holds the
+trainable parameters and every optimizer moment in backend buffers behind managed handles of a few
+dozen bytes each, far too little managed garbage to prompt a collection on its own; left to the
+runtime, a loop that drops such checkpoints would accumulate them until the process died. The rig
+therefore collects for you, once more than 32 MiB of that state has piled up — a running total
+across steps, not a per-step test. A model whose whole checkpoint is a few kilobytes only reaches
+that after thousands of steps, so it pays essentially nothing; a model producing a few MiB a step
+pays one collection every few steps; one producing hundreds of MiB a step pays one per step, which
+is what a run of that size has to pay to survive at all. Collecting in your own loop is normally
+unnecessary and changes nothing but the timing. An initial checkpoint is state like any other here,
+counted against the same budget, though its tensors are of another kind: host copies of the rig's
+values in managed arrays, which the collector sees at their full size. They are yours to drop.
 
 The rig backs off when a collection turns out to free nothing — a caller that keeps every checkpoint
 buys nothing from one — by watching weakly what it handed back and seeing whether a later collection

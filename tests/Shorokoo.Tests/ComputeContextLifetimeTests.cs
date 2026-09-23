@@ -785,12 +785,17 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
-    public void TestAConsumedTensorSaysWhichRunTookItAndToPassItSharedToKeepIt()
+    public void TestAConsumedTensorSaysWhichRunTookItAndToPassItSharedAndARunFedItAgainTakesNothing()
     {
         using var context = new ComputeContext();
         var (graph, a, b, _) = Model();
         var compiled = context.Compile(graph);
         compiled.Execute(a, b.TryConsume());
+
+        var bystander = Sample();
+        Assert.Throws<ObjectDisposedException>(() => compiled.Execute(bystander, a));
+        Assert.Throws<ObjectDisposedException>(() => context.Execute(graph, bystander, b));
+        Assert.False(bystander.IsDisposed);
 
         var bare = Assert.Throws<ObjectDisposedException>(() => compiled.Execute(a, Sample())).Message;
         Assert.Contains(a.ToString(), bare);

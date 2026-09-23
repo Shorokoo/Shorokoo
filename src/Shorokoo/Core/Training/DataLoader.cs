@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using Shorokoo.Core;
+using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Graph;
 
 namespace Shorokoo
@@ -123,6 +125,93 @@ namespace Shorokoo
             OptionalTensorData => nameof(OptionalTensorData),
             _ => data.GetType().Name,
         };
+
+        /// <summary>
+        /// Refuses <paramref name="fed"/> unless it holds what <paramref name="def"/>, the rig's
+        /// definition, declares: as many fields, and in each place a value of the kind the field
+        /// declares, of its element type, and of its rank where the definition states one.
+        ///
+        /// <para>A step feeds a struct's fields in order, whatever they are called, so this is what
+        /// a struct has to get right. It is checked before anything is fed because the runtime
+        /// refuses a value that does not fit only once the step has started — and by then the step
+        /// has taken everything it was fed as it is, the checkpoint among it.</para>
+        /// </summary>
+        /// <param name="fed">The struct, resolved out of any <c>.Shared()</c> or
+        /// <c>.TryConsume()</c> it was passed through.</param>
+        /// <param name="def">The rig's definition it is fed against.</param>
+        /// <param name="paramName">The argument it was passed as.</param>
+        /// <param name="builtBy">The call that builds a struct that fits, for the refusal to name.</param>
+        /// <exception cref="ArgumentException">It does not fit.</exception>
+        internal static void RequireFits(TensorDataStruct fed, TensorStructDef def, string paramName, string builtBy)
+        {
+            ArgumentNullException.ThrowIfNull(fed, paramName);
+            var fields = fed.Definition.Fields;
+            if (fields.Length != def.Fields.Length)
+                throw new ArgumentException(
+                    $"A training step was given {fields.Length} field(s) as {paramName}, where the rig "
+                    + $"declares {def.Fields.Length} ({string.Join(", ", def.Fields.Select(f => f.Name))}). "
+                    + $"Build it with {builtBy}, which takes one value per field, in that order.", paramName);
+            for (int i = 0; i < fields.Length; i++)
+            {
+                var value = fed.Fields[fields[i].Name];
+                if (Fits(value, def.Fields[i])) continue;
+                throw new ArgumentException(
+                    $"A training step was given {Describe(value)} as {paramName}'s field '{fields[i].Name}', "
+                    + $"where the rig declares {Describe(def.Fields[i])} in that place "
+                    + $"('{def.Fields[i].Name}'). Build it with {builtBy}, from values of the kind and "
+                    + "element type the rig declares.", paramName);
+            }
+        }
+
+        /// <summary>Whether <paramref name="value"/> can feed <paramref name="field"/> — a plain
+        /// tensor serving for an optional one, as a struct's own definition allows.</summary>
+        private static bool Fits(IData value, TensorStructFieldDef field)
+        {
+            var kind = value switch
+            {
+                TensorData => DataStructure.Tensor,
+                OptionalTensorData => DataStructure.Optional,
+                TensorDataSequence => DataStructure.Sequence,
+                TensorDataStruct => DataStructure.TensorStruct,
+                _ => (DataStructure?)null,
+            };
+            if (kind != field.Structure && !(kind == DataStructure.Tensor && field.Structure == DataStructure.Optional))
+                return false;
+            if (value.DType != field.ElementType) return false;
+            return field.Rank is not int rank || TensorOf(value) is not { } tensor || tensor.Shape.Dims.Length == rank;
+        }
+
+        /// <summary>The tensor a value is or holds, whose rank a field can state.</summary>
+        private static TensorData? TensorOf(IData value) => value switch
+        {
+            TensorData tensor => tensor,
+            OptionalTensorData { Value: { } present } => present,
+            _ => null,
+        };
+
+        /// <summary>A value as a refusal describes it: its kind, element type and rank.</summary>
+        private static string Describe(IData value) => value switch
+        {
+            TensorData t => $"a {t.DType} tensor of rank {t.Shape.Dims.Length}",
+            OptionalTensorData { Value: { } present } => $"an optional {present.DType} tensor of rank {present.Shape.Dims.Length}",
+            OptionalTensorData absent => $"an absent optional {absent.DType} tensor",
+            TensorDataSequence q => $"a sequence of {q.DType} tensors",
+            TensorDataStruct => "a struct",
+            _ => $"a {value.GetType().Name}",
+        };
+
+        /// <summary>A field as a refusal describes what it declares.</summary>
+        private static string Describe(TensorStructFieldDef field)
+        {
+            var rank = field.Rank is int r ? $" of rank {r}" : "";
+            return field.Structure switch
+            {
+                DataStructure.Optional => $"an optional {field.ElementType} tensor{rank}",
+                DataStructure.Sequence => $"a sequence of {field.ElementType} tensors",
+                DataStructure.TensorStruct => "a struct",
+                _ => $"a {field.ElementType} tensor{rank}",
+            };
+        }
     }
 
     /// <summary>

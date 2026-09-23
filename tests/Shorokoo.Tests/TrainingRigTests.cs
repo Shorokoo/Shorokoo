@@ -2482,18 +2482,15 @@ public class TrainingRigTrainingLoopCoverageTests
     [Fact]
     public void TestAResidentRunWhoseStepFailsAfterTakingItsOwnStateIsLostAndOneThatOnlyReadAPublishedCheckpointGoesOn()
     {
-        var rig = AdamWScalarRig();
-        var (input, target) = (InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f));
-        TensorDataStruct Mistyped() => new(
-            new TensorStructDef([new TensorStructFieldDef("targets", DataStructure.Tensor, 1, DType.Float64)], "Target"),
-            new Dictionary<string, IData> { { "targets", TensorData([4L], 2.0, 4.0, 6.0, 8.0) } });
+        var rig = IndexedWeightRig();
+        var (input, outOfRange, target) = (Indexed(rig, 0L, 1L, 2L, 3L), Indexed(rig, 9L, 1L, 2L, 3L), TargetBatch(2f, 4f, 6f, 8f));
         using var run = rig.BeginResidentRun();
 
         run.Step(input.Shared(), target.Shared());
         var published = run.StepToCheckpoint(input.Shared(), target.Shared());
-        Assert.Throws<OnnxRuntimeException>(() => run.Step(input.Shared(), Mistyped()));
+        Assert.Throws<OnnxRuntimeException>(() => run.Step(outOfRange.Shared(), target.Shared()));
         Assert.True(float.IsFinite(run.Step(input.Shared(), target.Shared())));
-        Assert.Throws<OnnxRuntimeException>(() => run.Step(input.Shared(), Mistyped()));
+        Assert.Throws<OnnxRuntimeException>(() => run.Step(outOfRange.Shared(), target.Shared()));
         Assert.Contains("StepToCheckpoint", Assert.Throws<InvalidOperationException>(
             () => run.Step(input.Shared(), target.Shared())).Message);
         Assert.DoesNotContain(Tensors(published), t => t.IsDisposed);
@@ -2519,6 +2516,31 @@ public class TrainingRigTrainingLoopCoverageTests
         Assert.Contains("a shared TensorData", Assert.Throws<ArgumentException>(() => rig.TrainStep(
             rig.CreateInitialCheckpoint(), loose.Shared(), TargetBatch(2f, 4f, 6f, 8f))).Message);
         Assert.False(loose.IsDisposed);
+    }
+
+    [Fact]
+    public void TestABatchThatDoesNotFitTheRigsDefinitionIsRefusedBeforeTheStepTakesAnything()
+    {
+        var rig = AdamWScalarRig();
+        var cp = rig.CreateInitialCheckpoint();
+        var (input, target) = (InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f));
+        var float64 = rig.TargetDef.FromOrderedData(TensorData([4L], 2.0, 4.0, 6.0, 8.0));
+        var fieldless = new TensorDataStruct(new TensorStructDef([], "ModelInput"), []);
+        TensorData[] State() => [.. ((TensorDataStruct[])[cp.TrainableParams, cp.ModelState, cp.OptimizerState])
+            .SelectMany(s => s.Fields.Values.OfType<TensorData>())];
+
+        Exception?[] refusals =
+        [
+            Record.Exception(() => rig.TrainStep(cp, input.Shared(), float64)),
+            Record.Exception(() => rig.TrainStep(cp, fieldless, target.Shared())),
+            Record.Exception(() => rig.TrainStep(cp, new InMemoryDataLoader(input, float64, batchSize: 4))),
+            Record.Exception(() => rig.Fit([input, input], [target, float64], numEpochs: 1, cp)),
+            Record.Exception(() => { using var run = rig.BeginResidentRun(cp); run.Step(input.Shared(), float64); }),
+        ];
+
+        Assert.DoesNotContain(State(), t => t.IsDisposed);
+        Assert.All(refusals, e => Assert.IsType<ArgumentException>(e));
+        Assert.True(float.IsFinite(rig.TrainStep(cp, input, target).Loss!.Value));
     }
 
     [Fact]

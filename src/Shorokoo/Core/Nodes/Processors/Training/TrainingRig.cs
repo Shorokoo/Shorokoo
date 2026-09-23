@@ -2454,7 +2454,10 @@ namespace Shorokoo
         /// consumed in turn when it is fed to the next step as it is.</returns>
         /// <exception cref="ArgumentException"><paramref name="trainingInput"/> or
         /// <paramref name="trainingOutput"/> is not a struct, nor one passed through
-        /// <c>.Shared()</c> or <c>.TryConsume()</c>.</exception>
+        /// <c>.Shared()</c> or <c>.TryConsume()</c>; or it does not hold what
+        /// <see cref="InputDef"/> or <see cref="TargetDef"/> declares — as many fields, each of the
+        /// declared kind, element type and stated rank, in order. Refused before the step takes
+        /// anything.</exception>
         public TrainingCheckpoint TrainStep(
             TrainingCheckpoint checkpoint,
             IData trainingInput,
@@ -2925,7 +2928,13 @@ namespace Shorokoo
                     "(see TrainingRig.MakeHyperparameters).");
             var inputStruct = TrainingFeeds.StructOf(trainingInput, nameof(trainingInput));
             var targetStruct = TrainingFeeds.StructOf(trainingOutput, nameof(trainingOutput));
-            if (hyperparams is not null) TrainingFeeds.StructOf(hyperparams, nameof(hyperparams));
+            var hyperStruct = hyperparams is null ? null : TrainingFeeds.StructOf(hyperparams, nameof(hyperparams));
+            // Before anything is fed: the runtime refuses what does not fit only once the step has
+            // taken what it was fed as it is, the checkpoint among it.
+            RequireBatchFits(inputStruct, targetStruct, nameof(trainingInput), nameof(trainingOutput));
+            if (HyperparameterStructDef.Fields.Length > 0)
+                TrainingFeeds.RequireFits(
+                    hyperStruct!, HyperparameterStructDef, nameof(hyperparams), "rig.MakeHyperparameters(...)");
 
             // Execute the training step graph.
             // Graph inputs (after lowering): [param_fields..., state_fields..., opt_state_fields..., hyperparam_fields..., counter_inputs..., model_input_fields..., target_fields...]
@@ -3123,6 +3132,14 @@ namespace Shorokoo
             }
         }
 
+        /// <summary>Refuses a batch that does not fit <see cref="InputDef"/> and <see cref="TargetDef"/>,
+        /// before anything is fed; see <see cref="TrainingFeeds.RequireFits"/>.</summary>
+        private void RequireBatchFits(TensorDataStruct input, TensorDataStruct target, string inputName, string targetName)
+        {
+            TrainingFeeds.RequireFits(input, InputDef, inputName, "rig.InputDef.FromOrderedData(...)");
+            TrainingFeeds.RequireFits(target, TargetDef, targetName, "rig.TargetDef.FromOrderedData(...)");
+        }
+
         /// <summary>
         /// Retires the copies runs made of <paramref name="batch"/>'s tensors and sequences to read
         /// them — every field, nested structs and present optionals included — once the step that
@@ -3307,6 +3324,13 @@ namespace Shorokoo
             // RuntimeContext, per fed input shape), so a Fit()/Train() loop and a manual TrainStep loop
             // share the rig's compiled graphs.
             RequireNoRuntimeHyperparameters();
+
+            // Every batch before the first step takes anything. Each step refuses one that does not
+            // fit anyway, but by then the steps before it have consumed the checkpoint the run began
+            // from.
+            for (int i = 0; i < trainingInputs.Length; i++)
+                RequireBatchFits(trainingInputs[i], trainingOutputs[i],
+                    $"{nameof(trainingInputs)}[{i}]", $"{nameof(trainingOutputs)}[{i}]");
 
             // The loop owns every intermediate state and returns only the last, so it trains through a
             // resident run: the state stays where the provider produced it and crosses to the host on

@@ -1204,9 +1204,9 @@ says "unavailable" anywhere else.
 Both tables here were taken on **one machine**: the host rows under Linux, the card rows below
 under Windows on the same box, same CPU and same RTX 4090. So the hardware is common to them and
 the operating system is not — enough for the ratios to be compared, not enough to call them a
-like-for-like pair. The host rows reproduced on that machine within the ranges shown, and more
-steadily than the spread above suggests: across four consecutive runs the settled-series row did
-not move at all.
+like-for-like pair. Four consecutive runs on that machine reproduced the host rows within the
+ranges shown but for `NextPowerOfTwo` on rows 4 and 5, which read 31–32 MiB, and more steadily than
+the spread above suggests: the settled-series row did not move at all.
 
 A second probe (`ArenaExtendStrategyCudaProbeTests`, `Purpose=Manual`) answers what the host one
 cannot: what each strategy costs **one real training step on a card**. A 49,214,208-parameter
@@ -1427,8 +1427,8 @@ session got a 252 MiB arena and a run filling 160 MiB of it went through; with a
 on the card, the session was rebuilt at 152 MiB and the same run failed.
 
 **When a session is built again.** ORT fixes `gpu_mem_limit` when a session is built, and building
-one costs about as much as the graph is large — measured, around 0.7 ms per node, about a second at
-1,600 nodes — so Shorokoo does not build one per run. A session is built with the budget less the
+one costs more the larger the graph — measured, a training step of some 1,500 nodes took 0.4–0.6 s
+to compile — so Shorokoo does not build one per run. A session is built with the budget less the
 discount rounded up to the next sixty-fourth of the budget, and kept for as long as that limit is
 within what the budget allows. A run that finds the discount grown past the room its session left
 builds the session again with the lower limit, before it takes anything; a run that finds the

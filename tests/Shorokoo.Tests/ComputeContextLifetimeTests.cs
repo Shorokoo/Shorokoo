@@ -329,6 +329,7 @@ public class ComputeContextLifetimeCoverageTests
         using var context = new ComputeContext();
         var (graph, expected) = Chain();
         var compiled = context.Compile(graph);
+        var copyAt = TensorData.RunMemoryOf(DefaultBackend.Instance, DType.Float32);
 
         foreach (var interfere in (Action<HostTensorData<float32>>[])[
             static t => t.TryDelete(),
@@ -337,13 +338,17 @@ public class ComputeContextLifetimeCoverageTests
             for (int round = 0; round < 3; round++)
             {
                 var fed = Wide32();
+                var ran = false;
                 var other = Task.Run(() =>
                 {
-                    SpinWait.SpinUntil(() => !fed.CopiesAreEmpty, TimeSpan.FromSeconds(10));
+                    SpinWait.SpinUntil(
+                        () => fed.CopyHeldAt(copyAt) is { IsLocked: true } || Volatile.Read(ref ran),
+                        TimeSpan.FromSeconds(10));
                     interfere(fed);
                 });
 
                 var result = Floats(compiled.Execute(fed.Shared())[0].ToTensorData());
+                Volatile.Write(ref ran, true);
                 other.Wait();
 
                 Assert.Equal(expected, result);

@@ -252,7 +252,8 @@ var concrete = graph
     .ToConcreteArchitecture(graph.FromOrderedInputs([hyper, input]))  // hypers first
     .ToConcreteModel();
 
-var results = ComputeContext.Default.Execute(concrete, hyper, input); // hypers first
+// Hypers first. Shared, so that both can be passed again: a feed given as it is is consumed.
+var results = ComputeContext.Default.Execute(concrete, hyper.Shared(), input.Shared());
 ```
 
 The hyper value passed to `FromOrderedInputs` is what concretization bakes from.
@@ -319,7 +320,9 @@ nothing is folded, and **both** switch at run time.
 
 These values stay **live inputs** of the concrete graph — concretization is not
 `Specialize` and removes nothing from the input list — so you supply them again
-at every `Execute`. The contract is that you supply **the same values**.
+at every `Execute`. The contract is that you supply **the same values**. To pass one
+`TensorData` at every call, feed it `.Shared()`, as the example above does: fed as it
+is, the first run consumes it, and the next `Execute` throws saying which run took it.
 Executing with a value that would have produced a different parameter space is
 **invalid use**: the parameters that answer needs were never created, and nothing
 re-derives them at run time.
@@ -1523,8 +1526,9 @@ using var ctx = new ComputeContext
 };
 
 var rig = TrainingRig.FromScratch(model, loss, optimizer, sample, hypers, runtimeContext: ctx);
+var checkpoint = rig.CreateInitialCheckpoint();
 for (int step = 0; step < steps; step++)
-    checkpoint = rig.TrainStep(checkpoint, inputs.Shared());
+    checkpoint = rig.TrainStep(checkpoint, inputs.Shared(), targets.Shared());
 
 var stats = ctx.RunStats;
 Console.WriteLine($"{stats.RunCount} runs, peak {stats.PeakBytes / (1024 * 1024)} MiB, "

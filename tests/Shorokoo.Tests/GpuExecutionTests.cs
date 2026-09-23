@@ -3,11 +3,22 @@ using Microsoft.ML.OnnxRuntime;
 using Shorokoo.Core.Backends;
 using Shorokoo.Core.Factory;
 using Shorokoo.Core.Nodes.Processors.Helpers;
+using Shorokoo.Modules.Layers;
 using Shorokoo.Modules.Losses;
 using Shorokoo.Modules.Optimizers;
+using Shorokoo.OnnxRuntime;
 using Shorokoo.Runtime;
 
 namespace Shorokoo.Tests;
+
+/// <summary>One 4096-wide linear layer: under AdamW its weight and two moments are 192 MiB of
+/// state, against a step whose every other tensor is a few batch rows or the weight's own
+/// gradient.</summary>
+[Module]
+public partial class WideLinearModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x) => Linear.Model(Scalar(4096L), Scalar(true)).Call(x);
+}
 
 /// <summary>
 /// What the CUDA execution provider actually does, run rather than read: a graph on the card, the
@@ -259,6 +270,176 @@ public class GpuExecutionTests
         Assert.Equal(expected.Length, actual.Length);
         for (int i = 0; i < expected.Length; i++)
             Assert.Equal(expected[i], actual[i], precision: 4);
+    }
+
+    /// <summary>
+    /// Whether ONNX Runtime lets a run's feed go once the last node reading it has run, measured
+    /// on a session of its own: it does not. A 64 MiB feed in the session's own arena, read by the
+    /// graph's first node alone and held by nothing but the run, keeps its block to the end, so an
+    /// arena capped at 136 MiB — room for the run's own two 64 MiB blocks — cannot take them beside
+    /// it. The same bytes fed from outside the arena fit; and with the output bound into the feed's
+    /// own memory the run fits where the feed is, and computes what it should. Writing an output
+    /// into what a run consumed is the one way a run reuses that memory.
+    /// </summary>
+    [CudaFact]
+    public void CudaProvider_AFeedIsHeldUntilItsRunEndsSoOnlyAnOutputWrittenIntoItReusesItsMemory()
+    {
+        const long MiB = 1024 * 1024;
+        const long N = 16L << 20;
+        var backend = DefaultBackend.Instance;
+        var x = InputVector<float32>("x");
+        var fill = InputVector<int64>("fill");
+        var proto = FastOnnxModelBuilder.BuildInternalOnnxModel(new InternalComputationGraph([x, fill],
+            [OnnxOp.Neg(OnnxOp.Expand(OnnxOp.ReduceSum(x, keepdims: false), fill))]), prepForOnnx: true);
+        var model = new MemoryStream();
+        ProtoBuf.Serializer.Serialize(model, proto);
+        using var options = new SessionOptions();
+        OrtBackend.Configure(options, ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal);
+        OrtBackend.AppendCuda(options, 0, new DeviceMemorySettings
+        {
+            LimitBytes = 136 * MiB,
+            ArenaExtend = ArenaExtendStrategy.SameAsRequested,
+        });
+        using var session = new InferenceSession(model.ToArray(), options);
+        using var onDevice = new OrtMemoryInfo("Cuda", OrtAllocatorType.DeviceAllocator, 0, OrtMemType.Default);
+        using var shape = OrtValue.CreateTensorValueFromMemory<long>([N], [1L]);
+        float[] fed = new float[N];
+        Array.Fill(fed, 1f / N);
+        var bytes = System.Runtime.InteropServices.MemoryMarshal.AsBytes(fed.AsSpan()).ToArray();
+        OrtTensorValue Outside() => (OrtTensorValue)backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, bytes, [N]);
+        OrtValue Run(OrtValue feed, OrtValue? into = null, bool releasedFirst = false)
+        {
+            using var binding = session.CreateIoBinding();
+            binding.BindInput(session.InputNames[0], feed);
+            binding.BindInput(session.InputNames[1], shape);
+            if (into is null) binding.BindOutputToDevice(session.OutputNames[0], onDevice);
+            else binding.BindOutput(session.OutputNames[0], into);
+            if (releasedFirst) feed.Dispose();
+            using var runOptions = new RunOptions();
+            session.RunWithBoundResults(runOptions, binding).Dispose();
+            return binding.GetOutputValues()[0];
+        }
+
+        using var outside = Outside();
+        var inArena = Run(outside.Inner);
+        Assert.Contains("BFCArena", Assert.ThrowsAny<OnnxRuntimeException>(
+            () => Run(inArena, releasedFirst: true)).Message);
+
+        using var sameBytesOutside = Outside();
+        Run(sameBytesOutside.Inner).Dispose();
+
+        var feed = Run(outside.Inner);
+        using var written = new OrtTensorValue(Run(feed, into: feed));
+        var values = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(backend.CopyTensorToHost(written));
+        Assert.Equal(N, values.Length);
+        Assert.Equal([(float)N, N, N], [values[0], values[(int)(N / 2)], values[(int)(N - 1)]]);
+    }
+
+    /// <summary>
+    /// A resident run whose steps write their state over the state they consume trains exactly as
+    /// one that writes it anywhere else — the same bits, not merely close — with and without a
+    /// budget on the context, which counts that state outside the arena. Every step writes all 56
+    /// of the stack's state outputs over their inputs, the first one over the copies of the initial
+    /// checkpoint it took; the checkpoint step brings its state home and writes none.
+    /// </summary>
+    [CudaFact]
+    public void CudaProvider_AResidentRunWritingItsStateOverTheStateItConsumedTrainsExactlyAsWithout()
+    {
+        (float[] Values, long Aliased) Trained(ComputeContext context)
+        {
+            using (context)
+            {
+                var sample = TensorData([2L, 8L], [.. Enumerable.Range(0, 16).Select(i => i / 16f)]);
+                var rig = TrainingRig.FromScratch(
+                    Modules.PlainTinyMlpStack.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
+                    [new TensorDataModelParam("input", ModelParamType.InputParam, sample.CopyTo(ComputeContext.Host))],
+                    new AdamWOptimizerHyperparameters { LearningRate = 0.01f }, runtimeContext: context);
+                var input = rig.InputDef.FromOrderedData(sample);
+                var target = rig.TargetDef.FromOrderedData(TensorData([2L, 16L], [.. Enumerable.Range(0, 32).Select(i => i / 32f)]));
+                using var run = rig.BeginResidentRun();
+                for (int i = 0; i < 4; i++) run.Step(input.Shared(), target.Shared());
+                var final = run.StepToCheckpoint(input.Shared(), target.Shared());
+                return ([.. Weights(final), .. TrainingRigHelpers.FlattenStruct(final.OptimizerState)], context.AliasedOutputs);
+            }
+        }
+
+        var (plain, none) = Trained(new ComputeContext { OutputAliasing = false });
+        var (aliased, written) = Trained(new ComputeContext());
+        var (budgeted, budgetWritten) = Trained(new ComputeContext
+        {
+            DeviceMemory = new DeviceMemorySettings { LimitBytes = 64L * 1024 * 1024 },
+        });
+
+        Assert.Equal(plain, aliased);
+        Assert.Equal(plain, budgeted);
+        Assert.Equal(0L, none);
+        Assert.Equal(4 * 56L, written);
+        Assert.Equal(4 * 56L, budgetWritten);
+    }
+
+    /// <summary>
+    /// What writing a step's state over the state it consumed saves: a resident run of
+    /// <see cref="WideLinearModel"/> under AdamW, with shrinkage on as a budget would force it. A
+    /// step that writes its state elsewhere holds the state it consumed and the state it makes in
+    /// its arena together — measured, 704 MiB at the step's peak against 320 MiB for one that writes
+    /// the new state over the old, which keeps both out of the arena — and the card's own peak falls
+    /// with it. The arena falls by twice the state; the card, read across every process on it, by at
+    /// least the state. A first run grows the card's transfer allocator, which never shrinks, so
+    /// neither measured run pays for that.
+    /// </summary>
+    [CudaFact]
+    public void CudaProvider_WritingAStepsStateOverWhatItConsumedTakesTwiceTheStateOffItsArenaPeak()
+    {
+        (long Arena, long Card, long State) Peaks(bool aliasing)
+        {
+            using var context = new ComputeContext
+            {
+                OutputAliasing = aliasing,
+                Diagnostics = new DiagnosticSettings { CollectRunStatistics = true },
+                RunSettings = new RunSettings { ShrinkArenaAfterRun = true },
+            };
+            var sample = TensorData([2L, 4096L], [.. Enumerable.Range(0, 8192).Select(i => (i % 13) / 13f)]);
+            var rig = TrainingRig.FromScratch(
+                WideLinearModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
+                [new TensorDataModelParam("input", ModelParamType.InputParam, sample.CopyTo(ComputeContext.Host))],
+                new AdamWOptimizerHyperparameters { LearningRate = 0.001f }, runtimeContext: context);
+            var input = rig.InputDef.FromOrderedData(sample);
+            var target = rig.TargetDef.FromOrderedData(TensorData([2L, 4096L], new float[8192]));
+            var initial = rig.CreateInitialCheckpoint();
+            var state = ((TensorDataStruct[])[initial.TrainableParams, initial.ModelState, initial.OptimizerState])
+                .SelectMany(s => s.Fields.Values.OfType<TensorData>()).Sum(t => t.ByteCount);
+
+            DeviceMemory.ResetPeak();
+            var idle = DeviceMemory.Sample()!.Value.UsedBytes;
+            using var stop = new CancellationTokenSource();
+            var sampler = Task.Run(() => { while (!stop.IsCancellationRequested) DeviceMemory.Sample(); });
+            try
+            {
+                using var run = rig.BeginResidentRun(initial);
+                for (int i = 0; i < 4; i++) run.Step(input.Shared(), target.Shared());
+            }
+            finally
+            {
+                stop.Cancel();
+                sampler.Wait();
+            }
+            return (context.RunStats.PeakBytes, DeviceMemory.PeakUsedBytes - idle, state);
+        }
+
+        DeviceMemory.ResetPeak();
+        try
+        {
+            Peaks(aliasing: true);
+            var plain = Peaks(aliasing: false);
+            var aliased = Peaks(aliasing: true);
+
+            Assert.True(plain.Arena - aliased.Arena >= 2 * aliased.State - (1L << 20));
+            Assert.True(plain.Card - aliased.Card >= aliased.State);
+        }
+        finally
+        {
+            DeviceMemory.ResetPeak();
+        }
     }
 
     /// <summary>

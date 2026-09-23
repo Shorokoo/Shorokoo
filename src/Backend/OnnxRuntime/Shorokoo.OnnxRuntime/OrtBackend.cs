@@ -132,9 +132,68 @@ public abstract class OrtBackend : IShorokooBackend
         ShorokooLogSeverity logSeverity,
         DeviceMemorySettings deviceMemory,
         DiagnosticSettings diagnostics)
+        => Build(modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases: null);
+
+    /// <summary>
+    /// <see cref="CreateSession(ReadOnlyMemory{byte}, ShorokooGraphOptimization, ShorokooLogSeverity, DeviceMemorySettings, DiagnosticSettings)"/>,
+    /// for a session that may write the outputs <paramref name="outputAliases"/> names into the
+    /// memory of the inputs it pairs them with, on a run that consumed those inputs.
+    ///
+    /// <para>The pairs were proved over the model as handed over, and ONNX Runtime does not run that
+    /// model: it rewrites it first, and a rewrite can change which nodes read an input. Measured on
+    /// a training step, ORT fused one of the two <c>MatMul</c>s reading a weight through a
+    /// <c>Transpose</c> into a <c>FusedMatMul</c> reading the weight itself — a new direct reader
+    /// the handed-over model never had. So the session is built with ORT writing out the graph it
+    /// will actually run, and a pair is kept only where <see cref="OutputAliasProof"/> proves it
+    /// again over that graph. A pair the rewritten graph no longer proves is dropped, and a graph
+    /// that cannot be read back keeps none.</para>
+    /// </summary>
+    public IShorokooSession CreateSession(
+        ReadOnlyMemory<byte> modelBytes,
+        ShorokooGraphOptimization graphOptimization,
+        ShorokooLogSeverity logSeverity,
+        DeviceMemorySettings deviceMemory,
+        DiagnosticSettings diagnostics,
+        IReadOnlyList<OutputAlias> outputAliases)
+    {
+        ArgumentNullException.ThrowIfNull(outputAliases);
+        return Build(
+            modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics,
+            outputAliases.Count == 0 ? null : outputAliases);
+    }
+
+    private IShorokooSession Build(
+        ReadOnlyMemory<byte> modelBytes,
+        ShorokooGraphOptimization graphOptimization,
+        ShorokooLogSeverity logSeverity,
+        DeviceMemorySettings deviceMemory,
+        DiagnosticSettings diagnostics,
+        IReadOnlyList<OutputAlias>? outputAliases)
     {
         ArgumentNullException.ThrowIfNull(deviceMemory);
         ArgumentNullException.ThrowIfNull(diagnostics);
+        if (outputAliases is not null)
+        {
+            try
+            {
+                return BuildOnce(modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases);
+            }
+            // Aliasing is a saving and never a requirement, so a session that could not be built
+            // while writing its graph out is built again as one that aliases nothing. A model that
+            // cannot be built at all fails again below, with its own error.
+            catch (Exception) { }
+        }
+        return BuildOnce(modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases: null);
+    }
+
+    private OrtSession BuildOnce(
+        ReadOnlyMemory<byte> modelBytes,
+        ShorokooGraphOptimization graphOptimization,
+        ShorokooLogSeverity logSeverity,
+        DeviceMemorySettings deviceMemory,
+        DiagnosticSettings diagnostics,
+        IReadOnlyList<OutputAlias>? outputAliases)
+    {
         // The `using` is load-bearing, not tidiness. SessionOptions is a SafeHandle, so it
         // carries a critical finalizer that calls OrtReleaseSessionOptions, and ORT takes its
         // handle as a bare IntPtr -- the P/Invoke does no SafeHandle ref-counting, and the
@@ -146,22 +205,74 @@ public abstract class OrtBackend : IShorokooBackend
         using var options = new SessionOptions();
         Configure(options, graphOptimization, logSeverity);
         string? profileDirectory = null;
+        string? optimizedDirectory = null;
         try
         {
             // Inside the try: the folder exists before the two setters that follow it call into
             // the runtime, so a throw from either would otherwise leave it behind.
             profileDirectory = EnableProfiling(options, diagnostics);
+            if (outputAliases is not null) optimizedDirectory = WriteOptimizedModel(options);
             _configureExecutionProvider(options, deviceMemory);
             var session = new InferenceSession(modelBytes.ToArray(), options);
             // The session keeps this backend so it can rebuild a feed that came from another
             // backend's native runtime -- see OrtSession.Unwrap.
-            return new OrtSession(session, _cudaDeviceId, this, profileDirectory);
+            return new OrtSession(
+                session, _cudaDeviceId, this, profileDirectory,
+                optimizedDirectory is null ? [] : ProvedAgain(optimizedDirectory, outputAliases!));
         }
         catch
         {
             // No session to own the folder, so nothing would ever delete it.
             DeleteProfileDirectory(profileDirectory);
             throw;
+        }
+        finally
+        {
+            DeleteProfileDirectory(optimizedDirectory);
+        }
+    }
+
+    // What the optimized model is called inside the folder it is written to, and the file its
+    // larger initializers go to beside it: they are the constants ORT folded, which the proof does
+    // not read, so they are kept out of the model it parses.
+    private const string OptimizedModelFile = "optimized.onnx";
+    private const string OptimizedInitializersFile = "initializers.bin";
+
+    /// <summary>
+    /// Has ONNX Runtime write the graph it will run — after its rewrites, with the nodes that
+    /// actually execute — into a folder of its own, and answers with the folder. The initializers
+    /// above a kibibyte go to a file beside it rather than into the model, so a folded constant the
+    /// size of a tensor costs a write and not a parse.
+    /// </summary>
+    private static string WriteOptimizedModel(SessionOptions options)
+    {
+        var directory = Path.Combine(
+            Path.GetTempPath(), "shorokoo-optimized-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        options.OptimizedModelFilePath = Path.Combine(directory, OptimizedModelFile);
+        options.AddSessionConfigEntry(
+            "session.optimized_model_external_initializers_file_name", OptimizedInitializersFile);
+        options.AddSessionConfigEntry(
+            "session.optimized_model_external_initializers_min_size_in_bytes", "1024");
+        return directory;
+    }
+
+    /// <summary>
+    /// The pairs of <paramref name="outputAliases"/> the graph ONNX Runtime wrote into
+    /// <paramref name="directory"/> still proves, or none where it wrote nothing that can be read:
+    /// a pair this cannot prove is not bound, which costs the memory and never the result.
+    /// </summary>
+    private static IReadOnlyList<OutputAlias> ProvedAgain(
+        string directory, IReadOnlyList<OutputAlias> outputAliases)
+    {
+        try
+        {
+            return OutputAliasProof.Prove(
+                File.ReadAllBytes(Path.Combine(directory, OptimizedModelFile)), outputAliases);
+        }
+        catch (Exception)
+        {
+            return [];
         }
     }
 

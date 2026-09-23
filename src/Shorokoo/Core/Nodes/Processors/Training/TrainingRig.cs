@@ -122,6 +122,14 @@ namespace Shorokoo
             get { lock (_compiledTrainSteps) return _compiledTrainStepGeneric is not null; }
         }
 
+        /// <summary>The state pairs the compiled training step for <paramref name="shapeKey"/> was
+        /// marked to write each updated field into the field it replaces, by position — the same
+        /// position on both sides (test hook).</summary>
+        internal IReadOnlyList<(int Output, int Input)> MarkedStatePairs(string shapeKey)
+        {
+            lock (_compiledTrainSteps) return _compiledTrainSteps[shapeKey].MarkedPairs();
+        }
+
         /// <summary>The rig's own initial values, for a test to see that nothing it did fed them to
         /// a run (test hook).</summary>
         internal IEnumerable<TensorData> OwnInitialValues
@@ -150,14 +158,32 @@ namespace Shorokoo
                 if (_compiledTrainSteps.Count < MaxShapeSpecializedTrainSteps)
                     return _compiledTrainSteps[key] = RuntimeContext.Compile(
                         TrainingStepPureGraph.ToInternal(), dims, trainingStep: true,
-                        description: TrainStepDescription);
+                        description: TrainStepDescription, aliasCandidates: StateAliasCandidates());
                 // Reached only once more distinct shapes have been fed than there are specialized
                 // slots, and shared by every shape after that -- so this session's sizes are known
                 // not to settle, which is the one case the arena strategy departs on.
                 return _compiledTrainStepGeneric ??= RuntimeContext.Compile(
                     TrainingStepPureGraph.ToInternal(), inputDims: null, trainingStep: true,
-                    reusedAcrossShapes: true, description: TrainStepDescription);
+                    reusedAcrossShapes: true, description: TrainStepDescription,
+                    aliasCandidates: StateAliasCandidates());
             }
+        }
+
+        /// <summary>
+        /// The outputs of a training step that could be written into the memory of the inputs they
+        /// replace: each updated parameter, model-state and optimizer-state field with the field it
+        /// updates. The step's inputs and outputs lead with those fields in one order, so the pairs
+        /// are positional. They are candidates, not promises: the compile keeps a pair only where the
+        /// lowered step proves nothing reads the input after the output is written — an optimizer's
+        /// element-wise update, typically, and never a weight a later node still reads — and the
+        /// backend binds it only on a step that consumed that state.
+        /// </summary>
+        private (int Output, int Input)[] StateAliasCandidates()
+        {
+            var state = UpdatedParamFieldCount + UpdatedStateFieldCount + UpdatedOptimizerStateFieldCount;
+            var pairs = new (int Output, int Input)[state];
+            for (int i = 0; i < state; i++) pairs[i] = (i, i);
+            return pairs;
         }
 
         /// <summary>What a message about a run of the training step calls it: its inputs are one per
@@ -3110,6 +3136,12 @@ namespace Shorokoo
         /// Dispose the run when the loop ends — anything it still holds goes with it, so take the
         /// checkpoint you want to keep with
         /// <see cref="ResidentTrainingRun.StepToCheckpoint(IData, IData)"/> first.</para>
+        ///
+        /// <para><b>Steps write the new state over the old.</b> A step's updated state is written
+        /// into the memory of the state it consumed wherever the step's graph proves nothing reads
+        /// the old value after the new one is written, as an optimizer's element-wise update allows,
+        /// so on a card such state is held once rather than twice. A run begun from a fresh initial
+        /// checkpoint does this from its first step.</para>
         /// </summary>
         public ResidentTrainingRun BeginResidentRun(TrainingCheckpoint? initialCheckpoint = null)
             => new(this, initialCheckpoint ?? CreateInitialCheckpoint());

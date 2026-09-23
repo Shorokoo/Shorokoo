@@ -87,6 +87,27 @@ public interface IShorokooBackend
         DiagnosticSettings diagnostics)
         => CreateSession(modelBytes, graphOptimization, logSeverity, deviceMemory);
 
+    // The same session, told which of its outputs it may write into the memory of which of its
+    // inputs (output aliasing, see OutputAlias): pairs the model's lowering proved -- nothing reads
+    // the input after the output is written, in the model as handed over. A session may then write
+    // such an output into the input's memory on a run that consumed that input (see
+    // IShorokooSession.RunConsuming), where the two agree in memory, shape and element type.
+    //
+    // The proof is over the model as handed over. A backend that rewrites the graph before it runs
+    // it -- fusing nodes, and so changing which of them read an input -- binds only the pairs its
+    // rewritten graph still proves: OutputAliasProof answers for a serialized model.
+    //
+    // The default drops the pairs and builds the ordinary session, which aliases nothing: always
+    // correct, and exactly what a backend that does not implement this should do.
+    IShorokooSession CreateSession(
+        ReadOnlyMemory<byte> modelBytes,
+        ShorokooGraphOptimization graphOptimization,
+        ShorokooLogSeverity logSeverity,
+        DeviceMemorySettings deviceMemory,
+        DiagnosticSettings diagnostics,
+        IReadOnlyList<OutputAlias> outputAliases)
+        => CreateSession(modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics);
+
     IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged;
 
     IShorokooTensorValue CreateTensorFromRawBytes(

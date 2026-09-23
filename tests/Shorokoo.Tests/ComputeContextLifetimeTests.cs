@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using Shorokoo.Core.Backends;
+using Shorokoo.Core.Factory;
 using Shorokoo.Runtime;
 
 namespace Shorokoo.Tests;
@@ -578,6 +579,68 @@ public class ComputeContextLifetimeCoverageTests
         Assert.False(Survives(t => t.TryConsume(), t => t));
         Assert.False(Survives(t => t.TryConsume(), t => t.TryConsume()));
         Assert.True(Survives(t => t.TryConsume(), t => t.TryConsume(), readElsewhere: true));
+    }
+
+    /// <summary>Which of <paramref name="pairs"/> — (output, input) over inputs a and b, output 0
+    /// into a where none is named — the lowered graph of <paramref name="outputs"/> proves.</summary>
+    private static (int Output, int Input)[] Marked(
+        Func<Tensor<float32>, Tensor<float32>, Variable[]> outputs, params (int Output, int Input)[] pairs)
+    {
+        var a = InputVector<float32>("a");
+        var b = InputVector<float32>("b");
+        var graph = FastOnnxModelBuilder.BuildInternalOnnxModel(
+            new InternalComputationGraph([a, b], [.. outputs(a, b)]), prepForOnnx: true).Graph;
+        if (pairs.Length == 0) pairs = [(0, 0)];
+        OutputAlias Named((int Output, int Input) p) => new(graph.Outputs[p.Output].Name, graph.Inputs[p.Input].Name);
+        var proven = OutputAliasProof.Prove(graph, pairs.Select(Named));
+        return [.. pairs.Where(p => proven.Contains(Named(p)))];
+    }
+
+    [Fact]
+    public void TestAnOutputIsMarkedToBeWrittenIntoAnInputOnlyWhereNothingReadsTheInputAfterItIsWritten()
+    {
+        Assert.Equal([(0, 0)], Marked((a, b) => [a - b]));
+        Assert.Equal([(0, 0)], Marked((a, b) => [a * 0.5f + b]));
+        Assert.Equal([(0, 0)], Marked((a, b) => [a - (Tensor<float32>)OnnxOp.ReduceSum(a, keepdims: false)]));
+        Assert.Equal([(0, 0)], Marked((a, b) => { var twice = a * 2f; return [twice, twice + b]; }, (0, 0), (1, 0)));
+        Assert.Empty(Marked((a, b) => [b - a]));
+        Assert.Empty(Marked((a, b) => [a - b, a * b]));
+        Assert.Empty(Marked((a, b) => [a - b, (Tensor<float32>)OnnxOp.Flatten(a) * 2f]));
+        Assert.Empty(Marked((a, b) => [a - b, OnnxOp.Flatten(a)]));
+        Assert.Empty(Marked((a, b) => { var t = a * 2f; return [b + (Tensor<float32>)OnnxOp.Cast(OnnxOp.Size(t), null, DType.Float32), t]; }));
+        Assert.Empty(Marked((a, b) => [OnnxOp.CumSum(a, Scalar(0L), exclusive: false, reverse: false)]));
+        Assert.Empty(Marked((a, b) => [OnnxOp.Identity(a, rank: 1)]));
+    }
+
+    [Fact]
+    public void TestARunWritesAMarkedOutputIntoAnInputOnlyWhereItConsumedItAloneAndItsShapeIsSettled()
+    {
+        using var context = new ComputeContext();
+        var a = InputVector<float32>("a");
+        var b = InputVector<float32>("b");
+        var graph = new InternalComputationGraph([a, b], [a - b]);
+        var compiled = context.Compile(graph, [[4L], [4L]], trainingStep: false, aliasCandidates: [(0, 0)]);
+        long Aliased(CompiledGraph run, IData x, IData y, float[] expected)
+        {
+            var before = context.AliasedOutputs;
+            Assert.Equal(expected, Floats(run.Execute(x, y)[0].ToTensorData()));
+            return context.AliasedOutputs - before;
+        }
+        TensorData Tens() => TensorData([4L], (float[])[10f, 20f, 30f, 40f]);
+        var kept = Tens();
+
+        Assert.Equal([(0, 0)], compiled.MarkedPairs());
+        Assert.Equal(1, Aliased(compiled, Tens(), Sample(), [9f, 18f, 27f, 36f]));
+        Assert.Equal(0, Aliased(compiled, kept.Shared(), Sample(), [9f, 18f, 27f, 36f]));
+        Assert.Equal([10f, 20f, 30f, 40f], Floats(kept));
+        Assert.Equal(1, Aliased(compiled, kept.TryConsume(), Sample(), [9f, 18f, 27f, 36f]));
+        var twice = Sample();
+        Assert.Equal(0, Aliased(compiled, twice, twice, [0f, 0f, 0f, 0f]));
+        var unsettled = context.Compile(graph, inputDims: null, trainingStep: false, aliasCandidates: [(0, 0)]);
+        Assert.Equal(0, Aliased(unsettled, Tens(), Sample(), [9f, 18f, 27f, 36f]));
+        Assert.Empty(context.Compile(graph).MarkedPairs());
+        using var unaliased = new ComputeContext { OutputAliasing = false };
+        Assert.Empty(unaliased.Compile(graph, [[4L], [4L]], trainingStep: false, aliasCandidates: [(0, 0)]).MarkedPairs());
     }
 
     [Fact]

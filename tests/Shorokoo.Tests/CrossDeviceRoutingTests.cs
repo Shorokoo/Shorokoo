@@ -384,6 +384,42 @@ public class CrossDeviceRoutingCoverageTests
     }
 
     [Fact]
+    public void TestAnOutputWrittenIntoConsumedMemoryIsCountedInTheArenaThatMemoryWasInAndNoOther()
+    {
+        var (aliasedLimits, aliased) = KeepingTwo(aliases: true);
+        Assert.Equal([6300L, 6200L], aliasedLimits);
+        Assert.Equal(2L, aliased);
+        var (plainLimits, plain) = KeepingTwo(aliases: false);
+        Assert.Equal([6300L], plainLimits);
+        Assert.Equal(0L, plain);
+
+        var card = new StubBackend(ComputeDevice.Cuda, 0) { ReleasesWhatItConsumes = true, Aliases = true };
+        using var context = new ComputeContext(card) { DeviceMemory = Budget(6400) };
+        var compiled = context.Compile(Doubled(), inputDims: null, trainingStep: false, aliasCandidates: [(0, 0)]);
+        TensorData Kept(IData a) => compiled.Execute([a], [true])[0].ToTensorData();
+        var onCard = Floats(20).To(context);
+        var written = Kept(Kept(onCard.Shared()));
+        Kept(Floats(1).Shared());
+        Assert.Single(card.Sessions);
+        Assert.Equal(1L, context.AliasedOutputs);
+        GC.KeepAlive((object[])[onCard, written]);
+    }
+
+    /// <summary>The arena limits a budgeted context's session went through, and how many outputs
+    /// were written into consumed memory, over two runs each consuming a host tensor copied onto
+    /// the card and leaving its output there.</summary>
+    private static (long?[] Limits, long Aliased) KeepingTwo(bool aliases)
+    {
+        var card = new StubBackend(ComputeDevice.Cuda, 0) { ReleasesWhatItConsumes = true, Aliases = aliases };
+        using var context = new ComputeContext(card) { DeviceMemory = Budget(6400) };
+        var compiled = context.Compile(Doubled(), inputDims: null, trainingStep: false, aliasCandidates: [(0, 0)]);
+        TensorData Kept(IData a) => compiled.Execute([a], [true])[0].ToTensorData();
+        var (first, second) = (Kept(Floats(20)), Kept(Floats(20)));
+        GC.KeepAlive((object[])[first, second]);
+        return ([.. card.Sessions.Select(s => s.LimitBytes)], context.AliasedOutputs);
+    }
+
+    [Fact]
     public void TestASessionsArenaLimitIsTheBudgetLessTheDiscountRoundedUpToTheNextSixtyFourthOfIt()
     {
         Assert.Equal(6300L, ComputeContext.ArenaLimitWithin(6400, 0));
@@ -508,6 +544,12 @@ public class CrossDeviceRoutingCoverageTests
         return new InternalComputationGraph([a], [OnnxOp.Identity(a, rank: 1)]);
     }
 
+    private static InternalComputationGraph Doubled()
+    {
+        var a = InputVector<float32>("a");
+        return new InternalComputationGraph([a], [a * 2f]);
+    }
+
     /// <summary>A backend that answers about itself and records what it was asked to build, what it
     /// was asked whether it could address, and what it released — so a transfer's route can be read
     /// off it without a native runtime or a card. Its sessions run nothing (see
@@ -539,6 +581,10 @@ public class CrossDeviceRoutingCoverageTests
         /// <summary>Whether its sessions release what they consume through this backend, as a
         /// native one does, rather than leaving it to the interface's default.</summary>
         internal bool ReleasesWhatItConsumes { get; init; }
+
+        /// <summary>Whether its releasing sessions write the outputs they were built to alias into
+        /// the memory of the values they consumed, as a native one does.</summary>
+        internal bool Aliases { get; init; }
 
         /// <summary>Whether its sessions' runs throw.</summary>
         internal bool FailsRuns { get; set; }
@@ -584,6 +630,16 @@ public class CrossDeviceRoutingCoverageTests
             ReadOnlyMemory<byte> modelBytes, ShorokooGraphOptimization graphOptimization,
             ShorokooLogSeverity logSeverity,
             DeviceMemorySettings deviceMemory)
+            => Build(modelBytes, deviceMemory, []);
+
+        IShorokooSession IShorokooBackend.CreateSession(
+            ReadOnlyMemory<byte> modelBytes, ShorokooGraphOptimization graphOptimization,
+            ShorokooLogSeverity logSeverity, DeviceMemorySettings deviceMemory,
+            DiagnosticSettings diagnostics, IReadOnlyList<OutputAlias> outputAliases)
+            => Build(modelBytes, deviceMemory, Aliases ? outputAliases : []);
+
+        private IShorokooSession Build(
+            ReadOnlyMemory<byte> modelBytes, DeviceMemorySettings deviceMemory, IReadOnlyList<OutputAlias> aliases)
         {
             Sessions.Add(deviceMemory);
             var graph = ProtoBuf.Serializer
@@ -591,7 +647,7 @@ public class CrossDeviceRoutingCoverageTests
             string[] inputs = [.. graph.Inputs.Select(i => i.Name)];
             string[] outputs = [.. graph.Outputs.Select(o => o.Name)];
             return ReleasesWhatItConsumes
-                ? new ReleasingStubSession(this, inputs, outputs)
+                ? new ReleasingStubSession(this, inputs, outputs, aliases)
                 : new StubSession(this, inputs, outputs);
         }
 
@@ -646,19 +702,42 @@ public class CrossDeviceRoutingCoverageTests
     }
 
     /// <summary>A session that releases what it consumes through its backend once the run is over,
-    /// however it ends — as a native one does.</summary>
-    private sealed class ReleasingStubSession(StubBackend backend, string[] inputNames, string[] outputNames)
+    /// however it ends — as a native one does — and writes each output it was built to alias into
+    /// the memory of the value its input was fed, where the run consumed that value alone and it is
+    /// in the memory the output is produced in.</summary>
+    private sealed class ReleasingStubSession(
+        StubBackend backend, string[] inputNames, string[] outputNames, IReadOnlyList<OutputAlias> aliases)
         : StubSession(backend, inputNames, outputNames), IShorokooSession
     {
         IReadOnlyList<IShorokooTensorValue> IShorokooSession.RunConsuming(
             IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
             IReadOnlyCollection<IShorokooTensorValue> consumed, IReadOnlyList<string> outputNames,
             IReadOnlySet<string> retainedOutputNames, RunSettings runSettings)
+            => ((IShorokooSession)this).RunConsuming(
+                inputs, consumed, outputNames, retainedOutputNames, runSettings, out _);
+
+        IReadOnlyList<IShorokooTensorValue> IShorokooSession.RunConsuming(
+            IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
+            IReadOnlyCollection<IShorokooTensorValue> consumed, IReadOnlyList<string> outputNames,
+            IReadOnlySet<string> retainedOutputNames, RunSettings runSettings,
+            out IReadOnlyList<string?> aliasedInputs)
         {
+            var written = new string?[outputNames.Count];
+            aliasedInputs = written;
             Backend.Handed.AddRange(consumed);
             try
             {
-                return Run(inputs, outputNames, runSettings);
+                var results = RunRetainingOutputs(inputs, outputNames, retainedOutputNames, runSettings).ToArray();
+                foreach (var alias in aliases)
+                {
+                    var output = outputNames.ToList().IndexOf(alias.Output);
+                    if (output < 0 || inputs[alias.Input] is not StubValue value) continue;
+                    if (!consumed.Contains(value) || inputs.Values.Count(v => ReferenceEquals(v, value)) != 1) continue;
+                    if (value.IsHostAccessible != results[output].IsHostAccessible) continue;
+                    results[output] = new StubValue(value.ElementType, value.Bytes, value.Shape, value.IsHostAccessible);
+                    written[output] = alias.Input;
+                }
+                return results;
             }
             finally
             {

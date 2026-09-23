@@ -60,6 +60,11 @@ namespace Shorokoo.Runtime
         // null, so an ordinary compile keeps no second copy of its model.
         private readonly byte[]? _model;
 
+        // The outputs the lowering proved may be written into the memory of the inputs they are
+        // paired with -- empty for a graph nothing marked -- which every session this graph is built
+        // on is built with, a rebuilt one included.
+        private readonly IReadOnlyList<OutputAlias> _outputAliases;
+
         internal CompiledGraph(
             IShorokooSession session,
             IShorokooBackend backend,
@@ -70,7 +75,8 @@ namespace Shorokoo.Runtime
             RunSettings defaultRunSettings,
             ComputeContext owner,
             string? description = null,
-            byte[]? model = null)
+            byte[]? model = null,
+            IReadOnlyList<OutputAlias>? outputAliases = null)
         {
             _owner = owner;
             _built = new BuiltSession(session, deviceMemory);
@@ -82,6 +88,21 @@ namespace Shorokoo.Runtime
             DefaultRunSettings = defaultRunSettings;
             _description = description;
             _model = model;
+            _outputAliases = outputAliases ?? [];
+        }
+
+        /// <summary>The outputs the lowering marked as ones a run may write into the memory of an
+        /// input it consumed, and the input each is paired with (test hook).</summary>
+        internal IReadOnlyList<OutputAlias> OutputAliases => _outputAliases;
+
+        /// <summary><see cref="OutputAliases"/> by position: which output, into which input
+        /// (test hook).</summary>
+        internal IReadOnlyList<(int Output, int Input)> MarkedPairs()
+        {
+            var session = _built.Session;
+            return [.. _outputAliases.Select(alias => (
+                session.OutputNames.ToList().IndexOf(alias.Output),
+                session.InputNames.ToList().IndexOf(alias.Input)))];
         }
 
         /// <summary>
@@ -309,16 +330,19 @@ namespace Shorokoo.Runtime
                 if (eviction is not null) settings = settings with { CancellationToken = eviction.Token };
 
                 IReadOnlyList<IShorokooTensorValue> results;
+                // Per output, the input whose consumed memory the session wrote it into, or null.
+                IReadOnlyList<string?>? aliasedInputs = null;
                 // Either side of the native call and nothing else: the arena figures are about
                 // what the run allocates, and the wrapping above allocates nowhere near it.
                 var arenaBefore = _owner.StartRunStats(session);
                 try
                 {
                     // What this run consumed goes to the backend here, and is its alone from this
-                    // call on, whatever the call does.
+                    // call on, whatever the call does -- the backend may write an output into it.
                     results = feeds.HandOver(consumed => session.RunConsuming(
                         sessionInputs, consumed, _outputNames,
-                        retainedOutputNames ?? ComputeContext.NoOutputsRetained, settings));
+                        retainedOutputNames ?? ComputeContext.NoOutputsRetained, settings,
+                        out aliasedInputs));
                 }
                 catch (OperationCanceledException stopped)
                     when (ComputeContext.StoppedByCaller(stopped, runSettings.CancellationToken))
@@ -333,7 +357,8 @@ namespace Shorokoo.Runtime
                     _owner.FinishRunStats(session, arenaBefore);
                 }
 
-                return _owner.AdoptOutputs(results, _outputNames, _backend, built.Arena);
+                return _owner.AdoptOutputs(
+                    results, _outputNames, _backend, ArenasOf(results.Count, aliasedInputs, sessionInputs, feeds, built));
             }
             finally
             {
@@ -347,6 +372,38 @@ namespace Shorokoo.Runtime
         }
 
         /// <summary>
+        /// The arena each output of a run is in, as a device-memory budget counts it: the arena of
+        /// the session that ran — <paramref name="built"/>'s — for an output it allocated there, and
+        /// for one it wrote into the memory of a tensor the run consumed (output aliasing), the arena
+        /// that memory was in: the consumed tensor's own record, which is none where it was never an
+        /// arena's. The session's arena limit covers only what the arena itself allocates, so an
+        /// output living where the consumed tensor lived is counted where that tensor was — in the
+        /// discount of every later run of this session, unless that memory is this session's arena
+        /// already.
+        /// </summary>
+        private Func<int, object?> ArenasOf(
+            int outputs, IReadOnlyList<string?>? aliasedInputs,
+            IReadOnlyDictionary<string, IShorokooTensorValue> sessionInputs, RunFeeds feeds, BuiltSession built)
+        {
+            if (aliasedInputs is null) return _ => built.Arena;
+            var arenas = new object?[outputs];
+            var aliased = 0;
+            for (int i = 0; i < outputs; i++)
+            {
+                if (i < aliasedInputs.Count && aliasedInputs[i] is { } input)
+                {
+                    aliased++;
+                    // A value the run did not hand over has no record here, and none is the answer
+                    // that never under-counts: the output is then counted outside every arena.
+                    arenas[i] = sessionInputs.TryGetValue(input, out var value) ? feeds.ArenaOfHanded(value) : null;
+                }
+                else arenas[i] = built.Arena;
+            }
+            _owner.CountAliasedOutputs(aliased);
+            return i => arenas[i];
+        }
+
+        /// <summary>
         /// The session a run under a device-memory budget of <paramref name="limit"/> bytes can use,
         /// with <paramref name="feeds"/> admitted against it: this graph's session while its arena
         /// limit is still within what the budget allows, and otherwise a new one built with the
@@ -356,7 +413,9 @@ namespace Shorokoo.Runtime
         /// the context holds in its memory outside that session's arena for the length of the run —
         /// every tensor attached to it there, and what the run itself reads there or copies there to
         /// read. A tensor the session's own earlier runs left in its arena is inside the limit
-        /// already, where it is, and is not discounted again. ONNX Runtime fixes an arena's limit
+        /// already, where it is, and is not discounted again — and so is one a run wrote into such a
+        /// tensor's memory, where one written into memory outside the arena is discounted with the
+        /// rest (see <see cref="ArenasOf"/>). ONNX Runtime fixes an arena's limit
         /// when the session is built, and building one costs about as much as the graph is large,
         /// so a session is kept for as long as its limit fits and built again only when the discount
         /// has grown past the room it left — never merely because it has fallen. See
@@ -397,7 +456,7 @@ namespace Shorokoo.Runtime
                 + "limit cannot come down to what its context's device-memory budget now allows.");
             var deviceMemory = _built.DeviceMemory with { LimitBytes = arenaLimit };
             var fresh = new BuiltSession(
-                _owner.BuildSession(_backend, model, Optimization, deviceMemory), deviceMemory);
+                _owner.BuildSession(_backend, model, Optimization, deviceMemory, _outputAliases), deviceMemory);
             BuiltSession old;
             lock (_sessionGate)
             {
@@ -1335,6 +1394,17 @@ namespace Shorokoo.Runtime
         internal NamedModelParam[] AdoptOutputs(
             IReadOnlyList<IShorokooTensorValue> results, IReadOnlyList<string> names,
             IShorokooBackend backend, object? arena = null)
+            => AdoptOutputs(results, names, backend, _ => arena);
+
+        /// <summary>
+        /// <see cref="AdoptOutputs(IReadOnlyList{IShorokooTensorValue}, IReadOnlyList{string}, IShorokooBackend, object?)"/>
+        /// with each output's arena answered by <paramref name="arenaOf"/>, given its position: an
+        /// output a run wrote into consumed memory is in whatever arena that memory was, if any, not
+        /// in the running session's.
+        /// </summary>
+        internal NamedModelParam[] AdoptOutputs(
+            IReadOnlyList<IShorokooTensorValue> results, IReadOnlyList<string> names,
+            IShorokooBackend backend, Func<int, object?> arenaOf)
         {
             var outputs = new NamedModelParam[results.Count];
             for (int i = 0; i < outputs.Length; i++)
@@ -1343,10 +1413,49 @@ namespace Shorokoo.Runtime
                     results[i], ModelParamType.OutputParam, names[i], backend);
                 if (outputs[i] is not TensorDataModelParam named) continue;
                 var tensor = named.ToTensorData();
-                if (arena is not null && !tensor.Space.IsHost) tensor.RecordArena(arena);
+                if (arenaOf(i) is { } arena && !tensor.Space.IsHost) tensor.RecordArena(arena);
                 Attach(tensor);
             }
             return outputs;
+        }
+
+        /// <summary>
+        /// Whether this context's compiles mark outputs a run may write into the memory of an input
+        /// it consumed — output aliasing, which the training rig's steps use for the state they
+        /// replace (<see cref="OutputAlias"/>). On unless turned off, and turned off only by a test
+        /// comparing a run with aliasing to one without.
+        /// </summary>
+        internal bool OutputAliasing { get; init; } = true;
+
+        // How many outputs this context's runs have written into consumed memory, over its life.
+        private long _aliasedOutputs;
+
+        /// <summary>How many outputs this context's runs have written into the memory of an input
+        /// they consumed, over its life (test hook).</summary>
+        internal long AliasedOutputs => Interlocked.Read(ref _aliasedOutputs);
+
+        /// <summary>Records that a run wrote <paramref name="count"/> outputs into consumed
+        /// memory.</summary>
+        internal void CountAliasedOutputs(int count)
+        {
+            if (count > 0) Interlocked.Add(ref _aliasedOutputs, count);
+        }
+
+        /// <summary>
+        /// The pairs of <paramref name="candidates"/> <paramref name="graph"/> proves, by name — none
+        /// where there are no candidates or this context aliases nothing
+        /// (<see cref="OutputAliasing"/>). A candidate naming a position the graph does not have is
+        /// no candidate.
+        /// </summary>
+        private IReadOnlyList<OutputAlias> MarkedAliases(
+            GraphProto graph, IReadOnlyList<(int Output, int Input)>? candidates)
+        {
+            if (!OutputAliasing || candidates is not { Count: > 0 }) return [];
+            var named = new List<OutputAlias>(candidates.Count);
+            foreach (var (output, input) in candidates)
+                if (output >= 0 && output < graph.Outputs.Count && input >= 0 && input < graph.Inputs.Count)
+                    named.Add(new OutputAlias(graph.Outputs[output].Name, graph.Inputs[input].Name));
+            return OutputAliasProof.Prove(graph, named);
         }
 
         /// <summary>
@@ -1531,12 +1640,19 @@ namespace Shorokoo.Runtime
         /// <param name="description">What a message about a run of the compiled graph calls it, in
         /// place of the list of its input and output names — "a TrainingRig's training step" for the
         /// rig's own, whose inputs are one per parameter.</param>
+        /// <param name="aliasCandidates">Outputs the caller would have a run write into the memory of
+        /// an input, by position — output <c>Output</c> into input <c>Input</c>, the training rig's
+        /// updated state into the state it replaces. Each is kept only where
+        /// <see cref="OutputAliasProof"/> proves it over the model as built, and the session is built
+        /// with those (<see cref="OutputAlias"/>); none on a context that aliases nothing
+        /// (<see cref="OutputAliasing"/>).</param>
         internal CompiledGraph Compile(
             InternalComputationGraph graph,
             IReadOnlyList<long[]?>? inputDims,
             bool trainingStep,
             bool reusedAcrossShapes = false,
-            string? description = null)
+            string? description = null,
+            IReadOnlyList<(int Output, int Input)>? aliasCandidates = null)
         {
             graph.RequireRunnableOps("ComputeContext.Compile");
             var originalInputNames = ResolveOriginalInputNames(graph);
@@ -1545,7 +1661,8 @@ namespace Shorokoo.Runtime
                 originalInputNames,
                 trainingStep,
                 reusedAcrossShapes,
-                description);
+                description,
+                aliasCandidates);
         }
 
         private CompiledGraph CompileFromModel(
@@ -1553,10 +1670,12 @@ namespace Shorokoo.Runtime
             string[] originalInputNames,
             bool trainingStep,
             bool reusedAcrossShapes,
-            string? description)
+            string? description,
+            IReadOnlyList<(int Output, int Input)>? aliasCandidates = null)
         {
             RefuseHostContext("compile");
             var model = buildModel();
+            var outputAliases = MarkedAliases(model.Graph, aliasCandidates);
 
             var memoryStream = new MemoryStream();
             ProtoBuf.Serializer.Serialize(memoryStream, model);
@@ -1585,7 +1704,7 @@ namespace Shorokoo.Runtime
                     deviceMemory = deviceMemory with { LimitBytes = arena };
                     kept = modelData;
                 }
-                session = BuildSession(backend, modelData, optimization, deviceMemory);
+                session = BuildSession(backend, modelData, optimization, deviceMemory, outputAliases);
             }
             finally
             {
@@ -1598,7 +1717,7 @@ namespace Shorokoo.Runtime
 
             var graph = new CompiledGraph(
                 session, backend, onnxInputNameByOriginal, originalInputNames, optimization,
-                deviceMemory, RunSettings, this, description, kept);
+                deviceMemory, RunSettings, this, description, kept, outputAliases);
             // Enrolled under the same gate a disposal takes, so a compile racing a disposal either
             // lands before it and is released with everything else, or finds the context gone.
             lock (_gate)
@@ -1867,13 +1986,15 @@ namespace Shorokoo.Runtime
         }
 
         /// <summary>A session of <paramref name="backend"/> over <paramref name="modelData"/>, built
-        /// with <paramref name="deviceMemory"/> and with what this context records about its
-        /// sessions.</summary>
+        /// with <paramref name="deviceMemory"/>, with what this context records about its sessions,
+        /// and with the outputs the lowering proved it may write into consumed inputs'
+        /// memory.</summary>
         internal IShorokooSession BuildSession(
             IShorokooBackend backend, byte[] modelData, ShorokooGraphOptimization optimization,
-            DeviceMemorySettings deviceMemory)
+            DeviceMemorySettings deviceMemory, IReadOnlyList<OutputAlias>? outputAliases = null)
             => backend.CreateSession(
-                modelData, optimization, ShorokooLogSeverity.Fatal, deviceMemory, Diagnostics);
+                modelData, optimization, ShorokooLogSeverity.Fatal, deviceMemory, Diagnostics,
+                outputAliases ?? []);
 
         /// <summary>
         /// Whether the model takes no runtime input, so every node's value is already

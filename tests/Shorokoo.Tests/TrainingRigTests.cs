@@ -2204,10 +2204,10 @@ public class TrainingRigTrainingLoopCoverageTests
 
     // ---- Resident training runs (Shorokoo/Shorokoo#325) ----
 
-    private static TrainingRig AdamWScalarRig() => TrainingRig.FromScratch(
+    private static TrainingRig AdamWScalarRig(ComputeContext? runtimeContext = null) => TrainingRig.FromScratch(
         ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
         [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([4L], [1f, 2f, 3f, 4f]))],
-        new AdamWOptimizerHyperparameters { LearningRate = 0.1f });
+        new AdamWOptimizerHyperparameters { LearningRate = 0.1f }, runtimeContext: runtimeContext);
 
     /// <summary>The losses and final checkpoint of <paramref name="steps"/> TrainStep calls.</summary>
     private static (float[] Losses, TrainingCheckpoint Final) StepLoopRun(TrainingRig rig, int steps)
@@ -2264,6 +2264,43 @@ public class TrainingRigTrainingLoopCoverageTests
 
     private static TensorData[] Tensors(TrainingCheckpoint checkpoint) =>
         [.. checkpoint.TrainableParams.Fields.Values.OfType<TensorData>()];
+
+    [Fact]
+    public void TestAStepWritesItsStateIntoTheStateItConsumedAndTrainsExactlyAsOneThatDoesNot()
+    {
+        (float[] Values, long Aliased) Trained(bool aliasing)
+        {
+            using var context = new ComputeContext { OutputAliasing = aliasing };
+            var rig = AdamWScalarRig(context);
+            var (input, target) = (InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f));
+            var ckpt = rig.CreateInitialCheckpoint();
+            for (int i = 0; i < 3; i++) ckpt = rig.TrainStep(ckpt, input.Shared(), target.Shared());
+            using var run = rig.BeginResidentRun(ckpt);
+            run.Step(input.Shared(), target.Shared());
+            var final = run.StepToCheckpoint(input.Shared(), target.Shared());
+            return ([.. FlattenStruct(final.TrainableParams), .. FlattenStruct(final.OptimizerState)], context.AliasedOutputs);
+        }
+
+        var (aliased, written) = Trained(aliasing: true);
+        var (plain, none) = Trained(aliasing: false);
+        Assert.Equal(plain, aliased);
+        Assert.Equal(20L, written);
+        Assert.Equal(0L, none);
+    }
+
+    [Fact]
+    public void TestAStepIsMarkedToWriteOverTheStateNothingReadsAfterItsUpdateAndNoOther()
+    {
+        var adamW = AdamWScalarRig();
+        adamW.TrainStep(adamW.CreateInitialCheckpoint(), InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f));
+        Assert.Equal([(0, 0), (1, 1), (2, 2), (3, 3)], adamW.MarkedStatePairs(Assert.Single(adamW.CompiledTrainStepShapeKeys)));
+
+        var (matmul, ckpt) = CoverFromScratch(BatchedMatmulModel.ComputationGraph, SoftmaxL2Loss.ComputationGraph,
+            SGDOptimizer.ComputationGraph, [4L, 5L, 8L], 0.01f);
+        matmul.TrainStep(ckpt, matmul.InputDef.FromOrderedData(TensorData([4L, 5L, 8L], new float[160])),
+            matmul.TargetDef.FromOrderedData(TensorData([4L, 4L], new float[16])));
+        Assert.Equal([(0, 0)], matmul.MarkedStatePairs(Assert.Single(matmul.CompiledTrainStepShapeKeys)));
+    }
 
     [Fact]
     public void TestEveryInitialCheckpointIsACopyAStepConsumesAndTheRigsOwnValuesAreNeverFed()

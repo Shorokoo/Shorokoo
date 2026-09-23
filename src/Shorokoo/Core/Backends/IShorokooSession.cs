@@ -37,7 +37,8 @@ public interface IShorokooSession : IDisposable
         RunSettings runSettings) => Run(inputs, outputNames, runSettings);
 
     // Runs the session -- as Run, or as RunRetainingOutputs when retainedOutputNames names any --
-    // with the values in `consumed` handed over rather than lent. This is the call every run makes.
+    // with the values in `consumed` handed over rather than lent. Every run calls the overload
+    // below, which may also write outputs into consumed memory, and whose default is this.
     //
     // A consumed value is one the caller has given up: a tensor fed to the run as it is, which the
     // run took when it started. From the moment this is called it belongs to this session's
@@ -74,6 +75,35 @@ public interface IShorokooSession : IDisposable
         {
             foreach (var value in consumed) value.Dispose();
         }
+    }
+
+    // RunConsuming, able to write an output into the memory of a value this run consumed rather
+    // than into memory of its own -- output aliasing, for the pairs the session was built with (see
+    // IShorokooBackend.CreateSession and OutputAlias) -- and saying which it did: `aliasedInputs`
+    // holds, per output in `outputNames` order, the input name whose consumed value's memory that
+    // output was written into, or null. This is the call every run makes.
+    //
+    // The contract on `consumed` is RunConsuming's, unchanged: each value is released exactly once,
+    // through the backend, before this returns or rethrows. An aliased output is a value of its own
+    // that holds the memory it was written into, so releasing the consumed value leaves the output
+    // whole -- ONNX Runtime counts the references to a buffer, and releases it with the last.
+    //
+    // A session binds a pair only on a run that consumed the input, where no other input is fed the
+    // same value, and where the value is in the memory the output is produced in, of the output's
+    // element type and its shape: an output that could not be written there is produced as usual.
+    //
+    // Defaulted to RunConsuming, aliasing nothing, so a backend outside this repository keeps
+    // compiling and keeps its contract.
+    IReadOnlyList<IShorokooTensorValue> RunConsuming(
+        IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
+        IReadOnlyCollection<IShorokooTensorValue> consumed,
+        IReadOnlyList<string> outputNames,
+        IReadOnlySet<string> retainedOutputNames,
+        RunSettings runSettings,
+        out IReadOnlyList<string?> aliasedInputs)
+    {
+        aliasedInputs = new string?[outputNames.Count];
+        return RunConsuming(inputs, consumed, outputNames, retainedOutputNames, runSettings);
     }
 
     // This session's own memory arena as its runtime reports it, or null when the backend has no

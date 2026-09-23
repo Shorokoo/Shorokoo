@@ -139,9 +139,10 @@ namespace Shorokoo.Runtime
     /// locks it, and attaches it); a consumption takes that copy, or makes one, and the tensor's own
     /// memory is released at once.</item>
     /// <item><b>Handed over.</b> What is consumed goes to the backend in the call
-    /// (<see cref="IShorokooSession.RunConsuming"/>) and is the backend's from then on, on every
-    /// path. Consumed memory that never reached that call is still this run's, and is released when
-    /// the run gives up.</item>
+    /// (<see cref="IShorokooSession.RunConsuming(IReadOnlyDictionary{string, IShorokooTensorValue}, IReadOnlyCollection{IShorokooTensorValue}, IReadOnlyList{string}, IReadOnlySet{string}, RunSettings, out IReadOnlyList{string})"/>)
+    /// and is the backend's from then on, on every path — to release, or to write an output into.
+    /// Consumed memory that never reached that call is still this run's, and is released when the
+    /// run gives up.</item>
     /// <item><b>Under a device-memory budget</b>, what the run will hold in the context's memory is
     /// planned before anything is taken (<see cref="Plan"/>), the session is chosen against it, and
     /// each copy the run then makes is admitted against that plan — so a run the budget cannot fit
@@ -183,10 +184,13 @@ namespace Shorokoo.Runtime
         private readonly List<TensorDataSequence> _takenSequences = [];
 
         // What the backend is handed: tensors consumed where they are, and the copies consumed in
-        // the place of the ones that could not be.
+        // the place of the ones that could not be -- and, by value, which tensor each value was, so
+        // an output the backend wrote into one can be told whose memory it now lives in.
         private readonly List<TensorData> _handedTensors = [];
         private readonly List<TensorDataSequence> _handedSequences = [];
         private readonly List<IShorokooTensorValue> _consumed = [];
+        private readonly Dictionary<IShorokooTensorValue, TensorData> _handedByValue =
+            new(ReferenceEqualityComparer.Instance);
 
         private bool _handedOver;
         private int _held;
@@ -557,8 +561,18 @@ namespace Shorokoo.Runtime
         {
             _handedTensors.Add(tensor);
             _consumed.Add(value);
+            _handedByValue[value] = tensor;
             return value;
         }
+
+        /// <summary>
+        /// The arena the memory behind <paramref name="value"/> was in, where it is a value this run
+        /// handed to the backend — the record of the tensor it was, consumed where it stood or copied
+        /// for the run — or null where it was in no arena, or is not one this run handed over.
+        /// What an output the backend wrote into that memory is in.
+        /// </summary>
+        internal object? ArenaOfHanded(IShorokooTensorValue value)
+            => _handedByValue.TryGetValue(value, out var tensor) ? tensor.Arena : null;
 
         private IShorokooTensorValue Read(Target target, TensorData tensor)
         {

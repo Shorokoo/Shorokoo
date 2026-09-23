@@ -136,17 +136,37 @@ public class CompositeTransferCoverageTests
     public void TestASequenceARunIsReadingCannotBeDisposedUntilTheRunReturns()
     {
         using var context = new ComputeContext();
+        var seq = InternalOp.ModuleSequenceInput(DType.Float32, null, null, "seq");
+        var compiled = context.Compile(new InternalComputationGraph(
+            [seq], [OnnxOp.ConcatFromSequence(seq, axis: 0, newAxis: false)]));
         var sequence = TensorDataSequence.Create([Sample(1f), Sample(3f)], DType.Float32);
-        using var lease = context.Lock(sequence);
+        using var reached = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+
+        var run = Task.Run(() => Floats(compiled.Run(new HeldSequence(sequence, reached, release))[0].ToTensorData()));
+        Assert.True(reached.Wait(TimeSpan.FromSeconds(10)));
 
         Assert.Throws<InvalidOperationException>(sequence.Dispose);
         Assert.False(sequence.IsDisposed);
-        Assert.Equal([3f, 4f], Floats(sequence[1]));
 
-        lease.Dispose();
+        release.Set();
+        Assert.Equal([1f, 2f, 3f, 4f], run.Result);
         sequence.Dispose();
         Assert.True(sequence.IsDisposed);
         Assert.Throws<ObjectDisposedException>(() => context.Lock(sequence));
+    }
+
+    /// <summary>Holds a run open once it has locked the sequence it is fed.</summary>
+    private sealed class HeldSequence(
+        TensorDataSequence data, ManualResetEventSlim reached, ManualResetEventSlim release)
+        : TensorDataSequenceModelParam("seq", ModelParamType.InputParam, data)
+    {
+        internal override IShorokooTensorValue ToTensorValue(IShorokooBackend backend)
+        {
+            reached.Set();
+            release.Wait(TimeSpan.FromSeconds(30));
+            return base.ToTensorValue(backend);
+        }
     }
 
     [Fact]

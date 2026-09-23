@@ -452,6 +452,27 @@ public class TensorDataApiCoverageTests
         Assert.Equal(42f, values[0]);
     }
 
+    [Fact]
+    public void TestAValueWrappedWithoutItsBackendIsCopiedEverywhereAndOneWrappedWithItIsNot()
+    {
+        using var context = new ComputeContext();
+        var backend = Shorokoo.Core.Backends.DefaultBackend.Instance;
+        var unnamed = TensorData.Create(new Shape(2L), DType.Float32, backend.CreateTensor<float>([1f, 2f], [2L]));
+        var named = TensorData.Create(new Shape(2L), DType.Float32, backend.CreateTensor<float>([1f, 2f], [2L]), backend);
+
+        Assert.Equal("an unrecorded backend", unnamed.AllocatingBackend.Description.Name);
+        Assert.Equal(MemorySpace.Host, unnamed.Space);
+        Assert.NotSame(unnamed, unnamed.To(context));
+        Assert.Same(unnamed, unnamed.ToHost());
+        Assert.Same(backend, named.AllocatingBackend);
+        Assert.Same(named, named.To(context));
+
+        var resident = new OnnxTensorData<float32>(new Shape(2L), new SpyTensorValue { IsHostAccessible = false });
+        Assert.Equal(MemoryKind.Unknown, resident.Space.Kind);
+        Assert.Contains("was not recorded",
+            Assert.Throws<InvalidOperationException>(() => resident.ToHost()).Message);
+    }
+
     /// <summary>A tensor whose storage the provider kept refuses every read, naming the call that
     /// brings it home rather than dereferencing a device address as a host one. Reachable on a
     /// host-only machine only through a value that says it is not host-accessible.</summary>

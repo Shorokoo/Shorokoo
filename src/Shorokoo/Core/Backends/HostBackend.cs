@@ -146,10 +146,10 @@ internal sealed class UnrecordedBackend : IShorokooBackend
         ArgumentNullException.ThrowIfNull(value);
         if (!value.IsHostAccessible)
             throw new InvalidOperationException(
-                $"This tensor ({string.Join('x', value.Shape)}:{value.ElementType}) is in an "
-                + "execution provider's own memory, and the backend that made it was not recorded, "
-                + "so there is no backend to ask for a copy of it. Wrap a runtime value with "
-                + "TensorData.Create(shape, dtype, value, backend) to say which backend made it.");
+                "This tensor's value is in an execution provider's own memory, and the backend that "
+                + "made it was not recorded, so there is no backend to ask for a copy of it. Wrap a "
+                + "runtime value with TensorData.Create(shape, dtype, value, backend) to say which "
+                + "backend made it.");
         var bytes = value.GetTensorDataAsSpan<byte>().ToArray();
         GC.KeepAlive(value);
         return bytes;

@@ -225,6 +225,49 @@ public class SideBySideBackendCoverageTests
         }
     }
 
+    [Fact]
+    public void TestTwoBackendsOverOneRuntimeReadEachOthersMemoryAndAnIsolatedRuntimeCopiesIt()
+    {
+        var (graph, a, b, expected) = Model();
+        var secondDefault = (IShorokooBackend)Activator.CreateInstance(DefaultBackend.Instance.GetType())!;
+        using var first = new ComputeContext();
+        using var sameRuntime = new ComputeContext(secondDefault);
+        using var isolated = new ComputeContext(Alt.Value);
+
+        Assert.Same(DefaultBackend.Instance.RuntimeIdentity, secondDefault.RuntimeIdentity);
+        Assert.NotSame(DefaultBackend.Instance.RuntimeIdentity, Alt.Value.RuntimeIdentity);
+
+        var fromFirst = first.Execute(graph, a, b)[0].ToTensorData();
+        var fromIsolated = isolated.Execute(graph, a, b)[0].ToTensorData();
+
+        Assert.Same(fromFirst, fromFirst.To(sameRuntime));
+        Assert.Same(fromIsolated, fromIsolated.To(isolated));
+        Assert.Same(a, a.To(isolated));
+        Assert.NotSame(fromFirst, fromFirst.To(isolated));
+        var copied = fromIsolated.To(first);
+        Assert.NotSame(fromIsolated, copied);
+        Assert.Equal(expected, [.. copied.As<float32>().AccessMemory<float>()]);
+    }
+
+    [Fact]
+    public void TestAFedTensorsRuntimeCopyIsReleasedThroughTheBackendThatBuiltIt()
+    {
+        var (graph, a, b, _) = Model();
+        var recorder = new RecordingBackend(Alt.Value);
+        using var onAlt = new ComputeContext(recorder);
+
+        onAlt.Execute(graph, a, b);
+        var built = recorder.Fed.ToArray();
+        Assert.Empty(recorder.Released);
+
+        onAlt.Dispose();
+        Assert.Empty(recorder.Released);
+
+        a.Delete();
+        b.Delete();
+        Assert.Equal(built, recorder.Released);
+    }
+
     /// <summary>The load context the isolated backend's own assemblies live in. It is what tells a
     /// value that backend built apart from one the default backend built, the two being the same
     /// type name in two loads of one assembly.</summary>
@@ -275,9 +318,21 @@ public class SideBySideBackendCoverageTests
 
         internal List<ShorokooGraphOptimization> Sessions { get; } = [];
 
+        internal List<IShorokooTensorValue> Released { get; } = [];
+
         public BackendDescription Description => inner.Description;
 
         public MemorySpace MemorySpace => inner.MemorySpace;
+
+        public object RuntimeIdentity => inner.RuntimeIdentity;
+
+        public bool CanAddress(MemoryLocation location) => inner.CanAddress(location);
+
+        public void Release(IShorokooTensorValue value)
+        {
+            Released.Add(value);
+            inner.Release(value);
+        }
 
         public IShorokooSession CreateSession(
             ReadOnlyMemory<byte> modelBytes, ShorokooGraphOptimization graphOptimization,

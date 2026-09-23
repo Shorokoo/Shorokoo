@@ -573,15 +573,17 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
-    public void TestABareFeedIsConsumedASharedOneReadAndATriedOneConsumedUnlessAnotherRunReadsIt()
+    public void TestABareFeedIsConsumedASharedOneReadAndATriedOneConsumedUnlessAnotherRunReadsItWhenTheRunStarts()
     {
         using var context = new ComputeContext();
         using var other = new ComputeContext();
-        bool Survives(Func<TensorData, IData> feed, bool readElsewhere = false)
+        bool Survives(Func<TensorData, IData> feed, bool readWhenCalled = false, bool readWhenRun = false)
         {
             var t = Sample();
-            using (readElsewhere ? other.Lock(t) : null)
-                Assert.Equal([2f, 4f, 6f, 8f], Floats(context.Execute(Doubling(), feed(t))[0].ToTensorData()));
+            IData fed;
+            using (readWhenCalled ? other.Lock(t) : null) fed = feed(t);
+            using (readWhenRun ? other.Lock(t) : null)
+                Assert.Equal([2f, 4f, 6f, 8f], Floats(context.Execute(Doubling(), fed)[0].ToTensorData()));
             var survived = !t.IsDisposed;
             Assert.Equal(survived, context.Tensors.Contains(t));
             return survived;
@@ -590,8 +592,9 @@ public class ComputeContextLifetimeCoverageTests
         Assert.False(Survives(t => t));
         Assert.True(Survives(t => t.Shared()));
         Assert.False(Survives(t => t.TryConsume()));
-        Assert.True(Survives(t => t.TryConsume(), readElsewhere: true));
-        Assert.True(Survives(t => t.Shared(), readElsewhere: true));
+        Assert.True(Survives(t => t.TryConsume(), readWhenRun: true));
+        Assert.False(Survives(t => t.TryConsume(), readWhenCalled: true));
+        Assert.True(Survives(t => t.Shared(), readWhenRun: true));
 
         var named = Sample();
         context.Run(Doubling(), NamedModelParam.FromIData("a", ModelParamType.InputParam, named.Shared()));

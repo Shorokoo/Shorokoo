@@ -2437,6 +2437,12 @@ namespace Shorokoo
         /// nothing else is reading it. A checkpoint from <see cref="CreateInitialCheckpoint()"/> is
         /// no exception: its tensors are copies of the rig's initial values, made for it, so
         /// consuming it takes nothing from the rig or from the next initial checkpoint.</para>
+        ///
+        /// <para>A step that reads what it cannot address where it is — a host tensor on a card, a
+        /// managed array on any backend — reads it through a copy the tensor holds for its next read.
+        /// It lets go of the copies of its batch as it returns, however it ends, so a batch fed every
+        /// step is copied afresh each time rather than held twice; the copies of a checkpoint it read
+        /// stay with the checkpoint for as long as it lives.</para>
         /// </summary>
         /// <param name="checkpoint">Current training state (params, model state, optimizer state,
         /// step) — consumed by the step unless passed <c>.Shared()</c> or <c>.TryConsume()</c>.</param>
@@ -3026,6 +3032,14 @@ namespace Shorokoo
                 throw new ComputeContextException(
                     ErrorCodes.CR009, "TrainingRig.TrainStep", report, ex);
             }
+            finally
+            {
+                // However the step ended. A batch it only read stays the caller's, but the copies
+                // made to read it -- on a card, the batch copied onto the card -- need not: see
+                // ReleaseReadCopies.
+                ReleaseReadCopies(inputStruct);
+                ReleaseReadCopies(targetStruct);
+            }
 
             // Graph outputs (after lowering): [updated_param_field_0, ..., updated_state_field_0, ..., updated_opt_state_field_0, ..., loss]
             // Repack updated param fields into a TensorDataStruct
@@ -3107,6 +3121,34 @@ namespace Shorokoo
                 inputs.Add(feedMode is { } mode ? new SharedInput(value, mode) : value);
                 labels.Add($"{section} '{field.Name}'");
             }
+        }
+
+        /// <summary>
+        /// Retires the copies runs made of <paramref name="batch"/>'s tensors and sequences to read
+        /// them — every field, nested structs and present optionals included — once the step that
+        /// read them has returned.
+        ///
+        /// <para>A run reads memory it cannot address — a host tensor on a card, and every managed
+        /// array on any backend — through a copy the tensor holds and reuses until it is written or
+        /// dies, which is right for a tensor read again and again. A batch is read once a step: a
+        /// dataset fed <c>.Shared()</c> epoch after epoch would otherwise keep a copy of every batch
+        /// in the run's memory for as long as the dataset lives — on a card, through an allocator
+        /// that never shrinks, every batch of it on the card at once. So a step lets go of them as it
+        /// returns, and the next read of the batch copies it again. What the step consumed has no
+        /// copies left to retire, and a copy another run is still reading goes when that run
+        /// returns. The checkpoint's state is not a batch: a checkpoint fed <c>.Shared()</c> is read
+        /// step after step, and keeps its copies.</para>
+        /// </summary>
+        private static void ReleaseReadCopies(TensorDataStruct batch)
+        {
+            foreach (var field in batch)
+                switch (field)
+                {
+                    case TensorData tensor: tensor.ReleaseRunCopies(); break;
+                    case TensorDataSequence sequence: sequence.ReleaseRunCopies(); break;
+                    case OptionalTensorData { Value: { } present }: present.ReleaseRunCopies(); break;
+                    case TensorDataStruct nested: ReleaseReadCopies(nested); break;
+                }
         }
 
         /// <summary>Adds a struct feed's fields to a step's inputs, fed as the struct was, each
@@ -3238,8 +3280,10 @@ namespace Shorokoo
         ///
         /// <para>The arrays are a dataset, fed once per epoch, so every step <b>reads</b> its batch —
         /// as if it were passed <c>.Shared()</c> — and the batches are all alive and unchanged when
-        /// this returns. The checkpoint is fed to the first step as <c>TrainStep</c> feeds one:
-        /// consumed as it is, read when passed <c>.Shared()</c>.</para>
+        /// this returns. Each step lets go of the copies it made to read its batch, so the dataset is
+        /// not held a second time in the run's memory — on a card, not all on the card at once. The
+        /// checkpoint is fed to the first step as <c>TrainStep</c> feeds one: consumed as it is, read
+        /// when passed <c>.Shared()</c>.</para>
         /// </summary>
         /// <param name="initialCheckpoint">Initial training state (with initial parameter values)</param>
         /// <param name="trainingInputs">Array of training input batches (each as TensorDataStruct)</param>

@@ -58,7 +58,7 @@ namespace Shorokoo
     /// the step — which is what a batch built per draw wants, and what
     /// <see cref="InMemoryDataLoader"/> produces. A loader that hands out tensors it keeps and
     /// hands out again passes them <c>.Shared()</c>, so that each step reads them and leaves them
-    /// alive.</para>
+    /// alive — and lets go, as it returns, of the copies it made to read them.</para>
     /// </summary>
     public readonly struct DataBatch
     {

@@ -220,6 +220,15 @@ public partial class ParamShapeWideModel
     }
 }
 
+/// <summary>A weight read at indices the batch supplies, so an index out of range fails a step
+/// inside the runtime, after the step has taken what it was fed.</summary>
+[Module]
+public partial class IndexedWeightModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x, Tensor<int64> index)
+        => x * InitScalarWeight.Init(Vector(4L)).Gather(index, axis: 0);
+}
+
 /// <summary>One weight over the representative-input threshold and one under it, so a rig built
 /// from this describes the first and materializes the second.</summary>
 [Module]
@@ -2209,6 +2218,18 @@ public class TrainingRigTrainingLoopCoverageTests
         [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([4L], [1f, 2f, 3f, 4f]))],
         new AdamWOptimizerHyperparameters { LearningRate = 0.1f }, runtimeContext: runtimeContext);
 
+    private static TrainingRig IndexedWeightRig() => TrainingRig.FromScratch(
+        IndexedWeightModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
+        [new TensorDataModelParam("x", ModelParamType.InputParam, TensorData([4L], [1f, 2f, 3f, 4f])),
+         new TensorDataModelParam("index", ModelParamType.InputParam, TensorData([4L], [0L, 1L, 2L, 3L]))],
+        new AdamWOptimizerHyperparameters { LearningRate = 0.1f });
+
+    private static TensorDataStruct Indexed(TrainingRig rig, params long[] index)
+        => rig.InputDef.FromOrderedData(TensorData([4L], [1f, 2f, 3f, 4f]), TensorData([4L], index));
+
+    private static TensorData[] BatchTensors(params TensorDataStruct[] batches)
+        => [.. batches.SelectMany(b => b.Fields.Values.OfType<TensorData>())];
+
     /// <summary>The losses and final checkpoint of <paramref name="steps"/> TrainStep calls.</summary>
     private static (float[] Losses, TrainingCheckpoint Final) StepLoopRun(TrainingRig rig, int steps)
     {
@@ -2498,6 +2519,29 @@ public class TrainingRigTrainingLoopCoverageTests
         Assert.Contains("a shared TensorData", Assert.Throws<ArgumentException>(() => rig.TrainStep(
             rig.CreateInitialCheckpoint(), loose.Shared(), TargetBatch(2f, 4f, 6f, 8f))).Message);
         Assert.False(loose.IsDisposed);
+    }
+
+    [Fact]
+    public void TestAStepLetsGoOfTheCopiesItMadeToReadItsBatchHoweverItIsDrivenAndHoweverItEnds()
+    {
+        var rig = IndexedWeightRig();
+        using var run = rig.BeginResidentRun();
+        bool CopiesKept(Action<TensorDataStruct, TensorDataStruct> step, long firstIndex = 0L)
+        {
+            var (input, target) = (Indexed(rig, firstIndex, 1L, 2L, 3L), TargetBatch(2f, 4f, 6f, 8f));
+            step(input, target);
+            return BatchTensors(input, target).Any(t => !t.CopiesAreEmpty);
+        }
+
+        Assert.Equal<bool>([false, false, false, false, false, false], [
+            CopiesKept((x, y) => rig.TrainStep(rig.CreateInitialCheckpoint(), x.Shared(), y.Shared())),
+            CopiesKept((x, y) => run.Step(x.Shared(), y.Shared())),
+            CopiesKept((x, y) => run.StepToCheckpoint(x.Shared(), y.Shared())),
+            CopiesKept((x, y) => run.Step(new DataBatch(x.Shared(), y.Shared(), new DataLoaderPosition(0, 0)))),
+            CopiesKept((x, y) => rig.Fit([x], [y], numEpochs: 2)),
+            CopiesKept((x, y) => Assert.Throws<OnnxRuntimeException>(
+                () => rig.TrainStep(rig.CreateInitialCheckpoint(), x.Shared(), y.Shared())), firstIndex: 9L),
+        ]);
     }
 
     [Fact]

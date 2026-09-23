@@ -534,13 +534,24 @@ it **consumes** — the tensors are dead once the step starts, and their memory 
 step returns — and what it is given `.Shared()` it only reads.
 
 ```csharp
-cp = rig.TrainStep(cp, x, y);                      // cp's state, x and y are consumed
 cp = rig.TrainStep(cp, x.Shared(), y.Shared());    // a batch fed again: read, and kept
+cp = rig.TrainStep(cp, x, y);                      // cp's state, x and y are consumed
 var next = rig.TrainStep(best.Shared(), x2, y2);   // a checkpoint kept past the step: read
 ```
 
 That is what the ordinary loop wants: the state a step supersedes is released as the step runs,
 rather than whenever the old checkpoint is collected.
+
+**What a step keeps of what it reads.** A run reads a tensor it cannot address where it is — every
+tensor built from a C# array, on any backend, and a host tensor on a card — through a copy in its
+own memory, which the tensor holds and reuses for its next read until it is written or dies
+([inference.md](inference.md#feeding-a-run-consumed-shared-or-tried)). A training step lets go of
+the copies it made to read its **batch** as it returns, whether it succeeded or failed: a dataset
+fed `.Shared()` epoch after epoch is not held a second time in the run's memory — on a card, not
+copied onto the card whole — and each step that reads a batch copies it afresh. It keeps the copies
+it made to read the **checkpoint's state**, which is read step after step: a checkpoint fed
+`.Shared()` to a step on a card keeps a copy of its state on the card for as long as the checkpoint
+lives. Drop a kept checkpoint once you are done with it rather than holding it past its use.
 
 - **A checkpoint** feeds its trainable parameters, model state and optimizer state as its
   `FeedMode` says. `null` — every checkpoint a step or a load hands you — is as it is, consumed.
@@ -570,7 +581,9 @@ rather than whenever the old checkpoint is collected.
   — and feed the initial checkpoint to the first step as `TrainStep` would. `Fit` over a loader
   feeds each batch as the loader built it: `InMemoryDataLoader` gathers a fresh batch per draw,
   which the step consumes, and a loader of your own that hands out tensors it keeps passes them
-  `.Shared()` in its `DataBatch`.
+  `.Shared()` in its `DataBatch`. Either way each step lets go of the copies it made to read its
+  batch, as above, so a dataset read `.Shared()` costs a copy of each batch per step, not a second
+  copy of the whole dataset for as long as it lives.
 - **A step that fails after it started has still consumed what it was fed as it is**, as any run
   has. A resident run notes when that took its own state, and then refuses every later step,
   saying so — see [below](#keeping-training-state-on-the-device).
@@ -1063,7 +1076,10 @@ stays the safer one, since it catches a swapped pair that `FromOrderedData` acce
   `TensorDataStruct`, which the step that trains on it consumes, or one passed through `.Shared()`
   or `.TryConsume()`. `InMemoryDataLoader` gathers a fresh batch on every `Next()`, so each step
   consumes its own and the dataset stays whole; a loader of your own that hands out tensors it
-  keeps, and hands out again, passes them `.Shared()`.
+  keeps, and hands out again, passes them `.Shared()`. The step that reads such a batch lets go of
+  the copies it made to read it as it returns
+  ([What a step keeps of what it reads](#what-a-training-step-consumes)), so the tensors your loader
+  keeps are not also kept in the run's memory — on a card, not all on the card at once.
 - **Shuffle is deterministic.** With `shuffle: true`, the permutation for epoch `e` is a pure
   function of `(seed, e)` — a Fisher–Yates shuffle over a SplitMix64 stream, using no ambient
   `Random` and no wall clock. That is what makes resume exact: restoring to `(e, b)` regenerates

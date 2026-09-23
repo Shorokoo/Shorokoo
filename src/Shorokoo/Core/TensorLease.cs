@@ -15,8 +15,7 @@ namespace Shorokoo.Runtime
     /// <param name="AttachedTensors">How many tensors those are.</param>
     /// <param name="Added">The bytes the run adds to them: what it reads there in place that the
     /// context has not counted, and the copies it makes there.</param>
-    /// <param name="Copies">Of <paramref name="Added"/>, the bytes of the copies it will make.</param>
-    internal readonly record struct DevicePlan(long Attached, int AttachedTensors, long Added, long Copies)
+    internal readonly record struct DevicePlan(long Attached, int AttachedTensors, long Added)
     {
         /// <summary>All of it: the discount the session's arena limit is cut from the budget by.</summary>
         internal long Outside => Attached + Added;
@@ -163,18 +162,20 @@ namespace Shorokoo.Runtime
         // The memory the running backend computes in, which is what a budget on the context counts.
         private readonly MemorySpace _space;
 
-        // What Prepare made of the inputs: one target per distinct tensor or sequence, and the one
-        // each input feeds.
+        // What Prepare made of the inputs: one target per distinct tensor or sequence, by what it
+        // feeds, and the one each input feeds.
         private IReadOnlyList<NamedModelParam>? _inputs;
         private List<Target>? _targets;
+        private Dictionary<object, Target>? _bySubject;
         private Target[]? _targetOf;
 
         // Under a budget, once admitted: the arena limit of the session this run will use, the plan
-        // it was chosen by, and the bytes of the copies the run has really made so far.
+        // it was chosen by, and the bytes of the copies the run has had to make that the plan did not
+        // count.
         private bool _admitted;
         private long _arenaLimit;
         private DevicePlan _plan;
-        private long _copiedBytes;
+        private long _unplannedBytes;
 
         // Everything this run took, whatever it then does with the memory: released when the run
         // gives up unless the backend was handed it, or it was released already.
@@ -264,6 +265,7 @@ namespace Shorokoo.Runtime
 
             _inputs = inputs;
             _targets = targets;
+            _bySubject = byFeed;
             _targetOf = targetOf;
         }
 
@@ -330,9 +332,10 @@ namespace Shorokoo.Runtime
             }
 
             long added = 0;
-            long copies = 0;
             foreach (var target in targets)
             {
+                target.PlannedFresh = false;
+                target.Copy = null;
                 // A sequence's value is built in host memory whatever the provider.
                 if (target.Subject is not TensorData tensor) continue;
                 TensorData? resident = tensor;
@@ -340,11 +343,12 @@ namespace Shorokoo.Runtime
                 {
                     var where = TensorData.RunMemoryOf(_backend, tensor.DType);
                     if (where.Space != _space) continue;
-                    resident = tensor.CopyHeldAt(where);
+                    // Read through the copy the tensor holds there, or through a fresh one.
+                    resident = target.Copy = tensor.CopyHeldAt(where);
                     if (resident is null)
                     {
+                        target.PlannedFresh = true;
                         added += tensor.ByteCount;
-                        copies += tensor.ByteCount;
                         continue;
                     }
                 }
@@ -352,7 +356,7 @@ namespace Shorokoo.Runtime
                 if (excludingArena is not null && ReferenceEquals(resident.Arena, excludingArena)) continue;
                 if (counted.Add(resident)) added += resident.ByteCount;
             }
-            return new DevicePlan(attached, attachedTensors, added, copies);
+            return new DevicePlan(attached, attachedTensors, added);
         }
 
         /// <summary>
@@ -384,25 +388,41 @@ namespace Shorokoo.Runtime
 
         /// <summary>
         /// Admits a copy of <paramref name="source"/> this run is about to make in its context's
-        /// memory, against the plan its session was chosen by: made as planned, a copy always fits.
-        /// One the plan did not foresee — the held copy another thread retired or took in between —
-        /// is refused where it would leave the session's arena less than its limit.
+        /// memory, against the plan its session was chosen by.
+        ///
+        /// <para>A copy the plan counted always fits. So does one made in place of the copy the run
+        /// meant to read — retired by a write, or taken, before the run held it — whose memory has
+        /// gone back: the new one only takes its room. Where that memory is still held, because
+        /// another run is reading the retired copy, both are on the card at once, which the plan did
+        /// not count; that is refused where it would leave the session's arena less than its
+        /// limit.</para>
         /// </summary>
         /// <exception cref="InvalidOperationException">The copy does not fit.</exception>
         private void AdmitCopy(TensorData source)
         {
             if (!_admitted || Budget is not { } limit) return;
             if (TensorData.RunMemoryOf(_backend, source.DType).Space != _space) return;
-            _copiedBytes += source.ByteCount;
-            var outside = _plan.Outside - _plan.Copies + _copiedBytes;
+            if (_bySubject is null || !_bySubject.TryGetValue(source, out var target)) return;
+            if (target.PlannedFresh)
+            {
+                target.PlannedFresh = false;
+                return;
+            }
+            if (target.Copy is { IsDisposed: true, IsLocked: false }) return;
+
+            var bytes = source.ByteCount;
+            _unplannedBytes += bytes;
+            var outside = _plan.Outside + _unplannedBytes;
             if (outside <= limit - _arenaLimit) return;
             throw new InvalidOperationException(
-                $"{_run} has to copy {source.Describe()} into {_space} to read it, and with that "
-                + $"copy it would hold {Figure(outside)} bytes there outside its own arena, which with "
-                + $"the {Figure(_arenaLimit)} bytes its session's arena may take is more than its "
-                + $"compute context's {Figure(limit)}-byte device-memory budget "
-                + "(DeviceMemorySettings.LimitBytes). What it had taken by then stays taken. Delete "
-                + "what the context no longer needs, or give the context a larger budget.");
+                $"{_run} has to copy {source.Describe()} into {_space} to read it again — "
+                + $"{Figure(bytes)} bytes — while the copy it meant to read, retired before this run "
+                + $"held it, is still held by another run: with both it would hold {Figure(outside)} bytes "
+                + $"there outside its own arena, which with the {Figure(_arenaLimit)} bytes its "
+                + $"session's arena may take is more than its compute context's {Figure(limit)}-byte "
+                + "device-memory budget (DeviceMemorySettings.LimitBytes). What it had taken by then "
+                + "stays taken. Delete what the context no longer needs, or give the context a larger "
+                + "budget.");
         }
 
         /// <summary>
@@ -512,14 +532,14 @@ namespace Shorokoo.Runtime
         private IShorokooTensorValue Build(Target target)
             => target.Subject switch
             {
-                TensorData tensor when target.Consumed => Consume(tensor, target.Death!),
-                TensorData tensor => Read(tensor),
+                TensorData tensor when target.Consumed => Consume(target, tensor, target.Death!),
+                TensorData tensor => Read(target, tensor),
                 TensorDataSequence sequence when target.Consumed => Consume(sequence, target.Death!),
                 TensorDataSequence sequence => Read(sequence),
                 _ => throw new UnreachableException(),
             };
 
-        private IShorokooTensorValue Consume(TensorData tensor, TensorDeath death)
+        private IShorokooTensorValue Consume(Target target, TensorData tensor, TensorDeath death)
         {
             if (tensor.FeedsInPlace(_backend))
                 return Hand(tensor, tensor.UncheckedValue(_backend));
@@ -527,7 +547,7 @@ namespace Shorokoo.Runtime
             // Incompatible memory: the contents go into the run's memory, the tensor is spent, and
             // the copy is what is consumed. Its own memory is released now rather than after the
             // run, which is the point of consuming it.
-            var copy = tensor.TakeRunCopy(_backend, AdmitCopy, death);
+            var copy = target.Copy = tensor.TakeRunCopy(_backend, AdmitCopy, death);
             var value = Hand(copy, copy.UncheckedValue(_backend));
             tensor.ReleaseTaken();
             return value;
@@ -540,7 +560,7 @@ namespace Shorokoo.Runtime
             return value;
         }
 
-        private IShorokooTensorValue Read(TensorData tensor)
+        private IShorokooTensorValue Read(Target target, TensorData tensor)
         {
             if (tensor.FeedsInPlace(_backend)) return tensor.UncheckedValue(_backend);
 
@@ -549,7 +569,7 @@ namespace Shorokoo.Runtime
             // reads it, which is what it now occupies memory for.
             for (int attempt = 0; ; attempt++)
             {
-                var copy = tensor.SharedCopyFor(_backend, AdmitCopy);
+                var copy = target.Copy = tensor.SharedCopyFor(_backend, AdmitCopy);
                 try
                 {
                     _leases.Add(_context.Lock(copy, _run));
@@ -618,6 +638,14 @@ namespace Shorokoo.Runtime
             internal TensorDeath? Death { get; set; }
 
             internal IShorokooTensorValue? Value { get; set; }
+
+            /// <summary>Under a budget: whether the plan counted a fresh copy of it, not yet
+            /// made.</summary>
+            internal bool PlannedFresh { get; set; }
+
+            /// <summary>The copy this run reads it through, as far as the run knows: the one it held
+            /// when the run was planned, and then the one each read found or made.</summary>
+            internal TensorData? Copy { get; set; }
 
             /// <summary>What the run does with it, over every occurrence: shared if any occurrence
             /// is, else consumed if any is bare, else tried.</summary>

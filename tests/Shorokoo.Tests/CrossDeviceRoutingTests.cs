@@ -319,6 +319,31 @@ public class CrossDeviceRoutingCoverageTests
     }
 
     [Fact]
+    public void TestACopyARunMeantToReadButFoundRetiredIsReplacedUnlessAnotherRunStillHoldsIt()
+    {
+        var card = new StubBackend(ComputeDevice.Cuda, 0);
+        using var context = new ComputeContext(card) { DeviceMemory = Budget(6400) };
+        using var reader = new ComputeContext(card);
+        var compiled = context.Compile(Echo());
+        var source = Floats(100);
+        NamedModelParam Writing(float value) => Hooked(source, () => source.As<float32>().AccessModifiableMemory<float>()[0] = value);
+
+        Run(compiled, source.Shared());
+        Assert.Equal(9f, compiled.Run(Writing(9f))[0].ToTensorData().As<float32>().ValueAt<float>(0));
+
+        var copy = Assert.Single(context.Tensors, t => t.Space == MemorySpace.Cuda(0));
+        using var reading = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var held = Task.Run(() => reader.Compile(Echo()).Run(
+            Hooked(copy, () => { reading.Set(); release.Wait(TimeSpan.FromSeconds(10)); })));
+        Assert.True(reading.Wait(TimeSpan.FromSeconds(10)));
+        Assert.Contains("still held by another run", Assert.Throws<InvalidOperationException>(
+            () => compiled.Run(Writing(7f))).Message);
+        release.Set();
+        Assert.True(held.Wait(TimeSpan.FromSeconds(10)));
+    }
+
+    [Fact]
     public void TestABudgetedContextRunsOneAtATimeAndPlacesNothingWhileItRunsWhereAnUnbudgetedOneOverlaps()
     {
         // How many of two runs were inside the session at once, and whether a placement onto the
@@ -374,6 +399,17 @@ public class CrossDeviceRoutingCoverageTests
     }
 
     private static DeviceMemorySettings Budget(long bytes) => new() { LimitBytes = bytes };
+
+    /// <summary>A shared feed for input "a" that calls <paramref name="held"/> once the run holds
+    /// it, before anything is built for it — where a write or a second run can be landed.</summary>
+    private static NamedModelParam Hooked(TensorData data, Action held)
+        => new HookedFeed(data, held) { Sharing = SharedInputMode.Shared };
+
+    private sealed class HookedFeed(TensorData data, Action held)
+        : TensorDataModelParam("a", ModelParamType.InputParam, data)
+    {
+        internal override void Held() => held();
+    }
 
     private static TensorData Floats(int count) => TensorData([(long)count], new float[count]);
 

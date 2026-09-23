@@ -39,9 +39,10 @@ Related: [core-types.md](core-types.md) · [defining-models.md](defining-models.
   training checkpoints take both —
   [Feeding a run: consumed, shared or tried](#feeding-a-run-consumed-shared-or-tried).
 - A `TensorData` is its memory — one object per allocation, released through the backend that
-  made it — and it ends in exactly three ways: deleted, consumed by a run, or moved into an
-  attribute. A run holds what it is reading for as long as it runs, so a tensor being read
-  cannot be deleted — [A tensor's lifetime](#a-tensors-lifetime-locks-and-deletion).
+  made it — and it ends when it is deleted, consumed by a run, or moved into an attribute; a copy a
+  run made of a tensor, and an element a sequence holds as its own, end with what they belong to.
+  A run holds what it is reading for as long as it runs, so a tensor being read cannot be deleted
+  — [A tensor's lifetime](#a-tensors-lifetime-locks-and-deletion).
 - A compute context keeps books on tensors and owns none: disposing it releases its sessions and
   leaves every tensor alive. `To(context)` hands a tensor to a context that can read it where it
   is and copies it otherwise, `CopyTo(context)` always copies, and `ToHost()` brings one within
@@ -781,8 +782,8 @@ allocated it. That backend is the one that releases the memory, whichever contex
 been attached to, or none. A tensor does not know which contexts it is attached to — see
 [Moving data between contexts](#moving-data-between-contexts).
 
-**How a tensor ends.** In exactly three ways, and nothing else ends it — in particular, disposing a
-context it is attached to does not:
+**How a tensor ends.** In one of three ways — and disposing a context it is attached to is not one
+of them:
 
 | | |
 |---|---|
@@ -790,7 +791,13 @@ context it is attached to does not:
 | **Consumed** | fed to a run as it is — or through `.TryConsume()` with nothing else reading it — which takes it when the run starts; see [Feeding a run](#feeding-a-run-consumed-shared-or-tried). |
 | **Moved into an attribute** | `MoveToAttribute()`, which takes its contents — see [core-types.md](core-types.md#the-two-conversions-and-which-one-spends-its-source). |
 
-A dead tensor records which, and every access to it afterwards — reading its elements, feeding it,
+Two kinds of tensor are also ended by what they belong to. A copy a run made to read a tensor it
+could not read where it is ([above](#feeding-a-run-consumed-shared-or-tried)) is retired when that
+tensor is written or ends. And the elements of a sequence that holds them as its own — the copy a
+sequence's `To`, `CopyTo` or `ToHost` makes — end when the sequence does, however it ends: an
+element read after a run consumed its sequence names that run.
+
+A dead tensor records why, and every access to it afterwards — reading its elements, feeding it,
 `To`, `CopyTo`, `ToHost`, `Shared()`, `TryConsume()`, `MoveToAttribute` — throws
 `ObjectDisposedException` saying so; for a consumed tensor it names the graph and the context whose
 run took it, and says to pass it `.Shared()` at that call. `Shape`, `DType`,

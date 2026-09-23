@@ -418,8 +418,8 @@ public static class IsolatedBackend
 
         // Forwarded like its unbudgeted sibling, and with the same consequence: the allocation is
         // made by the isolated backend, out of an arena its own runtime built with these settings.
-        // An isolated backend's device memory is therefore budgeted by the context that owns the
-        // tensor exactly as an ordinary backend's is, and separately from it -- two runtimes on one
+        // An isolated backend's device memory is therefore budgeted by the context the copy is made
+        // for exactly as an ordinary backend's is, and separately from it -- two runtimes on one
         // card hold two sets of arenas, because an allocation means nothing to the runtime that did
         // not make it.
         public IShorokooTensorValue CreateTensorInBackendMemory(
@@ -440,5 +440,16 @@ public static class IsolatedBackend
 
         public IShorokooTensorValue CreateSequence(IReadOnlyList<IShorokooTensorValue> values)
             => _inner.CreateSequence(values);
+
+        // The runtime is the inner backend's, which is the whole reason this wrapper forwards
+        // rather than answers: a tensor allocated through the wrapper records the wrapper as its
+        // allocating backend, and its location has to name the runtime the allocation really
+        // belongs to, or the inner backend -- asked below whether it can address it -- would not
+        // recognise its own memory.
+        public object RuntimeIdentity => _inner.RuntimeIdentity;
+
+        public bool CanAddress(MemoryLocation location) => _inner.CanAddress(location);
+
+        public void Release(IShorokooTensorValue value) => _inner.Release(value);
     }
 }

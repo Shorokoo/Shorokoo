@@ -66,29 +66,20 @@ namespace Shorokoo
 
     /// <summary>
     /// A feed the caller has given away rather than lent — <see cref="TensorData.Donate"/>'s, as a
-    /// model parameter. It feeds exactly as <see cref="TensorDataModelParam"/> does, is locked by
-    /// the run exactly as one is, and differs in one step afterwards: the run drops the donated
-    /// handle once it has built the value, leaving its own lock as the only thing naming the
-    /// allocation (Shorokoo/Shorokoo#359).
+    /// model parameter. It feeds the same value <see cref="TensorDataModelParam"/> does, and differs
+    /// in what the run does with the tensor: a run consumes it when it starts, rather than taking a
+    /// reader lock on it, and releases its memory as soon as it returns
+    /// (Shorokoo/Shorokoo#359).
     /// </summary>
     public sealed class DonatedTensorModelParam : TensorDataModelParam
     {
-        private readonly TensorDonation _donation;
-
-        /// <summary>Wraps <paramref name="donation"/>'s handle as the parameter named
+        /// <summary>Wraps <paramref name="donation"/>'s tensor as the parameter named
         /// <paramref name="name"/>.</summary>
         /// <exception cref="ArgumentNullException"><paramref name="donation"/> is null.</exception>
         public DonatedTensorModelParam(string name, ModelParamType paramType, TensorDonation donation)
             : base(name, paramType, (donation ?? throw new ArgumentNullException(nameof(donation))).Tensor)
         {
-            _donation = donation;
         }
-
-        /// <inheritdoc/>
-        // Through the donation rather than past it. The two say the same thing today -- taking a
-        // donation back is letting go of the handle it carries -- and a parameter that took a
-        // donation and then let go of something else would stop being one the moment they differed.
-        internal override void DropDonatedHandle() => _donation.Dispose();
     }
 
     public class TensorDataSequenceModelParam : NamedModelParam
@@ -277,20 +268,6 @@ namespace Shorokoo
         /// </summary>
         internal virtual IShorokooTensorValue ToTensorValue(IShorokooBackend backend)
             => ToTensorValue();
-
-        /// <summary>
-        /// Gives up the handle a donated feed carries, once the run has built the value from it.
-        /// Does nothing for every other kind of parameter, which the caller keeps.
-        ///
-        /// <para>Called after the value and after the lock, never before either: the value is
-        /// built through this handle, and the lock is what stops the drop from freeing the bytes
-        /// the run is about to read. What is left holding them is the run's own lock, so they go
-        /// back to the allocator when it is released rather than when the caller gets round to
-        /// it.</para>
-        /// </summary>
-        internal virtual void DropDonatedHandle()
-        {
-        }
 
         public abstract TensorData ToTensorData();
 

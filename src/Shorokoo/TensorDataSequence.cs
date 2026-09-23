@@ -10,6 +10,7 @@ using System.Collections;
 using Shorokoo.Core;
 using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Modules;
+using Shorokoo.Runtime;
 
 namespace Shorokoo
 {
@@ -56,6 +57,15 @@ namespace Shorokoo
         public List<TensorData<T>> AsList => [.. this];
     }
 
+    /// <summary>
+    /// A sequence of tensors, as a run takes and gives one.
+    ///
+    /// <para>A sequence has a life of its own, like a tensor's: a run reading it holds a reader lock
+    /// on it for as long as it runs, <see cref="Dispose"/> ends it and throws while a run holds one,
+    /// and a disposed sequence says so on every path to its elements. It knows no compute context;
+    /// <see cref="To"/>, <see cref="CopyTo"/> and <see cref="ToHost"/> put its elements where a
+    /// context can use them, as the same operations on <see cref="TensorData"/> do.</para>
+    /// </summary>
     public abstract class TensorDataSequence : IData, IDisposable, IReadOnlyList<TensorData>
     {
         public DType DType { get; private set; }
@@ -69,11 +79,17 @@ namespace Shorokoo
             this.DType = dtype;
         }
 
+        // The sequence's own life, kept the way a tensor keeps its own: per sequence, and taken by
+        // nothing else.
+        private readonly object _gate = new();
+        private bool _dead;
+        private int _locks;
+
         /// <summary>
-        /// True once this sequence's storage has been released. Its dtype and
+        /// True once this sequence has been disposed and its storage released. Its dtype and
         /// <see cref="ToString"/> stay readable as metadata; every path to the elements throws.
         /// </summary>
-        public bool IsDisposed { get; protected set; }
+        public bool IsDisposed => Volatile.Read(ref _dead);
 
         /// <summary>Guards every path to the sequence's elements.</summary>
         protected void ThrowIfDisposed()
@@ -85,12 +101,45 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// Refuses a read of a sequence that is gone — disposed, or holding a runtime value whose
-        /// allocation has been released. What the framework calls when it is about to reach past
-        /// the sequence to its allocation, so that the refusal names the sequence rather than
-        /// leaving the allocation to speak for something it cannot see.
+        /// Ends this sequence and releases its storage through the backend that made it. A sequence
+        /// already disposed is left as it is.
         /// </summary>
-        internal virtual void ThrowIfGone() => ThrowIfDisposed();
+        /// <exception cref="InvalidOperationException">A run is reading this sequence; releasing
+        /// its storage now would free it under the run.</exception>
+        public void Dispose()
+        {
+            lock (_gate)
+            {
+                if (_dead) return;
+                if (_locks > 0)
+                    throw new InvalidOperationException(
+                        $"Sequence {this} is being read by a run, so it cannot be disposed: its "
+                        + "storage would be freed under the run. Wait for the run to return.");
+                _dead = true;
+            }
+            ReleaseMemory();
+        }
+
+        /// <summary>Releases this sequence's storage. Called once, by <see cref="Dispose"/>.</summary>
+        private protected abstract void ReleaseMemory();
+
+        /// <summary>Takes a reader lock for the length of a run. Refuses a sequence that has been
+        /// disposed: there is nothing left to read.</summary>
+        /// <exception cref="ObjectDisposedException">The sequence has been disposed.</exception>
+        internal void AcquireReadLock()
+        {
+            lock (_gate)
+            {
+                ThrowIfDisposed();
+                _locks++;
+            }
+        }
+
+        /// <summary>Drops a reader lock.</summary>
+        internal void ReleaseReadLock()
+        {
+            lock (_gate) _locks--;
+        }
 
         public override string ToString()
         {
@@ -124,28 +173,6 @@ namespace Shorokoo
         }
 
         internal abstract TensorData GetAt(int index);
-
-        /// <summary>
-        /// The allocation behind this sequence's runtime value, which a run locks while it feeds
-        /// it. <see cref="TensorStorage.None"/> where there is nothing a run could be reading --
-        /// the empty sequence, which has no value to build at all.
-        /// </summary>
-        internal virtual TensorStorage Storage => TensorStorage.None;
-
-        // Whether this sequence's reference on its allocation has already been dropped. A context's
-        // disposal and an explicit Dispose can both drop it, and a reference dropped twice frees
-        // bytes something else still names.
-        private int _referenceDropped;
-
-        /// <summary>Drops this sequence's reference on its allocation, freeing the runtime value
-        /// behind it if nothing else names it and no run is reading it. Idempotent.</summary>
-        internal void DropReference()
-        {
-            var storage = Storage;
-            if (ReferenceEquals(storage, TensorStorage.None)) return;
-            if (Interlocked.Exchange(ref _referenceDropped, 1) != 0) return;
-            storage.DropHandleReference();
-        }
 
         public TensorData this[int index] => GetAt(index);
 
@@ -201,17 +228,17 @@ namespace Shorokoo
                 static IEnumerator<TensorData<T>> Empty() { yield break; }
             }
 
-            public override void Dispose() => IsDisposed = true;
+            private protected override void ReleaseMemory() { }
+
+            private protected override bool AddressableBy(ComputeContext target) => true;
+
+            private protected override bool IsHostReadable => true;
         }
 
         /// <summary>
-        /// A sequence that is just a list of tensors, holding the very tensors it was given.
-        ///
-        /// <para>Which is what the transfer operations need. Building one through the runtime --
-        /// <see cref="Create"/>'s ordinary path -- makes a fresh sequence value and fresh elements
-        /// owning it, so every element's context and ownership would be replaced by the act of
-        /// rebuilding, and a GiveAccessTo would hand back owners. Holding the elements keeps what
-        /// each of them decided.</para>
+        /// A sequence that is just a list of tensors, holding the very tensors it was given — the
+        /// shape a copy of a sequence takes, and the one sequence whose elements are tensors of its
+        /// own rather than copies minted per read.
         ///
         /// <para>It is not <see cref="IOnnxData"/>, for the same reason
         /// <see cref="HostTensorData{T}"/> is not: there is no runtime value here until something
@@ -226,21 +253,10 @@ namespace Shorokoo
             // What these elements have been built into, per backend.
             private readonly MaterializedValues _materialized = new();
 
-            // The allocation a run locks while it reads this sequence. Its bytes are the runtime's
-            // copies of the elements, so freeing it is what Dispose means -- and a run holding a
-            // lock on it defers that free until it returns.
-            private readonly TensorStorage _storage;
-
             internal ListTensorDataSequence(List<TensorData<T>> elements)
             {
                 _elements = elements;
-                _storage = new TensorStorage(MemorySpace.Host, _materialized.Invalidate);
-                // Built here and named by nothing else yet, so the first reference cannot be
-                // refused.
-                _storage.TryAddHandleReference();
             }
-
-            internal override TensorStorage Storage => _storage;
 
             public override int Count
             {
@@ -292,7 +308,7 @@ namespace Shorokoo
                 catch
                 {
                     // These copies belong to nobody yet; on failure nothing else will release them.
-                    foreach (var copy in inner) copy.Dispose();
+                    foreach (var copy in inner) backend.Release(copy);
                     throw;
                 }
 
@@ -302,25 +318,38 @@ namespace Shorokoo
             }
 
             /// <summary>
-            /// Lets go of this sequence's element handles and of the sequence values it had built
-            /// on backends.
+            /// Releases the sequence values built from these elements, and deletes the elements —
+            /// which are this sequence's own: a copy of a sequence is made of copies.
             ///
-            /// <para>Each element here is this sequence's own handle -- a rebuild gives every
-            /// element one of its own, even where the bytes are shared -- so disposing them lets
-            /// go of this sequence's names for those bytes and leaves any other handle on them
-            /// reading.</para>
+            /// <para>An element a run is reading on its own refuses its deletion; the others are
+            /// deleted all the same, and the refusal is what this throws.</para>
             /// </summary>
-            public override void Dispose()
+            private protected override void ReleaseMemory()
             {
-                if (IsDisposed) return;
-                IsDisposed = true;
-                foreach (var element in _elements) element.Dispose();
-                DropReference();
+                _materialized.Invalidate();
+                Exception? refused = null;
+                foreach (var element in _elements)
+                {
+                    try { element.Dispose(); }
+                    catch (InvalidOperationException ex) { refused ??= ex; }
+                }
+                if (refused is not null) throw refused;
+            }
+
+            private protected override bool AddressableBy(ComputeContext target)
+                => _elements.TrueForAll(target.CanAddress);
+
+            private protected override bool IsHostReadable
+                => _elements.TrueForAll(static element => element.IsHostResident);
+
+            private protected override void AttachElementsTo(ComputeContext target)
+            {
+                foreach (var element in _elements) target.Attach(element);
             }
         }
 
         /// <summary>A sequence holding these tensors as they are, rather than rebuilding them
-        /// through a runtime.</summary>
+        /// through a runtime. The sequence owns them from then on.</summary>
         internal static TensorDataSequence OfElements(List<TensorData> data, DType dtype)
             => data.Count == 0
                 ? CreateEmpty(dtype)
@@ -350,96 +379,92 @@ namespace Shorokoo
             return OnnxUtils.CreateTensorDataSequence(dtype, data);
         }
 
+        /// <summary>
+        /// This sequence where <paramref name="target"/> can use it: the very same object when the
+        /// target's backend can read every element as it stands — its elements then attached to the
+        /// target, as <see cref="TensorData.To"/> attaches a tensor — and otherwise a copy of the
+        /// whole sequence in the target's memory. This sequence is untouched either way.
+        ///
+        /// <para>A copy of the whole sequence rather than of the elements that need it, because a
+        /// sequence owns its elements: one whose elements were partly another sequence's would
+        /// delete them from under it when disposed.</para>
+        /// </summary>
+        /// <exception cref="ArgumentNullException"><paramref name="target"/> is null.</exception>
+        /// <exception cref="ObjectDisposedException">This sequence has been disposed.</exception>
+        public TensorDataSequence To(ComputeContext target)
+        {
+            ArgumentNullException.ThrowIfNull(target);
+            ThrowIfDisposed();
+            if (!AddressableBy(target)) return CopyTo(target);
+            AttachElementsTo(target);
+            return this;
+        }
+
+        /// <summary>An independent copy of this sequence, its elements copied into
+        /// <paramref name="target"/>'s memory and attached to it. This sequence is untouched.</summary>
+        /// <exception cref="ArgumentNullException"><paramref name="target"/> is null.</exception>
+        /// <exception cref="ObjectDisposedException">This sequence has been disposed.</exception>
+        public TensorDataSequence CopyTo(ComputeContext target)
+        {
+            ArgumentNullException.ThrowIfNull(target);
+            ThrowIfDisposed();
+            return Rebuild(element => element.CopyTo(target));
+        }
 
         /// <summary>
-        /// The compute context these elements belong to.
-        /// <see cref="Shorokoo.Runtime.ComputeContext.Host"/> is the framework's own host memory.
-        /// Set by the transfer operations; a sequence built any other way inherits nothing and
-        /// reports the host context.
+        /// This sequence where the host can read it: the very same object when every element
+        /// already is host-readable, and otherwise a copy in the framework's own host memory.
         /// </summary>
-        public Shorokoo.Runtime.ComputeContext Context { get; internal set; }
-            = Shorokoo.Runtime.ComputeContext.Host;
-
-        /// <summary>Moves this sequence's elements to <paramref name="target"/>, element by
-        /// element and under each element's own rules.</summary>
-        public TensorDataSequence TransferTo(Shorokoo.Runtime.ComputeContext? target)
-            => Rebuild(target ?? Shorokoo.Runtime.ComputeContext.Host,
-                static (t, c) => t.TransferTo(c));
-
-        /// <summary>Copies this sequence's elements into <paramref name="target"/>'s memory,
-        /// leaving this sequence untouched.</summary>
-        public TensorDataSequence CopyTo(Shorokoo.Runtime.ComputeContext? target)
-            => Rebuild(target ?? Shorokoo.Runtime.ComputeContext.Host,
-                static (t, c) => t.CopyTo(c));
-
-        /// <summary>Hands <paramref name="target"/> a second handle on each of this sequence's
-        /// elements, leaving this sequence's own handles alone.</summary>
-        public TensorDataSequence GiveAccessTo(Shorokoo.Runtime.ComputeContext? target)
-            => Rebuild(target ?? Shorokoo.Runtime.ComputeContext.Host,
-                static (t, c) => t.GiveAccessTo(c));
-
-        /// <param name="target">The context the rebuilt sequence belongs to.</param>
-        /// <param name="operation">The per-element operation to apply.</param>
-        private TensorDataSequence Rebuild(
-            Shorokoo.Runtime.ComputeContext target,
-            Func<TensorData, Shorokoo.Runtime.ComputeContext, TensorData> operation)
+        /// <exception cref="ObjectDisposedException">This sequence has been disposed.</exception>
+        public TensorDataSequence ToHost()
         {
             ThrowIfDisposed();
-            List<TensorData> moved = new(Count);
-            // Every element this rebuild produced, to be released if it fails: each holds a
-            // reference of its own, including where it shares the source element's allocation, so
-            // letting go of one drops that element's name for the bytes and nothing else. Skipping
-            // the shared ones was true of ownership and is not true of a count -- it left the
-            // allocation one reference above zero with nothing left that could ever drop it, and
-            // on a card that is a device allocation waiting on a finalizer.
-            List<TensorData> produced = new(Count);
-            // What each source element was before the move, so a failure can put it back. Without
-            // it a failed transfer left the source elements handed over -- referenceless, naming
-            // the target -- so the caller's sequence died with a context it was never given to.
-            List<(TensorData Element, Shorokoo.Runtime.ComputeContext Context)> handedOver = [];
+            return IsHostReadable ? this : CopyTo(ComputeContext.Host);
+        }
+
+        /// <summary>A list sequence of what <paramref name="copyElement"/> makes of each element,
+        /// releasing everything it made if one of them fails.</summary>
+        private TensorDataSequence Rebuild(Func<TensorData, TensorData> copyElement)
+        {
+            List<TensorData> copies = new(Count);
             TensorData? minted = null;
             try
             {
                 foreach (var element in this)
                 {
-                    // Held so the cleanup below can release it: a sequence that mints its elements
-                    // per read hands this loop a tensor nobody else will ever see, and an operation
-                    // that throws on it would otherwise leave that one to a finalizer too.
+                    // Held so it can be released: a sequence that mints its elements per read hands
+                    // this loop a tensor nobody else will ever see, and letting go of it here is the
+                    // only chance -- otherwise every copy of a session's sequence output leaves one
+                    // runtime value per element to its finalizer.
                     minted = MintsElementsPerRead ? element : null;
-                    var before = element.Context;
-                    var rebuiltElement = operation(element, target);
-                    if (element.HasHandedOverReference && !MintsElementsPerRead)
-                        handedOver.Add((element, before));
+                    var copy = copyElement(element);
+                    copies.Add(copy);
+                    if (minted is not null && !ReferenceEquals(copy, minted)) minted.Delete();
                     minted = null;
-                    moved.Add(rebuiltElement);
-                    if (!ReferenceEquals(rebuiltElement, element)) produced.Add(rebuiltElement);
-                    // A sequence whose elements are copied out per read hands this loop a tensor
-                    // nobody else will ever see again, so letting go of it here is the only chance
-                    // -- otherwise every rebuild of a session's sequence output leaves one runtime
-                    // value, a device allocation on a card, to its context's disposal, and the
-                    // default context is never disposed. Safe where the rebuilt element shares
-                    // these bytes: it holds a reference of its own, so this only drops a name.
-                    if (MintsElementsPerRead && !ReferenceEquals(rebuiltElement, element))
-                        element.Dispose();
                 }
             }
             catch
             {
-                // What this loop built belongs to nobody: the sequence that would have owned it is
-                // never constructed, so without this each rebuilt element is a runtime value -- a
-                // device allocation on a card -- left to its finalizer. The elements it did not
-                // reach are untouched, and the ones it moved are put back below.
-                minted?.Dispose();
-                // The sources first: an element that handed its reference over is holding none,
-                // so releasing the rebuilt element that took it would free the bytes underneath
-                // the source before it could be given its own back.
-                foreach (var (element, before) in handedOver) element.ReclaimReference(before);
-                foreach (var element in produced) element.Dispose();
+                // What this loop made belongs to nobody: the sequence that would have owned it is
+                // never constructed.
+                minted?.TryDelete();
+                foreach (var copy in copies) copy.TryDelete();
                 throw;
             }
-            var rebuilt = OfElements(moved, DType);
-            rebuilt.Context = target;
-            return rebuilt;
+            return OfElements(copies, DType);
+        }
+
+        /// <summary>Whether <paramref name="target"/>'s backend can read every element as it
+        /// stands.</summary>
+        private protected abstract bool AddressableBy(ComputeContext target);
+
+        /// <summary>Whether the host can read every element as it stands.</summary>
+        private protected abstract bool IsHostReadable { get; }
+
+        /// <summary>Attaches this sequence's own elements to <paramref name="target"/>, for a
+        /// sequence whose elements are tensors of its own.</summary>
+        private protected virtual void AttachElementsTo(ComputeContext target)
+        {
         }
 
         /// <summary>
@@ -448,18 +473,47 @@ namespace Shorokoo
         /// reader responsible for releasing it.
         /// </summary>
         private protected virtual bool MintsElementsPerRead => false;
-
-        /// <summary>Records which context this sequence belongs to. Overridden where there is a
-        /// runtime value for that context to own.</summary>
-        internal virtual void BindTo(Shorokoo.Runtime.ComputeContext context) => Context = context;
-
-        public abstract void Dispose();
     }
 
     public sealed class OnnxTensorDataSequence<T> : TensorDataSequence<T>, IOnnxData, IDisposable
         where T : IVarType
     {
         private readonly IShorokooTensorValue backing;
+
+        /// <summary>
+        /// A sequence over <paramref name="value"/>, without saying which backend made it. The
+        /// sequence takes the value over and releases it by disposing it; host memory is assumed,
+        /// which is where a value with no producer to ask can be read.
+        /// </summary>
+        public OnnxTensorDataSequence(IShorokooTensorValue value)
+            : this(value, UnrecordedBackend.Instance, MemorySpace.Host)
+        {
+        }
+
+        /// <summary>
+        /// A sequence over <paramref name="value"/>, which <paramref name="allocatingBackend"/>
+        /// made and releases. It is in that backend's memory: a sequence value is not a tensor and
+        /// cannot say where it is, so the backend is taken at its word, and a sequence a card's
+        /// execution provider produced is not labelled host memory it may not be.
+        /// </summary>
+        internal OnnxTensorDataSequence(IShorokooTensorValue value, IShorokooBackend allocatingBackend)
+            : this(value, allocatingBackend, allocatingBackend.MemorySpace)
+        {
+        }
+
+        private OnnxTensorDataSequence(
+            IShorokooTensorValue value, IShorokooBackend allocatingBackend, MemorySpace space)
+        {
+            this.backing = value ?? throw new ArgumentNullException(nameof(value));
+            AllocatingBackend = allocatingBackend ?? throw new ArgumentNullException(nameof(allocatingBackend));
+            Space = space;
+        }
+
+        /// <summary>The backend that made this sequence's value, and releases it.</summary>
+        internal IShorokooBackend AllocatingBackend { get; }
+
+        /// <summary>Where this sequence's value is.</summary>
+        internal MemorySpace Space { get; }
 
         /// <summary>
         /// The backing backend-runtime sequence value, which this sequence owns: disposing the
@@ -469,85 +523,51 @@ namespace Shorokoo
         {
             get
             {
-                ThrowIfGone();
+                ThrowIfDisposed();
                 return backing;
             }
         }
 
         public override int Count
         {
-            get { ThrowIfGone(); return backing.GetValueCount(); }
+            get { ThrowIfDisposed(); return backing.GetValueCount(); }
         }
 
         /// <summary>
         /// The element at <paramref name="index"/>, on storage of its own: the runtime copies the
         /// element out rather than aliasing the sequence, so the returned tensor owns what it
-        /// hands back and disposing it leaves this sequence intact.
+        /// hands back and deleting it leaves this sequence intact.
         ///
-        /// <para>The copy is made by the runtime holding the sequence, in that runtime's memory, so
-        /// the element belongs to this sequence's <see cref="TensorDataSequence.Context"/> — the
-        /// context whose session produced the sequence. Wrapping it without one left an element the
-        /// provider had kept in device memory unable to say where it was, and so unable to be moved
-        /// anywhere at all.</para>
+        /// <para>The copy is made by the runtime holding the sequence, so the element's allocating
+        /// backend is this sequence's, and it is released through that backend.</para>
         /// </summary>
         public override TensorData<T> this[int index]
         {
             get
             {
-                ThrowIfGone();
+                ThrowIfDisposed();
                 var val = backing.GetValue(index);
-                return (TensorData<T>)OnnxUtils.CreateTensorDataFromValue(
-                    new Shape(val.Shape), (DType)(int)val.ElementType, val, Context);
+                try
+                {
+                    return (TensorData<T>)OnnxUtils.CreateTensorDataFromValue(
+                        new Shape(val.Shape), (DType)(int)val.ElementType, val, AllocatingBackend);
+                }
+                catch
+                {
+                    AllocatingBackend.Release(val);
+                    throw;
+                }
             }
         }
 
-        // The allocation behind the backing value: this sequence is its handle, and a run locks
-        // it while it feeds it. Built here rather than at BindTo so there is always something to
-        // lock, and always exactly one thing that frees the value.
-        private readonly TensorStorage _storage;
-
-        internal override TensorStorage Storage => _storage;
-
         private protected override bool MintsElementsPerRead => true;
 
-        /// <summary>
-        /// Puts this sequence on <paramref name="context"/>'s books, so that disposing the context
-        /// drops this handle's reference on the backing value. Without it a sequence output named
-        /// its context but nothing of it was ever released by that context, while its elements
-        /// were -- so disposing the context took the elements and left the sequence, which then
-        /// answered about data it could no longer reach.
-        /// </summary>
-        internal override void BindTo(Shorokoo.Runtime.ComputeContext context)
-        {
-            base.BindTo(context);
-            // The allocation is built with the value, before there is a context to ask, so this is
-            // the first moment it can say which memory it is in. A sequence the execution provider
-            // kept on its card is not host memory, and labelling it so makes every question about
-            // moving it -- which is answered by the space -- answerable only wrongly.
-            _storage.PlaceIn(context.MemorySpace);
-            context.AttachSequence(this);
-        }
+        private protected override void ReleaseMemory() => AllocatingBackend.Release(backing);
 
-        /// <summary>Refuses a read once this sequence is disposed, or once the allocation behind
-        /// its value has been freed.</summary>
-        internal override void ThrowIfGone()
-        {
-            ThrowIfDisposed();
-            if (!_storage.IsLive)
-                throw new ObjectDisposedException(GetType().Name,
-                    $"Sequence {this} was released with the compute context that produced it.");
-        }
+        private protected override bool AddressableBy(ComputeContext target)
+            => target.ResolvedBackend.CanAddress(new MemoryLocation(Space, AllocatingBackend.RuntimeIdentity));
 
-        public OnnxTensorDataSequence(IShorokooTensorValue value) : base()
-        {
-            this.backing = value;
-            // Host until a context says otherwise, for the reason a runtime value wrapped without
-            // one is the host's: this sequence belongs to nobody yet, and host memory is where a
-            // value with no producing context can be read. BindTo places it where it really is.
-            _storage = new TensorStorage(MemorySpace.Host, value.Dispose);
-            // Built here and named by nothing else yet, so the first reference cannot be refused.
-            _storage.TryAddHandleReference();
-        }
+        private protected override bool IsHostReadable => Space.IsHost;
 
         /// <summary>
         /// The value this sequence already holds, whatever backend is asked for. It was made by
@@ -559,7 +579,7 @@ namespace Shorokoo
 
         public override IEnumerator<TensorData<T>> GetEnumerator()
         {
-            ThrowIfGone();
+            ThrowIfDisposed();
             return Elements(this);
 
             static IEnumerator<TensorData<T>> Elements(OnnxTensorDataSequence<T> self)
@@ -569,21 +589,6 @@ namespace Shorokoo
             }
         }
 
-        #region IDisposable
-
-        /// <summary>
-        /// Lets go of this sequence's handle on the backing value, which goes when nothing else
-        /// names it and no run is reading it. Idempotent; every read afterwards throws
-        /// <see cref="ObjectDisposedException"/>. No finalizer, for the reason
-        /// <see cref="OnnxTensorData{T}"/> has none.
-        /// </summary>
-        public override void Dispose()
-        {
-            if (IsDisposed) return;
-            IsDisposed = true;
-            DropReference();
-        }
-
-        #endregion
+        // No finalizer, for the reason OnnxTensorData<T> has none: the backing value has its own.
     }
 }

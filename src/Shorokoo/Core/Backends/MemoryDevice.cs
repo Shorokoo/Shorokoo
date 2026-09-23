@@ -8,14 +8,17 @@ namespace Shorokoo.Core.Backends;
 
 /// <summary>
 /// The memory a set of backends allocates in — one object per <see cref="MemorySpace"/>, and the
-/// top of the four levels a tensor hangs from:
+/// top of the levels the framework keeps books on:
 ///
 /// <code>
 /// MemoryDevice        one per memory space
 ///   └─ backend        a runtime; allocates in exactly one MemoryDevice
 ///        └─ ComputeContext   compiles and runs
-///             └─ TensorData  a handle on an allocation, attached to one context
 /// </code>
+///
+/// <para>A <see cref="TensorData"/> hangs from none of these: it records the backend that allocated
+/// it and where its memory is, and a context keeps only a weak list of the tensors attached to
+/// it.</para>
 ///
 /// <para><b>Interned by space.</b> <see cref="For"/> returns the same object for the same
 /// <see cref="MemorySpace"/>, so the two CPU backends of a side-by-side test share one device, and

@@ -38,9 +38,8 @@ namespace Shorokoo.Runtime
     {
         private readonly IShorokooSession _session;
         private readonly IShorokooBackend _backend;
-        // The context that compiled this graph: outputs belong to it, and it decides whether they
-        // leave it. A compiled graph runs on the backend it was built with whatever happens to the
-        // context afterwards, so this is about the results and not about where the work runs.
+        // The context that compiled this graph: its runs are this context's runs, so it takes the
+        // locks on what they read and its outputs are attached to it.
         private readonly ComputeContext _owner;
         private readonly Dictionary<string, string> _onnxInputNameByOriginal;
         private readonly string[] _originalInputNames;
@@ -179,8 +178,8 @@ namespace Shorokoo.Runtime
         private NamedModelParam[] Run(
             NamedModelParam[] inputs, IReadOnlySet<string>? retainedOutputNames, RunSettings runSettings)
         {
-            // Before the work, not after it. The outputs are handed to the owning context as they
-            // are wrapped, so a disposed one threw from inside the wrap of output 0 -- with the
+            // Before the work, not after it. The outputs are attached to the compiling context as
+            // they are wrapped, so a disposed one threw from inside the wrap of output 0 -- with the
             // native run already paid for, on a card a whole step's allocation, and outputs 1..n
             // never wrapped and so left to their finalizers. The exception also named the context
             // rather than the graph the caller had actually invoked.
@@ -189,11 +188,13 @@ namespace Shorokoo.Runtime
             ArgumentNullException.ThrowIfNull(runSettings);
             // Before the feeds, which is the only place it can be checked and still mean anything.
             // The backend refuses an already-cancelled run too, but by then every feed has been
-            // leased, every value built and every donated handle given up -- so the caller who
+            // locked, every value built and every donated tensor consumed -- so the caller who
             // caught the cancellation and meant to retry had nothing left to retry with.
             runSettings.CancellationToken.ThrowIfCancellationRequested();
             var sessionInputs = new Dictionary<string, IShorokooTensorValue>();
-            var leases = new List<TensorLease>(inputs.Length);
+            var feeds = new RunFeeds(_owner, inputs.Length,
+                () => TensorDeath.ConsumedBy(
+                    ComputeContext.DescribeGraph(_originalInputNames, _session.OutputNames), _backend.Description));
             _owner.EnterRun();
             try
             {
@@ -201,22 +202,17 @@ namespace Shorokoo.Runtime
                 {
                     var onnxName = _onnxInputNameByOriginal.TryGetValue(input.ParamName, out var mapped)
                         ? mapped : input.ParamName;
-                    // The lock first, then the value. The other order leaves a window in which a
-                    // dispose on another thread frees what was just built -- which is the whole of
-                    // Shorokoo/Shorokoo#366, narrowed rather than closed.
-                    leases.Add(ComputeContext.LeaseFeed(input));
                     // On this graph's own backend, because that is the runtime about to read the
                     // value. An input that already holds one hands it over whatever is passed; one
                     // held in plain managed memory -- every literal in the program -- builds it
-                    // here, and this is what decides which runtime builds it.
-                    sessionInputs[onnxName] = input.ToTensorValue(_backend);
-                    // A donated feed gives its handle up here, the value having been built through
-                    // it and the lock above holding the bytes. Every other feed keeps its.
-                    input.DropDonatedHandle();
+                    // here, and this is what decides which runtime builds it. The input is held
+                    // first -- read-locked, or consumed if it was donated -- and the value built
+                    // after.
+                    sessionInputs[onnxName] = feeds.Feed(input, _backend);
                 }
-                ComputeContext.RefuseUnleasedFeed(leases.Count, inputs.Length);
+                ComputeContext.RefuseUnleasedFeed(feeds.Held, inputs.Length);
 
-                using var eviction = ComputeContext.LinkEvictions(leases, runSettings.CancellationToken);
+                using var eviction = ComputeContext.LinkEvictions(feeds.Leases, runSettings.CancellationToken);
                 var settings = eviction is null
                     ? runSettings : runSettings with { CancellationToken = eviction.Token };
 
@@ -244,19 +240,15 @@ namespace Shorokoo.Runtime
                     _owner.FinishRunStats(_session, arenaBefore);
                 }
 
-                return _owner.Deliver(
-                    results.Zip(_session.OutputNames)
-                        .Select(x => OnnxUtils.CreateNamedModelParam(
-                            x.First, ModelParamType.OutputParam, x.Second, _owner))
-                        .ToArray(),
-                    retainedOutputNames);
+                return _owner.AdoptOutputs(results, _session.OutputNames, _backend);
             }
             finally
             {
-                // However the run ends. A lease outlives the native call by construction: it is
-                // dropped here and nowhere else, so a terminated run's feeds are still held right
-                // up to the moment it gives up.
-                foreach (var lease in leases) lease.Dispose();
+                // However the run ends. What the run holds outlives the native call by
+                // construction: it is given up here and nowhere else, so a terminated run's feeds
+                // are still held right up to the moment it gives up, and a consumed one's memory
+                // is released only once the run can no longer read it.
+                feeds.Dispose();
                 _owner.ExitRun();
             }
         }
@@ -387,7 +379,15 @@ namespace Shorokoo.Runtime
     /// where an existing runtime value lives — a tensor another backend produced is that backend's,
     /// so a session here converts it as it is fed and hands its own outputs back. That conversion
     /// costs a host copy per feed and is possible only for data the host can read; see
-    /// <see cref="Shorokoo.Core.Backends.BackendTransfer"/>.</para>
+    /// <see cref="Shorokoo.Core.Backends.BackendTransfer"/>. <see cref="TensorData.To"/> puts a
+    /// tensor where this context can read it once, instead.</para>
+    ///
+    /// <para><b>A context does not own tensors.</b> It keeps a weak list of the tensors attached to
+    /// it — its runs' outputs and inputs, and what <see cref="TensorData.To"/> and
+    /// <see cref="TensorData.CopyTo"/> placed for it — for its own accounting, and
+    /// <see cref="Detach"/> takes one off. Attachment never keeps a tensor alive and never ends one's
+    /// life: disposing a context releases what the context itself holds, its compiled sessions,
+    /// and leaves every tensor as it was.</para>
     /// </summary>
     public class ComputeContext : IDisposable
     {
@@ -455,23 +455,19 @@ namespace Shorokoo.Runtime
                 // it throws, with no way back short of assigning the setter.
                 // Under a lock, and the field is volatile: the getter now resolves a backend and
                 // constructs a context, so two threads racing it each handed their caller a
-                // different default. Harmless while both detach, but it is process-wide lazily
-                // initialized state in a suite that runs four tests at once.
+                // different default -- process-wide lazily initialized state, in a suite that runs
+                // four tests at once.
                 if (_defaultComputeContext is { IsDisposed: false } live) return live;
                 lock (_defaultGate)
                 {
                     if (_defaultComputeContext is { IsDisposed: false } bound) return bound;
 
-                // The backend a process loaded, under the rule that a CPU one wins: the unnamed
-                // default should not be the card. Reading DefaultBackend.Instance is what
-                // discovers and records one when nothing has been loaded yet, and what refuses --
-                // naming the packages to deploy -- when there is nothing to discover.
-                var backend = DefaultBackend.Remembered ?? DefaultBackend.Instance;
-
-                // Its outputs leave it. The default context is the one nobody named and nobody
-                // disposes, so a result that belonged to it would be tied to a lifetime the caller
-                // never sees; detached, a result is the caller's and outlives everything here.
-                    return _defaultComputeContext = new ComputeContext(backend, detachesOutputs: true);
+                    // The backend a process loaded, under the rule that a CPU one wins: the unnamed
+                    // default should not be the card. Reading DefaultBackend.Instance is what
+                    // discovers and records one when nothing has been loaded yet, and what refuses
+                    // -- naming the packages to deploy -- when there is nothing to discover.
+                    var backend = DefaultBackend.Remembered ?? DefaultBackend.Instance;
+                    return _defaultComputeContext = new ComputeContext(backend);
                 }
             }
 
@@ -479,38 +475,31 @@ namespace Shorokoo.Runtime
         }
 
         /// <summary>
-        /// The framework's own host memory, as a context: where a tensor that belongs to no
-        /// backend lives, and what <see cref="TensorData.Context"/> reports for one.
+        /// The framework's own host memory, as a context: a name for host memory, to be a target of
+        /// <see cref="TensorData.To"/> and <see cref="TensorData.CopyTo"/> like any other context.
         ///
-        /// <para>It holds tensors and runs nothing. <see cref="Compile(ComputationGraph)"/>,
+        /// <para>It holds nothing and runs nothing. No tensor is attached to it — its list is always
+        /// empty, having no budget to keep — and <see cref="Compile(ComputationGraph)"/>,
         /// <see cref="Execute(ComputationGraph, IData[])"/>,
         /// <see cref="Run(ComputationGraph, NamedModelParam[])"/> and <c>Eval</c> all throw,
-        /// naming a real context as the fix. It deliberately does
-        /// <i>not</i> fall back to the process-wide backend: that would put back the implicit
-        /// resolution that made merely describing a graph require a deployed backend.</para>
+        /// naming a real context as the fix. It deliberately does <i>not</i> fall back to the
+        /// process-wide backend: that would put back the implicit resolution that made merely
+        /// describing a graph require a deployed backend.</para>
         ///
-        /// <para>It cannot be disposed. <see cref="Dispose"/> does nothing and
-        /// <see cref="IsDisposed"/> is always false, because a tensor here outlives every compute
-        /// context — its bytes are managed, which the collector reclaims, or a runtime value with
-        /// a finalizer of its own, which is what reclaims a tensor nobody disposes. This context
-        /// adds no release obligation; it gives the existing one a name.</para>
+        /// <para>Its backend can read any host memory, whichever runtime allocated it, so
+        /// <c>To(ComputeContext.Host)</c> hands a host-readable tensor back as it is and copies
+        /// anything else into the framework's own managed memory — which is what
+        /// <see cref="TensorData.ToHost"/> does. It cannot be disposed: <see cref="Dispose"/> does
+        /// nothing and <see cref="IsDisposed"/> is always false.</para>
         /// </summary>
-        public static ComputeContext Host { get; } =
-            new(HostBackend.Instance, detachesOutputs: false, isHost: true);
+        public static ComputeContext Host { get; } = new(HostBackend.Instance, isHost: true);
 
         /// <summary>Creates a compute context that runs on the process-wide
         /// <see cref="Shorokoo.Core.Backends.DefaultBackend.Instance"/>, on the
         /// shipped defaults. Set <see cref="DeviceMemory"/> or <see cref="RunSettings"/> in an
         /// object initializer to compile and run under something else.</summary>
-        public ComputeContext() : this(detachesOutputs: false)
+        public ComputeContext()
         {
-        }
-
-        /// <summary>Creates a compute context on the process-wide backend, detaching its outputs
-        /// or not — see <see cref="DetachesOutputs"/>.</summary>
-        public ComputeContext(bool detachesOutputs)
-        {
-            DetachesOutputs = detachesOutputs;
         }
 
         private readonly DeviceMemorySettings _deviceMemory = DeviceMemorySettings.Default;
@@ -521,14 +510,14 @@ namespace Shorokoo.Runtime
         /// for life, so this configures the sessions to come and never the ones already built —
         /// to run a graph under a different budget, compile it on a context that carries one.
         ///
-        /// <para>It also bounds what can be <i>placed</i> in this context's memory. A tensor moved
-        /// onto its card — <see cref="TensorData.CopyTo"/>, <see cref="TensorData.TransferTo"/>,
+        /// <para>It also bounds what can be <i>placed</i> in this context's memory. A tensor copied
+        /// onto its card — <see cref="TensorData.CopyTo"/>, <see cref="TensorData.To"/>,
         /// <see cref="AllocateUninitialized(Shape, DType)"/> — is allocated out of an arena built
         /// with these same settings, so a <see cref="DeviceMemorySettings.LimitBytes"/> here is a
         /// ceiling on the tensors as well as on the sessions, and what those tensors are actually
         /// holding is reported by <see cref="ReadTransferArenaStatistics"/>. A tensor is charged to
-        /// the context that allocated it, once: handing it to a second context on the same card
-        /// re-wraps it without copying, so there is nothing there to re-charge.</para>
+        /// the arena it was allocated from, once: handing it to a second context that can read it
+        /// where it is copies nothing, so there is nothing there to re-charge.</para>
         ///
         /// <para>Its default <see cref="ArenaExtendStrategy.Auto"/> resolves per session, so one
         /// context can still give a session it knows is reused across shapes a different arena
@@ -674,26 +663,15 @@ namespace Shorokoo.Runtime
         /// backend needs a native of its own.</param>
         /// <exception cref="ArgumentNullException"><paramref name="backend"/> is null.</exception>
         public ComputeContext(IShorokooBackend backend)
-            : this(backend, detachesOutputs: false)
+            : this(backend, isHost: false)
         {
         }
 
-        /// <summary>
-        /// Creates a compute context on <paramref name="backend"/>, detaching its outputs or not —
-        /// see <see cref="DetachesOutputs"/>.
-        /// </summary>
-        /// <exception cref="ArgumentNullException"><paramref name="backend"/> is null.</exception>
-        public ComputeContext(IShorokooBackend backend, bool detachesOutputs)
-            : this(backend, detachesOutputs, isHost: false)
-        {
-        }
-
-        private ComputeContext(IShorokooBackend backend, bool detachesOutputs, bool isHost)
+        private ComputeContext(IShorokooBackend backend, bool isHost)
         {
             ArgumentNullException.ThrowIfNull(backend);
             _backend = backend;
             _isHost = isHost;
-            DetachesOutputs = detachesOutputs;
             // Eagerly, because the backend is already in hand: a context that names one is on that
             // backend's books from the moment it exists. One that names none registers when
             // something first resolves the default for it -- see ResolvedBackend -- rather than
@@ -710,102 +688,111 @@ namespace Shorokoo.Runtime
         // default-backend context without a table write per call.
         private IShorokooBackend? _registeredOn;
 
-        /// <summary>
-        /// Whether a run's output tensors leave this context behind.
-        ///
-        /// <para>With it set, every tensor a run produces is transferred to <see cref="Host"/> —
-        /// the framework's own host memory — and the tensor the session handed back is disposed. That
-        /// disposal frees nothing, by construction: a transfer within one memory space moves the
-        /// ownership off the original, and one across spaces has already released it. What the
-        /// caller gets back is a tensor that outlives this context, which is what a context that
-        /// is disposed per run needs its results to do.</para>
-        ///
-        /// <para>Without it, outputs belong to this context and disposing it takes them with it.</para>
-        /// </summary>
-        public bool DetachesOutputs { get; }
-
         // The graphs this context compiled, so its disposal releases their sessions. Weak, like
-        // the tensor tracking and for the same reason: a graph the program has dropped must not be
+        // the tensor list and for the same reason: a graph the program has dropped must not be
         // kept alive waiting for this. A dropped one is the finalizer's, which is what it was
         // before; what this fixes is the graph the program still holds when the context goes.
         private readonly ConditionalWeakTable<CompiledGraph, object> _compiled = new();
         private static readonly object OwnedMarker = new();
-        // Guards the disposal flag, the lease count and the attachment books against the writers
-        // that matter: a second Dispose, an attachment racing one, and a lease taken as one
-        // starts. All three are ordinary in a design whose premise is several live contexts driven
-        // at once, and the flag alone settled none of them -- two threads could both pass the
-        // check and run the release loop, or a tensor could attach just after the loop had passed
-        // it and hold its reference for ever.
+        // Guards the disposal flag, the run and lock counts and the attachment list against the
+        // writers that matter: a second Dispose, an attachment racing one, a lock taken as one
+        // starts, and a detach racing a run's lock. All are ordinary in a design whose premise is
+        // several live contexts driven at once, and the flag alone settled none of them.
         //
-        // Ordering: this gate is never held while a TensorStorage's own gate is taken, and a
-        // storage never takes this one. That is what keeps a delete -- which waits for lockers
-        // holding nothing at all -- from waiting on a run that is waiting on a gate the deleter
-        // holds.
-        private readonly object _disposalGate = new();
-        // Volatile: read by IsDisposed from threads that never took _disposalGate -- the Default
-        // getter's liveness check among them.
+        // Ordering: this gate is never held while a tensor's own gate is taken, and a tensor never
+        // takes this one. That is what keeps a delete -- which waits for readers holding nothing
+        // at all -- from waiting on a run that is waiting on a gate the deleter holds.
+        private readonly object _gate = new();
+        // Volatile: read by IsDisposed from threads that never took _gate -- the Default getter's
+        // liveness check among them.
         private volatile bool _disposed;
 
-        /// <summary>Whether this context has been disposed, and so has released what it owned.
+        /// <summary>Whether this context has been disposed, and so has released its sessions.
         /// Always false for <see cref="Host"/>, which cannot be disposed.</summary>
         public bool IsDisposed => _disposed;
 
-        private readonly WeakSet<TensorData> _attachedTensors = new();
-        private readonly WeakSet<TensorDataSequence> _attachedSequences = new();
+        // The tensors attached to this context. Weak: attachment is not ownership, and a tensor the
+        // program has dropped must not be kept alive by a context's accounting.
+        private readonly WeakSet<TensorData> _attached = new();
 
-        // How many leases this context has handed out and not taken back. Disposing a context
-        // while it is processing is invalid, and this is what makes that a refusal rather than an
-        // assumption.
+        // The reader locks this context's runs hold, per tensor or sequence, by reference. What
+        // Detach refuses on: a context may not let go of a tensor one of its own runs is reading.
+        // Strong, and harmlessly so -- a run holds everything it reads strongly anyway, for exactly
+        // as long as its lock.
+        private readonly Dictionary<object, int> _locksHeld = new(ReferenceEqualityComparer.Instance);
+
+        // How many reader locks this context holds in all. Disposing a context while it is
+        // processing is invalid, and this is what makes that a refusal rather than an assumption.
         private int _leases;
 
-        // How many runs of this context are inside a call into the backend. Separate from the
-        // lease count, which answers a different question and does not cover this one: a run fed
-        // nothing but plain host literals leases them all on Host -- the context they are attached
-        // to -- so this context's lease count is zero while its session is mid-call. The tensors
-        // are safe either way, which is what the leases are for; the session is not, and disposing
-        // this context is what releases it.
+        // How many runs of this context are inside a call into the backend. Separate from the lock
+        // count, which answers a different question and does not cover this one: a run fed nothing
+        // takes no lock, and its session is mid-call all the same -- and disposing this context is
+        // what releases it.
         private int _runs;
 
         /// <summary>
-        /// The tensors attached to this context and not yet collected — the handles on memory
-        /// this context governs. A snapshot: one attached after this returns is not in the list.
+        /// The tensors attached to this context: alive, and not collected. A snapshot: one attached
+        /// after this returns is not in the list.
         ///
-        /// <para>Weak, like everything else a context tracks, so a tensor the program has dropped
-        /// is not held alive by the context it named.</para>
+        /// <para>A tensor becomes attached by being an output of one of this context's runs, by
+        /// being read by one, and by <see cref="TensorData.To"/> or <see cref="TensorData.CopyTo"/>
+        /// with this context as the target; <see cref="Detach"/> takes one off. The list is weak and
+        /// it is not ownership: it never keeps a tensor alive, never ends one's life, and a tensor
+        /// that dies or is collected drops out of it. <see cref="Host"/>'s is always empty.</para>
         /// </summary>
-        public IReadOnlyList<TensorData> Tensors => _attachedTensors.Snapshot();
+        public IReadOnlyList<TensorData> Tensors
+        {
+            get
+            {
+                var live = new List<TensorData>();
+                foreach (var tensor in _attached.Snapshot())
+                    if (!tensor.IsDisposed) live.Add(tensor);
+                return live;
+            }
+        }
 
         /// <summary>
-        /// Records that <paramref name="tensor"/>'s bytes are in this context's memory, so that
-        /// disposing this context drops that handle's reference on them. Called from the tensor's
-        /// constructor and from each re-attachment.
+        /// Attaches <paramref name="tensor"/> to this context, for its accounting. Idempotent. The
+        /// host context attaches nothing: it keeps no accounts.
         /// </summary>
-        /// <exception cref="ObjectDisposedException">This context has been disposed, so it has
-        /// already released everything and would never release this.</exception>
-        internal void AttachTensor(TensorData tensor)
-        {
-            lock (_disposalGate)
-            {
-                ObjectDisposedException.ThrowIf(_disposed, this);
-                _attachedTensors.Add(tensor);
-            }
-        }
-
-        /// <summary>Forgets <paramref name="tensor"/>, because it is attached elsewhere
-        /// now.</summary>
-        internal void DetachTensor(TensorData tensor) => _attachedTensors.Remove(tensor);
-
-        /// <summary>Records that <paramref name="sequence"/>'s runtime value is in this context's
-        /// memory, so that disposing this context drops that handle's reference on it.</summary>
         /// <exception cref="ObjectDisposedException">This context has been disposed.</exception>
-        internal void AttachSequence(TensorDataSequence sequence)
+        internal void Attach(TensorData tensor)
         {
-            lock (_disposalGate)
+            if (_isHost) return;
+            lock (_gate)
             {
                 ObjectDisposedException.ThrowIf(_disposed, this);
-                _attachedSequences.Add(sequence);
+                _attached.Add(tensor);
             }
         }
+
+        /// <summary>
+        /// Takes <paramref name="tensor"/> off this context's list. It never ends the tensor's life,
+        /// never releases its memory and never affects another context's list; a tensor that is not
+        /// attached is left as it is.
+        /// </summary>
+        /// <exception cref="ArgumentNullException"><paramref name="tensor"/> is null.</exception>
+        /// <exception cref="InvalidOperationException">A run of this context is reading
+        /// <paramref name="tensor"/>. A context may not let go of what it is in the middle of
+        /// reading; wait for the run to return.</exception>
+        public void Detach(TensorData tensor)
+        {
+            ArgumentNullException.ThrowIfNull(tensor);
+            lock (_gate)
+            {
+                if (_locksHeld.ContainsKey(tensor))
+                    throw new InvalidOperationException(
+                        $"A run of this compute context is reading tensor {tensor}, so the context "
+                        + "cannot detach it until that run returns.");
+                _attached.Remove(tensor);
+            }
+        }
+
+        /// <summary>Whether this context's backend can read <paramref name="tensor"/>'s memory as
+        /// it stands — the question <see cref="TensorData.To"/> asks, answered by the
+        /// backend.</summary>
+        internal bool CanAddress(TensorData tensor) => ResolvedBackend.CanAddress(tensor.Location);
 
         /// <summary>The memory this context's tensors live in, shared with every other context
         /// whose backend allocates in the same place.</summary>
@@ -827,7 +814,8 @@ namespace Shorokoo.Runtime
         /// <para>On <see cref="Host"/> the buffer is a managed array, since that is what the
         /// framework's own host memory is; on a real backend it is the memory that backend
         /// allocates in, which on a CUDA one is the card's and so is not writable through a span
-        /// at all. <see cref="TensorData.IsHostResident"/> says which.</para>
+        /// at all. <see cref="TensorData.IsHostResident"/> says which. Either way the tensor is
+        /// attached to this context, as a <see cref="TensorData.CopyTo"/> result is.</para>
         /// </summary>
         /// <exception cref="ArgumentNullException"><paramref name="dtype"/> is null.</exception>
         /// <exception cref="NotSupportedException"><paramref name="dtype"/> is
@@ -853,22 +841,33 @@ namespace Shorokoo.Runtime
                     + "elements have no whole-byte stride, or its shape has no known element count.");
 
             if (_isHost)
-                return TensorData.NewHostTensor(
-                    shape, dtype, new byte[checked(shape.Count * (bits / 8))], this);
+                return TensorData.NewHostTensor(shape, dtype, new byte[checked(shape.Count * (bits / 8))]);
 
-            var value = ResolvedBackend.CreateUninitializedTensorInBackendMemory(
+            var backend = ResolvedBackend;
+            var value = backend.CreateUninitializedTensorInBackendMemory(
                 (ShorokooTensorElementType)(int)dtype, (long[])shape, DeviceMemory);
+            TensorData allocated;
             try
             {
-                return TensorData.Create(shape, dtype, value, this);
+                allocated = TensorData.Create(shape, dtype, value, backend);
             }
             catch
             {
                 // Nothing else names it yet, and on a card it is a device allocation that would
                 // otherwise sit on the finalizer queue.
-                value.Dispose();
+                backend.Release(value);
                 throw;
             }
+            try
+            {
+                Attach(allocated);
+            }
+            catch
+            {
+                allocated.Delete();
+                throw;
+            }
+            return allocated;
         }
 
         /// <summary>
@@ -891,125 +890,92 @@ namespace Shorokoo.Runtime
             => (TensorData<T>)AllocateUninitialized(shape, OnnxUtils.GetDType<T>());
 
         /// <summary>
-        /// Locks <paramref name="tensor"/>'s allocation for as long as this context is reading it,
-        /// and hands back the lease to drop when it is done. While a lease is outstanding the bytes
-        /// cannot be freed by anything letting go of a handle, and a deliberate delete of them
-        /// signals <see cref="TensorLease.Eviction"/> and waits rather than pulling them away.
+        /// Takes a reader lock on <paramref name="tensor"/> for a run of this context, attaches the
+        /// tensor to this context, and hands back the lease to drop when the run is done. While a
+        /// lease is outstanding the tensor cannot be deleted — a delete is refused or declined, and
+        /// a deliberate one signals <see cref="TensorLease.Eviction"/> and waits — and this context
+        /// cannot detach it. The lease holds the tensor itself, so nothing a run reads can be
+        /// collected under it.
         ///
-        /// <para>Only the context a tensor is attached to may lock it, which is what makes a
-        /// context's disposal safe to reason about: every lock on a tensor this context is about
-        /// to release is one this context is holding, so a context with no lease outstanding is
-        /// not reading anything it releases.</para>
-        ///
-        /// <para>It is a count, not a flag: the same tensor fed twice under two names in one run
-        /// leases twice and releases twice.</para>
+        /// <para>Any context may lock any tensor: the lock is the reading context's, and lives on
+        /// the tensor. It is a count, not a flag — the same tensor fed twice under two names in one
+        /// run is locked twice and released twice, and two runs may read one tensor at once.</para>
         /// </summary>
         /// <exception cref="ArgumentNullException"><paramref name="tensor"/> is null.</exception>
-        /// <exception cref="InvalidOperationException"><paramref name="tensor"/> is attached to
-        /// another context.</exception>
-        /// <exception cref="ObjectDisposedException">This context, or the allocation, is
-        /// gone.</exception>
+        /// <exception cref="ObjectDisposedException">This context has been disposed, or the tensor
+        /// is dead.</exception>
         internal TensorLease Lock(TensorData tensor)
         {
             ArgumentNullException.ThrowIfNull(tensor);
-            if (!ReferenceEquals(tensor.Context, this))
-                throw new InvalidOperationException(
-                    $"This tensor ({tensor}) is attached to another compute context, so this one "
-                    + "cannot lock it. Only the context a tensor is attached to may, which is what "
-                    + "makes that context's disposal answerable for it.");
-            // In the tensor's own words, which name it and say which way it is gone. The
-            // allocation refuses a dead lock too, but it can only speak for itself -- and the
-            // ordinary way to arrive here is feeding a donation a second time, which is a mistake
-            // about a tensor.
-            tensor.ThrowIfDisposed();
-            return Lock(tensor.Storage);
-        }
-
-        /// <summary>
-        /// <see cref="Lock(TensorData)"/> for a sequence, whose allocation is the runtime value
-        /// behind it rather than one tensor's bytes.
-        /// </summary>
-        internal TensorLease Lock(TensorDataSequence sequence)
-        {
-            ArgumentNullException.ThrowIfNull(sequence);
-            if (!ReferenceEquals(sequence.Context, this))
-                throw new InvalidOperationException(
-                    $"This sequence ({sequence}) is attached to another compute context, so this "
-                    + "one cannot lock it.");
-            sequence.ThrowIfGone();
-            return Lock(sequence.Storage);
-        }
-
-        // The two gates are taken one after the other rather than nested, in either direction: the
-        // count is this context's business and the lock is the allocation's, and a delete waiting
-        // for lockers must never find itself behind a gate a run is queued on.
-        internal TensorLease Lock(TensorStorage storage)
-        {
-            // The host context is never disposed, so counting its leases answers a question that
-            // cannot be asked -- and it is the context every literal in the program is attached to,
-            // so the count would be one process-wide monitor taken twice per fed input.
-            if (_isHost) return new TensorLease(this, storage, storage.Lock());
-
-            lock (_disposalGate)
-            {
-                ObjectDisposedException.ThrowIf(_disposed, this);
-                _leases++;
-            }
+            // The two gates are taken one after the other rather than nested, in either direction:
+            // the count is this context's business and the lock is the tensor's, and a delete
+            // waiting for readers must never find itself behind a gate a run is queued on.
+            // A read attaches the reader, as a run's output does: a tensor this context's runs
+            // read is one its accounting has to see. Attached with the count, under the one gate;
+            // a lock then refused leaves at worst a dead tensor on the list, which the list skips.
+            CountLock(tensor, attach: true);
             try
             {
-                return new TensorLease(this, storage, storage.Lock());
+                return new TensorLease(this, tensor, tensor.AcquireReadLock());
             }
             catch
             {
-                ReleaseLease();
+                ReleaseLease(tensor);
                 throw;
             }
         }
 
-        /// <summary>
-        /// Locks whatever <paramref name="input"/> is about to be fed as, for the length of the
-        /// run. The
-        /// lock is taken by the context the data is attached to — the only context allowed to take
-        /// it — which for a literal is <see cref="Host"/> and for a retained device output is the
-        /// context that produced it.
-        /// </summary>
-        /// <exception cref="InvalidOperationException">A kind of parameter that can be fed and
-        /// cannot be locked, which would be a feed with nothing holding it.</exception>
-        internal static TensorLease LeaseFeed(NamedModelParam input) => input switch
+        /// <summary><see cref="Lock(TensorData)"/> for a sequence a run of this context is
+        /// reading.</summary>
+        /// <exception cref="ArgumentNullException"><paramref name="sequence"/> is null.</exception>
+        /// <exception cref="ObjectDisposedException">This context, or the sequence, has been
+        /// disposed.</exception>
+        internal TensorLease Lock(TensorDataSequence sequence)
         {
-            TensorDataModelParam tensor => LeaseTensor(tensor.ToTensorData()),
-            OptionalTensorDataModelParam { Data.Value: { } present } => LeaseTensor(present),
-            // An absent optional holds nothing and the feed itself refuses it, naming the engine
-            // that does support one. It is leased all the same so that the count of leases still
-            // matches the count of feeds and the lock can be taken before the value is built.
-            OptionalTensorDataModelParam => Host.Lock(TensorStorage.None),
-            TensorDataSequenceModelParam sequence => LeaseSequence(sequence.ToTensorDataSequence()),
-            _ => throw new InvalidOperationException(
-                $"Input '{input.ParamName}' was fed to a run as a {input.GetType().Name}, which "
-                + "nothing knows how to lock. Every fed input has to be held for the length of the "
-                + "run, or disposing it from another thread frees what the run is reading."),
-        };
+            ArgumentNullException.ThrowIfNull(sequence);
+            CountLock(sequence, attach: false);
+            try
+            {
+                sequence.AcquireReadLock();
+                return new TensorLease(this, sequence);
+            }
+            catch
+            {
+                ReleaseLease(sequence);
+                throw;
+            }
+        }
 
-        private static TensorLease LeaseTensor(TensorData tensor) => tensor.Context.Lock(tensor);
-
-        private static TensorLease LeaseSequence(TensorDataSequence sequence)
-            => sequence.Context.Lock(sequence);
+        /// <summary>Counts one more lock of this context's on <paramref name="target"/>, and
+        /// attaches it if it is a tensor being read.</summary>
+        /// <exception cref="ObjectDisposedException">This context has been disposed.</exception>
+        private void CountLock(object target, bool attach)
+        {
+            lock (_gate)
+            {
+                ObjectDisposedException.ThrowIf(_disposed, this);
+                _leases++;
+                _locksHeld[target] = _locksHeld.TryGetValue(target, out var held) ? held + 1 : 1;
+                if (attach && !_isHost) _attached.Add((TensorData)target);
+            }
+        }
 
         /// <summary>
-        /// Refuses a run that did not lock every input it was given.
+        /// Refuses a run that did not hold every input it was given — by a reader lock, or by
+        /// consuming it.
         ///
-        /// <para>Checked here rather than only in a test, because there is nothing behind a lease:
+        /// <para>Checked here rather than only in a test, because there is nothing behind a lock:
         /// past asking the backend to stop there is no further escalation, so a feed path that
         /// forgets one is Shorokoo/Shorokoo#366 again with the machinery sitting unused beside it.
         /// The locker is this repository's own run path rather than a caller, which is exactly what
         /// makes the count checkable at all.</para>
         ///
         /// <para>Against the inputs the run was handed, and deliberately not against a counter the
-        /// feed loop keeps: such a counter is incremented beside the lease with no branch in
-        /// between, so it agreed with the lease count by construction and could not fail. What
-        /// actually enforces the rule for a kind of input nothing knows how to lock is
-        /// <see cref="LeaseFeed"/>'s own refusal; this catches the other shape, a feed path that
-        /// learns to skip an input and takes the lease with it.</para>
+        /// feed loop keeps beside the lock with no branch in between, which would agree with the
+        /// lock count by construction and could not fail. What actually enforces the rule for a
+        /// kind of input nothing knows how to hold is <see cref="RunFeeds.Feed"/>'s own refusal;
+        /// this catches the other shape, a feed path that learns to skip an input and its lock
+        /// with it.</para>
         /// </summary>
         internal static void RefuseUnleasedFeed(int leases, int inputs)
         {
@@ -1021,14 +987,14 @@ namespace Shorokoo.Runtime
         }
 
         /// <summary>
-        /// One signal for every allocation this run has locked, plus whatever the caller asked to
+        /// One signal for every tensor this run has locked, plus whatever the caller asked to
         /// stop the run with. Null when there is nothing to link — the caller's settings then go
         /// to the backend untouched.
         ///
         /// <para>This is how a locker discharges its one obligation: the backend is handed the
         /// linked token as <c>RunSettings.CancellationToken</c>, so a deliberate delete of
         /// anything this run is reading asks the run to stop. The correctness of the delete does
-        /// not rest on it — the bytes wait for the lease either way — so a backend that ignores
+        /// not rest on it — the memory waits for the lock either way — so a backend that ignores
         /// the token makes a delete slow and never unsafe.</para>
         /// </summary>
         internal static CancellationTokenSource? LinkEvictions(
@@ -1053,12 +1019,17 @@ namespace Shorokoo.Runtime
         internal static bool StoppedByCaller(OperationCanceledException stopped, CancellationToken caller)
             => caller.IsCancellationRequested && stopped.CancellationToken != caller;
 
-        /// <summary>Records that one of this context's leases has been dropped. Called by
-        /// <see cref="TensorLease.Dispose"/> and by nothing else.</summary>
-        internal void ReleaseLease()
+        /// <summary>Records that one of this context's locks on <paramref name="target"/> has been
+        /// dropped. Called by <see cref="TensorLease.Dispose"/>, and by a lock refused after it was
+        /// counted.</summary>
+        internal void ReleaseLease(object target)
         {
-            if (_isHost) return;
-            lock (_disposalGate) _leases--;
+            lock (_gate)
+            {
+                _leases--;
+                if (_locksHeld.TryGetValue(target, out var held) && held > 1) _locksHeld[target] = held - 1;
+                else _locksHeld.Remove(target);
+            }
         }
 
         /// <summary>
@@ -1073,7 +1044,7 @@ namespace Shorokoo.Runtime
             // The host context runs nothing -- Compile, Execute and Run all refuse there -- and
             // cannot be disposed, so there is no question here for a count to answer.
             if (_isHost) return;
-            lock (_disposalGate)
+            lock (_gate)
             {
                 ObjectDisposedException.ThrowIf(_disposed, this);
                 _runs++;
@@ -1085,73 +1056,51 @@ namespace Shorokoo.Runtime
         internal void ExitRun()
         {
             if (_isHost) return;
-            lock (_disposalGate) _runs--;
+            lock (_gate) _runs--;
         }
 
         /// <summary>
-        /// Lets go of everything attached to this context, and releases the sessions it compiled.
-        /// The backend is left alone.
-        ///
-        /// <para>Every tensor attached to this context has its handle's reference dropped, as if it
-        /// had been disposed — so bytes nothing else names are freed and reading such a tensor
-        /// afterwards throws, while bytes a handle on another context still names stand, which is
-        /// the whole point of a second name for them.</para>
-        ///
-        /// <para>The tracking is weak, so a tensor the program has already dropped does not keep
-        /// its allocation alive waiting for this.</para>
+        /// Releases what this context itself holds — the sessions it compiled — and nothing else.
+        /// The backend is left alone, and so is every tensor: a context is not a tool for deleting
+        /// tensors, and one attached to it lives on exactly as it would have, released through its
+        /// own backend when it is deleted or collected. Its list of attached tensors is cleared.
         /// </summary>
         /// <exception cref="InvalidOperationException">A run of this context is in flight, or a
-        /// lease it handed out is still outstanding. Disposing a context while it is processing is
-        /// invalid; wait for the run to return.</exception>
+        /// lock it took is still held. Disposing a context while it is processing is invalid; wait
+        /// for the run to return.</exception>
         public void Dispose()
         {
-            // The host context is not disposable, and this is the whole of it: its tensors are
-            // managed bytes the collector reclaims, or runtime values with finalizers of their
-            // own, so there is nothing here whose release anyone could be waiting for. Disposing
-            // it would instead invalidate every detached tensor in the process -- the one thing
-            // detaching exists to prevent -- and `using var c = ComputeContext.Host;` would do it
-            // by accident.
+            // The host context is not disposable, and this is the whole of it: it holds nothing and
+            // compiles nothing, so there is nothing here whose release anyone could be waiting for,
+            // and `using var c = ComputeContext.Host;` must not turn it into a dead name.
             if (_isHost) return;
 
             List<CompiledGraph> compiled;
-            IReadOnlyList<TensorData> tensors;
-            IReadOnlyList<TensorDataSequence> sequences;
-            lock (_disposalGate)
+            lock (_gate)
             {
                 if (_disposed) return;
                 // Before the flag, so a refusal leaves a context that still works. Two refusals,
-                // because there are two things a disposal would pull away and they are not the
-                // same thing: the session a run is inside, and the bytes a lease is holding. A run
-                // fed nothing but host literals leases them on Host, so the lease count below
-                // would be zero while this context's session was mid-call -- which is a
-                // use-after-free of the session rather than of any tensor, and says so.
+                // because a run reading nothing locks nothing and its session is mid-call all the
+                // same -- a use-after-free of the session rather than of any tensor, and it says so.
                 if (_runs > 0)
                     throw new InvalidOperationException(
                         $"This compute context has {_runs} run(s) in flight: disposing it would "
                         + "release the session they are inside, under a live call into "
                         + "the backend. Wait for the run to return.");
-                // A lease outstanding means a run of this context is reading something attached to
-                // it, and there is no answer to releasing those bytes under it -- so this is the
-                // one place the invalid program is told rather than silently accommodated.
                 if (_leases > 0)
                     throw new InvalidOperationException(
-                        $"This compute context still holds {_leases} lease(s): a run of it is "
-                        + "reading tensors attached to it, and disposing it would let go of them "
-                        + "while they are being read. Wait for the run to return.");
+                        $"This compute context still holds {_leases} lock(s): a run of it is "
+                        + "reading tensors, and disposing it under that read is not something it "
+                        + "can answer for. Wait for the run to return.");
                 _disposed = true;
 
-                tensors = _attachedTensors.Snapshot();
-                sequences = _attachedSequences.Snapshot();
                 compiled = [.. _compiled.Select(entry => entry.Key)];
                 _compiled.Clear();
+                _attached.Clear();
             }
 
-            // Outside the gate: dropping a reference can free a runtime value, which is a native
-            // call into the backend, and a session's disposal below is one too. Neither has any
-            // business running under a gate every attachment to this context takes -- and no lease
-            // can be taken now, the flag being set, so nothing can arrive after the snapshots.
-            foreach (var tensor in tensors) tensor.DropReference();
-            foreach (var sequence in sequences) sequence.DropReference();
+            // Outside the gate: a session's disposal is a native call into the backend, and has no
+            // business running under a gate every attachment to this context takes.
             foreach (var graph in compiled) graph.Dispose();
 
             // The backend is deliberately left alone. It was handed in, so it may be shared with
@@ -1162,73 +1111,30 @@ namespace Shorokoo.Runtime
         }
 
         /// <summary>
-        /// Hands a run's outputs to the caller the way this context was asked to: as they are, or
-        /// detached from it.
+        /// A run's outputs as the tensors and sequences the caller gets back, each allocated by
+        /// <paramref name="backend"/> — the backend the run ran on, and so the one that releases
+        /// it — and every tensor among them attached to this context.
         /// </summary>
-        internal NamedModelParam[] Deliver(
-            NamedModelParam[] outputs, IReadOnlySet<string>? retainedOutputNames)
+        internal NamedModelParam[] AdoptOutputs(
+            IReadOnlyList<IShorokooTensorValue> results, IReadOnlyList<string> names,
+            IShorokooBackend backend)
         {
-            if (!DetachesOutputs) return outputs;
-
+            var outputs = new NamedModelParam[results.Count];
             for (int i = 0; i < outputs.Length; i++)
             {
-                if (outputs[i] is TensorDataSequenceModelParam sequenceParam)
-                {
-                    // Retention first, as for a tensor below. The caller passes one flag per
-                    // output with no restriction on its value type, so a sequence can be named in
-                    // retainOnDevice -- and copying it home anyway honoured the flag for one kind
-                    // of output and silently ignored it for the other.
-                    if (retainedOutputNames?.Contains(sequenceParam.ParamName) == true) continue;
-
-                    // Detached by being moved, not by forgetting this context. Simply clearing the
-                    // context strands an element the provider kept on the card: the indexer then
-                    // wraps it on the host context, which records an unknown space, and an unknown
-                    // space can be neither read nor moved -- the data is there with no call left
-                    // that reaches it. A real move brings the elements home, and where it cannot,
-                    // the sequence stays bound so they remain reachable through the context that
-                    // owns them.
-                    var boundSequence = sequenceParam.ToTensorDataSequence();
-                    try
-                    {
-                        var freeSequence = boundSequence.CopyTo(Host);
-                        boundSequence.Dispose();
-                        outputs[i] = new TensorDataSequenceModelParam(
-                            sequenceParam.ParamName, sequenceParam.ParamType, freeSequence);
-                    }
-                    catch (InvalidOperationException ex) when (ex is not ObjectDisposedException)
-                    {
-                        // Elements the execution provider kept cannot be copied to the host from
-                        // here. Bound to this context is worse than detached and better than lost.
-                        // What the failed copy built is released by the rebuild itself, so there
-                        // is nothing to undo here -- see TensorDataSequence's rebuild.
-                        //
-                        // ObjectDisposedException is excluded because it derives from this one and
-                        // means something else entirely: the sequence's storage or its context is
-                        // gone. Swallowing it handed the caller an output bound to a dead context
-                        // with nothing said.
-                    }
-                    continue;
-                }
-                if (outputs[i] is not TensorDataModelParam tensorParam) continue;
-                var original = tensorParam.ToTensorData();
-
-                // An output the caller asked to keep on the device, and that really is there, is
-                // the one thing detaching must not touch: bringing it home is exactly what
-                // retaining it was meant to avoid, and this context would otherwise copy a
-                // resident run's whole state across the bus and free the device buffer on every
-                // step. A session with no device memory retains nothing, so its outputs are host
-                // ones and detach as any other output does.
-                if (!original.Space.IsHost
-                    && retainedOutputNames?.Contains(tensorParam.ParamName) == true)
-                    continue;
-
-                var detached = original.TransferTo(Host);
-                original.Dispose();
-                outputs[i] = new TensorDataModelParam(
-                    tensorParam.ParamName, tensorParam.ParamType, detached);
+                outputs[i] = OnnxUtils.CreateNamedModelParam(
+                    results[i], ModelParamType.OutputParam, names[i], backend);
+                if (outputs[i] is TensorDataModelParam tensor) Attach(tensor.ToTensorData());
             }
             return outputs;
         }
+
+        /// <summary>
+        /// Names a graph for a message about a run of it: by its inputs and outputs, which is what a
+        /// caller can recognise it by — graphs carry no name of their own.
+        /// </summary>
+        internal static string DescribeGraph(IReadOnlyList<string> inputs, IReadOnlyList<string> outputs)
+            => $"the graph ({string.Join(", ", inputs)}) -> ({string.Join(", ", outputs)})";
 
         /// <summary>The backend this context's work runs on: the one it was constructed with, or
         /// the default when it names none.</summary>
@@ -1421,7 +1327,7 @@ namespace Shorokoo.Runtime
                 deviceMemory, RunSettings, this);
             // Enrolled under the same gate a disposal takes, so a compile racing a disposal either
             // lands before it and is released with everything else, or finds the context gone.
-            lock (_disposalGate)
+            lock (_gate)
             {
                 if (_disposed)
                 {
@@ -1447,32 +1353,15 @@ namespace Shorokoo.Runtime
         /// Evaluates the given output variables by building and executing a zero-input graph,
         /// returning their concrete tensor data. Requires concretized outputs — a
         /// <c>[Module]</c>'s output fails fast with the lowering hint.
+        ///
+        /// <para>The results outlive this context, as every run's outputs do, and can go straight
+        /// back into a graph as literals through <see cref="TensorData.MoveToAttribute"/>.</para>
         /// </summary>
         public TensorData[] Eval(Variable[] outputs)
         {
             var graph = new InternalComputationGraph([], [.. outputs]);
             graph.RequireRunnableOps("ComputeContext.Eval");
-            var results = this.Execute(graph).Select(x => Detached(x.ToTensorData())).ToArray();
-
-            return results;
-        }
-
-        /// <summary>
-        /// <paramref name="result"/> on <see cref="Host"/>, so it outlives every context and can go
-        /// straight back into a graph as a literal.
-        ///
-        /// <para>Eval is the eager-evaluation API: its answer is a value for the caller to use, and
-        /// the first thing callers do with one is build it into the next graph — which an operator
-        /// attribute refuses of a tensor bound to a context. A context that detaches its outputs
-        /// already hands one back this way, so without this the same call on the same graph
-        /// produced a usable result or an unusable one depending on which context ran it.</para>
-        /// </summary>
-        private static TensorData Detached(TensorData result)
-        {
-            if (ReferenceEquals(result.Context, Host)) return result;
-            var free = result.TransferTo(Host);
-            result.Dispose();
-            return free;
+            return this.Execute(graph).Select(x => x.ToTensorData()).ToArray();
         }
 
         /// <summary>Params convenience over <see cref="Eval(Variable[])"/> for two or more outputs.</summary>
@@ -1578,7 +1467,7 @@ namespace Shorokoo.Runtime
             // allocation -- and outputs 1..n never wrapped and so left to their finalizers.
             RefuseHostContext("run");
             ObjectDisposedException.ThrowIf(IsDisposed, this);
-            // Before the model is built, the session created and the feeds leased -- see
+            // Before the model is built, the session created and the feeds held -- see
             // CompiledGraph.Run. This path pays for a whole model build and a session on top.
             RunSettings.CancellationToken.ThrowIfCancellationRequested();
             var model = buildModel();
@@ -1587,12 +1476,15 @@ namespace Shorokoo.Runtime
             ProtoBuf.Serializer.Serialize(memoryStream, model);
             var modelData = memoryStream.ToArray();
 
-            var leases = new List<TensorLease>(inputs.Length);
+            IShorokooSession? session = null;
+            var backend = ResolvedBackend;
+            var feeds = new RunFeeds(this, inputs.Length,
+                () => TensorDeath.ConsumedBy(
+                    DescribeGraph(originalInputNames, session?.OutputNames ?? []), backend.Description));
             // Before the session, so that everything this context is about to build is inside the
             // window its disposal is refused in -- the session most of all, since disposing the
             // context is what would release it.
             EnterRun();
-            IShorokooSession? session = null;
             try
             {
                 session = CreateSession(
@@ -1606,16 +1498,14 @@ namespace Shorokoo.Runtime
                 {
                     var onnxName = onnxInputNameByOriginal.TryGetValue(input.ParamName, out var mapped)
                         ? mapped : input.ParamName;
-                    // The lock first, then the value -- see CompiledGraph.Run.
-                    leases.Add(LeaseFeed(input));
-                    // This context's backend: the one that just built the session above, and so
-                    // the runtime that is about to read what it is fed.
-                    sessionInputs[onnxName] = input.ToTensorValue(ResolvedBackend);
-                    input.DropDonatedHandle();
+                    // Held first, then the value -- see CompiledGraph.Run -- on this context's
+                    // backend: the one that just built the session above, and so the runtime that
+                    // is about to read what it is fed.
+                    sessionInputs[onnxName] = feeds.Feed(input, backend);
                 }
-                RefuseUnleasedFeed(leases.Count, inputs.Length);
+                RefuseUnleasedFeed(feeds.Held, inputs.Length);
 
-                using var eviction = LinkEvictions(leases, RunSettings.CancellationToken);
+                using var eviction = LinkEvictions(feeds.Leases, RunSettings.CancellationToken);
                 var settings = eviction is null
                     ? RunSettings : RunSettings with { CancellationToken = eviction.Token };
                 IReadOnlyList<IShorokooTensorValue> results;
@@ -1640,18 +1530,15 @@ namespace Shorokoo.Runtime
                 // Nothing retained: this is the one-shot path, which builds a session, feeds it
                 // once and disposes it, so there is no later run for a device-resident output to
                 // be fed into.
-                return Deliver(
-                    results.Zip(session.OutputNames).Select(x =>
-                            OnnxUtils.CreateNamedModelParam(x.First, ModelParamType.OutputParam, x.Second, this))
-                        .ToArray(),
-                    retainedOutputNames: null);
+                return AdoptOutputs(results, session.OutputNames, backend);
             }
             finally
             {
-                // However the run ends, and before the session goes: a lease is dropped here and
-                // nowhere else, so a terminated run's feeds are still held right up to the moment
-                // it gives up.
-                foreach (var lease in leases) lease.Dispose();
+                // However the run ends, and before the session goes: what the run holds is given
+                // up here and nowhere else, so a terminated run's feeds are still held right up to
+                // the moment it gives up, and a consumed one's memory is released only once nothing
+                // can read it.
+                feeds.Dispose();
 
                 // Dispose the session to free native memory — on the throwing path too, where
                 // the memory it holds is the memory the caller has just been told it lacks. The
@@ -1878,8 +1765,8 @@ namespace Shorokoo.Runtime
         /// <para>This used to unwrap <see cref="IOnnxData"/> and throw at everything else, which
         /// made it a hole rather than an entry point: a tensor literal is held as managed bytes
         /// (<see cref="HostTensorData{T}"/>), a string literal as managed strings
-        /// (<see cref="HostStringTensorData"/>) and a transferred sequence as the tensors it was
-        /// handed, and none of the three carries a runtime value until something asks for one.
+        /// (<see cref="HostStringTensorData"/>) and a copied sequence as the tensors it was
+        /// copied into, and none of the three carries a runtime value until something asks for one.
         /// Asking each of them is what this does now; a value a runtime already made is still
         /// handed straight over.</para>
         ///

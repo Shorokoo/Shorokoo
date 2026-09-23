@@ -30,11 +30,9 @@ namespace Shorokoo
             var graph = new Shorokoo.Graph.InternalComputationGraph([], [.. outputs]);
             graph.RequireRunnableOps("OnnxEngine.Eval");
 
-            // Detaching, and disposed: what this hands back outlives the call, and a context
-            // nothing disposes would keep every result of every Eval on its books for good. The
-            // results are also literals a graph may be built from, and an operator attribute
-            // refuses a tensor that still belongs to a context.
-            using var ctx = new ComputeContext(detachesOutputs: true);
+            // Disposed: its session goes with it, and what this hands back outlives the call --
+            // a run's outputs outlive the context that ran it.
+            using var ctx = new ComputeContext();
             return ctx.Execute(graph).Select(x => x.ToTensorData()).ToArray();
         }
 

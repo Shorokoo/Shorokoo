@@ -1,4 +1,4 @@
-using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using Shorokoo.Core.Backends;
 using Shorokoo.Runtime;
 
@@ -17,8 +17,9 @@ public partial class BackendFreeNegate
 }
 
 /// <summary>
-/// A compute context owns the tensors whose memory is on its books, releases them when it is
-/// disposed, and can be asked to hand its results out detached so they outlive it.
+/// A compute context keeps a weak list of the tensors attached to it and owns none of them: its
+/// disposal releases its sessions and nothing else. A tensor's life is its own — deleted, consumed
+/// by a run it was donated to, or moved into an attribute — and a run holds what it reads.
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
@@ -39,59 +40,40 @@ public class ComputeContextLifetimeCoverageTests
             [.. av.Zip(bv, (x, y) => x * y + x)]);
     }
 
-    [Fact]
-    public void TestDisposingAContextReleasesWhatItOwnsAndInvalidatesIt()
+    private static InternalComputationGraph Doubling()
     {
+        var a = InputVector<float32>("a");
+        return new InternalComputationGraph([a], [a + a]);
+    }
+
+    [Fact]
+    public void TestDisposingAContextReleasesItsSessionsAndLeavesEveryTensorAttachedToItAlive()
+    {
+        var (graph, a, b, expected) = Model();
         var context = new ComputeContext();
-        var owned = Sample().TransferTo(context);
+        var compiled = context.Compile(graph);
+        var placed = Sample().To(context);
+        var copied = Sample().CopyTo(context);
+        var output = compiled.Execute(a, b)[0].ToTensorData();
+        var allocated = context.AllocateUninitialized<float32>(new Shape(4L));
 
         context.Dispose();
 
-        // The tensor was never disposed itself; its memory went when the context did.
-        Assert.False(owned.IsDisposed);
-        Assert.Throws<ObjectDisposedException>(() => Floats(owned));
-    }
-
-    [Fact]
-    public void TestDisposingTheSourceContextLeavesMemoryThatWasTransferredAway()
-    {
-        var source = new ComputeContext();
-        var target = new ComputeContext();
-
-        var onSource = Sample().TransferTo(source);
-        var onTarget = onSource.TransferTo(target);
-
-        // Same space, so nothing moved but the ownership -- and the ownership is what disposal
-        // follows. The source has nothing left to release.
-        source.Dispose();
-
-        Assert.Equal([1f, 2f, 3f, 4f], Floats(onTarget));
-        Assert.Same(target, onTarget.Context);
-
-        // And the target still governs it.
-        target.Dispose();
-        Assert.Throws<ObjectDisposedException>(() => Floats(onTarget));
-    }
-
-    [Fact]
-    public void TestDisposingAContextLeavesTensorsItOnlyHadAccessTo()
-    {
-        var owner = Sample();
-        var borrower = new ComputeContext();
-        var reader = owner.GiveAccessTo(borrower);
-
-        borrower.Dispose();
-
-        // The borrower never owned the bytes, so its disposal cannot have taken them.
-        Assert.Equal([1f, 2f, 3f, 4f], Floats(owner));
-        Assert.Equal([1f, 2f, 3f, 4f], Floats(reader));
+        Assert.True(compiled.IsDisposed);
+        Assert.Empty(context.Tensors);
+        Assert.All((TensorData[])[placed, copied, output, allocated, a, b], t => Assert.False(t.IsDisposed));
+        Assert.Equal([1f, 2f, 3f, 4f], Floats(placed));
+        Assert.Equal([1f, 2f, 3f, 4f], Floats(copied));
+        Assert.Equal(expected, Floats(output));
+        Assert.Throws<ObjectDisposedException>(() => Sample().To(context));
+        Assert.Throws<ObjectDisposedException>(() => Sample().CopyTo(context));
     }
 
     [Fact]
     public void TestDisposingAContextTwiceIsHarmless()
     {
         var context = new ComputeContext();
-        _ = Sample().TransferTo(context);
+        _ = Sample().To(context);
         context.Dispose();
         context.Dispose();
     }
@@ -122,7 +104,7 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
-    public void TestTheHostContextCannotBeDisposed()
+    public void TestTheHostContextCannotBeDisposedAndKeepsNoList()
     {
         var detached = Sample();
 
@@ -130,26 +112,36 @@ public class ComputeContextLifetimeCoverageTests
         ComputeContext.Host.Dispose();
 
         Assert.False(ComputeContext.Host.IsDisposed);
+        Assert.Same(detached, detached.To(ComputeContext.Host));
+        Assert.NotSame(detached, detached.CopyTo(ComputeContext.Host));
+        Assert.Empty(ComputeContext.Host.Tensors);
         Assert.Equal([1f, 2f, 3f, 4f], Floats(detached));
-        Assert.Equal([1f, 2f, 3f, 4f], Floats(Sample().TransferTo(ComputeContext.Host)));
     }
 
     [Fact]
-    public void TestAContextListsTheTensorsAttachedToItAndTheHostContextTheDetachedOnes()
+    public void TestAContextListsWhatIsAttachedToItUntilItIsDetachedOrDies()
     {
         using var first = new ComputeContext();
         using var second = new ComputeContext();
-        var detached = Sample();
-        var onFirst = detached.CopyTo(first);
+        var t = Sample();
 
-        Assert.Contains(onFirst, first.Tensors);
-        Assert.DoesNotContain(onFirst, second.Tensors);
-        Assert.Contains(detached, ComputeContext.Host.Tensors);
+        Assert.Same(t, t.To(first));
+        Assert.Contains(t, first.Tensors);
+        Assert.DoesNotContain(t, second.Tensors);
 
-        var onSecond = onFirst.TransferTo(second);
+        Assert.Same(t, t.To(second));
+        Assert.Contains(t, first.Tensors);
+        Assert.Contains(t, second.Tensors);
 
-        Assert.Contains(onSecond, second.Tensors);
-        Assert.DoesNotContain(onFirst, first.Tensors);
+        first.Detach(t);
+        first.Detach(t);
+        Assert.DoesNotContain(t, first.Tensors);
+        Assert.Contains(t, second.Tensors);
+        Assert.Equal([1f, 2f, 3f, 4f], Floats(t));
+
+        t.Delete();
+        Assert.DoesNotContain(t, second.Tensors);
+        Assert.Throws<ArgumentNullException>(() => first.Detach(null!));
     }
 
     [Fact]
@@ -206,56 +198,26 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
-    public void TestAContextThatDetachesOutputsHandsBackResultsThatOutliveIt()
+    public void TestARunsOutputsAndWhatItReadsAreAttachedToItsContextAndOutliveIt()
     {
         var (graph, a, b, expected) = Model();
-        var context = new ComputeContext(DefaultBackend.Instance, detachesOutputs: true);
-
-        Assert.True(context.DetachesOutputs);
-        var result = context.Execute(graph, a, b)[0].ToTensorData();
-
-        // Detached: the result is in the framework's own host memory, which is what makes the
-        // next line safe.
-        Assert.Same(ComputeContext.Host, result.Context);
-
-        context.Dispose();
-        Assert.Equal(expected, Floats(result));
-    }
-
-    [Fact]
-    public void TestAContextThatDoesNotDetachTakesItsOutputsWithIt()
-    {
-        var (graph, a, b, _) = Model();
-        var context = new ComputeContext(DefaultBackend.Instance, detachesOutputs: false);
-
-        Assert.False(context.DetachesOutputs);
-        var result = context.Execute(graph, a, b)[0].ToTensorData();
-        Assert.Same(context, result.Context);
-
-        context.Dispose();
-        Assert.Throws<ObjectDisposedException>(() => Floats(result));
-    }
-
-    [Fact]
-    public void TestACompiledGraphDetachesItsOutputsWhenItsContextDoes()
-    {
-        var (graph, a, b, expected) = Model();
-        var context = new ComputeContext(DefaultBackend.Instance, detachesOutputs: true);
+        var context = new ComputeContext();
         var compiled = context.Compile(graph);
 
-        var result = compiled.Execute(a, b)[0].ToTensorData();
-        Assert.Same(ComputeContext.Host, result.Context);
+        var oneShot = context.Execute(graph, a, b)[0].ToTensorData();
+        var fromCompiled = compiled.Execute(a, b)[0].ToTensorData();
+        var evaluated = context.Eval(Scalar(2f) * Scalar(3f));
+
+        Assert.All((TensorData[])[oneShot, fromCompiled, evaluated, a, b], t => Assert.Contains(t, context.Tensors));
+        Assert.Same(DefaultBackend.Instance, oneShot.AllocatingBackend);
+        Assert.Same(DefaultBackend.Instance, fromCompiled.AllocatingBackend);
+        Assert.Same(HostBackend.Instance, a.AllocatingBackend);
 
         context.Dispose();
-        Assert.Equal(expected, Floats(result));
-    }
 
-    [Fact]
-    public void TestTheDefaultContextDetachesItsOutputs()
-    {
-        // Whatever this process ended up with, the default context is the one nobody disposes, so
-        // its results must not be tied to it.
-        Assert.True(ComputeContext.Default.DetachesOutputs);
+        Assert.Equal(expected, Floats(oneShot));
+        Assert.Equal(expected, Floats(fromCompiled));
+        Assert.Equal(6f, evaluated.As<float32>().ValueAt<float>(0));
     }
 
     [Fact]
@@ -272,18 +234,20 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
-    public void TestDisposingAContextDropsTheRuntimeValuesItsHostTensorsWereFedAs()
+    public void TestDeletingATensorReleasesTheRuntimeValuesItWasFedAsAndDisposingItsContextDoesNot()
     {
         var (graph, a, b, _) = Model();
         var context = new ComputeContext();
-        var onContext = (HostTensorData<float32>)a.CopyTo(context);
+        var fed = (HostTensorData<float32>)a.CopyTo(context);
 
-        context.Execute(graph, onContext, b);
-        Assert.False(onContext.MaterializationsAreEmpty);
+        context.Execute(graph, fed, b);
+        Assert.False(fed.MaterializationsAreEmpty);
 
         context.Dispose();
+        Assert.False(fed.MaterializationsAreEmpty);
 
-        Assert.True(onContext.MaterializationsAreEmpty);
+        fed.Delete();
+        Assert.True(fed.MaterializationsAreEmpty);
     }
 
     [Fact]
@@ -355,19 +319,19 @@ public class ComputeContextLifetimeCoverageTests
     private static HostTensorData<float32> Wide32() => (HostTensorData<float32>)TensorData([(long)Wide], Feed());
 
     /// <summary>
-    /// Shorokoo/Shorokoo#366: feeding a tensor on one thread while another disposes it, or writes
-    /// to it, used to free the buffer the execution provider was reading. The run now holds what it
-    /// reads, and the bytes go when it returns rather than under it.
+    /// Shorokoo/Shorokoo#366: feeding a tensor on one thread while another deletes it, or writes to
+    /// it, used to free the buffer the execution provider was reading. The run holds what it reads,
+    /// so the delete is declined and the write's retired copies wait for the run.
     /// </summary>
     [Fact]
-    public void TestATensorDisposedOrWrittenOnAnotherThreadStaysValidForTheRunFeedingIt()
+    public void TestATensorDeletedOrWrittenOnAnotherThreadStaysValidForTheRunFeedingIt()
     {
         using var context = new ComputeContext();
         var (graph, expected) = Chain();
         var compiled = context.Compile(graph);
 
         foreach (var interfere in (Action<HostTensorData<float32>>[])[
-            static t => t.Dispose(),
+            static t => t.TryDelete(),
             static t => t.AccessModifiableMemory<float>()[0] = 99f])
         {
             for (int round = 0; round < 3; round++)
@@ -388,80 +352,81 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
-    public void TestATensorDisposedWhileARunFeedsItIsFreedWhenThatRunReturns()
+    public void TestATensorARunIsReadingCannotBeDeletedMovedOrDetachedByThatRunsContext()
     {
         using var context = new ComputeContext();
-        var (graph, _) = Chain();
+        using var other = new ComputeContext();
+        var (graph, expected) = Chain();
         var compiled = context.Compile(graph);
-        var deferred = 0;
+        var fed = Wide32();
+        Assert.Same(fed, fed.To(other));
+        using var reached = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
 
-        // A round whose disposing thread reached the tensor only after the run had returned put
-        // nothing to the product and is retried rather than asserted on. Timing it is what tells
-        // the two apart: without it a lost race reads exactly like a run that freed the bytes it
-        // was still using, and the test failed on this machine two runs in five.
-        for (int round = 0; round < 20 && deferred == 0; round++)
-        {
-            var fed = Wide32();
-            var clock = Stopwatch.StartNew();
-            var disposer = Task.Run(() =>
-            {
-                SpinWait.SpinUntil(() => !fed.MaterializationsAreEmpty, TimeSpan.FromSeconds(10));
-                fed.Dispose();
-                var empty = fed.MaterializationsAreEmpty;
-                return (Read: clock.Elapsed, Empty: empty);
-            });
+        var run = Task.Run(() => Floats(compiled.Run(new HeldFeed(fed, reached, release))[0].ToTensorData()));
+        Assert.True(reached.Wait(TimeSpan.FromSeconds(10)));
 
-            compiled.Execute(fed);
-            var ran = clock.Elapsed;
-            var (read, empty) = disposer.Result;
+        Assert.Throws<InvalidOperationException>(fed.Delete);
+        Assert.Throws<InvalidOperationException>(fed.Dispose);
+        Assert.False(fed.TryDelete());
+        Assert.Throws<InvalidOperationException>(() => fed.MoveToAttribute());
+        Assert.Throws<InvalidOperationException>(() => context.Detach(fed));
+        other.Detach(fed);
+        Assert.False(fed.IsDisposed);
 
-            Assert.True(fed.MaterializationsAreEmpty);
-            if (read > ran) continue;
-            Assert.False(empty);
-            deferred++;
-        }
-
-        Assert.Equal(1, deferred);
+        release.Set();
+        Assert.Equal(expected, run.Result);
+        context.Detach(fed);
+        Assert.True(fed.TryDelete());
     }
 
     [Fact]
-    public void TestASecondHandleSurvivesTheDisposalOfTheContextTheFirstWasAttachedTo()
-    {
-        var first = new ComputeContext();
-        var second = new ComputeContext();
-        var onFirst = Sample().TransferTo(first);
-        var onSecond = onFirst.GiveAccessTo(second);
-
-        first.Dispose();
-
-        Assert.Equal([1f, 2f, 3f, 4f], Floats(onSecond));
-        second.Dispose();
-        Assert.Throws<ObjectDisposedException>(() => Floats(onSecond));
-    }
-
-    [Fact]
-    public void TestALockIsRefusedByEveryContextButTheOneTheTensorIsAttachedTo()
+    public void TestAnyContextMayLockATensorAndNoneMayDetachWhatItHoldsALockOn()
     {
         using var owner = new ComputeContext();
         using var other = new ComputeContext();
-        var t = Sample().TransferTo(owner);
+        var t = Sample();
 
-        Assert.Throws<InvalidOperationException>(() => other.Lock(t));
-        using (var lease = owner.Lock(t)) Assert.False(lease.Eviction.IsCancellationRequested);
+        using (owner.Lock(t))
+        using (var second = other.Lock(t))
+        {
+            Assert.False(second.Eviction.IsCancellationRequested);
+            Assert.False(t.TryDelete());
+            Assert.Throws<InvalidOperationException>(() => owner.Detach(t));
+            Assert.Throws<InvalidOperationException>(() => other.Detach(t));
+            Assert.Contains(t, owner.Tensors);
+        }
 
-        var detached = Sample();
-        Assert.Throws<InvalidOperationException>(() => owner.Lock(detached));
-        using (ComputeContext.Host.Lock(detached)) Assert.False(detached.TryDelete());
-
+        owner.Detach(t);
         Assert.True(t.TryDelete());
         Assert.Throws<ObjectDisposedException>(() => owner.Lock(t));
+    }
+
+    [Fact]
+    public void TestARunsLockHoldsTheTensorItselfAliveForAsLongAsItIsHeld()
+    {
+        using var context = new ComputeContext();
+        var (lease, tensor) = LockedAndDropped(context);
+
+        GC.Collect(2, GCCollectionMode.Forced, blocking: true);
+        GC.WaitForPendingFinalizers();
+
+        Assert.True(tensor.IsAlive);
+        lease.Dispose();
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static (TensorLease Lease, WeakReference Tensor) LockedAndDropped(ComputeContext context)
+    {
+        var tensor = Sample();
+        return (context.Lock(tensor), new WeakReference(tensor));
     }
 
     [Fact]
     public void TestDisposingAContextWithALeaseOutstandingThrowsAndLeavesItUsable()
     {
         var context = new ComputeContext();
-        var t = Sample().TransferTo(context);
+        var t = Sample().To(context);
         var lease = context.Lock(t);
 
         Assert.Throws<InvalidOperationException>(context.Dispose);
@@ -477,7 +442,7 @@ public class ComputeContextLifetimeCoverageTests
     public void TestTryDeleteRefusesWhileALeaseIsOutstandingAndSucceedsOnceItDrops()
     {
         using var context = new ComputeContext();
-        var t = Sample().TransferTo(context);
+        var t = Sample().To(context);
         var lease = context.Lock(t);
 
         Assert.False(t.TryDelete());
@@ -494,17 +459,15 @@ public class ComputeContextLifetimeCoverageTests
     public async Task TestDeleteAsyncDeletesAtOnceAndReclaimsWhenTheLockDrops()
     {
         using var context = new ComputeContext();
-        var a = InputVector<float32>("a");
-        var graph = new InternalComputationGraph([a], [a + a]);
         var t = (HostTensorData<float32>)Sample().CopyTo(context);
-        context.Execute(graph, t);
+        context.Execute(Doubling(), t);
         Assert.False(t.MaterializationsAreEmpty);
 
         using var lease = context.Lock(t);
         Assert.False(await t.DeleteAsync(TimeSpan.FromMilliseconds(20)));
 
         // Deleted already, and said so: only the reclamation was still waiting.
-        Assert.Throws<ObjectDisposedException>(() => Floats(t));
+        Assert.Contains("deleted", Assert.Throws<ObjectDisposedException>(() => Floats(t)).Message);
         Assert.True(lease.Eviction.IsCancellationRequested);
         Assert.False(t.MaterializationsAreEmpty);
         Assert.False(await t.DeleteAsync(TimeSpan.Zero));
@@ -554,15 +517,15 @@ public class ComputeContextLifetimeCoverageTests
         release.Set();
         Assert.Equal(expected, run.Result);
 
-        var lease = context.Lock(Sample().TransferTo(context));
-        Assert.Contains("lease(s)", Assert.Throws<InvalidOperationException>(context.Dispose).Message);
+        var lease = context.Lock(Sample());
+        Assert.Contains("lock(s)", Assert.Throws<InvalidOperationException>(context.Dispose).Message);
         lease.Dispose();
         context.Dispose();
         Assert.True(context.IsDisposed);
     }
 
     [Fact]
-    public void TestARunOverADonatedFeedAnswersAsAKeptOneAndGivesTheBytesBackWithTheRun()
+    public void TestARunConsumesADonatedFeedWhenItStartsAndGivesItsMemoryBackWhenItReturns()
     {
         using var context = new ComputeContext();
         var (graph, expected) = Chain();
@@ -570,14 +533,19 @@ public class ComputeContextLifetimeCoverageTests
 
         var kept = Wide32();
         Assert.Equal(expected, Floats(compiled.Execute(kept)[0].ToTensorData()));
+        Assert.False(kept.IsDisposed);
         Assert.False(kept.MaterializationsAreEmpty);
 
         var donated = Wide32();
         var donation = donated.Donate();
+        Assert.False(donated.IsDisposed);
         Assert.Equal(expected, Floats(compiled.Execute(donation)[0].ToTensorData()));
+        Assert.True(donated.IsDisposed);
         Assert.True(donated.MaterializationsAreEmpty);
+        Assert.DoesNotContain(donated, context.Tensors);
         Assert.Throws<ObjectDisposedException>(() => Floats(donated));
         Assert.Throws<ObjectDisposedException>(() => compiled.Execute(donation));
+        donation.Dispose();
     }
 
     [Fact]
@@ -604,19 +572,15 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
-    public void TestAFeedNothingKnowsHowToLockIsRefusedAndSoIsAnInputThatWasNotLocked()
+    public void TestAFeedNothingKnowsHowToHoldIsRefusedAndSoIsAnInputThatWasNotHeld()
     {
-        Assert.Throws<InvalidOperationException>(() => ComputeContext.LeaseFeed(new UnlockableParam()));
+        using var context = new ComputeContext();
+        using var feeds = new RunFeeds(context, 1, () => TensorDeath.Deleted);
+
+        Assert.Throws<InvalidOperationException>(
+            () => feeds.Feed(new UnlockableParam(), DefaultBackend.Instance));
         Assert.Throws<InvalidOperationException>(() => ComputeContext.RefuseUnleasedFeed(1, 2));
         ComputeContext.RefuseUnleasedFeed(2, 2);
-    }
-
-    [Fact]
-    public async Task TestAnAllocationThatHoldsNothingIsNeverDeadAndNeverDeleted()
-    {
-        Assert.False(TensorStorage.None.TryDelete());
-        Assert.False(await TensorStorage.None.DeleteAsync(TimeSpan.Zero, default));
-        Assert.True(TensorStorage.None.IsLive);
     }
 
     [Fact]
@@ -629,56 +593,87 @@ public class ComputeContextLifetimeCoverageTests
         var donation = fed.Donate();
         compiled.Execute(donation);
 
-        var refused = Assert.Throws<ObjectDisposedException>(() => compiled.Execute(donation));
+        var refused = Assert.Throws<ObjectDisposedException>(() => compiled.Execute(donation)).Message;
 
-        Assert.Contains(fed.ToString(), refused.Message);
-        Assert.DoesNotContain(nameof(TensorStorage), refused.Message);
+        Assert.Contains(fed.ToString(), refused);
+        Assert.Contains("consumed by a run of", refused);
+        Assert.Contains(context.Backend.ToString(), refused);
+        Assert.Contains("Donate()", refused);
     }
 
-    /// <summary>A parameter of a kind no lock knows about, which is what <c>LeaseFeed</c>'s
-    /// refusal is for.</summary>
-    private sealed class UnlockableParam : NamedModelParam
-    {
-        public override IShorokooTensorValue ToTensorValue() => throw new NotSupportedException();
-        public override TensorData ToTensorData() => throw new NotSupportedException();
-        public override TensorData<T> ToTensorData<T>() => throw new NotSupportedException();
-        public override TensorDataSequence ToTensorDataSequence() => throw new NotSupportedException();
-        public override TensorDataSequence<T> ToTensorDataSequence<T>() => throw new NotSupportedException();
-    }
-
-    // A context lists the tensors attached to it, so a handle the caller has let go of must come
-    // off. Disposal used to leave it on, and the list then answered which tensors had ever been
-    // attached rather than which are -- a graph literal moved into an attribute is disposed by the
-    // move, so describing a graph alone grew it.
     [Fact]
-    public void TestATensorComesOffItsContextsListWhenItIsDisposedOrMovedAway()
+    public void TestADonationIsRefusedWhileAnotherRunReadsTheTensorAndTakesNothing()
+    {
+        using var context = new ComputeContext();
+        var shared = (HostTensorData<float32>)Sample();
+
+        using (context.Lock(shared))
+            Assert.Contains("another run is reading it", Assert.Throws<InvalidOperationException>(
+                () => context.Execute(Doubling(), shared.Donate())).Message);
+
+        Assert.False(shared.IsDisposed);
+        Assert.Equal([2f, 4f, 6f, 8f], Floats(context.Execute(Doubling(), shared.Donate())[0].ToTensorData()));
+        Assert.True(shared.IsDisposed);
+        Assert.True(shared.MaterializationsAreEmpty);
+    }
+
+    [Fact]
+    public void TestEveryAccessToADeadTensorThrowsSayingHowItDiedAndEndingItAgainIsHarmless()
+    {
+        using var context = new ComputeContext();
+        TensorData Deleted() { var t = Sample(); t.Delete(); return t; }
+        TensorData Moved() { var t = Sample(); _ = t.MoveToAttribute(); return t; }
+        TensorData Consumed() { var t = Sample(); context.Execute(Doubling(), t.Donate()); return t; }
+        Func<TensorData, object>[] accesses =
+        [
+            t => t.CopyRawMemory(), t => t.Data, t => t.IsHostResident, t => t.ToTensorValue(),
+            t => t.To(context), t => t.CopyTo(context), t => t.ToHost(), t => t.Donate(),
+            t => t.MoveToAttribute(), t => context.Lock(t),
+        ];
+
+        foreach (var (dead, cause) in (IEnumerable<(TensorData, string)>)[
+            (Deleted(), "deleted"), (Moved(), "MoveToAttribute()"), (Consumed(), "Donate()")])
+        {
+            Assert.True(dead.IsDisposed);
+            Assert.All(accesses, access => Assert.Contains(cause,
+                Assert.Throws<ObjectDisposedException>(() => access(dead)).Message));
+            dead.Dispose();
+            dead.Delete();
+            Assert.True(dead.TryDelete());
+            Assert.Equal(new Shape(4L), dead.Shape);
+            Assert.Equal(DType.Float32, dead.DType);
+        }
+    }
+
+    [Fact]
+    public void TestATensorComesOffItsContextsListWhenItDies()
     {
         using var context = new ComputeContext();
 
-        var held = context.AllocateUninitialized<float32>((long[])[2L]);
-        Assert.Contains(held, context.Tensors);
+        var deleted = context.AllocateUninitialized<float32>((long[])[2L]);
+        var moved = Sample().To(context);
+        Assert.Contains(deleted, context.Tensors);
+        Assert.Contains(moved, context.Tensors);
 
-        var spent = (TensorData<float32>)TensorData([2L], 1f, 2f);
-        Assert.Contains(spent, ComputeContext.Host.Tensors);
-        _ = spent.MoveToAttribute();
-        Assert.DoesNotContain(spent, ComputeContext.Host.Tensors);
+        deleted.Dispose();
+        _ = moved.MoveToAttribute();
 
-        held.Dispose();
-        Assert.DoesNotContain(held, context.Tensors);
+        Assert.DoesNotContain(deleted, context.Tensors);
+        Assert.DoesNotContain(moved, context.Tensors);
     }
 
     [Fact]
     public void TestAnAllocatedTensorIsFilledInPlaceAndFeedsAsACopiedOneDoes()
     {
         using var context = new ComputeContext();
-        var a = InputVector<float32>("a");
-        var graph = new InternalComputationGraph([a], [a + a]);
+        var graph = Doubling();
         float[] values = [1f, 2f, 3f, 4f];
 
         var allocated = context.AllocateUninitialized<float32>((long[])[4L]);
         values.CopyTo(allocated.AccessModifiableMemory<float>());
 
-        Assert.Same(context, allocated.Context);
+        Assert.Contains(allocated, context.Tensors);
+        Assert.Same(DefaultBackend.Instance, allocated.AllocatingBackend);
         Assert.Equal(values, Floats(allocated));
         Assert.Equal(Floats(Sample().CopyTo(context)), Floats(allocated));
         Assert.Equal(
@@ -693,26 +688,8 @@ public class ComputeContextLifetimeCoverageTests
         Assert.Throws<ArgumentNullException>(() => context.AllocateUninitialized(pair, null!));
     }
 
-    [Fact]
-    public void TestADonatedFeedFreesItsBytesWhileAKeptOneStillReads()
-    {
-        using var context = new ComputeContext();
-        var a = InputVector<float32>("a");
-        var graph = new InternalComputationGraph([a], [a + a]);
-
-        var donated = (HostTensorData<float32>)Sample();
-        context.Run(graph, new DonatedTensorModelParam("a", ModelParamType.InputParam, donated.Donate()));
-        Assert.True(donated.MaterializationsAreEmpty);
-
-        var shared = (HostTensorData<float32>)Sample();
-        using var reader = shared.GiveAccessTo(context);
-        context.Execute(graph, shared.Donate());
-        Assert.False(shared.MaterializationsAreEmpty);
-        Assert.Equal([1f, 2f, 3f, 4f], Floats(reader));
-    }
-
-    /// <summary>Holds a run open where the value is built: inside the window a disposal has to be
-    /// refused in, and leased on <c>Host</c> rather than on the running context.</summary>
+    /// <summary>Holds a run open where the value is built: after the run has taken its lock on the
+    /// feed, and inside the window a disposal of its context has to be refused in.</summary>
     private sealed class HeldFeed(
         TensorData data, ManualResetEventSlim reached, ManualResetEventSlim release)
         : TensorDataModelParam("a", ModelParamType.InputParam, data)
@@ -723,6 +700,17 @@ public class ComputeContextLifetimeCoverageTests
             release.Wait(TimeSpan.FromSeconds(30));
             return base.ToTensorValue(backend);
         }
+    }
+
+    /// <summary>A parameter of a kind no run knows how to hold, which is what
+    /// <c>RunFeeds.Feed</c>'s refusal is for.</summary>
+    private sealed class UnlockableParam : NamedModelParam
+    {
+        public override IShorokooTensorValue ToTensorValue() => throw new NotSupportedException();
+        public override TensorData ToTensorData() => throw new NotSupportedException();
+        public override TensorData<T> ToTensorData<T>() => throw new NotSupportedException();
+        public override TensorDataSequence ToTensorDataSequence() => throw new NotSupportedException();
+        public override TensorDataSequence<T> ToTensorDataSequence<T>() => throw new NotSupportedException();
     }
 
     internal sealed class StubBackend(ComputeDevice device, int? cudaDeviceId)

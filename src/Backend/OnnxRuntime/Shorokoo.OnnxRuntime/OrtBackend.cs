@@ -81,6 +81,21 @@ public abstract class OrtBackend : IShorokooBackend
     /// </summary>
     public BackendDescription Description { get; }
 
+    // One per loaded copy of this assembly, which is one per native ONNX Runtime: every backend
+    // over the runtime the program loaded shares this object, and a backend IsolatedBackend loads
+    // gets a private copy of this assembly and so an object of its own. That is exactly the line
+    // between two backends that can hand each other an allocation and two that cannot -- the same
+    // line OrtSession.Unwrap draws by type identity when it is fed a value.
+    private static readonly object LoadedRuntime = new();
+
+    /// <summary>
+    /// The native ONNX Runtime this backend is bound to, shared by every backend over it. Two
+    /// backends over one loaded runtime — a CPU backend and a CUDA backend in one process — can
+    /// read each other's allocations in place on a device they share; a backend loaded by
+    /// <see cref="IsolatedBackend"/> has a runtime of its own and cannot.
+    /// </summary>
+    public object RuntimeIdentity => LoadedRuntime;
+
     /// <summary>
     /// Creates an ORT inference session over a serialized ONNX model, on this backend's
     /// execution provider.
@@ -355,7 +370,7 @@ public abstract class OrtBackend : IShorokooBackend
     /// the arena <paramref name="deviceMemory"/> describes, which on a CUDA backend is what bounds
     /// it.
     ///
-    /// <para>The settings belong to the compute context the tensor will be owned by, so a context
+    /// <para>The settings belong to the compute context the copy is made for, so a context
     /// carrying a <see cref="DeviceMemorySettings.LimitBytes"/> bounds what can be moved onto its
     /// card as well as what the sessions it compiles may allocate. Past the ceiling the copy fails
     /// with ONNX Runtime's own arena error rather than taking what is left of the device.</para>
@@ -566,8 +581,8 @@ public abstract class OrtBackend : IShorokooBackend
                     + $"{Description.Name}'s own device memory cannot be an element of a sequence: "
                     + "ONNX Runtime can pack it into one but reads an element back with a host "
                     + "copy, so nothing could ever read it again. Bring the tensor into host "
-                    + "memory first -- CopyTensorToHost does that, and TensorData.CopyTo(null) "
-                    + "is the same move on a tensor a context owns.";
+                    + "memory first -- CopyTensorToHost does that, and TensorData.ToHost() "
+                    + "is the same move on a tensor.";
                 // This method's contract is that a failure disposes what it was handed, and both
                 // in-tree callers rely on it by calling outside the catch that would otherwise
                 // free these. A refusal is a failure like any other. What the caller keeps is the

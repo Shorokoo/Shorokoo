@@ -4,18 +4,21 @@ using Shorokoo.Runtime;
 namespace Shorokoo.Tests;
 
 /// <summary>
-/// Two different cards are two different memory spaces, so a tensor moving between them is copied
-/// through the host rather than re-wrapped. There is no direct device-to-device path.
+/// Whether a tensor is handed to a context as it is or copied into its memory is asked of the
+/// context's backend, given where the tensor's memory is: the same device and the same runtime. Two
+/// cards are two memory spaces, so a tensor reaching another card is copied through the host; two
+/// backends on one card copy too unless they share a runtime. There is no direct device-to-device
+/// path.
 ///
 /// <para>Stubbed backends rather than real ones, deliberately: the decision under test is which
-/// route a transfer takes, and that is made from the spaces the backends report. Proving it needs
-/// two CUDA devices to <i>report</i>, not two to exist — and a machine with one card could not run
+/// route a transfer takes, and that is made from what the backends answer. Proving it needs two
+/// CUDA devices to <i>report</i>, not two to exist — and a machine with one card could not run
 /// this at all otherwise. What a second card would add is confidence that the copy itself lands
 /// correctly on a device this process has not been using, which no stub can stand in for.</para>
 ///
 /// <para>The same stubs cover which context's <see cref="DeviceMemorySettings"/> a placed tensor is
-/// allocated under, for the same reason: what decides it is the settings the transfer reads off the
-/// target context and hands the backend, and a stub is what makes that handoff observable.</para>
+/// allocated under, and which backend a tensor's memory is released through, for the same reason:
+/// a stub is what makes those hand-offs observable.</para>
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
@@ -37,142 +40,131 @@ public class CrossDeviceRoutingCoverageTests
     [Fact]
     public void TestATensorOnOneCardReachesAnotherOnlyByGoingThroughTheHost()
     {
-        // The case the class is named for, and the one every other test here skips: the source is
-        // already on a card. Starting on the host makes CopyAcross the route for the trivial
-        // reason that the source is host-resident, so a regression that re-wrapped between two
-        // CUDA device ids -- or that dropped DeviceId from the space comparison -- passed.
+        // The case the class is named for: the source is already on a card. Starting on the host
+        // makes the copy the route for the trivial reason that the source is host-resident, so a
+        // regression that handed a tensor between two CUDA device ids over -- or that dropped
+        // DeviceId from the space comparison -- passed.
         var firstCard = new StubBackend(ComputeDevice.Cuda, 0);
         var secondCard = new StubBackend(ComputeDevice.Cuda, 1);
         using var one = new ComputeContext(firstCard);
         using var two = new ComputeContext(secondCard);
 
-        var onFirst = TensorData([2L], (float[])[3f, 4f]).TransferTo(one);
+        var onFirst = TensorData([2L], (float[])[3f, 4f]).To(one);
         Assert.Equal(MemorySpace.Cuda(0), onFirst.Space);
+        Assert.Same(firstCard, onFirst.AllocatingBackend);
         Assert.False(onFirst.IsHostResident);
 
-        var onSecond = onFirst.TransferTo(two);
+        var onSecond = onFirst.To(two);
 
-        // Through the host: the owning backend was asked for the bytes, and the target was asked
-        // to build from them. Neither happens on a re-wrap.
         Assert.Equal(1, firstCard.HostCopies);
         Assert.Equal(1, secondCard.BackendMemoryBuilds);
         Assert.Equal(MemorySpace.Cuda(1), onSecond.Space);
-        Assert.True(onFirst.IsDisposed);
+        Assert.Same(secondCard, onSecond.AllocatingBackend);
+        Assert.False(onFirst.IsDisposed);
+        Assert.Contains(onFirst, one.Tensors);
+        Assert.Contains(onSecond, two.Tensors);
     }
 
     [Fact]
-    public void TestTwoContextsOnOneCardShareItsAllocationOnlyWhenTheyShareABackend()
+    public void TestTwoContextsOnOneCardShareItsAllocationOnlyWhenTheyShareARuntime()
     {
-        // Same space is necessary and, off the host, not sufficient: an allocation means nothing
-        // to a runtime that did not make it. Same backend shares; two backends reporting the same
-        // card copy through the host.
         var backend = new StubBackend(ComputeDevice.Cuda, 0);
+        var otherRuntime = new StubBackend(ComputeDevice.Cuda, 0);
         using var one = new ComputeContext(backend);
         using var alsoOne = new ComputeContext(backend);
-        using var otherRuntime = new ComputeContext(new StubBackend(ComputeDevice.Cuda, 0));
+        using var other = new ComputeContext(otherRuntime);
 
-        var onCard = TensorData([2L], (float[])[5f, 6f]).TransferTo(one);
-        var shared = onCard.GiveAccessTo(alsoOne);
-        Assert.Same(alsoOne, shared.Context);
+        var onCard = TensorData([2L], (float[])[5f, 6f]).To(one);
+
+        Assert.Same(onCard, onCard.To(alsoOne));
+        Assert.Contains(onCard, alsoOne.Tensors);
         Assert.Equal(0, backend.HostCopies);
 
-        // The same request across runtimes cannot be served without allocating, which is what
-        // GiveAccessTo promises not to do.
-        Assert.Throws<InvalidOperationException>(() => onCard.GiveAccessTo(otherRuntime));
+        var copied = onCard.To(other);
+        Assert.NotSame(onCard, copied);
+        Assert.Equal(1, backend.HostCopies);
+        Assert.Equal(1, otherRuntime.BackendMemoryBuilds);
     }
 
     [Fact]
-    public void TestAnUnknownMemorySpaceRefusesEveryTransfer()
+    public void TestAnUnknownMemorySpaceIsNeverSharedAndComesHomeThroughTheBackendThatMadeIt()
     {
-        // A backend on some other execution provider reports a space nothing can name. Two such
-        // tensors compare equal as spaces without being in the same place, so the two operations
-        // that decide from that equality are refused rather than guessed at. A copy is not one of
-        // them: it reads the bytes back through the backend that made them.
         var other = new StubBackend(ComputeDevice.Other, null);
-        Assert.Equal(MemoryKind.Unknown, ((IShorokooBackend)other).MemorySpace.Kind);
-
+        Assert.Equal(MemorySpace.UnknownDevice, ((IShorokooBackend)other).MemorySpace);
         using var context = new ComputeContext(other);
-        var onUnknown = TensorData([2L], (float[])[1f, 2f]).TransferTo(context);
-        Assert.Equal(MemoryKind.Unknown, onUnknown.Space.Kind);
 
-        Assert.Throws<InvalidOperationException>(() => onUnknown.TransferTo(null));
-        Assert.Throws<InvalidOperationException>(() => onUnknown.GiveAccessTo(context));
+        var onUnknown = TensorData([2L], (float[])[3f, 4f]).CopyTo(context);
+        Assert.False(onUnknown.Space.IsKnown);
+
+        Assert.NotSame(onUnknown, onUnknown.To(context));
+        var home = onUnknown.ToHost();
+
+        Assert.Equal(2, other.HostCopies);
+        Assert.Equal([3f, 4f], (float[])[.. home.As<float32>().AccessMemory<float>()]);
+        Assert.Same(HostBackend.Instance, home.AllocatingBackend);
     }
 
     [Fact]
-    public void TestATransferToAnotherCardGoesThroughHostBytes()
-    {
-        var target = new StubBackend(ComputeDevice.Cuda, 1);
-        using var secondCard = new ComputeContext(target);
-
-        float[] values = [1f, 2f, 3f, 4f];
-        var onHost = TensorData([4L], values);
-
-        var moved = onHost.TransferTo(secondCard);
-
-        // The target was asked to build the tensor from raw bytes -- the host route -- rather than
-        // being handed the allocation, which is the only thing that can cross a space boundary.
-        Assert.Equal(1, target.BackendMemoryBuilds);
-        Assert.Equal(MemorySpace.Cuda(1), moved.Space);
-        Assert.True(onHost.IsDisposed);
-    }
-
-    [Fact]
-    public void TestACopyToAnotherCardLeavesTheSourceWhereItIs()
+    public void TestToAndCopyToAnotherCardGoThroughHostBytesAndLeaveTheSourceWhereItIs()
     {
         var target = new StubBackend(ComputeDevice.Cuda, 1);
         using var secondCard = new ComputeContext(target);
         var onHost = TensorData([2L], (float[])[7f, 8f]);
 
+        var moved = onHost.To(secondCard);
         var copy = onHost.CopyTo(secondCard);
 
-        Assert.Equal(1, target.BackendMemoryBuilds);
+        Assert.Equal(2, target.BackendMemoryBuilds);
+        Assert.Equal(MemorySpace.Cuda(1), moved.Space);
         Assert.Equal(MemorySpace.Cuda(1), copy.Space);
+        Assert.NotSame(moved, copy);
+        Assert.False(onHost.IsDisposed);
         Assert.Equal([7f, 8f], onHost.As<float32>().AccessMemory<float>().ToArray());
+        Assert.Equal([7f, 8f], (float[])[.. moved.ToHost().As<float32>().AccessMemory<float>()]);
     }
 
     [Fact]
-    public void TestGiveAccessToAnotherCardIsRefusedBecauseReachingItMeansAllocating()
+    public void TestWhetherATensorIsHandedOverOrCopiedIsAskedOfTheTargetsBackend()
     {
-        using var secondCard = new ComputeContext(new StubBackend(ComputeDevice.Cuda, 1));
-        var onHost = TensorData([2L], (float[])[7f, 8f]);
+        var everything = new StubBackend(ComputeDevice.Cuda, 0) { Addresses = _ => true };
+        var nothing = new StubBackend(ComputeDevice.Cpu, null) { Addresses = _ => false };
+        using var generous = new ComputeContext(everything);
+        using var strict = new ComputeContext(nothing);
+        var onHost = TensorData([2L], (float[])[1f, 2f]);
 
-        var ex = Assert.Throws<InvalidOperationException>(() => onHost.GiveAccessTo(secondCard));
-        Assert.Contains("CopyTo", ex.Message);
+        Assert.Same(onHost, onHost.To(generous));
+        Assert.Equal([onHost.Location], everything.AskedAbout);
+        Assert.Equal(0, everything.BackendMemoryBuilds);
+
+        Assert.NotSame(onHost, onHost.To(strict));
+        Assert.Equal([onHost.Location], nothing.AskedAbout);
     }
 
     [Fact]
-    public void TestADetachingContextLeavesARetainedDeviceOutputOnTheCard()
+    public void TestATensorsMemoryIsReleasedThroughTheBackendThatMadeItWhateverItIsAttachedTo()
     {
-        using var card = new ComputeContext(new StubBackend(ComputeDevice.Cuda, 0), detachesOutputs: true);
-        var onCard = TensorData([2L], (float[])[1f, 2f]).TransferTo(card);
-        NamedModelParam[] outputs =
-            [new TensorDataModelParam("state", ModelParamType.OutputParam, onCard)];
+        var card = new StubBackend(ComputeDevice.Cuda, 0);
+        var one = new ComputeContext(card);
+        var alsoOne = new ComputeContext(card);
+        using var other = new ComputeContext(new StubBackend(ComputeDevice.Cuda, 1));
 
-        var delivered = card.Deliver(outputs, new HashSet<string> { "state" });
+        var onCard = TensorData([2L], (float[])[1f, 2f]).To(one);
+        Assert.Same(onCard, onCard.To(alsoOne));
+        var elsewhere = onCard.To(other);
 
-        Assert.Same(card, delivered[0].ToTensorData().Context);
-        Assert.Equal(MemorySpace.Cuda(0), delivered[0].ToTensorData().Space);
+        one.Dispose();
+        alsoOne.Dispose();
+        Assert.Empty(card.Released);
+        Assert.False(onCard.IsDisposed);
+
+        onCard.Delete();
+        Assert.Single(card.Released);
+        Assert.Same(card.Built[0], card.Released[0]);
+        Assert.False(elsewhere.IsDisposed);
     }
 
     [Fact]
-    public void TestATensorInAnUnnamedSpaceStillComesHomeThroughTheBackendThatMadeIt()
-    {
-        var other = new StubBackend(ComputeDevice.Other, null);
-        using var context = new ComputeContext(other);
-        Assert.Equal(MemorySpace.UnknownDevice, ((IShorokooBackend)other).MemorySpace);
-
-        var onDevice = TensorData([2L], (float[])[3f, 4f]).CopyTo(context);
-        Assert.False(onDevice.Space.IsKnown);
-
-        var home = onDevice.CopyTo(null);
-
-        Assert.Equal(1, other.HostCopies);
-        Assert.Equal([3f, 4f], (float[])[.. home.As<float32>().AccessMemory<float>()]);
-    }
-
-    [Fact]
-    public void TestATensorPlacedOnACardIsAllocatedUnderTheOwningContextsBudgetAndStaysThere()
+    public void TestATensorPlacedOnACardIsAllocatedUnderTheTargetContextsBudgetAndStaysThere()
     {
         var card = new StubBackend(ComputeDevice.Cuda, 0);
         var tight = new DeviceMemorySettings { LimitBytes = 1L << 20 };
@@ -182,7 +174,7 @@ public class CrossDeviceRoutingCoverageTests
         using var unbudgeted = new ComputeContext(card);
 
         var onCard = TensorData([2L], (float[])[1f, 2f]).CopyTo(small);
-        TensorData([2L], (float[])[3f, 4f]).TransferTo(large);
+        TensorData([2L], (float[])[3f, 4f]).To(large);
         TensorData([2L], (float[])[5f, 6f]).CopyTo(unbudgeted);
         small.AllocateUninitialized<float32>(new Shape(2L));
 
@@ -192,33 +184,56 @@ public class CrossDeviceRoutingCoverageTests
         Assert.Equal(-1, unbudgeted.ReadTransferArenaStatistics()!.Value.LimitBytes);
         Assert.Null(ComputeContext.Host.ReadTransferArenaStatistics());
 
-        // The re-wrap allocates nothing, so there is nothing to re-charge: the bytes stay on the
-        // budget they were allocated under however many contexts hold them afterwards.
-        var moved = onCard.TransferTo(large);
-        var shared = moved.GiveAccessTo(unbudgeted);
+        // Handed over rather than copied, so there is nothing to re-charge: the memory stays under
+        // the budget it was allocated under however many contexts it is attached to afterwards.
+        Assert.Same(onCard, onCard.To(large));
+        Assert.Same(onCard, onCard.To(unbudgeted));
         Assert.Equal(4, card.Budgets.Count);
-        Assert.Same(large, moved.Context);
-        Assert.Same(unbudgeted, shared.Context);
+        Assert.Contains(onCard, large.Tensors);
+        Assert.Contains(onCard, unbudgeted.Tensors);
     }
 
-    /// <summary>A backend that answers about itself and records what it was asked to build, so a
-    /// transfer's route can be read off it without a session, a native runtime or a card.</summary>
+    /// <summary>A backend that answers about itself and records what it was asked to build, what it
+    /// was asked whether it could address, and what it released — so a transfer's route can be read
+    /// off it without a session, a native runtime or a card.</summary>
     private sealed class StubBackend(ComputeDevice device, int? cudaDeviceId)
         : IShorokooBackend
     {
-        public int BackendMemoryBuilds { get; private set; }
+        public int BackendMemoryBuilds => Built.Count;
+
+        internal List<IShorokooTensorValue> Built { get; } = [];
+
+        internal List<IShorokooTensorValue> Released { get; } = [];
 
         internal List<DeviceMemorySettings> Budgets { get; } = [];
 
+        internal List<MemoryLocation> AskedAbout { get; } = [];
+
+        /// <summary>What <see cref="CanAddress"/> answers, where a test decides; the interface's own
+        /// answer otherwise.</summary>
+        internal Func<MemoryLocation, bool>? Addresses { get; init; }
+
         public BackendDescription Description { get; } = new($"stub-{device}", device, cudaDeviceId);
+
+        public bool CanAddress(MemoryLocation location)
+        {
+            AskedAbout.Add(location);
+            return Addresses is { } answer
+                ? answer(location)
+                : location.Space.IsKnown && location.Space == ((IShorokooBackend)this).MemorySpace
+                  && (location.IsManaged || ReferenceEquals(location.Runtime, this));
+        }
+
+        public void Release(IShorokooTensorValue value) => Released.Add(value);
 
         public IShorokooTensorValue CreateTensorInBackendMemory(
             ShorokooTensorElementType elementType, byte[] data, long[] shape,
             DeviceMemorySettings deviceMemory)
         {
-            BackendMemoryBuilds++;
             Budgets.Add(deviceMemory);
-            return new StubValue(elementType, data, shape, hostAccessible: device == ComputeDevice.Cpu);
+            var value = new StubValue(elementType, data, shape, hostAccessible: device == ComputeDevice.Cpu);
+            Built.Add(value);
+            return value;
         }
 
         public IShorokooTensorValue CreateUninitializedTensorInBackendMemory(

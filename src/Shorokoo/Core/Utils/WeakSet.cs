@@ -10,7 +10,7 @@ namespace Shorokoo.Core.Utils;
 /// <para>Weak because a registry must not be the reason something stays alive. A backend the
 /// program has dropped, a context it has let go of and a tensor it no longer names are all
 /// garbage the moment nothing else holds them, and a list that kept them would turn every
-/// registration into a leak. This is the discipline <c>ComputeContext</c>'s owned storage and
+/// registration into a leak. This is the discipline <c>ComputeContext</c>'s attached tensors and
 /// compiled graphs already follow.</para>
 ///
 /// <para>By reference because two backends are the same backend exactly when they are the same
@@ -25,11 +25,21 @@ internal sealed class WeakSet<T>
 
     private static readonly object Present = new();
 
-    /// <summary>Records <paramref name="item"/>. Idempotent.</summary>
-    internal void Add(T item) => _entries.AddOrUpdate(item, Present);
+    /// <summary>
+    /// Records <paramref name="item"/>. Idempotent — and cheap when it is already recorded, which
+    /// is the common case for a context's list: every run re-attaches what it reads, and the lookup
+    /// takes no lock where an add would.
+    /// </summary>
+    internal void Add(T item)
+    {
+        if (!_entries.TryGetValue(item, out _)) _entries.TryAdd(item, Present);
+    }
 
     /// <summary>Forgets <paramref name="item"/>, if it was ever recorded.</summary>
     internal void Remove(T item) => _entries.Remove(item);
+
+    /// <summary>Forgets everything recorded.</summary>
+    internal void Clear() => _entries.Clear();
 
     /// <summary>
     /// The members still alive, as a list of the caller's own. A snapshot rather than a live view,

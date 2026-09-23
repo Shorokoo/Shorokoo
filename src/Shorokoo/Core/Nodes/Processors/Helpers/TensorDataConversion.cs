@@ -79,7 +79,8 @@ namespace Shorokoo.Core.Nodes.Processors.Helpers
                 // a backend-backed one hands over the one it already has. The cast would have
                 // thrown on the first of those, and this path already needs a backend to copy on.
                 var copy = OnnxUtils.CopyTensorValue(originalData.ToTensorValue());
-                return OnnxUtils.CreateTensorDataFromValue(shape, targetDType, copy, targetDType);
+                return OnnxUtils.CreateTensorDataFromValue(
+                    shape, targetDType, copy, targetDType, DefaultBackend.Instance);
             }
             
             // Extract element count for conversion
@@ -186,7 +187,7 @@ namespace Shorokoo.Core.Nodes.Processors.Helpers
             
             // Create TensorData with the targetDType which may include generic metadata
             // Use the internal constructor that accepts explicit DType
-            return new OnnxTensorData<TTarget>(originalData.Shape, ortValue, targetDType);
+            return new OnnxTensorData<TTarget>(originalData.Shape, ortValue, targetDType, DefaultBackend.Instance);
         }
 
         private static object[] ExtractValues(TensorData data, DType dtype, int count)

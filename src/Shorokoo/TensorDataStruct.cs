@@ -111,111 +111,114 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// The compute context this struct's fields belong to.
-        /// <see cref="Shorokoo.Runtime.ComputeContext.Host"/> is the framework's own host memory.
-        /// Set by the transfer operations below.
+        /// This struct where <paramref name="target"/> can use it, field by field under each
+        /// field's own <c>To</c>: a tensor the target's backend can read as it stands is handed over
+        /// as the same object and attached to the target, anything else is copied into the target's
+        /// memory. The very same struct when nothing had to be copied; this struct is untouched
+        /// either way.
         /// </summary>
-        public Shorokoo.Runtime.ComputeContext Context { get; private set; }
-            = Shorokoo.Runtime.ComputeContext.Host;
+        /// <exception cref="ArgumentNullException"><paramref name="target"/> is null.</exception>
+        public TensorDataStruct To(Shorokoo.Runtime.ComputeContext target)
+        {
+            ArgumentNullException.ThrowIfNull(target);
+            return Rebuild(field => Apply(field,
+                t => t.To(target), q => q.To(target), u => u.To(target)));
+        }
 
-        /// <summary>Moves this struct's tensors to <paramref name="target"/>, recursing through
-        /// nested structs and sequences.</summary>
-        public TensorDataStruct TransferTo(Shorokoo.Runtime.ComputeContext? target)
-            => Rebuild(target ?? Shorokoo.Runtime.ComputeContext.Host,
-                (d, c) => Move(d, c, static (t, x) => t.TransferTo(x),
-                static (q, x) => q.TransferTo(x), static (u, x) => u.TransferTo(x)));
+        /// <summary>An independent copy of this struct, every tensor in it copied into
+        /// <paramref name="target"/>'s memory and attached to it. This struct is untouched.</summary>
+        /// <exception cref="ArgumentNullException"><paramref name="target"/> is null.</exception>
+        public TensorDataStruct CopyTo(Shorokoo.Runtime.ComputeContext target)
+        {
+            ArgumentNullException.ThrowIfNull(target);
+            return Rebuild(field => Apply(field,
+                t => t.CopyTo(target), q => q.CopyTo(target), u => u.CopyTo(target)));
+        }
 
-        /// <summary>Copies this struct's tensors into <paramref name="target"/>'s memory, leaving
-        /// this struct untouched.</summary>
-        public TensorDataStruct CopyTo(Shorokoo.Runtime.ComputeContext? target)
-            => Rebuild(target ?? Shorokoo.Runtime.ComputeContext.Host,
-                (d, c) => Move(d, c, static (t, x) => t.CopyTo(x),
-                static (q, x) => q.CopyTo(x), static (u, x) => u.CopyTo(x)));
+        /// <summary>This struct where the host can read it, field by field under each field's own
+        /// <c>ToHost</c>. The very same struct when every field already is host-readable.</summary>
+        public TensorDataStruct ToHost()
+            => Rebuild(field => Apply(field,
+                static t => t.ToHost(), static q => q.ToHost(), static u => u.ToHost()));
 
-        /// <summary>Hands <paramref name="target"/> a second handle on each of this struct's
-        /// tensors, leaving this struct's own handles alone.</summary>
-        public TensorDataStruct GiveAccessTo(Shorokoo.Runtime.ComputeContext? target)
-            => Rebuild(target ?? Shorokoo.Runtime.ComputeContext.Host,
-                (d, c) => Move(d, c, static (t, x) => t.GiveAccessTo(x),
-                static (q, x) => q.GiveAccessTo(x), static (u, x) => u.GiveAccessTo(x)));
-
-        private TensorDataStruct Rebuild(
-            Shorokoo.Runtime.ComputeContext target,
-            Func<IData, Shorokoo.Runtime.ComputeContext, IData> operation)
+        /// <summary>
+        /// A struct of what <paramref name="operation"/> makes of each field — or this very struct,
+        /// if it made nothing new. What it did make is released if a later field fails: the struct
+        /// that would have held it is never constructed. The sources are never touched, so there is
+        /// nothing of theirs to put back.
+        /// </summary>
+        private TensorDataStruct Rebuild(Func<IData, IData> operation)
         {
             // Materialized as it goes rather than left lazy, so a field that throws can be caught
             // here at all: Select would defer every operation into the constructor, past any
             // cleanup this method could do.
-            List<KeyValuePair<string, IData>> moved = new(Fields.Count);
-            // Every tensor this rebuild produced, to be released if it fails: each holds a
-            // reference of its own, including where it shares the source field's allocation, so
-            // letting go of one drops that tensor's name for the bytes and nothing else. Skipping
-            // the shared ones was true of ownership and is not true of a count -- it left the
-            // allocation one reference above zero with nothing left that could ever drop it.
-            List<TensorData> rebuiltFields = [];
-            // What each source field was before the move, so a failure can put it back: otherwise a
-            // failed transfer left the fields it had reached handed over to a context the caller
-            // never received a struct for.
-            List<(TensorData Field, Shorokoo.Runtime.ComputeContext Context)> handedOver = [];
+            List<KeyValuePair<string, IData>> rebuilt = new(Fields.Count);
+            var changed = false;
             try
             {
                 foreach (var field in Fields)
                 {
-                    var source = TensorIn(field.Value);
-                    var wasOn = source?.Context ?? Shorokoo.Runtime.ComputeContext.Host;
-                    var rebuilt = operation(field.Value, target);
-                    if (source is { HasHandedOverReference: true }) handedOver.Add((source, wasOn));
-                    moved.Add(new KeyValuePair<string, IData>(field.Key, rebuilt));
-                    if (TensorIn(rebuilt) is { } t && !ReferenceEquals(t, source))
-                        rebuiltFields.Add(t);
+                    var result = operation(field.Value);
+                    changed |= !ReferenceEquals(result, field.Value);
+                    rebuilt.Add(new KeyValuePair<string, IData>(field.Key, result));
                 }
-                return new TensorDataStruct(Definition, moved) { Context = target };
             }
             catch
             {
-                // The struct that would have owned these is never constructed, so without this
-                // each is a runtime value -- a device allocation on a card -- left to a finalizer.
-                // The sources first: a field that handed its reference over is holding none, so
-                // releasing the rebuilt tensor that took it would free the bytes underneath the
-                // source before it could be given its own back.
-                foreach (var (field, wasOn) in handedOver) field.ReclaimReference(wasOn);
-                foreach (var t in rebuiltFields) t.Dispose();
+                foreach (var (key, result) in rebuilt) ReleaseNew(result, Fields[key]);
                 throw;
+            }
+            return changed ? new TensorDataStruct(Definition, rebuilt) : this;
+        }
+
+        /// <summary>
+        /// Releases whatever of <paramref name="result"/> is not <paramref name="source"/>'s own —
+        /// the copies a failed rebuild made. A field handed over as the same object is the source's,
+        /// and is left alone.
+        /// </summary>
+        private static void ReleaseNew(IData result, IData source)
+        {
+            if (ReferenceEquals(result, source)) return;
+            switch (result)
+            {
+                case TensorData t:
+                    t.TryDelete();
+                    break;
+                case TensorDataSequence q:
+                    q.Dispose();
+                    break;
+                case TensorDataStruct u when source is TensorDataStruct original:
+                    foreach (var (key, value) in u.Fields)
+                        if (original.Fields.TryGetValue(key, out var was)) ReleaseNew(value, was);
+                    break;
+                case OptionalTensorData { Value: { } inner }
+                    when source is OptionalTensorData { Value: var was } && !ReferenceEquals(inner, was):
+                    inner.TryDelete();
+                    break;
             }
         }
 
-        /// <summary>The tensor a field holds, however it holds it, and null for a field that is
-        /// not one tensor — what the rollback has to reach to put a field back or to let go of
-        /// one, and an optional carries its tensor as plainly as a bare field does.</summary>
-        private static TensorData? TensorIn(IData field) => field switch
-        {
-            TensorData t => t,
-            OptionalTensorData { HasValue: true, Value: { } v } => v,
-            _ => null,
-        };
-
         /// <summary>Applies the right one of three operations to whichever kind of field this is,
         /// and leaves anything else alone.</summary>
-        /// <param name="field">The field to move.</param>
-        /// <param name="target">The context the rebuilt field belongs to.</param>
+        /// <param name="field">The field to rebuild.</param>
         /// <param name="onTensor">What to do with a tensor field.</param>
         /// <param name="onSequence">What to do with a sequence field.</param>
         /// <param name="onStruct">What to do with a nested struct field.</param>
-        private static IData Move(
-            IData field, Shorokoo.Runtime.ComputeContext target,
-            Func<TensorData, Shorokoo.Runtime.ComputeContext, TensorData> onTensor,
-            Func<TensorDataSequence, Shorokoo.Runtime.ComputeContext, TensorDataSequence> onSequence,
-            Func<TensorDataStruct, Shorokoo.Runtime.ComputeContext, TensorDataStruct> onStruct)
+        private static IData Apply(
+            IData field,
+            Func<TensorData, TensorData> onTensor,
+            Func<TensorDataSequence, TensorDataSequence> onSequence,
+            Func<TensorDataStruct, TensorDataStruct> onStruct)
             => field switch
             {
-                TensorData t => onTensor(t, target),
-                TensorDataSequence q => onSequence(q, target),
-                TensorDataStruct u => onStruct(u, target),
-                // A present optional holds a tensor like any other field does. Left alone, it
-                // stayed in the memory of the context the struct had just left -- inside a struct
-                // reporting the target's -- and went when that context did.
+                TensorData t => onTensor(t),
+                TensorDataSequence q => onSequence(q),
+                TensorDataStruct u => onStruct(u),
+                // A present optional holds a tensor like any other field does, and is rebuilt only
+                // where its tensor was: an optional whose tensor came back as itself is the same
+                // optional.
                 OptionalTensorData { HasValue: true, Value: { } v }
-                    => OptionalTensorData.Some(onTensor(v, target)),
+                    => onTensor(v) is var r && ReferenceEquals(r, v) ? field : OptionalTensorData.Some(r),
                 _ => field,
             };
     }

@@ -110,7 +110,7 @@ namespace Shorokoo
         /// </summary>
         public TensorData Eval()
         {
-            return this.Eval(new ComputeContext(detachesOutputs: true));
+            return this.Eval(new ComputeContext());
         }
 
         /// <summary>Executes the graph rooted at this tensor using the given context (a fresh one if null)
@@ -119,7 +119,7 @@ namespace Shorokoo
         public TensorData Eval(ComputeContext ctx)
         {
             if (ctx == null)
-                ctx = new ComputeContext(detachesOutputs: true);
+                ctx = new ComputeContext();
 
             var graph = new Shorokoo.Graph.InternalComputationGraph([], [this]);
             graph.RequireRunnableOps("Tensor.Eval");

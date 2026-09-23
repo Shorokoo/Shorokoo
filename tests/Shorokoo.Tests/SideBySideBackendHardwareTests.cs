@@ -160,7 +160,7 @@ public class SideBySideBackendHardwareTests
     }
 
     [SideBySideCudaFact]
-    public void TestATensorLeftOnTheCardMovesToHostMemoryAndRunsThere()
+    public void TestATensorLeftOnTheCardIsCopiedToHostMemoryAndRunsThere()
     {
         var a = InputVector<float32>("a");
         var b = InputVector<float32>("b");
@@ -180,27 +180,26 @@ public class SideBySideBackendHardwareTests
         Assert.False(onCard.IsHostResident);
         Assert.Throws<InvalidOperationException>(() => onCard.As<float32>().AccessMemory<float>());
 
-        // One call brings it home, through the backend that owns the allocation.
+        // One call brings it home, through the backend that made the allocation, and leaves the
+        // source where it was.
         var firstHost = new ComputeContext();
-        var onHost = onCard.TransferTo(firstHost);
+        var onHost = onCard.To(firstHost);
 
         Assert.Equal(MemorySpace.Host, onHost.Space);
         SideBySideModel.AssertAgree(expected, Floats(onHost), SideBySideModel.DeviceTolerance);
+        Assert.False(onCard.IsDisposed);
+        Assert.Equal(MemoryKind.Cuda, onCard.Space.Kind);
 
-        // The move spent the source, which is what a move across spaces means.
-        Assert.True(onCard.IsDisposed);
-
-        // Between two host contexts nothing moves but which context the handle is attached to...
+        // Between two host contexts nothing moves: the second is handed the very same tensor...
         var secondHost = new ComputeContext();
-        var shared = onHost.TransferTo(secondHost);
-        Assert.Same(secondHost, shared.Context);
-        Assert.Same(secondHost, onHost.Context);
+        Assert.Same(onHost, onHost.To(secondHost));
+        Assert.Contains(onHost, secondHost.Tensors);
 
-        // ...and the result runs on the second one, which is where it now lives. Fed back through
-        // the same graph, so the answer is the model applied twice rather than the first answer.
+        // ...and it runs there. Fed back through the same graph, so the answer is the model applied
+        // twice rather than the first answer.
         float[] twice = [.. expected.Zip(bv, (x, y) => x * y + x)];
         SideBySideModel.AssertAgree(
-            twice, Floats(secondHost.Execute(graph, shared, tb)[0].ToTensorData()),
+            twice, Floats(secondHost.Execute(graph, onHost, tb)[0].ToTensorData()),
             SideBySideModel.DeviceTolerance);
     }
 
@@ -235,10 +234,10 @@ public class SideBySideBackendHardwareTests
             Assert.False(state.IsHostResident);
             Assert.True(state.Space.IsKnown);
             Assert.Equal(onCard, state.Space);
-            Assert.Same(cuda, state.Context);
+            Assert.Contains(state, cuda.Tensors);
         }
 
-        var home = retained[0].ToTensorData().TransferTo(null);
+        var home = retained[0].ToTensorData().ToHost();
         Assert.Equal(MemorySpace.Host, home.Space);
         Assert.All(Floats(home), v => Assert.True(float.IsFinite(v)));
 
@@ -254,7 +253,7 @@ public class SideBySideBackendHardwareTests
     }
 
     [SideBySideCudaFact]
-    public void TestATensorTransferredToTheCardLivesInDeviceMemoryAndRunsThere()
+    public void TestATensorPutOnTheCardLivesInDeviceMemoryAndRunsThere()
     {
         var a = InputVector<float32>("a");
         var b = InputVector<float32>("b");
@@ -267,15 +266,17 @@ public class SideBySideBackendHardwareTests
         var onHost = TensorData([4L], av);
         Assert.Equal(MemorySpace.Host, onHost.Space);
 
-        var onCard = onHost.TransferTo(cuda);
+        var onCard = onHost.To(cuda);
 
         Assert.Equal(MemorySpace.Cuda(0), onCard.Space);
-        Assert.Same(cuda, onCard.Context);
+        Assert.Contains(onCard, cuda.Tensors);
+        Assert.Same(onCard, onCard.To(cuda));
         Assert.False(onCard.IsHostResident);
         Assert.Throws<InvalidOperationException>(() => onCard.As<float32>().AccessMemory<float>());
 
-        // The move spent the source, which is what a move across spaces means.
-        Assert.True(onHost.IsDisposed);
+        // A copy onto the card, and the source untouched.
+        Assert.False(onHost.IsDisposed);
+        Assert.Equal(av, Floats(onHost));
 
         var tb = TensorData([4L], bv);
         SideBySideModel.AssertAgree(
@@ -284,7 +285,7 @@ public class SideBySideBackendHardwareTests
         // Still there afterwards, and still the card's: a run reads a feed, it does not consume it.
         Assert.Equal(MemorySpace.Cuda(0), onCard.Space);
 
-        var home = onCard.CopyTo(null);
+        var home = onCard.ToHost();
         Assert.Equal(MemorySpace.Host, home.Space);
         Assert.True(home.IsHostResident);
         Assert.Equal(av, Floats(home));
@@ -345,6 +346,7 @@ public class SideBySideBackendHardwareTests
 
         // And the sequence crosses back to a host context, element by element.
         Assert.Equal([2f, 4f], Floats(sequence.CopyTo(new ComputeContext())[0]));
+        Assert.Equal([2f, 4f], Floats(sequence.ToHost()[0]));
     }
 
     [SideBySideCudaFact]

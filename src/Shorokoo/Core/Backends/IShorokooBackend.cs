@@ -12,19 +12,55 @@ public interface IShorokooBackend
 
     // Where this backend's tensors live. Derived from Description by default, which is right for
     // every backend that allocates on the device it computes on -- i.e. all of them so far -- so
-    // an existing backend need not implement it. Two backends reporting the same space can hand
-    // tensors to each other without copying; see MemorySpace.
+    // an existing backend need not implement it. The same space is necessary for one backend to
+    // read another's allocation in place, and not sufficient: see RuntimeIdentity and CanAddress.
     MemorySpace MemorySpace => Description.Device switch
     {
         ComputeDevice.Cuda => MemorySpace.Cuda(Description.CudaDeviceId ?? 0),
         ComputeDevice.Cpu => MemorySpace.Host,
         // A backend on some other execution provider -- DirectML, ROCm, CoreML -- allocates
         // somewhere this has no name for, and saying "host" would be a guess with teeth: a device
-        // value would report IsHost, so the transfer code would share it with any context at all
-        // and the accessors would dereference a device address as a host one. Unknown is refused
+        // value would report IsHost, so it would be read in place by any host backend at all and
+        // the accessors would dereference a device address as a host one. Unknown is refused
         // cleanly instead, which is the honest answer until such a backend names its own space.
         _ => MemorySpace.UnknownDevice,
     };
+
+    // The runtime this backend's allocations belong to, as an object compared by reference: two
+    // backends answer the same object exactly when an allocation one of them makes is one the
+    // other's sessions can be handed as it stands. It is the second half of a tensor's
+    // MemoryLocation, recorded from the allocating backend when the tensor is made.
+    //
+    // The default is the backend itself, which is the answer that is never wrong: a backend can
+    // always read what it allocated, and a backend that says nothing about sharing its runtime
+    // shares it with nobody. A backend over a runtime that several backends can load together --
+    // ONNX Runtime serving a CPU and a CUDA backend from one native -- overrides this with
+    // something every such backend shares.
+    object RuntimeIdentity => this;
+
+    // Whether this backend's sessions can read memory at `location` as it stands, without a copy:
+    // the question To(context) asks of the context's backend before deciding between handing the
+    // tensor over and copying it. The answer is "same device and same runtime" -- and the
+    // framework's own managed host memory, which every backend on the host reads, counts as every
+    // host backend's runtime. It is asked of the target backend rather than decided by the core,
+    // because only the backend knows what it can address.
+    //
+    // A location whose space is unknown is never addressable: two such allocations compare equal
+    // as spaces without being anywhere in particular, so sharing one would be a guess.
+    bool CanAddress(MemoryLocation location)
+        => location.Space.IsKnown
+           && location.Space == MemorySpace
+           && (location.IsManaged || ReferenceEquals(location.Runtime, RuntimeIdentity));
+
+    // Releases a value this backend allocated. Every release of a tensor's memory comes here, to
+    // the backend that made it, whichever contexts the tensor was attached to -- or none -- so a
+    // backend that has something to do when its memory comes back has one place to do it. The
+    // default disposes the value, which is what releasing one has always meant.
+    void Release(IShorokooTensorValue value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        value.Dispose();
+    }
 
     // deviceMemory configures the arena this one session allocates in. It is a parameter, not
     // process state, because that is what ORT's own shape is: each session gets its own arena,
@@ -113,11 +149,10 @@ public interface IShorokooBackend
     // only way to bound one is to say which arena to take it from before it is taken. Everything
     // in this repository that places a tensor in a backend's own memory calls this one.
     //
-    // The context named here is the one that will OWN the tensor -- the target of the CopyTo or the
-    // TransferTo, which is also the context that allocated it, since those are the same context by
-    // construction. That settles it for the tensor's life: the one transfer that changes owners
-    // without reallocating re-wraps within a memory space and promises not to copy, so it cannot
-    // re-home what the allocation is charged to either.
+    // The settings named here are those of the context the copy is being made for -- the target of
+    // the CopyTo or the To. That settles which arena the allocation comes out of for the tensor's
+    // life: handing a tensor to a second context that can already address it copies nothing, so it
+    // cannot re-home the allocation either.
     //
     // The default drops the settings and asks the member above, which is what a backend written
     // before this member existed implements -- so such a backend keeps compiling AND keeps being

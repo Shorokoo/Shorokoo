@@ -6,8 +6,9 @@ using Shorokoo.Runtime;
 namespace Shorokoo.Tests;
 
 /// <summary>
-/// The composites carry a context and move like a tensor does, recursing through what they own.
-/// And the one place a bound tensor is refused outright: an operator's attribute.
+/// The composites take <c>To</c>, <c>CopyTo</c> and <c>ToHost</c> as a tensor does, applying them to
+/// what they hold; a sequence has a life of its own that a run holds while it reads it. And a
+/// tensor's move into an operator attribute, which ends it.
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
@@ -18,56 +19,41 @@ public class CompositeTransferCoverageTests
     private static float[] Floats(TensorData t) => [.. t.As<float32>().AccessMemory<float>()];
 
     [Fact]
-    public void TestASequenceMovesItsOwnedElementsAndCarriesTheContext()
+    public void TestASequenceCopyIsIndependentOfTheOriginalAndAttachedToTheTarget()
     {
-        var context = new ComputeContext();
+        using var context = new ComputeContext();
         var sequence = TensorDataSequence.Create([Sample(1f), Sample(3f)], DType.Float32);
 
-        var moved = sequence.TransferTo(context);
-
-        Assert.Same(context, moved.Context);
-        Assert.Equal(2, moved.Count);
-        Assert.Equal([1f, 2f], Floats(moved[0]));
-        Assert.Equal([3f, 4f], Floats(moved[1]));
-        Assert.All(moved, e => Assert.Same(context, e.Context));
-    }
-
-    [Fact]
-    public void TestASequenceCopyIsIndependentOfTheOriginal()
-    {
-        var sequence = TensorDataSequence.Create([Sample(1f)], DType.Float32);
-
-        var copy = sequence.CopyTo(new ComputeContext());
+        var copy = sequence.CopyTo(context);
         sequence.Dispose();
 
+        Assert.Equal(2, copy.Count);
         Assert.Equal([1f, 2f], Floats(copy[0]));
+        Assert.Equal([3f, 4f], Floats(copy[1]));
+        Assert.All(copy, e => Assert.Contains(e, context.Tensors));
+        Assert.All(copy, e => Assert.Same(HostBackend.Instance, e.AllocatingBackend));
     }
 
     [Fact]
-    public void TestASequenceGivesASecondHandleOnTheSameElements()
+    public void TestASequenceIsItselfWhereverItsElementsCanBeRead()
     {
-        var held = TensorDataSequence.OfElements([Sample(1f)], DType.Float32);
+        using var context = new ComputeContext();
+        var held = TensorDataSequence.OfElements([Sample(1f), Sample(3f)], DType.Float32);
+        var produced = TensorDataSequence.Create([Sample(5f)], DType.Float32);
 
-        var readers = held.GiveAccessTo(new ComputeContext());
-
-        Assert.NotSame(held[0], readers[0]);
-        Assert.Same(held[0].Storage, readers[0].Storage);
-        held[0].As<float32>().AccessModifiableMemory<float>()[0] = 9f;
-        Assert.Equal([9f, 2f], Floats(readers[0]));
-
-        held.Dispose();
-        Assert.Equal([9f, 2f], Floats(readers[0]));
-
-        var produced = TensorDataSequence.Create([Sample(3f)], DType.Float32);
-        var producedReaders = produced.GiveAccessTo(new ComputeContext());
-        produced.Dispose();
-        Assert.Equal([3f, 4f], Floats(producedReaders[0]));
+        Assert.Same(held, held.To(context));
+        Assert.Same(held, held.ToHost());
+        Assert.All(held, e => Assert.Contains(e, context.Tensors));
+        Assert.Same(produced, produced.To(context));
+        Assert.Same(produced, produced.To(ComputeContext.Host));
+        Assert.Same(produced, produced.ToHost());
+        Assert.Equal([5f, 6f], Floats(produced.To(context)[0]));
     }
 
     [Fact]
-    public void TestAStructMovesItsFieldsAndNestsIntoTheComposites()
+    public void TestAStructIsItselfWhereNothingHadToBeCopiedAndCopiesItsFieldsThroughEveryNesting()
     {
-        var context = new ComputeContext();
+        using var context = new ComputeContext();
         TensorStructFieldDef[] innerFields =
             [new TensorStructFieldDef("deep", DataStructure.Tensor, 1, DType.Float32)];
         var inner = new TensorDataStruct(
@@ -78,24 +64,34 @@ public class CompositeTransferCoverageTests
         [
             new TensorStructFieldDef("flat", DataStructure.Tensor, 1, DType.Float32),
             new TensorStructFieldDef("nested", DataStructure.TensorStruct, null, inner.DType),
+            new TensorStructFieldDef("maybe", DataStructure.Optional, 1, DType.Float32),
         ];
         var outer = new TensorDataStruct(
             new TensorStructDef(outerFields, "Outer"),
-            new Dictionary<string, IData> { { "flat", Sample(1f) }, { "nested", inner } });
+            new Dictionary<string, IData>
+            {
+                { "flat", Sample(1f) }, { "nested", inner }, { "maybe", OptionalTensorData.Some(Sample(5f)) },
+            });
 
-        var moved = outer.TransferTo(context);
+        Assert.Same(outer, outer.To(context));
+        Assert.Same(outer, outer.ToHost());
+        Assert.Contains((TensorData)outer.Fields["flat"], context.Tensors);
 
-        Assert.Same(context, moved.Context);
-        Assert.Same(context, ((TensorData)moved.Fields["flat"]).Context);
+        var copy = outer.CopyTo(context);
+        var copiedInner = (TensorDataStruct)copy.Fields["nested"];
+        var copiedDeep = (TensorData)copiedInner.Fields["deep"];
+        var copiedMaybe = ((OptionalTensorData)copy.Fields["maybe"]).Value!;
 
-        var movedInner = (TensorDataStruct)moved.Fields["nested"];
-        Assert.Same(context, movedInner.Context);
-        Assert.Same(context, ((TensorData)movedInner.Fields["deep"]).Context);
-        Assert.Equal([9f, 10f], Floats((TensorData)movedInner.Fields["deep"]));
+        Assert.NotSame(outer.Fields["flat"], copy.Fields["flat"]);
+        Assert.NotSame(inner.Fields["deep"], copiedDeep);
+        Assert.NotSame(((OptionalTensorData)outer.Fields["maybe"]).Value, copiedMaybe);
+        Assert.Equal([9f, 10f], Floats(copiedDeep));
+        Assert.Equal([5f, 6f], Floats(copiedMaybe));
+        Assert.Contains(copiedDeep, context.Tensors);
     }
 
     [Fact]
-    public void TestASequenceARunProducedCarriesItsContextDownToItsElements()
+    public void TestASequenceARunProducedIsItsBackendsAndSoIsEveryElementReadOutOfIt()
     {
         using var context = new ComputeContext();
         var x = InputVector<float32>("x");
@@ -103,16 +99,16 @@ public class CompositeTransferCoverageTests
 
         var sequence = context.Execute(graph, TensorData([2L], (float[])[1f, 2f]))[0].ToTensorDataSequence();
 
-        Assert.Same(context, sequence.Context);
+        Assert.Same(DefaultBackend.Instance, ((OnnxTensorDataSequence<float32>)sequence).AllocatingBackend);
         Assert.Equal(2, sequence.Count);
-        Assert.All(sequence, e => Assert.Same(context, e.Context));
+        Assert.All(sequence, e => Assert.Same(DefaultBackend.Instance, e.AllocatingBackend));
         Assert.All(sequence, e => Assert.Equal(MemorySpace.Host, e.Space));
         Assert.Equal([1f, 2f], Floats(sequence[0]));
         Assert.Equal([2f, 4f], Floats(sequence[1]));
     }
 
     [Fact]
-    public void TestASequenceIsReleasedWithTheContextThatProducedIt()
+    public void TestASequenceOutlivesTheContextThatProducedItAndDiesWhenItIsDisposed()
     {
         var x = InputVector<float32>("x");
         var graph = new InternalComputationGraph([x], [OnnxOp.SequenceConstruct(x, x + x)]);
@@ -120,35 +116,41 @@ public class CompositeTransferCoverageTests
         var sequence = context.Execute(graph, TensorData([2L], (float[])[1f, 2f]))[0]
             .ToTensorDataSequence();
 
-        Assert.Equal(2, sequence.Count);
-
         context.Dispose();
+        Assert.Equal([2f, 4f], Floats(sequence[1]));
 
+        sequence.Dispose();
+        sequence.Dispose();
+
+        Assert.True(sequence.IsDisposed);
         Assert.Throws<ObjectDisposedException>(() => sequence.Count);
         Assert.Throws<ObjectDisposedException>(() => sequence[0]);
         Assert.Throws<ObjectDisposedException>(() => ((IOnnxData)sequence).Value);
+        Assert.Throws<ObjectDisposedException>(() => sequence.To(ComputeContext.Host));
         Assert.Throws<ObjectDisposedException>(
             () => new ComputeContext().Execute(
                 new InternalComputationGraph([x], [OnnxOp.SequenceAt(x, Scalar(0L))]), sequence));
     }
 
     [Fact]
-    public void TestADetachingContextHandsASequenceOutBelongingToNobody()
+    public void TestASequenceARunIsReadingCannotBeDisposedUntilTheRunReturns()
     {
-        var x = InputVector<float32>("x");
-        var graph = new InternalComputationGraph([x], [OnnxOp.SequenceConstruct(x, x + x)]);
+        using var context = new ComputeContext();
+        var sequence = TensorDataSequence.Create([Sample(1f), Sample(3f)], DType.Float32);
+        using var lease = context.Lock(sequence);
 
-        TensorDataSequence sequence;
-        using (var context = new ComputeContext(detachesOutputs: true))
-            sequence = context.Execute(graph, TensorData([2L], (float[])[1f, 2f]))[0].ToTensorDataSequence();
+        Assert.Throws<InvalidOperationException>(sequence.Dispose);
+        Assert.False(sequence.IsDisposed);
+        Assert.Equal([3f, 4f], Floats(sequence[1]));
 
-        Assert.Same(ComputeContext.Host, sequence.Context);
-        Assert.All(sequence, e => Assert.Same(ComputeContext.Host, e.Context));
-        Assert.Equal([2f, 4f], Floats(sequence[1]));
+        lease.Dispose();
+        sequence.Dispose();
+        Assert.True(sequence.IsDisposed);
+        Assert.Throws<ObjectDisposedException>(() => context.Lock(sequence));
     }
 
     [Fact]
-    public void TestASequenceThatHasBeenTransferredCanBeFedBackIntoASession()
+    public void TestASequenceCopiedToAContextCanBeFedBackIntoASession()
     {
         using var producer = new ComputeContext();
         var x = InputVector<float32>("x");
@@ -157,81 +159,49 @@ public class CompositeTransferCoverageTests
             .Execute(construct, TensorData([2L], (float[])[1f, 2f]))[0].ToTensorDataSequence();
 
         using var consumer = new ComputeContext();
-        var moved = produced.TransferTo(consumer);
+        var copied = produced.CopyTo(consumer);
 
-        // There is nothing of a runtime's left in it to hand over: the transfer holds the tensors
-        // themselves, which is exactly why this case needed answering.
-        Assert.False(moved is IOnnxData);
+        // There is nothing of a runtime's left in it to hand over: the copy holds tensors of its
+        // own, which is exactly why this case needed answering.
+        Assert.False(copied is IOnnxData);
 
         var seq = InternalOp.ModuleSequenceInput(DType.Float32, null, null, "seq");
         var join = new InternalComputationGraph(
             [seq], [OnnxOp.ConcatFromSequence(seq, axis: 0, newAxis: false)]);
 
-        Assert.Equal([1f, 2f, 2f, 4f], Floats(consumer.Execute(join, moved)[0].ToTensorData()));
+        Assert.Equal([1f, 2f, 2f, 4f], Floats(consumer.Execute(join, copied)[0].ToTensorData()));
+        Assert.Equal([1f, 2f, 2f, 4f], Floats(consumer.Execute(join, copied)[0].ToTensorData()));
+        Assert.Same(copied.ToTensorValue(), copied.ToTensorValue());
 
-        // Twice, because what it built is kept rather than rebuilt: a run must not be handed a
-        // sequence whose elements an earlier one has already had released under it.
-        Assert.Equal([1f, 2f, 2f, 4f], Floats(consumer.Execute(join, moved)[0].ToTensorData()));
-        Assert.Same(moved.ToTensorValue(), moved.ToTensorValue());
-
-        // And the elements it was moved are untouched by any of it — the sequence value holds
-        // copies, so the run cannot reach the storage each element owns.
-        Assert.Equal([1f, 2f], Floats(moved[0]));
-        Assert.Equal([2f, 4f], Floats(moved[1]));
-        Assert.All(moved, e => Assert.Same(consumer, e.Context));
+        Assert.Equal([1f, 2f], Floats(copied[0]));
+        Assert.Equal([2f, 4f], Floats(copied[1]));
+        Assert.All(copied, e => Assert.Contains(e, consumer.Tensors));
     }
 
     [Fact]
-    public void TestAStructMovesAPresentOptionalFieldWithTheRest()
+    public void TestATensorOnAContextMovesIntoAnAttributeAndDiesSayingSo()
     {
-        var context = new ComputeContext();
-        TensorStructFieldDef[] fields =
-        [
-            new TensorStructFieldDef("plain", DataStructure.Tensor, 1, DType.Float32),
-            new TensorStructFieldDef("maybe", DataStructure.Optional, 1, DType.Float32),
-        ];
-        var subject = new TensorDataStruct(
-            new TensorStructDef(fields, "WithOptional"),
-            new Dictionary<string, IData>
-            {
-                { "plain", Sample(1f) },
-                { "maybe", OptionalTensorData.Some(Sample(5f)) },
-            });
-
-        var moved = subject.TransferTo(context);
-
-        var optional = (OptionalTensorData)moved.Fields["maybe"];
-        Assert.Same(context, optional.Value!.Context);
-        Assert.Equal([5f, 6f], Floats(optional.Value));
-    }
-
-    [Fact]
-    public void TestAnOperatorAttributeRefusesATensorBoundToAContext()
-    {
-        var bound = Sample(1f).TransferTo(new ComputeContext());
-
-        var ex = Assert.Throws<InvalidOperationException>(() => bound.MoveToAttribute());
-        Assert.Contains("Detach()", ex.Message);
-
-        // And the detached form the message names goes through.
-        _ = bound.Detach().MoveToAttribute();
-    }
-
-    [Fact]
-    public void TestATensorCapturedAsAnAttributeIsSpentAndCanNoLongerBeBound()
-    {
-        var literal = TensorData([2L], (float[])[1f, 2f]);
-        var attribute = literal.MoveToAttribute();
         using var context = new ComputeContext();
+        var output = context.Execute(Doubling(), Sample(1f))[0].ToTensorData();
+        var literal = TensorData([2L], (float[])[1f, 2f]);
 
-        Assert.True(literal.IsDisposed);
-        Assert.Throws<ObjectDisposedException>(() => literal.TransferTo(context));
-        Assert.Throws<ObjectDisposedException>(() => literal.GiveAccessTo(context));
-        Assert.Equal([1f, 2f], attribute.Elements<float>().ToArray());
+        var fromOutput = output.MoveToAttribute();
+        var fromLiteral = literal.MoveToAttribute();
+
+        Assert.Equal([2f, 4f], fromOutput.Elements<float>().ToArray());
+        Assert.Equal([1f, 2f], fromLiteral.Elements<float>().ToArray());
+        foreach (var moved in (TensorData[])[output, literal])
+        {
+            Assert.True(moved.IsDisposed);
+            Assert.DoesNotContain(moved, context.Tensors);
+            Assert.Contains("MoveToAttribute()",
+                Assert.Throws<ObjectDisposedException>(() => moved.To(context)).Message);
+            Assert.Throws<ObjectDisposedException>(() => moved.MoveToAttribute());
+        }
     }
 
     [Fact]
-    public void TestAFailedCompositeTransferLeavesTheSourceIntact()
+    public void TestAFailedCompositeCopyReleasesWhatItMadeAndLeavesTheSourceWhole()
     {
         using var target = new ComputeContext();
 
@@ -239,10 +209,9 @@ public class CompositeTransferCoverageTests
         var spentElement = Sample(7f);
         spentElement.Dispose();
         var sequence = TensorDataSequence.OfElements([element, spentElement], DType.Float32);
-        Assert.ThrowsAny<Exception>(() => sequence.TransferTo(target));
+        Assert.Throws<ObjectDisposedException>(() => sequence.CopyTo(target));
         Assert.Equal([1f, 2f], Floats(element));
-        Assert.Same(ComputeContext.Host, element.Context);
-        Assert.True(element.Storage.IsSoleHandle);
+        Assert.Empty(target.Tensors);
 
         // Both assignments of the two keys, because a struct's fields are walked in hash order:
         // one of them reaches the field that survives before the one that throws.
@@ -252,10 +221,9 @@ public class CompositeTransferCoverageTests
                 var kept = Sample(5f);
                 var spent = Sample(8f);
                 spent.Dispose();
-                Assert.ThrowsAny<Exception>(() => Pair(kept, spent, spentIsA, optional).TransferTo(target));
+                Assert.Throws<ObjectDisposedException>(() => Pair(kept, spent, spentIsA, optional).CopyTo(target));
                 Assert.Equal([5f, 6f], Floats(kept));
-                Assert.Same(ComputeContext.Host, kept.Context);
-                Assert.True(kept.Storage.IsSoleHandle);
+                Assert.Empty(target.Tensors);
             }
     }
 
@@ -278,18 +246,19 @@ public class CompositeTransferCoverageTests
     }
 
     [Fact]
-    public void TestASequenceTheProviderKeptIsInItsContextsMemory()
+    public void TestASequenceTheProviderKeptIsInItsBackendsMemoryAndCopiedToBeRead()
     {
-        using var card = new ComputeContext(
-            new ComputeContextLifetimeCoverageTests.StubBackend(ComputeDevice.Cuda, 0));
-        var sequence = new OnnxTensorDataSequence<float32>(new StubSequenceValue());
+        var card = new ComputeContextLifetimeCoverageTests.StubBackend(ComputeDevice.Cuda, 0);
+        using var onCard = new ComputeContext(card);
+        var unrecorded = new OnnxTensorDataSequence<float32>(new StubSequenceValue());
+        var produced = new OnnxTensorDataSequence<float32>(new StubSequenceValue(), card);
 
-        Assert.Equal(MemorySpace.Host, sequence.Storage.Space);
-
-        sequence.BindTo(card);
-
-        Assert.Equal(MemorySpace.Cuda(0), sequence.Storage.Space);
-        Assert.Same(MemoryDevice.For(MemorySpace.Cuda(0)), sequence.Storage.Device);
+        Assert.Equal(MemorySpace.Host, unrecorded.Space);
+        Assert.Equal(MemorySpace.Cuda(0), produced.Space);
+        Assert.Same(card, produced.AllocatingBackend);
+        Assert.Same(produced, produced.To(onCard));
+        Assert.NotSame(produced, produced.ToHost());
+        Assert.Equal(0, produced.ToHost().Count);
     }
 
     /// <summary>A sequence value belonging to no runtime, which is enough to ask a sequence where
@@ -309,33 +278,9 @@ public class CompositeTransferCoverageTests
         public void Dispose() { }
     }
 
-    [Fact]
-    public void TestCopyingACompositeCopiesTheElementsItOnlyHasAccessTo()
+    private static InternalComputationGraph Doubling()
     {
-        var source = new ComputeContext();
-        var sequence = TensorDataSequence.Create([Sample(1f)], DType.Float32).TransferTo(source);
-        TensorStructFieldDef[] fields =
-            [new TensorStructFieldDef("f", DataStructure.Tensor, 1, DType.Float32)];
-        var struc = new TensorDataStruct(
-            new TensorStructDef(fields, "S"),
-            new Dictionary<string, IData> { { "f", Sample(5f) } }).TransferTo(source);
-
-        var sequenceReader = sequence.GiveAccessTo(source);
-        var structReader = struc.GiveAccessTo(source);
-
-        var keptSequence = sequenceReader.CopyTo(null);
-        var keptStruct = structReader.CopyTo(null);
-
-        Assert.NotSame(sequenceReader[0], keptSequence[0]);
-        Assert.Same(ComputeContext.Host, keptSequence[0].Context);
-        Assert.NotSame(StructField(structReader), StructField(keptStruct));
-        Assert.Same(ComputeContext.Host, StructField(keptStruct).Context);
-
-        // The point of the copy: it outlives the context the elements were read from.
-        source.Dispose();
-        Assert.Equal([1f, 2f], Floats(keptSequence[0]));
-        Assert.Equal([5f, 6f], Floats(StructField(keptStruct)));
+        var a = InputVector<float32>("a");
+        return new InternalComputationGraph([a], [a + a]);
     }
-
-    private static TensorData StructField(TensorDataStruct s) => (TensorData)s.Fields["f"];
 }

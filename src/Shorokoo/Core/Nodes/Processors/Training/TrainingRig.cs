@@ -1859,7 +1859,7 @@ namespace Shorokoo
                 // A copy: the rig keeps the seed value as the hyperparameter's own, and the graph
                 // keeps the literal.
                 var node = Shorokoo.Core.Nodes.Processors.Fast.FastInternalOp.Constant(
-                    _hyperparamInitialCounterValues[h]!.Detach().MoveToAttribute());
+                    _hyperparamInitialCounterValues[h]!.CopyTo(ComputeContext.Host).MoveToAttribute());
                 fastTraining.Nodes.Add(node);
                 headNodesInOrder.Add(node);
                 hyperparamKeys[h] = new FastTensorKey(node.Key, 0);

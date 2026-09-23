@@ -9,7 +9,8 @@ namespace Shorokoo
 {
     /// <summary>
     /// A string tensor held as an ordinary managed <c>string[]</c>, owned by this object and
-    /// belonging to no backend.
+    /// belonging to no backend — its <see cref="TensorData.AllocatingBackend"/> is
+    /// <see cref="HostBackend.Instance"/>, the framework's own host memory.
     ///
     /// <para><see cref="HostTensorData{T}"/>'s counterpart for <c>utf8</c>, and here for
     /// the same reason. <c>TensorData([2], "a", "b")</c> and <c>Scalar("hello")</c> describe a
@@ -22,7 +23,7 @@ namespace Shorokoo
     /// byte buffer and a string element is variable-length and reference-typed. That is an
     /// argument about the storage and not about when the value is built: the storage differs here,
     /// the deferral does not. The runtime value is built the first time a backend asks for one, in
-    /// <see cref="ToTensorValue(IShorokooBackend)"/>, and kept per backend from
+    /// <see cref="TensorData.ToTensorValue(IShorokooBackend)"/>, and kept per backend from
     /// then on.</para>
     ///
     /// <para>There is no byte view of these elements, and there was none before: an ONNX Runtime
@@ -35,26 +36,15 @@ namespace Shorokoo
     {
         private readonly string[] _values;
 
-        // What these strings have been built into, per backend. Shared with every clone over the
-        // same strings, because the materializations name the strings rather than this wrapper.
-        private readonly MaterializedValues _materialized;
+        // What these strings have been built into, per backend, for the next feed.
+        private readonly MaterializedValues _materialized = new();
 
         /// <summary>Creates a string tensor of <paramref name="shape"/> over
         /// <paramref name="values"/>, which it takes as its own storage rather than copying.</summary>
         public HostStringTensorData(Shape shape, string[] values)
-            : this(shape, values, ComputeContext.Host, storage: null, new MaterializedValues())
-        {
-        }
-
-        // The materializations are built by the caller rather than defaulted here, because the
-        // allocation's release action closes over them and so needs them before the base call.
-        private HostStringTensorData(
-            Shape shape, string[] values, ComputeContext context, TensorStorage? storage,
-            MaterializedValues materialized)
-            : base(shape, storage ?? HostStorage(materialized), context)
+            : base(shape, HostBackend.Instance, MemorySpace.Host)
         {
             _values = values ?? throw new ArgumentNullException(nameof(values));
-            _materialized = materialized;
         }
 
         /// <summary>
@@ -80,22 +70,6 @@ namespace Shorokoo
                     + "strings.", nameof(values));
             return new HostStringTensorData(shape, values.Length == required ? values : values[..required]);
         }
-
-        /// <summary>A host string tensor over <paramref name="values"/> belonging to
-        /// <paramref name="context"/>, which must be a host-memory context.</summary>
-        internal static HostStringTensorData Bound(Shape shape, string[] values, ComputeContext context)
-            => new(shape, values, context, storage: null, new MaterializedValues());
-
-        // The strings are the garbage collector's to reclaim, so freeing this allocation frees no
-        // host memory. What it frees is each runtime's copy of them, once the last handle and the
-        // last lock have let go -- and it is also what tells a second handle on these elements
-        // that they are gone.
-        private static TensorStorage HostStorage(MaterializedValues materialized)
-            => new(MemorySpace.Host, materialized.Invalidate);
-
-        /// <inheritdoc/>
-        internal override TensorData CloneSharing(ComputeContext context)
-            => new HostStringTensorData(Shape, _values, context, Storage, _materialized);
 
         /// <summary>
         /// The elements as they were given, in row-major order. This is the one read of a string
@@ -126,9 +100,6 @@ namespace Shorokoo
                 return _values.Cast<object>().ToArray();
             }
         }
-
-        /// <summary>Always true: this tensor is managed memory and nothing else.</summary>
-        public override bool IsHostResident => true;
 
         /// <inheritdoc/>
         public override Span<V> AccessModifiableMemory<V>()
@@ -163,19 +134,22 @@ namespace Shorokoo
         /// that backend asks and kept for the next time. The value is this tensor's, like
         /// <see cref="OnnxTensorData{T}"/>'s is: the caller reads it and does not dispose it.
         /// </summary>
-        internal override IShorokooTensorValue ToTensorValue(IShorokooBackend backend)
-        {
-            ArgumentNullException.ThrowIfNull(backend);
-            ThrowIfDisposed();
+        private protected override IShorokooTensorValue ValueFor(IShorokooBackend backend)
+            => _materialized.Get(backend, f => f.CreateStringTensor(_values, (long[])this.Shape));
 
-            return _materialized.Get(
-                backend, f => f.CreateStringTensor(_values, (long[])this.Shape));
-        }
+        /// <summary>
+        /// The strings are the garbage collector's to reclaim, so releasing this tensor frees no
+        /// host memory of its own; what it frees is each runtime's copy of them, each through the
+        /// backend that built it.
+        /// </summary>
+        private protected override void ReleaseMemory() => _materialized.Invalidate();
 
-        // Disposal is the base class's: drop this handle's reference, and the allocation tears the
-        // materializations down when the last reference goes. They are shared with every clone
-        // over these strings, so one handle letting go of its name for them frees nothing.
-        //
+        /// <inheritdoc/>
+        private protected override byte[] CopyContentBytes() => throw NoFlatBuffer();
+
+        /// <inheritdoc/>
+        private protected override IReadOnlyList<string> CopyContentStrings() => _values;
+
         // No finalizer, for the reason OnnxTensorData<T> has none: a finalizer must not touch
         // another managed object that may already have been finalized, and each materialized value
         // has its own.

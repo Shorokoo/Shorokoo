@@ -31,10 +31,9 @@ namespace Shorokoo.OnnxRuntime;
 /// placed it. The session is built with that context's settings, so its arena carries that
 /// context's <c>gpu_mem_limit</c> and extend strategy, and a copy onto the card that does not fit
 /// the ceiling fails the way a step past it does instead of quietly eating the rest of the device.
-/// Which budget governs a tensor settles when it is allocated and never moves: a tensor's owning
-/// context is recorded at creation, and the one transfer that changes owners without reallocating
-/// — between two contexts that share a memory space — promises not to copy, so re-homing what it
-/// is charged to is not something it could do.</para>
+/// Which budget governs a tensor settles when it is allocated and never moves: handing the tensor to
+/// a second context that can read it where it is copies nothing, so re-homing what it is charged to
+/// is not something that could do.</para>
 ///
 /// <para>The cost is one session per (device, configuration), built on the first tensor actually
 /// allocated that way: a program that puts none on a card pays nothing, and one that leaves the

@@ -6,16 +6,11 @@ namespace Shorokoo;
 /// The runtime values some managed contents have been built into, one per backend they were fed
 /// to, held for the next feed and released together.
 ///
-/// <para>It belongs to the <i>contents</i> rather than to the tensor naming them, which is what
-/// makes it shareable: <see cref="TensorData.CloneSharing"/> hands the clone the same bytes, so
-/// the clone must name the same materializations too. Given one cache each, a write through one
-/// name would drop only that name's copies and the other would go on feeding the contents as they
-/// stood before the write — a run reading data the tensor itself no longer reports.</para>
-///
 /// <para>Keyed by backend because contents may legitimately be fed to more than one — that is the
 /// whole point of a program running two — and a value belongs to the runtime that made it.
 /// Reference equality is the right comparison: two backends are the same backend exactly when
-/// they are the same object.</para>
+/// they are the same object. Each value is released through the backend that built it, which is
+/// the backend that allocated it.</para>
 /// </summary>
 internal sealed class MaterializedValues
 {
@@ -57,17 +52,17 @@ internal sealed class MaterializedValues
     }
 
     /// <summary>
-    /// Drops every runtime's copy of these contents, freeing each one, because the contents are
+    /// Drops every runtime's copy of these contents, releasing each one, because the contents are
     /// gone. Each copy was taken at the moment it was built, so contents mutated after being fed
     /// would otherwise keep feeding the old ones -- silently, since the tensor itself reads back
     /// the new ones.
     ///
-    /// <para>This is the allocation's release action, so it runs when the last handle and the last
-    /// lock on those contents have let go: a value handed to a session is a bare native pointer
-    /// from that moment on, and freeing one while a run is reading it is a read of freed memory
-    /// that nothing on this side could detect. Where the contents are merely being <i>written</i>
-    /// rather than released, the copies come off the cache without being freed --
-    /// <see cref="Retire"/> -- and the caller frees them once the readers are done.</para>
+    /// <para>This is the tensor's release, so it runs when the tensor dies and no run is reading
+    /// it: a value handed to a session is a bare native pointer from that moment on, and freeing
+    /// one while a run is reading it is a read of freed memory that nothing on this side could
+    /// detect. Where the contents are merely being <i>written</i> rather than released, the copies
+    /// come off the cache without being freed -- <see cref="Retire"/> -- and the caller frees them
+    /// once the readers are done.</para>
     /// </summary>
     internal void Invalidate()
     {
@@ -84,13 +79,13 @@ internal sealed class MaterializedValues
     /// </summary>
     internal Action? Retire()
     {
-        IShorokooTensorValue[] retired;
+        KeyValuePair<IShorokooBackend, IShorokooTensorValue>[] retired;
         lock (_gate)
         {
             if (_byBackend is null) return null;
-            retired = [.. _byBackend.Values];
+            retired = [.. _byBackend];
             _byBackend = null;
         }
-        return () => { foreach (var value in retired) value.Dispose(); };
+        return () => { foreach (var (backend, value) in retired) backend.Release(value); };
     }
 }

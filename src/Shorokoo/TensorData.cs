@@ -19,22 +19,14 @@ namespace Shorokoo
     public abstract class TensorData<T> : TensorData, IData<T>
         where T : IVarType
     {
-        internal TensorData(Shape shape) : base(shape, OnnxUtils.GetDType<T>())
-        {
-        }
-
-        internal TensorData(Shape shape, TensorStorage storage, ComputeContext context)
-            : base(shape, OnnxUtils.GetDType<T>(), storage, context)
+        internal TensorData(Shape shape, IShorokooBackend allocatingBackend, MemorySpace space)
+            : base(shape, OnnxUtils.GetDType<T>(), allocatingBackend, space)
         {
         }
 
         internal TensorData(
-            Shape shape, DType dtype, TensorStorage storage, ComputeContext context)
-            : base(shape, dtype, storage, context)
-        {
-        }
-
-        internal TensorData(Shape shape, DType dtype) : base(shape, dtype)
+            Shape shape, DType dtype, IShorokooBackend allocatingBackend, MemorySpace space)
+            : base(shape, dtype, allocatingBackend, space)
         {
         }
 
@@ -215,21 +207,34 @@ namespace Shorokoo
     /// Concrete tensor value: a shape, a dtype, and raw element storage.
     /// Base of the typed <see cref="TensorData{T}"/> hierarchy.
     ///
-    /// <para><b>A run holds what it is reading.</b> A tensor is a handle on an allocation that
-    /// counts what names it — every handle, and every lock a run holds while it feeds it — so
-    /// disposing a tensor another thread is feeding, or writing to one through
-    /// <c>AccessModifiable…</c>, no longer frees the buffer under that run: the bytes go when the
-    /// last of the two lets go, which is when the run returns. Disposing a handle therefore means
-    /// "I am done with this name for these bytes", never "free these bytes now"; the operation
-    /// that means the latter is <see cref="DeleteAsync"/>, and it is refused or negotiated rather
-    /// than granted under a running read (Shorokoo/Shorokoo#366).</para>
+    /// <para><b>One tensor, one allocation.</b> A <c>TensorData</c> is its memory: no two of them
+    /// ever name the same bytes, and there is no second name to hand out. It records the backend
+    /// that allocated that memory (<see cref="AllocatingBackend"/>), which is the one that releases
+    /// it, and where the memory is (<see cref="Location"/>) — and it does not know which compute
+    /// contexts it is attached to. A context keeps its own weak list of those, for its own
+    /// purposes; attachment never keeps a tensor alive and never ends its life.</para>
+    ///
+    /// <para><b>A tensor dies in exactly three ways</b>: it is deleted (<see cref="Delete"/>,
+    /// <see cref="Dispose"/>, <see cref="TryDelete"/>, <see cref="DeleteAsync"/>), it is consumed
+    /// by a run it was donated to (<see cref="Donate"/>), or it is moved into an attribute
+    /// (<see cref="MoveToAttribute"/>). Nothing else ends its life — disposing a context it is
+    /// attached to does not — and a tensor nothing references is reclaimed like any other object,
+    /// its memory released through its backend's ordinary path. A dead tensor's shape, dtype and
+    /// <see cref="ToString"/> stay readable; every other access throws an
+    /// <see cref="ObjectDisposedException"/> that says why it died.</para>
+    ///
+    /// <para><b>A run holds what it is reading.</b> A run takes a reader lock on every tensor it
+    /// reads and holds it, and a reference to the tensor, for as long as it runs. A locked tensor
+    /// cannot be deleted — <see cref="Delete"/> throws and <see cref="TryDelete"/> declines — so
+    /// nothing frees a buffer a run is reading (Shorokoo/Shorokoo#366);
+    /// <see cref="DeleteAsync"/> is the one call that negotiates with the readers instead.</para>
     /// </summary>
     public abstract partial class TensorData : IData, IDisposable
     {
         /// <summary>The tensor's shape.</summary>
-        public Shape Shape { get; private set; }
+        public Shape Shape { get; }
         /// <summary>The element data type.</summary>
-        public DType DType { get; private set; }
+        public DType DType { get; }
 
         /// <summary>The raw storage bytes boxed as objects, for debugging/diagnostics.</summary>
         public virtual object[] Data
@@ -243,157 +248,42 @@ namespace Shorokoo
             }
         }
 
-        internal TensorData(Shape shape, DType dtype)
-            : this(shape, dtype, TensorStorage.None, ComputeContext.Host) { }
-
         internal TensorData(
-            Shape shape, DType dtype, TensorStorage storage, ComputeContext context)
+            Shape shape, DType dtype, IShorokooBackend allocatingBackend, MemorySpace space)
         {
-            ArgumentNullException.ThrowIfNull(context);
-            ArgumentNullException.ThrowIfNull(storage);
+            ArgumentNullException.ThrowIfNull(allocatingBackend);
             this.Shape = shape;
             this.DType = dtype;
-            this.Storage = storage;
-            this.Context = context;
-
-            // Invariant: a tensor on the host context is the framework's own -- plain host memory.
-            // There is no other kind, and such a tensor in device memory would have no way to say
-            // which device or to reach it.
-            if (ReferenceEquals(context, ComputeContext.Host)
-                && !storage.Space.IsHost && storage.Space.IsKnown)
-                throw new ArgumentException(
-                    $"A tensor on ComputeContext.Host holds host memory, but this storage is in "
-                    + $"{storage.Space}. Give it the context whose memory that is.", nameof(storage));
-
-            // One more name for the bytes, which is what a handle is -- and refused outright where
-            // there are no bytes left to name. Every clone path reaches this constructor after
-            // checking that its source is alive, and the check and the clone are two steps: a
-            // context disposed on another thread in between frees the allocation, and taking the
-            // reference regardless minted a handle over freed memory and handed it back as a
-            // success (Shorokoo/Shorokoo#366 in the transfer paths).
-            if (!storage.TryAddHandleReference())
-                throw new ObjectDisposedException(GetType().Name,
-                    storage.IsDeleted
-                        ? $"Tensor {shape}:{dtype} cannot be built over an allocation that has "
-                          + "been deleted, so its bytes are gone and reading it would read freed "
-                          + "memory. Deletion ignores how many handles name the allocation, which "
-                          + "is what makes it deletion."
-                        : $"Tensor {shape}:{dtype} cannot be built over an allocation nothing "
-                          + "holds any more -- every handle on it was disposed, or the compute "
-                          + "context they were attached to was. Take a CopyTo(...) while a handle "
-                          + "is still alive if the data has to outlive them.");
-            try
-            {
-                context.AttachTensor(this);
-            }
-            catch
-            {
-                storage.DropHandleReference();
-                throw;
-            }
+            this.AllocatingBackend = allocatingBackend;
+            this.Space = space;
         }
 
         /// <summary>
-        /// The allocation, shared with any other tensor naming the same memory. Internal because a
-        /// handle is the only thing outside needs: the reference counting and the transfer
-        /// operations express everything a caller can say about it.
+        /// The backend that created this tensor's memory, and the one that releases it — whichever
+        /// compute contexts the tensor is attached to, or none. <see cref="HostBackend.Instance"/>
+        /// for a tensor built from a C# array, whose memory is the framework's own; the backend a
+        /// session ran on for that session's outputs; the target context's backend for a copy made
+        /// for it.
         /// </summary>
-        internal TensorStorage Storage { get; private set; }
+        public IShorokooBackend AllocatingBackend { get; }
 
         /// <summary>
-        /// The compute context whose memory this tensor's bytes are in.
-        /// <see cref="ComputeContext.Host"/> means ordinary host memory belonging to no backend —
-        /// which is what every tensor built by the convenience constructors is, and what every
-        /// tensor used as an operator attribute must be.
+        /// Where this tensor's bytes are: host memory, or a particular device's. Fixed when the
+        /// tensor is made — a tensor never moves; <see cref="To"/> and <see cref="CopyTo"/> make
+        /// another one where it has to be somewhere else.
         /// </summary>
-        public ComputeContext Context { get; private set; }
+        public MemorySpace Space { get; }
 
-        /// <summary>Where this tensor's bytes are. Derived from the storage, never set.</summary>
-        public MemorySpace Space => Storage.Space;
-
-        /// <summary>The memory device this tensor's bytes are in — the allocation's, shared with
-        /// every other allocation in the same space.</summary>
-        public MemoryDevice Device => Storage.Device;
-
-        // Whether this handle's reference on the allocation has already been dropped. Interlocked
-        // rather than a bool because a context's disposal and an explicit Dispose can race, and a
-        // reference dropped twice frees bytes another handle still names.
-        private int _referenceDropped;
+        /// <summary>The memory device this tensor's bytes are in, shared with every other tensor in
+        /// the same <see cref="Space"/>.</summary>
+        public MemoryDevice Device => MemoryDevice.For(Space);
 
         /// <summary>
-        /// Drops this handle's reference on the allocation, freeing the bytes if it was the last
-        /// one. Idempotent, and never touches another handle.
-        ///
-        /// <para>Separate from <see cref="Dispose"/> because a context's disposal drops the
-        /// references of the tensors attached to it without those tensors having been disposed:
-        /// <see cref="IsDisposed"/> says the caller let go of this handle, which is a different
-        /// fact from the bytes being gone.</para>
+        /// Where this tensor's memory is, completely enough for a backend to say whether it can read
+        /// it as it stands: the <see cref="Space"/>, and the runtime of the backend that allocated
+        /// it. <see cref="IShorokooBackend.CanAddress"/> is asked this, by <see cref="To"/>.
         /// </summary>
-        internal void DropReference()
-        {
-            if (Interlocked.Exchange(ref _referenceDropped, 1) != 0) return;
-            Storage.DropHandleReference();
-        }
-
-        /// <summary>
-        /// Whether this handle has given its reference up without having been disposed — what a
-        /// same-space <see cref="TransferTo"/> leaves behind, and the one state a rolled-back
-        /// composite transfer has to put back.
-        ///
-        /// <para>Asked of the handle rather than derived from its context. A transfer to the
-        /// context the tensor is already on hands the reference over without moving anything, so
-        /// reading it off <see cref="Context"/> missed exactly the case where the source keeps a
-        /// name for bytes it no longer holds a reference on.</para>
-        /// </summary>
-        internal bool HasHandedOverReference
-            => !IsDisposed && Volatile.Read(ref _referenceDropped) != 0;
-
-        /// <summary>
-        /// Hands this handle's reference back after it was dropped by a step that has since been
-        /// rolled back — a composite transfer that failed part-way and is putting its source
-        /// elements back where they were.
-        ///
-        /// <para>Refused where the allocation has gone in the meantime, which leaves this handle
-        /// saying so rather than naming bytes that are not there: a rollback puts back what it
-        /// can, and it runs on the way out of an exception that must not be replaced.</para>
-        /// </summary>
-        internal void ReclaimReference(Shorokoo.Runtime.ComputeContext original)
-        {
-            ArgumentNullException.ThrowIfNull(original);
-            if (Interlocked.Exchange(ref _referenceDropped, 0) != 0
-                && !Storage.TryAddHandleReference())
-                Interlocked.Exchange(ref _referenceDropped, 1);
-            Reattach(original);
-        }
-
-        /// <summary>
-        /// Moves this handle to <paramref name="newContext"/> and drops the reference it held,
-        /// which is what a same-space transfer does to its source: the result holds a reference of
-        /// its own over the very same bytes, so the total is unchanged and this tensor stays
-        /// readable for as long as the result does.
-        ///
-        /// <para>It repoints <see cref="Context"/> as well, because that is now the context whose
-        /// disposal takes these bytes away. Leaving the old one there made <c>Context</c> a stale
-        /// answer to the only question it exists to answer.</para>
-        /// </summary>
-        internal void HandOver(Shorokoo.Runtime.ComputeContext newContext)
-        {
-            ArgumentNullException.ThrowIfNull(newContext);
-            // Re-attached first: attaching is the step that can be refused, and a refusal must not
-            // leave this handle having already given its reference up.
-            Reattach(newContext);
-            DropReference();
-        }
-
-        /// <summary>Moves this tensor from the context it names to <paramref name="context"/>, on
-        /// both their books.</summary>
-        private void Reattach(Shorokoo.Runtime.ComputeContext context)
-        {
-            if (ReferenceEquals(Context, context)) return;
-            Context.DetachTensor(this);
-            Context = context;
-            context.AttachTensor(this);
-        }
+        public MemoryLocation Location => new(Space, AllocatingBackend.RuntimeIdentity);
 
         /// <summary>
         /// This tensor's own byte array where it has one, so <see cref="MoveToAttribute"/> can take
@@ -401,41 +291,6 @@ namespace Shorokoo
         /// which case only a copy can get them out.
         /// </summary>
         internal virtual byte[]? OwnBytes => null;
-
-        /// <summary>
-        /// True once <see cref="Dispose"/> has released this tensor's storage. Its shape, dtype and
-        /// <see cref="ToString"/> stay readable as metadata; every path to the elements throws.
-        /// </summary>
-        public bool IsDisposed { get; protected set; }
-
-        /// <summary>
-        /// Guards every path to the tensor's elements. Call it before touching storage.
-        ///
-        /// <para>Visible to the framework as well as to subclasses, so that a caller holding the
-        /// tensor refuses in these words rather than leaving it to the allocation, which knows
-        /// only itself and cannot name the tensor or say which of them the caller has.</para>
-        /// </summary>
-        protected internal void ThrowIfDisposed()
-        {
-            if (IsDisposed)
-                throw new ObjectDisposedException(GetType().Name,
-                    $"Tensor {this} has been disposed; its storage is gone and reading it would " +
-                    "read freed memory.");
-
-            // Not the same check. This tensor may be perfectly undisposed and still be pointing at
-            // an allocation that is gone -- deleted, or let go of by the last other handle naming
-            // it -- and that is the whole reason liveness lives on the allocation.
-            if (!Storage.IsLive)
-                throw new ObjectDisposedException(GetType().Name,
-                    Storage.IsDeleted
-                        ? $"Tensor {this} names an allocation that has been deleted, so its bytes "
-                          + "are gone and reading it would read freed memory. Deletion ignores how "
-                          + "many handles name the allocation, which is what makes it deletion."
-                        : $"Tensor {this} names an allocation nothing holds any more -- every "
-                          + "handle on it was disposed, or the compute context they were attached "
-                          + "to was. Reading it would read freed memory. Take a CopyTo(...) while "
-                          + "a handle is still alive if the data has to outlive them.");
-        }
 
         /// <summary>"shape:dtype" diagnostic string.</summary>
         public override string ToString()
@@ -452,8 +307,8 @@ namespace Shorokoo
         /// Exposes the underlying storage as a read-only byte span.
         ///
         /// <para>The span is a window onto the tensor's own storage, not a copy, and nothing ties
-        /// its lifetime to the tensor's. It is valid only while the tensor is undisposed AND still
-        /// reachable: disposing the tensor frees what the span points at (later reads through the
+        /// its lifetime to the tensor's. It is valid only while the tensor is alive AND still
+        /// reachable: deleting the tensor frees what the span points at (later reads through the
         /// tensor itself throw, but the span has no such guard), and so does letting the tensor
         /// become unreachable, since its storage is released when the runtime value behind it is
         /// finalized. Being in scope is not being reachable — a local is retired at its last read,
@@ -476,45 +331,57 @@ namespace Shorokoo
 
         /// <summary>
         /// Whether this tensor's storage is host memory, so the <c>Access…Memory</c> accessors
-        /// may be called. Like every path to the elements it throws once the tensor is disposed,
-        /// rather than answering about storage that is gone — ask <see cref="IsDisposed"/> first if
-        /// a tensor may have been released. It is <c>false</c> only for a tensor an execution provider produced in
-        /// its own memory and a <see cref="ResidentTrainingRun"/> deliberately left there; reading
-        /// such a tensor throws, and <see cref="ResidentTrainingRun.StepToCheckpoint(TensorDataStruct, TensorDataStruct)"/>
-        /// is what brings one back to the host.
+        /// may be called. Like every path to the elements it throws once the tensor is dead, rather
+        /// than answering about storage that is gone — ask <see cref="IsDisposed"/> first if a
+        /// tensor may have died. It is <c>false</c> for a tensor an execution provider produced in
+        /// its own memory, or one put there by <see cref="To"/> or <see cref="CopyTo"/> on a device
+        /// context; reading such a tensor throws, and <see cref="ToHost"/> is what brings one back
+        /// to the host.
         /// </summary>
-        public virtual bool IsHostResident => true;
+        public virtual bool IsHostResident
+        {
+            get
+            {
+                ThrowIfDisposed();
+                return true;
+            }
+        }
 
         /// <summary>Downcasts to the typed <see cref="TensorData{T}"/>; T must match the actual element type.</summary>
         public TensorData<T> As<T>() where T : IVarType => (TensorData<T>)this;
 
         /// <summary>
-        /// Creates TensorData backed by an existing backend-runtime tensor value, belonging to
-        /// <see cref="ComputeContext.Host"/> — the framework's own host memory, which is where a
-        /// value it built itself is. A value a session produced comes with the context that
-        /// produced it instead, so that it can say where it is; that is the internal overload
-        /// below, and every path through <c>ComputeContext</c> takes it.
+        /// Creates TensorData backed by an existing backend-runtime tensor value, without saying
+        /// which backend made it. The tensor takes the value over: it is released with the tensor,
+        /// by disposing it.
+        ///
+        /// <para>Prefer <see cref="Create(Shape, DType, IShorokooTensorValue, IShorokooBackend)"/>
+        /// wherever the backend is known. A tensor whose producer was not named is host memory if
+        /// the value says it is and somewhere unnamed otherwise, no backend can read it in place,
+        /// and one that is not host-readable can be read back by nothing at all.</para>
         /// </summary>
         public static TensorData Create(Shape shape, DType dtype, IShorokooTensorValue data)
-        {
-            return OnnxUtils.CreateTensorDataFromValue(shape, dtype, data);
-        }
+            => OnnxUtils.CreateTensorDataFromValue(shape, dtype, data);
 
-        /// <summary>A backend-backed tensor bound to the context whose memory it is in.</summary>
-        internal static TensorData Create(
-            Shape shape, DType dtype, IShorokooTensorValue data, ComputeContext context)
-            => OnnxUtils.CreateTensorDataFromValue(shape, dtype, data, context);
+        /// <summary>
+        /// Creates TensorData backed by <paramref name="data"/>, a value
+        /// <paramref name="allocatingBackend"/> made. The tensor takes the value over, and releases
+        /// it through that backend.
+        /// </summary>
+        /// <exception cref="ArgumentNullException"><paramref name="data"/> or
+        /// <paramref name="allocatingBackend"/> is null.</exception>
+        public static TensorData Create(
+            Shape shape, DType dtype, IShorokooTensorValue data, IShorokooBackend allocatingBackend)
+            => OnnxUtils.CreateTensorDataFromValue(shape, dtype, data, allocatingBackend);
 
-        /// <summary>A host tensor over the given bytes, bound to the given host context.</summary>
-        internal static TensorData NewHostTensor(
-            Shape shape, DType dtype, byte[] bytes, ComputeContext context)
-            => OnnxUtils.CreateHostTensorData(shape, dtype, bytes, context);
+        /// <summary>A tensor over the given bytes, in the framework's own host memory.</summary>
+        internal static TensorData NewHostTensor(Shape shape, DType dtype, byte[] bytes)
+            => OnnxUtils.CreateManagedTensorData(shape, dtype, bytes);
 
-        /// <summary>A host string tensor over the given elements, bound to the given host
-        /// context.</summary>
-        internal static TensorData NewHostStringTensor(
-            Shape shape, string[] values, ComputeContext context)
-            => HostStringTensorData.Bound(shape, values, context);
+        /// <summary>A string tensor over the given elements, in the framework's own host
+        /// memory.</summary>
+        internal static TensorData NewHostStringTensor(Shape shape, string[] values)
+            => new HostStringTensorData(shape, values);
 
         /// <summary>
         /// Creates TensorData of the given shape and dtype over <paramref name="data"/> — plain
@@ -574,8 +441,7 @@ namespace Shorokoo
             // the parsed protobuf, and a loader reusing one scratch array got tensors that all
             // held the contents of its last read. Through a span rather than the range indexer,
             // which allocates one array of its own and then hands it to LINQ for a second.
-            return NewHostTensor(
-                shape, dtype, data.AsSpan(0, (int)required).ToArray(), ComputeContext.Host);
+            return NewHostTensor(shape, dtype, data.AsSpan(0, (int)required).ToArray());
         }
 
         /// <summary>
@@ -592,13 +458,19 @@ namespace Shorokoo
         ///
         /// <para>The value returned is the tensor's own: read it, do not dispose it.</para>
         /// </summary>
-        internal virtual IShorokooTensorValue ToTensorValue(IShorokooBackend backend)
+        internal IShorokooTensorValue ToTensorValue(IShorokooBackend backend)
         {
+            ArgumentNullException.ThrowIfNull(backend);
             ThrowIfDisposed();
-            if (this is IOnnxData od) return od.Value;
-            throw new InvalidOperationException(
-                $"TensorData of type {this.GetType().Name} does not expose a backend-runtime tensor value.");
+            return ValueFor(backend);
         }
+
+        /// <summary>
+        /// <see cref="ToTensorValue(IShorokooBackend)"/> without the liveness check: the value a run
+        /// that has taken this tensor feeds. Nothing else may call it — a dead tensor's memory is
+        /// the taker's alone.
+        /// </summary>
+        private protected abstract IShorokooTensorValue ValueFor(IShorokooBackend backend);
 
         /// <summary>Creates int32 TensorData of the given shape holding 0, 1, ..., Count-1 in row-major order.</summary>
         public static TensorData<int32> BuildRange(Shape shape)
@@ -606,84 +478,6 @@ namespace Shorokoo
             var vals = Enumerable.Range(0, (int)shape.Count).ToArray();
             return (TensorData<int32>)TensorData(shape.Dims, vals);
         }
-
-        /// <summary>
-        /// Lets go of this handle. The bytes go with it only if nothing else names them — no other
-        /// handle, and no run holding a lock on them — so disposing a tensor a run is reading is
-        /// safe and frees nothing until that run returns.
-        ///
-        /// <para>Idempotent, and it never affects another handle: a second name for the same bytes
-        /// reads on afterwards. What it is not is a way to say "free these bytes now"; that is
-        /// <see cref="TryDelete"/> and <see cref="DeleteAsync"/>.</para>
-        /// </summary>
-        public virtual void Dispose()
-        {
-            if (IsDisposed) return;
-            IsDisposed = true;
-            // Off the context's books as well as off the allocation's. A context lists the tensors
-            // attached to it, and a handle the caller has let go of is not one -- left on, the list
-            // grew with every tensor that had ever been attached and only shrank when the collector
-            // got round to it, so it answered "which tensors are attached" with "which were".
-            Context.DetachTensor(this);
-            DropReference();
-        }
-
-        /// <summary>
-        /// Deletes this tensor's allocation if nothing is reading it: frees the bytes now, and
-        /// every handle over them — this one and any other — throws from then on. Returns false,
-        /// changing nothing at all, if any run holds a lock on them; the tensor is left readable
-        /// and no run is disturbed.
-        ///
-        /// <para>Opportunistic, and that is the whole of it. It is not
-        /// <c>DeleteAsync(TimeSpan.Zero)</c>: it signals no eviction and aborts nobody, so a
-        /// caller can ask whether these bytes can go without committing to their going.</para>
-        /// </summary>
-        /// <returns>True when the allocation is dead — including when it already was.</returns>
-        public bool TryDelete() => Storage.TryDelete();
-
-        /// <summary>
-        /// Deletes this tensor's allocation and waits up to <paramref name="timeout"/> for its
-        /// bytes to be reclaimed.
-        /// </summary>
-        /// <remarks>
-        /// <para><b>The tensor is deleted either way.</b> Deletion is immediate and unconditional:
-        /// from the moment this is called every handle over the allocation throws, whatever this
-        /// returns and however long the wait takes. Deletion ignores the handle count — deleting
-        /// while five other tensors name the bytes renders all five unusable, by design — and
-        /// never ignores a lock: the bytes go back to the allocator only once the last run reading
-        /// them has stood down.</para>
-        /// <para><b>A false is a diagnostic, not a failure.</b> It says the bytes have not come
-        /// back yet because a locker has not stood down inside the budget. Retrying is waiting for
-        /// something that has already happened; the bytes come back when that run ends, with no
-        /// second call. A timeout never rolls the deletion back — eviction has been signalled and
-        /// the compliant lockers have already thrown their work away, and un-signalling cannot
-        /// un-abort them.</para>
-        /// <para><b>It is never prompt.</b> A backend is asked to stop, and what it can stop at is
-        /// its own business: the ONNX Runtime backend stops between kernels, so the wait is bounded
-        /// below by the longest single operator in flight — and by a whole run where the graph is
-        /// one operator, which has no boundary to stop at. A backend that ignores the request at
-        /// all makes this slow and never unsafe: the wait then ends when the run finishes
-        /// naturally.</para>
-        /// </remarks>
-        /// <param name="timeout">How long to wait for the bytes. <see cref="TimeSpan.Zero"/>
-        /// signals eviction and does not wait; <see cref="Timeout.InfiniteTimeSpan"/> waits
-        /// forever. There is deliberately no parameterless overload — an unbounded wait on a
-        /// locker that may never stand down is a hang, and a caller who wants one should be seen
-        /// to have asked for it.</param>
-        /// <param name="cancellationToken">Cancels <i>the wait</i>, never the deletion.</param>
-        /// <returns>True when the bytes were reclaimed inside the budget; false when the wait ran
-        /// out with the allocation deleted all the same.</returns>
-        /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was
-        /// cancelled while waiting. The allocation stays deleted.</exception>
-        public Task<bool> DeleteAsync(TimeSpan timeout, CancellationToken cancellationToken = default)
-            => Storage.DeleteAsync(timeout, cancellationToken);
-
-        /// <summary>
-        /// A second tensor over the very same bytes, attached to the given context. The allocation
-        /// is shared rather than copied, and the clone takes a reference of its own on it, so the
-        /// bytes outlive whichever of the two lets go first.
-        /// </summary>
-        internal abstract TensorData CloneSharing(ComputeContext context);
     }
 
     /// <summary>TensorData backed by a backend-runtime tensor value.</summary>
@@ -703,10 +497,9 @@ namespace Shorokoo
         private readonly IShorokooTensorValue backing;
 
         /// <summary>
-        /// The backing backend-runtime tensor value, which the allocation owns: it is released
-        /// when the last handle and the last lock on that allocation let go, and nothing else may
-        /// hold or free it (Shorokoo/Shorokoo#180). Disposing <i>this</i> tensor drops one handle,
-        /// which releases the value only when it was the last.
+        /// The backing backend-runtime tensor value, which this tensor owns: it is released through
+        /// <see cref="TensorData.AllocatingBackend"/> when the tensor dies, and nothing else may hold
+        /// or free it (Shorokoo/Shorokoo#180).
         /// </summary>
         public IShorokooTensorValue Value
         {
@@ -728,69 +521,83 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// Creates TensorData of the given shape around an existing runtime tensor value; the dtype
-        /// is derived from T. The tensor belongs to <see cref="ComputeContext.Host"/>, so its value
-        /// must be one the host can read — every path that wraps a session's output hands over the
-        /// context that produced it, and a value in a provider's own memory needs that context to
-        /// say which memory it is (see <see cref="StorageFor"/>).
+        /// Creates TensorData of the given shape around an existing runtime tensor value, without
+        /// saying which backend made it; the dtype is derived from T. The tensor takes the value
+        /// over. See <see cref="TensorData.Create(Shape, DType, IShorokooTensorValue)"/> for what
+        /// leaving the producer unnamed costs.
         /// </summary>
         public OnnxTensorData(Shape shape, IShorokooTensorValue value)
-            : this(shape, value, ComputeContext.Host, storage: null)
+            : this(shape, value, UnrecordedBackend.Instance)
         {
         }
 
-        internal OnnxTensorData(Shape shape, IShorokooTensorValue value, DType actualDType)
-            : base(shape, actualDType, StorageFor(value, ComputeContext.Host), ComputeContext.Host)
+        /// <summary>A tensor over a value <paramref name="allocatingBackend"/> made, taking it
+        /// over.</summary>
+        internal OnnxTensorData(Shape shape, IShorokooTensorValue value, IShorokooBackend allocatingBackend)
+            : base(shape, allocatingBackend, SpaceOf(value, allocatingBackend))
         {
             this.backing = value;
         }
 
+        /// <summary>The same, carrying <paramref name="actualDType"/> exactly as given — a
+        /// specialized dtype's generic parameter name included.</summary>
         internal OnnxTensorData(
-            Shape shape, IShorokooTensorValue value, ComputeContext context, TensorStorage? storage)
-            : base(shape, storage ?? StorageFor(value, context), context)
+            Shape shape, IShorokooTensorValue value, DType actualDType, IShorokooBackend allocatingBackend)
+            : base(shape, actualDType, allocatingBackend, SpaceOf(value, allocatingBackend))
         {
             this.backing = value;
         }
 
         /// <summary>
-        /// Where a runtime value's bytes are: the space of the context this tensor belongs to. A
-        /// tensor of a context holds that context's memory — host memory on a host backend, the
-        /// card's own on a CUDA one — and that is what decides whether handing it to another
-        /// context has to copy anything. Releasing the storage disposes the value, which is what
-        /// owning it means.
+        /// Where a runtime value's bytes are. The value is asked first, because it knows: ONNX
+        /// Runtime names the allocator a buffer came from, so a value a session produced on the host
+        /// says so. Only when the answer is "not the host" does the allocating backend say
+        /// <i>which</i> device, which is the one thing the value cannot — and a backend nobody
+        /// named answers "somewhere unrecorded", which is the honest answer where there is no
+        /// producer to ask.
         ///
-        /// <para>The value is asked first, because it knows: ONNX Runtime names the allocator a
-        /// buffer came from, so a tensor the backend allocated on the card says so and one it
-        /// allocated on the host says that. Only when the answer is "not the host" does the
-        /// context decide <i>which</i> device, which is the one thing the value cannot say. Once
-        /// the last handle and lock let go, the allocation frees itself by disposing the
-        /// value.</para>
-        ///
-        /// <para>That order matters. Letting the context answer outright would label a genuinely
-        /// host-readable value — a resident run's published state, say, which was deliberately
-        /// brought home — as living on the card it came from, and every later hand-off of it would
-        /// copy bytes that were already where they were wanted.</para>
+        /// <para>That order matters. Letting the backend answer outright would label a genuinely
+        /// host-readable value — a device session's ordinary output, which ONNX Runtime fetches to
+        /// the host — as living on the card it came from, and every later hand-off of it would copy
+        /// bytes that were already where they were wanted.</para>
         /// </summary>
-        private static TensorStorage StorageFor(IShorokooTensorValue value, ComputeContext context)
+        private static MemorySpace SpaceOf(IShorokooTensorValue value, IShorokooBackend allocatingBackend)
         {
-            if (value.IsHostAccessible) return new TensorStorage(MemorySpace.Host, value.Dispose);
-            // A value the provider kept, wrapped without the context that produced it, is somewhere
-            // this cannot name. Recorded as unknown rather than guessed at: a wrong device id would
-            // make two unrelated allocations look like one space and invite a transfer between them.
-            // Nothing the framework runs arrives here without one -- a session's outputs, a
-            // sequence's elements and a transfer's results all carry theirs -- so this is reached
-            // only by a caller wrapping a value of its own. The host context is that caller: it is
-            // the absence of a producing context, and host memory is the one place this value is
-            // known not to be.
-            return new TensorStorage(
-                ReferenceEquals(context, ComputeContext.Host)
-                    ? MemorySpace.UnknownDevice : context.MemorySpace,
-                value.Dispose);
+            ArgumentNullException.ThrowIfNull(value);
+            ArgumentNullException.ThrowIfNull(allocatingBackend);
+            return value.IsHostAccessible ? MemorySpace.Host : allocatingBackend.MemorySpace;
         }
 
         /// <inheritdoc/>
-        internal override TensorData CloneSharing(ComputeContext context)
-            => new OnnxTensorData<T>(Shape, backing, context, Storage);
+        private protected override void ReleaseMemory() => AllocatingBackend.Release(backing);
+
+        /// <inheritdoc/>
+        private protected override IShorokooTensorValue ValueFor(IShorokooBackend backend) => backing;
+
+        /// <inheritdoc/>
+        private protected override byte[] CopyContentBytes()
+        {
+            // The allocating backend's copy only where the host cannot read the value itself: that
+            // one is a native round trip, and a host value needs nothing but the span.
+            if (!backing.IsHostAccessible) return AllocatingBackend.CopyTensorToHost(backing);
+            var bytes = backing.GetTensorDataAsSpan<byte>().ToArray();
+            // Taking the span is the value's last read, so without this the JIT may retire it
+            // before ToArray has copied out of the buffer it points at (Shorokoo/Shorokoo#178).
+            GC.KeepAlive(backing);
+            return bytes;
+        }
+
+        /// <inheritdoc/>
+        private protected override IReadOnlyList<string> CopyContentStrings()
+            => backing.IsHostAccessible
+                ? backing.GetStringTensorData()
+                // Guarded like every other read of a backend-held tensor: a value in the
+                // provider's own memory is not the host's to read, and saying so beats handing
+                // back whatever the elements happen to collide with.
+                : throw new InvalidOperationException(
+                    $"This tensor ({Shape}:{DType}) lives in the execution provider's own memory, "
+                    + "not host memory, so its elements cannot be read here. ToHost() takes a copy "
+                    + "in host memory.");
 
         /// <inheritdoc/>
         public override bool IsHostResident => this.Value.IsHostAccessible;
@@ -804,10 +611,10 @@ namespace Shorokoo
         private IShorokooTensorValue HostValue => this.Value.IsHostAccessible ? this.Value
             : throw new InvalidOperationException(
                 $"This tensor ({this.Shape}:{this.DType}) lives in the execution provider's own " +
-                "memory, not host memory, so its contents cannot be read here. It belongs to a " +
-                "ResidentTrainingRun, which keeps training state on the device between steps; take " +
-                "a host copy of the state with StepToCheckpoint(...) on the step you want to read " +
-                "or save.");
+                "memory, not host memory, so its contents cannot be read here. ToHost() takes a " +
+                "copy in host memory; a ResidentTrainingRun, which keeps training state on the " +
+                "device between steps, brings its state home with StepToCheckpoint(...) on the " +
+                "step you want to read or save.");
 
         /// <inheritdoc/>
         public override Span<V> AccessModifiableMemory<V>()
@@ -832,10 +639,9 @@ namespace Shorokoo
             return this.HostValue.GetTensorDataAsSpan<byte>();
         }
 
-        // Disposal is the base class's: drop this handle's reference, and the allocation frees the
-        // backing value when the last reference goes. There is deliberately no finalizer -- one
-        // here could only release the backing value, and a finalizer must not touch another
-        // managed object that may already have been finalized itself. The backing value has its
-        // own finalizer, which is what reclaims a tensor nobody disposes (Shorokoo/Shorokoo#180).
+        // There is deliberately no finalizer -- one here could only release the backing value,
+        // and a finalizer must not touch another managed object that may already have been
+        // finalized itself. The backing value has its own finalizer, which is what reclaims a
+        // tensor nobody deletes (Shorokoo/Shorokoo#180).
     }
 }

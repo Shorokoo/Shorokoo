@@ -199,6 +199,19 @@ public class CompositeTransferCoverageTests
     }
 
     [Fact]
+    public void TestASequenceFedAgainAfterOneOfItsElementsWasWrittenIsReadAsWritten()
+    {
+        using var context = new ComputeContext();
+        var seq = InternalOp.ModuleSequenceInput(DType.Float32, null, null, "seq");
+        var join = new InternalComputationGraph([seq], [OnnxOp.ConcatFromSequence(seq, axis: 0, newAxis: false)]);
+        var sequence = TensorDataSequence.OfElements([Sample(1f), Sample(3f)], DType.Float32);
+
+        Assert.Equal([1f, 2f, 3f, 4f], Floats(context.Execute(join, sequence.Shared())[0].ToTensorData()));
+        sequence[0].As<float32>().AccessModifiableMemory<float>()[0] = 9f;
+        Assert.Equal([9f, 2f, 3f, 4f], Floats(context.Execute(join, sequence.Shared())[0].ToTensorData()));
+    }
+
+    [Fact]
     public void TestATensorOnAContextMovesIntoAnAttributeAndDiesSayingSo()
     {
         using var context = new ComputeContext();

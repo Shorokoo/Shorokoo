@@ -393,6 +393,14 @@ namespace Shorokoo
         /// </summary>
         private protected abstract IShorokooTensorValue BuildValueOn(IShorokooBackend backend);
 
+        /// <summary>
+        /// Called when one of this sequence's own elements is written: every sequence value runs
+        /// built from it was copied from the old contents, so each is retired and the next run builds
+        /// a fresh one — the rule a tensor's own copies follow, applied to the copies of the sequence
+        /// holding it.
+        /// </summary>
+        internal void ElementWritten() => RetireCopies();
+
         /// <summary>Retires every copy runs built of this sequence, which lives no longer than
         /// it.</summary>
         private void RetireCopies()
@@ -498,6 +506,9 @@ namespace Shorokoo
             internal ListTensorDataSequence(List<TensorData<T>> elements)
             {
                 _elements = elements;
+                // Each element is this sequence's own, and what a run builds from this sequence is
+                // copied from them: a write to one has to retire that too.
+                foreach (var element in elements) element.BelongsTo(this);
             }
 
             public override int Count

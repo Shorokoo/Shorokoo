@@ -58,6 +58,11 @@ namespace Shorokoo
         // Created on the first copy: most tensors are read where they are, or never read at all.
         private RunCopies? _copies;
 
+        // The sequence this tensor is an element of, where it is one of a list sequence's own: the
+        // sequence values runs built from that sequence were copied from this tensor too, so a
+        // write here retires them as well as this tensor's own copies.
+        private TensorDataSequence? _sequence;
+
         /// <summary>
         /// True once this tensor is dead — deleted, consumed by a run, or moved into an attribute.
         /// Its shape, dtype and <see cref="ToString"/> stay readable as metadata; every other access
@@ -485,12 +490,21 @@ namespace Shorokoo
             return null;
         }
 
+        /// <summary>Records that <paramref name="sequence"/> holds this tensor as one of its own
+        /// elements, so that a write to this tensor reaches the copies runs built of it.</summary>
+        internal void BelongsTo(TensorDataSequence sequence) => Volatile.Write(ref _sequence, sequence);
+
         /// <summary>
         /// Called by every accessor that hands out a writable view of the contents, before it does:
-        /// the copies runs made from these contents are stale from here, and are retired, so the
-        /// next run reads what was written.
+        /// the copies runs made from these contents are stale from here — this tensor's own, and
+        /// those of the sequence it is an element of — and are retired, so the next run reads what
+        /// was written.
         /// </summary>
-        private protected void Written() => RetireCopies();
+        private protected void Written()
+        {
+            RetireCopies();
+            Volatile.Read(ref _sequence)?.ElementWritten();
+        }
 
         /// <summary>
         /// Retires every copy runs made of this tensor, because the contents they were copied from

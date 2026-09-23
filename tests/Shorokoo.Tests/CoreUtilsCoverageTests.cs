@@ -2255,6 +2255,16 @@ public class CoreUtilsCoverageTests
             .OrderBy(i => i)
             .ToArray();
 
+    /// <summary>Spends time inside whatever calls it and returns how much, by its own clock: a
+    /// phase of a save report that contains the call is at least this long, however busy the
+    /// machine is.</summary>
+    private static TimeSpan Slept()
+    {
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        Thread.Sleep(50);
+        return clock.Elapsed;
+    }
+
     [Fact]
     public void TestAtomicFileWriterRotationCoverage()
     {
@@ -2337,22 +2347,26 @@ public class CoreUtilsCoverageTests
                 && report.Flush > TimeSpan.Zero && report.Commit > TimeSpan.Zero);
             Assert.True(report.Elapsed <= outer);
 
-            // What the measurement covers, pinned by making the content production take a known
-            // time rather than by comparing against the caller's clock. Contention can only make a
-            // measured phase longer, so a lower bound on it never fails for being busy -- which is
-            // what the ratio this replaced could not say.
+            var producing = TimeSpan.Zero;
             var delayed = AtomicFileWriter.WriteFile(
                 Path.Combine(dir, "slow.bin"),
-                s => { Thread.Sleep(50); s.Write(payload); });
-            Assert.True(delayed.Write >= TimeSpan.FromMilliseconds(40));
+                s => { producing = Slept(); s.Write(payload); });
+            Assert.True(delayed.Write >= producing);
 
-            // Rotation runs inside the call, so the report still fits inside the caller's clock.
+            var rotating = TimeSpan.Zero;
+            AtomicFileWriter.RotationFaultInjection = _ => rotating = Slept();
+            SaveReport rotated;
             clock = System.Diagnostics.Stopwatch.StartNew();
-            var rotated = AtomicFileWriter.WriteFile(
-                Path.Combine(dir, "ckpt-7.bin"), s => s.Write(payload),
-                AtomicFileWriter.RetainPolicy.KeepLast(1, "ckpt-", ".bin"));
+            try
+            {
+                rotated = AtomicFileWriter.WriteFile(
+                    Path.Combine(dir, "ckpt-7.bin"), s => s.Write(payload),
+                    AtomicFileWriter.RetainPolicy.KeepLast(1, "ckpt-", ".bin"));
+            }
+            finally { AtomicFileWriter.RotationFaultInjection = null; }
             var rotatedOuter = clock.Elapsed;
             Assert.Equal(payload.Length, rotated.BytesWritten);
+            Assert.True(rotated.Commit >= rotating);
             Assert.True(rotated.Elapsed <= rotatedOuter);
 
             Assert.Equal(0.0, default(SaveReport).BytesPerSecond);

@@ -30,18 +30,23 @@ Related: [core-types.md](core-types.md) · [defining-models.md](defining-models.
   `ComputeContext.Backend` and `DefaultBackend.Describe()` name it, and
   `DefaultBackend.RequireDevice(...)` refuses to start on the wrong one —
   [Which device am I on?](#which-device-am-i-on).
+- **A tensor fed to a run as it is is consumed by that run**: dead once the call is made, and
+  its memory released by the run's backend before the call returns, whatever the run did. Pass
+  it `.Shared()` to have the run only read it, so you can use it again, or `.TryConsume()` to
+  have it consumed only when nothing else is reading it. Structs, sequences, optionals and
+  training checkpoints take both —
+  [Feeding a run: consumed, shared or tried](#feeding-a-run-consumed-shared-or-tried).
 - A `TensorData` is its memory — one object per allocation, released through the backend that
-  made it — and it ends in exactly three ways: deleted, consumed by a run it was donated to, or
-  moved into an attribute. A run holds what it is reading for as long as it runs, so a tensor
-  being read cannot be deleted —
-  [A tensor's lifetime](#a-tensors-lifetime-locks-and-deletion).
+  made it — and it ends in exactly three ways: deleted, consumed by a run, or moved into an
+  attribute. A run holds what it is reading for as long as it runs, so a tensor being read
+  cannot be deleted — [A tensor's lifetime](#a-tensors-lifetime-locks-and-deletion).
 - A compute context keeps books on tensors and owns none: disposing it releases its sessions and
   leaves every tensor alive. `To(context)` hands a tensor to a context that can read it where it
   is and copies it otherwise, `CopyTo(context)` always copies, and `ToHost()` brings one within
   the host's reach — [Moving data between contexts](#moving-data-between-contexts).
 - An input large enough to dominate the step's peak need not exist twice: allocate it on the
-  context and fill the runtime's own buffer in place, then hand it to the run with `Donate()`
-  so its memory is released when the run returns —
+  context and fill the runtime's own buffer in place, then feed it as it is — the run consumes it
+  where it is, and its memory is released as the run returns —
   [Feeding a large input without a second copy](#feeding-a-large-input-without-a-second-copy).
 - On a GPU backend the CUDA arena is configured on the `ComputeContext` — `DeviceMemory` for
   the sessions it compiles and the tensors it holds on the card, `RunSettings` for what its runs
@@ -374,6 +379,10 @@ var r1 = compiled.Execute(inputData1);             // params IData[] — the dat
 var r2 = compiled.Execute(inputData2);             // reuses the session
 ```
 
+Each input fed as it is is consumed by the run it feeds, so `inputData1` is dead once the first
+call is made; pass it `.Shared()` there to use it again — see
+[Feeding a run: consumed, shared or tried](#feeding-a-run-consumed-shared-or-tried).
+
 `Compile(ComputationGraph graph)` takes the graph and nothing else — the data goes to
 the `CompiledGraph` it returns, whose `Execute(params IData[] inputs)` is the call you
 repeat. `ComputeContext` also offers `Eval(...)` (the `OnnxEngine.Eval` overloads,
@@ -381,7 +390,8 @@ plus `Eval<T>(Tensor<T>)` returning a typed `TensorData<T>`),
 `Execute(ComputationGraph graph, params IData[] inputs)`,
 `Run(ComputationGraph graph, params NamedModelParam[] inputs)`, and
 `ExecuteWithState(...)` (for models that carry state). Wherever `IData` is asked for,
-`TensorData` implements it, so pass `TensorData` values directly. `Execute`, `Run` and
+`TensorData` implements it, so pass `TensorData` values directly — as they are, to be consumed,
+or through `.Shared()` or `.TryConsume()`. `Execute`, `Run` and
 `CompiledGraph.Execute` return `NamedModelParam[]`; read each output with
 `namedModelParam.ToTensorData()` then `AccessMemory()`. `ExecuteWithState` returns
 `(NamedModelParam[] regularOutputs, ComputationGraph updatedGraph)` — feed the updated
@@ -409,12 +419,15 @@ catch (OperationCanceledException)
 ```
 
 A token already cancelled when the call is made is refused before anything is fed: no input is
-built into a runtime value, no feed is locked, and a donated tensor passed to the call is not
-consumed, so the refused call spends nothing. One cancelled while the run is in flight sets ONNX
-Runtime's terminate flag, which its executor reads **between nodes** — so what the wait costs is
-whatever is left of the kernel that was running, not what is left of the run. Two consequences are
-worth planning around, and the probe behind the figures below measures both
-(`TerminateLatencyProbeTests`, `Purpose=Manual`):
+built into a runtime value, no feed is locked, and nothing passed as it is is consumed, so the
+refused call spends nothing and can be made again with the same inputs. A run stopped after it
+started has consumed what it was fed as it is, as a run that fails has — so a caller who means to
+retry passes `.Shared()`.
+
+One cancelled while the run is in flight sets ONNX Runtime's terminate flag, which its executor
+reads **between nodes** — so what the wait costs is whatever is left of the kernel that was
+running, not what is left of the run. Two consequences are worth planning around, and the probe
+behind the figures below measures both (`TerminateLatencyProbeTests`, `Purpose=Manual`):
 
 - **The wait tracks one kernel.** On a chain of matmuls the run came back within one kernel's
   duration of the flag being set, and by about as much whether a tenth or nine tenths of the run
@@ -655,6 +668,70 @@ resolved the same way, so it binds the file that is really there.
 Each backend loaded this way gets a load context of its own, so several run side by side
 without sharing a native runtime.
 
+### Feeding a run: consumed, shared or tried
+
+A tensor fed to a run **as it is** is given to that run. The run takes it when it starts — the
+tensor is dead from that moment — and its memory goes to the run's backend, which releases it as
+soon as the run has finished reading it and before the call returns. That is what a batch built
+for one call wants, and it is what the call does:
+
+```csharp
+var result = compiled.Execute(batch)[0].ToTensorData();
+// batch is consumed: reading it throws, naming the run that took it
+```
+
+To use a tensor after the call, pass it `.Shared()`. The run then only reads it — holding a reader
+lock on it while it runs, so nothing can delete it underneath — and it is alive and unchanged
+afterwards:
+
+```csharp
+var weights = TensorData([4L, 4L], w);
+var first  = compiled.Execute(x1, weights.Shared());
+var second = compiled.Execute(x2, weights.Shared());   // weights is still there
+```
+
+`.TryConsume()` sits between the two: the run consumes the tensor if nothing else is reading it
+when the run starts, and reads it otherwise. Fed as it is, a tensor another run is reading is
+refused instead — the call throws `InvalidOperationException` naming the run that holds it, and
+takes nothing — since consuming it would take its memory from under that run.
+
+| Fed as | The run | Afterwards |
+|---|---|---|
+| `t` | takes it when it starts; refuses it while another run is reading it | dead |
+| `t.Shared()` | reads it, holding a reader lock | alive and unchanged |
+| `t.TryConsume()` | takes it if nothing else is reading it, reads it otherwise | dead, or alive if it was read |
+
+- **Consumption is irrevocable.** A run that fails, or is stopped, after it started has still
+  consumed what it was fed as it is. A run refused before it starts — a cancelled token, a feed
+  that is dead, or one being read that it would have to consume — takes nothing: everything it
+  could refuse over is checked before anything is taken.
+- **One tensor fed twice in one call** is taken at most once: read if any occurrence is
+  `.Shared()`, otherwise consumed if any is bare, otherwise tried.
+- **Composites apply the mode to everything they hold.** `TensorDataStruct`, `TensorDataSequence`
+  and `OptionalTensorData` have `.Shared()` and `.TryConsume()` too; fed as it is, a struct or a
+  sequence gives the run every tensor it holds. So does a training checkpoint — see
+  [What a training step consumes](training.md#what-a-training-step-consumes).
+- **The error names the call to change.** Reading a consumed tensor throws
+  `ObjectDisposedException` naming the run that took it — its graph and its context — and the
+  input it fed; the remedy is to pass it `.Shared()` at that call.
+- `.Shared()` and `.TryConsume()` return a `SharedInput`: an `IData` carrying the value and its
+  `Mode`, accepted wherever an input is. `Run`, which takes `NamedModelParam`s, reads each one's
+  `Sharing` instead — `null` for as it is.
+
+**Memory the run cannot read where it is.** A run reads its inputs in its backend's memory. A
+tensor anywhere else — every tensor built from a C# array, whose managed memory no runtime reads
+directly, and one another device or another runtime allocated — is fed through a copy in the
+run's memory, and the mode decides what becomes of that copy:
+
+- **Consumed**, the contents are copied into the run's memory, the tensor is dead and its own
+  memory released at the feed, and the copy is what the run consumes.
+- **Read**, the copy is made on the first such read and kept. It is a `TensorData` of its own:
+  held by the tensor it was copied from, locked by each run that reads it, attached to the context
+  that read it (so it shows in `context.Tensors`), and read again by every later shared read in
+  that memory rather than copied afresh. Writing to the tensor (`AccessModifiableMemory` and the
+  like) retires the copy — the next read copies what was written — and the copy goes too when the
+  tensor is deleted or consumed.
+
 ### A tensor's lifetime: locks and deletion
 
 A `TensorData` **is** its memory. There is one object per allocation — no second tensor ever names
@@ -670,12 +747,13 @@ context it is attached to does not:
 | | |
 |---|---|
 | **Deleted** | `Delete()`, `Dispose()`, `TryDelete()` or `DeleteAsync(...)` — below. |
-| **Consumed** | fed to a run as a donation, which takes it when the run starts — see [Feeding a large input without a second copy](#feeding-a-large-input-without-a-second-copy). |
+| **Consumed** | fed to a run as it is — or through `.TryConsume()` with nothing else reading it — which takes it when the run starts; see [Feeding a run](#feeding-a-run-consumed-shared-or-tried). |
 | **Moved into an attribute** | `MoveToAttribute()`, which takes its contents — see [core-types.md](core-types.md#the-two-conversions-and-which-one-spends-its-source). |
 
 A dead tensor records which, and every access to it afterwards — reading its elements, feeding it,
-`To`, `CopyTo`, `ToHost`, `Donate`, `MoveToAttribute` — throws `ObjectDisposedException` saying
-so; for a consumed tensor it names the graph and the context whose run took it. `Shape`, `DType`,
+`To`, `CopyTo`, `ToHost`, `Shared()`, `TryConsume()`, `MoveToAttribute` — throws
+`ObjectDisposedException` saying so; for a consumed tensor it names the graph and the context whose
+run took it, and says to pass it `.Shared()` at that call. `Shape`, `DType`,
 `ToString()` and `IsDisposed` keep working, so a dead tensor can still say what it was. Ending a
 tensor that is already dead does nothing, so disposing one twice, or at the end of a `using` over a
 tensor a run has consumed, is harmless.
@@ -689,14 +767,17 @@ case you are in when you are chasing memory. A tensor whose buffer the runtime a
 run's output, a copy onto a card, an `AllocateUninitialized` on a real context — is holding native
 memory, the card's own on a CUDA context, and releasing it hands that back at that moment. A
 tensor you built from a C# array is holding a managed array, which stays the collector's to
-reclaim whatever you do; what releasing *that* frees is each runtime's copy of those bytes,
-which is native and can itself be on a card.
+reclaim: releasing the tensor lets go of the array, and what it frees at once is the copies runs
+read it through ([above](#feeding-a-run-consumed-shared-or-tried)), which are native and can
+themselves be on a card.
 
-**What a run holds.** A run takes a reader lock on every tensor it reads and holds it — and a
-reference to the tensor itself — for as long as it runs, giving it up when it returns however it
-returns. Any number of runs may read one tensor at once. While any of them holds its lock the tensor
-cannot be deleted: `Delete()` and `Dispose()` throw `InvalidOperationException`, and `TryDelete()`
-declines. So nothing frees memory a run is in the middle of reading.
+**What a run holds.** A run takes a reader lock on every tensor it reads — fed `.Shared()`, or
+through `.TryConsume()` while something else held it — and holds it, and a reference to the
+tensor itself, for as long as it runs, giving it up when it returns however it returns. Any number
+of runs may read one tensor at once. While any of them holds its lock the tensor cannot be
+deleted: `Delete()` and `Dispose()` throw `InvalidOperationException`, and `TryDelete()` declines.
+So nothing frees memory a run is in the middle of reading. A tensor a run consumes it holds by
+taking it, which no other run can then do.
 
 The lock is taken inside the run, one feed at a time, so it is not held yet while the call is
 being set up — and a deletion landing in that window ends the tensor before the run can claim it,
@@ -819,27 +900,23 @@ the tensor is attached to the context exactly as a `CopyTo(context)` result is. 
 a CUDA context the buffer is the card's own memory, which the host cannot write through a span at
 all (`TensorData.IsHostResident` is false); getting bytes there is still `CopyTo`.
 
-`TensorData.Donate()` gives a feed to the run rather than lending it:
+The other half is feeding it **as it is**, which every feed not passed `.Shared()` already is.
+The run takes the buffer where it stands — memory the context's own backend allocated, which its
+runs address without a copy — and hands it back to the allocator as it returns:
 
 ```csharp
-var loss = compiled.Execute(batch.Donate())[0].ToTensorData();
+var loss = compiled.Execute(batch)[0].ToTensorData();
 // batch is consumed: reading it throws, and its buffer went back to the allocator with the run
 ```
 
-The run **consumes** a donated tensor when it starts. From that moment the tensor is dead —
-reading it throws, naming the run that took it — and its memory is released the moment the run
-returns, however it returns, where a feed you keep is released when *you* let go of it, which for a
-batch built per step is at the next collection. Nothing happens at `Donate()` itself: a run refused
-before it starts — a cancelled one, say — takes nothing, and the donation can be fed again. A run
-refuses a donation whose tensor has already been consumed, and one whose tensor another run is
-reading at that moment, since consuming it would take its memory from under that run. `Execute` takes a
-donation as an ordinary input; `Run`, which takes named parameters, takes one as
-`DonatedTensorModelParam`. A donation you build and then never feed is taken back by disposing it,
-which deletes the tensor.
+A consumed tensor's memory is released the moment the run has finished with it, however the run
+ends, where a feed you keep — one passed `.Shared()` — is released when *you* let go of it, which
+for a batch built per step is at the next collection. See
+[Feeding a run](#feeding-a-run-consumed-shared-or-tried) for the rules.
 
-**What donating does not buy.** ONNX Runtime's memory planner gives every graph input one extra
+**What consuming does not buy.** ONNX Runtime's memory planner gives every graph input one extra
 use count, precisely so that a caller can still read a feed after `Run` returns, so no input's
-buffer is ever recycled *inside* the run and no session or run option changes that. Donation moves
+buffer is ever recycled *inside* the run and no session or run option changes that. Consuming moves
 the release from "whenever the caller lets go" to "the instant the run returns"; it does not hand
 the input's bytes to the run's own intermediates.
 
@@ -856,8 +933,8 @@ using Shorokoo.LinuxGPU;
 var cpu  = new ComputeContext(new LinuxCpuBackend());
 var cuda = new ComputeContext(new LinuxGpuBackend());
 
-var onHost = cpu.Execute(graph, input);     // the host
-var onCard = cuda.Execute(graph, input);    // the same graph, the same input, the card
+var onHost = cpu.Execute(graph, input.Shared());   // the host, reading input and leaving it
+var onCard = cuda.Execute(graph, input);           // the same graph, the same input, the card
 ```
 
 The model is compiled once, into one assembly, and both contexts run *that* — so a check on
@@ -870,15 +947,15 @@ backend at all, so building a model and exporting it needs no runtime; a backend
 when the tensor is fed to one, and then either context accepts it — a session hands what it
 is fed to its own runtime, building it there if it does not have it yet.
 
-How often that costs a copy depends on which kind of tensor it is. One holding managed bytes
-— anything you built — caches what each backend made of it, so it is one copy per (tensor,
-backend) pair however many runs follow. One a *session* produced belongs to the runtime that
-produced it, and the other runtime rebuilds it as it is fed and releases the rebuild when the
-run returns: that is a host copy per feed, so a value handed back and forth between two
-backends pays on every run. Either way it is possible only for data the host can read: a value an execution provider kept in
-its own memory (`TensorData.IsHostResident` is false, which a
-[resident training run](training.md#keeping-training-state-on-the-device) produces) cannot
-cross, and says so rather than being read as a host address.
+How often that costs a copy depends on where the tensor is and how it is fed. A run reads as it
+stands only memory its own runtime can address — never a C# array's, and never another
+runtime's allocation — and reads anything else through a copy in its own memory
+([Feeding a run](#feeding-a-run-consumed-shared-or-tried)). Fed `.Shared()`, the tensor keeps
+that copy for the next read, so it is one copy per (tensor, runtime) however many runs follow,
+until the tensor is written; fed as it is, the copy is made for that run and consumed with the
+tensor. A tensor an execution provider left on the card (`TensorData.IsHostResident` is false,
+which a [resident training run](training.md#keeping-training-state-on-the-device) produces)
+crosses the same way, its bytes brought through the host by the backend that allocated them.
 
 #### Deploying two backends
 
@@ -1136,8 +1213,8 @@ var ctx = new ComputeContext
 };
 
 var compiled = ctx.Compile(graph);
-compiled.Execute(inputs);                                          // the context's run settings
-compiled.Execute(inputs, new RunSettings { ShrinkArenaAfterRun = false });   // this run only
+compiled.Execute([batch1]);                                        // the context's run settings
+compiled.Execute([batch2], new RunSettings { ShrinkArenaAfterRun = false });  // this run only
 
 Console.WriteLine(compiled.DeviceMemory.ArenaExtend);              // what this session was built with
 ```
@@ -1183,7 +1260,7 @@ The static `DeviceMemory` class — the readings, not the settings — reports w
 using var run = rig.BeginResidentRun(checkpoint);
 for (int step = 0; step < steps; step++)
 {
-    run.Step(input, target);
+    run.Step(input.Shared(), target.Shared());   // read, so the next step can use them
     DeviceMemory.Sample();
 }
 Console.WriteLine($"peak {DeviceMemory.PeakUsedBytes / (1024 * 1024)} MiB");
@@ -1325,7 +1402,7 @@ using var ctx = new ComputeContext
 
 var rig = TrainingRig.FromScratch(model, loss, optimizer, sample, hypers, runtimeContext: ctx);
 for (int step = 0; step < steps; step++)
-    checkpoint = rig.TrainStep(checkpoint, inputs);
+    checkpoint = rig.TrainStep(checkpoint, inputs.Shared());
 
 var stats = ctx.RunStats;
 Console.WriteLine($"{stats.RunCount} runs, peak {stats.PeakBytes / (1024 * 1024)} MiB, "

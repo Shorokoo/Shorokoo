@@ -272,9 +272,10 @@ loss. It is felt by the opposite shape — a pipeline over an input so large tha
 peak, whose output is input-shaped — where the one buffer that can never be recycled is the
 largest in the run.
 
-[`Donate()`](inference.md#feeding-a-large-input-without-a-second-copy) is the lever that does
-exist: it releases the input the instant the run returns instead of when the caller lets go, and
-allocating on the context removes the managed copy beside it. Neither makes the bytes available to
+[Feeding the input as it is](inference.md#feeding-a-large-input-without-a-second-copy), rather
+than `.Shared()`, is the lever that does exist: the run consumes it, which releases it the instant
+the run returns instead of when the caller lets go, and allocating on the context removes the
+managed copy beside it. Neither makes the bytes available to
 the run's own intermediates. Doing that means binding an output onto the input through ONNX
 Runtime's I/O binding, which ORT permits and checks nothing about: it buys exactly one
 input-sized buffer, only where an output matches that input's dtype and byte size, and nothing at

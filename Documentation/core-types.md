@@ -404,11 +404,11 @@ are reading a result is this:
   can still say what it was.
 
 Operations that build one tensor from another copy, or hand over the tensor itself, and leave the
-source as it was — unless they say otherwise in so many words. Two say otherwise, and each **ends**
-the tensor it is called on: `MoveToAttribute()`
-([above](#the-two-conversions-and-which-one-spends-its-source)), and `Donate()`, whose run consumes
-the tensor when it starts
-([inference.md](inference.md#feeding-a-large-input-without-a-second-copy)).
+source as it was — unless they say otherwise in so many words. Two things say otherwise, and each
+**ends** the tensor: `MoveToAttribute()`
+([above](#the-two-conversions-and-which-one-spends-its-source)), and feeding it to a run as it is,
+which the run consumes when it starts — pass it `.Shared()` to have the run only read it
+([inference.md](inference.md#feeding-a-run-consumed-shared-or-tried)).
 `TensorDataSequence.Create(...)` copies the tensors you pass it, and disposing the sequence
 releases only the sequence's own copies.
 

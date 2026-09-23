@@ -108,7 +108,8 @@ namespace Shorokoo.Runtime
         /// Enters this context's budget gate when memory in <paramref name="space"/> is under a
         /// budget, and answers null — having entered nothing — when it is not. From here to the
         /// matching <see cref="BudgetGate.Exit"/>, no run of this context executes and nothing else
-        /// is placed in its memory; the same thread may enter again.
+        /// is placed in its memory. The thread holding the gate may enter it again (see
+        /// <see cref="BudgetGate"/>).
         /// </summary>
         /// <exception cref="OperationCanceledException"><paramref name="cancellation"/> was cancelled
         /// while this waited for the gate.</exception>
@@ -224,8 +225,13 @@ namespace Shorokoo.Runtime
     /// <summary>
     /// What serializes everything that spends a budgeted compute context's device memory — its runs,
     /// the sessions it builds, and what is placed in its memory — so that no two of them count the
-    /// same room. Held by one thread at a time, which may enter it again: a run's own copies are made
-    /// inside the run.
+    /// same room. Held by one thread at a time.
+    ///
+    /// <para>The holder may enter it again, and a nested entry is counted rather than waited for:
+    /// a thread waiting on a gate it holds itself would wait for ever. Nothing the framework does
+    /// while holding the gate enters it twice — a run's own copies are admitted against the run's
+    /// plan rather than through the gate — so this only keeps a nested entry from becoming a
+    /// hang.</para>
     /// </summary>
     internal sealed class BudgetGate
     {

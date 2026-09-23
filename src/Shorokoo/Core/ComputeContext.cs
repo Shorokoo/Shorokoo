@@ -268,13 +268,16 @@ namespace Shorokoo.Runtime
         /// <see cref="Execute(IData[], bool[])"/>, or <see cref="Execute(IData[])"/> when
         /// <paramref name="retainOnDevice"/> is null, with each input called
         /// <paramref name="labels"/>' entry in a message about it — for a caller whose inputs the
-        /// graph names by identifiers nobody would recognise, the training step's among them.
+        /// graph names by identifiers nobody would recognise, the training step's among them — and
+        /// the run called <paramref name="description"/>, where the caller runs one graph as
+        /// different things: a training rig's own step and a resident run's.
         /// </summary>
-        internal NamedModelParam[] Execute(IData[] inputs, IReadOnlyList<string> labels, bool[]? retainOnDevice)
+        internal NamedModelParam[] Execute(
+            IData[] inputs, IReadOnlyList<string> labels, bool[]? retainOnDevice, string? description = null)
         {
             var named = NameInputs(inputs);
             for (int i = 0; i < named.Length && i < labels.Count; i++) named[i].Label = labels[i];
-            return Run(named, retainOnDevice is null ? null : Retained(retainOnDevice), DefaultRunSettings);
+            return Run(named, retainOnDevice is null ? null : Retained(retainOnDevice), DefaultRunSettings, description);
         }
 
         /// <summary>The names of the outputs <paramref name="retainOnDevice"/> flags, refusing an
@@ -309,7 +312,8 @@ namespace Shorokoo.Runtime
         // Every Execute and Run overload funnels here, so one guard covers the lot -- and covers it
         // before anything is fed, which a per-overload one would not for the retaining path.
         private NamedModelParam[] Run(
-            NamedModelParam[] inputs, IReadOnlySet<string>? retainedOutputNames, RunSettings runSettings)
+            NamedModelParam[] inputs, IReadOnlySet<string>? retainedOutputNames, RunSettings runSettings,
+            string? description = null)
         {
             // Before the work, not after it. The outputs are attached to the compiling context as
             // they are wrapped, so a disposed one threw from inside the wrap of output 0 -- with the
@@ -325,7 +329,7 @@ namespace Shorokoo.Runtime
             // locked, every value built and every consumed tensor taken -- so the caller who caught
             // the cancellation and meant to retry had nothing left to retry with.
             runSettings.CancellationToken.ThrowIfCancellationRequested();
-            var feeds = new RunFeeds(_owner, _backend, Identity());
+            var feeds = new RunFeeds(_owner, _backend, Identity(description));
             // Under a device-memory budget this waits for any run of the context already in flight:
             // two at once would each be counting the room the other's arena is taking.
             var entered = _owner.EnterRun(runSettings.CancellationToken);
@@ -397,11 +401,12 @@ namespace Shorokoo.Runtime
         /// <summary>
         /// A run of this graph as a message names it, holding only the names that takes — not this
         /// graph, which a tensor the run consumes would otherwise keep alive, with its session, its
-        /// kept model and its context, for as long as the tensor is referenced.
+        /// kept model and its context, for as long as the tensor is referenced. It is called
+        /// <paramref name="run"/> where the caller has a name for this run of its own.
         /// </summary>
-        private RunIdentity Identity()
+        private RunIdentity Identity(string? run)
         {
-            var description = _description;
+            var description = run ?? _description;
             var inputs = _originalInputNames;
             var outputs = _outputNames;
             var backend = _backend.Description;

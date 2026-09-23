@@ -2533,6 +2533,8 @@ public class TrainingRigTrainingLoopCoverageTests
         Assert.False(Field(input).IsDisposed || Field(target).IsDisposed);
         run.Step(new DataBatch(input, target, at));
         Assert.True(Field(input).IsDisposed && Field(target).IsDisposed);
+        Assert.Contains("consumed by a run of a TrainingRig's resident run step",
+            Assert.Throws<ObjectDisposedException>(() => FlattenStruct(input)).Message);
 
         Assert.Contains("rig.InputDef.FromOrderedData",
             Assert.Throws<ArgumentException>(() => new DataBatch(loose, TargetBatch(1f), at)).Message);

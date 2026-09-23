@@ -190,6 +190,11 @@ namespace Shorokoo
         /// parameter, which names nothing a caller would recognise.</summary>
         private const string TrainStepDescription = "a TrainingRig's training step";
 
+        /// <summary>What a message calls a run of the same step taken by a
+        /// <see cref="ResidentTrainingRun"/>, which the caller drove through the run rather than
+        /// through <c>TrainStep</c>.</summary>
+        private const string ResidentStepDescription = "a TrainingRig's resident run step";
+
         /// <summary>The tensor a feed is, or wraps, or null for anything else.</summary>
         private static TensorData? FedTensor(IData feed)
             => feed is SharedInput shared ? shared.Value as TensorData : feed as TensorData;
@@ -2648,7 +2653,7 @@ namespace Shorokoo
         /// <summary>
         /// The shared body of the loader <c>TrainStep</c>, run against the rig's cached compiled
         /// trainstep (<see cref="_compiledTrainSteps"/>). It draws the batch and hands it to
-        /// <see cref="ResidentBatchStep"/>, the one place the loader-step-and-counter semantics live
+        /// <see cref="BatchStep"/>, the one place the loader-step-and-counter semantics live
         /// — the same one <see cref="Fit(IDataLoader, int, TrainingCheckpoint?)"/> and
         /// <see cref="ResidentTrainingRun"/> step through, so every loader-driven form agrees. It
         /// retains nothing: the checkpoint this returns is the caller's to read.
@@ -2659,7 +2664,7 @@ namespace Shorokoo
         {
             if (checkpoint is null) throw new ArgumentNullException(nameof(checkpoint));
             if (loader is null) throw new ArgumentNullException(nameof(loader));
-            return ResidentBatchStep(checkpoint, loader.Next(), retain: false);
+            return BatchStep(checkpoint, loader.Next(), retain: false, TrainStepDescription);
         }
 
         /// <summary>The checkpoint's value for one reserved counter input ({step, epoch, batchIndex}).
@@ -2911,13 +2916,15 @@ namespace Shorokoo
         /// the returned checkpoint's tensors are then <b>not</b> host-readable, which is why only
         /// <see cref="ResidentTrainingRun"/>, which owns their lifetime, ever passes <c>true</c>.
         /// The loss is never retained: it is a scalar the host reads every step either way.
+        /// <paramref name="description"/> is what a message about the run calls it.
         /// </summary>
         private TrainingCheckpoint RunStep(
             TrainingCheckpoint checkpoint,
             IData? hyperparams,
             IData trainingInput,
             IData trainingOutput,
-            bool retainStateOnDevice = false)
+            bool retainStateOnDevice = false,
+            string description = TrainStepDescription)
         {
             if (checkpoint is null) throw new ArgumentNullException(nameof(checkpoint));
             if (trainingInput is null) throw new ArgumentNullException(nameof(trainingInput));
@@ -2992,11 +2999,11 @@ namespace Shorokoo
                     // path on a graph the CPU path runs fine.
                     var retain = new bool[compiled.OutputCount];
                     for (int i = 0; i < stateOutputCount; i++) retain[i] = true;
-                    results = compiled.Execute(expandedInputs, labels, retain);
+                    results = compiled.Execute(expandedInputs, labels, retain, description);
                 }
                 else
                 {
-                    results = compiled.Execute(expandedInputs, labels, retainOnDevice: null);
+                    results = compiled.Execute(expandedInputs, labels, retainOnDevice: null, description);
                 }
             }
             catch (Exception ex) when (AllocationFailureReport.IsAllocationFailure(ex))
@@ -3218,8 +3225,14 @@ namespace Shorokoo
             bool retain)
         {
             if (hyperparams is null) RequireNoRuntimeHyperparameters();
-            return RunStep(checkpoint, hyperparams, trainingInput, trainingOutput, retain);
+            return RunStep(checkpoint, hyperparams, trainingInput, trainingOutput, retain, ResidentStepDescription);
         }
+
+        /// <summary>One step of a <see cref="ResidentTrainingRun"/> on an already-drawn batch; see
+        /// <see cref="BatchStep"/>.</summary>
+        internal TrainingCheckpoint ResidentBatchStep(
+            TrainingCheckpoint checkpoint, DataBatch batch, bool retain)
+            => BatchStep(checkpoint, batch, retain, ResidentStepDescription);
 
         /// <summary>
         /// One step on an already-drawn batch, and the one place the loader-step-and-counter
@@ -3229,8 +3242,8 @@ namespace Shorokoo
         /// because <c>Fit</c> must see the loader's position after the draw to know whether this is
         /// the step to bring the state home on.
         /// </summary>
-        internal TrainingCheckpoint ResidentBatchStep(
-            TrainingCheckpoint checkpoint, DataBatch batch, bool retain)
+        private TrainingCheckpoint BatchStep(
+            TrainingCheckpoint checkpoint, DataBatch batch, bool retain, string description)
         {
             if (checkpoint is null) throw new ArgumentNullException(nameof(checkpoint));
             RequireNoRuntimeHyperparameters();
@@ -3241,7 +3254,7 @@ namespace Shorokoo
             // step's loss — so a later Fit(loader) resumes past this batch via RestoreAfter.
             var stepInput = checkpoint.WithCounters(
                 epoch: batch.Position.Epoch, batchIndex: batch.Position.BatchIndex);
-            return RunStep(stepInput, hyperparams: null, batch.Input, batch.Target, retain);
+            return RunStep(stepInput, hyperparams: null, batch.Input, batch.Target, retain, description);
         }
 
         /// <summary>The guard the schedule-driven step paths share: a schedule-less runtime

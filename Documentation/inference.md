@@ -698,8 +698,8 @@ var second = compiled.Execute(x2, weights.Shared());   // weights is still there
 
 `.TryConsume()` sits between the two: the run consumes the tensor if nothing else is reading it
 when the run starts, and reads it otherwise. Fed as it is, a tensor another run is reading is
-refused instead — the call throws `InvalidOperationException` naming the run that holds it, and
-takes nothing — since consuming it would take its memory from under that run.
+refused instead — the call throws `InvalidOperationException` naming the run that holds it — since
+consuming it would take its memory from under that run.
 
 | Fed as | The run | Afterwards |
 |---|---|---|
@@ -710,7 +710,9 @@ takes nothing — since consuming it would take its memory from under that run.
 - **Consumption is irrevocable.** A run that fails, or is stopped, after it started has still
   consumed what it was fed as it is. A run refused before it starts — a cancelled token, a feed
   that is dead, or one being read that it would have to consume — takes nothing: everything it
-  could refuse over is checked before anything is taken.
+  could refuse over is checked before anything is taken. The exception is a race with another
+  thread: a feed that dies, or that another run starts reading, between those checks and this run's
+  taking it refuses the run part-way, and what it had taken by then stays consumed.
 - **One tensor fed twice in one call** is taken at most once: read if any occurrence is
   `.Shared()`, otherwise consumed if any is bare, otherwise tried.
 - **Composites apply the mode to everything they hold.** `TensorDataStruct`, `TensorDataSequence`
@@ -826,10 +828,11 @@ deleted: `Delete()` and `Dispose()` throw `InvalidOperationException`, and `TryD
 So nothing frees memory a run is in the middle of reading. A tensor a run consumes it holds by
 taking it, which no other run can then do.
 
-The lock is taken inside the run, one feed at a time, so it is not held yet while the call is
-being set up — and a deletion landing in that window ends the tensor before the run can claim it,
-which costs you the run: the lock it then asks for is refused and `Execute` throws
-`ObjectDisposedException`. Nothing reads freed memory and no run returns a wrong answer, but
+The lock — or, for a feed the run consumes, the take — happens inside the run, one feed at a time,
+so nothing is held yet while the call is being set up — and a deletion landing in that window ends
+the tensor before the run can claim it, which costs you the run: the lock or take it then asks for
+is refused and `Execute` throws `ObjectDisposedException`, and what it had already taken of its
+other feeds stays consumed. Nothing reads freed memory and no run returns a wrong answer, but
 deleting a feed from a second thread is not something to do while a run of it is starting; see
 [A feed deleted while a run is starting loses that run](limitations.md#a-feed-deleted-while-a-run-is-starting-loses-that-run).
 

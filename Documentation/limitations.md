@@ -212,25 +212,30 @@ wrap such a value with `TensorData.Create(shape, dtype, value, backend)`, naming
 
 ### A feed deleted while a run is starting loses that run
 
-A run locks every tensor it is fed and holds the lock until it returns, so deleting a feed from
+A run holds every tensor it is fed until it returns. One it reads — fed `.Shared()`, or through
+`.TryConsume()` while another run was reading it — it holds under a reader lock, so deleting it from
 another thread *while the run holds it* is refused: `Delete()` and `Dispose()` throw and
-`TryDelete()` declines, and the run reads on — see
-[A tensor's lifetime](inference.md#a-tensors-lifetime-locks-and-deletion). The lock is taken
+`TryDelete()` declines, and the run reads on. One fed as it is, it holds by having taken it: the
+tensor is dead from then on, so a later `Delete()` finds nothing left to do — see
+[A tensor's lifetime](inference.md#a-tensors-lifetime-locks-and-deletion). Either hold is taken
 inside the run, one feed at a time, and everything before that is unprotected: the `Execute` /
-`Run` call itself, the expansion and naming of its inputs, and the locking of whichever feeds come
-first. A deletion landing in that window ends the tensor, so the lock the run then asks for is
-refused and the call throws `ObjectDisposedException`, saying the tensor was deleted.
+`Run` call itself, the expansion and naming of its inputs, and the holding of whichever feeds come
+first. A deletion landing in that window ends the tensor, so the lock or the take the run then asks
+for is refused and the call throws `ObjectDisposedException`, saying the tensor was deleted.
 
 The failure is clean — nothing reads freed memory, and no run returns a wrong answer — but the
-run is lost, and the window is not narrow: it is the whole of the call's setup. It is also the
+run is lost, and not always alone. A run checks every feed before it takes any, so one refused
+before it starts takes nothing; but a feed that dies in this window — or that another run starts
+reading, where this one would consume it — refuses the run part-way, and what it had taken by then
+stays consumed. The window is not narrow: it is the whole of the call's setup. It is also the
 arrangement that [One model, two devices](inference.md#one-model-two-devices) invites — staging
 the next batch while the other device is still reading the last one — which is exactly where it
 is easy to write by accident. Give the concurrent run a tensor of its own (`CopyTo`) or wait for
 it to return.
 
-Nothing detects the deletion *coming*; what the lock gives is a refusal at the moment the run
+Nothing detects the deletion *coming*; what the hold gives is a refusal at the moment the run
 reaches for a tensor that is gone. Closing the window rather than reporting it means taking the
-lock where the caller still holds the tensor — at the entry point, before the inputs are
+hold where the caller still holds the tensor — at the entry point, before the inputs are
 expanded — which also has to hold for `Run`, for `Eval`, and for the one-shot paths that build
 a session of their own.
 

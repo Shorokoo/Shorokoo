@@ -1412,13 +1412,15 @@ the *discount*: what the context holds on the card outside that session's arena 
 the run — the tensors attached to it there, and those the run reads there or copies there to read.
 A tensor already on the card is read where it is and never enters the arena, so it stays in the
 discount for the whole run: measured, a session whose arena was capped at 32 MiB read a 64 MiB
-input from the card with its arena never above 256 bytes, while the same bytes fed from host memory
-had to be copied into the arena and did not fit. What a run consumed is released as it returns, and
-drops out. A run whose discount leaves its arena nothing is refused before it takes anything it was
-fed; one whose arena needs more than it was left fails with ORT's `BFCArena` error. On an RTX 4090,
-under a 256 MiB budget: with nothing held, a session got a 252 MiB arena and a run filling 160 MiB of
-it went through; with a 100 MiB tensor held on the card, the session was rebuilt at 152 MiB and the
-same run failed.
+input from the card with its arena never above 256 bytes, while the same bytes handed to an ONNX
+Runtime session directly from host memory had to be copied into its arena and did not fit. Through
+Shorokoo that second case does not arise: a host tensor fed to a run on the card is copied onto the
+card before the run, outside the arena, and counted in the discount like any other tensor there.
+What a run consumed is released as it returns, and drops out. A run whose discount leaves its arena
+nothing is refused before it takes anything it was fed; one whose arena needs more than it was left
+fails with ORT's `BFCArena` error. On an RTX 4090, under a 256 MiB budget: with nothing held, a
+session got a 252 MiB arena and a run filling 160 MiB of it went through; with a 100 MiB tensor held
+on the card, the session was rebuilt at 152 MiB and the same run failed.
 
 **When a session is built again.** ORT fixes `gpu_mem_limit` when a session is built, and building
 one costs about as much as the graph is large — measured, around 0.7 ms per node, about a second at

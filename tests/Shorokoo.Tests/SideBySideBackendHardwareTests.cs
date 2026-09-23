@@ -353,22 +353,23 @@ public class SideBySideBackendHardwareTests
     public void TestASequenceRefusesTensorsTheCardHoldsRatherThanBecomingUnreadable()
     {
         var cuda = LoadCuda();
-        using var onCard = cuda.CreateUninitializedTensorInBackendMemory(
+        IShorokooTensorValue OnCard() => cuda.CreateUninitializedTensorInBackendMemory(
             ShorokooTensorElementType.Float, [2L]);
-        var onHost = cuda.CreateTensor<float>([1f, 2f], [2L]);
+        IShorokooTensorValue OnHost() => cuda.CreateTensor<float>([1f, 2f], [2L]);
 
+        // A refusal takes over what it was handed, as the contract requires of any failure, so
+        // every attempt is handed values of its own: reusing one reads a released value.
         var refused = Assert.Throws<InvalidOperationException>(
-            () => cuda.CreateSequence([onHost, onCard]));
+            () => cuda.CreateSequence([OnHost(), OnCard()]));
         Assert.Contains("CopyTensorToHost", refused.Message);
-        Assert.Throws<InvalidOperationException>(() => cuda.CreateSequence([onCard]));
+        Assert.Throws<InvalidOperationException>(() => cuda.CreateSequence([OnCard()]));
 
-        // Refused before anything was taken over, so both tensors are still the caller's and the
-        // advice the message gives can still be followed.
-        Assert.Equal([1f, 2f], onHost.GetTensorDataAsSpan<float>().ToArray());
+        // The advice the message gives, followed on a tensor the card holds.
+        using var onCard = OnCard();
         var home = cuda.CreateTensorFromRawBytes(
             ShorokooTensorElementType.Float, cuda.CopyTensorToHost(onCard), [2L]);
 
-        using var sequence = cuda.CreateSequence([onHost, home]);
+        using var sequence = cuda.CreateSequence([OnHost(), home]);
         Assert.Equal(2, sequence.GetValueCount());
         using var element = sequence.GetValue(0);
         Assert.Equal([1f, 2f], element.GetTensorDataAsSpan<float>().ToArray());

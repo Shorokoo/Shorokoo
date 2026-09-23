@@ -14,8 +14,8 @@ namespace Shorokoo.Tests;
 [Trait("Purpose", "Coverage")]
 public class QeePoolConvAuditTests
 {
-    private static readonly TensorData Image1x1x10x10 = F32Zeros([1L, 1L, 10L, 10L]);
-    private static readonly TensorData Image1x3x10x10 = F32Zeros([1L, 3L, 10L, 10L]);
+    private static TensorData Image1x1x10x10 => F32Zeros([1L, 1L, 10L, 10L]);
+    private static TensorData Image1x3x10x10 => F32Zeros([1L, 3L, 10L, 10L]);
 
     [Fact]
     public void TestQeePoolingShapeAudits()

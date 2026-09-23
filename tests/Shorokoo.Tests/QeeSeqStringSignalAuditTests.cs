@@ -15,7 +15,7 @@ namespace Shorokoo.Tests;
 [Trait("Purpose", "Coverage")]
 public class QeeSeqStringSignalAuditTests
 {
-    private static readonly TensorData FloatMat2x3 = F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f);
+    private static TensorData FloatMat2x3 => F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f);
 
     [Fact]
     public void TestQeeSequenceOptionalAndReverseSequenceAudits()

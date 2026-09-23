@@ -1010,7 +1010,7 @@ public class ModulesCoverageTests
         Assert.DoesNotContain(concreteArch.ToInternal().Nodes, n => n.OpCode == InternalOpCodes.FUNCTION_INVOKE);
     }
 
-    private static readonly TensorData VitPatches = TensorDataWithSmallVals(DType.Float32, [1L, 4L, 6L]);
+    private static TensorData VitPatches => TensorDataWithSmallVals(DType.Float32, [1L, 4L, 6L]);
 
     private static TensorData[] VitHypers(
         long embedDim = 4, long numHeads = 2, long ffnDim = 8, long numLayers = 1,

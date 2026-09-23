@@ -977,10 +977,13 @@ for a batch built per step is at the next collection. See
 [Feeding a run](#feeding-a-run-consumed-shared-or-tried) for the rules.
 
 **What consuming does not buy.** ONNX Runtime's memory planner gives every graph input one extra
-use count, precisely so that a caller can still read a feed after `Run` returns, so no input's
-buffer is ever recycled *inside* the run and no session or run option changes that. Consuming moves
-the release from "whenever the caller lets go" to "the instant the run returns"; it does not hand
-the input's bytes to the run's own intermediates.
+use count, precisely so that a caller can still read a feed after `Run` returns, so the planner
+never recycles an input's buffer for the run's own intermediates, and no session or run option
+changes that. Consuming moves the release from "whenever the caller lets go" to "the instant the run
+returns". The one reuse of a consumed input inside a run is an output written into it where the
+graph proves nothing reads the input afterwards —
+[above](#a-run-that-writes-an-output-into-what-it-consumed) — which today only a training step's
+state gets.
 
 ### One model, two devices
 

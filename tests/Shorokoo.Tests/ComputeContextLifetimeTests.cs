@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using Shorokoo.Core.Backends;
 using Shorokoo.Core.Factory;
+using Shorokoo.Core.Factory.IR;
 using Shorokoo.Runtime;
 
 namespace Shorokoo.Tests;
@@ -727,6 +728,62 @@ public class ComputeContextLifetimeCoverageTests
         Assert.Empty(Marked((a, b) => { var t = a * 2f; return [b + (Tensor<float32>)OnnxOp.Cast(OnnxOp.Size(t), null, DType.Float32), t]; }));
         Assert.Empty(Marked((a, b) => [OnnxOp.CumSum(a, Scalar(0L), exclusive: false, reverse: false)]));
         Assert.Empty(Marked((a, b) => [OnnxOp.Identity(a, rank: 1)]));
+    }
+
+    /// <summary>A graph written as a runtime hands one back: inputs and outputs by name, typed where
+    /// the name says so (<c>a:float[4]</c>).</summary>
+    private static GraphProto GraphOf(string inputs, string outputs, params NodeProto[] nodes)
+    {
+        var graph = new GraphProto();
+        graph.Inputs.AddRange(Names(inputs).Select(Info));
+        graph.Outputs.AddRange(Names(outputs).Select(Info));
+        graph.Nodes.AddRange(nodes);
+        return graph;
+    }
+
+    private static string[] Names(string names) => names.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+
+    private static ValueInfoProto Info(string spec)
+    {
+        var (name, type) = (spec.Split(':')[0], spec.Split(':').ElementAtOrDefault(1));
+        if (type is null) return new ValueInfoProto { Name = name };
+        var tensor = new TypeProto.Tensor
+        {
+            ElemType = (int)Enum.Parse<TensorProto.DataType>(type[..type.IndexOf('[')], ignoreCase: true),
+            Shape = new TensorShapeProto(),
+        };
+        tensor.Shape.Dims.AddRange(type[(type.IndexOf('[') + 1)..^1].Split(',')
+            .Select(d => new TensorShapeProto.Dimension { DimValue = long.Parse(d) }));
+        return new ValueInfoProto { Name = name, Type = new TypeProto { TensorType = tensor } };
+    }
+
+    private static NodeProto Op(string op, string inputs, string outputs, string domain = "", GraphProto? body = null)
+    {
+        var node = new NodeProto { OpType = op, Domain = domain };
+        node.Inputs.AddRange(Names(inputs));
+        node.Outputs.AddRange(Names(outputs));
+        if (body is not null)
+            node.Attributes.Add(new AttributeProto { Name = "then_branch", Type = AttributeProto.AttributeType.Graph, G = body });
+        return node;
+    }
+
+    private static GraphProto Initializing(string name, GraphProto graph)
+    {
+        graph.Initializers.Add(new TensorProto { Name = name });
+        return graph;
+    }
+
+    /// <summary>Whether <paramref name="graph"/> proves its output O written into its input
+    /// <paramref name="input"/>.</summary>
+    private static bool Proves(GraphProto graph, string input = "a")
+        => OutputAliasProof.Prove(graph, [new OutputAlias("O", input)]).Count == 1;
+
+    [Fact]
+    public void TestAWrittenGraphRefusesAnAliasWhereARuntimeAliasASubgraphOrADataReadingShapeStillReadsTheInputOrTheTypesDiffer()
+    {
+        var norm = Op("BatchNormalization", "X scale B mean var", "Y rm rv");
+        Assert.False(Proves(GraphOf("X scale B mean var two zero", "O Z Y", norm, Op("Mul", "rm two", "O"), Op("Add", "rm zero", "Z")), "mean"));
+        Assert.True(Proves(GraphOf("X scale B mean var two", "O Y", norm, Op("Mul", "rm two", "O")), "mean"));
     }
 
     [Fact]

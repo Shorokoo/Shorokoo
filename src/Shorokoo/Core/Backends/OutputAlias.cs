@@ -34,12 +34,13 @@ public readonly record struct OutputAlias(string Output, string Input);
 /// <item>Where the graph states their types, the two have one element type — and, where it states
 /// both shapes in full, one shape.</item>
 /// <item>Every node reading <c>I</c>'s memory has run before <c>P</c> writes: it is an ancestor of
-/// <c>P</c>. A node reads <c>I</c>'s memory when it reads <c>I</c> or a view of it — the output of
-/// an <c>Identity</c>, <c>Reshape</c>, <c>Squeeze</c>, <c>Unsqueeze</c>, <c>Flatten</c> and the few
-/// others a runtime implements by handing back the memory it was given. Ancestry counts only the
-/// edges a runtime cannot fold away: an edge into <c>Shape</c> or <c>Size</c> — which read no
-/// memory and are no readers — orders nothing once the shape is known when the session is built,
-/// so it does not count.</item>
+/// <c>P</c>. A node reads <c>I</c>'s memory when it reads <c>I</c> or a view of it — an output a
+/// runtime may hand back in the memory of one of the node's inputs: that of an <c>Identity</c>,
+/// <c>Reshape</c>, <c>Squeeze</c>, <c>Unsqueeze</c>, <c>Flatten</c> and a few others over their first
+/// input, and the running mean and variance of a <c>BatchNormalization</c> over the mean and
+/// variance it was given. Ancestry counts only the edges a runtime cannot fold away: an edge into
+/// <c>Shape</c> or <c>Size</c> — which read no memory and are no readers — orders nothing once the
+/// shape is known when the session is built, so it does not count.</item>
 /// <item><c>P</c> itself reads <c>I</c> only as the first operand of a two-input <c>Add</c>,
 /// <c>Sub</c>, <c>Mul</c> or <c>Div</c>, which reads each element before writing the same element
 /// of its output — the in-place form ONNX Runtime uses for these operators itself. With <c>O</c>
@@ -89,13 +90,27 @@ public static class OutputAliasProof
         return proven;
     }
 
-    // Operators a runtime may implement by handing back the memory of their first input as their
-    // output: whoever reads that output reads the input. Named whatever their domain, which only
-    // ever widens what counts as a reader.
-    private static readonly HashSet<string> Views = new(StringComparer.Ordinal)
+    /// <summary>
+    /// Whether a runtime may hand back <paramref name="node"/>'s input at position
+    /// <paramref name="input"/> as its output at position <paramref name="output"/>, the two being
+    /// one buffer: whoever reads that output reads the input. By position, because that is how
+    /// ONNX Runtime declares it on a kernel, and binds it even where the input is a graph input.
+    /// Its CPU and CUDA kernels in both the standard and Microsoft domains declare the pairs below:
+    /// an output 0 over input 0, <c>BatchNormalization</c> in training mode writing its running mean
+    /// and variance into the buffers of the mean and variance it was given, and, where the runtime
+    /// is built with NCCL, <c>AllReduce</c> handing back each of its inputs. <c>Dropout</c>, an
+    /// identity outside training, is counted as one too, and a sequence built by
+    /// <c>SequenceConstruct</c> or <c>SequenceInsert</c> may hold the memory of any tensor it was
+    /// given. Named whatever their domain, which only ever widens what counts as a reader.
+    /// </summary>
+    private static bool Shares(NodeProto node, int input, int output) => node.OpType switch
     {
-        "Identity", "Reshape", "Squeeze", "Unsqueeze", "Flatten", "Dropout", "ExpandDims",
-        "Optional", "OptionalGetElement", "SequenceConstruct", "SequenceInsert",
+        "Identity" or "Reshape" or "Squeeze" or "Unsqueeze" or "Flatten" or "Dropout" or "ExpandDims"
+            or "Optional" or "OptionalGetElement" => (input, output) is (0, 0),
+        "BatchNormalization" => (input, output) is (3, 1) or (4, 2),
+        "SequenceConstruct" or "SequenceInsert" => output == 0,
+        "AllReduce" => input == output,
+        _ => false,
     };
 
     // Operators that read a tensor's shape and none of its memory.
@@ -183,11 +198,13 @@ public static class OutputAliasProof
                     var node = _nodes[n];
                     if (ShapeOnly.Contains(node.OpType)) continue;
                     readers.Add(n);
-                    if (!Views.Contains(node.OpType) || node.Outputs.Count == 0) continue;
-                    var shared = node.OpType is "SequenceConstruct" or "SequenceInsert"
-                        || (node.Inputs.Count > 0 && node.Inputs[0] == name);
-                    if (shared && node.Outputs[0].Length > 0 && views.Add(node.Outputs[0]))
-                        pending.Enqueue(node.Outputs[0]);
+                    for (int i = 0; i < node.Inputs.Count; i++)
+                    {
+                        if (node.Inputs[i] != name) continue;
+                        for (int o = 0; o < node.Outputs.Count; o++)
+                            if (node.Outputs[o].Length > 0 && Shares(node, i, o) && views.Add(node.Outputs[o]))
+                                pending.Enqueue(node.Outputs[o]);
+                    }
                 }
             }
 

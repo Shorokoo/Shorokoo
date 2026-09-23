@@ -601,7 +601,7 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
-    public void TestTheSameTensorFedTwiceInOneCallIsHeldOnceAndReadIfAnyOccurrenceIsShared()
+    public void TestTheSameTensorFedTwiceInOneCallIsReadIfAnyOccurrenceIsSharedElseFedAsABareOneIfAnyIsBare()
     {
         using var context = new ComputeContext();
         using var other = new ComputeContext();
@@ -611,15 +611,31 @@ public class ComputeContextLifetimeCoverageTests
             var t = Sample();
             using (readElsewhere ? other.Lock(t) : null)
                 Assert.Equal([2f, 6f, 12f, 20f], Floats(context.Execute(graph, first(t), second(t))[0].ToTensorData()));
-            return !t.IsDisposed;
+            var survived = !t.IsDisposed;
+            Assert.Equal(survived, context.Tensors.Contains(t));
+            return survived;
+        }
+        string RefusedWhileReadElsewhere(Func<TensorData, IData> first, Func<TensorData, IData> second)
+        {
+            var t = Sample();
+            using var read = other.Lock(t);
+            var refusal = Assert.Throws<InvalidOperationException>(() => context.Execute(graph, first(t), second(t))).Message;
+            Assert.False(t.IsDisposed);
+            return refusal;
         }
 
         Assert.False(Survives(t => t, t => t));
         Assert.True(Survives(t => t, t => t.Shared()));
+        Assert.True(Survives(t => t.Shared(), t => t));
+        Assert.True(Survives(t => t.Shared(), t => t, readElsewhere: true));
         Assert.True(Survives(t => t.TryConsume(), t => t.Shared()));
+        Assert.True(Survives(t => t.Shared(), t => t.TryConsume()));
         Assert.False(Survives(t => t.TryConsume(), t => t));
         Assert.False(Survives(t => t.TryConsume(), t => t.TryConsume()));
         Assert.True(Survives(t => t.TryConsume(), t => t.TryConsume(), readElsewhere: true));
+        Assert.Contains("is being read by", RefusedWhileReadElsewhere(t => t, t => t));
+        Assert.Equal(RefusedWhileReadElsewhere(t => t, t => t), RefusedWhileReadElsewhere(t => t.TryConsume(), t => t));
+        Assert.Equal(RefusedWhileReadElsewhere(t => t, t => t), RefusedWhileReadElsewhere(t => t, t => t.TryConsume()));
     }
 
     /// <summary>Which of <paramref name="pairs"/> — (output, input) over inputs a and b, output 0

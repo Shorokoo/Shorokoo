@@ -1903,6 +1903,23 @@ public class CoreUtilsCoverageTests
         Assert.All(mustNotFlag, s => Assert.Empty(OrtValuesUsedWithoutKeepingThemAlive(s)));
     }
 
+    [Fact]
+    public void TestAReleasedRuntimeValueRefusesEveryReadRatherThanReadingFreedMemory()
+    {
+        var value = DefaultBackend.Instance.CreateTensor<float>([1f, 2f], [2L]);
+        value.Dispose();
+        Action[] reads =
+        [
+            () => _ = value.ValueType, () => _ = value.ElementType, () => _ = value.Shape,
+            () => _ = value.IsHostAccessible, () => value.GetTensorDataAsSpan<float>(),
+            () => value.GetTensorMutableDataAsSpan<float>(), () => value.GetStringTensorData(),
+            () => value.GetValueCount(), () => value.GetValue(0), () => value.GetSequenceElementType(),
+        ];
+
+        Assert.All(reads, read => Assert.Throws<ObjectDisposedException>(read));
+        value.Dispose();
+    }
+
     // A call made on the OrtValue a wrapper holds, reached bare (`Inner.X()`) or through the
     // wrapper (`ort.Inner.X()`). The receiver root is what has to stay reachable: rooting the
     // wrapper roots the value it holds, which is why both spellings are read the same way.

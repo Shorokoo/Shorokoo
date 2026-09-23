@@ -10,9 +10,28 @@ namespace Shorokoo.OnnxRuntime;
 
 internal sealed class OrtTensorValue : IShorokooTensorValue
 {
-    internal OrtValue Inner { get; }
+    private readonly OrtValue _inner;
 
-    public OrtTensorValue(OrtValue inner) { Inner = inner; }
+    // Set once, by Dispose. A value is released by whoever owns it -- a tensor that died, or a
+    // backend handed it by a run that consumed it -- and a caller that still holds it, through
+    // ToTensorValue() say, must be told rather than handed on to ORT.
+    private int _released;
+
+    /// <summary>
+    /// The ORT value this wraps, refused once this has been released: handing ONNX Runtime a freed
+    /// value is not an error it reports but a read of freed native memory, which takes the process
+    /// down with an access violation nothing can catch. Every path to the value comes through here.
+    /// </summary>
+    /// <exception cref="ObjectDisposedException">This value has been released.</exception>
+    internal OrtValue Inner => Volatile.Read(ref _released) == 0 ? _inner : throw Released();
+
+    public OrtTensorValue(OrtValue inner) { _inner = inner; }
+
+    private static ObjectDisposedException Released() => new(
+        nameof(OrtTensorValue),
+        "This runtime value has been released -- the tensor it belonged to was deleted, or consumed "
+        + "by a run whose backend released it, or it was disposed -- so its memory is gone and "
+        + "nothing may read it.");
 
     public ShorokooOnnxValueType ValueType => (ShorokooOnnxValueType)(int)Inner.OnnxType;
 
@@ -45,6 +64,9 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
     {
         get
         {
+            // Before the cached answer: a released value is not anywhere any more, and a caller
+            // told it is host memory goes on to read it.
+            if (Volatile.Read(ref _released) != 0) throw Released();
             if (_probed) return _hostAccessible;
             // Payload before the flag, both volatile: a Nullable<bool> is two fields written
             // non-atomically, so a reader on a weakly ordered target could see HasValue true ahead
@@ -215,5 +237,11 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
         return (ShorokooTensorElementType)(int)elementType;
     }
 
-    public void Dispose() => Inner.Dispose();
+    /// <summary>Releases the ORT value, once: a second call does nothing, and every read afterwards
+    /// is refused (<see cref="Inner"/>).</summary>
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _released, 1) != 0) return;
+        _inner.Dispose();
+    }
 }

@@ -286,10 +286,14 @@ largest in the run.
 than `.Shared()`, is the lever that does exist: the run consumes it, which releases it the instant
 the run returns instead of when the caller lets go, and allocating on the context removes the
 managed copy beside it. Neither makes the bytes available to
-the run's own intermediates. Doing that means binding an output onto the input through ONNX
-Runtime's I/O binding, which ORT permits and checks nothing about: it buys exactly one
-input-sized buffer, only where an output matches that input's dtype and byte size, and nothing at
-all where the output is a loss.
+the run's own intermediates. The one thing that does is writing an output into the input through
+ONNX Runtime's I/O binding, which ORT permits and checks nothing about: it buys exactly one
+input-sized buffer, only where an output matches that input's dtype and shape and nothing reads
+the input after the output is written, and nothing at all where the output is a loss. A training
+step does that for the state it replaces, whose lowering proves which outputs qualify —
+[A run that writes an output into what it consumed](inference.md#a-run-that-writes-an-output-into-what-it-consumed).
+A graph you compile yourself marks no outputs, so a pipeline of your own still holds its input
+beside its input-shaped output.
 
 ### A sequence's elements live in host memory
 

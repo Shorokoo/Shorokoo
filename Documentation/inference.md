@@ -31,9 +31,11 @@ Related: [core-types.md](core-types.md) · [defining-models.md](defining-models.
   `DefaultBackend.RequireDevice(...)` refuses to start on the wrong one —
   [Which device am I on?](#which-device-am-i-on).
 - **A tensor fed to a run as it is is consumed by that run**: dead once the call is made, and
-  its memory released by the run's backend before the call returns, whatever the run did. Pass
-  it `.Shared()` to have the run only read it, so you can use it again, or `.TryConsume()` to
-  have it consumed only when nothing else is reading it. Structs, sequences, optionals and
+  its memory the run's backend's, released before the call returns whatever the run did — or,
+  where the graph proves nothing reads it after, written over with one of the run's outputs
+  ([A run that writes an output into what it consumed](#a-run-that-writes-an-output-into-what-it-consumed)).
+  Pass it `.Shared()` to have the run only read it, so you can use it again, or `.TryConsume()`
+  to have it consumed only when nothing else is reading it. Structs, sequences, optionals and
   training checkpoints take both —
   [Feeding a run: consumed, shared or tried](#feeding-a-run-consumed-shared-or-tried).
 - A `TensorData` is its memory — one object per allocation, released through the backend that
@@ -673,9 +675,10 @@ without sharing a native runtime.
 ### Feeding a run: consumed, shared or tried
 
 A tensor fed to a run **as it is** is given to that run. The run takes it when it starts — the
-tensor is dead from that moment — and its memory goes to the run's backend, which releases it as
-soon as the run has finished reading it and before the call returns. That is what a batch built
-for one call wants, and it is what the call does:
+tensor is dead from that moment — and its memory goes to the run's backend, which releases it
+before the call returns, or writes one of the run's outputs into it where the graph allows
+([below](#a-run-that-writes-an-output-into-what-it-consumed)). That is what a batch built for one
+call wants, and it is what the call does:
 
 ```csharp
 var result = compiled.Execute(batch)[0].ToTensorData();
@@ -733,6 +736,39 @@ run's memory, and the mode decides what becomes of that copy:
   that memory rather than copied afresh. Writing to the tensor (`AccessModifiableMemory` and the
   like) retires the copy — the next read copies what was written — and the copy goes too when the
   tensor is deleted or consumed.
+
+### A run that writes an output into what it consumed
+
+Memory a run consumes is its backend's, and ONNX Runtime keeps every input of a run until the run
+ends: measured on a card, a 64 MiB input in the session's own arena, read by the graph's first node
+alone and held by nothing but the run, still held its memory when the last node ran — so an arena
+with room for the run's own two 64 MiB blocks could not also take the input. That memory cannot come
+back part-way through a run. What a run can do is write an output **into** it — output aliasing —
+and the same run then fits: the output is produced in the input's memory instead of in a block of
+its own.
+
+That is correct only where nothing reads the input after the output is written, so it happens only
+for outputs a graph's lowering marks after proving exactly that: every node reading the input is one
+the output's writer waits for, and the writer itself reads the input only as an element-wise
+update does. Today the one lowering that marks outputs is the training rig's step, which pairs each
+updated state field with the field it replaces
+([A step writes its state over the state it consumed](training.md#a-step-writes-its-state-over-the-state-it-consumed));
+a graph you compile yourself marks none, and its outputs are always memory of their own. ONNX Runtime
+rewrites a graph before it runs it, and a rewrite can change which nodes read an input, so the
+backend proves each marked pair again over the graph it will actually run and drops any it cannot.
+
+A run then writes a marked output into an input's memory only where:
+
+- **it consumed that input** — memory it was only lent, `.Shared()`, is the caller's, and is read
+  and left as it was;
+- **it was fed as no other input** — one tensor fed twice is read as both;
+- **the output is produced in that memory**, with the input's element type and shape — the shape
+  ONNX Runtime settled when it built the session, so a graph compiled for shapes it leaves open
+  writes its outputs where it always did. On a GPU backend an output a run fetches back to the host
+  is not produced in the card's memory the input is in.
+
+Nothing else changes. The outputs are new `TensorData` objects attached to the running context, the
+consumed input is dead as it always was, and the values are the same.
 
 ### A tensor's lifetime: locks and deletion
 
@@ -1377,8 +1413,17 @@ discount fallen keeps the session, and its lower limit. So:
   rig's state arrives on the card.
 
 An output a session left in its own arena — retained on the device and fed back to the next run of
-the same graph, which is what a resident training run does — is inside that session's limit
-already, and is not discounted again.
+the same graph — is inside that session's limit already, and is not discounted again.
+
+An output a run [wrote into memory it consumed](#a-run-that-writes-an-output-into-what-it-consumed)
+is counted where that memory is, once. The consumed tensor was on the context's books until the run
+took it, so the run's discount counted its bytes, and its arena never had to make room for the
+output. Afterwards the output is on the books in its place: in the discount of later runs where the
+consumed tensor was outside the session's arena — a copy the run made onto the card, or one
+`CopyTo` placed there — and inside the arena, and not discounted, where the consumed tensor was an
+output of that session's own earlier run. A resident training run that begins from an initial
+checkpoint keeps the state it writes over itself outside the arena for the whole run this way, in
+the memory the first step copied the checkpoint into.
 
 **One at a time.** Under a budget, the context's runs are serialized: a second waits for the first
 to return, and so do a transfer onto the context and a compile on it, since each would be counting

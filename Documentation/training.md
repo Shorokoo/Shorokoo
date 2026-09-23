@@ -16,8 +16,11 @@ Related: [defining-models.md](defining-models.md) · [nn-library.md](nn-library.
 - A training step **consumes** what it is fed as it is — the checkpoint's state and the batch — as
   any run does, so `cp = rig.TrainStep(cp, x, y)` releases the state it supersedes as the step runs.
   Feed `cp.Shared()` to keep a checkpoint past the step, and `x.Shared()` for a batch you feed
-  again; the rig's own initial values are only ever read —
-  [What a training step consumes](#what-a-training-step-consumes).
+  again. `CreateInitialCheckpoint()` hands out fresh copies every call, consumed like any other
+  checkpoint — [What a training step consumes](#what-a-training-step-consumes).
+- A step writes its updated state over the state it consumed wherever the step's graph proves
+  nothing still reads the old value, so on a card a resident run holds its state once rather than
+  twice — [A step writes its state over the state it consumed](#a-step-writes-its-state-over-the-state-it-consumed).
 - State (optimizer moments, momentum velocity, BatchNorm running stats) is **created**
   by a `[StateInitializer]` class's `Init(...)` call inside a module's `Inline` (the
   state analog of trainable-parameter initializers) and its per-step update is
@@ -415,9 +418,11 @@ public static TrainingRig FromScratch(
 // Each of the three forms above also has a twin taking a ModelParamList (model.FromOrderedInputs([…]))
 // for sampleInputs.
 
-// Fresh initial checkpoint. Optimizer state is initialized at each hyperparameter's value at the
-// initial counters. Fails loud if the optimizer's state initializer reads a Runtime hyper (its value
-// is unknown at build) — supply explicit values with the overload below.
+// Fresh initial checkpoint: host copies of the rig's initial values, new every call, so a step
+// consumes it like any other checkpoint and the rig keeps its own values for the next one. Optimizer
+// state is initialized at each hyperparameter's value at the initial counters. Fails loud if the
+// optimizer's state initializer reads a Runtime hyper (its value is unknown at build) — supply
+// explicit values with the overload below.
 public TrainingCheckpoint CreateInitialCheckpoint();
 public TrainingCheckpoint CreateInitialCheckpoint(TensorDataStruct hyperparameters); // from MakeHyperparameters(...)
 
@@ -491,7 +496,8 @@ public TrainingResult Train(
 // A training loop that keeps its state where the execution provider produced it, instead of moving
 // the whole of it through host memory on every step — see "Keeping training state on the device".
 // The initial checkpoint is fed to the first step as TrainStep feeds one: consumed as it is, read
-// when passed .Shared(). The default, CreateInitialCheckpoint(), is the rig's own and only read.
+// when passed .Shared(). The default is a fresh CreateInitialCheckpoint(), which the first step
+// consumes.
 public ResidentTrainingRun BeginResidentRun(TrainingCheckpoint? initialCheckpoint = null);
 ```
 
@@ -543,10 +549,19 @@ rather than whenever the old checkpoint is collected.
   `WithTrainableParams`, …) carry the mode through. Reading a consumed checkpoint's state throws,
   naming the training step that took it and the section it fed ("the checkpoint's trainable
   parameter …").
-- **The rig's own initial values are only ever read.** A rig keeps the values
-  `CreateInitialCheckpoint()` hands out for every initial checkpoint it makes, so a step fed one
-  reads them whatever its mode, and a run begun from one takes nothing of the rig's. The step
-  counters the rig builds for a step are its own, and consumed.
+- **An initial checkpoint is a copy.** `CreateInitialCheckpoint()` copies the rig's initial values
+  into tensors of the checkpoint's own on every call, and so does a load that falls back on the
+  rig for a component its file omits. A step consumes one like any other checkpoint, which takes
+  nothing of the rig's: the rig's own values are never fed to a run at all, and the next initial
+  checkpoint is whole. To start several steps or runs from one initial state, call it once for
+  each, or pass one checkpoint `.Shared()`. The step counters the rig builds for a step are its
+  own, and consumed.
+
+  ```csharp
+  var start = rig.CreateInitialCheckpoint();
+  var a = rig.TrainStep(start.Shared(), x.Shared(), y.Shared());   // start is kept
+  var b = rig.TrainStep(start, x, y);                              // start is consumed
+  ```
 - **Batches** are the caller's, fed as passed. `TrainStep`, a resident run's `Step` and a
   `DataBatch` take a `TensorDataStruct` or one passed through `.Shared()` / `.TryConsume()`;
   anything else is refused with an `ArgumentException` naming the struct definitions to build it
@@ -595,9 +610,11 @@ Read it as a cost model:
   valid: the run gives up the right to free that state when it hands it to you, and only reads it
   from then on.
 - **Each step consumes the state the run's last step produced**, which is how a resident run
-  releases state as it is superseded. The checkpoint you begin from is fed to the first step as you
-  passed it — consumed as it is, read and left yours when passed `.Shared()` — and the default,
-  `CreateInitialCheckpoint()`, is the rig's own and only read.
+  releases state as it is superseded — and writes the new state over it where it can, see
+  [below](#a-step-writes-its-state-over-the-state-it-consumed). The checkpoint you begin from is fed
+  to the first step as you passed it — consumed as it is, read and left yours when passed
+  `.Shared()` — and the default, a fresh `CreateInitialCheckpoint()`, is consumed by the first
+  step like any other.
 - **A step that fails can take the run with it.** A step takes the state it trains from when it
   starts, so one that fails after consuming the run's own state leaves nothing to train from: every
   later step throws `InvalidOperationException` saying so. Begin a new run from the last checkpoint
@@ -615,6 +632,46 @@ next supersedes it.
 
 > A checkpoint's tensors are readable exactly when they are on the host. Reading one a run is still
 > holding on the device throws and says so; that state reaches you through `StepToCheckpoint`.
+
+### A step writes its state over the state it consumed
+
+ONNX Runtime keeps every input of a run until the run ends — measured on a card: a 64 MiB feed
+read by a graph's first node alone still held its memory when the last node ran — so memory a step
+consumes cannot come back part-way through the step to be used for something else. What a step
+does instead is write its new state *into* that memory: the updated weight into the weight it
+replaces, each updated optimizer moment into the moment. That is right only where nothing reads the
+old value after the new one is written, as in an optimizer's element-wise update
+(`W ← W − lr·g`), so it is done only where the step's graph proves it: the rig pairs each updated
+state field with the field it replaces, and a pair is used only where every node reading the old
+value is one the update waits for. The backend proves each pair again over the graph ONNX Runtime
+actually runs, whose rewrites can change which nodes read what.
+
+It applies:
+
+- **To state the step consumed** — a checkpoint fed as it is, and a resident run's own state. A
+  checkpoint fed `.Shared()` is only read, and is left exactly as it was.
+- **Where the new state is produced in the memory the old is in** — every step on a CPU backend,
+  and a resident run's `Step` on a GPU, whose state stays on the card. A `TrainStep` or a
+  `StepToCheckpoint` on a GPU brings the new state home to the host, so it writes nothing over the
+  state it consumed on the card.
+- **To the state the graph proves.** Optimizer state qualifies where nothing but its own update
+  reads the old value, as AdamW's moments and step counter do. A weight qualifies where everything
+  that reads it is something its update waits for; a weight that the backward pass reads
+  directly, to pass a gradient on to an earlier layer, is written anew — a model of two bare
+  `MatMul` weights has its first marked and not its second, where a stack of `Linear` layers under
+  AdamW, measured on a card, has every weight, bias and moment written over.
+
+Nothing changes in what you see. The step returns new tensors, what it consumed is dead as it always
+was, and the results are the same to the bit — measured on a card, with it and without it, and
+under a device-memory budget. There is nothing to turn on.
+
+What it saves, measured on an RTX 4090: one 4096×4096 `Linear` layer under AdamW — 192 MiB of
+weight and moments — in a resident run with shrinkage on needed 704 MiB of arena at each step's
+peak without it and 320 MiB with it, and the card's own peak fell by the same 384 MiB: twice the
+state, since neither the state a step consumes nor the state it produces sits in the arena beside
+the step's working memory any more. Under a device-memory budget the state is still counted —
+once, where it lives — see
+[inference.md](inference.md#a-run-that-writes-an-output-into-what-it-consumed).
 
 ### What construction costs
 
@@ -665,7 +722,8 @@ per-step test. A model whose whole checkpoint is a few kilobytes only reaches th
 of steps, so it pays essentially nothing; a model producing a few MiB a step pays one collection
 every few steps; one producing hundreds of MiB a step pays one per step, which is what a run of that
 size has to pay to survive at all. Collecting in your own loop is normally unnecessary and changes
-nothing but the timing. The rig's own initial values never count: it keeps them whatever you do.
+nothing but the timing. An initial checkpoint is state like any other here: its tensors are copies,
+yours to drop.
 
 The rig backs off when a collection turns out to free nothing — a caller that keeps every checkpoint
 buys nothing from one — by watching weakly what it handed back and seeing whether a later collection
@@ -759,8 +817,9 @@ See [Device memory](inference.md#device-memory-gpu-backends).
 rig's budgeted collection governs *host* memory there, while a context's `DeviceMemory` settings
 reach only device memory: a process whose RSS climbs is not helped by a device-memory budget, and a
 card that fills up is not helped by the rig's reclamation. A resident run is the case where the two meet — its state
-stays in the arena, and the run releases it deterministically as each step supersedes it, which is
-why a retained step does not go through the rig's collection at all. A `StepToCheckpoint` step hands
+stays on the card, written over itself from step to step where the step's graph allows, and the run
+releases what it supersedes deterministically, which is why a retained step does not go through the
+rig's collection at all. A `StepToCheckpoint` step hands
 state back to you instead, so that one is reclaimed like any other.
 
 Result types:

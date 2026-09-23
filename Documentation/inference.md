@@ -1461,8 +1461,8 @@ keeps — its weights, and outputs left there — rather than its peak. A contex
 is none of this.
 
 What the budget does *not* count — spare blocks, the allocator tensors are placed from, a session's
-weights between its runs — is in
-[Known limitations](limitations.md#a-device-memory-budget-counts-tensors-not-arenas).
+weights between its runs, memory a tensor that has died still holds while a run finishes with it —
+is in [Known limitations](limitations.md#a-device-memory-budget-counts-tensors-not-arenas).
 
 ### What one session's arena did
 

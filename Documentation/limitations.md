@@ -262,6 +262,13 @@ exact. What it does not count is memory the card is holding all the same:
   has compiled several graphs with large weights holds all of them at once, which the budget sees
   only one at a time. A session rebuilt for a lower limit leaves its old arena alive for as long as
   outputs its runs left there are.
+- **Memory a dead tensor still holds.** The books count live tensors, and a tensor leaves them the
+  moment it dies, which can be before its memory comes back. One deleted with `DeleteAsync` while a
+  run is reading it holds its memory until that run returns; one a run of another context consumes
+  holds it until that run has finished with it. A budgeted context's own runs close that window,
+  since nothing is placed on the context while one is in flight; a run of another context, reading
+  or consuming a tensor this context also has on its books, leaves it open until that run returns,
+  and for that long the budget undercounts the card.
 
 So a budget is a ceiling on what the context counts, and the card can be holding more: leave it
 headroom, and read `DeviceMemory.Read()` for what the card is really carrying.

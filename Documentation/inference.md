@@ -1516,7 +1516,7 @@ runtime split pays here for every value that crosses.
 
 ### Per-run statistics on the context
 
-Persisted tensors belong to a `ComputeContext`, so what its runs cost is answerable there.
+A `ComputeContext` makes the runs, so what they cost is answerable there.
 Collection is **off by default** and costs nothing until asked for:
 
 ```csharp

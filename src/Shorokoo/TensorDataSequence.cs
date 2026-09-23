@@ -404,6 +404,10 @@ namespace Shorokoo
         /// </summary>
         internal void ElementWritten() => RetireCopies();
 
+        /// <summary>Retires every copy runs built of this sequence, for a caller that knows they will
+        /// not be read again soon; see <see cref="TensorData.ReleaseRunCopies"/>.</summary>
+        internal void ReleaseRunCopies() => RetireCopies();
+
         /// <summary>Retires every copy runs built of this sequence, which lives no longer than
         /// it.</summary>
         private void RetireCopies()

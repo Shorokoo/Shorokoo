@@ -502,6 +502,13 @@ namespace Shorokoo
             return null;
         }
 
+        /// <summary>
+        /// Retires every copy runs made of this tensor, as a write would, for a caller that knows the
+        /// copies will not be read again soon: a training step letting go of the copies of the batch
+        /// it read, which would otherwise stay in the run's memory for as long as the batch lives.
+        /// </summary>
+        internal void ReleaseRunCopies() => RetireCopies();
+
         /// <summary>Records that <paramref name="sequence"/> holds this tensor as one of its own
         /// elements, so that a write to this tensor reaches the copies runs built of it.</summary>
         internal void BelongsTo(TensorDataSequence sequence) => Volatile.Write(ref _sequence, sequence);

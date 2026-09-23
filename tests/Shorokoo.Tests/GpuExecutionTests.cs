@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using Microsoft.ML.OnnxRuntime;
 using Shorokoo.Core.Backends;
+using Shorokoo.Core.Factory;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 using Shorokoo.Modules.Losses;
 using Shorokoo.Modules.Optimizers;
@@ -80,39 +81,116 @@ public class GpuExecutionTests
     }
 
     /// <summary>
-    /// A tensor moved onto the card is allocated under the owning context's budget, so one that
-    /// does not fit fails instead of taking the rest of the device — and what it is holding is
-    /// reported against that budget rather than against a session's.
+    /// A transfer onto the card is refused before it allocates when the context's budget cannot
+    /// take it alongside what is attached there — a copy, an allocation, a tensor already on the
+    /// card handed over as it stands, and the copy a run would make of what it is fed — naming the
+    /// budget, what is attached and what was asked. The same tensor fits a context with no budget,
+    /// so what refused it was the budget and not the card; and what the context lets go of is room
+    /// it has again.
     /// </summary>
     [CudaFact]
-    public void CudaProvider_ATensorMovedOntoTheCardIsBoundedByItsContextsDeviceMemoryBudget()
+    public void CudaProvider_ATransferPastItsContextsBudgetIsRefusedBeforeItAllocatesOnTheCard()
     {
-        const long limit = 64L * 1024 * 1024;
+        const long MiB = 1024 * 1024;
         using var budgeted = new ComputeContext
         {
-            DeviceMemory = new DeviceMemorySettings { LimitBytes = limit },
+            DeviceMemory = new DeviceMemorySettings { LimitBytes = 64 * MiB },
         };
         using var uncapped = new ComputeContext();
 
-        Assert.Null(budgeted.ReadTransferArenaStatistics());
+        var held = TensorData([12L << 20], new float[12 << 20]).CopyTo(budgeted);
+        Assert.False(held.IsHostResident);
+        Assert.Equal(new DeviceMemoryUse(48 * MiB, 1, 64 * MiB), budgeted.ReadDeviceMemoryUse());
 
-        var fits = TensorData([4L * 1024 * 1024], new float[4 * 1024 * 1024]).CopyTo(budgeted);
-        Assert.False(fits.IsHostResident);
+        var tooBig = TensorData([8L << 20], new float[8 << 20]);
+        var refused = Assert.Throws<InvalidOperationException>(() => tooBig.CopyTo(budgeted));
+        Assert.Contains("asks this compute context for 33554432 bytes of CUDA device 0 memory", refused.Message);
+        Assert.Contains("is 67108864 bytes, and 50331648 bytes of it are attached", refused.Message);
+        Assert.Throws<InvalidOperationException>(() => tooBig.To(budgeted));
+        Assert.Throws<InvalidOperationException>(() => budgeted.AllocateUninitialized<float32>(new Shape(8L << 20)));
+        var onTheCard = tooBig.CopyTo(uncapped);
+        Assert.False(onTheCard.IsHostResident);
+        Assert.Throws<InvalidOperationException>(() => onTheCard.To(budgeted));
 
-        var arena = budgeted.ReadTransferArenaStatistics();
-        Assert.NotNull(arena);
-        Assert.Equal(limit, arena!.Value.LimitBytes);
-        Assert.True(arena.Value.InUseBytes >= 16L * 1024 * 1024);
+        var x = InputVector<float32>();
+        var doubled = budgeted.Compile(new InternalComputationGraph([x], [x + x]));
+        Assert.Throws<InvalidOperationException>(() => doubled.Execute(tooBig));
+        Assert.False(tooBig.IsDisposed);
+        Assert.Equal(new DeviceMemoryUse(48 * MiB, 1, 64 * MiB), budgeted.ReadDeviceMemoryUse());
 
-        var tooBig = TensorData([32L * 1024 * 1024], new float[32 * 1024 * 1024]);
-        var refused = Assert.ThrowsAny<OnnxRuntimeException>(() => tooBig.CopyTo(budgeted));
-        Assert.Contains("BFCArena", refused.Message);
+        held.Delete();
+        Assert.Same(onTheCard, onTheCard.To(budgeted));
+        Assert.Equal(new DeviceMemoryUse(32 * MiB, 1, 64 * MiB), budgeted.ReadDeviceMemoryUse());
+    }
 
-        // The same tensor fits a context that named no ceiling, so what refused it was the budget
-        // and not the card.
-        var elsewhere = tooBig.CopyTo(uncapped);
-        Assert.False(elsewhere.IsHostResident);
-        Assert.NotEqual(limit, uncapped.ReadTransferArenaStatistics()!.Value.LimitBytes);
+    /// <summary>
+    /// A run's arena is capped at the budget less what the context holds on the card: with nothing
+    /// held, a run whose arena needs 160 MiB fits a 256 MiB budget; with 100 MiB held on the card
+    /// the session is built again with the room that leaves, and the same run fails where the arena
+    /// passes it. A graph compiled once the tensor is gone gets the room back.
+    /// </summary>
+    [CudaFact]
+    public void CudaProvider_ARunsArenaIsCappedAtItsContextsBudgetLessWhatTheContextHoldsOnTheCard()
+    {
+        const long MiB = 1024 * 1024;
+        using var ctx = new ComputeContext
+        {
+            DeviceMemory = new DeviceMemorySettings { LimitBytes = 256 * MiB },
+        };
+        var filled = ArenaProbeModels.Filled(ctx);
+        IData Ones() => ArenaProbeModels.FilledShape(40L << 20);
+
+        Assert.Equal(252 * MiB, filled.DeviceMemory.LimitBytes);
+        Assert.True(ArenaProbeModels.Sum(filled.Execute(Ones())) > 0f);
+        Assert.Equal(252 * MiB, Assert.IsType<ArenaStatistics>(filled.ReadArenaStatistics()).LimitBytes);
+
+        var held = TensorData([25L << 20], new float[25 << 20]).CopyTo(ctx);
+        var failed = Assert.ThrowsAny<OnnxRuntimeException>(() => filled.Execute(Ones()));
+        Assert.Contains("BFCArena", failed.Message);
+        Assert.Equal(152 * MiB, filled.DeviceMemory.LimitBytes);
+        Assert.Equal(152 * MiB, Assert.IsType<ArenaStatistics>(filled.ReadArenaStatistics()).LimitBytes);
+
+        held.Delete();
+        var again = ArenaProbeModels.Filled(ctx);
+        Assert.Equal(252 * MiB, again.DeviceMemory.LimitBytes);
+        Assert.True(ArenaProbeModels.Sum(again.Execute(Ones())) > 0f);
+    }
+
+    /// <summary>
+    /// What <c>gpu_mem_limit</c> caps, measured on a session of its own: only what its arena
+    /// allocates. A 64 MiB input already on the card is read where it is by a session whose arena is
+    /// capped at 32 MiB, and the arena never holds it; the same bytes fed from host memory have to
+    /// be copied into the arena, and do not fit. That is why a context's budget discounts what it
+    /// holds on the card from the arena's limit for the length of the run.
+    /// </summary>
+    [CudaFact]
+    public void CudaProvider_AnArenaLimitCapsWhatTheArenaAllocatesAndNotAnInputReadWhereItIs()
+    {
+        const long MiB = 1024 * 1024;
+        var backend = DefaultBackend.Instance;
+        var x = InputVector<float32>("x");
+        var proto = FastOnnxModelBuilder.BuildInternalOnnxModel(
+            new InternalComputationGraph([x], [OnnxOp.ReduceSum(x)]), prepForOnnx: true);
+        var model = new MemoryStream();
+        ProtoBuf.Serializer.Serialize(model, proto);
+        using var session = backend.CreateSession(
+            model.ToArray(), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal,
+            new DeviceMemorySettings { LimitBytes = 32 * MiB }.Resolve(reusedAcrossShapes: false));
+        var bytes = new byte[64 * MiB];
+        IReadOnlyList<IShorokooTensorValue> Run(IShorokooTensorValue input) => session.Run(
+            new Dictionary<string, IShorokooTensorValue> { [session.InputNames[0]] = input },
+            session.OutputNames, RunSettings.Default);
+
+        using var onCard = backend.CreateTensorInBackendMemory(ShorokooTensorElementType.Float, bytes, [16L << 20]);
+        Assert.False(onCard.IsHostAccessible);
+        foreach (var output in Run(onCard)) output.Dispose();
+        var arena = Assert.IsType<ArenaStatistics>(session.ReadArenaStatistics());
+        Assert.Equal(32 * MiB, arena.LimitBytes);
+        Assert.True(arena.MaxInUseBytes < 32 * MiB);
+
+        using var onHost = backend.CreateTensorFromRawBytes(ShorokooTensorElementType.Float, bytes, [16L << 20]);
+        Assert.True(onHost.IsHostAccessible);
+        Assert.Contains("BFCArena", Assert.ThrowsAny<OnnxRuntimeException>(() => Run(onHost)).Message);
     }
 
     /// <summary>

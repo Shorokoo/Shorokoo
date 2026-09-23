@@ -8,6 +8,21 @@ using Shorokoo.Core.Backends;
 namespace Shorokoo.Runtime
 {
     /// <summary>
+    /// What a run will hold in its compute context's memory outside the arena of the session that
+    /// runs it, planned before it takes anything (<see cref="RunFeeds.Plan"/>).
+    /// </summary>
+    /// <param name="Attached">The bytes of the live tensors attached to the context there.</param>
+    /// <param name="AttachedTensors">How many tensors those are.</param>
+    /// <param name="Added">The bytes the run adds to them: what it reads there in place that the
+    /// context has not counted, and the copies it makes there.</param>
+    /// <param name="Copies">Of <paramref name="Added"/>, the bytes of the copies it will make.</param>
+    internal readonly record struct DevicePlan(long Attached, int AttachedTensors, long Added, long Copies)
+    {
+        /// <summary>All of it: the discount the session's arena limit is cut from the budget by.</summary>
+        internal long Outside => Attached + Added;
+    }
+
+    /// <summary>
     /// A run's reader lock on one tensor or sequence, taken by the compute context running it, from
     /// <c>ComputeContext.Lock</c>. While it is held the tensor cannot be deleted — a delete is
     /// refused, declined, or negotiated through <see cref="Eviction"/> — nor consumed by another
@@ -128,6 +143,10 @@ namespace Shorokoo.Runtime
     /// (<see cref="IShorokooSession.RunConsuming"/>) and is the backend's from then on, on every
     /// path. Consumed memory that never reached that call is still this run's, and is released when
     /// the run gives up.</item>
+    /// <item><b>Under a device-memory budget</b>, what the run will hold in the context's memory is
+    /// planned before anything is taken (<see cref="Plan"/>), the session is chosen against it, and
+    /// each copy the run then makes is admitted against that plan — so a run the budget cannot fit
+    /// is refused having taken nothing.</item>
     /// </list>
     /// </summary>
     internal sealed class RunFeeds : IDisposable
@@ -140,6 +159,22 @@ namespace Shorokoo.Runtime
         private readonly IShorokooBackend _backend;
         private readonly RunIdentity _run;
         private readonly List<TensorLease> _leases = [];
+
+        // The memory the running backend computes in, which is what a budget on the context counts.
+        private readonly MemorySpace _space;
+
+        // What Prepare made of the inputs: one target per distinct tensor or sequence, and the one
+        // each input feeds.
+        private IReadOnlyList<NamedModelParam>? _inputs;
+        private List<Target>? _targets;
+        private Target[]? _targetOf;
+
+        // Under a budget, once admitted: the arena limit of the session this run will use, the plan
+        // it was chosen by, and the bytes of the copies the run has really made so far.
+        private bool _admitted;
+        private long _arenaLimit;
+        private DevicePlan _plan;
+        private long _copiedBytes;
 
         // Everything this run took, whatever it then does with the memory: released when the run
         // gives up unless the backend was handed it, or it was released already.
@@ -165,7 +200,13 @@ namespace Shorokoo.Runtime
             _context = context;
             _backend = backend;
             _run = run;
+            _space = backend.MemorySpace;
+            Budget = context.BudgetIn(_space);
         }
+
+        /// <summary>The device-memory budget this run is under — its context's, where the memory
+        /// its backend computes in is a device's — or null where there is none.</summary>
+        internal long? Budget { get; }
 
         /// <summary>How many inputs are held, by a lock or by consumption.</summary>
         internal int Held => _held;
@@ -177,19 +218,27 @@ namespace Shorokoo.Runtime
         internal IReadOnlyCollection<IShorokooTensorValue> Consumed => _consumed;
 
         /// <summary>
-        /// Holds every input and builds what the session is fed for each, keyed by the session's
-        /// name for it (<paramref name="sessionNameOf"/>). See the class for the rules.
+        /// <see cref="Prepare"/> and then <see cref="Feed(Func{string, string})"/>, for a run with
+        /// nothing to decide in between.
+        /// </summary>
+        internal Dictionary<string, IShorokooTensorValue> Feed(
+            IReadOnlyList<NamedModelParam> inputs, Func<string, string> sessionNameOf)
+        {
+            Prepare(inputs);
+            return Feed(sessionNameOf);
+        }
+
+        /// <summary>
+        /// Works out what each input feeds — one target per distinct tensor or sequence, in the order
+        /// they first appear — and refuses, before anything is taken, every feed that cannot be held.
         /// </summary>
         /// <exception cref="ObjectDisposedException">A feed is dead. Nothing was taken.</exception>
         /// <exception cref="InvalidOperationException">A feed to be consumed is being read by
         /// another run, or is of a kind nothing knows how to hold. Nothing was taken.</exception>
-        internal Dictionary<string, IShorokooTensorValue> Feed(
-            IReadOnlyList<NamedModelParam> inputs, Func<string, string> sessionNameOf)
+        internal void Prepare(IReadOnlyList<NamedModelParam> inputs)
         {
             ArgumentNullException.ThrowIfNull(inputs);
 
-            // What each input feeds, one target per distinct tensor or sequence, in the order they
-            // first appear.
             var byFeed = new Dictionary<object, Target>(ReferenceEqualityComparer.Instance);
             var targets = new List<Target>();
             var targetOf = new Target[inputs.Count];
@@ -213,6 +262,26 @@ namespace Shorokoo.Runtime
             // the run gives up.
             foreach (var target in targets) target.RefuseIfCannotBeHeld(_run);
 
+            _inputs = inputs;
+            _targets = targets;
+            _targetOf = targetOf;
+        }
+
+        /// <summary>
+        /// Holds every input <see cref="Prepare"/> was given and builds what the session is fed for
+        /// each, keyed by the session's name for it (<paramref name="sessionNameOf"/>). See the class
+        /// for the rules.
+        /// </summary>
+        /// <exception cref="ObjectDisposedException">A feed died after it was prepared.</exception>
+        /// <exception cref="InvalidOperationException">A feed to be consumed came to be read by
+        /// another run after it was prepared, or a copy the run had to make that its plan did not
+        /// foresee would take its context past its device-memory budget.</exception>
+        internal Dictionary<string, IShorokooTensorValue> Feed(Func<string, string> sessionNameOf)
+        {
+            var inputs = _inputs ?? throw new InvalidOperationException("A run was fed before it was prepared.");
+            var targets = _targets!;
+            var targetOf = _targetOf!;
+
             // Reads first, then consumptions: a lock refused because its tensor died in between is
             // then refused before this run has taken anything.
             foreach (var target in targets)
@@ -232,6 +301,108 @@ namespace Shorokoo.Runtime
             for (int i = 0; i < inputs.Count; i++)
                 fed[sessionNameOf(inputs[i].ParamName)] = targetOf[i].Value!;
             return fed;
+        }
+
+        /// <summary>
+        /// What this run will hold in its context's memory for as long as it runs, outside the arena
+        /// of the session that runs it — worked out before anything is taken, so the session can be
+        /// chosen, and the run refused, while nothing has been spent.
+        ///
+        /// <para>That is every live tensor attached to the context there, and what the run adds to
+        /// it: each tensor it is fed that it reads in place there and the context has not yet
+        /// counted, and each copy it will have to make there of one it cannot read where it is —
+        /// or the copy already held, where one is. A sequence is read through the host and adds
+        /// nothing. What is in <paramref name="excludingArena"/> — the arena of the session about to
+        /// run, where its own earlier runs left their outputs — is inside that session's limit
+        /// already, and is left out.</para>
+        /// </summary>
+        internal DevicePlan Plan(object? excludingArena)
+        {
+            var targets = _targets ?? throw new InvalidOperationException("A run was planned before it was prepared.");
+            var counted = new HashSet<TensorData>(ReferenceEqualityComparer.Instance);
+            long attached = 0;
+            var attachedTensors = 0;
+            foreach (var tensor in _context.AttachedTensorsIn(_space, excludingArena))
+            {
+                counted.Add(tensor);
+                attached += tensor.ByteCount;
+                attachedTensors++;
+            }
+
+            long added = 0;
+            long copies = 0;
+            foreach (var target in targets)
+            {
+                // A sequence's value is built in host memory whatever the provider.
+                if (target.Subject is not TensorData tensor) continue;
+                TensorData? resident = tensor;
+                if (!tensor.FeedsInPlace(_backend))
+                {
+                    var where = TensorData.RunMemoryOf(_backend, tensor.DType);
+                    if (where.Space != _space) continue;
+                    resident = tensor.CopyHeldAt(where);
+                    if (resident is null)
+                    {
+                        added += tensor.ByteCount;
+                        copies += tensor.ByteCount;
+                        continue;
+                    }
+                }
+                if (resident.Space != _space) continue;
+                if (excludingArena is not null && ReferenceEquals(resident.Arena, excludingArena)) continue;
+                if (counted.Add(resident)) added += resident.ByteCount;
+            }
+            return new DevicePlan(attached, attachedTensors, added, copies);
+        }
+
+        /// <summary>
+        /// Records the session this run was admitted to — its arena limit, and the plan it was
+        /// chosen by — so each copy the run then makes in the context's memory is held to it.
+        /// </summary>
+        internal void Admit(long arenaLimit, DevicePlan plan)
+        {
+            _admitted = true;
+            _arenaLimit = arenaLimit;
+            _plan = plan;
+        }
+
+        /// <summary>
+        /// The refusal of a run when what it would hold in its context's memory leaves nothing of the
+        /// context's budget for the arena it computes in. Thrown before anything is taken.
+        /// </summary>
+        internal InvalidOperationException NoRoom(long limit, DevicePlan plan)
+            => new(
+                $"{_run} would hold {Figure(plan.Outside)} bytes of {_space} outside its own arena — "
+                + $"{Figure(plan.Attached)} bytes of the {Figure(plan.AttachedTensors)} tensor(s) "
+                + $"attached to its compute context there, and {Figure(plan.Added)} bytes more that it "
+                + "reads there or copies there to read — which leaves nothing of the context's "
+                + $"{Figure(limit)}-byte device-memory budget (DeviceMemorySettings.LimitBytes) for the "
+                + "arena the run computes in. Nothing it was fed has been taken. Delete what the "
+                + "context no longer needs, feed less at once, or give the context a larger budget.");
+
+        private static string Figure(long value) => ComputeContext.Figure(value);
+
+        /// <summary>
+        /// Admits a copy of <paramref name="source"/> this run is about to make in its context's
+        /// memory, against the plan its session was chosen by: made as planned, a copy always fits.
+        /// One the plan did not foresee — the held copy another thread retired or took in between —
+        /// is refused where it would leave the session's arena less than its limit.
+        /// </summary>
+        /// <exception cref="InvalidOperationException">The copy does not fit.</exception>
+        private void AdmitCopy(TensorData source)
+        {
+            if (!_admitted || Budget is not { } limit) return;
+            if (TensorData.RunMemoryOf(_backend, source.DType).Space != _space) return;
+            _copiedBytes += source.ByteCount;
+            var outside = _plan.Outside - _plan.Copies + _copiedBytes;
+            if (outside <= limit - _arenaLimit) return;
+            throw new InvalidOperationException(
+                $"{_run} has to copy {source.Describe()} into {_space} to read it, and with that "
+                + $"copy it would hold {Figure(outside)} bytes there outside its own arena, which with "
+                + $"the {Figure(_arenaLimit)} bytes its session's arena may take is more than its "
+                + $"compute context's {Figure(limit)}-byte device-memory budget "
+                + "(DeviceMemorySettings.LimitBytes). What it had taken by then stays taken. Delete "
+                + "what the context no longer needs, or give the context a larger budget.");
         }
 
         /// <summary>
@@ -356,7 +527,7 @@ namespace Shorokoo.Runtime
             // Incompatible memory: the contents go into the run's memory, the tensor is spent, and
             // the copy is what is consumed. Its own memory is released now rather than after the
             // run, which is the point of consuming it.
-            var copy = tensor.TakeRunCopy(_backend, _context.DeviceMemory, death);
+            var copy = tensor.TakeRunCopy(_backend, AdmitCopy, death);
             var value = Hand(copy, copy.UncheckedValue(_backend));
             tensor.ReleaseTaken();
             return value;
@@ -378,7 +549,7 @@ namespace Shorokoo.Runtime
             // reads it, which is what it now occupies memory for.
             for (int attempt = 0; ; attempt++)
             {
-                var copy = tensor.SharedCopyFor(_backend, _context.DeviceMemory);
+                var copy = tensor.SharedCopyFor(_backend, AdmitCopy);
                 try
                 {
                     _leases.Add(_context.Lock(copy, _run));

@@ -16,9 +16,10 @@ namespace Shorokoo.Tests;
 /// this at all otherwise. What a second card would add is confidence that the copy itself lands
 /// correctly on a device this process has not been using, which no stub can stand in for.</para>
 ///
-/// <para>The same stubs cover which context's <see cref="DeviceMemorySettings"/> a placed tensor is
-/// allocated under, and which backend a tensor's memory is released through, for the same reason:
-/// a stub is what makes those hand-offs observable.</para>
+/// <para>The same stubs cover which backend a tensor's memory is released through, and a context's
+/// device-memory budget — what it counts, what it refuses, the arena limit its sessions are built
+/// with and when they are built again — for the same reason: a stub card is what makes those
+/// hand-offs observable without one.</para>
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
@@ -164,33 +165,226 @@ public class CrossDeviceRoutingCoverageTests
     }
 
     [Fact]
-    public void TestATensorPlacedOnACardIsAllocatedUnderTheTargetContextsBudgetAndStaysThere()
+    public void TestAContextCountsTheTensorsAttachedToItInItsOwnMemoryAgainstItsBudget()
     {
         var card = new StubBackend(ComputeDevice.Cuda, 0);
-        var tight = new DeviceMemorySettings { LimitBytes = 1L << 20 };
-        var wide = new DeviceMemorySettings { LimitBytes = 1L << 30 };
-        using var small = new ComputeContext(card) { DeviceMemory = tight };
-        using var large = new ComputeContext(card) { DeviceMemory = wide };
+        using var budgeted = new ComputeContext(card) { DeviceMemory = Budget(64) };
         using var unbudgeted = new ComputeContext(card);
+        using var onHost = new ComputeContext(new StubBackend(ComputeDevice.Cpu, null)) { DeviceMemory = Budget(64) };
+        Assert.Equal(new DeviceMemoryUse(0, 0, 64), budgeted.ReadDeviceMemoryUse());
 
-        var onCard = TensorData([2L], (float[])[1f, 2f]).CopyTo(small);
-        TensorData([2L], (float[])[3f, 4f]).To(large);
-        TensorData([2L], (float[])[5f, 6f]).CopyTo(unbudgeted);
-        small.AllocateUninitialized<float32>(new Shape(2L));
+        var copied = Floats(4).CopyTo(budgeted);
+        var moved = Floats(2).To(budgeted);
+        var allocated = budgeted.AllocateUninitialized<float32>(new Shape(1L));
+        var sharedWithIt = Floats(3).CopyTo(unbudgeted).To(budgeted);
+        var hostSide = Floats(8).To(onHost);
 
-        Assert.Equal([tight, wide, DeviceMemorySettings.Default, tight], card.Budgets);
-        Assert.Equal(tight.LimitBytes, small.ReadTransferArenaStatistics()!.Value.LimitBytes);
-        Assert.Equal(wide.LimitBytes, large.ReadTransferArenaStatistics()!.Value.LimitBytes);
-        Assert.Equal(-1, unbudgeted.ReadTransferArenaStatistics()!.Value.LimitBytes);
-        Assert.Null(ComputeContext.Host.ReadTransferArenaStatistics());
+        Assert.Equal(new DeviceMemoryUse(40, 4, 64), budgeted.ReadDeviceMemoryUse());
+        Assert.Equal(24L, budgeted.ReadDeviceMemoryUse().AvailableBytes);
+        Assert.Equal(new DeviceMemoryUse(12, 1, null), unbudgeted.ReadDeviceMemoryUse());
+        Assert.Equal(new DeviceMemoryUse(32, 1, null), onHost.ReadDeviceMemoryUse());
+        Assert.Equal(default, ComputeContext.Host.ReadDeviceMemoryUse());
 
-        // Handed over rather than copied, so there is nothing to re-charge: the memory stays under
-        // the budget it was allocated under however many contexts it is attached to afterwards.
-        Assert.Same(onCard, onCard.To(large));
-        Assert.Same(onCard, onCard.To(unbudgeted));
-        Assert.Equal(4, card.Budgets.Count);
-        Assert.Contains(onCard, large.Tensors);
-        Assert.Contains(onCard, unbudgeted.Tensors);
+        budgeted.Detach(copied);
+        moved.Delete();
+        Assert.Equal(new DeviceMemoryUse(16, 2, 64), budgeted.ReadDeviceMemoryUse());
+        Assert.False(copied.IsDisposed);
+        Assert.Same(sharedWithIt, Assert.Single(unbudgeted.Tensors));
+        GC.KeepAlive((object[])[allocated, hostSide]);
+    }
+
+    [Fact]
+    public void TestAPlacementOntoABudgetedCardIsRefusedBeforeItAllocatesWhenItWouldPassTheLimit()
+    {
+        var card = new StubBackend(ComputeDevice.Cuda, 0);
+        using var budgeted = new ComputeContext(card) { DeviceMemory = Budget(32) };
+        using var unbudgeted = new ComputeContext(card);
+        var held = Floats(6).CopyTo(budgeted);
+        var elsewhere = Floats(4).CopyTo(unbudgeted);
+        string Refused(Func<object> place) => Assert.Throws<InvalidOperationException>(place).Message;
+
+        var copy = Refused(() => Floats(4).CopyTo(budgeted));
+        Assert.Contains("CopyTo(context) of Tensor (4,):Float32 asks this compute context for 16 bytes", copy);
+        Assert.Contains("the budget (DeviceMemorySettings.LimitBytes) is 32 bytes, and 24 bytes of it", copy);
+        Assert.Contains("To(context) of Tensor (4,):Float32", Refused(() => Floats(4).To(budgeted)));
+        Assert.Contains("AllocateUninitialized of (4,):Float32", Refused(() => budgeted.AllocateUninitialized<float32>(new Shape(4L))));
+        Assert.Contains("To(context) of Tensor (4,):Float32", Refused(() => elsewhere.To(budgeted)));
+        Assert.Equal(2, card.Built.Count);
+        Assert.DoesNotContain(elsewhere, budgeted.Tensors);
+
+        var toTheLimit = Floats(2).CopyTo(budgeted);
+        Assert.Equal(new DeviceMemoryUse(32, 2, 32), budgeted.ReadDeviceMemoryUse());
+        held.Delete();
+        Assert.Same(elsewhere, elsewhere.To(budgeted));
+        Assert.Same(elsewhere, elsewhere.To(budgeted));
+        Assert.Equal(new DeviceMemoryUse(24, 2, 32), budgeted.ReadDeviceMemoryUse());
+        Assert.Equal(1024L, Floats(256).CopyTo(unbudgeted).ByteCount);
+        GC.KeepAlive(toTheLimit);
+    }
+
+    [Fact]
+    public void TestASessionsArenaIsTheBudgetLessWhatItsContextHoldsOutsideItAndOnlyEverComesDown()
+    {
+        var card = new StubBackend(ComputeDevice.Cuda, 0);
+        using var context = new ComputeContext(card) { DeviceMemory = Budget(6400) };
+        var compiled = context.Compile(Echo());
+        long?[] Limits() => [.. card.Sessions.Select(s => s.LimitBytes)];
+
+        Assert.Equal([6300L], Limits());
+        compiled.Execute(Floats(10));
+        var held = Floats(250).CopyTo(context);
+        compiled.Execute(Floats(10));
+        compiled.Execute(Floats(10));
+        Assert.Equal([6300L, 5300L], Limits());
+        Assert.Equal(5300L, compiled.DeviceMemory.LimitBytes);
+
+        held.Delete();
+        compiled.Execute(Floats(10));
+        Assert.Equal([6300L, 5300L], Limits());
+
+        context.Execute(Echo(), Floats(10));
+        Assert.Equal([6300L, 5300L, 6300L], Limits());
+        Assert.Equal(5, card.Runs.Count);
+        Assert.All(card.Runs, run => Assert.True(run.ShrinkArenaAfterRun));
+
+        var free = new StubBackend(ComputeDevice.Cuda, 0);
+        using var unbudgeted = new ComputeContext(free);
+        unbudgeted.Compile(Echo()).Execute(Floats(10));
+        Assert.Null(Assert.Single(free.Sessions).LimitBytes);
+        Assert.False(Assert.Single(free.Runs).ShrinkArenaAfterRun);
+    }
+
+    [Fact]
+    public void TestWhatASessionsOwnRunsLeftInItsArenaIsInsideItsLimitUntilTheSessionIsBuiltAgain()
+    {
+        var card = new StubBackend(ComputeDevice.Cuda, 0);
+        using var context = new ComputeContext(card) { DeviceMemory = Budget(6400) };
+        var compiled = context.Compile(Echo());
+        TensorData Kept() => compiled.Execute([Floats(20)], [true])[0].ToTensorData();
+
+        var (first, second, third) = (Kept(), Kept(), Kept());
+        Assert.False(first.IsHostResident);
+        Assert.Single(card.Sessions);
+
+        var placed = Floats(100).CopyTo(context);
+        var fourth = Kept();
+        Assert.Equal([6300L, 5600L], card.Sessions.Select(s => s.LimitBytes));
+        compiled.Execute(second.Shared());
+        Assert.Equal(2, card.Sessions.Count);
+        GC.KeepAlive((object[])[first, third, placed, fourth]);
+    }
+
+    [Fact]
+    public void TestARunItsContextsBudgetCannotFitIsRefusedBeforeItTakesWhatItWasFed()
+    {
+        var card = new StubBackend(ComputeDevice.Cuda, 0);
+        using var context = new ComputeContext(card) { DeviceMemory = Budget(64) };
+        var compiled = context.Compile(Echo());
+        var fed = Floats(16);
+
+        var refusal = Assert.Throws<InvalidOperationException>(() => compiled.Execute(fed));
+        Assert.Contains("would hold 64 bytes of CUDA device 0 memory outside its own arena", refusal.Message);
+        Assert.Contains("0 bytes of the 0 tensor(s) attached to its compute context there, and 64 bytes more", refusal.Message);
+        Assert.Contains("64-byte device-memory budget", refusal.Message);
+        Assert.Throws<InvalidOperationException>(() => compiled.Execute(fed.Shared()));
+        Assert.Throws<InvalidOperationException>(() => context.Execute(Echo(), fed));
+        Assert.False(fed.IsDisposed);
+        Assert.Empty(card.Built);
+
+        Assert.Equal([1f, 2f, 3f], Run(compiled, TensorData([3L], (float[])[1f, 2f, 3f])));
+        var full = context.AllocateUninitialized<float32>(new Shape(16L));
+        Assert.Contains("leave nothing of the 64 bytes it has", Assert.Throws<InvalidOperationException>(
+            () => context.Compile(Echo())).Message);
+        GC.KeepAlive(full);
+    }
+
+    [Fact]
+    public void TestACopyARunReadsCountsOnTheBudgetOfEveryContextWhoseRunsReadIt()
+    {
+        var card = new StubBackend(ComputeDevice.Cuda, 0);
+        using var maker = new ComputeContext(card) { DeviceMemory = Budget(6400) };
+        using var reader = new ComputeContext(card) { DeviceMemory = Budget(6400) };
+        using var small = new ComputeContext(card) { DeviceMemory = Budget(40) };
+        var source = Floats(10);
+
+        Run(maker.Compile(Echo()), source.Shared());
+        Run(reader.Compile(Echo()), source.Shared());
+        Assert.Single(card.Built);
+        Assert.Equal(40L, maker.ReadDeviceMemoryUse().AttachedBytes);
+        Assert.Equal(40L, reader.ReadDeviceMemoryUse().AttachedBytes);
+
+        Assert.Throws<InvalidOperationException>(() => small.Execute(Echo(), source.Shared()));
+        Assert.Equal(0L, small.ReadDeviceMemoryUse().AttachedBytes);
+        Assert.False(source.IsDisposed);
+    }
+
+    [Fact]
+    public void TestABudgetedContextRunsOneAtATimeAndPlacesNothingWhileItRunsWhereAnUnbudgetedOneOverlaps()
+    {
+        // How many of two runs were inside the session at once, and whether a placement onto the
+        // context landed while the first was. Waits long for what is expected to happen and briefly
+        // for what is expected not to.
+        static (int MostAtOnce, bool PlacedDuringRun) Overlap(ComputeContext context, StubBackend card, bool overlaps)
+        {
+            var patience = overlaps ? TimeSpan.FromSeconds(10) : TimeSpan.FromMilliseconds(200);
+            var compiled = context.Compile(Echo());
+            using var inside = new SemaphoreSlim(0);
+            using var release = new ManualResetEventSlim();
+            var now = 0;
+            var most = 0;
+            card.DuringRun = () =>
+            {
+                InterlockedMax(ref most, Interlocked.Increment(ref now));
+                inside.Release();
+                release.Wait(TimeSpan.FromSeconds(10));
+                Interlocked.Decrement(ref now);
+            };
+            Task[] runs = [Task.Run(() => compiled.Execute(Floats(1))), Task.Run(() => compiled.Execute(Floats(1)))];
+            Assert.True(inside.Wait(TimeSpan.FromSeconds(10)));
+            inside.Wait(patience);
+            var placement = Task.Run(() => Floats(1).CopyTo(context));
+            var placed = placement.Wait(patience);
+            release.Set();
+            Assert.True(Task.WaitAll([.. runs, placement], TimeSpan.FromSeconds(10)));
+            return (most, placed);
+        }
+
+        var budgetedCard = new StubBackend(ComputeDevice.Cuda, 0);
+        using var budgeted = new ComputeContext(budgetedCard) { DeviceMemory = Budget(1L << 20) };
+        Assert.Equal((1, false), Overlap(budgeted, budgetedCard, overlaps: false));
+
+        var unbudgetedCard = new StubBackend(ComputeDevice.Cuda, 0);
+        using var unbudgeted = new ComputeContext(unbudgetedCard);
+        Assert.Equal((2, true), Overlap(unbudgeted, unbudgetedCard, overlaps: true));
+    }
+
+    [Fact]
+    public void TestASessionsArenaLimitIsTheBudgetLessTheDiscountRoundedUpToTheNextSixtyFourthOfIt()
+    {
+        Assert.Equal(6300L, ComputeContext.ArenaLimitWithin(6400, 0));
+        Assert.Equal(6300L, ComputeContext.ArenaLimitWithin(6400, 99));
+        Assert.Equal(6200L, ComputeContext.ArenaLimitWithin(6400, 100));
+        Assert.Equal(5300L, ComputeContext.ArenaLimitWithin(6400, 1040));
+        Assert.Equal(100L, ComputeContext.ArenaLimitWithin(6400, 6250));
+        Assert.Equal(1L, ComputeContext.ArenaLimitWithin(6400, 6399));
+        Assert.Null(ComputeContext.ArenaLimitWithin(6400, 6400));
+        Assert.Null(ComputeContext.ArenaLimitWithin(6400, 7000));
+        Assert.Equal(1L, ComputeContext.ArenaLimitWithin(10, 9));
+        Assert.Equal(60L << 30, ComputeContext.ArenaLimitWithin(64L << 30, 3L << 30));
+    }
+
+    private static DeviceMemorySettings Budget(long bytes) => new() { LimitBytes = bytes };
+
+    private static TensorData Floats(int count) => TensorData([(long)count], new float[count]);
+
+    private static float[] Run(CompiledGraph compiled, IData feed)
+        => [.. compiled.Execute(feed)[0].ToTensorData().As<float32>().AccessMemory<float>()];
+
+    private static void InterlockedMax(ref int target, int value)
+    {
+        int seen;
+        while (value > (seen = Volatile.Read(ref target)))
+            if (Interlocked.CompareExchange(ref target, value, seen) == seen) return;
     }
 
     [Fact]
@@ -260,7 +454,6 @@ public class CrossDeviceRoutingCoverageTests
         Assert.True(fresh.IsDisposed);
         Assert.Equal([card.Built[1], card.Built[2]], card.Handed);
         Assert.Equal([card.Built[0], card.Built[1], card.Built[2]], card.Released);
-        Assert.Equal([budget, budget, budget], card.Budgets);
     }
 
     private static TensorData OnCard(ComputeContext context, float first)
@@ -282,7 +475,8 @@ public class CrossDeviceRoutingCoverageTests
     /// <summary>A backend that answers about itself and records what it was asked to build, what it
     /// was asked whether it could address, and what it released — so a transfer's route can be read
     /// off it without a native runtime or a card. Its sessions run nothing (see
-    /// <see cref="StubSession"/>), which is all a test of who owns a feed needs of them.</summary>
+    /// <see cref="StubSession"/>), which is all a test of who owns a feed needs of them, and it
+    /// records what each was built with and what each run was given.</summary>
     private sealed class StubBackend(ComputeDevice device, int? cudaDeviceId)
         : IShorokooBackend
     {
@@ -292,7 +486,14 @@ public class CrossDeviceRoutingCoverageTests
 
         internal List<IShorokooTensorValue> Released { get; } = [];
 
-        internal List<DeviceMemorySettings> Budgets { get; } = [];
+        /// <summary>The device-memory settings each of its sessions was built with.</summary>
+        internal List<DeviceMemorySettings> Sessions { get; } = [];
+
+        /// <summary>What each run of its sessions was given, in order.</summary>
+        internal List<RunSettings> Runs { get; } = [];
+
+        /// <summary>Called inside every run of its sessions, where a test holds one open.</summary>
+        internal Action? DuringRun { get; set; }
 
         internal List<MemoryLocation> AskedAbout { get; } = [];
 
@@ -324,23 +525,12 @@ public class CrossDeviceRoutingCoverageTests
         public void Release(IShorokooTensorValue value) => Released.Add(value);
 
         public IShorokooTensorValue CreateTensorInBackendMemory(
-            ShorokooTensorElementType elementType, byte[] data, long[] shape,
-            DeviceMemorySettings deviceMemory)
+            ShorokooTensorElementType elementType, byte[] data, long[] shape)
         {
-            Budgets.Add(deviceMemory);
             var value = new StubValue(elementType, data, shape, hostAccessible: device == ComputeDevice.Cpu);
-            Built.Add(value);
+            lock (Built) Built.Add(value);
             return value;
         }
-
-        public IShorokooTensorValue CreateUninitializedTensorInBackendMemory(
-            ShorokooTensorElementType elementType, long[] shape, DeviceMemorySettings deviceMemory)
-            => CreateTensorInBackendMemory(
-                elementType, new byte[TensorElementLayout.ByteCount(elementType, shape)], shape,
-                deviceMemory);
-
-        public ArenaStatistics? ReadTransferArenaStatistics(DeviceMemorySettings deviceMemory)
-            => new ArenaStatistics(0, deviceMemory.LimitBytes ?? -1, 0, 0, 0, 0, 0, 0, 0);
 
         public int HostCopies { get; private set; }
 
@@ -359,6 +549,7 @@ public class CrossDeviceRoutingCoverageTests
             ShorokooLogSeverity logSeverity,
             DeviceMemorySettings deviceMemory)
         {
+            Sessions.Add(deviceMemory);
             var graph = ProtoBuf.Serializer
                 .Deserialize<Shorokoo.Core.Factory.IR.ModelProto>(new MemoryStream(modelBytes.ToArray())).Graph;
             string[] inputs = [.. graph.Inputs.Select(i => i.Name)];
@@ -367,6 +558,10 @@ public class CrossDeviceRoutingCoverageTests
                 ? new ReleasingStubSession(this, inputs, outputs)
                 : new StubSession(this, inputs, outputs);
         }
+
+        /// <summary>Whether this backend's memory is its own rather than the host's, which is where
+        /// its sessions leave what they are asked to retain.</summary>
+        internal bool OnADevice => device != ComputeDevice.Cpu;
 
         public IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged
             => throw new NotSupportedException();
@@ -378,7 +573,8 @@ public class CrossDeviceRoutingCoverageTests
             => throw new NotSupportedException();
     }
 
-    /// <summary>A session that runs nothing: every output is a host copy of its first input. It
+    /// <summary>A session that runs nothing: every output is a copy of its first input, in host
+    /// memory unless the run asked for it to be retained, when it is left in the backend's own. It
     /// leaves what it consumes to the interface's default, which disposes each value.</summary>
     private class StubSession(StubBackend backend, string[] inputNames, string[] outputNames)
         : IShorokooSession
@@ -389,14 +585,25 @@ public class CrossDeviceRoutingCoverageTests
 
         public IReadOnlyList<string> OutputNames => outputNames;
 
+        public bool HasDeviceMemory => backend.OnADevice;
+
         public IReadOnlyList<IShorokooTensorValue> Run(
             IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
             IReadOnlyList<string> outputNames, RunSettings runSettings)
+            => RunRetainingOutputs(inputs, outputNames, new HashSet<string>(), runSettings);
+
+        public IReadOnlyList<IShorokooTensorValue> RunRetainingOutputs(
+            IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
+            IReadOnlyList<string> outputNames, IReadOnlySet<string> retainedOutputNames,
+            RunSettings runSettings)
         {
+            lock (backend.Runs) backend.Runs.Add(runSettings);
+            backend.DuringRun?.Invoke();
             if (backend.FailsRuns) throw new InvalidOperationException("The stub run failed.");
             var first = (StubValue)inputs[inputNames[0]];
-            return [.. outputNames.Select(_ => (IShorokooTensorValue)new StubValue(
-                first.ElementType, [.. first.Bytes], first.Shape, hostAccessible: true))];
+            return [.. outputNames.Select(name => (IShorokooTensorValue)new StubValue(
+                first.ElementType, [.. first.Bytes], first.Shape,
+                hostAccessible: !(backend.OnADevice && retainedOutputNames.Contains(name))))];
         }
 
         public void Dispose() { }

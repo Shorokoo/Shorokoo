@@ -587,10 +587,10 @@ namespace Shorokoo
             private protected override bool IsHostReadable
                 => _elements.TrueForAll(static element => element.IsHostResident);
 
+            // As a tensor's To attaches it: under the target's device-memory budget, all of them or
+            // none, refused where the ones not yet on its books would take it past its limit.
             private protected override void AttachElementsTo(ComputeContext target)
-            {
-                foreach (var element in _elements) target.Attach(element);
-            }
+                => target.AttachAllWithinBudget(_elements, nameof(To));
         }
 
         /// <summary>A sequence holding these tensors as they are, rather than rebuilding them

@@ -299,6 +299,52 @@ namespace Shorokoo
         /// </summary>
         internal virtual byte[]? OwnBytes => null;
 
+        /// <summary>
+        /// The bytes this tensor's elements take up where they are: its element count at its
+        /// element's storage width, rounded up to a whole byte. What a compute context's
+        /// device-memory budget counts it as.
+        ///
+        /// <para>Zero for a string tensor, whose elements are variable-length — and which ONNX
+        /// Runtime keeps in host memory whatever its provider, so no device budget ever holds one —
+        /// and for a dtype with no storage width at all.</para>
+        /// </summary>
+        internal long ByteCount
+        {
+            get
+            {
+                var elements = Shape.Count;
+                if (elements <= 0) return 0;
+                // Untagged first: a literal standing for a type parameter is a distinct instance of
+                // the dtype it stands for, and the width table compares instances.
+                var dtype = DType.ToNonGenericType();
+                int bits;
+                if (dtype.IsSameElementTypeAs(DType.Int4) || dtype.IsSameElementTypeAs(DType.UInt4)) bits = 4;
+                else if (dtype.IsSameElementTypeAs(DType.Complex64)) bits = 64;
+                else if (dtype.IsSameElementTypeAs(DType.Complex128)) bits = 128;
+                else
+                {
+                    try { bits = dtype.EncodingBitCount; }
+                    // Strings and placeholders: nothing with a width to count.
+                    catch (UnsupportedDTypeException) { bits = 0; }
+                }
+                return bits <= 0 ? 0 : checked(elements * bits + 7) / 8;
+            }
+        }
+
+        // The arena this tensor was allocated out of, where it is an output a run left in device
+        // memory: a token standing for the session that ran it (see CompiledGraph), and null for
+        // everything else. A run on that same session counts it inside the session's arena limit,
+        // where it is, rather than against the room the limit is cut from.
+        private object? _arena;
+
+        /// <summary>The arena of the session whose run left this tensor in device memory, or
+        /// null.</summary>
+        internal object? Arena => Volatile.Read(ref _arena);
+
+        /// <summary>Records the arena a run's output was allocated out of. Once, as the output is
+        /// adopted and before anything else can see it.</summary>
+        internal void RecordArena(object arena) => Volatile.Write(ref _arena, arena);
+
         /// <summary>"shape:dtype" diagnostic string.</summary>
         public override string ToString()
         {

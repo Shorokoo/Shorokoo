@@ -20,6 +20,12 @@ namespace Shorokoo
     /// device and the same runtime. Any host-memory backend reads the framework's own managed
     /// host memory. Two backends over one loaded ONNX Runtime share a card allocation; two
     /// isolated runtimes on one card do not, and copy through the host.</para>
+    ///
+    /// <para>A target whose device memory is under a budget
+    /// (<see cref="ComputeContext.DeviceMemory"/>'s <see cref="DeviceMemorySettings.LimitBytes"/>)
+    /// counts what is attached to it there, and refuses what would take that past the limit: a
+    /// copy before it is allocated, and a tensor handed over as it stands before it is attached.
+    /// The refusal names the budget, what is attached and what was asked for.</para>
     /// </summary>
     public abstract partial class TensorData
     {
@@ -36,16 +42,18 @@ namespace Shorokoo
         /// <exception cref="ArgumentNullException"><paramref name="target"/> is null.</exception>
         /// <exception cref="ObjectDisposedException">This tensor is dead, or
         /// <paramref name="target"/> has been disposed.</exception>
-        /// <remarks>A copy onto a card is allocated under the target context's
-        /// <see cref="ComputeContext.DeviceMemory"/>, so one that does not fit fails with the backend
-        /// runtime's own allocation error — the budget working rather than failing.</remarks>
+        /// <exception cref="InvalidOperationException"><paramref name="target"/>'s device-memory
+        /// budget cannot take this tensor: what is attached to it in its memory, plus this tensor —
+        /// the copy, or this very tensor where it is already there and not yet on the target's
+        /// books — would pass its <see cref="DeviceMemorySettings.LimitBytes"/>. Nothing is copied
+        /// or attached.</exception>
         public TensorData To(ComputeContext target)
         {
             ArgumentNullException.ThrowIfNull(target);
             ThrowIfDisposed();
             RefuseDisposedTarget(target, nameof(To));
-            if (!target.CanAddress(this)) return CopyInto(target);
-            target.Attach(this);
+            if (!target.CanAddress(this)) return CopyInto(target, nameof(To));
+            target.AttachAllWithinBudget([this], nameof(To));
             return this;
         }
 
@@ -61,15 +69,15 @@ namespace Shorokoo
         /// <exception cref="ArgumentNullException"><paramref name="target"/> is null.</exception>
         /// <exception cref="ObjectDisposedException">This tensor is dead, or
         /// <paramref name="target"/> has been disposed.</exception>
-        /// <remarks>The copy is allocated under the target context's
-        /// <see cref="ComputeContext.DeviceMemory"/>, so one that does not fit fails with the backend
-        /// runtime's own allocation error.</remarks>
+        /// <exception cref="InvalidOperationException"><paramref name="target"/>'s device-memory
+        /// budget cannot take the copy alongside what is attached to it in its memory
+        /// (<see cref="DeviceMemorySettings.LimitBytes"/>). Nothing is copied.</exception>
         public TensorData CopyTo(ComputeContext target)
         {
             ArgumentNullException.ThrowIfNull(target);
             ThrowIfDisposed();
             RefuseDisposedTarget(target, nameof(CopyTo));
-            return CopyInto(target);
+            return CopyInto(target, nameof(CopyTo));
         }
 
         /// <summary>
@@ -136,22 +144,32 @@ namespace Shorokoo
         /// <summary>
         /// The copy of this tensor a run on <paramref name="backend"/> reads where it cannot be
         /// handed this tensor itself (<see cref="FeedsInPlace"/>): held by this tensor, keyed by the
-        /// memory it is in, and reused by every later read that wants it there. Made under
-        /// <paramref name="deviceMemory"/> — the reading context's — the first time.
+        /// memory it is in, and reused by every later read that wants it there. The first time it
+        /// is made, <paramref name="admit"/> is asked first — the reading run holding the copy to its
+        /// context's device-memory budget — and may refuse it by throwing.
+        ///
+        /// <para>Every context whose runs read it has it attached, so it counts on each of their
+        /// budgets; only the one that makes it is asked whether it fits.</para>
         /// </summary>
-        internal TensorData SharedCopyFor(IShorokooBackend backend, DeviceMemorySettings deviceMemory)
-            => CopyAt(RunMemoryOf(backend, DType), () => BuildRunCopy(backend, deviceMemory));
+        internal TensorData SharedCopyFor(IShorokooBackend backend, Action<TensorData>? admit)
+            => CopyAt(RunMemoryOf(backend, DType), () =>
+            {
+                admit?.Invoke(this);
+                return BuildRunCopy(backend);
+            });
 
         /// <summary>
         /// The copy a run on <paramref name="backend"/> that has taken this tensor consumes in its
         /// place, itself taken with <paramref name="death"/>: the one this tensor already holds in
-        /// the run's memory, or a fresh one. This tensor's own memory is the caller's to release.
+        /// the run's memory, or a fresh one — which <paramref name="admit"/> is asked about first,
+        /// as <see cref="SharedCopyFor"/> asks. This tensor's own memory is the caller's to release.
         /// </summary>
         internal TensorData TakeRunCopy(
-            IShorokooBackend backend, DeviceMemorySettings deviceMemory, TensorDeath death)
+            IShorokooBackend backend, Action<TensorData>? admit, TensorDeath death)
         {
             if (TakeCopyAt(RunMemoryOf(backend, DType), death) is { } held) return held;
-            var fresh = BuildRunCopy(backend, deviceMemory);
+            admit?.Invoke(this);
+            var fresh = BuildRunCopy(backend);
             // Made for this run alone, so nothing else can hold it: the take cannot fail.
             if (fresh.TryTake(death) != TakeOutcome.Taken)
                 throw new InvalidOperationException("A copy made for one run was held by another.");
@@ -160,15 +178,14 @@ namespace Shorokoo
 
         /// <summary>
         /// A new tensor holding this one's contents in the memory a run on
-        /// <paramref name="backend"/> reads, allocated by that backend — under
-        /// <paramref name="deviceMemory"/> where the memory is a card's. Reads the contents
+        /// <paramref name="backend"/> reads, allocated by that backend. Reads the contents
         /// without the liveness check: the caller holds this tensor's lock, or has taken it.
         /// </summary>
-        private TensorData BuildRunCopy(IShorokooBackend backend, DeviceMemorySettings deviceMemory)
+        private TensorData BuildRunCopy(IShorokooBackend backend)
             => BuiltBy(backend, DType.IsSameElementTypeAs(DType.Utf8)
                 ? backend.CreateStringTensor(CopyContentStrings(), (long[])Shape)
                 : backend.CreateTensorInBackendMemory(
-                    (ShorokooTensorElementType)(int)DType, ContentBytesForCopy(), (long[])Shape, deviceMemory));
+                    (ShorokooTensorElementType)(int)DType, ContentBytesForCopy(), (long[])Shape));
 
         /// <summary>
         /// A tensor over <paramref name="value"/>, which <paramref name="backend"/> has just built as
@@ -283,16 +300,41 @@ namespace Shorokoo
         /// value belongs to the runtime that made it, so the target has to be handed contents rather
         /// than a pointer.
         ///
-        /// <para>The target allocates them itself, through <c>CreateTensorInBackendMemory</c> rather
-        /// than <c>CreateTensorFromRawBytes</c>, so the bytes land in the memory the target names
+        /// <para>The target allocates them itself, through
+        /// <see cref="IShorokooBackend.CreateTensorInBackendMemory"/> rather than
+        /// <c>CreateTensorFromRawBytes</c>, so the bytes land in the memory the target names
         /// instead of in host memory wearing its name. That is the difference between a tensor that
         /// is on the card and one an execution provider has to copy there on every run. A target
         /// whose memory is the host's gets the framework's own managed memory, which every host
         /// backend reads.</para>
+        ///
+        /// <para>Where the target's memory is under its device-memory budget, the copy is refused
+        /// before anything is allocated when the budget cannot take it alongside what is attached to
+        /// the target — checked and attached one at a time with everything else that spends that
+        /// budget, so two copies cannot both be admitted into the same room.</para>
         /// </summary>
-        private TensorData CopyInto(ComputeContext target)
+        private TensorData CopyInto(ComputeContext target, string operation)
         {
-            var copy = target.MemorySpace.IsHost ? CopyToManagedHost() : CopyIntoBackendMemory(target);
+            var space = target.MemorySpace;
+            if (space.IsHost) return Attached(target, CopyToManagedHost());
+
+            var gate = target.EnterBudget(space, System.Threading.CancellationToken.None);
+            try
+            {
+                target.RefusePlacementOverBudget(
+                    space, ByteCount, () => $"{operation}(context) of {Describe()}");
+                return Attached(target, CopyIntoBackendMemory(target));
+            }
+            finally
+            {
+                gate?.Exit();
+            }
+        }
+
+        /// <summary><paramref name="copy"/>, attached to <paramref name="target"/> — or deleted,
+        /// where the attaching fails, since nothing else references it.</summary>
+        private static TensorData Attached(ComputeContext target, TensorData copy)
+        {
             try
             {
                 target.Attach(copy);
@@ -324,7 +366,7 @@ namespace Shorokoo
 
             var backend = target.ResolvedBackend;
             var value = backend.CreateTensorInBackendMemory(
-                (ShorokooTensorElementType)(int)DType, HostBytes(), (long[])Shape, target.DeviceMemory);
+                (ShorokooTensorElementType)(int)DType, HostBytes(), (long[])Shape);
             try
             {
                 return Create(Shape, DType, value, backend);

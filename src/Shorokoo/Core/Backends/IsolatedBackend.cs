@@ -416,27 +416,9 @@ public static class IsolatedBackend
             ShorokooTensorElementType elementType, byte[] data, long[] shape)
             => _inner.CreateTensorInBackendMemory(elementType, data, shape);
 
-        // Forwarded like its unbudgeted sibling, and with the same consequence: the allocation is
-        // made by the isolated backend, out of an arena its own runtime built with these settings.
-        // An isolated backend's device memory is therefore budgeted by the context the copy is made
-        // for exactly as an ordinary backend's is, and separately from it -- two runtimes on one
-        // card hold two sets of arenas, because an allocation means nothing to the runtime that did
-        // not make it.
-        public IShorokooTensorValue CreateTensorInBackendMemory(
-            ShorokooTensorElementType elementType, byte[] data, long[] shape,
-            DeviceMemorySettings deviceMemory)
-            => _inner.CreateTensorInBackendMemory(elementType, data, shape, deviceMemory);
-
         public IShorokooTensorValue CreateUninitializedTensorInBackendMemory(
             ShorokooTensorElementType elementType, long[] shape)
             => _inner.CreateUninitializedTensorInBackendMemory(elementType, shape);
-
-        public IShorokooTensorValue CreateUninitializedTensorInBackendMemory(
-            ShorokooTensorElementType elementType, long[] shape, DeviceMemorySettings deviceMemory)
-            => _inner.CreateUninitializedTensorInBackendMemory(elementType, shape, deviceMemory);
-
-        public ArenaStatistics? ReadTransferArenaStatistics(DeviceMemorySettings deviceMemory)
-            => _inner.ReadTransferArenaStatistics(deviceMemory);
 
         public IShorokooTensorValue CreateSequence(IReadOnlyList<IShorokooTensorValue> values)
             => _inner.CreateSequence(values);

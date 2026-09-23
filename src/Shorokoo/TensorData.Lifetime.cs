@@ -468,6 +468,18 @@ namespace Shorokoo
         }
 
         /// <summary>
+        /// The live copy held for runs at <paramref name="where"/>, or null when there is none —
+        /// without making one. What a run planning its device memory asks, to know whether a read
+        /// there will reuse memory already held or allocate more.
+        /// </summary>
+        internal TensorData? CopyHeldAt(MemoryLocation where)
+        {
+            var copies = Volatile.Read(ref _copies);
+            if (copies is null) return null;
+            lock (copies) return copies.TryGet(where, out var copy) && !copy.IsDisposed ? copy : null;
+        }
+
+        /// <summary>
         /// Takes the copy held at <paramref name="where"/> for a run that is consuming this tensor,
         /// marking it dead with <paramref name="death"/>, or null when there is none it can take.
         /// This tensor has already been taken by that run, so nothing else can be reading it

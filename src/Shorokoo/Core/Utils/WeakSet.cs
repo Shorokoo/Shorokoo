@@ -38,6 +38,9 @@ internal sealed class WeakSet<T>
     /// <summary>Forgets <paramref name="item"/>, if it was ever recorded.</summary>
     internal void Remove(T item) => _entries.Remove(item);
 
+    /// <summary>Whether <paramref name="item"/> is recorded.</summary>
+    internal bool Contains(T item) => _entries.TryGetValue(item, out _);
+
     /// <summary>Forgets everything recorded.</summary>
     internal void Clear() => _entries.Clear();
 

@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -21,9 +20,7 @@ namespace Shorokoo.Tests;
 /// <see cref="DefaultBackend"/> deployment-folder discovery and selection policy, the
 /// description a live backend answers with and the device assertion built on it, the
 /// uninitialised tensor allocation on the backend ABI and the zero-filling default behind it, the
-/// device-memory budget the same ABI threads to a placed tensor and the cap on how many arenas
-/// one card will open for it, the <see cref="DeviceMemory"/> settings the CUDA backends map onto
-/// ORT's arena options, the
+/// <see cref="DeviceMemory"/> settings the CUDA backends map onto ORT's arena options, the
 /// reflection that reaches ORT's per-session arena figures and the
 /// <see cref="ArenaStatistics"/>/<see cref="RunStatistics"/>/<see cref="NodePlacement"/> surface
 /// built on it, the per-run abort token and what both run paths do with one, the typed
@@ -440,41 +437,6 @@ public class CoreUtilsCoverageTests
             shape => Assert.Throws<NotSupportedException>(
                 () => defaulting.CreateUninitializedTensorInBackendMemory(
                     ShorokooTensorElementType.Float, shape)));
-    }
-
-    [Fact]
-    public void TestABackendThatNeverHeardOfADeviceMemoryBudgetStillBuildsTheTensorAndReportsNoArena()
-    {
-        IShorokooBackend defaulting = new ByteWiseOnlyBackend();
-        var budget = new DeviceMemorySettings { LimitBytes = 1L << 20 };
-
-        using var copied = defaulting.CreateTensorInBackendMemory(
-            ShorokooTensorElementType.Float, new byte[8], [2L], budget);
-        Assert.Equal((float[])[0f, 0f], [.. copied.GetTensorDataAsSpan<float>()]);
-
-        using var fresh = defaulting.CreateUninitializedTensorInBackendMemory(
-            ShorokooTensorElementType.Int64, [3L], budget);
-        Assert.Equal(new long[3], [.. fresh.GetTensorDataAsSpan<long>()]);
-
-        Assert.Null(defaulting.ReadTransferArenaStatistics(budget));
-        Assert.Null(defaulting.ReadTransferArenaStatistics(DeviceMemorySettings.Default));
-    }
-
-    [Fact]
-    public void TestACardRefusesToHoldMoreDeviceMemoryConfigurationsThanItsCap()
-    {
-        var settings = new DeviceMemorySettings { LimitBytes = 4L << 30 };
-        var cap = CudaDeviceAllocator.MaxConfigurationsPerDevice;
-
-        Assert.Null(CudaDeviceAllocator.CapacityRefusal(0, 0, settings));
-        Assert.Null(CudaDeviceAllocator.CapacityRefusal(0, cap - 1, settings));
-
-        var refused = CudaDeviceAllocator.CapacityRefusal(3, cap, settings);
-        Assert.NotNull(refused);
-        Assert.Contains("CUDA device 3", refused!.Message);
-        Assert.Contains(cap.ToString(CultureInfo.InvariantCulture), refused.Message);
-        Assert.Contains("4294967296", refused.Message);
-        Assert.NotNull(CudaDeviceAllocator.CapacityRefusal(0, cap + 1, DeviceMemorySettings.Default));
     }
 
     private static long Elements(long[] shape)
@@ -1066,6 +1028,15 @@ public class CoreUtilsCoverageTests
         Assert.Equal(run.PeakBytes, context.RunStats.PeakBytes);
     }
 
+    [Fact]
+    public void TestTheFilledProbeSumsAsManyOnesAsTheShapeItIsFedAsksFor()
+    {
+        using var context = new ComputeContext();
+        var filled = ArenaProbeModels.Filled(context);
+        Assert.Equal(1000f, ArenaProbeModels.Sum(filled.Execute(ArenaProbeModels.FilledShape(1000))));
+        Assert.Equal(4096f, ArenaProbeModels.Sum(filled.Execute(ArenaProbeModels.FilledShape(4096))));
+    }
+
     /// <summary>
     /// Collection is off until it is asked for, and then every run lands in the aggregates. The
     /// per-run peak says which of the two things it is: the run that pushed the arena's high-water
@@ -1305,7 +1276,8 @@ public class CoreUtilsCoverageTests
 
         var context = StripCommentsAndStrings(File.ReadAllText(
             Path.Combine(ProductSourceRoot(), "Shorokoo", "Core", "ComputeContext.cs")));
-        Assert.Matches(@"CreateSession\s*\(\s*modelData\s*,\s*optimization\s*,\s*deviceMemory\s*\)", context);
+        Assert.Matches(@"BuildSession\s*\(\s*backend\s*,\s*modelData\s*,\s*optimization\s*,\s*deviceMemory\s*\)", context);
+        Assert.Matches(@"backend\.CreateSession\s*\(\s*modelData\s*,\s*optimization\s*,\s*ShorokooLogSeverity\.Fatal\s*,\s*deviceMemory\s*,", context);
         Assert.Matches(@"DeviceMemory\.Resolve\s*\(\s*reusedAcrossShapes\s*\)", context);
 
         var session = Source("Shorokoo.OnnxRuntime", "OrtSession.cs");
@@ -2612,4 +2584,24 @@ internal static class ArenaProbeModels
     /// <inheritdoc cref="MatMul"/>
     internal static TensorData<float32> MatMulOperand(int side) =>
         TensorData([(long)side, side], new float[side * side]);
+
+    /// <summary>
+    /// A graph whose arena need is set by what it is fed: a shape, filled with ones by
+    /// <c>Expand</c> and summed. Its one large allocation is the fill, which the session's arena
+    /// makes, while what it is fed is an element per dimension — so the arena a run needs is
+    /// chosen without anything of that size being fed to it.
+    /// </summary>
+    internal static CompiledGraph Filled(ComputeContext context)
+    {
+        var shape = InputVector<int64>("shape");
+        return context.Compile(new InternalComputationGraph(
+            [shape], [OnnxOp.ReduceSum(OnnxOp.Expand(Vector(1f), shape), keepdims: false)]));
+    }
+
+    /// <inheritdoc cref="Filled"/>
+    internal static TensorData<int64> FilledShape(long elements) => TensorData([1L], elements);
+
+    /// <summary>What a run of <see cref="Filled"/> summed.</summary>
+    internal static float Sum(NamedModelParam[] outputs)
+        => outputs[0].ToTensorData().As<float32>().ValueAt<float>(0);
 }

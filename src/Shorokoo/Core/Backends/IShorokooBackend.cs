@@ -137,33 +137,16 @@ public interface IShorokooBackend
     // Left to the default on a device backend, a tensor "moved onto the card" is host bytes with a
     // device context's name on them, which the execution provider then copies over on every single
     // run: the per-run copy that giving a tensor a context exists to remove.
+    //
+    // It takes no device-memory settings, and needs none: a compute context's budget is kept by the
+    // context, which counts the tensors attached to it and refuses a copy that would take it past
+    // its budget before this is ever asked for the memory. A backend allocates; it does not decide
+    // whose budget an allocation is on.
     IShorokooTensorValue CreateTensorInBackendMemory(
         ShorokooTensorElementType elementType,
         byte[] data,
         long[] shape)
         => CreateTensorFromRawBytes(elementType, data, shape);
-
-    // The same tensor, told the arena settings of the context the result will belong to. This is
-    // the whole of what makes a tensor moved onto a card answer to a budget: a device allocation
-    // comes out of an arena, an arena is built with these values and keeps them for life, so the
-    // only way to bound one is to say which arena to take it from before it is taken. Everything
-    // in this repository that places a tensor in a backend's own memory calls this one.
-    //
-    // The settings named here are those of the context the copy is being made for -- the target of
-    // the CopyTo or the To. That settles which arena the allocation comes out of for the tensor's
-    // life: handing a tensor to a second context that can already address it copies nothing, so it
-    // cannot re-home the allocation either.
-    //
-    // The default drops the settings and asks the member above, which is what a backend written
-    // before this member existed implements -- so such a backend keeps compiling AND keeps being
-    // asked, byte for byte as it was. That is honest rather than papering over: it never had a way
-    // to honour a budget here, and nothing is lost by saying so.
-    IShorokooTensorValue CreateTensorInBackendMemory(
-        ShorokooTensorElementType elementType,
-        byte[] data,
-        long[] shape,
-        DeviceMemorySettings deviceMemory)
-        => CreateTensorInBackendMemory(elementType, data, shape);
 
     // The same tensor as CreateTensorInBackendMemory builds -- same element type, same shape, same
     // memory -- with nothing put into it: the buffer holds whatever was there, and whoever asked
@@ -186,30 +169,4 @@ public interface IShorokooBackend
         long[] shape)
         => CreateTensorInBackendMemory(
             elementType, new byte[TensorElementLayout.ByteCount(elementType, shape)], shape);
-
-    // The same tensor, under the arena settings of the context it will belong to, for the same
-    // reason the copying constructor above takes them: a tensor a context allocates for itself is
-    // as much of that context's device footprint as one it was handed, and ComputeContext's own
-    // AllocateUninitialized is the caller.
-    //
-    // Its default asks the member above, dropping the settings, so a backend that overrode that one
-    // to stop paying the fill goes on not paying it. A backend that means to honour a budget
-    // overrides this one; overriding only the budgeted copy above does not reach here, because the
-    // two are separate allocations and only the backend knows whether its own uninitialized path
-    // goes through the other.
-    IShorokooTensorValue CreateUninitializedTensorInBackendMemory(
-        ShorokooTensorElementType elementType,
-        long[] shape,
-        DeviceMemorySettings deviceMemory)
-        => CreateUninitializedTensorInBackendMemory(elementType, shape);
-
-    // The arena that tensors placed in this backend's memory under deviceMemory come out of, as
-    // its runtime reports it -- or null on a backend that reports none, and on one that has been
-    // asked for no such tensor yet. It is the transfer half of what CompiledGraph's own arena
-    // figures are for a session: between them a context's whole device footprint can be read
-    // rather than guessed at, which a budget that bounds only the sessions could never be.
-    //
-    // Shared with every context carrying the same settings on the same device, since that is
-    // exactly what shares the arena.
-    ArenaStatistics? ReadTransferArenaStatistics(DeviceMemorySettings deviceMemory) => null;
 }

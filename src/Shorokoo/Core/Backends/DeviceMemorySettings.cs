@@ -53,22 +53,31 @@ public enum ArenaExtendStrategy
 }
 
 /// <summary>
-/// The device-memory configuration a CUDA arena is built with — ONNX Runtime's
-/// <c>gpu_mem_limit</c> and <c>arena_extend_strategy</c>. It governs both arenas a compute
-/// context has: the one each session it compiles allocates in, and the one the tensors it places
-/// on its card come out of. Both are ignored by the CPU backends, which have no device arena.
+/// The device-memory configuration of a compute context: a budget on what it holds in its device's
+/// memory (<see cref="LimitBytes"/>), from which each of its sessions' ONNX Runtime
+/// <c>gpu_mem_limit</c> is derived, and the <c>arena_extend_strategy</c> its sessions' CUDA arenas
+/// are built with (<see cref="ArenaExtend"/>). Both are ignored where a context's memory is the
+/// host's: the CPU backends have no device arena, and a device-memory budget does not govern host
+/// memory.
 ///
-/// <para><b>This is arena-scoped, and that is ORT's own shape, not a convention layered on
-/// top.</b> ORT gives each session its own arena and reads both values once, while the session
-/// is being created, after which the session keeps them for life. So an instance held by a
-/// <see cref="Shorokoo.Runtime.ComputeContext"/> configures the sessions that context compiles
-/// from then on, two contexts can differ, and a session already compiled is unaffected by any
-/// later change: to run under a different budget, compile under a different one.</para>
+/// <para><b>The budget is the context's, not one arena's.</b> It covers the tensors attached to
+/// the context in its device's memory and, while one of its runs executes, the arena that run
+/// computes in, whose limit is cut to what the attached tensors leave. What that means for a
+/// transfer, a run and a session is on <see cref="LimitBytes"/>.</para>
 ///
-/// <para>The same values settle the arena that context's <i>transfers</i> allocate from — the one
-/// a tensor moved onto its card comes out of, which is not a session the program compiled and
-/// which lives until the process ends. Assigning here reaches neither kind after the fact; both
-/// read these values when they are built and never again.</para>
+/// <para><b>The arena settings are session-scoped, and that is ORT's own shape, not a convention
+/// layered on top.</b> ORT gives each session its own arena and reads its limit and strategy once,
+/// while the session is being created, after which the session keeps them for life. So an instance
+/// held by a <see cref="Shorokoo.Runtime.ComputeContext"/> configures the sessions that context
+/// compiles, two contexts can differ, and neither reaches the other's sessions: to run under a
+/// different budget or strategy, compile on a context that carries it.</para>
+///
+/// <para>The tensors a context places on its card — <c>To</c>, <c>CopyTo</c>,
+/// <c>AllocateUninitialized</c>, and the copies its runs make of memory they cannot read where it
+/// is — come out of none of those arenas. They are allocated from one allocator per card, shared by
+/// every context in the process whatever its settings and held for the life of the process; the
+/// budget is kept by counting them against the context they are attached to, not by that
+/// allocator.</para>
 ///
 /// <para>It is a record, so a variation is a <c>with</c> expression off an existing one rather
 /// than a mutation of shared state:</para>
@@ -86,7 +95,7 @@ public enum ArenaExtendStrategy
 public sealed record DeviceMemorySettings
 {
     /// <summary>
-    /// What a session gets when nothing names otherwise: no budget, and
+    /// What a context gets when nothing names otherwise: no budget, and
     /// <see cref="ArenaExtendStrategy.Auto"/>. Immutable and shared — a record, so it cannot be
     /// altered in place by one caller on behalf of every other.
     /// </summary>
@@ -95,32 +104,49 @@ public sealed record DeviceMemorySettings
     private readonly long? _limitBytes;
 
     /// <summary>
-    /// The upper bound, in bytes, on what this session's CUDA arena may allocate — ORT's
-    /// <c>gpu_mem_limit</c>. <c>null</c> (the default) leaves ORT free to take the whole
-    /// card. A step that needs more than this fails with an ORT <c>BFCArena</c> allocation
-    /// error rather than eating into what is left of the device, which is what makes a
-    /// too-large configuration fail early and visibly instead of starving everything else
-    /// on the machine.
+    /// The compute context's budget, in bytes, on its device's memory: the most it may hold there at
+    /// once, counting the tensors attached to it there and the arena of whichever of its runs is
+    /// executing. <c>null</c> (the default) is no budget, and leaves ORT free to take the whole card.
+    /// It is a budget, not a hint: what would pass it is refused, or fails, rather than eating into
+    /// what is left of the device.
     ///
-    /// <para>It caps <b>one arena</b>, and a card carries one per live session compiled against
-    /// it plus one per set of these settings a tensor has been placed on it under. So read it as
-    /// the ceiling on any one of them and divide accordingly: a context that compiles a graph and
-    /// a rig and also holds tensors moved onto its card can be holding this much three times over.
-    /// Both kinds are countable from the program's own side — the sessions it compiled, and the
-    /// configurations it placed tensors under — which is what makes the division possible; what
-    /// each is actually holding is reported by
-    /// <see cref="Shorokoo.Runtime.CompiledGraph.ReadArenaStatistics"/> and
-    /// <see cref="Shorokoo.Runtime.ComputeContext.ReadTransferArenaStatistics"/>.</para>
+    /// <para><b>Transfers.</b> <c>To</c>, <c>CopyTo</c> and <c>AllocateUninitialized</c> onto the
+    /// context, and the copies a run of it makes of memory it cannot read where it is, are refused
+    /// with an <see cref="InvalidOperationException"/> naming the budget, what is attached and what
+    /// was asked for, when what is attached plus what they would add passes the limit.
+    /// <see cref="Shorokoo.Runtime.ComputeContext.ReadDeviceMemoryUse"/> reads what is attached
+    /// against it.</para>
     ///
-    /// <para>They differ in how long they last. A session's arena goes when that session does; the
-    /// arena a transfer allocates from is held until the process ends, because the tensors in it
-    /// free themselves through it and can outlive every context. What opens one is a distinct pair
-    /// of values rather than a distinct object — these settings are a record, so two built
-    /// separately from the same budget are one key and one arena — so a program pays for the
-    /// budgets it names, not for the objects it builds. A program that keeps <i>varying</i> the
-    /// budget keeps opening arenas it can never close, which is why a card refuses to hold more
-    /// than a handful of distinct configurations at once; rounding the figure to a few fixed sizes
-    /// is what keeps it bounded.</para>
+    /// <para><b>Runs.</b> A session's arena gets ORT's <c>gpu_mem_limit</c> of the budget less the
+    /// <i>discount</i>: what the context holds in its memory outside that arena for the length of
+    /// the run — the tensors attached to it there, and those the run reads there or copies there to
+    /// read. A tensor already on the card is read where it is and never enters the arena, so it
+    /// stays in the discount for the whole run; one the session's own earlier runs left in its arena
+    /// is inside the limit already. What the run consumed is released as it returns, and drops out.
+    /// A run that needs more arena than it was left fails with ORT's <c>BFCArena</c> error; one whose
+    /// discount leaves no arena at all is refused before it takes anything it was fed.</para>
+    ///
+    /// <para><b>Sessions.</b> ORT fixes a session's <c>gpu_mem_limit</c> when the session is built,
+    /// and building one costs about as much as the graph is large, so a session is built with the
+    /// budget less the discount rounded up to the next sixty-fourth of the budget, and kept while
+    /// the discount stays within what that left. A run that finds the discount grown past it builds
+    /// the session again, with the lower limit; one that finds it fallen keeps the session and its
+    /// lower limit. So the limit only ever comes down — at most sixty-four times over a session's
+    /// life, and never in a loop whose discount holds steady.
+    /// <see cref="Shorokoo.Runtime.CompiledGraph.DeviceMemory"/> reports the limit a session
+    /// got.</para>
+    ///
+    /// <para><b>One at a time.</b> Under a budget the context's runs are serialized — a second
+    /// waits for the first to return — and so are compiles on it and transfers onto it, and every
+    /// run hands its arena's unused blocks back as it ends, whatever
+    /// <see cref="RunSettings.ShrinkArenaAfterRun"/> says.</para>
+    ///
+    /// <para><b>What it does not count.</b> The budget counts tensors, not arenas. The blocks an
+    /// arena keeps spare, the one allocator per card that tensors are placed from — which holds the
+    /// most it was ever asked for at once — and the weights a session keeps in its arena for as long
+    /// as it lives are not in it: a session's weights count only against its own runs, so a context
+    /// that has compiled several graphs with large weights is holding every one of them at once, and
+    /// can be holding more than its budget between them.</para>
     /// </summary>
     /// <exception cref="ArgumentOutOfRangeException">A limit of zero or less.</exception>
     public long? LimitBytes
@@ -156,9 +182,10 @@ public sealed record DeviceMemorySettings
     /// <para><b>The strategy is the smaller half of what a training step's arena costs.</b> On the
     /// card, that step's arena roughly doubles between its first run and its second under
     /// <i>either</i> strategy — 1.75x and 1.89x — in one extension, and ends up holding about
-    /// twice what its steps use (1.94x and 2.15x). The strategy trims that one block; only
-    /// <see cref="LimitBytes"/> stops it being taken, and a budget near what the step uses keeps
-    /// the run identical while giving back what the doubling would have held.</para>
+    /// twice what its steps use (1.94x and 2.15x). The strategy trims that one block; only an arena
+    /// limit stops it being taken — the one <see cref="LimitBytes"/> leaves a session — and a limit
+    /// near what the step uses keeps the run identical while giving back what the doubling would
+    /// have held.</para>
     /// </summary>
     /// <exception cref="ArgumentOutOfRangeException">Not one of the strategies.</exception>
     public ArenaExtendStrategy ArenaExtend

@@ -36,13 +36,29 @@ namespace Shorokoo.Runtime
     /// </summary>
     public class CompiledGraph : IDisposable
     {
-        private readonly IShorokooSession _session;
         private readonly IShorokooBackend _backend;
         // The context that compiled this graph: its runs are this context's runs, so it takes the
         // locks on what they read and its outputs are attached to it.
         private readonly ComputeContext _owner;
         private readonly Dictionary<string, string> _onnxInputNameByOriginal;
         private readonly string[] _originalInputNames;
+
+        // The session's outputs, by name, in its order -- every session this graph is ever built on
+        // is the same model's, so they are taken once rather than asked of whichever is current.
+        private readonly string[] _outputNames;
+
+        // The session this graph runs on and what it was built with. Replaced only on a context whose
+        // device memory is under a budget, at the start of a run -- which the budget serializes --
+        // when the run finds the context holding more of its memory than the session's arena limit
+        // left room for (see Within). Everything else that reaches into the session does so under
+        // _sessionGate, which the replacement takes too, so nothing calls into one being disposed.
+        private volatile BuiltSession _built;
+        private readonly object _sessionGate = new();
+
+        // The model the session was built from, kept only where it may have to be built again: on a
+        // context under a device-memory budget. Anywhere else a session is built once and this is
+        // null, so an ordinary compile keeps no second copy of its model.
+        private readonly byte[]? _model;
 
         internal CompiledGraph(
             IShorokooSession session,
@@ -53,17 +69,33 @@ namespace Shorokoo.Runtime
             DeviceMemorySettings deviceMemory,
             RunSettings defaultRunSettings,
             ComputeContext owner,
-            string? description = null)
+            string? description = null,
+            byte[]? model = null)
         {
             _owner = owner;
-            _session = session;
+            _built = new BuiltSession(session, deviceMemory);
+            _outputNames = [.. session.OutputNames];
             _backend = backend;
             _onnxInputNameByOriginal = onnxInputNameByOriginal;
             _originalInputNames = originalInputNames;
             Optimization = optimization;
-            DeviceMemory = deviceMemory;
             DefaultRunSettings = defaultRunSettings;
             _description = description;
+            _model = model;
+        }
+
+        /// <summary>
+        /// A session and the settings it was built with, and the arena it allocates in as the
+        /// tensors a run leaves there record it: a token of its own rather than the session, so an
+        /// output that outlives a rebuilt session does not keep the managed wrapper of it alive.
+        /// </summary>
+        private sealed class BuiltSession(IShorokooSession session, DeviceMemorySettings deviceMemory)
+        {
+            internal IShorokooSession Session { get; } = session;
+
+            internal DeviceMemorySettings DeviceMemory { get; } = deviceMemory;
+
+            internal object Arena { get; } = new();
         }
 
         // What a message about a run of this graph calls it, where the compiler knew better than a
@@ -72,7 +104,7 @@ namespace Shorokoo.Runtime
 
         /// <summary>This graph as a message about one of its runs names it.</summary>
         private string Described
-            => _description ?? ComputeContext.DescribeGraph(_originalInputNames, _session.OutputNames);
+            => _description ?? ComputeContext.DescribeGraph(_originalInputNames, _outputNames);
 
         /// <summary>
         /// What a run of this graph uses when the call names nothing: the
@@ -90,8 +122,10 @@ namespace Shorokoo.Runtime
         /// </summary>
         public BackendDescription Backend => _backend.Description;
 
+        private volatile bool _disposed;
+
         /// <summary>True once this graph's session has been released.</summary>
-        public bool IsDisposed { get; private set; }
+        public bool IsDisposed => _disposed;
 
         /// <summary>
         /// Releases the session behind this graph. A session is the expensive thing a
@@ -102,9 +136,14 @@ namespace Shorokoo.Runtime
         /// </summary>
         public void Dispose()
         {
-            if (IsDisposed) return;
-            IsDisposed = true;
-            _session.Dispose();
+            BuiltSession built;
+            lock (_sessionGate)
+            {
+                if (_disposed) return;
+                _disposed = true;
+                built = _built;
+            }
+            built.Session.Dispose();
             GC.SuppressFinalize(this);
         }
 
@@ -117,8 +156,16 @@ namespace Shorokoo.Runtime
         /// <see cref="ArenaExtendStrategy.Auto"/> already settled to the strategy this session
         /// got. A session keeps what it was built with, so this is what the session actually has —
         /// not what its context says now, and not <c>Auto</c>.
+        ///
+        /// <para>On a context whose device memory is under a budget,
+        /// <see cref="DeviceMemorySettings.LimitBytes"/> here is the session's own arena limit
+        /// rather than the budget: the budget less what the context held in its memory outside the
+        /// session when it was built, rounded up to the next sixty-fourth of the budget so that the
+        /// session is kept while that grows a little. It comes down, and never goes up, when a run
+        /// finds the context holding more than the session left room for and the session is built
+        /// again.</para>
         /// </summary>
-        public DeviceMemorySettings DeviceMemory { get; }
+        public DeviceMemorySettings DeviceMemory => _built.DeviceMemory;
 
         /// <summary>
         /// Executes the compiled graph with the given inputs.
@@ -182,14 +229,14 @@ namespace Shorokoo.Runtime
         private HashSet<string> Retained(bool[] retainOnDevice)
         {
             if (retainOnDevice is null) throw new ArgumentNullException(nameof(retainOnDevice));
-            if (retainOnDevice.Length != _session.OutputNames.Count)
+            if (retainOnDevice.Length != _outputNames.Length)
                 throw new InvalidTensorOperationException(ErrorCodes.CR006, "CompiledGraph.Execute",
-                    $"retainOnDevice.Length={retainOnDevice.Length}, graph.Outputs.Count={_session.OutputNames.Count}",
+                    $"retainOnDevice.Length={retainOnDevice.Length}, graph.Outputs.Count={_outputNames.Length}",
                     "Retention flag count does not match the graph's output count");
 
             var retained = new HashSet<string>();
             for (int i = 0; i < retainOnDevice.Length; i++)
-                if (retainOnDevice[i]) retained.Add(_session.OutputNames[i]);
+                if (retainOnDevice[i]) retained.Add(_outputNames[i]);
             return retained;
         }
 
@@ -227,32 +274,50 @@ namespace Shorokoo.Runtime
             runSettings.CancellationToken.ThrowIfCancellationRequested();
             var feeds = new RunFeeds(_owner, _backend,
                 new RunIdentity(() => ComputeContext.DescribeRun(Described, _backend.Description)));
-            _owner.EnterRun();
+            // Under a device-memory budget this waits for any run of the context already in flight:
+            // two at once would each be counting the room the other's arena is taking.
+            var entered = _owner.EnterRun(_backend.MemorySpace, runSettings.CancellationToken);
             try
             {
+                // Again, now that the run may have waited for another: the graph may have been
+                // released meanwhile.
+                ObjectDisposedException.ThrowIf(IsDisposed, this);
+
+                // Everything that can refuse the run over what it is fed, before anything is taken.
+                feeds.Prepare(inputs);
+
+                // Under a budget, the session this run can use -- kept, or built again with the
+                // arena limit what the context now holds leaves -- decided before anything is
+                // taken, so a run the budget cannot fit is refused having consumed nothing.
+                var built = feeds.Budget is { } limit ? Within(limit, feeds) : _built;
+                var session = built.Session;
+
                 // On this graph's own backend, because that is the runtime about to read the values:
                 // what it can address it is handed as it stands, and anything else -- every literal
                 // in the program, held in managed memory, and a tensor of another device or runtime
                 // -- through a copy that backend builds. Each input is held first -- read-locked, or
                 // consumed -- and its value built after.
-                var sessionInputs = feeds.Feed(inputs, name =>
+                var sessionInputs = feeds.Feed(name =>
                     _onnxInputNameByOriginal.TryGetValue(name, out var mapped) ? mapped : name);
                 ComputeContext.RefuseUnleasedFeed(feeds.Held, inputs.Length);
 
                 using var eviction = ComputeContext.LinkEvictions(feeds.Leases, runSettings.CancellationToken);
-                var settings = eviction is null
-                    ? runSettings : runSettings with { CancellationToken = eviction.Token };
+                // Under a budget the arena hands back what the run did not keep as it ends, whatever
+                // the caller asked: the budget counted the arena at its limit only for this run.
+                var settings = feeds.Budget is null
+                    ? runSettings : runSettings with { ShrinkArenaAfterRun = true };
+                if (eviction is not null) settings = settings with { CancellationToken = eviction.Token };
 
                 IReadOnlyList<IShorokooTensorValue> results;
                 // Either side of the native call and nothing else: the arena figures are about
                 // what the run allocates, and the wrapping above allocates nowhere near it.
-                var arenaBefore = _owner.StartRunStats(_session);
+                var arenaBefore = _owner.StartRunStats(session);
                 try
                 {
                     // What this run consumed goes to the backend here, and is its alone from this
                     // call on, whatever the call does.
-                    results = feeds.HandOver(consumed => _session.RunConsuming(
-                        sessionInputs, consumed, _session.OutputNames,
+                    results = feeds.HandOver(consumed => session.RunConsuming(
+                        sessionInputs, consumed, _outputNames,
                         retainedOutputNames ?? ComputeContext.NoOutputsRetained, settings));
                 }
                 catch (OperationCanceledException stopped)
@@ -265,10 +330,10 @@ namespace Shorokoo.Runtime
                 {
                     // However the run ended. A run that failed for want of memory is the one whose
                     // figures are worth most, so it is recorded like any other.
-                    _owner.FinishRunStats(_session, arenaBefore);
+                    _owner.FinishRunStats(session, arenaBefore);
                 }
 
-                return _owner.AdoptOutputs(results, _session.OutputNames, _backend);
+                return _owner.AdoptOutputs(results, _outputNames, _backend, built.Arena);
             }
             finally
             {
@@ -277,8 +342,77 @@ namespace Shorokoo.Runtime
                 // are still held right up to the moment it gives up. What it consumed went to the
                 // backend with the call, and only what never got that far is released here.
                 feeds.Dispose();
-                _owner.ExitRun();
+                _owner.ExitRun(entered);
             }
+        }
+
+        /// <summary>
+        /// The session a run under a device-memory budget of <paramref name="limit"/> bytes can use,
+        /// with <paramref name="feeds"/> admitted against it: this graph's session while its arena
+        /// limit is still within what the budget allows, and otherwise a new one built with the
+        /// limit what the context now holds leaves.
+        ///
+        /// <para>What the budget allows a session is the budget less the <i>discount</i>: the bytes
+        /// the context holds in its memory outside that session's arena for the length of the run —
+        /// every tensor attached to it there, and what the run itself reads there or copies there to
+        /// read. A tensor the session's own earlier runs left in its arena is inside the limit
+        /// already, where it is, and is not discounted again. ONNX Runtime fixes an arena's limit
+        /// when the session is built, and building one costs about as much as the graph is large,
+        /// so a session is kept for as long as its limit fits and built again only when the discount
+        /// has grown past the room it left — never merely because it has fallen. See
+        /// <see cref="ComputeContext.ArenaLimitWithin"/> for the limit a new one gets.</para>
+        /// </summary>
+        /// <exception cref="InvalidOperationException">What the context holds leaves no room for the
+        /// run's arena. Nothing has been taken.</exception>
+        private BuiltSession Within(long limit, RunFeeds feeds)
+        {
+            var built = _built;
+            var plan = feeds.Plan(built.Arena);
+            if (built.DeviceMemory.LimitBytes is { } current && current <= limit - plan.Outside)
+            {
+                feeds.Admit(current, plan);
+                return built;
+            }
+
+            // A new session's arena starts empty, so what this one's runs left in its arena is
+            // outside the new one, and is discounted with everything else.
+            var fresh = feeds.Plan(excludingArena: null);
+            var arena = ComputeContext.ArenaLimitWithin(limit, fresh.Outside)
+                ?? throw feeds.NoRoom(limit, fresh);
+            var rebuilt = Rebuild(arena);
+            feeds.Admit(arena, fresh);
+            return rebuilt;
+        }
+
+        /// <summary>
+        /// Builds this graph's session again with an arena limit of <paramref name="arenaLimit"/>,
+        /// and releases the one it replaces. What the old session's runs left in its arena survives
+        /// the release — each output keeps the arena it came from alive — so nothing a caller holds
+        /// is touched.
+        /// </summary>
+        private BuiltSession Rebuild(long arenaLimit)
+        {
+            var model = _model ?? throw new InvalidOperationException(
+                "This compiled graph kept no model to build its session again from, so its arena "
+                + "limit cannot come down to what its context's device-memory budget now allows.");
+            var deviceMemory = _built.DeviceMemory with { LimitBytes = arenaLimit };
+            var fresh = new BuiltSession(
+                _owner.BuildSession(_backend, model, Optimization, deviceMemory), deviceMemory);
+            BuiltSession old;
+            lock (_sessionGate)
+            {
+                if (_disposed)
+                {
+                    fresh.Session.Dispose();
+                    throw new ObjectDisposedException(GetType().Name);
+                }
+                old = _built;
+                _built = fresh;
+            }
+            // Outside the gate: every reader calls into the session under it, so once the swap is
+            // made nothing is inside the old one.
+            old.Session.Dispose();
+            return fresh;
         }
 
         /// <summary>Pairs the expanded inputs with the graph's input names, positionally.</summary>
@@ -302,7 +436,10 @@ namespace Shorokoo.Runtime
         /// Whether this graph's session produces its outputs somewhere other than host memory, so
         /// <see cref="Execute(IData[], bool[])"/> has somewhere to retain them.
         /// </summary>
-        public bool HasDeviceMemory => _session.HasDeviceMemory;
+        public bool HasDeviceMemory
+        {
+            get { lock (_sessionGate) return _built.Session.HasDeviceMemory; }
+        }
 
         /// <summary>
         /// Where this graph's session produces its outputs, which on a GPU backend is the one
@@ -314,7 +451,10 @@ namespace Shorokoo.Runtime
         /// <see cref="SessionOutputPlacement.Host"/> on one says all of it did. For <i>which</i>
         /// nodes, and what they cost, see <see cref="ReadNodePlacement"/> — which is not free.</para>
         /// </summary>
-        public SessionOutputPlacement OutputPlacement => _session.OutputPlacement;
+        public SessionOutputPlacement OutputPlacement
+        {
+            get { lock (_sessionGate) return _built.Session.OutputPlacement; }
+        }
 
         /// <summary>
         /// This session's own memory arena, as its runtime reports it, or <c>null</c> on a backend
@@ -326,12 +466,19 @@ namespace Shorokoo.Runtime
         /// For a record per run, folded as the runs happen, set
         /// <see cref="DiagnosticSettings.CollectRunStatistics"/> on the compiling context and read
         /// <see cref="ComputeContext.RunStats"/>.</para>
+        ///
+        /// <para>It reads the session this graph runs on now. Under a device-memory budget that can
+        /// be a later session than the one it was compiled with — see <see cref="DeviceMemory"/> —
+        /// and a new session's arena starts its figures afresh.</para>
         /// </summary>
         /// <exception cref="ObjectDisposedException">This graph's session has been released.</exception>
         public ArenaStatistics? ReadArenaStatistics()
         {
-            ObjectDisposedException.ThrowIf(IsDisposed, this);
-            return _session.ReadArenaStatistics();
+            lock (_sessionGate)
+            {
+                ObjectDisposedException.ThrowIf(IsDisposed, this);
+                return _built.Session.ReadArenaStatistics();
+            }
         }
 
         /// <summary>
@@ -350,8 +497,11 @@ namespace Shorokoo.Runtime
         /// <exception cref="ObjectDisposedException">This graph's session has been released.</exception>
         public ArenaStatistics? ReadPinnedArenaStatistics()
         {
-            ObjectDisposedException.ThrowIf(IsDisposed, this);
-            return _session.ReadPinnedArenaStatistics();
+            lock (_sessionGate)
+            {
+                ObjectDisposedException.ThrowIf(IsDisposed, this);
+                return _built.Session.ReadPinnedArenaStatistics();
+            }
         }
 
         /// <summary>
@@ -362,19 +512,24 @@ namespace Shorokoo.Runtime
         ///
         /// <para><b>Reading it stops the recording.</b> The trace covers every run made up to this
         /// call, runs after it are not recorded, and a second read hands back the same trace. So
-        /// call it once, after the runs you are asking about.</para>
+        /// call it once, after the runs you are asking about. Under a device-memory budget, a
+        /// session built again for a lower arena limit (see <see cref="DeviceMemory"/>) starts a
+        /// trace of its own, which covers the runs from then on.</para>
         /// </summary>
         /// <exception cref="ObjectDisposedException">This graph's session has been released.</exception>
         public NodePlacement? ReadNodePlacement()
         {
-            ObjectDisposedException.ThrowIf(IsDisposed, this);
-            return _session.ReadNodePlacement();
+            lock (_sessionGate)
+            {
+                ObjectDisposedException.ThrowIf(IsDisposed, this);
+                return _built.Session.ReadNodePlacement();
+            }
         }
 
         /// <summary>How many outputs this graph's session produces — the length
         /// <see cref="Execute(IData[], bool[])"/> requires of a retention array, so a caller can
         /// size one without deriving the count a second way and disagreeing.</summary>
-        public int OutputCount => _session.OutputNames.Count;
+        public int OutputCount => _outputNames.Length;
     }
 
     /// <summary>
@@ -396,9 +551,9 @@ namespace Shorokoo.Runtime
     /// <see cref="Backend"/>.
     ///
     /// <para>It also carries how its sessions and runs are configured — <see cref="DeviceMemory"/>
-    /// for the arena each session it compiles is built with, and <see cref="RunSettings"/> for what
-    /// its runs do by default. Both are per instance, so two contexts may differ and neither
-    /// reaches the other's sessions.</para>
+    /// for the arena each session it compiles is built with and for the budget it keeps on its
+    /// device's memory, and <see cref="RunSettings"/> for what its runs do by default. Both are per
+    /// instance, so two contexts may differ and neither reaches the other's sessions.</para>
     ///
     /// <para>The same data feeds either context and the same model runs on both, with nothing to
     /// say at the call site. A literal costs nothing to share: it is managed bytes until something
@@ -421,9 +576,11 @@ namespace Shorokoo.Runtime
     /// <see cref="TensorData.CopyTo"/> placed for it — for its own accounting, and
     /// <see cref="Detach"/> takes one off. Attachment never keeps a tensor alive and never ends one's
     /// life: disposing a context releases what the context itself holds, its compiled sessions,
-    /// and leaves every tensor as it was.</para>
+    /// and leaves every tensor as it was. The accounting is what the device-memory budget is kept
+    /// by: the bytes of what is attached in the context's memory, read with
+    /// <see cref="ReadDeviceMemoryUse"/>.</para>
     /// </summary>
-    public class ComputeContext : IDisposable
+    public partial class ComputeContext : IDisposable
     {
         private static volatile ComputeContext? _defaultComputeContext;
         private static readonly object _defaultGate = new();
@@ -539,26 +696,33 @@ namespace Shorokoo.Runtime
         private readonly DeviceMemorySettings _deviceMemory = DeviceMemorySettings.Default;
 
         /// <summary>
-        /// The arena settings every session this context compiles from now on is built with.
-        /// ONNX Runtime reads them while a session is being created and that session keeps them
-        /// for life, so this configures the sessions to come and never the ones already built —
-        /// to run a graph under a different budget, compile it on a context that carries one.
+        /// This context's device-memory budget, and the arena settings every session it compiles is
+        /// built with. Initialize-only: a context keeps what it was built with.
         ///
-        /// <para>It also bounds what can be <i>placed</i> in this context's memory. A tensor copied
-        /// onto its card — <see cref="TensorData.CopyTo"/>, <see cref="TensorData.To"/>,
-        /// <see cref="AllocateUninitialized(Shape, DType)"/> — is allocated out of an arena built
-        /// with these same settings, so a <see cref="DeviceMemorySettings.LimitBytes"/> here is a
-        /// ceiling on the tensors as well as on the sessions, and what those tensors are actually
-        /// holding is reported by <see cref="ReadTransferArenaStatistics"/>. A tensor is charged to
-        /// the arena it was allocated from, once: handing it to a second context that can read it
-        /// where it is copies nothing, so there is nothing there to re-charge.</para>
+        /// <para><b><see cref="DeviceMemorySettings.LimitBytes"/> is a budget on this context's
+        /// device memory</b>, and covers both halves of what it holds there: the tensors attached to
+        /// it in its memory — what <see cref="TensorData.To"/>, <see cref="TensorData.CopyTo"/> and
+        /// <see cref="AllocateUninitialized(Shape, DType)"/> placed for it, what its runs read there
+        /// or copied there to read, and the outputs they left there — and, while one of its runs
+        /// executes, the arena that run computes in. A transfer that would take the attached bytes
+        /// past the limit is refused, naming the budget, what is attached and what was asked for; a
+        /// session's arena is capped at the budget less what the context holds outside it for the
+        /// run, and is built again with a lower cap when that has grown past the room it left.
+        /// <see cref="ReadDeviceMemoryUse"/> reads what is attached against the limit.</para>
+        ///
+        /// <para>Under a budget the context's runs also go one at a time — a second waits for the
+        /// first to return, as does a transfer onto the context or a compile on it — and each run
+        /// hands its arena's unused blocks back as it ends, whatever
+        /// <see cref="RunSettings.ShrinkArenaAfterRun"/> says. A context with no limit is none of
+        /// this.</para>
         ///
         /// <para>Its default <see cref="ArenaExtendStrategy.Auto"/> resolves per session, so one
         /// context can still give a session it knows is reused across shapes a different arena
         /// strategy from the rest; <see cref="CompiledGraph.DeviceMemory"/> reports which one a
-        /// graph got.</para>
+        /// graph got, and under a budget the arena limit it got.</para>
         ///
-        /// <para>Ignored by the CPU backends, which have no device arena.</para>
+        /// <para>Ignored where the context's memory is the host's — the CPU backends have no device
+        /// arena, and a device-memory budget does not govern host memory.</para>
         /// </summary>
         /// <exception cref="ArgumentNullException">A null settings object.</exception>
         public DeviceMemorySettings DeviceMemory
@@ -632,35 +796,6 @@ namespace Shorokoo.Runtime
         /// unaffected by runs that come after it.</para>
         /// </summary>
         public RunStatistics RunStats => _runStatistics?.Snapshot() ?? RunStatistics.Empty;
-
-        /// <summary>
-        /// The arena the tensors this context has placed in its backend's own memory came out of —
-        /// the other half of its device footprint, beside the sessions
-        /// <see cref="CompiledGraph.ReadArenaStatistics"/> reports.
-        ///
-        /// <para><c>null</c> when there is nothing to report: a backend with no device memory, or
-        /// a device nothing has yet been placed on <i>under these settings</i> — by this context
-        /// or by any other. It fills as soon as one of them places a tensor, because the arena is
-        /// keyed on the device and the settings rather than on the context: it is built with
-        /// <see cref="DeviceMemory"/>, so <see cref="ArenaStatistics.LimitBytes"/> is this
-        /// context's own budget, and every context naming the same budget on the same card reads
-        /// this same arena and shares that one ceiling between them. Settings differing only by
-        /// <see cref="ArenaExtendStrategy.Auto"/> against what it resolves to are the same
-        /// settings here.</para>
-        ///
-        /// <para>A backend written before budgets existed reports <c>null</c> too, having no
-        /// budgeted arena to answer for — so <c>null</c> does not on its own distinguish "nothing
-        /// placed yet" from "this backend does not honour a budget".</para>
-        ///
-        /// <para>It is a reading, so it costs a call into the backend and nothing is
-        /// remembered.</para>
-        /// </summary>
-        /// <exception cref="ObjectDisposedException">This context has been disposed.</exception>
-        public ArenaStatistics? ReadTransferArenaStatistics()
-        {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-            return ResolvedBackend.ReadTransferArenaStatistics(DeviceMemory);
-        }
 
         /// <summary>
         /// The arena figures <paramref name="session"/> reports before a run, or <c>null</c> when
@@ -852,13 +987,18 @@ namespace Shorokoo.Runtime
         /// framework's own host memory is; on a real backend it is the memory that backend
         /// allocates in, which on a CUDA one is the card's and so is not writable through a span
         /// at all. <see cref="TensorData.IsHostResident"/> says which. Either way the tensor is
-        /// attached to this context, as a <see cref="TensorData.CopyTo"/> result is.</para>
+        /// attached to this context, as a <see cref="TensorData.CopyTo"/> result is, and on a
+        /// context under a device-memory budget it is refused, as a copy would be, when the budget
+        /// cannot take it.</para>
         /// </summary>
         /// <exception cref="ArgumentNullException"><paramref name="dtype"/> is null.</exception>
         /// <exception cref="NotSupportedException"><paramref name="dtype"/> is
         /// <see cref="DType.Utf8"/>, whose elements are variable-length, or has no whole-byte
         /// element stride, or <paramref name="shape"/> has no known element count.</exception>
         /// <exception cref="ObjectDisposedException">This context has been disposed.</exception>
+        /// <exception cref="InvalidOperationException">This context's device-memory budget cannot
+        /// take the tensor alongside what is attached to it
+        /// (<see cref="DeviceMemorySettings.LimitBytes"/>).</exception>
         public TensorData AllocateUninitialized(Shape shape, DType dtype)
         {
             ArgumentNullException.ThrowIfNull(dtype);
@@ -877,34 +1017,45 @@ namespace Shorokoo.Runtime
                     $"A tensor of {shape}:{dtype} cannot be allocated as a flat buffer: its "
                     + "elements have no whole-byte stride, or its shape has no known element count.");
 
+            var bytes = checked(shape.Count * (bits / 8));
             if (_isHost)
-                return TensorData.NewHostTensor(shape, dtype, new byte[checked(shape.Count * (bits / 8))]);
+                return TensorData.NewHostTensor(shape, dtype, new byte[bytes]);
 
             var backend = ResolvedBackend;
-            var value = backend.CreateUninitializedTensorInBackendMemory(
-                (ShorokooTensorElementType)(int)dtype, (long[])shape, DeviceMemory);
-            TensorData allocated;
+            var space = backend.MemorySpace;
+            var gate = EnterBudget(space, CancellationToken.None);
             try
             {
-                allocated = TensorData.Create(shape, dtype, value, backend);
+                RefusePlacementOverBudget(space, bytes, () => $"AllocateUninitialized of {shape}:{dtype}");
+                var value = backend.CreateUninitializedTensorInBackendMemory(
+                    (ShorokooTensorElementType)(int)dtype, (long[])shape);
+                TensorData allocated;
+                try
+                {
+                    allocated = TensorData.Create(shape, dtype, value, backend);
+                }
+                catch
+                {
+                    // Nothing else names it yet, and on a card it is a device allocation that would
+                    // otherwise sit on the finalizer queue.
+                    backend.Release(value);
+                    throw;
+                }
+                try
+                {
+                    Attach(allocated);
+                }
+                catch
+                {
+                    allocated.Delete();
+                    throw;
+                }
+                return allocated;
             }
-            catch
+            finally
             {
-                // Nothing else names it yet, and on a card it is a device allocation that would
-                // otherwise sit on the finalizer queue.
-                backend.Release(value);
-                throw;
+                gate?.Exit();
             }
-            try
-            {
-                Attach(allocated);
-            }
-            catch
-            {
-                allocated.Delete();
-                throw;
-            }
-            return allocated;
         }
 
         /// <summary>
@@ -1017,7 +1168,7 @@ namespace Shorokoo.Runtime
         /// <para>Against the inputs the run was handed, and deliberately not against a counter the
         /// feed loop keeps beside the lock with no branch in between, which would agree with the
         /// lock count by construction and could not fail. What actually enforces the rule for a
-        /// kind of input nothing knows how to hold is <see cref="RunFeeds.Feed"/>'s own refusal;
+        /// kind of input nothing knows how to hold is <see cref="RunFeeds.Prepare"/>'s own refusal;
         /// this catches the other shape, a feed path that learns to skip an input and its lock
         /// with it.</para>
         /// </summary>
@@ -1080,27 +1231,47 @@ namespace Shorokoo.Runtime
         /// Records that a run of this context has started, so that disposing it is refused until
         /// the run returns. Paired with <see cref="ExitRun"/> in a <c>finally</c>, in both run
         /// paths and nowhere else.
+        ///
+        /// <para>Where the memory the run's backend computes in — <paramref name="space"/> — is
+        /// under this context's device-memory budget, it first waits for the budget gate, so the
+        /// context's runs go one at a time; what it entered is what <see cref="ExitRun"/> is handed
+        /// back.</para>
         /// </summary>
         /// <exception cref="ObjectDisposedException">This context has been disposed, so its
         /// sessions are already gone and there is nothing left to run on.</exception>
-        internal void EnterRun()
+        /// <exception cref="OperationCanceledException"><paramref name="cancellation"/> was cancelled
+        /// while the run waited for the one before it. Nothing was taken.</exception>
+        internal BudgetGate? EnterRun(MemorySpace space, CancellationToken cancellation)
         {
             // The host context runs nothing -- Compile, Execute and Run all refuse there -- and
             // cannot be disposed, so there is no question here for a count to answer.
-            if (_isHost) return;
-            lock (_gate)
+            if (_isHost) return null;
+            var gate = EnterBudget(space, cancellation);
+            try
             {
-                ObjectDisposedException.ThrowIf(_disposed, this);
-                _runs++;
+                lock (_gate)
+                {
+                    ObjectDisposedException.ThrowIf(_disposed, this);
+                    _runs++;
+                }
             }
+            catch
+            {
+                gate?.Exit();
+                throw;
+            }
+            return gate;
         }
 
-        /// <summary>Records that a run of this context has returned, however it ended. Called from
-        /// the <c>finally</c> that pairs with <see cref="EnterRun"/> and nowhere else.</summary>
-        internal void ExitRun()
+        /// <summary>Records that a run of this context has returned, however it ended, and lets the
+        /// next one in where <paramref name="entered"/> is the budget gate its
+        /// <see cref="EnterRun"/> entered. Called from the <c>finally</c> that pairs with it and
+        /// nowhere else.</summary>
+        internal void ExitRun(BudgetGate? entered)
         {
             if (_isHost) return;
             lock (_gate) _runs--;
+            entered?.Exit();
         }
 
         /// <summary>
@@ -1157,18 +1328,23 @@ namespace Shorokoo.Runtime
         /// <summary>
         /// A run's outputs as the tensors and sequences the caller gets back, each allocated by
         /// <paramref name="backend"/> — the backend the run ran on, and so the one that releases
-        /// it — and every tensor among them attached to this context.
+        /// it — and every tensor among them attached to this context. One left in device memory
+        /// records <paramref name="arena"/>, the arena of the session that ran, where there is one
+        /// to name: it is in that arena, and a later run of the same session counts it there.
         /// </summary>
         internal NamedModelParam[] AdoptOutputs(
             IReadOnlyList<IShorokooTensorValue> results, IReadOnlyList<string> names,
-            IShorokooBackend backend)
+            IShorokooBackend backend, object? arena = null)
         {
             var outputs = new NamedModelParam[results.Count];
             for (int i = 0; i < outputs.Length; i++)
             {
                 outputs[i] = OnnxUtils.CreateNamedModelParam(
                     results[i], ModelParamType.OutputParam, names[i], backend);
-                if (outputs[i] is TensorDataModelParam tensor) Attach(tensor.ToTensorData());
+                if (outputs[i] is not TensorDataModelParam named) continue;
+                var tensor = named.ToTensorData();
+                if (arena is not null && !tensor.Space.IsHost) tensor.RecordArena(arena);
+                Attach(tensor);
             }
             return outputs;
         }
@@ -1390,15 +1566,39 @@ namespace Shorokoo.Runtime
             // Settled here, not inside the session: CompiledGraph then reports the strategy this
             // session actually got rather than the Auto that asked for it.
             var deviceMemory = DeviceMemory.Resolve(reusedAcrossShapes);
-            var session = CreateSession(modelData, optimization, deviceMemory);
+            var backend = ResolvedBackend;
+            var space = backend.MemorySpace;
+            byte[]? kept = null;
+            IShorokooSession session;
+            // Under a budget the session is built one at a time with runs of this context and what
+            // is placed in its memory -- its weights go into its arena as it is built -- and with an
+            // arena limit of what the context holds there now leaves. A run finding the context
+            // holding more builds it again with less, from the model this keeps for the purpose.
+            var gate = EnterBudget(space, CancellationToken.None);
+            try
+            {
+                if (BudgetIn(space) is { } limit)
+                {
+                    var (attached, tensors) = AttachedIn(space);
+                    var arena = ArenaLimitWithin(limit, attached)
+                        ?? throw NoRoomToCompile(space, limit, attached, tensors);
+                    deviceMemory = deviceMemory with { LimitBytes = arena };
+                    kept = modelData;
+                }
+                session = BuildSession(backend, modelData, optimization, deviceMemory);
+            }
+            finally
+            {
+                gate?.Exit();
+            }
 
             var onnxInputNameByOriginal = new Dictionary<string, string>();
             for (int i = 0; i < originalInputNames.Length && i < session.InputNames.Count; i++)
                 onnxInputNameByOriginal[originalInputNames[i]] = session.InputNames[i];
 
             var graph = new CompiledGraph(
-                session, ResolvedBackend, onnxInputNameByOriginal, originalInputNames, optimization,
-                deviceMemory, RunSettings, this, description);
+                session, backend, onnxInputNameByOriginal, originalInputNames, optimization,
+                deviceMemory, RunSettings, this, description, kept);
             // Enrolled under the same gate a disposal takes, so a compile racing a disposal either
             // lands before it and is released with everything else, or finds the context gone.
             lock (_gate)
@@ -1561,12 +1761,31 @@ namespace Shorokoo.Runtime
                 DescribeGraph(originalInputNames, session?.OutputNames ?? []), backend.Description)));
             // Before the session, so that everything this context is about to build is inside the
             // window its disposal is refused in -- the session most of all, since disposing the
-            // context is what would release it.
-            EnterRun();
+            // context is what would release it. Under a device-memory budget it also waits for the
+            // context's run in flight, if any.
+            var entered = EnterRun(backend.MemorySpace, RunSettings.CancellationToken);
             try
             {
-                session = CreateSession(
-                    modelData, HasOptionalOps(model.Graph) || IsFullyConstant(model.Graph));
+                // Everything that can refuse the run over what it is fed, before a session is built
+                // for it and before anything is taken.
+                feeds.Prepare(inputs);
+
+                // A one-shot session: built, fed once, and disposed, so no differing shapes can
+                // reach it -- and, under a budget, built with the arena limit what this run holds
+                // on the device leaves, since its arena starts empty and all of that is outside it.
+                var deviceMemory = DeviceMemory.Resolve(reusedAcrossShapes: false);
+                if (feeds.Budget is { } limit)
+                {
+                    var plan = feeds.Plan(excludingArena: null);
+                    var arena = ArenaLimitWithin(limit, plan.Outside) ?? throw feeds.NoRoom(limit, plan);
+                    deviceMemory = deviceMemory with { LimitBytes = arena };
+                    feeds.Admit(arena, plan);
+                }
+                session = BuildSession(
+                    backend, modelData,
+                    SessionOptimization(
+                        HasOptionalOps(model.Graph) || IsFullyConstant(model.Graph), trainingStep: false),
+                    deviceMemory);
                 var onnxInputNameByOriginal = new Dictionary<string, string>();
                 for (int i = 0; i < originalInputNames.Length && i < session.InputNames.Count; i++)
                     onnxInputNameByOriginal[originalInputNames[i]] = session.InputNames[i];
@@ -1574,13 +1793,15 @@ namespace Shorokoo.Runtime
                 // Held first, then the values -- see CompiledGraph.Run -- on this context's
                 // backend: the one that just built the session above, and so the runtime that is
                 // about to read what it is fed.
-                var sessionInputs = feeds.Feed(inputs, name =>
+                var sessionInputs = feeds.Feed(name =>
                     onnxInputNameByOriginal.TryGetValue(name, out var mapped) ? mapped : name);
                 RefuseUnleasedFeed(feeds.Held, inputs.Length);
 
                 using var eviction = LinkEvictions(feeds.Leases, RunSettings.CancellationToken);
-                var settings = eviction is null
-                    ? RunSettings : RunSettings with { CancellationToken = eviction.Token };
+                // Under a budget the arena shrinks as the run ends, as CompiledGraph.Run's does.
+                var settings = feeds.Budget is null
+                    ? RunSettings : RunSettings with { ShrinkArenaAfterRun = true };
+                if (eviction is not null) settings = settings with { CancellationToken = eviction.Token };
                 IReadOnlyList<IShorokooTensorValue> results;
                 var arenaBefore = StartRunStats(session);
                 try
@@ -1627,7 +1848,7 @@ namespace Shorokoo.Runtime
 
                 // Last, so that this context is answerable for its session right up to the moment
                 // the session is gone.
-                ExitRun();
+                ExitRun(entered);
             }
         }
 
@@ -1645,16 +1866,13 @@ namespace Shorokoo.Runtime
                 : ShorokooGraphOptimization.EnableAll;
         }
 
-        // A one-shot session: built, fed once, and disposed, so no differing shapes can reach it.
-        private IShorokooSession CreateSession(byte[] modelData, bool disableOptimizations = false)
-            => CreateSession(
-                modelData,
-                SessionOptimization(disableOptimizations, trainingStep: false),
-                DeviceMemory.Resolve(reusedAcrossShapes: false));
-
-        private IShorokooSession CreateSession(
-            byte[] modelData, ShorokooGraphOptimization optimization, DeviceMemorySettings deviceMemory)
-            => ResolvedBackend.CreateSession(
+        /// <summary>A session of <paramref name="backend"/> over <paramref name="modelData"/>, built
+        /// with <paramref name="deviceMemory"/> and with what this context records about its
+        /// sessions.</summary>
+        internal IShorokooSession BuildSession(
+            IShorokooBackend backend, byte[] modelData, ShorokooGraphOptimization optimization,
+            DeviceMemorySettings deviceMemory)
+            => backend.CreateSession(
                 modelData, optimization, ShorokooLogSeverity.Fatal, deviceMemory, Diagnostics);
 
         /// <summary>

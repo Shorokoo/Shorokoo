@@ -898,6 +898,13 @@ var same   = onHost.To(otherCpu);   // no copy: the very same object
 var mine   = onHost.CopyTo(cpu);    // always a copy
 ```
 
+**Where `To` or `ToHost` needs no copy, what it returns is `t`**, and what you do to the result you
+do to `t`. Fed to a run as it is, it is consumed: `ctx.Execute(graph, t.To(ctx))` consumes `t`
+itself where `To` needed no copy — a tensor built from a C# array, on a CPU context — and only the
+copy where it did, on a card. Deleted, it is gone: `using var h = t.ToHost();` deletes `t` at the
+end of the block when `t` was host-readable already. For a tensor independent of `t`, use `CopyTo`,
+which always copies; to keep `t` past a run, feed it `.Shared()`.
+
 **Attachment is bookkeeping, not ownership.** A context keeps a weak list of the tensors attached
 to it, `context.Tensors`: its runs' outputs, what its runs read, and what `To`, `CopyTo` and
 `AllocateUninitialized` placed for it. The list never keeps a tensor alive and never ends one's

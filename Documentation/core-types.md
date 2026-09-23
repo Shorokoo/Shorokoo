@@ -412,6 +412,12 @@ which the run consumes when it starts — pass it `.Shared()` to have the run on
 `TensorDataSequence.Create(...)` copies the tensors you pass it, and disposing the sequence
 releases only the sequence's own copies.
 
+The two that can hand over the tensor itself are `To(context)`, where the context can read it as it
+stands, and `ToHost()`, where the host already can. What they return is then the very tensor you
+called them on, not a second one: feeding it to a run as it is consumes the original, and deleting
+it — a `using` over it included — deletes the original. `CopyTo` is the one that always gives an
+independent tensor; see [Moving data between contexts](inference.md#moving-data-between-contexts).
+
 **A span is a window, not a copy.** `AccessMemory()` and `AccessRawMemory()` point straight
 into the tensor's memory, and nothing ties the span's lifetime to the tensor's. A span outlives
 the bytes it points at if the tensor goes — by being deleted, and also by simply becoming

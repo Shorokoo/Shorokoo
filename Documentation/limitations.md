@@ -351,9 +351,13 @@ backends use — and what they return is the whole device's usage rather than th
 it, so another process on the card is in your figures. `PeakUsedBytes` is likewise one record for
 the process.
 
-What would improve it is per-allocator figures out of ORT
-([#198](https://github.com/Shorokoo/Shorokoo/issues/198)), which would say what this process holds
-rather than what the device does.
+Per-allocator figures exist for what they cover: `CompiledGraph.ReadArenaStatistics()` reads one
+session's own arena, its bytes and nobody else's, and `ComputeContext.ReadDeviceMemoryUse()` what a
+context holds against its budget — see
+[What one session's arena did](inference.md#what-one-sessions-arena-did). None of them is this
+process's share of the card: nothing reads the allocator tensors are placed from, and a process with
+several sessions has several arenas to add up. For that total, the device's own figure is still the
+one there is.
 
 ### Backprop through dynamic loops
 

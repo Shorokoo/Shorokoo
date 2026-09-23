@@ -546,9 +546,9 @@ rather than whenever the old checkpoint is collected.
   `FeedMode` says. `null` — every checkpoint a step or a load hands you — is as it is, consumed.
   `cp.Shared()` returns the same checkpoint to be read instead, and `cp.TryConsume()` one to be
   consumed only where nothing else is reading it; the derivations (`WithStep`, `WithCounters`,
-  `WithTrainableParams`, …) carry the mode through. Reading a consumed checkpoint's state throws,
-  naming the training step that took it and the section it fed ("the checkpoint's trainable
-  parameter …").
+  `WithTrainableParams`, …) and `rig.AdoptCheckpoint` carry the mode through, since they share its
+  tensors. Reading a consumed checkpoint's state throws, naming the training step that took it and
+  the section it fed ("the checkpoint's trainable parameter …").
 - **An initial checkpoint is a copy.** `CreateInitialCheckpoint()` copies the rig's initial values
   into tensors of the checkpoint's own on every call, and so does a load that falls back on the
   rig for a component its file omits. A step consumes one like any other checkpoint, which takes

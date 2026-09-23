@@ -719,9 +719,11 @@ takes nothing — since consuming it would take its memory from under that run.
 - **The error names the call to change.** Reading a consumed tensor throws
   `ObjectDisposedException` naming the run that took it — its graph and its context — and the
   input it fed; the remedy is to pass it `.Shared()` at that call.
-- `.Shared()` and `.TryConsume()` return a `SharedInput`: an `IData` carrying the value and its
-  `Mode`, accepted wherever an input is. `Run`, which takes `NamedModelParam`s, reads each one's
-  `Sharing` instead — `null` for as it is.
+- On a tensor, struct, sequence or optional, `.Shared()` and `.TryConsume()` return a
+  `SharedInput`: an `IData` carrying the value and its `Mode`, accepted wherever an input is. On a
+  training checkpoint they return the checkpoint itself with its `FeedMode` set, which its
+  derivations (`WithStep`, …) and `rig.AdoptCheckpoint` keep, since they share its tensors. `Run`,
+  which takes `NamedModelParam`s, reads each one's `Sharing` instead — `null` for as it is.
 
 **Memory the run cannot read where it is.** A run reads its inputs in its backend's memory. A
 tensor anywhere else — every tensor built from a C# array, whose managed memory no runtime reads

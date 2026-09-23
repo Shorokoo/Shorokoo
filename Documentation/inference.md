@@ -1004,10 +1004,11 @@ the CPU tests the model the GPU run is training, not a second compilation of its
 `ComputeContext.Backend` says which device each one will use, and a `CompiledGraph` carries
 the backend it was built on in `CompiledGraph.Backend`.
 
-**Tensors are not tied to a backend.** A `TensorData` you build holds managed bytes and no
-backend at all, so building a model and exporting it needs no runtime; a backend enters only
-when the tensor is fed to one, and then either context accepts it — a session hands what it
-is fed to its own runtime, building it there if it does not have it yet.
+**Tensors you build are not tied to a runtime.** A `TensorData` you build holds managed bytes and
+no runtime backend — its allocating backend is `HostBackend.Instance`, the framework's own memory —
+so building a model and exporting it needs no runtime; a runtime enters only when the tensor is fed
+to one, and then either context accepts it — a session hands what it is fed to its own runtime,
+building it there if it does not have it yet.
 
 How often that costs a copy depends on where the tensor is and how it is fed. A run reads as it
 stands only memory its own runtime can address — never a C# array's, and never another

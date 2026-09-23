@@ -315,7 +315,7 @@ Variable w = Globals.TrainableTensor(weights, "conv1.weight");
 
 An attribute answers `Shape`, `DType`, `HasValues`, `Bytes` (or `Values` for `DType.Utf8`),
 `Elements<V>()` and `CopyToTensorData()`, and that is the whole of it: there is no `Dispose`, no
-`Context`, no `Space`. `HasValues` is false for one case only — a model definition saved
+`AllocatingBackend`, no `Space`. `HasValues` is false for one case only — a model definition saved
 *without* its weights, whose parameter slots keep dtype and shape and no elements until a
 checkpoint is bound back onto them. Reading the elements of one of those throws, and says so.
 

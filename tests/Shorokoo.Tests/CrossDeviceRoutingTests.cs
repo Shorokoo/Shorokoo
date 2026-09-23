@@ -39,12 +39,8 @@ public class CrossDeviceRoutingCoverageTests
     }
 
     [Fact]
-    public void TestATensorOnOneCardReachesAnotherOnlyByGoingThroughTheHost()
+    public void TestATensorAlreadyOnOneCardReachesAnotherOnlyByGoingThroughTheHost()
     {
-        // The case the class is named for: the source is already on a card. Starting on the host
-        // makes the copy the route for the trivial reason that the source is host-resident, so a
-        // regression that handed a tensor between two CUDA device ids over -- or that dropped
-        // DeviceId from the space comparison -- passed.
         var firstCard = new StubBackend(ComputeDevice.Cuda, 0);
         var secondCard = new StubBackend(ComputeDevice.Cuda, 1);
         using var one = new ComputeContext(firstCard);

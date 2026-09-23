@@ -962,7 +962,7 @@ public class CoreUtilsCoverageTests
     /// nothing rather than zeroes, which is the difference between "no figures" and "no memory".
     /// </summary>
     [Fact]
-    public void TestACompiledGraphReportsItsOwnArenaAndABackendWithoutOneReportsNothing()
+    public void TestAHostSessionReportsItsOwnArenaButNoPinnedOneAndABackendWithoutOneReportsNothing()
     {
         using var context = new ComputeContext();
         var compiled = Doubling(context);
@@ -978,9 +978,6 @@ public class CoreUtilsCoverageTests
         Assert.True(after.AllocationCount > 0);
         Assert.True(after.TotalAllocatedBytes >= after.MaxInUseBytes);
         Assert.True(after.MaxAllocSizeBytes > 0);
-
-        // A host session stages nothing across a bus, so it has no pinned arena to report — which
-        // is not the same answer as an arena that happens to be empty.
         Assert.Null(compiled.ReadPinnedArenaStatistics());
 
         IShorokooSession unanswering = new RunSettingsRecorder();
@@ -1014,8 +1011,6 @@ public class CoreUtilsCoverageTests
         Assert.Equal(ArenaProbeModels.WeightBytes, built.InUseBytes);
         Assert.Equal(ArenaProbeModels.WeightBytes, built.MaxAllocSizeBytes);
         Assert.Equal(1L, built.AllocationCount);
-        // The host arena takes a weight as a reserve; the CUDA one takes it as a block of its own,
-        // which is why the two counts are not comparable across devices.
         Assert.Equal(1L, built.ReserveCount);
         Assert.Equal(0L, built.ArenaExtensionCount);
 
@@ -1070,8 +1065,6 @@ public class CoreUtilsCoverageTests
         Assert.Equal(0L, stats.ArenaShrinkageCount);
         Assert.Equal([1L, 2L, 3L], stats.RecentRuns.Select(run => run.RunNumber));
         Assert.Equal(MemoryFigureKind.Measured, stats.RecentRuns[0].PeakKind);
-        // A graph with no weights starts empty, so run 1 found nothing and every later run found
-        // the mark its predecessor left.
         Assert.Equal(0L, stats.RecentRuns[0].PriorPeakBytes);
         Assert.Equal([.. stats.RecentRuns.SkipLast(1).Select(run => run.PeakBytes)],
             stats.RecentRuns.Skip(1).Select(run => run.PriorPeakBytes));

@@ -170,7 +170,7 @@ public class CompositeTransferCoverageTests
     }
 
     [Fact]
-    public void TestASequenceCopiedToAContextCanBeFedBackIntoASession()
+    public void TestASequenceCopiedToAContextHoldsNoRuntimeValueAndCanStillBeFedBackIntoASession()
     {
         using var producer = new ComputeContext();
         var x = InputVector<float32>("x");
@@ -181,8 +181,6 @@ public class CompositeTransferCoverageTests
         using var consumer = new ComputeContext();
         var copied = produced.CopyTo(consumer);
 
-        // There is nothing of a runtime's left in it to hand over: the copy holds tensors of its
-        // own, which is exactly why this case needed answering.
         Assert.False(copied is IOnnxData);
 
         var seq = InternalOp.ModuleSequenceInput(DType.Float32, null, null, "seq");

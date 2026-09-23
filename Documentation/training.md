@@ -630,9 +630,15 @@ Read it as a cost model:
   step like any other.
 - **A step that fails can take the run with it.** A step takes the state it trains from when it
   starts, so one that fails after consuming the run's own state leaves nothing to train from: every
-  later step throws `InvalidOperationException` saying so. Begin a new run from the last checkpoint
-  you took with `StepToCheckpoint` — a step that fails while the run is reading a published one
-  leaves it, and the run, whole.
+  later step throws `InvalidOperationException` saying so, and what is left to begin again from.
+  Begin a new run from the last checkpoint you took with `StepToCheckpoint` — a step that fails
+  while the run is reading a published one leaves it, and the run, whole. Before the run has handed
+  out any, begin from a checkpoint you still hold: the one the run began from survives only if you
+  passed it `.Shared()`, since its first step consumes it otherwise.
+- **State taken by something else is not the run's loss.** A checkpoint the run published shares
+  its tensors with the state the run goes on training from, so feeding it to another step as it is
+  consumes that state too. The run's next step, and every one after, is then refused before it
+  takes anything, with the error that state's own death gives — naming the step that took it.
 
 `Train` and every `Fit` overload already drive a resident run internally and take their checkpoint
 on the final step — they return one checkpoint, so they only ever needed one transfer. A manual

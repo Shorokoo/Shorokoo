@@ -38,9 +38,12 @@ namespace Shorokoo
     ///
     /// <para><b>A failed step.</b> A step takes what it consumes when it starts, and a step that
     /// then fails cannot give it back. Where that was the run's own state there is nothing left to
-    /// train from, and every later step says so; begin a new run from the last checkpoint you took.
-    /// A checkpoint handed out is only read, so a step that fails after one leaves it — and the
-    /// run — whole.</para>
+    /// train from, and every later step says so: begin a new run from the last checkpoint you took,
+    /// or, before the run has handed any out, from a checkpoint you still hold. A checkpoint handed
+    /// out is only read, so a step that fails after one leaves it — and the run — whole. State
+    /// something else took is not the run's loss: a checkpoint handed out shares its tensors with
+    /// the state the run goes on training from, so fed as it is to another step it takes that state
+    /// with it, and every later step of the run is refused over it, naming what took it.</para>
     ///
     /// <para><b>On a CPU backend</b> there is no second memory to be resident in, so a resident run
     /// is an ordinary step loop that releases each step's state as the next supersedes it — same
@@ -70,9 +73,14 @@ namespace Shorokoo
         /// </summary>
         private bool _ownsCurrent;
 
-        /// <summary>Set when a step failed after it had consumed the run's state, so there is
-        /// nothing left to train from.</summary>
-        private bool _lost;
+        /// <summary>Set when a step of this run failed after it had consumed the run's state, so
+        /// there is nothing left to train from: what every later step throws, saying what is left
+        /// to begin again from.</summary>
+        private string? _lost;
+
+        /// <summary>Whether the run has handed out a checkpoint (<see cref="StepToCheckpoint(IData, IData)"/>),
+        /// which it only ever reads and so cannot lose.</summary>
+        private bool _handedOut;
 
         private bool _disposed;
 
@@ -201,13 +209,7 @@ namespace Shorokoo
                     throw new ObjectDisposedException(nameof(ResidentTrainingRun),
                         "This resident training run has been disposed and its state released. Take the " +
                         "checkpoint you need with StepToCheckpoint(...) before disposing the run.");
-                if (_lost)
-                    throw new InvalidOperationException(
-                        "A step of this resident training run failed after it had consumed the run's "
-                        + "state: a step takes the state it trains from when it starts, and one that "
-                        + "fails cannot give it back, so there is nothing left to train from. Begin a new "
-                        + "run from the last checkpoint you took with StepToCheckpoint(...); the run only "
-                        + "ever reads a checkpoint it has handed out, so a failure leaves that one whole.");
+                if (_lost is { } lost) throw new InvalidOperationException(lost);
                 return _current;
             }
         }
@@ -216,20 +218,52 @@ namespace Shorokoo
         /// Runs one step from the current state, noting when a failed step took that state with it:
         /// a step consumes the state it is fed as it is before it computes, so a failure part-way
         /// leaves it dead.
+        ///
+        /// <para>Only a step that found the state whole and left it dead took it. State that was
+        /// dead already was taken by something else — a checkpoint this run handed out, fed as it
+        /// is to another step, consumes the state the run trains from with it — and is not this
+        /// run's loss: the step is refused over it before it takes anything, with that state's own
+        /// refusal, and so is every step after it.</para>
         /// </summary>
         private TrainingCheckpoint Stepped(Func<TrainingCheckpoint, TrainingCheckpoint> step)
         {
             var current = Current;
+            var whole = !IsSpent(current);
             try
             {
                 return step(current);
             }
             catch
             {
-                if (IsSpent(current)) _lost = true;
+                if (whole && IsSpent(current)) _lost = Lost(beganFrom: !_ownsCurrent);
                 throw;
             }
         }
+
+        /// <summary>
+        /// What every step after a lost one throws: that the run's state went with the step that
+        /// failed, and what is left to begin again from — the last checkpoint the run handed out,
+        /// where it has handed one out, and otherwise only what the caller still holds.
+        /// </summary>
+        /// <param name="beganFrom">Whether the state lost was the checkpoint the run began from,
+        /// taken by the run's first step.</param>
+        private string Lost(bool beganFrom)
+            => "A step of this resident training run failed after it had consumed the run's state: a "
+               + "step takes the state it trains from when it starts, and one that fails cannot give it "
+               + "back, so there is nothing left to train from. "
+               + (_handedOut
+                   ? "Begin a new run from the last checkpoint you took with StepToCheckpoint(...); the "
+                     + "run only ever reads a checkpoint it has handed out, so a failure leaves that one "
+                     + "whole."
+                   : beganFrom
+                       ? "That state was the checkpoint the run began from, which its first step consumed, "
+                         + "and the run has handed out no checkpoint since. Begin a new run from a "
+                         + "checkpoint you still hold; one passed to BeginResidentRun as .Shared() is only "
+                         + "read, so a failure leaves it whole."
+                       : "The run has handed out no checkpoint to begin again from -- StepToCheckpoint(...) "
+                         + "takes one -- so begin a new run from a checkpoint you still hold. The one this "
+                         + "run began from is whole only if it was passed .Shared(); passed as it is, the "
+                         + "run's first step consumed it.");
 
         /// <summary>Whether any tensor of <paramref name="checkpoint"/>'s state is dead.</summary>
         private static bool IsSpent(TrainingCheckpoint checkpoint)
@@ -259,6 +293,7 @@ namespace Shorokoo
         {
             _current = next.Shared();
             _ownsCurrent = false;
+            _handedOut = true;
             return next;
         }
 
@@ -270,7 +305,7 @@ namespace Shorokoo
         public void Dispose()
         {
             if (_disposed) return;
-            if (_ownsCurrent && !_lost) TrainingRig.ReleaseCheckpointState(_current);
+            if (_ownsCurrent && _lost is null) TrainingRig.ReleaseCheckpointState(_current);
             _ownsCurrent = false;
             // Drop the released checkpoint rather than pinning its whole object graph for the
             // lifetime of a run that is finished with it.

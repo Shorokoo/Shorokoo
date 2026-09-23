@@ -2497,6 +2497,29 @@ public class TrainingRigTrainingLoopCoverageTests
     }
 
     [Fact]
+    public void TestAResidentRunIsLostOnlyByItsOwnStepAndSaysWhatIsLeftToBeginAgainFrom()
+    {
+        var rig = IndexedWeightRig();
+        var (input, outOfRange, target) = (Indexed(rig, 0L, 1L, 2L, 3L), Indexed(rig, 9L, 1L, 2L, 3L), TargetBatch(2f, 4f, 6f, 8f));
+        string Lost(ResidentTrainingRun run)
+        {
+            Assert.Throws<OnnxRuntimeException>(() => run.Step(outOfRange.Shared(), target.Shared()));
+            return Assert.Throws<InvalidOperationException>(() => run.Step(input.Shared(), target.Shared())).Message;
+        }
+
+        using var taken = rig.BeginResidentRun();
+        rig.TrainStep(taken.StepToCheckpoint(input.Shared(), target.Shared()), input.Shared(), target.Shared());
+        var refused = Assert.Throws<ObjectDisposedException>(() => taken.Step(input.Shared(), target.Shared())).Message;
+        Assert.Equal(refused, Assert.Throws<ObjectDisposedException>(() => taken.Step(input.Shared(), target.Shared())).Message);
+
+        using var fresh = rig.BeginResidentRun();
+        Assert.Contains("the checkpoint the run began from, which its first step consumed", Lost(fresh));
+        using var untaken = rig.BeginResidentRun();
+        untaken.Step(input.Shared(), target.Shared());
+        Assert.Contains("handed out no checkpoint", Lost(untaken));
+    }
+
+    [Fact]
     public void TestABatchIsConsumedByTheStepItFeedsUnlessSharedAndAnythingButAStructIsRefused()
     {
         var rig = AdamWScalarRig();

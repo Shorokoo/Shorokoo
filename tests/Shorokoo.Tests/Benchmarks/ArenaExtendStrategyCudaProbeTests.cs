@@ -186,7 +186,7 @@ public class ArenaExtendStrategyCudaProbeTests
             long seen = 0;
             for (int step = 0; step < steps; step++)
             {
-                ckpt = rig.TrainStep(ckpt, tokens);
+                ckpt = rig.TrainStep(ckpt, tokens.Shared());
                 var stats = ctx.RunStats;
                 var made = stats.RecentRuns.Skip((int)seen).ToArray();
                 seen = stats.RunCount;

@@ -64,24 +64,6 @@ namespace Shorokoo
 
     }
 
-    /// <summary>
-    /// A feed the caller has given away rather than lent — <see cref="TensorData.Donate"/>'s, as a
-    /// model parameter. It feeds the same value <see cref="TensorDataModelParam"/> does, and differs
-    /// in what the run does with the tensor: a run consumes it when it starts, rather than taking a
-    /// reader lock on it, and releases its memory as soon as it returns
-    /// (Shorokoo/Shorokoo#359).
-    /// </summary>
-    public sealed class DonatedTensorModelParam : TensorDataModelParam
-    {
-        /// <summary>Wraps <paramref name="donation"/>'s tensor as the parameter named
-        /// <paramref name="name"/>.</summary>
-        /// <exception cref="ArgumentNullException"><paramref name="donation"/> is null.</exception>
-        public DonatedTensorModelParam(string name, ModelParamType paramType, TensorDonation donation)
-            : base(name, paramType, (donation ?? throw new ArgumentNullException(nameof(donation))).Tensor)
-        {
-        }
-    }
-
     public class TensorDataSequenceModelParam : NamedModelParam
     {
         private TensorDataSequence data;
@@ -235,9 +217,44 @@ namespace Shorokoo
     }
 
 
+    /// <summary>
+    /// A named input or output of a run: the data, and the name of the graph input or output it is.
+    ///
+    /// <para>As a run's input it follows the rule every feed does: the data is <b>consumed</b> by
+    /// the run — a tensor fed as it is is given to it — unless it was made from a
+    /// <see cref="SharedInput"/>, <see cref="FromIData"/>'s form for <c>t.Shared()</c> and
+    /// <c>t.TryConsume()</c>, which says otherwise (<see cref="Sharing"/>).</para>
+    /// </summary>
     public abstract class NamedModelParam
     {
         public string ParamName { get; protected set; } = null!;
+
+        /// <summary>
+        /// What a run fed this parameter does with its data: null — the data was given as it is, and
+        /// the run consumes it — or the <see cref="SharedInputMode"/> of the
+        /// <see cref="SharedInput"/> it was made from.
+        /// </summary>
+        public SharedInputMode? Sharing { get; internal set; }
+
+        /// <summary>
+        /// What a message about this input calls it, where the caller that built it knew better
+        /// than the graph's own name for it — "the checkpoint's trainable parameter 'w'" for a
+        /// training step's input, whose graph name is an internal identifier. Null for "input
+        /// '<see cref="ParamName"/>'".
+        /// </summary>
+        internal string? Label { get; set; }
+
+        /// <summary>This input as a message names it.</summary>
+        internal string Described => Label ?? $"input '{ParamName}'";
+
+        /// <summary>
+        /// Called by a run once it holds this parameter's data — a reader lock taken, or the data
+        /// consumed — and before it builds the value it is fed. Nothing to do here; the seam through
+        /// which a test holds a run open at exactly that point.
+        /// </summary>
+        internal virtual void Held()
+        {
+        }
 
         public ModelParamType ParamType { get; protected set; }
 
@@ -276,12 +293,22 @@ namespace Shorokoo
         public abstract TensorDataSequence ToTensorDataSequence();
         public abstract TensorDataSequence<T> ToTensorDataSequence<T>() where T : IVarType;
 
+        /// <summary>
+        /// The parameter named <paramref name="name"/> over <paramref name="data"/>: a tensor, a
+        /// sequence, an optional or a struct — or a <see cref="SharedInput"/> over one, which the
+        /// parameter records so that a run reads it, or consumes it only when nothing else is
+        /// reading it, rather than consuming it outright.
+        /// </summary>
         public static NamedModelParam FromIData(string name, ModelParamType paramType, IData data)
         {
+            if (data is SharedInput shared)
+            {
+                var param = FromIData(name, paramType, shared.Value);
+                param.Sharing = shared.Mode;
+                return param;
+            }
             if (data is TensorData td)
                 return new TensorDataModelParam(name, paramType, td);
-            else if (data is TensorDonation donation)
-                return new DonatedTensorModelParam(name, paramType, donation);
             else if (data is OptionalTensorData otd)
                 return new OptionalTensorDataModelParam(name, paramType, otd);
             else if (data is TensorDataSequence tds)

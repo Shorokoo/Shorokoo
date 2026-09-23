@@ -771,7 +771,7 @@ public class NNLibraryOptimizerTrainingCoverageTests
             var losses = new float[150];
             for (int i = 0; i < losses.Length; i++)
             {
-                ckpt = rig.TrainStep(ckpt, inputBatch, targetBatch);
+                ckpt = rig.TrainStep(ckpt, inputBatch.Shared(), targetBatch.Shared());
                 losses[i] = ckpt.Loss!.Value;
             }
             return losses;
@@ -801,7 +801,7 @@ public class NNLibraryOptimizerTrainingCoverageTests
         var convLosses = new float[15];
         for (int i = 0; i < convLosses.Length; i++)
         {
-            convCkpt = convRig.TrainStep(convCkpt, convInBatch, convTgBatch);
+            convCkpt = convRig.TrainStep(convCkpt, convInBatch.Shared(), convTgBatch.Shared());
             convLosses[i] = convCkpt.Loss!.Value;
         }
         Assert.All(convLosses, l => Assert.True(float.IsFinite(l)));
@@ -1360,7 +1360,7 @@ public class NNLibraryBatchNormTrainAndDropoutCoverageTests
             var injected = InjectModelState(fresh.ModelState, injectedState);
             var ckpt = fresh.WithModelState(injected);
             var step = rig.TrainStep(ckpt,
-                MakeBatch("input", "ModelInput", inputData),
+                MakeBatch("input", "ModelInput", inputData).Shared(),
                 MakeBatch("targets", "Target", TensorData(inShape, target)));
             stateAfter = rig.ModelStateDef.Fields.SelectMany(f => Floats(step.ModelState.Fields[f.Name])).ToArray();
             return step.Loss!.Value;
@@ -1564,7 +1564,7 @@ public class NNLibraryRecurrentTrainingCoverageTests
         var initial = rig.CreateInitialCheckpoint();
         var step = rig.TrainStep(initial,
             MakeBatch("input", "ModelInput", inputData),
-            MakeBatch("targets", "Target", targetData));
+            MakeBatch("targets", "Target", targetData).Shared());
 
         Assert.True(float.IsFinite(step.Loss!.Value));
         Assert.True(AnyParamMoved(rig, initial, step));

@@ -100,13 +100,13 @@ public class TrainingMemoryStabilityTests
 
         var ckpt = rig.CreateInitialCheckpoint();
         for (int i = 0; i < WarmupSteps; i++)
-            ckpt = rig.TrainStep(ckpt, inputBatch, targetBatch);
+            ckpt = rig.TrainStep(ckpt, inputBatch.Shared(), targetBatch.Shared());
 
         long managedBefore = LiveManagedBytes();
         long rssBefore = WorkingSetBytes();
 
         for (int i = 0; i < MeasuredSteps; i++)
-            ckpt = rig.TrainStep(ckpt, inputBatch, targetBatch);
+            ckpt = rig.TrainStep(ckpt, inputBatch.Shared(), targetBatch.Shared());
 
         long managedAfter = LiveManagedBytes();
         long rssAfter = WorkingSetBytes();
@@ -154,10 +154,10 @@ public class TrainingMemoryStabilityTests
     {
         var (rig, inputBatch, targetBatch) = WideRig();
         using var run = rig.BeginResidentRun();
-        for (int i = 0; i < NativeWarmupSteps; i++) run.Step(inputBatch, targetBatch);
+        for (int i = 0; i < NativeWarmupSteps; i++) run.Step(inputBatch.Shared(), targetBatch.Shared());
 
         long before = WorkingSetBytes();
-        for (int i = 0; i < NativeMeasuredSteps; i++) run.Step(inputBatch, targetBatch);
+        for (int i = 0; i < NativeMeasuredSteps; i++) run.Step(inputBatch.Shared(), targetBatch.Shared());
         long after = WorkingSetBytes();
 
         // Keep the run reachable past the measurement.
@@ -187,12 +187,12 @@ public class TrainingMemoryStabilityTests
 
         var ckpt = rig.CreateInitialCheckpoint();
         for (int i = 0; i < NativeWarmupSteps; i++)
-            ckpt = rig.TrainStep(ckpt, inputBatch, targetBatch);
+            ckpt = rig.TrainStep(ckpt, inputBatch.Shared(), targetBatch.Shared());
 
         long before = WorkingSetBytes();
         for (int i = 0; i < NativeMeasuredSteps; i++)
         {
-            ckpt = rig.TrainStep(ckpt, inputBatch, targetBatch);
+            ckpt = rig.TrainStep(ckpt, inputBatch.Shared(), targetBatch.Shared());
             if (collectEachStep)
             {
                 GC.Collect(2, GCCollectionMode.Forced, blocking: true);

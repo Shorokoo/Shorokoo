@@ -14,7 +14,7 @@ namespace Shorokoo.Core.Utils;
 /// compiled graphs already follow.</para>
 ///
 /// <para>By reference because two backends are the same backend exactly when they are the same
-/// object, which is also why <c>MaterializedValues</c> keys on identity.
+/// object, and two tensors the same tensor exactly when they are one allocation.
 /// <see cref="ConditionalWeakTable{TKey,TValue}"/> gives both properties at once: its keys are
 /// weak and its comparison is identity, with no comparer to pass and no way to override it.</para>
 /// </summary>

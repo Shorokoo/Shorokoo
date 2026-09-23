@@ -216,18 +216,25 @@ namespace Shorokoo
     ///
     /// <para><b>A tensor dies in exactly three ways</b>: it is deleted (<see cref="Delete"/>,
     /// <see cref="Dispose"/>, <see cref="TryDelete"/>, <see cref="DeleteAsync"/>), it is consumed
-    /// by a run it was donated to (<see cref="Donate"/>), or it is moved into an attribute
-    /// (<see cref="MoveToAttribute"/>). Nothing else ends its life — disposing a context it is
-    /// attached to does not — and a tensor nothing references is reclaimed like any other object,
-    /// its memory released through its backend's ordinary path. A dead tensor's shape, dtype and
-    /// <see cref="ToString"/> stay readable; every other access throws an
-    /// <see cref="ObjectDisposedException"/> that says why it died.</para>
+    /// by a run — fed to it as it is, which is the default, or through <see cref="TryConsume"/> —
+    /// or it is moved into an attribute (<see cref="MoveToAttribute"/>). Nothing else ends its life
+    /// — disposing a context it is attached to does not — and a tensor nothing references is
+    /// reclaimed like any other object, its memory released through its backend's ordinary path. A
+    /// dead tensor's shape, dtype and <see cref="ToString"/> stay readable; every other access
+    /// throws an <see cref="ObjectDisposedException"/> that says why it died — for a consumed one,
+    /// which run took it and how to keep it next time.</para>
+    ///
+    /// <para><b>Fed as it is, a tensor is consumed.</b> A run given a tensor takes it when it
+    /// starts: the tensor is dead from then on, even if the run fails, and its memory belongs to
+    /// the run's backend, which releases it as soon as the run no longer needs it. Feed
+    /// <see cref="Shared"/> to have the run read it and leave it alive.</para>
     ///
     /// <para><b>A run holds what it is reading.</b> A run takes a reader lock on every tensor it
     /// reads and holds it, and a reference to the tensor, for as long as it runs. A locked tensor
-    /// cannot be deleted — <see cref="Delete"/> throws and <see cref="TryDelete"/> declines — so
-    /// nothing frees a buffer a run is reading (Shorokoo/Shorokoo#366);
-    /// <see cref="DeleteAsync"/> is the one call that negotiates with the readers instead.</para>
+    /// cannot be deleted — <see cref="Delete"/> throws and <see cref="TryDelete"/> declines — or
+    /// consumed by another run, so nothing frees a buffer a run is reading
+    /// (Shorokoo/Shorokoo#366); <see cref="DeleteAsync"/> is the one call that negotiates with
+    /// the readers instead.</para>
     /// </summary>
     public abstract partial class TensorData : IData, IDisposable
     {
@@ -453,10 +460,11 @@ namespace Shorokoo
         /// <summary>
         /// This tensor as a value of <paramref name="backend"/>'s runtime. A tensor that already
         /// holds one hands it over and ignores the argument, since a value belongs to the runtime
-        /// that made it; one held in plain host memory builds it here, which is the first moment a
+        /// that made it; one held in plain host memory is copied into host memory of that runtime
+        /// here — the copy runs on that backend read it through — which is the first moment a
         /// backend is needed at all.
         ///
-        /// <para>The value returned is the tensor's own: read it, do not dispose it.</para>
+        /// <para>The value returned is the tensor's, or its copy's: read it, do not dispose it.</para>
         /// </summary>
         internal IShorokooTensorValue ToTensorValue(IShorokooBackend backend)
         {
@@ -466,11 +474,33 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// <see cref="ToTensorValue(IShorokooBackend)"/> without the liveness check: the value a run
-        /// that has taken this tensor feeds. Nothing else may call it — a dead tensor's memory is
-        /// the taker's alone.
+        /// <see cref="ToTensorValue(IShorokooBackend)"/> without the liveness check. Only a caller
+        /// that has vouched for the memory may call it: a run holding this tensor's lock, or one that
+        /// has taken it, whose memory is the taker's alone.
         /// </summary>
+        internal IShorokooTensorValue UncheckedValue(IShorokooBackend backend)
+        {
+            ArgumentNullException.ThrowIfNull(backend);
+            return ValueFor(backend);
+        }
+
+        /// <summary>See <see cref="UncheckedValue"/>.</summary>
         private protected abstract IShorokooTensorValue ValueFor(IShorokooBackend backend);
+
+        /// <summary>
+        /// Whether a run on <paramref name="backend"/> is handed this tensor's own value: it holds
+        /// one, and the backend can address it where it is. False for the framework's own managed
+        /// memory, which is a <c>byte[]</c> no session can be handed — a run reads it through a copy
+        /// its backend builds.
+        /// </summary>
+        internal virtual bool FeedsInPlace(IShorokooBackend backend) => false;
+
+        /// <summary>
+        /// This tensor's contents as host bytes for a copy to be built from: its own array where it
+        /// has one — the backend copies out of it and keeps nothing — and a copy otherwise. Without
+        /// the liveness check, like <see cref="CopyContentBytes"/>.
+        /// </summary>
+        private protected virtual byte[] ContentBytesForCopy() => CopyContentBytes();
 
         /// <summary>Creates int32 TensorData of the given shape holding 0, 1, ..., Count-1 in row-major order.</summary>
         public static TensorData<int32> BuildRange(Shape shape)
@@ -574,6 +604,18 @@ namespace Shorokoo
         /// <inheritdoc/>
         private protected override IShorokooTensorValue ValueFor(IShorokooBackend backend) => backing;
 
+        /// <summary>
+        /// Whether a run on <paramref name="backend"/> can be handed this value as it stands: the
+        /// backend can address the memory it is in — the same device and the same runtime — or, for
+        /// a string tensor, the value is its own runtime's. ONNX Runtime keeps every string tensor
+        /// in host memory whatever the provider, so a string is fed where it is to a session on a
+        /// card too, and a copy could be put nowhere else.
+        /// </summary>
+        internal override bool FeedsInPlace(IShorokooBackend backend)
+            => backend.CanAddress(Location)
+               || (DType.IsSameElementTypeAs(DType.Utf8) && Space.IsHost
+                   && ReferenceEquals(AllocatingBackend.RuntimeIdentity, backend.RuntimeIdentity));
+
         /// <inheritdoc/>
         private protected override byte[] CopyContentBytes()
         {
@@ -616,10 +658,16 @@ namespace Shorokoo
                 "device between steps, brings its state home with StepToCheckpoint(...) on the " +
                 "step you want to read or save.");
 
-        /// <inheritdoc/>
+        /// <summary>
+        /// A writable span over the elements. Taking it retires every copy a run made of this
+        /// tensor, since the contents they were copied from are about to change: the next run makes
+        /// a fresh one, and a run still reading an old copy finishes on it.
+        /// </summary>
         public override Span<V> AccessModifiableMemory<V>()
         {
-            return this.HostValue.GetTensorMutableDataAsSpan<V>();
+            var value = this.HostValue;
+            Written();
+            return value.GetTensorMutableDataAsSpan<V>();
         }
 
         /// <inheritdoc/>
@@ -628,10 +676,13 @@ namespace Shorokoo
             return this.HostValue.GetTensorDataAsSpan<V>();
         }
 
-        /// <inheritdoc/>
+        /// <summary>A writable byte span over the storage, retiring the copies runs made of this
+        /// tensor as <see cref="AccessModifiableMemory{V}"/> does.</summary>
         public override Span<byte> AccessModifiableRawMemory()
         {
-            return this.HostValue.GetTensorMutableDataAsSpan<byte>();
+            var value = this.HostValue;
+            Written();
+            return value.GetTensorMutableDataAsSpan<byte>();
         }
         /// <inheritdoc/>
         public override ReadOnlySpan<byte> AccessRawMemory()

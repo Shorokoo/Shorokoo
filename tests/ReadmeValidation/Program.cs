@@ -53,8 +53,10 @@ Console.WriteLine($"Checkpoint saved to: {savePath}");
 var inferenceInput = TensorData([4L, 8L], new float[32]);   // same [4 × 8] shape the rig trained on
 var concrete       = result.FinalCheckpoint.ToInferenceModel();
 
+// Passed .Shared(): the reloaded model below is run on the same input, and a bare feed is
+// consumed by the run it feeds.
 ReadOnlySpan<float> prediction = ComputeContext.Default
-    .Execute(concrete, inferenceInput)[0]
+    .Execute(concrete, inferenceInput.Shared())[0]
     .ToTensorData<float32>().AccessMemory();
 
 Console.WriteLine($"Inference output ({prediction.Length} values): [{string.Join(", ", prediction.ToArray())}]");

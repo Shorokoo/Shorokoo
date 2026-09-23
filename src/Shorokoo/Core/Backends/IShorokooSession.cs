@@ -36,6 +36,46 @@ public interface IShorokooSession : IDisposable
         IReadOnlySet<string> retainedOutputNames,
         RunSettings runSettings) => Run(inputs, outputNames, runSettings);
 
+    // Runs the session -- as Run, or as RunRetainingOutputs when retainedOutputNames names any --
+    // with the values in `consumed` handed over rather than lent. This is the call every run makes.
+    //
+    // A consumed value is one the caller has given up: a tensor fed to the run as it is, which the
+    // run took when it started. From the moment this is called it belongs to this session's
+    // backend alone, ON EVERY PATH -- a run that returns, one that throws, one that is stopped, and
+    // one that fails before it reaches the native call -- and the caller never touches it again,
+    // not even to release it. The backend must release each consumed value exactly once, through
+    // its own IShorokooBackend.Release, as soon as the run no longer reads it: before this returns
+    // its outputs, and before it rethrows a failure. That is the contract
+    // IShorokooBackend.CreateSequence has for the values it is handed, and for the same reason:
+    // a caller that hands memory over cannot also be the one to free it. A value may appear under
+    // several input names; it appears in `consumed` once.
+    //
+    // Every value in `consumed` is also in `inputs`, and every other value in `inputs` is lent:
+    // read it, and leave it to the caller.
+    //
+    // Defaulted so a backend outside this repository keeps compiling, and so that one that does not
+    // implement it keeps the contract anyway: the default runs the ordinary way and disposes each
+    // consumed value in a finally, which is what IShorokooBackend.Release's own default does. A
+    // backend whose Release does more than dispose implements this and releases through it.
+    IReadOnlyList<IShorokooTensorValue> RunConsuming(
+        IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
+        IReadOnlyCollection<IShorokooTensorValue> consumed,
+        IReadOnlyList<string> outputNames,
+        IReadOnlySet<string> retainedOutputNames,
+        RunSettings runSettings)
+    {
+        try
+        {
+            return retainedOutputNames.Count == 0
+                ? Run(inputs, outputNames, runSettings)
+                : RunRetainingOutputs(inputs, outputNames, retainedOutputNames, runSettings);
+        }
+        finally
+        {
+            foreach (var value in consumed) value.Dispose();
+        }
+    }
+
     // This session's own memory arena as its runtime reports it, or null when the backend has no
     // such figures to give. Cheap enough to call either side of a run, which is how a run's peak
     // is attributed; see ArenaStatistics for why MaxInUseBytes alone cannot be.

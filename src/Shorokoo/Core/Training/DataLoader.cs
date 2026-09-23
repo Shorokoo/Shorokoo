@@ -50,23 +50,68 @@ namespace Shorokoo
     /// <summary>
     /// One batch produced by an <see cref="IDataLoader"/>: the model <see cref="Input"/> and the
     /// training <see cref="Target"/> (each a <see cref="TensorDataStruct"/> shaped exactly as the
-    /// rig's <c>TrainStep</c> expects), tagged with the <see cref="Position"/> it was drawn from.
+    /// rig's <c>TrainStep</c> expects, or one passed through <c>.Shared()</c> or
+    /// <c>.TryConsume()</c>), tagged with the <see cref="Position"/> it was drawn from.
+    ///
+    /// <para>A batch is fed to the step that trains on it the way any feed is: a struct as it is is
+    /// <b>consumed</b> by that step — its tensors dead from then on, their memory released with
+    /// the step — which is what a batch built per draw wants, and what
+    /// <see cref="InMemoryDataLoader"/> produces. A loader that hands out tensors it keeps and
+    /// hands out again passes them <c>.Shared()</c>, so that each step reads them and leaves them
+    /// alive.</para>
     /// </summary>
     public readonly struct DataBatch
     {
-        /// <summary>Model input fields for this batch.</summary>
-        public TensorDataStruct Input { get; }
-        /// <summary>Training target fields for this batch.</summary>
-        public TensorDataStruct Target { get; }
+        /// <summary>Model input fields for this batch: a <see cref="TensorDataStruct"/>, or a
+        /// <see cref="SharedInput"/> over one.</summary>
+        public IData Input { get; }
+        /// <summary>Training target fields for this batch: a <see cref="TensorDataStruct"/>, or a
+        /// <see cref="SharedInput"/> over one.</summary>
+        public IData Target { get; }
         /// <summary>The stream position this batch was drawn from (the epoch + batch index it belongs to).</summary>
         public DataLoaderPosition Position { get; }
 
         /// <summary>Packages an input/target pair with the position it came from.</summary>
-        public DataBatch(TensorDataStruct input, TensorDataStruct target, DataLoaderPosition position)
+        /// <exception cref="ArgumentException"><paramref name="input"/> or <paramref name="target"/>
+        /// is neither a <see cref="TensorDataStruct"/> nor one passed through <c>.Shared()</c> or
+        /// <c>.TryConsume()</c>.</exception>
+        public DataBatch(IData input, IData target, DataLoaderPosition position)
         {
-            Input = input ?? throw new ArgumentNullException(nameof(input));
-            Target = target ?? throw new ArgumentNullException(nameof(target));
+            TrainingFeeds.StructOf(input, nameof(input));
+            TrainingFeeds.StructOf(target, nameof(target));
+            Input = input;
+            Target = target;
             Position = position;
+        }
+    }
+
+    /// <summary>
+    /// The struct arguments a training step turns into run inputs, and what the step makes of
+    /// them — shared by the rig, a resident run and the loaders so they all take the same forms and
+    /// refuse the same way.
+    /// </summary>
+    internal static class TrainingFeeds
+    {
+        /// <summary>
+        /// The struct <paramref name="feed"/> is, or wraps: a <see cref="TensorDataStruct"/> as it
+        /// is, or one passed through <c>.Shared()</c> or <c>.TryConsume()</c>.
+        /// </summary>
+        /// <exception cref="ArgumentNullException"><paramref name="feed"/> is null.</exception>
+        /// <exception cref="ArgumentException">It is something else.</exception>
+        internal static TensorDataStruct StructOf(IData feed, string paramName)
+        {
+            ArgumentNullException.ThrowIfNull(feed, paramName);
+            return feed switch
+            {
+                TensorDataStruct plain => plain,
+                SharedInput { Value: TensorDataStruct shared } => shared,
+                _ => throw new ArgumentException(
+                    $"A training step takes this as a TensorDataStruct -- fed as it is, and consumed by "
+                    + "the step, or passed through .Shared() or .TryConsume() -- but was given "
+                    + $"{(feed is SharedInput wrapped ? $"a shared {wrapped.Value.GetType().Name}" : $"a {feed.GetType().Name}")}. "
+                    + "Build the struct from the rig's definition: rig.InputDef.FromOrderedData(...) or "
+                    + "rig.TargetDef.FromOrderedData(...).", paramName),
+            };
         }
     }
 

@@ -60,9 +60,11 @@ namespace Shorokoo
     /// <summary>
     /// A sequence of tensors, as a run takes and gives one.
     ///
-    /// <para>A sequence has a life of its own, like a tensor's: a run reading it holds a reader lock
-    /// on it for as long as it runs, <see cref="Dispose"/> ends it and throws while a run holds one,
-    /// and a disposed sequence says so on every path to its elements. It knows no compute context;
+    /// <para>A sequence has a life of its own, like a tensor's: fed to a run as it is it is
+    /// <b>consumed</b> by that run, as a tensor is — dead from then on, its memory given to the
+    /// run's backend — and fed as <see cref="Shared"/> it is read, the run holding a reader lock on
+    /// it for as long as it runs. <see cref="Dispose"/> ends it and throws while a run holds one,
+    /// and a dead sequence says why on every path to its elements. It knows no compute context;
     /// <see cref="To"/>, <see cref="CopyTo"/> and <see cref="ToHost"/> put its elements where a
     /// context can use them, as the same operations on <see cref="TensorData"/> do.</para>
     /// </summary>
@@ -80,29 +82,39 @@ namespace Shorokoo
         }
 
         // The sequence's own life, kept the way a tensor keeps its own: per sequence, and taken by
-        // nothing else.
+        // nothing else. See TensorData.Lifetime for what each field means there; they mean the same
+        // here.
         private readonly object _gate = new();
-        private bool _dead;
+        private TensorDeath? _death;
+        private bool _taken;
+        private bool _released;
         private int _locks;
+        private List<object>? _readers;
+
+        // The sequence values runs built from this one where they could not be handed it as it is,
+        // one per place they are in, each a sequence in its own right. Created on the first.
+        private Dictionary<MemoryLocation, TensorDataSequence>? _copies;
+        private readonly object _copyGate = new();
 
         /// <summary>
-        /// True once this sequence has been disposed and its storage released. Its dtype and
-        /// <see cref="ToString"/> stay readable as metadata; every path to the elements throws.
+        /// True once this sequence is dead — disposed, or consumed by a run — and its storage gone.
+        /// Its dtype and <see cref="ToString"/> stay readable as metadata; every path to the
+        /// elements throws, saying which it was.
         /// </summary>
-        public bool IsDisposed => Volatile.Read(ref _dead);
+        public bool IsDisposed => Volatile.Read(ref _death) is not null;
+
+        /// <summary>How a refusal names this sequence.</summary>
+        internal string Describe() => $"Sequence {this}";
 
         /// <summary>Guards every path to the sequence's elements.</summary>
         protected void ThrowIfDisposed()
         {
-            if (IsDisposed)
-                throw new ObjectDisposedException(GetType().Name,
-                    $"Sequence {this} has been disposed; its element storage is gone and reading " +
-                    "it would read freed memory.");
+            if (Volatile.Read(ref _death) is { } death) throw death.Refusal(this, Describe());
         }
 
         /// <summary>
         /// Ends this sequence and releases its storage through the backend that made it. A sequence
-        /// already disposed is left as it is.
+        /// already dead is left as it is.
         /// </summary>
         /// <exception cref="InvalidOperationException">A run is reading this sequence; releasing
         /// its storage now would free it under the run.</exception>
@@ -110,36 +122,161 @@ namespace Shorokoo
         {
             lock (_gate)
             {
-                if (_dead) return;
+                if (_death is not null) return;
                 if (_locks > 0)
                     throw new InvalidOperationException(
-                        $"Sequence {this} is being read by a run, so it cannot be disposed: its "
-                        + "storage would be freed under the run. Wait for the run to return.");
-                _dead = true;
+                        $"Sequence {this} is being read by {DescribeReaderUnlocked() ?? "a run"}, so it "
+                        + "cannot be disposed: its storage would be freed under the run. Wait for the "
+                        + "run to return.");
+                _death = TensorDeath.Disposed;
+                _taken = true;
             }
-            ReleaseMemory();
+            ReleaseTaken();
         }
 
-        /// <summary>Releases this sequence's storage. Called once, by <see cref="Dispose"/>.</summary>
+        /// <summary>
+        /// This sequence to be <b>read</b> by the run it is fed to — every element of it — rather
+        /// than consumed; see <see cref="TensorData.Shared"/>.
+        /// </summary>
+        /// <exception cref="ObjectDisposedException">This sequence is dead.</exception>
+        public SharedInput Shared()
+        {
+            ThrowIfDisposed();
+            return new SharedInput(this, SharedInputMode.Shared);
+        }
+
+        /// <summary>
+        /// This sequence to be consumed by the run it is fed to if nothing else is reading it when
+        /// that run starts, and read otherwise; see <see cref="TensorData.TryConsume"/>.
+        /// </summary>
+        /// <exception cref="ObjectDisposedException">This sequence is dead.</exception>
+        public SharedInput TryConsume()
+        {
+            ThrowIfDisposed();
+            return new SharedInput(this, SharedInputMode.TryConsume);
+        }
+
+        /// <summary>Releases this sequence's own storage. Called at most once, by whoever it
+        /// belongs to when the sequence dies; never for storage a run consumed.</summary>
         private protected abstract void ReleaseMemory();
 
-        /// <summary>Takes a reader lock for the length of a run. Refuses a sequence that has been
-        /// disposed: there is nothing left to read.</summary>
-        /// <exception cref="ObjectDisposedException">The sequence has been disposed.</exception>
-        internal void AcquireReadLock()
+        /// <summary>Ends this sequence's life deliberately if no run is reading it; see
+        /// <see cref="TensorData.TryTake"/>.</summary>
+        internal TakeOutcome TryTake(TensorDeath death)
+        {
+            ArgumentNullException.ThrowIfNull(death);
+            lock (_gate)
+            {
+                if (_death is not null) return TakeOutcome.Dead;
+                if (_locks > 0) return TakeOutcome.Locked;
+                _death = death;
+                _taken = true;
+                return TakeOutcome.Taken;
+            }
+        }
+
+        /// <summary>Releases what a successful take handed over: this sequence's storage and the
+        /// copies runs built of it. Once.</summary>
+        internal void ReleaseTaken()
+        {
+            lock (_gate)
+            {
+                if (!_taken || _released) return;
+                _released = true;
+            }
+            try
+            {
+                ReleaseMemory();
+            }
+            finally
+            {
+                RetireCopies();
+            }
+        }
+
+        /// <summary>Records that what a take handed over went to a backend, which releases it
+        /// itself; the copies runs built of this sequence go now.</summary>
+        internal void HandedToBackend()
+        {
+            lock (_gate)
+            {
+                if (!_taken || _released) return;
+                _released = true;
+            }
+            RetireCopies();
+        }
+
+        /// <summary>Ends a copy its source no longer wants: dead, and released now or when the last
+        /// run reading it returns; see <see cref="TensorData.Retire"/>.</summary>
+        internal void Retire(TensorDeath death)
+        {
+            bool releaseNow = false;
+            lock (_gate)
+            {
+                if (_death is not null) return;
+                _death = death;
+                if (_locks == 0)
+                {
+                    _taken = true;
+                    releaseNow = true;
+                }
+            }
+            if (releaseNow) ReleaseTaken();
+        }
+
+        /// <summary>Takes a reader lock for the length of a run. Refuses a sequence that is dead:
+        /// there is nothing left to read.</summary>
+        /// <exception cref="ObjectDisposedException">The sequence is dead.</exception>
+        internal void AcquireReadLock(object? reader = null)
         {
             lock (_gate)
             {
                 ThrowIfDisposed();
                 _locks++;
+                if (reader is not null) (_readers ??= []).Add(reader);
             }
         }
 
-        /// <summary>Drops a reader lock.</summary>
-        internal void ReleaseReadLock()
+        /// <summary>Drops a reader lock. A copy retired while it was held is released with the
+        /// last one.</summary>
+        internal void ReleaseReadLock(object? reader = null)
         {
-            lock (_gate) _locks--;
+            bool release = false;
+            lock (_gate)
+            {
+                _locks--;
+                if (reader is not null) _readers?.Remove(reader);
+                if (_locks == 0 && _death is not null && !_taken && !_released)
+                {
+                    _released = true;
+                    release = true;
+                }
+            }
+            if (!release) return;
+            try
+            {
+                ReleaseMemory();
+            }
+            finally
+            {
+                RetireCopies();
+            }
         }
+
+        /// <summary>Whether a run is reading this sequence right now.</summary>
+        internal bool IsLocked
+        {
+            get { lock (_gate) return _locks > 0; }
+        }
+
+        /// <summary>The read a refusal of this sequence names, or null when no holder said.</summary>
+        internal string? DescribeReader()
+        {
+            lock (_gate) return DescribeReaderUnlocked();
+        }
+
+        private string? DescribeReaderUnlocked()
+            => _readers is { Count: > 0 } readers ? readers[0].ToString() : null;
 
         public override string ToString()
         {
@@ -157,19 +294,117 @@ namespace Shorokoo
         /// sites take, so a sequence is built by the backend whose session is about to read it.
         /// A sequence that already holds a runtime value hands it over and ignores the argument,
         /// since a value belongs to the runtime that made it; one that is only a list of tensors
-        /// builds it here.
+        /// is built on that runtime here — a copy held by this sequence, which runs on that backend
+        /// read too.
         ///
-        /// <para>The value returned is the sequence's own: read it, do not dispose it.</para>
+        /// <para>The value returned is the sequence's, or its copy's: read it, do not dispose
+        /// it.</para>
         /// </summary>
-        internal virtual IShorokooTensorValue ToTensorValue(IShorokooBackend backend)
+        internal IShorokooTensorValue ToTensorValue(IShorokooBackend backend)
         {
+            ArgumentNullException.ThrowIfNull(backend);
             ThrowIfDisposed();
-            // The empty sequence, and only it: ONNX Runtime's binding cannot build a zero-element
-            // sequence value, which is why the empty case is represented on the managed side alone.
-            throw new InvalidTensorOperationException(ErrorCodes.FW007, "ToTensorValue", ToString(),
-                "This sequence has no backend-runtime value to feed a session, and none can be "
-                + "built: ONNX Runtime cannot represent a zero-element sequence. Build an empty one "
-                + "inside the graph with the SequenceEmpty op instead of passing one in.");
+            return OwnValue ?? SharedCopyFor(backend).UncheckedValue;
+        }
+
+        /// <summary>The runtime value this sequence holds itself, without the liveness check, or
+        /// null for one that holds none of its own.</summary>
+        internal virtual IShorokooTensorValue? OwnValue => null;
+
+        /// <summary>This sequence's own value, or its copy's, without the liveness check.</summary>
+        internal IShorokooTensorValue UncheckedValue
+            => OwnValue ?? throw new InvalidOperationException(
+                $"Sequence {this} holds no runtime value of its own; a run reads it through a copy.");
+
+        /// <summary>
+        /// Whether a run on <paramref name="backend"/> can be handed this sequence's own value as it
+        /// stands. False for a sequence that is only a list of tensors, which a run reads through a
+        /// sequence value its backend builds.
+        /// </summary>
+        internal virtual bool FeedsInPlace(IShorokooBackend backend) => false;
+
+        /// <summary>
+        /// The memory a run on <paramref name="backend"/> reads a sequence in: host memory of its
+        /// runtime, since ONNX Runtime reads a sequence's elements back with a host copy whatever its
+        /// provider (see <c>IShorokooBackend.CreateSequence</c>). What a copy is keyed by.
+        /// </summary>
+        internal static MemoryLocation RunMemoryOf(IShorokooBackend backend)
+            => new(MemorySpace.Host, backend.RuntimeIdentity);
+
+        /// <summary>
+        /// The copy of this sequence a run on <paramref name="backend"/> reads where it cannot be
+        /// handed this one as it stands: built on that backend the first time, held by this
+        /// sequence and reused by every later read. The caller holds this sequence's lock, or has
+        /// checked it is alive.
+        /// </summary>
+        internal TensorDataSequence SharedCopyFor(IShorokooBackend backend)
+        {
+            var where = RunMemoryOf(backend);
+            lock (_copyGate)
+            {
+                if (_copies is not null && _copies.TryGetValue(where, out var held) && !held.IsDisposed)
+                    return held;
+                var made = BuildCopy(backend);
+                (_copies ??= [])[where] = made;
+                return made;
+            }
+        }
+
+        /// <summary>
+        /// The copy a run on <paramref name="backend"/> that has taken this sequence consumes in
+        /// its place, taken with <paramref name="death"/>: the one already held, or a fresh one.
+        /// </summary>
+        internal TensorDataSequence TakeRunCopy(IShorokooBackend backend, TensorDeath death)
+        {
+            var where = RunMemoryOf(backend);
+            TensorDataSequence? held = null;
+            lock (_copyGate)
+                if (_copies is not null && _copies.Remove(where, out var found)) held = found;
+            if (held is not null)
+            {
+                if (held.TryTake(death) == TakeOutcome.Taken) return held;
+                held.Retire(TensorDeath.Retired);
+            }
+            var fresh = BuildCopy(backend);
+            if (fresh.TryTake(death) != TakeOutcome.Taken)
+                throw new InvalidOperationException("A copy made for one run was held by another.");
+            return fresh;
+        }
+
+        /// <summary>A sequence over the value <see cref="BuildValueOn"/> makes on
+        /// <paramref name="backend"/>, allocated by it and released through it.</summary>
+        private TensorDataSequence BuildCopy(IShorokooBackend backend)
+        {
+            var value = BuildValueOn(backend);
+            try
+            {
+                return OnnxUtils.CreateTensorDataSequenceFromValue(DType, value, backend);
+            }
+            catch
+            {
+                backend.Release(value);
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// This sequence's contents built as one sequence value of <paramref name="backend"/>'s
+        /// runtime, which the caller owns. Without the liveness check.
+        /// </summary>
+        private protected abstract IShorokooTensorValue BuildValueOn(IShorokooBackend backend);
+
+        /// <summary>Retires every copy runs built of this sequence, which lives no longer than
+        /// it.</summary>
+        private void RetireCopies()
+        {
+            List<TensorDataSequence> retired;
+            lock (_copyGate)
+            {
+                if (_copies is null) return;
+                retired = [.. _copies.Values];
+                _copies = null;
+            }
+            foreach (var copy in retired) copy.Retire(TensorDeath.Retired);
         }
 
         internal abstract TensorData GetAt(int index);
@@ -233,6 +468,16 @@ namespace Shorokoo
             private protected override bool AddressableBy(ComputeContext target) => true;
 
             private protected override bool IsHostReadable => true;
+
+            /// <summary>
+            /// There is nothing to build: ONNX Runtime's binding cannot build a zero-element
+            /// sequence value, which is why the empty case is represented on the managed side alone.
+            /// </summary>
+            private protected override IShorokooTensorValue BuildValueOn(IShorokooBackend backend)
+                => throw new InvalidTensorOperationException(ErrorCodes.FW007, "ToTensorValue", ToString(),
+                    "This sequence has no backend-runtime value to feed a session, and none can be "
+                    + "built: ONNX Runtime cannot represent a zero-element sequence. Build an empty one "
+                    + "inside the graph with the SequenceEmpty op instead of passing one in.");
         }
 
         /// <summary>
@@ -242,16 +487,13 @@ namespace Shorokoo
         ///
         /// <para>It is not <see cref="IOnnxData"/>, for the same reason
         /// <see cref="HostTensorData{T}"/> is not: there is no runtime value here until something
-        /// asks for one. Feeding such a sequence to a session builds it then, on that session's
-        /// backend -- see <see cref="ToTensorValue(IShorokooBackend)"/>.</para>
+        /// asks for one. A run reads it through a sequence value its backend builds, held by this
+        /// sequence for the next run — see <see cref="SharedCopyFor"/>.</para>
         /// </summary>
         private sealed class ListTensorDataSequence<T> : TensorDataSequence<T>
             where T : IVarType
         {
             private readonly List<TensorData<T>> _elements;
-
-            // What these elements have been built into, per backend.
-            private readonly MaterializedValues _materialized = new();
 
             internal ListTensorDataSequence(List<TensorData<T>> elements)
             {
@@ -276,7 +518,7 @@ namespace Shorokoo
 
             /// <summary>
             /// This sequence's elements as one sequence value of <paramref name="backend"/>'s
-            /// runtime, built the first time that backend asks and kept for the next time.
+            /// runtime.
             ///
             /// <para>Each element is copied rather than handed over. <c>CreateSequence</c> takes
             /// the values it is given: the sequence owns them from then on and releases them with
@@ -284,18 +526,9 @@ namespace Shorokoo
             /// (Shorokoo/Shorokoo#180). The copy is the same one <c>TensorDataSequence.Create</c>
             /// makes for the same reason, taken on this backend rather than the process default.</para>
             /// </summary>
-            internal override IShorokooTensorValue ToTensorValue(IShorokooBackend backend)
+            private protected override IShorokooTensorValue BuildValueOn(IShorokooBackend backend)
             {
                 ArgumentNullException.ThrowIfNull(backend);
-                ThrowIfDisposed();
-
-                return _materialized.Get(backend, Build);
-            }
-
-            /// <summary>Builds this sequence's elements into one sequence value of
-            /// <paramref name="backend"/>'s runtime.</summary>
-            private IShorokooTensorValue Build(IShorokooBackend backend)
-            {
                 var inner = new List<IShorokooTensorValue>(_elements.Count);
                 try
                 {
@@ -318,22 +551,14 @@ namespace Shorokoo
             }
 
             /// <summary>
-            /// Releases the sequence values built from these elements, and deletes the elements —
-            /// which are this sequence's own: a copy of a sequence is made of copies.
-            ///
-            /// <para>An element a run is reading on its own refuses its deletion; the others are
-            /// deleted all the same, and the refusal is what this throws.</para>
+            /// Deletes the elements, which are this sequence's own: a copy of a sequence is made of
+            /// copies. An element a run is reading on its own is retired instead — dead from here,
+            /// and released when that run returns — since this sequence is gone either way.
             /// </summary>
             private protected override void ReleaseMemory()
             {
-                _materialized.Invalidate();
-                Exception? refused = null;
                 foreach (var element in _elements)
-                {
-                    try { element.Dispose(); }
-                    catch (InvalidOperationException ex) { refused ??= ex; }
-                }
-                if (refused is not null) throw refused;
+                    if (!element.TryDelete()) element.Retire(TensorDeath.Deleted);
             }
 
             private protected override bool AddressableBy(ComputeContext target)
@@ -515,6 +740,9 @@ namespace Shorokoo
         /// <summary>Where this sequence's value is.</summary>
         internal MemorySpace Space { get; }
 
+        /// <summary>Where this sequence's value is, with the runtime that made it.</summary>
+        private MemoryLocation Location => new(Space, AllocatingBackend.RuntimeIdentity);
+
         /// <summary>
         /// The backing backend-runtime sequence value, which this sequence owns: disposing the
         /// sequence releases it, and nothing else may hold or free it.
@@ -565,17 +793,24 @@ namespace Shorokoo
         private protected override void ReleaseMemory() => AllocatingBackend.Release(backing);
 
         private protected override bool AddressableBy(ComputeContext target)
-            => target.ResolvedBackend.CanAddress(new MemoryLocation(Space, AllocatingBackend.RuntimeIdentity));
+            => target.ResolvedBackend.CanAddress(Location);
 
         private protected override bool IsHostReadable => Space.IsHost;
 
+        /// <summary>The value this sequence already holds, whatever backend is asked for.</summary>
+        internal override IShorokooTensorValue? OwnValue => backing;
+
         /// <summary>
-        /// The value this sequence already holds, whatever backend is asked for. It was made by
-        /// one runtime and belongs to it; a session of another rebuilds it as it is fed, which is
-        /// a thing only that session can do.
+        /// Whether a run on <paramref name="backend"/> can be handed this value as it stands: the
+        /// backend can address the memory it is in. A sequence of another runtime is copied into the
+        /// running one — which reads the source, so only one in host memory can be.
         /// </summary>
-        internal override IShorokooTensorValue ToTensorValue(IShorokooBackend backend)
-            => Value;
+        internal override bool FeedsInPlace(IShorokooBackend backend) => backend.CanAddress(Location);
+
+        /// <summary>A copy of this sequence's value built on <paramref name="backend"/>, element by
+        /// element through the host.</summary>
+        private protected override IShorokooTensorValue BuildValueOn(IShorokooBackend backend)
+            => BackendTransfer.CopyTo(backend, backing);
 
         public override IEnumerator<TensorData<T>> GetEnumerator()
         {

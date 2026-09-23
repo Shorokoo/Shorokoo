@@ -894,10 +894,10 @@ public class CoreUtilsCoverageTests
         using var unfired = new CancellationTokenSource();
         var watched = new RunSettings { CancellationToken = unfired.Token };
         Assert.NotEqual(RunSettings.Default, watched);
-        Assert.Equal(expected, Doubled(compiled.Execute([input], RunSettings.Default)));
-        Assert.Equal(expected, Doubled(compiled.Execute([input], watched)));
-        Assert.Equal(expected, Doubled(compiled.Execute([input], watched)));
-        Assert.Equal(expected, Doubled(compiled.Execute([input], [false], watched)));
+        Assert.Equal(expected, Doubled(compiled.Execute([input.Shared()], RunSettings.Default)));
+        Assert.Equal(expected, Doubled(compiled.Execute([input.Shared()], watched)));
+        Assert.Equal(expected, Doubled(compiled.Execute([input.Shared()], watched)));
+        Assert.Equal(expected, Doubled(compiled.Execute([input.Shared()], [false], watched)));
         unfired.Cancel();
 
         using var cancelled = new CancellationTokenSource();

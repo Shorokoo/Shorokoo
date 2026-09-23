@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Threading;
 using Shorokoo.Core.Backends;
 using Shorokoo.Runtime;
 
@@ -22,9 +23,10 @@ namespace Shorokoo
     /// <para>Strings stayed out of <see cref="HostTensorData{T}"/> because its storage is a flat
     /// byte buffer and a string element is variable-length and reference-typed. That is an
     /// argument about the storage and not about when the value is built: the storage differs here,
-    /// the deferral does not. The runtime value is built the first time a backend asks for one, in
-    /// <see cref="TensorData.ToTensorValue(IShorokooBackend)"/>, and kept per backend from
-    /// then on.</para>
+    /// the deferral does not. The runtime value is built the first time a backend asks for one — a
+    /// copy of these strings in host memory of that backend's runtime, which is where ONNX Runtime
+    /// keeps every string tensor whatever its provider — and held by this tensor from then on, a
+    /// tensor in its own right (<see cref="TensorData.CopyAt"/>).</para>
     ///
     /// <para>There is no byte view of these elements, and there was none before: an ONNX Runtime
     /// string tensor has no flat buffer to span over either, so <see cref="AccessRawMemory"/> and
@@ -34,10 +36,8 @@ namespace Shorokoo
     /// </summary>
     public sealed class HostStringTensorData : TensorData<utf8>, IDisposable
     {
-        private readonly string[] _values;
-
-        // What these strings have been built into, per backend, for the next feed.
-        private readonly MaterializedValues _materialized = new();
+        // Let go of when the tensor dies, as HostTensorData lets go of its bytes.
+        private string[]? _values;
 
         /// <summary>Creates a string tensor of <paramref name="shape"/> over
         /// <paramref name="values"/>, which it takes as its own storage rather than copying.</summary>
@@ -85,7 +85,18 @@ namespace Shorokoo
             get
             {
                 ThrowIfDisposed();
-                return _values;
+                return Values;
+            }
+        }
+
+        /// <summary>The elements, refused in the tensor's own words once it is gone.</summary>
+        private string[] Values
+        {
+            get
+            {
+                if (Volatile.Read(ref _values) is { } values) return values;
+                ThrowIfDisposed();
+                throw new ObjectDisposedException(nameof(HostStringTensorData));
             }
         }
 
@@ -97,7 +108,7 @@ namespace Shorokoo
             get
             {
                 ThrowIfDisposed();
-                return _values.Cast<object>().ToArray();
+                return Values.Cast<object>().ToArray();
             }
         }
 
@@ -130,29 +141,32 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// These strings as a tensor of <paramref name="backend"/>'s runtime, built the first time
-        /// that backend asks and kept for the next time. The value is this tensor's, like
-        /// <see cref="OnnxTensorData{T}"/>'s is: the caller reads it and does not dispose it.
+        /// These strings as a tensor of <paramref name="backend"/>'s runtime: the copy in host
+        /// memory of that runtime, built the first time that backend asks and kept for the next time
+        /// — the same copy a run on that backend reads. The value is the copy's: the caller reads it
+        /// and does not dispose it.
         /// </summary>
         private protected override IShorokooTensorValue ValueFor(IShorokooBackend backend)
-            => _materialized.Get(backend, f => f.CreateStringTensor(_values, (long[])this.Shape));
+            => CopyAt(
+                    new MemoryLocation(MemorySpace.Host, backend.RuntimeIdentity),
+                    () => BuiltBy(backend, backend.CreateStringTensor(Values, (long[])this.Shape)))
+                .UncheckedValue(backend);
 
         /// <summary>
         /// The strings are the garbage collector's to reclaim, so releasing this tensor frees no
-        /// host memory of its own; what it frees is each runtime's copy of them, each through the
-        /// backend that built it.
+        /// host memory of its own: it lets go of them. The copies runs made of them are released by
+        /// the base class, each through the backend that built it.
         /// </summary>
-        private protected override void ReleaseMemory() => _materialized.Invalidate();
+        private protected override void ReleaseMemory() => Volatile.Write(ref _values, null);
 
         /// <inheritdoc/>
         private protected override byte[] CopyContentBytes() => throw NoFlatBuffer();
 
         /// <inheritdoc/>
-        private protected override IReadOnlyList<string> CopyContentStrings() => _values;
+        private protected override IReadOnlyList<string> CopyContentStrings() => Values;
 
         // No finalizer, for the reason OnnxTensorData<T> has none: a finalizer must not touch
-        // another managed object that may already have been finalized, and each materialized value
-        // has its own.
+        // another managed object that may already have been finalized, and each copy has its own.
 
         // Every byte-wise accessor lands here rather than on a cast that cannot work. The message
         // names the two reads that do, because the caller reaching for a span of a string tensor

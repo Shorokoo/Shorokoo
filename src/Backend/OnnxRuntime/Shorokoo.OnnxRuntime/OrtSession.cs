@@ -93,6 +93,39 @@ internal sealed class OrtSession : IShorokooSession
 
     public bool HasDeviceMemory => _outputMemory.Value.DeviceMemoryInfo is not null;
 
+    /// <summary>
+    /// Runs the session with <paramref name="consumed"/> handed over: each is this backend's from
+    /// here, on every path, and is released through it in the <c>finally</c> below — after the
+    /// native run, which ONNX Runtime does not let go of its inputs before, and before this returns
+    /// the outputs or rethrows a failure. Nothing the caller holds points into one of them any
+    /// more: the run's outputs are values of their own.
+    ///
+    /// <para>ONNX Runtime keeps every input until the run ends — its memory planner gives each
+    /// feed an extra use so a caller can read it after <c>Run</c> returns — so there is no earlier
+    /// point at which a consumed input could go.</para>
+    /// </summary>
+    public IReadOnlyList<IShorokooTensorValue> RunConsuming(
+        IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
+        IReadOnlyCollection<IShorokooTensorValue> consumed,
+        IReadOnlyList<string> outputNames,
+        IReadOnlySet<string> retainedOutputNames,
+        RunSettings runSettings)
+    {
+        ArgumentNullException.ThrowIfNull(consumed);
+        try
+        {
+            return retainedOutputNames.Count == 0
+                ? Run(inputs, outputNames, runSettings)
+                : RunRetainingOutputs(inputs, outputNames, retainedOutputNames, runSettings);
+        }
+        finally
+        {
+            // Through the backend, which is the one release path for memory it allocated. Its
+            // release is a disposal, which does not throw, so none of them can be skipped.
+            foreach (var value in consumed) _backend.Release(value);
+        }
+    }
+
     public IReadOnlyList<IShorokooTensorValue> Run(
         IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
         IReadOnlyList<string> outputNames,

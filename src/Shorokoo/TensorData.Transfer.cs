@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using Shorokoo.Core.Backends;
+using Shorokoo.Core.Utils;
 using Shorokoo.Runtime;
 
 namespace Shorokoo
@@ -88,26 +89,104 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// This tensor given to the next run that is fed the result, rather than lent to it. The run
-        /// <b>consumes</b> the tensor when it starts: from that moment the tensor is dead — every
-        /// access throws, saying which run took it — and its memory is released as soon as that run
-        /// returns, however it returns, rather than whenever the caller lets go of it.
+        /// This tensor to be <b>read</b> by the run it is fed to, rather than consumed by it. Fed as
+        /// it is, a tensor is given to the run, which takes it when it starts; fed as this, it is lent
+        /// instead — the run takes a reader lock on it for as long as it runs, the running context is
+        /// attached to it, and it is alive and unchanged when the run returns.
         ///
-        /// <para>Nothing happens to the tensor until then: donating marks nothing, and a run refused
-        /// before it starts — a cancelled one, say — takes nothing either. A run that is fed the
-        /// donation while another run is reading the tensor is refused, since consuming memory
-        /// another run is reading would take it from under that run.</para>
-        ///
-        /// <para>Nothing is copied and nothing moves. What it buys is the end of the wait — a feed a
-        /// caller keeps is held until that caller lets go, which for a batch built per step is until
-        /// the next collection, while a donated one is released with the step that read it
-        /// (Shorokoo/Shorokoo#359).</para>
+        /// <para>Nothing happens to the tensor here: the lock is taken when the run starts. What the
+        /// run reads is the tensor itself where the run's backend can address its memory, and
+        /// otherwise a copy in memory the backend can read — made on the first such read, held by
+        /// this tensor for the next ones, and retired by a write to it.</para>
         /// </summary>
         /// <exception cref="ObjectDisposedException">This tensor is dead.</exception>
-        public TensorDonation Donate()
+        public SharedInput Shared()
         {
             ThrowIfDisposed();
-            return new TensorDonation(this);
+            return new SharedInput(this, SharedInputMode.Shared);
+        }
+
+        /// <summary>
+        /// This tensor to be consumed by the run it is fed to if nothing else is reading it when that
+        /// run starts, and read by it — exactly as <see cref="Shared"/> would be — if something is.
+        /// The decision is made when the run starts, not here: whether another run holds a lock can
+        /// change in between.
+        ///
+        /// <para>For a feed that is spent if it can be and kept if it must be: consumed, its memory
+        /// goes to the run and is released as soon as the run no longer needs it; read, it stays
+        /// the caller's.</para>
+        /// </summary>
+        /// <exception cref="ObjectDisposedException">This tensor is dead.</exception>
+        public SharedInput TryConsume()
+        {
+            ThrowIfDisposed();
+            return new SharedInput(this, SharedInputMode.TryConsume);
+        }
+
+        /// <summary>
+        /// The memory a run on <paramref name="backend"/> reads a tensor of <paramref name="dtype"/>
+        /// in: the backend's own, in its own runtime — and host memory for a string tensor, which
+        /// ONNX Runtime keeps there whatever its provider. What a copy made for such a run is keyed
+        /// by.
+        /// </summary>
+        internal static MemoryLocation RunMemoryOf(IShorokooBackend backend, DType dtype)
+            => new(dtype.IsSameElementTypeAs(DType.Utf8) ? MemorySpace.Host : backend.MemorySpace,
+                backend.RuntimeIdentity);
+
+        /// <summary>
+        /// The copy of this tensor a run on <paramref name="backend"/> reads where it cannot be
+        /// handed this tensor itself (<see cref="FeedsInPlace"/>): held by this tensor, keyed by the
+        /// memory it is in, and reused by every later read that wants it there. Made under
+        /// <paramref name="deviceMemory"/> — the reading context's — the first time.
+        /// </summary>
+        internal TensorData SharedCopyFor(IShorokooBackend backend, DeviceMemorySettings deviceMemory)
+            => CopyAt(RunMemoryOf(backend, DType), () => BuildRunCopy(backend, deviceMemory));
+
+        /// <summary>
+        /// The copy a run on <paramref name="backend"/> that has taken this tensor consumes in its
+        /// place, itself taken with <paramref name="death"/>: the one this tensor already holds in
+        /// the run's memory, or a fresh one. This tensor's own memory is the caller's to release.
+        /// </summary>
+        internal TensorData TakeRunCopy(
+            IShorokooBackend backend, DeviceMemorySettings deviceMemory, TensorDeath death)
+        {
+            if (TakeCopyAt(RunMemoryOf(backend, DType), death) is { } held) return held;
+            var fresh = BuildRunCopy(backend, deviceMemory);
+            // Made for this run alone, so nothing else can hold it: the take cannot fail.
+            if (fresh.TryTake(death) != TakeOutcome.Taken)
+                throw new InvalidOperationException("A copy made for one run was held by another.");
+            return fresh;
+        }
+
+        /// <summary>
+        /// A new tensor holding this one's contents in the memory a run on
+        /// <paramref name="backend"/> reads, allocated by that backend — under
+        /// <paramref name="deviceMemory"/> where the memory is a card's. Reads the contents
+        /// without the liveness check: the caller holds this tensor's lock, or has taken it.
+        /// </summary>
+        private TensorData BuildRunCopy(IShorokooBackend backend, DeviceMemorySettings deviceMemory)
+            => BuiltBy(backend, DType.IsSameElementTypeAs(DType.Utf8)
+                ? backend.CreateStringTensor(CopyContentStrings(), (long[])Shape)
+                : backend.CreateTensorInBackendMemory(
+                    (ShorokooTensorElementType)(int)DType, ContentBytesForCopy(), (long[])Shape, deviceMemory));
+
+        /// <summary>
+        /// A tensor over <paramref name="value"/>, which <paramref name="backend"/> has just built as
+        /// a copy of this one: this tensor's shape and dtype, allocated by that backend and released
+        /// through it. The value is released there too if the wrapping fails, since nothing else
+        /// names it yet.
+        /// </summary>
+        private protected TensorData BuiltBy(IShorokooBackend backend, IShorokooTensorValue value)
+        {
+            try
+            {
+                return OnnxUtils.CreateTensorDataFromValue(Shape, DType, value, DType, backend);
+            }
+            catch
+            {
+                backend.Release(value);
+                throw;
+            }
         }
 
         /// <summary>

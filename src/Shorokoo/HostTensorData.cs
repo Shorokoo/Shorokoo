@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Threading;
 using Shorokoo.Core.Backends;
 using Shorokoo.Core.Utils;
 using Shorokoo.Runtime;
@@ -24,8 +25,10 @@ namespace Shorokoo
     /// <c>DefaultBackend.Instance.CreateTensor</c>, so the node definition table's own tensors
     /// resolved the process-wide backend the first time anything touched a graph — which meant a
     /// program that only wanted to build a model and export it as ONNX still had to deploy a
-    /// runtime to do it. The tensor arrives on a backend when it is fed to a session, in
-    /// <see cref="TensorData.ToTensorValue(IShorokooBackend)"/>, and not before.</para>
+    /// runtime to do it. The tensor arrives on a backend when it is fed to a session, and not
+    /// before: a session is handed a runtime value, never a managed array, so a run reads this
+    /// tensor through a copy its backend builds — held by this tensor for the next run, a tensor in
+    /// its own right (<see cref="TensorData.CopyAt"/>).</para>
     ///
     /// <para>String tensors are not held here: their elements are variable-length and
     /// reference-typed, so they do not fit a flat byte buffer — see
@@ -34,10 +37,9 @@ namespace Shorokoo
     public sealed class HostTensorData<T> : TensorData<T>, IDisposable
         where T : IVarType
     {
-        private readonly byte[] _bytes;
-
-        // What these bytes have been built into, per backend, for the next feed.
-        private readonly MaterializedValues _materialized = new();
+        // Let go of when the tensor dies, so a dead tensor still referenced does not keep the bytes
+        // it no longer has: a batch a run consumed is garbage from the moment the run takes it.
+        private byte[]? _bytes;
 
         /// <summary>Creates a tensor of <paramref name="shape"/> over <paramref name="bytes"/>,
         /// which it takes as its own storage rather than copying.</summary>
@@ -56,12 +58,18 @@ namespace Shorokoo
         }
 
         /// <inheritdoc/>
-        internal override byte[]? OwnBytes => _bytes;
+        internal override byte[]? OwnBytes => Volatile.Read(ref _bytes);
 
-        /// <summary>Whether no runtime holds a copy of these bytes -- the seam a test needs to see
-        /// that a release freed the materializations rather than merely forgetting the tensor.
-        /// </summary>
-        internal bool MaterializationsAreEmpty => _materialized.IsEmpty;
+        /// <summary>The storage, refused in the tensor's own words once it is gone.</summary>
+        private byte[] Bytes
+        {
+            get
+            {
+                if (Volatile.Read(ref _bytes) is { } bytes) return bytes;
+                ThrowIfDisposed();
+                throw new ObjectDisposedException(nameof(HostTensorData<T>));
+            }
+        }
 
         /// <summary>
         /// Creates a tensor of <paramref name="shape"/> holding a copy of
@@ -92,71 +100,76 @@ namespace Shorokoo
             get
             {
                 ThrowIfDisposed();
-                return _bytes.Cast<object>().ToArray();
+                return Bytes.Cast<object>().ToArray();
             }
         }
 
-        /// <inheritdoc/>
+        /// <summary>
+        /// A writable span over the elements. Taking it retires every copy a run made of these
+        /// bytes: the next run builds a fresh one from what was written, and a run still reading an
+        /// old copy finishes on it — the copy is released only when that run returns, because a
+        /// value handed to a session is a bare pointer from then on and freeing one under a running
+        /// read is the use-after-free the reader lock exists to stop (Shorokoo/Shorokoo#366).
+        /// </summary>
         public override Span<V> AccessModifiableMemory<V>()
         {
             ThrowIfDisposed();
-            RetireMaterializations();
-            return MemoryMarshal.Cast<byte, V>(_bytes.AsSpan());
+            var bytes = Bytes;
+            Written();
+            return MemoryMarshal.Cast<byte, V>(bytes.AsSpan());
         }
 
         /// <inheritdoc/>
         public override ReadOnlySpan<V> AccessMemory<V>()
         {
             ThrowIfDisposed();
-            return MemoryMarshal.Cast<byte, V>(_bytes);
+            return MemoryMarshal.Cast<byte, V>(Bytes);
         }
 
-        /// <inheritdoc/>
+        /// <summary>A writable byte span over the storage, retiring the copies runs made of it as
+        /// <see cref="AccessModifiableMemory{V}"/> does.</summary>
         public override Span<byte> AccessModifiableRawMemory()
         {
             ThrowIfDisposed();
-            RetireMaterializations();
-            return _bytes;
-        }
-
-        /// <summary>
-        /// Drops every runtime's copy of these contents, because they are about to be written to.
-        /// The copies are taken off the cache at once, so the next feed rebuilds them from what
-        /// was written; freeing them waits for the last run reading them to return, because a
-        /// value handed to a session is a bare pointer from that moment on and freeing one under
-        /// a running read is the use-after-free the reader lock exists to stop
-        /// (Shorokoo/Shorokoo#366).
-        /// </summary>
-        private void RetireMaterializations()
-        {
-            if (_materialized.Retire() is { } free) FreeWhenUnlocked(free);
+            var bytes = Bytes;
+            Written();
+            return bytes;
         }
 
         /// <inheritdoc/>
         public override ReadOnlySpan<byte> AccessRawMemory()
         {
             ThrowIfDisposed();
-            return _bytes;
+            return Bytes;
         }
 
         /// <summary>
-        /// This tensor's contents as a value of <paramref name="backend"/>'s runtime, built the
-        /// first time that backend asks and kept for the next time. The value is this tensor's,
-        /// like <see cref="OnnxTensorData{T}"/>'s is: the caller reads it and does not dispose it.
+        /// These bytes as a value of <paramref name="backend"/>'s runtime: the copy in host memory of
+        /// that runtime, built the first time that backend asks and kept for the next time — the same
+        /// copy a run on a host backend reads. The value is the copy's: the caller reads it and does
+        /// not dispose it.
         /// </summary>
         private protected override IShorokooTensorValue ValueFor(IShorokooBackend backend)
-            => _materialized.Get(backend, f => f.CreateTensorFromRawBytes(
-                (ShorokooTensorElementType)(int)this.DType, _bytes, (long[])this.Shape));
+            => CopyAt(
+                    new MemoryLocation(MemorySpace.Host, backend.RuntimeIdentity),
+                    () => BuiltBy(backend, backend.CreateTensorFromRawBytes(
+                        (ShorokooTensorElementType)(int)this.DType, Bytes, (long[])this.Shape)))
+                .UncheckedValue(backend);
 
         /// <summary>
         /// Managed bytes are the garbage collector's to reclaim, so releasing this tensor frees no
-        /// host memory of its own. What it does free is each runtime's copy of the bytes, which is
-        /// native and can be a device allocation — each through the backend that built it.
+        /// host memory of its own: it lets go of the array, which is then garbage however long the
+        /// tensor itself is kept. The copies runs made of the bytes — native, and possibly on a
+        /// card — are released by the base class, each through the backend that built it.
         /// </summary>
-        private protected override void ReleaseMemory() => _materialized.Invalidate();
+        private protected override void ReleaseMemory() => Volatile.Write(ref _bytes, null);
 
         /// <inheritdoc/>
-        private protected override byte[] CopyContentBytes() => _bytes.AsSpan().ToArray();
+        private protected override byte[] CopyContentBytes() => Bytes.AsSpan().ToArray();
+
+        /// <summary>The array itself: a backend building a copy copies out of it and keeps
+        /// nothing.</summary>
+        private protected override byte[] ContentBytesForCopy() => Bytes;
 
         /// <inheritdoc/>
         private protected override IReadOnlyList<string> CopyContentStrings()
@@ -164,7 +177,6 @@ namespace Shorokoo
                 $"Tensor {this} holds {DType}, not strings, so it has no string elements to read.");
 
         // No finalizer, for the reason OnnxTensorData<T> has none: a finalizer must not touch
-        // another managed object that may already have been finalized, and each materialized value
-        // has its own.
+        // another managed object that may already have been finalized, and each copy has its own.
     }
 }

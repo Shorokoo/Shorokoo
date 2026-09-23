@@ -130,21 +130,32 @@ namespace Shorokoo
         {
             var dims = new long[]?[expandedInputs.Length];
             for (int i = 0; i < expandedInputs.Length; i++)
-                dims[i] = expandedInputs[i] is TensorData t ? t.Shape.Dims : null;
+                dims[i] = FedTensor(expandedInputs[i]) is TensorData t ? t.Shape.Dims : null;
             var key = string.Join(";", dims.Select(d => d is null ? "?" : string.Join(",", d)));
 
             lock (_compiledTrainSteps)
             {
                 if (_compiledTrainSteps.TryGetValue(key, out var compiled)) return compiled;
                 if (_compiledTrainSteps.Count < MaxShapeSpecializedTrainSteps)
-                    return _compiledTrainSteps[key] = RuntimeContext.Compile(TrainingStepPureGraph.ToInternal(), dims, trainingStep: true);
+                    return _compiledTrainSteps[key] = RuntimeContext.Compile(
+                        TrainingStepPureGraph.ToInternal(), dims, trainingStep: true,
+                        description: TrainStepDescription);
                 // Reached only once more distinct shapes have been fed than there are specialized
                 // slots, and shared by every shape after that -- so this session's sizes are known
                 // not to settle, which is the one case the arena strategy departs on.
                 return _compiledTrainStepGeneric ??= RuntimeContext.Compile(
-                    TrainingStepPureGraph.ToInternal(), inputDims: null, trainingStep: true, reusedAcrossShapes: true);
+                    TrainingStepPureGraph.ToInternal(), inputDims: null, trainingStep: true,
+                    reusedAcrossShapes: true, description: TrainStepDescription);
             }
         }
+
+        /// <summary>What a message about a run of the training step calls it: its inputs are one per
+        /// parameter, which names nothing a caller would recognise.</summary>
+        private const string TrainStepDescription = "a TrainingRig's training step";
+
+        /// <summary>The tensor a feed is, or wraps, or null for anything else.</summary>
+        private static TensorData? FedTensor(IData feed)
+            => feed is SharedInput shared ? shared.Value as TensorData : feed as TensorData;
 
         /// <summary>
         /// The rig's <b>constituent</b> layer (§5.8): the swappable source-of-truth models — the
@@ -343,7 +354,7 @@ namespace Shorokoo
         /// constant or scheduled in-graph. Scheduled hyperparameters (a built-in <see cref="Schedule"/>
         /// or a scheduler module) are <b>not</b> here — they are computed in-graph from the step counter
         /// and need no per-step value. When non-empty, supply values via
-        /// <see cref="TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, TensorDataStruct)"/>.
+        /// <see cref="TrainStep(TrainingCheckpoint, IData, IData, IData)"/>.
         /// Internal build machinery — build the per-step values with <see cref="MakeHyperparameters(float)"/>
         /// (which reads this def internally); inspect the dynamic names via <see cref="DynamicHyperparameterNames"/>.
         /// </summary>
@@ -367,7 +378,7 @@ namespace Shorokoo
         /// computes its own loss takes a forwarding loss module whose body ignores the second input; the
         /// rig sees that the input is unreachable from the loss output and derives no target field, so
         /// there is nothing for a caller to construct. Use <see cref="HasTargets"/> to ask, and the
-        /// target-free <see cref="TrainStep(TrainingCheckpoint, TensorDataStruct)"/> /
+        /// target-free <see cref="TrainStep(TrainingCheckpoint, IData)"/> /
         /// <see cref="Fit(TensorDataStruct[], int, TrainingCheckpoint?)"/> to step such a rig.</para>
         /// </summary>
         public TensorStructDef TargetDef { get; private set; } = null!;
@@ -1465,6 +1476,7 @@ namespace Shorokoo
                 BatchIndex = checkpoint.BatchIndex,
                 Rig = this,
                 Loss = checkpoint.Loss,
+                FeedMode = checkpoint.FeedMode,
             };
         }
 
@@ -2354,49 +2366,66 @@ namespace Shorokoo
         /// all back on the next one — free on a CPU backend, and on a GPU the thing that sets the
         /// pace of a long run. A loop that does not need every step's checkpoint should run through
         /// <see cref="BeginResidentRun(TrainingCheckpoint?)"/> instead (Shorokoo/Shorokoo#325).</para>
+        ///
+        /// <para><b>What the step consumes.</b> Its arguments are fed the way any run's inputs are:
+        /// as they are, they are <b>consumed</b> — the checkpoint's state, the input and the target
+        /// are dead once the step has started, and their memory is released with it rather than
+        /// whenever they are collected. That is what <c>cp = rig.TrainStep(cp, x, y)</c> with a
+        /// batch built per step wants. To use one again, pass it <c>.Shared()</c> — a checkpoint you
+        /// keep, a batch you feed every step — or <c>.TryConsume()</c> to have it consumed only when
+        /// nothing else is reading it. The rig's own initial values, which every
+        /// <see cref="CreateInitialCheckpoint()"/> is built over, are never consumed: the step
+        /// always reads them.</para>
         /// </summary>
-        /// <param name="checkpoint">Current training state (params, model state, optimizer state, step)</param>
-        /// <param name="trainingInput">Training input data as TensorDataStruct</param>
-        /// <param name="trainingOutput">Training target data as TensorDataStruct</param>
+        /// <param name="checkpoint">Current training state (params, model state, optimizer state,
+        /// step) — consumed by the step unless passed <c>.Shared()</c> or <c>.TryConsume()</c>.</param>
+        /// <param name="trainingInput">Training input data: a <see cref="TensorDataStruct"/>, or one
+        /// passed through <c>.Shared()</c> or <c>.TryConsume()</c>.</param>
+        /// <param name="trainingOutput">Training target data, in the same forms.</param>
         /// <returns>The post-step checkpoint (advanced step, updated params/state) with its
-        /// <see cref="TrainingCheckpoint.Loss"/> set to this step's loss.</returns>
+        /// <see cref="TrainingCheckpoint.Loss"/> set to this step's loss. Its tensors are new, and
+        /// consumed in turn when it is fed to the next step as it is.</returns>
+        /// <exception cref="ArgumentException"><paramref name="trainingInput"/> or
+        /// <paramref name="trainingOutput"/> is not a struct, nor one passed through
+        /// <c>.Shared()</c> or <c>.TryConsume()</c>.</exception>
         public TrainingCheckpoint TrainStep(
             TrainingCheckpoint checkpoint,
-            TensorDataStruct trainingInput,
-            TensorDataStruct trainingOutput)
+            IData trainingInput,
+            IData trainingOutput)
             => TrainStepWith(checkpoint, trainingInput, trainingOutput);
 
         /// <summary>
         /// Executes a single training step on a rig whose loss reads no target
         /// (<see cref="HasTargets"/> is <c>false</c>) — a model that computes its own loss under a
         /// forwarding loss module (Shorokoo/Shorokoo#331). Identical to
-        /// <see cref="TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct)"/> in every
-        /// other respect; the target the composed graph still carries is the rig's to supply, not the
-        /// caller's. Throws when the rig <i>does</i> read a target, since dropping it would silently
-        /// train against something the caller never chose.
+        /// <see cref="TrainStep(TrainingCheckpoint, IData, IData)"/> in every other respect —
+        /// what it consumes included; the target the composed graph still carries is the rig's to
+        /// supply, not the caller's. Throws when the rig <i>does</i> read a target, since dropping it
+        /// would silently train against something the caller never chose.
         /// </summary>
         /// <param name="checkpoint">Current training state (params, model state, optimizer state, step)</param>
-        /// <param name="trainingInput">Training input data as TensorDataStruct</param>
+        /// <param name="trainingInput">Training input data: a <see cref="TensorDataStruct"/>, or one
+        /// passed through <c>.Shared()</c> or <c>.TryConsume()</c>.</param>
         /// <returns>The post-step checkpoint (advanced step, updated params/state) with its
         /// <see cref="TrainingCheckpoint.Loss"/> set to this step's loss.</returns>
         public TrainingCheckpoint TrainStep(
             TrainingCheckpoint checkpoint,
-            TensorDataStruct trainingInput)
+            IData trainingInput)
         {
             RequireTargetless(nameof(TrainStep));
             return TrainStepWith(checkpoint, trainingInput, TargetDef.FromOrderedData());
         }
 
         /// <summary>
-        /// The explicit-counter form of <see cref="TrainStep(TrainingCheckpoint, TensorDataStruct)"/>,
+        /// The explicit-counter form of <see cref="TrainStep(TrainingCheckpoint, IData)"/>,
         /// for a host driving its own data iteration over a rig whose loss reads no target
         /// (Shorokoo/Shorokoo#331). <paramref name="epoch"/> and <paramref name="batchNumber"/> mean
         /// what they mean on
-        /// <see cref="TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, long, long)"/>.
+        /// <see cref="TrainStep(TrainingCheckpoint, IData, IData, long, long)"/>.
         /// </summary>
         public TrainingCheckpoint TrainStep(
             TrainingCheckpoint checkpoint,
-            TensorDataStruct trainingInput,
+            IData trainingInput,
             long epoch,
             long batchNumber)
         {
@@ -2427,16 +2456,20 @@ namespace Shorokoo
         /// carries only the schedule-less runtime values.
         /// </summary>
         /// <param name="checkpoint">Current training state (params, model state, optimizer state, step)</param>
-        /// <param name="hyperparams">Values for the schedule-less runtime hyperparameters (<see cref="HyperparameterStructDef"/> order).</param>
-        /// <param name="trainingInput">Training input data as TensorDataStruct</param>
-        /// <param name="trainingOutput">Training target data as TensorDataStruct</param>
+        /// <param name="hyperparams">Values for the schedule-less runtime hyperparameters
+        /// (<see cref="HyperparameterStructDef"/> order): a struct, consumed like every other feed
+        /// — <see cref="MakeHyperparameters(float)"/> builds a fresh one per call — or one passed
+        /// through <c>.Shared()</c> to be read every step.</param>
+        /// <param name="trainingInput">Training input data: a <see cref="TensorDataStruct"/>, or one
+        /// passed through <c>.Shared()</c> or <c>.TryConsume()</c>.</param>
+        /// <param name="trainingOutput">Training target data, in the same forms.</param>
         /// <returns>The post-step checkpoint (advanced step, updated params/state) with its
         /// <see cref="TrainingCheckpoint.Loss"/> set to this step's loss.</returns>
         public TrainingCheckpoint TrainStep(
             TrainingCheckpoint checkpoint,
-            TensorDataStruct hyperparams,
-            TensorDataStruct trainingInput,
-            TensorDataStruct trainingOutput)
+            IData hyperparams,
+            IData trainingInput,
+            IData trainingOutput)
         {
             if (hyperparams is null) throw new ArgumentNullException(nameof(hyperparams));
             return RunStep(checkpoint, hyperparams, trainingInput, trainingOutput);
@@ -2460,10 +2493,12 @@ namespace Shorokoo
         /// <see cref="TrainingCheckpoint.Loss"/> are preserved (via
         /// <see cref="TrainingCheckpoint.WithCounters"/>).</para>
         ///
-        /// <para>Like the counter-agnostic <see cref="TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct)"/>
+        /// <para>Like the counter-agnostic <see cref="TrainStep(TrainingCheckpoint, IData, IData)"/>
         /// it drives, this schedule-driven form requires the rig to have no schedule-less runtime
         /// hyperparameter (<see cref="Hyperparameter.Runtime()"/>); supply those via
-        /// <see cref="MakeHyperparameters(float)"/> and a manual explicit-data loop instead.</para>
+        /// <see cref="MakeHyperparameters(float)"/> and a manual explicit-data loop instead. It
+        /// consumes what that one does: the checkpoint as passed, and the batch as the loader hands
+        /// it over (<see cref="DataBatch"/>).</para>
         /// </summary>
         /// <param name="checkpoint">Current training state; its counters are replaced from the loader.</param>
         /// <param name="loader">The data loader; <see cref="IDataLoader.Next"/> is called once.</param>
@@ -2494,21 +2529,23 @@ namespace Shorokoo
         /// <see cref="TrainingCheckpoint.Rig"/> and this step's <see cref="TrainingCheckpoint.Loss"/> are
         /// preserved.</para>
         ///
-        /// <para>Like <see cref="TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct)"/>,
+        /// <para>Like <see cref="TrainStep(TrainingCheckpoint, IData, IData)"/>,
         /// this schedule-driven form requires the rig to have no schedule-less runtime hyperparameter
         /// (<see cref="Hyperparameter.Runtime()"/>); use the explicit-hyperparameters overload and set the
-        /// counters via <see cref="TrainingCheckpoint.WithCounters"/> for those.</para>
+        /// counters via <see cref="TrainingCheckpoint.WithCounters"/> for those. It consumes what that
+        /// one does.</para>
         /// </summary>
         /// <param name="checkpoint">Current training state; its epoch / batch counters are replaced by the arguments.</param>
-        /// <param name="trainingInput">Training input data as TensorDataStruct.</param>
-        /// <param name="trainingOutput">Training target data as TensorDataStruct.</param>
+        /// <param name="trainingInput">Training input data: a <see cref="TensorDataStruct"/>, or one
+        /// passed through <c>.Shared()</c> or <c>.TryConsume()</c>.</param>
+        /// <param name="trainingOutput">Training target data, in the same forms.</param>
         /// <param name="epoch">The 0-based epoch of the batch being trained; recorded verbatim.</param>
         /// <param name="batchNumber">The 0-based batch index of the batch being trained; recorded verbatim.</param>
         /// <returns>The post-step checkpoint: step advanced, epoch / batch set to the given values, with this step's loss.</returns>
         public TrainingCheckpoint TrainStep(
             TrainingCheckpoint checkpoint,
-            TensorDataStruct trainingInput,
-            TensorDataStruct trainingOutput,
+            IData trainingInput,
+            IData trainingOutput,
             long epoch,
             long batchNumber)
         {
@@ -2530,8 +2567,8 @@ namespace Shorokoo
         /// </summary>
         private TrainingCheckpoint TrainStepWith(
             TrainingCheckpoint checkpoint,
-            TensorDataStruct trainingInput,
-            TensorDataStruct trainingOutput)
+            IData trainingInput,
+            IData trainingOutput)
         {
             if (checkpoint is null) throw new ArgumentNullException(nameof(checkpoint));
             RequireNoRuntimeHyperparameters();
@@ -2585,6 +2622,10 @@ namespace Shorokoo
         /// <summary>The budget currently in force (test hook).</summary>
         internal long ReclaimBudgetBytes => System.Threading.Interlocked.Read(ref _reclaimBudgetBytes);
 
+        /// <summary>Superseded state counted towards the next reclamation and not yet reclaimed
+        /// (test hook).</summary>
+        internal long SupersededStateBytesPending => System.Threading.Interlocked.Read(ref _supersededStateBytes);
+
         /// <summary>Lowers both the base budget and the one in force (test hook).</summary>
         internal void SetReclaimBudgetForTests(long bytes)
         {
@@ -2625,20 +2666,26 @@ namespace Shorokoo
         /// (Shorokoo/Shorokoo#321). At 49 M parameters that is ~565 MiB a step, and the run dies
         /// around step 12 of 48,000.</para>
         ///
-        /// <para>The rig knows what the runtime cannot infer from the managed heap: the step just
-        /// taken supersedes a known quantity of runtime memory. Collecting on that budget is the
-        /// same thing a caller would otherwise have to write by hand after every step. A model
-        /// producing a few MiB a step pays one collection every few steps; one producing hundreds
-        /// of MiB a step pays one per step, which is what the by-hand version cost and what a run
-        /// of that size has to pay to survive at all. The alternative,
+        /// <para>A step fed its checkpoint as it is consumes it, and that state is released as the
+        /// step runs, so for the ordinary loop there is nothing left to collect and this does
+        /// nothing: it counts only state the step superseded <b>without</b> consuming — a checkpoint
+        /// fed <c>.Shared()</c>, or through <c>.TryConsume()</c> while something else was reading
+        /// it — which is alive after the step and garbage the moment its holder drops it.</para>
+        ///
+        /// <para>For that state the rig knows what the runtime cannot infer from the managed heap:
+        /// the step just taken superseded a known quantity of runtime memory. Collecting on that
+        /// budget is the same thing a caller would otherwise have to write by hand after every
+        /// step. A model superseding a few MiB a step pays one collection every few steps; one
+        /// superseding hundreds of MiB a step pays one per step, which is what the by-hand version
+        /// cost and what a run of that size has to pay to survive at all. The alternative,
         /// <see cref="GC.AddMemoryPressure"/>, is too slack at this ratio: it collects roughly
         /// every ten steps, and the runtime's arena ratchets upward between collections instead of
         /// settling.</para>
         ///
-        /// <para><b>The budget counts what a step produces, which is only garbage if the caller
-        /// drops it.</b> A caller may legitimately keep its checkpoints — comparing a step against
-        /// the one before it, or holding the best so far — and then there is nothing to reclaim and
-        /// a forced collection is pure cost, repeated forever. So the rig watches weakly the
+        /// <para><b>Superseded state is only garbage if the caller drops it.</b> A caller that
+        /// shares its checkpoints may legitimately keep them — comparing a step against the one
+        /// before it, or holding the best so far — and then there is nothing to reclaim and a
+        /// forced collection is pure cost, repeated forever. So the rig watches weakly the
         /// checkpoints it produced, and asks whether one of them survived a later collection: if it
         /// did, the caller is keeping them, and the budget doubles, up to
         /// <see cref="MaxReclaimBudgetBytes"/>, snapping back the moment a watched checkpoint does
@@ -2704,22 +2751,73 @@ namespace Shorokoo
             }
         }
 
-        /// <summary>Backend bytes a checkpoint's tensor fields hold. A field whose size is not
-        /// derivable — a dtype with no fixed byte stride, a shape with no element count, or a
-        /// sequence or optional rather than a tensor — contributes nothing, which only makes the
-        /// budget conservative.</summary>
-        private static long BackendBytes(params IEnumerable<IData>[] structs)
+        /// <summary>Backend bytes the tensor fields of <paramref name="structs"/> that are still
+        /// alive hold, leaving out the rig's own initial values, which it keeps whatever the caller
+        /// does. A field whose size is not derivable — a dtype with no fixed byte stride, a shape
+        /// with no element count, or a sequence or optional rather than a tensor — contributes
+        /// nothing, which only makes the budget conservative.</summary>
+        private long SupersededBytes(params IEnumerable<IData>[] structs)
         {
             long total = 0;
             foreach (var s in structs)
                 foreach (var field in s)
                     total += field switch
                     {
-                        TensorDataStruct nested => BackendBytes(nested),
-                        TensorData tensor when tensor.Shape.Count > 0 => tensor.Shape.Count * ElementBytes(tensor.DType),
+                        TensorDataStruct nested => SupersededBytes(nested),
+                        TensorData { IsDisposed: false } tensor when tensor.Shape.Count > 0 && !IsRigOwned(tensor)
+                            => tensor.Shape.Count * ElementBytes(tensor.DType),
                         _ => 0,
                     };
             return total;
+        }
+
+        /// <summary>
+        /// Whether <paramref name="tensor"/> is one of this rig's own initial values — what every
+        /// <see cref="CreateInitialCheckpoint()"/>, and a load that falls back on the rig for a
+        /// component its file omits, is built over. The rig keeps them for the next such checkpoint,
+        /// so a step only ever reads them, however the checkpoint holding them was fed: consuming
+        /// one would take it from every checkpoint the rig makes after.
+        /// </summary>
+        private bool IsRigOwned(TensorData tensor)
+        {
+            // The families as they stand -- a deferred build replaces them when it materializes, and
+            // has no values before, so nothing a caller holds can be one of them then -- and the set
+            // rebuilt only when one of them has been replaced: a step asks this of every field.
+            Dictionary<string, IData>?[] families = [_initialParamFields, _initialStateFields, _initialOptStateFields];
+            var owned = Volatile.Read(ref _rigOwned);
+            if (owned is null || !owned.IsOver(families))
+            {
+                owned = new RigOwnedValues(families);
+                Volatile.Write(ref _rigOwned, owned);
+            }
+            return owned.Contains(tensor);
+        }
+
+        private RigOwnedValues? _rigOwned;
+
+        /// <summary>The rig's own initial values, by reference, and which value families they were
+        /// read from.</summary>
+        private sealed class RigOwnedValues
+        {
+            private readonly Dictionary<string, IData>?[] _families;
+            private readonly HashSet<object> _values = new(ReferenceEqualityComparer.Instance);
+
+            internal RigOwnedValues(Dictionary<string, IData>?[] families)
+            {
+                _families = families;
+                foreach (var family in families)
+                    if (family is not null)
+                        foreach (var value in family.Values) _values.Add(value);
+            }
+
+            internal bool IsOver(Dictionary<string, IData>?[] families)
+            {
+                for (int i = 0; i < families.Length; i++)
+                    if (!ReferenceEquals(families[i], _families[i])) return false;
+                return true;
+            }
+
+            internal bool Contains(TensorData tensor) => _values.Contains(tensor);
         }
 
         /// <summary>
@@ -2796,9 +2894,9 @@ namespace Shorokoo
         /// </summary>
         private TrainingCheckpoint RunStep(
             TrainingCheckpoint checkpoint,
-            TensorDataStruct? hyperparams,
-            TensorDataStruct trainingInput,
-            TensorDataStruct trainingOutput,
+            IData? hyperparams,
+            IData trainingInput,
+            IData trainingOutput,
             bool retainStateOnDevice = false)
         {
             if (checkpoint is null) throw new ArgumentNullException(nameof(checkpoint));
@@ -2808,6 +2906,9 @@ namespace Shorokoo
                 throw new ArgumentNullException(nameof(hyperparams),
                     "This rig was built with dynamic hyperparameters; supply their values each step " +
                     "(see TrainingRig.MakeHyperparameters).");
+            var inputStruct = TrainingFeeds.StructOf(trainingInput, nameof(trainingInput));
+            var targetStruct = TrainingFeeds.StructOf(trainingOutput, nameof(trainingOutput));
+            if (hyperparams is not null) TrainingFeeds.StructOf(hyperparams, nameof(hyperparams));
 
             // Execute the training step graph.
             // Graph inputs (after lowering): [param_fields..., state_fields..., opt_state_fields..., hyperparam_fields..., counter_inputs..., model_input_fields..., target_fields...]
@@ -2816,22 +2917,39 @@ namespace Shorokoo
             // schedule-less runtime hyperparameters; the int64 counter inputs {step, epoch, batchIndex}
             // exist only for those a scheduled hyperparameter consumes, and are fed the checkpoint's
             // current counters so the scheduler math resumes correctly from a saved checkpoint.
-            var execInputs = new List<IData>(9)
-            {
-                checkpoint.TrainableParams,
-                checkpoint.ModelState,
-                checkpoint.OptimizerState,
-            };
-            if (HyperparameterStructDef.Fields.Length > 0) execInputs.Add(hyperparams!);
+            //
+            // How each is fed is the caller's, as for any run: the checkpoint's state as its
+            // FeedMode says, the batch and the hyperparameters as they were passed. Two feeds are the
+            // rig's own business -- its initial values, which it keeps for every checkpoint it makes
+            // (read, always), and the counters, built here for this step alone (consumed).
+            //
+            // Each feed is labelled with what the caller passed it as, which is what a message about
+            // it -- the one a tensor this step consumed throws, say -- has to name: the graph's own
+            // names for the state inputs are internal identifiers.
+            var execInputs = new List<IData>();
+            var labels = new List<string>();
+            AddState(execInputs, labels, checkpoint.TrainableParams, checkpoint.FeedMode, "the checkpoint's trainable parameter");
+            AddState(execInputs, labels, checkpoint.ModelState, checkpoint.FeedMode, "the checkpoint's model state");
+            AddState(execInputs, labels, checkpoint.OptimizerState, checkpoint.FeedMode, "the checkpoint's optimizer state");
+            if (HyperparameterStructDef.Fields.Length > 0)
+                AddStruct(execInputs, labels, hyperparams!, "the hyperparameter");
             foreach (var counter in _counterInputNames)
+            {
                 execInputs.Add(Shorokoo.Globals.TensorData(Array.Empty<long>(), CounterValue(checkpoint, counter)));
-            execInputs.Add(trainingInput);
-            execInputs.Add(trainingOutput);
+                labels.Add($"the '{counter}' counter");
+            }
+            AddStruct(execInputs, labels, trainingInput, "the training input");
+            AddStruct(execInputs, labels, trainingOutput, "the training target");
             // A loss that ignores its target leaves TargetDef empty, so the struct above contributes
             // no field — the rig supplies the dead input's value itself (Shorokoo/Shorokoo#331). Target
-            // fields come last in the layout, so it goes here.
-            if (_ignoredTargetPlaceholder is not null) execInputs.Add(_ignoredTargetPlaceholder);
-            var expandedInputs = ComputeContext.ExpandStructInputs(execInputs.ToArray());
+            // fields come last in the layout, so it goes here. It is the rig's, and fed every step:
+            // read, never consumed.
+            if (_ignoredTargetPlaceholder is not null)
+            {
+                execInputs.Add(_ignoredTargetPlaceholder.Shared());
+                labels.Add("the rig's stand-in for the target its loss ignores");
+            }
+            var expandedInputs = execInputs.ToArray();
             var compiled = CompiledTrainStepFor(expandedInputs);
             var stateOutputCount =
                 UpdatedParamFieldCount + UpdatedStateFieldCount + UpdatedOptimizerStateFieldCount;
@@ -2848,11 +2966,11 @@ namespace Shorokoo
                     // path on a graph the CPU path runs fine.
                     var retain = new bool[compiled.OutputCount];
                     for (int i = 0; i < stateOutputCount; i++) retain[i] = true;
-                    results = compiled.Execute(expandedInputs, retain);
+                    results = compiled.Execute(expandedInputs, labels, retain);
                 }
                 else
                 {
-                    results = compiled.Execute(expandedInputs);
+                    results = compiled.Execute(expandedInputs, labels, retainOnDevice: null);
                 }
             }
             catch (Exception ex) when (AllocationFailureReport.IsAllocationFailure(ex))
@@ -2882,7 +3000,7 @@ namespace Shorokoo
                         $"the training step at step {checkpoint.Step}",
                         AllocationFailureReport.Classify(ex, device.HasDeviceMemory),
                         device,
-                        StepTensorInventory(checkpoint, trainingInput, trainingOutput),
+                        StepTensorInventory(checkpoint, inputStruct, targetStruct),
                         AllocationFailureReport.ReadProcessMemory(),
                         ex.Message);
                 }
@@ -2947,17 +3065,47 @@ namespace Shorokoo
                 Loss = lossValue,
             };
 
-            // Only state nobody is going to release explicitly. A retained step's state belongs to
-            // the ResidentTrainingRun, which frees it deterministically as the next step supersedes
-            // it, so counting it here would buy a forced blocking gen-2 collection per step -- on
-            // a model whose state crosses the budget every step, that is a full-heap collection
-            // with nothing to collect, in the loop whose whole point is that per-step overhead
-            // dominates.
+            // Only state this step superseded and left alive: what it consumed is released already.
+            // A retained step's state belongs to the ResidentTrainingRun, which consumes it with the
+            // next step or releases it itself, so counting it here would buy a forced blocking gen-2
+            // collection per step -- on a model whose state crosses the budget every step, that is a
+            // full-heap collection with nothing to collect, in the loop whose whole point is that
+            // per-step overhead dominates.
             if (!retainStateOnDevice)
                 ReclaimSupersededState(
-                    BackendBytes(updatedParams, updatedModelState, updatedOptimizerState), newCheckpoint);
+                    SupersededBytes(checkpoint.TrainableParams, checkpoint.ModelState, checkpoint.OptimizerState),
+                    newCheckpoint);
 
             return newCheckpoint;
+        }
+
+        /// <summary>
+        /// Adds <paramref name="state"/>'s fields to a step's inputs, each fed as
+        /// <paramref name="feedMode"/> says — as it is, and consumed, when that is null — except the
+        /// rig's own initial values, which are always read (<see cref="IsRigOwned"/>). Each is
+        /// labelled <paramref name="section"/> and its field's name.
+        /// </summary>
+        private void AddState(
+            List<IData> inputs, List<string> labels, TensorDataStruct state, SharedInputMode? feedMode,
+            string section)
+        {
+            foreach (var field in state.Definition.Fields)
+            {
+                var value = state.Fields[field.Name];
+                inputs.Add(value is TensorData tensor && IsRigOwned(tensor)
+                    ? new SharedInput(tensor, SharedInputMode.Shared)
+                    : feedMode is { } mode ? new SharedInput(value, mode) : value);
+                labels.Add($"{section} '{field.Name}'");
+            }
+        }
+
+        /// <summary>Adds a struct feed's fields to a step's inputs, fed as the struct was, each
+        /// labelled <paramref name="section"/> and its field's name.</summary>
+        private static void AddStruct(List<IData> inputs, List<string> labels, IData feed, string section)
+        {
+            var fields = TrainingFeeds.StructOf(feed, nameof(feed)).Definition.Fields;
+            inputs.AddRange(ComputeContext.ExpandStructInputs([feed]));
+            foreach (var field in fields) labels.Add($"{section} '{field.Name}'");
         }
 
         // ---- Device-resident training (Shorokoo/Shorokoo#325) ----
@@ -2970,11 +3118,13 @@ namespace Shorokoo
         /// costs the model's arithmetic and one that costs its parameter count.
         ///
         /// <para><paramref name="initialCheckpoint"/> defaults to
-        /// <see cref="CreateInitialCheckpoint()"/>. It stays the caller's: the run reads it and never
-        /// frees it. Dispose the run when the loop ends — anything it still holds goes with it, so
-        /// take the checkpoint you want to keep with
-        /// <see cref="ResidentTrainingRun.StepToCheckpoint(TensorDataStruct, TensorDataStruct)"/>
-        /// first.</para>
+        /// <see cref="CreateInitialCheckpoint()"/>. It is fed to the run's first step the way
+        /// <c>TrainStep</c> feeds a checkpoint: as it is, that step consumes its state; passed
+        /// <c>.Shared()</c>, the run reads it and it stays the caller's, whole. (The rig's own initial
+        /// values are only ever read, so a run begun from <see cref="CreateInitialCheckpoint()"/>
+        /// takes nothing of the rig's.) Dispose the run when the loop ends — anything it still holds
+        /// goes with it, so take the checkpoint you want to keep with
+        /// <see cref="ResidentTrainingRun.StepToCheckpoint(IData, IData)"/> first.</para>
         /// </summary>
         public ResidentTrainingRun BeginResidentRun(TrainingCheckpoint? initialCheckpoint = null)
             => new(this, initialCheckpoint ?? CreateInitialCheckpoint());
@@ -2986,9 +3136,9 @@ namespace Shorokoo
         /// </summary>
         internal TrainingCheckpoint ResidentStep(
             TrainingCheckpoint checkpoint,
-            TensorDataStruct? hyperparams,
-            TensorDataStruct trainingInput,
-            TensorDataStruct trainingOutput,
+            IData? hyperparams,
+            IData trainingInput,
+            IData trainingOutput,
             bool retain)
         {
             if (hyperparams is null) RequireNoRuntimeHyperparameters();
@@ -3033,11 +3183,10 @@ namespace Shorokoo
         /// <summary>
         /// Frees the backend tensors behind a checkpoint's state. Only a
         /// <see cref="ResidentTrainingRun"/> calls this, and only for state it produced and nothing
-        /// else can still be holding — a device allocation the next step has superseded would
-        /// otherwise sit on the card until a finalizer ran, which on a training loop that allocates
-        /// almost nothing managed is far too late. Safe at that point because the step that read
-        /// these as inputs has already returned, and ONNX Runtime synchronizes its providers before
-        /// a run returns.
+        /// else can still be holding that no step went on to consume — what it still holds when it
+        /// is disposed — since a device allocation left behind would otherwise sit on the card until
+        /// a finalizer ran, which on a training loop that allocates almost nothing managed is far too
+        /// late. A tensor a step already consumed is dead, and ending it again does nothing.
         /// </summary>
         internal static void ReleaseCheckpointState(TrainingCheckpoint checkpoint)
         {
@@ -3069,6 +3218,11 @@ namespace Shorokoo
         /// <summary>
         /// Runs a full training loop over the training data for the specified number of epochs.
         /// Each element in the input/output arrays represents one training step (typically a pre-batched batch).
+        ///
+        /// <para>The arrays are a dataset, fed once per epoch, so every step <b>reads</b> its batch —
+        /// as if it were passed <c>.Shared()</c> — and the batches are all alive and unchanged when
+        /// this returns. The checkpoint is fed to the first step as <c>TrainStep</c> feeds one:
+        /// consumed as it is, read when passed <c>.Shared()</c>.</para>
         /// </summary>
         /// <param name="initialCheckpoint">Initial training state (with initial parameter values)</param>
         /// <param name="trainingInputs">Array of training input batches (each as TensorDataStruct)</param>
@@ -3107,15 +3261,17 @@ namespace Shorokoo
 
                 for (int i = 0; i < trainingInputs.Length; i++)
                 {
+                    // Read, not consumed: the same batch is fed again next epoch.
+                    var (input, target) = (trainingInputs[i].Shared(), trainingOutputs[i].Shared());
                     bool last = epoch == numEpochs - 1 && i == trainingInputs.Length - 1;
                     if (last)
                     {
-                        checkpoint = run.StepToCheckpoint(trainingInputs[i], trainingOutputs[i]);
+                        checkpoint = run.StepToCheckpoint(input, target);
                         epochLoss += checkpoint.Loss!.Value;
                     }
                     else
                     {
-                        epochLoss += run.Step(trainingInputs[i], trainingOutputs[i]);
+                        epochLoss += run.Step(input, target);
                     }
                 }
 
@@ -3182,7 +3338,7 @@ namespace Shorokoo
         /// epoch's last batch begins the next epoch. Scheduled hyperparameters are applied automatically (the global
         /// step advances across the run); this schedule-driven form requires the rig to have no
         /// schedule-less runtime hyperparameter — supply those via <see cref="MakeHyperparameters(float)"/>
-        /// and a manual <see cref="TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, TensorDataStruct)"/>
+        /// and a manual <see cref="TrainStep(TrainingCheckpoint, IData, IData, IData)"/>
         /// loop instead.</para>
         /// </summary>
         /// <param name="loader">The data loader owning the (input, target) batch stream and its position.</param>
@@ -3262,6 +3418,11 @@ namespace Shorokoo
         /// initializers, and optimizer state from the optimizer's [StateInitializer]s (run once per
         /// trainable parameter, at each hyperparameter's value at the initial counters). This is pure
         /// packaging — no computation happens here.
+        ///
+        /// <para>The tensors are the rig's own, the same ones in every checkpoint this makes, which
+        /// is why a training step only ever reads them — fed to one as it is, such a checkpoint is
+        /// not consumed. Anything else that runs on them outside the rig should feed them
+        /// <c>.Shared()</c>: consuming one ends it for every checkpoint the rig makes after.</para>
         ///
         /// <para><b>Fails loud (D5)</b> when the optimizer's state initializer actually reads a
         /// <see cref="HyperparameterKind.Runtime"/> hyperparameter, whose value is unknown at build:
@@ -3663,7 +3824,7 @@ namespace Shorokoo
 
         /// <summary>
         /// Packs a single dynamic hyperparameter value into a <see cref="TensorDataStruct"/> for the
-        /// explicit <see cref="TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, TensorDataStruct)"/>
+        /// explicit <see cref="TrainStep(TrainingCheckpoint, IData, IData, IData)"/>
         /// overload. Convenience for the common case of exactly one dynamic hyperparameter (e.g. the
         /// learning rate); throws if the rig has a different number. For multiple, use the named overload.
         /// The value is converted to the hyperparameter's declared dtype, failing loud if it would not
@@ -3701,7 +3862,7 @@ namespace Shorokoo
 
         /// <summary>
         /// Packs named dynamic hyperparameter values into a <see cref="TensorDataStruct"/> for the
-        /// explicit <see cref="TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, TensorDataStruct)"/>
+        /// explicit <see cref="TrainStep(TrainingCheckpoint, IData, IData, IData)"/>
         /// overload. Every dynamic hyperparameter must be named exactly once (case-insensitive); names
         /// are those in <see cref="DynamicHyperparameterNames"/>, e.g.
         /// <c>MakeHyperparameters(("learningRate", lr), ("weightDecay", wd))</c>. Each value is a host

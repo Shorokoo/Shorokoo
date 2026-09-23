@@ -105,6 +105,20 @@ namespace Shorokoo
             return this.Definition.Fields.Select(x => (IData)Fields[x.Name]).GetEnumerator();
         }
 
+        /// <summary>
+        /// This struct to be <b>read</b> by the run it is fed to — every member of it — rather than
+        /// consumed. Fed as it is, a struct's members are consumed as a bare tensor is; see
+        /// <see cref="TensorData.Shared"/>.
+        /// </summary>
+        public SharedInput Shared() => new(this, SharedInputMode.Shared);
+
+        /// <summary>
+        /// This struct's members to be consumed by the run it is fed to where nothing else is
+        /// reading them when that run starts, and read otherwise — decided member by member; see
+        /// <see cref="TensorData.TryConsume"/>.
+        /// </summary>
+        public SharedInput TryConsume() => new(this, SharedInputMode.TryConsume);
+
         IEnumerator IEnumerable.GetEnumerator()
         {
             return GetEnumerator();

@@ -143,7 +143,8 @@ public class CompositeTransferCoverageTests
         using var reached = new ManualResetEventSlim();
         using var release = new ManualResetEventSlim();
 
-        var run = Task.Run(() => Floats(compiled.Run(new HeldSequence(sequence, reached, release))[0].ToTensorData()));
+        var run = Task.Run(() => Floats(compiled.Run(
+            new HeldSequence(sequence, reached, release) { Sharing = SharedInputMode.Shared })[0].ToTensorData()));
         Assert.True(reached.Wait(TimeSpan.FromSeconds(10)));
 
         Assert.Throws<InvalidOperationException>(sequence.Dispose);
@@ -161,11 +162,10 @@ public class CompositeTransferCoverageTests
         TensorDataSequence data, ManualResetEventSlim reached, ManualResetEventSlim release)
         : TensorDataSequenceModelParam("seq", ModelParamType.InputParam, data)
     {
-        internal override IShorokooTensorValue ToTensorValue(IShorokooBackend backend)
+        internal override void Held()
         {
             reached.Set();
             release.Wait(TimeSpan.FromSeconds(30));
-            return base.ToTensorValue(backend);
         }
     }
 
@@ -189,8 +189,8 @@ public class CompositeTransferCoverageTests
         var join = new InternalComputationGraph(
             [seq], [OnnxOp.ConcatFromSequence(seq, axis: 0, newAxis: false)]);
 
-        Assert.Equal([1f, 2f, 2f, 4f], Floats(consumer.Execute(join, copied)[0].ToTensorData()));
-        Assert.Equal([1f, 2f, 2f, 4f], Floats(consumer.Execute(join, copied)[0].ToTensorData()));
+        Assert.Equal([1f, 2f, 2f, 4f], Floats(consumer.Execute(join, copied.Shared())[0].ToTensorData()));
+        Assert.Equal([1f, 2f, 2f, 4f], Floats(consumer.Execute(join, copied.Shared())[0].ToTensorData()));
         Assert.Same(copied.ToTensorValue(), copied.ToTensorValue());
 
         Assert.Equal([1f, 2f], Floats(copied[0]));

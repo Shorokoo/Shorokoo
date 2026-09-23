@@ -49,7 +49,7 @@ public class TensorContextTransferCoverageTests
             x => x.To(cpu), x => x.To(alsoCpu), x => x.To(ComputeContext.Host), x => x.ToHost()])
             Assert.Same(t, to(t));
 
-        var output = cpu.Execute(Doubling(), t)[0].ToTensorData();
+        var output = cpu.Execute(Doubling(), t.Shared())[0].ToTensorData();
         Assert.Same(DefaultBackend.Instance, output.AllocatingBackend);
         Assert.Same(output, output.To(alsoCpu));
         Assert.Same(output, output.To(ComputeContext.Host));
@@ -120,9 +120,9 @@ public class TensorContextTransferCoverageTests
         var t = (TensorData<float32>)TensorData([2L], (float[])[1f, 2f]);
         var handed = t.To(context);
 
-        Assert.Equal([2f, 4f], Floats(context.Execute(Doubling(), handed)[0].ToTensorData()));
+        Assert.Equal([2f, 4f], Floats(context.Execute(Doubling(), handed.Shared())[0].ToTensorData()));
         t.AccessModifiableMemory<float>()[0] = 99f;
-        Assert.Equal([198f, 4f], Floats(context.Execute(Doubling(), handed)[0].ToTensorData()));
+        Assert.Equal([198f, 4f], Floats(context.Execute(Doubling(), handed.Shared())[0].ToTensorData()));
     }
 
     private static InternalComputationGraph Doubling()

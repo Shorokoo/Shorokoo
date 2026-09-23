@@ -552,7 +552,7 @@ public class TensorDataApiCoverageTests
     {
         var context = new ComputeContext();
         var onContext = TensorData([2L], (float[])[1f, 2f]).CopyTo(context);
-        var output = context.Execute(Doubling(), onContext)[0].ToTensorData();
+        var output = context.Execute(Doubling(), onContext.Shared())[0].ToTensorData();
 
         Assert.Same(onContext, onContext.ToHost());
         Assert.Same(output, output.ToHost());
@@ -576,9 +576,9 @@ public class TensorDataApiCoverageTests
         var t = TensorData([2L], (float[])[1f, 2f]);
         var context = new ComputeContext();
 
-        Assert.Equal([2f, 4f], Floats(context.Execute(graph, t)[0]));
+        Assert.Equal([2f, 4f], Floats(context.Execute(graph, t.Shared())[0]));
         t.As<float32>().AccessModifiableMemory<float>()[0] = 99f;
-        Assert.Equal([198f, 4f], Floats(context.Execute(graph, t)[0]));
+        Assert.Equal([198f, 4f], Floats(context.Execute(graph, t.Shared())[0]));
     }
 
     [Fact]

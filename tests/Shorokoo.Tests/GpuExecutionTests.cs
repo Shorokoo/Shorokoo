@@ -138,8 +138,8 @@ public class GpuExecutionTests
             RunSettings = new RunSettings { ShrinkArenaAfterRun = true },
         });
         using var run = rig.BeginResidentRun();
-        run.Step(input, target);
-        run.Step(input, target);
+        run.Step(input.Shared(), target.Shared());
+        run.Step(input.Shared(), target.Shared());
         var published = run.StepToCheckpoint(input, target);
 
         Assert.Equal(3, published.Step);
@@ -276,7 +276,7 @@ public class GpuExecutionTests
             };
             var compiled = ArenaProbeModels.MatMul(ctx);
             var operand = ArenaProbeModels.MatMulOperand(512);
-            for (int run = 0; run < 3; run++) compiled.Execute(operand, operand);
+            for (int run = 0; run < 3; run++) compiled.Execute(operand.Shared(), operand.Shared());
             return ctx.RunStats;
         }
 
@@ -316,7 +316,7 @@ public class GpuExecutionTests
             Assert.NotNull(idle);
             for (int run = 0; run < 5; run++)
             {
-                compiled.Execute(operand, operand);
+                compiled.Execute(operand.Shared(), operand.Shared());
                 DeviceMemory.Sample();
             }
 
@@ -398,7 +398,7 @@ public class GpuExecutionTests
     {
         var rig = ScalarRig();
         var ckpt = rig.CreateInitialCheckpoint();
-        for (int i = 0; i < 3; i++) ckpt = rig.TrainStep(ckpt, input, target);
+        for (int i = 0; i < 3; i++) ckpt = rig.TrainStep(ckpt, input.Shared(), target.Shared());
         return Weights(ckpt);
     }
 

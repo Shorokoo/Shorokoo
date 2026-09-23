@@ -494,7 +494,7 @@ public class AutoDiffCheckpointingCoverageTests
         var losses = new float[steps];
         for (var i = 0; i < steps; i++)
         {
-            ckpt = rig.TrainStep(ckpt, input, target);
+            ckpt = rig.TrainStep(ckpt, input.Shared(), target.Shared());
             losses[i] = ckpt.Loss!.Value;
         }
         return losses;

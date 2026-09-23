@@ -59,7 +59,7 @@ public class OnnxControlFlowImportTests
         var init = TensorData(DType.Float32, [4L], 1f, 2f, 3f, 4f);
         var no = TensorData(DType.Bool, [], false);
 
-        AssertTensorEquals(init, new ComputeContext().Execute(graph, no, init)[0].ToTensorData());
+        AssertTensorEquals(init, new ComputeContext().Execute(graph, no.Shared(), init.Shared())[0].ToTensorData());
 
         var sFinal = Assert.IsType<RuntimeTensor>(
             new QuickExecutionEngine().Run(graph, no, init)[graph.Outputs[0]]);

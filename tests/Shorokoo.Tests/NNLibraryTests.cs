@@ -1050,7 +1050,7 @@ public class NNLibraryLayerTrainingCoverageTests
 
         Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
         var initial = rig.CreateInitialCheckpoint();
-        var step = rig.TrainStep(initial,
+        var step = rig.TrainStep(initial.Shared(),
             MakeBatch("input", "ModelInput", inputData),
             MakeBatch("targets", "Target", targetData));
 
@@ -1178,7 +1178,7 @@ public class NNLibraryBatchNormEvalTrainingCoverageTests
             NNBatchNormEvalGradModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
             [new TensorDataModelParam("input", ModelParamType.InputParam, inputData)], 0.5f);
         var initial = rig.CreateInitialCheckpoint();
-        var step = rig.TrainStep(initial,
+        var step = rig.TrainStep(initial.Shared(),
             MakeBatch("input", "ModelInput", inputData),
             MakeBatch("targets", "Target", TensorData([3L], targetVals)));
 
@@ -1246,7 +1246,7 @@ public class NNLibraryBatchNormEvalTrainingCoverageTests
             NNLayerNormAffineTrueParamModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
             [new TensorDataModelParam("input", ModelParamType.InputParam, lnInput)], 0.5f);
         var initial = rig.CreateInitialCheckpoint();
-        var step = rig.TrainStep(initial,
+        var step = rig.TrainStep(initial.Shared(),
             MakeBatch("input", "ModelInput", lnInput),
             MakeBatch("targets", "Target", TensorData([2L], [1f, 2f])));
 
@@ -1278,7 +1278,7 @@ public class NNLibraryBatchNormTrainAndDropoutCoverageTests
         var rig = TrainingRig.FromScratch(modelGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
             [new TensorDataModelParam("input", ModelParamType.InputParam, inputData)], 0.1f);
         var initial = rig.CreateInitialCheckpoint();
-        var step = rig.TrainStep(initial,
+        var step = rig.TrainStep(initial.Shared(),
             MakeBatch("input", "ModelInput", inputData),
             MakeBatch("targets", "Target", TensorData(outShape, new float[outTotal])));
 
@@ -1562,7 +1562,7 @@ public class NNLibraryRecurrentTrainingCoverageTests
 
         Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
         var initial = rig.CreateInitialCheckpoint();
-        var step = rig.TrainStep(initial,
+        var step = rig.TrainStep(initial.Shared(),
             MakeBatch("input", "ModelInput", inputData),
             MakeBatch("targets", "Target", targetData).Shared());
 

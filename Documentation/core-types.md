@@ -450,12 +450,15 @@ the shorter and safer form.
 
 ### A tensor whose values are not on the host
 
-Disposal is not the only reason a tensor's elements cannot be read. A tensor produced by a
-[resident training run](training.md#keeping-training-state-on-the-device) is left in the execution
-provider's own memory, where a host read would dereference a device address. `IsHostResident` says
-which it is, and the accessors throw `InvalidOperationException` rather than reading it — naming
-`StepToCheckpoint`, which is what brings that state home. A tensor from any other route is
-host-resident, so this only arises for a run that asked for residency.
+Disposal is not the only reason a tensor's elements cannot be read. A tensor on a card is in the
+execution provider's own memory, where a host read would dereference a device address: one a run
+left there — an output kept with `CompiledGraph.Execute(inputs, retainOnDevice)`, or the state of a
+[resident training run](training.md#keeping-training-state-on-the-device) — and one put there by
+`To`, `CopyTo` or `AllocateUninitialized` on a device context. `IsHostResident` says which it is,
+and the accessors throw `InvalidOperationException` rather than reading it, naming `ToHost()`, which
+copies the tensor into host memory, and — for a resident run's state — `StepToCheckpoint`, which
+brings that state home. A tensor built from a C# array is host-resident, and so is a run's output
+that nobody asked to keep on the card, which ONNX Runtime fetches to the host.
 
 ## Anti-patterns
 

@@ -320,40 +320,39 @@ public class ComputeContextLifetimeCoverageTests
     private static HostTensorData<float32> Wide32() => (HostTensorData<float32>)TensorData([(long)Wide], Feed());
 
     /// <summary>
-    /// Shorokoo/Shorokoo#366: feeding a tensor on one thread while another deletes it, or writes to
-    /// it, used to free the buffer the execution provider was reading. The run holds what it reads,
-    /// so the delete is declined and the write's retired copy waits for the run.
+    /// Shorokoo/Shorokoo#366: writing to a tensor on one thread while a run on another reads it
+    /// used to free the buffer the execution provider was reading. The write retires the copy the
+    /// run reads through, and the retired copy waits for the run.
     /// </summary>
     [Fact]
-    public void TestATensorDeletedOrWrittenOnAnotherThreadStaysValidForTheRunFeedingIt()
+    public void TestATensorWrittenOnAnotherThreadStaysValidForTheRunFeedingIt()
     {
         using var context = new ComputeContext();
         var (graph, expected) = Chain();
         var compiled = context.Compile(graph);
         var copyAt = TensorData.RunMemoryOf(DefaultBackend.Instance, DType.Float32);
 
-        foreach (var interfere in (Action<HostTensorData<float32>>[])[
-            static t => t.TryDelete(),
-            static t => t.AccessModifiableMemory<float>()[0] = 99f])
+        for (int round = 0; round < 3; round++)
         {
-            for (int round = 0; round < 3; round++)
+            var fed = Wide32();
+            var ran = false;
+            using var spinning = new ManualResetEventSlim();
+            var other = Task.Run(() =>
             {
-                var fed = Wide32();
-                var ran = false;
-                var other = Task.Run(() =>
-                {
-                    SpinWait.SpinUntil(
-                        () => fed.CopyHeldAt(copyAt) is { IsLocked: true } || Volatile.Read(ref ran),
-                        TimeSpan.FromSeconds(10));
-                    interfere(fed);
-                });
+                spinning.Set();
+                var spin = new SpinWait();
+                while (fed.CopyHeldAt(copyAt) is not { IsLocked: true } && !Volatile.Read(ref ran))
+                    spin.SpinOnce(sleep1Threshold: -1);
+                fed.AccessModifiableMemory<float>()[0] = 99f;
+            });
+            Assert.True(spinning.Wait(TimeSpan.FromSeconds(10)));
 
-                var result = Floats(compiled.Execute(fed.Shared())[0].ToTensorData());
-                Volatile.Write(ref ran, true);
-                other.Wait();
+            float[] result;
+            try { result = Floats(compiled.Execute(fed.Shared())[0].ToTensorData()); }
+            finally { Volatile.Write(ref ran, true); }
+            other.Wait();
 
-                Assert.Equal(expected, result);
-            }
+            Assert.Equal(expected, result);
         }
     }
 

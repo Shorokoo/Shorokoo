@@ -30,13 +30,18 @@ Related: [core-types.md](core-types.md) · [defining-models.md](defining-models.
   `ComputeContext.Backend` and `DefaultBackend.Describe()` name it, and
   `DefaultBackend.RequireDevice(...)` refuses to start on the wrong one —
   [Which device am I on?](#which-device-am-i-on).
-- A `TensorData` is a handle on an allocation that counts its handles: disposing one lets go of
-  your name for the bytes rather than pulling them away, and a run holds what it is reading for
-  as long as it runs. Freeing on demand is a separate pair of calls —
-  [A tensor's lifetime](#a-tensors-lifetime-handles-locks-and-deletion).
+- A `TensorData` is its memory — one object per allocation, released through the backend that
+  made it — and it ends in exactly three ways: deleted, consumed by a run it was donated to, or
+  moved into an attribute. A run holds what it is reading for as long as it runs, so a tensor
+  being read cannot be deleted —
+  [A tensor's lifetime](#a-tensors-lifetime-locks-and-deletion).
+- A compute context keeps books on tensors and owns none: disposing it releases its sessions and
+  leaves every tensor alive. `To(context)` hands a tensor to a context that can read it where it
+  is and copies it otherwise, `CopyTo(context)` always copies, and `ToHost()` brings one within
+  the host's reach — [Moving data between contexts](#moving-data-between-contexts).
 - An input large enough to dominate the step's peak need not exist twice: allocate it on the
   context and fill the runtime's own buffer in place, then hand it to the run with `Donate()`
-  so its bytes go back to the allocator when the run returns —
+  so its memory is released when the run returns —
   [Feeding a large input without a second copy](#feeding-a-large-input-without-a-second-copy).
 - On a GPU backend the CUDA arena is configured on the `ComputeContext` — `DeviceMemory` for
   the sessions it compiles and the tensors it holds on the card, `RunSettings` for what its runs
@@ -404,8 +409,8 @@ catch (OperationCanceledException)
 ```
 
 A token already cancelled when the call is made is refused before anything is fed: no input is
-built into a runtime value, no feed is locked, and a donation passed to the call still carries its
-handle, so the refused call spends nothing. One cancelled while the run is in flight sets ONNX
+built into a runtime value, no feed is locked, and a donated tensor passed to the call is not
+consumed, so the refused call spends nothing. One cancelled while the run is in flight sets ONNX
 Runtime's terminate flag, which its executor reads **between nodes** — so what the wait costs is
 whatever is left of the kernel that was running, not what is left of the run. Two consequences are
 worth planning around, and the probe behind the figures below measures both
@@ -650,61 +655,73 @@ resolved the same way, so it binds the file that is really there.
 Each backend loaded this way gets a load context of its own, so several run side by side
 without sharing a native runtime.
 
-### A tensor's lifetime: handles, locks and deletion
+### A tensor's lifetime: locks and deletion
 
-A `TensorData` is a **handle** on an allocation, and the allocation counts the handles on it.
-Most of what follows is that one sentence.
+A `TensorData` **is** its memory. There is one object per allocation — no second tensor ever names
+the same bytes — and it records the backend that allocated it (`AllocatingBackend`) and where the
+memory is: `Space` for the device, and `Location` for the device together with the runtime that
+allocated it. That backend is the one that releases the memory, whichever contexts the tensor has
+been attached to, or none. A tensor does not know which contexts it is attached to — see
+[Moving data between contexts](#moving-data-between-contexts).
 
-**Handles.** `CopyTo` and `ComputeContext.AllocateUninitialized` make an allocation and one
-handle on it; `GiveAccessTo` makes a second handle on the same allocation. `Dispose()` drops a
-handle, and the allocation is released when the last one goes. So disposing is idempotent, and
-it never reaches another handle: the tensor you disposed is unreadable, a second name for the
-same bytes reads on. It is also optional — an allocation nothing names any more is reclaimed
-like any other object — so you dispose to choose *when* the memory comes back, not to avoid a
-leak.
+**How a tensor ends.** In exactly three ways, and nothing else ends it — in particular, disposing a
+context it is attached to does not:
+
+| | |
+|---|---|
+| **Deleted** | `Delete()`, `Dispose()`, `TryDelete()` or `DeleteAsync(...)` — below. |
+| **Consumed** | fed to a run as a donation, which takes it when the run starts — see [Feeding a large input without a second copy](#feeding-a-large-input-without-a-second-copy). |
+| **Moved into an attribute** | `MoveToAttribute()`, which takes its contents — see [core-types.md](core-types.md#the-two-conversions-and-which-one-spends-its-source). |
+
+A dead tensor records which, and every access to it afterwards — reading its elements, feeding it,
+`To`, `CopyTo`, `ToHost`, `Donate`, `MoveToAttribute` — throws `ObjectDisposedException` saying
+so; for a consumed tensor it names the graph and the context whose run took it. `Shape`, `DType`,
+`ToString()` and `IsDisposed` keep working, so a dead tensor can still say what it was. Ending a
+tensor that is already dead does nothing, so disposing one twice, or at the end of a `using` over a
+tensor a run has consumed, is harmless.
+
+A tensor nothing references is reclaimed like any other object, its memory released through its
+backend's ordinary path — so deleting is optional. You delete to choose *when* the memory comes
+back, not to avoid a leak.
 
 What that release actually frees depends on where the bytes are, and it is worth knowing which
 case you are in when you are chasing memory. A tensor whose buffer the runtime allocated — a
-run's output, a `CopyTo` onto a real context, an `AllocateUninitialized` — is holding native
+run's output, a copy onto a card, an `AllocateUninitialized` on a real context — is holding native
 memory, the card's own on a CUDA context, and releasing it hands that back at that moment. A
 tensor you built from a C# array is holding a managed array, which stays the collector's to
 reclaim whatever you do; what releasing *that* frees is each runtime's copy of those bytes,
 which is native and can itself be on a card.
 
-**What a run holds.** A run takes a lock of its own on every tensor it is fed, for as long as
-it runs, and gives it up when it returns however it returns. Once a run holds that lock,
-disposing the tensor on another thread is safe: your handle goes, the run reads on, and the
-bytes come back when the run lets go.
+**What a run holds.** A run takes a reader lock on every tensor it reads and holds it — and a
+reference to the tensor itself — for as long as it runs, giving it up when it returns however it
+returns. Any number of runs may read one tensor at once. While any of them holds its lock the tensor
+cannot be deleted: `Delete()` and `Dispose()` throw `InvalidOperationException`, and `TryDelete()`
+declines. So nothing frees memory a run is in the middle of reading.
 
 The lock is taken inside the run, one feed at a time, so it is not held yet while the call is
-being set up — and a disposal landing in that window frees the allocation before the run can
-claim it, which costs you the run: the lock it then asks for is refused and `Execute` throws
+being set up — and a deletion landing in that window ends the tensor before the run can claim it,
+which costs you the run: the lock it then asks for is refused and `Execute` throws
 `ObjectDisposedException`. Nothing reads freed memory and no run returns a wrong answer, but
-disposing a feed from a second thread is not something to do while a run of it is starting; see
-[A feed disposed while a run is starting loses that run](limitations.md#a-feed-disposed-while-a-run-is-starting-loses-that-run).
+deleting a feed from a second thread is not something to do while a run of it is starting; see
+[A feed deleted while a run is starting loses that run](limitations.md#a-feed-deleted-while-a-run-is-starting-loses-that-run).
 
 A context is held the same way — disposing a `ComputeContext` throws, rather than proceeding,
-while a run of it is in flight or while it holds a lock on anything attached to it.
+while a run of it is in flight or while it holds a lock on anything.
 
-**Deletion is not disposal.** Disposing says "I am done with this". Two calls say "free these
-bytes now", and they are the ones that can take memory away from a reader:
+**Deleting.** Three calls, which differ in what they do when a run is reading the tensor:
 
 | | What it does |
 |---|---|
-| `bool TryDelete()` | Frees the bytes at once and marks the allocation dead — if no run holds it. If one does, it changes **nothing at all** and returns `false`: the tensor stays readable and no run is disturbed. |
-| `Task<bool> DeleteAsync(timeout, cancellationToken)` | Marks the allocation dead at once, asks whatever is reading it to stop, and waits up to `timeout` for the bytes to come back. |
-
-Both ignore how many handles name the allocation — deleting while five other tensors name those
-bytes renders all five unusable, by design. Every handle over a deleted allocation throws from
-the moment of the call, and the message names deletion as the cause rather than leaving you to
-work it out.
+| `Delete()` / `Dispose()` | The same operation: ends the tensor and releases its memory now. Throws if a run is reading it. |
+| `bool TryDelete()` | The same if no run is reading the tensor. If one is, it changes **nothing at all** and returns `false`: the tensor stays readable and no run is disturbed. `true` for a tensor already dead. |
+| `Task<bool> DeleteAsync(timeout, cancellationToken)` | Ends the tensor at once, asks whatever is reading it to stop, and waits up to `timeout` for the memory to come back. |
 
 Three things about `DeleteAsync` are easy to guess wrong, and all three follow from deletion
 being immediate while only *reclamation* waits:
 
-- **The tensor is deleted either way.** A `false` says the bytes had not come back inside the
+- **The tensor is deleted either way.** A `false` says the memory had not come back inside the
   budget; it never says the deletion did not happen. Retrying waits for something that has
-  already happened — the bytes come back when the run ends, with no second call.
+  already happened — the memory comes back when the run ends, with no second call.
 - **A timeout never rolls back.** By the time the budget runs out the run has been asked to
   stop and has thrown its work away, and un-asking cannot un-abort it.
 - **The `CancellationToken` cancels the wait, not the deletion.**
@@ -714,12 +731,11 @@ costs is the longest single operator in flight, and a whole run where the graph 
 operator. A backend that ignores the request makes `DeleteAsync` slow and never unsafe — the
 wait then ends when the run finishes naturally.
 
-**`ComputeContext.Host`.** Every tensor is attached to a compute context; `Context` is never
-null. `ComputeContext.Host` is the framework's own host memory — where a tensor naming no
-backend lives, so every literal you build starts there. It holds tensors and does nothing else:
-`Compile`, `Execute`, `Run` and `Eval` all refuse, naming a real context, and it cannot be
-disposed, which is what lets a tensor there outlive every context in the program. Passing
-`null` where a context is wanted still means it.
+**Host memory.** A tensor built from a C# array belongs to no context and no runtime: its
+allocating backend is `HostBackend.Instance`, the framework's own managed memory, which every
+host backend can read. `ComputeContext.Host` is a name for host memory, a target for `To` and
+`CopyTo` like any other context. It holds nothing and runs nothing — `Compile`, `Execute`, `Run`
+and `Eval` all refuse, naming a real context — and it cannot be disposed.
 
 A graph's own literals are not tensors at all and have no lifetime — they are
 [`TensorAttribute`s](core-types.md#two-kinds-of-concrete-tensor-tensordata-and-tensorattribute),
@@ -727,47 +743,44 @@ immutable and attached to nothing.
 
 ### Moving data between contexts
 
-A `TensorData`'s `Context` says which compute context its handle is attached to, and `Space`
-says where the bytes are: host memory, or a particular CUDA device.
+A tensor never moves: its memory is where it was allocated for as long as it lives. What the three
+operations decide is whether a context is given *this* tensor or a copy of it, and none of them
+touches the tensor it is called on:
 
-Three operations move a tensor between contexts. They differ in what happens to the
-handles rather than to the bytes:
+| | Result |
+|---|---|
+| `t.To(context)` | `t` itself, if `context`'s backend can read its memory as it stands; otherwise a new copy in `context`'s memory. Either way attached to `context`. |
+| `t.CopyTo(context)` | Always a new, independent copy in `context`'s memory, attached to `context`. |
+| `t.ToHost()` | `t` itself, if the host can read its memory; otherwise a new copy in the framework's own host memory, attached to nothing. |
 
-| | Same memory space | Different memory space |
-|---|---|---|
-| `TransferTo` | nothing is copied; this handle moves to the target and the result takes its place | the bytes are copied and the source handle is dropped |
-| `CopyTo` | an independent copy with an allocation of its own | the same |
-| `GiveAccessTo` | a second handle on the same allocation; both read until both let go | refused — use `CopyTo` |
-
-`Detach()` is `CopyTo(ComputeContext.Host)` under its readable name: a copy in the framework's own
-host memory, which is what a result you mean to keep has to be.
-
-Whether the bytes move is decided by the space **and** by whether the two contexts share a
-native runtime. Host memory is host memory whoever allocated it, so any two host contexts
-pass a tensor between them without copying. A device allocation is not: it is meaningful
-only to the runtime that made it, so two CUDA contexts share one without copying when they
-are the same backend, or two backends over one loaded runtime — and copy through the host
-when they are separate runtimes, which is what `IsolatedBackend` produces. A run's outputs
-come back on the host unless you asked for them to be retained
-(`CompiledGraph.Execute(inputs, retainOnDevice)`), so this arises for a tensor you put on
-the card or kept there deliberately.
+Whether a backend can read a tensor's memory as it stands is asked of that backend, and the answer
+is **the same device and the same runtime**. The framework's own host memory — every tensor built
+from a C# array — is readable by every host backend. A device allocation is meaningful only to the
+runtime that made it: two backends over one loaded ONNX Runtime share a card allocation — a CPU
+backend and a CUDA backend in one process, or two instances of one — while two isolated runtimes
+on one card, which is what `IsolatedBackend` produces, do not, and copy through the host. A run's
+outputs come back on the host unless you asked for them to be retained
+(`CompiledGraph.Execute(inputs, retainOnDevice)`), so the copy arises for a tensor you put on the
+card or kept there deliberately.
 
 ```csharp
-var onCard  = cuda.Compile(model).Execute([input], [true])[0].ToTensorData();  // device memory
-var onHost  = onCard.TransferTo(cpu);                        // one copy across the bus
-var shared  = onHost.TransferTo(otherCpu);                   // no copy: same space
+var onCard = cuda.Compile(model).Execute([input], [true])[0].ToTensorData();  // device memory
+var onHost = onCard.To(cpu);        // one copy across the bus; onCard is untouched
+var same   = onHost.To(otherCpu);   // no copy: the very same object
+var mine   = onHost.CopyTo(cpu);    // always a copy
 ```
 
-Disposing a context drops every handle it holds — one per tensor attached to it. Where that
-was the last handle on those bytes they go, and reading the tensor afterwards throws
-`ObjectDisposedException` rather than reading freed memory; where another handle still names
-them, one `GiveAccessTo` handed to a second context, they stay alive for it. A tensor
-transferred away is attached elsewhere by then and is not among the handles dropped. A context
-constructed with `detachesOutputs: true` hands its results out on `ComputeContext.Host`, so
-they outlive it; `ComputeContext.Default` is built that way.
+**Attachment is bookkeeping, not ownership.** A context keeps a weak list of the tensors attached
+to it, `context.Tensors`: its runs' outputs, what its runs read, and what `To`, `CopyTo` and
+`AllocateUninitialized` placed for it. The list never keeps a tensor alive and never ends one's
+life; a tensor that dies or is collected drops out of it. `context.Detach(t)` takes a tensor off
+the list — refused while a run of that context is reading `t` — and never deletes it. Disposing a
+context releases what the context itself holds, its compiled sessions, and leaves every tensor as
+it was: a run's outputs outlive the context that ran it.
 
-`TensorDataStruct` and `TensorDataSequence` carry a context and take the same three
-operations, recursing into the tensors they hold.
+`TensorDataStruct` and `TensorDataSequence` take the same three operations, applied to the tensors
+they hold. A struct comes back as itself where nothing had to be copied. A sequence owns its
+elements, so where any of them has to be copied, the whole sequence is.
 
 ### Feeding a large input without a second copy
 
@@ -801,7 +814,7 @@ reachable. `WriteMemory` keeps the tensor alive across the call, the way `CopyMe
 reading side.
 
 Nothing is written into it — the buffer holds whatever was last there, so fill all of it — and
-the tensor belongs to the context exactly as a `CopyTo(context)` result does. The
+the tensor is attached to the context exactly as a `CopyTo(context)` result is. The
 `(shape, dtype)` overload is the same thing where the element type is only known at runtime. On
 a CUDA context the buffer is the card's own memory, which the host cannot write through a span at
 all (`TensorData.IsHostResident` is false); getting bytes there is still `CopyTo`.
@@ -810,19 +823,19 @@ all (`TensorData.IsHostResident` is false); getting bytes there is still `CopyTo
 
 ```csharp
 var loss = compiled.Execute(batch.Donate())[0].ToTensorData();
-// batch is spent: reading it throws, and its buffer went back to the allocator with the run
+// batch is consumed: reading it throws, and its buffer went back to the allocator with the run
 ```
 
-A donated tensor is spent from the moment you donate it, exactly as a cross-space `TransferTo`
-source is. The donation carries the only handle left on those bytes and the run gives that up too
-once it has taken its own lock, so nothing but the run names the buffer while it runs and the
-bytes are released the moment it returns — where a feed you keep is released when *you* let go of
-it, which for a batch built per step is at the next collection. Donating twice, or feeding one
-donation to two runs, is refused: there is nothing left to give. If another handle still names the
-same bytes — one `GiveAccessTo` handed out — they stay alive for it and the donation buys nothing.
-`Execute` takes a donation as an ordinary input; `Run`, which takes named parameters, takes one as
+The run **consumes** a donated tensor when it starts. From that moment the tensor is dead —
+reading it throws, naming the run that took it — and its memory is released the moment the run
+returns, however it returns, where a feed you keep is released when *you* let go of it, which for a
+batch built per step is at the next collection. Nothing happens at `Donate()` itself: a run refused
+before it starts — a cancelled one, say — takes nothing, and the donation can be fed again. Feeding
+a donation whose tensor has already been consumed is refused, and so is donating a tensor another
+run is reading, since consuming it would take its memory from under that run. `Execute` takes a
+donation as an ordinary input; `Run`, which takes named parameters, takes one as
 `DonatedTensorModelParam`. A donation you build and then never feed is taken back by disposing it,
-which is the handle's own `Dispose` under another name and the only deterministic release it has.
+which deletes the tensor.
 
 **What donating does not buy.** ONNX Runtime's memory planner gives every graph input one extra
 use count, precisely so that a caller can still read a feed after `Run` returns, so no input's
@@ -1267,7 +1280,7 @@ runtime split pays here for every value that crosses.
 
 ### A tensor placed on the card is budgeted too
 
-A session is not the only thing on a context's books. `CopyTo`, `TransferTo` and
+A session is not the only thing on a context's books. `CopyTo`, `To` where it has to copy, and
 `AllocateUninitialized` put a tensor in the context's own memory, which on a GPU backend is the
 card's, and those allocations answer to the same `DeviceMemory` the context compiles under:
 
@@ -1288,9 +1301,9 @@ error rather than eating the rest of the device. `ReadTransferArenaStatistics()`
 `CompiledGraph.ReadArenaStatistics()` of that arena — the same nine figures, `null` on a backend
 with no device memory and on a context that has placed nothing yet.
 
-**Which budget a tensor answers to is fixed when it is allocated.** The context that allocated it is
-the context that owns it, and passing it to a second context on the same card re-wraps it without
-copying, so it stays charged where it was made whatever the second context's budget says — see
+**Which budget a tensor answers to is fixed when it is allocated.** It is charged to the arena it was
+allocated from, and handing it to a second context that can read it where it is copies nothing, so
+it stays charged where it was made whatever the second context's budget says — see
 [Known limitations](limitations.md#a-tensor-on-a-card-is-charged-to-the-context-that-placed-it-and-stays-charged-there).
 To hold a tensor under a different budget, `CopyTo` a context carrying that one.
 

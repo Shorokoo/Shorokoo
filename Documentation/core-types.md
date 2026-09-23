@@ -269,15 +269,15 @@ Concrete numbers reach Shorokoo in two roles, and each role has its own type.
 | | `TensorData` | `TensorAttribute` |
 |---|---|---|
 | What it is | a **run's** data: an input you feed, an output you read, training state | a **graph's** data: a literal written into the description itself |
-| Where the bytes are | in one compute context's memory — the host, or a particular card | nowhere in particular: a shape, a dtype and the elements |
-| Lifetime | a handle on an allocation; `IDisposable` | none — immutable, shared, not disposable |
+| Where the bytes are | in the memory one backend allocated — the host, or a particular card | nowhere in particular: a shape, a dtype and the elements |
+| Lifetime | its own memory, released through that backend when it is deleted or collected; `IDisposable` | none — immutable, shared, not disposable |
 | Where you meet it | `Eval`, `Execute`, `Run`, `TrainStep`, a checkpoint's tensors | `Constant`, `ConstantOfShape`, a trainable parameter's initial value |
 
 The split is not bookkeeping. A description has to mean the same thing everywhere: a graph you
 build here, export to `.onnx`, and read back on a machine with a different card must be the
-same graph. A `TensorData` cannot promise that — it names memory that belongs to one compute
-context, so a graph holding one could only be built where that context is — and it has a
-lifetime, which a description does not. Nothing frees a literal, and a graph whose constant
+same graph. A `TensorData` cannot promise that — it is memory one backend allocated, so a graph
+holding one could only be built where that backend's memory is — and it has a lifetime, which a
+description does not. Nothing frees a literal, and a graph whose constant
 could be disposed out from under it is not a description of anything.
 
 So the slots that take a tensor-valued *operator attribute* take a `TensorAttribute`:
@@ -323,8 +323,8 @@ checkpoint is bound back onto them. Reading the elements of one of those throws,
 
 | | Costs | Afterwards |
 |---|---|---|
-| `TensorData.MoveToAttribute()` | nothing, where the tensor holds its own array and is the only handle on it; a copy otherwise | **the tensor is spent**: it is disposed, and reading it throws `ObjectDisposedException` |
-| `TensorAttribute.CopyToTensorData()` | a copy, always | both usable; the attribute is unchanged, and the copy is on `ComputeContext.Host` |
+| `TensorData.MoveToAttribute()` | nothing, where the tensor holds its own array; a copy otherwise | **the tensor ends**: it is dead, and reading it throws `ObjectDisposedException` saying it was moved into an attribute |
+| `TensorAttribute.CopyToTensorData()` | a copy, always | both usable; the attribute is unchanged, and the copy is in the framework's own host memory |
 
 The asymmetry is about size. Binding a checkpoint's weights into a graph is the direction that
 runs hot — a 165 M-parameter model is some 660 MB — so it moves, and moving means the source is
@@ -332,32 +332,20 @@ gone. The other direction copies because an attribute is immutable and shared by
 that captured it: a writable tensor over the same bytes would be a way to edit a description
 through the back door.
 
-That is also why the move falls back to a copy wherever handing the array over would leave
-somebody else able to write it, or wherever there is no array to hand over in the first place:
+The move takes the tensor's own array where it has one — a tensor built from a C# array, which
+nothing else can write once the tensor is dead — and copies wherever there is no array to hand
+over: the elements are a runtime's own buffer, read back through the backend that made it where
+that buffer is on a card, or a string tensor's variable-length elements. The memory the copy came
+from is released either way. The case the no-copy path exists for — a checkpoint's tensor, parsed
+for the bind — is the own-array case, so the size argument above is untouched.
 
-- **A second handle names the same bytes.** `GiveAccessTo` hands out another handle, and
-  surrendering yours says nothing about that one — it could still write through
-  `AccessModifiableMemory`, and the description the graph captured would change under it. An
-  attribute taken while you are the only handle cannot be written by anyone.
-- **The elements are a runtime value's, or strings.** There is no managed array to give: the
-  bytes are a runtime's own buffer, or a string tensor's variable-length elements, and only a
-  copy gets them out.
-
-The case the no-copy path exists for — a checkpoint's tensor, parsed for the bind and named by
-nothing else — is the sole-handle case, so the size argument above is untouched.
-
-`MoveToAttribute()` refuses a tensor attached to a compute context, and says which call fixes
-it. A result that came back from `Execute` on a context of your own belongs to that context,
-so send it home first:
+`MoveToAttribute()` takes any live tensor, a run's output included, and refuses only one a run is
+still reading. To build a literal from a result and keep the result, move a copy of it:
 
 ```csharp
 TensorData result = compiled.Execute(input)[0].ToTensorData();
-Variable literal = Globals.Tensor(result.Detach().MoveToAttribute());
+Variable literal = Globals.Tensor(result.CopyTo(ComputeContext.Host).MoveToAttribute());
 ```
-
-`OnnxEngine.Eval`, `ComputeContext.Eval` and `ComputeContext.Default` already hand their
-results back on `ComputeContext.Host`, so those need no `Detach()` — see
-[Moving data between contexts](inference.md#moving-data-between-contexts).
 
 ### Changing code that passed a `TensorData` as an attribute
 
@@ -395,38 +383,39 @@ for by name, never something a factory does to an argument you handed it.
 
 ## What a `TensorData` holds, and when its values go away
 
-A `TensorData` is a **handle** on an allocation, not the allocation itself. More than one
-handle can name the same bytes, and the allocation is released when the last one lets go — so
-disposing a tensor means letting go of your own name for the memory, never pulling it away from
-something else that is reading it. The whole model — handles, what a run holds while it runs,
-and the two calls that do mean "free these bytes now" — is in
-[A tensor's lifetime](inference.md#a-tensors-lifetime-handles-locks-and-deletion). What matters
-while you are reading a result is this:
+A `TensorData` **is** its memory: one object per allocation, released through the backend that
+made it. No second tensor ever names the same bytes, so deleting a tensor — `Delete()` and
+`Dispose()` are the same call — releases them. The whole model — how a tensor ends, what a run
+holds while it runs, and the calls that delete — is in
+[A tensor's lifetime](inference.md#a-tensors-lifetime-locks-and-deletion). What matters while you
+are reading a result is this:
 
-- **Disposing is optional.** A tensor you simply drop is reclaimed like any other object, and
-  nothing in the framework hands you a tensor you are obliged to dispose. Dispose when you want
-  the memory back at a known moment — a long loop that produces large tensors is the case that
+- **Deleting is optional.** A tensor you simply drop is reclaimed like any other object, and
+  nothing in the framework hands you a tensor you are obliged to delete. Delete when you want the
+  memory back at a known moment — a long loop that produces large tensors is the case that
   motivates it.
-- **Disposing is about this handle.** It is idempotent, it leaves every other handle on the
-  same bytes reading, and it frees nothing while a run is still reading them.
-- **The disposed handle stops reading.** `AccessMemory()`, `AccessRawMemory()`, `.Data` and
-  `.DebugData` throw `ObjectDisposedException` rather than reading freed memory. `.Shape`,
-  `.DType`, `.ToString()` and `.IsDisposed` keep working, so a disposed tensor can still say
-  what it was.
+- **`Delete()` waits for nobody and interrupts nobody.** It throws while a run is reading the
+  tensor rather than freeing memory under it; `TryDelete()` declines instead, and
+  `DeleteAsync(...)` is the one that asks the run to stop. Deleting a tensor that is already dead
+  does nothing.
+- **A dead tensor stops reading.** `AccessMemory()`, `AccessRawMemory()`, `.Data` and `.DebugData`
+  throw `ObjectDisposedException` rather than reading freed memory, and the message says how the
+  tensor died. `.Shape`, `.DType`, `.ToString()` and `.IsDisposed` keep working, so a dead tensor
+  can still say what it was.
 
-Operations that build one tensor from another copy, so the source keeps its values — unless
-they say otherwise in so many words. Three say otherwise, and each **spends** the tensor it is
-called on: `MoveToAttribute()`
-([above](#the-two-conversions-and-which-one-spends-its-source)), `Donate()`, and `TransferTo`
-across memory spaces — the last two in
-[inference.md](inference.md#feeding-a-large-input-without-a-second-copy).
+Operations that build one tensor from another copy, or hand over the tensor itself, and leave the
+source as it was — unless they say otherwise in so many words. Two say otherwise, and each **ends**
+the tensor it is called on: `MoveToAttribute()`
+([above](#the-two-conversions-and-which-one-spends-its-source)), and `Donate()`, whose run consumes
+the tensor when it starts
+([inference.md](inference.md#feeding-a-large-input-without-a-second-copy)).
 `TensorDataSequence.Create(...)` copies the tensors you pass it, and disposing the sequence
 releases only the sequence's own copies.
 
 **A span is a window, not a copy.** `AccessMemory()` and `AccessRawMemory()` point straight
-into the allocation, and nothing ties the span's lifetime to the tensor's. A span outlives the
-bytes it points at if you let go of the last handle on them — by disposing the tensor, and also
-by letting it simply become unreachable while you are still reading.
+into the tensor's memory, and nothing ties the span's lifetime to the tensor's. A span outlives
+the bytes it points at if the tensor goes — by being deleted, and also by simply becoming
+unreachable while you are still reading.
 
 That second one catches people out, because being *in scope* is not the same as being
 *reachable*: the runtime retires a local at its last read, and taking the span **is** the

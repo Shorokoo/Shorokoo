@@ -193,61 +193,62 @@ rest of it.
 
 ### Moving a tensor between memory spaces copies it
 
-A `TensorData` is a handle on an allocation, attached to a compute context, and
-`TransferTo` / `CopyTo` / `GiveAccessTo` move it between contexts; see
-[Moving data between contexts](inference.md#moving-data-between-contexts). Any two host contexts
-share host bytes without copying. Two CUDA contexts on one device share the allocation only when
-they share a native ONNX Runtime — a device allocation means nothing to a runtime that did not make
-it, so two *isolated* backends over one card copy through the host like any other crossing. Crossing
-from the host to a device or back is a real copy, once per crossing. There is no way to have a
-tensor be in two spaces at once, and there is no direct device-to-device path: a tensor moving
-between two different cards goes through the host.
+A `TensorData` is its memory, and it never moves: `To` hands it to a context whose backend can read
+it where it is and copies it otherwise, and `CopyTo` always copies; see
+[Moving data between contexts](inference.md#moving-data-between-contexts). Every host backend reads
+the framework's own host memory as it stands. Two CUDA contexts on one device share an allocation
+only when they share a native ONNX Runtime — a device allocation means nothing to a runtime that did
+not make it, so two *isolated* backends over one card copy through the host like any other
+crossing. Crossing from the host to a device or back is a real copy, once per crossing. There is no
+way to have a tensor be in two spaces at once, and there is no direct device-to-device path: a
+tensor going to a different card goes through the host.
 
-A tensor that came back from a session without the context that produced it being recorded reports
-its space as unknown, and cannot be transferred at all — there is no telling whether another
-context shares it. Bring such a value home on the backend that owns it first.
+A tensor in memory Shorokoo has no name for — produced by a backend on an execution provider it does
+not know, or wrapped around a runtime value without saying which backend made it — reports its space
+as unknown, and no context is ever handed it as it stands: two such allocations compare equal as
+spaces without being in the same place. `To` and `CopyTo` copy it instead, through the backend that
+made it. One whose producer was not recorded and that the host cannot read cannot be copied at all;
+wrap such a value with `TensorData.Create(shape, dtype, value, backend)`, naming the backend.
 
-### A feed disposed while a run is starting loses that run
+### A feed deleted while a run is starting loses that run
 
-A run locks every tensor it is fed and holds the lock until it returns, so a feed disposed from
-another thread *while the run holds it* is safe: the handle goes, the run reads on, and the bytes
-come back when the run lets go — see
-[A tensor's lifetime](inference.md#a-tensors-lifetime-handles-locks-and-deletion). The lock is
-taken inside the run, one feed at a time, and everything before that is unprotected: the
-`Execute` / `Run` call itself, the expansion and naming of its inputs, and the locking of
-whichever feeds come first. A disposal landing in that window drops the last handle on the
-allocation, so the lock the run then asks for is refused and the call throws
-`ObjectDisposedException`.
+A run locks every tensor it is fed and holds the lock until it returns, so deleting a feed from
+another thread *while the run holds it* is refused: `Delete()` and `Dispose()` throw and
+`TryDelete()` declines, and the run reads on — see
+[A tensor's lifetime](inference.md#a-tensors-lifetime-locks-and-deletion). The lock is taken
+inside the run, one feed at a time, and everything before that is unprotected: the `Execute` /
+`Run` call itself, the expansion and naming of its inputs, and the locking of whichever feeds come
+first. A deletion landing in that window ends the tensor, so the lock the run then asks for is
+refused and the call throws `ObjectDisposedException`, saying the tensor was deleted.
 
 The failure is clean — nothing reads freed memory, and no run returns a wrong answer — but the
-run is lost, and it is not a narrow race to be got away with: measured on a loop that handed a
-feed to `Execute` on one thread and disposed it from another as the call was made, 499 of 500
-runs ended that way. It is also the arrangement that
-[One model, two devices](inference.md#one-model-two-devices) invites — staging the next batch
-while the other device is still reading the last one — which is exactly where it is easy to
-write by accident. Give the concurrent run a tensor of its own (`CopyTo`) or wait for it to
-return.
+run is lost, and the window is not narrow: it is the whole of the call's setup. It is also the
+arrangement that [One model, two devices](inference.md#one-model-two-devices) invites — staging
+the next batch while the other device is still reading the last one — which is exactly where it
+is easy to write by accident. Give the concurrent run a tensor of its own (`CopyTo`) or wait for
+it to return.
 
-Nothing detects the disposal *coming*; what the lock gives is a refusal at the moment the run
-reaches for bytes that are gone. Closing the window rather than reporting it means taking the
-lock where the caller still holds the handle — at the entry point, before the inputs are
+Nothing detects the deletion *coming*; what the lock gives is a refusal at the moment the run
+reaches for a tensor that is gone. Closing the window rather than reporting it means taking the
+lock where the caller still holds the tensor — at the entry point, before the inputs are
 expanded — which also has to hold for `Run`, for `Eval`, and for the one-shot paths that build
 a session of their own.
 
 ### A tensor on a card is charged to the context that placed it, and stays charged there
 
 `ComputeContext.DeviceMemory` bounds the arenas of the sessions that context compiles *and* the
-arena the tensors placed in its memory come out of, so a `CopyTo` / `TransferTo` onto a budgeted
-context fails when the tensor does not fit rather than taking what is left of the card. What that
+arena the tensors placed in its memory come out of, so a `CopyTo` — or a `To` that has to copy —
+onto a budgeted context fails when the tensor does not fit rather than taking what is left of the
+card. What that
 arena is holding is read with `ComputeContext.ReadTransferArenaStatistics()`, beside
 `CompiledGraph.ReadArenaStatistics()` for each session — between them a context's whole device
 footprint is readable rather than inferred.
 
 What is settled at the moment of the allocation is *which* budget, and it never moves afterwards.
-Handing the tensor to a second context on the same card re-wraps it without copying — that is what
-`TransferTo` and `GiveAccessTo` within one memory space are for — and the allocation stays charged
-to the budget it was made under, whatever the receiving context carries. Re-homing it would mean
-copying it, which those two operations promise not to do. To hold a tensor under a different budget,
+`To` a second context on the same card whose backend can read the allocation hands over the very
+same tensor without copying, and the allocation stays charged to the budget it was made under,
+whatever the receiving context carries. Re-homing it would mean copying it, which `To` does only
+when the target cannot read the memory as it stands. To hold a tensor under a different budget,
 `CopyTo` a context that carries that budget and let the original go.
 
 Two costs follow from the arena outliving everything that uses it. It is held for the life of the

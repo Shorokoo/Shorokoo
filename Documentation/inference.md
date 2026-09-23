@@ -1212,6 +1212,7 @@ through `ComputeContext.RunStats` rather than off the device:
 
 | the training step's own arena | `SameAsRequested` | `NextPowerOfTwo` |
 |---|---|---|
+| in use at its highest, step 0 | **7,305 MiB** | 7,441–7,485 MiB |
 | in use at its highest, settled | **8,009 MiB** | 8,043–8,101 MiB |
 | taken from the device, step 0 | **8,864 MiB** | 9,233–9,249 MiB |
 | taken from the device, step 1 onwards | **15,508 MiB** | 17,425–17,441 MiB |
@@ -1296,11 +1297,14 @@ on for every run. `LimitBytes` is a budget, not a hint: what would pass it is re
 with ORT's `BFCArena ... Failed to allocate memory for requested buffer`, rather than eating the rest
 of the device, so a figure set too low fails work that would have fitted. An arena limit near what
 a step actually uses is also the one lever that reaches the step-1 expansion above: the same
-batch-8 transformer, its step's arena capped at 10 GiB, ran every step inside 8,864 MiB (exact-size
-extension) or 9,217–9,233 MiB (ORT's), never took the extra block at all, and kept its in-use peak
-at 7,305 / 7,469–7,485 MiB — the same run it was, on roughly half the card. That was a cap on the
-step's arena alone; a context budget of 10 GiB leaves the arena less than that, by what the context
-holds on the card, so size the budget as what the step uses plus what the rig keeps there.
+batch-8 transformer, its step's arena capped at 10 GiB, ran four steps inside 8,864 MiB (exact-size
+extension) or 9,217–9,233 MiB (ORT's) and never took the extra block at all. Every figure stayed
+within noise of the uncapped step 0 — its in-use peak across the four steps was 7,305 /
+7,469–7,485 MiB, against step 0's 7,305 / 7,441–7,485 in the table, where the uncapped steps went
+on to settle at 8,009 / 8,043–8,101 — so the cap clipped nothing step 0 did, and the later steps ran
+in what the arena already held, on roughly half the card. That was a cap on the step's arena alone;
+a context budget of 10 GiB leaves the arena less than that, by what the context holds on the card,
+so size the budget as what the step uses plus what the rig keeps there.
 
 `ArenaExtend` is read **when a session is built** — the first inference call, or a training rig's
 first `TrainStep` for a given input shape — so the context has to carry it before the graph is

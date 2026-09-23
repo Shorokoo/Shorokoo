@@ -1666,6 +1666,11 @@ using Shorokoo.Core.Interpreter;   // QuickExecutionEngine
 and small prototypes. It only materializes values for tensors ≤ `MaxDataElements`
 (default 256). Do not use it as a production inference path.
 
+It consumes nothing. A tensor fed to it as it is is read, and a `SharedInput` is read as it is,
+whatever its mode: the engine is a reference evaluator walking the graph in managed code, not a run
+on a compute context, so it takes ownership of nothing it is given. Every input is still yours,
+alive and unchanged, when it returns.
+
 To debug the graph *structure* rather than values — e.g. when `ToConcreteArchitecture`
 doesn't produce the graph you expect — snapshot the lowering stages with `DebugRequests`; to see
 where a lowering that runs for minutes has got to, pass it a `progress:` sink and watch it stage by

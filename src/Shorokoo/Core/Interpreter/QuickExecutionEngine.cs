@@ -44,6 +44,10 @@ namespace Shorokoo.Core.Interpreter;
 ///     <see cref="QuickRunState"/> that each <c>Run</c> creates for itself. One engine is
 ///     therefore reusable across runs — including after a run that gave up part-way — and
 ///     safe to share between threads.
+///   - It consumes nothing. A tensor fed as it is is read, not taken as a compute context's run
+///     would take it, and a <see cref="SharedInput"/> is read as it is, whatever its mode: this is
+///     a reference evaluator, not a run, so it takes ownership of nothing it is given and every
+///     input is the caller's, alive and unchanged, when it returns.
 /// </summary>
 public sealed class QuickExecutionEngine
 {

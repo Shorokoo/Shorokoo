@@ -784,6 +784,8 @@ public class ComputeContextLifetimeCoverageTests
         var norm = Op("BatchNormalization", "X scale B mean var", "Y rm rv");
         Assert.False(Proves(GraphOf("X scale B mean var two zero", "O Z Y", norm, Op("Mul", "rm two", "O"), Op("Add", "rm zero", "Z")), "mean"));
         Assert.True(Proves(GraphOf("X scale B mean var two", "O Y", norm, Op("Mul", "rm two", "O")), "mean"));
+        Assert.False(Proves(GraphOf("a b", "O S", Op("Shape", "a", "S", domain: "custom"), Op("Sub", "a b", "O"))));
+        Assert.True(Proves(GraphOf("a b", "O S", Op("Shape", "a", "S"), Op("Sub", "a b", "O"))));
     }
 
     [Fact]

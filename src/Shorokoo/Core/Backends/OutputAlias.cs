@@ -39,8 +39,8 @@ public readonly record struct OutputAlias(string Output, string Input);
 /// <c>Reshape</c>, <c>Squeeze</c>, <c>Unsqueeze</c>, <c>Flatten</c> and a few others over their first
 /// input, and the running mean and variance of a <c>BatchNormalization</c> over the mean and
 /// variance it was given. Ancestry counts only the edges a runtime cannot fold away: an edge into
-/// <c>Shape</c> or <c>Size</c> — which read no memory and are no readers — orders nothing once the
-/// shape is known when the session is built, so it does not count.</item>
+/// the standard <c>Shape</c> or <c>Size</c> — which read no memory and are no readers — orders
+/// nothing once the shape is known when the session is built, so it does not count.</item>
 /// <item><c>P</c> itself reads <c>I</c> only as the first operand of a two-input <c>Add</c>,
 /// <c>Sub</c>, <c>Mul</c> or <c>Div</c>, which reads each element before writing the same element
 /// of its output — the in-place form ONNX Runtime uses for these operators itself. With <c>O</c>
@@ -113,8 +113,9 @@ public static class OutputAliasProof
         _ => false,
     };
 
-    // Operators that read a tensor's shape and none of its memory.
-    private static readonly HashSet<string> ShapeOnly = new(StringComparer.Ordinal) { "Shape", "Size" };
+    // Whether the node reads a tensor's shape and none of its memory: the standard Shape and Size,
+    // and nothing else of those names -- an operator of another domain may read whatever it likes.
+    private static bool ReadsOnlyAShape(NodeProto node) => IsStandard(node) && node.OpType is "Shape" or "Size";
 
     // The element-wise operators whose first operand the output may be written over: each element
     // is read before the same element of the output is written, and ONNX Runtime writes these in
@@ -196,7 +197,7 @@ public static class OutputAliasProof
                 foreach (var n in consumers)
                 {
                     var node = _nodes[n];
-                    if (ShapeOnly.Contains(node.OpType)) continue;
+                    if (ReadsOnlyAShape(node)) continue;
                     readers.Add(n);
                     for (int i = 0; i < node.Inputs.Count; i++)
                     {
@@ -235,7 +236,7 @@ public static class OutputAliasProof
             while (pending.TryPop(out var n))
             {
                 var node = _nodes[n];
-                if (ShapeOnly.Contains(node.OpType)) continue;
+                if (ReadsOnlyAShape(node)) continue;
                 foreach (var input in node.Inputs)
                 {
                     if (input.Length == 0 || !_producer.TryGetValue(input, out var producer)) continue;

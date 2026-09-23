@@ -830,9 +830,9 @@ The run **consumes** a donated tensor when it starts. From that moment the tenso
 reading it throws, naming the run that took it — and its memory is released the moment the run
 returns, however it returns, where a feed you keep is released when *you* let go of it, which for a
 batch built per step is at the next collection. Nothing happens at `Donate()` itself: a run refused
-before it starts — a cancelled one, say — takes nothing, and the donation can be fed again. Feeding
-a donation whose tensor has already been consumed is refused, and so is donating a tensor another
-run is reading, since consuming it would take its memory from under that run. `Execute` takes a
+before it starts — a cancelled one, say — takes nothing, and the donation can be fed again. A run
+refuses a donation whose tensor has already been consumed, and one whose tensor another run is
+reading at that moment, since consuming it would take its memory from under that run. `Execute` takes a
 donation as an ordinary input; `Run`, which takes named parameters, takes one as
 `DonatedTensorModelParam`. A donation you build and then never feed is taken back by disposing it,
 which deletes the tensor.

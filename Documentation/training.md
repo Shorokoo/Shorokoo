@@ -1013,8 +1013,9 @@ is no exception to wrap. The inventory printed by the last step that did fail is
 
 ## Feeding data: the data loader
 
-The array overloads of `Fit`/`Train` take pre-batched `TensorDataStruct[]` and leave the
-checkpoint's epoch / batch counters for you to set. A **data loader** instead owns the batch
+The array overloads of `Fit`/`Train` take pre-batched `TensorDataStruct[]` — a dataset fed every
+epoch, so each step reads its batch and never consumes it — and leave the checkpoint's epoch /
+batch counters for you to set. A **data loader** instead owns the batch
 stream: it chops your data into batches, tracks its position, and lets `Fit` advance the
 checkpoint's step / epoch / batch counters automatically — so a saved checkpoint records exactly
 where the run was, and a resumed run continues from the very next batch.
@@ -1288,7 +1289,8 @@ These are in namespace `Shorokoo` (covered by `using Shorokoo;`), except `Schedu
 
 `sampleInputs` for `FromScratch` is a `NamedModelParam[]` describing each model input
 by name and sample shape. `Train`/`TrainStep` take `TensorDataStruct` batches — `TrainStep` as they
-are, to be consumed, or through `.Shared()` to be read and kept
+are, to be consumed, or through `.Shared()` to be read and kept; `Train` and `Fit` over arrays read
+every batch, since they feed the arrays again each epoch, and leave them all alive
 ([What a training step consumes](#what-a-training-step-consumes)).
 
 ## Workflow: train a model

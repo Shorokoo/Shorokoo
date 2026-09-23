@@ -59,7 +59,8 @@ var rig = TrainingRig.FromScratch(
     model.FromOrderedInputs([exampleInput]),
     new AdamOptimizerHyperparameters { LearningRate = 1e-3f });
 
-// Fit iterates all batches on every epoch — supply as many as you like.
+// Fit iterates all batches on every epoch, reading them rather than consuming them — supply as
+// many as you like, and they are all still yours afterwards.
 var rng     = new Random(42);
 float[] batch1X = Enumerable.Range(0, 32).Select(_ => (float)rng.NextDouble()).ToArray();
 float[] batch1Y = Enumerable.Range(0, 32).Select(_ => (float)rng.NextDouble()).ToArray();

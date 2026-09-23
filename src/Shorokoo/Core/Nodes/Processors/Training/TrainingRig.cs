@@ -2990,9 +2990,10 @@ namespace Shorokoo
                     // (Shorokoo/Shorokoo#332, Shorokoo/Shorokoo#347). HasDeviceMemory is the
                     // session's own answer to whether there is device memory to exhaust, and one
                     // value feeds both the classification and the wording built on it.
-                    // The arena cap is the one this session was BUILT with, which is the context's
-                    // setting at compile time; reading it off the context now would report a
-                    // budget the failing session never had.
+                    // The arena cap is the one this session was BUILT with: under a device-memory
+                    // budget, what the budget left it once the tensors the context holds on the card
+                    // were counted. Reading LimitBytes off the context would report the budget,
+                    // which is a cap the failing session never had.
                     var device = new DeviceFacts(
                         compiled.HasDeviceMemory, DeviceMemory.Read(), compiled.DeviceMemory.LimitBytes,
                         AllocationFailureReport.BackendAssemblyName());

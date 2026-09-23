@@ -70,7 +70,7 @@ public class ClassicLayerTrainingCoverageTests
         var initial = rig.CreateInitialCheckpoint();
         Assert.NotEmpty(initial.ModelState.Fields);
 
-        var step = rig.TrainStep(initial,
+        var step = rig.TrainStep(initial.Shared(),
             MakeBatch("input", "ModelInput", inputData),
             MakeBatch("targets", "Target", targetData));
 

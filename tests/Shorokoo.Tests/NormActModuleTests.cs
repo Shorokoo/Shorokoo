@@ -96,7 +96,7 @@ public class NormActTrainingCoverageTests
             0.01f);
 
         var initial = rig.CreateInitialCheckpoint();
-        var step = rig.TrainStep(initial,
+        var step = rig.TrainStep(initial.Shared(),
             MakeBatch("input", "ModelInput", inputData),
             MakeBatch("targets", "Target", targetData));
 
@@ -137,7 +137,7 @@ public class NormActTrainingCoverageTests
 
         var rig = Rig(NormActRMSNormAffineTrueParamModel.ComputationGraph, inputData);
         var initial = rig.CreateInitialCheckpoint();
-        var step = rig.TrainStep(initial,
+        var step = rig.TrainStep(initial.Shared(),
             MakeBatch("input", "ModelInput", inputData),
             MakeBatch("targets", "Target", TensorData([2L], new float[2])));
 

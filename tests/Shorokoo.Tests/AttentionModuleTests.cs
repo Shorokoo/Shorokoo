@@ -210,7 +210,7 @@ public class TransformerEncoderTrainingCoverageTests
         var targetDef = new TensorStructDef(TargetFields, "Target");
 
         var encoderStep = encoderRig.TrainStep(
-            encoderInitial,
+            encoderInitial.Shared(),
             new TensorDataStruct(new TensorStructDef(encoderInputFields, "ModelInput"),
                 new Dictionary<string, IData> { { "input", TensorData(inputShape, Floats(24, seed: 0.07f)) } }),
             new TensorDataStruct(targetDef,
@@ -257,7 +257,7 @@ public class ChunkedSdpaTrainingCoverageTests
             [new TensorStructFieldDef("targets", DataStructure.Tensor, 3, DType.Float32)];
 
         var step = rig.TrainStep(
-            initial,
+            initial.Shared(),
             new TensorDataStruct(new TensorStructDef(inputFields, "ModelInput"),
                 new Dictionary<string, IData> { { "input", TensorData(inputShape, Floats(96, seed: 0.3f)) } }),
             new TensorDataStruct(new TensorStructDef(targetFields, "Target"),
@@ -308,7 +308,7 @@ public class TransformerDecoderTrainingCoverageTests
         ];
 
         var decoderStep = decoderRig.TrainStep(
-            decoderInitial,
+            decoderInitial.Shared(),
             new TensorDataStruct(new TensorStructDef(decoderInputFields, "ModelInput"),
                 new Dictionary<string, IData>
                 {

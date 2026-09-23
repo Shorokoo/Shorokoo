@@ -2324,6 +2324,40 @@ public class TrainingRigTrainingLoopCoverageTests
         Assert.Equal(FlattenStruct(second.TrainableParams), FlattenStruct(rig.CreateInitialCheckpoint().TrainableParams));
     }
 
+    [Fact]
+    public void TestAnInitialCheckpointGivenHyperparametersAndTheStateALoadFillsInAreFreshCopiesOfTheRigsValuesToo()
+    {
+        var x = TensorData([2L], 1f, 2f);
+        var rig = TrainingRig.FromScratch(StatefulGainNoRefModel.ComputationGraph, L2Loss.ComputationGraph,
+            AdamWOptimizer.ComputationGraph, [new TensorDataModelParam("input", ModelParamType.InputParam, x)],
+            new AdamWOptimizerHyperparameters { LearningRate = 0.1f });
+        TensorDataStruct[] Families(TrainingCheckpoint c) => [c.TrainableParams, c.ModelState, c.OptimizerState];
+        var (flat, skpt) = (TempPath("defaults") + ".safetensors", TempPath("defaults") + ".skpt");
+        try
+        {
+            rig.CreateInitialCheckpoint().Save(flat, CheckpointComponents.Counters);
+            Persistence.SaveTrainingCheckpointToSkpt(rig.CreateInitialCheckpoint(), skpt);
+            TrainingCheckpoint[] handedOut =
+            [
+                rig.CreateInitialCheckpoint(rig.MakeHyperparameters()),
+                rig.CreateInitialCheckpoint(rig.MakeHyperparameters()),
+                rig.LoadCheckpoint(flat, CheckpointComponents.Counters),
+                rig.LoadCheckpoint(flat, CheckpointComponents.Counters),
+                rig.LoadCheckpointFromSkpt(skpt, CheckpointComponents.Counters),
+            ];
+
+            Assert.All(handedOut, c => Assert.All(Families(c), s => Assert.NotEmpty(s.Fields)));
+            TensorData[] tensors = [.. handedOut.SelectMany(Families).SelectMany(s => s.Fields.Values.OfType<TensorData>())];
+            Assert.Equal(tensors.Length, tensors.Distinct().Count());
+            Assert.Empty(tensors.Intersect(rig.OwnInitialValues));
+        }
+        finally
+        {
+            string[] written = [flat, skpt];
+            foreach (var p in written) if (File.Exists(p)) File.Delete(p);
+        }
+    }
+
     /// <summary>The same run through a resident run, checkpointing on the last step only.</summary>
     private static (float[] Losses, TrainingCheckpoint Final) ResidentRun(TrainingRig rig, int steps)
     {

@@ -251,10 +251,76 @@ public class CompositeTransferCoverageTests
         Assert.False(sequence.IsDisposed);
     }
 
+    [Fact]
+    public void TestAListSequencesElementsFollowTheFeedRulesWithItWhereverElseTheyAreFed()
+    {
+        using var context = new ComputeContext();
+        using var other = new ComputeContext();
+        var join = context.Compile(Join());
+        var both = context.Compile(ElementThenSequence());
+        TensorDataSequence Pair() => TensorDataSequence.OfElements([Sample(1f), Sample(3f)], DType.Float32);
+        (bool Element, bool Sequence) Survive(Func<TensorData, IData> element, Func<TensorDataSequence, IData> sequence)
+        {
+            var s = Pair();
+            var e = s[0];
+            Assert.Equal([1f, 2f, 1f, 2f, 3f, 4f], Floats(both.Execute(element(e), sequence(s))[0].ToTensorData()));
+            return (!e.IsDisposed, !s.IsDisposed);
+        }
+
+        Assert.Equal((true, false), Survive(e => e.Shared(), s => s));
+        Assert.Equal((true, true), Survive(e => e, s => s.Shared()));
+        Assert.Equal((true, true), Survive(e => e.TryConsume(), s => s.Shared()));
+        Assert.Equal((false, false), Survive(e => e, s => s));
+
+        var readElsewhere = Pair();
+        var read = readElsewhere[0];
+        using (other.Lock(read))
+        {
+            Assert.Contains("element 0 of input 'seq'",
+                Assert.Throws<InvalidOperationException>(() => join.Execute(readElsewhere)).Message);
+            Assert.Throws<InvalidOperationException>(readElsewhere.Dispose);
+            Assert.False(readElsewhere.IsDisposed || read.IsDisposed);
+            Assert.Equal([1f, 2f, 3f, 4f], Floats(join.Execute(readElsewhere.TryConsume())[0].ToTensorData()));
+        }
+        Assert.True(readElsewhere.IsDisposed);
+        Assert.Equal([1f, 2f], Floats(read));
+    }
+
+    [Fact]
+    public void TestARunReadingAListSequenceHoldsEachOfItsElementsUntilItReturns()
+    {
+        using var context = new ComputeContext();
+        var join = context.Compile(Join());
+        var sequence = TensorDataSequence.OfElements([Sample(1f), Sample(3f)], DType.Float32);
+        var element = sequence[0];
+        using var reached = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var holding = Task.Run(() => Floats(join.Run(
+            new HeldSequence(sequence, reached, release) { Sharing = SharedInputMode.Shared })[0].ToTensorData()));
+        Assert.True(reached.Wait(TimeSpan.FromSeconds(10)));
+
+        Assert.Throws<InvalidOperationException>(element.Delete);
+        Assert.False(element.TryDelete());
+        Assert.Throws<InvalidOperationException>(() => element.MoveToAttribute());
+        Assert.Throws<InvalidOperationException>(() => context.Execute(Doubling(), element));
+
+        release.Set();
+        Assert.Equal([1f, 2f, 3f, 4f], holding.Result);
+        Assert.True(element.TryDelete());
+    }
+
     private static InternalComputationGraph Join()
     {
         var seq = InternalOp.ModuleSequenceInput(DType.Float32, null, null, "seq");
         return new InternalComputationGraph([seq], [OnnxOp.ConcatFromSequence(seq, axis: 0, newAxis: false)]);
+    }
+
+    private static InternalComputationGraph ElementThenSequence()
+    {
+        var x = InputVector<float32>("x");
+        var seq = InternalOp.ModuleSequenceInput(DType.Float32, null, null, "seq");
+        return new InternalComputationGraph(
+            [x, seq], [OnnxOp.Concat([x, OnnxOp.ConcatFromSequence(seq, axis: 0, newAxis: false)], axis: 0)]);
     }
 
     [Fact]

@@ -52,6 +52,10 @@ namespace Shorokoo
         {
             ArgumentNullException.ThrowIfNull(write);
             write(AccessModifiableMemory<V>());
+            // Again, now the write is done: a run that copied the contents while it was under way
+            // holds what was there partway, and that copy would be read by every later run as if it
+            // were what was written.
+            Written();
             GC.KeepAlive(this);
         }
 
@@ -62,12 +66,7 @@ namespace Shorokoo
         /// frees what it points at (Shorokoo/Shorokoo#178). Prefer this wherever the whole buffer
         /// is being copied anyway.
         /// </summary>
-        public V[] CopyMemory<V>() where V : unmanaged
-        {
-            var copy = AccessMemory<V>().ToArray();
-            GC.KeepAlive(this);
-            return copy;
-        }
+        public V[] CopyMemory<V>() where V : unmanaged => Reading(() => AccessMemory<V>().ToArray());
 
         /// <summary>
         /// One element, read safely — the single-value counterpart of <see cref="CopyMemory{V}"/>,
@@ -75,12 +74,8 @@ namespace Shorokoo
         /// <c>AccessMemory&lt;V&gt;()[i]</c> by hand indexes a span whose tensor the JIT may already
         /// have retired (Shorokoo/Shorokoo#178).
         /// </summary>
-        public V ValueAt<V>(int index) where V : unmanaged
-        {
-            var value = AccessMemory<V>()[index];
-            GC.KeepAlive(this);
-            return value;
-        }
+        public V ValueAt<V>(int index) where V : unmanaged => Reading(() => AccessMemory<V>()[index]);
+
         /// <summary>Exposes the underlying buffer as a read-only span of V (V must match T's storage
         /// type). The span points straight into the tensor's storage, so it is valid only while the
         /// tensor is — see <see cref="TensorData.AccessRawMemory"/>.</summary>
@@ -214,15 +209,20 @@ namespace Shorokoo
     /// contexts it is attached to. A context keeps its own weak list of those, for its own
     /// purposes; attachment never keeps a tensor alive and never ends its life.</para>
     ///
-    /// <para><b>A tensor dies in exactly three ways</b>: it is deleted (<see cref="Delete"/>,
-    /// <see cref="Dispose"/>, <see cref="TryDelete"/>, <see cref="DeleteAsync"/>), it is consumed
-    /// by a run — fed to it as it is, which is the default, or through <see cref="TryConsume"/> —
-    /// or it is moved into an attribute (<see cref="MoveToAttribute"/>). Nothing else ends its life
-    /// — disposing a context it is attached to does not — and a tensor nothing references is
-    /// reclaimed like any other object, its memory released through its backend's ordinary path. A
-    /// dead tensor's shape, dtype and <see cref="ToString"/> stay readable; every other access
-    /// throws an <see cref="ObjectDisposedException"/> that says why it died — for a consumed one,
-    /// which run took it and how to keep it next time.</para>
+    /// <para><b>A tensor you make dies in exactly three ways</b>: it is deleted
+    /// (<see cref="Delete"/>, <see cref="Dispose"/>, <see cref="TryDelete"/>,
+    /// <see cref="DeleteAsync"/>), it is consumed by a run — fed to it as it is, which is the
+    /// default, or through <see cref="TryConsume"/> — or it is moved into an attribute
+    /// (<see cref="MoveToAttribute"/>). Two kinds of tensor belong to something else and end with
+    /// it: a copy a run made of a tensor it could not read where it was, which ends when that tensor
+    /// is written to or dies, and an element of a list sequence, which ends with its sequence.
+    /// Nothing else ends a tensor's life — disposing a context it is attached to does not — and a
+    /// tensor nothing references is reclaimed like any other object, its memory released through its
+    /// backend's ordinary path. A dead tensor's shape, dtype, <see cref="ToString"/> and where its
+    /// memory was (<see cref="AllocatingBackend"/>, <see cref="Space"/>, <see cref="Device"/>,
+    /// <see cref="Location"/>) stay readable; every other access throws an
+    /// <see cref="ObjectDisposedException"/> that says why it died — for a consumed one, which run
+    /// took it and how to keep it next time.</para>
     ///
     /// <para><b>Fed as it is, a tensor is consumed.</b> A run given a tensor takes it when it
     /// starts: the tensor is dead from then on, even if the run fails, and its memory belongs to
@@ -263,6 +263,7 @@ namespace Shorokoo
             this.DType = dtype;
             this.AllocatingBackend = allocatingBackend;
             this.Space = space;
+            _life = new Lifetime(this);
         }
 
         /// <summary>
@@ -375,12 +376,7 @@ namespace Shorokoo
         /// keeps it — <see cref="AccessRawMemory"/> plus the copy, with the tensor kept alive
         /// across it. Prefer this wherever the whole buffer is being copied anyway.
         /// </summary>
-        public byte[] CopyRawMemory()
-        {
-            var copy = AccessRawMemory().ToArray();
-            GC.KeepAlive(this);
-            return copy;
-        }
+        public byte[] CopyRawMemory() => Reading(() => AccessRawMemory().ToArray());
 
         /// <summary>
         /// Whether this tensor's storage is host memory, so the <c>Access…Memory</c> accessors

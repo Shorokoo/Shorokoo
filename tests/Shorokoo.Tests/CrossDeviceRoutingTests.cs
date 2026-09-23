@@ -528,6 +528,114 @@ public class CrossDeviceRoutingCoverageTests
         Assert.Equal([card.Built[0], card.Built[1], card.Built[2]], card.Released);
     }
 
+    [Fact]
+    public void TestATensorBeingCopiedOutOfItsMemoryCannotBeConsumedOrDeletedUntilTheCopyIsDone()
+    {
+        var card = new StubBackend(ComputeDevice.Cuda, 0) { ReleasesWhatItConsumes = true };
+        using var context = new ComputeContext(card);
+        var compiled = context.Compile(Echo());
+        foreach (var read in (Func<TensorData, object>[])[
+            t => t.ToHost(), t => t.CopyTo(ComputeContext.Host), t => t.MoveToAttribute()])
+        {
+            var onCard = OnCard(context, 1f);
+            using var copying = new ManualResetEventSlim();
+            using var release = new ManualResetEventSlim();
+            card.DuringHostCopy = () => { copying.Set(); release.Wait(TimeSpan.FromSeconds(10)); };
+            var reading = Task.Run(() => read(onCard));
+            Assert.True(copying.Wait(TimeSpan.FromSeconds(10)));
+
+            Assert.Throws<InvalidOperationException>(() => compiled.Execute(onCard));
+            Assert.Throws<InvalidOperationException>(onCard.Delete);
+            Assert.DoesNotContain(card.Built[^1], card.Released);
+
+            release.Set();
+            Assert.True(reading.Wait(TimeSpan.FromSeconds(10)));
+            card.DuringHostCopy = null;
+        }
+    }
+
+    [Fact]
+    public void TestAReleaseThatThrowsStillLetsGoOfTheRestAndOfTheBudgetedContext()
+    {
+        var card = new StubBackend(ComputeDevice.Cuda, 0) { FailingReleases = 1 };
+        using var context = new ComputeContext(card) { DeviceMemory = Budget(1L << 20) };
+        var compiled = context.Compile(Sum());
+        var (taken, read) = (OnCard(context, 1f), OnCard(context, 3f));
+        using var patience = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        Assert.Contains("stopped by the test", Assert.Throws<InvalidOperationException>(() => compiled.Run(
+            new HookedFeed(taken, () => throw new InvalidOperationException("stopped by the test")),
+            new TensorDataModelParam("b", ModelParamType.InputParam, read) { Sharing = SharedInputMode.Shared })).Message);
+
+        Assert.Equal([card.Built[0]], card.Released);
+        Assert.True(read.TryDelete());
+        Assert.Equal([1f, 2f], compiled.Execute(
+            [OnCard(context, 1f), OnCard(context, 3f)], new RunSettings { CancellationToken = patience.Token })[0]
+            .ToTensorData().As<float32>().CopyMemory<float>());
+    }
+
+    [Fact]
+    public void TestATensorConsumedWhileItWaitedToBePlacedOntoABudgetedContextIsRefusedRatherThanHandedBackDead()
+    {
+        var card = new StubBackend(ComputeDevice.Cuda, 0);
+        using var budgeted = new ComputeContext(card) { DeviceMemory = Budget(1L << 20) };
+        using var free = new ComputeContext(card);
+        var placed = OnCard(free, 1f);
+        using var inside = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        card.DuringRun = () => { inside.Set(); release.Wait(TimeSpan.FromSeconds(10)); };
+        var holding = Task.Run(() => budgeted.Compile(Echo()).Execute(Floats(1)));
+        Assert.True(inside.Wait(TimeSpan.FromSeconds(10)));
+        card.DuringRun = null;
+
+        var placing = Task.Run(() => placed.To(budgeted));
+        Assert.False(placing.Wait(TimeSpan.FromMilliseconds(200)));
+        free.Compile(Echo()).Execute(placed);
+        release.Set();
+
+        Assert.True(holding.Wait(TimeSpan.FromSeconds(10)));
+        Assert.Throws<ObjectDisposedException>(() => placing.GetAwaiter().GetResult());
+        Assert.DoesNotContain(placed, budgeted.Tensors);
+    }
+
+    [Fact]
+    public void TestAGraphCannotBeDisposedWhileOneOfItsRunsIsInFlight()
+    {
+        var card = new StubBackend(ComputeDevice.Cuda, 0);
+        using var context = new ComputeContext(card);
+        var compiled = context.Compile(Echo());
+        using var inside = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        card.DuringRun = () => { inside.Set(); release.Wait(TimeSpan.FromSeconds(10)); };
+        var running = Task.Run(() => Run(compiled, Floats(1)));
+        Assert.True(inside.Wait(TimeSpan.FromSeconds(10)));
+
+        Assert.Contains("in flight", Assert.Throws<InvalidOperationException>(compiled.Dispose).Message);
+        Assert.False(compiled.IsDisposed);
+        Assert.Equal(0, card.SessionDisposals);
+
+        release.Set();
+        Assert.True(running.Wait(TimeSpan.FromSeconds(10)));
+        compiled.Dispose();
+        Assert.True(compiled.IsDisposed);
+        Assert.Equal(1, card.SessionDisposals);
+    }
+
+    [Fact]
+    public void TestASequenceDisposedWhileACopyOfItWasBeingBuiltLeavesNoCopyBehind()
+    {
+        var cpu = new StubBackend(ComputeDevice.Cpu, null);
+        var sequence = TensorDataSequence.OfElements([Floats(2), Floats(3)], DType.Float32);
+        cpu.DuringSequenceBuild = () => Record.Exception(sequence.Dispose);
+
+        Record.Exception(() => sequence.ToTensorValue(cpu));
+        sequence.Dispose();
+
+        Assert.True(sequence.IsDisposed);
+        Assert.Single(cpu.Sequences);
+        Assert.All(cpu.Sequences, built => Assert.Contains(built, cpu.Released));
+    }
+
     private static TensorData OnCard(ComputeContext context, float first)
         => TensorData([2L], (float[])[first, first + 1f]).To(context);
 
@@ -589,6 +697,16 @@ public class CrossDeviceRoutingCoverageTests
         /// <summary>Whether its sessions' runs throw.</summary>
         internal bool FailsRuns { get; set; }
 
+        /// <summary>How many of its next releases throw after recording what they were given.</summary>
+        internal int FailingReleases { get; set; }
+
+        /// <summary>Called inside every copy of one of its values back to the host, where a test
+        /// holds one open.</summary>
+        internal Action? DuringHostCopy { get; set; }
+
+        /// <summary>How many of its sessions have been disposed.</summary>
+        internal int SessionDisposals { get; set; }
+
         /// <summary>What <see cref="CanAddress"/> answers, where a test decides; the interface's own
         /// answer otherwise.</summary>
         internal Func<MemoryLocation, bool>? Addresses { get; init; }
@@ -604,7 +722,13 @@ public class CrossDeviceRoutingCoverageTests
                   && (location.IsManaged || ReferenceEquals(location.Runtime, this));
         }
 
-        public void Release(IShorokooTensorValue value) => Released.Add(value);
+        public void Release(IShorokooTensorValue value)
+        {
+            Released.Add(value);
+            if (FailingReleases <= 0) return;
+            FailingReleases--;
+            throw new InvalidOperationException("The stub release failed.");
+        }
 
         public IShorokooTensorValue CreateTensorInBackendMemory(
             ShorokooTensorElementType elementType, byte[] data, long[] shape)
@@ -618,11 +742,19 @@ public class CrossDeviceRoutingCoverageTests
 
         public IShorokooTensorValue CreateTensorFromRawBytes(
             ShorokooTensorElementType elementType, byte[] data, long[] shape)
-            => throw new NotSupportedException();
+            => new StubValue(elementType, data, shape, hostAccessible: true);
+
+        /// <summary>The sequence values it built, in order.</summary>
+        internal List<IShorokooTensorValue> Sequences { get; } = [];
+
+        /// <summary>Called inside every sequence value it builds, where a test lands something
+        /// mid-build.</summary>
+        internal Action? DuringSequenceBuild { get; set; }
 
         public byte[] CopyTensorToHost(IShorokooTensorValue value)
         {
             HostCopies++;
+            DuringHostCopy?.Invoke();
             return ((StubValue)value).Bytes;
         }
 
@@ -662,7 +794,35 @@ public class CrossDeviceRoutingCoverageTests
             => throw new NotSupportedException();
 
         public IShorokooTensorValue CreateSequence(IReadOnlyList<IShorokooTensorValue> values)
-            => throw new NotSupportedException();
+        {
+            DuringSequenceBuild?.Invoke();
+            var sequence = new StubSequenceValue(values);
+            Sequences.Add(sequence);
+            return sequence;
+        }
+    }
+
+    /// <summary>A sequence value over the values it was built from, which it hands out copies
+    /// of.</summary>
+    private sealed class StubSequenceValue(IReadOnlyList<IShorokooTensorValue> values) : IShorokooTensorValue
+    {
+        public bool IsHostAccessible => true;
+        public ShorokooOnnxValueType ValueType => ShorokooOnnxValueType.Sequence;
+        public ShorokooTensorElementType ElementType => ShorokooTensorElementType.Float;
+        public long[] Shape => [];
+        public ReadOnlySpan<T> GetTensorDataAsSpan<T>() where T : unmanaged => throw new NotSupportedException();
+        public Span<T> GetTensorMutableDataAsSpan<T>() where T : unmanaged => throw new NotSupportedException();
+        public IReadOnlyList<string> GetStringTensorData() => throw new NotSupportedException();
+        public int GetValueCount() => values.Count;
+
+        public IShorokooTensorValue GetValue(int index)
+        {
+            var value = (StubValue)values[index];
+            return new StubValue(value.ElementType, [.. value.Bytes], value.Shape, hostAccessible: true);
+        }
+
+        public ShorokooTensorElementType GetSequenceElementType() => ShorokooTensorElementType.Float;
+        public void Dispose() { }
     }
 
     /// <summary>A session that runs nothing: every output is a copy of its first input, in host
@@ -698,7 +858,7 @@ public class CrossDeviceRoutingCoverageTests
                 hostAccessible: !(backend.OnADevice && retainedOutputNames.Contains(name))))];
         }
 
-        public void Dispose() { }
+        public void Dispose() => backend.SessionDisposals++;
     }
 
     /// <summary>A session that releases what it consumes through its backend once the run is over,

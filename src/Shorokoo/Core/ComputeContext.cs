@@ -123,10 +123,6 @@ namespace Shorokoo.Runtime
         // list of input and output names -- the training rig names its step.
         private readonly string? _description;
 
-        /// <summary>This graph as a message about one of its runs names it.</summary>
-        private string Described
-            => _description ?? ComputeContext.DescribeGraph(_originalInputNames, _outputNames);
-
         /// <summary>
         /// What a run of this graph uses when the call names nothing: the
         /// <see cref="ComputeContext.RunSettings"/> of the context that compiled it, taken when
@@ -139,11 +135,16 @@ namespace Shorokoo.Runtime
         /// <summary>
         /// The backend this graph was compiled on and runs on — fixed when it was compiled, since
         /// the session belongs to that backend and cannot move. Feeding it data another backend
-        /// built is allowed: the session rebuilds what it must, provided the data is host-resident.
+        /// built is allowed: what this backend cannot address where it is — another device's, or
+        /// another runtime's — is read through a copy in memory it can, made through the host.
         /// </summary>
         public BackendDescription Backend => _backend.Description;
 
         private volatile bool _disposed;
+
+        // How many of this graph's runs are between their start and their return, under
+        // _sessionGate: a disposal while any is would release the session under a live call.
+        private int _running;
 
         /// <summary>True once this graph's session has been released.</summary>
         public bool IsDisposed => _disposed;
@@ -155,12 +156,21 @@ namespace Shorokoo.Runtime
         /// context that compiled it rather than left to a finalizer. Disposing twice is harmless,
         /// and running a disposed graph is refused rather than answered.
         /// </summary>
+        /// <exception cref="InvalidOperationException">A run of this graph is in flight. Disposing
+        /// it would release the session that run is inside; wait for the run to return.</exception>
         public void Dispose()
         {
             BuiltSession built;
             lock (_sessionGate)
             {
                 if (_disposed) return;
+                // Before the flag, so a refusal leaves a graph that still works -- as a context in
+                // the same position refuses.
+                if (_running > 0)
+                    throw new InvalidOperationException(
+                        $"This compiled graph has {_running} run(s) in flight: disposing it would "
+                        + "release the session they are inside, under a live call into the backend. "
+                        + "Wait for the run to return.");
                 _disposed = true;
                 built = _built;
             }
@@ -293,16 +303,23 @@ namespace Shorokoo.Runtime
             // locked, every value built and every consumed tensor taken -- so the caller who caught
             // the cancellation and meant to retry had nothing left to retry with.
             runSettings.CancellationToken.ThrowIfCancellationRequested();
-            var feeds = new RunFeeds(_owner, _backend,
-                new RunIdentity(() => ComputeContext.DescribeRun(Described, _backend.Description)));
+            var feeds = new RunFeeds(_owner, _backend, Identity());
             // Under a device-memory budget this waits for any run of the context already in flight:
             // two at once would each be counting the room the other's arena is taking.
             var entered = _owner.EnterRun(_backend.MemorySpace, runSettings.CancellationToken);
+            Exception? failed = null;
+            var counted = false;
             try
             {
-                // Again, now that the run may have waited for another: the graph may have been
-                // released meanwhile.
-                ObjectDisposedException.ThrowIf(IsDisposed, this);
+                // Counted in under the session's gate, which a disposal takes too, so a disposal
+                // either sees this run and refuses, or has already released the session and this run
+                // refuses instead -- now that the run may have waited for another.
+                lock (_sessionGate)
+                {
+                    ObjectDisposedException.ThrowIf(_disposed, this);
+                    _running++;
+                    counted = true;
+                }
 
                 // Everything that can refuse the run over what it is fed, before anything is taken.
                 feeds.Prepare(inputs);
@@ -320,7 +337,6 @@ namespace Shorokoo.Runtime
                 // consumed -- and its value built after.
                 var sessionInputs = feeds.Feed(name =>
                     _onnxInputNameByOriginal.TryGetValue(name, out var mapped) ? mapped : name);
-                ComputeContext.RefuseUnleasedFeed(feeds.Held, inputs.Length);
 
                 using var eviction = ComputeContext.LinkEvictions(feeds.Leases, runSettings.CancellationToken);
                 // Under a budget the arena hands back what the run did not keep as it ends, whatever
@@ -360,15 +376,45 @@ namespace Shorokoo.Runtime
                 return _owner.AdoptOutputs(
                     results, _outputNames, _backend, ArenasOf(results.Count, aliasedInputs, sessionInputs, feeds, built));
             }
+            catch (Exception e) when ((failed = e) is null)
+            {
+                // Never entered: the filter only records what the run failed with, for the
+                // release below not to take its place.
+                throw;
+            }
             finally
             {
-                // However the run ends. What the run holds outlives the native call by
-                // construction: it is given up here and nowhere else, so a terminated run's feeds
-                // are still held right up to the moment it gives up. What it consumed went to the
-                // backend with the call, and only what never got that far is released here.
-                feeds.Dispose();
-                _owner.ExitRun(entered);
+                // However the run ends, and each step however the one before it did -- a context
+                // left counting a run, or a budget gate left held, would refuse or block everything
+                // after it for good. What the run holds outlives the native call by construction: it
+                // is given up here and nowhere else, so a terminated run's feeds are still held right
+                // up to the moment it gives up. What it consumed went to the backend with the call,
+                // and only what never got that far is released here.
+                try
+                {
+                    feeds.Dispose(failed);
+                }
+                finally
+                {
+                    if (counted) lock (_sessionGate) _running--;
+                    _owner.ExitRun(entered);
+                }
             }
+        }
+
+        /// <summary>
+        /// A run of this graph as a message names it, holding only the names that takes — not this
+        /// graph, which a tensor the run consumes would otherwise keep alive, with its session, its
+        /// kept model and its context, for as long as the tensor is referenced.
+        /// </summary>
+        private RunIdentity Identity()
+        {
+            var description = _description;
+            var inputs = _originalInputNames;
+            var outputs = _outputNames;
+            var backend = _backend.Description;
+            return new RunIdentity(() => ComputeContext.DescribeRun(
+                description ?? ComputeContext.DescribeGraph(inputs, outputs), backend));
         }
 
         /// <summary>
@@ -1137,108 +1183,61 @@ namespace Shorokoo.Runtime
             => (TensorData<T>)AllocateUninitialized(shape, OnnxUtils.GetDType<T>());
 
         /// <summary>
-        /// Takes a reader lock on <paramref name="tensor"/> for a run of this context, attaches the
-        /// tensor to this context, and hands back the lease to drop when the run is done. While a
-        /// lease is outstanding the tensor cannot be deleted — a delete is refused or declined, and
-        /// a deliberate one signals <see cref="TensorLease.Eviction"/> and waits — nor consumed by
-        /// another run, and this context cannot detach it. The lease holds the tensor itself, so
-        /// nothing a run reads can be collected under it.
+        /// Takes a reader lock on <paramref name="target"/> — a tensor or a sequence — for a run of
+        /// this context, attaches a tensor to this context, and hands back the lease to drop when
+        /// the run is done. While a lease is outstanding the target cannot be deleted — a delete is
+        /// refused or declined, and a deliberate one signals <see cref="TensorLease.Eviction"/> and
+        /// waits — nor consumed by another run, and this context cannot detach it. The lease holds
+        /// the target itself, so nothing a run reads can be collected under it.
         ///
         /// <para>Any context may lock any tensor: the lock is the reading context's, and lives on
         /// the tensor. It is a count, not a flag — two runs may read one tensor at once, and each
         /// holds a lock of its own; one run holds each tensor it is fed once, however many inputs
         /// it feeds.</para>
         /// </summary>
-        /// <param name="tensor">What is being read.</param>
+        /// <param name="target">What is being read.</param>
         /// <param name="reader">Who is reading it — a run — for a run the tensor has to refuse
         /// meanwhile to name; null for a holder with nothing to say.</param>
-        /// <exception cref="ArgumentNullException"><paramref name="tensor"/> is null.</exception>
-        /// <exception cref="ObjectDisposedException">This context has been disposed, or the tensor
+        /// <exception cref="ArgumentNullException"><paramref name="target"/> is null.</exception>
+        /// <exception cref="ObjectDisposedException">This context has been disposed, or the target
         /// is dead.</exception>
-        internal TensorLease Lock(TensorData tensor, object? reader = null)
+        internal TensorLease Lock(ILifetimeOwner target, object? reader = null)
         {
-            ArgumentNullException.ThrowIfNull(tensor);
+            ArgumentNullException.ThrowIfNull(target);
             // The two gates are taken one after the other rather than nested, in either direction:
-            // the count is this context's business and the lock is the tensor's, and a delete
+            // the count is this context's business and the lock is the target's, and a delete
             // waiting for readers must never find itself behind a gate a run is queued on.
-            // A read attaches the reader, as a run's output does: a tensor this context's runs
+            // A read attaches the tensor read, as a run's output does: a tensor this context's runs
             // read is one its accounting has to see. Attached with the count, under the one gate;
             // a lock then refused leaves at worst a dead tensor on the list, which the list skips.
-            CountLock(tensor, attach: true);
+            CountLock(target);
             try
             {
-                return new TensorLease(this, tensor, tensor.AcquireReadLock(reader), reader);
+                return new TensorLease(this, target, target.Life.AcquireReadLock(reader), reader);
             }
             catch
             {
-                ReleaseLease(tensor);
-                throw;
-            }
-        }
-
-        /// <summary><see cref="Lock(TensorData, object)"/> for a sequence a run of this context is
-        /// reading.</summary>
-        /// <exception cref="ArgumentNullException"><paramref name="sequence"/> is null.</exception>
-        /// <exception cref="ObjectDisposedException">This context, or the sequence, has been
-        /// disposed.</exception>
-        internal TensorLease Lock(TensorDataSequence sequence, object? reader = null)
-        {
-            ArgumentNullException.ThrowIfNull(sequence);
-            CountLock(sequence, attach: false);
-            try
-            {
-                sequence.AcquireReadLock(reader);
-                return new TensorLease(this, sequence, reader);
-            }
-            catch
-            {
-                ReleaseLease(sequence);
+                ReleaseLease(target);
                 throw;
             }
         }
 
         /// <summary>Counts one more lock of this context's on <paramref name="target"/>, and
-        /// attaches it if it is a tensor being read.</summary>
+        /// attaches it if it is a tensor.</summary>
         /// <exception cref="ObjectDisposedException">This context has been disposed.</exception>
-        private void CountLock(object target, bool attach)
+        private void CountLock(ILifetimeOwner target)
         {
             lock (_gate)
             {
                 ObjectDisposedException.ThrowIf(_disposed, this);
                 _leases++;
                 _locksHeld[target] = _locksHeld.TryGetValue(target, out var held) ? held + 1 : 1;
-                if (attach && !_isHost) _attached.Add((TensorData)target);
+                if (target is TensorData tensor && !_isHost) _attached.Add(tensor);
             }
         }
 
         /// <summary>What a run asks to retain on the device when it asks for nothing.</summary>
         internal static IReadOnlySet<string> NoOutputsRetained { get; } = new HashSet<string>();
-
-        /// <summary>
-        /// Refuses a run that did not hold every input it was given — by a reader lock, or by
-        /// consuming it.
-        ///
-        /// <para>Checked here rather than only in a test, because there is nothing behind a lock:
-        /// past asking the backend to stop there is no further escalation, so a feed path that
-        /// forgets one is Shorokoo/Shorokoo#366 again with the machinery sitting unused beside it.
-        /// The locker is this repository's own run path rather than a caller, which is exactly what
-        /// makes the count checkable at all.</para>
-        ///
-        /// <para>Against the inputs the run was handed, and deliberately not against a counter the
-        /// feed loop keeps beside the lock with no branch in between, which would agree with the
-        /// lock count by construction and could not fail. What actually enforces the rule for a
-        /// kind of input nothing knows how to hold is <see cref="RunFeeds.Prepare"/>'s own refusal;
-        /// this catches the other shape, a feed path that learns to skip an input and its lock
-        /// with it.</para>
-        /// </summary>
-        internal static void RefuseUnleasedFeed(int leases, int inputs)
-        {
-            if (leases == inputs) return;
-            throw new InvalidOperationException(
-                $"This run was given {inputs} input(s) and locked {leases} of them. Every fed input "
-                + "is held for the length of the run; one that is not can have its memory freed "
-                + "under the run by another thread.");
-        }
 
         /// <summary>
         /// One signal for every tensor this run has locked, plus whatever the caller asked to
@@ -1876,8 +1875,11 @@ namespace Shorokoo.Runtime
 
             IShorokooSession? session = null;
             var backend = ResolvedBackend;
-            var feeds = new RunFeeds(this, backend, new RunIdentity(() => DescribeRun(
-                DescribeGraph(originalInputNames, session?.OutputNames ?? []), backend.Description)));
+            // The outputs are the session's, named once it is built; a refusal before then names
+            // the graph by its inputs.
+            var outputNames = new StrongBox<IReadOnlyList<string>>([]);
+            var feeds = new RunFeeds(this, backend, OneShotRun(originalInputNames, outputNames, backend.Description));
+            Exception? failed = null;
             // Before the session, so that everything this context is about to build is inside the
             // window its disposal is refused in -- the session most of all, since disposing the
             // context is what would release it. Under a device-memory budget it also waits for the
@@ -1905,6 +1907,7 @@ namespace Shorokoo.Runtime
                     SessionOptimization(
                         HasOptionalOps(model.Graph) || IsFullyConstant(model.Graph), trainingStep: false),
                     deviceMemory);
+                outputNames.Value = [.. session.OutputNames];
                 var onnxInputNameByOriginal = new Dictionary<string, string>();
                 for (int i = 0; i < originalInputNames.Length && i < session.InputNames.Count; i++)
                     onnxInputNameByOriginal[originalInputNames[i]] = session.InputNames[i];
@@ -1914,7 +1917,6 @@ namespace Shorokoo.Runtime
                 // about to read what it is fed.
                 var sessionInputs = feeds.Feed(name =>
                     onnxInputNameByOriginal.TryGetValue(name, out var mapped) ? mapped : name);
-                RefuseUnleasedFeed(feeds.Held, inputs.Length);
 
                 using var eviction = LinkEvictions(feeds.Leases, RunSettings.CancellationToken);
                 // Under a budget the arena shrinks as the run ends, as CompiledGraph.Run's does.
@@ -1947,29 +1949,55 @@ namespace Shorokoo.Runtime
                 // be fed into.
                 return AdoptOutputs(results, session.OutputNames, backend);
             }
+            catch (Exception e) when ((failed = e) is null)
+            {
+                // Never entered: the filter only records what the run failed with, for the
+                // release below not to take its place.
+                throw;
+            }
             finally
             {
-                // However the run ends, and before the session goes: what the run holds is given
-                // up here and nowhere else, so a terminated run's feeds are still held right up to
-                // the moment it gives up. What it consumed went to the backend with the call; only
-                // what never got that far is released here.
-                feeds.Dispose();
-
-                // Dispose the session to free native memory — on the throwing path too, where
-                // the memory it holds is the memory the caller has just been told it lacks. The
-                // returned tensor values stay valid across it, and the finally also keeps the
-                // session rooted across the native calls above. They are not, however, free of
-                // it: a result keeps its session's ALLOCATOR alive, so a caller that retains one
-                // retains that session's arena — see `FastProcessorHelper.RehostOffSession` for
-                // what a caller that must not does, and Shorokoo/Shorokoo#180 for the general
-                // question.
-                session?.Dispose();
-
-                // Last, so that this context is answerable for its session right up to the moment
-                // the session is gone.
-                ExitRun(entered);
+                // However the run ends, and each step however the one before it did. Before the
+                // session goes: what the run holds is given up here and nowhere else, so a
+                // terminated run's feeds are still held right up to the moment it gives up. What it
+                // consumed went to the backend with the call; only what never got that far is
+                // released here.
+                try
+                {
+                    feeds.Dispose(failed);
+                }
+                finally
+                {
+                    try
+                    {
+                        // Dispose the session to free native memory — on the throwing path too,
+                        // where the memory it holds is the memory the caller has just been told it
+                        // lacks. The returned tensor values stay valid across it, and the finally
+                        // also keeps the session rooted across the native calls above. They are
+                        // not, however, free of it: a result keeps its session's ALLOCATOR alive, so
+                        // a caller that retains one retains that session's arena — see
+                        // `FastProcessorHelper.RehostOffSession` for what a caller that must not
+                        // does, and Shorokoo/Shorokoo#180 for the general question.
+                        session?.Dispose();
+                    }
+                    finally
+                    {
+                        // Last, so that this context is answerable for its session right up to the
+                        // moment the session is gone.
+                        ExitRun(entered);
+                    }
+                }
             }
         }
+
+        /// <summary>
+        /// A one-shot run as a message names it, holding only the names that takes: its outputs are
+        /// the session's, which <paramref name="outputs"/> is given once the session is built.
+        /// Nothing of the run itself, which a tensor it consumes would otherwise keep alive.
+        /// </summary>
+        private static RunIdentity OneShotRun(
+            string[] inputs, StrongBox<IReadOnlyList<string>> outputs, BackendDescription backend)
+            => new(() => DescribeRun(DescribeGraph(inputs, outputs.Value ?? []), backend));
 
         private static ShorokooGraphOptimization SessionOptimization(bool disableOptimizations, bool trainingStep)
         {

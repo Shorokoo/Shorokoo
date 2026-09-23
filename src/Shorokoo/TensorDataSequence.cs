@@ -7,6 +7,7 @@ using Shorokoo;
 using Shorokoo.Core.Backends;
 using static Shorokoo.Globals;
 using System.Collections;
+using System.Threading;
 using Shorokoo.Core;
 using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Modules;
@@ -68,7 +69,7 @@ namespace Shorokoo
     /// <see cref="To"/>, <see cref="CopyTo"/> and <see cref="ToHost"/> put its elements where a
     /// context can use them, as the same operations on <see cref="TensorData"/> do.</para>
     /// </summary>
-    public abstract class TensorDataSequence : IData, IDisposable, IReadOnlyList<TensorData>
+    public abstract class TensorDataSequence : IData, IDisposable, IReadOnlyList<TensorData>, ILifetimeOwner
     {
         public DType DType { get; private set; }
 
@@ -79,41 +80,44 @@ namespace Shorokoo
         internal TensorDataSequence(DType dtype)
         {
             this.DType = dtype;
+            _life = new Lifetime(this);
         }
 
-        // The sequence's own life, kept the way a tensor keeps its own: per sequence, and taken by
-        // nothing else. See TensorData.Lifetime for what each field means there; they mean the same
-        // here.
-        private readonly object _gate = new();
-        private TensorDeath? _death;
-        private bool _taken;
-        private bool _released;
-        private int _locks;
-        private List<object>? _readers;
+        // The sequence's own life, kept by the same machinery a tensor keeps its own with: per
+        // sequence, and taken by nothing else.
+        private readonly Lifetime _life;
 
         // The sequence values runs built from this one where they could not be handed it as it is,
         // one per place they are in, each a sequence in its own right. Created on the first.
-        private Dictionary<MemoryLocation, TensorDataSequence>? _copies;
-        private readonly object _copyGate = new();
+        private RunCopies<TensorDataSequence>? _copies;
+
+        /// <inheritdoc/>
+        Lifetime ILifetimeOwner.Life => _life;
+
+        /// <inheritdoc/>
+        string ILifetimeOwner.Describe() => Describe();
+
+        /// <inheritdoc/>
+        void ILifetimeOwner.ReleaseOwnMemory() => ReleaseMemory();
+
+        /// <inheritdoc/>
+        void ILifetimeOwner.RetireRunCopies() => RetireCopies();
 
         /// <summary>
         /// True once this sequence is dead — disposed, or consumed by a run — and its storage gone.
         /// Its dtype and <see cref="ToString"/> stay readable as metadata; every path to the
         /// elements throws, saying which it was.
         /// </summary>
-        public bool IsDisposed => Volatile.Read(ref _death) is not null;
+        public bool IsDisposed => _life.Death is not null;
 
         /// <summary>How this sequence died, or null while it lives.</summary>
-        internal TensorDeath? Death => Volatile.Read(ref _death);
+        internal TensorDeath? Death => _life.Death;
 
         /// <summary>How a refusal names this sequence.</summary>
         internal string Describe() => $"Sequence {this}";
 
         /// <summary>Guards every path to the sequence's elements.</summary>
-        protected void ThrowIfDisposed()
-        {
-            if (Volatile.Read(ref _death) is { } death) throw death.Refusal(this, Describe());
-        }
+        protected void ThrowIfDisposed() => _life.ThrowIfDead();
 
         /// <summary>
         /// Ends this sequence and releases its storage through the backend that made it. A sequence
@@ -123,18 +127,27 @@ namespace Shorokoo
         /// its storage now would free it under the run.</exception>
         public void Dispose()
         {
-            lock (_gate)
+            // Its own elements die with it, and an element a run is reading may not be deleted any
+            // more than this sequence may. One locked between this and the take outlives the
+            // sequence on its own account rather than dying under the run.
+            if (ElementBeingRead is { } read)
+                throw new InvalidOperationException(
+                    $"Sequence {this} holds {read.Describe()}, which is being read by "
+                    + $"{read.DescribeReader() ?? "a run"}, so the sequence cannot be disposed: the "
+                    + "element would be freed under the run. Wait for the run to return.");
+            switch (_life.TryTake(TensorDeath.Disposed))
             {
-                if (_death is not null) return;
-                if (_locks > 0)
+                case TakeOutcome.Taken:
+                    _life.ReleaseTaken();
+                    return;
+                case TakeOutcome.Dead:
+                    return;
+                default:
                     throw new InvalidOperationException(
-                        $"Sequence {this} is being read by {DescribeReaderUnlocked() ?? "a run"}, so it "
+                        $"Sequence {this} is being read by {_life.DescribeReader() ?? "a run"}, so it "
                         + "cannot be disposed: its storage would be freed under the run. Wait for the "
                         + "run to return.");
-                _death = TensorDeath.Disposed;
-                _taken = true;
             }
-            ReleaseTaken();
         }
 
         /// <summary>
@@ -165,121 +178,35 @@ namespace Shorokoo
 
         /// <summary>Ends this sequence's life deliberately if no run is reading it; see
         /// <see cref="TensorData.TryTake"/>.</summary>
-        internal TakeOutcome TryTake(TensorDeath death)
-        {
-            ArgumentNullException.ThrowIfNull(death);
-            lock (_gate)
-            {
-                if (_death is not null) return TakeOutcome.Dead;
-                if (_locks > 0) return TakeOutcome.Locked;
-                _death = death;
-                _taken = true;
-                return TakeOutcome.Taken;
-            }
-        }
+        internal TakeOutcome TryTake(TensorDeath death) => _life.TryTake(death);
 
         /// <summary>Releases what a successful take handed over: this sequence's storage and the
         /// copies runs built of it. Once.</summary>
-        internal void ReleaseTaken()
-        {
-            lock (_gate)
-            {
-                if (!_taken || _released) return;
-                _released = true;
-            }
-            try
-            {
-                ReleaseMemory();
-            }
-            finally
-            {
-                RetireCopies();
-            }
-        }
+        internal void ReleaseTaken() => _life.ReleaseTaken();
 
         /// <summary>Records that what a take handed over went to a backend, which releases it
         /// itself; the copies runs built of this sequence go now.</summary>
-        internal void HandedToBackend()
-        {
-            lock (_gate)
-            {
-                if (!_taken || _released) return;
-                _released = true;
-            }
-            RetireCopies();
-        }
+        internal void HandedToBackend() => _life.HandedToBackend();
 
         /// <summary>Ends a copy its source no longer wants: dead, and released now or when the last
         /// run reading it returns; see <see cref="TensorData.Retire"/>.</summary>
-        internal void Retire(TensorDeath death)
-        {
-            bool releaseNow = false;
-            lock (_gate)
-            {
-                if (_death is not null) return;
-                _death = death;
-                if (_locks == 0)
-                {
-                    _taken = true;
-                    releaseNow = true;
-                }
-            }
-            if (releaseNow) ReleaseTaken();
-        }
+        internal void Retire(TensorDeath death) => _life.Retire(death);
 
         /// <summary>Takes a reader lock for the length of a run. Refuses a sequence that is dead:
         /// there is nothing left to read.</summary>
         /// <exception cref="ObjectDisposedException">The sequence is dead.</exception>
-        internal void AcquireReadLock(object? reader = null)
-        {
-            lock (_gate)
-            {
-                ThrowIfDisposed();
-                _locks++;
-                if (reader is not null) (_readers ??= []).Add(reader);
-            }
-        }
+        internal CancellationToken AcquireReadLock(object? reader = null) => _life.AcquireReadLock(reader);
 
         /// <summary>Drops a reader lock. A copy retired while it was held is released with the
         /// last one.</summary>
-        internal void ReleaseReadLock(object? reader = null)
-        {
-            bool release = false;
-            lock (_gate)
-            {
-                _locks--;
-                if (reader is not null) _readers?.Remove(reader);
-                if (_locks == 0 && _death is not null && !_taken && !_released)
-                {
-                    _released = true;
-                    release = true;
-                }
-            }
-            if (!release) return;
-            try
-            {
-                ReleaseMemory();
-            }
-            finally
-            {
-                RetireCopies();
-            }
-        }
+        internal void ReleaseReadLock(object? reader = null) => _life.ReleaseReadLock(reader);
 
         /// <summary>Whether a run is reading this sequence right now.</summary>
-        internal bool IsLocked
-        {
-            get { lock (_gate) return _locks > 0; }
-        }
+        internal bool IsLocked => _life.IsLocked;
 
         /// <summary>The read a refusal of this sequence names, or null when no holder said.</summary>
-        internal string? DescribeReader()
-        {
-            lock (_gate) return DescribeReaderUnlocked();
-        }
+        internal string? DescribeReader() => _life.DescribeReader();
 
-        private string? DescribeReaderUnlocked()
-            => _readers is { Count: > 0 } readers ? readers[0].ToString() : null;
 
         public override string ToString()
         {
@@ -314,6 +241,15 @@ namespace Shorokoo
         /// null for one that holds none of its own.</summary>
         internal virtual IShorokooTensorValue? OwnValue => null;
 
+        /// <summary>The tensors this sequence holds as its own elements — a list sequence's — or
+        /// null for one whose elements are a runtime value's, minted per read. A run feeding this
+        /// sequence holds each of them with it.</summary>
+        internal virtual IReadOnlyList<TensorData>? OwnElements => null;
+
+        /// <summary>One of this sequence's own elements that a run is reading right now, or
+        /// null.</summary>
+        private protected virtual TensorData? ElementBeingRead => null;
+
         /// <summary>This sequence's own value, or its copy's, without the liveness check.</summary>
         internal IShorokooTensorValue UncheckedValue
             => OwnValue ?? throw new InvalidOperationException(
@@ -340,18 +276,10 @@ namespace Shorokoo
         /// sequence and reused by every later read. The caller holds this sequence's lock, or has
         /// checked it is alive.
         /// </summary>
+        /// <exception cref="ObjectDisposedException">This sequence's storage was released while the
+        /// copy was being made, by a caller that held no lock on it.</exception>
         internal TensorDataSequence SharedCopyFor(IShorokooBackend backend)
-        {
-            var where = RunMemoryOf(backend);
-            lock (_copyGate)
-            {
-                if (_copies is not null && _copies.TryGetValue(where, out var held) && !held.IsDisposed)
-                    return held;
-                var made = BuildCopy(backend);
-                (_copies ??= [])[where] = made;
-                return made;
-            }
-        }
+            => RunCopiesOf().CopyAt(RunMemoryOf(backend), () => BuildCopy(backend), _life);
 
         /// <summary>
         /// The copy a run on <paramref name="backend"/> that has taken this sequence consumes in
@@ -359,15 +287,7 @@ namespace Shorokoo
         /// </summary>
         internal TensorDataSequence TakeRunCopy(IShorokooBackend backend, TensorDeath death)
         {
-            var where = RunMemoryOf(backend);
-            TensorDataSequence? held = null;
-            lock (_copyGate)
-                if (_copies is not null && _copies.Remove(where, out var found)) held = found;
-            if (held is not null)
-            {
-                if (held.TryTake(death) == TakeOutcome.Taken) return held;
-                held.Retire(TensorDeath.Retired);
-            }
+            if (Volatile.Read(ref _copies)?.Take(RunMemoryOf(backend), death) is { } held) return held;
             var fresh = BuildCopy(backend);
             if (fresh.TryTake(death) != TakeOutcome.Taken)
                 throw new InvalidOperationException("A copy made for one run was held by another.");
@@ -410,17 +330,12 @@ namespace Shorokoo
 
         /// <summary>Retires every copy runs built of this sequence, which lives no longer than
         /// it.</summary>
-        private void RetireCopies()
-        {
-            List<TensorDataSequence> retired;
-            lock (_copyGate)
-            {
-                if (_copies is null) return;
-                retired = [.. _copies.Values];
-                _copies = null;
-            }
-            foreach (var copy in retired) copy.Retire(TensorDeath.Retired);
-        }
+        private void RetireCopies() => Volatile.Read(ref _copies)?.RetireAll();
+
+        private RunCopies<TensorDataSequence> RunCopiesOf()
+            => Volatile.Read(ref _copies)
+               ?? Interlocked.CompareExchange(ref _copies, new RunCopies<TensorDataSequence>(), null)
+               ?? _copies!;
 
         internal abstract TensorData GetAt(int index);
 
@@ -542,7 +457,12 @@ namespace Shorokoo
             /// the values it is given: the sequence owns them from then on and releases them with
             /// itself, which would free storage the elements still own and still read
             /// (Shorokoo/Shorokoo#180). The copy is the same one <c>TensorDataSequence.Create</c>
-            /// makes for the same reason, taken on this backend rather than the process default.</para>
+            /// makes for the same reason, taken on this backend rather than the process default,
+            /// and it is made straight from each element's contents: through nothing held on the
+            /// element that a write to it could retire mid-copy.</para>
+            ///
+            /// <para>The elements are read without the liveness check, as the caller holds them: a
+            /// run reading or consuming this sequence holds every element with it.</para>
             /// </summary>
             private protected override IShorokooTensorValue BuildValueOn(IShorokooBackend backend)
             {
@@ -550,11 +470,7 @@ namespace Shorokoo
                 var inner = new List<IShorokooTensorValue>(_elements.Count);
                 try
                 {
-                    // Each element on this backend first, so that a literal materializes here
-                    // rather than somewhere else and is then dragged across; BackendTransfer then
-                    // has nothing to move for an element already of this runtime.
-                    foreach (var element in _elements)
-                        inner.Add(BackendTransfer.CopyTo(backend, element.ToTensorValue(backend)));
+                    foreach (var element in _elements) inner.Add(element.HostCopyOn(backend));
                 }
                 catch
                 {
@@ -571,19 +487,33 @@ namespace Shorokoo
             /// <summary>
             /// Ends the elements, which are this sequence's own — a copy of a sequence is made of
             /// copies — the way this sequence ended, so that an element read afterwards says which:
-            /// consumed by a run, say, rather than merely gone. An element a run is reading on its
-            /// own is retired instead — dead from here, and released when that run returns — since
-            /// this sequence is gone either way.
+            /// disposed, say, rather than merely gone. An element that already died is left to
+            /// whoever ended it — a run consuming this sequence takes each element as it takes the
+            /// sequence, and releases it itself. One a run is reading on its own account is not
+            /// this sequence's to end: a locked tensor may not be deleted, so it lives on without
+            /// the sequence.
             /// </summary>
             private protected override void ReleaseMemory()
             {
                 var death = Death ?? TensorDeath.Deleted;
                 foreach (var element in _elements)
                 {
-                    if (element.TryTake(death) == TakeOutcome.Taken) element.ReleaseTaken();
-                    else element.Retire(death);
+                    switch (element.TryTake(death))
+                    {
+                        case TakeOutcome.Taken:
+                            element.ReleaseTaken();
+                            break;
+                        case TakeOutcome.Locked:
+                            element.Leaves(this);
+                            break;
+                    }
                 }
             }
+
+            internal override IReadOnlyList<TensorData> OwnElements => _elements;
+
+            private protected override TensorData? ElementBeingRead
+                => _elements.Find(static element => element.IsLocked);
 
             private protected override bool AddressableBy(ComputeContext target)
                 => _elements.TrueForAll(target.CanAddress);

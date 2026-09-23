@@ -139,6 +139,9 @@ namespace Shorokoo.Runtime
             var gate = EnterBudget(space, CancellationToken.None);
             try
             {
+                // Again, now that this may have waited at the gate for a run of this context: a
+                // tensor consumed or deleted meanwhile is refused, not handed back dead.
+                foreach (var tensor in tensors) tensor.ThrowIfDisposed();
                 if (gate is not null)
                 {
                     long adding = 0;

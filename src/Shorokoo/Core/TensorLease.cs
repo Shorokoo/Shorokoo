@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Runtime.ExceptionServices;
 using System.Threading;
 using Shorokoo.Core.Backends;
 
@@ -42,30 +43,23 @@ namespace Shorokoo.Runtime
 
         // Held strongly for as long as the lease is: a run keeps what it reads alive for the whole
         // run, so a tensor with a lock on it is never garbage.
-        private readonly object _target;
+        private readonly ILifetimeOwner _target;
 
         // Who is reading, as the tensor names the read to a run it has to refuse.
         private readonly object? _reader;
         private int _released;
 
-        internal TensorLease(ComputeContext holder, TensorData tensor, CancellationToken eviction, object? reader)
+        internal TensorLease(ComputeContext holder, ILifetimeOwner target, CancellationToken eviction, object? reader)
         {
             _holder = holder;
-            _target = tensor;
+            _target = target;
             _reader = reader;
             Eviction = eviction;
         }
 
-        internal TensorLease(ComputeContext holder, TensorDataSequence sequence, object? reader)
-        {
-            _holder = holder;
-            _target = sequence;
-            _reader = reader;
-        }
-
         /// <summary>Raised when something asks for the tensor to be deleted. Stop reading it and
         /// drop this lease: the deleter is waiting for exactly that. A sequence is never deleted
-        /// that way, so its lease has no signal to raise.</summary>
+        /// that way, so its signal is never raised.</summary>
         internal CancellationToken Eviction { get; }
 
         /// <summary>What this lease holds.</summary>
@@ -79,13 +73,17 @@ namespace Shorokoo.Runtime
             GC.SuppressFinalize(this);
             // The tensor's lock first, then the context's count, and neither under the other: the
             // two gates are never nested, so a delete waiting for this lease cannot end up behind
-            // a gate the run is queued on.
-            switch (_target)
+            // a gate the run is queued on. The count is dropped whatever the release does: a
+            // release that throws has still let go of the lock, and a count left behind would
+            // refuse the context's disposal for good.
+            try
             {
-                case TensorData tensor: tensor.ReleaseReadLock(_reader); break;
-                case TensorDataSequence sequence: sequence.ReleaseReadLock(_reader); break;
+                _target.Life.ReleaseReadLock(_reader);
             }
-            _holder.ReleaseLease(_target);
+            finally
+            {
+                _holder.ReleaseLease(_target);
+            }
         }
 
 #if DEBUG
@@ -120,6 +118,7 @@ namespace Shorokoo.Runtime
         public override string ToString() => _text ??= _describe();
     }
 
+
     /// <summary>
     /// What one run does with its inputs, decided in one place for both run paths: which it reads
     /// and which it consumes, what it is fed for each, and what it gives up when it returns.
@@ -129,7 +128,10 @@ namespace Shorokoo.Runtime
     /// <c>.Shared()</c> is read; one fed through <c>.TryConsume()</c> is consumed if no other run is
     /// reading it when this one starts, and read otherwise. The same one fed more than once in the
     /// call is held once and bound to every input it feeds: shared if any occurrence is, else
-    /// consumed if any is bare, else tried.</item>
+    /// consumed if any is bare, else tried. A list sequence's own elements are held with it, as it
+    /// is fed — the same tensor fed on its own as well counts as one more occurrence — so an
+    /// element another run is reading refuses the sequence's consumption as it would its own, and
+    /// one this run reads outlives the sequence it consumes.</item>
     /// <item><b>Held before anything is built.</b> A read takes a reader lock and attaches the
     /// running context; a consumption takes the tensor — it is dead from here, whatever the run
     /// then does. Everything is checked first, so a run refused because one of its feeds is dead
@@ -137,7 +139,7 @@ namespace Shorokoo.Runtime
     /// <item><b>What the session is fed.</b> The tensor's own value where the run's backend can
     /// address it; otherwise a copy in memory it can. A read reuses the copy the tensor holds (and
     /// locks it, and attaches it); a consumption takes that copy, or makes one, and the tensor's own
-    /// memory is released at once.</item>
+    /// memory is released as soon as every value the run is fed has been built.</item>
     /// <item><b>Handed over.</b> What is consumed goes to the backend in the call
     /// (<see cref="IShorokooSession.RunConsuming(IReadOnlyDictionary{string, IShorokooTensorValue}, IReadOnlyCollection{IShorokooTensorValue}, IReadOnlyList{string}, IReadOnlySet{string}, RunSettings, out IReadOnlyList{string})"/>)
     /// and is the backend's from then on, on every path — to release, or to write an output into.
@@ -163,8 +165,8 @@ namespace Shorokoo.Runtime
         // The memory the running backend computes in, which is what a budget on the context counts.
         private readonly MemorySpace _space;
 
-        // What Prepare made of the inputs: one target per distinct tensor or sequence, by what it
-        // feeds, and the one each input feeds.
+        // What Prepare made of the inputs: one target per distinct tensor or sequence -- those an
+        // input feeds, and the elements of a list sequence one feeds -- and the one each input feeds.
         private IReadOnlyList<NamedModelParam>? _inputs;
         private List<Target>? _targets;
         private Dictionary<object, Target>? _bySubject;
@@ -180,20 +182,17 @@ namespace Shorokoo.Runtime
 
         // Everything this run took, whatever it then does with the memory: released when the run
         // gives up unless the backend was handed it, or it was released already.
-        private readonly List<TensorData> _takenTensors = [];
-        private readonly List<TensorDataSequence> _takenSequences = [];
+        private readonly List<ILifetimeOwner> _taken = [];
 
-        // What the backend is handed: tensors consumed where they are, and the copies consumed in
-        // the place of the ones that could not be -- and, by value, which tensor each value was, so
-        // an output the backend wrote into one can be told whose memory it now lives in.
-        private readonly List<TensorData> _handedTensors = [];
-        private readonly List<TensorDataSequence> _handedSequences = [];
+        // What the backend is handed: tensors and sequences consumed where they are, and the copies
+        // consumed in the place of the ones that could not be -- and, by value, which tensor each
+        // value was, so an output the backend wrote into one can be told whose memory it now lives in.
+        private readonly List<ILifetimeOwner> _handed = [];
         private readonly List<IShorokooTensorValue> _consumed = [];
         private readonly Dictionary<IShorokooTensorValue, TensorData> _handedByValue =
             new(ReferenceEqualityComparer.Instance);
 
         private bool _handedOver;
-        private int _held;
 
         /// <param name="context">The context running, which takes the locks and is attached to
         /// what the run reads.</param>
@@ -213,9 +212,6 @@ namespace Shorokoo.Runtime
         /// its backend computes in is a device's — or null where there is none.</summary>
         internal long? Budget { get; }
 
-        /// <summary>How many inputs are held, by a lock or by consumption.</summary>
-        internal int Held => _held;
-
         /// <summary>The locks held, whose eviction signals the run listens for.</summary>
         internal IReadOnlyList<TensorLease> Leases => _leases;
 
@@ -223,19 +219,9 @@ namespace Shorokoo.Runtime
         internal IReadOnlyCollection<IShorokooTensorValue> Consumed => _consumed;
 
         /// <summary>
-        /// <see cref="Prepare"/> and then <see cref="Feed(Func{string, string})"/>, for a run with
-        /// nothing to decide in between.
-        /// </summary>
-        internal Dictionary<string, IShorokooTensorValue> Feed(
-            IReadOnlyList<NamedModelParam> inputs, Func<string, string> sessionNameOf)
-        {
-            Prepare(inputs);
-            return Feed(sessionNameOf);
-        }
-
-        /// <summary>
         /// Works out what each input feeds — one target per distinct tensor or sequence, in the order
-        /// they first appear — and refuses, before anything is taken, every feed that cannot be held.
+        /// they first appear, and one more for each element of a list sequence fed — and refuses,
+        /// before anything is taken, every feed that cannot be held.
         /// </summary>
         /// <exception cref="ObjectDisposedException">A feed is dead. Nothing was taken.</exception>
         /// <exception cref="InvalidOperationException">A feed to be consumed is being read by
@@ -244,21 +230,30 @@ namespace Shorokoo.Runtime
         {
             ArgumentNullException.ThrowIfNull(inputs);
 
-            var byFeed = new Dictionary<object, Target>(ReferenceEqualityComparer.Instance);
+            var bySubject = new Dictionary<object, Target>(ReferenceEqualityComparer.Instance);
             var targets = new List<Target>();
             var targetOf = new Target[inputs.Count];
+            Target TargetOf(ILifetimeOwner subject)
+            {
+                if (bySubject.TryGetValue(subject, out var target)) return target;
+                target = new Target(subject);
+                bySubject.Add(subject, target);
+                targets.Add(target);
+                return target;
+            }
+
             for (int i = 0; i < inputs.Count; i++)
             {
                 var input = inputs[i];
-                var subject = SubjectOf(input);
-                if (!byFeed.TryGetValue(subject, out var target))
-                {
-                    target = new Target(subject);
-                    byFeed.Add(subject, target);
-                    targets.Add(target);
-                }
-                target.Add(input.Described, input.Sharing);
-                targetOf[i] = target;
+                var target = targetOf[i] = TargetOf(SubjectOf(input));
+                var name = new FeedName(input.Label, input.ParamName, Element: -1);
+                target.Feeds(name, input.Sharing);
+                // A list sequence's elements are its own, and a run reading or consuming it reads or
+                // consumes them with it -- the sequence value it is fed is built from them. Each is
+                // held as this input feeds the sequence, beside whatever else feeds it.
+                if (target.Subject is TensorDataSequence { OwnElements: { } elements })
+                    for (int j = 0; j < elements.Count; j++)
+                        TargetOf(elements[j]).Holds(name with { Element = j }, input.Sharing);
             }
 
             // Everything that can refuse the run is asked before anything is taken, so a refused run
@@ -269,7 +264,7 @@ namespace Shorokoo.Runtime
 
             _inputs = inputs;
             _targets = targets;
-            _bySubject = byFeed;
+            _bySubject = bySubject;
             _targetOf = targetOf;
         }
 
@@ -295,13 +290,16 @@ namespace Shorokoo.Runtime
             foreach (var target in targets)
                 if (target.Mode != FeedMode.Shared) TakeOrLock(target);
 
-            for (int i = 0; i < inputs.Count; i++)
-            {
-                inputs[i].Held();
-                _held++;
-            }
+            foreach (var input in inputs) input.Held();
 
-            foreach (var target in targets) target.Value = Build(target);
+            foreach (var target in targets)
+                if (target.IsFed) target.Value = Build(target);
+
+            // Every value is built, so what a consumption copied from, and the elements a consumed
+            // sequence held only for its value to be built from, are nobody's any more: their memory
+            // goes now rather than after the run, which is the point of consuming them.
+            foreach (var target in targets)
+                if (target.Consumed && (target.Copied || !target.IsFed)) target.Life.ReleaseTaken();
 
             var fed = new Dictionary<string, IShorokooTensorValue>(inputs.Count);
             for (int i = 0; i < inputs.Count; i++)
@@ -318,9 +316,10 @@ namespace Shorokoo.Runtime
         /// it: each tensor it is fed that it reads in place there and the context has not yet
         /// counted, and each copy it will have to make there of one it cannot read where it is —
         /// or the copy already held, where one is. A sequence is read through the host and adds
-        /// nothing. What is in <paramref name="excludingArena"/> — the arena of the session about to
-        /// run, where its own earlier runs left their outputs — is inside that session's limit
-        /// already, and is left out.</para>
+        /// nothing, and so do the elements it is built from. What is in
+        /// <paramref name="excludingArena"/> — the arena of the session about to run, where its own
+        /// earlier runs left their outputs — is inside that session's limit already, and is left
+        /// out.</para>
         /// </summary>
         internal DevicePlan Plan(object? excludingArena)
         {
@@ -341,7 +340,7 @@ namespace Shorokoo.Runtime
                 target.PlannedFresh = false;
                 target.Copy = null;
                 // A sequence's value is built in host memory whatever the provider.
-                if (target.Subject is not TensorData tensor) continue;
+                if (!target.IsFed || target.Subject is not TensorData tensor) continue;
                 TensorData? resident = tensor;
                 if (!tensor.FeedsInPlace(_backend))
                 {
@@ -432,7 +431,7 @@ namespace Shorokoo.Runtime
         /// <summary>
         /// Calls into the backend with what this run consumed handed over. From the moment
         /// <paramref name="run"/> is called that memory is the backend's alone, however it returns:
-        /// the tensors it was are marked so, and nothing here touches it again.
+        /// everything it was is marked so, and nothing here touches it again.
         /// </summary>
         internal T HandOver<T>(Func<IReadOnlyCollection<IShorokooTensorValue>, T> run)
         {
@@ -443,8 +442,21 @@ namespace Shorokoo.Runtime
             }
             finally
             {
-                foreach (var tensor in _handedTensors) tensor.HandedToBackend();
-                foreach (var sequence in _handedSequences) sequence.HandedToBackend();
+                // Every one of them, whatever marking one of them does: one left unmarked would be
+                // released again when the run gives up, after its backend has released it.
+                Exception? failed = null;
+                foreach (var owner in _handed)
+                {
+                    try
+                    {
+                        owner.Life.HandedToBackend();
+                    }
+                    catch (Exception e)
+                    {
+                        failed ??= e;
+                    }
+                }
+                if (failed is not null) ExceptionDispatchInfo.Throw(failed);
             }
         }
 
@@ -452,53 +464,81 @@ namespace Shorokoo.Runtime
         /// Gives up everything held, however the run ended: every lock dropped — each copy's before
         /// the tensor's it was made of, so a run that finds a tensor free finds its copies free too —
         /// and whatever the run took and did not hand to the backend released.
+        ///
+        /// <para>Every one of them is given up even where giving one up throws, since what is left
+        /// held is held for good. Where the run itself failed — <paramref name="failed"/> — that is
+        /// what its caller has to hear, so a release failing on the way out is not allowed to take
+        /// its place; otherwise the first such failure is thrown once everything is given up.</para>
         /// </summary>
-        public void Dispose()
+        /// <param name="failed">What the run failed with, or null where it returned.</param>
+        internal void Dispose(Exception? failed)
         {
-            for (int i = _leases.Count - 1; i >= 0; i--) _leases[i].Dispose();
+            Exception? releasing = null;
+            for (int i = _leases.Count - 1; i >= 0; i--)
+            {
+                try
+                {
+                    _leases[i].Dispose();
+                }
+                catch (Exception e)
+                {
+                    releasing ??= e;
+                }
+            }
             // A release is once only, and does nothing for what was handed over, so these can be
             // asked of everything.
-            foreach (var tensor in _handedTensors) tensor.ReleaseTaken();
-            foreach (var sequence in _handedSequences) sequence.ReleaseTaken();
-            foreach (var tensor in _takenTensors) tensor.ReleaseTaken();
-            foreach (var sequence in _takenSequences) sequence.ReleaseTaken();
-            Debug.Assert(_handedOver || _consumed.Count == 0 || _handedTensors.Count + _handedSequences.Count > 0);
+            foreach (var owner in (IEnumerable<ILifetimeOwner>)[.. _handed, .. _taken])
+            {
+                try
+                {
+                    owner.Life.ReleaseTaken();
+                }
+                catch (Exception e)
+                {
+                    releasing ??= e;
+                }
+            }
+            Debug.Assert(_handedOver || _consumed.Count == 0 || _handed.Count > 0);
+            if (releasing is not null && failed is null) ExceptionDispatchInfo.Throw(releasing);
         }
+
+        /// <summary><see cref="Dispose(Exception)"/> for a run that returned.</summary>
+        public void Dispose() => Dispose(failed: null);
 
         /// <summary>
         /// The tensor or sequence <paramref name="input"/> feeds. An absent optional feeds nothing,
         /// and a session cannot be fed one: its own refusal, naming the engine that can, is thrown
-        /// here, before anything is taken.
+        /// here, before anything is taken. Nor can it be fed a struct whole: its refusal says to feed
+        /// the fields, which <c>Execute</c> expands a struct into.
         /// </summary>
-        private object SubjectOf(NamedModelParam input) => input switch
+        private ILifetimeOwner SubjectOf(NamedModelParam input) => input switch
         {
             TensorDataModelParam tensor => tensor.ToTensorData(),
             OptionalTensorDataModelParam { Data: { HasValue: true, Value: { } present } } => present,
             OptionalTensorDataModelParam absent => RefuseAbsent(absent),
             TensorDataSequenceModelParam sequence => sequence.ToTensorDataSequence(),
+            TensorStructModelParam whole => RefuseWhole(whole),
             _ => throw new InvalidOperationException(
                 $"Input '{input.ParamName}' was fed to a run as a {input.GetType().Name}, which nothing "
                 + "knows how to hold. Every fed input has to be held for the length of the run, or "
                 + "deleting it from another thread frees what the run is reading."),
         };
 
-        private object RefuseAbsent(OptionalTensorDataModelParam absent)
+        private ILifetimeOwner RefuseAbsent(OptionalTensorDataModelParam absent)
         {
             absent.ToTensorValue(_backend);
             throw new InvalidOperationException($"Input '{absent.ParamName}' is an absent optional.");
         }
 
-        /// <summary>Takes a reader lock on the target for this run, attaching the running
-        /// context.</summary>
-        private void Lock(Target target)
+        private static ILifetimeOwner RefuseWhole(TensorStructModelParam whole)
         {
-            _leases.Add(target.Subject switch
-            {
-                TensorData tensor => _context.Lock(tensor, _run),
-                TensorDataSequence sequence => _context.Lock(sequence, _run),
-                _ => throw new UnreachableException(),
-            });
+            whole.ToTensorValue();
+            throw new InvalidOperationException($"Input '{whole.ParamName}' is a struct.");
         }
+
+        /// <summary>Takes a reader lock on the target for this run, attaching the running context
+        /// to a tensor.</summary>
+        private void Lock(Target target) => _leases.Add(_context.Lock(target.Subject, _run));
 
         /// <summary>
         /// Takes the target for this run: consumed, if nothing is reading it — and refused if
@@ -507,19 +547,12 @@ namespace Shorokoo.Runtime
         private void TakeOrLock(Target target)
         {
             var death = TensorDeath.ConsumedBy(_run, target.Inputs, tried: target.Mode == FeedMode.TryConsume);
-            var outcome = target.Subject switch
-            {
-                TensorData tensor => tensor.TryTake(death),
-                TensorDataSequence sequence => sequence.TryTake(death),
-                _ => throw new UnreachableException(),
-            };
-            switch (outcome)
+            switch (target.Life.TryTake(death))
             {
                 case TakeOutcome.Taken:
                     target.Consumed = true;
                     target.Death = death;
-                    if (target.Subject is TensorData taken) _takenTensors.Add(taken);
-                    else _takenSequences.Add((TensorDataSequence)target.Subject);
+                    _taken.Add(target.Subject);
                     return;
                 case TakeOutcome.Locked when target.Mode == FeedMode.TryConsume:
                     Lock(target);
@@ -536,32 +569,40 @@ namespace Shorokoo.Runtime
         private IShorokooTensorValue Build(Target target)
             => target.Subject switch
             {
-                TensorData tensor when target.Consumed => Consume(target, tensor, target.Death!),
+                TensorData tensor when target.Consumed => Consume(target, tensor),
                 TensorData tensor => Read(target, tensor),
-                TensorDataSequence sequence when target.Consumed => Consume(sequence, target.Death!),
+                TensorDataSequence sequence when target.Consumed => Consume(target, sequence),
                 TensorDataSequence sequence => Read(sequence),
                 _ => throw new UnreachableException(),
             };
 
-        private IShorokooTensorValue Consume(Target target, TensorData tensor, TensorDeath death)
+        private IShorokooTensorValue Consume(Target target, TensorData tensor)
         {
             if (tensor.FeedsInPlace(_backend))
                 return Hand(tensor, tensor.UncheckedValue(_backend));
 
             // Incompatible memory: the contents go into the run's memory, the tensor is spent, and
-            // the copy is what is consumed. Its own memory is released now rather than after the
-            // run, which is the point of consuming it.
-            var copy = target.Copy = tensor.TakeRunCopy(_backend, AdmitCopy, death);
-            var value = Hand(copy, copy.UncheckedValue(_backend));
-            tensor.ReleaseTaken();
-            return value;
+            // the copy is what is consumed. Its own memory is released as soon as every value is
+            // built rather than after the run, which is the point of consuming it.
+            var copy = target.Copy = tensor.TakeRunCopy(_backend, AdmitCopy, target.Death!);
+            target.Copied = true;
+            return Hand(copy, copy.UncheckedValue(_backend));
         }
 
-        private IShorokooTensorValue Hand(TensorData tensor, IShorokooTensorValue value)
+        private IShorokooTensorValue Consume(Target target, TensorDataSequence sequence)
         {
-            _handedTensors.Add(tensor);
+            if (sequence.FeedsInPlace(_backend)) return Hand(sequence, sequence.UncheckedValue);
+
+            var copy = sequence.TakeRunCopy(_backend, target.Death!);
+            target.Copied = true;
+            return Hand(copy, copy.UncheckedValue);
+        }
+
+        private IShorokooTensorValue Hand(ILifetimeOwner owner, IShorokooTensorValue value)
+        {
+            _handed.Add(owner);
             _consumed.Add(value);
-            _handedByValue[value] = tensor;
+            if (owner is TensorData tensor) _handedByValue[value] = tensor;
             return value;
         }
 
@@ -596,22 +637,6 @@ namespace Shorokoo.Runtime
             }
         }
 
-        private IShorokooTensorValue Consume(TensorDataSequence sequence, TensorDeath death)
-        {
-            if (sequence.FeedsInPlace(_backend))
-            {
-                _handedSequences.Add(sequence);
-                _consumed.Add(sequence.UncheckedValue);
-                return sequence.UncheckedValue;
-            }
-
-            var copy = sequence.TakeRunCopy(_backend, death);
-            _handedSequences.Add(copy);
-            _consumed.Add(copy.UncheckedValue);
-            sequence.ReleaseTaken();
-            return copy.UncheckedValue;
-        }
-
         private IShorokooTensorValue Read(TensorDataSequence sequence)
         {
             if (sequence.FeedsInPlace(_backend)) return sequence.UncheckedValue;
@@ -638,16 +663,39 @@ namespace Shorokoo.Runtime
             TryConsume,
         }
 
-        /// <summary>One tensor or sequence this run is fed, however many inputs it feeds.</summary>
-        private sealed class Target(object subject)
+        /// <summary>
+        /// One input a target is held for, as a message names it: the caller's label for the input,
+        /// or its name — and, for an element of a list sequence the input feeds, which one.
+        /// </summary>
+        private readonly record struct FeedName(string? Label, string ParamName, int Element)
         {
-            private readonly List<string> _names = [];
+            public override string ToString()
+            {
+                var input = Label ?? $"input '{ParamName}'";
+                return Element < 0 ? input : $"element {Element} of {input}";
+            }
+        }
+
+        /// <summary>One tensor or sequence this run holds, however many inputs it feeds.</summary>
+        private sealed class Target(ILifetimeOwner subject)
+        {
+            private readonly List<FeedName> _names = [];
             private bool _anyShared;
             private bool _anyBare;
 
-            internal object Subject { get; } = subject;
+            internal ILifetimeOwner Subject { get; } = subject;
+
+            internal Lifetime Life => Subject.Life;
+
+            /// <summary>Whether an input feeds it, rather than only a list sequence an input feeds
+            /// holding it — the one kind the session is handed a value for.</summary>
+            internal bool IsFed { get; private set; }
 
             internal bool Consumed { get; set; }
+
+            /// <summary>Whether what the session is fed for it, consumed, is a copy — so its own
+            /// memory is nobody's once every value is built.</summary>
+            internal bool Copied { get; set; }
 
             internal TensorDeath? Death { get; set; }
 
@@ -666,15 +714,24 @@ namespace Shorokoo.Runtime
             internal FeedMode Mode
                 => _anyShared ? FeedMode.Shared : _anyBare ? FeedMode.Consume : FeedMode.TryConsume;
 
-            /// <summary>The input or inputs it feeds, as a message names them.</summary>
+            /// <summary>The input or inputs it is held for, as a message names them.</summary>
             internal string Inputs
                 => _names.Count == 1
-                    ? _names[0]
+                    ? _names[0].ToString()
                     : $"{string.Join(", ", _names.Take(_names.Count - 1))} and {_names[^1]}";
 
-            internal void Add(string described, SharedInputMode? sharing)
+            /// <summary>Records an input that feeds it.</summary>
+            internal void Feeds(FeedName name, SharedInputMode? sharing)
             {
-                if (!_names.Contains(described)) _names.Add(described);
+                IsFed = true;
+                Holds(name, sharing);
+            }
+
+            /// <summary>Records an input it is held for: one that feeds it, or feeds the list
+            /// sequence holding it.</summary>
+            internal void Holds(FeedName name, SharedInputMode? sharing)
+            {
+                if (!_names.Contains(name)) _names.Add(name);
                 switch (sharing)
                 {
                     case null: _anyBare = true; break;
@@ -686,45 +743,25 @@ namespace Shorokoo.Runtime
             /// or consumed — or one to be consumed that another run is reading.</summary>
             internal void RefuseIfCannotBeHeld(RunIdentity run)
             {
-                switch (Subject)
-                {
-                    case TensorData { IsDisposed: true }:
-                    case TensorDataSequence { IsDisposed: true }:
-                        throw Refusal();
-                    case TensorData tensor when Mode == FeedMode.Consume && tensor.IsLocked:
-                    case TensorDataSequence sequence when Mode == FeedMode.Consume && sequence.IsLocked:
-                        throw BeingRead(run);
-                }
+                if (Life.Death is not null) throw Refusal();
+                if (Mode == FeedMode.Consume && Life.IsLocked) throw BeingRead(run);
             }
 
             /// <summary>What an access to it throws now that it is dead.</summary>
-            internal Exception Refusal() => Subject switch
-            {
-                TensorData tensor => tensor.Death!.Refusal(tensor, tensor.Describe()),
-                TensorDataSequence sequence => sequence.Death!.Refusal(sequence, sequence.Describe()),
-                _ => throw new UnreachableException(),
-            };
+            internal Exception Refusal() => Life.Death!.Refusal(Subject, Subject.Describe());
 
             /// <summary>
             /// The refusal of a consumption that would take memory another run is reading, naming
             /// that run where it said who it was, and the ways around it.
             /// </summary>
             internal InvalidOperationException BeingRead(RunIdentity run)
-            {
-                var (what, reader) = Subject switch
-                {
-                    TensorData tensor => (tensor.Describe(), tensor.DescribeReader()),
-                    TensorDataSequence sequence => (sequence.Describe(), sequence.DescribeReader()),
-                    _ => throw new UnreachableException(),
-                };
-                return new InvalidOperationException(
-                    $"{what} is being read by {reader ?? "another run"}, so {run} cannot consume it as "
-                    + $"{Inputs}: fed as it is, it is given to the run it feeds, which would take its "
-                    + "memory from under the one reading it. Pass it as .Shared() to read it alongside "
-                    + "that run -- or pass the struct, sequence or checkpoint holding it that way -- "
-                    + "or as .TryConsume() to have it consumed only when nothing else is reading it; "
-                    + "or wait for the other run to return.");
-            }
+                => new(
+                    $"{Subject.Describe()} is being read by {Life.DescribeReader() ?? "another run"}, "
+                    + $"so {run} cannot consume it as {Inputs}: fed as it is, it is given to the run it "
+                    + "feeds, which would take its memory from under the one reading it. Pass it as "
+                    + ".Shared() to read it alongside that run -- or pass the struct, sequence or "
+                    + "checkpoint holding it that way -- or as .TryConsume() to have it consumed only "
+                    + "when nothing else is reading it; or wait for the other run to return.");
         }
     }
 }

@@ -358,6 +358,47 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
+    public void TestARunReadingATensorWhileItIsWrittenLeavesNothingStaleForTheNextRun()
+    {
+        using var context = new ComputeContext();
+        var t = Sample();
+
+        t.As<float32>().WriteMemory<float>(span =>
+        {
+            span[0] = 9f;
+            context.Execute(Doubling(), t.Shared());
+            span[1] = 9f;
+        });
+
+        Assert.Equal([18f, 18f, 6f, 8f], Floats(context.Execute(Doubling(), t.Shared())[0].ToTensorData()));
+    }
+
+    [Fact]
+    public void TestATensorARunConsumedKeepsNeitherTheGraphNorTheContextThatRanItAlive()
+    {
+        var (graph, context, consumed) = ConsumedByAGraphNobodyHolds();
+
+        GC.Collect(2, GCCollectionMode.Forced, blocking: true);
+        GC.WaitForPendingFinalizers();
+        GC.Collect(2, GCCollectionMode.Forced, blocking: true);
+
+        Assert.False(graph.IsAlive);
+        Assert.False(context.IsAlive);
+        Assert.Contains("consumed by a run of the graph (a) -> (",
+            Assert.Throws<ObjectDisposedException>(() => Floats(consumed)).Message);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static (WeakReference Graph, WeakReference Context, TensorData Consumed) ConsumedByAGraphNobodyHolds()
+    {
+        var context = new ComputeContext();
+        var compiled = context.Compile(Doubling());
+        var consumed = Sample();
+        compiled.Execute(consumed);
+        return (new WeakReference(compiled), new WeakReference(context), consumed);
+    }
+
+    [Fact]
     public void TestATensorARunIsReadingCannotBeDeletedMovedOrDetachedByThatRunsContext()
     {
         using var context = new ComputeContext();
@@ -715,14 +756,16 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
-    public void TestAFeedNothingKnowsHowToHoldIsRefusedAndSoIsAnInputThatWasNotHeld()
+    public void TestAFeedNothingKnowsHowToHoldIsRefusedAndAStructIsToldToFeedItsFields()
     {
         using var context = new ComputeContext();
         using var feeds = new RunFeeds(context, DefaultBackend.Instance, new RunIdentity(() => "a run"));
+        TensorStructFieldDef[] fields = [new TensorStructFieldDef("x", DataStructure.Tensor, 1, DType.Float32)];
+        var whole = new TensorStructModelParam("s", ModelParamType.InputParam, new TensorDataStruct(
+            new TensorStructDef(fields, "S"), new Dictionary<string, IData> { { "x", Sample() } }));
 
-        Assert.Throws<InvalidOperationException>(() => feeds.Feed([new UnlockableParam()], name => name));
-        Assert.Throws<InvalidOperationException>(() => ComputeContext.RefuseUnleasedFeed(1, 2));
-        ComputeContext.RefuseUnleasedFeed(2, 2);
+        Assert.Throws<InvalidOperationException>(() => feeds.Prepare([new UnlockableParam()]));
+        Assert.Contains("StructData", Assert.Throws<InvalidTensorOperationException>(() => feeds.Prepare([whole])).Message);
     }
 
     [Fact]
@@ -743,6 +786,8 @@ public class ComputeContextLifetimeCoverageTests
         Assert.Contains("which it fed as input 'b'", tried);
         Assert.Contains("passed as .TryConsume()", tried);
         Assert.Contains("pass it there as .Shared()", tried);
+        Assert.Contains("or pass the struct, sequence or checkpoint that held it that way", tried);
+        Assert.DoesNotContain("HostTensorData", tried);
     }
 
     [Fact]

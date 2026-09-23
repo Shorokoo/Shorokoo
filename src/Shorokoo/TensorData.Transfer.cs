@@ -233,9 +233,9 @@ namespace Shorokoo
             // that made it, say -- and a failure then leaves a tensor that is still whole rather than
             // one that died with its contents lost. The generic placeholder's storage dtype is read
             // now for the same reason: afterwards there is no value left to ask.
-            var strings = DType.IsSameElementTypeAs(DType.Utf8) ? CopyContentStrings() : null;
+            var strings = DType.IsSameElementTypeAs(DType.Utf8) ? Reading(CopyContentStrings) : null;
             var own = strings is null ? OwnBytes : null;
-            var copied = strings is null && own is null ? CopyContentBytes() : null;
+            var copied = strings is null && own is null ? Reading(CopyContentBytes) : null;
             var storageDType = StorageDType();
 
             switch (TryTake(TensorDeath.MovedToAttribute))
@@ -273,13 +273,7 @@ namespace Shorokoo
             => DType.IsGenericType && this is IOnnxData onnx ? (DType)(int)onnx.Value.ElementType : null;
 
         /// <summary>The elements of a string tensor, however this one holds them.</summary>
-        private protected IEnumerable<string> StringElements()
-        {
-            ThrowIfDisposed();
-            var strings = CopyContentStrings();
-            GC.KeepAlive(this);
-            return strings;
-        }
+        private protected IEnumerable<string> StringElements() => Reading(CopyContentStrings);
 
         /// <summary>
         /// Refuses a target that has been disposed, naming the operation the caller actually made.
@@ -384,14 +378,9 @@ namespace Shorokoo
         /// <summary>
         /// This tensor's contents as host bytes, whatever memory it is in: its own, copied, where the
         /// host can read them, and otherwise a copy the backend that made the memory reads back —
-        /// the only thing that knows how to reach it.
+        /// the only thing that knows how to reach it. Copied under a reader lock, so no run can
+        /// consume the tensor, and no delete release it, from under the copy.
         /// </summary>
-        private byte[] HostBytes()
-        {
-            ThrowIfDisposed();
-            var bytes = CopyContentBytes();
-            GC.KeepAlive(this);
-            return bytes;
-        }
+        private byte[] HostBytes() => Reading(CopyContentBytes);
     }
 }

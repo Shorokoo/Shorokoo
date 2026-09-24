@@ -1,4 +1,5 @@
 using Shorokoo.Runtime;
+using Shorokoo.Core.Factory;
 using Shorokoo.Core.Interpreter;
 using Shorokoo.PyTorch.Cpu;
 using static Shorokoo.Tests.Utils.QeeAudit;
@@ -133,6 +134,38 @@ public class QeeImageRandomRnnAuditTests
         Assert.True(QeeAudit.QeeOnly<QeeRecurrentQeeOnlyShapeAuditCheck>(RecurrentX));
         Assert.True(QeeAudit.Check<QeeGruShapeAuditCheck>(RecurrentX));
         Assert.True(QeeAudit.Check<QeeLstmShapeAuditCheck>(RecurrentX, I32([2L], 4, 4)));
+    }
+
+    private static string Written(string op, bool bidirectional, string[] activations, float[]? alpha, float[]? beta)
+    {
+        var x = InputTensor<float32>("x", rank: 3);
+        var w = InputTensor<float32>("w", rank: 3);
+        var r = InputTensor<float32>("r", rank: 3);
+        var y = op switch
+        {
+            "RNN" => OnnxOp.Rnn(x, w, r, null, null, null, alpha, beta, activations, null,
+                bidirectional ? RNNDirection.Bidirectional : RNNDirection.Forward, 5L, false).y,
+            "GRU" => OnnxOp.Gru(x, w, r, null, null, null, alpha, beta, activations, null,
+                bidirectional ? GRUDirection.Bidirectional : GRUDirection.Forward, 5L, false).y,
+            _ => OnnxOp.Lstm(x, w, r, null, null, null, null, null, alpha, beta, activations, null,
+                bidirectional ? LSTMDirection.Bidirectional : LSTMDirection.Forward, 5L, null, false).y,
+        };
+        var node = FastOnnxModelBuilder.BuildInternalOnnxModel(new InternalComputationGraph([x, w, r], [y]), prepForOnnx: true)
+            .Graph.Nodes.Single(n => n.OpType == op);
+        string List(string name) => string.Join(" ", node.Attributes.SingleOrDefault(a => a.Name == name)?.Floats ?? []);
+        return $"{List("activation_alpha")} | {List("activation_beta")}";
+    }
+
+    [Fact]
+    public void TestRecurrentActivationArgumentsReachTheBackendOnePerConsumingActivationWithTheirDefaults()
+    {
+        Assert.Equal("0.3 0.7 | 0.2 0.2", Written("RNN", true, ["LeakyRelu", "Affine"], [0.3f, 0.7f], [0.2f]));
+        Assert.Equal("0.3 0.3 | ", Written("RNN", true, ["Tanh", "LeakyRelu"], [0.3f], null));
+        Assert.Equal("0.01 | ", Written("RNN", false, ["LeakyRelu"], null, null));
+        Assert.Equal(" | ", Written("RNN", true, ["Tanh", "Relu"], [0.5f], [0.5f]));
+        Assert.Equal("1 1 | 0", Written("GRU", false, ["Affine", "ThresholdedRelu"], null, null));
+        Assert.Equal("2 1 | 3 4", Written("GRU", true, ["ScaledTanh", "Softsign", "Relu", "Affine"], [2f], [3f, 4f]));
+        Assert.Equal("0.1 1 0.01 | 0.5", Written("LSTM", true, ["HardSigmoid", "Tanh", "Elu", "Sigmoid", "Relu", "LeakyRelu"], [0.1f], null));
     }
 
     [Fact]

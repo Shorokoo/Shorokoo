@@ -104,6 +104,13 @@ public class CSharpModelBuilderCoverageTests
                 [OnnxOp.Constant((string[])["cova", "covb"]), OnnxOp.Constant("covc")]),
             "Vector(", "Scalar(");
 
+    /// <summary>Fails: MakeConstantNode reads TensorAttribute.Bytes to size a Constant's value
+    /// tensor before looking at its dtype, and a string tensor — what Globals.Vector(params string[])
+    /// builds — has no bytes, so codegen throws InvalidOperationException.</summary>
+    [Fact]
+    public void TestAStringTensorValueConstantCodegens()
+        => AssertCodegens(new InternalComputationGraph([], [Vector("cova", "covb").ToVariable()]), "cova");
+
     [Fact]
     public void TestCodegenedSourceRebuildsTheGraphItCameFrom()
     {

@@ -185,6 +185,7 @@ internal sealed partial class OnnxToPythonTranslator
         var call = $"training.autograd({loss}, ({string.Concat(arguments.Select(a => a + ", "))}))";
         var gradients = step.Node.Outputs.Select(o => o.Length == 0 ? "_" : Define(scope, o)).ToList();
         Line(gradients.Count == 0 ? call : $"{string.Join(", ", gradients)}, = {call}");
+        EndStatement(scope);
         _indent--;
 
         foreach (var name in wrt) Rebind(scope, name, "training.detach");
@@ -196,5 +197,6 @@ internal sealed partial class OnnxToPythonTranslator
     {
         var current = scope.Lookup(onnxName, null);
         Line($"{Define(scope, onnxName)} = {function}({current})");
+        EndStatement(scope);
     }
 }

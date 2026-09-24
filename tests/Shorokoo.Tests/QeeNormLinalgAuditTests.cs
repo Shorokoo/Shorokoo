@@ -28,4 +28,22 @@ public class QeeNormLinalgAuditTests
         Assert.True(QeeAudit.Check<QeeQuantizationValueAuditCheck>(
             F32([2L, 2L], 1.25f, -0.5f, 0.6f, 3.1f)));
     }
+
+    [Fact]
+    public void TestQuantizationRuntimeValueAudits()
+    {
+        Assert.True(QeeAudit.OrtOnly<QeeQuantizationRuntimeValueAuditCheck>(
+            F32([2L, 4L], 0.625f, -1.3f, 2.2f, 40f, -0.1f, 3.75f, -50f, 0.875f),
+            I8([2L, 4L], 10, -20, 30, -128, 127, 0, -3, 64)));
+        Assert.True(QeeAudit.OrtOnly<QeeQLinearValueAuditCheck>(
+            I8([2L, 3L], 1, -2, 3, 4, 0, -5),
+            U8([2L, 3L], 125, 118, 140, 100, 130, 121),
+            U8([1L, 2L, 6L, 6L], [.. Enumerable.Range(0, 72).Select(i => (byte)(i * 37 % 256))])));
+    }
+
+    [Fact]
+    public void TestDequantizeLinearOfInt32WithoutZeroPointKeepsItsValuesThroughAReshape()
+    {
+        Assert.True(QeeAudit.Check<QeeDequantizeInt32ReshapeAuditCheck>(I32([3L], 1000, -6, 2)));
+    }
 }

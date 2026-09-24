@@ -318,4 +318,115 @@ namespace Shorokoo.Tests.Modules
         private static Tensor<float32> Flat(Tensor<float32> t) => t.Reshape(Vector(-1L));
         private static Tensor<int64> FlatI(Tensor<int64> t) => t.Reshape(Vector(-1L));
     }
+
+    /// <summary>Quantization VALUES from runtime inputs, so that none is folded (QEE computes no
+    /// blocked values, so this runs on ONNX Runtime only): QuantizeLinear
+    /// per-tensor int8 with a tie (2.5 → 2) and saturation both ways, per-axis uint8 along
+    /// axis 1, blocked (block 2 along axis 1), int16 and uint16 targets; DequantizeLinear
+    /// per-tensor, per-axis, blocked and from int32; DynamicQuantizeLinear's three outputs.
+    /// Inputs f = [[0.625,−1.3,2.2,40],[−0.1,3.75,−50,0.875]], i8 = [[10,−20,30,−128],[127,0,−3,64]].</summary>
+    [Module]
+    public partial class QeeQuantizationRuntimeValueAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> f, Tensor<int8> i8)
+        {
+            var blockScale = Vector(0.5f, 1f, 0.25f, 2f).Reshape(Vector(2L, 2L));
+            var qT = (Tensor<int8>)OnnxOp.QuantizeLinear(f, Scalar(0.25f), Scalar((sbyte)3));
+            var qAxis = (Tensor<uint8>)OnnxOp.QuantizeLinear(f, Vector(0.5f, 0.25f, 1f, 2f).Tensor(),
+                Vector((byte)10, (byte)20, (byte)30, (byte)40), axis: 1);
+            var qBlock = (Tensor<int8>)OnnxOp.QuantizeLinear(f, blockScale,
+                Vector((sbyte)0, (sbyte)0, (sbyte)0, (sbyte)0).Reshape(Vector(2L, 2L)), axis: 1, blockSize: 2);
+            var q16 = (Tensor<int16>)OnnxOp.QuantizeLinear(f, Scalar(0.01f), Scalar((short)-7));
+            var qu16 = (Tensor<uint16>)OnnxOp.QuantizeLinear(f, Scalar(0.005f), Scalar((ushort)1000));
+
+            var dq = (Tensor<float32>)OnnxOp.DequantizeLinear(i8, Scalar(0.5f), Scalar((sbyte)-2), null);
+            var dqAxis = (Tensor<float32>)OnnxOp.DequantizeLinear(i8, Vector(0.5f, 0.25f, 1f, 2f),
+                Vector((sbyte)1, (sbyte)2, (sbyte)3, (sbyte)4), axis: 1);
+            var dqBlock = (Tensor<float32>)OnnxOp.DequantizeLinear(i8, blockScale, null, axis: 1, blockSize: 2);
+            var dq32 = (Tensor<float32>)OnnxOp.DequantizeLinear(i8.Cast<int32>() * Scalar(1000), Scalar(0.001f), null, null);
+
+            var (dy, dScale, dZp) = OnnxOp.DynamicQuantizeLinear(f);
+
+            var mismatch =
+                IntMismatch(FlatI(qT.Cast<int64>()), Vector(5L, -2L, 12L, 127L, 3L, 18L, -128L, 7L)) +
+                IntMismatch(FlatI(qAxis.Cast<int64>()), Vector(11L, 15L, 32L, 60L, 10L, 35L, 0L, 40L)) +
+                IntMismatch(FlatI(qBlock.Cast<int64>()), Vector(1L, -3L, 2L, 40L, 0L, 15L, -25L, 0L)) +
+                IntMismatch(FlatI(q16.Cast<int64>()), Vector(55L, -137L, 213L, 3993L, -17L, 368L, -5007L, 81L)) +
+                IntMismatch(FlatI(qu16.Cast<int64>()), Vector(1125L, 740L, 1440L, 9000L, 980L, 1750L, 0L, 1175L)) +
+                FloatMismatch(Flat(dq), Vector(6f, -9f, 16f, -63f, 64.5f, 1f, -0.5f, 33f)) +
+                FloatMismatch(Flat(dqAxis), Vector(4.5f, -5.5f, 27f, -264f, 63f, -0.5f, -6f, 120f)) +
+                FloatMismatch(Flat(dqBlock), Vector(5f, -10f, 30f, -128f, 31.75f, 0f, -6f, 128f)) +
+                FloatMismatch(Flat(dq32 - i8.Cast<float32>()), Vector(0f)) +
+                IntMismatch(FlatI(((Tensor<uint8>)dy).Cast<int64>()), Vector(144L, 138L, 148L, 255L, 142L, 153L, 0L, 144L)) +
+                FloatMismatch(((Tensor<float32>)dScale).Reshape(Vector(1L)), Vector(90f / 255f)) +
+                IntMismatch(((Tensor<uint8>)dZp).Cast<int64>().Reshape(Vector(1L)), Vector(142L));
+            return mismatch < Scalar(1L);
+        }
+
+        private static Tensor<float32> Flat(Tensor<float32> t) => t.Reshape(Vector(-1L));
+        private static Tensor<int64> FlatI(Tensor<int64> t) => t.Reshape(Vector(-1L));
+    }
+
+    /// <summary>QLinearMatMul and QLinearConv VALUES (QEE computes neither, so this runs on ONNX
+    /// Runtime only): int8 per-tensor and uint8 with a per-column b scale and zero point;
+    /// QLinearConv uint8 × int8 with per-output-channel w scales, an int32 bias, group 2,
+    /// asymmetric pads, strides and dilations, and SAME_LOWER. Inputs a8 = [[1,−2,3],[4,0,−5]],
+    /// au = [[125,118,140],[100,130,121]], x [1,2,6,6] uint8 with x[i] = 37·i mod 256.</summary>
+    [Module]
+    public partial class QeeQLinearValueAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<int8> a8, Tensor<uint8> au, Tensor<uint8> x)
+        {
+            var b8 = Vector((sbyte)3, (sbyte)-1, (sbyte)0, (sbyte)2, (sbyte)5, (sbyte)-4).Reshape(Vector(3L, 2L));
+            var bu = Vector((byte)130, (byte)120, (byte)128, (byte)140, (byte)100, (byte)129).Reshape(Vector(3L, 2L));
+            var mm8 = (Tensor<int8>)OnnxOp.QLinearMatMul(
+                a8, Scalar(0.05f), Scalar((sbyte)1), b8, Scalar(0.1f), Scalar((sbyte)0), Scalar(0.02f), Scalar((sbyte)-3));
+            var mmu = (Tensor<uint8>)OnnxOp.QLinearMatMul(
+                au, Scalar(0.02f), Scalar((byte)120), bu, Vector(0.05f, 0.03f), Vector((byte)128, (byte)125),
+                Scalar(0.01f), Scalar((byte)100));
+
+            var w = Vector((sbyte)1, (sbyte)-2, (sbyte)3, (sbyte)0, (sbyte)1, (sbyte)-1, (sbyte)2, (sbyte)1, (sbyte)-3,
+                (sbyte)-1, (sbyte)0, (sbyte)2, (sbyte)1, (sbyte)1, (sbyte)0, (sbyte)-2, (sbyte)3, (sbyte)1,
+                (sbyte)2, (sbyte)2, (sbyte)-1, (sbyte)0, (sbyte)-3, (sbyte)1, (sbyte)1, (sbyte)0, (sbyte)1,
+                (sbyte)0, (sbyte)1, (sbyte)1, (sbyte)-1, (sbyte)2, (sbyte)0, (sbyte)3, (sbyte)-2, (sbyte)1).Reshape(Vector(4L, 1L, 3L, 3L));
+            var wScale = Vector(0.1f, 0.05f, 0.2f, 0.08f);
+            var bias = Vector(50, -30, 0, 200);
+            var conv = (Tensor<uint8>)OnnxOp.QLinearConv(x, Scalar(0.04f), Scalar((byte)110), w, wScale, Scalar((sbyte)0),
+                Scalar(0.03f), Scalar((byte)128), bias,
+                autoPad: AutoPad.NotSet, dilations: [1L, 2L], group: 2L, kernelShape: [3L, 3L],
+                pads: [1L, 2L, 0L, 1L], strides: [2L, 1L]);
+            var same = (Tensor<uint8>)OnnxOp.QLinearConv(x, Scalar(0.04f), Scalar((byte)110), w, wScale, Scalar((sbyte)0),
+                Scalar(0.03f), Scalar((byte)128), null,
+                autoPad: AutoPad.SameLower, dilations: null, group: 2L, kernelShape: [3L, 3L], pads: null, strides: [2L, 2L]);
+
+            var mismatch =
+                IntMismatch(FlatI(mm8.Cast<int64>()), Vector(0L, -7L, -8L, 2L)) +
+                IntMismatch(FlatI(mmu.Cast<int64>()), Vector(45L, 102L, 93L, 115L)) +
+                ShapeMismatch(conv, Vector(1L, 4L, 3L, 5L)) +
+                IntMismatch(FlatI(conv.Cast<int64>()), Vector(
+                    168L, 124L, 144L, 75L, 122L, 60L, 225L, 213L, 155L, 143L, 137L, 30L, 58L, 239L, 184L,
+                    136L, 98L, 88L, 132L, 136L, 139L, 139L, 131L, 109L, 93L, 141L, 124L, 142L, 138L, 135L,
+                    174L, 164L, 130L, 130L, 51L, 0L, 148L, 124L, 154L, 108L, 216L, 148L, 2L, 236L, 140L,
+                    155L, 159L, 139L, 151L, 149L, 136L, 93L, 176L, 223L, 141L, 169L, 180L, 140L, 105L, 173L)) +
+                ShapeMismatch(same, Vector(1L, 4L, 3L, 3L)) +
+                IntMismatch(FlatI(same.Cast<int64>()), Vector(
+                    181L, 98L, 98L, 24L, 192L, 109L, 135L, 37L, 194L, 136L, 119L, 139L, 133L, 138L, 128L, 136L, 132L, 140L,
+                    154L, 120L, 120L, 1L, 144L, 135L, 138L, 90L, 149L, 129L, 122L, 146L, 134L, 182L, 140L, 167L, 146L, 185L));
+            return mismatch < Scalar(1L);
+        }
+
+        private static Tensor<int64> FlatI(Tensor<int64> t) => t.Reshape(Vector(-1L));
+    }
+
+    /// <summary>DequantizeLinear of an int32 tensor with no zero point, read through a Reshape:
+    /// [1000, −6, 2] × 0.5 = [500, −3, 1].</summary>
+    [Module]
+    public partial class QeeDequantizeInt32ReshapeAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<int32> x)
+        {
+            var dq = (Tensor<float32>)OnnxOp.DequantizeLinear(x, Scalar(0.5f), null, null);
+            return FloatMismatch(dq.Reshape(Vector(-1L)), Vector(500f, -3f, 1f)) < Scalar(1L);
+        }
+    }
 }

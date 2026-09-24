@@ -419,14 +419,14 @@ public class PyTorchBackendCoverageTests
         return node;
     }
 
-    private static byte[] TrainingStep(GraphProto graph, long version = 1)
+    private static byte[] TrainingStep(GraphProto graph, long version = 1, params FunctionProto[] functions)
     {
         var squash = new FunctionProto { Name = "Squash", Domain = "Functions" };
         squash.Inputs.Add("a");
         squash.Outputs.Add("b");
         squash.Nodes.Add(Node("Tanh", ["a"], ["b"]));
         squash.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = 21 });
-        var model = ProtoBuf.Serializer.Deserialize<ModelProto>(new MemoryStream(Serialize(graph, squash)));
+        var model = ProtoBuf.Serializer.Deserialize<ModelProto>(new MemoryStream(Serialize(graph, [squash, .. functions])));
         model.OpsetImports.Add(new OperatorSetIdProto { Domain = TrainingFormats.AutoGradDomain, Version = version });
         using var stream = new MemoryStream();
         ProtoBuf.Serializer.Serialize(stream, model);
@@ -765,6 +765,21 @@ public class PyTorchBackendCoverageTests
         Assert.Equal([-1f, -2f], RunFloats(session, new() { ["x"] = [1f, 2f] }, ["y"])[0]);
         Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(Serialize(Graph(["x"], ["y"], Node("First", ["x", "x", "x"], ["y"], "Functions")), first), default, default, DeviceMemorySettings.Default));
         Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(Serialize(Graph(["x"], ["y"], Node("First", ["x"], ["y", "z"], "Functions")), first), default, default, DeviceMemorySettings.Default));
+    }
+
+    [Fact]
+    public void TestAFunctionCallRunsAndDifferentiatesTheOverloadItNames()
+    {
+        FunctionProto[] overloads = [Function("F", ["a"], ["y"], "neg", Node("Neg", ["a"], ["y"])), Function("F", ["a"], ["y"], "abs", Node("Abs", ["a"], ["y"]))];
+        var call = Node("F", ["x"], ["y"], "Functions");
+        call.Overload = "neg";
+        var stepCall = Node("F", ["w"], ["t"], "Functions");
+        stepCall.Overload = "neg";
+        using var session = Torch.CreateSession(Serialize(Graph(["x"], ["y"], call), overloads), default, default, DeviceMemorySettings.Default);
+        using var step = Torch.CreateSession(TrainingStep(Graph(["w"], ["g"], stepCall, Node("ReduceSum", ["t"], ["loss"]), AutoGrad(["loss", "w"], ["g"])), 1, overloads), default, default, DeviceMemorySettings.Default);
+
+        Assert.Equal([-1f, 2f], RunFloats(session, new() { ["x"] = [1f, -2f] }, ["y"])[0]);
+        Assert.Equal([-1f, -1f], RunFloats(step, new() { ["w"] = [1f, -2f] }, ["g"])[0]);
     }
 
     private static PythonEnvironment Resolve(PythonEnvironmentOptions options, string variable)

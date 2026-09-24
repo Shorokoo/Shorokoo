@@ -249,11 +249,13 @@ token. A single node that is one long kernel is not interrupted.
   comparisons and logic operators, the reductions, `MatMul`/`Gemm`, the shape operators
   (`Reshape`, `Transpose`, `Concat`, `Split`, `Squeeze`/`Unsqueeze`, `Shape`, `Expand`, `Tile`,
   `Pad`, `Constant`, `ConstantOfShape`, `Range`, …), `Gather`/`GatherElements`/`Slice`/`Compress`,
-  and `If`/`Loop` are translated, and so are Shorokoo's own random draws (Dropout masks and the
-  like), which reach the backend as integer operators. Convolution and pooling, normalization,
-  recurrent networks, the ONNX random operators, sequences, strings, signal, image and
-  quantization operators are not yet: a model using one is refused when its session is created,
-  naming it.
+  `If`/`Loop`, convolution and pooling, normalization and the losses, `Einsum`/`Det`/`MatMulInteger`,
+  and the image and geometry operators (`Resize`, `GridSample`, `AffineGrid`, `RoiAlign`,
+  `NonMaxSuppression`, `CenterCropPad`, `Col2Im`, `DepthToSpace`/`SpaceToDepth`, …) are
+  translated, and so are Shorokoo's own random draws (Dropout masks and the like), which reach
+  the backend as integer operators. Recurrent networks, the ONNX random operators, sequences,
+  strings, signal, quantization operators and `ImageDecoder` are not yet: a model using one is
+  refused when its session is created, naming it.
 - **Linux x64 and Windows x64 only**, the platforms there are lock files for.
 - **Device memory is torch's, per process** — see [Runs](#runs) for what a context's settings
   can and cannot reach.

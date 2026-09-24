@@ -27,5 +27,7 @@ public class QeeNormLinalgAuditTests
         Assert.True(QeeAudit.Check<QeeEinsumDetAuditCheck>(F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)));
         Assert.True(QeeAudit.Check<QeeQuantizationValueAuditCheck>(
             F32([2L, 2L], 1.25f, -0.5f, 0.6f, 3.1f)));
+        Assert.True(QeeAudit.Check<QeeNormLossVariantsAuditCheck>(
+            F32Wave([2L, 4L, 3L, 2L]), I64([2L, 3L, 2L], 0L, 1L, 2L, 3L, 2L, 1L, 3L, 3L, 0L, 2L, 1L, 2L)));
     }
 }

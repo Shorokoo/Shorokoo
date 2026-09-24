@@ -301,4 +301,126 @@ namespace Shorokoo.Tests.Modules
             return mismatch < Scalar(1L);
         }
     }
+
+    /// <summary>Convolution variants on non-trivial weights: 1-D with asymmetric pads + stride +
+    /// dilation, 2-D SAME_LOWER grouped and asymmetric-pad strided, 3-D SAME_UPPER; ConvTranspose
+    /// 1-D SAME_LOWER, 2-D grouped with asymmetric pads + dilations + output_padding, 2-D with an
+    /// output_shape leaving an odd total padding, 3-D strided; DeformConv with a mask, two offset
+    /// groups, two groups and dilations. Inputs: x1 [2,2,9], x2 [1,4,7,6], x3 [1,2,5,4,4], and k,
+    /// 1024 values the weights, offsets and mask are cut from.</summary>
+    [Module]
+    public partial class QeeConvVariantsShapeAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x1, Tensor<float32> x2, Tensor<float32> x3, Tensor<float32> k)
+        {
+            // (9+2+1-5)/2+1 = 4.
+            var conv1 = NN.Conv(x1, Cut(k, 0, 3, 2, 3), Cut(k, 20, 3).Vec(), AutoPad.NotSet,
+                dilations: [2L], group: 1L, kernelShape: [3L], pads: [2L, 1L], strides: [2L]);
+            // SAME_LOWER: ceil(7/2) = 4, ceil(6/2) = 3.
+            var convSame = NN.Conv(x2, Cut(k, 30, 4, 2, 3, 3), Cut(k, 110, 4).Vec(), AutoPad.SameLower,
+                dilations: [1L, 1L], group: 2L, kernelShape: [3L, 3L], pads: null, strides: [2L, 2L]);
+            // pads [1,0,0,2]: H 7+1-2+1 = 7, W (6+2-3)/2+1 = 3.
+            var convAsym = NN.Conv(x2, Cut(k, 120, 2, 4, 2, 3), Cut(k, 170, 2).Vec(), AutoPad.NotSet,
+                dilations: [1L, 1L], group: 1L, kernelShape: [2L, 3L], pads: [1L, 0L, 0L, 2L], strides: [1L, 2L]);
+            // SAME_UPPER: [5, ceil(4/2), 4].
+            var conv3 = NN.Conv(x3, Cut(k, 180, 2, 2, 3, 3, 2), Cut(k, 260, 2).Vec(), AutoPad.SameUpper,
+                dilations: [1L, 1L, 1L], group: 1L, kernelShape: [3L, 3L, 2L], pads: null, strides: [1L, 2L, 1L]);
+            // SAME_LOWER: 9*2 = 18.
+            var convT1 = NN.ConvTranspose(x1, Cut(k, 270, 2, 3, 3), Cut(k, 290, 3).Vec(), AutoPad.SameLower,
+                dilations: [1L], group: 1L, kernelShape: [3L], outputPadding: [0L], outputShape: null,
+                pads: null, strides: [2L]);
+            // H (7-1)*2+1+3-1-2 = 13, W (6-1)*3+2+3-0-1 = 19.
+            var convTAsym = NN.ConvTranspose(x2, Cut(k, 300, 4, 2, 3, 2), Cut(k, 350, 4).Vec(), AutoPad.NotSet,
+                dilations: [1L, 2L], group: 2L, kernelShape: [3L, 2L], outputPadding: [1L, 2L], outputShape: null,
+                pads: [1L, 0L, 2L, 1L], strides: [2L, 3L]);
+            // Full extent [15, 13]; output_shape [14, 13] leaves a total padding of 1 on H.
+            var convTShape = NN.ConvTranspose(x2, Cut(k, 360, 4, 3, 3, 3), Cut(k, 470, 3).Vec(), AutoPad.NotSet,
+                dilations: [1L, 1L], group: 1L, kernelShape: [3L, 3L], outputPadding: [0L, 0L], outputShape: [14L, 13L],
+                pads: null, strides: [2L, 2L]);
+            // (5-1)*2+2-2 = 8, (4-1)*2+2-2 = 6.
+            var convT3 = NN.ConvTranspose(x3, Cut(k, 480, 2, 1, 2, 2, 2), Cut(k, 500, 1).Vec(), AutoPad.NotSet,
+                dilations: [1L, 1L, 1L], group: 1L, kernelShape: [2L, 2L, 2L], outputPadding: [0L, 0L, 0L], outputShape: null,
+                pads: [1L, 1L, 1L, 1L, 1L, 1L], strides: [2L, 2L, 2L]);
+            // H (7+1-3)+1 = 6, W (6+1-2)+1 = 6.
+            var deform = (Tensor<float32>)OnnxOp.DeformConv(x2, Cut(k, 0, 2, 2, 2, 2), Cut(k, 100, 1, 16, 6, 6) * Scalar(2f),
+                Cut(k, 40, 2).Vec(), (Cut(k, 700, 1, 8, 6, 6) + Scalar(3f)) / Scalar(6f),
+                dilations: [2L, 1L], group: 2L, kernelShape: [2L, 2L], offsetGroup: 2L,
+                pads: [1L, 0L, 0L, 1L], strides: [1L, 1L]);
+
+            var mismatch =
+                ShapeMismatch(conv1, Vector(2L, 3L, 4L)) +
+                ShapeMismatch(convSame, Vector(1L, 4L, 4L, 3L)) +
+                ShapeMismatch(convAsym, Vector(1L, 2L, 7L, 3L)) +
+                ShapeMismatch(conv3, Vector(1L, 2L, 5L, 2L, 4L)) +
+                ShapeMismatch(convT1, Vector(2L, 3L, 18L)) +
+                ShapeMismatch(convTAsym, Vector(1L, 4L, 13L, 19L)) +
+                ShapeMismatch(convTShape, Vector(1L, 3L, 14L, 13L)) +
+                ShapeMismatch(convT3, Vector(1L, 1L, 8L, 6L, 6L)) +
+                ShapeMismatch(deform, Vector(1L, 2L, 6L, 6L));
+            return mismatch < Scalar(1L);
+        }
+
+        private static Tensor<float32> Cut(Tensor<float32> k, long start, params long[] shape)
+            => k.Slice(Vector(start), Vector(start + shape.Aggregate(1L, (a, b) => a * b))).Reshape(Vector(shape));
+    }
+
+    /// <summary>Pooling variants: MaxPool 1-D with ceil_mode + dilations + pads, 2-D with
+    /// storage_order 1 and its Indices over asymmetric pads, 3-D SAME_UPPER; AveragePool 2-D with
+    /// count_include_pad over asymmetric pads + ceil_mode, 1-D SAME_LOWER, 3-D dilated; LpPool
+    /// p=1 SAME_UPPER and p=3 over asymmetric pads; the global pools in 1-D and 3-D; MaxRoiPool
+    /// with a spatial_scale and fractional regions. Inputs: x1 [1,2,11], x2 [1,2,9,8],
+    /// x3 [1,1,5,6,4].</summary>
+    [Module]
+    public partial class QeePoolVariantsShapeAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x1, Tensor<float32> x2, Tensor<float32> x3)
+        {
+            // ceil((11+2-5)/2)+1 = 5.
+            var max1 = NN.MaxPool(x1, ceilMode: true, dilations: [2L], kernelShape: [3L],
+                pads: [1L, 1L], storageOrder: 0L, strides: [2L]);
+            // H (9+1-3)/2+1 = 4, W (8+1-2)/2+1 = 4.
+            var (max2, indices) = OnnxOp.MaxPoolWithIndices(x2, autoPad: AutoPad.NotSet, ceilMode: false,
+                dilations: [1L, 1L], kernelShape: [3L, 2L], pads: [1L, 0L, 0L, 1L], storageOrder: 1L, strides: [2L, 2L]);
+            // SAME_UPPER: [ceil(5/2), ceil(6/2), ceil(4/2)].
+            var max3 = (Tensor<float32>)OnnxOp.MaxPool(x3, autoPad: AutoPad.SameUpper, kernelShape: [2L, 2L, 2L],
+                strides: [2L, 2L, 2L]);
+            // H ceil((9+2-3)/2)+1 = 5, W ceil((8+2-3)/2)+1 = 5.
+            var avgPad = (Tensor<float32>)OnnxOp.AveragePool(x2, autoPad: AutoPad.NotSet, ceilMode: true,
+                countIncludePad: true, dilations: [1L, 1L], kernelShape: [3L, 3L], pads: [2L, 1L, 0L, 1L], strides: [2L, 2L]);
+            // SAME_LOWER: ceil(11/3) = 4.
+            var avg1 = (Tensor<float32>)OnnxOp.AveragePool(x1, autoPad: AutoPad.SameLower, ceilMode: false,
+                countIncludePad: false, dilations: null, kernelShape: [4L], pads: null, strides: [3L]);
+            // [5-2+1, 6-3+1, 4-2+1].
+            var avg3 = (Tensor<float32>)OnnxOp.AveragePool(x3, autoPad: AutoPad.NotSet, ceilMode: false,
+                countIncludePad: false, dilations: [1L, 2L, 1L], kernelShape: [2L, 2L, 2L],
+                pads: [0L, 0L, 0L, 0L, 0L, 0L], strides: [1L, 1L, 1L]);
+            // SAME_UPPER: [ceil(9/1), ceil(8/2)].
+            var lpSame = (Tensor<float32>)OnnxOp.LpPool(x2, autoPad: AutoPad.SameUpper, ceilMode: false,
+                dilations: null, kernelShape: [2L, 3L], p: 1L, pads: null, strides: [1L, 2L]);
+            // 11+0+2-3+1 = 11.
+            var lpAsym = (Tensor<float32>)OnnxOp.LpPool(x1, autoPad: AutoPad.NotSet, ceilMode: false,
+                dilations: [1L], kernelShape: [3L], p: 3L, pads: [0L, 2L], strides: [1L]);
+            var gmp = (Tensor<float32>)OnnxOp.GlobalMaxPool(x3);
+            var gap = (Tensor<float32>)OnnxOp.GlobalAveragePool(x1);
+            var glp = (Tensor<float32>)OnnxOp.GlobalLpPool(x3, p: 3L);
+            var rois = Vector(0f, 0.6f, 1.4f, 13f, 15f, 0f, 3f, 2.5f, 7f, 9f, 0f, -2f, 0f, 4f, 20f).Reshape(Vector(3L, 5L));
+            var roiPool = (Tensor<float32>)OnnxOp.MaxRoiPool(x2, rois, pooledShape: [2L, 3L], spatialScale: 0.5f);
+
+            var mismatch =
+                ShapeMismatch(max1, Vector(1L, 2L, 5L)) +
+                ShapeMismatch((Tensor<float32>)max2, Vector(1L, 2L, 4L, 4L)) +
+                ShapeMismatch((Tensor<int64>)indices, Vector(1L, 2L, 4L, 4L)) +
+                ShapeMismatch(max3, Vector(1L, 1L, 3L, 3L, 2L)) +
+                ShapeMismatch(avgPad, Vector(1L, 2L, 5L, 5L)) +
+                ShapeMismatch(avg1, Vector(1L, 2L, 4L)) +
+                ShapeMismatch(avg3, Vector(1L, 1L, 4L, 4L, 3L)) +
+                ShapeMismatch(lpSame, Vector(1L, 2L, 9L, 4L)) +
+                ShapeMismatch(lpAsym, Vector(1L, 2L, 11L)) +
+                ShapeMismatch(gmp, Vector(1L, 1L, 1L, 1L, 1L)) +
+                ShapeMismatch(gap, Vector(1L, 2L, 1L)) +
+                ShapeMismatch(glp, Vector(1L, 1L, 1L, 1L, 1L)) +
+                ShapeMismatch(roiPool, Vector(3L, 2L, 2L, 3L));
+            return mismatch < Scalar(1L);
+        }
+    }
 }

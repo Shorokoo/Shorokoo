@@ -36,5 +36,5 @@ public sealed class WinCpuBackend : OrtBackend
     /// execution-provider step does nothing; sessions still get the usual log-severity
     /// and graph-optimization options.
     /// </summary>
-    public WinCpuBackend() : base(static (_, _) => { }, ComputeDevice.Cpu, cudaDeviceId: null) { }
+    public WinCpuBackend() { }
 }

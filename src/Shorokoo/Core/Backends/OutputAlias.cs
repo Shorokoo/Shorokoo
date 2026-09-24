@@ -103,9 +103,10 @@ public static class OutputAliasProof
     /// an output 0 over input 0, <c>BatchNormalization</c> in training mode writing its running mean
     /// and variance into the buffers of the mean and variance it was given, and, where the runtime
     /// is built with NCCL, <c>AllReduce</c> handing back each of its inputs. <c>Dropout</c>, an
-    /// identity outside training, is counted as one too, and a sequence built by
+    /// identity outside training, is counted as one too; a sequence built by
     /// <c>SequenceConstruct</c> or <c>SequenceInsert</c> may hold the memory of any tensor it was
-    /// given. Named whatever their domain, which only ever widens what counts as a reader.
+    /// given, and what <c>SequenceErase</c> leaves of a sequence the memory that sequence held.
+    /// Named whatever their domain, which only ever widens what counts as a reader.
     /// </summary>
     private static bool Shares(NodeProto node, int input, int output) => node.OpType switch
     {
@@ -113,6 +114,7 @@ public static class OutputAliasProof
             or "Optional" or "OptionalGetElement" => (input, output) is (0, 0),
         "BatchNormalization" => (input, output) is (3, 1) or (4, 2),
         "SequenceConstruct" or "SequenceInsert" => output == 0,
+        "SequenceErase" => (input, output) is (0, 0),
         "AllReduce" => input == output,
         _ => false,
     };

@@ -795,7 +795,7 @@ public class ComputeContextLifetimeCoverageTests
 
     /// <summary>A graph written as a runtime hands one back: inputs and outputs by name, typed where
     /// the name says so (<c>a:float[4]</c>).</summary>
-    private static GraphProto GraphOf(string inputs, string outputs, params NodeProto[] nodes)
+    internal static GraphProto GraphOf(string inputs, string outputs, params NodeProto[] nodes)
     {
         var graph = new GraphProto();
         graph.Inputs.AddRange(Names(inputs).Select(Info));
@@ -820,7 +820,7 @@ public class ComputeContextLifetimeCoverageTests
         return new ValueInfoProto { Name = name, Type = new TypeProto { TensorType = tensor } };
     }
 
-    private static NodeProto Op(string op, string inputs, string outputs, string domain = "", GraphProto? body = null)
+    internal static NodeProto Op(string op, string inputs, string outputs, string domain = "", GraphProto? body = null)
     {
         var node = new NodeProto { OpType = op, Domain = domain };
         node.Inputs.AddRange(Names(inputs));
@@ -855,6 +855,34 @@ public class ComputeContextLifetimeCoverageTests
         Assert.True(Proves(GraphOf("a:float[4] b", "O:float[4]", Op("Neg", "b", "O"))));
         Assert.False(Proves(GraphOf("a:float[4] b", "O:double[4]", Op("Cast", "b", "O"))));
         Assert.False(Proves(GraphOf("a:float[4] b", "O:float[2,2]", Op("Neg", "b", "O"))));
+        Assert.False(Proves(GraphOf("a b", "O Z", Op("Flatten", "a", "v"), Op("ReduceSum", "v", "g"), Op("Sub", "a g", "O"), Op("Neg", "v", "Z"))));
+        Assert.False(Proves(GraphOf("a b", "O Z", Op("AllReduce", "a", "v", domain: "com.microsoft"), Op("ReduceSum", "v", "g"), Op("Sub", "a g", "O"), Op("Neg", "v", "Z"))));
+        Assert.False(Proves(GraphOf("X scale B mean var two zero", "O Z Y", norm, Op("Mul", "rv two", "O"), Op("Add", "rv zero", "Z")), "var"));
+        Assert.False(Proves(GraphOf("a x z", "O Z", Op("SequenceConstruct", "a x", "S"), Op("SequenceErase", "S", "E"),
+            Op("ConcatFromSequence", "E", "c"), Op("ReduceSum", "c", "g"), Op("Sub", "a g", "O"), Op("SequenceAt", "E z", "Z"))));
+    }
+
+    [Fact]
+    public void TestAWrittenGraphRefusesAnAliasWhereTheInputIsAnOutputTheOutputIsListedTwiceOrItsWriterIsNotAStandardOperator()
+    {
+        Assert.True(Proves(GraphOf("a b", "O", Op("Sub", "a b", "O"))));
+        Assert.False(Proves(GraphOf("a b", "O a", Op("Sub", "a b", "O"))));
+        Assert.False(Proves(GraphOf("a b", "O O", Op("Sub", "a b", "O"))));
+        Assert.False(Proves(GraphOf("a b", "O", Op("Sub", "a b", "O", domain: "custom"))));
+    }
+
+    [Fact]
+    public void TestASerializedModelProvesWhatItsGraphProvesAndOneWithoutAGraphProvesNothing()
+    {
+        OutputAlias[] pair = [new("O", "a")];
+        var proved = GraphOf("a b", "O", Op("Sub", "a b", "O"));
+        var refused = GraphOf("a b", "O Z", Op("Sub", "a b", "O"), Op("Neg", "a", "Z"));
+        Assert.Single(OutputAliasProof.Prove(ModelOf(proved), pair));
+        Assert.Equal(OutputAliasProof.Prove(proved, pair), OutputAliasProof.Prove(ModelOf(proved), pair));
+        Assert.Equal(OutputAliasProof.Prove(refused, pair), OutputAliasProof.Prove(ModelOf(refused), pair));
+        var graphless = new MemoryStream();
+        ProtoBuf.Serializer.Serialize(graphless, new ModelProto { IrVersion = 8 });
+        Assert.Empty(OutputAliasProof.Prove(graphless.ToArray(), pair));
     }
 
     [Fact]
@@ -928,7 +956,7 @@ public class ComputeContextLifetimeCoverageTests
 
     /// <summary>A session of <paramref name="backend"/> over <paramref name="graph"/>, built to
     /// write its output O into its input a.</summary>
-    private static OrtSession Aliasing(IShorokooBackend backend, GraphProto graph)
+    internal static OrtSession Aliasing(IShorokooBackend backend, GraphProto graph)
         => (OrtSession)backend.CreateSession(
             ModelOf(graph), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal,
             new DeviceMemorySettings().Resolve(reusedAcrossShapes: false), DiagnosticSettings.Default,
@@ -976,9 +1004,8 @@ public class ComputeContextLifetimeCoverageTests
     [Fact]
     public void TestASessionHoldingMoreThanSixteenMebibytesOfInitializersIsBuiltAgainWithoutWritingItsGraphOutAndStillAliases()
     {
-        (int Builds, float O, string? Aliased) Built(int floats, ComputeDevice device = ComputeDevice.Cpu)
+        (int Builds, float O, string? Aliased) Built(ScriptedBackend backend, int floats)
         {
-            var backend = new ScriptedBackend(_ => { }, device);
             var graph = GraphOf("a:float[1] i:int64[1]", "O:float[1]", Op("Gather", "C i", "g"), Op("Sub", "a g", "O"));
             graph.Initializers.Add(new TensorProto { Name = "C", Dims = [floats], data_type = 1, RawData = new byte[4L * floats] });
             using var session = Aliasing(backend, graph);
@@ -990,9 +1017,9 @@ public class ComputeContextLifetimeCoverageTests
         }
 
         const int SixteenMebibytes = 4 << 20;
-        Assert.Equal((2, 5f, "a"), Built(SixteenMebibytes + 1));
-        Assert.Equal((1, 5f, "a"), Built(SixteenMebibytes));
-        Assert.Equal((1, 5f, "a"), Built(SixteenMebibytes + 1, ComputeDevice.Other));
+        Assert.Equal((1, 5f, "a"), Built(new ScriptedBackend(_ => { }), SixteenMebibytes + 1));
+        Assert.Equal((2, 5f, "a"), Built(ScriptedBackend.Stock(_ => { }), SixteenMebibytes + 1));
+        Assert.Equal((1, 5f, "a"), Built(ScriptedBackend.Stock(_ => { }), SixteenMebibytes));
     }
 
     /// <summary>ONNX Runtime's own failure, which only ONNX Runtime constructs.</summary>
@@ -1003,16 +1030,22 @@ public class ComputeContextLifetimeCoverageTests
             culture: null)!;
 
     /// <summary>The CPU backend, calling <c>build</c> with the number of each session it builds,
-    /// from 0, where a provider would be appended.</summary>
+    /// from 0, where a provider would be appended. Made with <c>new</c>, it is built through the
+    /// constructor a subclass appending a provider of its own calls; made by <see cref="Stock"/>,
+    /// it stands for ONNX Runtime's own CPU provider, as the CPU packages' backends do.</summary>
     private sealed class ScriptedBackend : OrtBackend
     {
         private readonly int[] _builds;
 
-        internal ScriptedBackend(Action<int> build, ComputeDevice device = ComputeDevice.Cpu)
-            : this([0], build, device) { }
+        internal ScriptedBackend(Action<int> build) : this([0], build) { }
 
-        private ScriptedBackend(int[] builds, Action<int> build, ComputeDevice device)
-            : base((_, _) => build(builds[0]++), device, cudaDeviceId: null) => _builds = builds;
+        private ScriptedBackend(int[] builds, Action<int> build)
+            : base((_, _) => build(builds[0]++), ComputeDevice.Cpu, cudaDeviceId: null) => _builds = builds;
+
+        private ScriptedBackend(int[] builds, Action<int> build, bool stockProvider)
+            : base((_, _) => build(builds[0]++), ComputeDevice.Cpu, cudaDeviceId: null, stockProvider) => _builds = builds;
+
+        internal static ScriptedBackend Stock(Action<int> build) => new([0], build, stockProvider: true);
 
         internal int Builds => _builds[0];
     }
@@ -1348,6 +1381,41 @@ public class ProcessWideBackendCoverageTests
             DefaultBackend.Instance = liveDefault;
             DefaultBackend.ForgetRemembered();
             if (liveRemembered is not null) DefaultBackend.Remember(liveRemembered);
+        }
+    }
+}
+
+/// <summary>
+/// Where the process makes its temporary files, which every test making one reads, so these run
+/// alone.
+/// </summary>
+[Trait("Domain", "Core")]
+[Trait("Purpose", "Coverage")]
+[Collection(ProcessWideTempFolder.Name)]
+public class ProcessWideTempFolderCoverageTests
+{
+    [Fact]
+    public void TestASessionWithNowhereToWriteItsGraphOutIsBuiltAliasingNothing()
+    {
+        var graph = ComputeContextLifetimeCoverageTests.GraphOf("a:float[4] b:float[4]", "O:float[4]",
+            ComputeContextLifetimeCoverageTests.Op("Sub", "a b", "O"));
+        using (var writable = ComputeContextLifetimeCoverageTests.Aliasing(DefaultBackend.Instance, graph))
+            Assert.Single(writable.BindableAliases);
+
+        var blocker = Path.GetTempFileName();
+        var variable = OperatingSystem.IsWindows() ? "TMP" : "TMPDIR";
+        var was = Environment.GetEnvironmentVariable(variable);
+        try
+        {
+            // A file where a folder would have to be, so nothing can be made in the temp folder.
+            Environment.SetEnvironmentVariable(variable, Path.Combine(blocker, "temp"));
+            using var session = ComputeContextLifetimeCoverageTests.Aliasing(DefaultBackend.Instance, graph);
+            Assert.Empty(session.BindableAliases);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(variable, was);
+            File.Delete(blocker);
         }
     }
 }

@@ -85,10 +85,14 @@ public sealed class HostBackend : IShorokooBackend
     public IShorokooTensorValue CreateStringTensor(IReadOnlyList<string> data, long[] shape)
         => throw NoValues();
 
-    /// <summary>Always throws: there is no runtime here to build a value with.</summary>
+    /// <summary>Always throws: there is no runtime here to build a value with. Whatever it is
+    /// handed is disposed first, as a failure to build a sequence must.</summary>
     /// <exception cref="NotSupportedException">Always.</exception>
     public IShorokooTensorValue CreateSequence(IReadOnlyList<IShorokooTensorValue> values)
-        => throw NoValues();
+    {
+        foreach (var value in values) value.Dispose();
+        throw NoValues();
+    }
 
     /// <summary>Always throws, for the reason the others do; overridden rather than left to the
     /// interface default, which would allocate through a member that throws anyway and say so in
@@ -182,10 +186,14 @@ internal sealed class UnrecordedBackend : IShorokooBackend
     public IShorokooTensorValue CreateStringTensor(IReadOnlyList<string> data, long[] shape)
         => throw Unnamed();
 
-    /// <summary>Always throws: a producer nobody named builds nothing.</summary>
+    /// <summary>Always throws: a producer nobody named builds nothing. Whatever it is handed is
+    /// disposed first, as a failure to build a sequence must.</summary>
     /// <exception cref="NotSupportedException">Always.</exception>
     public IShorokooTensorValue CreateSequence(IReadOnlyList<IShorokooTensorValue> values)
-        => throw Unnamed();
+    {
+        foreach (var value in values) value.Dispose();
+        throw Unnamed();
+    }
 
     private static NotSupportedException Unnamed()
         => new("This stands for the backend that made a runtime value which was wrapped without "

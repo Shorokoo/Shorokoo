@@ -1257,9 +1257,10 @@ public class CoreUtilsCoverageTests
             Assert.Matches(@"base\s*\(\s*cudaDeviceId\s*:\s*0\s*\)", Source(gpu.Split('/')));
         string[] cpuFactories = ["Shorokoo.LinuxCPU/LinuxCpuBackend.cs", "Shorokoo.WinCPU/WinCpuBackend.cs"];
         foreach (var cpu in cpuFactories)
-            Assert.Matches(@"cudaDeviceId\s*:\s*null", Source(cpu.Split('/')));
+            Assert.DoesNotMatch(@"\bbase\s*\(", Source(cpu.Split('/')));
 
         var source = Source("Shorokoo.OnnxRuntime", "OrtBackend.cs");
+        Assert.Matches(@"protected\s+OrtBackend\s*\(\s*\)\s*:\s*this\s*\([^;]*cudaDeviceId\s*:\s*null", source);
         // Trailing [,)] rather than a closing paren: what this pins is that the device id still
         // reaches the session, not how many other things travel with it.
         Assert.Matches(@"new\s+OrtSession\s*\(\s*session\s*,\s*_cudaDeviceId\s*[,)]", source);
@@ -1909,6 +1910,22 @@ public class CoreUtilsCoverageTests
         IShorokooTensorValue[] beside = [Pair(), foreign, Pair()];
         Assert.Throws<InvalidCastException>(() => backend.CreateSequence(beside));
         Assert.True(Released(beside[0]) && foreign.Disposed && Released(beside[2]));
+
+        IShorokooTensorValue[] afterARelease = [Pair(), Pair()];
+        afterARelease[0].Dispose();
+        Assert.Throws<ObjectDisposedException>(() => backend.CreateSequence(afterARelease));
+        Assert.True(Released(afterARelease[1]));
+    }
+
+    [Fact]
+    public void TestABackendThatBuildsNoSequenceReleasesTheValuesItIsHandedForOne()
+    {
+        foreach (var backend in (IShorokooBackend[])[HostBackend.Instance, UnrecordedBackend.Instance])
+        {
+            var handed = new ForeignValue();
+            Assert.Throws<NotSupportedException>(() => backend.CreateSequence([handed]));
+            Assert.True(handed.Disposed);
+        }
     }
 
     /// <summary>A value no backend made, which a sequence of the ONNX Runtime backend cannot

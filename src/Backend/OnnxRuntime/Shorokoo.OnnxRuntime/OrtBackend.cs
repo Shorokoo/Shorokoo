@@ -16,25 +16,34 @@ namespace Shorokoo.OnnxRuntime;
 /// Runtime: it builds ORT sessions and ORT-backed tensor values for Shorokoo's inference
 /// pipeline. It is platform-neutral and abstract — each platform package
 /// (<c>Shorokoo.WinCPU</c>, <c>Shorokoo.WinGPU</c>, <c>Shorokoo.LinuxCPU</c>,
-/// <c>Shorokoo.LinuxGPU</c>) subclasses it and supplies its execution-provider
-/// configuration through the constructor delegate.
+/// <c>Shorokoo.LinuxGPU</c>) subclasses it through its CPU or its CUDA constructor.
 ///
 /// <para>You do not normally reference this type, or the <c>Shorokoo.OnnxRuntime</c>
 /// package that carries it, directly: reference one platform package instead and let
 /// <see cref="Shorokoo.Core.Backends.DefaultBackend"/> find its backend.
 /// Subclass this only to drive a different ONNX Runtime execution provider than the four
-/// shipped packages offer.</para>
+/// shipped packages offer, appending it through the constructor that takes a delegate.</para>
 /// </summary>
 public abstract class OrtBackend : IShorokooBackend
 {
     private readonly Action<SessionOptions, DeviceMemorySettings> _configureExecutionProvider;
     private readonly int? _cudaDeviceId;
 
+    // Whether every session runs on ONNX Runtime's own CPU provider or its CUDA provider, the two
+    // whose graph is known not to change for being written out (see CreateSession), rather than
+    // on a provider a subclass appended.
+    private readonly bool _stockProvider;
+
+    /// <summary>
+    /// The constructor for a subclass that appends an execution provider of its own. Its sessions
+    /// are never built a second time to save memory, as those of the CPU and CUDA constructors
+    /// may be (see <see cref="CreateSession(ReadOnlyMemory{byte}, ShorokooGraphOptimization, ShorokooLogSeverity, DeviceMemorySettings, DiagnosticSettings, IReadOnlyList{OutputAlias})"/>):
+    /// nothing here knows what that provider does to a graph.
+    /// </summary>
     /// <param name="configureExecutionProvider">
     /// Applied to the <see cref="SessionOptions"/> of every session this backend creates,
     /// after the log-severity and graph-optimization settings and before the session is
-    /// constructed. This is where a subclass appends its execution provider; a CPU backend
-    /// leaves ORT on its default provider and does nothing here. It is handed the
+    /// constructed. This is where a subclass appends its execution provider. It is handed the
     /// <see cref="DeviceMemorySettings"/> of the session being built — the arena settings belong
     /// to that session, so they arrive with it rather than being read from anywhere else.
     /// </param>
@@ -58,13 +67,14 @@ public abstract class OrtBackend : IShorokooBackend
         Action<SessionOptions, DeviceMemorySettings> configureExecutionProvider,
         ComputeDevice device,
         int? cudaDeviceId)
-    {
-        // Built here rather than on each read of Description, so a backend that could only
-        // describe itself incoherently cannot be constructed at all.
-        Description = new BackendDescription(GetType().Assembly.GetName().Name ?? GetType().Name, device, cudaDeviceId);
-        _configureExecutionProvider = configureExecutionProvider;
-        _cudaDeviceId = cudaDeviceId;
-    }
+        : this(configureExecutionProvider, device, cudaDeviceId, stockProvider: false) { }
+
+    /// <summary>
+    /// The CPU-backend constructor: every session runs on ONNX Runtime's own CPU execution
+    /// provider, its default, so none is appended.
+    /// </summary>
+    protected OrtBackend()
+        : this(static (_, _) => { }, ComputeDevice.Cpu, cudaDeviceId: null, stockProvider: true) { }
 
     /// <summary>
     /// The CUDA-backend constructor: every session gets the CUDA execution provider on
@@ -73,7 +83,23 @@ public abstract class OrtBackend : IShorokooBackend
     /// that device's arena on each run.
     /// </summary>
     protected OrtBackend(int cudaDeviceId)
-        : this((opts, mem) => AppendCuda(opts, cudaDeviceId, mem), ComputeDevice.Cuda, cudaDeviceId) { }
+        : this((opts, mem) => AppendCuda(opts, cudaDeviceId, mem), ComputeDevice.Cuda, cudaDeviceId, stockProvider: true) { }
+
+    // The one the others call. Internal rather than private so a test can stand for a stock
+    // provider while it watches each session being built.
+    internal OrtBackend(
+        Action<SessionOptions, DeviceMemorySettings> configureExecutionProvider,
+        ComputeDevice device,
+        int? cudaDeviceId,
+        bool stockProvider)
+    {
+        // Built here rather than on each read of Description, so a backend that could only
+        // describe itself incoherently cannot be constructed at all.
+        Description = new BackendDescription(GetType().Assembly.GetName().Name ?? GetType().Name, device, cudaDeviceId);
+        _configureExecutionProvider = configureExecutionProvider;
+        _cudaDeviceId = cudaDeviceId;
+        _stockProvider = stockProvider;
+    }
 
     /// <summary>
     /// This backend: the assembly the concrete backend lives in, and the device the constructor
@@ -163,12 +189,13 @@ public abstract class OrtBackend : IShorokooBackend
     /// graph, writing it out changing nothing else the CPU and CUDA providers do. Below that,
     /// keeping the copy costs less than a second build.</para>
     ///
-    /// <para>That premise is known only of the providers that ship here, so on a device of
-    /// another kind the session stays as first built. DirectML fuses its graph only when none is
-    /// being written out, so a DirectML session built to alias runs unfused — and built again, it
-    /// would run a graph the pairs were never proved over. A provider that compiles nodes cannot
-    /// have its graph written out at all, so a session built to alias on one is built twice, the
-    /// second time aliasing nothing.</para>
+    /// <para>That premise is known only of the providers that ship here, so a session of a
+    /// backend that appends a provider of its own stays as first built. DirectML fuses its graph
+    /// only when none is being written out, so a DirectML session built to alias runs unfused —
+    /// and built again, it would run a graph the pairs were never proved over. A provider that
+    /// compiles nodes cannot have its graph written out at all, so a session built to alias on
+    /// one is built twice, the second time aliasing nothing; and where no folder for the graph can
+    /// be made in the temp folder, the session is built aliasing nothing from the start.</para>
     /// </summary>
     public IShorokooSession CreateSession(
         ReadOnlyMemory<byte> modelBytes,
@@ -207,6 +234,22 @@ public abstract class OrtBackend : IShorokooBackend
         var optimizedDirectory = TempDirectory("shorokoo-optimized-");
         try
         {
+            // Made here, apart from the build, so that a temp folder this process cannot write in
+            // is told apart from a failure of the build itself: aliasing is a saving and never a
+            // requirement, so a session whose graph has nowhere to be written out is built as one
+            // that aliases nothing, as it would be with no aliasing asked for. Only the folder is
+            // made here: the runtime failing to write into it -- a disk filling as it writes --
+            // reports nothing that tells it apart from any other failure of the build, and fails
+            // the build like one.
+            try
+            {
+                Directory.CreateDirectory(optimizedDirectory);
+            }
+            catch (Exception unwritable) when (unwritable is IOException or UnauthorizedAccessException)
+            {
+                return Wrap(New(optimizedDirectory: null), []);
+            }
+
             BuiltSession built;
             try
             {
@@ -226,8 +269,7 @@ public abstract class OrtBackend : IShorokooBackend
             }
 
             var (proved, initializerBytes) = ProvedAgain(optimizedDirectory, outputAliases);
-            if (initializerBytes > InitializersKeptTwice
-                && Description.Device is ComputeDevice.Cpu or ComputeDevice.Cuda)
+            if (initializerBytes > InitializersKeptTwice && _stockProvider)
             {
                 Discard(built);
                 built = New(optimizedDirectory: null);
@@ -275,10 +317,10 @@ public abstract class OrtBackend : IShorokooBackend
         // process. Disposing in a finally keeps them rooted across the constructor.
         using var options = new SessionOptions();
         Configure(options, graphOptimization, logSeverity);
-        // Named before anything can throw, and made inside the try: each folder is made by the call
-        // that points the options into it, and a setter there throwing after the folder was made
-        // would otherwise leave it with no name for the catch, or the caller's finally, to delete
-        // it by.
+        // Named before anything can throw, and made inside the try, by the call that points the
+        // options into it: a setter there throwing after the folder was made would otherwise leave
+        // it with no name for the catch to delete it by. The folder the graph is written into is
+        // the caller's, made and deleted there.
         var profileDirectory = diagnostics.TraceNodePlacement ? TempDirectory("shorokoo-node-placement-") : null;
         try
         {
@@ -332,13 +374,12 @@ public abstract class OrtBackend : IShorokooBackend
 
     /// <summary>
     /// Has ONNX Runtime write the graph it will run — after its rewrites, with the nodes that
-    /// actually execute — into <paramref name="directory"/>, which this makes. The initializers
-    /// above a kibibyte go to a file beside it rather than into the model, so a folded constant the
-    /// size of a tensor costs a write and not a parse.
+    /// actually execute — into <paramref name="directory"/>, which the caller has made. The
+    /// initializers above a kibibyte go to a file beside it rather than into the model, so a folded
+    /// constant the size of a tensor costs a write and not a parse.
     /// </summary>
     private static void WriteOptimizedModel(SessionOptions options, string directory)
     {
-        Directory.CreateDirectory(directory);
         options.OptimizedModelFilePath = Path.Combine(directory, OptimizedModelFile);
         options.AddSessionConfigEntry(
             "session.optimized_model_external_initializers_file_name", OptimizedInitializersFile);
@@ -746,35 +787,30 @@ public abstract class OrtBackend : IShorokooBackend
     /// it is that one the message's advice is about.</exception>
     public IShorokooTensorValue CreateSequence(IReadOnlyList<IShorokooTensorValue> values)
     {
-        // Before the ownership transfer below, so the message can still name the offending
-        // tensor's shape and type. A pattern match rather than a cast, so a value that is not this
-        // backend's still fails where it did, on the cast inside the try.
-        foreach (var v in values)
-            if (v is OrtTensorValue { IsInDeviceMemory: true } onDevice)
-            {
-                // Built before the disposal, which invalidates what it reads.
-                var refusal =
-                    $"A tensor ({string.Join('x', onDevice.Shape)}:{onDevice.ElementType}) in "
-                    + $"{Description.Name}'s own device memory cannot be an element of a sequence: "
-                    + "ONNX Runtime can pack it into one but reads an element back with a host "
-                    + "copy, so nothing could ever read it again. Bring the tensor into host "
-                    + "memory first -- CopyTensorToHost does that, and TensorData.ToHost() "
-                    + "is the same move on a tensor.";
-                // This method's contract is that a failure disposes what it was handed, and both
-                // in-tree callers rely on it by calling outside the catch that would otherwise
-                // free these. A refusal is a failure like any other. What the caller keeps is the
-                // tensor these were copied from, which is what it has to move.
-                foreach (var owned in values) owned.Dispose();
-                throw new InvalidOperationException(refusal);
-            }
-
         var inner = new List<OrtValue>(values.Count);
         try
         {
-            // Inside the try, not before it: this method documents itself as taking ownership, so
-            // an element that is not this backend's value -- one from another runtime, or a foreign
-            // implementation -- throws on the cast with the earlier elements already unwrapped and
-            // the caller already committed to having given them up.
+            // Before the ownership transfer below, so the message can still name the offending
+            // tensor's shape and type. A pattern match rather than a cast, so a value that is not
+            // this backend's still fails where it did, on the cast below. Inside the try with the
+            // rest: this method's contract is that a failure disposes what it was handed, and a
+            // refusal is a failure like any other -- as is a value already released, which throws
+            // when it is asked where it is. What the caller keeps is the tensor these were copied
+            // from, which is what it has to move.
+            foreach (var v in values)
+                if (v is OrtTensorValue { IsInDeviceMemory: true } onDevice)
+                    throw new InvalidOperationException(
+                        $"A tensor ({string.Join('x', onDevice.Shape)}:{onDevice.ElementType}) in "
+                        + $"{Description.Name}'s own device memory cannot be an element of a sequence: "
+                        + "ONNX Runtime can pack it into one but reads an element back with a host "
+                        + "copy, so nothing could ever read it again. Bring the tensor into host "
+                        + "memory first -- CopyTensorToHost does that, and TensorData.ToHost() "
+                        + "is the same move on a tensor.");
+
+            // This method documents itself as taking ownership, so an element that is not this
+            // backend's value -- one from another runtime, or a foreign implementation -- throws on
+            // the cast with the earlier elements already unwrapped and the caller already committed
+            // to having given them up.
             foreach (var v in values) inner.Add(((OrtTensorValue)v).Inner);
             var sequence = OrtValue.CreateSequence(inner);
             // The sequence holds the values now and frees them with itself, so each wrapper is

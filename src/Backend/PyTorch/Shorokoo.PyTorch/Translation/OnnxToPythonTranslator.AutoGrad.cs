@@ -34,7 +34,7 @@ internal sealed record AutoGradStep(int Index, NodeProto Node)
             if (function.Nodes.Any(ContainsAutoGrad))
                 throw Refusal($"the function {function.Name} holds one, and it is taken only at the top level of the model's graph");
         foreach (var node in graph.Nodes)
-            if (node.Attributes.Any(a => a.G is { } g && g.Nodes.Any(ContainsAutoGrad)))
+            if (Bodies(node).Any(g => g.Nodes.Any(ContainsAutoGrad)))
                 throw Refusal($"the {node.OpType} node '{node.Name}' holds one in its body, and it is taken only at the top level of the model's graph");
 
         var found = graph.Nodes.Select((node, index) => (node, index)).Where(n => IsAutoGrad(n.node)).ToList();
@@ -64,7 +64,12 @@ internal sealed record AutoGradStep(int Index, NodeProto Node)
     }
 
     private static bool ContainsAutoGrad(NodeProto node)
-        => IsAutoGrad(node) || node.Attributes.Any(a => a.G is { } g && g.Nodes.Any(ContainsAutoGrad));
+        => IsAutoGrad(node) || Bodies(node).Any(g => g.Nodes.Any(ContainsAutoGrad));
+
+    /// <summary>Every subgraph <paramref name="node"/>'s attributes hold, a graph attribute's and a
+    /// graphs attribute's alike.</summary>
+    private static IEnumerable<GraphProto> Bodies(NodeProto node)
+        => node.Attributes.SelectMany(a => a.G is { } g ? a.Graphs.Prepend(g) : a.Graphs);
 
     private static int ElementType(GraphProto graph, string name)
     {
@@ -121,7 +126,7 @@ internal sealed record AutoGradStep(int Index, NodeProto Node)
                 $"The PyTorch backend does not differentiate through the {node.OpType} operator, and the {node.OpType} "
                 + $"node '{node.Name}' lies between the loss of the training step's AutoGrad node and a tensor it "
                 + "differentiates with respect to.");
-        foreach (var body in node.Attributes.Select(a => a.G).OfType<GraphProto>())
+        foreach (var body in Bodies(node))
         {
             var inner = new HashSet<string>(dependent, StringComparer.Ordinal);
             inner.UnionWith(body.Inputs.Select(i => i.Name));
@@ -138,7 +143,7 @@ internal sealed record AutoGradStep(int Index, NodeProto Node)
     /// <summary>What a node reads: its inputs, and the values of enclosing scopes its bodies read.</summary>
     private static IEnumerable<string> Reads(NodeProto node)
         => node.Inputs.Where(i => i.Length > 0)
-            .Concat(node.Attributes.Select(a => a.G).OfType<GraphProto>().SelectMany(Captured));
+            .Concat(Bodies(node).SelectMany(Captured));
 
     private static IEnumerable<string> Captured(GraphProto graph)
     {

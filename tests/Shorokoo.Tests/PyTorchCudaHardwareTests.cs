@@ -92,6 +92,40 @@ public class PyTorchCudaHardwareTests
     }
 
     [TorchCudaFact]
+    public void TestALimitIsWhatARunMayAllocateBeyondWhatTheAllocatorHoldsWhereItHoldsMoreThanItHasHandedOut()
+    {
+        const long mebibyte = 1L << 20;
+        var smalls = Enumerable.Range(0, 4096).Select(_ => Cuda.Value.CreateUninitializedTensorInBackendMemory(ShorokooTensorElementType.Float, [128])).ToList();
+        foreach (var small in smalls.SkipLast(1)) small.Dispose();
+        using var kept = smalls[^1];
+        using var session = Cuda.Value.CreateSession(NegModel(), default, default, new DeviceMemorySettings { LimitBytes = 17 * mebibyte });
+        using var x = Cuda.Value.CreateUninitializedTensorInBackendMemory(ShorokooTensorElementType.Float, [4 * mebibyte]);
+        using var y = session.RunRetainingOutputs(new Dictionary<string, IShorokooTensorValue> { ["x"] = x }, ["y"], new HashSet<string> { "y" }, RunSettings.Default)[0];
+
+        Assert.False(y.IsHostAccessible);
+    }
+
+    [TorchCudaFact]
+    public void TestARunWithoutALimitIsNotHeldToTheLimitOfAnotherSessionsRunOnTheCard()
+    {
+        using var capped = Cuda.Value.CreateSession(NegModel(), default, default, new DeviceMemorySettings { LimitBytes = 1L << 20 });
+        using var free = Cuda.Value.CreateSession(NegModel(), default, default, DeviceMemorySettings.Default);
+        using var small = Cuda.Value.CreateUninitializedTensorInBackendMemory(ShorokooTensorElementType.Float, [1024]);
+        using var large = Cuda.Value.CreateUninitializedTensorInBackendMemory(ShorokooTensorElementType.Float, [16L << 20]);
+        var until = DateTime.UtcNow + TimeSpan.FromSeconds(2);
+        void Run(IShorokooSession session, IShorokooTensorValue x)
+            => session.RunRetainingOutputs(new Dictionary<string, IShorokooTensorValue> { ["x"] = x }, ["y"], new HashSet<string> { "y" }, RunSettings.Default)[0].Dispose();
+        var cappedRuns = Task.Run(() => { while (DateTime.UtcNow < until) Run(capped, small); });
+        var failures = 0;
+        while (DateTime.UtcNow < until)
+            try { Run(free, large); }
+            catch (InvalidOperationException) { failures++; }
+        cappedRuns.Wait();
+
+        Assert.Equal(0, failures);
+    }
+
+    [TorchCudaFact]
     public void TestARunAskedToShrinkHandsTheCardsCachedBlocksBack()
     {
         using var session = Cuda.Value.CreateSession(PyTorchBackendCoverageTests.Serialize(

@@ -1408,7 +1408,7 @@ CopyTo(context) of Tensor (8388608,):Float32 asks this compute context for 33554
 device 0 memory, which its device-memory budget cannot give: the budget
 (DeviceMemorySettings.LimitBytes) is 67108864 bytes, and 50331648 bytes of it are attached to the
 context there, in 1 tensor(s), leaving 16777216. Delete what the context no longer needs, or give
-it a larger budget.
+the context a larger budget.
 ```
 
 **A run's arena gets what the context leaves it.** A session's `gpu_mem_limit` is the budget less

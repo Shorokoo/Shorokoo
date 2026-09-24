@@ -296,18 +296,7 @@ namespace Shorokoo
         /// <summary>A sequence over the value <see cref="BuildValueOn"/> makes on
         /// <paramref name="backend"/>, allocated by it and released through it.</summary>
         private TensorDataSequence BuildCopy(IShorokooBackend backend)
-        {
-            var value = BuildValueOn(backend);
-            try
-            {
-                return OnnxUtils.CreateTensorDataSequenceFromValue(DType, value, backend);
-            }
-            catch
-            {
-                backend.Release(value);
-                throw;
-            }
-        }
+            => OnnxUtils.CreateTensorDataSequenceFromValue(DType, BuildValueOn(backend), backend);
 
         /// <summary>
         /// This sequence's contents built as one sequence value of <paramref name="backend"/>'s
@@ -753,16 +742,8 @@ namespace Shorokoo
             {
                 ThrowIfDisposed();
                 var val = backing.GetValue(index);
-                try
-                {
-                    return (TensorData<T>)OnnxUtils.CreateTensorDataFromValue(
-                        new Shape(val.Shape), (DType)(int)val.ElementType, val, AllocatingBackend);
-                }
-                catch
-                {
-                    AllocatingBackend.Release(val);
-                    throw;
-                }
+                return (TensorData<T>)OnnxUtils.CreateTensorDataFromValue(
+                    new Shape(val.Shape), (DType)(int)val.ElementType, val, AllocatingBackend);
             }
         }
 

@@ -184,15 +184,11 @@ namespace Shorokoo.Runtime
         // gives up unless the backend was handed it, or it was released already.
         private readonly List<ILifetimeOwner> _taken = [];
 
-        // What the backend is handed: tensors and sequences consumed where they are, and the copies
-        // consumed in the place of the ones that could not be -- and, by value, which tensor each
-        // value was, so an output the backend wrote into one can be told whose memory it now lives in.
-        private readonly List<ILifetimeOwner> _handed = [];
-        private readonly List<IShorokooTensorValue> _consumed = [];
-        private readonly Dictionary<IShorokooTensorValue, TensorData> _handedByValue =
-            new(ReferenceEqualityComparer.Instance);
-
-        private bool _handedOver;
+        // What the backend is handed, by value: the tensors and sequences consumed where they are, and
+        // the copies consumed in the place of the ones that could not be -- each once, and each the one
+        // its value was, so an output the backend wrote into a value can be told whose memory it now
+        // lives in.
+        private readonly Dictionary<IShorokooTensorValue, ILifetimeOwner> _handed = new(ReferenceEqualityComparer.Instance);
 
         /// <param name="context">The context running, which takes the locks and is attached to
         /// what the run reads.</param>
@@ -205,7 +201,7 @@ namespace Shorokoo.Runtime
             _backend = backend;
             _run = run;
             _space = backend.MemorySpace;
-            Budget = context.BudgetIn(_space);
+            Budget = context.BudgetIn();
         }
 
         /// <summary>The device-memory budget this run is under — its context's, where the memory
@@ -216,7 +212,7 @@ namespace Shorokoo.Runtime
         internal IReadOnlyList<TensorLease> Leases => _leases;
 
         /// <summary>The values handed to the backend, each once.</summary>
-        internal IReadOnlyCollection<IShorokooTensorValue> Consumed => _consumed;
+        internal IReadOnlyCollection<IShorokooTensorValue> Consumed => _handed.Keys;
 
         /// <summary>
         /// Works out what each input feeds — one target per distinct tensor or sequence, in the order
@@ -324,17 +320,17 @@ namespace Shorokoo.Runtime
         internal DevicePlan Plan(object? excludingArena)
         {
             var targets = _targets ?? throw new InvalidOperationException("A run was planned before it was prepared.");
-            var counted = new HashSet<TensorData>(ReferenceEqualityComparer.Instance);
-            long attached = 0;
-            var attachedTensors = 0;
-            foreach (var tensor in _context.AttachedTensorsIn(_space, excludingArena))
-            {
-                counted.Add(tensor);
-                attached += tensor.ByteCount;
-                attachedTensors++;
-            }
+            var (attached, attachedTensors) = _context.AttachedIn(excludingArena);
 
+            // What the run adds is what is not on the books already, each once however many inputs
+            // it is read through.
             long added = 0;
+            HashSet<TensorData>? adding = null;
+            bool Adds(TensorData tensor)
+                => tensor.Space == _space
+                   && !(excludingArena is not null && ReferenceEquals(tensor.Arena, excludingArena))
+                   && !_context.Attaches(tensor)
+                   && (adding ??= new(ReferenceEqualityComparer.Instance)).Add(tensor);
             foreach (var target in targets)
             {
                 target.PlannedFresh = false;
@@ -348,10 +344,7 @@ namespace Shorokoo.Runtime
                     // context: where it is in the context's memory too -- another runtime's
                     // allocation on the same card -- the books carry both for the run. A tried feed
                     // may yet be read, so it is counted as one.
-                    if (target.Mode != FeedMode.Consume && tensor.Space == _space
-                        && !(excludingArena is not null && ReferenceEquals(tensor.Arena, excludingArena))
-                        && counted.Add(tensor))
-                        added += tensor.ByteCount;
+                    if (target.Mode != FeedMode.Consume && Adds(tensor)) added += tensor.ByteCount;
                     var where = TensorData.RunMemoryOf(_backend, tensor.DType);
                     if (where.Space != _space) continue;
                     // Read through the copy the tensor holds there, or through a fresh one.
@@ -363,11 +356,24 @@ namespace Shorokoo.Runtime
                         continue;
                     }
                 }
-                if (resident.Space != _space) continue;
-                if (excludingArena is not null && ReferenceEquals(resident.Arena, excludingArena)) continue;
-                if (counted.Add(resident)) added += resident.ByteCount;
+                if (Adds(resident)) added += resident.ByteCount;
             }
             return new DevicePlan(attached, attachedTensors, added);
+        }
+
+        /// <summary>
+        /// The arena limit a new session gets for this run under a budget of <paramref name="limit"/>
+        /// bytes — the budget less everything the run will hold outside that session's arena, which
+        /// starts empty — with the run admitted against it.
+        /// </summary>
+        /// <exception cref="InvalidOperationException">What the run would hold leaves the arena
+        /// nothing. Nothing has been taken.</exception>
+        internal long AdmitFresh(long limit)
+        {
+            var plan = Plan(excludingArena: null);
+            var arena = ComputeContext.ArenaLimitWithin(limit, plan.Outside) ?? throw NoRoom(limit, plan);
+            Admit(arena, plan);
+            return arena;
         }
 
         /// <summary>
@@ -443,17 +449,16 @@ namespace Shorokoo.Runtime
         /// </summary>
         internal T HandOver<T>(Func<IReadOnlyCollection<IShorokooTensorValue>, T> run)
         {
-            _handedOver = true;
             try
             {
-                return run(_consumed);
+                return run(_handed.Keys);
             }
             finally
             {
                 // Every one of them, whatever marking one of them does: one left unmarked would be
                 // released again when the run gives up, after its backend has released it.
                 Exception? failed = null;
-                foreach (var owner in _handed)
+                foreach (var owner in _handed.Values)
                 {
                     try
                     {
@@ -495,7 +500,7 @@ namespace Shorokoo.Runtime
             }
             // A release is once only, and does nothing for what was handed over, so these can be
             // asked of everything.
-            foreach (var owner in (IEnumerable<ILifetimeOwner>)[.. _handed, .. _taken])
+            foreach (var owner in (IEnumerable<ILifetimeOwner>)[.. _handed.Values, .. _taken])
             {
                 try
                 {
@@ -506,7 +511,6 @@ namespace Shorokoo.Runtime
                     releasing ??= e;
                 }
             }
-            Debug.Assert(_handedOver || _consumed.Count == 0 || _handed.Count > 0);
             if (releasing is not null && failed is null) ExceptionDispatchInfo.Throw(releasing);
         }
 
@@ -608,9 +612,7 @@ namespace Shorokoo.Runtime
 
         private IShorokooTensorValue Hand(ILifetimeOwner owner, IShorokooTensorValue value)
         {
-            _handed.Add(owner);
-            _consumed.Add(value);
-            if (owner is TensorData tensor) _handedByValue[value] = tensor;
+            _handed.Add(value, owner);
             return value;
         }
 
@@ -621,7 +623,7 @@ namespace Shorokoo.Runtime
         /// What an output the backend wrote into that memory is in.
         /// </summary>
         internal object? ArenaOfHanded(IShorokooTensorValue value)
-            => _handedByValue.TryGetValue(value, out var tensor) ? tensor.Arena : null;
+            => _handed.TryGetValue(value, out var owner) && owner is TensorData tensor ? tensor.Arena : null;
 
         private IShorokooTensorValue Read(Target target, TensorData tensor)
         {

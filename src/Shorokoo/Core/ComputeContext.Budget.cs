@@ -65,61 +65,48 @@ namespace Shorokoo.Runtime
         {
             if (_isHost) return default;
             var space = MemorySpace;
-            var (bytes, tensors) = AttachedIn(space);
-            return new DeviceMemoryUse(bytes, tensors, BudgetIn(space));
+            var (bytes, tensors) = AttachedIn();
+            return new DeviceMemoryUse(bytes, tensors, BudgetIn());
         }
 
         /// <summary>
-        /// The budget in force on this context's memory when that memory is
-        /// <paramref name="space"/>: <see cref="DeviceMemorySettings.LimitBytes"/> where the space is
-        /// a device's, and null where it is the host's, which a device-memory budget does not
-        /// govern.
+        /// The budget in force on this context's memory: <see cref="DeviceMemorySettings.LimitBytes"/>
+        /// where that memory is a device's, and null where it is the host's, which a device-memory
+        /// budget does not govern.
         /// </summary>
-        internal long? BudgetIn(MemorySpace space) => _isHost || space.IsHost ? null : DeviceMemory.LimitBytes;
+        internal long? BudgetIn() => _isHost || MemorySpace.IsHost ? null : DeviceMemory.LimitBytes;
 
         /// <summary>
-        /// The bytes of the live tensors attached to this context in <paramref name="space"/>, and
+        /// The bytes of the live tensors attached to this context in its own memory, and
         /// how many they are — leaving out those in <paramref name="excludingArena"/>, the arena of
         /// the session about to run, whose limit already covers them.
         /// </summary>
-        internal (long Bytes, int Tensors) AttachedIn(MemorySpace space, object? excludingArena = null)
+        internal (long Bytes, int Tensors) AttachedIn(object? excludingArena = null)
         {
+            var space = MemorySpace;
             long bytes = 0;
             var tensors = 0;
-            foreach (var tensor in AttachedTensorsIn(space, excludingArena))
+            foreach (var tensor in _attached.Snapshot())
             {
+                if (tensor.IsDisposed || tensor.Space != space) continue;
+                if (excludingArena is not null && ReferenceEquals(tensor.Arena, excludingArena)) continue;
                 bytes += tensor.ByteCount;
                 tensors++;
             }
             return (bytes, tensors);
         }
 
-        /// <summary>The live tensors attached to this context in <paramref name="space"/>, those in
-        /// <paramref name="excludingArena"/> left out.</summary>
-        internal List<TensorData> AttachedTensorsIn(MemorySpace space, object? excludingArena)
-        {
-            var found = new List<TensorData>();
-            foreach (var tensor in _attached.Snapshot())
-            {
-                if (tensor.IsDisposed || tensor.Space != space) continue;
-                if (excludingArena is not null && ReferenceEquals(tensor.Arena, excludingArena)) continue;
-                found.Add(tensor);
-            }
-            return found;
-        }
-
         /// <summary>
-        /// Enters this context's budget gate when memory in <paramref name="space"/> is under a
-        /// budget, and answers null — having entered nothing — when it is not. From here to the
+        /// Enters this context's budget gate when its memory is under a budget, and answers null — having entered nothing — when it is not. From here to the
         /// matching <see cref="BudgetGate.Exit"/>, no run of this context executes and nothing else
         /// is placed in its memory. The thread holding the gate may enter it again (see
         /// <see cref="BudgetGate"/>).
         /// </summary>
         /// <exception cref="OperationCanceledException"><paramref name="cancellation"/> was cancelled
         /// while this waited for the gate.</exception>
-        internal BudgetGate? EnterBudget(MemorySpace space, CancellationToken cancellation)
+        internal BudgetGate? EnterBudget(CancellationToken cancellation)
         {
-            if (BudgetIn(space) is null) return null;
+            if (BudgetIn() is null) return null;
             var gate = Volatile.Read(ref _budgetGate)
                        ?? Interlocked.CompareExchange(ref _budgetGate, new BudgetGate(), null)
                        ?? _budgetGate!;
@@ -137,7 +124,7 @@ namespace Shorokoo.Runtime
         {
             if (_isHost) return;
             var space = MemorySpace;
-            var gate = EnterBudget(space, CancellationToken.None);
+            var gate = EnterBudget(CancellationToken.None);
             try
             {
                 // Again, now that this may have waited at the gate for a run of this context: a
@@ -151,7 +138,7 @@ namespace Shorokoo.Runtime
                         if (tensor.Space == space && !tensor.IsDisposed && !_attached.Contains(tensor)
                             && seen.Add(tensor))
                             adding += tensor.ByteCount;
-                    RefusePlacementOverBudget(space, adding, () => tensors.Count == 1
+                    RefusePlacementOverBudget(adding, () => tensors.Count == 1
                         ? $"{operation}(context) of {tensors[0].Describe()}"
                         : $"{operation}(context) of a sequence of {tensors.Count} tensors");
                 }
@@ -161,6 +148,46 @@ namespace Shorokoo.Runtime
             {
                 gate?.Exit();
             }
+        }
+
+        /// <summary>
+        /// A new tensor of <paramref name="bytes"/> in this context's memory, made by
+        /// <paramref name="make"/> and attached to this context: refused, before anything is made,
+        /// where the context's device-memory budget cannot take it alongside what is attached — under
+        /// the budget gate, so nothing else is placed in between — and deleted again, since nothing
+        /// else names it, if the attaching fails.
+        /// </summary>
+        /// <exception cref="InvalidOperationException">The budget cannot take it. Nothing was
+        /// made.</exception>
+        internal TensorData Placed(long bytes, Func<string> asked, Func<TensorData> make)
+        {
+            var gate = EnterBudget(CancellationToken.None);
+            try
+            {
+                RefusePlacementOverBudget(bytes, asked);
+                return Attached(make());
+            }
+            finally
+            {
+                gate?.Exit();
+            }
+        }
+
+        /// <summary><paramref name="made"/>, attached to this context — or deleted, where the
+        /// attaching fails, since nothing else references it: on a card, an allocation just
+        /// filled across the bus.</summary>
+        internal TensorData Attached(TensorData made)
+        {
+            try
+            {
+                Attach(made);
+            }
+            catch
+            {
+                made.Delete();
+                throw;
+            }
+            return made;
         }
 
         /// <summary>
@@ -180,12 +207,11 @@ namespace Shorokoo.Runtime
         internal T PlaceAll<T>(long? bytes, Func<string> asked, Func<T> place)
         {
             if (_isHost) return place();
-            var space = MemorySpace;
-            var gate = EnterBudget(space, CancellationToken.None);
+            var gate = EnterBudget(CancellationToken.None);
             if (gate is null) return place();
             try
             {
-                if (bytes is { } adding) RefusePlacementOverBudget(space, adding, asked);
+                if (bytes is { } adding) RefusePlacementOverBudget(adding, asked);
                 // Only this placement attaches to this context while the gate is held -- its runs,
                 // compiles and every other placement wait at it -- so whatever the list gains in
                 // between is this placement's.
@@ -209,25 +235,25 @@ namespace Shorokoo.Runtime
         }
 
         /// <summary>
-        /// Refuses to place <paramref name="bytes"/> more in this context's memory, in
-        /// <paramref name="space"/>, where its budget cannot take them alongside what is attached to
-        /// it there. The caller holds the budget gate, so nothing else is placed in between.
+        /// Refuses to place <paramref name="bytes"/> more in this context's memory where its budget
+        /// cannot take them alongside what is attached to it there. The caller holds the budget gate,
+        /// so nothing else is placed in between.
         /// </summary>
-        /// <param name="space">The memory being placed in: the context's own.</param>
         /// <param name="bytes">What the placement adds to what is attached there.</param>
         /// <param name="asked">What asked, as the refusal names it — built only for a refusal.</param>
         /// <exception cref="InvalidOperationException">The budget cannot take them.</exception>
-        internal void RefusePlacementOverBudget(MemorySpace space, long bytes, Func<string> asked)
+        internal void RefusePlacementOverBudget(long bytes, Func<string> asked)
         {
-            if (bytes <= 0 || BudgetIn(space) is not { } limit) return;
-            var (attached, tensors) = AttachedIn(space);
+            if (bytes <= 0 || BudgetIn() is not { } limit) return;
+            var space = MemorySpace;
+            var (attached, tensors) = AttachedIn();
             if (attached + bytes <= limit) return;
             throw new InvalidOperationException(
                 $"{asked()} asks this compute context for {Figure(bytes)} bytes of {space}, which its "
                 + "device-memory budget cannot give: the budget (DeviceMemorySettings.LimitBytes) is "
                 + $"{Figure(limit)} bytes, and {Figure(attached)} bytes of it are attached to the "
                 + $"context there, in {Figure(tensors)} tensor(s), leaving {Figure(limit - attached)}. "
-                + "Delete what the context no longer needs, or give it a larger budget.");
+                + "Delete what the context no longer needs, or give the context a larger budget.");
         }
 
         /// <summary>
@@ -241,7 +267,7 @@ namespace Shorokoo.Runtime
                 + $"in the context's device-memory budget, and the {Figure(attached)} bytes of the "
                 + $"{Figure(tensors)} tensor(s) attached to it in {space} leave nothing of the "
                 + $"{Figure(limit)} bytes it has (DeviceMemorySettings.LimitBytes). Delete what the "
-                + "context no longer needs, or give it a larger budget.");
+                + "context no longer needs, or give the context a larger budget.");
 
         /// <summary>A figure as a budget refusal prints it: invariant digits, so a message reads the
         /// same whatever culture the process runs in.</summary>

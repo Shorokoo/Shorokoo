@@ -306,7 +306,7 @@ namespace Shorokoo.Runtime
             var feeds = new RunFeeds(_owner, _backend, Identity());
             // Under a device-memory budget this waits for any run of the context already in flight:
             // two at once would each be counting the room the other's arena is taking.
-            var entered = _owner.EnterRun(_backend.MemorySpace, runSettings.CancellationToken);
+            var entered = _owner.EnterRun(runSettings.CancellationToken);
             Exception? failed = null;
             var counted = false;
             try
@@ -338,40 +338,9 @@ namespace Shorokoo.Runtime
                 var sessionInputs = feeds.Feed(name =>
                     _onnxInputNameByOriginal.TryGetValue(name, out var mapped) ? mapped : name);
 
-                using var eviction = ComputeContext.LinkEvictions(feeds.Leases, runSettings.CancellationToken);
-                // Under a budget the arena hands back what the run did not keep as it ends, whatever
-                // the caller asked: the budget counted the arena at its limit only for this run.
-                var settings = feeds.Budget is null
-                    ? runSettings : runSettings with { ShrinkArenaAfterRun = true };
-                if (eviction is not null) settings = settings with { CancellationToken = eviction.Token };
-
-                IReadOnlyList<IShorokooTensorValue> results;
                 // Per output, the input whose consumed memory the session wrote it into, or null.
-                IReadOnlyList<string?>? aliasedInputs = null;
-                // Either side of the native call and nothing else: the arena figures are about
-                // what the run allocates, and the wrapping above allocates nowhere near it.
-                var arenaBefore = _owner.StartRunStats(session);
-                try
-                {
-                    // What this run consumed goes to the backend here, and is its alone from this
-                    // call on, whatever the call does -- the backend may write an output into it.
-                    results = feeds.HandOver(consumed => session.RunConsuming(
-                        sessionInputs, consumed, _outputNames,
-                        retainedOutputNames ?? ComputeContext.NoOutputsRetained, settings,
-                        out aliasedInputs));
-                }
-                catch (OperationCanceledException stopped)
-                    when (ComputeContext.StoppedByCaller(stopped, runSettings.CancellationToken))
-                {
-                    throw new OperationCanceledException(
-                        stopped.Message, stopped.InnerException, runSettings.CancellationToken);
-                }
-                finally
-                {
-                    // However the run ended. A run that failed for want of memory is the one whose
-                    // figures are worth most, so it is recorded like any other.
-                    _owner.FinishRunStats(session, arenaBefore);
-                }
+                var results = _owner.CallSession(session, feeds, sessionInputs, _outputNames,
+                    retainedOutputNames ?? ComputeContext.NoOutputsRetained, runSettings, out var aliasedInputs);
 
                 return _owner.AdoptOutputs(
                     results, _outputNames, _backend, ArenasOf(results.Count, aliasedInputs, sessionInputs, feeds, built));
@@ -431,20 +400,25 @@ namespace Shorokoo.Runtime
             int outputs, IReadOnlyList<string?>? aliasedInputs,
             IReadOnlyDictionary<string, IShorokooTensorValue> sessionInputs, RunFeeds feeds, BuiltSession built)
         {
-            if (aliasedInputs is null) return _ => built.Arena;
-            var arenas = new object?[outputs];
+            // Built only once an output turns out to have been written into consumed memory: a run
+            // that aliased nothing -- which answers with no entries, or none but nulls -- allocates
+            // nothing here.
+            object?[]? arenas = null;
             var aliased = 0;
-            for (int i = 0; i < outputs; i++)
+            for (int i = 0; aliasedInputs is not null && i < outputs && i < aliasedInputs.Count; i++)
             {
-                if (i < aliasedInputs.Count && aliasedInputs[i] is { } input)
+                if (aliasedInputs[i] is not { } input) continue;
+                if (arenas is null)
                 {
-                    aliased++;
-                    // A value the run did not hand over has no record here, and none is the answer
-                    // that never under-counts: the output is then counted outside every arena.
-                    arenas[i] = sessionInputs.TryGetValue(input, out var value) ? feeds.ArenaOfHanded(value) : null;
+                    arenas = new object?[outputs];
+                    Array.Fill(arenas, built.Arena);
                 }
-                else arenas[i] = built.Arena;
+                aliased++;
+                // A value the run did not hand over has no record here, and none is the answer that
+                // never under-counts: the output is then counted outside every arena.
+                arenas[i] = sessionInputs.TryGetValue(input, out var value) ? feeds.ArenaOfHanded(value) : null;
             }
+            if (arenas is null) return _ => built.Arena;
             _owner.CountAliasedOutputs(aliased);
             return i => arenas[i];
         }
@@ -481,12 +455,7 @@ namespace Shorokoo.Runtime
 
             // A new session's arena starts empty, so what this one's runs left in its arena is
             // outside the new one, and is discounted with everything else.
-            var fresh = feeds.Plan(excludingArena: null);
-            var arena = ComputeContext.ArenaLimitWithin(limit, fresh.Outside)
-                ?? throw feeds.NoRoom(limit, fresh);
-            var rebuilt = Rebuild(arena);
-            feeds.Admit(arena, fresh);
-            return rebuilt;
+            return Rebuild(feeds.AdmitFresh(limit));
         }
 
         /// <summary>
@@ -1134,40 +1103,9 @@ namespace Shorokoo.Runtime
                 return TensorData.NewHostTensor(shape, dtype, new byte[bytes]);
 
             var backend = ResolvedBackend;
-            var space = backend.MemorySpace;
-            var gate = EnterBudget(space, CancellationToken.None);
-            try
-            {
-                RefusePlacementOverBudget(space, bytes, () => $"AllocateUninitialized of {shape}:{dtype}");
-                var value = backend.CreateUninitializedTensorInBackendMemory(
-                    (ShorokooTensorElementType)(int)dtype, (long[])shape);
-                TensorData allocated;
-                try
-                {
-                    allocated = TensorData.Create(shape, dtype, value, backend);
-                }
-                catch
-                {
-                    // Nothing else names it yet, and on a card it is a device allocation that would
-                    // otherwise sit on the finalizer queue.
-                    backend.Release(value);
-                    throw;
-                }
-                try
-                {
-                    Attach(allocated);
-                }
-                catch
-                {
-                    allocated.Delete();
-                    throw;
-                }
-                return allocated;
-            }
-            finally
-            {
-                gate?.Exit();
-            }
+            return Placed(bytes, () => $"AllocateUninitialized of {shape}:{dtype}", () => TensorData.Create(
+                shape, dtype, backend.CreateUninitializedTensorInBackendMemory(
+                    (ShorokooTensorElementType)(int)dtype, (long[])shape), backend));
         }
 
         /// <summary>
@@ -1297,21 +1235,20 @@ namespace Shorokoo.Runtime
         /// the run returns. Paired with <see cref="ExitRun"/> in a <c>finally</c>, in both run
         /// paths and nowhere else.
         ///
-        /// <para>Where the memory the run's backend computes in — <paramref name="space"/> — is
-        /// under this context's device-memory budget, it first waits for the budget gate, so the
-        /// context's runs go one at a time; what it entered is what <see cref="ExitRun"/> is handed
+        /// <para>Where this context's memory is under its device-memory budget, it first waits for
+        /// the budget gate, so the context's runs go one at a time; what it entered is what <see cref="ExitRun"/> is handed
         /// back.</para>
         /// </summary>
         /// <exception cref="ObjectDisposedException">This context has been disposed, so its
         /// sessions are already gone and there is nothing left to run on.</exception>
         /// <exception cref="OperationCanceledException"><paramref name="cancellation"/> was cancelled
         /// while the run waited for the one before it. Nothing was taken.</exception>
-        internal BudgetGate? EnterRun(MemorySpace space, CancellationToken cancellation)
+        internal BudgetGate? EnterRun(CancellationToken cancellation)
         {
             // The host context runs nothing -- Compile, Execute and Run all refuse there -- and
             // cannot be disposed, so there is no question here for a count to answer.
             if (_isHost) return null;
-            var gate = EnterBudget(space, cancellation);
+            var gate = EnterBudget(cancellation);
             try
             {
                 lock (_gate)
@@ -1699,12 +1636,12 @@ namespace Shorokoo.Runtime
             // is placed in its memory -- its weights go into its arena as it is built -- and with an
             // arena limit of what the context holds there now leaves. A run finding the context
             // holding more builds it again with less, from the model this keeps for the purpose.
-            var gate = EnterBudget(space, CancellationToken.None);
+            var gate = EnterBudget(CancellationToken.None);
             try
             {
-                if (BudgetIn(space) is { } limit)
+                if (BudgetIn() is { } limit)
                 {
-                    var (attached, tensors) = AttachedIn(space);
+                    var (attached, tensors) = AttachedIn();
                     var arena = ArenaLimitWithin(limit, attached)
                         ?? throw NoRoomToCompile(space, limit, attached, tensors);
                     deviceMemory = deviceMemory with { LimitBytes = arena };
@@ -1717,9 +1654,7 @@ namespace Shorokoo.Runtime
                 gate?.Exit();
             }
 
-            var onnxInputNameByOriginal = new Dictionary<string, string>();
-            for (int i = 0; i < originalInputNames.Length && i < session.InputNames.Count; i++)
-                onnxInputNameByOriginal[originalInputNames[i]] = session.InputNames[i];
+            var onnxInputNameByOriginal = SessionNamesOf(originalInputNames, session);
 
             var graph = new CompiledGraph(
                 session, backend, onnxInputNameByOriginal, originalInputNames, optimization,
@@ -1891,7 +1826,7 @@ namespace Shorokoo.Runtime
             // window its disposal is refused in -- the session most of all, since disposing the
             // context is what would release it. Under a device-memory budget it also waits for the
             // context's run in flight, if any.
-            var entered = EnterRun(backend.MemorySpace, RunSettings.CancellationToken);
+            var entered = EnterRun(RunSettings.CancellationToken);
             try
             {
                 // Everything that can refuse the run over what it is fed, before a session is built
@@ -1904,10 +1839,7 @@ namespace Shorokoo.Runtime
                 var deviceMemory = DeviceMemory.Resolve(reusedAcrossShapes: false);
                 if (feeds.Budget is { } limit)
                 {
-                    var plan = feeds.Plan(excludingArena: null);
-                    var arena = ArenaLimitWithin(limit, plan.Outside) ?? throw feeds.NoRoom(limit, plan);
-                    deviceMemory = deviceMemory with { LimitBytes = arena };
-                    feeds.Admit(arena, plan);
+                    deviceMemory = deviceMemory with { LimitBytes = feeds.AdmitFresh(limit) };
                 }
                 session = BuildSession(
                     backend, modelData,
@@ -1915,9 +1847,7 @@ namespace Shorokoo.Runtime
                         HasOptionalOps(model.Graph) || IsFullyConstant(model.Graph), trainingStep: false),
                     deviceMemory);
                 outputNames.Value = [.. session.OutputNames];
-                var onnxInputNameByOriginal = new Dictionary<string, string>();
-                for (int i = 0; i < originalInputNames.Length && i < session.InputNames.Count; i++)
-                    onnxInputNameByOriginal[originalInputNames[i]] = session.InputNames[i];
+                var onnxInputNameByOriginal = SessionNamesOf(originalInputNames, session);
 
                 // Held first, then the values -- see CompiledGraph.Run -- on this context's
                 // backend: the one that just built the session above, and so the runtime that is
@@ -1925,35 +1855,11 @@ namespace Shorokoo.Runtime
                 var sessionInputs = feeds.Feed(name =>
                     onnxInputNameByOriginal.TryGetValue(name, out var mapped) ? mapped : name);
 
-                using var eviction = LinkEvictions(feeds.Leases, RunSettings.CancellationToken);
-                // Under a budget the arena shrinks as the run ends, as CompiledGraph.Run's does.
-                var settings = feeds.Budget is null
-                    ? RunSettings : RunSettings with { ShrinkArenaAfterRun = true };
-                if (eviction is not null) settings = settings with { CancellationToken = eviction.Token };
-                IReadOnlyList<IShorokooTensorValue> results;
-                var arenaBefore = StartRunStats(session);
-                try
-                {
-                    // What this run consumed is the backend's from this call on, whatever it does.
-                    results = feeds.HandOver(consumed => session.RunConsuming(
-                        sessionInputs, consumed, session.OutputNames, NoOutputsRetained, settings));
-                }
-                catch (OperationCanceledException stopped)
-                    when (StoppedByCaller(stopped, RunSettings.CancellationToken))
-                {
-                    throw new OperationCanceledException(
-                        stopped.Message, stopped.InnerException, RunSettings.CancellationToken);
-                }
-                finally
-                {
-                    // Before the session goes, in the finally below: its arena is what is being
-                    // read, and a disposed session has none.
-                    FinishRunStats(session, arenaBefore);
-                }
-
                 // Nothing retained: this is the one-shot path, which builds a session, feeds it
                 // once and disposes it, so there is no later run for a device-resident output to
-                // be fed into.
+                // be fed into -- and a session built for one run was marked to alias nothing.
+                var results = CallSession(
+                    session, feeds, sessionInputs, session.OutputNames, NoOutputsRetained, RunSettings, out _);
                 return AdoptOutputs(results, session.OutputNames, backend);
             }
             catch (Exception e) when ((failed = e) is null)
@@ -1995,6 +1901,57 @@ namespace Shorokoo.Runtime
                     }
                 }
             }
+        }
+
+        /// <summary>
+        /// The native call both run paths make, made the same way: every lock's eviction signal
+        /// linked with the caller's; under a budget, the arena shrunk as the run ends whatever the
+        /// caller asked, since the budget counted it at its limit only for this run; the arena's
+        /// figures read either side of the call and nothing else; what the run consumed handed over
+        /// in the call, the backend's alone from then on whatever the call does; and a stop the caller
+        /// asked for rethrown with the caller's own token. Gives back, per output, the input whose
+        /// consumed memory the session wrote it into, or null — or nothing, where it wrote none.
+        /// </summary>
+        internal IReadOnlyList<IShorokooTensorValue> CallSession(
+            IShorokooSession session, RunFeeds feeds, IReadOnlyDictionary<string, IShorokooTensorValue> sessionInputs,
+            IReadOnlyList<string> outputNames, IReadOnlySet<string> retainedOutputNames, RunSettings runSettings,
+            out IReadOnlyList<string?> aliasedInputs)
+        {
+            using var eviction = LinkEvictions(feeds.Leases, runSettings.CancellationToken);
+            var settings = feeds.Budget is null ? runSettings : runSettings with { ShrinkArenaAfterRun = true };
+            if (eviction is not null) settings = settings with { CancellationToken = eviction.Token };
+
+            IReadOnlyList<string?> aliased = [];
+            var arenaBefore = StartRunStats(session);
+            try
+            {
+                var results = feeds.HandOver(consumed => session.RunConsuming(
+                    sessionInputs, consumed, outputNames, retainedOutputNames, settings, out aliased));
+                aliasedInputs = aliased;
+                return results;
+            }
+            catch (OperationCanceledException stopped) when (StoppedByCaller(stopped, runSettings.CancellationToken))
+            {
+                throw new OperationCanceledException(
+                    stopped.Message, stopped.InnerException, runSettings.CancellationToken);
+            }
+            finally
+            {
+                // However the run ended, and before a one-shot session goes: a run that failed for
+                // want of memory is the one whose figures are worth most, and a disposed session has
+                // no arena left to read.
+                FinishRunStats(session, arenaBefore);
+            }
+        }
+
+        /// <summary>The session's own name for each of <paramref name="originals"/>, by position: what
+        /// a run of it is fed under.</summary>
+        private static Dictionary<string, string> SessionNamesOf(string[] originals, IShorokooSession session)
+        {
+            var names = new Dictionary<string, string>();
+            for (int i = 0; i < originals.Length && i < session.InputNames.Count; i++)
+                names[originals[i]] = session.InputNames[i];
+            return names;
         }
 
         /// <summary>

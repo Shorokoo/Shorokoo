@@ -215,21 +215,10 @@ namespace Shorokoo
         /// <summary>
         /// A tensor over <paramref name="value"/>, which <paramref name="backend"/> has just built as
         /// a copy of this one: this tensor's shape and dtype, allocated by that backend and released
-        /// through it. The value is released there too if the wrapping fails, since nothing else
-        /// names it yet.
+        /// through it — at once, if the wrapping fails, since nothing else names it yet.
         /// </summary>
         private protected TensorData BuiltBy(IShorokooBackend backend, IShorokooTensorValue value)
-        {
-            try
-            {
-                return OnnxUtils.CreateTensorDataFromValue(Shape, DType, value, DType, backend);
-            }
-            catch
-            {
-                backend.Release(value);
-                throw;
-            }
-        }
+            => OnnxUtils.CreateTensorDataFromValue(Shape, DType, value, DType, backend);
 
         /// <summary>
         /// This tensor's elements as a <see cref="TensorAttribute"/> — a tensor in a graph's
@@ -333,40 +322,10 @@ namespace Shorokoo
         /// budget, so two copies cannot both be admitted into the same room.</para>
         /// </summary>
         private TensorData CopyInto(ComputeContext target, string operation)
-        {
-            var space = target.MemorySpace;
-            if (space.IsHost) return Attached(target, CopyToManagedHost());
-
-            var gate = target.EnterBudget(space, System.Threading.CancellationToken.None);
-            try
-            {
-                target.RefusePlacementOverBudget(
-                    space, ByteCount, () => $"{operation}(context) of {Describe()}");
-                return Attached(target, CopyIntoBackendMemory(target));
-            }
-            finally
-            {
-                gate?.Exit();
-            }
-        }
-
-        /// <summary><paramref name="copy"/>, attached to <paramref name="target"/> — or deleted,
-        /// where the attaching fails, since nothing else references it.</summary>
-        private static TensorData Attached(ComputeContext target, TensorData copy)
-        {
-            try
-            {
-                target.Attach(copy);
-            }
-            catch
-            {
-                // Nothing else references it, and on a card it is an allocation that has just been
-                // filled across the bus.
-                copy.Delete();
-                throw;
-            }
-            return copy;
-        }
+            => target.MemorySpace.IsHost
+                ? target.Attached(CopyToManagedHost())
+                : target.Placed(BytesPlacedOnto(target, copying: true),
+                    () => $"{operation}(context) of {Describe()}", () => CopyIntoBackendMemory(target));
 
         /// <summary>A copy of this tensor in the framework's own host memory, attached to
         /// nothing.</summary>

@@ -81,7 +81,9 @@ public interface IShorokooSession : IDisposable
     // than into memory of its own -- output aliasing, for the pairs the session was built with (see
     // IShorokooBackend.CreateSession and OutputAlias) -- and saying which it did: `aliasedInputs`
     // holds, per output in `outputNames` order, the input name whose consumed value's memory that
-    // output was written into, or null. This is the call every run makes.
+    // output was written into, or null -- or is empty, where no output was written into anything,
+    // which is what a run that aliases nothing answers without allocating. This is the call every
+    // run makes.
     //
     // The contract on `consumed` is RunConsuming's, unchanged: each value is released exactly once,
     // through the backend, before this returns or rethrows. An aliased output is a value of its own
@@ -102,7 +104,7 @@ public interface IShorokooSession : IDisposable
         RunSettings runSettings,
         out IReadOnlyList<string?> aliasedInputs)
     {
-        aliasedInputs = new string?[outputNames.Count];
+        aliasedInputs = [];
         return RunConsuming(inputs, consumed, outputNames, retainedOutputNames, runSettings);
     }
 

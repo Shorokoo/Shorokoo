@@ -284,6 +284,13 @@ token. A single node that is one long kernel is not interrupted.
   the distribution, shape and element type are the operator's, and a node with a `seed` draws the
   same values on every run, but not the values ONNX Runtime draws. Shorokoo's own keyed draws
   are integer arithmetic, and agree with ONNX Runtime exactly.
+- **Two text operators follow the ONNX reference implementation where ONNX Runtime departs from
+  it.** `StringSplit` without a delimiter splits at runs of any whitespace — tabs, newlines and
+  Unicode spaces as well as the space, which is all ONNX Runtime splits at — and splits an empty
+  string at a delimiter into one empty piece, where ONNX Runtime counts none. `StringNormalizer`
+  changes case by Unicode's full mappings in every locale (`ß` upper-cases to `SS`, `Σ`
+  lower-cases to `σ`), where ONNX Runtime leaves what its locale does not map, which in the C
+  locale is everything beyond ASCII.
 - **Linux x64 and Windows x64 only**, the platforms there are lock files for. A backend can be
   constructed anywhere; elsewhere it refuses to start with `PythonEnvironmentFailure.UnsupportedPlatform`.
 - **Device memory is torch's, per process** — see [Runs](#runs) for what a context's settings

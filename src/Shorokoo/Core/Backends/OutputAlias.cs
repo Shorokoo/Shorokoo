@@ -69,9 +69,13 @@ public static class OutputAliasProof
         return parsed.Graph is { } graph ? Prove(graph, candidates) : [];
     }
 
-    /// <summary>The candidates <paramref name="graph"/> proves, in the order they were
-    /// given.</summary>
-    internal static IReadOnlyList<OutputAlias> Prove(GraphProto graph, IEnumerable<OutputAlias> candidates)
+    /// <summary>
+    /// The candidates <paramref name="graph"/> proves, in the order they were given: the answer
+    /// <see cref="Prove(byte[], IEnumerable{OutputAlias})"/> gives for a model already parsed, so a
+    /// caller that reads more of the model than the proof does parses it once.
+    /// </summary>
+    /// <exception cref="ArgumentNullException">An argument is null.</exception>
+    public static IReadOnlyList<OutputAlias> Prove(GraphProto graph, IEnumerable<OutputAlias> candidates)
     {
         ArgumentNullException.ThrowIfNull(graph);
         ArgumentNullException.ThrowIfNull(candidates);

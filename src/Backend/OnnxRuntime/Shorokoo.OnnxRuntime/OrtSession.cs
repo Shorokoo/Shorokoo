@@ -51,6 +51,12 @@ internal sealed class OrtSession : IShorokooSession
     /// has to be for that to happen.</summary>
     private sealed record AliasSlot(string Output, string Input, long[] Shape, TensorElementType ElementType);
 
+    /// <summary>
+    /// A pair the graph ONNX Runtime runs proves, and the shape that graph states for the output —
+    /// null where it states none, or leaves a dimension open.
+    /// </summary>
+    internal readonly record struct ProvedAlias(OutputAlias Alias, long[]? StatedShape);
+
     public IReadOnlySet<string> AliasableInputs { get; }
 
     public OrtSession(
@@ -64,7 +70,7 @@ internal sealed class OrtSession : IShorokooSession
         int? cudaDeviceId,
         IShorokooBackend backend,
         string? profileDirectory,
-        IReadOnlyList<OutputAlias> outputAliases)
+        IReadOnlyList<ProvedAlias> outputAliases)
     {
         _session = session;
         _cudaDeviceId = cudaDeviceId;
@@ -84,22 +90,27 @@ internal sealed class OrtSession : IShorokooSession
     /// The pairs of <paramref name="outputAliases"/> this session can bind: the output is one of its
     /// tensors, and not a string one; the input is one of its inputs; and ORT settled the output's
     /// shape in full when it built the session.
+    ///
+    /// <para>Settled means the graph ORT wrote out states the shape, and the session reports the
+    /// same one. The session alone cannot say: ORT reports an output it has no shape for as having
+    /// no dimensions, which is what a scalar has too, so a scalar consumed value would pass for an
+    /// output the run then makes <c>[1]</c>, and the run fail on the binding. The graph tells the
+    /// two apart — a scalar's shape is there, and empty.</para>
     /// </summary>
-    private static List<AliasSlot> Slots(InferenceSession session, IReadOnlyList<OutputAlias> outputAliases)
+    private static List<AliasSlot> Slots(InferenceSession session, IReadOnlyList<ProvedAlias> outputAliases)
     {
         var slots = new List<AliasSlot>(outputAliases.Count);
         if (outputAliases.Count == 0) return slots;
         var inputs = new HashSet<string>(session.InputNames, StringComparer.Ordinal);
         var outputs = session.OutputMetadata;
-        foreach (var alias in outputAliases)
+        foreach (var (alias, shape) in outputAliases)
         {
-            if (!inputs.Contains(alias.Input) || !outputs.TryGetValue(alias.Output, out var output)) continue;
+            if (shape is null || !inputs.Contains(alias.Input) || !outputs.TryGetValue(alias.Output, out var output)) continue;
             // A string tensor's elements are objects rather than bytes in a buffer of its own, and
             // nothing here proves writing one over another sound, so it is never bound.
             if (!output.IsTensor || output.ElementDataType == TensorElementType.String) continue;
-            if (output.Dimensions.Any(d => d <= 0)) continue;
-            slots.Add(new AliasSlot(
-                alias.Output, alias.Input, [.. output.Dimensions.Select(d => (long)d)], output.ElementDataType));
+            if (!output.Dimensions.Select(d => (long)d).SequenceEqual(shape)) continue;
+            slots.Add(new AliasSlot(alias.Output, alias.Input, shape, output.ElementDataType));
         }
         return slots;
     }

@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Runtime.InteropServices;
 using Microsoft.ML.OnnxRuntime;
 using Shorokoo.Core.Backends;
+using Shorokoo.Core.Factory.IR;
 using OrtFloat16 = Microsoft.ML.OnnxRuntime.Float16;
 using OrtBFloat16 = Microsoft.ML.OnnxRuntime.BFloat16;
 using ShoFloat16 = Shorokoo.Core.Backends.Float16;
@@ -259,21 +260,45 @@ public abstract class OrtBackend : IShorokooBackend
 
     /// <summary>
     /// The pairs of <paramref name="outputAliases"/> the graph ONNX Runtime wrote into
-    /// <paramref name="directory"/> still proves, or none where it wrote nothing that can be read:
-    /// a pair this cannot prove is not bound, which costs the memory and never the result.
+    /// <paramref name="directory"/> still proves, each with the shape that graph states for its
+    /// output, or none where it wrote nothing that can be read: a pair this cannot prove is not
+    /// bound, which costs the memory and never the result.
     /// </summary>
-    private static IReadOnlyList<OutputAlias> ProvedAgain(
+    private static IReadOnlyList<OrtSession.ProvedAlias> ProvedAgain(
         string directory, IReadOnlyList<OutputAlias> outputAliases)
     {
         try
         {
-            return OutputAliasProof.Prove(
-                File.ReadAllBytes(Path.Combine(directory, OptimizedModelFile)), outputAliases);
+            ModelProto model;
+            using (var stream = File.OpenRead(Path.Combine(directory, OptimizedModelFile)))
+                model = ProtoBuf.Serializer.Deserialize<ModelProto>(stream);
+            if (model.Graph is not { } graph) return [];
+            var stated = new Dictionary<string, TypeProto?>(StringComparer.Ordinal);
+            foreach (var output in graph.Outputs) stated.TryAdd(output.Name, output.Type);
+            return [.. OutputAliasProof.Prove(graph, outputAliases).Select(alias =>
+                new OrtSession.ProvedAlias(alias, StatedShape(stated.GetValueOrDefault(alias.Output))))];
         }
         catch (Exception)
         {
             return [];
         }
+    }
+
+    /// <summary>
+    /// The shape <paramref name="type"/> states, where it states one in full — every dimension a
+    /// known positive number, and none for a scalar — and null where it states no shape at all or
+    /// leaves a dimension open.
+    /// </summary>
+    private static long[]? StatedShape(TypeProto? type)
+    {
+        if (type?.TensorType?.Shape is not { } shape) return null;
+        var dims = new long[shape.Dims.Count];
+        for (int i = 0; i < dims.Length; i++)
+        {
+            if (shape.Dims[i].DimValue <= 0 || shape.Dims[i].DimParam.Length > 0) return null;
+            dims[i] = shape.Dims[i].DimValue;
+        }
+        return dims;
     }
 
     /// <summary>

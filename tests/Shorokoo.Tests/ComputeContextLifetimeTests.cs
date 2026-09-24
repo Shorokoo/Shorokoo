@@ -820,6 +820,12 @@ public class ComputeContextLifetimeCoverageTests
         Assert.Equal(0, Aliased(compiled, twice, twice, [0f, 0f, 0f, 0f]));
         var unsettled = context.Compile(graph, inputDims: null, trainingStep: false, aliasCandidates: [(0, 0)]);
         Assert.Equal(0, Aliased(unsettled, Tens(), Sample(), [9f, 18f, 27f, 36f]));
+        var (s, t) = (InputScalar<float32>("s"), InputScalar<float32>("t"));
+        var scalar = context.Compile(new InternalComputationGraph([s, t], [s - t]), [[], []], trainingStep: false, aliasCandidates: [(0, 0)]);
+        Assert.Equal(1, Aliased(scalar, TensorData([], 10f), TensorData([], 3f), [7f]));
+        var anyRank = InputTensor<float32>("w");
+        var shapeless = context.Compile(new InternalComputationGraph([anyRank, b], [anyRank - b]), [null, [1L]], trainingStep: false, aliasCandidates: [(0, 0)]);
+        Assert.Equal(0, Aliased(shapeless, TensorData([], 10f), TensorData([1L], 3f), [7f]));
         Assert.Empty(context.Compile(graph).MarkedPairs());
         using var unaliased = new ComputeContext { OutputAliasing = false };
         Assert.Empty(unaliased.Compile(graph, [[4L], [4L]], trainingStep: false, aliasCandidates: [(0, 0)]).MarkedPairs());

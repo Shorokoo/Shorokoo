@@ -151,15 +151,9 @@ internal sealed class OrtSession : IShorokooSession
     public bool HasDeviceMemory => _outputMemory.Value.DeviceMemoryInfo is not null;
 
     /// <summary>
-    /// Runs the session with <paramref name="consumed"/> handed over: each is this backend's from
-    /// here, on every path, and is released through it in the <c>finally</c> below — after the
-    /// native run, which ONNX Runtime does not let go of its inputs before, and before this returns
-    /// the outputs or rethrows a failure. Nothing the caller holds points into one of them any
-    /// more: the run's outputs are values of their own.
-    ///
-    /// <para>ONNX Runtime keeps every input until the run ends — its memory planner gives each
-    /// feed an extra use so a caller can read it after <c>Run</c> returns — so there is no earlier
-    /// point at which a consumed input could go.</para>
+    /// The overload below, for a caller that does not ask which outputs went into consumed memory.
+    /// A session built with pairs writes them there all the same; the one-shot runs that call this
+    /// are built with none.
     /// </summary>
     public IReadOnlyList<IShorokooTensorValue> RunConsuming(
         IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
@@ -167,27 +161,21 @@ internal sealed class OrtSession : IShorokooSession
         IReadOnlyList<string> outputNames,
         IReadOnlySet<string> retainedOutputNames,
         RunSettings runSettings)
-    {
-        ArgumentNullException.ThrowIfNull(consumed);
-        try
-        {
-            return retainedOutputNames.Count == 0
-                ? Run(inputs, outputNames, runSettings)
-                : RunRetainingOutputs(inputs, outputNames, retainedOutputNames, runSettings);
-        }
-        finally
-        {
-            // Through the backend, which is the one release path for memory it allocated. Its
-            // release is a disposal, which does not throw, so none of them can be skipped.
-            foreach (var value in consumed) _backend.Release(value);
-        }
-    }
+        => RunConsuming(inputs, consumed, outputNames, retainedOutputNames, runSettings, out _);
 
     /// <summary>
-    /// <see cref="RunConsuming(IReadOnlyDictionary{string, IShorokooTensorValue}, IReadOnlyCollection{IShorokooTensorValue}, IReadOnlyList{string}, IReadOnlySet{string}, RunSettings)"/>,
-    /// writing each output this session was built to alias into the memory of the consumed value
-    /// its input was fed, wherever that can be done (see <see cref="OutputsIntoConsumed"/>), and
-    /// saying which it did in <paramref name="aliasedInputs"/>.
+    /// Runs the session with <paramref name="consumed"/> handed over, writing each output this
+    /// session was built to alias into the memory of the consumed value its input was fed,
+    /// wherever that can be done (see <see cref="OutputsIntoConsumed"/>), and saying which it did in
+    /// <paramref name="aliasedInputs"/>.
+    ///
+    /// <para>Each consumed value is this backend's from here, on every path, and is released
+    /// through it in the <c>finally</c> below — after the native run, which ONNX Runtime does not
+    /// let go of its inputs before, and before this returns the outputs or rethrows a failure.
+    /// Nothing the caller holds points into one of them any more: the run's outputs are values of
+    /// their own. ONNX Runtime keeps every input until the run ends — its memory planner gives each
+    /// feed an extra use so a caller can read it after <c>Run</c> returns — so there is no earlier
+    /// point at which a consumed input could go.</para>
     ///
     /// <para>An aliased output is bound to the consumed value itself, so the node that produces it
     /// writes straight into that memory rather than into a block of the arena — which is the whole
@@ -229,6 +217,8 @@ internal sealed class OrtSession : IShorokooSession
         }
         finally
         {
+            // Through the backend, which is the one release path for memory it allocated. Its
+            // release is a disposal, which does not throw, so none of them can be skipped.
             foreach (var value in consumed) _backend.Release(value);
         }
     }

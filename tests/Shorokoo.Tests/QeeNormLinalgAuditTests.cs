@@ -1,3 +1,4 @@
+using Shorokoo.Core.Factory;
 using Shorokoo.Core.Interpreter;
 using static Shorokoo.Tests.Utils.QeeAudit;
 
@@ -57,6 +58,35 @@ public class QeeNormLinalgAuditTests
             TensorData([3L], (ushort)1000, (ushort)6, (ushort)2), I32([3L], 1000, -6, 2)));
         Assert.True(QeeAudit.Check<QeeDequantizeInt32VectorScaleReshapeAuditCheck>(I32([1L, 3L], 1000, -6, 2)));
         Assert.True(QeeAudit.Check<QeeDequantizeInt32PerAxisAuditCheck>(I32([2L, 3L], 10, -6, 2, 4, 0, -8)));
+        Assert.True(QeeAudit.Check<QeeDequantizeInt32OneElementScaleAuditCheck>(I32([3L], 1000, -6, 2)));
+    }
+
+    [Fact]
+    public void TestDequantizeLinearPerAxisKeepsItsValuesThroughATransposeOfAKnownRank()
+    {
+        Assert.True(QeeAudit.Check<QeeDequantizePerAxisTransposeAuditCheck>(I8([2L, 3L], 10, -6, 2, 4, 0, -8)));
+    }
+
+    [Fact]
+    public void TestDequantizeLinearIsWrittenAsAuthoredWhereOnnxRuntimeDoesNotMoveItAndInExportedFiles()
+    {
+        TensorData[] arithmetic = [I8([3L], 100, -6, 2), I32([3L], 1000, -6, 2)];
+        TensorData[] readThrough = [I8([3L], 100, -6, 2), TensorData([3L], (short)1000, (short)-6, (short)2),
+            TensorData([3L], (ushort)1000, (ushort)6, (ushort)2), I32([3L], 1000, -6, 2)];
+        Assert.True(QeeAudit.Check<QeeDequantizeIntoArithmeticAuditCheck>(arithmetic));
+        Assert.Equal([2, 2, 2], DequantizeInputs(QeeDequantizeIntoArithmeticAuditCheck.ComputationGraph, false, arithmetic));
+        Assert.Equal([2, 2, 2, 2, 2, 2, 2],
+            DequantizeInputs(QeeDequantizeWithoutZeroPointReshapeTransposeAuditCheck.ComputationGraph, true, readThrough));
+    }
+
+    private static int[] DequantizeInputs(ComputationGraph module, bool exported, TensorData[] inputs)
+    {
+        var g = module.ToInternal();
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([.. inputs])).ToConcreteModel();
+        var model = exported
+            ? FastOnnxModelBuilder.BuildOnnxModel(concrete)
+            : FastOnnxModelBuilder.BuildInternalOnnxModel(concrete, prepForOnnx: true);
+        return [.. model.Graph.Nodes.Where(n => n.OpType == OpCodes.DEQUANTIZE_LINEAR).Select(n => n.Inputs.Count(i => i.Length > 0))];
     }
 
     // ONNX Runtime's float32 LayerNormalization takes the variance as E[x²] − E[x]², which cancels catastrophically:

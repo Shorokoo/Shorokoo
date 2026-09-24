@@ -548,4 +548,46 @@ namespace Shorokoo.Tests.Modules
             return Apart(NN.LayerNormalization(x, scale), twoPass) < Scalar(1L);
         }
     }
+
+    /// <summary>DequantizeLinear of an int32 [3] tensor with no zero point and a one-element scale at
+    /// the default axis — per tensor, since the scale has one element — read as it is and through
+    /// a Reshape: [1000, −6, 2] × 0.5 = [500, −3, 1].</summary>
+    [Module]
+    public partial class QeeDequantizeInt32OneElementScaleAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<int32> x)
+        {
+            var dq = (Tensor<float32>)OnnxOp.DequantizeLinear(x, Vector(0.5f), null, null);
+            return FloatMismatch(dq, Vector(500f, -3f, 1f)) + FloatMismatch(dq.Reshape(Vector(-1L)), Vector(500f, -3f, 1f)) < Scalar(1L);
+        }
+    }
+
+    /// <summary>DequantizeLinear read by arithmetic rather than moved through: an int8 tensor times 2,
+    /// and an int32 tensor per tensor and along axis 0, each plus 1. a = [100, −6, 2],
+    /// b = [1000, −6, 2].</summary>
+    [Module]
+    public partial class QeeDequantizeIntoArithmeticAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<int8> a, Tensor<int32> b)
+        {
+            var mismatch =
+                FloatMismatch((Tensor<float32>)OnnxOp.DequantizeLinear(a, Scalar(0.5f), null, null) * Scalar(2f), Vector(100f, -6f, 2f)) +
+                FloatMismatch((Tensor<float32>)OnnxOp.DequantizeLinear(b, Scalar(0.5f), null, null) + Scalar(1f), Vector(501f, -2f, 2f)) +
+                FloatMismatch((Tensor<float32>)OnnxOp.DequantizeLinear(b, Vector(0.5f, 2f, 0.25f), null, 0L) + Scalar(1f), Vector(501f, -11f, 1.5f));
+            return mismatch < Scalar(1L);
+        }
+    }
+
+    /// <summary>DequantizeLinear of an int8 tensor of known rank [2, 3] along axis 1, with a zero
+    /// point, read through a Transpose that names no permutation. x = [[10, −6, 2], [4, 0, −8]].</summary>
+    [Module]
+    public partial class QeeDequantizePerAxisTransposeAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<int8> x)
+        {
+            var columns = (Tensor<float32>)OnnxOp.DequantizeLinear(x.Reshape(Vector(2L, 3L)), Vector(0.5f, 2f, 0.25f),
+                Vector((sbyte)2, (sbyte)-2, (sbyte)0), 1L);
+            return FloatMismatch(columns.Transpose().Reshape(Vector(-1L)), Vector(4f, 1f, -8f, 4f, 0.5f, -2f)) < Scalar(1L);
+        }
+    }
 }

@@ -41,6 +41,26 @@ public class BackendPackageCoverageTests
     }
 
     [Fact]
+    public void TestTheTorchBackendsProbeAsExplicitOnlyAndDiscoveryNeverCountsThem()
+    {
+        var cpu = BackendPackage.Probe(Beside("Shorokoo.PyTorch.Cpu"));
+        var cuda = BackendPackage.Probe(Beside("Shorokoo.PyTorch.Cuda"));
+        var loaded = typeof(Shorokoo.PyTorch.Cpu.TorchCpuBackend).Assembly;
+
+        Assert.Equal((Windows ? BackendRejection.WrongOperatingSystem : BackendRejection.None, "cpu", true), (cpu.Reason, cpu.Device, cpu.IsExplicitOnly));
+        Assert.Equal((Windows ? BackendRejection.WrongOperatingSystem : BackendRejection.None, "cuda", true), (cuda.Reason, cuda.Device, cuda.IsExplicitOnly));
+        Assert.False(BackendPackage.Probe(NativeBackend).IsExplicitOnly);
+        Assert.False(BackendPackage.TryLoad(Beside("Shorokoo.PyTorch.Cpu"), out var none, out var refusal));
+        Assert.Null(none);
+        Assert.Equal(Windows ? BackendRejection.WrongOperatingSystem : BackendRejection.NotLoadable, refusal.Reason);
+        Assert.True(DefaultBackend.IsExplicitOnly(loaded));
+        Assert.False(DefaultBackend.IsExplicitOnly(DefaultBackend.Instance.GetType().Assembly));
+        Assert.Contains(loaded, DefaultBackend.DiscoverableAssemblies(AppDomain.CurrentDomain.GetAssemblies()));
+        Assert.Single(DefaultBackend.LoadedCandidates(
+            DefaultBackend.DiscoverableAssemblies(AppDomain.CurrentDomain.GetAssemblies()).Select(a => a.GetName().Name ?? "")));
+    }
+
+    [Fact]
     public void TestEveryWayOfNotBeingALoadableBackendIsAnAnswerAndNotAThrow()
     {
         (string Path, BackendRejection Reason, string Contains)[] cases =

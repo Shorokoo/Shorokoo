@@ -106,7 +106,7 @@ def sequence_element(sequence, index):
     """An element of a sequence as a value of its own: a copy, so that writing to it cannot reach
     into the sequence."""
     element = sequence[index]
-    return element.copy() if is_strings(element) else element.clone()
+    return element.copy() if is_strings(element) else element.clone(memory_format=torch.contiguous_format)
 
 
 def describe(value):
@@ -118,6 +118,11 @@ def describe(value):
         return (KIND_SEQUENCE, code, [len(value)], True, 0, 0)
     if is_strings(value):
         return (KIND_TENSOR, STRING, list(value.shape), True, 0, 0)
+    if not value.is_contiguous():
+        # The .NET side reads a host tensor as one dense buffer from its data pointer, so a
+        # strided view handed to it would be read wrong; every path that wraps one makes it
+        # contiguous first, and this keeps it that way.
+        raise ValueError("only a contiguous tensor can be handed to .NET")
     return (
         KIND_TENSOR,
         _CODES[value.dtype],

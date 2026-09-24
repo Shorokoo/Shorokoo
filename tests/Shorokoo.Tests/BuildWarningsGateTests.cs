@@ -53,7 +53,8 @@ public class BuildWarningsGateTests
     /// most of it. The four platform packages are all listed rather than one standing
     /// for the rest: each compiles a manifest and a factory that only it has, and all
     /// four build on either operating system, since only their natives are
-    /// platform-bound.
+    /// platform-bound. The PyTorch projects are listed the same way, host and logic included,
+    /// though each device package pulls both in.
     /// </summary>
     private static readonly string[] ProductProjects =
     [
@@ -63,6 +64,10 @@ public class BuildWarningsGateTests
         Path.Combine("src", "Backend", "OnnxRuntime", "Shorokoo.WinGPU", "Shorokoo.WinGPU.csproj"),
         Path.Combine("src", "Backend", "OnnxRuntime", "Shorokoo.LinuxCPU", "Shorokoo.LinuxCPU.csproj"),
         Path.Combine("src", "Backend", "OnnxRuntime", "Shorokoo.LinuxGPU", "Shorokoo.LinuxGPU.csproj"),
+        Path.Combine("src", "Backend", "PyTorch", "Shorokoo.PythonHost", "Shorokoo.PythonHost.csproj"),
+        Path.Combine("src", "Backend", "PyTorch", "Shorokoo.PyTorch", "Shorokoo.PyTorch.csproj"),
+        Path.Combine("src", "Backend", "PyTorch", "Shorokoo.PyTorch.Cpu", "Shorokoo.PyTorch.Cpu.csproj"),
+        Path.Combine("src", "Backend", "PyTorch", "Shorokoo.PyTorch.Cuda", "Shorokoo.PyTorch.Cuda.csproj"),
     ];
 
     private static readonly TimeSpan BuildTimeout = TimeSpan.FromMinutes(5);

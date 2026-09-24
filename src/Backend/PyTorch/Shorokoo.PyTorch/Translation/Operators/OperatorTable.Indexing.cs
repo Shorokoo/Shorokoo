@@ -9,5 +9,6 @@ internal static partial class OperatorTable
         table.Map("Gather", M + "gather", ["axis"]);
         table.Map("GatherElements", M + "gather_elements", ["axis"]);
         table.Map("Slice", M + "slice_", ["starts", "ends", "axes"]);
+        table.Map("Compress", M + "compress", ["axis"]);
     }
 }

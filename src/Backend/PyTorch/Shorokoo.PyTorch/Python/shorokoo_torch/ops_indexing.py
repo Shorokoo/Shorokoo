@@ -1,4 +1,4 @@
-"""ONNX operators that index into a tensor: Gather, GatherElements, Slice.
+"""ONNX operators that index into a tensor: Gather, GatherElements, Slice, Compress.
 
 Indices may be negative, counting from the end of their axis, as ONNX allows.
 """
@@ -64,3 +64,15 @@ def slice_(data, starts_in=None, ends_in=None, axes_in=None, steps_in=None, /, *
             positions = torch.arange(first, last, step, device=result.device)
             result = torch.index_select(result, axis, positions)
     return result
+
+
+def compress(data, condition, /, *, axis=None):
+    """The slices along `axis` (of the flattened input where there is none) whose condition is
+    true. A condition shorter than the axis selects from the leading slices only."""
+    if axis is None:
+        data = data.reshape(-1)
+        axis = 0
+    axis = axis % data.ndim
+    keep = condition.reshape(-1)[: data.shape[axis]].to(torch.bool)
+    index = torch.nonzero(keep).reshape(-1).to(data.device)
+    return torch.index_select(data, axis, index)

@@ -1,6 +1,6 @@
 """ONNX shape and data-movement operators that rearrange or make tensors without indexing into
 them: Reshape, Transpose, Concat, Split, Squeeze/Unsqueeze, Shape, Size, Flatten, Expand, Tile,
-Identity, ConstantOfShape, Range, Trilu.
+Identity, ConstantOfShape, Range, Trilu, Pad.
 
 A result may be a view of an input; the run hands every output over in memory of its own, so a
 view never escapes to the caller.
@@ -10,6 +10,7 @@ import math
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from . import runtime as _rt
 
@@ -125,3 +126,51 @@ def range_(start, limit, delta):
 def trilu(data, k=None, /, *, upper=1):
     diagonal = int(k.reshape(-1)[0]) if k is not None else 0
     return torch.triu(data, diagonal) if upper else torch.tril(data, diagonal)
+
+
+def _padding_indices(length, before, after, mode, device):
+    """The source index of every position of a padded axis, for the modes that copy from the
+    input: edge repeats the end elements, reflect mirrors about them, wrap cycles."""
+    positions = torch.arange(-before, length + after, device=device)
+    if mode == "edge":
+        return positions.clamp(0, length - 1)
+    if mode == "wrap":
+        return torch.remainder(positions, length)
+    if length == 1:
+        return torch.zeros_like(positions)
+    period = 2 * (length - 1)
+    folded = torch.remainder(positions, period)
+    return torch.where(folded >= length, period - folded, folded)
+
+
+def pad(data, pads_in=None, constant_value=None, axes_in=None, /, *, mode="constant", pads=None, value=0.0):
+    """Pad, from opset 11 (pads, constant value and, from 18, axes as inputs) or before it
+    (attributes). A negative pad crops."""
+    rank = data.ndim
+    widths = _ints(pads_in) if pads_in is not None else list(pads)
+    axes = [a % rank for a in _ints(axes_in)] if axes_in is not None else list(range(rank))
+    before, after = [0] * rank, [0] * rank
+    for i, axis in enumerate(axes):
+        before[axis], after[axis] = widths[i], widths[i + len(axes)]
+
+    result = data
+    for axis in range(rank):
+        start, stop = max(-before[axis], 0), result.shape[axis] - max(-after[axis], 0)
+        if start or stop != result.shape[axis]:
+            result = result.narrow(axis, start, max(stop - start, 0))
+    before = [max(b, 0) for b in before]
+    after = [max(a, 0) for a in after]
+    if not any(before) and not any(after):
+        return result
+
+    if mode == "constant":
+        fill = constant_value.reshape(-1)[0].item() if constant_value is not None else value
+        widths = []
+        for axis in reversed(range(rank)):
+            widths += [before[axis], after[axis]]
+        return F.pad(result, widths, mode="constant", value=fill)
+    for axis in range(rank):
+        if before[axis] or after[axis]:
+            index = _padding_indices(result.shape[axis], before[axis], after[axis], mode, result.device)
+            result = torch.index_select(result, axis, index)
+    return result

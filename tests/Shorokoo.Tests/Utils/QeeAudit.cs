@@ -23,7 +23,8 @@ namespace Shorokoo.Tests.Utils
     /// (ComputationGraph → ToConcreteArchitecture → ToConcreteModel) and runs both audit
     /// passes on that single concrete model: the strict QuickExecutionEngine-only
     /// self-check, then the full <c>AutoTest.TestGraph</c> pipeline (ORT execute, ONNX
-    /// save/load roundtrip, C# codegen, QEE dtype pass).
+    /// save/load roundtrip, C# codegen, QEE dtype pass), then the same model on the PyTorch CPU
+    /// backend, which must agree with ORT (<see cref="QeeAuditOnTorch"/>).
     /// </summary>
     public static class QeeAudit
     {
@@ -62,12 +63,14 @@ namespace Shorokoo.Tests.Utils
             if (qee != QeeStrictness.None && !QeePass(concreteModel, allInputs, qee))
                 return false;
 
-            return !autoTest || AutoTest.TestGraph(
-                concreteModel,
-                testOnnxRoundtrip: testOnnxRoundtrip,
-                testCsRoundtrip: testCsRoundtrip,
-                sampleInputs: allInputs,
-                testQuickEngineExecution: testQuickEngineExecution);
+            return !autoTest
+                || AutoTest.TestGraph(
+                    concreteModel,
+                    testOnnxRoundtrip: testOnnxRoundtrip,
+                    testCsRoundtrip: testCsRoundtrip,
+                    sampleInputs: allInputs,
+                    testQuickEngineExecution: testQuickEngineExecution)
+                && QeeAuditOnTorch.Agrees<TModule>(concreteModel, allInputs);
         }
 
         /// <summary>QEE output tensors in declaration order — for outputs whose shapes are

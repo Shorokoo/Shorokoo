@@ -18,6 +18,7 @@ internal static partial class OperatorTable
         table.Map("Tile", M + "tile");
         table.Map("Identity", M + "identity");
         table.Map("Trilu", M + "trilu", ["upper"]);
+        table.Map("Pad", M + "pad", ["mode", "pads", "value"]);
         table.Map("Shape", M + "shape", ["start", "end"], gradient: TorchGradient.NotDifferentiable);
         table.Map("Size", M + "size", gradient: TorchGradient.NotDifferentiable);
         table.Map("ConstantOfShape", M + "constant_of_shape", ["value"], gradient: TorchGradient.NotDifferentiable);

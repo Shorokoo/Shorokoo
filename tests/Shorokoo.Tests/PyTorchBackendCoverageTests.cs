@@ -671,6 +671,18 @@ public class PyTorchBackendCoverageTests
         Assert.Equal([10f, 20f, 30f, 40f], kept.As<float32>().CopyMemory<float>());
     }
 
+    [Fact]
+    public void TestEveryPairASessionBindsIsWrittenIntoItsOwnInputWhereASessionCannotBindAnEarlierPair()
+    {
+        var graph = ComputeContextLifetimeCoverageTests.GraphOf("a:float[3] b:float[3] c:float[3] g:float[3]", "O0:float[3] O1:float[3] O2:float[3]",
+            Op("Mul", "a g", "t"), Op("Neg", "t", "O0"), Op("Sub", "b g", "O1"), Op("Add", "c g", "O2"));
+        using var session = Torch.CreateSession(Serialize(graph), default, default, DeviceMemorySettings.Default, DiagnosticSettings.Default,
+            [new OutputAlias("O0", "a"), new OutputAlias("O1", "b"), new OutputAlias("O2", "c")]);
+
+        Assert.Equal("-,b,c -1 -1 -1 9 9 9 101 101 101", AliasedRun(session, graph));
+        Assert.Equal([new OutputAlias("O1", "b"), new OutputAlias("O2", "c")], session.BindableAliases);
+    }
+
     private static PythonEnvironment Resolve(PythonEnvironmentOptions options, string variable)
         => PythonEnvironmentResolver.Resolve(PythonEnvironmentLock.Cpu, options,
             name => name == PythonEnvironmentResolver.EnvironmentVariable ? variable : null);
@@ -733,6 +745,17 @@ public class PyTorchBackendCoverageTests
         float[] values = [.. results.SelectMany(r => integers ? r.GetTensorDataAsSpan<long>().ToArray().Select(v => (float)v) : r.GetTensorDataAsSpan<float>().ToArray())];
         foreach (var result in results) result.Dispose();
         return (aliased.Count == 0 ? null : aliased[0], string.Join(" ", values));
+    }
+
+    private static string AliasedRun(IShorokooSession session, GraphProto graph)
+    {
+        var feeds = graph.Inputs.ToDictionary(i => i.Name, i => Torch.CreateTensor(Enumerable.Repeat(i.Name switch { "a" => 1f, "b" => 10f, "c" => 100f, _ => 1f }, 3).ToArray(), [3]));
+        using var kept = feeds["g"];
+        var results = session.RunConsuming(feeds.ToDictionary(f => f.Key, f => (IShorokooTensorValue)f.Value), [.. feeds.Where(f => f.Key != "g").Select(f => f.Value)],
+            [.. graph.Outputs.Select(o => o.Name)], ComputeContext.NoOutputsRetained, RunSettings.Default, out var aliased);
+        var values = string.Join(" ", results.SelectMany(r => r.GetTensorDataAsSpan<float>().ToArray()));
+        foreach (var result in results) result.Dispose();
+        return string.Join(",", results.Select((_, i) => aliased.Count == 0 ? "-" : aliased[i] ?? "-")) + " " + values;
     }
 
     /// <summary>y = v + 1, m times over, by a Loop: one node per iteration to stop at.</summary>

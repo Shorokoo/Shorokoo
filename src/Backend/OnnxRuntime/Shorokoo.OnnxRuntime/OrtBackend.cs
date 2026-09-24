@@ -205,14 +205,15 @@ public abstract class OrtBackend : IShorokooBackend
         // process. Disposing in a finally keeps them rooted across the constructor.
         using var options = new SessionOptions();
         Configure(options, graphOptimization, logSeverity);
-        string? profileDirectory = null;
-        string? optimizedDirectory = null;
+        // Named before anything can throw, and made inside the try: each folder is made by the call
+        // that points the options into it, and a setter there throwing after the folder was made
+        // would otherwise leave it with no name for the catch or the finally to delete it by.
+        var profileDirectory = diagnostics.TraceNodePlacement ? TempDirectory("shorokoo-node-placement-") : null;
+        var optimizedDirectory = outputAliases is not null ? TempDirectory("shorokoo-optimized-") : null;
         try
         {
-            // Inside the try: the folder exists before the two setters that follow it call into
-            // the runtime, so a throw from either would otherwise leave it behind.
-            profileDirectory = EnableProfiling(options, diagnostics);
-            if (outputAliases is not null) optimizedDirectory = WriteOptimizedModel(options);
+            if (profileDirectory is not null) EnableProfiling(options, profileDirectory);
+            if (optimizedDirectory is not null) WriteOptimizedModel(options, optimizedDirectory);
             _configureExecutionProvider(options, deviceMemory);
             var session = new InferenceSession(modelBytes.ToArray(), options);
             // The session keeps this backend so it can rebuild a feed that came from another
@@ -224,14 +225,18 @@ public abstract class OrtBackend : IShorokooBackend
         catch
         {
             // No session to own the folder, so nothing would ever delete it.
-            DeleteProfileDirectory(profileDirectory);
+            DeleteDirectory(profileDirectory);
             throw;
         }
         finally
         {
-            DeleteProfileDirectory(optimizedDirectory);
+            DeleteDirectory(optimizedDirectory);
         }
     }
+
+    /// <summary>A folder of its own in the temp folder, named and not yet made.</summary>
+    private static string TempDirectory(string prefix)
+        => Path.Combine(Path.GetTempPath(), prefix + Guid.NewGuid().ToString("N"));
 
     // What the optimized model is called inside the folder it is written to, and the file its
     // larger initializers go to beside it: they are the constants ORT folded, which the proof does
@@ -241,21 +246,18 @@ public abstract class OrtBackend : IShorokooBackend
 
     /// <summary>
     /// Has ONNX Runtime write the graph it will run — after its rewrites, with the nodes that
-    /// actually execute — into a folder of its own, and answers with the folder. The initializers
+    /// actually execute — into <paramref name="directory"/>, which this makes. The initializers
     /// above a kibibyte go to a file beside it rather than into the model, so a folded constant the
     /// size of a tensor costs a write and not a parse.
     /// </summary>
-    private static string WriteOptimizedModel(SessionOptions options)
+    private static void WriteOptimizedModel(SessionOptions options, string directory)
     {
-        var directory = Path.Combine(
-            Path.GetTempPath(), "shorokoo-optimized-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
         options.OptimizedModelFilePath = Path.Combine(directory, OptimizedModelFile);
         options.AddSessionConfigEntry(
             "session.optimized_model_external_initializers_file_name", OptimizedInitializersFile);
         options.AddSessionConfigEntry(
             "session.optimized_model_external_initializers_min_size_in_bytes", "1024");
-        return directory;
     }
 
     /// <summary>
@@ -302,8 +304,10 @@ public abstract class OrtBackend : IShorokooBackend
     }
 
     /// <summary>
-    /// Turns ORT's profiler on when <paramref name="diagnostics"/> asks for a node-placement
-    /// trace, and answers with the folder it will write into — null when nothing asked.
+    /// Turns ORT's profiler on for a session asked to trace where its nodes ran, writing into
+    /// <paramref name="directory"/>, which this makes. A folder of its own per session: two
+    /// sessions profiling at once would otherwise agree on a prefix, and ORT tells files apart by
+    /// timestamp alone.
     ///
     /// <para><b>The prefix is set before the switch is thrown, and the order is load-bearing.</b>
     /// ORT reads the prefix at the moment profiling is enabled and ignores any later change, so
@@ -311,20 +315,14 @@ public abstract class OrtBackend : IShorokooBackend
     /// own default name — a stray file per session, in whatever folder the program happens to be
     /// running from, that nothing then cleans up.</para>
     /// </summary>
-    private static string? EnableProfiling(SessionOptions options, DiagnosticSettings diagnostics)
+    private static void EnableProfiling(SessionOptions options, string directory)
     {
-        if (!diagnostics.TraceNodePlacement) return null;
-        // A folder of its own per session: two sessions profiling at once would otherwise agree on
-        // a prefix and ORT distinguishes files by timestamp alone.
-        var directory = Path.Combine(
-            Path.GetTempPath(), "shorokoo-node-placement-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
         options.ProfileOutputPathPrefix = Path.Combine(directory, "profile");
         options.EnableProfiling = true;
-        return directory;
     }
 
-    private static void DeleteProfileDirectory(string? directory)
+    private static void DeleteDirectory(string? directory)
     {
         if (directory is null) return;
         try { Directory.Delete(directory, recursive: true); }

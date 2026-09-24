@@ -909,4 +909,20 @@ namespace Shorokoo.Tests.Modules
         internal static Scalar<int64> PastLength(Tensor<float32> y)
             => Apart(y.Slice(Vector(2L, 1L), Vector(4L, 2L), axes: Vector(0L, 2L)), Vector(0f).Tensor());
     }
+
+    /// <summary>ImageDecoder values in every pixel format: an RGB PNG, an RGB JPEG and a greyscale
+    /// JPEG, each decoded to HWC uint8. ONNX Runtime has no ImageDecoder kernel, so this runs on
+    /// the PyTorch backend.</summary>
+    [Module]
+    public partial class QeeImageDecoderValueCheck
+    {
+        public static (Tensor<uint8>, Tensor<uint8>, Tensor<uint8>, Tensor<uint8>, Tensor<uint8>, Tensor<uint8>) Inline(
+            Vector<uint8> png, Vector<uint8> jpeg, Vector<uint8> greyJpeg)
+            => ((Tensor<uint8>)OnnxOp.ImageDecoder(png, pixelFormat: "RGB"),
+                (Tensor<uint8>)OnnxOp.ImageDecoder(png, pixelFormat: "BGR"),
+                (Tensor<uint8>)OnnxOp.ImageDecoder(png, pixelFormat: "Grayscale"),
+                (Tensor<uint8>)OnnxOp.ImageDecoder(jpeg),
+                (Tensor<uint8>)OnnxOp.ImageDecoder(jpeg, pixelFormat: "Grayscale"),
+                (Tensor<uint8>)OnnxOp.ImageDecoder(greyJpeg, pixelFormat: "BGR"));
+    }
 }

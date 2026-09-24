@@ -63,6 +63,8 @@ nvidia-nvshmem-cu13==3.4.5
     # via torch
 nvidia-nvtx==13.0.85
     # via cuda-toolkit
+pillow==12.3.0
+    # via -r requirements.in
 setuptools==84.0.0
     # via torch
 sympy==1.14.0

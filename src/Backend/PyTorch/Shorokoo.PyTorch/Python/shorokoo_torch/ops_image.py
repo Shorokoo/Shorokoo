@@ -1,5 +1,5 @@
 """ONNX image and geometry: Resize (and the Upsample it replaced), GridSample, AffineGrid, RoiAlign,
-NonMaxSuppression, CenterCropPad, Col2Im, DepthToSpace and SpaceToDepth.
+NonMaxSuppression, CenterCropPad, Col2Im, DepthToSpace and SpaceToDepth, and ImageDecoder.
 
 Resize runs one axis at a time: a nearest resize gathers along the axis, and a linear or cubic one
 multiplies by an [output, input] matrix of interpolation weights, which covers antialiasing,
@@ -8,8 +8,10 @@ mapped to input coordinates in float32, as ONNX Runtime maps them, so that a nea
 the same way.
 """
 
+import io
 import math
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -424,3 +426,24 @@ def col2im(data, image_shape, block_shape, /, *, dilations=None, pads=None, stri
     for i in reversed(range(n)):
         crop += [-pads[i], -pads[i + n]]
     return F.pad(out, crop) if any(crop) else out
+
+
+# ---- ImageDecoder ----------------------------------------------------------------------------
+
+def image_decoder(encoded, /, *, pixel_format="RGB"):
+    """Decodes with Pillow, as the ONNX reference implementation does, so every format the spec
+    names (BMP, JPEG, JPEG 2000, TIFF, PNG, WebP, the portable any-maps) is read. An image of any
+    other mode (palette, alpha, greyscale, CMYK) is converted to the requested pixel format."""
+    try:
+        from PIL import Image
+    except ImportError as e:
+        raise RuntimeError("ImageDecoder needs Pillow in the Python environment") from e
+    with Image.open(io.BytesIO(encoded.detach().cpu().numpy().tobytes())) as image:
+        pixels = np.asarray(image.convert("L" if pixel_format == "Grayscale" else "RGB"))
+    if pixel_format == "Grayscale":
+        pixels = pixels[:, :, None]
+    elif pixel_format == "BGR":
+        pixels = pixels[:, :, ::-1]
+    elif pixel_format != "RGB":
+        raise NotImplementedError(f"ImageDecoder pixel_format '{pixel_format}'")
+    return torch.from_numpy(np.ascontiguousarray(pixels)).to(_rt.device())

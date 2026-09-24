@@ -123,7 +123,7 @@ downloads several gigabytes of CUDA libraries for a card that is not there.
 3. **The cache.** Otherwise the environment described by the package's lock file for this
    platform (Linux x64 or Windows x64 — each has its own), under
    `$XDG_CACHE_HOME/shorokoo/python-envs/` (or `~/.cache/…`; `%LOCALAPPDATA%\shorokoo\…` on
-   Windows), in a folder named after the lock and a hash of it — `cpu-6279c3b3d69b31c7`. If it
+   Windows), in a folder named after the lock and a hash of it — `cpu-a8a00e90bef324c8`. If it
    is not there yet it is created with uv: `uv python install 3.12`, `uv venv`, then
    `uv pip install` of the lock. Two processes starting at once build it once — the second
    waits on a lock file beside it — and a build that was interrupted is started over rather
@@ -132,12 +132,13 @@ downloads several gigabytes of CUDA libraries for a card that is not there.
 
 An environment you provide must be a **CPython 3.12** virtual environment (a folder with a
 `pyvenv.cfg`) whose base interpreter has a shared library — `libpython3.12.so` on Linux,
-`python312.dll` beside `python.exe` on Windows — with `torch` and `numpy` installed. uv's own
-Python builds have the shared library; so does the environment made by
+`python312.dll` beside `python.exe` on Windows — with `torch` and `numpy` installed, and `pillow`
+for a model that uses `ImageDecoder`. uv's own Python builds have the shared library; so does the
+environment made by
 
 ```bash
 uv venv --managed-python -p 3.12 /opt/torch-env
-VIRTUAL_ENV=/opt/torch-env uv pip install torch numpy --index-url https://download.pytorch.org/whl/cpu
+VIRTUAL_ENV=/opt/torch-env uv pip install torch numpy pillow --index-url https://download.pytorch.org/whl/cpu
 ```
 
 A distribution's system Python often lacks it, which is refused with
@@ -245,7 +246,7 @@ token. A single node that is one long kernel is not interrupted.
 
 ## Limitations
 
-- **Operator coverage is partial.** The elementwise math and activation operators, the
+- **Operator coverage is that of the operators Shorokoo builds.** The elementwise math and activation operators, the
   comparisons and logic operators, the reductions, `MatMul`/`Gemm`, the shape operators
   (`Reshape`, `Transpose`, `Concat`, `Split`, `Squeeze`/`Unsqueeze`, `Shape`, `Expand`, `Tile`,
   `Pad`, `Constant`, `ConstantOfShape`, `Range`, `OneHot`, `EyeLike`, `ReverseSequence`,
@@ -253,15 +254,18 @@ token. A single node that is one long kernel is not interrupted.
   `Compress`, `ScatterElements`, `ScatterND`, `TopK`, `Unique`, `NonZero`), `If`/`Loop`,
   convolution and pooling, normalization and the losses, `Einsum`/`Det`/`MatMulInteger`, the
   image and geometry operators (`Resize`, `GridSample`, `AffineGrid`, `RoiAlign`,
-  `NonMaxSuppression`, `CenterCropPad`, `Col2Im`, `DepthToSpace`/`SpaceToDepth`, …), the
+  `NonMaxSuppression`, `CenterCropPad`, `Col2Im`, `DepthToSpace`/`SpaceToDepth`, `ImageDecoder`,
+  …), the
   recurrent networks (`RNN`, `GRU`, `LSTM` — `layout=1` included, which ONNX Runtime's CPU
   kernels refuse), the signal operators (`DFT`, `STFT`, the windows, `MelWeightMatrix`), the
   quantization operators (`QuantizeLinear`, `DequantizeLinear`, `DynamicQuantizeLinear`,
   `QLinearMatMul`, `QLinearConv`), sequences and optionals (`SequenceMap` included), the string
   operators (`TfIdfVectorizer` included), and the ONNX random operators and `Dropout` are
   translated, as are functions that take attributes and Shorokoo's own random draws, which reach
-  the backend as integer operators. `ImageDecoder` is not yet: a model using it is refused when
-  its session is created, naming it.
+  the backend as integer operators. `ImageDecoder`, which ONNX Runtime has no kernel for, decodes
+  with Pillow every format the ONNX specification names (BMP, JPEG, JPEG 2000, TIFF, PNG, WebP and
+  the portable any-maps). A model using an operator the backend does not translate — one from a
+  domain other than ONNX's own, say — is refused when its session is created, naming it.
 - **ONNX random draws differ from ONNX Runtime's.** `RandomNormal`, `RandomUniform`, their `Like`
   forms, `Bernoulli`, `Multinomial` and a training-mode `Dropout` draw from PyTorch's generator:
   the distribution, shape and element type are the operator's, and a node with a `seed` draws the

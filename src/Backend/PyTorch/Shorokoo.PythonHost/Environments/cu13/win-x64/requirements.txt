@@ -16,6 +16,8 @@ networkx==3.7
     # via torch
 numpy==2.5.3
     # via -r requirements.in
+pillow==12.3.0
+    # via -r requirements.in
 setuptools==84.0.0
     # via torch
 sympy==1.14.0

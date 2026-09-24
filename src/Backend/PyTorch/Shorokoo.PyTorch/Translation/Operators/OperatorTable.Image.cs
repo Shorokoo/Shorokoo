@@ -24,5 +24,6 @@ internal static partial class OperatorTable
         table.Map("Col2Im", M + "col2im", ["dilations", "pads", "strides"]);
         table.Map("DepthToSpace", M + "depth_to_space", ["blocksize", "mode"]);
         table.Map("SpaceToDepth", M + "space_to_depth", ["blocksize"]);
+        table.Map("ImageDecoder", M + "image_decoder", ["pixel_format"], gradient: TorchGradient.NotDifferentiable);
     }
 }

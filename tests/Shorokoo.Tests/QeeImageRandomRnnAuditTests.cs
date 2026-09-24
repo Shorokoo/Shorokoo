@@ -1,5 +1,6 @@
 using Shorokoo.Runtime;
 using Shorokoo.Core.Interpreter;
+using Shorokoo.PyTorch.Cpu;
 using static Shorokoo.Tests.Utils.QeeAudit;
 
 namespace Shorokoo.Tests;
@@ -70,6 +71,38 @@ public class QeeImageRandomRnnAuditTests
         Assert.Null(img.Shape);
         Assert.Equal(3, img.Rank);
         Assert.Equal(3, img.MaxRank);
+    }
+
+    private const string Png = "iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAIAAAASFvFNAAAAHUlEQVR42mP4z8DA8J+BgeE/E7eI3InpKf//MwAAPP4G/q61Bd4AAAAASUVORK5CYII=";
+
+    private const string Jpeg = "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAIBAQEBAQIBAQECAgICAgQDAgICAgUEBAMEBgUGBgYFBgYGBwkIBgcJBwYGCAsICQoKCgoKBggLDAsKDAkKCgr/2wBDAQICAgICAgUDAwUKBwYHCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgr/wAARCAAIABADAREAAhEBAxEB/8QAFAABAAAAAAAAAAAAAAAAAAAABf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/xAAUAQEAAAAAAAAAAAAAAAAAAAAI/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEQMRAD8APFc2CBUBO//Z";
+
+    private const string GreyJpeg = "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAIBAQEBAQIBAQECAgICAgQDAgICAgUEBAMEBgUGBgYFBgYGBwkIBgcJBwYGCAsICQoKCgoKBggLDAsKDAkKCgr/wAALCAAIAAgBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACP/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AGb//2Q==";
+
+    private static TensorData Encoded(string base64)
+    {
+        var bytes = Convert.FromBase64String(base64);
+        return U8([bytes.Length], bytes);
+    }
+
+    private static double[] Repeat(int times, params double[] run) => [.. Enumerable.Repeat(run, times).SelectMany(r => r)];
+
+    [Fact]
+    public void TestImageDecoderDecodesPngAndJpegToHwcInEveryPixelFormatOnTorch()
+    {
+        Assert.True(AutoTest.AdvancedTestGraph<QeeImageDecoderValueCheck>([],
+            [Encoded(Png), Encoded(Jpeg), Encoded(GreyJpeg)],
+            context: new ComputeContext(new TorchCpuBackend()),
+            tolerance: 0,
+            expected:
+            [
+                255, 0, 0, 0, 255, 0, 0, 0, 255, 10, 20, 30, 200, 150, 100, 255, 255, 255,
+                0, 0, 255, 0, 255, 0, 255, 0, 0, 30, 20, 10, 100, 150, 200, 255, 255, 255,
+                76, 150, 29, 18, 159, 255,
+                .. Repeat(8, [.. Repeat(8, 200, 100, 50), .. Repeat(8, 128, 128, 128)]),
+                .. Repeat(8, [.. Repeat(8, 124), .. Repeat(8, 128)]),
+                .. Repeat(64, 77, 77, 77),
+            ]));
     }
 
     [Fact]

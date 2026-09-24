@@ -1626,8 +1626,8 @@ card's own capacity —
 but `RunSettings.ShrinkArenaAfterRun`, which every run under a device-memory budget has on, hands
 blocks back at the end of a run, before these are read, while the peak comes from a mark the
 runtime never lowers. Three shrinking runs of a matmul on a
-card left `ArenaBytes` below a `PeakBytes` of 3,145,728; on the same graph without shrinkage the
-two were equal. How far below depends on how many sessions the context compiled, so read the
+card, its operands fed `.Shared()`, left `ArenaBytes` at 0 below a `PeakBytes` of 1,048,576; on the
+same graph without shrinkage the two were equal. How far below depends on how many sessions the context compiled, so read the
 ordering rather than a figure. `ArenaExtensionCount` is the same figure's other half and undercounts for the
 same reason: it is the blocks the arena is *holding*, so a shrinking run can end below where it
 started and the aggregate loses the difference.

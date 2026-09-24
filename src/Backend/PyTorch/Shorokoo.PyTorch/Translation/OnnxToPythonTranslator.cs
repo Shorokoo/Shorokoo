@@ -339,8 +339,16 @@ internal sealed partial class OnnxToPythonTranslator
             if (node.Attributes.FirstOrDefault(a => !declared.Contains(a.Name) && !a.Name.StartsWith("shrk_", StringComparison.Ordinal)) is { } argument)
                 throw new TorchUnsupportedModelException(TorchUnsupportedReason.UnsupportedUsage, node.Domain, node.OpType,
                     $"The call of function {node.OpType} passes the attribute '{argument.Name}', which the function does not declare.");
+            // A call may leave the function's trailing inputs and outputs off, an input left off
+            // being an omitted optional one; it has no more of either than the function declares.
+            while (outputs.Count > 0 && outputs[^1].Length == 0) outputs.RemoveAt(outputs.Count - 1);
+            if (node.Inputs.Count > function.Proto.Inputs.Count || outputs.Count > function.Proto.Outputs.Count)
+                throw new TorchUnsupportedModelException(TorchUnsupportedReason.UnsupportedModel, node.Domain, node.OpType,
+                    $"The call '{node.Name}' of function {node.OpType} has {node.Inputs.Count} inputs and {outputs.Count} "
+                    + $"outputs, and the function declares {function.Proto.Inputs.Count} and {function.Proto.Outputs.Count}.");
             var callee = TakesAttributes(function.Proto) ? Specialize(function.Name, function.Proto, node) : function.Name;
-            var arguments = node.Inputs.Select(i => i.Length == 0 ? "None" : scope.Lookup(i, node));
+            var arguments = node.Inputs.Select(i => i.Length == 0 ? "None" : scope.Lookup(i, node))
+                .Concat(Enumerable.Repeat("None", function.Proto.Inputs.Count - node.Inputs.Count));
             expression = $"{callee}({string.Join(", ", arguments)})";
             if (outputs.Count < function.Proto.Outputs.Count) expression += $"[:{outputs.Count}]";
             returnsTuple = true;

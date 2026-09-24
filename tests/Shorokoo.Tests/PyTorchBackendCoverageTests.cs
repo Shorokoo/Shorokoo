@@ -794,6 +794,12 @@ public class PyTorchBackendCoverageTests
         Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(Serialize(ScanLoop(typed: false)), default, default, DeviceMemorySettings.Default));
     }
 
+    [Fact]
+    public void TestAnAttributeWithNeitherATypeNorAValueOrWithTextThatIsNotUtf8IsRefusedAtSessionCreation()
+    {
+        Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(Typed(11, ["x"], ["y"], [Node("ReduceSum", ["x"], ["y"], attributes: new AttributeProto { Name = "axes" })]), default, default, DeviceMemorySettings.Default));
+    }
+
     private static PythonEnvironment Resolve(PythonEnvironmentOptions options, string variable)
         => PythonEnvironmentResolver.Resolve(PythonEnvironmentLock.Cpu, options,
             name => name == PythonEnvironmentResolver.EnvironmentVariable ? variable : null);

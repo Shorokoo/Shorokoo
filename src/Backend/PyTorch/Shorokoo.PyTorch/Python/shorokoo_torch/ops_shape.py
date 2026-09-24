@@ -164,10 +164,15 @@ def pad(data, pads_in=None, constant_value=None, axes_in=None, /, *, mode="const
         return result
 
     if mode == "constant":
-        fill = constant_value.reshape(-1)[0].item() if constant_value is not None else value
         widths = []
         for axis in reversed(range(rank)):
             widths += [before[axis], after[axis]]
+        if constant_value is not None and constant_value.requires_grad:
+            # A value being differentiated fills the padding as a tensor, not a number, so that its
+            # gradient -- the sum of the gradient over the positions it fills -- reaches it.
+            inside = F.pad(torch.ones_like(result), widths, mode="constant", value=0.0) > 0
+            return torch.where(inside, F.pad(result, widths, mode="constant"), constant_value.reshape(()))
+        fill = constant_value.reshape(-1)[0].item() if constant_value is not None else value
         return F.pad(result, widths, mode="constant", value=fill)
     for axis in range(rank):
         if before[axis] or after[axis]:
@@ -188,6 +193,9 @@ def one_hot(indices, depth, values, /, *, axis=-1):
     hot = index.unsqueeze(axis) == torch.arange(count, device=index.device).reshape(positions)
     if _rt.is_strings(values):
         return np.where(hot.cpu().numpy(), values[1], values[0]).astype(object)
+    # The values are constants of the encoding, as Shorokoo's own autodiff treats them: no
+    # gradient reaches them.
+    values = values.detach()
     return torch.where(hot, values[1].to(hot.device), values[0].to(hot.device))
 
 

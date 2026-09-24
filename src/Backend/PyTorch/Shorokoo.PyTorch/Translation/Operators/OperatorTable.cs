@@ -59,6 +59,29 @@ internal static partial class OperatorTable
     /// <summary>Every operator the table translates.</summary>
     public static IReadOnlyCollection<string> Supported => Entries.Keys;
 
+    [ThreadStatic] private static Dictionary<string, TorchGradient>? _gradientOverrides;
+
+    /// <summary>How the training backend treats a standard-domain operator, or null for one the
+    /// table does not translate.</summary>
+    public static TorchGradient? GradientOf(string opType)
+        => _gradientOverrides?.TryGetValue(opType, out var overridden) == true ? overridden
+            : Entries.TryGetValue(opType, out var entry) ? entry.Gradient : null;
+
+    /// <summary>Treats <paramref name="opType"/> as <paramref name="gradient"/> on this thread until
+    /// the result is disposed — for tests of what the training backend does with a classification
+    /// no operator has yet.</summary>
+    internal static IDisposable OverrideGradient(string opType, TorchGradient gradient)
+    {
+        var overrides = _gradientOverrides ??= new Dictionary<string, TorchGradient>(StringComparer.Ordinal);
+        overrides[opType] = gradient;
+        return new GradientOverride(opType);
+    }
+
+    private sealed class GradientOverride(string opType) : IDisposable
+    {
+        public void Dispose() => _gradientOverrides?.Remove(opType);
+    }
+
     private static Dictionary<string, OperatorEntry> Build()
     {
         var registry = new Registry();

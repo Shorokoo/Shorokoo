@@ -12,7 +12,12 @@ internal sealed record TranslatedModel(
     IReadOnlyList<TorchConstant> Constants,
     string[] InputNames,
     string[] OutputNames,
-    ShorokooTensorElementType[] OutputSequenceElementTypes);
+    ShorokooTensorElementType[] OutputSequenceElementTypes)
+{
+    /// <summary>The outputs a run may write into consumed inputs' memory (see
+    /// <see cref="OnnxToPythonTranslator.Translate(ModelProto, IReadOnlyList{OutputAlias})"/>).</summary>
+    public IReadOnlyList<AliasSlot> Aliases { get; init; } = [];
+}
 
 /// <summary>
 /// The names a graph's values go by in the Python being written, scope by scope: a subgraph sees
@@ -54,11 +59,15 @@ internal sealed class Scope(Scope? parent)
 /// assigns the outputs. Every node is read under the opset its graph imports, a function's own
 /// imports for a function body.</para>
 ///
+/// <para>A training step whose gradient is left to the backend carries one
+/// <c>ai.shorokoo.training::AutoGrad</c> node, which becomes <c>torch.autograd.grad</c> over the
+/// forward pass before it (see <see cref="AutoGradStep"/> and <c>shorokoo_torch/training.py</c>).</para>
+///
 /// <para>Everything the backend cannot translate is found here, while the session is being
 /// created — an operator it has no entry for, an attribute an entry does not handle — and
 /// refused with a <see cref="TorchUnsupportedModelException"/> naming it.</para>
 /// </summary>
-internal sealed class OnnxToPythonTranslator
+internal sealed partial class OnnxToPythonTranslator
 {
     private const string FunctionsDomain = "Functions";
 
@@ -88,16 +97,18 @@ internal sealed class OnnxToPythonTranslator
 
     private TranslatedModel Run(ModelProto model, GraphProto graph)
     {
-        Line("# Translated from ONNX by Shorokoo's PyTorch backend.");
-        Line("import torch");
-        Line($"from shorokoo_torch import {string.Join(", ", OperatorTable.Modules)}");
-
         var modelOpsets = _modelOpsets = Opsets(model.OpsetImports, null);
         for (int i = 0; i < model.Functions.Count; i++)
         {
             var function = model.Functions[i];
             _functions[FunctionKey(function.Domain, function.Name)] = ($"f{i}", function);
         }
+        var training = AutoGradStep.Find(model, graph, modelOpsets, _functions.Values.Select(f => f.Proto));
+
+        Line("# Translated from ONNX by Shorokoo's PyTorch backend.");
+        Line("import torch");
+        Line($"from shorokoo_torch import {string.Join(", ", OperatorTable.Modules)}");
+        if (training is not null) Line("from shorokoo_torch import training");
         foreach (var (name, function) in _functions.Values)
         {
             if (TakesAttributes(function)) continue;
@@ -110,7 +121,7 @@ internal sealed class OnnxToPythonTranslator
         var initializers = graph.Initializers.Select(i => i.Name).ToHashSet(StringComparer.Ordinal);
         var inputs = graph.Inputs.Select(i => i.Name).Where(n => !initializers.Contains(n)).ToArray();
         Line();
-        EmitGraph("main", graph, inputs, parent: null);
+        EmitGraph("main", graph, inputs, parent: null, training);
         _source.Append(_specializations);
 
         return new TranslatedModel(
@@ -155,9 +166,7 @@ internal sealed class OnnxToPythonTranslator
     /// The name of the Python function computing <paramref name="function"/> as <paramref name="call"/>
     /// calls it: one written for each distinct set of attribute values the model calls the function
     /// with — the call's, and the function's defaults for those it leaves out — after the rest of
-    /// the module, since Python binds a module's functions by name when they run. An attribute the
-    /// call passes but the function does not declare is one its body cannot read, so it is ignored,
-    /// as ONNX Runtime ignores it.
+    /// the module, since Python binds a module's functions by name when they run.
     /// </summary>
     private string Specialize(string name, FunctionProto function, NodeProto call)
     {
@@ -183,7 +192,8 @@ internal sealed class OnnxToPythonTranslator
 
     /// <summary>Writes a graph as a function <paramref name="name"/> taking
     /// <paramref name="inputs"/>, reading values of <paramref name="parent"/> by closure.</summary>
-    private void EmitGraph(string name, GraphProto graph, IReadOnlyList<string> inputs, Scope? parent)
+    private void EmitGraph(
+        string name, GraphProto graph, IReadOnlyList<string> inputs, Scope? parent, AutoGradStep? training = null)
     {
         if (graph.SparseInitializers.Count > 0)
             throw new TorchUnsupportedModelException(TorchUnsupportedReason.UnsupportedModel, null, null,
@@ -195,8 +205,15 @@ internal sealed class OnnxToPythonTranslator
         foreach (var initializer in graph.Initializers)
             if (!scope.IsBoundHere(initializer.Name))
                 scope.Bind(initializer.Name, AddConstant(TorchConstant.FromTensor(initializer, null)));
-        foreach (var node in graph.Nodes) EmitNode(node, scope);
-        Return(graph.Outputs.Select(o => o.Name), scope);
+        if (training is null)
+        {
+            foreach (var node in graph.Nodes) EmitNode(node, scope);
+            Return(graph.Outputs.Select(o => o.Name), scope);
+        }
+        else
+        {
+            EmitTrainingStep(graph, scope, training);
+        }
         _indent--;
     }
 
@@ -215,9 +232,9 @@ internal sealed class OnnxToPythonTranslator
         return $"_C[{_constants.Count - 1}]";
     }
 
-    private void Return(IEnumerable<string> outputs, Scope scope)
+    private void Return(IEnumerable<string> outputs, Scope scope, string wrap = "")
     {
-        var values = outputs.Select(o => scope.Lookup(o, null)).ToList();
+        var values = outputs.Select(o => wrap.Length == 0 ? scope.Lookup(o, null) : $"{wrap}({scope.Lookup(o, null)})").ToList();
         Line(values.Count == 0 ? "return ()" : $"return ({string.Join(", ", values)},)");
     }
 
@@ -230,11 +247,20 @@ internal sealed class OnnxToPythonTranslator
 
     private void EmitNode(NodeProto node, Scope scope)
     {
+        BeforeNode(node);
         string expression;
         bool returnsTuple;
         var outputs = node.Outputs.ToList();
         if (_functions.TryGetValue(FunctionKey(node.Domain, node.OpType), out var function))
         {
+            // A call's attributes bind the function's declared ones. Shorokoo also annotates the
+            // calls it writes with shrk_* attributes (the structure and types of the values
+            // passed), which the body never reads; any other attribute would be an argument the
+            // function has no parameter for.
+            var declared = function.Proto.Attributes.Concat(function.Proto.AttributeProtoes.Select(a => a.Name)).ToHashSet(StringComparer.Ordinal);
+            if (node.Attributes.FirstOrDefault(a => !declared.Contains(a.Name) && !a.Name.StartsWith("shrk_", StringComparison.Ordinal)) is { } argument)
+                throw new TorchUnsupportedModelException(TorchUnsupportedReason.UnsupportedUsage, node.Domain, node.OpType,
+                    $"The call of function {node.OpType} passes the attribute '{argument.Name}', which the function does not declare.");
             var callee = TakesAttributes(function.Proto) ? Specialize(function.Name, function.Proto, node) : function.Name;
             var arguments = node.Inputs.Select(i => i.Length == 0 ? "None" : scope.Lookup(i, node));
             expression = $"{callee}({string.Join(", ", arguments)})";
@@ -272,6 +298,8 @@ internal sealed class OnnxToPythonTranslator
             Line(expression);
         else if (returnsTuple)
             Line($"{string.Join(", ", targets)}, = {expression}");
+        else if (AliasedWrite(node, scope, targets))
+            Line($"if {targets[0]} is None: {targets[0]} = {expression}");
         else
             Line($"{targets[0]} = {expression}");
     }

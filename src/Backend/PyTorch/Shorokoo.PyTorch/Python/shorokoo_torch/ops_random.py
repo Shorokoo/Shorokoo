@@ -79,5 +79,5 @@ def dropout(data, ratio_in=None, training_mode=None, /, *, seed=None, ratio=None
     else:
         uniform = _draw(lambda v, g: v.uniform_(0.0, 1.0, generator=g), data.shape, torch.float32, seed, data.device)
         mask = uniform >= rate
-        output = data * mask.to(data.dtype) * (1.0 / (1.0 - rate))
+        output = torch.where(mask, data * (1.0 / (1.0 - rate)), torch.zeros_like(data))
     return (output, mask)[:_outputs]

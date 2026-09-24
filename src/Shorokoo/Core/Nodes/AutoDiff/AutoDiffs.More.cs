@@ -274,7 +274,8 @@ namespace Shorokoo.Core.Nodes.AutoDiff
                 var numDimsShape = inputShape.DShape; // Vector<int64> of shape [1], value = number of dims
                 Tensor<int64> begins = OnnxOp.Slice(padsCast, Vector(0L), numDimsShape);
                 var ends = begins + inputShape;
-                return [OnnxOp.Slice(grad, begins, ends), null, null, null];
+                Tensor<T1> sliced = OnnxOp.Slice(grad, begins, ends);
+                return [sliced, null, PadValueGrad(grad, sliced, constantValue), null];
             }
             else
             {
@@ -284,8 +285,18 @@ namespace Shorokoo.Core.Nodes.AutoDiff
                 Tensor<int64> begins = OnnxOp.Slice(padsCast, Vector(0L), numAxesShape);
                 Tensor<int64> dimSizes = OnnxOp.Gather(inputShape, axesCast, axis: 0);
                 var ends = begins + dimSizes;
-                return [OnnxOp.Slice(grad, begins, ends, axesCast), null, null, null];
+                Tensor<T1> sliced = OnnxOp.Slice(grad, begins, ends, axesCast);
+                return [sliced, null, PadValueGrad(grad, sliced, constantValue), null];
             }
+        }
+
+        // The constant value fills every padded position, so its gradient is the sum of the
+        // gradient over them: all of it less the part that lands back on the data.
+        private static Variable PadValueGrad<T>(Tensor<T> grad, Tensor<T> sliced, Tensor<T> constantValue)
+            where T : IVarType
+        {
+            var padded = grad.Reduce(ReduceKind.Sum, keepDims: false) - sliced.Reduce(ReduceKind.Sum, keepDims: false);
+            return OnnxOp.Reshape(padded, constantValue.DShape, allowZero: false);
         }
 
         // ===== Slice =====

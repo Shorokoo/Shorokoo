@@ -164,6 +164,58 @@ namespace Shorokoo.Tests.Modules
         private static Tensor<int64> FlatI(Tensor<int64> t) => t.Reshape(Vector(-1L));
     }
 
+    /// <summary>Normalization and loss variants on non-trivial data: SoftmaxCrossEntropyLoss over
+    /// spatial dims with weights + ignore_index (mean, with log_prob) and without (sum, none),
+    /// NegativeLogLikelihoodLoss with weights + ignore_index (mean) and without (none);
+    /// training-mode BatchNormalization with a momentum; LayerNormalization over axis 1 without
+    /// bias; InstanceNormalization, GroupNormalization with one channel per group, LRN of even
+    /// size, LpNormalization p=2, MeanVarianceNormalization over one axis. Inputs: s [2,4,3,2],
+    /// labels [2,3,2] int64.</summary>
+    [Module]
+    public partial class QeeNormLossVariantsAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> s, Tensor<int64> labels)
+        {
+            var weights = Vector(0.5f, 1f, 2f, 1.5f);
+            var (sceMean, logProb) = NN.SoftmaxCrossEntropyLoss(s, labels, weights, ignoreIndex: 1L, reduction: "mean");
+            var (sceSum, _) = NN.SoftmaxCrossEntropyLoss(s, labels, reduction: "sum");
+            var (sceNone, _) = NN.SoftmaxCrossEntropyLoss(s, labels, reduction: "none");
+            var nllMean = NN.NegativeLogLikelihoodLoss(s, labels, weights, ignoreIndex: 2L, reduction: "mean");
+            var nllNone = NN.NegativeLogLikelihoodLoss(s, labels, reduction: "none");
+            var scale = Vector(1.5f, -0.5f, 2f, 1f);
+            var bias = Vector(0.1f, 0.2f, -0.3f, 0f);
+            var (bn, runMean, runVar) = s.BatchNormalizationFullOuputs(scale, bias, Vector(0.2f, -0.1f, 0f, 0.3f),
+                Vector(1f, 2f, 0.5f, 1.5f), momentum: 0.7f, trainingMode: true);
+            var scaleLn = s.Slice(Vector(0L), Vector(1L)).Reshape(Vector(4L, 3L, 2L));
+            var (ln, lnMean, lnInv) = NN.LayerNormalizationFullOutputs(s, scaleLn, axis: 1);
+            var inst = (Tensor<float32>)OnnxOp.InstanceNormalization(s, scale, bias, epsilon: 1e-3f);
+            var group = NN.GroupNormalization(s, scale, bias, numGroups: 4);
+            var lrn = (Tensor<float32>)OnnxOp.Lrn(s, alpha: 0.02f, beta: 0.6f, bias: 2f, size: 5L);
+            var lp = (Tensor<float32>)OnnxOp.LpNormalization(s, axis: -1, p: 2);
+            var mvn = s.MeanVarianceNormalization((long[])[1]);
+
+            var mismatch =
+                IntMismatch(sceMean.ShapeTensor().ShapeTensor(), Vector(0L)) +
+                ShapeMismatch(logProb!, Vector(2L, 4L, 3L, 2L)) +
+                IntMismatch(sceSum.ShapeTensor().ShapeTensor(), Vector(0L)) +
+                ShapeMismatch(sceNone, Vector(2L, 3L, 2L)) +
+                IntMismatch(nllMean.ShapeTensor().ShapeTensor(), Vector(0L)) +
+                ShapeMismatch(nllNone, Vector(2L, 3L, 2L)) +
+                ShapeMismatch(bn, Vector(2L, 4L, 3L, 2L)) +
+                ShapeMismatch(runMean, Vector(4L)) +
+                ShapeMismatch(runVar, Vector(4L)) +
+                ShapeMismatch(ln, Vector(2L, 4L, 3L, 2L)) +
+                ShapeMismatch(lnMean!, Vector(2L, 1L, 1L, 1L)) +
+                ShapeMismatch(lnInv!, Vector(2L, 1L, 1L, 1L)) +
+                ShapeMismatch(inst, Vector(2L, 4L, 3L, 2L)) +
+                ShapeMismatch(group, Vector(2L, 4L, 3L, 2L)) +
+                ShapeMismatch(lrn, Vector(2L, 4L, 3L, 2L)) +
+                ShapeMismatch(lp, Vector(2L, 4L, 3L, 2L)) +
+                ShapeMismatch(mvn, Vector(2L, 4L, 3L, 2L));
+            return mismatch < Scalar(1L);
+        }
+    }
+
     /// <summary>MatMul numpy semantics with VALUES: 2-D×2-D, the 1-D edge cases
     /// ([K]×[K,N] → [N], [M,K]×[K] → [M], [K]×[K] → scalar — ranks checked via
     /// shape-of-shape), batched 3-D×2-D broadcast; Gemm transA / transB / alpha+beta /

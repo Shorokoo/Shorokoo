@@ -10,7 +10,7 @@
 
     <IsPackable>true</IsPackable>
     <Description>Shorokoo execution backend running on the CPU through PyTorch, in an embedded CPython. The Python environment (torch CPU build) is provisioned with uv on first use, or named with SHOROKOO_PYTHON_ENV. Install alongside the Shorokoo package and name it explicitly: new ComputeContext(new TorchCpuBackend()).</Description>
-    <PackageTags>shorokoo;pytorch;torch;backend;linux;cpu;machine-learning</PackageTags>
+    <PackageTags>shorokoo;pytorch;torch;backend;linux;windows;cpu;machine-learning</PackageTags>
   </PropertyGroup>
 
   <ItemGroup>

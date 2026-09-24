@@ -244,4 +244,11 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
         if (Interlocked.Exchange(ref _released, 1) != 0) return;
         _inner.Dispose();
     }
+
+    /// <summary>
+    /// Marks this released without releasing the ORT value, which is no longer this wrapper's: a
+    /// sequence ONNX Runtime built out of it holds it now, and releases it with itself. Every read
+    /// afterwards is refused, as after <see cref="Dispose"/>, which then does nothing.
+    /// </summary>
+    internal void HandedOver() => Volatile.Write(ref _released, 1);
 }

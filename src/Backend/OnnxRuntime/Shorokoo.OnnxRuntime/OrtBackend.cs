@@ -632,7 +632,8 @@ public abstract class OrtBackend : IShorokooBackend
     /// <para>This <b>takes ownership</b> of <paramref name="values"/>: ORT moves them into the
     /// sequence's own member list and the sequence frees them when it is disposed, so a caller
     /// that still needs them must pass copies. Shorokoo's <c>TensorDataSequence.Create</c> does
-    /// exactly that.</para>
+    /// exactly that. Each value handed over refuses every read from then on, whether the sequence
+    /// is built or refused.</para>
     ///
     /// <para><b>Every element must be in host memory.</b> ONNX Runtime will happily pack a tensor
     /// the execution provider left on a card into a sequence, and then cannot read it back out:
@@ -677,13 +678,21 @@ public abstract class OrtBackend : IShorokooBackend
             // implementation -- throws on the cast with the earlier elements already unwrapped and
             // the caller already committed to having given them up.
             foreach (var v in values) inner.Add(((OrtTensorValue)v).Inner);
-            return new OrtTensorValue(OrtValue.CreateSequence(inner));
+            var sequence = OrtValue.CreateSequence(inner);
+            // The sequence holds the values now and frees them with itself, so each wrapper is
+            // marked released without freeing what it held. Left live, a wrapper would go on
+            // handing ORT a value the sequence owns, and once the sequence is gone a freed one.
+            foreach (var v in values) ((OrtTensorValue)v).HandedOver();
+            return new OrtTensorValue(sequence);
         }
         catch
         {
-            // ORT hands the values back on failure — it empties the list only on success — so
-            // without this they would sit undisposed until their finalizers ran.
-            foreach (var v in inner) v.Dispose();
+            // ORT hands the values back on failure -- it empties the list only on success -- so
+            // they are freed here, every one this was handed rather than those unwrapped before the
+            // failure, and through their wrappers. A value freed behind a wrapper that still reports
+            // itself live reaches ORT on its next read as a handle that is gone: an access
+            // violation, not an exception.
+            foreach (var v in values) v.Dispose();
             throw;
         }
     }

@@ -1885,6 +1885,50 @@ public class CoreUtilsCoverageTests
         value.Dispose();
     }
 
+    [Fact]
+    public void TestASequenceReleasesEveryValueItIsHandedWhetherItIsBuiltOrRefused()
+    {
+        var backend = DefaultBackend.Instance;
+        IShorokooTensorValue Pair() => backend.CreateTensor<float>([1f, 2f], [2L]);
+        static bool Released(IShorokooTensorValue value)
+        {
+            try { _ = ((OrtTensorValue)value).Inner; return false; }
+            catch (ObjectDisposedException) { return true; }
+        }
+
+        IShorokooTensorValue[] built = [Pair(), Pair()];
+        using (var sequence = backend.CreateSequence(built))
+            Assert.Equal([1f, 2f], sequence.GetValue(1).GetTensorDataAsSpan<float>().ToArray());
+        Assert.All(built, value => Assert.True(Released(value)));
+
+        IShorokooTensorValue[] mixed = [Pair(), backend.CreateTensor<long>([1L], [1L])];
+        Assert.Throws<OnnxRuntimeException>(() => backend.CreateSequence(mixed));
+        Assert.All(mixed, value => Assert.True(Released(value)));
+
+        var foreign = new ForeignValue();
+        IShorokooTensorValue[] beside = [Pair(), foreign, Pair()];
+        Assert.Throws<InvalidCastException>(() => backend.CreateSequence(beside));
+        Assert.True(Released(beside[0]) && foreign.Disposed && Released(beside[2]));
+    }
+
+    /// <summary>A value no backend made, which a sequence of the ONNX Runtime backend cannot
+    /// hold.</summary>
+    private sealed class ForeignValue : IShorokooTensorValue
+    {
+        internal bool Disposed { get; private set; }
+
+        public ShorokooOnnxValueType ValueType => ShorokooOnnxValueType.Tensor;
+        public ShorokooTensorElementType ElementType => ShorokooTensorElementType.Float;
+        public long[] Shape => [2L];
+        public ReadOnlySpan<T> GetTensorDataAsSpan<T>() where T : unmanaged => throw new NotSupportedException();
+        public Span<T> GetTensorMutableDataAsSpan<T>() where T : unmanaged => throw new NotSupportedException();
+        public IReadOnlyList<string> GetStringTensorData() => throw new NotSupportedException();
+        public int GetValueCount() => throw new NotSupportedException();
+        public IShorokooTensorValue GetValue(int index) => throw new NotSupportedException();
+        public ShorokooTensorElementType GetSequenceElementType() => throw new NotSupportedException();
+        public void Dispose() => Disposed = true;
+    }
+
     // A call made on the OrtValue a wrapper holds, reached bare (`Inner.X()`) or through the
     // wrapper (`ort.Inner.X()`). The receiver root is what has to stay reachable: rooting the
     // wrapper roots the value it holds, which is why both spellings are read the same way.

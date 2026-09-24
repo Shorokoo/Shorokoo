@@ -139,7 +139,7 @@ public class QeeImageRandomRnnAuditTests
         Assert.True(QeeAudit.Check<QeeLstmShapeAuditCheck>(RecurrentX, I32([2L], 4, 4)));
     }
 
-    private static string Written(string op, bool bidirectional, string[] activations, float[]? alpha, float[]? beta)
+    private static string Written(string op, bool bidirectional, string[] activations, float[]? alpha, float[]? beta, bool exported = false)
     {
         var x = InputTensor<float32>("x", rank: 3);
         var w = InputTensor<float32>("w", rank: 3);
@@ -153,7 +153,8 @@ public class QeeImageRandomRnnAuditTests
             _ => OnnxOp.Lstm(x, w, r, null, null, null, null, null, alpha, beta, activations, null,
                 bidirectional ? LSTMDirection.Bidirectional : LSTMDirection.Forward, 5L, null, false).y,
         };
-        var node = FastOnnxModelBuilder.BuildInternalOnnxModel(new InternalComputationGraph([x, w, r], [y]), prepForOnnx: true)
+        var graph = new InternalComputationGraph([x, w, r], [y]);
+        var node = (exported ? FastOnnxModelBuilder.BuildOnnxModel(graph) : FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true))
             .Graph.Nodes.Single(n => n.OpType == op);
         string List(string name) => string.Join(" ", node.Attributes.SingleOrDefault(a => a.Name == name)?.Floats ?? []);
         return $"{List("activation_alpha")} | {List("activation_beta")}";
@@ -169,7 +170,10 @@ public class QeeImageRandomRnnAuditTests
         Assert.Equal("1 1 | 0", Written("GRU", false, ["Affine", "ThresholdedRelu"], null, null));
         Assert.Equal("2 1 | 3 4", Written("GRU", true, ["ScaledTanh", "Softsign", "Relu", "Affine"], [2f], [3f, 4f]));
         Assert.Equal("0.1 1 0.01 | 0.5", Written("LSTM", true, ["HardSigmoid", "Tanh", "Elu", "Sigmoid", "Relu", "LeakyRelu"], [0.1f], null));
-        Assert.Equal("2 | 3", Written("LSTM", false, ["Affine", "ScaledTanh", "Tanh"], [2f], [3f]));
+        Assert.Equal("2 0 | 3 0", Written("LSTM", false, ["Affine", "ScaledTanh", "Tanh"], [2f], [3f]));
+        Assert.Equal("0.3 0 | 0 0", Written("RNN", true, ["LeakyRelu", "ScaledTanh"], [0.3f], null));
+        Assert.Equal("2 | 3", Written("LSTM", false, ["Affine", "ScaledTanh", "Tanh"], [2f], [3f], exported: true));
+        Assert.Equal("0.3 | ", Written("RNN", true, ["LeakyRelu", "ScaledTanh"], [0.3f], null, exported: true));
     }
 
     [Fact]

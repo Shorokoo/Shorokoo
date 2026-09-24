@@ -5,7 +5,7 @@ using static Shorokoo.Tests.Utils.QeeAudit;
 namespace Shorokoo.Tests;
 
 /// <summary>
-/// Phase 4 QEE-A5 audit batch: image/geometry, random/generator and recurrent families
+/// QEE audit batch: image/geometry, random/generator and recurrent families
 /// (ONNX opset 21). Each module in QeeImageRandomRnnAuditModules.cs is self-checking
 /// (single Scalar&lt;bit&gt;). Outputs whose shapes legitimately stay unknown at QEE time
 /// (NonMaxSuppression's data-dependent n, ImageDecoder's data-dependent H/W, Constant

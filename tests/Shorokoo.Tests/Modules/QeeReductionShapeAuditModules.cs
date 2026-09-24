@@ -21,9 +21,9 @@ namespace Shorokoo.Tests.Modules
     }
 
     // ===================================================================
-    //  Self-checking VALUE-audit modules for the Phase 4 QEE-A3 batch
-    //  (reductions + shape/data-movement family, ONNX opset 21). Like the
-    //  A2 modules, these compare the audited ops' computed VALUES (and,
+    //  Self-checking VALUE-audit modules for the QEE audit of the
+    //  reductions + shape/data-movement family (ONNX opset 21). Like the
+    //  elementwise audit modules, these compare the audited ops' computed VALUES (and,
     //  via ShapeTensor, their inferred SHAPES) against spec-expected
     //  constants and return a single Scalar<bit>.
     //

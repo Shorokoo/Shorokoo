@@ -356,8 +356,8 @@ namespace Shorokoo.Tests.Modules
     }
 
     /// <summary>STFT on a signal built from x: the spectrogram side-branch is masked
-    /// to zero via multiply-by-zero, so dL/dx on the unmasked Σ(x) path stays 1. Since
-    /// AD-B3 this exercises the REAL overlap-add adjoint (no longer a null-stub) with a
+    /// to zero via multiply-by-zero, so dL/dx on the unmasked Σ(x) path stays 1. This
+    /// exercises the REAL overlap-add adjoint (no longer a null-stub) with a
     /// zero-valued upstream gradient — its contribution must be exactly zero, leaving
     /// dL/dx = 1. The signal shape is <c>[batch=1, signal_length=N, channels=1]</c>.</summary>
     [Module]
@@ -378,7 +378,7 @@ namespace Shorokoo.Tests.Modules
     }
 
     /// <summary>DeformConv reached only through a x0-masked side branch, so the gradient
-    /// routed into it is zero-valued. AD-B3 replaced the silent ZERO-STUB with an AD003
+    /// routed into it is zero-valued. An AD003 guard replaced a silent zero stub, and
     /// guard that must fire anyway — a guard that only fires on a live gradient would let
     /// the silent-zeros regression back in. The bit check below is never reached.</summary>
     [Module]

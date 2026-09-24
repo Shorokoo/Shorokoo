@@ -53,7 +53,7 @@ public partial class NNLinearMatchesPyTorch
 // ---------------------------------------------------------------------------
 // Bilinear (src/Shorokoo.Modules/Layers/Bilinear.cs) — PyTorch nn.Bilinear:
 // y[..., k] = Σ_{i,j} x1[..., i]·A[k,i,j]·x2[..., j] (+ b[k]), via a single
-// explicit-label einsum "ni,kij,nj->nk". Design §7. The modules pin frozen
+// explicit-label einsum "ni,kij,nj->nk". The modules pin frozen
 // forward-value goldens (self-generated at master-seed-0). The former manual
 // Σ_{i,j} references re-materialized the layer's A and b via second Init calls
 // and were retired with keyed per-parameter init (call sites no longer share
@@ -61,7 +61,7 @@ public partial class NNLinearMatchesPyTorch
 // PyTorch-reference golden migration.
 // ---------------------------------------------------------------------------
 
-/// <summary>§7.1 Bilinear(useBias:true) forward output on x1 [2,3], x2 [2,4] at MasterSeed=0 must
+/// <summary>Bilinear(useBias:true) forward output on x1 [2,3], x2 [2,4] at MasterSeed=0 must
 /// match the frozen reference. The old check re-ran the bilinear form by hand (a tautology); the
 /// reference is now the layer's own frozen forward output.</summary>
 [Module]
@@ -79,7 +79,7 @@ public partial class NNBilinearForwardGolden
     }
 }
 
-/// <summary>§7.2 useBias gating: the Bilinear(useBias:true) and Bilinear(useBias:false) forward
+/// <summary>useBias gating: the Bilinear(useBias:true) and Bilinear(useBias:false) forward
 /// outputs on x1 [2,3], x2 [2,4] at MasterSeed=0 must each match their frozen reference. The old
 /// check re-ran both bilinear forms by hand; the references are now the layer's own frozen outputs
 /// (distinct call-sites get distinct seeded weights under per-parameter init).</summary>
@@ -101,7 +101,7 @@ public partial class NNBilinearUseBiasGoldens
     }
 }
 
-/// <summary>§7.3 Batch broadcasting: with x1 [2,2,3], x2 [2,2,4] the output shape is [2,2,2]
+/// <summary>Batch broadcasting: with x1 [2,2,3], x2 [2,2,4] the output shape is [2,2,2]
 /// (asserted via ShapeTensor) AND its forward output at MasterSeed=0 must match the frozen
 /// reference. The old check re-ran the per-row bilinear form by hand; the reference is now the
 /// layer's own frozen forward output.</summary>
@@ -123,7 +123,7 @@ public partial class NNBilinearBatchBroadcasts
     }
 }
 
-/// <summary>§7.4 Rig train-step smoke model: wraps Bilinear on two fixed inputs (x1 [N,in1], x2 [N,in2])
+/// <summary>Rig train-step smoke model: wraps Bilinear on two fixed inputs (x1 [N,in1], x2 [N,in2])
 /// and reduces to a per-row scalar so the rig can take an L2 loss. The rank-3 A weight [out,in1,in2] is
 /// the first Einsum-autodiff exercise at the module level — the driving [Fact] asserts A moved.</summary>
 [Module]
@@ -194,7 +194,7 @@ public partial class NNConvTranspose2dForwardGolden
 
 // ---------------------------------------------------------------------------
 // Generalized Convolution helper coverage (Convolution.Conv / ConvTranspose,
-// src/Shorokoo.Modules/Layers/Convolution.cs) — design §7 groups 1–9. Each
+// src/Shorokoo.Modules/Layers/Convolution.cs). Each
 // self-checking [Module] returns a Scalar<bit> that AutoTest.AdvancedTestGraph
 // requires to be true: it runs the configured geometry and compares the (collapsed)
 // forward output against an inlined frozen golden reference (self-generated at the
@@ -204,7 +204,7 @@ public partial class NNConvTranspose2dForwardGolden
 // so value correctness comes from the ORT backend inside AdvancedTestGraph.
 // ---------------------------------------------------------------------------
 
-/// <summary>§7-1 Non-square kernel: Convolution.Conv(kernelSize:[3,5], pads:[1,2,1,2]) — frozen
+/// <summary>Non-square kernel: Convolution.Conv(kernelSize:[3,5], pads:[1,2,1,2]) — frozen
 /// forward-value golden (self-generated).</summary>
 [Module]
 public partial class ConvNonSquareKernelGolden
@@ -220,7 +220,7 @@ public partial class ConvNonSquareKernelGolden
     }
 }
 
-/// <summary>§7-2 Per-axis stride &amp; dilation: stride:[1,2], dilation:[2,1] with explicit pads —
+/// <summary>Per-axis stride &amp; dilation: stride:[1,2], dilation:[2,1] with explicit pads —
 /// frozen forward-value golden (self-generated).</summary>
 [Module]
 public partial class ConvPerAxisStrideDilationGolden
@@ -237,7 +237,7 @@ public partial class ConvPerAxisStrideDilationGolden
     }
 }
 
-/// <summary>§7-3 Asymmetric pad: padding:[1,2,0,1] (ONNX begin..end order, applied verbatim) —
+/// <summary>Asymmetric pad: padding:[1,2,0,1] (ONNX begin..end order, applied verbatim) —
 /// frozen forward-value golden (self-generated).</summary>
 [Module]
 public partial class ConvAsymmetricPadGolden
@@ -253,7 +253,7 @@ public partial class ConvAsymmetricPadGolden
     }
 }
 
-/// <summary>§7-4 auto_pad SAME_UPPER and VALID: both variants run and both outputs fold into one
+/// <summary>auto_pad SAME_UPPER and VALID: both variants run and both outputs fold into one
 /// frozen forward-value golden (self-generated). Forward value only — SAME has no Conv backward.</summary>
 [Module]
 public partial class ConvAutoPadGolden
@@ -271,7 +271,7 @@ public partial class ConvAutoPadGolden
     }
 }
 
-/// <summary>§7-5 Groups / depthwise: groups:inC (depthwise, inC=4 → outC=4) AND a mid groups:2 —
+/// <summary>Groups / depthwise: groups:inC (depthwise, inC=4 → outC=4) AND a mid groups:2 —
 /// both variants run and fold into one frozen forward-value golden (self-generated).</summary>
 [Module]
 public partial class ConvGroupsGolden
@@ -291,7 +291,7 @@ public partial class ConvGroupsGolden
     }
 }
 
-/// <summary>§7-6 padding_mode Reflect, Replicate and Circular: all three modes run and fold into one
+/// <summary>padding_mode Reflect, Replicate and Circular: all three modes run and fold into one
 /// frozen forward-value golden (self-generated). Forward only — reflect/edge/wrap Pad is
 /// non-differentiable and has no QEE values, so QEE / CS-roundtrip are disabled for this check in the
 /// driving [Fact].</summary>
@@ -315,7 +315,7 @@ public partial class ConvPaddingModesGolden
     }
 }
 
-/// <summary>§7-6 Causal (1D): Convolution.Conv1d(paddingMode:Causal) — frozen forward-value golden
+/// <summary>Causal (1D): Convolution.Conv1d(paddingMode:Causal) — frozen forward-value golden
 /// (self-generated): the configured layer's output must match the inlined reference. Forward only
 /// (the Pad here is constant-mode, so it is differentiable, but kept inference-grade for symmetry
 /// with the other padding-mode check).</summary>
@@ -336,7 +336,7 @@ public partial class ConvCausalGolden
     }
 }
 
-/// <summary>§7-7 ConvTranspose output_padding: ConvTranspose(kernelSize:[2,2], stride:[2,2],
+/// <summary>ConvTranspose output_padding: ConvTranspose(kernelSize:[2,2], stride:[2,2],
 /// outputPadding:[1,1]) — frozen forward-value golden (self-generated).</summary>
 [Module]
 public partial class ConvTransposeOutputPaddingGolden
@@ -353,7 +353,7 @@ public partial class ConvTransposeOutputPaddingGolden
     }
 }
 
-/// <summary>§7-7 ConvTranspose output_shape: ConvTranspose(stride:[2,2], outputShape:[…]) — frozen
+/// <summary>ConvTranspose output_shape: ConvTranspose(stride:[2,2], outputShape:[…]) — frozen
 /// forward-value golden (self-generated).</summary>
 [Module]
 public partial class ConvTransposeOutputShapeGolden
@@ -371,7 +371,7 @@ public partial class ConvTransposeOutputShapeGolden
     }
 }
 
-/// <summary>§7-7 ConvTranspose1d rank alias smoke: rank 3, one spatial dim — frozen forward-value
+/// <summary>ConvTranspose1d rank alias smoke: rank 3, one spatial dim — frozen forward-value
 /// golden (self-generated).</summary>
 [Module]
 public partial class ConvTranspose1dGolden
@@ -387,7 +387,7 @@ public partial class ConvTranspose1dGolden
     }
 }
 
-/// <summary>§7-7 ConvTranspose3d rank alias smoke: rank 5, three spatial dims — frozen forward-value
+/// <summary>ConvTranspose3d rank alias smoke: rank 5, three spatial dims — frozen forward-value
 /// golden (self-generated).</summary>
 [Module]
 public partial class ConvTranspose3dGolden
@@ -403,7 +403,7 @@ public partial class ConvTranspose3dGolden
     }
 }
 
-/// <summary>§7-8 Alias coverage: the generic Conv plus the Conv2d and ConvTranspose2d aliases all run
+/// <summary>Alias coverage: the generic Conv plus the Conv2d and ConvTranspose2d aliases all run
 /// and fold into one frozen forward-value golden (self-generated). Each call site draws its own
 /// weights under keyed per-site init, so the golden pins three independent outputs — the former
 /// alias ≡ generic relation is retired, not asserted. The scalar overload is covered separately by
@@ -426,7 +426,7 @@ public partial class ConvAliasesGolden
     }
 }
 
-/// <summary>§7-8 Scalar overload: the scalar Conv(c, outC, 3, padding:1) — frozen forward-value
+/// <summary>Scalar overload: the scalar Conv(c, outC, 3, padding:1) — frozen forward-value
 /// golden (self-generated): the configured layer's output must match the inlined reference. Pins
 /// the scalar overload's own output only; the scalar ≡ per-axis broadcast relation is retired
 /// (keyed per-site init gives the two call sites distinct weights). The scalar overload reads
@@ -452,7 +452,7 @@ public partial class ConvScalarOverloadGolden
     }
 }
 
-/// <summary>§7-9 bias:false — frozen forward-value golden (self-generated): the configured layer's
+/// <summary>bias:false — frozen forward-value golden (self-generated): the configured layer's
 /// output must match the inlined reference. The bias:true path is value-covered by the default-arg
 /// baseline goldens; the init-time bias:true == bias:false relation is retired (keyed per-site
 /// init gives the two call sites distinct weights).</summary>
@@ -470,7 +470,7 @@ public partial class ConvNoBiasGolden
     }
 }
 
-/// <summary>§7-10 Trainability smoke model: a tiny groups:1, explicit-pad, Zeros-mode
+/// <summary>Trainability smoke model: a tiny groups:1, explicit-pad, Zeros-mode
 /// Convolution.Conv → ReLU → GlobalAvgPool → [N, 2] logits, for a TrainingRig FromScratch /
 /// TrainStep (the supported differentiable corner: 2-D weight grad, explicit pads, zeros mode).</summary>
 [Module]
@@ -536,7 +536,7 @@ public partial class NNInstanceNorm2dNormalizes
 }
 
 // ---------------------------------------------------------------------------
-// Generalized rank-generic InstanceNorm + GroupNorm coverage (design §7).
+// Generalized rank-generic InstanceNorm + GroupNorm coverage.
 // Both are STATE-FREE (no Globals.StateUpdate), so they run on the plain
 // inference pipeline and are exercised via AutoTest.AdvancedTestGraph here.
 // Each self-checking [Module] mirrors the existing NNGroupNormNormalizes /
@@ -549,12 +549,12 @@ public partial class NNInstanceNorm2dNormalizes
 // mirroring the affine on/off rig [Fact]) and lives in the *Model modules below.
 // ---------------------------------------------------------------------------
 
-// --- §7-1: per-region zero-mean/unit-var, InstanceNorm at ranks 3/4/5 ---
+// --- per-region zero-mean/unit-var, InstanceNorm at ranks 3/4/5 ---
 // One module per rank (the reduction axis set [2..rank) is spelled per rank,
 // like NNInstanceNorm2dNormalizes spells [2,3]). affine:false so γ/β do not
 // perturb the bare x̂.
 
-/// <summary>§7-1 InstanceNorm rank-3 [N,C,L]: ~zero mean / ~unit variance per (sample, channel) over axis 2.</summary>
+/// <summary>InstanceNorm rank-3 [N,C,L]: ~zero mean / ~unit variance per (sample, channel) over axis 2.</summary>
 [Module]
 public partial class NNInstanceNormRank3Normalizes
 {
@@ -570,7 +570,7 @@ public partial class NNInstanceNormRank3Normalizes
     }
 }
 
-/// <summary>§7-1 InstanceNorm rank-4 [N,C,H,W]: ~zero mean / ~unit variance per (sample, channel) over axes 2,3.</summary>
+/// <summary>InstanceNorm rank-4 [N,C,H,W]: ~zero mean / ~unit variance per (sample, channel) over axes 2,3.</summary>
 [Module]
 public partial class NNInstanceNormRank4Normalizes
 {
@@ -586,7 +586,7 @@ public partial class NNInstanceNormRank4Normalizes
     }
 }
 
-/// <summary>§7-1 InstanceNorm rank-5 [N,C,D,H,W]: ~zero mean / ~unit variance per (sample, channel) over axes 2,3,4.</summary>
+/// <summary>InstanceNorm rank-5 [N,C,D,H,W]: ~zero mean / ~unit variance per (sample, channel) over axes 2,3,4.</summary>
 [Module]
 public partial class NNInstanceNormRank5Normalizes
 {
@@ -602,11 +602,11 @@ public partial class NNInstanceNormRank5Normalizes
     }
 }
 
-// --- §7-1: per-region zero-mean/unit-var, GroupNorm (G=2) at ranks 3/4/5 ---
+// --- per-region zero-mean/unit-var, GroupNorm (G=2) at ranks 3/4/5 ---
 // Reduce the [N, G, -1] reshape's axis 2 (the whole per-(sample, group)
 // region at any rank), exactly as NNGroupNormNormalizes does. affine:false.
 
-/// <summary>§7-1 GroupNorm (G=2) rank-3 [N,C,L]: ~zero mean / ~unit variance per (sample, group).</summary>
+/// <summary>GroupNorm (G=2) rank-3 [N,C,L]: ~zero mean / ~unit variance per (sample, group).</summary>
 [Module]
 public partial class NNGroupNormRank3Normalizes
 {
@@ -624,7 +624,7 @@ public partial class NNGroupNormRank3Normalizes
     }
 }
 
-/// <summary>§7-1 GroupNorm (G=2) rank-4 [N,C,H,W]: ~zero mean / ~unit variance per (sample, group).</summary>
+/// <summary>GroupNorm (G=2) rank-4 [N,C,H,W]: ~zero mean / ~unit variance per (sample, group).</summary>
 [Module]
 public partial class NNGroupNormRank4Normalizes
 {
@@ -642,7 +642,7 @@ public partial class NNGroupNormRank4Normalizes
     }
 }
 
-/// <summary>§7-1 GroupNorm (G=2) rank-5 [N,C,D,H,W]: ~zero mean / ~unit variance per (sample, group).</summary>
+/// <summary>GroupNorm (G=2) rank-5 [N,C,D,H,W]: ~zero mean / ~unit variance per (sample, group).</summary>
 [Module]
 public partial class NNGroupNormRank5Normalizes
 {
@@ -660,13 +660,13 @@ public partial class NNGroupNormRank5Normalizes
     }
 }
 
-// --- §7-2(a): affine:false forward goldens ---
+// --- affine:false forward goldens ---
 // γ=1/β=0 at init means affine on/off coincide numerically (constant inits are
 // keying-independent), so the affine:false output is the discriminating value
 // surface; it is pinned by a frozen golden rather than the former hand-built x̂
 // recompute (which re-derived the same formula — a tautology).
 
-/// <summary>§7-2(a) InstanceNorm(affine:false) forward output on CurvedTensor([2,3,4,4],0.4,-3,0.05) at
+/// <summary>InstanceNorm(affine:false) forward output on CurvedTensor([2,3,4,4],0.4,-3,0.05) at
 /// MasterSeed=0 must match the frozen reference. The old check re-ran (x−mean)/sqrt(var+eps) by hand
 /// (a tautology); the reference is now the layer's own frozen output. The input is a DISTINCT-valued
 /// (quadratic) ramp, not a linear one: a linear ramp standardizes every (sample,channel) slice to the
@@ -687,7 +687,7 @@ public partial class NNInstanceNormAffineFalseGolden
     }
 }
 
-/// <summary>§7-2(a) GroupNorm(G=2, affine:false) forward output on CurvedTensor([2,4,3,3],0.7,-10,0.05) at
+/// <summary>GroupNorm(G=2, affine:false) forward output on CurvedTensor([2,4,3,3],0.7,-10,0.05) at
 /// MasterSeed=0 must match the frozen reference. The old check re-ran the per-group
 /// (x−mean)/sqrt(var+eps) by hand (a tautology); the reference is now the layer's own frozen output.
 /// The input is a DISTINCT-valued (quadratic) ramp, not a linear one: a linear ramp standardizes every
@@ -708,11 +708,11 @@ public partial class NNGroupNormAffineFalseGolden
     }
 }
 
-// --- §7-3: GroupNorm(G=1) ≡ LayerNorm-over-CHW (rank-4) ---
+// --- GroupNorm(G=1) ≡ LayerNorm-over-CHW (rank-4) ---
 // normalizedDims = rank-1 = 3 (the last C·H·W block). Both affine off → only
 // the normalization is compared. Biased variance uniform ⇒ exact up to float.
 
-/// <summary>§7-3 GroupNorm(G=1, affine:false) ≡ LayerNorm over the last C·H·W (normalizedDims=rank−1=3)
+/// <summary>GroupNorm(G=1, affine:false) ≡ LayerNorm over the last C·H·W (normalizedDims=rank−1=3)
 /// on a rank-4 input. Relative-L1 &lt; 1e-3.</summary>
 [Module]
 public partial class NNGroupNormG1MatchesLayerNorm
@@ -729,11 +729,11 @@ public partial class NNGroupNormG1MatchesLayerNorm
     }
 }
 
-// --- §7-4: GroupNorm(G=C) ≡ InstanceNorm (rank-4 and rank-3) ---
+// --- GroupNorm(G=C) ≡ InstanceNorm (rank-4 and rank-3) ---
 // Each channel is its own group, so GN with G=C reduces over each channel's
 // spatial extent — exactly InstanceNorm. C is read from the runtime shape.
 
-/// <summary>§7-4 GroupNorm(G=C, affine:false) ≡ InstanceNorm(affine:false) on a rank-4 input
+/// <summary>GroupNorm(G=C, affine:false) ≡ InstanceNorm(affine:false) on a rank-4 input
 /// (C read from the runtime shape). Relative-L1 &lt; 1e-3.</summary>
 [Module]
 public partial class NNGroupNormGCMatchesInstanceNormRank4
@@ -751,7 +751,7 @@ public partial class NNGroupNormGCMatchesInstanceNormRank4
     }
 }
 
-/// <summary>§7-4 GroupNorm(G=C, affine:false) ≡ InstanceNorm(affine:false) on a rank-3 input
+/// <summary>GroupNorm(G=C, affine:false) ≡ InstanceNorm(affine:false) on a rank-3 input
 /// (C read from the runtime shape). Relative-L1 &lt; 1e-3.</summary>
 [Module]
 public partial class NNGroupNormGCMatchesInstanceNormRank3
@@ -769,11 +769,11 @@ public partial class NNGroupNormGCMatchesInstanceNormRank3
     }
 }
 
-// --- §7-5: alias equivalence — InstanceNorm{1,2,3}d ≡ InstanceNorm(affine:false) ---
+// --- alias equivalence — InstanceNorm{1,2,3}d ≡ InstanceNorm(affine:false) ---
 // The aliases forward to InstanceNorm.Call(Scalar(false), eps, x), so they must
 // agree bit-for-bit on the matching-rank input.
 
-/// <summary>§7-5 InstanceNorm1d.Call(eps, x) == InstanceNorm.Call(affine:false, eps, x) on a rank-3 input (bit-for-bit).</summary>
+/// <summary>InstanceNorm1d.Call(eps, x) == InstanceNorm.Call(affine:false, eps, x) on a rank-3 input (bit-for-bit).</summary>
 [Module]
 public partial class NNInstanceNorm1dAliasEquiv
 {
@@ -787,7 +787,7 @@ public partial class NNInstanceNorm1dAliasEquiv
     }
 }
 
-/// <summary>§7-5 InstanceNorm2d.Call(eps, x) == InstanceNorm.Call(affine:false, eps, x) on a rank-4 input (bit-for-bit).</summary>
+/// <summary>InstanceNorm2d.Call(eps, x) == InstanceNorm.Call(affine:false, eps, x) on a rank-4 input (bit-for-bit).</summary>
 [Module]
 public partial class NNInstanceNorm2dAliasEquiv
 {
@@ -801,7 +801,7 @@ public partial class NNInstanceNorm2dAliasEquiv
     }
 }
 
-/// <summary>§7-5 InstanceNorm3d.Call(eps, x) == InstanceNorm.Call(affine:false, eps, x) on a rank-5 input (bit-for-bit).</summary>
+/// <summary>InstanceNorm3d.Call(eps, x) == InstanceNorm.Call(affine:false, eps, x) on a rank-5 input (bit-for-bit).</summary>
 [Module]
 public partial class NNInstanceNorm3dAliasEquiv
 {
@@ -815,7 +815,7 @@ public partial class NNInstanceNorm3dAliasEquiv
     }
 }
 
-// --- §7-2(b): affine param-count discrimination (rig models) ---
+// --- affine param-count discrimination (rig models) ---
 // Mirror NNBatchNormAffineFalseEvalGradModel: a live scalar pre-weight gives
 // the rig a trainable param to count, and InstanceNorm/GroupNorm.Model(affine,
 // …) fixes the affine bit. With affine:false, γ/β are pruned (dead branch, no
@@ -823,7 +823,7 @@ public partial class NNInstanceNorm3dAliasEquiv
 // affine:true, γ/β survive ⇒ 3 trainable params (scalar weight + γ + β). The
 // rig [Fact] in NNLibrary*TrainingCoverageTests asserts the field counts.
 
-/// <summary>§7-2(b) InstanceNorm(affine:false) rig model: scalar pre-weight → InstanceNorm → per-(sample,channel) mean.
+/// <summary>InstanceNorm(affine:false) rig model: scalar pre-weight → InstanceNorm → per-(sample,channel) mean.
 /// γ/β are pruned (dead branch), so the only trainable param is the scalar weight.</summary>
 [Module]
 public partial class NNInstanceNormAffineFalseParamModel
@@ -837,7 +837,7 @@ public partial class NNInstanceNormAffineFalseParamModel
     }
 }
 
-/// <summary>§7-2(b) InstanceNorm(affine:true) rig model: scalar pre-weight → InstanceNorm → per-(sample,channel) mean.
+/// <summary>InstanceNorm(affine:true) rig model: scalar pre-weight → InstanceNorm → per-(sample,channel) mean.
 /// γ/β survive, so the model exposes 3 trainable params (scalar weight + γ + β).</summary>
 [Module]
 public partial class NNInstanceNormAffineTrueParamModel
@@ -851,7 +851,7 @@ public partial class NNInstanceNormAffineTrueParamModel
     }
 }
 
-/// <summary>§7-2(b) GroupNorm(G=2, affine:false) rig model: scalar pre-weight → GroupNorm → per-channel mean.
+/// <summary>GroupNorm(G=2, affine:false) rig model: scalar pre-weight → GroupNorm → per-channel mean.
 /// γ/β are pruned (dead branch), so the only trainable param is the scalar weight.</summary>
 [Module]
 public partial class NNGroupNormAffineFalseParamModel
@@ -865,7 +865,7 @@ public partial class NNGroupNormAffineFalseParamModel
     }
 }
 
-/// <summary>§7-2(b) GroupNorm(G=2, affine:true) rig model: scalar pre-weight → GroupNorm → per-channel mean.
+/// <summary>GroupNorm(G=2, affine:true) rig model: scalar pre-weight → GroupNorm → per-channel mean.
 /// γ/β survive, so the model exposes 3 trainable params (scalar weight + γ + β).</summary>
 [Module]
 public partial class NNGroupNormAffineTrueParamModel
@@ -879,7 +879,7 @@ public partial class NNGroupNormAffineTrueParamModel
     }
 }
 
-/// <summary>§7-2(b) LayerNorm(normalizedDims=2, affine:false) rig model over [N, D1, D2]: scalar
+/// <summary>LayerNorm(normalizedDims=2, affine:false) rig model over [N, D1, D2]: scalar
 /// pre-weight → LayerNorm → per-sample mean. γ/β are pruned (dead branch), so the only trainable param
 /// is the scalar weight.</summary>
 [Module]
@@ -894,7 +894,7 @@ public partial class NNLayerNormAffineFalseParamModel
     }
 }
 
-/// <summary>§7-2(b) LayerNorm(normalizedDims=2, affine:true) rig model over [N, D1, D2]: scalar
+/// <summary>LayerNorm(normalizedDims=2, affine:true) rig model over [N, D1, D2]: scalar
 /// pre-weight → LayerNorm → per-sample mean. γ/β survive, so the model exposes 3 trainable params
 /// (scalar weight + γ + β), each materializing to D1·D2 — the discriminator against a paramShape that
 /// collapsed to the last dim alone — and both must take gradient through the live IfElse branch.</summary>
@@ -1249,7 +1249,7 @@ public partial class NNAlphaDropoutMomentPreservation
 
         var meanPen = (meanY - meanX).Abs();
         var varPen = (varY - varX).Abs();
-        // Generous statistical tolerances (single fixed-mask realization, #74004).
+        // Generous statistical tolerances (single fixed-mask realization; PyTorch issue #74004).
         return meanPen < Scalar(0.3f) & varPen < Scalar(0.6f);
     }
 }
@@ -1434,7 +1434,7 @@ public partial class NNEmbeddingForwardGolden
 
 // ---------------------------------------------------------------------------
 // Embedding knob coverage (paddingIdx / maxNorm / normType / init choice,
-// src/Shorokoo.Modules/Layers/Embedding.cs — embedding-knobs design §8). Each
+// src/Shorokoo.Modules/Layers/Embedding.cs). Each
 // self-checking [Module] returns a Scalar<bit> that AutoTest.AdvancedTestGraph
 // requires true. Each reference reads the call site's OWN table via
 // IModel.GetTrainableParam — a semantic reference to the same parameter, valid
@@ -1444,10 +1444,10 @@ public partial class NNEmbeddingForwardGolden
 // ---------------------------------------------------------------------------
 
 /// <summary>
-/// §8-2/§8-3 paddingIdx forward mask. With paddingIdx:2 over indices [0,1,2,2,3]
+/// paddingIdx forward mask. With paddingIdx:2 over indices [0,1,2,2,3]
 /// (V=5, D=4): every output row at a pad position (the two `2`s) must be all-zero,
 /// and every non-pad row must equal the model's own table (via GetTrainableParam)
-/// gathered at that index (unchanged). Also folds the off-sentinel no-op (§8-3): with paddingIdx:-1
+/// gathered at that index (unchanged). Also folds the off-sentinel no-op: with paddingIdx:-1
 /// the SAME call must equal the plain Gather of ALL rows (the IfElse(-1) gate
 /// disables masking). The pad-row L2 mass and the non-pad/off-sentinel diffs are
 /// rolled into one Scalar&lt;bit&gt; penalty.
@@ -1490,14 +1490,14 @@ public partial class NNEmbeddingPaddingIdxZeros
 }
 
 /// <summary>
-/// §8-4/§8-6 maxNorm L2 clamp (shrink-only). The Normal-initialized [5,4] table's rows
+/// maxNorm L2 clamp (shrink-only). The Normal-initialized [5,4] table's rows
 /// are N(0,1)×4, so each row's L2 norm is ≈2 ≫ a 0.5 cap (the cap binds every gathered
 /// row). The reference reads the model's own table via GetTrainableParam and applies the
 /// hand-built shrink-only clamp out = gather·min(1, maxNorm/‖row‖₂). Asserts:
 ///   (a) the over-cap output row's L2 norm ≈ maxNorm (clamped DOWN to the cap);
 ///   (b) the clamped output matches the hand reference exactly (per-row);
 ///   (c) under-cap rows are UNCHANGED — a huge maxNorm:1000f leaves the output ==
-///       plain Gather (scale clipped to 1); and the §8-6 off-sentinel maxNorm:0f
+///       plain Gather (scale clipped to 1); and the off-sentinel maxNorm:0f
 ///       likewise == plain Gather (renorm gate disabled).
 /// Indices come from the runtime tensor (row 0 is the over-cap probe).
 /// </summary>
@@ -1547,7 +1547,7 @@ public partial class NNEmbeddingMaxNormClampsL2
 }
 
 /// <summary>
-/// §8-5 normType honored (L1 vs L2). On the SAME over-cap row with maxNorm:0.5,
+/// normType honored (L1 vs L2). On the SAME over-cap row with maxNorm:0.5,
 /// normType:1 must clamp the OUTPUT row's L1 norm to maxNorm, normType:2 must clamp
 /// its L2 norm to maxNorm, and the two outputs must DIFFER — proving normType flows
 /// into the p-norm (not a hardcoded 2). The over-cap index comes from the runtime
@@ -1578,7 +1578,7 @@ public partial class NNEmbeddingNormTypeL1VsL2
     }
 }
 
-/// <summary>§8-7 init choice (static EmbeddingHelpers.Embed): the XavierUniform-selector form AND the
+/// <summary>Init choice (static EmbeddingHelpers.Embed): the XavierUniform-selector form AND the
 /// default (Normal) form both run and fold into one frozen forward-value golden (self-generated) — a
 /// selector that stops being wired changes the output and fails the reference comparison.</summary>
 [Module]
@@ -1599,7 +1599,7 @@ public partial class NNEmbeddingInitChoice
 }
 
 /// <summary>
-/// §8-8 train-step rig model: a tiny Embedding-based model with paddingIdx set, so
+/// Train-step rig model: a tiny Embedding-based model with paddingIdx set, so
 /// TrainingRig.FromScratch + one TrainStep can assert the trainable embedding weight
 /// MOVES (the masked lookup is differentiable). Embeds the in-graph constant indices
 /// [0,1,2] over a trainable weight [4,3] (V=4, D=3) with paddingIdx:2 (so the last
@@ -1621,8 +1621,7 @@ public partial class EmbeddingPaddingRigModel
 }
 
 // ---------------------------------------------------------------------------
-// EmbeddingBag (src/Shorokoo.Modules/Layers/Embedding.cs — embedding-bag design
-// §8). EmbeddingBag.Bag(indices [B,L], V, D, mode) is mathematically
+// EmbeddingBag (src/Shorokoo.Modules/Layers/Embedding.cs). EmbeddingBag.Bag(indices [B,L], V, D, mode) is mathematically
 // Embedding(indices).Reduce(mode, axis=1) → [B, D]. Each self-checking [Module]
 // pins a frozen forward-value golden (self-generated). The former Gather→Reduce
 // references re-materialized the table via a second Init call and were retired
@@ -1630,7 +1629,7 @@ public partial class EmbeddingPaddingRigModel
 // [B=2, L=3] with distinct ids so Sum ≠ Mean ≠ Max are all non-trivial.
 // ---------------------------------------------------------------------------
 
-/// <summary>§8-1 (Sum): EmbeddingBag.Bag(BagMode.Sum) on indices [[0,1,2],[1,3,0]] at MasterSeed=0
+/// <summary>(Sum): EmbeddingBag.Bag(BagMode.Sum) on indices [[0,1,2],[1,3,0]] at MasterSeed=0
 /// must match the frozen reference. Was a Gather→Reduce comparison against a re-materialized
 /// identical table (retired with keyed per-site init); now a frozen forward-value golden
 /// (self-generated) that pins the per-feature sum over the bag axis.</summary>
@@ -1650,7 +1649,7 @@ public partial class NNEmbeddingBagSumGolden
     }
 }
 
-/// <summary>§8-1 (Mean): EmbeddingBag.Bag(BagMode.Mean) on indices [[0,1,2],[1,3,0]] at MasterSeed=0
+/// <summary>(Mean): EmbeddingBag.Bag(BagMode.Mean) on indices [[0,1,2],[1,3,0]] at MasterSeed=0
 /// must match the frozen reference (full-L denominator). Was a Gather→Reduce comparison against a
 /// re-materialized identical table (retired with keyed per-site init); now a frozen forward-value
 /// golden (self-generated).</summary>
@@ -1670,7 +1669,7 @@ public partial class NNEmbeddingBagMeanGolden
     }
 }
 
-/// <summary>§8-1 (Max): EmbeddingBag.Bag(BagMode.Max) on indices [[0,1,2],[1,3,0]] at MasterSeed=0
+/// <summary>(Max): EmbeddingBag.Bag(BagMode.Max) on indices [[0,1,2],[1,3,0]] at MasterSeed=0
 /// must match the frozen reference (per-feature max over the bag). Was a Gather→Reduce comparison
 /// against a re-materialized identical table (retired with keyed per-site init); now a frozen
 /// forward-value golden (self-generated).</summary>
@@ -1691,7 +1690,7 @@ public partial class NNEmbeddingBagMaxGolden
 }
 
 /// <summary>
-/// §8-2 shape: a [B, L] = [2, 3] index tensor → a [B, D] = [2, 4] EmbeddingBag output (D=4).
+/// Shape: a [B, L] = [2, 3] index tensor → a [B, D] = [2, 4] EmbeddingBag output (D=4).
 /// Asserts y.ShapeTensor()[0] == 2 (B) and [1] == 4 (D), pinning that the bag axis (L=3) is
 /// reduced away and the output is exactly [batch, embeddingDim] (the NNBilinearBatchBroadcasts
 /// ShapeTensor idiom).
@@ -1709,10 +1708,10 @@ public partial class NNEmbeddingBagShapeCheck
     }
 }
 
-/// <summary>§8-3 paddingIdx zeroes pad rows for Sum (the EXACT case): Bag(..., Sum, paddingIdx:2) on a
+/// <summary>paddingIdx zeroes pad rows for Sum (the EXACT case): Bag(..., Sum, paddingIdx:2) on a
 /// bag containing the pad id, plus the UNMASKED Sum of the same bag — both fold into one frozen
 /// forward-value golden (self-generated), so ignoring paddingIdx produces the unmasked numbers in the
-/// masked segment and fails. Per the design, only the Sum-exact case is pinned (Mean/Max + paddingIdx
+/// masked segment and fails. Only the Sum-exact case is pinned (Mean/Max + paddingIdx
 /// have documented caveats).</summary>
 [Module]
 public partial class NNEmbeddingBagPaddingIdxSumExact
@@ -1730,7 +1729,7 @@ public partial class NNEmbeddingBagPaddingIdxSumExact
     }
 }
 
-/// <summary>§8-4 init choice: the XavierUniform-selector Bag AND the default (Normal) Bag both run and
+/// <summary>Init choice: the XavierUniform-selector Bag AND the default (Normal) Bag both run and
 /// fold into one frozen forward-value golden (self-generated) — the embeddingInit selector staying wired
 /// is what keeps the two segments distinct.</summary>
 [Module]
@@ -1751,7 +1750,7 @@ public partial class NNEmbeddingBagInitChoice
 }
 
 /// <summary>
-/// §8-5 train-step rig model: a tiny model ending in EmbeddingBag.Bag so TrainingRig.FromScratch +
+/// Train-step rig model: a tiny model ending in EmbeddingBag.Bag so TrainingRig.FromScratch +
 /// one TrainStep can assert the owned trainable table MOVES (the bag lookup is differentiable
 /// through Gather + Reduce). Bags the in-graph constant indices [[0,1],[2,3]] ([B=2,L=2]) over a
 /// trainable weight [5,3] (V=5, D=3) with BagMode.Sum → [2,3], per-row-means to [2], and adds the
@@ -1824,7 +1823,7 @@ public partial class NNPoolingHelpersChecks
 // ---------------------------------------------------------------------------
 // Generalized Pooling helper coverage (Pooling.MaxPool/AvgPool/LpPool + 1d/2d/3d
 // aliases, GlobalLpPool, MaxPoolWithIndices/MaxUnpool, src/Shorokoo.Modules/
-// Layers/Pooling.cs) — design §7 cases 1–8. Each self-checking [Module] returns
+// Layers/Pooling.cs). Each self-checking [Module] returns
 // a Scalar<bit> that AutoTest.AdvancedTestGraph requires true. ALL pool ops have
 // NO QEE values (shape/dtype only), so the numeric Scalar<bit> is computed on the
 // ORT backend inside AdvancedTestGraph — exactly like NNPoolingHelpersChecks. The
@@ -1836,7 +1835,7 @@ public partial class NNPoolingHelpersChecks
 // wherever values are compared to constants.
 // ---------------------------------------------------------------------------
 
-/// <summary>§7-1 1D/3D closed forms. MaxPool1d([2]) on x=[1,3,2,4] (stride 2) → [3,4];
+/// <summary>1D/3D closed forms. MaxPool1d([2]) on x=[1,3,2,4] (stride 2) → [3,4];
 /// AvgPool1d([2]) → [2,3]; a full-window MaxPool3d([2,2,2]) / AvgPool3d on a [1,1,2,2,2]
 /// cube of 1..8 → max 8 / mean 4.5. Inputs are in-module constants (exact hand math);
 /// a 0*x touch gates on the runtime input.</summary>
@@ -1867,7 +1866,7 @@ public partial class NNPool1d3dClosedForm
     }
 }
 
-/// <summary>§7-2 LpPool p=2 == √(Σx²). LpPool1d([2]) on x=[3,4] → √(9+16)=5; and a full-window
+/// <summary>LpPool p=2 == √(Σx²). LpPool1d([2]) on x=[3,4] → √(9+16)=5; and a full-window
 /// LpPool2d([H,W]) == GlobalLpPool(p=2) on the runtime input (relative-L1 ≈ 0). The closed-form
 /// half uses an in-module constant; the equivalence half pools x.</summary>
 [Module]
@@ -1892,7 +1891,7 @@ public partial class NNLpPoolClosedFormAndGlobal
     }
 }
 
-/// <summary>§7-3 full-window pool == global pool on the runtime input x=[1,C,H,W]:
+/// <summary>Full-window pool == global pool on the runtime input x=[1,C,H,W]:
 /// MaxPool2d(x, [H,W]) == GlobalMaxPool2d(x); AvgPool2d(x, [H,W]) == GlobalAvgPool2d(x);
 /// LpPool2d(x, [H,W]) == GlobalLpPool(x). Relative-L1 ≈ 0.</summary>
 [Module]
@@ -1919,7 +1918,7 @@ public partial class NNFullWindowEqualsGlobal
     }
 }
 
-/// <summary>§7-4 scalar ↔ per-axis alias equivalence on the runtime input:
+/// <summary>Scalar ↔ per-axis alias equivalence on the runtime input:
 /// MaxPool2d(x, 2) == MaxPool2d(x, [2,2]); same for AvgPool/LpPool; and the per-rank alias
 /// MaxPool1d(x1,[2]) == MaxPool(x1,[2]). The scalar overload reads x.Rank()-2 at build time,
 /// which a symbolic [Module] input lacks, so the scalar pools use an in-module constant
@@ -1957,7 +1956,7 @@ public partial class NNPoolScalarPerAxisAliasEquiv
     }
 }
 
-/// <summary>§7-5 per-axis / asymmetric geometry vs the raw core op: MaxPool2d(x, [3,2],
+/// <summary>Per-axis / asymmetric geometry vs the raw core op: MaxPool2d(x, [3,2],
 /// stride:[2,1], padding:[1,0]) equals a hand-built NN.MaxPool with the SAME geometry
 /// (dilations [1,1], kernel [3,2], symmetric pads [1,0,1,0], strides [2,1]). Relative-L1.
 /// Pins the per-axis stride/padding plumbing.</summary>
@@ -1982,7 +1981,7 @@ public partial class NNPoolPerAxisGeometryMatchesCoreOp
     }
 }
 
-/// <summary>§7-6 MaxUnpool round-trip: (vals, idx) = MaxPoolWithIndices(x, [2,2]); then
+/// <summary>MaxUnpool round-trip: (vals, idx) = MaxPoolWithIndices(x, [2,2]); then
 /// MaxUnpool(vals, idx, [2,2], outputShape: x.ShapeTensor()) → a tensor of x's shape. Assert
 /// (a) the unpooled shape matches x (sum of |shape−x.shape| == 0); (b) GlobalMaxPool(u) ==
 /// GlobalMaxPool(x) — the kept maxima land back (the global max of x is the max of the pooled
@@ -2017,7 +2016,7 @@ public partial class NNMaxUnpoolRoundTrip
     }
 }
 
-/// <summary>§7-7 count_include_pad toggle: AvgPool2d([2,2], padding:[1,1]) with
+/// <summary>count_include_pad toggle: AvgPool2d([2,2], padding:[1,1]) with
 /// countIncludePad:true vs false DIFFER at the padded border, each matching a hand-computed
 /// 2x2 output. Input is an in-module constant [1,1,2,2] = [[1,2],[3,4]]; pad 1 → the 2x2 sits
 /// at the center of a 4x4 zero-padded grid, kernel 2 stride 2 → every window covers exactly
@@ -2099,7 +2098,7 @@ public partial class NNLossClosedFormChecks
 }
 
 // ---------------------------------------------------------------------------
-// Loss configurability-knob closed-form checks (loss-knobs design §7). One
+// Loss configurability-knob closed-form checks. One
 // self-checking [Module] per knob family, calling the new Reduced(...) /
 // PerElement(...) overloads with CONSTANT inputs (constant weight/posWeight
 // Tensors, a long? ignoreIndex, a LossReduction) and comparing to the
@@ -2112,7 +2111,7 @@ public partial class NNLossClosedFormChecks
 // ---------------------------------------------------------------------------
 
 /// <summary>
-/// CrossEntropyLoss reduction + weight + ignore_index knobs (design §7).
+/// CrossEntropyLoss reduction + weight + ignore_index knobs.
 /// All logits are uniform <c>[0,0]</c> so each non-ignored sample's CE is
 /// exactly ln2:
 ///   reduction Mean = ln2; Sum = 2·ln2; PerElement = [ln2, ln2] (both elements);
@@ -2178,13 +2177,13 @@ public partial class NNCrossEntropyReductionWeightIgnoreChecks
 }
 
 /// <summary>
-/// CrossEntropyLoss label_smoothing knob (design §7), built in-graph from
+/// CrossEntropyLoss label_smoothing knob, built in-graph from
 /// LogSoftmax+NLL+uniform:
 ///   nontrivial: logits [[2,0]], target [0], α=0.2, K=2 → 0.32694
 ///     (logp=[−0.126928,−2.126928]; nll=0.126928; smooth=1.126928;
 ///      loss = 0.8·0.126928 + 0.2·1.126928);
 ///   K=2 uniform-logit collapse: logits [[0,0]], target [0], α=0.1 → ln2.
-/// Stretch (design O2): the 3-way labelSmoothing+weight+ignoreIndex interaction
+/// Stretch: the 3-way labelSmoothing+weight+ignoreIndex interaction
 /// is pinned by NNCrossEntropyLabelSmoothWeightIgnoreChecks below.
 /// </summary>
 [Module]
@@ -2211,7 +2210,7 @@ public partial class NNCrossEntropyLabelSmoothingChecks
 }
 
 /// <summary>
-/// Stretch (design O2): the 3-way labelSmoothing + weight + ignoreIndex
+/// Stretch: the 3-way labelSmoothing + weight + ignoreIndex
 /// interaction. The smoothing term must thread <c>weight[target]</c> AND drop
 /// ignored samples from its denominator too, exactly like the NLL term.
 /// <para>
@@ -2251,7 +2250,7 @@ public partial class NNCrossEntropyLabelSmoothWeightIgnoreChecks
 
 /// <summary>
 /// NLLLoss weight + ignore_index knobs (predictions are log-probs), mirroring
-/// the CE closed forms (design §7). Log-probs are uniform <c>[−ln2, −ln2]</c> so
+/// the CE closed forms. Log-probs are uniform <c>[−ln2, −ln2]</c> so
 /// each non-ignored sample's NLL is exactly ln2:
 ///   weighted mean (w=[2,1], targets [0,1]) = (2·ln2+1·ln2)/3 = ln2;
 ///   weighted SUM (w=[2,1], targets [0,1]) = 3·ln2;
@@ -2296,7 +2295,7 @@ public partial class NNNLLLossWeightIgnoreChecks
 }
 
 /// <summary>
-/// BCEWithLogitsLoss pos_weight knob (design §7). With logit x=0, σ(0)=0.5:
+/// BCEWithLogitsLoss pos_weight knob. With logit x=0, σ(0)=0.5:
 ///   t=1, posWeight=2 → −2·log(0.5) = 2·ln2 (per-element, via PerElement);
 ///   t=0, posWeight=2 → −log(1−σ(0)) = ln2 (pos_weight has NO effect on negatives);
 ///   mean over [t=1, t=0], posWeight=2 = (2·ln2 + ln2)/2 = 1.5·ln2 = 1.0397208.
@@ -2331,7 +2330,7 @@ public partial class NNBCEWithLogitsPosWeightChecks
 }
 
 /// <summary>
-/// SmoothL1Loss beta knob and the Huber(δ=β)/β bridge (design §7). With error
+/// SmoothL1Loss beta knob and the Huber(δ=β)/β bridge. With error
 /// e=2 (predictions [2], targets [0]):
 ///   beta=4 (quadratic region |e|&lt;β): 0.5·e²/β = 0.5;
 ///   beta=1 (linear): |e| − 0.5·β = 1.5;
@@ -2361,7 +2360,7 @@ public partial class NNSmoothL1BetaChecks
 }
 
 /// <summary>
-/// Regression-loss reductions (L1/L2/Huber, design §7):
+/// Regression-loss reductions (L1/L2/Huber):
 ///   L1([1,3],[0,1]): mean=1.5, sum=3, PerElement=[1,2] (both elements);
 ///   L2([[1,2],[3,4]],0): mean=7.5, sum=30;
 ///   HuberLoss(δ=1) Reduced sum vs mean on the same [1,3]/[0,1] (both small-error
@@ -2405,7 +2404,7 @@ public partial class NNRegressionReductionChecks
 }
 
 // ---------------------------------------------------------------------------
-// Rig-wrapper [Module]s for the loss-knobs (design §7 "Rig-path tests"). These
+// Rig-wrapper [Module]s for the loss-knobs. These
 // are tiny 2-input (predictions, targets) wrappers that BAKE the build-time
 // knobs / a constant weight tensor, so they satisfy the TrainingRig 2-input
 // scalar-loss contract. Driven by NNLibrary*TrainingCoverageTests via
@@ -2494,7 +2493,7 @@ public partial class NNBatchNormTrainGradModel
 }
 
 // ---------------------------------------------------------------------------
-// Generalized rank-generic BatchNorm coverage models (design §7 groups A–G).
+// Generalized rank-generic BatchNorm coverage models.
 // Every BatchNorm graph carries Globals.StateUpdate links, so ALL of these run
 // through the rig (NNLibrary*TrainingCoverageTests), not AutoTest — even the
 // "pure" eval-path closed-form checks (the plain inference executor has no
@@ -3006,7 +3005,7 @@ public partial class AnalyticBindLinearModel
         => Linear.Model(Scalar(2L), Scalar(true)).Call(x);
 }
 
-/// <summary>Loss edge semantics (campaign §3): SmoothL1's two regions (0.5d² for |d|&lt;1,
+/// <summary>Loss edge semantics: SmoothL1's two regions (0.5d² for |d|&lt;1,
 /// |d|−0.5 beyond), BCE's clamp at p∈{0,1} (≈1e-7 when correct, −ln(1e-7)=16.118 when
 /// maximally wrong — finite either way), BCEWithLogits' stability at logits ±100
 /// (≈0 / ≈100, no overflow or NaN), and CrossEntropy's log-softmax at non-uniform
@@ -3313,7 +3312,7 @@ public partial class NNBinaryFocalLossChecks
 }
 
 // ---------------------------------------------------------------------------
-// Recurrent.RNN (vanilla/Elman) helper coverage — design §7 (rnn/design.md).
+// Recurrent.RNN (vanilla/Elman) helper coverage.
 // Each self-checking [Module] returns a Scalar<bit> that AutoTest.AdvancedTestGraph
 // requires to be true: it computes (y, hN) = Recurrent.RNN(x, …) and compares the
 // (collapsed) concatenation of BOTH outputs against an inlined frozen golden
@@ -3322,13 +3321,13 @@ public partial class NNBinaryFocalLossChecks
 // reshape all reach the verdict. The former hand-built OnnxOp.Rnn references relied
 // on same-shape inits materializing identically and were retired with per-parameter
 // init; op-level gradient coverage lives in AutoGradOpsTests. RNN has no QEE step
-// values, so value correctness comes from the ORT backend inside AdvancedTestGraph
-// (note [2] of the design). The relu / bidirectional BPTT-throws guards live as
+// values, so value correctness comes from the ORT backend inside AdvancedTestGraph.
+// The relu / bidirectional BPTT-throws guards live as
 // [Fact]s in NNLibrary*TrainingCoverageTests.
 // ---------------------------------------------------------------------------
 
 
-/// <summary>§7-2 Forward tanh baseline: Recurrent.RNN(x, H) — frozen forward-value golden
+/// <summary>Forward tanh baseline: Recurrent.RNN(x, H) — frozen forward-value golden
 /// (self-generated) over BOTH y and hN, covering the bias packing and the [L,D,N,H]→[L,N,D*H]
 /// reshape.</summary>
 [Module]
@@ -3345,9 +3344,9 @@ public partial class RnnBaselineForwardTanhGolden
     }
 }
 
-/// <summary>§7-1/§7-2 (batchFirst) + §7-7 Matches the core op with batchFirst input:
+/// <summary>Matches the core op with batchFirst input:
 /// Recurrent.RNN(batchFirst:true) on [N, L, in] — frozen forward-value golden (self-generated): the
-/// configured layer's output must match the inlined reference. Sole batchFirst pin, covering §7-7
+/// configured layer's output must match the inlined reference. Sole batchFirst pin, covering the layout
 /// via the golden: the batchFirst↔transpose equivalence (batchFirst:true == transpose in →
 /// layout-0 op → transpose out of the seq-first path) held when this golden was frozen but is no
 /// longer asserted relationally — under keyed per-site init two Recurrent.RNN call sites draw
@@ -3367,7 +3366,7 @@ public partial class RnnBatchFirstGolden
     }
 }
 
-/// <summary>§7-1 Single-step recurrence anchor: L=1, h_0=0, so the layer computes y[0] = tanh(W·x_0 + bias)
+/// <summary>Single-step recurrence anchor: L=1, h_0=0, so the layer computes y[0] = tanh(W·x_0 + bias)
 /// (R is unused at step 0) and hN == y[0]. Frozen forward-value golden (self-generated) on y, PLUS the
 /// state contract asserted relationally on the layer's own outputs (hN equals y, which at L=1 is y[0],
 /// and hN's leading dim is D·numLayers == 1) — output-vs-output, valid under any initialization.</summary>
@@ -3387,7 +3386,7 @@ public partial class RnnSingleStepAnchorTanh
     }
 }
 
-/// <summary>§7-3 relu nonlinearity (forward only): Recurrent.RNN(Relu) — frozen forward-value
+/// <summary>Relu nonlinearity (forward only): Recurrent.RNN(Relu) — frozen forward-value
 /// golden (self-generated): the configured layer's output must match the inlined reference.
 /// Forward-value check only (relu RNN BPTT throws AD003 — pinned separately in
 /// NNLibrary*TrainingCoverageTests).</summary>
@@ -3405,7 +3404,7 @@ public partial class RnnReluForwardGolden
     }
 }
 
-/// <summary>§7-4 bias:false — frozen forward-value golden (self-generated): the configured layer's
+/// <summary>bias:false — frozen forward-value golden (self-generated): the configured layer's
 /// output must match the inlined reference. The bias:true path is value-covered by the default-arg
 /// baseline goldens; the init-time bias:true == bias:false relation is retired (keyed per-site
 /// init gives the two call sites distinct weights).</summary>
@@ -3423,7 +3422,7 @@ public partial class RnnNoBiasGolden
     }
 }
 
-/// <summary>§7-5 numLayers stacking: numLayers:2 (forward, tanh) — frozen forward-value golden
+/// <summary>numLayers stacking: numLayers:2 (forward, tanh) — frozen forward-value golden
 /// (self-generated): the configured layer's output must match the inlined reference. Asserts y and
 /// the stacked [2,N,H] hN both match. Layer-1's input size is D·H = H (D=1), passed as
 /// Scalar(d·H) by the helper.</summary>
@@ -3441,7 +3440,7 @@ public partial class RnnNumLayersStackGolden
     }
 }
 
-/// <summary>§7-6 direction Reverse (trainable): Recurrent.RNN(Reverse) — frozen forward-value
+/// <summary>Direction Reverse (trainable): Recurrent.RNN(Reverse) — frozen forward-value
 /// golden (self-generated): the configured layer's output must match the inlined
 /// reference.</summary>
 [Module]
@@ -3458,7 +3457,7 @@ public partial class RnnReverseGolden
     }
 }
 
-/// <summary>§7-6 direction Bidirectional (forward inference only): Recurrent.RNN(Bidirectional) —
+/// <summary>Direction Bidirectional (forward inference only): Recurrent.RNN(Bidirectional) —
 /// frozen forward-value golden (self-generated): the configured layer's output must match the
 /// inlined reference. Forward-value only (bidirectional BPTT throws AD003 — pinned in
 /// NNLibrary*TrainingCoverageTests).</summary>
@@ -3477,7 +3476,7 @@ public partial class RnnBidirectionalGolden
     }
 }
 
-/// <summary>§7-8 state contract: for a forward single-layer RNN, hN == y[-1] (the last step's
+/// <summary>State contract: for a forward single-layer RNN, hN == y[-1] (the last step's
 /// hidden state), asserted relationally on the layer's own outputs — output-vs-output, valid under
 /// any initialization — together with hN's leading dim (D·numLayers == 1) and the frozen
 /// forward-value golden (self-generated) on y. Pins the (y, hN) return relationship.</summary>
@@ -3498,7 +3497,7 @@ public partial class RnnStateContractForwardSingleLayer
     }
 }
 
-/// <summary>§7-9 forward frozen golden: a forward, tanh, single-layer Recurrent.RNN over a length-3
+/// <summary>Forward frozen golden: a forward, tanh, single-layer Recurrent.RNN over a length-3
 /// sequence built from the probed scalar — frozen forward-value golden (self-generated). Gradient
 /// correctness for the recurrent ops is pinned per input slot in AutoGradOpsTests; layer-level FD grad
 /// checks were retired with per-parameter init.</summary>
@@ -3517,7 +3516,7 @@ public partial class RnnForwardTanhGolden
     }
 }
 
-/// <summary>§7-3 (BPTT throw) relu RNN gradient: a loss through Recurrent.RNN(Relu) must throw AD003 at
+/// <summary>(BPTT throw) relu RNN gradient: a loss through Recurrent.RNN(Relu) must throw AD003 at
 /// lowering (relu is a non-default activation; BPTT unsupported). Mirrors AutoGradRnnBidirectionalThrowCheck.
 /// Never reached past AutoGrad — the AdvancedTestGraph call throws.</summary>
 [Module]
@@ -3533,7 +3532,7 @@ public partial class RnnReluBpttThrowCheck
     }
 }
 
-/// <summary>§7-6 (BPTT throw) bidirectional RNN gradient: a loss through Recurrent.RNN(Bidirectional)
+/// <summary>(BPTT throw) bidirectional RNN gradient: a loss through Recurrent.RNN(Bidirectional)
 /// must throw AD003 at lowering (bidirectional BPTT unimplemented). Mirrors AutoGradRnnBidirectionalThrowCheck.</summary>
 [Module]
 public partial class RnnBidirectionalBpttThrowCheck
@@ -3549,7 +3548,7 @@ public partial class RnnBidirectionalBpttThrowCheck
 }
 
 // ---------------------------------------------------------------------------
-// Recurrent.LSTM helper coverage — design §7 (lstm/design.md). Mirrors the
+// Recurrent.LSTM helper coverage. Mirrors the
 // Recurrent.RNN set above EXACTLY: each self-checking [Module] computes
 // (y, hN, cN) = Recurrent.LSTM(x, …) and compares the (collapsed) concatenation of
 // ALL outputs against an inlined frozen golden reference (self-generated at the
@@ -3563,7 +3562,7 @@ public partial class RnnBidirectionalBpttThrowCheck
 // ---------------------------------------------------------------------------
 
 
-/// <summary>§7-1 Forward baseline: Recurrent.LSTM(x, H) — frozen forward-value golden (self-generated)
+/// <summary>Forward baseline: Recurrent.LSTM(x, H) — frozen forward-value golden (self-generated)
 /// over y, hN AND cN, covering the i,o,f,c gate packing, bias packing, and the [L,D,N,H]→[L,N,D*H]
 /// reshape.</summary>
 [Module]
@@ -3580,10 +3579,10 @@ public partial class LstmBaselineForwardGolden
     }
 }
 
-/// <summary>§7-1 (batchFirst) + §7-6 Matches the core op with batchFirst input:
+/// <summary>Matches the core op with batchFirst input:
 /// Recurrent.LSTM(batchFirst:true) on [N, L, in] — frozen forward-value golden (self-generated):
 /// the configured layer's output must match the inlined reference. hN/cN stay [D·numLayers, N, H].
-/// Sole batchFirst pin, covering §7-6 via the golden: the batchFirst↔transpose equivalence held
+/// Sole batchFirst pin, covering the layout via the golden: the batchFirst↔transpose equivalence held
 /// when this golden was frozen but is no longer asserted relationally — under keyed per-site init
 /// two Recurrent.LSTM call sites draw distinct weights, so the former two-path comparison module
 /// became this single-path golden.</summary>
@@ -3601,7 +3600,7 @@ public partial class LstmBatchFirstGolden
     }
 }
 
-/// <summary>§7-2 Single-step gate anchor: L=1, h_0=c_0=0, so the layer computes i=σ(W_i·x_0+b_i),
+/// <summary>Single-step gate anchor: L=1, h_0=c_0=0, so the layer computes i=σ(W_i·x_0+b_i),
 /// c̃=tanh(W_c·x_0+b_c), C_1=i⊙c̃, H_1=o⊙tanh(C_1) with o=σ(W_o·x_0+b_o) over the ONNX i,o,f,c gate
 /// blocks of the packed [D,4H,in] W (R unused at step 0). H=2. Frozen forward-value golden
 /// (self-generated): a wrong gate packing or equation changes the output and fails the reference
@@ -3619,7 +3618,7 @@ public partial class LstmSingleStepGateAnchor
     }
 }
 
-/// <summary>§7-3 bias:false — frozen forward-value golden (self-generated) on y, hN, cN: the
+/// <summary>bias:false — frozen forward-value golden (self-generated) on y, hN, cN: the
 /// configured layer's output must match the inlined reference. The bias:true path is value-covered
 /// by the default-arg baseline goldens; the init-time bias:true == bias:false relation is retired
 /// (keyed per-site init gives the two call sites distinct weights).</summary>
@@ -3637,7 +3636,7 @@ public partial class LstmNoBiasGolden
     }
 }
 
-/// <summary>§7-4 numLayers stacking: numLayers:2 (forward) — frozen forward-value golden
+/// <summary>numLayers stacking: numLayers:2 (forward) — frozen forward-value golden
 /// (self-generated): the configured layer's output must match the inlined reference. Asserts y, the
 /// stacked [2,N,H] hN, and the stacked [2,N,H] cN all match. Layer-1's input size is D·H = H (D=1),
 /// passed as Scalar(d·H) by the helper.</summary>
@@ -3655,7 +3654,7 @@ public partial class LstmNumLayersStackGolden
     }
 }
 
-/// <summary>§7-5 direction Reverse (trainable): Recurrent.LSTM(Reverse) — frozen forward-value
+/// <summary>Direction Reverse (trainable): Recurrent.LSTM(Reverse) — frozen forward-value
 /// golden (self-generated): the configured layer's output must match the inlined
 /// reference.</summary>
 [Module]
@@ -3672,7 +3671,7 @@ public partial class LstmReverseGolden
     }
 }
 
-/// <summary>§7-5 direction Bidirectional (forward inference only): Recurrent.LSTM(Bidirectional) —
+/// <summary>Direction Bidirectional (forward inference only): Recurrent.LSTM(Bidirectional) —
 /// frozen forward-value golden (self-generated): the configured layer's output must match the
 /// inlined reference. Forward-value only (bidirectional BPTT throws AD003 — pinned in
 /// NNLibrary*TrainingCoverageTests).</summary>
@@ -3691,7 +3690,7 @@ public partial class LstmBidirectionalGolden
     }
 }
 
-/// <summary>§7-7 state contract: for a forward single-layer LSTM, hN == y[-1] (the last step's
+/// <summary>State contract: for a forward single-layer LSTM, hN == y[-1] (the last step's
 /// hidden state), asserted relationally on the layer's own outputs — output-vs-output, valid under
 /// any initialization — together with hN's and cN's leading dims (D·numLayers == 1) and the frozen
 /// forward-value golden (self-generated) on y. Pins the (y, hN, cN) return relationship (cN has no
@@ -3716,7 +3715,7 @@ public partial class LstmStateContractForwardSingleLayer
     }
 }
 
-/// <summary>§7-8 forward frozen golden: a forward, single-layer Recurrent.LSTM over a length-3 sequence
+/// <summary>Forward frozen golden: a forward, single-layer Recurrent.LSTM over a length-3 sequence
 /// built from the probed scalar — frozen forward-value golden (self-generated). Op-level LSTM gradient
 /// coverage lives in AutoGradOpsTests.</summary>
 [Module]
@@ -3734,9 +3733,9 @@ public partial class LstmForwardGolden
     }
 }
 
-/// <summary>§7-8 trainability rig model: a forward, single-layer Recurrent.LSTM reducing (y, hN, cN)
+/// <summary>Trainability rig model: a forward, single-layer Recurrent.LSTM reducing (y, hN, cN)
 /// to a per-batch logit pair, for a TrainingRig FromScratch / TrainStep. The owned W/R/bias
-/// differentiate end-to-end here (the trainable corner, design §5.2 — and the scheduler fix that
+/// differentiate end-to-end here (the trainable corner — and the scheduler fix that
 /// landed unblocks the recurrent rig path). Output [N, 2] so CrossEntropy has two logits.</summary>
 [Module]
 public partial class LstmForwardTrainModel
@@ -3756,7 +3755,7 @@ public partial class LstmForwardTrainModel
     }
 }
 
-/// <summary>§7-5 (BPTT throw) bidirectional LSTM gradient: a loss through Recurrent.LSTM(Bidirectional)
+/// <summary>(BPTT throw) bidirectional LSTM gradient: a loss through Recurrent.LSTM(Bidirectional)
 /// must throw AD003 at lowering (bidirectional BPTT unimplemented). Mirrors AutoGradRnnBidirectionalThrowCheck /
 /// RnnBidirectionalBpttThrowCheck. Never reached past AutoGrad — the AdvancedTestGraph call throws.</summary>
 [Module]
@@ -3773,7 +3772,7 @@ public partial class LstmBidirectionalBpttThrowCheck
 }
 
 // ---------------------------------------------------------------------------
-// Recurrent.GRU helper coverage — design §7 (gru/design.md). Mirrors the
+// Recurrent.GRU helper coverage. Mirrors the
 // Recurrent.LSTM set above EXACTLY (which itself mirrors the RNN set): each
 // self-checking [Module] computes (y, hN) = Recurrent.GRU(x, …) and compares the
 // (collapsed) concatenation of BOTH outputs against an inlined frozen golden
@@ -3789,7 +3788,7 @@ public partial class LstmBidirectionalBpttThrowCheck
 // ---------------------------------------------------------------------------
 
 
-/// <summary>§7-1 Forward baseline: Recurrent.GRU(x, H) (linearBeforeReset:true default) — frozen
+/// <summary>Forward baseline: Recurrent.GRU(x, H) (linearBeforeReset:true default) — frozen
 /// forward-value golden (self-generated) over BOTH y and hN, covering the z,r,h gate packing, bias
 /// packing, and the [L,D,N,H]→[L,N,D*H] reshape.</summary>
 [Module]
@@ -3806,10 +3805,10 @@ public partial class GruBaselineForwardGolden
     }
 }
 
-/// <summary>§7-1 (batchFirst) + §7-7 Matches the core op with batchFirst input:
+/// <summary>Matches the core op with batchFirst input:
 /// Recurrent.GRU(batchFirst:true) on [N, L, in] — frozen forward-value golden (self-generated): the
 /// configured layer's output must match the inlined reference. hN stays [D·numLayers, N, H].
-/// Sole batchFirst pin, covering §7-7 via the golden: the batchFirst↔transpose equivalence held
+/// Sole batchFirst pin, covering the layout via the golden: the batchFirst↔transpose equivalence held
 /// when this golden was frozen but is no longer asserted relationally — under keyed per-site init
 /// two Recurrent.GRU call sites draw distinct weights, so the former two-path comparison module
 /// became this single-path golden.</summary>
@@ -3827,7 +3826,7 @@ public partial class GruBatchFirstGolden
     }
 }
 
-/// <summary>§7-2 linearBeforeReset BOTH forms (the GRU numeric crux): the reset-after default
+/// <summary>linearBeforeReset BOTH forms (the GRU numeric crux): the reset-after default
 /// (linearBeforeReset:true) AND the reset-before form (:false) both run on the same x, and y/hN of both
 /// fold into one frozen forward-value golden (self-generated) — the two segments differ, so a knob that
 /// stops being honored produces the other form's numbers and fails.</summary>
@@ -3846,7 +3845,7 @@ public partial class GruLinearBeforeResetBothForms
     }
 }
 
-/// <summary>§7-3 Single-step gate anchor: L=1, h_0=0, so the layer computes z=σ(W_z·x_0+b_z),
+/// <summary>Single-step gate anchor: L=1, h_0=0, so the layer computes z=σ(W_z·x_0+b_z),
 /// ĥ=tanh(W_h·x_0+b_h) (the reset term r⊙(R_h·h_0) vanishes at h_0=0; with linearBeforeReset:true the
 /// r-gated recurrent bias also drops since Rb=0), H_1=(1−z)⊙ĥ, over the ONNX z,r,h gate blocks of the
 /// packed [D,3H,in] W. H=2. Frozen forward-value golden (self-generated): a wrong gate packing or
@@ -3864,7 +3863,7 @@ public partial class GruSingleStepGateAnchor
     }
 }
 
-/// <summary>§7-4 bias:false — frozen forward-value golden (self-generated) on y and hN: the
+/// <summary>bias:false — frozen forward-value golden (self-generated) on y and hN: the
 /// configured layer's output must match the inlined reference. The bias:true path is value-covered
 /// by the default-arg baseline goldens; the init-time bias:true == bias:false relation is retired
 /// (keyed per-site init gives the two call sites distinct weights).</summary>
@@ -3882,7 +3881,7 @@ public partial class GruNoBiasGolden
     }
 }
 
-/// <summary>§7-5 numLayers stacking: numLayers:2 (forward) — frozen forward-value golden
+/// <summary>numLayers stacking: numLayers:2 (forward) — frozen forward-value golden
 /// (self-generated): the configured layer's output must match the inlined reference. Asserts y and
 /// the stacked [2,N,H] hN both match. Layer-1's input size is D·H = H (D=1), passed as
 /// Scalar(d·H) by the helper.</summary>
@@ -3900,7 +3899,7 @@ public partial class GruNumLayersStackGolden
     }
 }
 
-/// <summary>§7-6 direction Reverse (trainable): Recurrent.GRU(Reverse) — frozen forward-value
+/// <summary>Direction Reverse (trainable): Recurrent.GRU(Reverse) — frozen forward-value
 /// golden (self-generated): the configured layer's output must match the inlined
 /// reference.</summary>
 [Module]
@@ -3917,7 +3916,7 @@ public partial class GruReverseGolden
     }
 }
 
-/// <summary>§7-6 direction Bidirectional (forward inference only): Recurrent.GRU(Bidirectional) —
+/// <summary>Direction Bidirectional (forward inference only): Recurrent.GRU(Bidirectional) —
 /// frozen forward-value golden (self-generated): the configured layer's output must match the
 /// inlined reference. Forward-value only (bidirectional BPTT throws AD003 — pinned in
 /// NNLibrary*TrainingCoverageTests).</summary>
@@ -3936,7 +3935,7 @@ public partial class GruBidirectionalGolden
     }
 }
 
-/// <summary>§7-8 state contract: for a forward single-layer GRU, hN == y[-1] (the last step's
+/// <summary>State contract: for a forward single-layer GRU, hN == y[-1] (the last step's
 /// hidden state), asserted relationally on the layer's own outputs — output-vs-output, valid under
 /// any initialization — together with hN's leading dim (D·numLayers == 1) and the frozen
 /// forward-value golden (self-generated) on y. Pins the (y, hN) return relationship.</summary>
@@ -3957,7 +3956,7 @@ public partial class GruStateContractForwardSingleLayer
     }
 }
 
-/// <summary>§7-9 forward frozen golden: a forward, single-layer, linearBeforeReset:true Recurrent.GRU
+/// <summary>Forward frozen golden: a forward, single-layer, linearBeforeReset:true Recurrent.GRU
 /// over a length-3 sequence built from the probed scalar — frozen forward-value golden (self-generated).
 /// Op-level GRU gradient coverage lives in AutoGradOpsTests.</summary>
 [Module]
@@ -3975,7 +3974,7 @@ public partial class GruForwardGolden
     }
 }
 
-/// <summary>§7-9 trainability rig model: a forward, single-layer, linearBeforeReset:true Recurrent.GRU
+/// <summary>Trainability rig model: a forward, single-layer, linearBeforeReset:true Recurrent.GRU
 /// reducing (y, hN) to a per-batch logit pair, for a TrainingRig FromScratch / TrainStep. The owned
 /// W/R/bias differentiate end-to-end here (the trainable corner — and the scheduler fix that landed
 /// unblocks the recurrent rig path). Output [N, 2] so CrossEntropy has two logits.</summary>
@@ -3997,7 +3996,7 @@ public partial class GruForwardTrainModel
     }
 }
 
-/// <summary>§7-6 (BPTT throw) bidirectional GRU gradient: a loss through Recurrent.GRU(Bidirectional)
+/// <summary>(BPTT throw) bidirectional GRU gradient: a loss through Recurrent.GRU(Bidirectional)
 /// must throw AD003 at lowering (bidirectional BPTT unimplemented). Mirrors LstmBidirectionalBpttThrowCheck.
 /// Never reached past AutoGrad — the AdvancedTestGraph call throws.</summary>
 [Module]
@@ -4014,7 +4013,7 @@ public partial class GruBidirectionalBpttThrowCheck
 }
 
 // ---------------------------------------------------------------------------
-// Recurrent single-step CELL coverage — recurrent-cells/design.md §7. Mirrors
+// Recurrent single-step CELL coverage. Mirrors
 // the Recurrent.RNN/LSTM/GRU helper sets above EXACTLY: each self-checking
 // [Module] runs a cell (Recurrent.RNNCell/LSTMCell/GRUCell) — with nonzero
 // previous state(s) so initial_h(/initial_c) are genuinely threaded — and
@@ -4030,7 +4029,7 @@ public partial class GruBidirectionalBpttThrowCheck
 
 // ===========================  RNNCell  =====================================
 
-/// <summary>§7-1 (RNNCell) Single-step anchor: tanh. H=2, N=1, NONZERO h (so R is exercised, unlike the
+/// <summary>(RNNCell) Single-step anchor: tanh. H=2, N=1, NONZERO h (so R is exercised, unlike the
 /// layer's h_0=0 anchor); the cell computes h' = tanh(W·x + R·h + bias). x is [1, in] and h is the
 /// in-module nonzero constant [1, 2]. Frozen forward-value golden (self-generated).</summary>
 [Module]
@@ -4048,7 +4047,7 @@ public partial class RnnCellClosedFormTanh
     }
 }
 
-/// <summary>§7-1 (RNNCell) Closed-form single-step anchor: relu forward. As RnnCellClosedFormTanh but
+/// <summary>(RNNCell) Closed-form single-step anchor: relu forward. As RnnCellClosedFormTanh but
 /// nonlinearity:Relu ⇒ h' == relu(W·x + R·h + bias). Forward-value only (relu cell BPTT throws AD003 —
 /// pinned by a [Fact]).</summary>
 [Module]
@@ -4066,7 +4065,7 @@ public partial class RnnCellClosedFormRelu
     }
 }
 
-/// <summary>§7-2/§7-3 (RNNCell) single step: Recurrent.RNNCell(x, h, H) with nonzero h (so initial_h is
+/// <summary>RNNCell single step: Recurrent.RNNCell(x, h, H) with nonzero h (so initial_h is
 /// genuinely threaded) — frozen forward-value golden (self-generated); the [N, H] output shape is pinned
 /// by the golden's element count. x [N, in], h [N, H].</summary>
 [Module]
@@ -4085,7 +4084,7 @@ public partial class RnnCellSingleStepGolden
     }
 }
 
-/// <summary>§7-4 (RNNCell) bias:false — frozen forward-value golden (self-generated): the
+/// <summary>(RNNCell) bias:false — frozen forward-value golden (self-generated): the
 /// configured cell's output must match the inlined reference. The bias:true path is value-covered
 /// by the default-arg cell goldens; the init-time bias:true == bias:false relation is retired
 /// (keyed per-site init gives the two call sites distinct weights).</summary>
@@ -4105,7 +4104,7 @@ public partial class RnnCellNoBiasGolden
     }
 }
 
-/// <summary>§7-5 (RNNCell) State threading — THE DEFINING TEST. Two hand-unrolled cell steps from
+/// <summary>(RNNCell) State threading — THE DEFINING TEST. Two hand-unrolled cell steps from
 /// h_0 = 0: step 2 consumes step 1's h', so the golden (self-generated, over both steps' outputs) breaks
 /// if the cell stops threading state. x is [2, N, in] (the two step inputs).</summary>
 [Module]
@@ -4133,7 +4132,7 @@ public partial class RnnCellStateThreading
     }
 }
 
-/// <summary>§7-6 (RNNCell) forward frozen golden (tanh): one RNNCell step where x AND the nonzero h are
+/// <summary>(RNNCell) forward frozen golden (tanh): one RNNCell step where x AND the nonzero h are
 /// built from the probed scalar (the h-input is the cell's distinguishing input) — frozen forward-value
 /// golden (self-generated). Op-level RNN gradient coverage lives in AutoGradOpsTests.</summary>
 [Module]
@@ -4153,7 +4152,7 @@ public partial class RnnCellForwardTanhGolden
     }
 }
 
-/// <summary>§7-7 (RNNCell) trainability rig model: a hand-unrolled 2-step RNNCell (tanh) loop reducing
+/// <summary>(RNNCell) trainability rig model: a hand-unrolled 2-step RNNCell (tanh) loop reducing
 /// the final hidden state to a per-batch logit pair, for a TrainingRig FromScratch / TrainStep + L2Loss +
 /// SGD. The owned W/R/bias differentiate end-to-end through the user loop. h_0 is a zero seed derived from
 /// x's batch dim. Output [N, 2]. Input [L=2, N, in].</summary>
@@ -4180,7 +4179,7 @@ public partial class RnnCellTrainModel
     }
 }
 
-/// <summary>§7-8 (RNNCell, BPTT throw) relu cell gradient: a loss through Recurrent.RNNCell(Relu) must
+/// <summary>(RNNCell, BPTT throw) relu cell gradient: a loss through Recurrent.RNNCell(Relu) must
 /// throw AD003 at lowering (relu is a non-default activation; BPTT unsupported). Mirrors
 /// RnnReluBpttThrowCheck. Never reached past AutoGrad — the AdvancedTestGraph call throws.</summary>
 [Module]
@@ -4200,7 +4199,7 @@ public partial class RnnCellReluBpttThrowCheck
 
 // ===========================  LSTMCell  ====================================
 
-/// <summary>§7-1 (LSTMCell) Single-step gate anchor. H=2, N=1, NONZERO h and c (so R and the forget gate
+/// <summary>(LSTMCell) Single-step gate anchor. H=2, N=1, NONZERO h and c (so R and the forget gate
 /// are exercised); in ONNX i,o,f,c order the cell computes pre-act = W·x + R·h + bias; i=σ(blk0),
 /// o=σ(blk1), f=σ(blk2), g=tanh(blk3); c' = f⊙c + i⊙g; h' = o⊙tanh(c'). Frozen forward-value golden
 /// (self-generated) over (h', c'): a wrong i,o,f,c↔i,f,g,o packing changes the output and fails the
@@ -4222,7 +4221,7 @@ public partial class LstmCellClosedFormGateAnchor
     }
 }
 
-/// <summary>§7-2/§7-3 (LSTMCell) single step: Recurrent.LSTMCell(x, h, c, H) with nonzero h and c (so
+/// <summary>LSTMCell single step: Recurrent.LSTMCell(x, h, c, H) with nonzero h and c (so
 /// initial_h/initial_c are genuinely threaded) — frozen forward-value golden (self-generated) over BOTH
 /// h' and c'; the [N, H] output shapes are pinned by the golden's element count.</summary>
 [Module]
@@ -4243,7 +4242,7 @@ public partial class LstmCellSingleStepGolden
     }
 }
 
-/// <summary>§7-4 (LSTMCell) bias:false — frozen forward-value golden (self-generated):
+/// <summary>(LSTMCell) bias:false — frozen forward-value golden (self-generated):
 /// the configured cell's output must match the inlined reference.</summary>
 [Module]
 public partial class LstmCellNoBiasGolden
@@ -4264,7 +4263,7 @@ public partial class LstmCellNoBiasGolden
     }
 }
 
-/// <summary>§7-5 (LSTMCell) State threading — the defining test. Two hand-unrolled cell steps from
+/// <summary>(LSTMCell) State threading — the defining test. Two hand-unrolled cell steps from
 /// h_0 = c_0 = 0: step 2 consumes step 1's (h', c'), and all four step outputs fold into one frozen
 /// forward-value golden (self-generated), so the cell failing to thread EITHER carried state breaks the
 /// reference comparison.</summary>
@@ -4292,7 +4291,7 @@ public partial class LstmCellStateThreading
     }
 }
 
-/// <summary>§7-6 (LSTMCell) forward frozen golden: one LSTMCell step where x, h AND c are built from the
+/// <summary>(LSTMCell) forward frozen golden: one LSTMCell step where x, h AND c are built from the
 /// probed scalar — frozen forward-value golden (self-generated) over (h', c'). Op-level LSTM gradient
 /// coverage lives in AutoGradOpsTests.</summary>
 [Module]
@@ -4313,7 +4312,7 @@ public partial class LstmCellForwardGolden
     }
 }
 
-/// <summary>§7-7 (LSTMCell) trainability rig model: a hand-unrolled 2-step LSTMCell loop reducing the
+/// <summary>(LSTMCell) trainability rig model: a hand-unrolled 2-step LSTMCell loop reducing the
 /// final (h, c) to a per-batch logit pair, for a TrainingRig FromScratch / TrainStep + L2Loss + SGD. The
 /// owned W/R/bias differentiate end-to-end through the user loop. h_0/c_0 are zero seeds. Output [N, 2].</summary>
 [Module]
@@ -4341,7 +4340,7 @@ public partial class LstmCellTrainModel
 
 // ===========================  GRUCell  =====================================
 
-/// <summary>§7-1 (GRUCell) Single-step anchor, linearBeforeReset:true (reset-after). H=2, N=1, NONZERO h.
+/// <summary>(GRUCell) Single-step anchor, linearBeforeReset:true (reset-after). H=2, N=1, NONZERO h.
 /// With the single owned bias (Rb=0) the cell computes, in ONNX z,r,h order: z=σ(Wz·x + Rz·h + bz),
 /// r=σ(Wr·x + Rr·h + br), n=tanh(Wh·x + r⊙(Rh·h) + bh), h'=(1−z)⊙n + z⊙h. Frozen forward-value golden
 /// (self-generated): a wrong z,r,h↔r,z,n packing changes the output and fails the reference
@@ -4361,7 +4360,7 @@ public partial class GruCellClosedFormLbrTrue
     }
 }
 
-/// <summary>§7-1 (GRUCell) linearBeforeReset:false (reset-before, the ONNX op default): the cell computes
+/// <summary>(GRUCell) linearBeforeReset:false (reset-before, the ONNX op default): the cell computes
 /// n = tanh(Wh·x + bh + (r⊙h)·Rhᵀ). H=2, N=1, nonzero h. Frozen forward-value golden (self-generated),
 /// generated with the lbr bit honored — a regression that ignores lbr:false produces the reset-after
 /// numbers and fails the reference comparison.</summary>
@@ -4380,7 +4379,7 @@ public partial class GruCellClosedFormLbrFalse
     }
 }
 
-/// <summary>§7-2/§7-3 (GRUCell) single step: Recurrent.GRUCell(x, h, H) (linearBeforeReset:true) with
+/// <summary>GRUCell single step: Recurrent.GRUCell(x, h, H) (linearBeforeReset:true) with
 /// nonzero h (so initial_h is genuinely threaded) — frozen forward-value golden (self-generated); the
 /// [N, H] output shape is pinned by the golden's element count.</summary>
 [Module]
@@ -4399,7 +4398,7 @@ public partial class GruCellSingleStepGolden
     }
 }
 
-/// <summary>§7-4 (GRUCell) bias:false — frozen forward-value golden (self-generated):
+/// <summary>(GRUCell) bias:false — frozen forward-value golden (self-generated):
 /// the configured cell's output must match the inlined reference.</summary>
 [Module]
 public partial class GruCellNoBiasGolden
@@ -4418,7 +4417,7 @@ public partial class GruCellNoBiasGolden
     }
 }
 
-/// <summary>§7-5 (GRUCell) State threading — the defining test. Two hand-unrolled cell steps
+/// <summary>(GRUCell) State threading — the defining test. Two hand-unrolled cell steps
 /// (linearBeforeReset:true) from h_0 = 0: step 2 consumes step 1's h', and both steps' outputs fold into
 /// one frozen forward-value golden (self-generated), so the cell failing to thread state breaks the
 /// reference comparison.</summary>
@@ -4445,7 +4444,7 @@ public partial class GruCellStateThreading
     }
 }
 
-/// <summary>§7-6 (GRUCell) forward frozen golden (linearBeforeReset:true): one GRUCell step where x AND
+/// <summary>(GRUCell) forward frozen golden (linearBeforeReset:true): one GRUCell step where x AND
 /// the nonzero h are built from the probed scalar — frozen forward-value golden (self-generated).
 /// Op-level GRU gradient coverage (both lbr forms) lives in AutoGradOpsTests.</summary>
 [Module]
@@ -4464,7 +4463,7 @@ public partial class GruCellForwardGolden
     }
 }
 
-/// <summary>§7-7 (GRUCell) trainability rig model: a hand-unrolled 2-step GRUCell (linearBeforeReset:true)
+/// <summary>(GRUCell) trainability rig model: a hand-unrolled 2-step GRUCell (linearBeforeReset:true)
 /// loop reducing the final hidden state to a per-batch logit pair, for a TrainingRig FromScratch /
 /// TrainStep + L2Loss + SGD. The owned W/R/bias differentiate end-to-end through the user loop. h_0 is a
 /// zero seed. Output [N, 2].</summary>
@@ -4491,8 +4490,7 @@ public partial class GruCellTrainModel
 }
 
 // ---------------------------------------------------------------------------
-// Constant + Orthogonal initializer coverage (constant-init / orthogonal-init
-// design §7). Each self-checking [Module] materializes the seeded init graph and
+// Constant + Orthogonal initializer coverage. Each self-checking [Module] materializes the seeded init graph and
 // asserts on the produced constant, exactly like NNLinearMatchesPyTorch
 // exercises KaimingUniform.Init. A trivial 0*x touch folds the runtime input in
 // (the params are input-independent), and the multi-clause value checks use the
@@ -4620,8 +4618,7 @@ public partial class NNOrthogonalWideGramIsIdentity
 }
 
 // ---------------------------------------------------------------------------
-// Configurable UniformRange + NormalDist initializer coverage (configurable-
-// uniform-normal design §7). Each self-checking [Module] materializes a large
+// Configurable UniformRange + NormalDist initializer coverage. Each self-checking [Module] materializes a large
 // seeded sample via <Init>.Init([...], Scalar(...), Scalar(...)) and asserts on
 // its empirical statistics, exactly like NNConstantInitFillsValue exercises
 // Constant.Init. The multi-clause checks use the same NaN-safe ok-counting
@@ -4712,8 +4709,7 @@ public partial class NNNormalDistMoments
 }
 
 // ---------------------------------------------------------------------------
-// Configurable-gain Xavier/Kaiming initializer coverage (configurable-gain
-// design §7). Each *Gain class is materialized via <Init>.Init([64,64],
+// Configurable-gain Xavier/Kaiming initializer coverage. Each *Gain class is materialized via <Init>.Init([64,64],
 // Scalar(gain)) and checked through its empirical sample std (= sqrt(mean(w²) −
 // mean(w)²)), exactly like NNNormalDistMoments exercises NormalDist. On a SQUARE
 // [64,64] shape (fanIn = fanOut = 64) all four collapse to the SAME closed form,
@@ -4728,7 +4724,7 @@ public partial class NNNormalDistMoments
 // The gain=2 band ±0.015 is tight around 0.25 yet brackets all four observed
 // values; crucially it EXCLUDES the √6-double-bake value 0.354 (a buggy Kaiming
 // using √(6/fanIn) would give 2·√(6/64)/√3 = 0.354), so the check discriminates
-// the §4.1 double-bake trap.
+// the √6 double-bake trap.
 // ---------------------------------------------------------------------------
 
 /// <summary>All four configurable-gain inits (XavierUniformGain / XavierNormalGain /
@@ -4780,8 +4776,7 @@ public partial class NNXavierKaimingGainStd
 }
 
 // ---------------------------------------------------------------------------
-// TripletMarginLoss / TripletMarginWithDistance coverage (triplet-margin-loss
-// design §9). Self-checking [Module]s in the established loss style: in-module
+// TripletMarginLoss / TripletMarginWithDistance coverage. Self-checking [Module]s in the established loss style: in-module
 // constant anchor/positive/negative, a zero-scaled runtime touch so AutoTest has
 // an input to drive, and the NaN-safe Within(...) / AtLeastZero(...) ok-counting
 // idiom (a NaN fails every comparison so it can never slip a check). The
@@ -4792,7 +4787,7 @@ public partial class NNXavierKaimingGainStd
 // ---------------------------------------------------------------------------
 
 /// <summary>
-/// TripletMarginLoss load-bearing closed form (design §9.1) on a fixed
+/// TripletMarginLoss load-bearing closed form on a fixed
 /// <c>[N=3, D=3]</c> batch, default <c>p=2</c> (Euclidean), <c>margin=1</c>,
 /// <c>eps=1e-6</c>, <c>swap=false</c>. Anchors all <c>[0,0,0]</c>:
 /// <list type="bullet">
@@ -4861,7 +4856,7 @@ public partial class NNTripletMarginClosedFormChecks
 
 /// <summary>
 /// TripletMarginLoss <c>swap</c> (Balntas anchor swap), <c>margin</c> and <c>p</c>
-/// knobs (design §9.2/§9.3), each via a hand-computed single-triplet case.
+/// knobs, each via a hand-computed single-triplet case.
 /// <list type="bullet">
 ///   <item><b>swap</b>: a=[0,0,0], p=[2,0,0], n=[3,0,0], margin=1 → dAp=2, dAn=3,
 ///     d(p,n)=1. swap=false: dNeg=3, L=relu(1+2−3)=0. swap=true: dNeg=min(3,1)=1,
@@ -4920,7 +4915,7 @@ public partial class NNTripletMarginSwapMarginPChecks
 }
 
 /// <summary>
-/// TripletMarginLoss reduction-mode equivalences (design §9.4): on the §9.1
+/// TripletMarginLoss reduction-mode equivalences: on the closed-form test's
 /// fixed batch (per-triplet losses [0, 0.5, 2]),
 /// <c>Reduced(Mean) == Inline</c> (mean 0.8333333) and
 /// <c>Reduced(Sum)</c> equals the sum of the PerElement vector (2.5). The
@@ -4964,14 +4959,13 @@ public partial class NNTripletMarginReductionChecks
 }
 
 /// <summary>
-/// TripletMarginWithDistance (caller-supplied distance Func) coverage (design
-/// §9.7). Two checks pin the Func plumbing + the build-time-bool swap:
+/// TripletMarginWithDistance (caller-supplied distance Func) coverage. Two checks pin the Func plumbing + the build-time-bool swap:
 /// <list type="bullet">
 ///   <item><b>Custom squared-L2</b> distance <c>d(x,y)=Σ(x−y)²</c> (no root):
 ///     a=[0], p=[2], n=[2.2], margin=1 → d_ap=4, d_an=4.84, L=relu(1+4−4.84)=0.16.</item>
 ///   <item><b>Equivalence pin</b>: passing the p=2 Euclidean Func
 ///     <c>d(x,y)=sqrt(Σ(x−y)²)</c> reproduces the built-in TripletMarginLoss(p=2)
-///     value on the §9.1 fixed batch (mean 0.8333333), confirming the skeleton is
+///     value on the closed-form test's fixed batch (mean 0.8333333), confirming the skeleton is
 ///     identical and only the distance is pluggable.</item>
 ///   <item><b>swap on the custom distance</b>: a=[0,0,0], p=[2,0,0], n=[3,0,0]
 ///     with the squared-L2 Func → d_ap=4, d_an=9, d_pn=1. swap=false:
@@ -4997,7 +4991,7 @@ public partial class NNTripletMarginWithDistanceChecks
         var custom = TripletMarginWithDistance.PerElement(sqL2, 1f, false, a1, p1, n1)
             .Reduce(ReduceKind.Sum, keepDims: false).Scalar();   // 0.16
 
-        // --- equivalence: euclid Func == built-in TripletMarginLoss(p=2) on §9.1 batch.
+        // --- equivalence: euclid Func == built-in TripletMarginLoss(p=2) on the closed-form batch.
         var anchor = Tensor([3L, 3L],
             0f, 0f, 0f,  0f, 0f, 0f,  0f, 0f, 0f);
         var positive = Tensor([3L, 3L],
@@ -5033,8 +5027,8 @@ public partial class NNTripletMarginWithDistanceChecks
 }
 
 /// <summary>
-/// Rig-trainability model for TripletMarginLoss (triplet-margin-loss design §5/§9.5
-/// "loss-is-the-model-tail" recipe). The model takes a single <c>[3N, D]</c> input
+/// Rig-trainability model for TripletMarginLoss (the "loss-is-the-model-tail"
+/// recipe). The model takes a single <c>[3N, D]</c> input
 /// batch, splits it into anchor / positive / negative blocks of <c>N</c> rows each,
 /// runs a SHARED trainable Linear embedding on each block, and RETURNS THE SCALAR
 /// triplet loss as the model output. Paired with the IdentityScalarLoss adapter in
@@ -5059,8 +5053,7 @@ public partial class NNTripletEmbeddingRigModel
 }
 
 /// <summary>
-/// The generic "my loss is already computed in the model" rig adapter
-/// (triplet-margin-loss design §5): a 2-input <c>(prediction, target)</c> loss
+/// The generic "my loss is already computed in the model" rig adapter: a 2-input <c>(prediction, target)</c> loss
 /// that just returns the scalar <c>prediction</c> (the model already produced the
 /// loss), with a zero-scaled touch of <c>target</c> to honour the rig's 2-input
 /// contract. Lets any non-(pred,target) objective (here TripletMarginLoss) train
@@ -5074,12 +5067,11 @@ public partial class NNIdentityScalarLoss
 }
 
 // ---------------------------------------------------------------------------
-// CosineEmbeddingLoss (+ CosineSimilarity helper) coverage
-// (cosine-embedding-loss design §9). Self-checking [Module]s in the established
+// CosineEmbeddingLoss (+ CosineSimilarity helper) coverage. Self-checking [Module]s in the established
 // loss style: in-module constant x1/x2/y, a zero-scaled runtime touch so AutoTest
 // has an input to drive, and the NaN-safe Within(...) / AtLeastZero(...)
 // ok-counting idiom (a NaN fails every comparison so it can never slip a check).
-// The load-bearing closed form (§9.1) cross-checks the per-sample [N] loss against
+// The load-bearing closed form cross-checks the per-sample [N] loss against
 // an INDEPENDENT raw-op reference: cos built by hand from (x1·x2).sum(-1) /
 // (‖x1‖·‖x2‖), then the where(y==1, 1−cos, relu(cos−margin)) split — NOT by
 // re-calling the module. Cosines are exact (identical ⇒ 1, orthogonal ⇒ 0,
@@ -5088,7 +5080,7 @@ public partial class NNIdentityScalarLoss
 // ---------------------------------------------------------------------------
 
 /// <summary>
-/// CosineEmbeddingLoss load-bearing closed form (design §9.1) covering BOTH y
+/// CosineEmbeddingLoss load-bearing closed form covering BOTH y
 /// branches on a fixed <c>[N=6, D=2]</c> batch, <c>margin=0</c>, <c>eps=1e-8</c>.
 /// All <c>x1=[1,0]</c>; the per-sample cosine and loss are hand-computed:
 /// <list type="bullet">
@@ -5171,7 +5163,7 @@ public partial class NNCosineEmbeddingClosedFormChecks
 }
 
 /// <summary>
-/// CosineEmbeddingLoss <c>margin</c> gating (design §9.2): on the SAME single-pair
+/// CosineEmbeddingLoss <c>margin</c> gating: on the SAME single-pair
 /// input <c>x1=[1,0]</c>, <c>x2=[1,1]</c> (cos = 1/√2 ≈ 0.70710678), two margins
 /// (0 and 0.5):
 /// <list type="bullet">
@@ -5216,8 +5208,7 @@ public partial class NNCosineEmbeddingMarginGatingChecks
 }
 
 /// <summary>
-/// CosineEmbeddingLoss the <c>where(y==1, …, …)</c> data-dependent split (design
-/// §9.3). A batch <c>N=2</c>, <c>x1=[[1,0],[1,0]]</c>, <c>x2=[[2,0],[0,1]]</c>
+/// CosineEmbeddingLoss the <c>where(y==1, …, …)</c> data-dependent split. A batch <c>N=2</c>, <c>x1=[[1,0],[1,0]]</c>, <c>x2=[[2,0],[0,1]]</c>
 /// (cos = [1, 0]), <c>margin=0</c>. Same x1/x2, only y flips:
 /// <list type="bullet">
 ///   <item>y=[+1, −1] ⇒ PerElement = [1−1, relu(0−0)] = [0, 0];</item>
@@ -5265,7 +5256,7 @@ public partial class NNCosineEmbeddingWhereSplitChecks
 }
 
 /// <summary>
-/// CosineEmbeddingLoss reduction-mode equivalences (design §9.4) on an <c>N=3</c>
+/// CosineEmbeddingLoss reduction-mode equivalences on an <c>N=3</c>
 /// batch with per-sample losses [0, 1, 0.29289322] (all y=+1: x1=[1,0] paired with
 /// x2=[2,0] (cos=1, L=0), [0,1] (cos=0, L=1), [1,1] (cos=0.70710678, L=0.29289322)):
 /// <c>Reduced(Mean) == Inline</c> (mean 0.43096441) and <c>Reduced(Sum)</c> equals
@@ -5302,7 +5293,7 @@ public partial class NNCosineEmbeddingReductionChecks
 }
 
 /// <summary>
-/// CosineSimilarity helper (design §9.5), independent of the loss. Hand-computed
+/// CosineSimilarity helper, independent of the loss. Hand-computed
 /// per-row cosines over a <c>[N=5, D=2]</c> batch, asserted == a raw-op reference
 /// AND the exact constants:
 /// <list type="bullet">
@@ -5379,8 +5370,8 @@ public partial class NNCosineSimilarityHelperChecks
 }
 
 /// <summary>
-/// Rig-trainability model for CosineEmbeddingLoss (cosine-embedding-loss design §5
-/// "loss-is-the-model-tail" recipe, Recipe A fallback). The model takes a single
+/// Rig-trainability model for CosineEmbeddingLoss (the "loss-is-the-model-tail"
+/// recipe). The model takes a single
 /// <c>[2N, D]</c> input batch, splits it into x1 / x2 blocks of <c>N</c> rows each,
 /// runs a SHARED trainable Linear embedding on each block, and RETURNS THE SCALAR
 /// cosine loss as the model output. Paired with the NNIdentityScalarLoss adapter in

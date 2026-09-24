@@ -3,9 +3,9 @@ using static Shorokoo.Tests.Modules.QeeAuditVerdicts;
 namespace Shorokoo.Tests.Modules
 {
     // ===================================================================
-    //  Self-checking shape/value-audit modules for the Phase 4 QEE-A5
-    //  batch (image/geometry, random/generator, and recurrent families,
-    //  ONNX opset 21). Same pattern as QeePoolConvAuditModules.cs: each
+    //  Self-checking shape/value-audit modules for the QEE audit of the
+    //  image/geometry, random/generator, and recurrent families (ONNX
+    //  opset 21). Same pattern as QeePoolConvAuditModules.cs: each
     //  module runs a group of related ops under the attribute combos
     //  audited in the batch and compares every result's ShapeTensor()
     //  (and, where values are deterministic, the values) against the

@@ -3,8 +3,8 @@ using static Shorokoo.Tests.Modules.QeeAuditVerdicts;
 namespace Shorokoo.Tests.Modules
 {
     // ===================================================================
-    //  Self-checking shape-audit modules for the Phase 4 QEE-A1 batch
-    //  (pooling & convolution family, ONNX opset 21). Each module runs a
+    //  Self-checking shape-audit modules for the QEE audit of the pooling
+    //  & convolution family (ONNX opset 21). Each module runs a
     //  group of related ops under the attribute combinations audited in
     //  the batch (dilations / ceil_mode / auto_pad / asymmetric pads /
     //  group / output_padding / output_shape) and compares every result's

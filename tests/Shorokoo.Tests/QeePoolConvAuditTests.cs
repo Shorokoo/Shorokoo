@@ -4,7 +4,7 @@ using static Shorokoo.Tests.Utils.QeeAudit;
 namespace Shorokoo.Tests;
 
 /// <summary>
-/// Phase 4 QEE-A1 audit batch: pooling and convolution families (ONNX opset 21). Each
+/// QEE audit batch: pooling and convolution families (ONNX opset 21). Each
 /// module in QeePoolConvAuditModules.cs compares the ShapeTensor() of every op result
 /// against the spec-expected dims and returns a single Scalar&lt;bit&gt;;
 /// <see cref="QeeAudit.Check{TModule}"/> validates that bit under both real ONNX Runtime

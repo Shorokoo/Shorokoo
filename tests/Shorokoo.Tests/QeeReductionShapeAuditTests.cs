@@ -4,7 +4,7 @@ using static Shorokoo.Tests.Utils.QeeAudit;
 namespace Shorokoo.Tests;
 
 /// <summary>
-/// Phase 4 QEE-A3 audit batch: reductions plus the shape/data-movement family (ONNX opset
+/// QEE audit batch: reductions plus the shape/data-movement family (ONNX opset
 /// 21). Each module in QeeReductionShapeAuditModules.cs compares every audited op's output
 /// values (and inferred shapes via ShapeTensor) against spec-expected constants and returns
 /// a single Scalar&lt;bit&gt;; <see cref="QeeAudit.Check{TModule}"/> validates that bit

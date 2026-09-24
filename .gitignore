@@ -58,6 +58,3 @@ tests/test-data/modules/fclayer/fclayer_architecture.zsrk
 tools/DataGen/PyTorch.DataGen/**/.venv/
 # Release artifacts
 artifacts/
-
-# Claude Code agent worktrees (transient)
-.claude/worktrees/

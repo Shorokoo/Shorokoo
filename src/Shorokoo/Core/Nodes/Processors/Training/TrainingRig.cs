@@ -215,7 +215,7 @@ namespace Shorokoo
             => feed is SharedInput shared ? shared.Value as TensorData : feed as TensorData;
 
         /// <summary>
-        /// The rig's <b>constituent</b> layer (§5.8): the swappable source-of-truth models — the
+        /// The rig's <b>constituent</b> layer: the swappable source-of-truth models — the
         /// inference model, the loss graph, the optimizer graph (as authored), and the scheduler
         /// (carried in the <see cref="Hyperparameters"/> until #106 folds it into its own persisted
         /// constituent) — plus the RNG config the trainstep is derived from. This
@@ -229,7 +229,7 @@ namespace Shorokoo
 
         /// <summary>
         /// The model constituent's <b>concrete architecture</b> — derived state, computed once when
-        /// the rig is first built (§5.8): the model graph run through <c>ToConcreteArchitecture</c> at
+        /// the rig is first built: the model graph run through <c>ToConcreteArchitecture</c> at
         /// its inputs and bound to the RNG config, shape-specialized and with every trainable parameter
         /// visible at the top level. Like <see cref="TrainingStepPureGraph"/> it is environment-
         /// independent and NEVER persisted; unlike the trainstep it does not change when loss /
@@ -499,7 +499,7 @@ namespace Shorokoo
         /// <summary>
         /// The int64 scalar counter inputs on the training-step graph, in input order — a subset of
         /// <see cref="CounterInputNames"/> (<c>step</c>, <c>epoch</c>, <c>batchIndex</c>), the union of
-        /// what the rig's scheduled hyperparameters consume (D1). Empty when no hyperparameter is
+        /// what the rig's scheduled hyperparameters consume. Empty when no hyperparameter is
         /// scheduled. Each is fed the checkpoint's corresponding counter every <c>TrainStep</c>; the
         /// scheduler math computes the hyperparameter values from them in-graph (no host evaluation).
         /// Built-in DSL schedules consume only <c>step</c>; a scheduler module declares its subset by
@@ -659,10 +659,10 @@ namespace Shorokoo
 
         /// <summary>
         /// The value each hyperparameter contributes to optimizer state init, evaluated at the
-        /// <b>initial counters</b> (step/epoch/batchIndex = 0) through the single value route (§2.5):
+        /// <b>initial counters</b> (step/epoch/batchIndex = 0) through the single value route:
         /// a baked hyper's constant, a scheduled hyper's canonical graph evaluated via QEE at build
         /// (built-in schedule <i>and</i> user module alike), and <c>null</c> for a runtime hyper
-        /// (its value is host-supplied — see D5). Indexed in optimizer order. Replaces the old
+        /// (its value is host-supplied). Indexed in optimizer order. Replaces the old
         /// hardcoded-<c>0f</c> state-init seed that silently fed <c>0</c> for scheduler modules. Each
         /// value carries the hyperparameter's declared dtype and its built shape.
         /// </summary>
@@ -670,7 +670,7 @@ namespace Shorokoo
 
         /// <summary>
         /// Optimizer-order indices of the hyperparameters the optimizer's state-init graph actually
-        /// <b>consumes</b> (reachable from its outputs) — the D5 dependency analysis. Empty for every
+        /// <b>consumes</b> (reachable from its outputs) — the dependency analysis. Empty for every
         /// built-in optimizer (their state inits are shape-only zeros/ones).
         /// </summary>
         private HashSet<int> _stateInitConsumedHyperIndices = new();
@@ -681,11 +681,11 @@ namespace Shorokoo
         /// <summary>
         /// True when the optimizer's state-init graph reads a <see cref="HyperparameterKind.Runtime"/>
         /// hyper: its initial value is unknowable at build, so <see cref="CreateInitialCheckpoint()"/>
-        /// fails loud (D5) until <see cref="CreateInitialCheckpoint(TensorDataStruct)"/> supplies it.
+        /// fails loud until <see cref="CreateInitialCheckpoint(TensorDataStruct)"/> supplies it.
         /// </summary>
         private bool _stateInitNeedsRuntimeHypers;
 
-        /// <summary>The names of the runtime hyperparameters the state-init graph consumes (for the D5 error).</summary>
+        /// <summary>The names of the runtime hyperparameters the state-init graph consumes (for the error).</summary>
         private string[] _stateInitConsumedRuntimeHyperNames = Array.Empty<string>();
 
         /// <summary>Default values for the dynamic hyperparameter fields (their initial values from
@@ -881,7 +881,7 @@ namespace Shorokoo
             if (sampleInputs is null) throw new ArgumentNullException(nameof(sampleInputs));
             if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
 
-            // Capture the constituents (the swappable source-of-truth layer, §5.8) and take the
+            // Capture the constituents (the swappable source-of-truth layer) and take the
             // initial build path, which concretizes the model from the sample inputs. The sample
             // inputs are a construction-time argument only — consumed here to produce the retained
             // concrete arch and its shape exemplars, and never stored on the rig. "No config" means
@@ -1346,7 +1346,7 @@ namespace Shorokoo
             return reaches;
         }
 
-        // ───────────────────── Two-layer rig: immutable derivations (§5.8.5) ─────────────────────
+        // ───────────────────── Two-layer rig: immutable derivations ─────────────────────
         // A TrainingRig is an immutable value (consistent with the frozen ComputationGraph). None of
         // the operations below mutate the receiver; each returns a NEW rig that shares the unchanged
         // constituents (and their graphs) BY REFERENCE — via `record with` on RigConstituents — and
@@ -1449,7 +1449,7 @@ namespace Shorokoo
         /// arch is left untouched — a <b>clone</b> is re-keyed and the new rig derives from that. It is
         /// still only a rebind, not a re-concretization: the model constituent's structure is unchanged,
         /// so no <c>ToConcreteArchitecture</c> and no sample inputs are needed; re-initialization then
-        /// re-draws every trainable parameter on the new seed's keyed streams (§2.5). The design's
+        /// re-draws every trainable parameter on the new seed's keyed streams. The
         /// cheaper path (share even the trainstep, re-derive only the compiled session, since the seed
         /// rides as an aliased param value) rests on the #22 param-identity substrate; until that lands
         /// the re-seed re-derives the trainstep, which is correct and equally immutable.
@@ -1471,7 +1471,7 @@ namespace Shorokoo
 
         /// <summary>
         /// Extracts the inference model for a checkpoint — a <b>pure read off the model constituent's
-        /// mapping</b> (§5.8.2): bind the checkpoint's model-owned params (trainable weights + module
+        /// mapping</b>: bind the checkpoint's model-owned params (trainable weights + module
         /// state) by their canonical identifiers into the rig's retained concrete arch. No
         /// re-concretization and no sample inputs — the arch was concretized once at build (at all
         /// inputs, so a multi-input model extracts correctly) and is reused. No copy step, no
@@ -1695,9 +1695,9 @@ namespace Shorokoo
             var optimizerInfo = Shorokoo.Core.Nodes.Processors.Fast.FastNormalizeOptimizerGraph.Process(optimizerFastGraph);
             _optimizerStateInitGraph = optimizerInfo.StateInitGraph;
 
-            // Value route (§2.5): the value each hyper contributes to optimizer state init, at the
+            // Value route: the value each hyper contributes to optimizer state init, at the
             // initial counters. Baked → its constant; scheduled → its graph evaluated via QEE below;
-            // runtime → null (host-supplied, D5). Filled per kind as the hypers are wired.
+            // runtime → null (host-supplied). Filled per kind as the hypers are wired.
             _hyperparamInitialCounterValues = new TensorData?[hyperparameters.Length];
 
             // Step 1: Compose model + loss + autograd via TrainingGraphBuilder. The model
@@ -1724,7 +1724,7 @@ namespace Shorokoo
             //
             // A loss whose body never reads that input (a forwarder over a model that computes its own
             // loss) gets no field at all and the rig keeps a placeholder for the dead graph input
-            // instead (Shorokoo/Shorokoo#331). The question is the same reachability one D5 asks of the
+            // instead (Shorokoo/Shorokoo#331). The question is the same reachability one asked of the
             // optimizer's state-init graph, so it is asked the same way.
             {
                 var lossProdMap = BuildProducerByOutputMap(lossGraph);
@@ -1885,7 +1885,7 @@ namespace Shorokoo
             HyperparameterStructDef = new TensorStructDef(hyperFields, "Hyperparameters");
             DynamicHyperparameterNames = hyperFields.Select(f => f.Name).ToArray();
 
-            // Runtime-hyper optimizer-index → field name, for the D5 CreateInitialCheckpoint override.
+            // Runtime-hyper optimizer-index → field name, for the CreateInitialCheckpoint override.
             _runtimeHyperNameByOptIndex = new Dictionary<int, string>();
             for (int i = 0; i < runtimeIndices.Count; i++)
                 _runtimeHyperNameByOptIndex[runtimeIndices[i]] = hyperFields[i].Name;
@@ -1920,7 +1920,7 @@ namespace Shorokoo
 
             // --- Scheduled hyperparameters: emitted in-graph from the named int64 counter inputs. ---
             // The counter inputs {step, epoch, batchIndex} are shared graph inputs; each scheduler
-            // (built-in lowering or user module) consumes a named subset (D1) and is inlined against
+            // (built-in lowering or user module) consumes a named subset and is inlined against
             // exactly those inputs via FastReplay. Built-in DSL schedules are step-only (PerEpoch
             // derives its epoch in-graph from step, #39); a module declares its subset by input name.
             var counterInputsInOrder = new List<(FastTensorKey Key, string Name)>();
@@ -1958,7 +1958,7 @@ namespace Shorokoo
                 foreach (var h in scheduledIndices)
                 {
                     var built = builtByIndex[h];
-                    // Value route (§2.5): the scheduler graph is the single truth, so its value at the
+                    // Value route: the scheduler graph is the single truth, so its value at the
                     // initial counters — what optimizer state init needs — comes from evaluating that
                     // very graph via QEE, not a hardcoded 0f (the old scheduler-module state-init hole).
                     _hyperparamInitialCounterValues[h] = EvaluateSchedulerAtInitialCounters(built.Graph);
@@ -2168,9 +2168,9 @@ namespace Shorokoo
         /// <summary>
         /// Evaluates a scheduler graph (built-in lowering or user module) at the <b>initial counters</b>
         /// — every counter input bound to 0 — via the pure managed <see cref="Shorokoo.Core.Interpreter.QuickExecutionEngine"/>,
-        /// returning the scalar value at the scheduler's own (declared) dtype. This is the single value route (§2.5) for optimizer state init:
+        /// returning the scalar value at the scheduler's own (declared) dtype. This is the single value route for optimizer state init:
         /// the scheduler graph is normative, so its build-time value comes from evaluating it, not from
-        /// a host closure or a hardcoded placeholder. The graph is pure (enforced, D4), so all-zero
+        /// a host closure or a hardcoded placeholder. The graph is pure (enforced), so all-zero
         /// counters fully determine the value.
         /// </summary>
         private static TensorData EvaluateSchedulerAtInitialCounters(InternalComputationGraph schedulerGraph)
@@ -2192,7 +2192,7 @@ namespace Shorokoo
         /// training-step graph by <see cref="Shorokoo.Core.Nodes.Processors.Fast.FastReplay.ReplayInto"/>
         /// against the shared step-counter input.
         /// </summary>
-        /// <summary>The reserved counter inputs a scheduler graph may consume, in canonical order (D1).</summary>
+        /// <summary>The reserved counter inputs a scheduler graph may consume, in canonical order.</summary>
         internal static readonly string[] CounterInputNames = ["step", "epoch", "batchIndex"];
 
         /// <summary>A built scheduler graph and the counter inputs it consumes, in the graph's input order.</summary>
@@ -2231,9 +2231,9 @@ namespace Shorokoo
 
         /// <summary>
         /// Validates a user scheduler module's signature — its inputs a subset of the reserved int64
-        /// scalar counters <c>{step, epoch, batchIndex}</c> (D1; each named, rank-0, no duplicates) and
+        /// scalar counters <c>{step, epoch, batchIndex}</c> (each named, rank-0, no duplicates) and
         /// a single output at the hyperparameter's declared dtype and rank (any shape the module produces
-        /// is allowed when the declaration is rank-agnostic) — enforces purity (D4), and returns its
+        /// is allowed when the declaration is rank-agnostic) — enforces purity, and returns its
         /// inlined graph together
         /// with the counter names it consumes (in input order, for wiring). Fails loud at rig build with
         /// a clear message on any signature/purity mismatch.
@@ -2257,12 +2257,12 @@ namespace Shorokoo
                 Shorokoo.Core.Nodes.Processors.Fast.FastProcessorHelper.RemoveUnreachableNodes(g);
             }
 
-            // Purity contract (D4): a scheduler graph is a pure function of its counter inputs. After
+            // Purity contract: a scheduler graph is a pure function of its counter inputs. After
             // inlining, reject any trainable param, module state / StateUpdate, or RNG draw — impure
             // constructs would be inlined into the trainstep with an undefined failure mode.
             AssertSchedulerGraphPure(g, name);
 
-            // Each input must be a named reserved counter (int64 scalar), with no duplicates (D1).
+            // Each input must be a named reserved counter (int64 scalar), with no duplicates.
             var producerByOutput = BuildProducerByOutputMap(g);
             var counterNames = new string[g.Inputs.Count];
             var seen = new HashSet<string>(StringComparer.Ordinal);
@@ -2320,7 +2320,7 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// Enforces the scheduler-graph purity contract (D4): fails loud at rig build if the inlined
+        /// Enforces the scheduler-graph purity contract: fails loud at rig build if the inlined
         /// scheduler graph carries a trainable parameter, module state (a <c>StateUpdate</c> link /
         /// state-deps marker), or an RNG draw. Such a graph would be inlined straight into the
         /// training-step graph, where trainable-param discovery and state threading would misbehave.
@@ -3624,7 +3624,7 @@ namespace Shorokoo
         /// To start several runs from the same initial state, call this once per run, or pass one
         /// checkpoint <c>.Shared()</c>.</para>
         ///
-        /// <para><b>Fails loud (D5)</b> when the optimizer's state initializer actually reads a
+        /// <para><b>Fails loud</b> when the optimizer's state initializer actually reads a
         /// <see cref="HyperparameterKind.Runtime"/> hyperparameter, whose value is unknown at build:
         /// supply explicit initial values via <see cref="CreateInitialCheckpoint(TensorDataStruct)"/>
         /// (build them with <see cref="MakeHyperparameters(float)"/>). No silent placeholder is ever
@@ -3651,7 +3651,7 @@ namespace Shorokoo
         /// Like <see cref="CreateInitialCheckpoint()"/>, but with explicit initial values for the
         /// <see cref="HyperparameterKind.Runtime"/> hyperparameters (build the struct with
         /// <see cref="MakeHyperparameters(float)"/> / <see cref="MakeHyperparameters(ValueTuple{string, object}[])"/>
-        /// — the same struct the per-step override <c>TrainStep</c> takes). Required (D5) when the
+        /// — the same struct the per-step override <c>TrainStep</c> takes). Required when the
         /// optimizer's state initializer reads a runtime hyperparameter; harmless otherwise. Baked and
         /// scheduled hyperparameters still contribute their build-time value at the initial counters.
         /// Its tensors are its own, as that one's are.
@@ -3679,7 +3679,7 @@ namespace Shorokoo
         /// baked/scheduled hypers use their build-time value at the initial counters
         /// (<see cref="_hyperparamInitialCounterValues"/>); a runtime hyper takes its value from
         /// <paramref name="runtimeHypers"/> when supplied. A runtime hyper the state-init graph
-        /// actually <b>consumes</b> must be present (D5): its absence fails loud rather than defaulting
+        /// actually <b>consumes</b> must be present: its absence fails loud rather than defaulting
         /// to a placeholder. An unconsumed runtime hyper is irrelevant to state init, so it defaults to
         /// its declared dtype's zero.
         /// </summary>
@@ -3771,7 +3771,7 @@ namespace Shorokoo
 
         /// <summary>
         /// The subset of the first <paramref name="count"/> input indices of <paramref name="graph"/>
-        /// that are actually reachable from its outputs — the D5 dependency analysis over the optimizer
+        /// that are actually reachable from its outputs — the dependency analysis over the optimizer
         /// state-init graph, whose leading inputs are the hyperparameters (then param, grad). Shares
         /// <see cref="Shorokoo.Core.Training.TrainingGraphBuilder"/>'s scope-aware walk with the
         /// target-reachability question, so the two cannot disagree about what "reaches" means: a
@@ -3808,14 +3808,14 @@ namespace Shorokoo
         public TrainingCheckpoint LoadCheckpointFromSkpt(string filePath, CheckpointComponents? components = null)
             => TrainingCheckpoint.LoadFromSkpt(filePath, this, components);
 
-        // ───────── Constituent persistence & from-file reconstruction (§5.8.2, #115/#106) ─────────
+        // ───────── Constituent persistence & from-file reconstruction (#115/#106) ─────────
         // A training .skpt stores the rig's constituents as ordinary models/ entries so a fresh process
         // rebuilds the whole rig — trainstep and all — from the file alone. Save reads the graphs and
         // recipe off these members; Load (static, below) reads them back and re-derives via the same
         // DeriveFromConcreteArch path a fresh build uses.
 
         /// <summary>The rig's concrete-architecture constituent (value-less), the substrate a from-file
-        /// reconstruction re-derives the trainstep from (§5.8). Environment-independent; serialized as
+        /// reconstruction re-derives the trainstep from. Environment-independent; serialized as
         /// the checkpoint's <c>model-arch</c> constituent entry.</summary>
         internal ComputationGraph ConcreteArchConstituent => new(_concreteArch, GraphKind.ConcreteArchitecture);
 
@@ -3983,7 +3983,7 @@ namespace Shorokoo
         /// serialized constituents (concrete architecture, loss, optimizer, and the composed scheduler
         /// when present), hyperparameter bindings, and RNG config are read from the file and the
         /// in-memory <c>trainstep</c> re-derived, then the checkpoint's state is loaded against the
-        /// reconstructed rig (§5.8). This is the from-file-alone counterpart of
+        /// reconstructed rig. This is the from-file-alone counterpart of
         /// <see cref="LoadCheckpoint"/> (which requires a pre-existing rig). The two compute contexts
         /// seed the rebuilt rig (rev 22; never persisted — a reloaded run gets fresh ones), each
         /// defaulting to <see cref="ComputeContext.Default"/>. Re-deriving the trainstep is most of a
@@ -4270,7 +4270,7 @@ namespace Shorokoo
 
             // Initial optimizer state: run the optimizer's state initializers once per trainable
             // parameter, binding the optimizer's hyperparameter inputs to their value at the initial
-            // counters (§2.5's single value route — baked constant, or scheduler graph evaluated via
+            // counters (the single value route — baked constant, or scheduler graph evaluated via
             // QEE at build; no more hardcoded 0f for scheduler modules), the parameter's initial
             // value, and a zero gradient. The state-init graph carries the [StateInitializer]
             // functions split out of the optimizer graph by FastNormalizeOptimizerGraph.
@@ -4281,7 +4281,7 @@ namespace Shorokoo
                     ?? throw new InvalidOperationException(
                         "Optimizer state fields exist but no state-init graph was produced.");
 
-                // D5: which hyperparameters does the state-init graph actually consume? A runtime hyper
+                // Which hyperparameters does the state-init graph actually consume? A runtime hyper
                 // it reads has no build-time value, so defer to CreateInitialCheckpoint(hyperparameters)
                 // and fail loud on the no-arg path — no silent placeholder ever reaches an initializer.
                 _stateInitConsumedHyperIndices =
@@ -4439,7 +4439,7 @@ namespace Shorokoo
     }
 
     /// <summary>
-    /// The immutable <b>constituent</b> layer of a <see cref="TrainingRig"/> (§5.8): the swappable
+    /// The immutable <b>constituent</b> layer of a <see cref="TrainingRig"/>: the swappable
     /// source-of-truth models plus the hyperparameters and RNG config needed to (re-)derive the
     /// in-memory <c>trainstep</c>. A <c>With…</c> derivation produces a new value with <c>record
     /// with</c>, sharing every unchanged constituent (and its graph) by reference and re-deriving only

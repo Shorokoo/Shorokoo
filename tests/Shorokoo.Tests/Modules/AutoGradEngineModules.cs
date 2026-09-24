@@ -1,7 +1,7 @@
 namespace Shorokoo.Tests.Modules
 {
     /// <summary>
-    /// Phase 4 AD-B2 modules for the autograd ENGINE path-checking semantics in
+    /// Modules for the autograd ENGINE path-checking semantics in
     /// <c>FastProcessAutoGrad</c> plus the new AD003 attribute-envelope guards.
     /// Same self-checking pattern as <c>AutoGradStructuralModules.cs</c> where the
     /// scenario differentiates successfully; the AD003 scenarios are driven through

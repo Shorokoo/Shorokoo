@@ -4,7 +4,7 @@ using static Shorokoo.Tests.Utils.QeeAudit;
 namespace Shorokoo.Tests;
 
 /// <summary>
-/// Phase 4 QEE-A6 audit batch: sequence, optional, string, signal and control-flow
+/// QEE audit batch: sequence, optional, string, signal and control-flow
 /// families (ONNX opset 21). Each module in QeeSeqStringSignalAuditModules.cs is
 /// self-checking on values (where QEE computes them) and on inferred shapes (via
 /// ShapeTensor). Modules built on Shorokoo-internal op codes or utf8 runtime inputs

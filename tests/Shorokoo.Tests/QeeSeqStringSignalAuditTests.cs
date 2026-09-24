@@ -46,4 +46,11 @@ public class QeeSeqStringSignalAuditTests
             F32([1L, 1L, 2L, 2L], 1f, 0f, 0f, 1f),
             F32([1L], 0f)));
     }
+
+    [Fact]
+    public void TestSignalValueAudits()
+    {
+        Assert.True(QeeAudit.Check<QeeSignalValueAuditCheck>(
+            Wave(2, 6, 2), Wave(1, 7, 1), Wave(2, 3, 4, 2), Wave(2, 20, 1), I64([], 8L), I64([], 3L)));
+    }
 }

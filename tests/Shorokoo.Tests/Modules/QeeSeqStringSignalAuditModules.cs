@@ -275,6 +275,62 @@ namespace Shorokoo.Tests.Modules
         private static Tensor<float32> Flat(Tensor<float32> t) => t.Reshape(Vector(-1L));
     }
 
+    /// <summary>DFT, STFT, window and MelWeightMatrix values from runtime inputs: a complex
+    /// [2,6,2] signal forward and back (the inverse recovers it), a real odd-length signal full
+    /// and onesided (a prefix of the full one), dft_length padding and truncation, axis inputs
+    /// 2 and −3 on a [2,3,4,2] signal (inverse on the latter); STFT with a runtime Hann window
+    /// ([2,5,5,2]) and windowless with frame_length 6, two-sided ([2,5,6,2]); symmetric float64
+    /// Hamming, periodic Blackman; MelWeightMatrix [17,6] in float32 and float64.
+    /// Scalars: winSize 8, frameStep 3; the mel matrix is made from them (6 bins, dft_length 32,
+    /// 8000 Hz, 100–3500 Hz) so that it is computed at run time.</summary>
+    [Module]
+    public partial class QeeSignalValueAuditCheck
+    {
+        public static Scalar<bit> Inline(
+            Tensor<float32> cplx, Tensor<float32> real7, Tensor<float32> sig4, Tensor<float32> stftSig,
+            Scalar<int64> winSize, Scalar<int64> frameStep)
+        {
+            var melBins = winSize - Scalar(2L);
+            var dftLen = winSize * Scalar(4L);
+            var sampleRate = winSize * Scalar(1000L);
+            var low = Scalar(100f);
+            var high = Scalar(3500f);
+            var dftC = (Tensor<float32>)OnnxOp.Dft(cplx, null, null, inverse: false);
+            var invC = (Tensor<float32>)OnnxOp.Dft(dftC, null, null, inverse: true);
+            var dftFull = (Tensor<float32>)OnnxOp.Dft(real7, null, null, inverse: false);
+            var dftOne = (Tensor<float32>)OnnxOp.Dft(real7, null, null, inverse: false, onesided: true);
+            var dftPad = (Tensor<float32>)OnnxOp.Dft(real7, Scalar(10L), null, inverse: false);
+            var dftTrunc = (Tensor<float32>)OnnxOp.Dft(cplx, Scalar(4L), null, inverse: false);
+            var dftAx2 = (Tensor<float32>)OnnxOp.Dft(sig4, null, Scalar(2L), inverse: false);
+            var dftAxNeg = (Tensor<float32>)OnnxOp.Dft(sig4, null, Scalar(-3L), inverse: true);
+
+            var hann = (Tensor<float32>)OnnxOp.HannWindow(winSize, outputDatatype: DType.Float32);
+            var stftWin = (Tensor<float32>)OnnxOp.STFT(stftSig, frameStep, window: hann, frameLength: null, onesided: true);
+            var stftLen = (Tensor<float32>)OnnxOp.STFT(stftSig, frameStep, window: null, frameLength: Scalar(6L), onesided: false);
+            var hamm = (Tensor<float64>)OnnxOp.HammingWindow(winSize, outputDatatype: DType.Float64, periodic: false);
+            var black = (Tensor<float32>)OnnxOp.BlackmanWindow(winSize, outputDatatype: DType.Float32, periodic: true);
+            var mel = (Tensor<float32>)OnnxOp.MelWeightMatrix(melBins, dftLen, sampleRate, low, high, outputDatatype: DType.Float32);
+            var melD = (Tensor<float64>)OnnxOp.MelWeightMatrix(melBins, dftLen, sampleRate, low, high, outputDatatype: DType.Float64);
+
+            var mismatch =
+                Apart(invC, cplx) +
+                Apart(dftOne, dftFull.Slice(Vector(0L), Vector(4L), axes: Vector(1L))) +
+                ShapeMismatch(dftC, Vector(2L, 6L, 2L)) +
+                ShapeMismatch(dftOne, Vector(1L, 4L, 2L)) +
+                ShapeMismatch(dftPad, Vector(1L, 10L, 2L)) +
+                ShapeMismatch(dftTrunc, Vector(2L, 4L, 2L)) +
+                ShapeMismatch(dftAx2, Vector(2L, 3L, 4L, 2L)) +
+                ShapeMismatch(dftAxNeg, Vector(2L, 3L, 4L, 2L)) +
+                ShapeMismatch(stftWin, Vector(2L, 5L, 5L, 2L)) +
+                ShapeMismatch(stftLen, Vector(2L, 5L, 6L, 2L)) +
+                ShapeMismatch(hamm, Vector(8L)) +
+                ShapeMismatch(black, Vector(8L)) +
+                ShapeMismatch(mel, Vector(17L, 6L)) +
+                ShapeMismatch(melD, Vector(17L, 6L));
+            return mismatch < Scalar(1L);
+        }
+    }
+
     /// <summary>TfIdfVectorizer output extent = max(ngram_indexes) + 1 (= 5 here), NOT the
     /// pool length (= 3) — pins this batch's shape fix, ORT-validated. 1-D [4] → [5] and
     /// 2-D [1,4] → [1,5]. Pool: unigrams {1},{2} + bigram (3,4); mode TF.

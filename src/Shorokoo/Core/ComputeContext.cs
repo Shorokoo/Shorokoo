@@ -556,9 +556,18 @@ namespace Shorokoo.Runtime
         /// Whether this graph's session produces its outputs somewhere other than host memory, so
         /// <see cref="Execute(IData[], bool[])"/> has somewhere to retain them.
         /// </summary>
+        /// <exception cref="ObjectDisposedException">This graph has been disposed, and its session
+        /// with it.</exception>
         public bool HasDeviceMemory
         {
-            get { lock (_sessionGate) return _built.Session.HasDeviceMemory; }
+            get
+            {
+                lock (_sessionGate)
+                {
+                    ObjectDisposedException.ThrowIf(IsDisposed, this);
+                    return _built.Session.HasDeviceMemory;
+                }
+            }
         }
 
         /// <summary>
@@ -571,9 +580,18 @@ namespace Shorokoo.Runtime
         /// <see cref="SessionOutputPlacement.Host"/> on one says all of it did. For <i>which</i>
         /// nodes, and what they cost, see <see cref="ReadNodePlacement"/> — which is not free.</para>
         /// </summary>
+        /// <exception cref="ObjectDisposedException">This graph has been disposed, and its session
+        /// with it.</exception>
         public SessionOutputPlacement OutputPlacement
         {
-            get { lock (_sessionGate) return _built.Session.OutputPlacement; }
+            get
+            {
+                lock (_sessionGate)
+                {
+                    ObjectDisposedException.ThrowIf(IsDisposed, this);
+                    return _built.Session.OutputPlacement;
+                }
+            }
         }
 
         /// <summary>

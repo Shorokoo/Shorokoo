@@ -1,11 +1,31 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.ExceptionServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Shorokoo.Core.Backends;
 
 namespace Shorokoo
 {
+    /// <summary>
+    /// Who holds a reader lock taken outside any run, as a refusal of the tensor or sequence names
+    /// it: a copy being made out of its memory, or a write into it. Either way the memory may not
+    /// end while it is held.
+    /// </summary>
+    internal sealed class OutsideARun
+    {
+        private readonly string _what;
+
+        private OutsideARun(string what) => _what = what;
+
+        internal static OutsideARun CopyingOut { get; } = new("a copy being made of its contents");
+
+        internal static OutsideARun Writing { get; } = new("a write into its contents");
+
+        /// <inheritdoc/>
+        public override string ToString() => _what;
+    }
+
     /// <summary>
     /// What a <see cref="Lifetime"/> belongs to: a tensor or a sequence, each one allocation. The
     /// lifetime decides when the allocation ends; the owner knows what ending it releases.
@@ -384,7 +404,8 @@ namespace Shorokoo
 
         /// <summary>Retires every copy held, because the contents they were copied from are about
         /// to change or are gone. Each is dead from here and released once its last reader
-        /// returns.</summary>
+        /// returns: every one of them, even where releasing one throws, which is thrown once all
+        /// are retired.</summary>
         internal void RetireAll()
         {
             List<TCopy> retired;
@@ -394,7 +415,21 @@ namespace Shorokoo
                 retired = [.. _byLocation.Values];
                 _byLocation = null;
             }
-            foreach (var copy in retired) copy.Life.Retire(TensorDeath.Retired);
+            // Every one of them, whatever one release does: a copy left unretired would stay on its
+            // context's books, and in its memory, with nothing left that knows it is there.
+            Exception? failed = null;
+            foreach (var copy in retired)
+            {
+                try
+                {
+                    copy.Life.Retire(TensorDeath.Retired);
+                }
+                catch (Exception e)
+                {
+                    failed ??= e;
+                }
+            }
+            if (failed is not null) ExceptionDispatchInfo.Throw(failed);
         }
 
         private TCopy? TryGetLive(MemoryLocation where)

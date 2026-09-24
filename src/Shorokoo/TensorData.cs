@@ -46,16 +46,27 @@ namespace Shorokoo
         /// runtime value's finalizer hands the block back while the caller is still writing into
         /// it (Shorokoo/Shorokoo#178). Scope is not reachability. Whatever fills a tensor should
         /// fill it here.</para>
+        ///
+        /// <para>The tensor is held for the write as a run holds what it reads: a run that would
+        /// consume it, and a delete, are refused until the write is done, rather than taking the
+        /// memory from under it.</para>
         /// </summary>
         /// <exception cref="ArgumentNullException"><paramref name="write"/> is null.</exception>
+        /// <exception cref="ObjectDisposedException">The tensor is dead.</exception>
+        /// <exception cref="InvalidOperationException">The tensor is a copy a run made of another to
+        /// read it, which runs read again in that tensor's place.</exception>
         public void WriteMemory<V>(SpanWriter<V> write) where V : unmanaged
         {
             ArgumentNullException.ThrowIfNull(write);
-            write(AccessModifiableMemory<V>());
-            // Again, now the write is done: a run that copied the contents while it was under way
-            // holds what was there partway, and that copy would be read by every later run as if it
-            // were what was written.
-            Written();
+            Reading(() =>
+            {
+                write(AccessModifiableMemory<V>());
+                // Again, now the write is done: a run that copied the contents while it was under way
+                // holds what was there partway, and that copy would be read by every later run as if
+                // it were what was written.
+                Written();
+                return 0;
+            }, OutsideARun.Writing);
             GC.KeepAlive(this);
         }
 

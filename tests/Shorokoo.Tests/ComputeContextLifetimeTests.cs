@@ -248,6 +248,7 @@ public class ComputeContextLifetimeCoverageTests
         Assert.Throws<ObjectDisposedException>(() => compiled.Execute(a, b));
         Assert.Throws<ObjectDisposedException>(() => context.Execute(graph, a, b));
         Assert.Throws<ObjectDisposedException>(() => context.Eval(InputVector<float32>("a") * 2f));
+        Assert.False(a.IsDisposed || b.IsDisposed);
     }
 
     [Fact]
@@ -281,6 +282,45 @@ public class ComputeContextLifetimeCoverageTests
 
         Assert.True(compiled.IsDisposed);
         Assert.Throws<ObjectDisposedException>(() => context.Compile(graph));
+        Assert.Throws<ObjectDisposedException>(() => compiled.HasDeviceMemory);
+        Assert.Throws<ObjectDisposedException>(() => compiled.OutputPlacement);
+    }
+
+    [Fact]
+    public void TestACopyARunReadsInATensorsPlaceCannotBeWrittenSoEveryLaterReadSeesTheTensor()
+    {
+        using var context = new ComputeContext();
+        var compiled = context.Compile(Doubling());
+        var source = Sample();
+        compiled.Execute(source.Shared());
+        var copy = source.CopyHeldAt(TensorData.RunMemoryOf(context.ResolvedBackend, source.DType))!;
+
+        Assert.Throws<InvalidOperationException>(() => copy.As<float32>().WriteMemory<float>(span => span.Fill(9f)));
+        Assert.Equal([2f, 4f, 6f, 8f], Floats(compiled.Execute(source.Shared())[0].ToTensorData()));
+    }
+
+    [Fact]
+    public void TestATensorBeingWrittenCannotBeConsumedOrDeletedUntilTheWriteIsDone()
+    {
+        using var context = new ComputeContext();
+        var compiled = context.Compile(Doubling());
+        var written = Sample();
+        using var writing = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var write = Task.Run(() => written.As<float32>().WriteMemory<float>(span =>
+        {
+            writing.Set();
+            release.Wait(TimeSpan.FromSeconds(10));
+            span.Fill(5f);
+        }));
+        Assert.True(writing.Wait(TimeSpan.FromSeconds(10)));
+
+        Assert.Throws<InvalidOperationException>(() => compiled.Execute(written));
+        Assert.Throws<InvalidOperationException>(written.Delete);
+
+        release.Set();
+        Assert.True(write.Wait(TimeSpan.FromSeconds(10)));
+        Assert.Equal([10f, 10f, 10f, 10f], Floats(compiled.Execute(written)[0].ToTensorData()));
     }
 
     [Fact]

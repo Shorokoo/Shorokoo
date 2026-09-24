@@ -336,7 +336,9 @@ namespace Shorokoo.Core.Utils
             var inner = new List<IShorokooTensorValue>(data.Count);
             try
             {
-                foreach (var d in data) inner.Add(CopyTensorValue(d.ToTensorValue()));
+                // Each under its reader lock, as every copy out of a tensor made outside a run is: a run
+                // consuming it on another thread is refused rather than freeing it mid-copy.
+                foreach (var d in data) inner.Add(d.Reading(() => CopyTensorValue(d.ToTensorValue())));
             }
             catch
             {

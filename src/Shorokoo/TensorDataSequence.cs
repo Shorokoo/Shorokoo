@@ -120,6 +120,33 @@ namespace Shorokoo
         protected void ThrowIfDisposed() => _life.ThrowIfDead();
 
         /// <summary>
+        /// Runs <paramref name="read"/> -- a read of this sequence's contents made outside any run -- under
+        /// a reader lock on this sequence and on each element it holds as its own, so nothing ends that
+        /// memory while it is read: a run that would consume the sequence, or an element, is refused,
+        /// and so is disposing it, exactly as while a run reads it. Refuses a sequence that is already
+        /// dead.
+        /// </summary>
+        /// <exception cref="ObjectDisposedException">The sequence is dead.</exception>
+        private protected T Reading<T>(Func<T> read)
+        {
+            var holder = OutsideARun.CopyingOut;
+            _life.AcquireReadLock(holder);
+            var elements = OwnElements;
+            var locked = 0;
+            try
+            {
+                for (; elements is not null && locked < elements.Count; locked++)
+                    ((ILifetimeOwner)elements[locked]).Life.AcquireReadLock(holder);
+                return read();
+            }
+            finally
+            {
+                for (var i = locked - 1; i >= 0; i--) ((ILifetimeOwner)elements![i]).Life.ReleaseReadLock(holder);
+                _life.ReleaseReadLock(holder);
+            }
+        }
+
+        /// <summary>
         /// Ends this sequence and releases its storage through the backend that made it. A sequence
         /// already dead is left as it is.
         /// </summary>
@@ -127,6 +154,7 @@ namespace Shorokoo
         /// its storage now would free it under the run.</exception>
         public void Dispose()
         {
+            if (IsDisposed) return;
             // Its own elements die with it, and an element a run is reading may not be deleted any
             // more than this sequence may. One locked between this and the take outlives the
             // sequence on its own account rather than dying under the run.
@@ -207,7 +235,7 @@ namespace Shorokoo
         {
             ArgumentNullException.ThrowIfNull(backend);
             ThrowIfDisposed();
-            return OwnValue ?? SharedCopyFor(backend).UncheckedValue;
+            return OwnValue ?? Reading(() => SharedCopyFor(backend)).UncheckedValue;
         }
 
         /// <summary>The runtime value this sequence holds itself, without the liveness check, or
@@ -457,18 +485,29 @@ namespace Shorokoo
             private protected override void ReleaseMemory()
             {
                 var death = Death ?? TensorDeath.Deleted;
+                // Every element, whatever releasing one does: one left alive under a dead sequence
+                // could not even be reached any more, the sequence's indexer refusing.
+                Exception? failed = null;
                 foreach (var element in _elements)
                 {
-                    switch (element.TryTake(death))
+                    try
                     {
-                        case TakeOutcome.Taken:
-                            element.ReleaseTaken();
-                            break;
-                        case TakeOutcome.Locked:
-                            element.Leaves(this);
-                            break;
+                        switch (element.TryTake(death))
+                        {
+                            case TakeOutcome.Taken:
+                                element.ReleaseTaken();
+                                break;
+                            case TakeOutcome.Locked:
+                                element.Leaves(this);
+                                break;
+                        }
+                    }
+                    catch (Exception e)
+                    {
+                        failed ??= e;
                     }
                 }
+                if (failed is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(failed);
             }
 
             internal override IReadOnlyList<TensorData> OwnElements => _elements;
@@ -559,7 +598,7 @@ namespace Shorokoo
         private TensorDataSequence CopyInto(ComputeContext target, string operation)
             => target.PlaceAll(BytesPlacedOnto(target, copying: true),
                 () => $"{operation}(context) of a sequence of {Count} tensors",
-                () => Rebuild(element => element.CopyTo(target)));
+                () => Reading(() => Rebuild(element => element.CopyTo(target))));
 
         /// <summary>
         /// The bytes putting this sequence on <paramref name="target"/> adds to what the target's
@@ -697,10 +736,7 @@ namespace Shorokoo
             }
         }
 
-        public override int Count
-        {
-            get { ThrowIfDisposed(); return backing.GetValueCount(); }
-        }
+        public override int Count => Reading(backing.GetValueCount);
 
         /// <summary>
         /// The element at <paramref name="index"/>, on storage of its own: the runtime copies the
@@ -708,18 +744,16 @@ namespace Shorokoo
         /// hands back and deleting it leaves this sequence intact.
         ///
         /// <para>The copy is made by the runtime holding the sequence, so the element's allocating
-        /// backend is this sequence's, and it is released through that backend.</para>
+        /// backend is this sequence's, and it is released through that backend. The sequence is held
+        /// while it is made, so a run cannot consume it, nor a dispose release it, mid-copy.</para>
         /// </summary>
         public override TensorData<T> this[int index]
-        {
-            get
+            => Reading(() =>
             {
-                ThrowIfDisposed();
                 var val = backing.GetValue(index);
                 return (TensorData<T>)OnnxUtils.CreateTensorDataFromValue(
                     new Shape(val.Shape), (DType)(int)val.ElementType, val, AllocatingBackend);
-            }
-        }
+            });
 
         private protected override bool MintsElementsPerRead => true;
 

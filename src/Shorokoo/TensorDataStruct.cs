@@ -271,7 +271,19 @@ namespace Shorokoo
             }
             catch
             {
-                foreach (var (key, result) in rebuilt) ReleaseNew(result, Fields[key]);
+                // Every one of them, whatever releasing one does; the failure that got here is what
+                // the caller hears, not a release failing on the way out.
+                foreach (var (key, result) in rebuilt)
+                {
+                    try
+                    {
+                        ReleaseNew(result, Fields[key]);
+                    }
+                    catch (Exception)
+                    {
+                        // Released as far as it would go.
+                    }
+                }
                 throw;
             }
             return changed ? new TensorDataStruct(Definition, rebuilt, _fieldModes) : this;

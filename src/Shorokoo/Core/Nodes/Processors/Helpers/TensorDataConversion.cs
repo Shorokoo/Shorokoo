@@ -78,7 +78,8 @@ namespace Shorokoo.Core.Nodes.Processors.Helpers
                 // managed memory answers too: a HostTensorData builds the runtime value here, and
                 // a backend-backed one hands over the one it already has. The cast would have
                 // thrown on the first of those, and this path already needs a backend to copy on.
-                var copy = OnnxUtils.CopyTensorValue(originalData.ToTensorValue());
+                // Under the tensor's reader lock, as every copy out of a tensor made outside a run is.
+                var copy = originalData.Reading(() => OnnxUtils.CopyTensorValue(originalData.ToTensorValue()));
                 return OnnxUtils.CreateTensorDataFromValue(
                     shape, targetDType, copy, targetDType, DefaultBackend.Instance);
             }

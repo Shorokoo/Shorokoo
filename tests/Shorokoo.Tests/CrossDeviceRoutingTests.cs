@@ -721,6 +721,76 @@ public class CrossDeviceRoutingCoverageTests
         Assert.Equal(0L, budgeted.ReadDeviceMemoryUse().AttachedBytes);
     }
 
+    [Fact]
+    public void TestASequenceBeingReadOutOfItsValueCannotBeConsumedOrDisposedUntilTheReadIsDone()
+    {
+        var card = new StubBackend(ComputeDevice.Cuda, 0);
+        using var context = new ComputeContext(card);
+        var compiled = context.Compile(TensorBesideSequence());
+        var sequence = OnnxUtils.CreateTensorDataSequenceFromValue(
+            DType.Float32, card.CreateSequence([HostFloats(2), HostFloats(2)]), card);
+        using var reading = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        card.DuringElementRead = () => { reading.Set(); release.Wait(TimeSpan.FromSeconds(10)); };
+        var read = Task.Run(() => sequence[0]);
+        Assert.True(reading.Wait(TimeSpan.FromSeconds(10)));
+
+        Assert.Throws<InvalidOperationException>(() => compiled.Execute(Floats(1), sequence));
+        Assert.Throws<InvalidOperationException>(sequence.Dispose);
+
+        release.Set();
+        Assert.True(read.Wait(TimeSpan.FromSeconds(10)));
+        card.DuringElementRead = null;
+        Assert.False(sequence.IsDisposed);
+    }
+
+    [Fact]
+    public void TestAHostValueBeingCopiedOutCannotBeConsumedOrDeletedUntilTheCopyIsDone()
+    {
+        var host = new StubBackend(ComputeDevice.Cpu, null);
+        using var context = new ComputeContext(host);
+        var compiled = context.Compile(Echo());
+        foreach (var copyOut in (Func<TensorData, object>[])[
+            t => t.CopyRawMemory(), t => t.As<float32>().CopyMemory<float>(), t => t.As<float32>().ValueAt<float>(0),
+            t => TensorDataSequence.Create([t], null)])
+        {
+            using var reading = new ManualResetEventSlim();
+            using var release = new ManualResetEventSlim();
+            var tensor = TensorData.Create(new Shape(2L), DType.Float32, new StubValue(
+                ShorokooTensorElementType.Float, new byte[8], [2L], hostAccessible: true)
+            {
+                DuringRead = () => { reading.Set(); release.Wait(TimeSpan.FromSeconds(10)); },
+            }, host);
+            var copying = Task.Run(() => copyOut(tensor));
+            Assert.True(reading.Wait(TimeSpan.FromSeconds(10)));
+
+            Assert.Throws<InvalidOperationException>(() => compiled.Execute(tensor));
+            Assert.Throws<InvalidOperationException>(tensor.Delete);
+
+            release.Set();
+            Assert.True(copying.Wait(TimeSpan.FromSeconds(10)));
+        }
+    }
+
+    [Fact]
+    public void TestAReleaseThatThrowsLetsEveryOtherCopyOfATensorGoToo()
+    {
+        var first = new StubBackend(ComputeDevice.Cuda, 0) { FailingReleases = 1 };
+        var second = new StubBackend(ComputeDevice.Cuda, 1);
+        using var one = new ComputeContext(first);
+        using var two = new ComputeContext(second);
+        var source = Floats(2);
+        Run(one.Compile(Echo()), source.Shared());
+        Run(two.Compile(Echo()), source.Shared());
+
+        Assert.Throws<InvalidOperationException>(source.ReleaseRunCopies);
+        Assert.Equal([first.Built[0]], first.Released);
+        Assert.Equal([second.Built[0]], second.Released);
+    }
+
+    private static StubValue HostFloats(int count)
+        => new(ShorokooTensorElementType.Float, new byte[count * 4], [count], hostAccessible: true);
+
     private static InternalComputationGraph TensorBesideSequence()
     {
         var x = InputVector<float32>("x");
@@ -918,13 +988,15 @@ public class CrossDeviceRoutingCoverageTests
     }
 
     [Fact]
-    public void TestASequenceDisposedWhileACopyOfItWasBeingBuiltLeavesNoCopyBehind()
+    public void TestASequenceIsNotDisposedWhileACopyOfItIsBeingBuiltAndTheCopyGoesWithItAfter()
     {
         var cpu = new StubBackend(ComputeDevice.Cpu, null);
         var sequence = TensorDataSequence.OfElements([Floats(2), Floats(3)], DType.Float32);
-        cpu.DuringSequenceBuild = () => Record.Exception(sequence.Dispose);
+        Exception? duringBuild = null;
+        cpu.DuringSequenceBuild = () => duringBuild = Record.Exception(sequence.Dispose);
 
-        Record.Exception(() => sequence.ToTensorValue(cpu));
+        sequence.ToTensorValue(cpu);
+        Assert.IsType<InvalidOperationException>(duringBuild);
         sequence.Dispose();
 
         Assert.True(sequence.IsDisposed);
@@ -1055,6 +1127,10 @@ public class CrossDeviceRoutingCoverageTests
         /// mid-build.</summary>
         internal Action? DuringSequenceBuild { get; set; }
 
+        /// <summary>Called inside every read of an element out of a sequence value it built, where a
+        /// test holds one open.</summary>
+        internal Action? DuringElementRead { get; set; }
+
         public byte[] CopyTensorToHost(IShorokooTensorValue value)
         {
             HostCopies++;
@@ -1100,7 +1176,7 @@ public class CrossDeviceRoutingCoverageTests
         public IShorokooTensorValue CreateSequence(IReadOnlyList<IShorokooTensorValue> values)
         {
             DuringSequenceBuild?.Invoke();
-            var sequence = new StubSequenceValue(values);
+            var sequence = new StubSequenceValue(values, this);
             Sequences.Add(sequence);
             return sequence;
         }
@@ -1108,7 +1184,8 @@ public class CrossDeviceRoutingCoverageTests
 
     /// <summary>A sequence value over the values it was built from, which it hands out copies
     /// of.</summary>
-    private sealed class StubSequenceValue(IReadOnlyList<IShorokooTensorValue> values) : IShorokooTensorValue
+    private sealed class StubSequenceValue(IReadOnlyList<IShorokooTensorValue> values, StubBackend backend)
+        : IShorokooTensorValue
     {
         public bool IsHostAccessible => true;
         public ShorokooOnnxValueType ValueType => ShorokooOnnxValueType.Sequence;
@@ -1121,6 +1198,7 @@ public class CrossDeviceRoutingCoverageTests
 
         public IShorokooTensorValue GetValue(int index)
         {
+            backend.DuringElementRead?.Invoke();
             var value = (StubValue)values[index];
             return new StubValue(value.ElementType, [.. value.Bytes], value.Shape, hostAccessible: true);
         }
@@ -1222,6 +1300,9 @@ public class CrossDeviceRoutingCoverageTests
 
         internal int Disposals { get; private set; }
 
+        /// <summary>Called inside every read of its bytes, where a test holds one open.</summary>
+        internal Action? DuringRead { get; init; }
+
         public bool IsHostAccessible => hostAccessible;
 
         public ShorokooOnnxValueType ValueType => ShorokooOnnxValueType.Tensor;
@@ -1229,7 +1310,10 @@ public class CrossDeviceRoutingCoverageTests
         public long[] Shape => shape;
 
         public ReadOnlySpan<T> GetTensorDataAsSpan<T>() where T : unmanaged
-            => System.Runtime.InteropServices.MemoryMarshal.Cast<byte, T>(data);
+        {
+            DuringRead?.Invoke();
+            return System.Runtime.InteropServices.MemoryMarshal.Cast<byte, T>(data);
+        }
 
         public Span<T> GetTensorMutableDataAsSpan<T>() where T : unmanaged
             => System.Runtime.InteropServices.MemoryMarshal.Cast<byte, T>(data.AsSpan());

@@ -287,6 +287,13 @@ public class CompositeTransferCoverageTests
         using (other.Lock(sequenceRead))
             Assert.Equal([1f, 2f, 3f, 4f], Floats(join.Execute(sequenceRead.TryConsume())[0].ToTensorData()));
         Assert.False(sequenceRead.IsDisposed || sequenceRead[0].IsDisposed || sequenceRead[1].IsDisposed);
+
+        var spent = Pair();
+        var kept = spent[0];
+        both.Execute(kept.Shared(), spent);
+        using (other.Lock(kept)) spent.Dispose();
+        Assert.True(spent.IsDisposed);
+        Assert.False(kept.IsDisposed);
     }
 
     [Fact]

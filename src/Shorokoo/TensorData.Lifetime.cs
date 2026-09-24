@@ -14,9 +14,9 @@ namespace Shorokoo
     /// — the same machinery a sequence keeps its own life with. A tensor is its allocation — there
     /// is no second object naming the same memory and no count of names — so the one question the
     /// state answers is whether this tensor may still be read, and the one decision it makes is
-    /// who ends that. <see cref="TryTake"/> is the single atomic way to end it deliberately; every
-    /// deliberate death — deletion, consumption by a run, a move into an attribute — is a take plus
-    /// what the taker does with the memory.</para>
+    /// who ends that. <see cref="TryTake"/> is the single atomic way to end it deliberately; deletion,
+    /// consumption by a run and a move into an attribute are each a take plus what the taker does with
+    /// the memory, and only <see cref="DeleteAsync"/> marks it dead without one.</para>
     /// </summary>
     public abstract partial class TensorData : ILifetimeOwner
     {
@@ -30,6 +30,10 @@ namespace Shorokoo
         // sequence values runs built from that sequence were copied from this tensor too, so a
         // write here retires them as well as this tensor's own copies.
         private TensorDataSequence? _sequence;
+
+        // Where this tensor is a copy a run made of another to read it, how that tensor is named: runs
+        // read this in its place, so it may not be written. Null for every other tensor.
+        private string? _copyOf;
 
         /// <inheritdoc/>
         Lifetime ILifetimeOwner.Life => _life;
@@ -219,26 +223,22 @@ namespace Shorokoo
         /// consume the tensor is refused, and a delete refused or held back, exactly as while a run
         /// reads it. Refuses a tensor that is already dead.
         /// </summary>
+        /// <param name="read">What is done with the memory.</param>
+        /// <param name="holder">Who holds the lock meanwhile, as a refusal names it: a copy being
+        /// made of the contents, unless the caller says otherwise.</param>
         /// <exception cref="ObjectDisposedException">The tensor is dead.</exception>
-        private protected T Reading<T>(Func<T> read)
+        internal T Reading<T>(Func<T> read, OutsideARun? holder = null)
         {
-            _life.AcquireReadLock(CopyingOut.Reader);
+            holder ??= OutsideARun.CopyingOut;
+            _life.AcquireReadLock(holder);
             try
             {
                 return read();
             }
             finally
             {
-                _life.ReleaseReadLock(CopyingOut.Reader);
+                _life.ReleaseReadLock(holder);
             }
-        }
-
-        /// <summary>Who holds the lock <see cref="Reading"/> takes, as a refusal names it.</summary>
-        private sealed class CopyingOut
-        {
-            internal static CopyingOut Reader { get; } = new();
-
-            public override string ToString() => "a copy being made of its contents";
         }
 
         // ---- Copies made for runs ----
@@ -267,7 +267,12 @@ namespace Shorokoo
         /// <exception cref="ObjectDisposedException">This tensor's memory was released while the
         /// copy was being made, by a caller that held no lock on it.</exception>
         internal TensorData CopyAt(MemoryLocation where, Func<TensorData> build)
-            => RunCopiesOf().CopyAt(where, build, _life);
+            => RunCopiesOf().CopyAt(where, () =>
+            {
+                var copy = build();
+                copy._copyOf = Describe();
+                return copy;
+            }, _life);
 
         /// <summary>
         /// The live copy held for runs at <paramref name="where"/>, or null when there is none —
@@ -320,6 +325,12 @@ namespace Shorokoo
         /// </summary>
         private protected void Written()
         {
+            if (_copyOf is { } source)
+                throw new InvalidOperationException(
+                    $"Tensor {this} is the copy a run made of {source} to read it where it could not be read "
+                    + "as it stands, and later runs read it again in that tensor's place: written, it "
+                    + "would change what they read and not the tensor. Write the tensor itself, which "
+                    + "retires this copy.");
             RetireCopies();
             Volatile.Read(ref _sequence)?.ElementWritten();
         }

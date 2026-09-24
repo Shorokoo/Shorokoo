@@ -451,4 +451,13 @@ namespace Shorokoo.Tests.Modules
             => ((Tensor<float32>)OnnxOp.AveragePool(x, AutoPad.SameUpper, false, false, [2L], [3L], null, [2L]))
                 .Concat(2L, (Tensor<float32>)OnnxOp.AveragePool(x, AutoPad.SameLower, false, false, [2L], [3L], null, [2L]));
     }
+
+    /// <summary>ConvTranspose whose output_shape exceeds the full extent by a whole stride.
+    /// x and w are [1,1,2,2], b is [1].</summary>
+    [Module]
+    public partial class ConvTransposeOversizedOutputShapeValues
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x, Tensor<float32> w, Tensor<float32> b)
+            => (Tensor<float32>)OnnxOp.ConvTranspose(x, w, b, AutoPad.NotSet, null, 1L, [2L, 2L], null, [6L, 6L], null, [2L, 2L]);
+    }
 }

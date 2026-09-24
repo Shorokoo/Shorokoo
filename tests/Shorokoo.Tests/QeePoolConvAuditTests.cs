@@ -65,4 +65,15 @@ public class QeePoolConvAuditTests
         Assert.True(AutoTest.AdvancedTestGraph<SameDilatedAveragePoolValues>([], [x],
             expected: [2, 3, 5, 7, 8, 1, 2, 4, 6, 7]));
     }
+
+    [Fact]
+    public void TestConvTransposeOutputShapeBeyondTheFullExtentIsRefused()
+    {
+        var ones = F32([1L, 1L, 2L, 2L], 1f, 1f, 1f, 1f);
+        var ex = Assert.Throws<OnnxNodeException>(
+            () => AutoTest.AdvancedTestGraph<ConvTransposeOversizedOutputShapeValues>([], [ones, ones, F32([1L], 0f)]));
+        Assert.Contains("ConvTranspose", ex.Message);
+        Assert.Contains("output_shape [6, 6]", ex.Message);
+        Assert.Contains("full extent [4, 4]", ex.Message);
+    }
 }

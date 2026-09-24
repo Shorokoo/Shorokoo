@@ -38,7 +38,8 @@ namespace Shorokoo.Runtime
         /// Into how many parts a budget is cut for the room a session's arena leaves: a session is
         /// built with the budget less the discount rounded up to the next whole part above it — a
         /// sixty-fourth of the budget — so that it is kept until the discount grows past that, and
-        /// rebuilt at most this many times however the discount climbs.
+        /// rebuilt at most this many times as the discount climbs through the parts, and once more
+        /// each time what is left halves in the last one (see <see cref="ArenaLimitWithin"/>).
         /// </summary>
         internal const int BudgetParts = 64;
 
@@ -163,6 +164,51 @@ namespace Shorokoo.Runtime
         }
 
         /// <summary>
+        /// Places what <paramref name="place"/> puts on this context — a struct's fields, or a
+        /// sequence's elements — as one placement under its device-memory budget: refused whole,
+        /// having placed nothing, where the <paramref name="bytes"/> it adds would take the budget
+        /// past its limit, and taken off the books whole where a part of it fails, so a composite
+        /// that is refused leaves nothing of itself counted. The gate is held throughout, so nothing
+        /// else is placed, and no run of this context runs, in between.
+        ///
+        /// <para><paramref name="bytes"/> is null where what the composite adds cannot be told
+        /// without making it — a copy of a runtime's sequence, whose elements are only minted by
+        /// reading them — and then each part is held to the budget as it is placed.</para>
+        /// </summary>
+        /// <exception cref="InvalidOperationException">The budget cannot take the composite. Nothing
+        /// was placed.</exception>
+        internal T PlaceAll<T>(long? bytes, Func<string> asked, Func<T> place)
+        {
+            if (_isHost) return place();
+            var space = MemorySpace;
+            var gate = EnterBudget(space, CancellationToken.None);
+            if (gate is null) return place();
+            try
+            {
+                if (bytes is { } adding) RefusePlacementOverBudget(space, adding, asked);
+                // Only this placement attaches to this context while the gate is held -- its runs,
+                // compiles and every other placement wait at it -- so whatever the list gains in
+                // between is this placement's.
+                var before = new HashSet<TensorData>(_attached.Snapshot(), ReferenceEqualityComparer.Instance);
+                try
+                {
+                    return place();
+                }
+                catch
+                {
+                    foreach (var tensor in _attached.Snapshot())
+                        if (!before.Contains(tensor))
+                            lock (_gate) _attached.Remove(tensor);
+                    throw;
+                }
+            }
+            finally
+            {
+                gate.Exit();
+            }
+        }
+
+        /// <summary>
         /// Refuses to place <paramref name="bytes"/> more in this context's memory, in
         /// <paramref name="space"/>, where its budget cannot take them alongside what is attached to
         /// it there. The caller holds the budget gate, so nothing else is placed in between.
@@ -207,13 +253,17 @@ namespace Shorokoo.Runtime
         /// that arena, or null when they leave it nothing.
         ///
         /// <para>The budget less the discount rounded up to the next whole
-        /// <see cref="BudgetParts"/>th of the budget above it — or the discount exactly, where that
-        /// rounding would leave nothing. Rounding up is the headroom that keeps a session: one is
-        /// kept while its limit is within what the budget allows, which it stays until the discount
-        /// grows past the part it rounded up to. So a steady run keeps its session, and one whose
-        /// discount keeps climbing rebuilds once per part it climbs through — at most
-        /// <see cref="BudgetParts"/> times — rather than on every run. It costs the arena less than
-        /// one part of the budget.</para>
+        /// <see cref="BudgetParts"/>th of the budget above it. Rounding up is the headroom that keeps
+        /// a session: one is kept while its limit is within what the budget allows, which it stays
+        /// until the discount grows past the part it rounded up to. So a steady run keeps its
+        /// session, and one whose discount keeps climbing rebuilds once per part it climbs through —
+        /// at most <see cref="BudgetParts"/> times — rather than on every run. It costs the arena
+        /// less than one part of the budget.</para>
+        ///
+        /// <para>In the budget's last part, where that rounding would leave nothing, the limit is the
+        /// largest halving of a part that fits in what is left: a discount climbing on through it
+        /// then rebuilds once each time what is left halves — a handful of times — where the room
+        /// exactly would rebuild on every run it grew by a byte.</para>
         ///
         /// <para>The limit only ever comes down. A session is not rebuilt when the discount falls,
         /// since a limit below what the budget allows breaches nothing, and a policy that also
@@ -224,7 +274,11 @@ namespace Shorokoo.Runtime
             if (outside >= limit) return null;
             var part = Math.Max(1L, limit / BudgetParts);
             var headroom = part - Math.Max(0L, outside) % part;
-            return outside < limit - headroom ? limit - outside - headroom : limit - outside;
+            if (outside < limit - headroom) return limit - outside - headroom;
+            var room = limit - outside;
+            var arena = part;
+            while (arena > room) arena /= 2;
+            return arena;
         }
     }
 

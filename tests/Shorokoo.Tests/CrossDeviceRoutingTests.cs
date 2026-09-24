@@ -427,11 +427,67 @@ public class CrossDeviceRoutingCoverageTests
         Assert.Equal(6200L, ComputeContext.ArenaLimitWithin(6400, 100));
         Assert.Equal(5300L, ComputeContext.ArenaLimitWithin(6400, 1040));
         Assert.Equal(100L, ComputeContext.ArenaLimitWithin(6400, 6250));
+        Assert.Equal(100L, ComputeContext.ArenaLimitWithin(6400, 6300));
+        Assert.Equal(50L, ComputeContext.ArenaLimitWithin(6400, 6304));
+        Assert.Equal(25L, ComputeContext.ArenaLimitWithin(6400, 6351));
         Assert.Equal(1L, ComputeContext.ArenaLimitWithin(6400, 6399));
         Assert.Null(ComputeContext.ArenaLimitWithin(6400, 6400));
         Assert.Null(ComputeContext.ArenaLimitWithin(6400, 7000));
         Assert.Equal(1L, ComputeContext.ArenaLimitWithin(10, 9));
         Assert.Equal(60L << 30, ComputeContext.ArenaLimitWithin(64L << 30, 3L << 30));
+    }
+
+    [Fact]
+    public void TestARunReadingAnotherRuntimesTensorOnItsCardCountsBothThatTensorAndItsCopy()
+    {
+        var card = new StubBackend(ComputeDevice.Cuda, 0);
+        var otherRuntime = new StubBackend(ComputeDevice.Cuda, 0);
+        using var context = new ComputeContext(card) { DeviceMemory = Budget(6400) };
+        using var elsewhere = new ComputeContext(otherRuntime);
+        var compiled = context.Compile(Echo());
+        var source = Floats(1000).CopyTo(elsewhere);
+
+        Assert.Throws<InvalidOperationException>(() => compiled.Execute(source.Shared()));
+        Assert.Equal(new DeviceMemoryUse(0, 0, 6400), context.ReadDeviceMemoryUse());
+        Assert.False(source.IsDisposed);
+    }
+
+    [Fact]
+    public void TestADiscountClimbingThroughTheLastPartOfTheBudgetRebuildsTheSessionOnlyAFewTimes()
+    {
+        var card = new StubBackend(ComputeDevice.Cuda, 0);
+        using var context = new ComputeContext(card) { DeviceMemory = Budget(6400) };
+        var compiled = context.Compile(Echo());
+        List<TensorData> held = [Floats(1575).CopyTo(context)];
+        for (int step = 0; step < 24; step++)
+        {
+            Run(compiled, held[0].Shared());
+            held.Add(Floats(1).CopyTo(context));
+        }
+
+        Assert.InRange(card.Sessions.Count, 2, 9);
+    }
+
+    [Fact]
+    public void TestACompositePlacedOntoABudgetedCardIsRefusedWholeBeforeAnyOfItIsPlaced()
+    {
+        var card = new StubBackend(ComputeDevice.Cuda, 0);
+        using var budgeted = new ComputeContext(card) { DeviceMemory = Budget(64) };
+        using var free = new ComputeContext(card);
+        TensorStructFieldDef[] fields =
+        [
+            new TensorStructFieldDef("a", DataStructure.Tensor, 1, DType.Float32),
+            new TensorStructFieldDef("b", DataStructure.Tensor, 1, DType.Float32),
+        ];
+        var pair = new TensorDataStruct(new TensorStructDef(fields, "Pair"),
+            new Dictionary<string, IData> { { "a", Floats(4).CopyTo(free) }, { "b", Floats(16) } });
+        var triple = TensorDataSequence.OfElements([Floats(6), Floats(6), Floats(6)], DType.Float32);
+        var built = card.Built.Count;
+
+        Assert.Throws<InvalidOperationException>(() => pair.To(budgeted));
+        Assert.Contains("sequence of 3 tensors", Assert.Throws<InvalidOperationException>(() => triple.CopyTo(budgeted)).Message);
+        Assert.Equal(new DeviceMemoryUse(0, 0, 64), budgeted.ReadDeviceMemoryUse());
+        Assert.Equal(built, card.Built.Count);
     }
 
     private static DeviceMemorySettings Budget(long bytes) => new() { LimitBytes = bytes };

@@ -81,6 +81,23 @@ namespace Shorokoo
         }
 
         /// <summary>
+        /// The bytes putting this tensor on <paramref name="target"/> — handed over as it stands
+        /// where <see cref="To"/> would, unless <paramref name="copying"/>, and copied otherwise —
+        /// adds to what the target's device-memory budget counts: this tensor's own where it is in
+        /// the target's memory and not yet on its books, and a copy's where the copy lands there. A
+        /// copy a host keeps adds nothing, a string's among them. What a composite placement is
+        /// refused on before any of it is placed.
+        /// </summary>
+        internal long BytesPlacedOnto(ComputeContext target, bool copying)
+        {
+            var space = target.MemorySpace;
+            if (space.IsHost) return 0;
+            if (!copying && target.CanAddress(this))
+                return Space == space && !target.Attaches(this) ? ByteCount : 0;
+            return DType.IsSameElementTypeAs(DType.Utf8) ? 0 : ByteCount;
+        }
+
+        /// <summary>
         /// This tensor where the host can read it: the very same object when its memory is
         /// host-readable already, and otherwise a new copy in the framework's own host memory,
         /// attached to nothing. This tensor is untouched either way.

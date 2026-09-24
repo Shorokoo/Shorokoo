@@ -1434,8 +1434,10 @@ within what the budget allows. A run that finds the discount grown past the room
 builds the session again with the lower limit, before it takes anything; a run that finds the
 discount fallen keeps the session, and its lower limit. So:
 
-- the limit only ever comes down — at most sixty-four times over a compiled graph's life — and a
-  loop that holds the same things on the card from one run to the next never rebuilds;
+- the limit only ever comes down — at most sixty-four times over a compiled graph's life as the
+  discount climbs through the budget, and once more each time what is left halves in its last
+  sixty-fourth — and a loop that holds the same things on the card from one run to the next never
+  rebuilds;
 - a context that lets go of what it held keeps its compiled graphs' smaller arenas: compile the
   graph again to give it the room back;
 - `CompiledGraph.DeviceMemory.LimitBytes` is the arena limit the graph's session has now, and

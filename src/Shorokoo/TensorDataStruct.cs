@@ -132,21 +132,49 @@ namespace Shorokoo
         /// either way.
         /// </summary>
         /// <exception cref="ArgumentNullException"><paramref name="target"/> is null.</exception>
+        /// <exception cref="InvalidOperationException"><paramref name="target"/>'s device-memory
+        /// budget cannot take what the struct's fields would put on it. Nothing is placed.</exception>
         public TensorDataStruct To(Shorokoo.Runtime.ComputeContext target)
         {
             ArgumentNullException.ThrowIfNull(target);
-            return Rebuild(field => Apply(field,
-                t => t.To(target), q => q.To(target), u => u.To(target)));
+            return target.PlaceAll(BytesPlacedOnto(target, copying: false), () => $"To(context) of {this}",
+                () => Rebuild(field => Apply(field, t => t.To(target), q => q.To(target), u => u.To(target))));
         }
 
         /// <summary>An independent copy of this struct, every tensor in it copied into
         /// <paramref name="target"/>'s memory and attached to it. This struct is untouched.</summary>
         /// <exception cref="ArgumentNullException"><paramref name="target"/> is null.</exception>
+        /// <exception cref="InvalidOperationException"><paramref name="target"/>'s device-memory
+        /// budget cannot take the copies. Nothing is copied.</exception>
         public TensorDataStruct CopyTo(Shorokoo.Runtime.ComputeContext target)
         {
             ArgumentNullException.ThrowIfNull(target);
-            return Rebuild(field => Apply(field,
-                t => t.CopyTo(target), q => q.CopyTo(target), u => u.CopyTo(target)));
+            return target.PlaceAll(BytesPlacedOnto(target, copying: true), () => $"CopyTo(context) of {this}",
+                () => Rebuild(field => Apply(field, t => t.CopyTo(target), q => q.CopyTo(target), u => u.CopyTo(target))));
+        }
+
+        /// <summary>
+        /// The bytes putting this struct's fields on <paramref name="target"/> adds to what the
+        /// target's device-memory budget counts, field by field as each field's own <c>To</c> or
+        /// <c>CopyTo</c> would place it — or null where a field cannot tell without making its copy.
+        /// </summary>
+        internal long? BytesPlacedOnto(Shorokoo.Runtime.ComputeContext target, bool copying)
+        {
+            long bytes = 0;
+            foreach (var field in Fields.Values)
+            {
+                long? adding = field switch
+                {
+                    TensorData t => t.BytesPlacedOnto(target, copying),
+                    OptionalTensorData { HasValue: true, Value: { } present } => present.BytesPlacedOnto(target, copying),
+                    TensorDataSequence q => q.BytesPlacedOnto(target, copying),
+                    TensorDataStruct u => u.BytesPlacedOnto(target, copying),
+                    _ => 0,
+                };
+                if (adding is not { } known) return null;
+                bytes += known;
+            }
+            return bytes;
         }
 
         /// <summary>This struct where the host can read it, field by field under each field's own

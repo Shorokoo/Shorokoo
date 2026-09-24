@@ -344,6 +344,14 @@ namespace Shorokoo.Runtime
                 TensorData? resident = tensor;
                 if (!tensor.FeedsInPlace(_backend))
                 {
+                    // A read locks the tensor as well as its copy, and the lock attaches it to the
+                    // context: where it is in the context's memory too -- another runtime's
+                    // allocation on the same card -- the books carry both for the run. A tried feed
+                    // may yet be read, so it is counted as one.
+                    if (target.Mode != FeedMode.Consume && tensor.Space == _space
+                        && !(excludingArena is not null && ReferenceEquals(tensor.Arena, excludingArena))
+                        && counted.Add(tensor))
+                        added += tensor.ByteCount;
                     var where = TensorData.RunMemoryOf(_backend, tensor.DType);
                     if (where.Space != _space) continue;
                     // Read through the copy the tensor holds there, or through a fresh one.

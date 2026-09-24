@@ -131,8 +131,9 @@ public sealed record DeviceMemorySettings
     /// budget less the discount rounded up to the next sixty-fourth of the budget, and kept while
     /// the discount stays within what that left. A run that finds the discount grown past it builds
     /// the session again, with the lower limit; one that finds it fallen keeps the session and its
-    /// lower limit. So the limit only ever comes down — at most sixty-four times over a session's
-    /// life, and never in a loop whose discount holds steady.
+    /// lower limit. So the limit only ever comes down — at most sixty-four times over a compiled
+    /// graph's life as the discount climbs through the budget, and once more each time what is left
+    /// halves in its last sixty-fourth — and never in a loop whose discount holds steady.
     /// <see cref="Shorokoo.Runtime.CompiledGraph.DeviceMemory"/> reports the limit a session
     /// got.</para>
     ///

@@ -574,7 +574,7 @@ namespace Shorokoo
         {
             ArgumentNullException.ThrowIfNull(target);
             ThrowIfDisposed();
-            if (!AddressableBy(target)) return CopyTo(target);
+            if (!AddressableBy(target)) return CopyInto(target, nameof(To));
             AttachElementsTo(target);
             return this;
         }
@@ -583,11 +583,36 @@ namespace Shorokoo
         /// <paramref name="target"/>'s memory and attached to it. This sequence is untouched.</summary>
         /// <exception cref="ArgumentNullException"><paramref name="target"/> is null.</exception>
         /// <exception cref="ObjectDisposedException">This sequence has been disposed.</exception>
+        /// <exception cref="InvalidOperationException"><paramref name="target"/>'s device-memory
+        /// budget cannot take the copies. Nothing is copied.</exception>
         public TensorDataSequence CopyTo(ComputeContext target)
         {
             ArgumentNullException.ThrowIfNull(target);
             ThrowIfDisposed();
-            return Rebuild(element => element.CopyTo(target));
+            return CopyInto(target, nameof(CopyTo));
+        }
+
+        /// <summary>A copy of this sequence in <paramref name="target"/>'s memory, placed as one:
+        /// refused before any element is copied where the target's budget cannot take them
+        /// all.</summary>
+        private TensorDataSequence CopyInto(ComputeContext target, string operation)
+            => target.PlaceAll(BytesPlacedOnto(target, copying: true),
+                () => $"{operation}(context) of a sequence of {Count} tensors",
+                () => Rebuild(element => element.CopyTo(target)));
+
+        /// <summary>
+        /// The bytes putting this sequence on <paramref name="target"/> adds to what the target's
+        /// device-memory budget counts, as <see cref="TensorData.BytesPlacedOnto"/> tells them for a
+        /// tensor — or null where that cannot be told without making the copies: a runtime's
+        /// sequence mints its elements only as they are read.
+        /// </summary>
+        internal long? BytesPlacedOnto(ComputeContext target, bool copying)
+        {
+            var copied = copying || !AddressableBy(target);
+            if (OwnElements is not { } elements) return copied && Count > 0 ? null : 0;
+            long bytes = 0;
+            foreach (var element in elements) bytes += element.BytesPlacedOnto(target, copied);
+            return bytes;
         }
 
         /// <summary>

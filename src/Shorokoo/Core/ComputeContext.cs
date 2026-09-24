@@ -1071,6 +1071,9 @@ namespace Shorokoo.Runtime
         /// backend.</summary>
         internal bool CanAddress(TensorData tensor) => ResolvedBackend.CanAddress(tensor.Location);
 
+        /// <summary>Whether <paramref name="tensor"/> is on this context's books.</summary>
+        internal bool Attaches(TensorData tensor) => _attached.Contains(tensor);
+
         /// <summary>The memory this context's tensors live in, shared with every other context
         /// whose backend allocates in the same place.</summary>
         public MemoryDevice Device => MemoryDevice.Of(ResolvedBackend);

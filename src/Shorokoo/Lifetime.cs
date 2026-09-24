@@ -34,9 +34,10 @@ namespace Shorokoo
     /// <para>This is the allocation's own state and nobody else's. There is no second object naming
     /// the same memory and no count of names, so the one question it answers is whether the
     /// allocation may still be read, and the one decision it makes is who ends that.
-    /// <see cref="TryTake"/> is the single atomic way to end it deliberately; every deliberate death
-    /// — deletion, consumption by a run, a move into an attribute — is a take plus what the taker
-    /// does with the memory.</para>
+    /// <see cref="TryTake"/> is the single atomic way to end it deliberately; deletion, consumption
+    /// by a run and a move into an attribute are each a take plus what the taker does with the
+    /// memory. <see cref="DeleteAsync"/> alone, which does not wait for the readers to finish, marks
+    /// the allocation dead at once and leaves the memory to the last of them.</para>
     ///
     /// <para>Locked on itself, per allocation, and taken by nothing else. Deliberately not a
     /// process-wide gate: the lock and unlock path runs on every feed of every run, and a delete has

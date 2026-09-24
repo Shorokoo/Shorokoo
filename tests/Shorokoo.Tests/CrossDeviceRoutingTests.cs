@@ -487,6 +487,9 @@ public class CrossDeviceRoutingCoverageTests
         Assert.Null(ComputeContext.ArenaLimitWithin(6400, 7000));
         Assert.Equal(1L, ComputeContext.ArenaLimitWithin(10, 9));
         Assert.Equal(60L << 30, ComputeContext.ArenaLimitWithin(64L << 30, 3L << 30));
+        Assert.Equal(163L, ComputeContext.ArenaLimitWithin(6463, 6250));
+        Assert.Equal(100L, ComputeContext.ArenaLimitWithin(6401, 6300));
+        Assert.Equal(100L, ComputeContext.ArenaLimitWithin(6463, 6300));
     }
 
     [Fact]
@@ -540,6 +543,12 @@ public class CrossDeviceRoutingCoverageTests
         Assert.Contains("sequence of 3 tensors", Assert.Throws<InvalidOperationException>(() => triple.CopyTo(budgeted)).Message);
         Assert.Equal(new DeviceMemoryUse(0, 0, 64), budgeted.ReadDeviceMemoryUse());
         Assert.Equal(built, card.Built.Count);
+
+        var twice = Floats(10).CopyTo(free);
+        var same = new TensorDataStruct(new TensorStructDef(fields, "Pair"),
+            new Dictionary<string, IData> { { "a", twice }, { "b", twice } });
+        Assert.Same(same, same.To(budgeted));
+        Assert.Equal(new DeviceMemoryUse(40, 1, 64), budgeted.ReadDeviceMemoryUse());
     }
 
     [Fact]

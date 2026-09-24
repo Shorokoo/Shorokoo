@@ -85,16 +85,18 @@ namespace Shorokoo
         /// where <see cref="To"/> would, unless <paramref name="copying"/>, and copied otherwise —
         /// adds to what the target's device-memory budget counts: this tensor's own where it is in
         /// the target's memory and not yet on its books, and a copy's where the copy lands there. A
-        /// copy a host keeps adds nothing, a string's among them. What a composite placement is
-        /// refused on before any of it is placed.
+        /// copy the host keeps adds nothing: one of a dtype the target's runs read from host memory,
+        /// a string among them. What a composite placement is refused on before any of it is placed;
+        /// <paramref name="handedOver"/> is what the composite hands over as it stands so far, so a
+        /// tensor it holds twice is counted once.
         /// </summary>
-        internal long BytesPlacedOnto(ComputeContext target, bool copying)
+        internal long BytesPlacedOnto(ComputeContext target, bool copying, HashSet<TensorData>? handedOver = null)
         {
             var space = target.MemorySpace;
             if (space.IsHost) return 0;
             if (!copying && target.CanAddress(this))
-                return Space == space && !target.Attaches(this) ? ByteCount : 0;
-            return DType.IsSameElementTypeAs(DType.Utf8) ? 0 : ByteCount;
+                return Space == space && !target.Attaches(this) && (handedOver?.Add(this) ?? true) ? ByteCount : 0;
+            return RunMemoryOf(target.ResolvedBackend, DType).Space.IsHost ? 0 : ByteCount;
         }
 
         /// <summary>

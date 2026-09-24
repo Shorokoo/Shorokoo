@@ -61,12 +61,6 @@ internal sealed class OrtSession : IShorokooSession
     public IReadOnlyList<OutputAlias> BindableAliases { get; }
 
     public OrtSession(
-        InferenceSession session, int? cudaDeviceId, IShorokooBackend backend)
-        : this(session, cudaDeviceId, backend, profileDirectory: null, outputAliases: [])
-    {
-    }
-
-    public OrtSession(
         InferenceSession session,
         int? cudaDeviceId,
         IShorokooBackend backend,

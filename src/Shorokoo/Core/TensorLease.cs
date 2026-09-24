@@ -64,9 +64,6 @@ namespace Shorokoo.Runtime
         /// that way, so its signal is never raised.</summary>
         internal CancellationToken Eviction { get; }
 
-        /// <summary>What this lease holds.</summary>
-        internal object Target => _target;
-
         /// <summary>Drops the lock. The memory goes now if the delete it was waiting for has
         /// already been asked for. Idempotent.</summary>
         public void Dispose()

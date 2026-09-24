@@ -217,19 +217,22 @@ namespace Shorokoo
         /// <summary>
         /// The bytes putting this struct's fields on <paramref name="target"/> adds to what the
         /// target's device-memory budget counts, field by field as each field's own <c>To</c> or
-        /// <c>CopyTo</c> would place it — or null where a field cannot tell without making its copy.
+        /// <c>CopyTo</c> would place it, a tensor handed over as it stands counted once however many
+        /// fields hold it — or null where a field cannot tell without making its copy.
         /// </summary>
-        internal long? BytesPlacedOnto(Shorokoo.Runtime.ComputeContext target, bool copying)
+        internal long? BytesPlacedOnto(
+            Shorokoo.Runtime.ComputeContext target, bool copying, HashSet<TensorData>? handedOver = null)
         {
+            handedOver ??= new HashSet<TensorData>(ReferenceEqualityComparer.Instance);
             long bytes = 0;
             foreach (var field in Fields.Values)
             {
                 long? adding = field switch
                 {
-                    TensorData t => t.BytesPlacedOnto(target, copying),
-                    OptionalTensorData { HasValue: true, Value: { } present } => present.BytesPlacedOnto(target, copying),
-                    TensorDataSequence q => q.BytesPlacedOnto(target, copying),
-                    TensorDataStruct u => u.BytesPlacedOnto(target, copying),
+                    TensorData t => t.BytesPlacedOnto(target, copying, handedOver),
+                    OptionalTensorData { HasValue: true, Value: { } present } => present.BytesPlacedOnto(target, copying, handedOver),
+                    TensorDataSequence q => q.BytesPlacedOnto(target, copying, handedOver),
+                    TensorDataStruct u => u.BytesPlacedOnto(target, copying, handedOver),
                     _ => 0,
                 };
                 if (adding is not { } known) return null;

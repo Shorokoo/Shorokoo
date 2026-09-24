@@ -180,33 +180,6 @@ namespace Shorokoo
         /// <see cref="TensorData.TryTake"/>.</summary>
         internal TakeOutcome TryTake(TensorDeath death) => _life.TryTake(death);
 
-        /// <summary>Releases what a successful take handed over: this sequence's storage and the
-        /// copies runs built of it. Once.</summary>
-        internal void ReleaseTaken() => _life.ReleaseTaken();
-
-        /// <summary>Records that what a take handed over went to a backend, which releases it
-        /// itself; the copies runs built of this sequence go now.</summary>
-        internal void HandedToBackend() => _life.HandedToBackend();
-
-        /// <summary>Ends a copy its source no longer wants: dead, and released now or when the last
-        /// run reading it returns; see <see cref="TensorData.Retire"/>.</summary>
-        internal void Retire(TensorDeath death) => _life.Retire(death);
-
-        /// <summary>Takes a reader lock for the length of a run. Refuses a sequence that is dead:
-        /// there is nothing left to read.</summary>
-        /// <exception cref="ObjectDisposedException">The sequence is dead.</exception>
-        internal CancellationToken AcquireReadLock(object? reader = null) => _life.AcquireReadLock(reader);
-
-        /// <summary>Drops a reader lock. A copy retired while it was held is released with the
-        /// last one.</summary>
-        internal void ReleaseReadLock(object? reader = null) => _life.ReleaseReadLock(reader);
-
-        /// <summary>Whether a run is reading this sequence right now.</summary>
-        internal bool IsLocked => _life.IsLocked;
-
-        /// <summary>The read a refusal of this sequence names, or null when no holder said.</summary>
-        internal string? DescribeReader() => _life.DescribeReader();
-
 
         public override string ToString()
         {
@@ -594,12 +567,13 @@ namespace Shorokoo
         /// tensor — or null where that cannot be told without making the copies: a runtime's
         /// sequence mints its elements only as they are read.
         /// </summary>
-        internal long? BytesPlacedOnto(ComputeContext target, bool copying)
+        internal long? BytesPlacedOnto(ComputeContext target, bool copying, HashSet<TensorData>? handedOver = null)
         {
             var copied = copying || !AddressableBy(target);
             if (OwnElements is not { } elements) return copied && Count > 0 ? null : 0;
+            handedOver ??= new HashSet<TensorData>(ReferenceEqualityComparer.Instance);
             long bytes = 0;
-            foreach (var element in elements) bytes += element.BytesPlacedOnto(target, copied);
+            foreach (var element in elements) bytes += element.BytesPlacedOnto(target, copied, handedOver);
             return bytes;
         }
 

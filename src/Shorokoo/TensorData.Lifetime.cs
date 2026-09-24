@@ -50,10 +50,6 @@ namespace Shorokoo
         /// </summary>
         public bool IsDisposed => _life.Death is not null;
 
-        /// <summary>Why this tensor died, or null while it is alive. What every refused access
-        /// names.</summary>
-        internal TensorDeath? Death => _life.Death;
-
         /// <summary>Whether a run is reading this tensor right now — what <see cref="Delete"/>
         /// refuses on and <see cref="TryDelete"/> declines on.</summary>
         internal bool IsLocked => _life.IsLocked;
@@ -192,50 +188,19 @@ namespace Shorokoo
         /// Ends this tensor's life deliberately, if no run is reading it: marks it dead with
         /// <paramref name="death"/> and hands its memory to the caller, who must either release it
         /// with <see cref="ReleaseTaken"/> or hand it to a backend and say so with
-        /// <see cref="HandedToBackend"/>. If a run holds a lock nothing at all changes. The one
-        /// atomic primitive every deliberate death is built on.
+        /// <see cref="Lifetime.HandedToBackend"/>. If a run holds a lock nothing at all changes. The
+        /// atomic primitive deleting, consuming and moving a tensor into an attribute are built on;
+        /// only <see cref="DeleteAsync"/>, which does not wait for the lock to be free, marks a tensor
+        /// dead without it.
         /// </summary>
         internal TakeOutcome TryTake(TensorDeath death) => _life.TryTake(death);
 
         /// <summary>
         /// Releases the memory a successful <see cref="TryTake"/> handed over, through the backend
         /// that made it, and the copies runs made of it. Once: a second call releases nothing, and
-        /// neither does a call after <see cref="HandedToBackend"/>.
+        /// neither does a call after <see cref="Lifetime.HandedToBackend"/>.
         /// </summary>
         internal void ReleaseTaken() => _life.ReleaseTaken();
-
-        /// <summary>
-        /// Records that the memory a successful <see cref="TryTake"/> handed over went to a backend,
-        /// which releases it itself — a run that consumed this tensor, after its call into the
-        /// backend returned or threw. Nothing here touches that memory; the copies runs made of this
-        /// tensor are this tensor's own business still, and go now.
-        /// </summary>
-        internal void HandedToBackend() => _life.HandedToBackend();
-
-        /// <summary>
-        /// Ends a copy that its source no longer wants — the source was written to, or died. It is
-        /// marked dead with <paramref name="death"/> and its memory released now, or when the last
-        /// run reading it returns; unlike a deletion it asks no run to stop, since a run reading the
-        /// old contents is reading what it was fed. A tensor already dead is left as it is: whoever
-        /// ended it deals with its memory.
-        /// </summary>
-        internal void Retire(TensorDeath death) => _life.Retire(death);
-
-        /// <summary>
-        /// Takes a reader lock for the length of a run, and hands back the signal a deliberate
-        /// delete raises. Refuses a tensor that is already dead: there is nothing left to read.
-        /// </summary>
-        /// <param name="reader">Who is reading, for a refusal of this tensor to name while the lock
-        /// is held; null for a holder with nothing to say.</param>
-        /// <exception cref="ObjectDisposedException">The tensor is dead.</exception>
-        internal CancellationToken AcquireReadLock(object? reader = null) => _life.AcquireReadLock(reader);
-
-        /// <summary>
-        /// Drops a reader lock. The memory goes now if this was the last lock on a tensor that died
-        /// while it was held — deleted, or retired as a copy — which is what such a tensor is
-        /// waiting for.
-        /// </summary>
-        internal void ReleaseReadLock(object? reader = null) => _life.ReleaseReadLock(reader);
 
         /// <summary>The read a refusal of this tensor names: the first holder of a lock that said
         /// who it was, or null when none did.</summary>

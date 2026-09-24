@@ -66,7 +66,6 @@ namespace Shorokoo.Runtime
         public DeviceMemoryUse ReadDeviceMemoryUse()
         {
             if (_isHost) return default;
-            var space = MemorySpace;
             var (bytes, tensors) = AttachedIn();
             return new DeviceMemoryUse(bytes, tensors, BudgetIn());
         }
@@ -129,7 +128,6 @@ namespace Shorokoo.Runtime
         internal void AttachAllWithinBudget(IReadOnlyList<TensorData> tensors, string operation)
         {
             if (_isHost) return;
-            var space = MemorySpace;
             var gate = EnterBudget(CancellationToken.None);
             try
             {
@@ -139,11 +137,8 @@ namespace Shorokoo.Runtime
                 if (gate is not null)
                 {
                     long adding = 0;
-                    var seen = new HashSet<TensorData>(ReferenceEqualityComparer.Instance);
-                    foreach (var tensor in tensors)
-                        if (tensor.Space == space && !tensor.IsDisposed && !_attached.Contains(tensor)
-                            && seen.Add(tensor))
-                            adding += tensor.ByteCount;
+                    var handedOver = new HashSet<TensorData>(ReferenceEqualityComparer.Instance);
+                    foreach (var tensor in tensors) adding += tensor.BytesPlacedOnto(this, copying: false, handedOver);
                     RefusePlacementOverBudget(adding, () => tensors.Count == 1
                         ? $"{operation}(context) of {tensors[0].Describe()}"
                         : $"{operation}(context) of a sequence of {tensors.Count} tensors");
@@ -289,24 +284,27 @@ namespace Shorokoo.Runtime
         /// a session: one is kept while its limit is within what the budget allows, which it stays
         /// until the discount grows past the part it rounded up to. So a steady run keeps its
         /// session, and one whose discount keeps climbing rebuilds once per part it climbs through —
-        /// at most <see cref="BudgetParts"/> times — rather than on every run. It costs the arena
-        /// less than one part of the budget.</para>
+        /// at most <see cref="BudgetParts"/> times — rather than on every run. It costs the arena at
+        /// most one part of the budget.</para>
         ///
-        /// <para>In the budget's last part, where that rounding would leave nothing, the limit is the
-        /// largest halving of a part that fits in what is left: a discount climbing on through it
-        /// then rebuilds once each time what is left halves — a handful of times — where the room
-        /// exactly would rebuild on every run it grew by a byte.</para>
+        /// <para>In the budget's last part, where that rounding would leave less than a part — nothing,
+        /// or the few bytes a budget that is not a whole number of parts has over — the limit is the
+        /// largest halving of a part that fits in what is left: a discount climbing on through it then
+        /// rebuilds once each time what is left halves — a handful of times — where the room exactly
+        /// would rebuild on every run it grew by a byte.</para>
         ///
-        /// <para>The limit only ever comes down. A session is not rebuilt when the discount falls,
-        /// since a limit below what the budget allows breaches nothing, and a policy that also
-        /// raised it would rebuild on every run of a loop whose discount moved both ways.</para>
+        /// <para>The limit only ever comes down as the discount climbs. A session is not rebuilt when
+        /// the discount falls, since a limit below what the budget allows breaches nothing, and a
+        /// policy that also raised it would rebuild on every run of a loop whose discount moved both
+        /// ways. It is built again with more only for a run its limit cannot hold at all.</para>
         /// </summary>
         internal static long? ArenaLimitWithin(long limit, long outside)
         {
             if (outside >= limit) return null;
             var part = Math.Max(1L, limit / BudgetParts);
             var headroom = part - Math.Max(0L, outside) % part;
-            if (outside < limit - headroom) return limit - outside - headroom;
+            var rounded = limit - outside - headroom;
+            if (rounded >= part) return rounded;
             var room = limit - outside;
             var arena = part;
             while (arena > room) arena /= 2;
@@ -320,10 +318,10 @@ namespace Shorokoo.Runtime
     /// same room. Held by one thread at a time.
     ///
     /// <para>The holder may enter it again, and a nested entry is counted rather than waited for:
-    /// a thread waiting on a gate it holds itself would wait for ever. Nothing the framework does
-    /// while holding the gate enters it twice — a run's own copies are admitted against the run's
-    /// plan rather than through the gate — so this only keeps a nested entry from becoming a
-    /// hang.</para>
+    /// a thread waiting on a gate it holds itself would wait for ever. A composite placement relies on
+    /// this — it holds the gate across the whole struct or sequence, and each part it places enters it
+    /// again — while a run's own copies are admitted against the run's plan rather than through the
+    /// gate.</para>
     /// </summary>
     internal sealed class BudgetGate
     {

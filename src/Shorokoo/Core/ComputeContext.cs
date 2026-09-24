@@ -1381,17 +1381,15 @@ namespace Shorokoo.Runtime
         /// <summary>
         /// A run's outputs as the tensors and sequences the caller gets back, each allocated by
         /// <paramref name="backend"/> — the backend the run ran on, and so the one that releases
-        /// it — and every tensor among them attached to this context. One left in device memory
-        /// records <paramref name="arena"/>, the arena of the session that ran, where there is one
-        /// to name: it is in that arena, and a later run of the same session counts it there.
+        /// it — and every tensor among them attached to this context. For a session run once and
+        /// released, whose arena goes with it, so no output records one.
         /// </summary>
         internal NamedModelParam[] AdoptOutputs(
-            IReadOnlyList<IShorokooTensorValue> results, IReadOnlyList<string> names,
-            IShorokooBackend backend, object? arena = null)
-            => AdoptOutputs(results, names, backend, _ => arena);
+            IReadOnlyList<IShorokooTensorValue> results, IReadOnlyList<string> names, IShorokooBackend backend)
+            => AdoptOutputs(results, names, backend, static _ => null);
 
         /// <summary>
-        /// <see cref="AdoptOutputs(IReadOnlyList{IShorokooTensorValue}, IReadOnlyList{string}, IShorokooBackend, object?)"/>
+        /// <see cref="AdoptOutputs(IReadOnlyList{IShorokooTensorValue}, IReadOnlyList{string}, IShorokooBackend)"/>
         /// with each output's arena answered by <paramref name="arenaOf"/>, given its position: an
         /// output a run wrote into consumed memory is in whatever arena that memory was, if any, not
         /// in the running session's.

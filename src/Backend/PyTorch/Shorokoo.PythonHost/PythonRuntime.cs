@@ -27,6 +27,7 @@ public static class PythonRuntime
 {
     private static readonly object Gate = new();
     private static PythonEnvironment? _environment;
+    private static PythonEnvironmentException? _failure;
 
     /// <summary>The environment the interpreter runs over, or null before it is started.</summary>
     public static PythonEnvironment? Environment => _environment;
@@ -52,33 +53,47 @@ public static class PythonRuntime
                 return running;
             }
 
+            // CPython is not started twice in a process, so one that failed to start stays failed.
+            if (_failure is { } failed)
+                throw new PythonEnvironmentException(PythonEnvironmentFailure.InterpreterFailed,
+                    $"CPython failed to start earlier in this process, and a process cannot start it again: {failed.Message}",
+                    failed);
+
             try
             {
                 Runtime.PythonDLL = environment.LibPython;
                 PythonEngine.PythonHome = environment.PythonHome;
                 PythonEngine.Initialize();
-                using (Py.GIL())
+                // Initializing leaves the lock held by this thread, and it is let go of however the
+                // setup below ends: held, every other thread's Gil() would wait forever.
+                try
                 {
-                    using var scope = Py.CreateScope();
-                    scope.Set("_site_packages", environment.SitePackages);
-                    scope.Set("_prefix", environment.Directory);
-                    scope.Set("_executable", Executable(environment));
-                    // The environment's packages first, ahead of anything the base installation or
-                    // the user's own site-packages would offer, and its .pth files honoured; and
-                    // sys.prefix made the environment's, as a venv's own interpreter would have it.
-                    scope.Exec("""
-                        import sys, site
-                        sys.path.insert(0, _site_packages)
-                        site.addsitedir(_site_packages)
-                        sys.prefix = sys.exec_prefix = _prefix
-                        sys.executable = _executable
-                        """);
+                    using (Py.GIL())
+                    {
+                        using var scope = Py.CreateScope();
+                        scope.Set("_site_packages", environment.SitePackages);
+                        scope.Set("_prefix", environment.Directory);
+                        scope.Set("_executable", Executable(environment));
+                        // The environment's packages first, ahead of anything the base installation or
+                        // the user's own site-packages would offer, and its .pth files honoured; and
+                        // sys.prefix made the environment's, as a venv's own interpreter would have it.
+                        scope.Exec("""
+                            import sys, site
+                            sys.path.insert(0, _site_packages)
+                            site.addsitedir(_site_packages)
+                            sys.prefix = sys.exec_prefix = _prefix
+                            sys.executable = _executable
+                            """);
+                    }
                 }
-                PythonEngine.BeginAllowThreads();
+                finally
+                {
+                    PythonEngine.BeginAllowThreads();
+                }
             }
             catch (Exception ex) when (ex is not PythonEnvironmentException)
             {
-                throw new PythonEnvironmentException(PythonEnvironmentFailure.InterpreterFailed,
+                throw _failure = new PythonEnvironmentException(PythonEnvironmentFailure.InterpreterFailed,
                     $"CPython could not be started from '{environment.LibPython}' over "
                     + $"'{environment.Directory}': {ex.Message}", ex);
             }

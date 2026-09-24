@@ -101,8 +101,8 @@ internal sealed class NodeContext
     }
 
     /// <summary>An attribute's kind, read off the field it fills where a writer left the type
-    /// unset.</summary>
-    private static AttributeProto.AttributeType KindOf(AttributeProto attribute)
+    /// unset; refused where it fills none, which leaves nothing to tell an empty list by.</summary>
+    private AttributeProto.AttributeType KindOf(AttributeProto attribute)
     {
         if (attribute.Type != AttributeProto.AttributeType.Undefined) return attribute.Type;
         if (attribute.T is not null) return AttributeProto.AttributeType.Tensor;
@@ -112,6 +112,7 @@ internal sealed class NodeContext
         if (attribute.Floats is { Length: > 0 }) return AttributeProto.AttributeType.Floats;
         if (attribute.Strings.Count > 0) return AttributeProto.AttributeType.Strings;
         if (attribute.ShouldSerializeF()) return AttributeProto.AttributeType.Float;
-        return AttributeProto.AttributeType.Int;
+        if (attribute.ShouldSerializeI()) return AttributeProto.AttributeType.Int;
+        throw Unsupported($"its attribute '{attribute.Name}' has no type and no value to read one off");
     }
 }

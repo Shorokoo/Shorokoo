@@ -78,6 +78,7 @@ public class QeeImageRandomRnnAuditTests
             [], qee: QeeStrictness.None, testCsRoundtrip: false));
         Assert.True(QeeAudit.OrtOnly<QeeDropoutAuditCheck>(F32([4L], 1f, 2f, 3f, 4f)));
         Assert.True(QeeAudit.OrtOnly<QeeKeyedRngValueAuditCheck>(F32Zeros([3L, 5L])));
+        Assert.True(QeeAudit.OrtOnly<RtLoweredUniform>(F32Zeros([3L, 5L])));
         Assert.True(QeeAudit.Check<QeeRangeConstantOfShapeAuditCheck>());
 
         var strings = QeeAudit.Outputs<QeeConstantStringCheck>();

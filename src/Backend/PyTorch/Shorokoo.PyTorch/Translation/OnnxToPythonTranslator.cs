@@ -155,21 +155,17 @@ internal sealed class OnnxToPythonTranslator
     /// The name of the Python function computing <paramref name="function"/> as <paramref name="call"/>
     /// calls it: one written for each distinct set of attribute values the model calls the function
     /// with — the call's, and the function's defaults for those it leaves out — after the rest of
-    /// the module, since Python binds a module's functions by name when they run.
+    /// the module, since Python binds a module's functions by name when they run. An attribute the
+    /// call passes but the function does not declare is one its body cannot read, so it is ignored,
+    /// as ONNX Runtime ignores it.
     /// </summary>
     private string Specialize(string name, FunctionProto function, NodeProto call)
     {
         var declared = function.Attributes.Concat(function.AttributeProtoes.Select(a => a.Name)).ToHashSet(StringComparer.Ordinal);
         var values = new SortedDictionary<string, AttributeProto>(StringComparer.Ordinal);
         foreach (var fallback in function.AttributeProtoes) values[fallback.Name] = fallback;
-        foreach (var attribute in call.Attributes)
-        {
-            if (!declared.Contains(attribute.Name))
-                throw new TorchUnsupportedModelException(TorchUnsupportedReason.UnsupportedUsage, call.Domain, call.OpType,
-                    $"The call of function {call.OpType} passes the attribute '{attribute.Name}', which the function "
-                    + "does not declare.");
+        foreach (var attribute in call.Attributes.Where(a => declared.Contains(a.Name)))
             values[attribute.Name] = attribute;
-        }
 
         var key = FunctionKey(function.Domain, function.Name) + "\u0001" + FunctionAttributes.Key(values);
         if (_specialized.TryGetValue(key, out var specialization)) return specialization;
@@ -239,12 +235,7 @@ internal sealed class OnnxToPythonTranslator
         var outputs = node.Outputs.ToList();
         if (_functions.TryGetValue(FunctionKey(node.Domain, node.OpType), out var function))
         {
-            var callee = function.Name;
-            if (TakesAttributes(function.Proto))
-                callee = Specialize(function.Name, function.Proto, node);
-            else if (node.Attributes.Count > 0)
-                throw new TorchUnsupportedModelException(TorchUnsupportedReason.UnsupportedUsage, node.Domain, node.OpType,
-                    $"The call of function {node.OpType} passes attributes, which the function does not declare.");
+            var callee = TakesAttributes(function.Proto) ? Specialize(function.Name, function.Proto, node) : function.Name;
             var arguments = node.Inputs.Select(i => i.Length == 0 ? "None" : scope.Lookup(i, node));
             expression = $"{callee}({string.Join(", ", arguments)})";
             if (outputs.Count < function.Proto.Outputs.Count) expression += $"[:{outputs.Count}]";

@@ -212,6 +212,44 @@ public class PyTorchBackendCoverageTests
     }
 
     [Fact]
+    public void TestFunctionAttributesSequenceMapTensorScatterAndOmittedOutputsAgreeWithOnnxRuntime()
+    {
+        var scaled = new FunctionProto { Name = "Scaled", Domain = "Functions" };
+        scaled.Inputs.Add("a");
+        scaled.Outputs.Add("b");
+        scaled.Attributes.Add("axis");
+        scaled.AttributeProtoes.Add(new AttributeProto { Name = "alpha", Type = AttributeProto.AttributeType.Float, F = 2f });
+        scaled.Nodes.AddRange([
+            Node("Constant", [], ["c"], attributes: new AttributeProto { Name = "value_float", Type = AttributeProto.AttributeType.Float, RefAttrName = "alpha" }),
+            Node("Mul", ["a", "c"], ["m"]),
+            Node("Softmax", ["m"], ["b"], attributes: new AttributeProto { Name = "axis", Type = AttributeProto.AttributeType.Int, RefAttrName = "axis" })]);
+        scaled.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = 21 });
+        var alpha3 = new AttributeProto { Name = "alpha", Type = AttributeProto.AttributeType.Float, F = 3f };
+        var axis0 = new AttributeProto { Name = "axis", Type = AttributeProto.AttributeType.Int, I = 0 };
+
+        var body = Graph(["e", "w"], ["p", "q"], Node("Add", ["e", "w"], ["p"]), Node("ReduceSum", ["e"], ["q"], attributes: Int("keepdims", 0)));
+        foreach (var value in body.Inputs.Concat(body.Outputs)) value.Type = FloatTensor;
+
+        Assert.True(AgreesWithOrt(Typed(21, ["x"], ["y1", "y2", "y3"],
+            [Node("Scaled", ["x"], ["y1"], "Functions", alpha3, axis0), Node("Scaled", ["x"], ["y2"], "Functions"),
+             Node("Scaled", ["x"], ["y3"], "Functions", axis0, alpha3)], scaled), X23));
+        Assert.True(AgreesWithOrt(Typed(21, ["x", "w"], ["o1", "o2"],
+            [Node("SplitToSequence", ["x"], ["s"]),
+             Node("SequenceMap", ["s", "w"], ["ps", "qs"], attributes: new AttributeProto { Name = "body", Type = AttributeProto.AttributeType.Graph, G = body }),
+             Node("ConcatFromSequence", ["ps"], ["o1"], attributes: Int("axis", 0)),
+             Node("ConcatFromSequence", ["qs"], ["o2"], attributes: [Int("axis", 0), Int("new_axis", 1)])]),
+            X23, ("w", [10f, 20f, 30f], [3])));
+        foreach (var (mode, starts) in (ReadOnlySpan<(string, long[])>)[("linear", [1, 2]), ("circular", [3, 0])])
+            Assert.True(AgreesWithOrt(Typed(24, ["past", "update"], ["present"],
+                [Node("Constant", [], ["at"], attributes: Tensor("value", 7, [2], starts)),
+                 Node("TensorScatter", ["past", "update", "at"], ["present"], attributes: [Str("mode", mode), Int("axis", 1)])]),
+                ("past", new float[8], [2, 4, 1]), ("update", [1f, 2f, 3f, 4f], [2, 2, 1])));
+        Assert.True(AgreesWithOrt(Typed(21, ["x"], ["u", "inv", "d"],
+            [Node("Unique", ["x"], ["u", "", "inv"]),
+             Node("Dropout", ["x"], ["d"])]), X23));
+    }
+
+    [Fact]
     public void TestAnOutputIsMemoryOfItsOwnEvenWhereTheGraphReturnsItsInput()
     {
         using var session = Torch.CreateSession(Onnx("Identity", (int)ShorokooTensorElementType.Float), default, default, DeviceMemorySettings.Default);
@@ -319,12 +357,61 @@ public class PyTorchBackendCoverageTests
         return y.GetTensorDataAsSpan<float>().ToArray();
     }
 
-    private static NodeProto Node(string opType, string[] inputs, string[] outputs, string domain = "")
+    private static NodeProto Node(string opType, string[] inputs, string[] outputs, string domain = "", params AttributeProto[] attributes)
     {
-        var node = new NodeProto { OpType = opType, Name = opType, Domain = domain };
+        var node = new NodeProto { OpType = opType, Name = $"{opType}:{string.Join(",", outputs)}", Domain = domain };
         node.Inputs.AddRange(inputs);
         node.Outputs.AddRange(outputs);
+        node.Attributes.AddRange(attributes);
         return node;
+    }
+
+    private static readonly (string, float[], long[]) X23 = ("x", [3f, 1f, 3f, 2f, 5f, 1f], [2, 3]);
+
+    private static TypeProto FloatTensor => new() { TensorType = new TypeProto.Tensor { ElemType = 1 } };
+
+    private static AttributeProto Int(string name, long value) => new() { Name = name, Type = AttributeProto.AttributeType.Int, I = value };
+
+    private static AttributeProto Str(string name, string value)
+        => new() { Name = name, Type = AttributeProto.AttributeType.String, S = System.Text.Encoding.UTF8.GetBytes(value) };
+
+    private static AttributeProto Tensor(string name, int elementType, long[] dims, long[] values)
+        => new() { Name = name, Type = AttributeProto.AttributeType.Tensor, T = new TensorProto { data_type = elementType, Dims = dims, Int64Datas = values } };
+
+    private static byte[] Typed(int opset, string[] inputs, string[] outputs, NodeProto[] nodes, params FunctionProto[] functions)
+    {
+        var graph = Graph(inputs, outputs, nodes);
+        foreach (var input in graph.Inputs) input.Type = FloatTensor;
+        var model = new ModelProto { IrVersion = 10, Graph = graph };
+        model.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = opset });
+        model.OpsetImports.Add(new OperatorSetIdProto { Domain = "Functions", Version = 1 });
+        model.Functions.AddRange(functions);
+        using var stream = new MemoryStream();
+        ProtoBuf.Serializer.Serialize(stream, model);
+        return stream.ToArray();
+    }
+
+    private static bool AgreesWithOrt(byte[] model, params (string Name, float[] Data, long[] Shape)[] feeds)
+    {
+        var outputs = ProtoBuf.Serializer.Deserialize<ModelProto>(new MemoryStream(model)).Graph.Outputs.Select(o => o.Name).ToArray();
+        var onOrt = Run(DefaultBackend.Instance, model, feeds, outputs);
+        var onTorch = Run(Torch, model, feeds, outputs);
+        return onOrt.Zip(onTorch).All(p => p.First.Type == p.Second.Type && p.First.Shape == p.Second.Shape
+            && p.First.Values.Zip(p.Second.Values).All(v => Math.Abs(v.First - v.Second) <= AutoTest.Tolerance * Math.Max(1.0, Math.Abs(v.First))));
+    }
+
+    private static (ShorokooTensorElementType Type, string Shape, double[] Values)[] Run(
+        IShorokooBackend backend, byte[] model, (string Name, float[] Data, long[] Shape)[] feeds, string[] outputs)
+    {
+        using var session = backend.CreateSession(model, default, default, DeviceMemorySettings.Default);
+        var inputs = feeds.ToDictionary(f => f.Name, f => backend.CreateTensor(f.Data, f.Shape));
+        var values = session.Run(inputs, outputs, RunSettings.Default);
+        (ShorokooTensorElementType, string, double[])[] results = [.. values.Select(v => (v.ElementType, string.Join(",", v.Shape),
+            v.ElementType == ShorokooTensorElementType.Float
+                ? v.GetTensorDataAsSpan<float>().ToArray().Select(f => (double)f).ToArray()
+                : v.GetTensorDataAsSpan<long>().ToArray().Select(i => (double)i).ToArray()))];
+        foreach (var value in values.Concat(inputs.Values)) value.Dispose();
+        return results;
     }
 
     private static GraphProto Graph(string[] inputs, string[] outputs, params NodeProto[] nodes)

@@ -86,11 +86,14 @@ internal static class CudaDriver
     /// </summary>
     internal static string? Refusal(CudaDriverReading reading, string required)
     {
-        var needed = VersionNumber(required);
+        // A requirement this cannot read is refused rather than skipped: skipping it would accept
+        // the backend on any driver at all.
+        if (VersionNumber(required) is not { } minimum)
+            return $"'{required}' is not a CUDA version written major.minor, so no driver can be checked against it";
         if (!reading.Installed)
             return $"no NVIDIA driver is installed (there is no {LibraryName} to load), and the driver is "
                    + "the one part of CUDA it does not bring with it";
-        if (needed is { } minimum && reading.Version < minimum)
+        if (reading.Version < minimum)
             return reading.Version == 0
                 ? "the NVIDIA driver installed does not say which CUDA it supports"
                 : $"the NVIDIA driver installed supports CUDA up to {VersionText(reading.Version)}, and it needs "

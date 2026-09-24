@@ -91,6 +91,15 @@ public readonly record struct MemoryLocation(MemorySpace Space, object Runtime)
     /// <c>string[]</c> the garbage collector owns, which any host-memory backend can read.</summary>
     public bool IsManaged => ReferenceEquals(Runtime, HostBackend.Instance.RuntimeIdentity);
 
+    /// <summary>Whether <paramref name="other"/> is the same memory of the same runtime — the
+    /// runtime compared by reference, so two runtime identities that happen to be equal by value
+    /// are two runtimes still.</summary>
+    public bool Equals(MemoryLocation other) => Space == other.Space && ReferenceEquals(Runtime, other.Runtime);
+
+    /// <inheritdoc/>
+    public override int GetHashCode()
+        => HashCode.Combine(Space, System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(Runtime));
+
     /// <inheritdoc/>
     public override string ToString() => IsManaged ? "managed host memory" : Space.ToString();
 }

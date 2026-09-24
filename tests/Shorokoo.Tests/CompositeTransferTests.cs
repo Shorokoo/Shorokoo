@@ -401,7 +401,7 @@ public class CompositeTransferCoverageTests
     }
 
     [Fact]
-    public void TestASequenceTheProviderKeptIsInItsBackendsMemoryAndCopiedToBeRead()
+    public void TestASequenceARunProducedIsWhereItsBackendSaysItsSequencesAreAndReadThereAsItStands()
     {
         var card = new ComputeContextLifetimeCoverageTests.StubBackend(ComputeDevice.Cuda, 0);
         using var onCard = new ComputeContext(card);
@@ -409,11 +409,10 @@ public class CompositeTransferCoverageTests
         var produced = new OnnxTensorDataSequence<float32>(new StubSequenceValue(), card);
 
         Assert.Equal(MemorySpace.Host, unrecorded.Space);
-        Assert.Equal(MemorySpace.Cuda(0), produced.Space);
+        Assert.Equal(((IShorokooBackend)card).SequenceRunMemory.Space, produced.Space);
         Assert.Same(card, produced.AllocatingBackend);
         Assert.Same(produced, produced.To(onCard));
-        Assert.NotSame(produced, produced.ToHost());
-        Assert.Equal(0, produced.ToHost().Count);
+        Assert.Same(produced, produced.ToHost());
     }
 
     /// <summary>A sequence value belonging to no runtime, which is enough to ask a sequence where

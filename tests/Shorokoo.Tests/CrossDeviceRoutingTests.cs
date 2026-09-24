@@ -36,6 +36,29 @@ public class CrossDeviceRoutingCoverageTests
         IShorokooBackend second = new StubBackend(ComputeDevice.Cuda, 0);
         Assert.Equal(first.MemorySpace, second.MemorySpace);
         Assert.Equal(MemorySpace.Cuda(0), first.MemorySpace);
+
+        var runtime = new ValueRuntime(1);
+        Assert.Equal(new MemoryLocation(MemorySpace.Host, runtime), new MemoryLocation(MemorySpace.Host, runtime));
+        Assert.NotEqual(new MemoryLocation(MemorySpace.Host, runtime), new MemoryLocation(MemorySpace.Host, new ValueRuntime(1)));
+    }
+
+    /// <summary>A runtime identity equal by value to any other of the same number.</summary>
+    private sealed record ValueRuntime(int Number);
+
+    [Fact]
+    public void TestTwoBackendsOnAnUnnamedDeviceSharingARuntimeEachReadOnlyWhatItAllocated()
+    {
+        var shared = new object();
+        var first = new StubBackend(ComputeDevice.Other, null) { Runtime = shared };
+        var second = new StubBackend(ComputeDevice.Other, null) { Runtime = shared };
+        using var onFirst = new ComputeContext(first);
+        using var onSecond = new ComputeContext(second);
+        var allocated = TensorData([2L], (float[])[1f, 2f]).CopyTo(onFirst);
+
+        Assert.True(allocated.FeedsInPlace(first));
+        Assert.False(allocated.FeedsInPlace(second));
+        Assert.Same(allocated, allocated.To(onFirst));
+        Assert.NotSame(allocated, allocated.To(onSecond));
     }
 
     [Fact]

@@ -165,8 +165,14 @@ namespace Shorokoo
         /// dtype, as the backend answers it (<see cref="RunMemoryOf"/>): that backend's context has
         /// nothing to move even where the backend cannot address the memory — a string tensor in the
         /// host memory of a card's runtime, say, which is where that runtime reads every string.
+        ///
+        /// <para>In a memory space Shorokoo has no name for, the location names no device in
+        /// particular, and two backends over one runtime on two such devices would match it alike: there
+        /// it answers only for the backend that allocated this tensor.</para>
         /// </summary>
-        internal bool IsWhereRunsRead(IShorokooBackend backend) => Location == RunMemoryOf(backend, DType);
+        internal bool IsWhereRunsRead(IShorokooBackend backend)
+            => Location == RunMemoryOf(backend, DType)
+               && (Location.Space.IsKnown || ReferenceEquals(AllocatingBackend, backend));
 
         /// <summary>Host memory of <paramref name="backend"/>'s runtime: where the values it builds
         /// from host bytes are, and where it leaves an output it does not keep in memory of its

@@ -697,12 +697,13 @@ namespace Shorokoo
 
         /// <summary>
         /// A sequence over <paramref name="value"/>, which <paramref name="allocatingBackend"/>
-        /// made and releases. It is in that backend's memory: a sequence value is not a tensor and
-        /// cannot say where it is, so the backend is taken at its word, and a sequence a card's
-        /// execution provider produced is not labelled host memory it may not be.
+        /// made and releases. It is where that backend says its runs leave the sequences they produce
+        /// (<see cref="IShorokooBackend.SequenceRunMemory"/>): a sequence value is not a tensor and
+        /// cannot say where it is, so the backend is taken at its word -- host memory for ONNX
+        /// Runtime, which brings every sequence a run produces to the host.
         /// </summary>
         internal OnnxTensorDataSequence(IShorokooTensorValue value, IShorokooBackend allocatingBackend)
-            : this(value, allocatingBackend, allocatingBackend.MemorySpace)
+            : this(value, allocatingBackend, allocatingBackend.SequenceRunMemory.Space)
         {
         }
 
@@ -772,7 +773,9 @@ namespace Shorokoo
         /// running one — which reads the source, so only one in host memory can be.
         /// </summary>
         internal override bool FeedsInPlace(IShorokooBackend backend)
-            => backend.CanAddress(Location) || Location == RunMemoryOf(backend);
+            => backend.CanAddress(Location)
+               || (Location == RunMemoryOf(backend)
+                   && (Location.Space.IsKnown || ReferenceEquals(AllocatingBackend, backend)));
 
         /// <summary>A copy of this sequence's value built on <paramref name="backend"/>, element by
         /// element through the host.</summary>

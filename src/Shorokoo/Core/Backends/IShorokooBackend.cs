@@ -38,18 +38,22 @@ public interface IShorokooBackend
     // something every such backend shares.
     object RuntimeIdentity => this;
 
-    // Whether this backend's sessions can read memory at `location` as it stands, without a copy:
+    // Whether memory at `location` is this backend's as it stands, needing no copy to be its own:
     // the question To(context) asks of the context's backend before deciding between handing the
-    // tensor over and copying it. The answer is "same device and same runtime" -- and the
-    // framework's own managed host memory, which every backend on the host reads, counts as every
-    // host backend's runtime. It is asked of the target backend rather than decided by the core,
-    // because only the backend knows what it can address.
+    // tensor over and copying it, and a run asks before handing a session a tensor's own value. The
+    // answer is "same device and same runtime" -- and the framework's own managed host memory, which
+    // every backend on the host reads, counts as every host backend's runtime, so To hands a tensor
+    // there over as it is; a run still feeds such a tensor through a value its runtime builds, a
+    // session being handed runtime values only. It is asked of the target backend rather than
+    // decided by the core, because only the backend knows what it can address.
     //
     // A location whose space is unknown is addressable only by the one backend that allocated it:
     // two such allocations compare equal as spaces without being anywhere in particular, so sharing
     // one between backends would be a guess, while a backend always reads what it allocated. That
-    // one backend is known only where the runtime is the backend itself -- the default identity; a
-    // runtime several backends share says nothing about which of them made an allocation it names.
+    // one backend is known here only where the runtime is the backend itself -- the default
+    // identity; a runtime several backends share says nothing about which of them made an allocation
+    // it names, and the framework, which knows the backend that allocated each tensor, hands such a
+    // backend its own allocations there itself, and no other backend's.
     bool CanAddress(MemoryLocation location)
         => location.Space == MemorySpace
            && (location.Space.IsKnown
@@ -58,15 +62,19 @@ public interface IShorokooBackend
 
     // Where a run on this backend reads a tensor of `elementType` it is fed: the memory a tensor has
     // to be in to be handed to the session as it stands, and the memory a copy made for such a run
-    // is put in -- the question To(context) and a run's feed both answer by, so they agree. The
-    // default is this backend's own memory in its own runtime, and the host memory of that runtime
-    // for a string tensor, which every runtime so far keeps there whatever its device.
+    // is put in -- the question To(context) and a run's read both answer by, so they agree. A
+    // consumed feed that no output may be written into is the one that goes elsewhere: to the
+    // session in host memory, for the runtime to copy into its own arena. The default is this
+    // backend's own memory in its own runtime, and the host memory of that runtime for a string
+    // tensor, which every runtime so far keeps there whatever its device.
     MemoryLocation RunMemoryOf(ShorokooTensorElementType elementType)
         => new(elementType == ShorokooTensorElementType.String ? MemorySpace.Host : MemorySpace, RuntimeIdentity);
 
-    // Where a run on this backend reads a sequence it is fed, as RunMemoryOf answers for a tensor.
+    // Where a run on this backend reads a sequence it is fed, as RunMemoryOf answers for a tensor,
+    // and where its runs leave the sequences they produce, which the framework records them as in.
     // The default is the host memory of this backend's runtime: ONNX Runtime reads a sequence's
-    // elements through the host whatever its provider (see CreateSequence).
+    // elements through the host whatever its provider (see CreateSequence), and brings a sequence a
+    // run produces to the host even when the run was asked to keep it.
     MemoryLocation SequenceRunMemory => new(MemorySpace.Host, RuntimeIdentity);
 
     // Releases a value this backend allocated. Every release the framework makes of a tensor's
@@ -76,8 +84,9 @@ public interface IShorokooBackend
     //
     // Memory a run consumed is the one exception, since the framework hands it over rather than
     // releasing it: the session it was handed to releases it (IShorokooSession.RunConsuming). That
-    // session is the running backend's, which can address the memory as it stands and so shares the
-    // allocating backend's runtime, but may be another instance of it; and a session that leaves
+    // session is the running backend's, and what it is handed is a value of that backend's runtime --
+    // memory it addresses as it stands, or host memory of its runtime -- so it shares the allocating
+    // backend's runtime, but may be another instance of it; and a session that leaves
     // RunConsuming to the interface's default has it disposed without coming here. A backend that
     // counts its releases implements RunConsuming and releases there through this.
     void Release(IShorokooTensorValue value)

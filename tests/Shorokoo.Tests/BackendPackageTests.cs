@@ -75,6 +75,7 @@ public class BackendPackageCoverageTests
         Assert.Contains("does not say", CudaDriver.Refusal(new CudaDriverReading(true, 0, 1), "13.0"));
         Assert.Contains("no CUDA device", CudaDriver.Refusal(new CudaDriverReading(true, 13020, 0), "13.0"));
         Assert.Null(CudaDriver.Refusal(new CudaDriverReading(true, 13000, 1), "13.0"));
+        Assert.Contains("12.4.1", CudaDriver.Refusal(new CudaDriverReading(true, 13000, 1), "12.4.1"));
     }
 
     [Fact]

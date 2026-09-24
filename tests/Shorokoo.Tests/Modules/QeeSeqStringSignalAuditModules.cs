@@ -396,7 +396,8 @@ namespace Shorokoo.Tests.Modules
     /// Cast between numbers and strings: a float as printf's %.8g, an integer and a bool in
     /// decimal, and strings read back as floats (exponent form, INF in any case) and as integers;
     /// a reversing Slice of strings whose start clamps to the first; TfIdfVectorizer weighting by
-    /// output position in TFIDF and IDF modes.
+    /// output position in TFIDF and IDF modes; RegexFullMatch in RE2's syntax, whose \d and \s
+    /// are ASCII, with POSIX classes, \pL, \x{41} and \z.
     /// Inputs x = ["Hello World", "the  quick fox"], f = [1, 0.1, −3.5, 1e20, 1e−5, 123456789],
     /// i = [−7, 0, 9007199254740993].</summary>
     [Module]
@@ -436,11 +437,19 @@ namespace Shorokoo.Tests.Modules
                 IntMismatch((Tensor<int64>)OnnxOp.Cast(Strings("42", "-17"), null, DType.Int64), Vector(42L, -17L)) +
                 Mismatch(x.Slice(Vector(-4L), Vector(-10L), Vector(0L), Vector(-1L)), Strings("Hello World")) +
                 FloatMismatch(TfIdf(i, "TFIDF"), Vector(0.5f, 1.5f, 5f)) +
-                FloatMismatch(TfIdf(i, "IDF"), Vector(0.5f, 1.5f, 2.5f));
+                FloatMismatch(TfIdf(i, "IDF"), Vector(0.5f, 1.5f, 2.5f)) +
+                IntMismatch(Matches(Strings("123", "١٢٣"), @"\d+"), Vector(1L, 0L)) +
+                IntMismatch(Matches(Strings(" ", "\u00a0"), @"\s"), Vector(1L, 0L)) +
+                IntMismatch(Matches(Strings("abc", "ab1"), "[[:alpha:]]+"), Vector(1L, 0L)) +
+                IntMismatch(Matches(Strings("é", "1"), @"\pL+"), Vector(1L, 0L)) +
+                IntMismatch(Matches(Strings("A", "a"), @"\x{41}\z"), Vector(1L, 0L));
             return mismatch < Scalar(1L);
         }
 
         private static Tensor<utf8> Strings(params string[] values) => (Tensor<utf8>)OnnxOp.Constant(values);
+
+        private static Tensor<int64> Matches(Tensor<utf8> x, string pattern)
+            => ((Tensor<bit>)OnnxOp.RegexFullMatch(x, pattern)).Cast<int64>();
 
         private static Tensor<float32> TfIdf(Tensor<int64> i, string mode)
             => (Tensor<float32>)OnnxOp.TfIdfVectorizer(i.Slice(Vector(0L), Vector(1L)) * Scalar(0L) + Vector(1L, 2L, 3L, 4L, 1L), maxGramLength: 2L, maxSkipCount: 0L,

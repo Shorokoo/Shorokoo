@@ -894,7 +894,7 @@ public class PyTorchBackendCoverageTests
         var root = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "shorokoo-uv-" + Guid.NewGuid().ToString("N"))).FullName;
         var (uv, log) = (Path.Combine(root, "uv"), Path.Combine(root, "log"));
         File.WriteAllText(uv, "#!/bin/sh\n" + script.Replace("LOG", log) + "\n");
-        File.SetUnixFileMode(uv, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(uv, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         var clock = System.Diagnostics.Stopwatch.StartNew();
         try
         {

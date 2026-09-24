@@ -1005,6 +1005,28 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
+    public void TestTheBackendReleasesTheValueOfATensorARunConsumedWhetherTheRunSucceedsOrFails()
+    {
+        using var context = new ComputeContext();
+        var x = InputVector<float32>("x");
+        var failing = new InternalComputationGraph([x], [OnnxOp.Reshape(x, Vector(3L), allowZero: false)]);
+        bool Released(Action<TensorData> run)
+        {
+            var value = DefaultBackend.Instance.CreateTensor<float>([1f, 2f, 3f, 4f], [4L]);
+            try { run(TensorData.Create(new Shape(4L), DType.Float32, value, DefaultBackend.Instance)); }
+            catch (OnnxRuntimeException) { }
+            try { _ = value.Shape; return false; }
+            catch (ObjectDisposedException) { return true; }
+        }
+
+        Assert.All((bool[])[
+            Released(t => context.Execute(Doubling(), t)),
+            Released(t => context.Execute(failing, t)),
+            Released(t => context.Compile(Doubling()).Execute(t)),
+            Released(t => context.Compile(failing).Execute(t))], Assert.True);
+    }
+
+    [Fact]
     public void TestAnAlreadyCancelledRunIsRefusedBeforeItTakesWhatItWasFed()
     {
         using var cancelled = new CancellationTokenSource();

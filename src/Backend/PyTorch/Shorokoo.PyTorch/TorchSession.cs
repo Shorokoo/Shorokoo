@@ -36,6 +36,7 @@ internal sealed class TorchSession : IShorokooSession
     private readonly long? _limitBytes;
     private readonly NodePlacement? _nodePlacement;
     private readonly AliasSlot[] _aliases;
+    private readonly bool[] _bindable;
 
     // The loaded model's entry point and its constants, and what the run needs to keep outputs off
     // the constants' memory. Held in fields for the session's life: they are what the model is.
@@ -65,15 +66,17 @@ internal sealed class TorchSession : IShorokooSession
         _limitBytes = limitBytes;
         _nodePlacement = nodePlacement;
         OutputPlacement = outputPlacement;
-        // An output of the graph's own, by one of main's inputs: the pairs a run can bind at all.
-        // Written by the graph, a pair binds wherever the output ends up in the memory its input is
-        // in; copied home into it, only on a CUDA session, for an output fetched back.
-        _aliases =
+        // Every slot of the translation's plan, in its numbering, which the translated code's writes
+        // name; and of those, the pairs a run can bind at all: an output of the graph's own, by one of
+        // main's inputs. Written by the graph, a pair binds wherever the output ends up in the memory
+        // its input is in; copied home into it, only on a CUDA session, for an output fetched back.
+        _aliases = [.. model.Aliases];
+        _bindable =
         [
-            .. model.Aliases.Where(slot => slot.InputIndex >= 0 && _outputIndex.ContainsKey(slot.Output)
-                                           && (slot.WrittenByTheGraph || backend.OnCuda)),
+            .. _aliases.Select(slot => slot.InputIndex >= 0 && _outputIndex.ContainsKey(slot.Output)
+                                       && (slot.WrittenByTheGraph || backend.OnCuda)),
         ];
-        BindableAliases = [.. _aliases.Select(slot => new OutputAlias(slot.Output, slot.Input))];
+        BindableAliases = [.. _aliases.Where((_, slot) => _bindable[slot]).Select(slot => new OutputAlias(slot.Output, slot.Input))];
         _main = main;
         _constants = constants;
         _constantStorages = constantStorages;
@@ -338,10 +341,11 @@ internal sealed class TorchSession : IShorokooSession
     }
 
     /// <summary>
-    /// Per alias slot, the position of the input whose consumed value the output may be written
-    /// into, or -1: where the run consumed the very value it is fed as that input, fed it under no
-    /// other name, and it is a tensor of this runtime — a copy made for the run from another
-    /// runtime's value is not the value consumed. What else it takes is settled in the run.
+    /// Per slot of the translation's plan, the position of the input whose consumed value the output
+    /// may be written into, or -1: where the session binds the slot's pair, the run consumed the very
+    /// value it is fed as that input, fed it under no other name, and it is a tensor of this runtime
+    /// — a copy made for the run from another runtime's value is not the value consumed. What else it
+    /// takes is settled in the run.
     /// </summary>
     private int[] AliasTargets(
         IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
@@ -349,7 +353,7 @@ internal sealed class TorchSession : IShorokooSession
         TorchTensorValue[] feeds,
         IReadOnlySet<string> retainedOutputNames)
     {
-        if (_aliases.Length == 0 || consumed is null || consumed.Count == 0) return [];
+        if (BindableAliases.Count == 0 || consumed is null || consumed.Count == 0) return [];
         var handed = new HashSet<IShorokooTensorValue>(consumed, ReferenceEqualityComparer.Instance);
         var fedAs = new Dictionary<IShorokooTensorValue, int>(ReferenceEqualityComparer.Instance);
         foreach (var value in inputs.Values) fedAs[value] = fedAs.GetValueOrDefault(value) + 1;
@@ -357,7 +361,7 @@ internal sealed class TorchSession : IShorokooSession
         for (int slot = 0; slot < targets.Length; slot++)
         {
             var alias = _aliases[slot];
-            var value = inputs.GetValueOrDefault(alias.Input);
+            var value = _bindable[slot] ? inputs.GetValueOrDefault(alias.Input) : null;
             targets[slot] = value is TorchTensorValue { ValueType: ShorokooOnnxValueType.Tensor } own
                             && own.ElementType != ShorokooTensorElementType.String
                             && handed.Contains(own) && fedAs[own] == 1 && ReferenceEquals(feeds[alias.InputIndex], own)
@@ -388,7 +392,7 @@ internal sealed class TorchSession : IShorokooSession
             {
                 var alias = _aliases[slot];
                 using var entry = new PyTuple([
-                    new PyInt(_outputIndex[alias.Output]), new PyInt(targets[slot]),
+                    new PyInt(_bindable[slot] ? _outputIndex[alias.Output] : -1), new PyInt(targets[slot]),
                     (_backend.OnCuda && retainedOutputNames.Contains(alias.Output)).ToPython(),
                 ]);
                 aliases.Append(entry);
@@ -437,7 +441,7 @@ internal sealed class TorchSession : IShorokooSession
                         using var written = triple[2];
                         outputs.Add(TorchTensorValue.Wrap(triple[0], description, _outputSequenceTypes[wanted[i]]));
                         if (written.IsTrue())
-                            (aliased ??= new string?[wanted.Length])[i] = _aliases.First(a => a.Output == outputNames[i]).Input;
+                            (aliased ??= new string?[wanted.Length])[i] = _aliases.Where((_, slot) => _bindable[slot]).First(a => a.Output == outputNames[i]).Input;
                     }
                 }
                 catch

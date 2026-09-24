@@ -117,9 +117,11 @@ public sealed class HostBackend : IShorokooBackend
 /// <para>Such a tensor still has to be released somehow and asked where it is, so it gets a
 /// backend that answers honestly: its memory is released by disposing the value, which is the one
 /// release anything can ask of a value; it is host memory if the value says so and somewhere
-/// unnamed otherwise; and no backend can address it in place, since nothing knows which runtime
-/// made it. Moving it anywhere copies, which works for a host-readable value and is refused, in
-/// words that name the fix, for one that is not.</para>
+/// unnamed otherwise; and no runtime is handed it as it stands, since nothing knows which runtime
+/// made it. A host-readable one is read where it is by the host — <c>ToHost()</c> and
+/// <c>To(ComputeContext.Host)</c> hand it back as it is — and through a copy by a run, or by a
+/// context whose backend runs. One that is not host-readable cannot be copied at all: moving it
+/// is refused, and so is a run fed it, in words that name the fix.</para>
 /// </summary>
 internal sealed class UnrecordedBackend : IShorokooBackend
 {

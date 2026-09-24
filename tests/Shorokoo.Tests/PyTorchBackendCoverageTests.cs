@@ -694,6 +694,14 @@ public class PyTorchBackendCoverageTests
         Assert.Equal("c,b 101 101 101 9 9 9", AliasedRun(second, graph));
     }
 
+    [Fact]
+    public void TestAnInitializerWhoseRawDataIsNotItsShapesSizeIsRefusedAtSessionCreation()
+    {
+        Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(RawInitialized(4), default, default, DeviceMemorySettings.Default));
+        Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(RawInitialized(16), default, default, DeviceMemorySettings.Default));
+        Torch.CreateSession(RawInitialized(12), default, default, DeviceMemorySettings.Default).Dispose();
+    }
+
     private static PythonEnvironment Resolve(PythonEnvironmentOptions options, string variable)
         => PythonEnvironmentResolver.Resolve(PythonEnvironmentLock.Cpu, options,
             name => name == PythonEnvironmentResolver.EnvironmentVariable ? variable : null);
@@ -767,6 +775,13 @@ public class PyTorchBackendCoverageTests
         var values = string.Join(" ", results.SelectMany(r => r.GetTensorDataAsSpan<float>().ToArray()));
         foreach (var result in results) result.Dispose();
         return string.Join(",", results.Select((_, i) => aliased.Count == 0 ? "-" : aliased[i] ?? "-")) + " " + values;
+    }
+
+    private static byte[] RawInitialized(int bytes)
+    {
+        var graph = ComputeContextLifetimeCoverageTests.GraphOf("x:float[3]", "y:float[3]", Op("Add", "x w", "y"));
+        graph.Initializers.Add(new TensorProto { Name = "w", data_type = (int)TensorProto.DataType.Float, Dims = [3], RawData = new byte[bytes] });
+        return Serialize(graph);
     }
 
     /// <summary>y = v + 1, m times over, by a Loop: one node per iteration to stop at.</summary>

@@ -44,8 +44,9 @@ internal sealed class OrtSession : IShorokooSession
     // with the shape and element type ORT inferred for the output. A pair whose output shape ORT
     // could not settle when the session was built is not here, since nothing could be bound to it
     // without knowing the output would fit -- a symbolic dim is only known once the run is under
-    // way, and a buffer bound to the wrong shape fails the run.
-    private readonly IReadOnlyList<AliasSlot> _aliases;
+    // way, and a buffer bound to the wrong shape fails the run. Keyed by output: the proof pairs each
+    // output with one input at most.
+    private readonly Dictionary<string, AliasSlot> _aliases;
 
     /// <summary>An output this session may write into an input's memory, and what the input's value
     /// has to be for that to happen.</summary>
@@ -59,7 +60,7 @@ internal sealed class OrtSession : IShorokooSession
 
     /// <summary>The pairs this session binds where a run lets it (test hook).</summary>
     internal IReadOnlyList<OutputAlias> OutputAliases
-        => [.. _aliases.Select(slot => new OutputAlias(slot.Output, slot.Input))];
+        => [.. _aliases.Values.Select(slot => new OutputAlias(slot.Output, slot.Input))];
 
     public IReadOnlySet<string> AliasableInputs { get; }
 
@@ -81,7 +82,7 @@ internal sealed class OrtSession : IShorokooSession
         _backend = backend;
         _profileDirectory = profileDirectory;
         _aliases = Slots(session, outputAliases);
-        AliasableInputs = _aliases.Select(slot => slot.Input).ToHashSet(StringComparer.Ordinal);
+        AliasableInputs = _aliases.Values.Select(slot => slot.Input).ToHashSet(StringComparer.Ordinal);
         // Nothing to clean up, so nothing to finalize -- every untraced session would otherwise
         // join the finalization queue to run an early return.
         if (profileDirectory is null) GC.SuppressFinalize(this);
@@ -101,9 +102,9 @@ internal sealed class OrtSession : IShorokooSession
     /// output the run then makes <c>[1]</c>, and the run fail on the binding. The graph tells the
     /// two apart — a scalar's shape is there, and empty.</para>
     /// </summary>
-    private static List<AliasSlot> Slots(InferenceSession session, IReadOnlyList<ProvedAlias> outputAliases)
+    private static Dictionary<string, AliasSlot> Slots(InferenceSession session, IReadOnlyList<ProvedAlias> outputAliases)
     {
-        var slots = new List<AliasSlot>(outputAliases.Count);
+        var slots = new Dictionary<string, AliasSlot>(outputAliases.Count, StringComparer.Ordinal);
         if (outputAliases.Count == 0) return slots;
         var inputs = new HashSet<string>(session.InputNames, StringComparer.Ordinal);
         var outputs = session.OutputMetadata;
@@ -114,7 +115,7 @@ internal sealed class OrtSession : IShorokooSession
             // nothing here proves writing one over another sound, so it is never bound.
             if (!output.IsTensor || output.ElementDataType == TensorElementType.String) continue;
             if (!output.Dimensions.Select(d => (long)d).SequenceEqual(shape)) continue;
-            slots.Add(new AliasSlot(alias.Output, alias.Input, shape, output.ElementDataType));
+            slots.TryAdd(alias.Output, new AliasSlot(alias.Output, alias.Input, shape, output.ElementDataType));
         }
         return slots;
     }
@@ -201,8 +202,7 @@ internal sealed class OrtSession : IShorokooSession
         out IReadOnlyList<string?> aliasedInputs)
     {
         ArgumentNullException.ThrowIfNull(consumed);
-        var aliased = new string?[outputNames.Count];
-        aliasedInputs = aliased;
+        aliasedInputs = [];
         try
         {
             if (OutputsIntoConsumed(inputs, consumed, outputNames, retainedOutputNames) is not { } into)
@@ -211,8 +211,10 @@ internal sealed class OrtSession : IShorokooSession
                     : RunRetainingOutputs(inputs, outputNames, retainedOutputNames, runSettings);
 
             var results = RunBound(inputs, outputNames, retainedOutputNames, into, runSettings);
+            var aliased = new string?[outputNames.Count];
             for (int i = 0; i < outputNames.Count; i++)
                 if (into.TryGetValue(outputNames[i], out var target)) aliased[i] = target.Input;
+            aliasedInputs = aliased;
             return results;
         }
         finally
@@ -249,13 +251,12 @@ internal sealed class OrtSession : IShorokooSession
         var handed = new HashSet<IShorokooTensorValue>(consumed, ReferenceEqualityComparer.Instance);
         var fedAs = new Dictionary<IShorokooTensorValue, int>(ReferenceEqualityComparer.Instance);
         foreach (var value in inputs.Values) fedAs[value] = fedAs.GetValueOrDefault(value) + 1;
-        var requested = new HashSet<string>(outputNames, StringComparer.Ordinal);
         var deviceMemory = _outputMemory.Value.DeviceMemoryInfo;
 
         Dictionary<string, AliasTarget>? into = null;
-        foreach (var slot in _aliases)
+        foreach (var name in outputNames)
         {
-            if (!requested.Contains(slot.Output) || !inputs.TryGetValue(slot.Input, out var value)) continue;
+            if (!_aliases.TryGetValue(name, out var slot) || !inputs.TryGetValue(slot.Input, out var value)) continue;
             if (!handed.Contains(value) || fedAs[value] != 1 || value is not OrtTensorValue own) continue;
             var onDevice = deviceMemory is not null && retainedOutputNames.Contains(slot.Output);
             if (!Fits(own, slot, onDevice ? deviceMemory : null)) continue;

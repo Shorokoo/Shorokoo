@@ -2544,6 +2544,32 @@ public class TrainingRigTrainingLoopCoverageTests
     }
 
     [Fact]
+    public void TestATensorAStepConsumedNamesTheInputItFedByTheNameItsStructGaveTheField()
+    {
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
+            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([4L], [1f, 2f, 3f, 4f]))],
+            new AdamWOptimizerHyperparameters { LearningRate = Hyperparameter.Runtime() });
+        var renamed = new TensorStructDef([new TensorStructFieldDef("x", DataStructure.Tensor, 1, DType.Float32)], "Renamed");
+        void AssertLabelled(TensorDataStruct input)
+        {
+            var (cp, hp, target) = (rig.CreateInitialCheckpoint(), rig.MakeHyperparameters(0.1f), rig.TargetDef.FromOrderedData(TensorData([4L], [2f, 4f, 6f, 8f])));
+            rig.TrainStep(cp, hp, input, target);
+            (TensorDataStruct Struct, int Field, string Section)[] fed =
+            [
+                (cp.TrainableParams, 0, "the checkpoint's trainable parameter"), (cp.OptimizerState, 1, "the checkpoint's optimizer state"),
+                (hp, 0, "the hyperparameter"), (input, 0, "the training input"), (target, 0, "the training target"),
+            ];
+            Assert.All(fed, f => Assert.Contains($"which it fed as {f.Section} '{f.Struct.Definition.Fields[f.Field].Name}'",
+                Assert.Throws<ObjectDisposedException>(() => ((TensorData)f.Struct[f.Field]).CopyRawMemory()).Message));
+        }
+
+        AssertLabelled(rig.InputDef.FromOrderedData(TensorData([4L], [1f, 2f, 3f, 4f])));
+        AssertLabelled(renamed.FromOrderedData(TensorData([4L], [1f, 2f, 3f, 4f])));
+        AssertLabelled(rig.InputDef.FromOrderedData(TensorData([4L], [1f, 2f, 3f, 4f])));
+    }
+
+    [Fact]
     public void TestAFieldGivenSharedWhenItsStructWasBuiltIsReadByAStepThatConsumesTheRestOfIt()
     {
         var rig = IndexedWeightRig();

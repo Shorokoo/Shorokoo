@@ -195,6 +195,12 @@ namespace Shorokoo
         /// through <c>TrainStep</c>.</summary>
         private const string ResidentStepDescription = "a TrainingRig's resident run step";
 
+        /// <summary>What a message calls each input of a step fed structs named as the rig's own
+        /// definitions name them, worked out by the first step; see <see cref="StepLabels"/>. The
+        /// definitions are fixed once the rig is built, and two steps racing to fill this build the
+        /// same labels.</summary>
+        private string[]? _stepLabels;
+
         /// <summary>The tensor a feed is, or wraps, or null for anything else.</summary>
         private static TensorData? FedTensor(IData feed)
             => feed is SharedInput shared ? shared.Value as TensorData : feed as TensorData;
@@ -2946,43 +2952,37 @@ namespace Shorokoo
 
             // Execute the training step graph.
             // Graph inputs (after lowering): [param_fields..., state_fields..., opt_state_fields..., hyperparam_fields..., counter_inputs..., model_input_fields..., target_fields...]
-            // CompiledGraph.Execute expands TensorDataStruct inputs into individual fields; an empty
-            // struct contributes no fields. The hyperparams input slot exists only when the rig has
+            // Each struct contributes its fields in order (AddStruct); an empty struct contributes
+            // none. The hyperparams input slot exists only when the rig has
             // schedule-less runtime hyperparameters; the int64 counter inputs {step, epoch, batchIndex}
             // exist only for those a scheduled hyperparameter consumes, and are fed the checkpoint's
             // current counters so the scheduler math resumes correctly from a saved checkpoint.
             //
             // How each is fed is the caller's, as for any run: the checkpoint's state as its
             // FeedMode says, the batch and the hyperparameters as they were passed -- an initial
-            // checkpoint included, whose tensors are copies of the rig's own. The counters are the
-            // rig's business, built here for this step alone (consumed).
+            // checkpoint included, whose tensors are copies of the rig's own -- and a field built
+            // into its struct with a mode of its own as that says too. The counters are the rig's
+            // business, built here for this step alone (consumed).
             //
             // Each feed is labelled with what the caller passed it as, which is what a message about
             // it -- the one a tensor this step consumed throws, say -- has to name: the graph's own
             // names for the state inputs are internal identifiers.
-            var execInputs = new List<IData>();
-            var labels = new List<string>();
-            AddState(execInputs, labels, checkpoint.TrainableParams, checkpoint.FeedMode, "the checkpoint's trainable parameter");
-            AddState(execInputs, labels, checkpoint.ModelState, checkpoint.FeedMode, "the checkpoint's model state");
-            AddState(execInputs, labels, checkpoint.OptimizerState, checkpoint.FeedMode, "the checkpoint's optimizer state");
-            if (HyperparameterStructDef.Fields.Length > 0)
-                AddStruct(execInputs, labels, hyperparams!, "the hyperparameter");
+            var hyperparameters = HyperparameterStructDef.Fields.Length > 0 ? hyperStruct! : null;
+            var labels = StepLabels(checkpoint, hyperparameters, inputStruct, targetStruct);
+            var execInputs = new List<IData>(labels.Count);
+            AddStruct(execInputs, checkpoint.TrainableParams, checkpoint.FeedMode);
+            AddStruct(execInputs, checkpoint.ModelState, checkpoint.FeedMode);
+            AddStruct(execInputs, checkpoint.OptimizerState, checkpoint.FeedMode);
+            if (hyperparameters is not null) AddStruct(execInputs, hyperparameters, TrainingFeeds.ModeOf(hyperparams!));
             foreach (var counter in _counterInputNames)
-            {
                 execInputs.Add(Shorokoo.Globals.TensorData(Array.Empty<long>(), CounterValue(checkpoint, counter)));
-                labels.Add($"the '{counter}' counter");
-            }
-            AddStruct(execInputs, labels, trainingInput, "the training input");
-            AddStruct(execInputs, labels, trainingOutput, "the training target");
+            AddStruct(execInputs, inputStruct, TrainingFeeds.ModeOf(trainingInput));
+            AddStruct(execInputs, targetStruct, TrainingFeeds.ModeOf(trainingOutput));
             // A loss that ignores its target leaves TargetDef empty, so the struct above contributes
             // no field — the rig supplies the dead input's value itself (Shorokoo/Shorokoo#331). Target
             // fields come last in the layout, so it goes here. It is the rig's, and fed every step:
             // read, never consumed.
-            if (_ignoredTargetPlaceholder is not null)
-            {
-                execInputs.Add(_ignoredTargetPlaceholder.Shared());
-                labels.Add("the rig's stand-in for the target its loss ignores");
-            }
+            if (_ignoredTargetPlaceholder is not null) execInputs.Add(_ignoredTargetPlaceholder.Shared());
             var expandedInputs = execInputs.ToArray();
             var compiled = CompiledTrainStepFor(expandedInputs);
             var stateOutputCount =
@@ -3123,23 +3123,81 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// Adds <paramref name="state"/>'s fields to a step's inputs, each fed as
-        /// <paramref name="feedMode"/> says — as it is, and consumed, when that is null — combined
-        /// with any mode the field was given when the struct was built
-        /// (<see cref="TensorDataStruct.FieldFeedMode"/>), and labelled <paramref name="section"/>
-        /// and its field's name. No checkpoint holds the rig's own initial values
-        /// (<see cref="CopiesOf"/>), so every field is the caller's to spend.
+        /// Adds <paramref name="fed"/>'s fields to a step's inputs in its definition's order, each fed
+        /// as <paramref name="mode"/> — the mode the struct was passed in, or the checkpoint's
+        /// <see cref="TrainingCheckpoint.FeedMode"/> for its state; null is as it is, and consumed —
+        /// combines with any mode the field was given when the struct was built
+        /// (<see cref="TensorDataStruct.FieldFeedMode"/>). No checkpoint holds the rig's own initial
+        /// values (<see cref="CopiesOf"/>), so every field of state is the caller's to spend.
         /// </summary>
-        private static void AddState(
-            List<IData> inputs, List<string> labels, TensorDataStruct state, SharedInputMode? feedMode,
-            string section)
+        private static void AddStruct(List<IData> inputs, TensorDataStruct fed, SharedInputMode? mode)
         {
-            foreach (var field in state.Definition.Fields)
+            foreach (var field in fed.Definition.Fields)
             {
-                var value = state.Fields[field.Name];
-                inputs.Add(state.FieldFeedMode(field.Name, feedMode) is { } mode ? new SharedInput(value, mode) : value);
-                labels.Add($"{section} '{field.Name}'");
+                var value = fed.Fields[field.Name];
+                inputs.Add(fed.FieldFeedMode(field.Name, mode) is { } fieldMode ? new SharedInput(value, fieldMode) : value);
             }
+        }
+
+        /// <summary>
+        /// What a message about a training step calls each of its inputs, in the order the step feeds
+        /// them: what the caller passed each as — "the checkpoint's trainable parameter 'w'", "the
+        /// training input 'x'" — since the step graph's own names for them are internal identifiers.
+        ///
+        /// <para>Only a message reads them. So they are worked out once per rig for structs whose
+        /// fields are named as the rig's own definitions name them — every struct the rig builds, and
+        /// every batch built from <see cref="InputDef"/> or <see cref="TargetDef"/> — and afresh, from
+        /// the names the caller's structs give their fields, for any other. The hyperparameters are
+        /// null where the rig has none to feed.</para>
+        /// </summary>
+        private IReadOnlyList<string> StepLabels(
+            TrainingCheckpoint checkpoint, TensorDataStruct? hyperparameters, TensorDataStruct input, TensorDataStruct target)
+        {
+            if (NamedAs(checkpoint.TrainableParams, TrainableParamStructDef)
+                && NamedAs(checkpoint.ModelState, ModelStateDef)
+                && NamedAs(checkpoint.OptimizerState, OptimizerStateDef)
+                && (hyperparameters is null || NamedAs(hyperparameters, HyperparameterStructDef))
+                && NamedAs(input, InputDef)
+                && NamedAs(target, TargetDef))
+                return _stepLabels ??= LabelsFor(TrainableParamStructDef, ModelStateDef, OptimizerStateDef,
+                    hyperparameters is null ? null : HyperparameterStructDef, InputDef, TargetDef);
+            return LabelsFor(checkpoint.TrainableParams.Definition, checkpoint.ModelState.Definition,
+                checkpoint.OptimizerState.Definition, hyperparameters?.Definition, input.Definition, target.Definition);
+        }
+
+        /// <summary><see cref="StepLabels"/> for structs of these definitions.</summary>
+        private string[] LabelsFor(
+            TensorStructDef parameters, TensorStructDef modelState, TensorStructDef optimizerState,
+            TensorStructDef? hyperparameters, TensorStructDef input, TensorStructDef target)
+        {
+            var labels = new List<string>();
+            void Section(TensorStructDef def, string section)
+            {
+                foreach (var field in def.Fields) labels.Add($"{section} '{field.Name}'");
+            }
+
+            Section(parameters, "the checkpoint's trainable parameter");
+            Section(modelState, "the checkpoint's model state");
+            Section(optimizerState, "the checkpoint's optimizer state");
+            if (hyperparameters is not null) Section(hyperparameters, "the hyperparameter");
+            foreach (var counter in _counterInputNames) labels.Add($"the '{counter}' counter");
+            Section(input, "the training input");
+            Section(target, "the training target");
+            if (_ignoredTargetPlaceholder is not null) labels.Add("the rig's stand-in for the target its loss ignores");
+            return [.. labels];
+        }
+
+        /// <summary>Whether <paramref name="fed"/>'s fields are named, in order, as
+        /// <paramref name="own"/>'s are — which they are by reference for every struct the rig
+        /// builds.</summary>
+        private static bool NamedAs(TensorDataStruct fed, TensorStructDef own)
+        {
+            if (ReferenceEquals(fed.Definition, own)) return true;
+            var fields = fed.Definition.Fields;
+            if (fields.Length != own.Fields.Length) return false;
+            for (int i = 0; i < fields.Length; i++)
+                if (fields[i].Name != own.Fields[i].Name) return false;
+            return true;
         }
 
         /// <summary>Refuses a batch that does not fit <see cref="InputDef"/> and <see cref="TargetDef"/>,
@@ -3176,15 +3234,6 @@ namespace Shorokoo
                     case OptionalTensorData { Value: { } present }: present.ReleaseRunCopies(); break;
                     case TensorDataStruct nested: ReleaseReadCopies(nested); break;
                 }
-        }
-
-        /// <summary>Adds a struct feed's fields to a step's inputs, fed as the struct was, each
-        /// labelled <paramref name="section"/> and its field's name.</summary>
-        private static void AddStruct(List<IData> inputs, List<string> labels, IData feed, string section)
-        {
-            var fields = TrainingFeeds.StructOf(feed, nameof(feed)).Definition.Fields;
-            inputs.AddRange(ComputeContext.ExpandStructInputs([feed]));
-            foreach (var field in fields) labels.Add($"{section} '{field.Name}'");
         }
 
         // ---- Device-resident training (Shorokoo/Shorokoo#325) ----

@@ -116,6 +116,10 @@ namespace Shorokoo
             };
         }
 
+        /// <summary>The mode <paramref name="feed"/> was passed in: that of the <c>.Shared()</c> or
+        /// <c>.TryConsume()</c> it came through, or null for a struct passed as it is.</summary>
+        internal static SharedInputMode? ModeOf(IData feed) => feed is SharedInput shared ? shared.Mode : null;
+
         /// <summary>What a refusal calls <paramref name="data"/>: the public type a caller built it
         /// as, not the implementation behind it.</summary>
         private static string KindOf(IData data) => data switch

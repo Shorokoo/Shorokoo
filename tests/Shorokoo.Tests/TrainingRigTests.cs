@@ -474,6 +474,18 @@ public class TrainingRigFromScratchCoverageTests
             SGDOptimizer.ComputationGraph, narrow, 0.01f).OptimizationInputShapes[^1];
         Assert.Equal(DType.Int64, nll.DType);
         Assert.Equal([4L], nll.Shape.Dims);
+
+        var flattened = TrainingRig.FromScratch(
+            DigitClassifier.ComputationGraph, FlattenedTargetCrossEntropyLoss.ComputationGraph,
+            SGDOptimizer.ComputationGraph, narrow, 0.01f).OptimizationInputShapes[^1];
+        Assert.Equal(DType.Int64, flattened.DType);
+        Assert.Equal([4L], flattened.Shape.Dims);
+
+        var cast = TrainingRig.FromScratch(
+            DigitClassifier.ComputationGraph, Int32TargetNLLLoss.ComputationGraph,
+            SGDOptimizer.ComputationGraph, narrow, 0.01f).OptimizationInputShapes[^1];
+        Assert.Equal(DType.Int32, cast.DType);
+        Assert.Equal([4L], cast.Shape.Dims);
     }
 
     [Fact]
@@ -2491,7 +2503,7 @@ public class TrainingRigTrainingLoopCoverageTests
         Assert.Throws<OnnxRuntimeException>(() => run.Step(outOfRange.Shared(), target.Shared()));
         Assert.True(float.IsFinite(run.Step(input.Shared(), target.Shared())));
         Assert.Throws<OnnxRuntimeException>(() => run.Step(outOfRange.Shared(), target.Shared()));
-        Assert.Contains("StepToCheckpoint", Assert.Throws<InvalidOperationException>(
+        Assert.Contains("the last checkpoint you took with StepToCheckpoint", Assert.Throws<InvalidOperationException>(
             () => run.Step(input.Shared(), target.Shared())).Message);
         Assert.DoesNotContain(Tensors(published), t => t.IsDisposed);
     }
@@ -2516,7 +2528,7 @@ public class TrainingRigTrainingLoopCoverageTests
         Assert.Contains("the checkpoint the run began from, which its first step consumed", Lost(fresh));
         using var untaken = rig.BeginResidentRun();
         untaken.Step(input.Shared(), target.Shared());
-        Assert.Contains("handed out no checkpoint", Lost(untaken));
+        Assert.Contains("StepToCheckpoint(...) takes one", Lost(untaken));
     }
 
     [Fact]
@@ -2648,6 +2660,24 @@ public class TrainingRigTrainingLoopCoverageTests
     }
 
     [Fact]
+    public void TestAResidentRunLetsGoOfTheCopiesItReadACheckpointItDoesNotOwnThroughOnceItHasMovedOn()
+    {
+        var rig = IndexedWeightRig();
+        var (input, target) = (Indexed(rig, 0L, 1L, 2L, 3L), TargetBatch(2f, 4f, 6f, 8f));
+        static TensorData[] State(TrainingCheckpoint checkpoint) =>
+            [.. ((TensorDataStruct[])[checkpoint.TrainableParams, checkpoint.ModelState, checkpoint.OptimizerState])
+                .SelectMany(state => state.Fields.Values.OfType<TensorData>())];
+
+        var initial = rig.CreateInitialCheckpoint();
+        using var run = rig.BeginResidentRun(initial.Shared());
+        run.Step(input.Shared(), target.Shared());
+
+        Assert.NotEmpty(State(initial));
+        Assert.All(State(initial), t => Assert.True(t.CopiesAreEmpty));
+        Assert.DoesNotContain(State(initial), t => t.IsDisposed);
+    }
+
+    [Fact]
     public void TestAResidentRunAppliesRuntimeHyperparametersAndRefusesThemMissing()
     {
         var rig = TrainingRig.FromScratch(
@@ -2764,6 +2794,27 @@ public class TrainingRigCheckpointCoverageTests
             TrainingRig.StepFaultInjection = () => throw new InvalidOperationException("Node (Foo) is not supported");
             Assert.IsNotType<ComputeContextException>(Assert.Throws<InvalidOperationException>(
                 () => rig.TrainStep(ckpt.Shared(), InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f))));
+        }
+        finally { TrainingRig.StepFaultInjection = null; }
+    }
+
+    [Fact]
+    public void TestAResidentRunsAllocationFailureNamesTheRunsStepRatherThanTrainStep()
+    {
+        var rig = AdamRig();
+        const string arena = "[ErrorCode:Fail] /onnxruntime/core/framework/bfc_arena.cc:358 "
+            + "onnxruntime::BFCArena::AllocateRawInternal Failed to allocate memory for "
+            + "requested buffer of size 2359296";
+
+        TrainingRig.StepFaultInjection = () => throw new InvalidOperationException(arena);
+        try
+        {
+            using var run = rig.BeginResidentRun(rig.CreateInitialCheckpoint().WithStep(41));
+            var thrown = Assert.Throws<ComputeContextException>(
+                () => run.Step(InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f))).Message;
+            Assert.Contains("ResidentTrainingRun.Step", thrown);
+            Assert.Contains("the resident run step at step 41", thrown);
+            Assert.DoesNotContain("TrainStep", thrown);
         }
         finally { TrainingRig.StepFaultInjection = null; }
     }

@@ -273,6 +273,29 @@ public class GpuExecutionTests
     }
 
     /// <summary>
+    /// A checkpoint a resident run hands out is host memory the run goes on from: the next step
+    /// reads it through a card copy of its whole state, and then trains from state of its own. The
+    /// copies go with that step rather than staying with the caller's checkpoint, which would keep
+    /// a second copy of the state on the card for as long as the checkpoint lives.
+    /// </summary>
+    [CudaFact]
+    public void CudaProvider_AResidentRunLetsGoOfTheCardCopiesOfACheckpointItHandedOutOnceItHasMovedOn()
+    {
+        var (input, target) = (TrainingRigHelpers.InBatch(1f, 2f, 3f, 4f),
+                               TrainingRigHelpers.TargetBatch(2f, 4f, 6f, 8f));
+        var rig = ScalarRig();
+        using var run = rig.BeginResidentRun();
+        run.Step(input.Shared(), target.Shared());
+        var published = run.StepToCheckpoint(input.Shared(), target.Shared());
+        run.Step(input.Shared(), target.Shared());
+
+        TensorData[] state = [.. ((TensorDataStruct[])[published.TrainableParams, published.ModelState, published.OptimizerState])
+            .SelectMany(fields => fields.Fields.Values.OfType<TensorData>())];
+        Assert.NotEmpty(state);
+        Assert.All(state, t => Assert.True(t.CopiesAreEmpty));
+    }
+
+    /// <summary>
     /// Whether ONNX Runtime lets a run's feed go once the last node reading it has run, measured
     /// on a session of its own: it does not. A 64 MiB feed in the session's own arena, read by the
     /// graph's first node alone and held by nothing but the run, keeps its block to the end, so an

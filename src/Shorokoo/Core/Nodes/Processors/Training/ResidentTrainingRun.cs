@@ -238,6 +238,14 @@ namespace Shorokoo
                 if (whole && IsSpent(current)) _lost = Lost(beganFrom: !_ownsCurrent);
                 throw;
             }
+            finally
+            {
+                // State the run does not own -- the checkpoint it began from, or one it handed out --
+                // is read by this step alone, which moves the run on to state of its own. The copies
+                // made to read it would otherwise stay with the caller's checkpoint for as long as
+                // that lives: on a card, a second copy of the whole state.
+                if (!_ownsCurrent) TrainingRig.ReleaseStateReadCopies(current);
+            }
         }
 
         /// <summary>
@@ -276,7 +284,8 @@ namespace Shorokoo
 
         /// <summary>
         /// Takes over a step's result. The state it superseded was the step's to deal with: this
-        /// run's own was consumed by it, and anything else it only read.
+        /// run's own was consumed by it, and anything else it only read, letting go of the copies
+        /// it read it through.
         /// </summary>
         private TrainingCheckpoint Advance(TrainingCheckpoint next)
         {

@@ -554,7 +554,10 @@ fed `.Shared()` epoch after epoch is not held a second time in the run's memory 
 copied onto the card whole — and each step that reads a batch copies it afresh. It keeps the copies
 it made to read the **checkpoint's state**, which is read step after step: a checkpoint fed
 `.Shared()` to a step on a card keeps a copy of its state on the card for as long as the checkpoint
-lives. Drop a kept checkpoint once you are done with it rather than holding it past its use.
+lives. Drop a kept checkpoint once you are done with it rather than holding it past its use. A
+resident run is the exception: a checkpoint it does not own — the one you began it from
+`.Shared()`, or one `StepToCheckpoint` handed you — is read by one step only, the step that moves
+the run on to state of its own, and that step lets its copies go as it returns.
 
 - **A checkpoint** feeds its trainable parameters, model state and optimizer state as its
   `FeedMode` says. `null` — every checkpoint a step or a load hands you — is as it is, consumed.

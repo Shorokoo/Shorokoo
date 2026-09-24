@@ -1309,6 +1309,29 @@ public partial class TargetGatedLoss
     }
 }
 
+/// <summary>Cross-entropy that flattens its target before reading it as class indices, as a
+/// sequence model's loss flattens <c>[N, T]</c> labels.</summary>
+[Module]
+public partial class FlattenedTargetCrossEntropyLoss
+{
+    public static Scalar<float32> Inline(Tensor<float32> predictions, Tensor<int64> targets)
+    {
+        var (loss, _) = NN.SoftmaxCrossEntropyLoss(predictions, targets.Reshape(Vector(-1L)),
+            weights: null, ignoreIndex: null, reduction: "mean");
+        return loss.Scalar();
+    }
+}
+
+/// <summary>Negative log-likelihood whose caller feeds int32 class indices, cast to the int64 the
+/// operator reads.</summary>
+[Module]
+public partial class Int32TargetNLLLoss
+{
+    public static Scalar<float32> Inline(Tensor<float32> predictions, Tensor<int32> targets)
+        => NN.NegativeLogLikelihoodLoss(predictions, targets.Cast<int64>(),
+            weight: null, ignoreIndex: null, reduction: "mean").Scalar();
+}
+
 /// <summary>
 /// A model whose forward pass <b>reads</b> its module-owned state, not merely updates it — so a
 /// checkpoint whose state has moved off its initial value produces a different output, and binding

@@ -200,7 +200,7 @@ def run(main, args, wanted, retained, run_device, constant_storages, constant_id
     at; `aliases` one (output index, input index, retained) per slot of the translation's plan, in
     the numbering its `_alias_write` calls use -- an index -1 where the run may not write that slot
     into a consumed input -- see _Aliasing; `limit_bytes` what the run may allocate on a CUDA device
-    beyond what is allocated there already, or -1; `shrink` whether to hand the device's unused
+    beyond what its allocator holds there already, or -1; `shrink` whether to hand the device's unused
     cached blocks back once the run is over."""
     run_device = torch.device(run_device)
     outputs = moved = None

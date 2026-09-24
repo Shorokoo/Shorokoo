@@ -57,6 +57,9 @@ public abstract class TorchBackend : IShorokooBackend
 
     internal bool OnCuda => _cudaDeviceId is not null;
 
+    /// <summary>The CUDA device this backend runs on, or -1 on the CPU.</summary>
+    internal int CudaDeviceId => _cudaDeviceId ?? -1;
+
     /// <summary>
     /// Resolves the Python environment and starts PyTorch in it now, rather than on the first call
     /// that needs it, and returns the environment it runs in.
@@ -73,23 +76,52 @@ public abstract class TorchBackend : IShorokooBackend
             lock (_gate)
             {
                 if (_runtime is not null) return _runtime;
+                // Before the environment is resolved, since resolving it can mean provisioning several
+                // gigabytes of CUDA libraries for a card the machine turns out not to have.
+                if (_cudaDeviceId is not null && MissingDriver() is { } missing)
+                    throw new PythonEnvironmentException(PythonEnvironmentFailure.DeviceUnavailable,
+                        $"{Description} cannot start: {missing}");
                 var runtime = TorchRuntime.Start(_lockFile, _options);
                 if (_cudaDeviceId is { } device && device >= runtime.CudaDeviceCount)
                     throw new PythonEnvironmentException(PythonEnvironmentFailure.DeviceUnavailable,
                         $"{Description} needs CUDA device {device}, and torch {runtime.TorchVersion} in "
-                        + $"'{runtime.Environment.Directory}' sees {runtime.CudaDeviceCount}. A CPU build of "
-                        + "torch sees none: where a CPU torch backend started first, it chose the "
-                        + "environment for the whole process, so create the CUDA backend first or name a "
-                        + $"CUDA environment with {PythonEnvironmentResolver.EnvironmentVariable}.");
+                        + $"'{runtime.Environment.Directory}' sees {runtime.CudaDeviceCount}. "
+                        + (runtime.TorchCudaVersion.Length == 0
+                            ? "That is a CPU build of torch, which sees no card: where a CPU torch backend "
+                              + "started first, it chose the environment for the whole process, so create the "
+                              + "CUDA backend first or name a CUDA environment with "
+                              + $"{PythonEnvironmentResolver.EnvironmentVariable}."
+                            : $"It is built for CUDA {runtime.TorchCudaVersion}; the NVIDIA driver loads, so the "
+                              + "device number is past the cards this machine has, or they are hidden from "
+                              + "the process (CUDA_VISIBLE_DEVICES)."));
                 Volatile.Write(ref _runtime, runtime);
                 return runtime;
             }
         }
     }
 
+    /// <summary>
+    /// Why this machine's NVIDIA driver cannot serve this backend — none installed, too old for the
+    /// CUDA its manifest names, or no device — or null where it can, or where the assembly cannot be
+    /// read to ask (a single-file deployment has no path to probe), which leaves the answer to torch.
+    /// </summary>
+    private string? MissingDriver()
+    {
+        var location = GetType().Assembly.Location;
+        if (string.IsNullOrEmpty(location)) return null;
+        var probe = BackendPackage.Probe(location);
+        return probe.Reason == BackendRejection.MissingCudaDriver ? probe.Detail : null;
+    }
+
     /// <summary>Creates a session over a serialized ONNX model. The model is translated and
     /// checked here, so a model this backend cannot run is refused now, naming what it cannot
     /// run, rather than on its first run.</summary>
+    /// <param name="modelBytes">The serialized ONNX model.</param>
+    /// <param name="graphOptimization">Unused: torch runs the graph as translated.</param>
+    /// <param name="logSeverity">The least severity at which a warning the session's runs raise
+    /// in Python is shown; above <see cref="ShorokooLogSeverity.Warning"/> they are not.</param>
+    /// <param name="deviceMemory">On CUDA, the limit each run's allocations get
+    /// (<see cref="DeviceMemorySettings.LimitBytes"/>); ignored on the CPU.</param>
     /// <exception cref="TorchUnsupportedModelException">The model uses something this backend
     /// cannot run.</exception>
     public IShorokooSession CreateSession(
@@ -97,7 +129,36 @@ public abstract class TorchBackend : IShorokooBackend
         ShorokooGraphOptimization graphOptimization,
         ShorokooLogSeverity logSeverity,
         DeviceMemorySettings deviceMemory)
-        => TorchSession.Create(this, modelBytes);
+        => TorchSession.Create(this, modelBytes, logSeverity, deviceMemory, DiagnosticSettings.Default, []);
+
+    /// <summary>The same session, recording which device ran each node where
+    /// <paramref name="diagnostics"/> asks (<see cref="DiagnosticSettings.TraceNodePlacement"/>):
+    /// every node runs on this backend's device, so the record costs the runs nothing.</summary>
+    public IShorokooSession CreateSession(
+        ReadOnlyMemory<byte> modelBytes,
+        ShorokooGraphOptimization graphOptimization,
+        ShorokooLogSeverity logSeverity,
+        DeviceMemorySettings deviceMemory,
+        DiagnosticSettings diagnostics)
+        => TorchSession.Create(this, modelBytes, logSeverity, deviceMemory, diagnostics, []);
+
+    /// <summary>
+    /// The same session, writing the outputs <paramref name="outputAliases"/> names into the memory
+    /// of the inputs it pairs them with on a run that consumed those inputs, where the model proves
+    /// the pair (<see cref="OutputAliasProof"/> — torch runs the graph as handed over, so the proof
+    /// over it stands) and torch can make the write: see <see cref="TorchSession"/>.
+    /// </summary>
+    public IShorokooSession CreateSession(
+        ReadOnlyMemory<byte> modelBytes,
+        ShorokooGraphOptimization graphOptimization,
+        ShorokooLogSeverity logSeverity,
+        DeviceMemorySettings deviceMemory,
+        DiagnosticSettings diagnostics,
+        IReadOnlyList<OutputAlias> outputAliases)
+    {
+        ArgumentNullException.ThrowIfNull(outputAliases);
+        return TorchSession.Create(this, modelBytes, logSeverity, deviceMemory, diagnostics, outputAliases);
+    }
 
     public IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged
     {

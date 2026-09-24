@@ -14,7 +14,7 @@ environment**, which it can provision itself the first time you use it.
 
 ## Facts
 
-- Packages: `Shorokoo.PyTorch.Cpu` and `Shorokoo.PyTorch.Cuda`, for **Linux x64**. Each
+- Packages: `Shorokoo.PyTorch.Cpu` and `Shorokoo.PyTorch.Cuda`, for **Linux x64 and Windows x64**. Each
   brings `Shorokoo.PyTorch` (the translator and the backend) and `Shorokoo.PythonHost` (the
   embedded interpreter). Neither ships PyTorch itself: that lives in the Python environment.
 - A torch backend is **always named**: `new ComputeContext(new TorchCpuBackend())`. It is
@@ -86,6 +86,7 @@ Console.WriteLine(environment);             // "/home/me/.cache/shorokoo/python-
 | device | the host | `cuda:N` — device 0 by default, `new TorchCudaBackend(1)` for another |
 | environment | PyTorch's CPU build | PyTorch built for CUDA 13 |
 | machine needs | nothing | an NVIDIA driver recent enough for CUDA 13; the CUDA libraries come with the environment |
+| environment lock | torch `2.14.0+cpu` | Linux: PyPI's torch `2.14.0` (CUDA 13); Windows: `2.14.0+cu130` from PyTorch's `cu130` index |
 | `Description.Device` / `MemorySpace` | `Cpu` / host | `Cuda` / `MemorySpace.Cuda(N)` |
 
 On CUDA, a tensor moved to the context (`TensorData.To(context)`) is on the card, and a run
@@ -105,6 +106,13 @@ var cpu = new TorchCpuBackend();             // shares it
 A CUDA backend started in a process already running the CPU build fails with
 `PythonEnvironmentFailure.DeviceUnavailable`, saying so.
 
+**No driver, no provisioning.** The CUDA package's manifest declares the driver it needs
+(`RequiresCudaDriver = "13.0"`), so `BackendPackage.Probe` answers
+`BackendRejection.MissingCudaDriver` on a machine with no NVIDIA driver, one too old for CUDA 13,
+or one that sees no device — saying which. Starting the backend on such a machine fails the same
+way, with `PythonEnvironmentFailure.DeviceUnavailable`, *before* anything is provisioned: it never
+downloads several gigabytes of CUDA libraries for a card that is not there.
+
 ## The Python environment
 
 ### How it is resolved
@@ -112,7 +120,8 @@ A CUDA backend started in a process already running the CPU build fails with
 1. **The backend's options.** `new TorchCpuBackend(new PythonEnvironmentOptions { EnvironmentPath = "/opt/torch-env" })`
    uses that virtual environment as it is. Nothing is installed into it.
 2. **`SHOROKOO_PYTHON_ENV`**, a virtual environment directory, used the same way.
-3. **The cache.** Otherwise the environment described by the package's lock file, under
+3. **The cache.** Otherwise the environment described by the package's lock file for this
+   platform (Linux x64 or Windows x64 — each has its own), under
    `$XDG_CACHE_HOME/shorokoo/python-envs/` (or `~/.cache/…`; `%LOCALAPPDATA%\shorokoo\…` on
    Windows), in a folder named after the lock and a hash of it — `cpu-6279c3b3d69b31c7`. If it
    is not there yet it is created with uv: `uv python install 3.12`, `uv venv`, then
@@ -122,8 +131,9 @@ A CUDA backend started in a process already running the CPU build fails with
    `PythonEnvironmentOptions.UvPath` or `SHOROKOO_UV` names the uv to use.
 
 An environment you provide must be a **CPython 3.12** virtual environment (a folder with a
-`pyvenv.cfg`) whose base interpreter has a shared `libpython3.12.so`, with `torch` and `numpy`
-installed. uv's own Python builds have the shared library; so does the environment made by
+`pyvenv.cfg`) whose base interpreter has a shared library — `libpython3.12.so` on Linux,
+`python312.dll` beside `python.exe` on Windows — with `torch` and `numpy` installed. uv's own
+Python builds have the shared library; so does the environment made by
 
 ```bash
 uv venv --managed-python -p 3.12 /opt/torch-env
@@ -151,7 +161,7 @@ whose message names what is missing:
 | `MissingPackage` | the environment cannot import `torch` or `numpy` |
 | `EnvironmentConflict` | the process already runs Python over a different environment |
 | `InterpreterFailed` | CPython itself would not start |
-| `DeviceUnavailable` | a CUDA backend, and PyTorch sees no such device |
+| `DeviceUnavailable` | a CUDA backend, and no NVIDIA driver fit for CUDA 13, or PyTorch sees no such device |
 
 ## Values
 
@@ -162,7 +172,58 @@ String tensors work, and always stay on the host; sequences of tensors work.
 
 Every output a run hands back is memory of its own — never an input's or a weight's, even where
 the model returns one of those unchanged — so writing to an output never changes anything
-else.
+else. The one exception is an output written into an input the run *consumed* (see
+[output aliasing](#runs)), which nothing else holds any more.
+
+## Runs
+
+What a run does with the settings every backend is handed, on each device:
+
+| | CPU | CUDA |
+|---|---|---|
+| **Output aliasing** (a run writing an output into a consumed input) | yes, for an output produced by `Add`/`Sub`/`Mul`/`Div` | the same on the card for an output kept there; any output fetched home is copied into a consumed host input |
+| **Resident runs** (`RunRetainingOutputs`) | nothing to retain: outputs are on the host | a kept tensor output stays on the card; inputs already there are read in place |
+| **Cancellation** (`RunSettings.CancellationToken`) | stops before the next node | stops before the next node |
+| **`DeviceMemory.LimitBytes`** | ignored, as on every CPU backend | caps each run's allocations (see below) |
+| **`RunSettings.ShrinkArenaAfterRun`** | ignored | `torch.cuda.empty_cache()` after the run |
+| **Arena statistics** / `RunStats` | none | torch's caching allocator on the device |
+| **`TraceNodePlacement`** | every node on `cpu` | every node on `cuda:N` |
+| **Log severity** | Python warnings a run raises are shown at `Warning` and below, not above | same |
+
+**Output aliasing.** A compiled graph that pairs an output with an input it replaces — the
+training rig pairs each updated parameter with the parameter — has a run that *consumed* that
+input write the output into its memory, where the graph proves nothing reads the input
+afterwards. torch writes an `Add`, `Sub`, `Mul` or `Div` into memory it is handed (`out=`), so such
+an output costs no memory at all: the optimizer's `p - lr * g` is written over `p`. Other operators
+cannot be told where to write, so on the CPU their pairs are not bound. On CUDA, an output the run
+fetches back is copied home into the consumed host tensor rather than into memory of its own. A
+write is also declined wherever something the rest of the run still reads could be the input's
+memory under another name: torch hands back views where ONNX Runtime copies (`Transpose`,
+`Expand`, `Slice`, a `Cast` to the same type), and those are checked when the run gets there.
+
+**Device memory on CUDA.** torch has one caching allocator per device for the whole process,
+where ONNX Runtime gives each session an arena of its own, so the per-session settings map as
+far as they can and no further:
+
+- `LimitBytes` (which the budget of a context sets per session) caps a run at what is allocated on
+  the device when it starts plus the limit, through torch's per-process memory fraction; the
+  allocator's cached blocks are handed back first, so they cannot serve the run past the cap. A run
+  that needs more fails with an `InvalidOperationException` naming the limit. Because the cap is the
+  process's, capped runs on one device take turns, and a run of *another* context on that device
+  while one is in progress is capped too.
+- `ArenaExtend` has no counterpart: torch's allocator grows its own way, configured process-wide by
+  `PYTORCH_CUDA_ALLOC_CONF` before the backend starts.
+- `ReadArenaStatistics` reads `torch.cuda.memory_stats`: `InUseBytes`, `MaxInUseBytes`,
+  `TotalAllocatedBytes`, `AllocationCount`, `ArenaExtensionCount` (segments held) and
+  `ArenaShrinkageCount` (segments released) are the device allocator's — every session's on that
+  device, not one session's — and `LimitBytes` is the session's limit or -1. torch records no
+  largest single allocation and no reserves, so `MaxAllocSizeBytes` and `ReserveCount` are 0.
+- There is no pinned host arena: host–device copies go through ordinary host memory, so
+  `ReadPinnedArenaStatistics` is null.
+
+**Cancellation** is checked before every node, so a run stops at the next node boundary —
+inside a `Loop` too, once per iteration — and throws `OperationCanceledException` carrying the
+token. A single node that is one long kernel is not interrupted.
 
 ## Limitations
 
@@ -173,12 +234,10 @@ else.
   and `If`/`Loop` are translated. Convolution and pooling, normalization, recurrent networks,
   random draws, sequences, strings, signal, image and quantization operators are not yet: a
   model using one is refused when its session is created, naming it.
-- **Linux x64 only.** The lock files are resolved for Linux x64, and so are the packages.
-- **Device memory settings are not applied.** PyTorch's caching allocator is process-wide, so
-  a context's `DeviceMemory` budget still bounds the tensors the context holds, but a session's
-  arena settings do not reach PyTorch, and sessions report no arena statistics.
-- **No output aliasing.** A run that consumes its inputs releases them; it never writes an
-  output into one.
-- **Cancellation** is honoured before a run starts, not during it.
+- **Linux x64 and Windows x64 only**, the platforms there are lock files for.
+- **Device memory is torch's, per process** — see [Runs](#runs) for what a context's settings
+  can and cannot reach.
+- **Node placement records no bytes.** A traced session names the device every node ran on, which
+  is the session's; the per-node byte counts are 0.
 - **Crash isolation**: the interpreter runs in your process, so a fault inside PyTorch takes
   the process down with it.

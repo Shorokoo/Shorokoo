@@ -41,7 +41,9 @@ internal sealed class TorchRuntime
         LoadModel = runtime.GetAttr("load_model");
         ConstantStorages = runtime.GetAttr("constant_storages");
         ConstantIds = runtime.GetAttr("constant_ids");
+        ArenaStatistics = runtime.GetAttr("arena_statistics");
         TorchVersion = runtime.InvokeMethod("torch_version").As<string>();
+        TorchCudaVersion = runtime.InvokeMethod("torch_cuda_version").As<string>();
         CudaDeviceCount = runtime.InvokeMethod("cuda_device_count").As<int>();
     }
 
@@ -50,6 +52,9 @@ internal sealed class TorchRuntime
 
     /// <summary>The torch version, e.g. <c>2.14.0+cpu</c>.</summary>
     public string TorchVersion { get; }
+
+    /// <summary>The CUDA version torch was built for, e.g. <c>13.0</c>, or empty for a CPU build.</summary>
+    public string TorchCudaVersion { get; }
 
     /// <summary>How many CUDA devices torch sees; zero for a CPU build or a machine with no card.</summary>
     public int CudaDeviceCount { get; }
@@ -67,6 +72,10 @@ internal sealed class TorchRuntime
     public PyObject LoadModel { get; }
     public PyObject ConstantStorages { get; }
     public PyObject ConstantIds { get; }
+    public PyObject ArenaStatistics { get; }
+
+    /// <summary>The name of the Python exception a run stopped between two nodes raises.</summary>
+    public const string RunStopped = "RunStopped";
 
     /// <summary>
     /// torch in this process, started over the environment <paramref name="lockFile"/> and

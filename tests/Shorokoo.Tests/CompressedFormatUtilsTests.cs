@@ -621,6 +621,27 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
     }
 
     [Fact]
+    public void TestInspectReadsSafeTensorsWhoseHeaderLengthSpellsTheSrkMagic()
+    {
+        const string head = "{\"w\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[0,4]},\"__metadata__\":{\"pad\":\"";
+        const string tail = "\"}}";
+        long[] headerLengths = [0x004B5253, 0x014B5253];
+        foreach (var headerLength in headerLengths)
+        {
+            var json = head + new string(' ', (int)headerLength - head.Length - tail.Length) + tail;
+            var bytes = BuildRawSafeTensors(json, new byte[4]);
+            Assert.Equal("SRK"u8.ToArray(), bytes[..3]);
+            var path = P($"inspect_srk_length_{headerLength:X}.safetensors");
+            File.WriteAllBytes(path, bytes);
+
+            var result = Persistence.Inspect(path);
+            Assert.Equal(ArtifactKind.SafeTensors, result.Kind);
+            Assert.Empty(result.Observations);
+            Assert.Equal("w", Assert.Single(result.SafeTensors!.Tensors).Name);
+        }
+    }
+
+    [Fact]
     public void TestInspectCompressedSafeTensorsAndHostileInputs()
     {
         var t1 = TensorData([2, 3], 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f);

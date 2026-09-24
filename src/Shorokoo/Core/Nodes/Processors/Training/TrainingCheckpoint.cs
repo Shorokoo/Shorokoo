@@ -621,9 +621,9 @@ namespace Shorokoo
                     $"'{filePath}' is not a Shorokoo training checkpoint (missing '{CheckpointMarkerName}' marker).");
 
             var marker = markerData.As<int64>().CopyMemory<long>();
-            // The marker is a fixed int64[2] = [version, step]. Exactly one format version exists (3);
-            // a wrong shape or version is unreadable by this build. (v3 moves epoch/batch out of the
-            // marker into presence-gated int64 scalars; there are no released v1/v2 files.)
+            // The marker is a fixed int64[2] = [version, step]; epoch and batch index are separate
+            // presence-gated int64 scalars. Exactly one format version exists
+            // (CheckpointFormatVersion); a wrong shape or version is unreadable by this build.
             if (marker.Length != 2)
                 throw new InvalidOperationException(
                     $"'{filePath}' has a malformed checkpoint marker: expected 2 int64 elements " +

@@ -189,6 +189,16 @@ combine them into the single call that says what you mean, and express a
 condition that has to be tested part-way through the body as an `IfElse` over the
 rest of it.
 
+### Little-endian platforms only
+
+Shorokoo runs only on little-endian machines, which covers every platform .NET
+officially supports (x64, x86, Arm64, Arm32). Tensor data, ONNX raw data and
+every file format Shorokoo reads or writes — SafeTensors, `.srk`, `.skpt` and
+training checkpoints — are little-endian, and tensor bytes move between memory
+and disk unconverted. On a big-endian host (such as IBM Z) every one of them
+would be silently misread, so loading the Shorokoo assembly there throws
+`PlatformNotSupportedException` instead.
+
 ## Current limitations (could be lifted)
 
 ### Moving a tensor between memory spaces copies it

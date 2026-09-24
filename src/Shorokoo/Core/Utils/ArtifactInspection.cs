@@ -644,7 +644,18 @@ namespace Shorokoo
                 return NotRecognized(filePath, fileLen, observations, "the file is empty.");
 
             if (prefixRead >= 3 && prefix[0] == (byte)'S' && prefix[1] == (byte)'R' && prefix[2] == (byte)'K')
-                return InspectSrkContainer(filePath, stream, fileLen, prefix, prefixRead, observations);
+            {
+                // A SafeTensors header length whose low bytes spell "SRK" (0x4B5253 + k·2^24)
+                // opens with the container magic too. Such a file has no readable .srk header, so
+                // an unreadable one gets a second look as SafeTensors. The converse cannot happen:
+                // a real container's bytes 4–7 (header length, then the JSON's first bytes) read as
+                // a length far past MaxSafeTensorsHeaderBytes.
+                var srk = InspectSrkContainer(filePath, stream, fileLen, prefix, prefixRead, observations);
+                if (srk.Srk!.Header is null && prefixRead == 8
+                    && TryInspectSafeTensors(filePath, stream, fileLen, prefix, []) is { } imitator)
+                    return imitator;
+                return srk;
+            }
 
             if (prefixRead >= 4 && LooksLikeZipArchive(prefix))
                 return InspectZipArchive(filePath, stream, fileLen, observations);

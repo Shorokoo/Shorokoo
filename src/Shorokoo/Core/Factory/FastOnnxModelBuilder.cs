@@ -285,6 +285,12 @@ namespace Shorokoo.Core.Factory
             if (flattenFunctionBodies)
                 RecurrentActivationArguments.Normalize(model);
 
+            // ----- 5b, continued. The same dialects get every DequantizeLinear with no zero
+            // point written so that ONNX Runtime's QDQ propagation keeps its input type; see
+            // WriteDequantizeZeroPoints.
+            if (flattenFunctionBodies)
+                WriteDequantizeZeroPoints(model.Graph, BuildTensorMetaByName(tensorInfoLookup));
+
             // ----- 5c. Execution dialect only: the one AUTO_GRAD node a training step keeps when
             // its gradient is left to the execution backend goes out as that backend's operator.
             // Only such a step reaches here carrying one -- the compile gate refuses AUTO_GRAD in
@@ -1088,6 +1094,100 @@ namespace Shorokoo.Core.Factory
                 i += lowered.Count - 1;
             }
         }
+
+        /// <summary>
+        /// Writes each <c>DequantizeLinear</c> that has no zero point in a form ONNX Runtime
+        /// dequantizes as the spec does.
+        ///
+        /// <para>ONNX Runtime moves a <c>DequantizeLinear</c> whose scale is a constant scalar
+        /// forward past a following <c>Reshape</c>, <c>Transpose</c>, <c>Squeeze</c>,
+        /// <c>Unsqueeze</c>, <c>Slice</c> or <c>MaxPool</c>, by inserting after it a
+        /// <c>QuantizeLinear</c>/<c>DequantizeLinear</c> pair built from the original's scale and
+        /// zero point. With no zero point that <c>QuantizeLinear</c> quantizes to uint8, its own
+        /// default, whatever the original's input type was — so an int8, int16, uint16 or int32
+        /// input read through such an operator comes back clamped to what uint8 can hold.</para>
+        ///
+        /// <para>An int8, int16 or uint16 input is given the zero point the spec already implies:
+        /// zeros of its own type, in the scale's shape (<c>ConstantOfShape(Shape(scale))</c>), so
+        /// the inserted pair keeps the type. An int32 input cannot take that route — no
+        /// <c>QuantizeLinear</c> produces int32, so ONNX Runtime would build an invalid graph —
+        /// and is written as the arithmetic it stands for, <c>Cast(x) * scale</c> (after
+        /// <c>x - zero_point</c> in int32 where there is one), which is how ONNX Runtime's own
+        /// kernel computes it. That rewrite is made only where it is exact and simple: a float32
+        /// rank-0 scale, no block size and no other output type — the only shape of scale the
+        /// propagation acts on besides a one-element vector.</para>
+        /// </summary>
+        private static void WriteDequantizeZeroPoints(GraphProto graph, Dictionary<string, TensorMeta> tensorMetaByName)
+        {
+            if (graph is null) return;
+            ForEachGraphRecursive(graph, g => WriteDequantizeZeroPointsInGraph(g, tensorMetaByName));
+        }
+
+        private static void WriteDequantizeZeroPointsInGraph(GraphProto graph, Dictionary<string, TensorMeta> tensorMetaByName)
+        {
+            for (int i = 0; i < graph.Nodes.Count; i++)
+            {
+                var node = graph.Nodes[i];
+                if (node.OpType != OpCodes.DEQUANTIZE_LINEAR || node.Domain.Length != 0
+                    || node.Inputs.Count < 2 || node.Outputs.Count != 1 || node.Outputs[0].Length == 0)
+                    continue;
+                string x = node.Inputs[0], scale = node.Inputs[1];
+                string zeroPoint = node.Inputs.Count > 2 ? node.Inputs[2] : "";
+                var xType = ResolveTensorMeta(graph, tensorMetaByName, x)?.ProtoElemType;
+                string prefix = (node.Name.Length > 0 ? node.Name : node.Outputs[0]) + "_dqlow";
+
+                if (xType == (int)TensorProto.DataType.Int32)
+                {
+                    var scaleMeta = ResolveTensorMeta(graph, tensorMetaByName, scale);
+                    if (scaleMeta is not { Rank: 0, ProtoElemType: (int)TensorProto.DataType.Float }
+                        || node.Attributes.Any(a => a.Name == OnnxOpAttributeNames.AttrBlockSize && a.I != 0
+                            || a.Name == OnnxOpAttributeNames.AttrOutputDtype && a.I != (int)TensorProto.DataType.Float))
+                        continue;
+                    var lowered = new List<NodeProto>(3);
+                    string integers = x;
+                    if (zeroPoint.Length > 0)
+                    {
+                        integers = $"{prefix}_centred";
+                        lowered.Add(MakeNode($"{prefix}_sub", OpCodes.SUB, [x, zeroPoint], [integers]));
+                    }
+                    string floats = $"{prefix}_float";
+                    lowered.Add(MakeNode($"{prefix}_cast", OpCodes.CAST, [integers], [floats],
+                        MakeIntAttr(OnnxOpAttributeNames.AttrTo, (int)TensorProto.DataType.Float)));
+                    lowered.Add(MakeNode($"{prefix}_mul", OpCodes.MUL, [floats, scale], [node.Outputs[0]]));
+                    graph.Nodes.RemoveAt(i);
+                    graph.Nodes.InsertRange(i, lowered);
+                    i += lowered.Count - 1;
+                }
+                else if (zeroPoint.Length == 0 && xType is { } narrow && ZeroPointBytes(narrow) is int bytes)
+                {
+                    string shape = $"{prefix}_scale_shape", zeros = $"{prefix}_zero_point";
+                    graph.Nodes.InsertRange(i,
+                    [
+                        MakeNode($"{prefix}_shape", OpCodes.SHAPE, [scale], [shape]),
+                        MakeNode($"{prefix}_zeros", OpCodes.CONSTANT_OF_SHAPE, [shape], [zeros],
+                            new AttributeProto
+                            {
+                                Name = OnnxOpAttributeNames.AttrValue,
+                                Type = AttributeProto.AttributeType.Tensor,
+                                T = new TensorProto { Dims = [1], data_type = narrow, RawData = new byte[bytes] },
+                            }),
+                    ]);
+                    while (node.Inputs.Count < 3) node.Inputs.Add("");
+                    node.Inputs[2] = zeros;
+                    i += 2;
+                }
+            }
+        }
+
+        /// <summary>The size of a zero point of <paramref name="protoElemType"/>, for the input
+        /// types whose missing zero point <see cref="WriteDequantizeZeroPoints"/> writes out; null
+        /// for every other (uint8 is already the default's type).</summary>
+        private static int? ZeroPointBytes(int protoElemType) => protoElemType switch
+        {
+            (int)TensorProto.DataType.Int8 => 1,
+            (int)TensorProto.DataType.Int16 or (int)TensorProto.DataType.Uint16 => 2,
+            _ => null,
+        };
 
         private static AttributeProto MakeIntAttr(string name, long value)
             => new AttributeProto { Name = name, Type = AttributeProto.AttributeType.Int, I = value };

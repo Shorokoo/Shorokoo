@@ -24,19 +24,49 @@ internal sealed record TranslatedModel(
 /// its enclosing graph's values, as ONNX says it does, and Python's closures give the nested
 /// function exactly that. Every value gets an identifier of its own, so no scope ever shadows
 /// another.
+///
+/// <para>A scope is one Python function, written statement by statement, and it records the last
+/// statement that reads each identifier it assigns, so that the function can let go of the value
+/// there (see <see cref="OnnxToPythonTranslator"/>). A nested function reading an enclosing
+/// scope's value reads it within the enclosing statement that holds and calls it.</para>
 /// </summary>
 internal sealed class Scope(Scope? parent)
 {
     private readonly Dictionary<string, string> _names = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, int> _lastRead = new(StringComparer.Ordinal);
 
     public void Bind(string onnxName, string expression) => _names[onnxName] = expression;
+
+    /// <summary>The statement being written, counted from the function's header, statement 0.</summary>
+    public int Statement { get; private set; }
+
+    /// <summary>Where each statement written so far ends in the source, and at what indentation.</summary>
+    public List<(int Position, int Indent)> Ends { get; } = [];
+
+    /// <summary>Records <paramref name="identifier"/> as a local this function assigns, in the
+    /// statement being written.</summary>
+    public void Assign(string identifier) => _lastRead[identifier] = Statement;
+
+    public void EndStatement(int position, int indent)
+    {
+        Ends.Add((position, indent));
+        Statement++;
+    }
+
+    /// <summary>The locals this function assigns, grouped by the statement that reads each last.</summary>
+    public IEnumerable<IGrouping<int, string>> LastReads()
+        => _lastRead.GroupBy(pair => pair.Value, pair => pair.Key);
 
     public bool IsBoundHere(string onnxName) => _names.ContainsKey(onnxName);
 
     public string Lookup(string onnxName, NodeProto? user)
     {
         for (var scope = this; scope is not null; scope = scope.Parent)
-            if (scope._names.TryGetValue(onnxName, out var expression)) return expression;
+        {
+            if (!scope._names.TryGetValue(onnxName, out var expression)) continue;
+            if (scope._lastRead.ContainsKey(expression)) scope._lastRead[expression] = scope.Statement;
+            return expression;
+        }
         throw new TorchUnsupportedModelException(TorchUnsupportedReason.UnsupportedModel, user?.Domain, user?.OpType,
             $"The value '{onnxName}'{(user is null ? "" : $", read by the {user.OpType} node '{user.Name}',")} "
             + "is not produced before it is read: the graph is not in topological order, or reads a "
@@ -59,6 +89,12 @@ internal sealed class Scope(Scope? parent)
 /// assigns the outputs. Every node is read under the opset its graph imports, a function's own
 /// imports for a function body.</para>
 ///
+/// <para>Every function lets go of each value it assigns — a parameter or a node's output — right
+/// after the statement that reads it last, with a <c>del</c>, so that a run holds only the values
+/// something still reads, as ONNX Runtime frees a buffer after its last use, and not every value
+/// the graph ever made. A value a nested function reads is read by the statement that calls it; a
+/// value the function returns is never let go of.</para>
+///
 /// <para>A training step whose gradient is left to the backend carries one
 /// <c>ai.shorokoo.training::AutoGrad</c> node, which becomes <c>torch.autograd.grad</c> over the
 /// forward pass before it (see <see cref="AutoGradStep"/> and <c>shorokoo_torch/training.py</c>).</para>
@@ -72,6 +108,7 @@ internal sealed partial class OnnxToPythonTranslator
     private const string FunctionsDomain = "Functions";
 
     private StringBuilder _source = new();
+    private List<(int Position, string Text)> _releases = [];
     private readonly StringBuilder _specializations = new();
     private readonly Dictionary<string, string> _specialized = new(StringComparer.Ordinal);
     private readonly List<TorchConstant> _constants = [];
@@ -122,6 +159,7 @@ internal sealed partial class OnnxToPythonTranslator
         var inputs = graph.Inputs.Select(i => i.Name).Where(n => !initializers.Contains(n)).ToArray();
         Line();
         EmitGraph("main", graph, inputs, parent: null, training);
+        _source = WithReleases(_source, _releases);
         _source.Append(_specializations);
 
         return new TranslatedModel(
@@ -156,9 +194,11 @@ internal sealed partial class OnnxToPythonTranslator
         var parameters = function.Inputs.Select(input => Define(scope, input)).ToList();
         Line($"def {name}({string.Join(", ", parameters)}):");
         _indent++;
+        EndStatement(scope);
         foreach (var node in function.Nodes)
             EmitNode(attributes is null ? node : FunctionAttributes.Resolve(node, attributes), scope);
         Return(function.Outputs, scope);
+        Release(scope);
         _indent--;
     }
 
@@ -181,12 +221,12 @@ internal sealed partial class OnnxToPythonTranslator
         specialization = $"{name}_{_specialized.Count}";
         _specialized[key] = specialization;
 
-        var (source, indent, opsets) = (_source, _indent, _opsets);
-        (_source, _indent, _opsets) = (new StringBuilder(), 0, Opsets(function.OpsetImports, _modelOpsets));
+        var (source, releases, indent, opsets) = (_source, _releases, _indent, _opsets);
+        (_source, _releases, _indent, _opsets) = (new StringBuilder(), [], 0, Opsets(function.OpsetImports, _modelOpsets));
         Line();
         EmitFunction(specialization, function, values);
-        _specializations.Append(_source);
-        (_source, _indent, _opsets) = (source, indent, opsets);
+        _specializations.Append(WithReleases(_source, _releases));
+        (_source, _releases, _indent, _opsets) = (source, releases, indent, opsets);
         return specialization;
     }
 
@@ -205,6 +245,7 @@ internal sealed partial class OnnxToPythonTranslator
         foreach (var initializer in graph.Initializers)
             if (!scope.IsBoundHere(initializer.Name))
                 scope.Bind(initializer.Name, AddConstant(TorchConstant.FromTensor(initializer, null)));
+        EndStatement(scope);
         if (training is null)
         {
             foreach (var node in graph.Nodes) EmitNode(node, scope);
@@ -214,6 +255,7 @@ internal sealed partial class OnnxToPythonTranslator
         {
             EmitTrainingStep(graph, scope, training);
         }
+        Release(scope);
         _indent--;
     }
 
@@ -242,7 +284,43 @@ internal sealed partial class OnnxToPythonTranslator
     {
         var identifier = $"v{_nextValue++}";
         if (onnxName.Length > 0) scope.Bind(onnxName, identifier);
+        scope.Assign(identifier);
         return identifier;
+    }
+
+    /// <summary>Ends the statement of <paramref name="scope"/>'s function just written: where it
+    /// ends is where the values it reads last are let go of.</summary>
+    private void EndStatement(Scope scope) => scope.EndStatement(_source.Length, _indent);
+
+    /// <summary>
+    /// Lets go of every value <paramref name="scope"/>'s function assigns right after the statement
+    /// that reads it last — right after the header for a parameter nothing reads, right after its own
+    /// statement for an output nothing reads — except those its return statement reads, which is the
+    /// last one and ends no statement. The <c>del</c>s are inserted where the statements end once the
+    /// whole source is written (<see cref="WithReleases"/>), so that nothing written so far moves.
+    /// </summary>
+    private void Release(Scope scope)
+    {
+        foreach (var statement in scope.LastReads().Where(g => g.Key < scope.Ends.Count))
+        {
+            var (position, indent) = scope.Ends[statement.Key];
+            _releases.Add((position, $"{new string(' ', 4 * indent)}del {string.Join(", ", statement.Order(StringComparer.Ordinal))}\n"));
+        }
+    }
+
+    /// <summary><paramref name="source"/> with each of <paramref name="releases"/> inserted at its
+    /// position.</summary>
+    private static StringBuilder WithReleases(StringBuilder source, List<(int Position, string Text)> releases)
+    {
+        var text = source.ToString();
+        var result = new StringBuilder(text.Length + releases.Sum(r => r.Text.Length));
+        var at = 0;
+        foreach (var (position, release) in releases.OrderBy(r => r.Position))
+        {
+            result.Append(text, at, position - at).Append(release);
+            at = position;
+        }
+        return result.Append(text, at, text.Length - at);
     }
 
     private void EmitNode(NodeProto node, Scope scope)
@@ -302,6 +380,7 @@ internal sealed partial class OnnxToPythonTranslator
             Line($"if {targets[0]} is None: {targets[0]} = {expression}");
         else
             Line($"{targets[0]} = {expression}");
+        EndStatement(scope);
     }
 
     private void Line(string text = "")

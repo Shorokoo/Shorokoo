@@ -5540,7 +5540,7 @@ public class TrainingRigNativeTorchCoverageTests
     private static TensorDataStruct DigitScores => Target([4L, 10L], NNLibraryTrainingFixtures.Ramp(40, 0.025f, 0f));
 
     [Fact]
-    public void TestModelsLossesAndOptimizersTrainAlikeOnTorch()
+    public void TestModelsAndOptimizersTrainAlikeOnTorch()
     {
         string?[] waiting =
         [
@@ -5550,8 +5550,16 @@ public class TrainingRigNativeTorchCoverageTests
             TrainsAlikeOnTorch(ScalarMultiplyParamFromParamModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Four, FourTargets, [0.002f]),
             TrainsAlikeOnTorch(ScalarMultiplyWithBatchNormModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Eight, EightTargets, [0.5f]),
             TrainsAlikeOnTorch(ScalarMultiplyWithBatchNormModel.ComputationGraph, L2Loss.ComputationGraph, SGDMomentumOptimizer.ComputationGraph, Eight, EightTargets, [0.5f, 0.9f]),
-            TrainsAlikeOnTorch(DigitClassifier.ComputationGraph, SoftmaxL2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph, Digits, DigitScores, AdamW),
-            TrainsAlikeOnTorch(DigitClassifier.ComputationGraph, CrossEntropyLoss.ComputationGraph, SGDOptimizer.ComputationGraph, Digits, DigitClasses, [0.1f]),
+            TrainsAlikeOnTorch(ScalarMultiplyGatedByParamModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph, Four, FourTargets, AdamW),
+        ];
+        AssertNoneWaitingOnAnOperator(waiting);
+    }
+
+    [Fact]
+    public void TestShapeAndIndexingOperatorsTrainAlikeOnTorch()
+    {
+        string?[] waiting =
+        [
             TrainsAlikeOnTorch(ScalarMultiplyAndSliceModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Eight, Target([4L], 1f, 2f, 3f, 4f), Sgd),
             TrainsAlikeOnTorch(ScalarMultiplyAndTileModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Four, Target([8L], 2f, 4f, 6f, 8f, 1f, 1f, 1f, 1f), Sgd),
             TrainsAlikeOnTorch(ScalarMultiplyAndClipModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Input([4L], 0.25f, -0.5f, 1.5f, -3f), FourTargets, Sgd),
@@ -5560,31 +5568,6 @@ public class TrainingRigNativeTorchCoverageTests
             TrainsAlikeOnTorch(ScalarMultiplyAndSplitModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Four, Target([2L], 2f, 4f), Sgd),
             TrainsAlikeOnTorch(ScalarMultiplyWithQeeFoldableLoopIterCountModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Four, FourTargets, Sgd),
             TrainsAlikeOnTorch(IndexedWeightModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Inputs(("x", TensorData([4L], [1f, 2f, 3f, 4f])), ("index", TensorData([4L], [3L, 0L, 0L, 2L]))), FourTargets, Sgd),
-            TrainsAlikeOnTorch(ScalarMultiplyGatedByParamModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph, Four, FourTargets, AdamW),
-        ];
-        AssertNoneWaitingOnAnOperator(waiting);
-    }
-
-    [Fact]
-    public void TestNNLibraryLayersTrainAlikeOnTorch()
-    {
-        var (conv, classes) = NNLibraryTrainingFixtures.MakeTinyConvBatch();
-        var sequence = Input([3L, 4L, 2L], NNLibraryTrainingFixtures.Ramp(24, 0.1f, -1f));
-        var cells = Input([2L, 4L, 2L], NNLibraryTrainingFixtures.Ramp(16, 0.1f, -0.7f));
-        var batchNorm = Input([2L, 3L, 2L, 2L], NNLibraryTrainingFixtures.Ramp(24, 0.25f, -2.5f));
-        string?[] waiting =
-        [
-            TrainsAlikeOnTorch(NNTinyConvClassifier.ComputationGraph, CrossEntropyLoss.ComputationGraph, SGDMomentumOptimizer.ComputationGraph, Inputs(("input", conv)), Target(classes), [0.2f, 0.9f]),
-            TrainsAlikeOnTorch(BilinearRigModel.ComputationGraph, L2Loss.ComputationGraph, AdamOptimizer.ComputationGraph, Inputs(("x1", TensorData([2L, 3L], [0.5f, -1f, 0.25f, 1f, -0.5f, 0.75f])), ("x2", TensorData([2L, 4L], [0.3f, -0.5f, 0.2f, -0.1f, 0.4f, 0.6f, -0.2f, 0.8f]))), Target([2L], 0.5f, -0.5f), Adam),
-            TrainsAlikeOnTorch(EmbeddingPaddingRigModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Inputs(("x", TensorData([3L], [0.5f, -1f, 0.25f]))), Target([3L], 1f, 2f, 3f), [0.1f]),
-            TrainsAlikeOnTorch(LstmForwardTrainModel.ComputationGraph, CrossEntropyLoss.ComputationGraph, SGDMomentumOptimizer.ComputationGraph, sequence, Target(TensorData([4L], [0L, 1L, 0L, 1L])), [0.2f, 0.9f]),
-            TrainsAlikeOnTorch(GruForwardTrainModel.ComputationGraph, CrossEntropyLoss.ComputationGraph, SGDMomentumOptimizer.ComputationGraph, sequence, Target(TensorData([4L], [0L, 1L, 0L, 1L])), [0.2f, 0.9f]),
-            TrainsAlikeOnTorch(RnnCellTrainModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, cells, Target([4L, 2L], 0.5f, -0.5f, 1f, 0f, 0.25f, 0.75f, -1f, 0.1f), [0.1f]),
-            TrainsAlikeOnTorch(LstmCellTrainModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, cells, Target([4L, 2L], 0.5f, -0.5f, 1f, 0f, 0.25f, 0.75f, -1f, 0.1f), [0.1f]),
-            TrainsAlikeOnTorch(GruCellTrainModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, cells, Target([4L, 2L], 0.5f, -0.5f, 1f, 0f, 0.25f, 0.75f, -1f, 0.1f), [0.1f]),
-            TrainsAlikeOnTorch(NNBatchNormTrainGradModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, batchNorm, Target([3L], 0.5f, -0.25f, 1f), [0.1f]),
-            TrainsAlikeOnTorch(NNBatchNormAnalyticMomentum09Model.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Input([1L, 1L, 2L, 2L], 1f, 2f, 3f, 4f), Target([1L, 1L, 2L, 2L], 0.5f, -1f, 2f, 0f), [0.1f]),
-            TrainsAlikeOnTorch(NNBatchNormAnalyticRank2Model.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Input([2L, 1L], 1f, 3f), Target([2L, 1L], 0.5f, 2f), [0.1f]),
         ];
         AssertNoneWaitingOnAnOperator(waiting);
     }
@@ -5657,6 +5640,75 @@ public class TrainingRigNativeTorchCoverageTests
         finally
         {
             File.Delete(path);
+        }
+    }
+
+    [Trait("Domain", "Training")]
+    [Trait("Purpose", "Coverage")]
+    public class Classifiers
+    {
+        [Fact]
+        public void TestClassifiersTrainAlikeOnTorch()
+        {
+            var (conv, classes) = NNLibraryTrainingFixtures.MakeTinyConvBatch();
+            string?[] waiting =
+            [
+                TrainsAlikeOnTorch(DigitClassifier.ComputationGraph, SoftmaxL2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph, Digits, DigitScores, AdamW),
+                TrainsAlikeOnTorch(DigitClassifier.ComputationGraph, CrossEntropyLoss.ComputationGraph, SGDOptimizer.ComputationGraph, Digits, DigitClasses, [0.1f]),
+                TrainsAlikeOnTorch(NNTinyConvClassifier.ComputationGraph, CrossEntropyLoss.ComputationGraph, SGDMomentumOptimizer.ComputationGraph, Inputs(("input", conv)), Target(classes), [0.2f, 0.9f]),
+                TrainsAlikeOnTorch(BilinearRigModel.ComputationGraph, L2Loss.ComputationGraph, AdamOptimizer.ComputationGraph, Inputs(("x1", TensorData([2L, 3L], [0.5f, -1f, 0.25f, 1f, -0.5f, 0.75f])), ("x2", TensorData([2L, 4L], [0.3f, -0.5f, 0.2f, -0.1f, 0.4f, 0.6f, -0.2f, 0.8f]))), Target([2L], 0.5f, -0.5f), Adam),
+                TrainsAlikeOnTorch(EmbeddingPaddingRigModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Inputs(("x", TensorData([3L], [0.5f, -1f, 0.25f]))), Target([3L], 1f, 2f, 3f), [0.1f]),
+            ];
+            AssertNoneWaitingOnAnOperator(waiting);
+        }
+
+        [Fact]
+        public void TestBatchNormLayersTrainAlikeOnTorch()
+        {
+            var batchNorm = Input([2L, 3L, 2L, 2L], NNLibraryTrainingFixtures.Ramp(24, 0.25f, -2.5f));
+            string?[] waiting =
+            [
+                TrainsAlikeOnTorch(NNBatchNormTrainGradModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, batchNorm, Target([3L], 0.5f, -0.25f, 1f), [0.1f]),
+                TrainsAlikeOnTorch(NNBatchNormAnalyticMomentum09Model.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Input([1L, 1L, 2L, 2L], 1f, 2f, 3f, 4f), Target([1L, 1L, 2L, 2L], 0.5f, -1f, 2f, 0f), [0.1f]),
+                TrainsAlikeOnTorch(NNBatchNormAnalyticRank2Model.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Input([2L, 1L], 1f, 3f), Target([2L, 1L], 0.5f, 2f), [0.1f]),
+            ];
+            AssertNoneWaitingOnAnOperator(waiting);
+        }
+    }
+
+    [Trait("Domain", "Training")]
+    [Trait("Purpose", "Coverage")]
+    public class RecurrentLayers
+    {
+        [Fact]
+        public void TestRecurrentLayersAndAnRnnCellTrainAlikeOnTorch()
+        {
+            var sequence = Input([3L, 4L, 2L], NNLibraryTrainingFixtures.Ramp(24, 0.1f, -1f));
+            var cells = Input([2L, 4L, 2L], NNLibraryTrainingFixtures.Ramp(16, 0.1f, -0.7f));
+            string?[] waiting =
+            [
+                TrainsAlikeOnTorch(LstmForwardTrainModel.ComputationGraph, CrossEntropyLoss.ComputationGraph, SGDMomentumOptimizer.ComputationGraph, sequence, Target(TensorData([4L], [0L, 1L, 0L, 1L])), [0.2f, 0.9f]),
+                TrainsAlikeOnTorch(GruForwardTrainModel.ComputationGraph, CrossEntropyLoss.ComputationGraph, SGDMomentumOptimizer.ComputationGraph, sequence, Target(TensorData([4L], [0L, 1L, 0L, 1L])), [0.2f, 0.9f]),
+                TrainsAlikeOnTorch(RnnCellTrainModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, cells, Target([4L, 2L], 0.5f, -0.5f, 1f, 0f, 0.25f, 0.75f, -1f, 0.1f), [0.1f]),
+            ];
+            AssertNoneWaitingOnAnOperator(waiting);
+        }
+    }
+
+    [Trait("Domain", "Training")]
+    [Trait("Purpose", "Coverage")]
+    public class GatedRecurrentCells
+    {
+        [Fact]
+        public void TestLstmAndGruCellsTrainAlikeOnTorch()
+        {
+            var cells = Input([2L, 4L, 2L], NNLibraryTrainingFixtures.Ramp(16, 0.1f, -0.7f));
+            string?[] waiting =
+            [
+                TrainsAlikeOnTorch(LstmCellTrainModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, cells, Target([4L, 2L], 0.5f, -0.5f, 1f, 0f, 0.25f, 0.75f, -1f, 0.1f), [0.1f]),
+                TrainsAlikeOnTorch(GruCellTrainModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, cells, Target([4L, 2L], 0.5f, -0.5f, 1f, 0f, 0.25f, 0.75f, -1f, 0.1f), [0.1f]),
+            ];
+            AssertNoneWaitingOnAnOperator(waiting);
         }
     }
 }

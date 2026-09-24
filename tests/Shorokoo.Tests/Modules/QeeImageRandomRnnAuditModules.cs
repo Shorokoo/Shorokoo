@@ -956,4 +956,32 @@ namespace Shorokoo.Tests.Modules
                 (Tensor<uint8>)OnnxOp.ImageDecoder(jpeg, pixelFormat: "Grayscale"),
                 (Tensor<uint8>)OnnxOp.ImageDecoder(greyJpeg, pixelFormat: "BGR"));
     }
+
+    /// <summary>tf_crop_and_resize at scale 1 still crops to the roi: linear over scales, then nearest over sizes.
+    /// Input x is [1,1,1,5].</summary>
+    [Module]
+    public partial class CropAndResizeAtScaleOneValues
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x)
+        {
+            var roi = Vector(0f, 0f, 0f, 0.5f, 1f, 1f, 1f, 1.5f);
+            var linear = (Tensor<float32>)OnnxOp.Resize(x, roi: roi, scales: Vector(1f, 1f, 1f, 1f), sizes: null,
+                antialias: null, axes: null, coordinateTransformationMode: CoordinateTransformationMode.Tf_crop_and_resize,
+                cubicCoeffA: null, excludeOutside: null, extrapolationValue: -1f,
+                keepAspectRatioPolicy: null, mode: ResizeMode.Linear, nearestMode: null);
+            var nearest = (Tensor<float32>)OnnxOp.Resize(x, roi: roi, scales: null, sizes: Vector(1L, 1L, 1L, 5L),
+                antialias: null, axes: null, coordinateTransformationMode: CoordinateTransformationMode.Tf_crop_and_resize,
+                cubicCoeffA: null, excludeOutside: null, extrapolationValue: -1f,
+                keepAspectRatioPolicy: null, mode: ResizeMode.Nearest, nearestMode: null);
+            return linear.Concat(3L, nearest);
+        }
+    }
+
+    /// <summary>1-D Col2Im with pads and a stride. Input cols is [1,3,4].</summary>
+    [Module]
+    public partial class Col2Im1DPaddedValues
+    {
+        public static Tensor<float32> Inline(Tensor<float32> cols)
+            => (Tensor<float32>)OnnxOp.Col2Im(cols, Vector(8L), Vector(3L), dilations: [1L], pads: [1L, 1L], strides: [2L]);
+    }
 }

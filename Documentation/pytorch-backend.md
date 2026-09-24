@@ -220,6 +220,12 @@ write is also declined wherever something the rest of the run still reads could 
 memory under another name: torch hands back views where ONNX Runtime copies (`Transpose`,
 `Expand`, `Slice`, a `Cast` to the same type), and those are checked when the run gets there.
 
+**Intermediate values.** A run lets go of each value the graph computes right after the last node
+that reads it — in the main graph, in a function's body and in a branch or loop body alike — as
+ONNX Runtime frees a buffer after its last use, so a run's peak is what is live at once, not the
+sum of everything the graph computes. In a training step whose gradient torch takes, what the
+backward pass needs is kept by torch's autograd graph until the gradient is taken.
+
 **Device memory on CUDA.** torch has one caching allocator per device for the whole process,
 where ONNX Runtime gives each session an arena of its own, so the per-session settings map as
 far as they can and no further:

@@ -735,7 +735,9 @@ consuming it would take its memory from under that run.
   `SharedInput`: an `IData` carrying the value and its `Mode`, accepted wherever an input is. On a
   training checkpoint they return the checkpoint itself with its `FeedMode` set, which its
   derivations (`WithStep`, …) and `rig.AdoptCheckpoint` keep, since they share its tensors. `Run`,
-  which takes `NamedModelParam`s, reads each one's `FeedMode` instead — `null` for as it is.
+  which takes `NamedModelParam`s, reads each one's `FeedMode` instead — `null` for as it is — and
+  on a parameter they return a copy of it over the same data with its `FeedMode` set:
+  `graph.Run(p.Shared())` reads `p`'s tensor, and leaves `p` itself as it was.
 
 **Memory the run cannot read where it is.** A run reads its inputs in its backend's memory. A
 tensor anywhere else — every tensor built from a C# array, whose managed memory no runtime reads

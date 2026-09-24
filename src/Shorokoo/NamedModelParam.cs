@@ -221,9 +221,10 @@ namespace Shorokoo
     /// A named input or output of a run: the data, and the name of the graph input or output it is.
     ///
     /// <para>As a run's input it follows the rule every feed does: the data is <b>consumed</b> by
-    /// the run — a tensor fed as it is is given to it — unless it was made from a
-    /// <see cref="SharedInput"/>, <see cref="FromIData"/>'s form for <c>t.Shared()</c> and
-    /// <c>t.TryConsume()</c>, which says otherwise (<see cref="FeedMode"/>).</para>
+    /// the run — a tensor fed as it is is given to it — unless the parameter says otherwise
+    /// (<see cref="FeedMode"/>): passed <see cref="Shared"/> or <see cref="TryConsume"/>, as a
+    /// tensor would be, or made from a <see cref="SharedInput"/>, <see cref="FromIData"/>'s form
+    /// for <c>t.Shared()</c> and <c>t.TryConsume()</c>.</para>
     /// </summary>
     public abstract class NamedModelParam
     {
@@ -236,6 +237,37 @@ namespace Shorokoo
         /// <see cref="TrainingCheckpoint.FeedMode"/> is, which means the same for the state it feeds.
         /// </summary>
         public SharedInputMode? FeedMode { get; internal set; }
+
+        /// <summary>
+        /// This parameter, its data to be <b>read</b> by the run it is fed to rather than consumed:
+        /// what <c>t.Shared()</c> is for a tensor, and what a run's message about a tensor it
+        /// consumed asks for at the call that fed it. The data is alive and unchanged when the run
+        /// returns.
+        ///
+        /// <para>A copy of this parameter over the same data, with <see cref="FeedMode"/>
+        /// <see cref="SharedInputMode.Shared"/>. This one is unchanged, and fed as it is still gives
+        /// its data to the run. Nothing is checked here: a run refuses a dead feed before it takes
+        /// anything.</para>
+        /// </summary>
+        public NamedModelParam Shared() => FedAs(SharedInputMode.Shared);
+
+        /// <summary>
+        /// This parameter, its data to be consumed by the run it is fed to where nothing else is
+        /// reading it when that run starts, and read otherwise — decided when the run starts; see
+        /// <see cref="TensorData.TryConsume"/>. A copy over the same data, as <see cref="Shared"/>
+        /// returns.
+        /// </summary>
+        public NamedModelParam TryConsume() => FedAs(SharedInputMode.TryConsume);
+
+        /// <summary>A shallow copy with <see cref="FeedMode"/> set. Every parameter type holds its
+        /// data by reference and nothing it could not share, so the copy feeds the very same
+        /// data.</summary>
+        private NamedModelParam FedAs(SharedInputMode mode)
+        {
+            var copy = (NamedModelParam)MemberwiseClone();
+            copy.FeedMode = mode;
+            return copy;
+        }
 
         /// <summary>
         /// What a message about this input calls it, where the caller that built it knew better

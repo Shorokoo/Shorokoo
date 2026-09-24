@@ -1548,9 +1548,10 @@ namespace Shorokoo.Runtime
         /// session per call (disposed afterwards); use <see cref="Compile(ComputationGraph)"/>
         /// for repeated runs.
         ///
-        /// <para>A parameter's data is consumed by the run unless it was made from a
-        /// <see cref="SharedInput"/> — <c>NamedModelParam.FromIData(name, type, t.Shared())</c> —
-        /// which says otherwise (<see cref="NamedModelParam.FeedMode"/>).</para>
+        /// <para>A parameter's data is consumed by the run unless the parameter says otherwise
+        /// (<see cref="NamedModelParam.FeedMode"/>): passed <c>p.Shared()</c> or
+        /// <c>p.TryConsume()</c>, or made from a <see cref="SharedInput"/> —
+        /// <c>NamedModelParam.FromIData(name, type, t.Shared())</c>.</para>
         /// </summary>
         public NamedModelParam[] Run(ComputationGraph graph, params NamedModelParam[] inputs)
         {

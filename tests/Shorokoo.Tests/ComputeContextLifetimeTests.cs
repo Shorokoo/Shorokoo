@@ -615,6 +615,28 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
+    public void TestAParameterPassedSharedIsReadByEveryRunAsTheMessageOfOneConsumedAsItIsAsks()
+    {
+        using var context = new ComputeContext();
+        using var other = new ComputeContext();
+        var compiled = context.Compile(Doubling());
+        var p = new TensorDataModelParam("a", ModelParamType.InputParam, Sample());
+        var tried = new TensorDataModelParam("a", ModelParamType.InputParam, Sample());
+
+        Assert.Equal([2f, 4f, 6f, 8f], Floats(compiled.Run(p.Shared())[0].ToTensorData()));
+        Assert.Equal([2f, 4f, 6f, 8f], Floats(compiled.Run(p.Shared())[0].ToTensorData()));
+        Assert.False(p.ToTensorData().IsDisposed);
+        Assert.Null(p.FeedMode);
+        compiled.Run(p);
+        Assert.Contains("pass it there as .Shared()", Assert.Throws<ObjectDisposedException>(() => compiled.Run(p)).Message);
+
+        using (other.Lock(tried.ToTensorData())) compiled.Run(tried.TryConsume());
+        Assert.False(tried.ToTensorData().IsDisposed);
+        compiled.Run(tried.TryConsume());
+        Assert.True(tried.ToTensorData().IsDisposed);
+    }
+
+    [Fact]
     public void TestTheSameTensorFedTwiceInOneCallIsReadIfAnyOccurrenceIsSharedElseFedAsABareOneIfAnyIsBare()
     {
         using var context = new ComputeContext();

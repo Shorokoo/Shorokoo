@@ -20,11 +20,13 @@ def if_(condition, then_branch, else_branch):
     return then_branch() if _truth(condition) else else_branch()
 
 
-def loop(trip_count, condition, carried, body, scan_dtypes):
+def loop(trip_count, condition, carried, body, scan_types):
+    """`scan_types` is one (element type code, element dims or None) per scan output: what the body
+    declares of it, which an output of a loop that runs no iteration is made empty of."""
     limit = None if trip_count is None else int(trip_count.reshape(-1)[0].item())
     keep_going = True if condition is None else _truth(condition)
     values = list(carried)
-    scans = [[] for _ in scan_dtypes]
+    scans = [[] for _ in scan_types]
     iteration = 0
     while keep_going and (limit is None or iteration < limit):
         outputs = body(
@@ -37,7 +39,8 @@ def loop(trip_count, condition, carried, body, scan_dtypes):
             scan.append(value)
         iteration += 1
     stacked = [
-        torch.stack(scan) if scan else torch.empty((0,), dtype=_rt.torch_dtype(dtype), device=_rt.device())
-        for scan, dtype in zip(scans, scan_dtypes)
+        torch.stack(scan) if scan
+        else torch.empty((0, *(dims or ())), dtype=_rt.torch_dtype(dtype), device=_rt.device())
+        for scan, (dtype, dims) in zip(scans, scan_types)
     ]
     return tuple(values + stacked)

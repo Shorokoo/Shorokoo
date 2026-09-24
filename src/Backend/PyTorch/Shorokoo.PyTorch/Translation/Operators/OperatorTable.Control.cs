@@ -1,4 +1,5 @@
 using System.Globalization;
+using Shorokoo.Core.Factory.IR;
 
 namespace Shorokoo.PyTorch.Translation.Operators;
 
@@ -24,11 +25,27 @@ internal static partial class OperatorTable
     {
         var body = node.Graph("body");
         var carried = node.Node.Inputs.Count - 2;
-        var scanDtypes = body.Outputs.Skip(1 + carried)
-            .Select(o => (o.Type?.TensorType?.ElemType is > 0 and var type ? type : 1).ToString(CultureInfo.InvariantCulture));
+        var scans = body.Outputs.Skip(1 + carried).Select(output => ScanType(node, output)).ToList();
         var values = Enumerable.Range(2, carried).Select(node.Input);
         var bodyFunction = node.Subgraph("body");
         return $"ops_control.loop({node.Input(0)}, {node.Input(1)}, {PyLiteral.List(values)}, "
-            + $"{bodyFunction}, {PyLiteral.List(scanDtypes)})";
+            + $"{bodyFunction}, {PyLiteral.List(scans)})";
+    }
+
+    /// <summary>
+    /// The element type and shape a scan output of a loop that runs no iteration is made empty with,
+    /// as ONNX Runtime makes it: the body's declared element type, and the shape <c>[0, …]</c> of its
+    /// declared dims, one it does not know being 0 — or <c>[0]</c> where it declares no shape.
+    /// Refused where the body declares no element type: there is nothing to make it of.
+    /// </summary>
+    private static string ScanType(NodeContext node, ValueInfoProto output)
+    {
+        if (output.Type?.TensorType is not { ElemType: > 0 } tensor)
+            throw node.Unsupported($"its body's scan output '{output.Name}' declares no tensor element type, "
+                + "which a loop that runs no iteration hands it out empty of");
+        var dims = tensor.Shape is { } shape
+            ? PyLiteral.List(shape.Dims.Select(d => PyLiteral.Int(d.ShouldSerializeDimValue() ? d.DimValue : 0)))
+            : "None";
+        return $"({tensor.ElemType.ToString(CultureInfo.InvariantCulture)}, {dims})";
     }
 }

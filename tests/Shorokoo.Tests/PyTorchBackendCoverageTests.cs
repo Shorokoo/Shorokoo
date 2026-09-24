@@ -187,6 +187,30 @@ public class PyTorchBackendCoverageTests
     }
 
     [Fact]
+    public void TestATorchAuditFailsOnAnOperatorTorchCannotRunAndOnADropoutFedOutOfTrainingThatDraws()
+    {
+        TensorData[] inputs = [QeeAudit.F32([4L], 1f, 2f, 3f, 4f), TensorData(DType.Bool, [], false)];
+        Assert.True(Audited(inputs, static model => model));
+        Assert.False(Audited(inputs, static model => Altered(model, dropout => dropout.OpType = "NoSuchOperator")));
+        Assert.False(Audited(inputs, static model => Altered(model, dropout =>
+        {
+            model.Graph.Nodes.Insert(0, new NodeProto { OpType = "Constant", Name = "always_training", Outputs = { "always_training" },
+                Attributes = { new AttributeProto { Name = "value", Type = AttributeProto.AttributeType.Tensor,
+                    T = new TensorProto { data_type = (int)TensorProto.DataType.Bool, RawData = [1] } } } });
+            dropout.Inputs[2] = "always_training";
+        })));
+    }
+
+    private static bool Audited(TensorData[] inputs, Func<ModelProto, ModelProto> alterOnTorch)
+        => QeeAuditOnTorch.Agrees<QeeDropoutFedModeAuditCheck>(QeeAudit.Lower<QeeDropoutFedModeAuditCheck>(inputs, null, null), inputs, alterOnTorch);
+
+    private static ModelProto Altered(ModelProto model, Action<NodeProto> alterDropout)
+    {
+        alterDropout(model.Graph.Nodes.Single(n => n.OpType == "Dropout"));
+        return model;
+    }
+
+    [Fact]
     public void TestControlFlowRunsOnTorch()
     {
         var torch = new ComputeContext(Torch);

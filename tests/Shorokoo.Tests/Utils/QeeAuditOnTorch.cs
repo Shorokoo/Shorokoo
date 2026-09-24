@@ -53,7 +53,7 @@ internal static class QeeAuditOnTorch
         [(typeof(QeeEmptyReduceNoIdentityCheck), "ReduceMean")] = "ONNX: an empty ReduceMean is undefined; torch yields NaN, ORT 0",
     };
 
-    public static bool Agrees<TModule>(InternalComputationGraph model, TensorData[] inputs)
+    public static bool Agrees<TModule>(InternalComputationGraph model, TensorData[] inputs, Func<ModelProto, ModelProto>? alterOnTorch = null)
     {
         IData[] feeds = [.. inputs.Select(static t => (IData)t.Shared())];
         List<NodeProto> nodes = [];
@@ -62,7 +62,8 @@ internal static class QeeAuditOnTorch
         Dictionary<string, IData> onTorch;
         try
         {
-            onTorch = Values(new ComputeContext(Backend.Value).ExecuteRewritten(model, m => ExposeEveryValue(m, [], []), feeds));
+            onTorch = Values(new ComputeContext(Backend.Value).ExecuteRewritten(model,
+                m => (alterOnTorch ?? (static altered => altered))(ExposeEveryValue(m, [], [])), feeds));
         }
         catch (Exception ex) when (IsUntranslatedOperator(ex))
         {

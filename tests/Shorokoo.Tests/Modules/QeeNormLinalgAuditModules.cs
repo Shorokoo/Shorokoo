@@ -598,4 +598,16 @@ namespace Shorokoo.Tests.Modules
             return mismatch < Scalar(1L);
         }
     }
+
+    /// <summary>Dropout whose training mode is fed at run time: fed false, it passes x through.
+    /// x = [1, 2, 3, 4].</summary>
+    [Module]
+    public partial class QeeDropoutFedModeAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x, Scalar<bit> training)
+        {
+            var (output, _) = OnnxOp.Dropout(x, Scalar(0.5f), training);
+            return FloatMismatch((Tensor<float32>)output, Vector(1f, 2f, 3f, 4f)) < Scalar(1L);
+        }
+    }
 }

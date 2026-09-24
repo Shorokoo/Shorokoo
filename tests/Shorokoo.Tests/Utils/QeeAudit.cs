@@ -84,7 +84,7 @@ namespace Shorokoo.Tests.Utils
                 : throw new InvalidOperationException($"missing output {k}"))];
         }
 
-        private static InternalComputationGraph Lower<TModule>(
+        internal static InternalComputationGraph Lower<TModule>(
             TensorData[] allInputs, Dictionary<string, DType>? genericTypes, RngConfig? rngConfig)
         {
             var prop = typeof(TModule).GetProperty("ComputationGraph", BindingFlags.Public | BindingFlags.Static)

@@ -834,6 +834,28 @@ public class ComputeContextLifetimeCoverageTests
         Assert.Empty(unaliased.Compile(graph, [[4L], [4L]], trainingStep: false, aliasCandidates: [(0, 0)]).MarkedPairs());
     }
 
+    [Fact]
+    public void TestAnOutputTheRuntimeFoldsToAConstantIsMemoryOfItsOwnThatAWriteDoesNotCarryIntoAnotherRun()
+    {
+        using var context = new ComputeContext();
+        var x = InputVector<float32>("x");
+        float[] AfterAWrite(Variable output)
+        {
+            var compiled = context.Compile(new InternalComputationGraph([x], [output]), [[4L]], trainingStep: false);
+            TensorData<float32> Run() => compiled.Execute(Sample())[0].ToTensorData().As<float32>();
+            var (first, second) = (Run(), Run());
+            first.WriteMemory<float>(written => written.Fill(9f));
+            return [.. second.CopyMemory<float>(), .. Run().CopyMemory<float>()];
+        }
+
+        Assert.Equal([1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f],
+            AfterAWrite(OnnxOp.ConstantOfShape(OnnxOp.Shape(x), TensorData(DType.Float32, [1L], 1f).MoveToAttribute())));
+        Assert.Equal([1f, 2f, 3f, 4f, 1f, 2f, 3f, 4f], AfterAWrite(Vector(1f, 2f, 3f, 4f)));
+        Assert.Equal([1f, 2f, 3f, 4f, 1f, 2f, 3f, 4f], AfterAWrite(OnnxOp.Identity(Vector(1f, 2f, 3f, 4f), rank: 1)));
+        Assert.Equal([1f, 2f, 3f, 4f, 1f, 2f, 3f, 4f], AfterAWrite(OnnxOp.Reshape(Vector(1f, 2f, 3f, 4f), Vector(2L, 2L), allowZero: false)));
+        Assert.Equal([11f, 22f, 33f, 44f, 11f, 22f, 33f, 44f], AfterAWrite(Vector(1f, 2f, 3f, 4f) + Vector(10f, 20f, 30f, 40f)));
+    }
+
     /// <summary>The model a lowering hands a backend for <paramref name="graph"/>.</summary>
     private static byte[] ModelOf(GraphProto graph)
     {

@@ -194,6 +194,15 @@ internal sealed class OrtSession : IShorokooSession
     /// saving, since ONNX Runtime holds the value until the run ends either way. What comes back is
     /// a value of its own over the same memory: ORT counts the references to a buffer, so releasing
     /// the consumed value below, as every run does, leaves the output whole.</para>
+    ///
+    /// <para>Writing into a consumed value is only safe because it is memory of its own — nothing
+    /// else reads it — and the values runs consume are mostly outputs of earlier runs. So this
+    /// rests on ONNX Runtime never handing out a session's own memory as an output, and it does
+    /// not, measured on 1.26: an output it folded to a constant, and an initializer or a view of
+    /// one handed out as an output, each comes back in a buffer of its own on every run, and a
+    /// write into one reaches neither the session nor any other run's output.
+    /// <c>ComputeContextLifetimeCoverageTests.TestAnOutputTheRuntimeFoldsToAConstantIsMemoryOfItsOwnThatAWriteDoesNotCarryIntoAnotherRun</c>
+    /// fails if a later version starts sharing one.</para>
     /// </summary>
     public IReadOnlyList<IShorokooTensorValue> RunConsuming(
         IReadOnlyDictionary<string, IShorokooTensorValue> inputs,

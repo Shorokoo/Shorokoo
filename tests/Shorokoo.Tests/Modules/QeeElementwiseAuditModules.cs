@@ -181,6 +181,50 @@ namespace Shorokoo.Tests.Modules
             => (actual.Cast<int64>() - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
     }
 
+    /// <summary>Unsigned wraparound, which Shorokoo's keyed generator is built on: uint32 Add, Mul
+    /// and Sub modulo 2^32, BitShift LEFT dropping the bits shifted out and RIGHT filling with
+    /// zeros, Div/Mod, and int64 → uint32 Cast wrapping; uint64 Add/Mul modulo 2^64, a logical
+    /// RIGHT shift of values with the top bit set, Div/Mod and Greater past 2^63, and the uint64 →
+    /// uint32 Cast keeping the low 32 bits. uint64 results are compared as their int64 bit
+    /// patterns. Inputs: ia = [2^32−1, 2^16, 1, 2^31+1], ib = [2, 2^16, 2, 1], sa = [2, 16, 31, 1];
+    /// wa = [−1, −2^63, −6101065172474983726, 7] (as uint64: 2^64−1, 2^63,
+    /// 12345678901234567890, 7), wb = [3, 2, 1000000007, 7], ws = [1, 63, 4, 0].</summary>
+    [Module]
+    public partial class QeeUnsignedWraparoundValueAuditCheck
+    {
+        public static Scalar<bit> Inline(
+            Tensor<int64> ia, Tensor<int64> ib, Tensor<int64> sa, Tensor<int64> wa, Tensor<int64> wb, Tensor<int64> ws)
+        {
+            var (a, b, s) = (ia.Cast<uint32>(), ib.Cast<uint32>(), sa.Cast<uint32>());
+            var (x, y, z) = (wa.Cast<uint64>(), wb.Cast<uint64>(), ws.Cast<uint64>());
+            var mismatch =
+                IntMismatch(U32((Tensor<uint32>)OnnxOp.Add(a, b)), Vector(1L, 131072L, 3L, 2147483650L)) +
+                IntMismatch(U32((Tensor<uint32>)OnnxOp.Mul(a, b)), Vector(4294967294L, 0L, 2L, 2147483649L)) +
+                IntMismatch(U32((Tensor<uint32>)OnnxOp.Sub(b, a)), Vector(3L, 0L, 1L, 2147483648L)) +
+                IntMismatch(U32((Tensor<uint32>)OnnxOp.BitShift(a, s, BitShiftDirection.Left)),
+                    Vector(4294967292L, 0L, 2147483648L, 2L)) +
+                IntMismatch(U32((Tensor<uint32>)OnnxOp.BitShift(a, s, BitShiftDirection.Right)),
+                    Vector(1073741823L, 1L, 0L, 1073741824L)) +
+                IntMismatch(U32((Tensor<uint32>)OnnxOp.Div(a, b)), Vector(2147483647L, 1L, 0L, 2147483649L)) +
+                IntMismatch(U32((Tensor<uint32>)OnnxOp.Mod(a, b)), Vector(1L, 0L, 1L, 0L)) +
+                IntMismatch(U32(Vector(-1L, -2L).Cast<uint32>()), Vector(4294967295L, 4294967294L)) +
+                IntMismatch(((Tensor<uint64>)OnnxOp.Add(x, y)).Cast<int64>(),
+                    Vector(2L, -9223372036854775806L, -6101065171474983719L, 14L)) +
+                IntMismatch(((Tensor<uint64>)OnnxOp.Mul(x, y)).Cast<int64>(),
+                    Vector(-3L, 0L, -716234467903602754L, 49L)) +
+                IntMismatch(((Tensor<uint64>)OnnxOp.BitShift(x, z, BitShiftDirection.Right)).Cast<int64>(),
+                    Vector(9223372036854775807L, 1L, 771604931327160493L, 7L)) +
+                IntMismatch(((Tensor<uint64>)OnnxOp.Div(x, y)).Cast<int64>(),
+                    Vector(6148914691236517205L, 4611686018427387904L, 12345678814L, 1L)) +
+                IntMismatch(((Tensor<uint64>)OnnxOp.Mod(x, y)).Cast<int64>(), Vector(0L, 0L, 814816192L, 0L)) +
+                IntMismatch(((Tensor<bit>)OnnxOp.Greater(x, y)).Cast<int64>(), Vector(1L, 1L, 1L, 0L)) +
+                IntMismatch(U32(x.Cast<uint32>()), Vector(4294967295L, 0L, 3944680146L, 7L));
+            return mismatch < Scalar(1L);
+        }
+
+        private static Tensor<int64> U32(Tensor<uint32> t) => t.Cast<int64>();
+    }
+
     /// <summary>Bitwise And / Or / Xor / Not and BitShift LEFT / RIGHT on uint32 (the
     /// ops are unsigned-only in-framework; BitwiseNot must mask the complement to the
     /// 32-bit width: ~12 → 4294967283). Inputs: ba = [12, 10, 15], bb = [10, 5, 3].</summary>

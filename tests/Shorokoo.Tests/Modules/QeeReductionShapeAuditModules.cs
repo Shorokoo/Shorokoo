@@ -435,4 +435,57 @@ namespace Shorokoo.Tests.Modules
         private static Tensor<float32> Flat(Tensor<float32> t) => t.Reshape(Vector(-1L));
         private static Tensor<int64> FlatI(Tensor<int64> t) => t.Reshape(Vector(-1L));
     }
+
+    /// <summary>ScatterND with every reduction (mul, min, max, and add over a repeated index,
+    /// which accumulates), ScatterElements add over a repeated index, GatherND (index tuples,
+    /// negative indices, whole-slice lookups, batch_dims 1), ReverseSequence with the batch on
+    /// axis 0, EyeLike (int64, k 1), CumSum exclusive + reverse on int64 along axis −1, and TopK on
+    /// int64 with ties (largest and smallest keep the lower index first).
+    /// Input m = [[1,2,3],[4,5,6]].</summary>
+    [Module]
+    public partial class QeeScatterGatherNdEdgeValueAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> m)
+        {
+            var v4 = Vector(1f, 2f, 3f, 4f);
+            var d22 = Vector(1f, 2f, 3f, 4f).Reshape(Vector(2L, 2L));
+            var at31 = Vector(3L, 1L).Reshape(Vector(2L, 1L));
+            var at11 = Vector(1L, 1L).Reshape(Vector(2L, 1L));
+            var ints = Vector(3L, 1L, 3L, 2L);
+            var (top, topIdx) = OnnxOp.TopK(ints, Vector(2L), axis: -1L);
+            var (low, lowIdx) = OnnxOp.TopK(ints, Vector(2L), axis: -1L, largest: false);
+            var mismatch =
+                FloatMismatch((Tensor<float32>)OnnxOp.ScatterND(v4, at31, Vector(30f, 10f), ScatterNDReduction.Mul),
+                    Vector(1f, 20f, 3f, 120f)) +
+                FloatMismatch((Tensor<float32>)OnnxOp.ScatterND(v4, at31, Vector(0f, 10f), ScatterNDReduction.Min),
+                    Vector(1f, 2f, 3f, 0f)) +
+                FloatMismatch((Tensor<float32>)OnnxOp.ScatterND(v4, at31, Vector(0f, 10f), ScatterNDReduction.Max),
+                    Vector(1f, 10f, 3f, 4f)) +
+                FloatMismatch((Tensor<float32>)OnnxOp.ScatterND(v4, at11, Vector(5f, 6f), ScatterNDReduction.Add),
+                    Vector(1f, 13f, 3f, 4f)) +
+                FloatMismatch((Tensor<float32>)OnnxOp.ScatterElements(v4, Vector(2L, 2L), Vector(10f, 20f),
+                    axis: 0, reduction: ScatterNDReduction.Add), Vector(1f, 2f, 33f, 4f)) +
+                FloatMismatch(Flat((Tensor<float32>)OnnxOp.GatherND(d22, Vector(0L, 1L, 1L, 0L).Reshape(Vector(2L, 2L)))),
+                    Vector(2f, 3f)) +
+                FloatMismatch(Flat((Tensor<float32>)OnnxOp.GatherND(d22, Vector(-1L, -1L).Reshape(Vector(1L, 2L)))),
+                    Vector(4f)) +
+                FloatMismatch(Flat((Tensor<float32>)OnnxOp.GatherND(d22, Vector(1L).Reshape(Vector(1L, 1L)))),
+                    Vector(3f, 4f)) +
+                FloatMismatch(Flat((Tensor<float32>)OnnxOp.GatherND(d22, Vector(1L, 0L).Reshape(Vector(2L, 1L)), 1L)),
+                    Vector(2f, 3f)) +
+                FloatMismatch(Flat((Tensor<float32>)OnnxOp.ReverseSequence(m, Vector(2L, 3L), 0L, 1L)),
+                    Vector(2f, 1f, 3f, 6f, 5f, 4f)) +
+                IntMismatch(FlatI((Tensor<int64>)OnnxOp.EyeLike(d22, DType.Int64, 1L)), Vector(0L, 1L, 0L, 0L)) +
+                IntMismatch((Tensor<int64>)OnnxOp.CumSum(Vector(1L, 2L, 3L), Scalar(-1L), exclusive: true, reverse: true),
+                    Vector(5L, 3L, 0L)) +
+                IntMismatch((Tensor<int64>)top, Vector(3L, 3L)) +
+                IntMismatch((Tensor<int64>)topIdx, Vector(0L, 2L)) +
+                IntMismatch((Tensor<int64>)low, Vector(1L, 2L)) +
+                IntMismatch((Tensor<int64>)lowIdx, Vector(1L, 3L));
+            return mismatch < Scalar(1L);
+        }
+
+        private static Tensor<float32> Flat(Tensor<float32> t) => t.Reshape(Vector(-1L));
+        private static Tensor<int64> FlatI(Tensor<int64> t) => t.Reshape(Vector(-1L));
+    }
 }

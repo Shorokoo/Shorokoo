@@ -333,6 +333,62 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>String VALUES, which QEE does not compute, so ORT-validated only: StringConcat,
+    /// StringNormalizer (LOWER; UPPER dropping stopwords ignoring case; NONE dropping them
+    /// case-sensitively; in the C locale, which every machine has), RegexFullMatch, StringSplit (at a delimiter, where adjacent delimiters
+    /// make an empty piece; at whitespace runs without one; maxsplit 1), Unique over strings, and
+    /// Cast between numbers and strings: a float as printf's %.8g, an integer and a bool in
+    /// decimal, and strings read back as floats (exponent form, INF in any case) and as integers.
+    /// Inputs x = ["Hello World", "the  quick fox"], f = [1, 0.1, −3.5, 1e20, 1e−5, 123456789],
+    /// i = [−7, 0, 9007199254740993].</summary>
+    [Module]
+    public partial class QeeStringValueAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<utf8> x, Tensor<float32> f, Tensor<int64> i)
+        {
+            var (split, splitCount) = OnnxOp.StringSplit(x, delimiter: " ");
+            var (spaced, spacedCount) = OnnxOp.StringSplit(x);
+            var (once, onceCount) = OnnxOp.StringSplit(x, delimiter: " ", maxsplit: 1L);
+            var (unique, _, uniqueInverse, _) = OnnxOp.Unique(Strings("b", "a", "b"));
+            var mismatch =
+                Mismatch(OnnxOp.StringConcat(x, Strings("!", "?")), Strings("Hello World!", "the  quick fox?")) +
+                Mismatch(OnnxOp.StringNormalizer(x, caseChangeAction: "LOWER", locale: "C"), Strings("hello world", "the  quick fox")) +
+                Mismatch(OnnxOp.StringNormalizer(Strings("The", "cat", "THE", "Sat"), caseChangeAction: "UPPER",
+                    isCaseSensitive: 0L, locale: "C", stopwords: ["the"]), Strings("CAT", "SAT")) +
+                Mismatch(OnnxOp.StringNormalizer(Strings("The", "the", "a"), caseChangeAction: "NONE",
+                    isCaseSensitive: 1L, locale: "C", stopwords: ["the"]), Strings("The", "a")) +
+                IntMismatch(((Tensor<bit>)OnnxOp.RegexFullMatch(Strings("abc123", "abc", "123"), "[a-z]+\\d+")).Cast<int64>(),
+                    Vector(1L, 0L, 0L)) +
+                Mismatch(split, Strings("Hello", "World", "", "", "the", "", "quick", "fox")) +
+                IntMismatch((Tensor<int64>)splitCount, Vector(2L, 4L)) +
+                Mismatch(spaced, Strings("Hello", "World", "", "the", "quick", "fox")) +
+                IntMismatch((Tensor<int64>)spacedCount, Vector(2L, 3L)) +
+                Mismatch(once, Strings("Hello", "World", "the", " quick fox")) +
+                IntMismatch((Tensor<int64>)onceCount, Vector(2L, 2L)) +
+                Mismatch(unique, Strings("a", "b")) +
+                IntMismatch((Tensor<int64>)uniqueInverse, Vector(1L, 0L, 1L)) +
+                Mismatch(OnnxOp.Cast(f, null, DType.Utf8),
+                    Strings("1", "0.1", "-3.5", "1e+20", "9.9999997e-06", "1.2345679e+08")) +
+                Mismatch(OnnxOp.Cast(i, null, DType.Utf8), Strings("-7", "0", "9007199254740993")) +
+                Mismatch(OnnxOp.Cast(Vector(true, false), null, DType.Utf8), Strings("1", "0")) +
+                FloatMismatch((Tensor<float32>)OnnxOp.Cast(Strings("3.5", "-1e3", "0.25"), null, DType.Float32),
+                    Vector(3.5f, -1000f, 0.25f)) +
+                IntMismatch(((Tensor<bit>)OnnxOp.IsInf((Tensor<float32>)OnnxOp.Cast(Strings("INF", "-inf"), null, DType.Float32))).Cast<int64>(),
+                    Vector(1L, 1L)) +
+                IntMismatch((Tensor<int64>)OnnxOp.Cast(Strings("42", "-17"), null, DType.Int64), Vector(42L, -17L));
+            return mismatch < Scalar(1L);
+        }
+
+        private static Tensor<utf8> Strings(params string[] values) => (Tensor<utf8>)OnnxOp.Constant(values);
+
+        private static Scalar<int64> Mismatch(Variable actual, Tensor<utf8> expected)
+        {
+            var flat = ((Tensor<utf8>)actual).Reshape(Vector(-1L));
+            return ShapeMismatch(flat, expected.TShape)
+                + ((Tensor<bit>)OnnxOp.Not(OnnxOp.Equal(flat, expected))).Cast<int64>().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+        }
+    }
+
     /// <summary>Shorokoo-internal control-flow/lowering ops (QeeOnly-strict — ORT has no
     /// kernels for these op codes): StateUpdateLink passes the UPDATED state (input 1)
     /// through with values; WithStateDeps passes the MAIN output (input 0) through with

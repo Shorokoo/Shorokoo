@@ -15,6 +15,7 @@ import torch.nn.functional as F
 from . import runtime as _rt
 
 _NARROW_UNSIGNED = {torch.uint16: 0xFFFF, torch.uint32: 0xFFFFFFFF}
+_SIGN_BIT = -(2 ** 63)
 
 
 def _emulated(fn, *xs):
@@ -53,9 +54,6 @@ def sub(a, b):
 
 def mul(a, b):
     return _emulated(torch.mul, a, b)
-
-
-_SIGN_BIT = -(2 ** 63)
 
 
 def _unsigned_at_least(x, y):
@@ -193,12 +191,20 @@ def erf(x):
     return torch.erf(x)
 
 
+def _ordered(fn, a, b):
+    """`fn` (maximum or minimum) of a and b; uint64 ones, which torch cannot order, as int64 bit
+    patterns with the sign bit flipped, which int64 orders as unsigned."""
+    if a.dtype == torch.uint64:
+        return (fn(a.view(torch.int64) ^ _SIGN_BIT, b.view(torch.int64) ^ _SIGN_BIT) ^ _SIGN_BIT).view(torch.uint64)
+    return _widened(fn, a, b)
+
+
 def max_(*xs):
-    return functools.reduce(lambda a, b: _widened(torch.maximum, a, b), xs)
+    return functools.reduce(lambda a, b: _ordered(torch.maximum, a, b), xs)
 
 
 def min_(*xs):
-    return functools.reduce(lambda a, b: _widened(torch.minimum, a, b), xs)
+    return functools.reduce(lambda a, b: _ordered(torch.minimum, a, b), xs)
 
 
 def sum_(*xs):

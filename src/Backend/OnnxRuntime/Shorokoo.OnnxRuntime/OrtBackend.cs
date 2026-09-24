@@ -148,6 +148,27 @@ public abstract class OrtBackend : IShorokooBackend
     /// will actually run, and a pair is kept only where <see cref="OutputAliasProof"/> proves it
     /// again over that graph. A pair the rewritten graph no longer proves is dropped, and a graph
     /// that cannot be read back keeps none.</para>
+    ///
+    /// <para>Writing the graph out costs the session more than the write: while it saves the
+    /// graph, ORT keeps every initializer in it — folded constants included — for the session's
+    /// life, where otherwise it lets them go once the session holds its own copy. Where that copy
+    /// is a second one, the cost is the initializers over again: measured on the CPU, a session
+    /// over a 256 MiB <c>MatMul</c> weight, which ORT repacks for its kernel, took 524 MiB of
+    /// process memory built while writing and 270 MiB without, where one over a 256 MiB
+    /// <c>Add</c> operand, which the kernel reads as it is, took 270 MiB either way. On a card
+    /// every initializer is a second copy by construction, the host's beside the card's. So where
+    /// the graph written out holds more than 16 MiB of initializers, in the file beside it and
+    /// inline, the session is disposed and built again without writing, keeping the pairs proved
+    /// over the graph the first build wrote: the same model with the same options makes the same
+    /// graph, writing it out changing nothing else the CPU and CUDA providers do. Below that,
+    /// keeping the copy costs less than a second build.</para>
+    ///
+    /// <para>That premise is known only of the providers that ship here, so on a device of
+    /// another kind the session stays as first built. DirectML fuses its graph only when none is
+    /// being written out, so a DirectML session built to alias runs unfused — and built again, it
+    /// would run a graph the pairs were never proved over. A provider that compiles nodes cannot
+    /// have its graph written out at all, so a session built to alias on one is built twice, the
+    /// second time aliasing nothing.</para>
     /// </summary>
     public IShorokooSession CreateSession(
         ReadOnlyMemory<byte> modelBytes,
@@ -163,6 +184,10 @@ public abstract class OrtBackend : IShorokooBackend
             outputAliases.Count == 0 ? null : outputAliases);
     }
 
+    // The most bytes of initializers a session built while writing its graph out keeps as it was
+    // built, holding them twice, rather than being built again without writing (see CreateSession).
+    private const long InitializersKeptTwice = 16L << 20;
+
     private IShorokooSession Build(
         ReadOnlyMemory<byte> modelBytes,
         ShorokooGraphOptimization graphOptimization,
@@ -173,11 +198,19 @@ public abstract class OrtBackend : IShorokooBackend
     {
         ArgumentNullException.ThrowIfNull(deviceMemory);
         ArgumentNullException.ThrowIfNull(diagnostics);
-        if (outputAliases is not null)
+        // One copy for however many sessions are built from it: ORT takes the model as an array.
+        var model = modelBytes.ToArray();
+        BuiltSession New(string? optimizedDirectory) => NewSession(
+            model, graphOptimization, logSeverity, deviceMemory, diagnostics, optimizedDirectory);
+        if (outputAliases is null) return Wrap(New(optimizedDirectory: null), []);
+
+        var optimizedDirectory = TempDirectory("shorokoo-optimized-");
+        try
         {
+            BuiltSession built;
             try
             {
-                return BuildOnce(modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases);
+                built = New(optimizedDirectory);
             }
             // ONNX Runtime cannot write out a graph holding nodes an execution provider compiled
             // (TensorRT, OpenVINO and the like), and refuses to build a session asked to. Aliasing
@@ -187,9 +220,24 @@ public abstract class OrtBackend : IShorokooBackend
             // cannot be built at all, and when it could -- an allocation failing while the session
             // initialized, say -- left the graph a session that never aliases, for its whole life
             // and without a word.
-            catch (OnnxRuntimeException refusal) when (RefusesToWriteCompiledNodes(refusal)) { }
+            catch (OnnxRuntimeException refusal) when (RefusesToWriteCompiledNodes(refusal))
+            {
+                return Wrap(New(optimizedDirectory: null), []);
+            }
+
+            var (proved, initializerBytes) = ProvedAgain(optimizedDirectory, outputAliases);
+            if (initializerBytes > InitializersKeptTwice
+                && Description.Device is ComputeDevice.Cpu or ComputeDevice.Cuda)
+            {
+                Discard(built);
+                built = New(optimizedDirectory: null);
+            }
+            return Wrap(built, proved);
         }
-        return BuildOnce(modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases: null);
+        finally
+        {
+            DeleteDirectory(optimizedDirectory);
+        }
     }
 
     /// <summary>
@@ -201,13 +249,21 @@ public abstract class OrtBackend : IShorokooBackend
     private static bool RefusesToWriteCompiledNodes(OnnxRuntimeException failure)
         => failure.Message.Contains("contains compiled nodes", StringComparison.Ordinal);
 
-    private OrtSession BuildOnce(
-        ReadOnlyMemory<byte> modelBytes,
+    /// <summary>An ONNX Runtime session, and the folder it writes its profile into, if it keeps
+    /// one: what <see cref="OrtSession"/> is made of.</summary>
+    private readonly record struct BuiltSession(InferenceSession Session, string? ProfileDirectory);
+
+    /// <summary>
+    /// An ONNX Runtime session over <paramref name="model"/>, writing the graph it will run into
+    /// <paramref name="optimizedDirectory"/> where one is named.
+    /// </summary>
+    private BuiltSession NewSession(
+        byte[] model,
         ShorokooGraphOptimization graphOptimization,
         ShorokooLogSeverity logSeverity,
         DeviceMemorySettings deviceMemory,
         DiagnosticSettings diagnostics,
-        IReadOnlyList<OutputAlias>? outputAliases)
+        string? optimizedDirectory)
     {
         // The `using` is load-bearing, not tidiness. SessionOptions is a SafeHandle, so it
         // carries a critical finalizer that calls OrtReleaseSessionOptions, and ORT takes its
@@ -221,20 +277,15 @@ public abstract class OrtBackend : IShorokooBackend
         Configure(options, graphOptimization, logSeverity);
         // Named before anything can throw, and made inside the try: each folder is made by the call
         // that points the options into it, and a setter there throwing after the folder was made
-        // would otherwise leave it with no name for the catch or the finally to delete it by.
+        // would otherwise leave it with no name for the catch, or the caller's finally, to delete
+        // it by.
         var profileDirectory = diagnostics.TraceNodePlacement ? TempDirectory("shorokoo-node-placement-") : null;
-        var optimizedDirectory = outputAliases is not null ? TempDirectory("shorokoo-optimized-") : null;
         try
         {
             if (profileDirectory is not null) EnableProfiling(options, profileDirectory);
             if (optimizedDirectory is not null) WriteOptimizedModel(options, optimizedDirectory);
             _configureExecutionProvider(options, deviceMemory);
-            var session = new InferenceSession(modelBytes.ToArray(), options);
-            // The session keeps this backend so it can rebuild a feed that came from another
-            // backend's native runtime -- see OrtSession.Unwrap.
-            return new OrtSession(
-                session, _cudaDeviceId, this, profileDirectory,
-                optimizedDirectory is null ? [] : ProvedAgain(optimizedDirectory, outputAliases!));
+            return new BuiltSession(new InferenceSession(model, options), profileDirectory);
         }
         catch
         {
@@ -242,10 +293,31 @@ public abstract class OrtBackend : IShorokooBackend
             DeleteDirectory(profileDirectory);
             throw;
         }
-        finally
+    }
+
+    /// <summary><paramref name="built"/> as this backend's session, binding the pairs of
+    /// <paramref name="outputAliases"/> it can.</summary>
+    private OrtSession Wrap(BuiltSession built, IReadOnlyList<OrtSession.ProvedAlias> outputAliases)
+    {
+        var (session, profileDirectory) = built;
+        try
         {
-            DeleteDirectory(optimizedDirectory);
+            // The session keeps this backend so it can rebuild a feed that came from another
+            // backend's native runtime -- see OrtSession.Unwrap.
+            return new OrtSession(session, _cudaDeviceId, this, profileDirectory, outputAliases);
         }
+        catch
+        {
+            Discard(built);
+            throw;
+        }
+    }
+
+    /// <summary>Releases a session nothing will own, and its profile folder.</summary>
+    private static void Discard(BuiltSession built)
+    {
+        built.Session.Dispose();
+        DeleteDirectory(built.ProfileDirectory);
     }
 
     /// <summary>A folder of its own in the temp folder, named and not yet made.</summary>
@@ -277,10 +349,12 @@ public abstract class OrtBackend : IShorokooBackend
     /// <summary>
     /// The pairs of <paramref name="outputAliases"/> the graph ONNX Runtime wrote into
     /// <paramref name="directory"/> still proves, each with the shape that graph states for its
-    /// output, or none where it wrote nothing that can be read: a pair this cannot prove is not
-    /// bound, which costs the memory and never the result.
+    /// output, and the bytes of initializers the graph holds, in the file beside it and inline.
+    /// Where it wrote nothing that can be read, no pairs — a pair this cannot prove is not bound,
+    /// which costs the memory and never the result — and initializers of any size, which rules
+    /// out keeping them twice unseen.
     /// </summary>
-    private static IReadOnlyList<OrtSession.ProvedAlias> ProvedAgain(
+    private static (IReadOnlyList<OrtSession.ProvedAlias> Proved, long InitializerBytes) ProvedAgain(
         string directory, IReadOnlyList<OutputAlias> outputAliases)
     {
         try
@@ -288,17 +362,29 @@ public abstract class OrtBackend : IShorokooBackend
             ModelProto model;
             using (var stream = File.OpenRead(Path.Combine(directory, OptimizedModelFile)))
                 model = ProtoBuf.Serializer.Deserialize<ModelProto>(stream);
-            if (model.Graph is not { } graph) return [];
+            if (model.Graph is not { } graph) return ([], long.MaxValue);
             var stated = new Dictionary<string, TypeProto?>(StringComparer.Ordinal);
             foreach (var output in graph.Outputs) stated.TryAdd(output.Name, output.Type);
-            return [.. OutputAliasProof.Prove(graph, outputAliases).Select(alias =>
-                new OrtSession.ProvedAlias(alias, StatedShape(stated.GetValueOrDefault(alias.Output))))];
+            var aside = new FileInfo(Path.Combine(directory, OptimizedInitializersFile));
+            return (
+                [.. OutputAliasProof.Prove(graph, outputAliases).Select(alias =>
+                    new OrtSession.ProvedAlias(alias, StatedShape(stated.GetValueOrDefault(alias.Output))))],
+                (aside.Exists ? aside.Length : 0) + graph.Initializers.Sum(InlineBytes));
         }
         catch (Exception)
         {
-            return [];
+            return ([], long.MaxValue);
         }
     }
+
+    /// <summary>The bytes of <paramref name="initializer"/>'s contents the model holds inline:
+    /// none for one ONNX Runtime wrote to the file beside it.</summary>
+    private static long InlineBytes(TensorProto initializer)
+        => (initializer.RawData?.LongLength ?? 0)
+           + 4L * ((initializer.FloatDatas?.Length ?? 0) + (initializer.Int32Datas?.Length ?? 0))
+           + 8L * ((initializer.Int64Datas?.Length ?? 0) + (initializer.DoubleDatas?.Length ?? 0)
+                   + (initializer.Uint64Datas?.Length ?? 0))
+           + initializer.StringDatas.Sum(bytes => (long)bytes.Length);
 
     /// <summary>
     /// The shape <paramref name="type"/> states, where it states one in full — every dimension a

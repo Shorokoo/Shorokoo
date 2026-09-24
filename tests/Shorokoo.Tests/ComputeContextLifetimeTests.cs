@@ -868,6 +868,28 @@ public class ComputeContextLifetimeCoverageTests
         Assert.Equal((2, 0), (compiling.Builds, unaliased.OutputAliases.Count));
     }
 
+    [Fact]
+    public void TestASessionHoldingMoreThanSixteenMebibytesOfInitializersIsBuiltAgainWithoutWritingItsGraphOutAndStillAliases()
+    {
+        (int Builds, float O, string? Aliased) Built(int floats, ComputeDevice device = ComputeDevice.Cpu)
+        {
+            var backend = new ScriptedBackend(_ => { }, device);
+            var graph = GraphOf("a:float[1] i:int64[1]", "O:float[1]", Op("Gather", "C i", "g"), Op("Sub", "a g", "O"));
+            graph.Initializers.Add(new TensorProto { Name = "C", Dims = [floats], data_type = 1, RawData = new byte[4L * floats] });
+            using var session = Aliasing(backend, graph);
+            var a = backend.CreateTensor<float>([5f], [1L]);
+            using var i = backend.CreateTensor<long>([0L], [1L]);
+            using var o = session.RunConsuming(new Dictionary<string, IShorokooTensorValue> { ["a"] = a, ["i"] = i }, [a], ["O"],
+                ComputeContext.NoOutputsRetained, RunSettings.Default, out var aliased)[0];
+            return (backend.Builds, o.GetTensorDataAsSpan<float>()[0], aliased[0]);
+        }
+
+        const int SixteenMebibytes = 4 << 20;
+        Assert.Equal((2, 5f, "a"), Built(SixteenMebibytes + 1));
+        Assert.Equal((1, 5f, "a"), Built(SixteenMebibytes));
+        Assert.Equal((1, 5f, "a"), Built(SixteenMebibytes + 1, ComputeDevice.Other));
+    }
+
     /// <summary>ONNX Runtime's own failure, which only ONNX Runtime constructs.</summary>
     private static OnnxRuntimeException OrtFailure(string message)
         => (OnnxRuntimeException)Activator.CreateInstance(

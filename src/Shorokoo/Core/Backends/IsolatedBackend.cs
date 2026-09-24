@@ -404,6 +404,8 @@ public static class IsolatedBackend
             => _inner.CreateSession(
                 modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases);
 
+        public bool AcceptsTrainingFormat(string format) => _inner.AcceptsTrainingFormat(format);
+
         public IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged
             => _inner.CreateTensor(data, shape);
 

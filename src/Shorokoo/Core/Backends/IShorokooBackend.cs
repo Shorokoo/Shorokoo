@@ -142,6 +142,18 @@ public interface IShorokooBackend
         IReadOnlyList<OutputAlias> outputAliases)
         => CreateSession(modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics);
 
+    // Whether this backend's sessions run a training step handed over in `format` (one of
+    // TrainingFormats). Every backend runs TrainingFormats.Onnx -- a step whose gradient Shorokoo
+    // has already written out as ordinary operators -- so that is the default and the only answer
+    // a backend that computes no gradients of its own should give. A backend that differentiates
+    // itself also accepts TrainingFormats.OnnxAutoGrad, whose one ai.shorokoo.training::AutoGrad
+    // node it must then run. A rig asked to leave the gradient to a backend that does not accept
+    // the format refuses at build, before anything is composed.
+    //
+    // A decorator forwards this, as it forwards every member with a default body: answering from
+    // the default would say "no" for a backend that says "yes".
+    bool AcceptsTrainingFormat(string format) => format == TrainingFormats.Onnx;
+
     IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged;
 
     IShorokooTensorValue CreateTensorFromRawBytes(

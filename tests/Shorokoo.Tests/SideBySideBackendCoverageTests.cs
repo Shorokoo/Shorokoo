@@ -344,6 +344,8 @@ public class SideBySideBackendCoverageTests
 
         public bool CanAddress(MemoryLocation location) => inner.CanAddress(location);
 
+        public bool AcceptsTrainingFormat(string format) => inner.AcceptsTrainingFormat(format);
+
         public void Release(IShorokooTensorValue value)
         {
             Released.Add(value);

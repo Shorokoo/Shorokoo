@@ -51,7 +51,7 @@ namespace Shorokoo
     /// <see cref="LoadTrainingCheckpoint"/> for the flat safetensors file, and
     /// <see cref="SaveTrainingCheckpointToSkpt"/> /
     /// <see cref="TrainingRig.LoadCheckpointFromSkpt"/> (or
-    /// <see cref="TrainingRig.Load(string, ComputeContext?, ComputeContext?, IProgress{BuildProgress})"/>,
+    /// <see cref="TrainingRig.Load(string, ComputeContext?, ComputeContext?, IProgress{BuildProgress}, TrainingBackend?)"/>,
     /// which rebuilds the rig from the file alone) for the native .skpt container.
     /// </summary>
     // Partial: Persistence.Inspect (read-only artifact identification) lives in
@@ -131,7 +131,7 @@ namespace Shorokoo
         /// differentiates anything, lowers an optimizer per parameter, or runs an initializer, which is
         /// what made the rig route cost a build for a job that computes no gradients. Resuming
         /// <i>training</i> is a different question and still wants
-        /// <see cref="TrainingRig.Load(string, ComputeContext?, ComputeContext?, IProgress{BuildProgress})"/>:
+        /// <see cref="TrainingRig.Load(string, ComputeContext?, ComputeContext?, IProgress{BuildProgress}, TrainingBackend?)"/>:
         /// the file stores the rig's constituents, not its derived trainstep.</para>
         ///
         /// <para>The weights bound are the trained ones — a training checkpoint carries the single
@@ -243,7 +243,7 @@ namespace Shorokoo
         /// by <see cref="SaveTrainingCheckpoint(TrainingCheckpoint, string)"/> /
         /// <see cref="TrainingCheckpoint.Save(string, CheckpointComponents?)"/>. This entry point
         /// reads that format only: handed a <c>.skpt</c> container it fails immediately, naming
-        /// <see cref="TrainingRig.Load(string, ComputeContext?, ComputeContext?, IProgress{BuildProgress})"/>
+        /// <see cref="TrainingRig.Load(string, ComputeContext?, ComputeContext?, IProgress{BuildProgress}, TrainingBackend?)"/>
         /// as the entry point for that shape (a caller with a genuinely unknown file identifies it
         /// with <see cref="Inspect"/> first). The file describes itself — the section prefix gives
         /// each tensor's kind and the safetensors header its name, element type and shape — so the

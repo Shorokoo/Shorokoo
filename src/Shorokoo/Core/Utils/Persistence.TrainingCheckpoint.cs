@@ -36,7 +36,7 @@ namespace Shorokoo
         /// as an inference checkpoint via <see cref="Load(string)"/>. Reload the training state
         /// with <see cref="TrainingRig.LoadCheckpointFromSkpt"/>,
         /// or rebuild the whole rig from the file alone with
-        /// <see cref="TrainingRig.Load(string, ComputeContext?, ComputeContext?, IProgress{BuildProgress})"/>.
+        /// <see cref="TrainingRig.Load(string, ComputeContext?, ComputeContext?, IProgress{BuildProgress}, TrainingBackend?)"/>.
         ///
         /// <para>The write is atomic (staged to a temp file and committed by rename). For per-entry
         /// Zstd compression or provenance metadata, use the builder form
@@ -110,7 +110,7 @@ namespace Shorokoo
         /// field-for-field (a missing field, or a mapped tensor no def declares, fails loudly,
         /// naming the mismatch; the dimensions are checked by the rig as it adopts the result). Backs the rig-supplied
         /// <see cref="TrainingCheckpoint.LoadFromSkpt"/> and, through it,
-        /// <see cref="TrainingRig.Load(string, ComputeContext?, ComputeContext?, IProgress{BuildProgress})"/>;
+        /// <see cref="TrainingRig.Load(string, ComputeContext?, ComputeContext?, IProgress{BuildProgress}, TrainingBackend?)"/>;
         /// callers verify the container shape first.
         ///
         /// <para><paramref name="components"/> selects which parts to load (<c>null</c> ⇒ everything
@@ -401,12 +401,13 @@ namespace Shorokoo
         /// scheduler <c>models/</c> entries plus the rig block's hyperparameter bindings and RNG config
         /// — with no host-supplied source graphs. The model-input shapes ride on the arch itself (its
         /// self-describing MODEL_TENSOR_INPUT nodes), not the manifest. Backs the static
-        /// <see cref="TrainingRig.Load(string, ComputeContext?, ComputeContext?, IProgress{BuildProgress})"/>. A file with no rig
+        /// <see cref="TrainingRig.Load(string, ComputeContext?, ComputeContext?, IProgress{BuildProgress}, TrainingBackend?)"/>. A file with no rig
         /// block (a flat checkpoint, which carries training state only) fails loudly.
         /// </summary>
         internal static TrainingRig ReconstructRigFromSkpt(
             string filePath, ComputeContext mergeContext, ComputeContext runtimeContext,
-            BuildProgressReporter? progress = null, bool deferInitialization = false)
+            TrainingBackend trainingBackend, BuildProgressReporter? progress = null,
+            bool deferInitialization = false)
         {
             VerifySkptContainer(filePath,
                 "A flat checkpoint stores training state only — no rig constituents to rebuild " +
@@ -473,7 +474,7 @@ namespace Shorokoo
 
             return TrainingRig.ReconstructFromConstituents(
                 archGraph, lossGraph, optimizerGraph, hypers, names, rngConfig,
-                mergeContext, runtimeContext, progress, deferInitialization);
+                mergeContext, runtimeContext, trainingBackend, progress, deferInitialization);
         }
 
         /// <summary>
@@ -658,7 +659,7 @@ namespace Shorokoo
         /// as <see cref="Save"/> — the same manifest, model and data entries byte-identical —
         /// laid out as real files, which is the natural shape for a run writing a checkpoint
         /// every N steps (unchanged entries stay untouched files for diff/rsync). Loading
-        /// (<see cref="TrainingRig.Load(string, ComputeContext?, ComputeContext?, IProgress{BuildProgress})"/>,
+        /// (<see cref="TrainingRig.Load(string, ComputeContext?, ComputeContext?, IProgress{BuildProgress}, TrainingBackend?)"/>,
         /// <see cref="TrainingRig.LoadCheckpointFromSkpt"/>, <see cref="Persistence.Load(string)"/>)
         /// accepts either shape; <see cref="Persistence.PackSkpt"/> converts the directory to
         /// the single-file form. The write is atomic (staged to a temp directory and committed

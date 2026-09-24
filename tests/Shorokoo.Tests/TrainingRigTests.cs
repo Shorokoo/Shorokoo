@@ -1,5 +1,6 @@
 using System.Globalization;
 using Microsoft.ML.OnnxRuntime;
+using Shorokoo.Core.Backends;
 using Shorokoo.Core.Factory;
 using Shorokoo.Core.Interpreter;
 using Shorokoo.Core.Factory.IR;
@@ -5179,5 +5180,126 @@ public class BuildProgressCoverageTests
             StagesOf(reports, BuildPhase.Concretize));
         Assert.True(reports[^1].IsComplete);
         Assert.DoesNotContain(reports[..^1], r => r.IsComplete);
+    }
+}
+
+[Trait("Domain", "Training")]
+[Trait("Purpose", "Coverage")]
+public class TrainingRigTrainingBackendCoverageTests
+{
+    private sealed class AutoGradBackend(IShorokooBackend inner) : IShorokooBackend
+    {
+        internal List<(ModelProto Model, IReadOnlyList<OutputAlias> Aliases)> Handed { get; } = [];
+
+        public bool AcceptsTrainingFormat(string format)
+            => format is TrainingFormats.Onnx or TrainingFormats.OnnxAutoGrad;
+
+        public BackendDescription Description => inner.Description;
+        public MemorySpace MemorySpace => inner.MemorySpace;
+        public object RuntimeIdentity => inner.RuntimeIdentity;
+        public bool CanAddress(MemoryLocation location) => inner.CanAddress(location);
+        public MemoryLocation RunMemoryOf(ShorokooTensorElementType elementType) => inner.RunMemoryOf(elementType);
+        public MemoryLocation SequenceRunMemory => inner.SequenceRunMemory;
+        public void Release(IShorokooTensorValue value) => inner.Release(value);
+
+        public IShorokooSession CreateSession(
+            ReadOnlyMemory<byte> modelBytes, ShorokooGraphOptimization graphOptimization,
+            ShorokooLogSeverity logSeverity, DeviceMemorySettings deviceMemory)
+            => inner.CreateSession(modelBytes, graphOptimization, logSeverity, deviceMemory);
+
+        public IShorokooSession CreateSession(
+            ReadOnlyMemory<byte> modelBytes, ShorokooGraphOptimization graphOptimization,
+            ShorokooLogSeverity logSeverity, DeviceMemorySettings deviceMemory, DiagnosticSettings diagnostics)
+            => inner.CreateSession(modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics);
+
+        public IShorokooSession CreateSession(
+            ReadOnlyMemory<byte> modelBytes, ShorokooGraphOptimization graphOptimization,
+            ShorokooLogSeverity logSeverity, DeviceMemorySettings deviceMemory, DiagnosticSettings diagnostics,
+            IReadOnlyList<OutputAlias> outputAliases)
+        {
+            var model = ProtoBuf.Serializer.Deserialize<ModelProto>(modelBytes);
+            if (model.OpsetImports.All(o => o.Domain != "ai.shorokoo.training"))
+                return inner.CreateSession(
+                    modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases);
+            Handed.Add((model, outputAliases));
+            throw new NotSupportedException();
+        }
+
+        public IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged
+            => inner.CreateTensor(data, shape);
+        public IShorokooTensorValue CreateTensorFromRawBytes(
+            ShorokooTensorElementType elementType, byte[] data, long[] shape)
+            => inner.CreateTensorFromRawBytes(elementType, data, shape);
+        public IShorokooTensorValue CreateStringTensor(IReadOnlyList<string> data, long[] shape)
+            => inner.CreateStringTensor(data, shape);
+        public IShorokooTensorValue CreateSequence(IReadOnlyList<IShorokooTensorValue> values)
+            => inner.CreateSequence(values);
+        public byte[] CopyTensorToHost(IShorokooTensorValue value) => inner.CopyTensorToHost(value);
+        public IShorokooTensorValue CreateTensorInBackendMemory(
+            ShorokooTensorElementType elementType, byte[] data, long[] shape)
+            => inner.CreateTensorInBackendMemory(elementType, data, shape);
+        public IShorokooTensorValue CreateUninitializedTensorInBackendMemory(
+            ShorokooTensorElementType elementType, long[] shape)
+            => inner.CreateUninitializedTensorInBackendMemory(elementType, shape);
+    }
+
+    private static TrainingRig Rig(
+        ComputationGraph optimizer, Hyperparameter[] hypers,
+        ComputeContext? runtime = null, TrainingBackend? backend = null)
+        => TrainingRig.FromScratch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, optimizer,
+            ScalarMultiplyBatches().sample, hypers, runtimeContext: runtime, trainingBackend: backend);
+
+    private static float[] Stepped(TrainingRig rig)
+        => FlattenStruct(rig.TrainStep(
+            rig.CreateInitialCheckpoint(), InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f)).TrainableParams);
+
+    [Fact]
+    public void TestTheDefaultIsShorokooAndEveryDerivationCarriesTheTrainingBackend()
+    {
+        var rig = Rig(SGDOptimizer.ComputationGraph, [0.1f]);
+        Assert.Same(TrainingBackend.Shorokoo, rig.TrainingBackend);
+        Assert.Equal(Stepped(rig), Stepped(rig.WithTrainingBackend(TrainingBackend.Shorokoo)));
+        Assert.Equal("Native (onnx-autograd/1)", TrainingBackend.Native.ToString());
+
+        using var accepting = new ComputeContext(new AutoGradBackend(DefaultBackend.Instance));
+        var native = Rig(SGDOptimizer.ComputationGraph, [0.1f], accepting, TrainingBackend.Native);
+        TrainingRig[] derived =
+        [
+            native,
+            Rig(SGDOptimizer.ComputationGraph, [0.1f], accepting).WithTrainingBackend(TrainingBackend.Native),
+            native.WithLoss(L2Loss.ComputationGraph),
+            native.WithOptimizer(SGDOptimizer.ComputationGraph, 0.2f),
+            native.WithOptimizer(SGDOptimizer.ComputationGraph, new SGDOptimizerHyperparameters { LearningRate = 0.2f }),
+            native.WithScheduler(0.2f),
+            native.WithScheduler(new SGDOptimizerHyperparameters { LearningRate = 0.2f }),
+            native.WithSeed(new RngConfig { MasterSeed = 3 }),
+        ];
+        Assert.All(derived, d => Assert.Same(TrainingBackend.Native, d.TrainingBackend));
+        Assert.All(derived, d => Assert.Same(accepting, d.RuntimeContext));
+        Assert.Same(TrainingBackend.Shorokoo, native.WithTrainingBackend(TrainingBackend.Shorokoo).TrainingBackend);
+
+        var path = TempPath("training_backend") + ".skpt";
+        try
+        {
+            Persistence.SaveTrainingCheckpointToSkpt(rig.CreateInitialCheckpoint(), path);
+            Assert.Same(TrainingBackend.Shorokoo, TrainingRig.Load(path).Rig.TrainingBackend);
+            Assert.Same(TrainingBackend.Native,
+                TrainingRig.Load(path, runtimeContext: accepting, trainingBackend: TrainingBackend.Native).Rig.TrainingBackend);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void TestLeavingTheGradientToABackendThatDoesNotAcceptItIsRefusedAtBuild()
+    {
+        Assert.False(DefaultBackend.Instance.AcceptsTrainingFormat(TrainingFormats.OnnxAutoGrad));
+        Assert.True(DefaultBackend.Instance.AcceptsTrainingFormat(TrainingFormats.Onnx));
+        Assert.Throws<NotSupportedException>(() => Rig(SGDOptimizer.ComputationGraph, [0.1f], backend: TrainingBackend.Native));
+        Assert.Throws<NotSupportedException>(
+            () => Rig(SGDOptimizer.ComputationGraph, [0.1f]).WithTrainingBackend(TrainingBackend.Native));
+        Assert.Throws<ArgumentNullException>(() => Rig(SGDOptimizer.ComputationGraph, [0.1f]).WithTrainingBackend(null!));
     }
 }

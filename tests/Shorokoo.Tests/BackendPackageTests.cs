@@ -56,6 +56,7 @@ public class BackendPackageCoverageTests
         Assert.Null(none);
         Assert.Equal(BackendRejection.NotLoadable, refusal.Reason);
         Assert.True(DefaultBackend.IsExplicitOnly(loaded));
+        Assert.Contains("DefaultBackend.Instance", DefaultBackend.NoBackendFromDeployed(loaded, "Shorokoo.LinuxCPU", "Shorokoo.LinuxCPU.dll"));
         Assert.False(DefaultBackend.IsExplicitOnly(DefaultBackend.Instance.GetType().Assembly));
         Assert.Contains(loaded, DefaultBackend.DiscoverableAssemblies(AppDomain.CurrentDomain.GetAssemblies()));
         Assert.Single(DefaultBackend.LoadedCandidates(

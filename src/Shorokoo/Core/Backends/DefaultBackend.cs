@@ -232,11 +232,14 @@ public static class DefaultBackend
                 "or add such a package as a dependency.");
 
         var path = Path.Combine(dir, chosen.Assembly + ".dll");
-        return Remembering(InstantiateBackend(Assembly.LoadFrom(path)))
-            ?? throw new InvalidOperationException(
-                $"'{chosen.Assembly}' was found at '{path}' but exposes no concrete " +
-                $"{nameof(IShorokooBackend)}.");
+        var assembly = Assembly.LoadFrom(path);
+        return Remembering(InstantiateBackend(assembly))
+            ?? throw new InvalidOperationException(NoBackendFromDeployed(assembly, chosen.Assembly, path));
     }
+
+    /// <summary>Why the deployed <paramref name="assembly"/> discovery chose gave it no backend.</summary>
+    internal static string NoBackendFromDeployed(Assembly assembly, string name, string path)
+        => $"'{name}' was found at '{path}' but exposes no concrete {nameof(IShorokooBackend)}.";
 
     /// <summary>
     /// Chooses the one backend among those deployed for the current OS. Nothing deployed

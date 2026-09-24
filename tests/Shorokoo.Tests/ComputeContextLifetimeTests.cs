@@ -1,5 +1,6 @@
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using Microsoft.ML.OnnxRuntime;
 using Shorokoo.Core.Backends;
 using Shorokoo.Core.Factory;
@@ -399,6 +400,10 @@ public class ComputeContextLifetimeCoverageTests
     /// Shorokoo/Shorokoo#366: writing to a tensor on one thread while a run on another reads it
     /// used to free the buffer the execution provider was reading. The write retires the copy the
     /// run reads through, and the retired copy waits for the run.
+    ///
+    /// <para>A round counts only where the write landed inside the run: where the run still held
+    /// the copy once the write was done. A write that lost the race to the run's end puts nothing
+    /// to the product, and is retried rather than taken for a pass.</para>
     /// </summary>
     [Fact]
     public void TestATensorWrittenOnAnotherThreadStaysValidForTheRunFeedingIt()
@@ -407,8 +412,9 @@ public class ComputeContextLifetimeCoverageTests
         var (graph, expected) = Chain();
         var compiled = context.Compile(graph);
         var copyAt = TensorData.RunMemoryOf(DefaultBackend.Instance, DType.Float32);
+        var landed = 0;
 
-        for (int round = 0; round < 3; round++)
+        for (int round = 0; round < 20 && landed < 3; round++)
         {
             var fed = Wide32();
             var ran = false;
@@ -417,19 +423,24 @@ public class ComputeContextLifetimeCoverageTests
             {
                 spinning.Set();
                 var spin = new SpinWait();
-                while (fed.CopyHeldAt(copyAt) is not { IsLocked: true } && !Volatile.Read(ref ran))
+                TensorData? held;
+                while ((held = fed.CopyHeldAt(copyAt)) is not { IsLocked: true } && !Volatile.Read(ref ran))
                     spin.SpinOnce(sleep1Threshold: -1);
                 fed.AccessModifiableMemory<float>()[0] = 99f;
+                return held is { IsLocked: true };
             });
             Assert.True(spinning.Wait(TimeSpan.FromSeconds(10)));
 
             float[] result;
             try { result = Floats(compiled.Execute(fed.Shared())[0].ToTensorData()); }
             finally { Volatile.Write(ref ran, true); }
-            other.Wait();
+            var inside = other.Result;
 
             Assert.Equal(expected, result);
+            if (inside) landed++;
         }
+
+        Assert.NotEqual(0, landed);
     }
 
     [Fact]
@@ -986,6 +997,22 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
+    public void TestASessionRunForACallerThatDoesNotAskWhatItAliasedStillWritesItsOutputIntoWhatItConsumed()
+    {
+        var backend = DefaultBackend.Instance;
+        using var session = Aliasing(backend, GraphOf("a:float[4] b:float[4]", "O:float[4]", Op("Sub", "a b", "O")));
+        var a = backend.CreateTensor<float>([10f, 20f, 30f, 40f], [4L]);
+        using var b = backend.CreateTensor<float>([1f, 2f, 3f, 4f], [4L]);
+        ref var consumedMemory = ref MemoryMarshal.GetReference(a.GetTensorDataAsSpan<float>());
+
+        using var o = session.RunConsuming(new Dictionary<string, IShorokooTensorValue> { ["a"] = a, ["b"] = b }, [a], ["O"],
+            ComputeContext.NoOutputsRetained, RunSettings.Default)[0];
+
+        Assert.Equal([9f, 18f, 27f, 36f], o.GetTensorDataAsSpan<float>().ToArray());
+        Assert.True(Unsafe.AreSame(ref consumedMemory, ref MemoryMarshal.GetReference(o.GetTensorDataAsSpan<float>())));
+    }
+
+    [Fact]
     public void TestASessionThatCannotWriteItsGraphOutIsBuiltWithoutAliasingOnlyWhereTheRuntimeRefusesItsCompiledNodes()
     {
         var graph = GraphOf("a:float[4] b:float[4]", "O:float[4]", Op("Sub", "a b", "O"));
@@ -1256,7 +1283,7 @@ public class ComputeContextLifetimeCoverageTests
         Assert.Throws<ArgumentNullException>(() => context.AllocateUninitialized(pair, null!));
     }
 
-    /// <summary>Holds a run open where the value is built: after the run has held the feed, and
+    /// <summary>Holds a run open once it has held its feeds and before it builds their values:
     /// inside the window a disposal of its context has to be refused in.</summary>
     private sealed class HeldFeed(
         TensorData data, ManualResetEventSlim reached, ManualResetEventSlim release)
@@ -1270,7 +1297,7 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     /// <summary>A parameter of a kind no run knows how to hold, which is what
-    /// <c>RunFeeds.Feed</c>'s refusal is for.</summary>
+    /// <c>RunFeeds.Prepare</c>'s refusal is for.</summary>
     private sealed class UnlockableParam : NamedModelParam
     {
         public override IShorokooTensorValue ToTensorValue() => throw new NotSupportedException();

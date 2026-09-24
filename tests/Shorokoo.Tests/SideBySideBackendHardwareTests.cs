@@ -402,9 +402,10 @@ public class SideBySideBackendHardwareTests
 
         // A refusal takes over what it was handed, as the contract requires of any failure, so
         // every attempt is handed values of its own: reusing one reads a released value.
-        var refused = Assert.Throws<InvalidOperationException>(
-            () => cuda.CreateSequence([OnHost(), OnCard()]));
+        IShorokooTensorValue[] handed = [OnHost(), OnCard()];
+        var refused = Assert.Throws<InvalidOperationException>(() => cuda.CreateSequence(handed));
         Assert.Contains("CopyTensorToHost", refused.Message);
+        Assert.All(handed, value => Assert.Throws<ObjectDisposedException>(() => value.ValueType));
         Assert.Throws<InvalidOperationException>(() => cuda.CreateSequence([OnCard()]));
 
         // The advice the message gives, followed on a tensor the card holds.

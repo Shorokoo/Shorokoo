@@ -220,6 +220,15 @@ public partial class ParamShapeWideModel
     }
 }
 
+/// <summary>A weight scaling its input, offset by the first tensor of a sequence the batch
+/// supplies: a batch with a sequence among its fields.</summary>
+[Module]
+public partial class SequenceOffsetModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x, TensorSequence<float32> offsets)
+        => x * InitScalarWeight.Init(Vector(4L)) + offsets[Scalar(0L)];
+}
+
 /// <summary>A weight read at indices the batch supplies, so an index out of range fails a step
 /// inside the runtime, after the step has taken what it was fed.</summary>
 [Module]
@@ -437,11 +446,12 @@ public class TrainingRigFromScratchCoverageTests
 
     /// <summary>
     /// A class-index loss takes a target of another shape and dtype than the model's output —
-    /// <c>[N]</c> int64 against <c>[N, C]</c> float32 — and the rig stands the model's output in
-    /// for it when it seeds shape inference and the memory-aware pass. The pass is then judged on
-    /// a one-hot of <c>[N, C, C]</c>, which is harmless while C is a handful and is why every
-    /// existing cross-entropy rig passes; at a language model's vocabulary it is 10 T elements,
-    /// and building the rig fails outright.
+    /// <c>[N]</c> int64 against <c>[N, C]</c> float32 — so the rig seeds shape inference and the
+    /// memory-aware pass with a target of the loss's own shape, followed through a reshape or a
+    /// cast on its way to the labels, rather than standing the model's output in for it. Judged on
+    /// the prediction's shape, the pass would see a one-hot of <c>[N, C, C]</c>: harmless while C
+    /// is a handful, and 10 G elements at a language model's vocabulary, where building the rig
+    /// failed outright.
     /// </summary>
     [Fact]
     public void TestAClassIndexLossIsOptimizedAgainstItsOwnTargetRatherThanThePrediction()
@@ -1429,6 +1439,11 @@ public class TrainingRigScheduleCoverageTests
 
         Assert.Throws<InvalidOperationException>(() => runtimeRig.TrainStep(initial, inputBatch.Shared(), targetBatch.Shared()));
         Assert.Throws<ArgumentException>(() => runtimeRig.MakeHyperparameters(("bogus", 0.1f)));
+        var unfed = runtimeRig.CreateInitialCheckpoint();
+        var misfit = Assert.Throws<ArgumentException>(() => runtimeRig.TrainStep(
+            unfed, inputBatch.Shared(), inputBatch.Shared(), targetBatch.Shared())).Message;
+        Assert.Contains("as hyperparams's field 'input', where the rig declares a Float32 tensor of rank 0", misfit);
+        Assert.DoesNotContain(unfed.TrainableParams.Fields.Values.OfType<TensorData>(), t => t.IsDisposed);
 
         var schedRig = TrainingRig.FromScratch(
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
@@ -1746,6 +1761,30 @@ public class TrainingRigTrainingLoopCoverageTests
         => rig.TrainStep(rig.CreateInitialCheckpoint(),
             rig.InputDef.FromOrderedData(x, bias).Shared(),
             rig.TargetDef.FromOrderedData(TensorData([3L], 0f, 0f, 0f))).Loss!.Value;
+
+    // A present optional in a batch is read through a copy too, and a step lets go of it as it
+    // does of a tensor's.
+    [Fact]
+    public void TestAStepLetsGoOfTheCopiesItMadeToReadAnOptionalInItsBatch()
+    {
+        var x = TensorData([3L], 1f, 2f, 3f);
+        var present = OptionalTensorData.Some(TensorData([3L], 1f, 1f, 1f));
+        Assert.True(float.IsFinite(StepLoss(OptionalBiasRig(present, x), x, present)));
+        Assert.True(x.CopiesAreEmpty && present.Value!.CopiesAreEmpty);
+    }
+
+    // A rig feeds its model tensors and optionals only, so a model taking a sequence is refused
+    // before anything is built, naming the input, rather than failing inside concretization.
+    [Fact]
+    public void TestARigIsRefusedUpFrontForAModelTakingASequenceNamingTheInput()
+    {
+        var offsets = TensorDataSequence.OfElements([TensorData([4L], 0f, 0f, 0f, 0f)], DType.Float32);
+        var refused = Assert.Throws<NotSupportedException>(() => TrainingRig.FromScratch(
+            SequenceOffsetModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [new TensorDataModelParam("x", ModelParamType.InputParam, TensorData([4L], 1f, 2f, 3f, 4f)),
+             new TensorDataSequenceModelParam("offsets", ModelParamType.InputParam, offsets)], 0.1f)).Message;
+        Assert.Contains("the model's input 'offsets' (#1) is a sequence", refused);
+    }
 
     // Two reads of one optional input give the backward pass two gradients to accumulate into a
     // single optional-structured slot.

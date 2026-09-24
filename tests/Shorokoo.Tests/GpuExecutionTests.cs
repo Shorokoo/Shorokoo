@@ -93,11 +93,11 @@ public class GpuExecutionTests
 
     /// <summary>
     /// A transfer onto the card is refused before it allocates when the context's budget cannot
-    /// take it alongside what is attached there — a copy, an allocation, a tensor already on the
-    /// card handed over as it stands, and the copy a run would make of what it is fed — naming the
-    /// budget, what is attached and what was asked. The same tensor fits a context with no budget,
-    /// so what refused it was the budget and not the card; and what the context lets go of is room
-    /// it has again.
+    /// take it alongside what is attached there — a copy, an allocation, and a tensor already on
+    /// the card handed over as it stands — naming the budget, what is attached and what was asked;
+    /// and a run fed more than the arena the budget leaves it is refused having taken nothing. The
+    /// same tensor fits a context with no budget, so what refused it was the budget and not the
+    /// card; and what the context lets go of is room it has again.
     /// </summary>
     [CudaFact]
     public void CudaProvider_ATransferPastItsContextsBudgetIsRefusedBeforeItAllocatesOnTheCard()
@@ -206,10 +206,10 @@ public class GpuExecutionTests
 
     /// <summary>
     /// A tensor fed to a run on the card as it is goes to that run: one in the card's memory is
-    /// handed over where it is, and one in host memory is copied into the card's and the copy
-    /// handed over — dead afterwards either way. Fed <c>.Shared()</c>, a host tensor is copied onto
-    /// the card once, attached to the context that read it, and read there by every run after
-    /// until it is written.
+    /// handed over where it is, and one in host memory goes to the session from the host, or as the
+    /// card copy it already holds where it has one — dead afterwards either way. Fed
+    /// <c>.Shared()</c>, a host tensor is copied onto the card once, attached to the context that
+    /// read it, and read there by every run after until it is written.
     /// </summary>
     [CudaFact]
     public void CudaProvider_AFeedIsConsumedOnTheCardAndAHostOneIsReadThroughOneCopyUntilWritten()

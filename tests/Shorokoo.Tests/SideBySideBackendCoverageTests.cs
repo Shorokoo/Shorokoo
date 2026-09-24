@@ -63,6 +63,21 @@ public class SideBySideBackendCoverageTests
     }
 
     [Fact]
+    public void TestAnIsolatedBackendsSessionWritesAnOutputIntoTheInputItConsumed()
+    {
+        using var context = new ComputeContext(Alt.Value);
+        var a = InputVector<float32>("a");
+        var b = InputVector<float32>("b");
+        var compiled = context.Compile(new InternalComputationGraph([a, b], [a - b]), [[4L], [4L]],
+            trainingStep: false, aliasCandidates: [(0, 0)]);
+
+        var result = compiled.Execute(TensorData([4L], 10f, 20f, 30f, 40f), TensorData([4L], 1f, 2f, 3f, 4f));
+
+        Assert.Equal([9f, 18f, 27f, 36f], result[0].ToTensorData().As<float32>().CopyMemory<float>());
+        Assert.Equal(1L, context.AliasedOutputs);
+    }
+
+    [Fact]
     public void TestTwoBackendsRunOneModelOnOneSetOfInputsInOneProcess()
     {
         var (graph, a, b, expected) = Model();

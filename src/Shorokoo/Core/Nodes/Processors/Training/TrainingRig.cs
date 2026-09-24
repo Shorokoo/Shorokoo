@@ -917,6 +917,32 @@ namespace Shorokoo
         }
 
         /// <summary>
+        /// Refuses a model that takes a sequence, which a rig cannot feed: every stage of a rig past
+        /// concretization -- the representative inputs its shape inference is seeded with among them
+        /// -- knows a model input only as a tensor or an optional. Refused here, before anything is
+        /// built, rather than where the first of those stages fails, which it does in terms of its
+        /// own internals.
+        /// </summary>
+        /// <exception cref="NotSupportedException">An input of <paramref name="model"/> is a
+        /// sequence.</exception>
+        private static void RequireNoSequenceInput(InternalComputationGraph model)
+        {
+            var producers = BuildProducerByOutputMap(model);
+            for (int i = 0; i < model.Inputs.Count; i++)
+            {
+                if (!producers.TryGetValue(model.Inputs[i], out var node)
+                    || node.OpCode != InternalOpCodes.MODEL_SEQUENCE_INPUT) continue;
+                var name = i < model.InputUniqueNames.Count && !string.IsNullOrEmpty(model.InputUniqueNames[i])
+                    ? $"'{model.InputUniqueNames[i]}' (#{i})"
+                    : $"#{i}";
+                throw new NotSupportedException(
+                    $"A training rig feeds its model tensors and optional tensors, and the model's input {name} "
+                    + "is a sequence. Train a model that takes the sequence's tensors as inputs of their own, "
+                    + "or that builds the sequence from them itself.");
+            }
+        }
+
+        /// <summary>
         /// Shared shape check for both derive paths: hyperparameter names, when supplied, must match
         /// the hyperparameter value count (a swapped optimizer/scheduler is checked just as at build).
         /// </summary>
@@ -966,6 +992,7 @@ namespace Shorokoo
             // model is refused up front.
             Concretizing("Thaw");
             var model = RequireModelGraphKind(c.Model, "TrainingRig (model constituent)");
+            RequireNoSequenceInput(model);
 
             // Single ToConcreteArchitecture pass — the ONE concretization for this rig and all its
             // future derivations. The resulting concrete arch is the shared substrate: the trainstep

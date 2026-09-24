@@ -424,8 +424,17 @@ public class CrossDeviceRoutingCoverageTests
             [NamedModelParam.FromIData("a", ModelParamType.InputParam, Floats(1))], RunSettings.Default));
         Assert.True(inside.Wait(TimeSpan.FromSeconds(10)));
 
+        // Each on a thread of its own, saying so right before its call: a task the pool started
+        // only after the cancellation would take the path of a run already cancelled, and never
+        // wait at the gate at all.
         var (compiledFeed, oneShotFeed) = (Floats(1), Floats(1));
-        Task[] waiting = [Task.Run(() => compiled.Execute(compiledFeed)), Task.Run(() => context.Execute(Echo(), oneShotFeed))];
+        using var calling = new CountdownEvent(2);
+        Task[] waiting =
+        [
+            Task.Factory.StartNew(() => { calling.Signal(); compiled.Execute(compiledFeed); }, TaskCreationOptions.LongRunning),
+            Task.Factory.StartNew(() => { calling.Signal(); context.Execute(Echo(), oneShotFeed); }, TaskCreationOptions.LongRunning),
+        ];
+        Assert.True(calling.Wait(TimeSpan.FromSeconds(10)));
         Assert.Equal(-1, Task.WaitAny(waiting, TimeSpan.FromMilliseconds(200)));
         cancel.Cancel();
         Assert.All(waiting, stopped => Assert.IsAssignableFrom<OperationCanceledException>(
@@ -481,8 +490,9 @@ public class CrossDeviceRoutingCoverageTests
     }
 
     /// <summary>The arena limits a budgeted context's session went through, and how many outputs
-    /// were written into consumed memory, over two runs each consuming a host tensor copied onto
-    /// the card and leaving its output there.</summary>
+    /// were written into consumed memory, over two runs each consuming a host tensor and leaving
+    /// its output on the card: a tensor its output may be written into is copied onto the card
+    /// first, and one it may not goes to the session from the host.</summary>
     private static (long?[] Limits, long Aliased) KeepingTwo(bool aliases)
     {
         var card = new StubBackend(ComputeDevice.Cuda, 0) { ReleasesWhatItConsumes = true, Aliases = aliases };
@@ -977,7 +987,11 @@ public class CrossDeviceRoutingCoverageTests
         Assert.True(inside.Wait(TimeSpan.FromSeconds(10)));
         card.DuringRun = null;
 
-        var placing = Task.Run(() => placed.To(budgeted));
+        // On a thread of its own, saying so right before the call: a placement the pool started
+        // only after the tensor was consumed would be refused before the gate, by its first look.
+        using var calling = new ManualResetEventSlim();
+        var placing = Task.Factory.StartNew(() => { calling.Set(); return placed.To(budgeted); }, TaskCreationOptions.LongRunning);
+        Assert.True(calling.Wait(TimeSpan.FromSeconds(10)));
         Assert.False(placing.Wait(TimeSpan.FromMilliseconds(200)));
         free.Compile(Echo()).Execute(placed);
         release.Set();

@@ -383,6 +383,15 @@ does a `[Hyper]`, which is a constant by the time the model is concretized.
 The rejection covers module-owned state inside such a loop as well: an update
 registered there has no value the training graph can carry out of the body.
 
+### A training rig feeds its model tensors and optional tensors
+
+A model may take a `TensorSequence<T>` for inference, but a `TrainingRig` cannot be built over one:
+its stages past concretization — the representative inputs its shape inference is seeded with, the
+batch definition its steps are checked against — know a model input only as a tensor or an
+optional tensor. `TrainingRig.FromScratch` refuses such a model before it builds anything, naming
+the input, with a `NotSupportedException`. Train a model that takes the sequence's tensors as inputs
+of their own, or that builds the sequence from them itself.
+
 ### Conditional execution in a training graph
 
 An `IfElse` branch runs only when its condition selects it. A training graph keeps

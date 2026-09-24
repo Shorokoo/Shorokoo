@@ -453,7 +453,7 @@ public class TensorDataApiCoverageTests
     }
 
     [Fact]
-    public void TestAValueWrappedWithoutItsBackendIsCopiedEverywhereAndOneWrappedWithItIsNot()
+    public void TestAValueWrappedWithoutItsBackendIsCopiedIntoAContextButKeptByTheHostAndOneWrappedWithItIsNot()
     {
         using var context = new ComputeContext();
         var backend = Shorokoo.Core.Backends.DefaultBackend.Instance;

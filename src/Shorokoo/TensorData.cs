@@ -424,8 +424,9 @@ namespace Shorokoo
         ///
         /// <para>Prefer <see cref="Create(Shape, DType, IShorokooTensorValue, IShorokooBackend)"/>
         /// wherever the backend is known. A tensor whose producer was not named is host memory if
-        /// the value says it is and somewhere unnamed otherwise, no backend can read it in place,
-        /// and one that is not host-readable can be read back by nothing at all.</para>
+        /// the value says it is and somewhere unnamed otherwise: a run on any backend reads it
+        /// through a copy, the host reads one in host memory where it is, and one that is not
+        /// host-readable can be read back by nothing at all.</para>
         /// </summary>
         public static TensorData Create(Shape shape, DType dtype, IShorokooTensorValue data)
             => OnnxUtils.CreateTensorDataFromValue(shape, dtype, data);

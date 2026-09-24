@@ -31,9 +31,13 @@ namespace Shorokoo.Core.Factory
     /// model that leaves Shorokoo — for a backend or as an exported file.</para>
     ///
     /// <para>A node is left as written where the rewrite cannot know what it means: an
-    /// activation ONNX does not name, a list of activations of the wrong length, an attribute
-    /// that refers to a function's attribute, or an activation left without a value the spec
-    /// gives no default for (<c>ScaledTanh</c>'s alpha and beta).</para>
+    /// activation ONNX does not name, a list of activations of the wrong length, or an attribute
+    /// that refers to a function's attribute. An activation left without a value the spec gives
+    /// no default for (<c>ScaledTanh</c>'s alpha and beta) leaves its node as written in an
+    /// exported file; in the model handed to a backend's session the gap is filled with 0, the
+    /// value ONNX Runtime reads for it in every recurrent operator and the PyTorch backend reads
+    /// too, so nothing a session computes changes and a bidirectional <c>RNN</c> is not read past
+    /// the end of its list.</para>
     /// </summary>
     internal static class RecurrentActivationArguments
     {
@@ -67,20 +71,22 @@ namespace Shorokoo.Core.Factory
         };
 
         /// <summary>Rewrites every recurrent node of <paramref name="model"/>: the main graph, the
-        /// subgraphs nested in it, and every function body.</summary>
-        public static void Normalize(ModelProto model)
+        /// subgraphs nested in it, and every function body. <paramref name="forSession"/> says the
+        /// model is handed to a backend's session, where a value with no spec default is filled
+        /// with ONNX Runtime's 0 (see the class remarks).</summary>
+        public static void Normalize(ModelProto model, bool forSession)
         {
             if (model.Graph is { } graph)
-                FastOnnxModelBuilder.ForEachGraphRecursive(graph, g => g.Nodes.ForEach(Normalize));
+                FastOnnxModelBuilder.ForEachGraphRecursive(graph, g => g.Nodes.ForEach(n => Normalize(n, forSession)));
             foreach (var function in model.Functions)
             {
                 var body = new GraphProto();
                 body.Nodes.AddRange(function.Nodes);
-                FastOnnxModelBuilder.ForEachGraphRecursive(body, g => g.Nodes.ForEach(Normalize));
+                FastOnnxModelBuilder.ForEachGraphRecursive(body, g => g.Nodes.ForEach(n => Normalize(n, forSession)));
             }
         }
 
-        private static void Normalize(NodeProto node)
+        private static void Normalize(NodeProto node, bool forSession)
         {
             if (node.Domain.Length != 0 || !DefaultActivations.TryGetValue(node.OpType, out var perDirection))
                 return;
@@ -100,8 +106,9 @@ namespace Shorokoo.Core.Factory
             if (names.Length != perDirection.Length * directions || names.Any(n => !Arguments.ContainsKey(n)))
                 return;
 
-            if (Consumed(names, alpha?.Floats, n => (Arguments[n].TakesAlpha, Arguments[n].Alpha)) is not { } alphas
-                || Consumed(names, beta?.Floats, n => (Arguments[n].TakesBeta, Arguments[n].Beta)) is not { } betas)
+            float? Unstated(float? fallback) => fallback ?? (forSession ? 0f : null);
+            if (Consumed(names, alpha?.Floats, n => (Arguments[n].TakesAlpha, Unstated(Arguments[n].Alpha))) is not { } alphas
+                || Consumed(names, beta?.Floats, n => (Arguments[n].TakesBeta, Unstated(Arguments[n].Beta))) is not { } betas)
                 return;
             bool positional = node.OpType == "RNN";
             Write(node, Alpha, positional ? Positional(alphas) : Ordered(alphas));

@@ -939,13 +939,13 @@ namespace Shorokoo.Tests.Modules
     /// RNN whose beta list is shorter than its directions ([LeakyRelu, Affine], alpha [0.3, 0.7],
     /// beta [0.2]) or whose one alpha belongs to its second activation, a GRU leaving Affine's and
     /// ThresholdedRelu's alpha to their defaults of 1, and a bidirectional LSTM consuming one alpha
-    /// among three activations that take one, and a GRU whose ScaledTanh is given no alpha or beta,
-    /// which ONNX states no default for. The values are ONNX Runtime's, and the PyTorch backend must
+    /// among three activations that take one, and a GRU and a bidirectional RNN whose ScaledTanh is
+    /// given no alpha or beta, which ONNX states no default for. The values are ONNX Runtime's, and the PyTorch backend must
     /// agree with them. Inputs: x [4,2,3], w [2,20,3], r [2,20,5], b [2,40].</summary>
     [Module]
     public partial class QeeRecurrentActivationArgumentsValueCheck
     {
-        public static (Tensor<float32>, Tensor<float32>, Tensor<float32>, Tensor<float32>, Tensor<float32>) Inline(
+        public static (Tensor<float32>, Tensor<float32>, Tensor<float32>, Tensor<float32>, Tensor<float32>, Tensor<float32>) Inline(
             Tensor<float32> x, Tensor<float32> w, Tensor<float32> r, Tensor<float32> b)
         {
             var wRnn = w.Slice(Vector(0L), Vector(5L), axes: Vector(1L));
@@ -965,7 +965,10 @@ namespace Shorokoo.Tests.Modules
                 [0.1f], null, ["HardSigmoid", "Tanh", "Elu", "Sigmoid", "Relu", "LeakyRelu"], null, LSTMDirection.Bidirectional, 5L, null, false);
             var (y5, _) = OnnxOp.Gru(x, wGru, rGru, bGru, null, null,
                 null, null, ["ScaledTanh", "Tanh"], null, GRUDirection.Forward, 5L, false);
-            return ((Tensor<float32>)y1, (Tensor<float32>)y2, (Tensor<float32>)y3, (Tensor<float32>)y4, (Tensor<float32>)y5);
+            var (y6, _) = OnnxOp.Rnn(x, wRnn, rRnn, bRnn, null, null,
+                [0.3f], null, ["LeakyRelu", "ScaledTanh"], null, RNNDirection.Bidirectional, 5L, false);
+            return ((Tensor<float32>)y1, (Tensor<float32>)y2, (Tensor<float32>)y3, (Tensor<float32>)y4, (Tensor<float32>)y5,
+                (Tensor<float32>)y6);
         }
     }
 

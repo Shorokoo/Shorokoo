@@ -287,7 +287,7 @@ namespace Shorokoo.Core.Factory
             // written in full, in the form ONNX Runtime reads as the spec does; see
             // RecurrentActivationArguments.
             if (flattenFunctionBodies)
-                RecurrentActivationArguments.Normalize(model);
+                RecurrentActivationArguments.Normalize(model, forSession);
 
             // ----- 5b, continued. Execution dialect only: every DequantizeLinear ONNX Runtime's
             // optimizer would move past what reads it is written so that it keeps its input type;

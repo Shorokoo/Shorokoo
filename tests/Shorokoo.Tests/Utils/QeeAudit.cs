@@ -140,6 +140,8 @@ namespace Shorokoo.Tests.Utils
         public static TensorData U8(long[] dims, params byte[] vals) => Globals.TensorData(dims, vals);
         public static TensorData Bits(long[] dims, params bool[] vals) => Globals.TensorData(dims, vals);
         public static TensorData Strs(long[] dims, params string[] vals) => Globals.TensorData(dims, vals);
+        public static TensorData Wave(params long[] dims)
+            => F32(dims, [.. Enumerable.Range(0, (int)dims.Aggregate(1L, (a, b) => a * b)).Select(i => 0.6f * MathF.Sin(0.37f * i + dims.Length))]);
         public static TensorData F32Zeros(long[] dims) => Globals.TensorDataWithDefaultVals(DType.Float32, dims);
         public static TensorData I8Zeros(long[] dims) => Globals.TensorDataWithDefaultVals(DType.Int8, dims);
     }

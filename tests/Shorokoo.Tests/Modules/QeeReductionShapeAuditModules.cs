@@ -12,6 +12,9 @@ namespace Shorokoo.Tests.Modules
             => ((Tensor<bit>)OnnxOp.Not((actual - expected).Abs() <= Scalar(1e-3f))).Cast<int64>()
                 .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 
+        internal static Scalar<int64> Apart(Tensor<float32> a, Tensor<float32> b)
+            => FloatMismatch(a.Reshape(Vector(-1L)) - b.Reshape(Vector(-1L)), Vector(0f));
+
         internal static Scalar<int64> IntMismatch(Tensor<int64> actual, Vector<int64> expected)
             => (actual - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
 

@@ -27,6 +27,8 @@ public class QeeImageRandomRnnAuditTests
 
     private static TensorData RecurrentX => F32Zeros([4L, 2L, 3L]);
 
+    private static TensorData SeqLens => I32([2L], 4, 2);
+
     [Fact]
     public void TestQeeImageGeometryShapeAudits()
     {
@@ -92,5 +94,13 @@ public class QeeImageRandomRnnAuditTests
         Assert.True(QeeAudit.QeeOnly<QeeRecurrentQeeOnlyShapeAuditCheck>(RecurrentX));
         Assert.True(QeeAudit.Check<QeeGruShapeAuditCheck>(RecurrentX));
         Assert.True(QeeAudit.Check<QeeLstmShapeAuditCheck>(RecurrentX, I32([2L], 4, 4)));
+    }
+
+    [Fact]
+    public void TestRecurrentValueAudits()
+    {
+        Assert.True(QeeAudit.OrtOnly<QeeRnnValueAuditCheck>(Wave(4, 2, 3), Wave(2, 5, 3), Wave(2, 5, 5), Wave(2, 10), Wave(2, 2, 5), SeqLens));
+        Assert.True(QeeAudit.OrtOnly<QeeGruValueAuditCheck>(Wave(4, 2, 3), Wave(2, 15, 3), Wave(2, 15, 5), Wave(2, 30), Wave(2, 2, 5), SeqLens));
+        Assert.True(QeeAudit.OrtOnly<QeeLstmValueAuditCheck>(Wave(4, 2, 3), Wave(2, 20, 3), Wave(2, 20, 5), Wave(2, 40), Wave(2, 2, 5), Wave(2, 2, 5), Wave(2, 15), SeqLens));
     }
 }

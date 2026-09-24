@@ -1,4 +1,5 @@
 using static Shorokoo.Tests.Modules.QeeAuditVerdicts;
+using static Shorokoo.Tests.Modules.RecurrentAuditVerdicts;
 
 namespace Shorokoo.Tests.Modules
 {
@@ -581,4 +582,153 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+
+    // ===================================================================
+    //  Recurrent family: value audits. QEE computes no recurrent values,
+    //  so these run on ONNX Runtime (and every value is compared on the
+    //  PyTorch backend); the bit checks the identities any correct
+    //  implementation satisfies: Y_h is Y's last step (the first, for the
+    //  reverse direction) and Y is zero past a sequence's length.
+    //  Weights arrive as runtime inputs so nothing is folded away.
+    // ===================================================================
+
+    /// <summary>RNN values: forward with B and initial_h; reverse with Relu and clip;
+    /// bidirectional with sequence_lens, initial_h and Affine / ScaledTanh alpha-beta lists.
+    /// Inputs: x [4,2,3], w [2,5,3], r [2,5,5], b [2,10], h0 [2,2,5], seqLens [4,2].</summary>
+    [Module]
+    public partial class QeeRnnValueAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x, Tensor<float32> w, Tensor<float32> r,
+            Tensor<float32> b, Tensor<float32> h0, Tensor<int32> seqLens)
+        {
+            var (y1, yh1) = OnnxOp.Rnn(x, First(w), First(r), First(b), null, First(h0),
+                null, null, null, null, RNNDirection.Forward, 5L, false);
+            var (y2, yh2) = OnnxOp.Rnn(x, First(w), First(r), null, null, null,
+                null, null, ["Relu"], 0.8f, RNNDirection.Reverse, 5L, false);
+            var (y3, yh3) = OnnxOp.Rnn(x, w, r, b, seqLens, h0,
+                [0.7f, 0.9f], [0.2f, 0.5f], ["Affine", "ScaledTanh"], null, RNNDirection.Bidirectional, 5L, false);
+
+            var mismatch =
+                ShapeMismatch((Tensor<float32>)y3, Vector(4L, 2L, 2L, 5L)) +
+                ShapeMismatch((Tensor<float32>)yh3, Vector(2L, 2L, 5L)) +
+                Apart(Step((Tensor<float32>)y1, 3L), (Tensor<float32>)yh1) +
+                Apart(Step((Tensor<float32>)y2, 0L), (Tensor<float32>)yh2) +
+                PastLength((Tensor<float32>)y3);
+            return mismatch < Scalar(1L);
+        }
+    }
+
+    /// <summary>GRU values: forward with linear_before_reset, B and initial_h; reverse
+    /// without it, with clip; bidirectional with sequence_lens and HardSigmoid / Softsign /
+    /// Sigmoid / ScaledTanh alpha-beta lists. Inputs: x [4,2,3], w [2,15,3], r [2,15,5],
+    /// b [2,30], h0 [2,2,5], seqLens [4,2].</summary>
+    [Module]
+    public partial class QeeGruValueAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x, Tensor<float32> w, Tensor<float32> r,
+            Tensor<float32> b, Tensor<float32> h0, Tensor<int32> seqLens)
+        {
+            var (y1, yh1) = OnnxOp.Gru(x, First(w), First(r), First(b), null, First(h0),
+                null, null, null, null, GRUDirection.Forward, 5L, false, linearBeforeReset: true);
+            var (y2, yh2) = OnnxOp.Gru(x, First(w), First(r), First(b), null, null,
+                null, null, null, 0.6f, GRUDirection.Reverse, 5L, false, linearBeforeReset: false);
+            var (y3, yh3) = OnnxOp.Gru(x, w, r, b, seqLens, h0,
+                [0.3f, 0.9f], [0.4f, 1.2f], ["HardSigmoid", "Softsign", "Sigmoid", "ScaledTanh"], null,
+                GRUDirection.Bidirectional, 5L, false, linearBeforeReset: true);
+
+            var mismatch =
+                ShapeMismatch((Tensor<float32>)y3, Vector(4L, 2L, 2L, 5L)) +
+                ShapeMismatch((Tensor<float32>)yh3, Vector(2L, 2L, 5L)) +
+                Apart(Step((Tensor<float32>)y1, 3L), (Tensor<float32>)yh1) +
+                Apart(Step((Tensor<float32>)y2, 0L), (Tensor<float32>)yh2) +
+                PastLength((Tensor<float32>)y3);
+            return mismatch < Scalar(1L);
+        }
+    }
+
+    /// <summary>LSTM values: forward with B, initial_h, initial_c, peepholes and clip;
+    /// reverse with input_forget; bidirectional with sequence_lens and a six-entry activation
+    /// list (HardSigmoid / Elu / Softplus on the reverse half). Inputs: x [4,2,3],
+    /// w [2,20,3], r [2,20,5], b [2,40], h0 [2,2,5], c0 [2,2,5], p [2,15], seqLens [4,2].</summary>
+    [Module]
+    public partial class QeeLstmValueAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x, Tensor<float32> w, Tensor<float32> r,
+            Tensor<float32> b, Tensor<float32> h0, Tensor<float32> c0, Tensor<float32> p, Tensor<int32> seqLens)
+        {
+            var (y1, yh1, _) = OnnxOp.Lstm(x, First(w), First(r), First(b), null, First(h0), First(c0), First(p),
+                null, null, null, 0.9f, LSTMDirection.Forward, 5L, null, false);
+            var (y2, yh2, _) = OnnxOp.Lstm(x, First(w), First(r), First(b), null, null, null, null,
+                null, null, null, null, LSTMDirection.Reverse, 5L, inputForget: true, layout: false);
+            var (y3, yh3, yc3) = OnnxOp.Lstm(x, w, r, b, seqLens, h0, c0, p,
+                [0.3f, 0.8f], [0.4f], ["Sigmoid", "Tanh", "Tanh", "HardSigmoid", "Elu", "Softplus"], null,
+                LSTMDirection.Bidirectional, 5L, null, false);
+
+            var mismatch =
+                ShapeMismatch((Tensor<float32>)y3, Vector(4L, 2L, 2L, 5L)) +
+                ShapeMismatch((Tensor<float32>)yh3, Vector(2L, 2L, 5L)) +
+                ShapeMismatch((Tensor<float32>)yc3, Vector(2L, 2L, 5L)) +
+                Apart(Step((Tensor<float32>)y1, 3L), (Tensor<float32>)yh1) +
+                Apart(Step((Tensor<float32>)y2, 0L), (Tensor<float32>)yh2) +
+                PastLength((Tensor<float32>)y3);
+            return mismatch < Scalar(1L);
+        }
+    }
+
+    /// <summary>layout=1 (batch-first) against layout=0 on the same data, for bidirectional
+    /// RNN, GRU and LSTM with sequence_lens and initial states: Y is layout 0's Y permuted
+    /// [seq,dirs,batch,hidden] → [batch,seq,dirs,hidden], and Y_h / Y_c are transposed. ONNX
+    /// Runtime's CPU kernels refuse layout=1, so this runs on the PyTorch backend. Inputs as in
+    /// <see cref="QeeLstmValueAuditCheck"/>.</summary>
+    [Module]
+    public partial class QeeRecurrentBatchFirstValueCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x, Tensor<float32> w, Tensor<float32> r,
+            Tensor<float32> b, Tensor<float32> h0, Tensor<float32> c0, Tensor<float32> p, Tensor<int32> seqLens)
+        {
+            var xB = BatchFirst(x);
+            var h0B = BatchFirst(h0);
+            var c0B = BatchFirst(c0);
+            var wRnn = w.Slice(Vector(0L), Vector(5L), axes: Vector(1L));
+            var rRnn = r.Slice(Vector(0L), Vector(5L), axes: Vector(1L));
+            var bRnn = b.Slice(Vector(0L), Vector(10L), axes: Vector(1L));
+            var wGru = w.Slice(Vector(0L), Vector(15L), axes: Vector(1L));
+            var rGru = r.Slice(Vector(0L), Vector(15L), axes: Vector(1L));
+            var bGru = b.Slice(Vector(0L), Vector(30L), axes: Vector(1L));
+
+            var (yR, yhR) = OnnxOp.Rnn(x, wRnn, rRnn, bRnn, seqLens, h0, null, null, null, null, RNNDirection.Bidirectional, 5L, false);
+            var (yRB, yhRB) = OnnxOp.Rnn(xB, wRnn, rRnn, bRnn, seqLens, h0B, null, null, null, null, RNNDirection.Bidirectional, 5L, true);
+            var (yG, yhG) = OnnxOp.Gru(x, wGru, rGru, bGru, seqLens, h0, null, null, null, null, GRUDirection.Bidirectional, 5L, false, true);
+            var (yGB, yhGB) = OnnxOp.Gru(xB, wGru, rGru, bGru, seqLens, h0B, null, null, null, null, GRUDirection.Bidirectional, 5L, true, true);
+            var (yL, yhL, ycL) = OnnxOp.Lstm(x, w, r, b, seqLens, h0, c0, p, null, null, null, null, LSTMDirection.Bidirectional, 5L, null, false);
+            var (yLB, yhLB, ycLB) = OnnxOp.Lstm(xB, w, r, b, seqLens, h0B, c0B, p, null, null, null, null, LSTMDirection.Bidirectional, 5L, null, true);
+
+            var mismatch =
+                Apart(SeqFirstY((Tensor<float32>)yRB), (Tensor<float32>)yR) +
+                Apart(BatchFirst((Tensor<float32>)yhRB), (Tensor<float32>)yhR) +
+                Apart(SeqFirstY((Tensor<float32>)yGB), (Tensor<float32>)yG) +
+                Apart(BatchFirst((Tensor<float32>)yhGB), (Tensor<float32>)yhG) +
+                Apart(SeqFirstY((Tensor<float32>)yLB), (Tensor<float32>)yL) +
+                Apart(BatchFirst((Tensor<float32>)yhLB), (Tensor<float32>)yhL) +
+                Apart(BatchFirst((Tensor<float32>)ycLB), (Tensor<float32>)ycL) +
+                ShapeMismatch((Tensor<float32>)yLB, Vector(2L, 4L, 2L, 5L));
+            return mismatch < Scalar(1L);
+        }
+
+        private static Tensor<float32> BatchFirst(Tensor<float32> t) => (Tensor<float32>)OnnxOp.Transpose(t, [1L, 0L, 2L]);
+
+        private static Tensor<float32> SeqFirstY(Tensor<float32> y) => (Tensor<float32>)OnnxOp.Transpose(y, [1L, 2L, 0L, 3L]);
+    }
+
+    internal static class RecurrentAuditVerdicts
+    {
+        internal static Tensor<float32> First(Tensor<float32> t)
+            => t.Slice(Vector(0L), Vector(1L), axes: Vector(0L));
+
+        internal static Tensor<float32> Step(Tensor<float32> y, long t)
+            => y.Slice(Vector(t), Vector(t + 1L), axes: Vector(0L)).Reshape(Vector(-1L));
+
+        internal static Scalar<int64> PastLength(Tensor<float32> y)
+            => Apart(y.Slice(Vector(2L, 1L), Vector(4L, 2L), axes: Vector(0L, 2L)), Vector(0f).Tensor());
+    }
 }

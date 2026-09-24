@@ -193,6 +193,14 @@ public class PyTorchBackendCoverageTests
     }
 
     [Fact]
+    public void TestBatchFirstRecurrentNetworksRunOnTorch()
+    {
+        Assert.True(AutoTest.AdvancedTestGraph<QeeRecurrentBatchFirstValueCheck>([],
+            [QeeAudit.Wave(4, 2, 3), QeeAudit.Wave(2, 20, 3), QeeAudit.Wave(2, 20, 5), QeeAudit.Wave(2, 40), QeeAudit.Wave(2, 2, 5), QeeAudit.Wave(2, 2, 5), QeeAudit.Wave(2, 15), QeeAudit.I32([2L], 4, 2)],
+            context: new ComputeContext(Torch)));
+    }
+
+    [Fact]
     public void TestAFunctionCalledInsideABranchRunsAsAPythonFunction()
     {
         var twice = new FunctionProto { Name = "Twice", Domain = "Functions" };

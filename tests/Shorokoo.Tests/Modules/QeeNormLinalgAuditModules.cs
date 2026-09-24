@@ -518,4 +518,21 @@ namespace Shorokoo.Tests.Modules
             return FloatMismatch(dq.Reshape(Vector(-1L)), Vector(500f, -3f, 1f)) < Scalar(1L);
         }
     }
+
+    /// <summary>DequantizeLinear of an int32 [2, 3] tensor per axis — along axis 1 with a zero
+    /// point, and along axis −2 without one, of the tensor reshaped so its rank is known — read
+    /// through a Transpose. x = [[10, −6, 2], [4, 0, −8]].</summary>
+    [Module]
+    public partial class QeeDequantizeInt32PerAxisAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<int32> x)
+        {
+            var columns = (Tensor<float32>)OnnxOp.DequantizeLinear(x, Vector(0.5f, 2f, 0.25f), Vector(2, -2, 0), 1L);
+            var rows = (Tensor<float32>)OnnxOp.DequantizeLinear(x.Reshape(Vector(2L, 3L)), Vector(0.5f, 0.25f), null, -2L);
+            var mismatch =
+                FloatMismatch(columns.Transpose().Reshape(Vector(-1L)), Vector(4f, 1f, -8f, 4f, 0.5f, -2f)) +
+                FloatMismatch(rows.Transpose().Reshape(Vector(-1L)), Vector(5f, 1f, -3f, 0f, 1f, -2f));
+            return mismatch < Scalar(1L);
+        }
+    }
 }

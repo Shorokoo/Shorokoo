@@ -1113,9 +1113,9 @@ namespace Shorokoo.Core.Factory
         /// <c>QuantizeLinear</c> produces int32, so ONNX Runtime would build an invalid graph —
         /// and is written as the arithmetic it stands for, <c>Cast(x) * scale</c> (after
         /// <c>x - zero_point</c> in int32 where there is one), which is how ONNX Runtime's own
-        /// kernel computes it. That rewrite is made only where it is exact and simple: a float32
-        /// rank-0 scale, no block size and no other output type — the only shape of scale the
-        /// propagation acts on besides a one-element vector.</para>
+        /// kernel computes it, a per-axis scale and zero point reshaped along the axis to
+        /// broadcast. That rewrite is made where it is exact: a float32 scale of rank 0 or 1, no
+        /// block size and no other output type.</para>
         /// </summary>
         private static void WriteDequantizeZeroPoints(GraphProto graph, Dictionary<string, TensorMeta> tensorMetaByName)
         {
@@ -1139,11 +1139,49 @@ namespace Shorokoo.Core.Factory
                 if (xType == (int)TensorProto.DataType.Int32)
                 {
                     var scaleMeta = ResolveTensorMeta(graph, tensorMetaByName, scale);
-                    if (scaleMeta is not { Rank: 0, ProtoElemType: (int)TensorProto.DataType.Float }
+                    if (scaleMeta is not { Rank: 0 or 1, ProtoElemType: (int)TensorProto.DataType.Float }
                         || node.Attributes.Any(a => a.Name == OnnxOpAttributeNames.AttrBlockSize && a.I != 0
                             || a.Name == OnnxOpAttributeNames.AttrOutputDtype && a.I != (int)TensorProto.DataType.Float))
                         continue;
-                    var lowered = new List<NodeProto>(3);
+                    var lowered = new List<NodeProto>(14);
+                    if (scaleMeta.Rank == 1)
+                    {
+                        // Per axis: the scale (and zero point) are laid along the axis for the
+                        // elementwise arithmetic to broadcast, reshaped to
+                        // [1] * leading ++ [-1] ++ [1] * trailing, where one of the two counts is
+                        // fixed by the axis and the other is the rest of x's rank, read at run time.
+                        long axis = node.Attributes.FirstOrDefault(a => a.Name == OnnxOpAttributeNames.AttrAxis)?.I ?? 1;
+                        long fixedOnes = axis >= 0 ? axis : -axis - 1;
+                        string alongName = $"{prefix}_along", rankName = $"{prefix}_rank";
+                        string fixedName = $"{prefix}_fixed_ones", restName = $"{prefix}_rest_ones";
+                        lowered.Add(MakeNode($"{prefix}_shape_x", OpCodes.SHAPE, [x], [$"{prefix}_shape_x_out"]));
+                        lowered.Add(MakeNode($"{prefix}_rank_of", OpCodes.SHAPE, [$"{prefix}_shape_x_out"], [rankName]));
+                        lowered.Add(MakeInt64ConstNode($"{prefix}_rest_less_const", $"{prefix}_rest_less", [fixedOnes + 1]));
+                        lowered.Add(MakeNode($"{prefix}_rest_sub", OpCodes.SUB, [rankName, $"{prefix}_rest_less"], [$"{prefix}_rest_count"]));
+                        lowered.Add(MakeNode($"{prefix}_rest", OpCodes.CONSTANT_OF_SHAPE, [$"{prefix}_rest_count"], [restName],
+                            new AttributeProto
+                            {
+                                Name = OnnxOpAttributeNames.AttrValue,
+                                Type = AttributeProto.AttributeType.Tensor,
+                                T = new TensorProto { Dims = [1], data_type = (int)TensorProto.DataType.Int64, RawData = BitConverter.GetBytes(1L) },
+                            }));
+                        var ones = new long[fixedOnes];
+                        Array.Fill(ones, 1L);
+                        lowered.Add(MakeInt64ConstNode($"{prefix}_fixed_ones_const", fixedName, ones));
+                        lowered.Add(MakeInt64ConstNode($"{prefix}_minus_one_const", $"{prefix}_minus_one", [-1L]));
+                        string[] parts = axis >= 0
+                            ? [fixedName, $"{prefix}_minus_one", restName]
+                            : [restName, $"{prefix}_minus_one", fixedName];
+                        lowered.Add(MakeNode($"{prefix}_along_concat", OpCodes.CONCAT, parts, [alongName],
+                            MakeIntAttr(OnnxOpAttributeNames.AttrAxis, 0)));
+                        lowered.Add(MakeNode($"{prefix}_scale_along", OpCodes.RESHAPE, [scale, alongName], [$"{prefix}_scale"]));
+                        scale = $"{prefix}_scale";
+                        if (zeroPoint.Length > 0)
+                        {
+                            lowered.Add(MakeNode($"{prefix}_zero_point_along", OpCodes.RESHAPE, [zeroPoint, alongName], [$"{prefix}_zero_point"]));
+                            zeroPoint = $"{prefix}_zero_point";
+                        }
+                    }
                     string integers = x;
                     if (zeroPoint.Length > 0)
                     {

@@ -56,5 +56,6 @@ public class QeeNormLinalgAuditTests
             I8([3L], 100, -6, 2), TensorData([3L], (short)1000, (short)-6, (short)2),
             TensorData([3L], (ushort)1000, (ushort)6, (ushort)2), I32([3L], 1000, -6, 2)));
         Assert.True(QeeAudit.Check<QeeDequantizeInt32VectorScaleReshapeAuditCheck>(I32([1L, 3L], 1000, -6, 2)));
+        Assert.True(QeeAudit.Check<QeeDequantizeInt32PerAxisAuditCheck>(I32([2L, 3L], 10, -6, 2, 4, 0, -8)));
     }
 }

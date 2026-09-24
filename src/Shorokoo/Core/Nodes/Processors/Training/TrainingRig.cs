@@ -2204,7 +2204,8 @@ namespace Shorokoo
             // Step 10: lower to an executable form. LowerGraph runs its Fast pipeline
             // in place on fastTraining and returns the same graph for the public-facing
             // TrainingStepPureGraph property.
-            _trainingStepWorkGraph = LowerGraph(fastTraining, MergeContext, progress);
+            _trainingStepWorkGraph = LowerGraph(
+                fastTraining, MergeContext, progress, lowerAutoGrad: TrainingBackend.LowersAutoGrad);
 
             UpdatedParamFieldCount = TrainableParamStructDef.Fields.Length;
             UpdatedStateFieldCount = ModelStateDef.Fields.Length;
@@ -2474,8 +2475,15 @@ namespace Shorokoo
         /// loop over trainable parameters (e.g. ResNet residual stacks) must be flattened before
         /// the autograd pass runs.
         /// </summary>
+        /// <param name="fast">The composed training graph, lowered in place and returned.</param>
+        /// <param name="mergeContext">The build/merge context the folds evaluate on.</param>
+        /// <param name="progress">The build's progress reporter, if any.</param>
+        /// <param name="lowerAutoGrad">False for a step whose gradient is left to the execution
+        /// backend (<see cref="TrainingBackend.Native"/>): the pipeline stops before the autograd
+        /// expansion, and the step keeps its one <c>AUTO_GRAD</c> node for the backend to run.</param>
         private static InternalComputationGraph LowerGraph(
-            InternalComputationGraph fast, ComputeContext mergeContext, BuildProgressReporter? progress = null)
+            InternalComputationGraph fast, ComputeContext mergeContext, BuildProgressReporter? progress = null,
+            bool lowerAutoGrad = true)
         {
             void Stage(string stage) => progress?.Report(BuildPhase.TrainingStep, stage);
 
@@ -2514,6 +2522,17 @@ namespace Shorokoo
             Stage("LowerAttributeTensorOps");
             Shorokoo.Core.Nodes.Processors.Fast.FastLowerAttributeTensorOps.Process(fast, compute: mergeContext);
 
+            // The cut for a step whose gradient the execution backend computes: everything above is
+            // shared with the default path, and nothing below runs. The registered-op lowering and
+            // the If unscoping inside the autograd pass exist for Shorokoo's own backward walk, so
+            // the backend receives those ops, and the scopes, as the user wrote them.
+            if (!lowerAutoGrad)
+            {
+                Stage("DeferAutoGradToExecutionBackend");
+                RequireSingleTopLevelAutoGrad(fast);
+                return fast;
+            }
+
             // Lower AUTO_GRAD nodes natively on the Fast graph — no CG round-trip needed.
             Stage("ExpandAutoGrad");
             Shorokoo.Core.Nodes.Processors.AutoGrad.FastProcessAutoGradProcessor.Process(fast);
@@ -2521,6 +2540,31 @@ namespace Shorokoo
             Stage("SimplifyAfterAutoGrad");
             Shorokoo.Core.Nodes.Processors.Fast.FastSimplify.Process(fast);
             return fast;
+        }
+
+        /// <summary>
+        /// The shape a step handed over in <see cref="TrainingFormats.OnnxAutoGrad"/> is held to: one
+        /// <c>AUTO_GRAD</c> node — the rig's own, since concretization lowers any a module authored —
+        /// at the top level of the graph, where a backend can differentiate the loss's whole ancestry
+        /// with respect to its inputs rather than one arm of a branch or one trip of a loop.
+        /// </summary>
+        private static void RequireSingleTopLevelAutoGrad(InternalComputationGraph fast)
+        {
+            int depth = 0, topLevel = 0, total = 0;
+            foreach (var node in fast.Nodes)
+            {
+                if (node.IsCloseNode()) depth--;
+                if (node.OpCode == InternalOpCodes.AUTO_GRAD)
+                {
+                    total++;
+                    if (depth == 0) topLevel++;
+                }
+                if (node.IsOpenNode()) depth++;
+            }
+            if (total != 1 || topLevel != 1)
+                throw new InvalidOperationException(
+                    $"A training step whose gradient is left to the execution backend must carry exactly one "
+                    + $"top-level AUTO_GRAD node; this one carries {total}, {topLevel} of them at the top level.");
         }
 
         /// <summary>
@@ -4457,7 +4501,14 @@ namespace Shorokoo
             // alternates Rematerializer and MemoryAwareScheduler under a combined
             // compute+memory metric, only committing transforms that strictly improve it.
             Stage("InferTrainingStepShapes");
-            var shapeInfo = shapeInferencer.Infer(graph, allInputs);
+            ShapeInferenceResult shapeInfo;
+            if (TrainingBackend.LowersAutoGrad)
+                shapeInfo = shapeInferencer.Infer(graph, allInputs);
+            else
+                // The gradient node the step keeps has a shape rule for this inference only; see
+                // AutoGradShapeOp for why it is never registered.
+                using (Shorokoo.Core.Interpreter.OpRegistry.Override(Shorokoo.Core.Interpreter.Ops.AutoGradShapeOp.Instance))
+                    shapeInfo = shapeInferencer.Infer(graph, allInputs);
 
             // A parameter's shape is declared by its initializer and baked into the arch, and every
             // other part of the framework holds to it — binding a value of another shape into the
@@ -4486,9 +4537,28 @@ namespace Shorokoo
                     + "shape broadcasts against it instead of scaling it.");
             }
             var baselineEval = new Shorokoo.Core.AutoDiffCheckpointing.GraphEvaluator().Evaluate(graph, shapeInfo);
-            Stage("OptimizeTrainingStepGraph");
-            var optimizer = new MemoryAwareGraphOptimizer(shapeInference: shapeInferencer);
-            var optResult = optimizer.OptimizeWithShapeInfo(graph, shapeInfo);
+            GraphOptimizationResult optResult;
+            if (TrainingBackend.LowersAutoGrad)
+            {
+                Stage("OptimizeTrainingStepGraph");
+                var optimizer = new MemoryAwareGraphOptimizer(shapeInference: shapeInferencer);
+                optResult = optimizer.OptimizeWithShapeInfo(graph, shapeInfo);
+            }
+            else
+            {
+                // The memory-aware pass rewrites a backward pass it can see, and this step has none:
+                // the gradient is the execution backend's, and so is what it keeps alive for it. The
+                // step goes out as composed -- and a [Module(Checkpoint = true)] segment with it,
+                // unhonoured.
+                optResult = new GraphOptimizationResult
+                {
+                    StrategyName = "Baseline",
+                    OptimizedGraph = graph,
+                    ShapeInfo = shapeInfo,
+                    Evaluation = baselineEval,
+                    AllStrategies = [("Baseline", baselineEval, graph)],
+                };
+            }
             PreOptimizationEval = baselineEval;
             OptimizationResult = optResult;
             OptimizationInputs = allInputs;

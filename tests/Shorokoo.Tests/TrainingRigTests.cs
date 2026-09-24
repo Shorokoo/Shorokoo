@@ -5261,7 +5261,7 @@ public class TrainingRigTrainingBackendCoverageTests
         Assert.Equal(Stepped(rig), Stepped(rig.WithTrainingBackend(TrainingBackend.Shorokoo)));
         Assert.Equal("Native (onnx-autograd/1)", TrainingBackend.Native.ToString());
 
-        using var accepting = new ComputeContext(new AutoGradBackend(DefaultBackend.Instance));
+        using var accepting = Accepting();
         var native = Rig(SGDOptimizer.ComputationGraph, [0.1f], accepting, TrainingBackend.Native);
         TrainingRig[] derived =
         [
@@ -5290,6 +5290,40 @@ public class TrainingRigTrainingBackendCoverageTests
         {
             File.Delete(path);
         }
+    }
+
+    private static ComputeContext Accepting() => new(new AutoGradBackend(DefaultBackend.Instance));
+
+    private static TrainingRig Native(
+        ComputeContext accepting, ComputationGraph model, ComputationGraph loss, ComputationGraph optimizer,
+        long[] shape, params Hyperparameter[] hypers)
+        => TrainingRig.FromScratch(model, loss, optimizer,
+            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData(shape, new float[ProductOf(shape)]))],
+            hypers, runtimeContext: accepting, trainingBackend: TrainingBackend.Native);
+
+    private static int AutoGrads(TrainingRig rig)
+        => rig.TrainingStepPureGraph.ToInternal().Nodes.Count(n => n.OpCode == InternalOpCodes.AUTO_GRAD);
+
+    [Fact]
+    public void TestANativeStepKeepsItsOneAutoGradAndSkipsTheMemoryPass()
+    {
+        using var accepting = Accepting();
+        TrainingRig[] rigs =
+        [
+            Native(accepting, ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, [4L], 0.1f),
+            Native(accepting, ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph, [4L], 0.001f, 0.9f, 0.999f, 1e-8f, 0.01f),
+            Native(accepting, ScalarMultiplyWithBatchNormModel.ComputationGraph, L2Loss.ComputationGraph, SGDMomentumOptimizer.ComputationGraph, [8L], 0.5f, 0.9f),
+            Native(accepting, DigitClassifier.ComputationGraph, CrossEntropyLoss.ComputationGraph, SGDOptimizer.ComputationGraph, [4L, 64L], 0.01f),
+            Native(accepting, RngRigDropoutModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, [4L], 0.1f),
+            Native(accepting, ScalarMultiplyAndScatterModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, [4L], 0.1f),
+        ];
+        Assert.All(rigs, r => Assert.Equal(1, AutoGrads(r)));
+        Assert.All(rigs, r => Assert.Equal("Baseline", r.OptimizationResult.StrategyName));
+        Assert.Equal(0, AutoGrads(Rig(SGDOptimizer.ComputationGraph, [0.1f])));
+
+        Assert.Contains("at that parameter's own shape", Assert.Throws<ArgumentException>(() => Native(
+            accepting, ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, VectorRateOptimizer.ComputationGraph, [4L],
+            Hyperparameter.Baked((TensorData)TensorData([4L], [0.1f, 0.2f, 0.4f, 0.8f])), Hyperparameter.Runtime())).Message);
     }
 
     [Fact]

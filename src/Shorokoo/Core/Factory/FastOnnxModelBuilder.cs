@@ -233,6 +233,10 @@ namespace Shorokoo.Core.Factory
             // into every caller.
             bool flattenFunctionBodies = prepForOnnx || vanillaExport || applyExecutionLowerings;
 
+            // The model a backend's session is built from, as against an exported file or the .srk
+            // dialect: only it is rewritten around one runtime's optimizer.
+            bool forSession = prepForOnnx && !vanillaExport;
+
             // ----- 3. Build the main GraphProto by walking the Fast graph.
             var graphProto = BuildGraphProto(
                 graphName: "",
@@ -249,7 +253,7 @@ namespace Shorokoo.Core.Factory
             // a FunctionProto for each.
             var functions = CollectFunctionsPostOrder(prepFast);
             var functionProtos = functions
-                .Select(fn => BuildFunctionProto(fn, opset, prepForOnnx, applyExecutionLowerings, stripCheckpointStamp, flattenFunctionBodies))
+                .Select(fn => BuildFunctionProto(fn, opset, prepForOnnx, applyExecutionLowerings, stripCheckpointStamp, flattenFunctionBodies, forSession))
                 .ToArray();
 
             var model = (ModelProto)OnnxIRFactory.CreateModel(graphProto, functionProtos, opset);
@@ -285,17 +289,19 @@ namespace Shorokoo.Core.Factory
             if (flattenFunctionBodies)
                 RecurrentActivationArguments.Normalize(model);
 
-            // ----- 5b, continued. The same dialects get every DequantizeLinear with no zero
-            // point written so that ONNX Runtime's QDQ propagation keeps its input type; see
-            // WriteDequantizeZeroPoints.
-            if (flattenFunctionBodies)
+            // ----- 5b, continued. Execution dialect only: every DequantizeLinear ONNX Runtime's
+            // optimizer would move past what reads it is written so that it keeps its input type;
+            // see WriteDequantizeZeroPoints. A workaround for one runtime's optimizer, so an exported
+            // file keeps its quantization as the user wrote it. Function bodies are written as they
+            // are built (BuildFunctionProto).
+            if (forSession)
                 WriteDequantizeZeroPoints(model.Graph, BuildTensorMetaByName(tensorInfoLookup));
 
             // ----- 5c. Execution dialect only: the one AUTO_GRAD node a training step keeps when
             // its gradient is left to the execution backend goes out as that backend's operator.
             // Only such a step reaches here carrying one -- the compile gate refuses AUTO_GRAD in
             // every other format -- and the .srk dialect keeps the node as Shorokoo's own.
-            if (prepForOnnx && !vanillaExport)
+            if (forSession)
                 EmitDeferredAutoGrad(model);
 
             // ----- 6. Attach TensorStructDef metadata for any struct-typed
@@ -1096,32 +1102,49 @@ namespace Shorokoo.Core.Factory
         }
 
         /// <summary>
-        /// Writes each <c>DequantizeLinear</c> that has no zero point in a form ONNX Runtime
-        /// dequantizes as the spec does.
+        /// Writes each <c>DequantizeLinear</c> that ONNX Runtime's optimizer would move past the
+        /// operator reading it in a form it dequantizes as the spec does. For a model handed to a
+        /// backend's session only: an exported file keeps its quantization as written.
         ///
-        /// <para>ONNX Runtime moves a <c>DequantizeLinear</c> whose scale is a constant scalar
-        /// forward past a following <c>Reshape</c>, <c>Transpose</c>, <c>Squeeze</c>,
-        /// <c>Unsqueeze</c>, <c>Slice</c> or <c>MaxPool</c>, by inserting after it a
-        /// <c>QuantizeLinear</c>/<c>DequantizeLinear</c> pair built from the original's scale and
-        /// zero point. With no zero point that <c>QuantizeLinear</c> quantizes to uint8, its own
-        /// default, whatever the original's input type was — so an int8, int16, uint16 or int32
-        /// input read through such an operator comes back clamped to what uint8 can hold.</para>
+        /// <para>ONNX Runtime moves a <c>DequantizeLinear</c> whose scale is a single value — of
+        /// rank 0, or one element — forward past a <c>Reshape</c>, <c>Transpose</c>,
+        /// <c>Squeeze</c>, <c>Unsqueeze</c>, <c>Slice</c> or <c>MaxPool</c> reading it (through
+        /// any <c>Identity</c>, which it removes first), and one with a scale along an axis past a
+        /// <c>Transpose</c>, by inserting after it a <c>QuantizeLinear</c>/<c>DequantizeLinear</c>
+        /// pair built from the original's scale and zero point. With no zero point that
+        /// <c>QuantizeLinear</c> quantizes to uint8, its own default, whatever the original's input
+        /// type was — so an int8, int16, uint16 or int32 input read through such an operator comes
+        /// back clamped to what uint8 can hold, or the session is refused over the pair's types.
+        /// Every other <c>DequantizeLinear</c> — one read by a convolution or a matrix product, the
+        /// patterns ONNX Runtime fuses — is left exactly as written.</para>
         ///
         /// <para>An int8, int16 or uint16 input is given the zero point the spec already implies:
         /// zeros of its own type, in the scale's shape (<c>ConstantOfShape(Shape(scale))</c>), so
         /// the inserted pair keeps the type. An int32 input cannot take that route — no
-        /// <c>QuantizeLinear</c> produces int32, so ONNX Runtime would build an invalid graph —
-        /// and is written as the arithmetic it stands for, <c>Cast(x) * scale</c> (after
+        /// <c>QuantizeLinear</c> produces int32, and one with an int32 zero point makes the graph
+        /// invalid — and is written as the arithmetic it stands for, <c>Cast(x) * scale</c> (after
         /// <c>x - zero_point</c> in int32 where there is one), which is how ONNX Runtime's own
-        /// kernel computes it, a per-axis scale and zero point reshaped along the axis to
-        /// broadcast. That rewrite is made where it is exact: a float32 scale of rank 0 or 1, no
-        /// block size and no other output type.</para>
+        /// kernel computes it: a one-element scale and zero point read as the single values they
+        /// are, one along an axis reshaped along it to broadcast. That rewrite is made where it is
+        /// exact: a float32 scale, no block size and no other output type.</para>
+        ///
+        /// <para>A <c>Transpose</c> that names no permutation and reads a <c>DequantizeLinear</c>
+        /// along an axis is given its permutation — the reversal it defaults to: ONNX Runtime's
+        /// transpose optimizer reads that permutation without checking there is one, and aborts the
+        /// process. Where the rank that permutation needs is not known, the
+        /// <c>DequantizeLinear</c> is written as its arithmetic instead, whatever its integer input
+        /// type (a narrower one subtracting its zero point in float32, where no difference
+        /// wraps), so there is none left for the optimizer to reach.</para>
         /// </summary>
         private static void WriteDequantizeZeroPoints(GraphProto graph, Dictionary<string, TensorMeta> tensorMetaByName)
         {
             if (graph is null) return;
             ForEachGraphRecursive(graph, g => WriteDequantizeZeroPointsInGraph(g, tensorMetaByName));
         }
+
+        /// <summary>The operators ONNX Runtime moves a single-valued <c>DequantizeLinear</c> past.</summary>
+        private static readonly HashSet<string> MovedPast =
+            [OpCodes.RESHAPE, OpCodes.TRANSPOSE, OpCodes.SQUEEZE, OpCodes.UNSQUEEZE, OpCodes.SLICE, OpCodes.MAX_POOL];
 
         private static void WriteDequantizeZeroPointsInGraph(GraphProto graph, Dictionary<string, TensorMeta> tensorMetaByName)
         {
@@ -1133,18 +1156,61 @@ namespace Shorokoo.Core.Factory
                     continue;
                 string x = node.Inputs[0], scale = node.Inputs[1];
                 string zeroPoint = node.Inputs.Count > 2 ? node.Inputs[2] : "";
-                var xType = ResolveTensorMeta(graph, tensorMetaByName, x)?.ProtoElemType;
-                string prefix = (node.Name.Length > 0 ? node.Name : node.Outputs[0]) + "_dqlow";
+                var scaleMeta = ResolveTensorMeta(graph, tensorMetaByName, scale);
+                var scaleDims = ConstantDims(graph, scale);
+                bool single = scaleMeta?.Rank == 0 || scaleDims is [] or [1];
+                bool alongAxis = scaleDims is [> 1];
+                var readers = Readers(graph, node.Outputs[0]);
+                if (single ? !readers.Any(r => MovedPast.Contains(r.OpType))
+                    : !alongAxis || !readers.Any(r => r.OpType == OpCodes.TRANSPOSE))
+                    continue;
 
-                if (xType == (int)TensorProto.DataType.Int32)
+                var xMeta = ResolveTensorMeta(graph, tensorMetaByName, x);
+                var xType = xMeta?.ProtoElemType;
+                var unpermuted = alongAxis
+                    ? readers.Where(r => r.OpType == OpCodes.TRANSPOSE && !r.Attributes.Any(a => a.Name == OnnxOpAttributeNames.AttrPerm)).ToList()
+                    : [];
+                // Where the permutation cannot be written for want of the rank, the node is written
+                // as its arithmetic whatever its input type, so no DequantizeLinear is left for the
+                // transpose optimizer to reach.
+                bool asArithmetic = xType == (int)TensorProto.DataType.Int32;
+                if (unpermuted.Count > 0)
                 {
-                    var scaleMeta = ResolveTensorMeta(graph, tensorMetaByName, scale);
-                    if (scaleMeta is not { Rank: 0 or 1, ProtoElemType: (int)TensorProto.DataType.Float }
+                    if ((xMeta?.Rank ?? KnownRank(graph, x)) is int rank)
+                        foreach (var transpose in unpermuted)
+                            transpose.Attributes.Add(new AttributeProto
+                            {
+                                Name = OnnxOpAttributeNames.AttrPerm,
+                                Type = AttributeProto.AttributeType.Ints,
+                                Ints = [.. Enumerable.Range(0, rank).Reverse().Select(d => (long)d)],
+                            });
+                    else
+                        asArithmetic = xType is { } t && (t == (int)TensorProto.DataType.Uint8 || ZeroPointBytes(t) is not null);
+                }
+
+                string prefix = (node.Name.Length > 0 ? node.Name : node.Outputs[0]) + "_dqlow";
+                if (asArithmetic)
+                {
+                    if (scaleMeta?.ProtoElemType != (int)TensorProto.DataType.Float
                         || node.Attributes.Any(a => a.Name == OnnxOpAttributeNames.AttrBlockSize && a.I != 0
                             || a.Name == OnnxOpAttributeNames.AttrOutputDtype && a.I != (int)TensorProto.DataType.Float))
                         continue;
                     var lowered = new List<NodeProto>(14);
-                    if (scaleMeta.Rank == 1)
+                    if (scaleDims is [1])
+                    {
+                        // One element: the single value it holds, which broadcasts over x of any rank
+                        // to x's own shape, as the spec's per-tensor reading does.
+                        string scalarShape = $"{prefix}_scalar_shape";
+                        lowered.Add(MakeInt64ConstNode($"{prefix}_scalar_shape_const", scalarShape, []));
+                        lowered.Add(MakeNode($"{prefix}_scale_scalar", OpCodes.RESHAPE, [scale, scalarShape], [$"{prefix}_scale"]));
+                        scale = $"{prefix}_scale";
+                        if (zeroPoint.Length > 0)
+                        {
+                            lowered.Add(MakeNode($"{prefix}_zero_point_scalar", OpCodes.RESHAPE, [zeroPoint, scalarShape], [$"{prefix}_zero_point"]));
+                            zeroPoint = $"{prefix}_zero_point";
+                        }
+                    }
+                    else if (alongAxis)
                     {
                         // Per axis: the scale (and zero point) are laid along the axis for the
                         // elementwise arithmetic to broadcast, reshaped to
@@ -1182,15 +1248,23 @@ namespace Shorokoo.Core.Factory
                             zeroPoint = $"{prefix}_zero_point";
                         }
                     }
-                    string integers = x;
-                    if (zeroPoint.Length > 0)
-                    {
-                        integers = $"{prefix}_centred";
-                        lowered.Add(MakeNode($"{prefix}_sub", OpCodes.SUB, [x, zeroPoint], [integers]));
-                    }
+                    // int32 subtracts its zero point in int32, as ONNX Runtime's kernel does; a
+                    // narrower type in float32, which holds every difference of two of its values
+                    // exactly and cannot wrap.
                     string floats = $"{prefix}_float";
-                    lowered.Add(MakeNode($"{prefix}_cast", OpCodes.CAST, [integers], [floats],
-                        MakeIntAttr(OnnxOpAttributeNames.AttrTo, (int)TensorProto.DataType.Float)));
+                    if (zeroPoint.Length == 0)
+                        lowered.Add(CastToFloat($"{prefix}_cast", x, floats));
+                    else if (xType == (int)TensorProto.DataType.Int32)
+                    {
+                        lowered.Add(MakeNode($"{prefix}_sub", OpCodes.SUB, [x, zeroPoint], [$"{prefix}_centred"]));
+                        lowered.Add(CastToFloat($"{prefix}_cast", $"{prefix}_centred", floats));
+                    }
+                    else
+                    {
+                        lowered.Add(CastToFloat($"{prefix}_cast", x, $"{prefix}_x_float"));
+                        lowered.Add(CastToFloat($"{prefix}_zero_point_cast", zeroPoint, $"{prefix}_zero_point_float"));
+                        lowered.Add(MakeNode($"{prefix}_sub", OpCodes.SUB, [$"{prefix}_x_float", $"{prefix}_zero_point_float"], [floats]));
+                    }
                     lowered.Add(MakeNode($"{prefix}_mul", OpCodes.MUL, [floats, scale], [node.Outputs[0]]));
                     graph.Nodes.RemoveAt(i);
                     graph.Nodes.InsertRange(i, lowered);
@@ -1217,6 +1291,45 @@ namespace Shorokoo.Core.Factory
             }
         }
 
+        /// <summary>The nodes of <paramref name="graph"/> reading <paramref name="name"/>, looking
+        /// through <c>Identity</c> nodes to what reads theirs.</summary>
+        private static List<NodeProto> Readers(GraphProto graph, string name)
+        {
+            var readers = new List<NodeProto>();
+            foreach (var reader in graph.Nodes.Where(n => n.Inputs.Contains(name)))
+            {
+                if (reader.OpType == OpCodes.IDENTITY && reader.Domain.Length == 0 && reader.Outputs.Count == 1)
+                    readers.AddRange(Readers(graph, reader.Outputs[0]));
+                else
+                    readers.Add(reader);
+            }
+            return readers;
+        }
+
+        private static NodeProto CastToFloat(string name, string input, string output)
+            => MakeNode(name, OpCodes.CAST, [input], [output],
+                MakeIntAttr(OnnxOpAttributeNames.AttrTo, (int)TensorProto.DataType.Float));
+
+        /// <summary>The rank of <paramref name="name"/> where <paramref name="graph"/> fixes it where
+        /// it is written, as ONNX Runtime's shape inference would see it: a constant, or the output
+        /// of a <c>Reshape</c> to a constant shape; else null.</summary>
+        private static int? KnownRank(GraphProto graph, string name)
+        {
+            if (ConstantDims(graph, name) is { } dims) return dims.Length;
+            var producer = graph.Nodes.FirstOrDefault(n => n.Outputs.Contains(name));
+            return producer is { OpType: OpCodes.RESHAPE, Inputs.Count: >= 2 } && producer.Domain.Length == 0
+                && ConstantDims(graph, producer.Inputs[1]) is [var length] ? (int)length : null;
+        }
+
+        /// <summary>The dimensions of <paramref name="name"/> where <paramref name="graph"/> holds it
+        /// as a constant — a <c>Constant</c> node's tensor or an initializer — else null.</summary>
+        private static long[]? ConstantDims(GraphProto graph, string name)
+        {
+            foreach (var node in graph.Nodes)
+                if (node.OpType == OpCodes.CONSTANT && node.Domain.Length == 0 && node.Outputs.Contains(name))
+                    return node.Attributes.FirstOrDefault(a => a.Name == OnnxOpAttributeNames.AttrValue)?.T?.Dims ?? null;
+            return graph.Initializers.FirstOrDefault(t => t.Name == name)?.Dims;
+        }
         /// <summary>The size of a zero point of <paramref name="protoElemType"/>, for the input
         /// types whose missing zero point <see cref="WriteDequantizeZeroPoints"/> writes out; null
         /// for every other (uint8 is already the default's type).</summary>
@@ -1506,7 +1619,7 @@ namespace Shorokoo.Core.Factory
 
         private static FunctionProto BuildFunctionProto(
             Function function, OpSetVersion opset, bool prepForOnnx, bool applyExecutionLowerings,
-            bool stripCheckpointStamp = true, bool flattenBody = true)
+            bool stripCheckpointStamp = true, bool flattenBody = true, bool forSession = false)
         {
             // Run the same pre-passes over the function's own body. That body has its own
             // ONNX-name namespace,
@@ -1552,8 +1665,11 @@ namespace Shorokoo.Core.Factory
             // it — most of them, and every body on the training hot path — skips it and runs the
             // pre-passes alone, as before. Asking before the pre-passes is safe: none of them
             // introduces control flow (FastIdentityWrapping only wraps the close nodes it finds).
+            // A session's body that dequantizes needs one too, for WriteDequantizeZeroPoints to know
+            // the input types.
             Dictionary<FastTensorKey, FastTensorInfo>? fnTensorInfoLookup = null;
-            if (fnFast.Nodes.Any(n => n.OpCode == OpCodes.LOOP_CLOSE || n.OpCode == OpCodes.IF_CLOSE))
+            if (fnFast.Nodes.Any(n => n.OpCode == OpCodes.LOOP_CLOSE || n.OpCode == OpCodes.IF_CLOSE
+                    || forSession && n.OpCode == OpCodes.DEQUANTIZE_LINEAR))
                 fnTensorInfoLookup = RunPrePassesAndBuildLookup(fnFast, prepForOnnx, applyExecutionLowerings);
             else
                 RunPrePasses(fnFast, prepForOnnx, applyExecutionLowerings);
@@ -1566,6 +1682,8 @@ namespace Shorokoo.Core.Factory
                 isFunction: true,
                 tensorInfoLookup: fnTensorInfoLookup,
                 stripCheckpointStamp: stripCheckpointStamp);
+            if (forSession && fnTensorInfoLookup is not null)
+                WriteDequantizeZeroPoints(fnGraphProto, BuildTensorMetaByName(fnTensorInfoLookup));
 
             var fnProto = new FunctionProto();
             // Encode the name to dodge built-in ONNX op-name collisions (see OnnxFunctionName);

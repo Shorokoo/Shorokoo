@@ -578,16 +578,24 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
-    /// <summary>DequantizeLinear of an int8 tensor of known rank [2, 3] along axis 1, with a zero
-    /// point, read through a Transpose that names no permutation. x = [[10, −6, 2], [4, 0, −8]].</summary>
+    /// <summary>DequantizeLinear of an int8 tensor of known rank along its last axis, with a zero
+    /// point, read through a Transpose that names no permutation: [2, 3], and [1, 2, 3] by an
+    /// Unsqueeze, whose zero point is far enough from x that x − zero_point leaves int8.
+    /// x = [[10, −6, 2], [4, 0, −8]].</summary>
     [Module]
     public partial class QeeDequantizePerAxisTransposeAuditCheck
     {
         public static Scalar<bit> Inline(Tensor<int8> x)
         {
-            var columns = (Tensor<float32>)OnnxOp.DequantizeLinear(x.Reshape(Vector(2L, 3L)), Vector(0.5f, 2f, 0.25f),
+            var matrix = x.Reshape(Vector(2L, 3L));
+            var columns = (Tensor<float32>)OnnxOp.DequantizeLinear(matrix, Vector(0.5f, 2f, 0.25f),
                 Vector((sbyte)2, (sbyte)-2, (sbyte)0), 1L);
-            return FloatMismatch(columns.Transpose().Reshape(Vector(-1L)), Vector(4f, 1f, -8f, 4f, 0.5f, -2f)) < Scalar(1L);
+            var unsqueezed = (Tensor<float32>)OnnxOp.DequantizeLinear(OnnxOp.Unsqueeze(matrix, Vector(0L)), Vector(0.5f, 2f, 0.25f),
+                Vector((sbyte)100, (sbyte)-100, (sbyte)127), -1L);
+            var mismatch =
+                FloatMismatch(columns.Transpose().Reshape(Vector(-1L)), Vector(4f, 1f, -8f, 4f, 0.5f, -2f)) +
+                FloatMismatch(unsqueezed.Transpose().Reshape(Vector(-1L)), Vector(-45f, -48f, 188f, 200f, -31.25f, -33.75f));
+            return mismatch < Scalar(1L);
         }
     }
 }

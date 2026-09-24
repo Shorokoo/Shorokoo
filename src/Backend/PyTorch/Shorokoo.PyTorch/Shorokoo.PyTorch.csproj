@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PlatformTarget>x64</PlatformTarget>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+
+    <IsPackable>true</IsPackable>
+    <Description>PyTorch backend logic for Shorokoo (device-neutral): translates a Shorokoo graph to Python and runs it with PyTorch in an embedded interpreter. You normally do not install this directly; install Shorokoo.PyTorch.Cpu or Shorokoo.PyTorch.Cuda.</Description>
+    <PackageTags>shorokoo;pytorch;torch;backend;machine-learning</PackageTags>
+  </PropertyGroup>
+
+  <!-- The Python support package travels inside the assembly and is imported from memory, so the
+       helpers a translated model calls are always the ones this assembly was built with. The
+       logical name is the module's path, e.g. "shorokoo_torch/ops_elementwise.py". -->
+  <ItemGroup>
+    <EmbeddedResource Include="Python\shorokoo_torch\*.py" LogicalName="shorokoo_torch/%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\Shorokoo\Shorokoo.csproj" />
+    <ProjectReference Include="..\Shorokoo.PythonHost\Shorokoo.PythonHost.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Shorokoo.PyTorch.Cpu" />
+    <InternalsVisibleTo Include="Shorokoo.PyTorch.Cuda" />
+    <InternalsVisibleTo Include="Shorokoo.Tests" />
+  </ItemGroup>
+</Project>

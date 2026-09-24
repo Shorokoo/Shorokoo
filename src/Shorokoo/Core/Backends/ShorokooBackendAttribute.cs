@@ -61,4 +61,19 @@ public sealed class ShorokooBackendAttribute : Attribute
     /// A probe on a machine without it answers no rather than throwing from a driver call.
     /// </summary>
     public string? RequiresCudaRuntime { get; set; }
+
+    /// <summary>
+    /// How a program comes to use this backend: null for a backend <see cref="DefaultBackend"/>
+    /// may discover, or <see cref="ExplicitSelection"/> for one that is only ever used where a
+    /// program names it — <c>new ComputeContext(new TorchCpuBackend())</c>.
+    ///
+    /// <para>An explicit backend can be deployed beside a discoverable one without making
+    /// discovery ambiguous, because discovery never counts it, and
+    /// <see cref="BackendPackage.TryLoad"/> does not load it: it binds no native ONNX Runtime for
+    /// isolation to give it. <see cref="BackendPackage.Probe"/> reads it like any other.</para>
+    /// </summary>
+    public string? Selection { get; set; }
+
+    /// <summary>The <see cref="Selection"/> of a backend a program must name to use.</summary>
+    public const string ExplicitSelection = "explicit";
 }

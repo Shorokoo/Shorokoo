@@ -49,10 +49,17 @@ public enum BackendRejection
 /// <param name="Os">The operating system it declares, when it declared one.</param>
 /// <param name="Architecture">The architecture it declares, when it declared one.</param>
 /// <param name="Device">The device it declares, when it declared one.</param>
+/// <param name="Selection">How it is selected, when it declared that: null for a backend
+/// discovery may pick, <see cref="ShorokooBackendAttribute.ExplicitSelection"/> for one a program
+/// has to name.</param>
 public readonly record struct BackendProbe(
     bool Supported, BackendRejection Reason, string Detail,
-    string? Os = null, string? Architecture = null, string? Device = null)
+    string? Os = null, string? Architecture = null, string? Device = null, string? Selection = null)
 {
+    /// <summary>Whether the backend is one a program must name to use, which discovery never
+    /// picks (see <see cref="ShorokooBackendAttribute.Selection"/>).</summary>
+    public bool IsExplicitOnly => Selection == ShorokooBackendAttribute.ExplicitSelection;
+
     /// <inheritdoc/>
     public override string ToString() => Supported ? "supported" : $"{Reason}: {Detail}";
 }
@@ -130,8 +137,9 @@ public static class BackendPackage
         var os = declared.GetValueOrDefault("os", "");
         var arch = declared.GetValueOrDefault("architecture", "");
         var device = declared.GetValueOrDefault("device", "");
+        var selection = declared.GetValueOrDefault("selection");
         BackendProbe No(BackendRejection reason, string detail)
-            => new(false, reason, detail, os, arch, device);
+            => new(false, reason, detail, os, arch, device, selection);
 
         // Before OSPlatform.Create, which throws on an empty string: a manifest that names no
         // operating system is one this machine is not, and saying so is this method's whole job.
@@ -166,7 +174,7 @@ public static class BackendPackage
                 $"'{Path.GetFileName(full)}' needs a CUDA {cuda}.x runtime, which this machine "
                 + "does not have -- no driver, no device, or the toolkit is not installed.");
 
-        return new(true, BackendRejection.None, "supported", os, arch, device);
+        return new(true, BackendRejection.None, "supported", os, arch, device, selection);
     }
 
     /// <summary>
@@ -190,6 +198,18 @@ public static class BackendPackage
         backend = null;
         var probe = Probe(assemblyPath);
         if (!probe.Supported) { failure = probe; return false; }
+        if (probe.IsExplicitOnly)
+        {
+            failure = probe with
+            {
+                Supported = false,
+                Reason = BackendRejection.NotLoadable,
+                Detail = $"'{Path.GetFileName(assemblyPath)}' is a backend a program constructs by name, and "
+                    + "binds no native ONNX Runtime for this to load it over: reference its package and "
+                    + "construct its backend.",
+            };
+            return false;
+        }
 
         var full = Path.GetFullPath(assemblyPath);
         var directory = Path.GetDirectoryName(full)!;

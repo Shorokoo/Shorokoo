@@ -345,10 +345,18 @@ public static class DefaultBackend
         return usable[0].Backend;
     }
 
+    /// <summary>Whether <paramref name="asm"/> declares itself a backend a program must name
+    /// (<see cref="ShorokooBackendAttribute.Selection"/>).</summary>
+    internal static bool IsExplicitOnly(Assembly asm)
+        => asm.GetCustomAttribute<ShorokooBackendAttribute>()?.Selection == ShorokooBackendAttribute.ExplicitSelection;
+
     private static IShorokooBackend? InstantiateBackend(Assembly asm)
     {
         try
         {
+            // A backend whose manifest says it is used only where a program names it is never
+            // discovery's answer, whatever its assembly is called.
+            if (IsExplicitOnly(asm)) return null;
             var type = asm.GetExportedTypes().FirstOrDefault(t =>
                 typeof(IShorokooBackend).IsAssignableFrom(t)
                 && !t.IsAbstract

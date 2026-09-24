@@ -138,13 +138,14 @@ downloads several gigabytes of CUDA libraries for a card that is not there.
 
 An environment you provide must be a **CPython 3.12** virtual environment (a folder with a
 `pyvenv.cfg`) whose base interpreter has a shared library — `libpython3.12.so` on Linux,
-`python312.dll` beside `python.exe` on Windows — with `torch` and `numpy` installed, and `pillow`
-for a model that uses `ImageDecoder`. uv's own Python builds have the shared library; so does the
-environment made by
+`python312.dll` beside `python.exe` on Windows — with `torch` and `numpy` installed, `pillow`
+for a model that uses `ImageDecoder`, and `google-re2` for one that uses `RegexFullMatch`. uv's
+own Python builds have the shared library; so does the environment made by
 
 ```bash
 uv venv --managed-python -p 3.12 /opt/torch-env
-uv pip install --python /opt/torch-env torch numpy pillow --index-url https://download.pytorch.org/whl/cpu
+uv pip install --python /opt/torch-env torch numpy pillow google-re2 \
+    --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
 ```
 
 A distribution's system Python often lacks it, which is refused with

@@ -181,6 +181,31 @@ namespace Shorokoo.Tests.Modules
                 keepAspectRatioPolicy: null, mode: mode, nearestMode: nearest);
     }
 
+    /// <summary>Resize of uint8 values: linear and cubic with antialias, which round to the nearest
+    /// integer and saturate where a cubic overshoots the type's range, and linear without it,
+    /// which truncates. Input x = [0, 255, 255, 0, 0, 255, 0, 0] as [1, 1, 1, 8].</summary>
+    [Module]
+    public partial class QeeResizeUInt8ValueAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<uint8> x)
+        {
+            var mismatch =
+                IntMismatch(Resized(x, 0.6f, ResizeMode.Linear, true), Vector(96L, 198L, 32L, 128L)) +
+                IntMismatch(Resized(x, 0.6f, ResizeMode.Cubic, true), Vector(111L, 218L, 20L, 141L)) +
+                IntMismatch(Resized(x, 2.5f, ResizeMode.Cubic, true),
+                    Vector(0L, 21L, 128L, 234L, 255L, 255L, 234L, 128L, 21L, 0L, 0L, 23L, 151L, 250L, 212L, 83L, 0L, 0L, 0L, 0L)) +
+                IntMismatch(Resized(x, 1.7f, ResizeMode.Linear, false),
+                    Vector(0L, 97L, 247L, 255L, 217L, 67L, 0L, 0L, 127L, 232L, 82L, 0L, 0L));
+            return mismatch < Scalar(1L);
+        }
+
+        private static Tensor<int64> Resized(Tensor<uint8> x, float scale, ResizeMode mode, bool antialias)
+            => ((Tensor<uint8>)OnnxOp.Resize(x, roi: null, scales: Vector(1f, 1f, 1f, scale), sizes: null,
+                antialias: antialias, axes: null, coordinateTransformationMode: null, cubicCoeffA: null, excludeOutside: null,
+                extrapolationValue: null, keepAspectRatioPolicy: null, mode: mode, nearestMode: null))
+                .Cast<int64>().Reshape(Vector(-1L));
+    }
+
     /// <summary>Sampling and rearrangement variants: GridSample cubic with reflection padding,
     /// nearest with zeros padding under align_corners, linear with border padding, on a rotated
     /// and scaled AffineGrid that reaches outside the image; RoiAlign avg with a sampling_ratio

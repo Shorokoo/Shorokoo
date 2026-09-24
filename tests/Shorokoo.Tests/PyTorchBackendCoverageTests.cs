@@ -394,6 +394,91 @@ public class PyTorchBackendCoverageTests
         Assert.Equal("AutoGrad", Refusal(tanhOffPath, version: 2).Operator);
     }
 
+    [Fact]
+    public void TestGradientsAtTiesAndBoundsAreShorokoosOwnRules()
+    {
+        AssertNear([1f, 1f, 1f, 0f, 0f], Gradient("lambda x: E.clip(x, min=0.0, max=6.0)", "[0., 6., 3., -1., 7.]"));
+        AssertNear([1f, 1f, 1f, 0f, 0f], Gradient("E.clip", "[0., 6., 3.]", "0.", "6."));
+        AssertNear([1f / 3, 1f, 1f / 3, 0f, 1f / 3, 0f], Gradient("E.max_", "[1., 2.]", "[1., 0.]", "[1., 1.]"));
+        AssertNear([1f / 3, 0f, 1f / 3, 1f, 1f / 3, 0f], Gradient("E.min_", "[1., 2.]", "[1., 0.]", "[1., 5.]"));
+        AssertNear([0.1f, 1f, 0.1f], Gradient("lambda x: E.leaky_relu(x, alpha=0.1)", "[0., 2., -2.]"));
+        AssertNear([0.25f, 0.25f, 1f, 0f, -2f, 0f], Gradient("E.prelu", "[0., -2., 3.]", "[0.25, 0.25, 0.25]"));
+        AssertNear([0f, 0f, 0.2f], Gradient("E.hard_sigmoid", "[-2.5, 2.5, 0.]"));
+        AssertNear([0f, 1f, 0.5f], Gradient("E.hard_swish", "[-3., 3., 0.]"));
+        AssertNear([1e12f, 1e12f, 0.032f, -0.024f], Gradient("lambda x: N.lp_normalization(x, p=2)", "[[0., 0.], [3., 4.]]"));
+        AssertNear([1e12f, 1e12f, 0.375f, 0.125f], Gradient("lambda x: N.lp_normalization(x, p=1)", "[[0., 0.], [1., -3.]]"));
+    }
+
+    [Fact]
+    public void TestLayerNormalizationOfRowsWithALargeMeanAgreesWithItsFunctionBody()
+        => Assert.True(AutoTest.AdvancedTestGraph<LayerNormalizationOfALargeMeanCheck>([], QeeNormLinalgAuditTests.LargeMeanRows,
+            context: new ComputeContext(Torch)));
+
+    [Fact]
+    public void TestElementTypesTorchHasNoKernelForAreComputedExactly()
+    {
+        Assert.Equal("[0, 1, 1] torch.uint64", Evaluated("E.sign(u64(0, 5, 2**64 - 1))"));
+        Assert.Equal("[2, 9223372036854775813, 7] torch.uint64", Evaluated("E.clip(u64(1, 2**64 - 1, 7), u64(2), u64(2**63 + 5))"));
+        Assert.Equal("[5, 0] torch.uint32 [5, 0] torch.uint64", Evaluated("E.prelu(u32(5, 0), u32(2))") + " " + Evaluated("E.prelu(u64(5, 0), u64(2))"));
+        Assert.Equal("[18446744073709551615] torch.uint64 [1] torch.uint64", Evaluated("R.reduce_max(u64(1, 2**64 - 1, 2**63))") + " " + Evaluated("R.reduce_min(u64(1, 2**64 - 1, 2**63))"));
+        Assert.Equal("[2] torch.uint64", Evaluated("R.reduce_l1(u64(1, 2**64 - 1, 2))"));
+        Assert.Equal("[1] torch.int64 [0] torch.int64", Evaluated("R.arg_max(u64(1, 2**64 - 1, 2**63))") + " " + Evaluated("R.arg_min(u64(1, 2**64 - 1, 2**63))"));
+        foreach (var type in (ReadOnlySpan<string>)["uint16", "uint32", "uint64"])
+            Assert.Equal($"[[1, 2], [0, 4]] torch.{type}", Evaluated($"S.trilu(torch.tensor(np.array([[1, 2], [3, 4]], np.{type})))"));
+        foreach (var type in (ReadOnlySpan<string>)["uint32", "uint64"])
+            Assert.Equal($"[[8, 11], [16, 23]] torch.{type}", Evaluated($"L.gemm(*[torch.tensor(np.array(v, np.{type})) for v in ([[1, 2], [3, 4]], [[1, 2], [3, 4]], [1])])"));
+        Assert.Equal("-2.0 torch.float16", Evaluated("L.det(torch.tensor([[1., 2.], [3., 4.]], dtype=torch.float16))"));
+    }
+
+    [Fact]
+    public void TestFloat8CastsSaturateOrOverflowAsTheSpecificationSays()
+    {
+        Assert.Equal("[448.0, 448.0, nan, nan, nan, nan, nan] torch.float32",
+            Evaluated("E.cast(E.cast(torch.tensor([448., 464., 465., -464.5, 1e5, float('inf'), float('nan')]), to=17, saturate=0), to=1)"));
+        Assert.Equal("[57344.0, -57344.0, 57344.0] torch.float32",
+            Evaluated("E.cast(E.cast(torch.tensor([float('inf'), float('-inf'), 1e5]), to=19), to=1)"));
+    }
+
+    [Fact]
+    public void TestSplitIntoMoreOutputsThanAnEvenSplitFillsEndsInEmptyOnes()
+        => Assert.Equal("[2, 2, 1, 0]", Evaluated("[len(t) for t in S.split(torch.arange(5.), num_outputs=4, _outputs=4)]"));
+
+    [Fact]
+    public void TestAnIntegerProductRunsOnTheCardOnlyWhereFloat64HoldsItExactly()
+    {
+        Assert.Equal("int64 int64", Evaluated("' '.join(L._integer_route([128, 128], n, 'cpu') for n in (1, 2**60))"));
+        Assert.Equal("float64 cpu", Evaluated("' '.join(L._integer_route([128, 128], n, 'cuda') for n in (2**39, 2**39 + 1))"));
+        Assert.Equal("float64 cpu", Evaluated("' '.join(L._integer_route([255, 255, 2], n, 'cuda') for n in (2**36, 2**37))"));
+        Assert.Equal("128 255 32768 65535 2147483648 18446744073709551615 255 255",
+            Evaluated("' '.join(str(L._largest(t, shifted)) for t, shifted in [(torch.int8, False), (torch.uint8, False), (torch.int16, False), (torch.uint16, False), (torch.int32, False), (torch.uint64, False), (torch.int8, True), (torch.uint8, True)])"));
+        Assert.Equal("3 3 1 4", Evaluated("' '.join(str(L._summed_terms(e, s)) for e, s in [('ij,jk->ik', [(2, 3), (3, 4)]), ('ij,jk', [(2, 3), (3, 4)]), ('...i,...i->...i', [(5, 3), (5, 3)]), ('bij,bjk->b', [(7, 2, 2), (7, 2, 1)])])"));
+    }
+
+    private static float[] Gradient(string function, params string[] arguments)
+        => [.. Evaluated($"""
+            (lambda xs: ((({function})(*xs)).sum().backward(), [v for x in xs for v in x.grad.reshape(-1).tolist()])[1])(
+                [torch.tensor(a, dtype=torch.float32, requires_grad=True) for a in ({string.Join(", ", arguments)},)])
+            """).Trim('[', ']').Split(", ").Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture))];
+
+    private static string Evaluated(string expression)
+    {
+        Torch.Start();
+        using (PythonRuntime.Gil())
+        {
+            using var scope = Py.CreateScope();
+            scope.Exec($$"""
+                import numpy as np
+                import torch
+                from shorokoo_torch import ops_elementwise as E, ops_linalg as L, ops_norm as N, ops_reduction as R, ops_shape as S
+                u32 = lambda *v: torch.tensor(np.array(v, np.uint32))
+                u64 = lambda *v: torch.tensor(np.array(v, np.uint64))
+                value = {{expression}}
+                result = f"{value.tolist()} {value.dtype}" if isinstance(value, torch.Tensor) else str(value)
+                """);
+            return scope.Get<string>("result");
+        }
+    }
+
     private static TorchUnsupportedModelException Refusal(GraphProto step, long version = 1)
         => Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(TrainingStep(step, version), default, default, DeviceMemorySettings.Default));
 

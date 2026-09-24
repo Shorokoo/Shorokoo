@@ -394,7 +394,9 @@ namespace Shorokoo.Tests.Modules
     /// case-sensitively; in the C locale, which every machine has), RegexFullMatch, StringSplit (at a delimiter, where adjacent delimiters
     /// make an empty piece; at whitespace runs without one; maxsplit 1), Unique over strings, and
     /// Cast between numbers and strings: a float as printf's %.8g, an integer and a bool in
-    /// decimal, and strings read back as floats (exponent form, INF in any case) and as integers.
+    /// decimal, and strings read back as floats (exponent form, INF in any case) and as integers;
+    /// a reversing Slice of strings whose start clamps to the first; TfIdfVectorizer weighting by
+    /// output position in TFIDF and IDF modes.
     /// Inputs x = ["Hello World", "the  quick fox"], f = [1, 0.1, −3.5, 1e20, 1e−5, 123456789],
     /// i = [−7, 0, 9007199254740993].</summary>
     [Module]
@@ -431,11 +433,19 @@ namespace Shorokoo.Tests.Modules
                     Vector(3.5f, -1000f, 0.25f)) +
                 IntMismatch(((Tensor<bit>)OnnxOp.IsInf((Tensor<float32>)OnnxOp.Cast(Strings("INF", "-inf"), null, DType.Float32))).Cast<int64>(),
                     Vector(1L, 1L)) +
-                IntMismatch((Tensor<int64>)OnnxOp.Cast(Strings("42", "-17"), null, DType.Int64), Vector(42L, -17L));
+                IntMismatch((Tensor<int64>)OnnxOp.Cast(Strings("42", "-17"), null, DType.Int64), Vector(42L, -17L)) +
+                Mismatch(x.Slice(Vector(-4L), Vector(-10L), Vector(0L), Vector(-1L)), Strings("Hello World")) +
+                FloatMismatch(TfIdf(i, "TFIDF"), Vector(0.5f, 1.5f, 5f)) +
+                FloatMismatch(TfIdf(i, "IDF"), Vector(0.5f, 1.5f, 2.5f));
             return mismatch < Scalar(1L);
         }
 
         private static Tensor<utf8> Strings(params string[] values) => (Tensor<utf8>)OnnxOp.Constant(values);
+
+        private static Tensor<float32> TfIdf(Tensor<int64> i, string mode)
+            => (Tensor<float32>)OnnxOp.TfIdfVectorizer(i.Slice(Vector(0L), Vector(1L)) * Scalar(0L) + Vector(1L, 2L, 3L, 4L, 1L), maxGramLength: 2L, maxSkipCount: 0L,
+                minGramLength: 1L, mode: mode, ngramCounts: [0L, 2L], ngramIndexes: [2L, 0L, 1L],
+                poolInt64s: [1L, 2L, 3L, 4L], poolStrings: null, weights: [0.5f, 1.5f, 2.5f]);
 
         private static Scalar<int64> Mismatch(Variable actual, Tensor<utf8> expected)
         {

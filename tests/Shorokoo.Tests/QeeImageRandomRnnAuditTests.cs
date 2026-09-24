@@ -31,6 +31,8 @@ public class QeeImageRandomRnnAuditTests
 
     private static TensorData SeqLens => I32([2L], 4, 2);
 
+    private static TensorData EmptySequence => I32([2L], 4, 0);
+
     [Fact]
     public void TestQeeImageGeometryShapeAudits()
     {
@@ -47,6 +49,7 @@ public class QeeImageRandomRnnAuditTests
             F32Wave([1L, 8L, 12L]),
             F32([3L, 5L], 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f, 11f, 12f, 13f, 14f, 15f)));
         Assert.True(QeeAudit.Check<QeeResizeModesShapeAuditCheck>(F32Wave([1L, 2L, 5L, 7L])));
+        Assert.True(QeeAudit.OrtOnly<QeeResizeUInt8ValueAuditCheck>(U8([1L, 1L, 1L, 8L], 0, 255, 255, 0, 0, 255, 0, 0)));
         Assert.True(QeeAudit.Check<QeeSamplingVariantsShapeAuditCheck>(
             F32Wave([1L, 2L, 5L, 6L]), F32Wave([1L, 8L, 2L, 3L]), F32Wave([1L, 12L, 12L])));
     }
@@ -175,6 +178,14 @@ public class QeeImageRandomRnnAuditTests
         Assert.True(QeeAudit.OrtOnly<QeeGruValueAuditCheck>(Wave(4, 2, 3), Wave(2, 15, 3), Wave(2, 15, 5), Wave(2, 30), Wave(2, 2, 5), SeqLens));
         Assert.True(QeeAudit.OrtOnly<QeeLstmValueAuditCheck>(Wave(4, 2, 3), Wave(2, 20, 3), Wave(2, 20, 5), Wave(2, 40), Wave(2, 2, 5), Wave(2, 2, 5), Wave(2, 15), SeqLens));
         Assert.True(QeeAudit.OrtOnly<QeeRecurrentActivationArgumentsValueCheck>(Wave(4, 2, 3), Wave(2, 20, 3), Wave(2, 20, 5), Wave(2, 40)));
+    }
+
+    [Fact]
+    public void TestRecurrentNetworksEndAnEmptySequenceInZeroStates()
+    {
+        Assert.True(QeeAudit.OrtOnly<QeeRnnValueAuditCheck>(Wave(4, 2, 3), Wave(2, 5, 3), Wave(2, 5, 5), Wave(2, 10), Wave(2, 2, 5), EmptySequence));
+        Assert.True(QeeAudit.OrtOnly<QeeGruValueAuditCheck>(Wave(4, 2, 3), Wave(2, 15, 3), Wave(2, 15, 5), Wave(2, 30), Wave(2, 2, 5), EmptySequence));
+        Assert.True(QeeAudit.OrtOnly<QeeLstmValueAuditCheck>(Wave(4, 2, 3), Wave(2, 20, 3), Wave(2, 20, 5), Wave(2, 40), Wave(2, 2, 5), Wave(2, 2, 5), Wave(2, 15), EmptySequence));
     }
 
     // ONNX Runtime copies the input through when the output shape equals the input shape, ignoring the roi:

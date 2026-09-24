@@ -231,7 +231,7 @@ namespace Shorokoo.Tests.Modules
     }
 
     /// <summary>Slice (negative steps — full reverse via huge-negative end, start clamped
-    /// from a huge positive for step&lt;0, end clamping for step&gt;0, negative starts),
+    /// from a huge positive and from a huge negative for step&lt;0, an empty one, end clamping for step&gt;0, negative starts),
     /// Gather (axis 0/1, negative + 2-D indices), GatherElements (axis 0/1, negative
     /// indices), GatherND (plain + batch_dims=1), Compress (axis mode, condition shorter
     /// than the dim, flatten mode). Input g = [[0,1,2,3],[10,11,12,13],[20,21,22,23]].</summary>
@@ -251,6 +251,10 @@ namespace Shorokoo.Tests.Modules
                 // step −2: start 1000 clamps to dim−1=3 → columns 3, 1.
                 FloatMismatch(Flat(g.Slice(Vector(1000L), Vector(0L), Vector(1L), Vector(-2L))),
                     Vector(3f, 1f, 13f, 11f, 23f, 21f)) +
+                // step −1 with a start at or before the end selects nothing.
+                ShapeMismatch(g.Slice(Vector(0L), Vector(2L), Vector(1L), Vector(-1L)), Vector(3L, 0L)) +
+                // step −1: start −5 is −1 past the end and clamps to 0, the first column, not to −1.
+                FloatMismatch(Flat(g.Slice(Vector(-5L), Vector(-10L), Vector(1L), Vector(-1L))), Vector(0f, 10f, 20f)) +
                 // step +1: end 1000 clamps to the dim.
                 FloatMismatch(Flat(g.Slice(Vector(2L), Vector(1000L), Vector(1L))), Vector(2f, 3f, 12f, 13f, 22f, 23f)) +
                 // negative start with step 2 → columns 1, 3.

@@ -176,10 +176,15 @@ internal static class TensorDataConverter
     /// <summary>
     /// Converts an input <see cref="IData"/> (plain tensor or optional) into the matching
     /// <see cref="IRuntimeTensor"/> for the QuickExecutionEngine input store.
+    ///
+    /// <para>A <see cref="SharedInput"/> is read through: the engine is not a compute context's
+    /// run, holds no backend memory and consumes nothing — it reads every input it is given — so
+    /// the forms a run takes are accepted here and mean what a bare feed means.</para>
     /// </summary>
     public static IRuntimeTensor ToRuntimeInput(IData data, int maxElements, Variable? reference = null)
         => data switch
         {
+            SharedInput shared => ToRuntimeInput(shared.Value, maxElements, reference),
             OptionalTensorData opt => ToRuntimeOptional(opt, maxElements, reference),
             TensorData td => ToRuntimeTensor(td, maxElements, reference),
             _ => throw new InvalidTensorOperationException(ErrorCodes.FW008, data.GetType().Name, "ToRuntimeInput",

@@ -195,7 +195,7 @@ public class CodegenFreeModuleTests
         var concreteModel = moduleGraph
             .ToConcreteArchitecture(moduleGraph.FromOrderedInputs([.. inputs]))
             .ToConcreteModel();
-        return ComputeContext.Default.Execute(concreteModel, (IData[])inputs)
+        return ComputeContext.Default.Execute(concreteModel, [.. inputs.Select(i => (IData)i.Shared())])
             .Select(x => x.ToTensorData().AccessRawMemory().ToArray())
             .ToArray();
     }
@@ -411,12 +411,12 @@ public class CodegenFreeModuleTests
         Assert.Single(concrete.ToInternal().GetStateParamDataNodes());
         Assert.Equal(0f, StateValue(concrete));
 
-        var (outputs1, updated1) = ComputeContext.Default.ExecuteWithState(concrete, input);
+        var (outputs1, updated1) = ComputeContext.Default.ExecuteWithState(concrete, input.Shared());
         Assert.Single(outputs1);
         Assert.Equal<float>([2f, 4f, 6f, 8f], Floats(outputs1[0].ToTensorData().AccessRawMemory().ToArray()));
         Assert.Equal(1f, StateValue(updated1));
 
-        var (outputs2, updated2) = ComputeContext.Default.ExecuteWithState(updated1, input);
+        var (outputs2, updated2) = ComputeContext.Default.ExecuteWithState(updated1, input.Shared());
         Assert.Equal<float>([2f, 4f, 6f, 8f], Floats(outputs2[0].ToTensorData().AccessRawMemory().ToArray()));
         Assert.Equal(2f, StateValue(updated2));
     }
@@ -436,11 +436,11 @@ public class CodegenFreeModuleTests
         Assert.Equal(1, concrete.ToInternal().GetStateUpdateOutputCount());
         Assert.Equal(0f, StateValue(concrete));
 
-        var (outputs1, updated1) = ComputeContext.Default.ExecuteWithState(concrete, input);
+        var (outputs1, updated1) = ComputeContext.Default.ExecuteWithState(concrete, input.Shared());
         Assert.Equal<float>([3f, 5f], Floats(outputs1[0].ToTensorData().AccessRawMemory().ToArray()));
         Assert.Equal(2f, StateValue(updated1));
 
-        var (outputs2, updated2) = ComputeContext.Default.ExecuteWithState(updated1, input);
+        var (outputs2, updated2) = ComputeContext.Default.ExecuteWithState(updated1, input.Shared());
         Assert.Equal<float>([7f, 9f], Floats(outputs2[0].ToTensorData().AccessRawMemory().ToArray()));
         Assert.Equal(4f, StateValue(updated2));
 
@@ -460,7 +460,7 @@ public class CodegenFreeModuleTests
         var concrete = cg.ToConcreteArchitecture(
             cg.FromOrderedInputs([input, TensorData(DType.Bool, [], true)])).ToConcreteModel();
         var (outputs, updated) = ComputeContext.Default.ExecuteWithState(
-            concrete, input, TensorData(DType.Bool, [], cond));
+            concrete, input.Shared(), TensorData(DType.Bool, [], cond));
         return [StateValue(updated), .. Floats(outputs[0].ToTensorData().AccessRawMemory().ToArray())];
     }
 
@@ -538,28 +538,28 @@ public class CodegenFreeModuleTests
             Assert.Equal(1, concrete.ToInternal().GetStateUpdateOutputCount());
             Assert.Equal(0f, StateValue(concrete));
 
-            var (outputs1, updated1) = ComputeContext.Default.ExecuteWithState(concrete, input);
+            var (outputs1, updated1) = ComputeContext.Default.ExecuteWithState(concrete, input.Shared());
             Assert.Equal<float>([2f, 4f, 6f, 8f], Floats(outputs1[0].ToTensorData().AccessRawMemory().ToArray()));
             Assert.Equal(13f, StateValue(updated1));   // +10 initializer, +1 × 3 iterations
 
-            var (_, updated2) = ComputeContext.Default.ExecuteWithState(updated1, input);
+            var (_, updated2) = ComputeContext.Default.ExecuteWithState(updated1, input.Shared());
             Assert.Equal(26f, StateValue(updated2));   // re-reads the updated state: 13 + 10 + 3
         }
 
         var nested = Concretize(StateUpdateInNestedLoopBody, null, input);
         Assert.Equal(1, nested.ToInternal().GetStateUpdateOutputCount());
         Assert.Equal(0f, StateValue(nested));
-        var (nestedOutputs, nested1) = ComputeContext.Default.ExecuteWithState(nested, input);
+        var (nestedOutputs, nested1) = ComputeContext.Default.ExecuteWithState(nested, input.Shared());
         Assert.Equal<float>([2f, 4f, 6f, 8f], Floats(nestedOutputs[0].ToTensorData().AccessRawMemory().ToArray()));
         Assert.Equal(16f, StateValue(nested1));        // +10, then +1 × 2·3
-        var (_, nested2) = ComputeContext.Default.ExecuteWithState(nested1, input);
+        var (_, nested2) = ComputeContext.Default.ExecuteWithState(nested1, input.Shared());
         Assert.Equal(32f, StateValue(nested2));
 
         var zeroIter = Concretize(StateUpdateInZeroIterationLoopBody, null, input);
         Assert.Equal(0f, StateValue(zeroIter));
-        var (_, zero1) = ComputeContext.Default.ExecuteWithState(zeroIter, input);
+        var (_, zero1) = ComputeContext.Default.ExecuteWithState(zeroIter, input.Shared());
         Assert.Equal(10f, StateValue(zero1));          // the body contributes nothing
-        var (_, zero2) = ComputeContext.Default.ExecuteWithState(zero1, input);
+        var (_, zero2) = ComputeContext.Default.ExecuteWithState(zero1, input.Shared());
         Assert.Equal(20f, StateValue(zero2));
     }
 

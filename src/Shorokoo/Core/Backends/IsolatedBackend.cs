@@ -394,6 +394,16 @@ public static class IsolatedBackend
             DiagnosticSettings diagnostics)
             => _inner.CreateSession(modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics);
 
+        public IShorokooSession CreateSession(
+            ReadOnlyMemory<byte> modelBytes,
+            ShorokooGraphOptimization graphOptimization,
+            ShorokooLogSeverity logSeverity,
+            DeviceMemorySettings deviceMemory,
+            DiagnosticSettings diagnostics,
+            IReadOnlyList<OutputAlias> outputAliases)
+            => _inner.CreateSession(
+                modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases);
+
         public IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged
             => _inner.CreateTensor(data, shape);
 
@@ -422,5 +432,20 @@ public static class IsolatedBackend
 
         public IShorokooTensorValue CreateSequence(IReadOnlyList<IShorokooTensorValue> values)
             => _inner.CreateSequence(values);
+
+        // The runtime is the inner backend's, which is the whole reason this wrapper forwards
+        // rather than answers: a tensor allocated through the wrapper records the wrapper as its
+        // allocating backend, and its location has to name the runtime the allocation really
+        // belongs to, or the inner backend -- asked below whether it can address it -- would not
+        // recognise its own memory.
+        public object RuntimeIdentity => _inner.RuntimeIdentity;
+
+        public bool CanAddress(MemoryLocation location) => _inner.CanAddress(location);
+
+        public MemoryLocation RunMemoryOf(ShorokooTensorElementType elementType) => _inner.RunMemoryOf(elementType);
+
+        public MemoryLocation SequenceRunMemory => _inner.SequenceRunMemory;
+
+        public void Release(IShorokooTensorValue value) => _inner.Release(value);
     }
 }

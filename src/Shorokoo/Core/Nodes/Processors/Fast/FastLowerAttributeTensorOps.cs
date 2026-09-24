@@ -283,8 +283,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             TensorData[] samples, ComputeContext? compute)
         {
             // The one point in this pass that runs a graph, and so the one point that may require
-            // a backend. Everything above resolves without one.
-            var results = (compute ?? ComputeContext.Default).Execute(resolver, samples);
+            // a backend. Everything above resolves without one. The samples are the caller's --
+            // the sample inputs a model is concretized against -- so the run reads them and leaves
+            // them whole: consuming them would spend what the caller passed in to describe a shape.
+            var results = (compute ?? ComputeContext.Default).Execute(
+                resolver, [.. samples.Select(static sample => (IData)sample.Shared())]);
             for (int i = 0; i < keys.Count; i++)
                 if (resolved[i] is null)
                     resolved[i] = results[i].ToTensorData();

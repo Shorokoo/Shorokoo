@@ -298,7 +298,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         //   5. dSignal = overlap-add of g·window: ScatterElements(Add) of the flattened
         //      frames onto a zeros[B, T, C] base at indices m·S + n along the time axis.
         //
-        // (This replaces the AD-B1 ZERO-STUB that silently returned null gradients —
+        // (This replaced a zero stub that silently returned null gradients —
         // a silently frozen parameter is the worst failure mode for training.)
 
         internal static Variable?[] STFTGradient(

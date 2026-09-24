@@ -1,4 +1,11 @@
+using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using Microsoft.ML.OnnxRuntime;
 using Shorokoo.Core.Backends;
+using Shorokoo.Core.Factory;
+using Shorokoo.Core.Factory.IR;
+using Shorokoo.OnnxRuntime;
 using Shorokoo.Runtime;
 
 namespace Shorokoo.Tests;
@@ -16,8 +23,9 @@ public partial class BackendFreeNegate
 }
 
 /// <summary>
-/// A compute context owns the tensors whose memory is on its books, releases them when it is
-/// disposed, and can be asked to hand its results out detached so they outlive it.
+/// A compute context keeps a weak list of the tensors attached to it and owns none of them: its
+/// disposal releases its sessions and nothing else. A tensor's life is its own — deleted, consumed
+/// by a run it was fed to as it is, or moved into an attribute — and a run holds what it reads.
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
@@ -38,59 +46,40 @@ public class ComputeContextLifetimeCoverageTests
             [.. av.Zip(bv, (x, y) => x * y + x)]);
     }
 
-    [Fact]
-    public void TestDisposingAContextReleasesWhatItOwnsAndInvalidatesIt()
+    private static InternalComputationGraph Doubling()
     {
+        var a = InputVector<float32>("a");
+        return new InternalComputationGraph([a], [a + a]);
+    }
+
+    [Fact]
+    public void TestDisposingAContextReleasesItsSessionsAndLeavesEveryTensorAttachedToItAlive()
+    {
+        var (graph, a, b, expected) = Model();
         var context = new ComputeContext();
-        var owned = Sample().TransferTo(context);
+        var compiled = context.Compile(graph);
+        var placed = Sample().To(context);
+        var copied = Sample().CopyTo(context);
+        var output = compiled.Execute(a.Shared(), b.Shared())[0].ToTensorData();
+        var allocated = context.AllocateUninitialized<float32>(new Shape(4L));
 
         context.Dispose();
 
-        // The tensor was never disposed itself; its memory went when the context did.
-        Assert.False(owned.IsDisposed);
-        Assert.Throws<ObjectDisposedException>(() => Floats(owned));
-    }
-
-    [Fact]
-    public void TestDisposingTheSourceContextLeavesMemoryThatWasTransferredAway()
-    {
-        var source = new ComputeContext();
-        var target = new ComputeContext();
-
-        var onSource = Sample().TransferTo(source);
-        var onTarget = onSource.TransferTo(target);
-
-        // Same space, so nothing moved but the ownership -- and the ownership is what disposal
-        // follows. The source has nothing left to release.
-        source.Dispose();
-
-        Assert.Equal([1f, 2f, 3f, 4f], Floats(onTarget));
-        Assert.Same(target, onTarget.Context);
-
-        // And the target still governs it.
-        target.Dispose();
-        Assert.Throws<ObjectDisposedException>(() => Floats(onTarget));
-    }
-
-    [Fact]
-    public void TestDisposingAContextLeavesTensorsItOnlyHadAccessTo()
-    {
-        var owner = Sample();
-        var borrower = new ComputeContext();
-        var reader = owner.GiveAccessTo(borrower);
-
-        borrower.Dispose();
-
-        // The borrower never owned the bytes, so its disposal cannot have taken them.
-        Assert.Equal([1f, 2f, 3f, 4f], Floats(owner));
-        Assert.Equal([1f, 2f, 3f, 4f], Floats(reader));
+        Assert.True(compiled.IsDisposed);
+        Assert.Empty(context.Tensors);
+        Assert.All((TensorData[])[placed, copied, output, allocated, a, b], t => Assert.False(t.IsDisposed));
+        Assert.Equal([1f, 2f, 3f, 4f], Floats(placed));
+        Assert.Equal([1f, 2f, 3f, 4f], Floats(copied));
+        Assert.Equal(expected, Floats(output));
+        Assert.Throws<ObjectDisposedException>(() => Sample().To(context));
+        Assert.Throws<ObjectDisposedException>(() => Sample().CopyTo(context));
     }
 
     [Fact]
     public void TestDisposingAContextTwiceIsHarmless()
     {
         var context = new ComputeContext();
-        _ = Sample().TransferTo(context);
+        _ = Sample().To(context);
         context.Dispose();
         context.Dispose();
     }
@@ -121,7 +110,7 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
-    public void TestTheHostContextCannotBeDisposed()
+    public void TestTheHostContextCannotBeDisposedAndKeepsNoList()
     {
         var detached = Sample();
 
@@ -129,26 +118,36 @@ public class ComputeContextLifetimeCoverageTests
         ComputeContext.Host.Dispose();
 
         Assert.False(ComputeContext.Host.IsDisposed);
+        Assert.Same(detached, detached.To(ComputeContext.Host));
+        Assert.NotSame(detached, detached.CopyTo(ComputeContext.Host));
+        Assert.Empty(ComputeContext.Host.Tensors);
         Assert.Equal([1f, 2f, 3f, 4f], Floats(detached));
-        Assert.Equal([1f, 2f, 3f, 4f], Floats(Sample().TransferTo(ComputeContext.Host)));
     }
 
     [Fact]
-    public void TestAContextListsTheTensorsAttachedToItAndTheHostContextTheDetachedOnes()
+    public void TestAContextListsWhatIsAttachedToItUntilItIsDetachedOrDies()
     {
         using var first = new ComputeContext();
         using var second = new ComputeContext();
-        var detached = Sample();
-        var onFirst = detached.CopyTo(first);
+        var t = Sample();
 
-        Assert.Contains(onFirst, first.Tensors);
-        Assert.DoesNotContain(onFirst, second.Tensors);
-        Assert.Contains(detached, ComputeContext.Host.Tensors);
+        Assert.Same(t, t.To(first));
+        Assert.Contains(t, first.Tensors);
+        Assert.DoesNotContain(t, second.Tensors);
 
-        var onSecond = onFirst.TransferTo(second);
+        Assert.Same(t, t.To(second));
+        Assert.Contains(t, first.Tensors);
+        Assert.Contains(t, second.Tensors);
 
-        Assert.Contains(onSecond, second.Tensors);
-        Assert.DoesNotContain(onFirst, first.Tensors);
+        first.Detach(t);
+        first.Detach(t);
+        Assert.DoesNotContain(t, first.Tensors);
+        Assert.Contains(t, second.Tensors);
+        Assert.Equal([1f, 2f, 3f, 4f], Floats(t));
+
+        t.Delete();
+        Assert.DoesNotContain(t, second.Tensors);
+        Assert.Throws<ArgumentNullException>(() => first.Detach(null!));
     }
 
     [Fact]
@@ -175,6 +174,18 @@ public class ComputeContextLifetimeCoverageTests
         Assert.DoesNotContain(context, alsoCpu.ContextsOn());
         Assert.Same(host, context.Device);
         Assert.Same(host, ComputeContext.Host.Device);
+    }
+
+    [Fact]
+    public void TestABackendOnAnUnnamedDeviceReadsItsOwnAllocationsThereAndNoOtherBackends()
+    {
+        IShorokooBackend backend = new StubBackend(ComputeDevice.Other, null);
+        IShorokooBackend other = new StubBackend(ComputeDevice.Other, null);
+        var own = new MemoryLocation(MemorySpace.UnknownDevice, backend.RuntimeIdentity);
+
+        Assert.True(backend.CanAddress(own));
+        Assert.False(other.CanAddress(own));
+        Assert.False(backend.CanAddress(new MemoryLocation(MemorySpace.UnknownDevice, other.RuntimeIdentity)));
     }
 
     [Fact]
@@ -205,56 +216,26 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
-    public void TestAContextThatDetachesOutputsHandsBackResultsThatOutliveIt()
+    public void TestARunsOutputsAndWhatItReadsAreAttachedToItsContextAndOutliveIt()
     {
         var (graph, a, b, expected) = Model();
-        var context = new ComputeContext(DefaultBackend.Instance, detachesOutputs: true);
-
-        Assert.True(context.DetachesOutputs);
-        var result = context.Execute(graph, a, b)[0].ToTensorData();
-
-        // Detached: the result is in the framework's own host memory, which is what makes the
-        // next line safe.
-        Assert.Same(ComputeContext.Host, result.Context);
-
-        context.Dispose();
-        Assert.Equal(expected, Floats(result));
-    }
-
-    [Fact]
-    public void TestAContextThatDoesNotDetachTakesItsOutputsWithIt()
-    {
-        var (graph, a, b, _) = Model();
-        var context = new ComputeContext(DefaultBackend.Instance, detachesOutputs: false);
-
-        Assert.False(context.DetachesOutputs);
-        var result = context.Execute(graph, a, b)[0].ToTensorData();
-        Assert.Same(context, result.Context);
-
-        context.Dispose();
-        Assert.Throws<ObjectDisposedException>(() => Floats(result));
-    }
-
-    [Fact]
-    public void TestACompiledGraphDetachesItsOutputsWhenItsContextDoes()
-    {
-        var (graph, a, b, expected) = Model();
-        var context = new ComputeContext(DefaultBackend.Instance, detachesOutputs: true);
+        var context = new ComputeContext();
         var compiled = context.Compile(graph);
 
-        var result = compiled.Execute(a, b)[0].ToTensorData();
-        Assert.Same(ComputeContext.Host, result.Context);
+        var oneShot = context.Execute(graph, a.Shared(), b.Shared())[0].ToTensorData();
+        var fromCompiled = compiled.Execute(a.Shared(), b.Shared())[0].ToTensorData();
+        var evaluated = context.Eval(Scalar(2f) * Scalar(3f));
+
+        Assert.All((TensorData[])[oneShot, fromCompiled, evaluated, a, b], t => Assert.Contains(t, context.Tensors));
+        Assert.Same(DefaultBackend.Instance, oneShot.AllocatingBackend);
+        Assert.Same(DefaultBackend.Instance, fromCompiled.AllocatingBackend);
+        Assert.Same(HostBackend.Instance, a.AllocatingBackend);
 
         context.Dispose();
-        Assert.Equal(expected, Floats(result));
-    }
 
-    [Fact]
-    public void TestTheDefaultContextDetachesItsOutputs()
-    {
-        // Whatever this process ended up with, the default context is the one nobody disposes, so
-        // its results must not be tied to it.
-        Assert.True(ComputeContext.Default.DetachesOutputs);
+        Assert.Equal(expected, Floats(oneShot));
+        Assert.Equal(expected, Floats(fromCompiled));
+        Assert.Equal(6f, evaluated.As<float32>().ValueAt<float>(0));
     }
 
     [Fact]
@@ -268,21 +249,24 @@ public class ComputeContextLifetimeCoverageTests
         Assert.Throws<ObjectDisposedException>(() => compiled.Execute(a, b));
         Assert.Throws<ObjectDisposedException>(() => context.Execute(graph, a, b));
         Assert.Throws<ObjectDisposedException>(() => context.Eval(InputVector<float32>("a") * 2f));
+        Assert.False(a.IsDisposed || b.IsDisposed);
     }
 
     [Fact]
-    public void TestDisposingAContextDropsTheRuntimeValuesItsHostTensorsWereFedAs()
+    public void TestDeletingATensorReleasesTheCopiesItWasReadThroughAndDisposingItsContextDoesNot()
     {
         var (graph, a, b, _) = Model();
         var context = new ComputeContext();
-        var onContext = (HostTensorData<float32>)a.CopyTo(context);
+        var fed = (HostTensorData<float32>)a.CopyTo(context);
 
-        context.Execute(graph, onContext, b);
-        Assert.False(onContext.MaterializationsAreEmpty);
+        context.Execute(graph, fed.Shared(), b);
+        Assert.False(fed.CopiesAreEmpty);
 
         context.Dispose();
+        Assert.False(fed.CopiesAreEmpty);
 
-        Assert.True(onContext.MaterializationsAreEmpty);
+        fed.Delete();
+        Assert.True(fed.CopiesAreEmpty);
     }
 
     [Fact]
@@ -299,6 +283,65 @@ public class ComputeContextLifetimeCoverageTests
 
         Assert.True(compiled.IsDisposed);
         Assert.Throws<ObjectDisposedException>(() => context.Compile(graph));
+        Assert.Throws<ObjectDisposedException>(() => compiled.HasDeviceMemory);
+        Assert.Throws<ObjectDisposedException>(() => compiled.OutputPlacement);
+    }
+
+    [Fact]
+    public void TestAGraphThatHandsAnInputBackAsItsOutputGivesTheOutputMemoryOfItsOwn()
+    {
+        using var context = new ComputeContext();
+        var x = InputVector<float32>("x");
+        var passthrough = context.Compile(new InternalComputationGraph([x], [x]), [[4L]], trainingStep: false);
+        var source = Sample();
+        var output = passthrough.Execute(source.Shared())[0].ToTensorData();
+
+        output.As<float32>().WriteMemory<float>(span => span.Fill(9f));
+
+        Assert.Equal([1f, 2f, 3f, 4f], Floats(passthrough.Execute(source.Shared())[0].ToTensorData()));
+
+        var doubled = x * 2f;
+        var twice = context.Compile(new InternalComputationGraph([x], [doubled, doubled]), [[4L]], trainingStep: false)
+            .Execute(Sample());
+        twice[0].ToTensorData().As<float32>().WriteMemory<float>(span => span.Fill(9f));
+        Assert.Equal([2f, 4f, 6f, 8f], Floats(twice[1].ToTensorData()));
+    }
+
+    [Fact]
+    public void TestACopyARunReadsInATensorsPlaceCannotBeWrittenSoEveryLaterReadSeesTheTensor()
+    {
+        using var context = new ComputeContext();
+        var compiled = context.Compile(Doubling());
+        var source = Sample();
+        compiled.Execute(source.Shared());
+        var copy = source.CopyHeldAt(TensorData.RunMemoryOf(context.ResolvedBackend, source.DType))!;
+
+        Assert.Throws<InvalidOperationException>(() => copy.As<float32>().WriteMemory<float>(span => span.Fill(9f)));
+        Assert.Equal([2f, 4f, 6f, 8f], Floats(compiled.Execute(source.Shared())[0].ToTensorData()));
+    }
+
+    [Fact]
+    public void TestATensorBeingWrittenCannotBeConsumedOrDeletedUntilTheWriteIsDone()
+    {
+        using var context = new ComputeContext();
+        var compiled = context.Compile(Doubling());
+        var written = Sample();
+        using var writing = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var write = Task.Run(() => written.As<float32>().WriteMemory<float>(span =>
+        {
+            writing.Set();
+            release.Wait(TimeSpan.FromSeconds(10));
+            span.Fill(5f);
+        }));
+        Assert.True(writing.Wait(TimeSpan.FromSeconds(10)));
+
+        Assert.Throws<InvalidOperationException>(() => compiled.Execute(written));
+        Assert.Throws<InvalidOperationException>(written.Delete);
+
+        release.Set();
+        Assert.True(write.Wait(TimeSpan.FromSeconds(10)));
+        Assert.Equal([10f, 10f, 10f, 10f], Floats(compiled.Execute(written)[0].ToTensorData()));
     }
 
     [Fact]
@@ -354,97 +397,170 @@ public class ComputeContextLifetimeCoverageTests
     private static HostTensorData<float32> Wide32() => (HostTensorData<float32>)TensorData([(long)Wide], Feed());
 
     /// <summary>
-    /// Shorokoo/Shorokoo#366: feeding a tensor on one thread while another disposes it, or writes
-    /// to it, used to free the buffer the execution provider was reading. The run now holds what it
-    /// reads, and the bytes go when it returns rather than under it.
+    /// Shorokoo/Shorokoo#366: writing to a tensor on one thread while a run on another reads it
+    /// used to free the buffer the execution provider was reading. The write retires the copy the
+    /// run reads through, and the retired copy waits for the run.
+    ///
+    /// <para>A round counts only where the write landed inside the run: where the run still held
+    /// the copy once the write was done. A write that lost the race to the run's end puts nothing
+    /// to the product, and is retried rather than taken for a pass.</para>
     /// </summary>
     [Fact]
-    public void TestATensorDisposedOrWrittenOnAnotherThreadStaysValidForTheRunFeedingIt()
+    public void TestATensorWrittenOnAnotherThreadStaysValidForTheRunFeedingIt()
     {
         using var context = new ComputeContext();
         var (graph, expected) = Chain();
         var compiled = context.Compile(graph);
+        var copyAt = TensorData.RunMemoryOf(DefaultBackend.Instance, DType.Float32);
+        var landed = 0;
 
-        foreach (var interfere in (Action<HostTensorData<float32>>[])[
-            static t => t.Dispose(),
-            static t => t.AccessModifiableMemory<float>()[0] = 99f])
+        for (int round = 0; round < 20 && landed < 3; round++)
         {
-            for (int round = 0; round < 3; round++)
+            var fed = Wide32();
+            var ran = false;
+            using var spinning = new ManualResetEventSlim();
+            var other = Task.Run(() =>
             {
-                var fed = Wide32();
-                var other = Task.Run(() =>
-                {
-                    SpinWait.SpinUntil(() => !fed.MaterializationsAreEmpty, TimeSpan.FromSeconds(10));
-                    interfere(fed);
-                });
+                spinning.Set();
+                var spin = new SpinWait();
+                TensorData? held;
+                while ((held = fed.CopyHeldAt(copyAt)) is not { IsLocked: true } && !Volatile.Read(ref ran))
+                    spin.SpinOnce(sleep1Threshold: -1);
+                fed.AccessModifiableMemory<float>()[0] = 99f;
+                return held is { IsLocked: true };
+            });
+            Assert.True(spinning.Wait(TimeSpan.FromSeconds(10)));
 
-                var result = Floats(compiled.Execute(fed)[0].ToTensorData());
-                other.Wait();
+            float[] result;
+            try { result = Floats(compiled.Execute(fed.Shared())[0].ToTensorData()); }
+            finally { Volatile.Write(ref ran, true); }
+            var inside = other.Result;
 
-                Assert.Equal(expected, result);
-            }
+            Assert.Equal(expected, result);
+            if (inside) landed++;
         }
+
+        Assert.NotEqual(0, landed);
     }
 
     [Fact]
-    public void TestATensorDisposedWhileARunFeedsItIsFreedWhenThatRunReturns()
+    public void TestARunReadingATensorWhileItIsWrittenLeavesNothingStaleForTheNextRun()
     {
         using var context = new ComputeContext();
-        var (graph, _) = Chain();
-        var compiled = context.Compile(graph);
-        var fed = Wide32();
+        var t = Sample();
 
-        var disposer = Task.Run(() =>
+        t.As<float32>().WriteMemory<float>(span =>
         {
-            SpinWait.SpinUntil(() => !fed.MaterializationsAreEmpty, TimeSpan.FromSeconds(10));
-            fed.Dispose();
-            return fed.MaterializationsAreEmpty;
+            span[0] = 9f;
+            context.Execute(Doubling(), t.Shared());
+            span[1] = 9f;
         });
 
-        compiled.Execute(fed);
-
-        Assert.False(disposer.Result);
-        Assert.True(fed.MaterializationsAreEmpty);
+        Assert.Equal([18f, 18f, 6f, 8f], Floats(context.Execute(Doubling(), t.Shared())[0].ToTensorData()));
     }
 
     [Fact]
-    public void TestASecondHandleSurvivesTheDisposalOfTheContextTheFirstWasAttachedTo()
+    public void TestATensorARunConsumedKeepsNeitherTheGraphNorTheContextThatRanItAlive()
     {
-        var first = new ComputeContext();
-        var second = new ComputeContext();
-        var onFirst = Sample().TransferTo(first);
-        var onSecond = onFirst.GiveAccessTo(second);
+        var (graph, context, consumed) = ConsumedByAGraphNobodyHolds();
 
-        first.Dispose();
+        GC.Collect(2, GCCollectionMode.Forced, blocking: true);
+        GC.WaitForPendingFinalizers();
+        GC.Collect(2, GCCollectionMode.Forced, blocking: true);
 
-        Assert.Equal([1f, 2f, 3f, 4f], Floats(onSecond));
-        second.Dispose();
-        Assert.Throws<ObjectDisposedException>(() => Floats(onSecond));
+        Assert.False(graph.IsAlive);
+        Assert.False(context.IsAlive);
+        Assert.Contains("consumed by a run of the graph (a) -> (",
+            Assert.Throws<ObjectDisposedException>(() => Floats(consumed)).Message);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static (WeakReference Graph, WeakReference Context, TensorData Consumed) ConsumedByAGraphNobodyHolds()
+    {
+        var context = new ComputeContext();
+        var compiled = context.Compile(Doubling());
+        var consumed = Sample();
+        compiled.Execute(consumed);
+        return (new WeakReference(compiled), new WeakReference(context), consumed);
     }
 
     [Fact]
-    public void TestALockIsRefusedByEveryContextButTheOneTheTensorIsAttachedTo()
+    public void TestATensorARunIsReadingCannotBeDeletedMovedOrDetachedByThatRunsContext()
+    {
+        using var context = new ComputeContext();
+        using var other = new ComputeContext();
+        var (graph, expected) = Chain();
+        var compiled = context.Compile(graph);
+        var fed = Wide32();
+        Assert.Same(fed, fed.To(other));
+        using var reached = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+
+        var run = Task.Run(() => Floats(compiled.Run(
+            new HeldFeed(fed, reached, release) { FeedMode = SharedInputMode.Shared })[0].ToTensorData()));
+        Assert.True(reached.Wait(TimeSpan.FromSeconds(10)));
+
+        Assert.Throws<InvalidOperationException>(fed.Delete);
+        Assert.Throws<InvalidOperationException>(fed.Dispose);
+        Assert.False(fed.TryDelete());
+        Assert.Throws<InvalidOperationException>(() => fed.MoveToAttribute());
+        Assert.Throws<InvalidOperationException>(() => context.Detach(fed));
+        other.Detach(fed);
+        Assert.False(fed.IsDisposed);
+
+        release.Set();
+        Assert.Equal(expected, run.Result);
+        context.Detach(fed);
+        Assert.True(fed.TryDelete());
+    }
+
+    [Fact]
+    public void TestAnyContextMayLockATensorAndNoneMayDetachWhatItHoldsALockOn()
     {
         using var owner = new ComputeContext();
         using var other = new ComputeContext();
-        var t = Sample().TransferTo(owner);
+        var t = Sample();
 
-        Assert.Throws<InvalidOperationException>(() => other.Lock(t));
-        using (var lease = owner.Lock(t)) Assert.False(lease.Eviction.IsCancellationRequested);
+        using (owner.Lock(t))
+        using (var second = other.Lock(t))
+        {
+            Assert.False(second.Eviction.IsCancellationRequested);
+            Assert.False(t.TryDelete());
+            Assert.Throws<InvalidOperationException>(() => owner.Detach(t));
+            Assert.Throws<InvalidOperationException>(() => other.Detach(t));
+            Assert.Contains(t, owner.Tensors);
+        }
 
-        var detached = Sample();
-        Assert.Throws<InvalidOperationException>(() => owner.Lock(detached));
-        using (ComputeContext.Host.Lock(detached)) Assert.False(detached.TryDelete());
-
+        owner.Detach(t);
         Assert.True(t.TryDelete());
         Assert.Throws<ObjectDisposedException>(() => owner.Lock(t));
+    }
+
+    [Fact]
+    public void TestARunsLockHoldsTheTensorItselfAliveForAsLongAsItIsHeld()
+    {
+        using var context = new ComputeContext();
+        var (lease, tensor) = LockedAndDropped(context);
+
+        GC.Collect(2, GCCollectionMode.Forced, blocking: true);
+        GC.WaitForPendingFinalizers();
+
+        Assert.True(tensor.IsAlive);
+        lease.Dispose();
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static (TensorLease Lease, WeakReference Tensor) LockedAndDropped(ComputeContext context)
+    {
+        var tensor = Sample();
+        return (context.Lock(tensor), new WeakReference(tensor));
     }
 
     [Fact]
     public void TestDisposingAContextWithALeaseOutstandingThrowsAndLeavesItUsable()
     {
         var context = new ComputeContext();
-        var t = Sample().TransferTo(context);
+        var t = Sample().To(context);
         var lease = context.Lock(t);
 
         Assert.Throws<InvalidOperationException>(context.Dispose);
@@ -460,7 +576,7 @@ public class ComputeContextLifetimeCoverageTests
     public void TestTryDeleteRefusesWhileALeaseIsOutstandingAndSucceedsOnceItDrops()
     {
         using var context = new ComputeContext();
-        var t = Sample().TransferTo(context);
+        var t = Sample().To(context);
         var lease = context.Lock(t);
 
         Assert.False(t.TryDelete());
@@ -477,23 +593,21 @@ public class ComputeContextLifetimeCoverageTests
     public async Task TestDeleteAsyncDeletesAtOnceAndReclaimsWhenTheLockDrops()
     {
         using var context = new ComputeContext();
-        var a = InputVector<float32>("a");
-        var graph = new InternalComputationGraph([a], [a + a]);
         var t = (HostTensorData<float32>)Sample().CopyTo(context);
-        context.Execute(graph, t);
-        Assert.False(t.MaterializationsAreEmpty);
+        context.Execute(Doubling(), t.Shared());
+        Assert.False(t.CopiesAreEmpty);
 
         using var lease = context.Lock(t);
         Assert.False(await t.DeleteAsync(TimeSpan.FromMilliseconds(20)));
 
         // Deleted already, and said so: only the reclamation was still waiting.
-        Assert.Throws<ObjectDisposedException>(() => Floats(t));
+        Assert.Contains("deleted", Assert.Throws<ObjectDisposedException>(() => Floats(t)).Message);
         Assert.True(lease.Eviction.IsCancellationRequested);
-        Assert.False(t.MaterializationsAreEmpty);
+        Assert.False(t.CopiesAreEmpty);
         Assert.False(await t.DeleteAsync(TimeSpan.Zero));
 
         lease.Dispose();
-        Assert.True(t.MaterializationsAreEmpty);
+        Assert.True(t.CopiesAreEmpty);
         Assert.True(await t.DeleteAsync(TimeSpan.Zero));
     }
 
@@ -505,11 +619,11 @@ public class ComputeContextLifetimeCoverageTests
         var compiled = context.Compile(graph);
         var fed = Wide32();
 
-        var run = Task.Run(() => Floats(compiled.Execute(fed)[0].ToTensorData()));
-        Assert.True(SpinWait.SpinUntil(() => !fed.MaterializationsAreEmpty, TimeSpan.FromSeconds(10)));
+        var run = Task.Run(() => Floats(compiled.Execute(fed.Shared())[0].ToTensorData()));
+        Assert.True(SpinWait.SpinUntil(() => !fed.CopiesAreEmpty, TimeSpan.FromSeconds(10)));
 
         Assert.True(await fed.DeleteAsync(TimeSpan.FromSeconds(30)));
-        Assert.True(fed.MaterializationsAreEmpty);
+        Assert.True(fed.CopiesAreEmpty);
         Assert.Throws<ObjectDisposedException>(() => Floats(fed));
 
         // Stopped or finished, never a wrong answer: a run that reaches its last kernel before the
@@ -537,30 +651,499 @@ public class ComputeContextLifetimeCoverageTests
         release.Set();
         Assert.Equal(expected, run.Result);
 
-        var lease = context.Lock(Sample().TransferTo(context));
-        Assert.Contains("lease(s)", Assert.Throws<InvalidOperationException>(context.Dispose).Message);
+        var lease = context.Lock(Sample());
+        Assert.Contains("lock(s)", Assert.Throws<InvalidOperationException>(context.Dispose).Message);
         lease.Dispose();
         context.Dispose();
         Assert.True(context.IsDisposed);
     }
 
     [Fact]
-    public void TestARunOverADonatedFeedAnswersAsAKeptOneAndGivesTheBytesBackWithTheRun()
+    public void TestABareFeedIsConsumedASharedOneReadAndATriedOneConsumedUnlessAnotherRunReadsItWhenTheRunStarts()
     {
         using var context = new ComputeContext();
-        var (graph, expected) = Chain();
+        using var other = new ComputeContext();
+        bool Survives(Func<TensorData, IData> feed, bool readWhenCalled = false, bool readWhenRun = false)
+        {
+            var t = Sample();
+            IData fed;
+            using (readWhenCalled ? other.Lock(t) : null) fed = feed(t);
+            using (readWhenRun ? other.Lock(t) : null)
+                Assert.Equal([2f, 4f, 6f, 8f], Floats(context.Execute(Doubling(), fed)[0].ToTensorData()));
+            var survived = !t.IsDisposed;
+            Assert.Equal(survived, context.Tensors.Contains(t));
+            return survived;
+        }
+
+        Assert.False(Survives(t => t));
+        Assert.True(Survives(t => t.Shared()));
+        Assert.False(Survives(t => t.TryConsume()));
+        Assert.True(Survives(t => t.TryConsume(), readWhenRun: true));
+        Assert.False(Survives(t => t.TryConsume(), readWhenCalled: true));
+        Assert.True(Survives(t => t.Shared(), readWhenRun: true));
+
+        var named = Sample();
+        context.Run(Doubling(), NamedModelParam.FromIData("a", ModelParamType.InputParam, named.Shared()));
+        Assert.False(named.IsDisposed);
+        context.Run(Doubling(), NamedModelParam.FromIData("a", ModelParamType.InputParam, named));
+        Assert.True(named.IsDisposed);
+    }
+
+    [Fact]
+    public void TestAParameterPassedSharedIsReadByEveryRunAsTheMessageOfOneConsumedAsItIsAsks()
+    {
+        using var context = new ComputeContext();
+        using var other = new ComputeContext();
+        var compiled = context.Compile(Doubling());
+        var p = new TensorDataModelParam("a", ModelParamType.InputParam, Sample());
+        var tried = new TensorDataModelParam("a", ModelParamType.InputParam, Sample());
+
+        Assert.Equal([2f, 4f, 6f, 8f], Floats(compiled.Run(p.Shared())[0].ToTensorData()));
+        Assert.Equal([2f, 4f, 6f, 8f], Floats(compiled.Run(p.Shared())[0].ToTensorData()));
+        Assert.False(p.ToTensorData().IsDisposed);
+        Assert.Null(p.FeedMode);
+        compiled.Run(p);
+        Assert.Contains("pass it there as .Shared()", Assert.Throws<ObjectDisposedException>(() => compiled.Run(p)).Message);
+
+        using (other.Lock(tried.ToTensorData())) compiled.Run(tried.TryConsume());
+        Assert.False(tried.ToTensorData().IsDisposed);
+        compiled.Run(tried.TryConsume());
+        Assert.True(tried.ToTensorData().IsDisposed);
+    }
+
+    [Fact]
+    public void TestAStructsFieldIsFedAsItWasGivenAndReadWhereItOrItsStructIsShared()
+    {
+        using var context = new ComputeContext();
+        var (graph, _, _, _) = Model();
+        TensorStructFieldDef[] fields =
+            [new TensorStructFieldDef("a", DataStructure.Tensor, 1, DType.Float32), new TensorStructFieldDef("b", DataStructure.Tensor, 1, DType.Float32)];
+        var def = new TensorStructDef(fields, "Pair");
+        (bool A, bool B) Consumed(Func<TensorDataStruct, IData> feed, Func<TensorData, IData> b)
+        {
+            var pair = def.FromOrderedData(Sample(), b(Sample()));
+            Assert.Equal([2f, 6f, 12f, 20f], Floats(context.Execute(graph, feed(pair))[0].ToTensorData()));
+            return (((TensorData)pair[0]).IsDisposed, ((TensorData)pair[1]).IsDisposed);
+        }
+
+        Assert.Equal<(bool, bool)>([(true, false), (false, false), (true, false), (true, true), (true, true)], [
+            Consumed(s => s, b => b.Shared()),
+            Consumed(s => s.Shared(), b => b),
+            Consumed(s => s.TryConsume(), b => b.Shared()),
+            Consumed(s => s, b => b.TryConsume()),
+            Consumed(s => s, b => b),
+        ]);
+    }
+
+    [Fact]
+    public void TestTheSameTensorFedTwiceInOneCallIsReadIfAnyOccurrenceIsSharedElseFedAsABareOneIfAnyIsBare()
+    {
+        using var context = new ComputeContext();
+        using var other = new ComputeContext();
+        var graph = Model().Graph;
+        bool Survives(Func<TensorData, IData> first, Func<TensorData, IData> second, bool readElsewhere = false)
+        {
+            var t = Sample();
+            using (readElsewhere ? other.Lock(t) : null)
+                Assert.Equal([2f, 6f, 12f, 20f], Floats(context.Execute(graph, first(t), second(t))[0].ToTensorData()));
+            var survived = !t.IsDisposed;
+            Assert.Equal(survived, context.Tensors.Contains(t));
+            return survived;
+        }
+        string RefusedWhileReadElsewhere(Func<TensorData, IData> first, Func<TensorData, IData> second)
+        {
+            var t = Sample();
+            using var read = other.Lock(t);
+            var refusal = Assert.Throws<InvalidOperationException>(() => context.Execute(graph, first(t), second(t))).Message;
+            Assert.False(t.IsDisposed);
+            return refusal;
+        }
+
+        Assert.False(Survives(t => t, t => t));
+        Assert.True(Survives(t => t, t => t.Shared()));
+        Assert.True(Survives(t => t.Shared(), t => t));
+        Assert.True(Survives(t => t.Shared(), t => t, readElsewhere: true));
+        Assert.True(Survives(t => t.TryConsume(), t => t.Shared()));
+        Assert.True(Survives(t => t.Shared(), t => t.TryConsume()));
+        Assert.False(Survives(t => t.TryConsume(), t => t));
+        Assert.False(Survives(t => t.TryConsume(), t => t.TryConsume()));
+        Assert.True(Survives(t => t.TryConsume(), t => t.TryConsume(), readElsewhere: true));
+        Assert.Contains("is being read by", RefusedWhileReadElsewhere(t => t, t => t));
+        Assert.Equal(RefusedWhileReadElsewhere(t => t, t => t), RefusedWhileReadElsewhere(t => t.TryConsume(), t => t));
+        Assert.Equal(RefusedWhileReadElsewhere(t => t, t => t), RefusedWhileReadElsewhere(t => t, t => t.TryConsume()));
+    }
+
+    /// <summary>Which of <paramref name="pairs"/> — (output, input) over inputs a and b, output 0
+    /// into a where none is named — the lowered graph of <paramref name="outputs"/> proves.</summary>
+    private static (int Output, int Input)[] Marked(
+        Func<Tensor<float32>, Tensor<float32>, Variable[]> outputs, params (int Output, int Input)[] pairs)
+    {
+        var a = InputVector<float32>("a");
+        var b = InputVector<float32>("b");
+        var graph = FastOnnxModelBuilder.BuildInternalOnnxModel(
+            new InternalComputationGraph([a, b], [.. outputs(a, b)]), prepForOnnx: true).Graph;
+        if (pairs.Length == 0) pairs = [(0, 0)];
+        OutputAlias Named((int Output, int Input) p) => new(graph.Outputs[p.Output].Name, graph.Inputs[p.Input].Name);
+        var proven = OutputAliasProof.Prove(graph, pairs.Select(Named));
+        return [.. pairs.Where(p => proven.Contains(Named(p)))];
+    }
+
+    [Fact]
+    public void TestAnOutputIsMarkedToBeWrittenIntoAnInputOnlyWhereNothingReadsTheInputAfterItIsWritten()
+    {
+        Assert.Equal([(0, 0)], Marked((a, b) => [a - b]));
+        Assert.Equal([(0, 0)], Marked((a, b) => [a * 0.5f + b]));
+        Assert.Equal([(0, 0)], Marked((a, b) => [a - (Tensor<float32>)OnnxOp.ReduceSum(a, keepdims: false)]));
+        Assert.Equal([(0, 0)], Marked((a, b) => { var twice = a * 2f; return [twice, twice + b]; }, (0, 0), (1, 0)));
+        Assert.Empty(Marked((a, b) => [b - a]));
+        Assert.Empty(Marked((a, b) => [a - b, a * b]));
+        Assert.Empty(Marked((a, b) => [a - b, (Tensor<float32>)OnnxOp.Flatten(a) * 2f]));
+        Assert.Empty(Marked((a, b) => [a - b, OnnxOp.Flatten(a)]));
+        Assert.Empty(Marked((a, b) => { var t = a * 2f; return [b + (Tensor<float32>)OnnxOp.Cast(OnnxOp.Size(t), null, DType.Float32), t]; }));
+        Assert.Empty(Marked((a, b) => [OnnxOp.CumSum(a, Scalar(0L), exclusive: false, reverse: false)]));
+        Assert.Empty(Marked((a, b) => [OnnxOp.Identity(a, rank: 1)]));
+    }
+
+    /// <summary>A graph written as a runtime hands one back: inputs and outputs by name, typed where
+    /// the name says so (<c>a:float[4]</c>).</summary>
+    internal static GraphProto GraphOf(string inputs, string outputs, params NodeProto[] nodes)
+    {
+        var graph = new GraphProto();
+        graph.Inputs.AddRange(Names(inputs).Select(Info));
+        graph.Outputs.AddRange(Names(outputs).Select(Info));
+        graph.Nodes.AddRange(nodes);
+        return graph;
+    }
+
+    private static string[] Names(string names) => names.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+
+    private static ValueInfoProto Info(string spec)
+    {
+        var (name, type) = (spec.Split(':')[0], spec.Split(':').ElementAtOrDefault(1));
+        if (type is null) return new ValueInfoProto { Name = name };
+        var tensor = new TypeProto.Tensor
+        {
+            ElemType = (int)Enum.Parse<TensorProto.DataType>(type[..type.IndexOf('[')], ignoreCase: true),
+            Shape = new TensorShapeProto(),
+        };
+        tensor.Shape.Dims.AddRange(type[(type.IndexOf('[') + 1)..^1].Split(',')
+            .Select(d => new TensorShapeProto.Dimension { DimValue = long.Parse(d) }));
+        return new ValueInfoProto { Name = name, Type = new TypeProto { TensorType = tensor } };
+    }
+
+    internal static NodeProto Op(string op, string inputs, string outputs, string domain = "", GraphProto? body = null)
+    {
+        var node = new NodeProto { OpType = op, Domain = domain };
+        node.Inputs.AddRange(Names(inputs));
+        node.Outputs.AddRange(Names(outputs));
+        if (body is not null)
+            node.Attributes.Add(new AttributeProto { Name = "then_branch", Type = AttributeProto.AttributeType.Graph, G = body });
+        return node;
+    }
+
+    private static GraphProto Initializing(string name, GraphProto graph)
+    {
+        graph.Initializers.Add(new TensorProto { Name = name });
+        return graph;
+    }
+
+    /// <summary>Whether <paramref name="graph"/> proves its output O written into its input
+    /// <paramref name="input"/>.</summary>
+    private static bool Proves(GraphProto graph, string input = "a")
+        => OutputAliasProof.Prove(graph, [new OutputAlias("O", input)]).Count == 1;
+
+    [Fact]
+    public void TestAWrittenGraphRefusesAnAliasWhereARuntimeAliasASubgraphOrADataReadingShapeStillReadsTheInputOrTheTypesDiffer()
+    {
+        var norm = Op("BatchNormalization", "X scale B mean var", "Y rm rv");
+        Assert.False(Proves(GraphOf("X scale B mean var two zero", "O Z Y", norm, Op("Mul", "rm two", "O"), Op("Add", "rm zero", "Z")), "mean"));
+        Assert.True(Proves(GraphOf("X scale B mean var two", "O Y", norm, Op("Mul", "rm two", "O")), "mean"));
+        Assert.False(Proves(GraphOf("a b", "O S", Op("Shape", "a", "S", domain: "custom"), Op("Sub", "a b", "O"))));
+        Assert.True(Proves(GraphOf("a b", "O S", Op("Shape", "a", "S"), Op("Sub", "a b", "O"))));
+        Assert.False(Proves(GraphOf("a b c", "O Z", Op("Sub", "a b", "O"), Op("If", "c", "Z", body: GraphOf("", "t", Op("Identity", "a", "t"))))));
+        Assert.False(Proves(Initializing("a", GraphOf("a b", "O", Op("Sub", "a b", "O")))));
+        Assert.False(Proves(GraphOf("a b c", "O", Op("If", "c", "O", body: GraphOf("", "t", Op("Identity", "b", "t"))))));
+        Assert.True(Proves(GraphOf("a:float[4] b", "O:float[4]", Op("Neg", "b", "O"))));
+        Assert.False(Proves(GraphOf("a:float[4] b", "O:double[4]", Op("Cast", "b", "O"))));
+        Assert.False(Proves(GraphOf("a:float[4] b", "O:float[2,2]", Op("Neg", "b", "O"))));
+        Assert.False(Proves(GraphOf("a b", "O Z", Op("Flatten", "a", "v"), Op("ReduceSum", "v", "g"), Op("Sub", "a g", "O"), Op("Neg", "v", "Z"))));
+        Assert.False(Proves(GraphOf("a b", "O Z", Op("AllReduce", "a", "v", domain: "com.microsoft"), Op("ReduceSum", "v", "g"), Op("Sub", "a g", "O"), Op("Neg", "v", "Z"))));
+        Assert.False(Proves(GraphOf("X scale B mean var two zero", "O Z Y", norm, Op("Mul", "rv two", "O"), Op("Add", "rv zero", "Z")), "var"));
+        Assert.False(Proves(GraphOf("a x z", "O Z", Op("SequenceConstruct", "a x", "S"), Op("SequenceErase", "S", "E"),
+            Op("ConcatFromSequence", "E", "c"), Op("ReduceSum", "c", "g"), Op("Sub", "a g", "O"), Op("SequenceAt", "E z", "Z"))));
+    }
+
+    [Fact]
+    public void TestAWrittenGraphRefusesAnAliasWhereTheInputIsAnOutputTheOutputIsListedTwiceOrItsWriterIsNotAStandardOperator()
+    {
+        Assert.True(Proves(GraphOf("a b", "O", Op("Sub", "a b", "O"))));
+        Assert.False(Proves(GraphOf("a b", "O a", Op("Sub", "a b", "O"))));
+        Assert.False(Proves(GraphOf("a b", "O O", Op("Sub", "a b", "O"))));
+        Assert.False(Proves(GraphOf("a b", "O", Op("Sub", "a b", "O", domain: "custom"))));
+    }
+
+    [Fact]
+    public void TestASerializedModelProvesWhatItsGraphProvesAndOneWithoutAGraphProvesNothing()
+    {
+        OutputAlias[] pair = [new("O", "a")];
+        var proved = GraphOf("a b", "O", Op("Sub", "a b", "O"));
+        var refused = GraphOf("a b", "O Z", Op("Sub", "a b", "O"), Op("Neg", "a", "Z"));
+        Assert.Single(OutputAliasProof.Prove(ModelOf(proved), pair));
+        Assert.Equal(OutputAliasProof.Prove(proved, pair), OutputAliasProof.Prove(ModelOf(proved), pair));
+        Assert.Equal(OutputAliasProof.Prove(refused, pair), OutputAliasProof.Prove(ModelOf(refused), pair));
+        var graphless = new MemoryStream();
+        ProtoBuf.Serializer.Serialize(graphless, new ModelProto { IrVersion = 8 });
+        Assert.Empty(OutputAliasProof.Prove(graphless.ToArray(), pair));
+    }
+
+    [Fact]
+    public void TestARunWritesAMarkedOutputIntoAnInputOnlyWhereItConsumedItAloneAndItsShapeIsSettled()
+    {
+        using var context = new ComputeContext();
+        var a = InputVector<float32>("a");
+        var b = InputVector<float32>("b");
+        var graph = new InternalComputationGraph([a, b], [a - b]);
+        var compiled = context.Compile(graph, [[4L], [4L]], trainingStep: false, aliasCandidates: [(0, 0)]);
+        long Aliased(CompiledGraph run, IData x, IData y, float[] expected)
+        {
+            var before = context.AliasedOutputs;
+            Assert.Equal(expected, Floats(run.Execute(x, y)[0].ToTensorData()));
+            return context.AliasedOutputs - before;
+        }
+        TensorData Tens() => TensorData([4L], (float[])[10f, 20f, 30f, 40f]);
+        var kept = Tens();
+
+        Assert.Equal([(0, 0)], compiled.MarkedPairs());
+        Assert.Equal(1, Aliased(compiled, Tens(), Sample(), [9f, 18f, 27f, 36f]));
+        Assert.Equal(0, Aliased(compiled, kept.Shared(), Sample(), [9f, 18f, 27f, 36f]));
+        Assert.Equal([10f, 20f, 30f, 40f], Floats(kept));
+        Assert.Equal(1, Aliased(compiled, kept.TryConsume(), Sample(), [9f, 18f, 27f, 36f]));
+        var twice = Sample();
+        Assert.Equal(0, Aliased(compiled, twice, twice, [0f, 0f, 0f, 0f]));
+        var unsettled = context.Compile(graph, inputDims: null, trainingStep: false, aliasCandidates: [(0, 0)]);
+        Assert.Equal(0, Aliased(unsettled, Tens(), Sample(), [9f, 18f, 27f, 36f]));
+        var (s, t) = (InputScalar<float32>("s"), InputScalar<float32>("t"));
+        var scalar = context.Compile(new InternalComputationGraph([s, t], [s - t]), [[], []], trainingStep: false, aliasCandidates: [(0, 0)]);
+        Assert.Equal(1, Aliased(scalar, TensorData([], 10f), TensorData([], 3f), [7f]));
+        var anyRank = InputTensor<float32>("w");
+        var shapeless = context.Compile(new InternalComputationGraph([anyRank, b], [anyRank - b]), [null, [1L]], trainingStep: false, aliasCandidates: [(0, 0)]);
+        Assert.Equal(0, Aliased(shapeless, TensorData([], 10f), TensorData([1L], 3f), [7f]));
+        Assert.Empty(context.Compile(graph).MarkedPairs());
+        using var unaliased = new ComputeContext { OutputAliasing = false };
+        Assert.Empty(unaliased.Compile(graph, [[4L], [4L]], trainingStep: false, aliasCandidates: [(0, 0)]).MarkedPairs());
+    }
+
+    [Fact]
+    public void TestAnOutputTheRuntimeFoldsToAConstantIsMemoryOfItsOwnThatAWriteDoesNotCarryIntoAnotherRun()
+    {
+        using var context = new ComputeContext();
+        var x = InputVector<float32>("x");
+        float[] AfterAWrite(Variable output)
+        {
+            var compiled = context.Compile(new InternalComputationGraph([x], [output]), [[4L]], trainingStep: false);
+            TensorData<float32> Run() => compiled.Execute(Sample())[0].ToTensorData().As<float32>();
+            var (first, second) = (Run(), Run());
+            first.WriteMemory<float>(written => written.Fill(9f));
+            return [.. second.CopyMemory<float>(), .. Run().CopyMemory<float>()];
+        }
+
+        Assert.Equal([1f, 1f, 1f, 1f, 1f, 1f, 1f, 1f],
+            AfterAWrite(OnnxOp.ConstantOfShape(OnnxOp.Shape(x), TensorData(DType.Float32, [1L], 1f).MoveToAttribute())));
+        Assert.Equal([1f, 2f, 3f, 4f, 1f, 2f, 3f, 4f], AfterAWrite(Vector(1f, 2f, 3f, 4f)));
+        Assert.Equal([1f, 2f, 3f, 4f, 1f, 2f, 3f, 4f], AfterAWrite(OnnxOp.Identity(Vector(1f, 2f, 3f, 4f), rank: 1)));
+        Assert.Equal([1f, 2f, 3f, 4f, 1f, 2f, 3f, 4f], AfterAWrite(OnnxOp.Reshape(Vector(1f, 2f, 3f, 4f), Vector(2L, 2L), allowZero: false)));
+        Assert.Equal([11f, 22f, 33f, 44f, 11f, 22f, 33f, 44f], AfterAWrite(Vector(1f, 2f, 3f, 4f) + Vector(10f, 20f, 30f, 40f)));
+    }
+
+    /// <summary>The model a lowering hands a backend for <paramref name="graph"/>.</summary>
+    private static byte[] ModelOf(GraphProto graph)
+    {
+        var model = new ModelProto { IrVersion = 8, Graph = graph };
+        model.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = 17 });
+        var stream = new MemoryStream();
+        ProtoBuf.Serializer.Serialize(stream, model);
+        return stream.ToArray();
+    }
+
+    /// <summary>A session of <paramref name="backend"/> over <paramref name="graph"/>, built to
+    /// write its output O into its input a.</summary>
+    internal static OrtSession Aliasing(IShorokooBackend backend, GraphProto graph)
+        => (OrtSession)backend.CreateSession(
+            ModelOf(graph), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal,
+            new DeviceMemorySettings().Resolve(reusedAcrossShapes: false), DiagnosticSettings.Default,
+            [new OutputAlias("O", "a")]);
+
+    [Fact]
+    public void TestAPairIsDroppedWhereTheGraphTheRuntimeRunsReadsTheInputAfterTheOutputIsWritten()
+    {
+        var graph = GraphOf("a:float[4,4] x:float[4,4] y:float[4,4]", "O:float[4,4] Z:float[4,4]",
+            Op("Transpose", "a", "t"), Op("MatMul", "x t", "m"), Op("MatMul", "y t", "Z"), Op("Sub", "a m", "O"));
+        using var session = Aliasing(DefaultBackend.Instance, graph);
+        float[] a = [.. Enumerable.Range(1, 16).Select(v => (float)v)];
+        float[] t = [.. Enumerable.Range(0, 16).Select(k => a[k % 4 * 4 + k / 4])];
+        IShorokooTensorValue Square(float[] values) => DefaultBackend.Instance.CreateTensor(values, [4L, 4L]);
+        float[] Diagonal(float v) => [.. Enumerable.Range(0, 16).Select(k => k % 5 == 0 ? v : 0f)];
+        var consumed = Square(a);
+        using var x = Square(Diagonal(1f));
+        using var y = Square(Diagonal(2f));
+        var outputs = session.RunConsuming(new Dictionary<string, IShorokooTensorValue> { ["a"] = consumed, ["x"] = x, ["y"] = y },
+            [consumed], ["O", "Z"], ComputeContext.NoOutputsRetained, RunSettings.Default, out var aliased);
+
+        Assert.True(Proves(graph));
+        Assert.Empty(session.BindableAliases);
+        Assert.All(aliased, Assert.Null);
+        Assert.Equal([.. a.Zip(t, (p, q) => p - q)], outputs[0].GetTensorDataAsSpan<float>().ToArray());
+        Assert.Equal([.. t.Select(q => 2f * q)], outputs[1].GetTensorDataAsSpan<float>().ToArray());
+    }
+
+    [Fact]
+    public void TestASessionRunForACallerThatDoesNotAskWhatItAliasedStillWritesItsOutputIntoWhatItConsumed()
+    {
+        var backend = DefaultBackend.Instance;
+        using var session = Aliasing(backend, GraphOf("a:float[4] b:float[4]", "O:float[4]", Op("Sub", "a b", "O")));
+        var a = backend.CreateTensor<float>([10f, 20f, 30f, 40f], [4L]);
+        using var b = backend.CreateTensor<float>([1f, 2f, 3f, 4f], [4L]);
+        ref var consumedMemory = ref MemoryMarshal.GetReference(a.GetTensorDataAsSpan<float>());
+
+        using var o = session.RunConsuming(new Dictionary<string, IShorokooTensorValue> { ["a"] = a, ["b"] = b }, [a], ["O"],
+            ComputeContext.NoOutputsRetained, RunSettings.Default)[0];
+
+        Assert.Equal([9f, 18f, 27f, 36f], o.GetTensorDataAsSpan<float>().ToArray());
+        Assert.True(Unsafe.AreSame(ref consumedMemory, ref MemoryMarshal.GetReference(o.GetTensorDataAsSpan<float>())));
+    }
+
+    [Fact]
+    public void TestASessionThatCannotWriteItsGraphOutIsBuiltWithoutAliasingOnlyWhereTheRuntimeRefusesItsCompiledNodes()
+    {
+        var graph = GraphOf("a:float[4] b:float[4]", "O:float[4]", Op("Sub", "a b", "O"));
+        var transient = new ScriptedBackend(build => { if (build == 0) throw new OutOfMemoryException(); });
+        Assert.Throws<OutOfMemoryException>(() => Aliasing(transient, graph));
+
+        var compiling = new ScriptedBackend(build =>
+        {
+            if (build == 0)
+                throw OrtFailure("Unable to serialize model as it contains compiled nodes. Please disable any execution providers which generate compiled nodes.");
+        });
+        using var unaliased = Aliasing(compiling, graph);
+        Assert.Equal((2, 0), (compiling.Builds, unaliased.BindableAliases.Count));
+    }
+
+    [Fact]
+    public void TestASessionHoldingMoreThanSixteenMebibytesOfInitializersIsBuiltAgainWithoutWritingItsGraphOutAndStillAliases()
+    {
+        (int Builds, float O, string? Aliased) Built(ScriptedBackend backend, int floats)
+        {
+            var graph = GraphOf("a:float[1] i:int64[1]", "O:float[1]", Op("Gather", "C i", "g"), Op("Sub", "a g", "O"));
+            graph.Initializers.Add(new TensorProto { Name = "C", Dims = [floats], data_type = 1, RawData = new byte[4L * floats] });
+            using var session = Aliasing(backend, graph);
+            var a = backend.CreateTensor<float>([5f], [1L]);
+            using var i = backend.CreateTensor<long>([0L], [1L]);
+            using var o = session.RunConsuming(new Dictionary<string, IShorokooTensorValue> { ["a"] = a, ["i"] = i }, [a], ["O"],
+                ComputeContext.NoOutputsRetained, RunSettings.Default, out var aliased)[0];
+            return (backend.Builds, o.GetTensorDataAsSpan<float>()[0], aliased[0]);
+        }
+
+        const int SixteenMebibytes = 4 << 20;
+        Assert.Equal((1, 5f, "a"), Built(new ScriptedBackend(_ => { }), SixteenMebibytes + 1));
+        Assert.Equal((2, 5f, "a"), Built(ScriptedBackend.Stock(_ => { }), SixteenMebibytes + 1));
+        Assert.Equal((1, 5f, "a"), Built(ScriptedBackend.Stock(_ => { }), SixteenMebibytes));
+    }
+
+    /// <summary>ONNX Runtime's own failure, which only ONNX Runtime constructs.</summary>
+    private static OnnxRuntimeException OrtFailure(string message)
+        => (OnnxRuntimeException)Activator.CreateInstance(
+            typeof(OnnxRuntimeException), BindingFlags.NonPublic | BindingFlags.Instance, binder: null,
+            [Enum.ToObject(typeof(OnnxRuntimeException).Assembly.GetType("Microsoft.ML.OnnxRuntime.ErrorCode")!, 1), message],
+            culture: null)!;
+
+    /// <summary>The CPU backend, calling <c>build</c> with the number of each session it builds,
+    /// from 0, where a provider would be appended. Made with <c>new</c>, it is built through the
+    /// constructor a subclass appending a provider of its own calls; made by <see cref="Stock"/>,
+    /// it stands for ONNX Runtime's own CPU provider, as the CPU packages' backends do.</summary>
+    private sealed class ScriptedBackend : OrtBackend
+    {
+        private readonly int[] _builds;
+
+        internal ScriptedBackend(Action<int> build) : this([0], build) { }
+
+        private ScriptedBackend(int[] builds, Action<int> build)
+            : base((_, _) => build(builds[0]++), ComputeDevice.Cpu, cudaDeviceId: null) => _builds = builds;
+
+        private ScriptedBackend(int[] builds, Action<int> build, bool stockProvider)
+            : base((_, _) => build(builds[0]++), ComputeDevice.Cpu, cudaDeviceId: null, stockProvider) => _builds = builds;
+
+        internal static ScriptedBackend Stock(Action<int> build) => new([0], build, stockProvider: true);
+
+        internal int Builds => _builds[0];
+    }
+
+    [Fact]
+    public void TestConsumingATensorAnotherRunIsReadingIsRefusedNamingThatRunAndTakesNothing()
+    {
+        using var context = new ComputeContext();
+        var (graph, _) = Chain();
         var compiled = context.Compile(graph);
+        var read = Wide32();
+        var bystander = Wide32();
+        using var reached = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var run = Task.Run(() => compiled.Run(
+            new HeldFeed(read, reached, release) { FeedMode = SharedInputMode.Shared }));
+        Assert.True(reached.Wait(TimeSpan.FromSeconds(10)));
 
-        var kept = Wide32();
-        Assert.Equal(expected, Floats(compiled.Execute(kept)[0].ToTensorData()));
-        Assert.False(kept.MaterializationsAreEmpty);
+        var refused = Assert.Throws<InvalidOperationException>(
+            () => context.Execute(Model().Graph, bystander, read)).Message;
+        Assert.Contains($"is being read by a run of the graph (a) -> (", refused);
+        Assert.Contains("cannot consume it as input 'b'", refused);
+        Assert.Contains(".Shared()", refused);
+        Assert.False(bystander.IsDisposed);
+        Assert.Equal(Floats(bystander).Select(v => 2 * v), Floats(context.Execute(Doubling(), read.TryConsume())[0].ToTensorData()));
+        Assert.False(read.IsDisposed);
 
-        var donated = Wide32();
-        var donation = donated.Donate();
-        Assert.Equal(expected, Floats(compiled.Execute(donation)[0].ToTensorData()));
-        Assert.True(donated.MaterializationsAreEmpty);
-        Assert.Throws<ObjectDisposedException>(() => Floats(donated));
-        Assert.Throws<ObjectDisposedException>(() => compiled.Execute(donation));
+        release.Set();
+        run.Wait();
+        context.Execute(Doubling(), read.TryConsume());
+        Assert.True(read.IsDisposed);
+    }
+
+    [Fact]
+    public void TestARunThatFailsStillConsumesWhatItWasFedAsItIs()
+    {
+        using var context = new ComputeContext();
+        var x = InputVector<float32>("x");
+        var failing = new InternalComputationGraph([x], [OnnxOp.Reshape(x, Vector(3L), allowZero: false)]);
+        var fed = Sample();
+        var kept = Sample();
+
+        Assert.ThrowsAny<Microsoft.ML.OnnxRuntime.OnnxRuntimeException>(() => context.Execute(failing, fed));
+        Assert.ThrowsAny<Microsoft.ML.OnnxRuntime.OnnxRuntimeException>(() => context.Execute(failing, kept.Shared()));
+
+        Assert.True(fed.IsDisposed);
+        Assert.True(fed.CopiesAreEmpty);
+        Assert.False(kept.IsDisposed);
+        Assert.Contains("consumed by a run of", Assert.Throws<ObjectDisposedException>(() => Floats(fed)).Message);
+    }
+
+    [Fact]
+    public void TestTheBackendReleasesTheValueOfATensorARunConsumedWhetherTheRunSucceedsOrFails()
+    {
+        using var context = new ComputeContext();
+        var x = InputVector<float32>("x");
+        var failing = new InternalComputationGraph([x], [OnnxOp.Reshape(x, Vector(3L), allowZero: false)]);
+        bool Released(Action<TensorData> run)
+        {
+            var value = DefaultBackend.Instance.CreateTensor<float>([1f, 2f, 3f, 4f], [4L]);
+            try { run(TensorData.Create(new Shape(4L), DType.Float32, value, DefaultBackend.Instance)); }
+            catch (OnnxRuntimeException) { }
+            try { _ = value.Shape; return false; }
+            catch (ObjectDisposedException) { return true; }
+        }
+
+        Assert.All((bool[])[
+            Released(t => context.Execute(Doubling(), t)),
+            Released(t => context.Execute(failing, t)),
+            Released(t => context.Compile(Doubling()).Execute(t)),
+            Released(t => context.Compile(failing).Execute(t))], Assert.True);
     }
 
     [Fact]
@@ -573,95 +1156,117 @@ public class ComputeContextLifetimeCoverageTests
         using var context = new ComputeContext();
         var compiled = context.Compile(graph);
 
-        var fed = Wide32().Donate();
+        var fed = Wide32();
         Assert.Throws<OperationCanceledException>(() => compiled.Run(
             [NamedModelParam.FromIData("a", ModelParamType.InputParam, fed)], settings));
         Assert.Equal(expected, Floats(compiled.Execute(fed)[0].ToTensorData()));
 
         using var stopped = new ComputeContext { RunSettings = settings };
-        var oneShot = Wide32().Donate();
+        var oneShot = Wide32();
         Assert.Throws<OperationCanceledException>(() => stopped.Run(
-            graph, new DonatedTensorModelParam("a", ModelParamType.InputParam, oneShot)));
+            graph, new TensorDataModelParam("a", ModelParamType.InputParam, oneShot)));
         Assert.Equal(expected, Floats(context.Run(
-            graph, new DonatedTensorModelParam("a", ModelParamType.InputParam, oneShot))[0].ToTensorData()));
+            graph, new TensorDataModelParam("a", ModelParamType.InputParam, oneShot))[0].ToTensorData()));
+        Assert.True(oneShot.IsDisposed);
     }
 
     [Fact]
-    public void TestAFeedNothingKnowsHowToLockIsRefusedAndSoIsAnInputThatWasNotLocked()
-    {
-        Assert.Throws<InvalidOperationException>(() => ComputeContext.LeaseFeed(new UnlockableParam()));
-        Assert.Throws<InvalidOperationException>(() => ComputeContext.RefuseUnleasedFeed(1, 2));
-        ComputeContext.RefuseUnleasedFeed(2, 2);
-    }
-
-    [Fact]
-    public async Task TestAnAllocationThatHoldsNothingIsNeverDeadAndNeverDeleted()
-    {
-        Assert.False(TensorStorage.None.TryDelete());
-        Assert.False(await TensorStorage.None.DeleteAsync(TimeSpan.Zero, default));
-        Assert.True(TensorStorage.None.IsLive);
-    }
-
-    [Fact]
-    public void TestFeedingADonationTwiceIsRefusedInTheTensorsOwnWords()
+    public void TestAFeedNothingKnowsHowToHoldIsRefusedAndAStructIsToldToFeedItsFields()
     {
         using var context = new ComputeContext();
-        var (graph, _) = Chain();
+        using var feeds = new RunFeeds(context, DefaultBackend.Instance, new RunIdentity(() => "a run"), budget: null);
+        TensorStructFieldDef[] fields = [new TensorStructFieldDef("x", DataStructure.Tensor, 1, DType.Float32)];
+        var whole = new TensorStructModelParam("s", ModelParamType.InputParam, new TensorDataStruct(
+            new TensorStructDef(fields, "S"), new Dictionary<string, IData> { { "x", Sample() } }));
+
+        Assert.Throws<InvalidOperationException>(() => feeds.Prepare([new UnlockableParam()]));
+        Assert.Contains("StructData", Assert.Throws<InvalidTensorOperationException>(() => feeds.Prepare([whole])).Message);
+    }
+
+    [Fact]
+    public void TestAConsumedTensorSaysWhichRunTookItAndToPassItSharedAndARunFedItAgainTakesNothing()
+    {
+        using var context = new ComputeContext();
+        var (graph, a, b, _) = Model();
         var compiled = context.Compile(graph);
-        var fed = Wide32();
-        var donation = fed.Donate();
-        compiled.Execute(donation);
+        compiled.Execute(a, b.TryConsume());
 
-        var refused = Assert.Throws<ObjectDisposedException>(() => compiled.Execute(donation));
+        var bystander = Sample();
+        Assert.Throws<ObjectDisposedException>(() => compiled.Execute(bystander, a));
+        Assert.Throws<ObjectDisposedException>(() => context.Execute(graph, bystander, b));
+        Assert.False(bystander.IsDisposed);
 
-        Assert.Contains(fed.ToString(), refused.Message);
-        Assert.DoesNotContain(nameof(TensorStorage), refused.Message);
+        var bare = Assert.Throws<ObjectDisposedException>(() => compiled.Execute(a, Sample())).Message;
+        Assert.Contains(a.ToString(), bare);
+        Assert.Contains("consumed by a run of the graph (a, b) -> (", bare);
+        Assert.Contains($"on the compute context over {context.Backend}", bare);
+        Assert.Contains("which it fed as input 'a'", bare);
+        Assert.Contains("pass it there as .Shared()", bare);
+        var tried = Assert.Throws<ObjectDisposedException>(() => Floats(b)).Message;
+        Assert.Contains("which it fed as input 'b'", tried);
+        Assert.Contains("passed as .TryConsume()", tried);
+        Assert.Contains("pass it there as .Shared()", tried);
+        Assert.Contains("or pass the struct, sequence or checkpoint that held it that way", tried);
+        Assert.DoesNotContain("HostTensorData", tried);
     }
 
-    /// <summary>A parameter of a kind no lock knows about, which is what <c>LeaseFeed</c>'s
-    /// refusal is for.</summary>
-    private sealed class UnlockableParam : NamedModelParam
-    {
-        public override IShorokooTensorValue ToTensorValue() => throw new NotSupportedException();
-        public override TensorData ToTensorData() => throw new NotSupportedException();
-        public override TensorData<T> ToTensorData<T>() => throw new NotSupportedException();
-        public override TensorDataSequence ToTensorDataSequence() => throw new NotSupportedException();
-        public override TensorDataSequence<T> ToTensorDataSequence<T>() => throw new NotSupportedException();
-    }
-
-    // A context lists the tensors attached to it, so a handle the caller has let go of must come
-    // off. Disposal used to leave it on, and the list then answered which tensors had ever been
-    // attached rather than which are -- a graph literal moved into an attribute is disposed by the
-    // move, so describing a graph alone grew it.
     [Fact]
-    public void TestATensorComesOffItsContextsListWhenItIsDisposedOrMovedAway()
+    public void TestEveryAccessToADeadTensorThrowsSayingHowItDiedAndEndingItAgainIsHarmless()
+    {
+        using var context = new ComputeContext();
+        TensorData Deleted() { var t = Sample(); t.Delete(); return t; }
+        TensorData Moved() { var t = Sample(); _ = t.MoveToAttribute(); return t; }
+        TensorData Consumed() { var t = Sample(); context.Execute(Doubling(), t); return t; }
+        Func<TensorData, object>[] accesses =
+        [
+            t => t.CopyRawMemory(), t => t.Data, t => t.IsHostResident, t => t.ToTensorValue(),
+            t => t.To(context), t => t.CopyTo(context), t => t.ToHost(), t => t.Shared(),
+            t => t.TryConsume(), t => t.MoveToAttribute(), t => context.Lock(t),
+        ];
+
+        foreach (var (dead, cause) in (IEnumerable<(TensorData, string)>)[
+            (Deleted(), "deleted"), (Moved(), "MoveToAttribute()"), (Consumed(), ".Shared()")])
+        {
+            Assert.True(dead.IsDisposed);
+            Assert.All(accesses, access => Assert.Contains(cause,
+                Assert.Throws<ObjectDisposedException>(() => access(dead)).Message));
+            dead.Dispose();
+            dead.Delete();
+            Assert.True(dead.TryDelete());
+            Assert.Equal(new Shape(4L), dead.Shape);
+            Assert.Equal(DType.Float32, dead.DType);
+        }
+    }
+
+    [Fact]
+    public void TestATensorComesOffItsContextsListWhenItDies()
     {
         using var context = new ComputeContext();
 
-        var held = context.AllocateUninitialized<float32>((long[])[2L]);
-        Assert.Contains(held, context.Tensors);
+        var deleted = context.AllocateUninitialized<float32>((long[])[2L]);
+        var moved = Sample().To(context);
+        Assert.Contains(deleted, context.Tensors);
+        Assert.Contains(moved, context.Tensors);
 
-        var spent = (TensorData<float32>)TensorData([2L], 1f, 2f);
-        Assert.Contains(spent, ComputeContext.Host.Tensors);
-        _ = spent.MoveToAttribute();
-        Assert.DoesNotContain(spent, ComputeContext.Host.Tensors);
+        deleted.Dispose();
+        _ = moved.MoveToAttribute();
 
-        held.Dispose();
-        Assert.DoesNotContain(held, context.Tensors);
+        Assert.DoesNotContain(deleted, context.Tensors);
+        Assert.DoesNotContain(moved, context.Tensors);
     }
 
     [Fact]
     public void TestAnAllocatedTensorIsFilledInPlaceAndFeedsAsACopiedOneDoes()
     {
         using var context = new ComputeContext();
-        var a = InputVector<float32>("a");
-        var graph = new InternalComputationGraph([a], [a + a]);
+        var graph = Doubling();
         float[] values = [1f, 2f, 3f, 4f];
 
         var allocated = context.AllocateUninitialized<float32>((long[])[4L]);
         values.CopyTo(allocated.AccessModifiableMemory<float>());
 
-        Assert.Same(context, allocated.Context);
+        Assert.Contains(allocated, context.Tensors);
+        Assert.Same(DefaultBackend.Instance, allocated.AllocatingBackend);
         Assert.Equal(values, Floats(allocated));
         Assert.Equal(Floats(Sample().CopyTo(context)), Floats(allocated));
         Assert.Equal(
@@ -673,39 +1278,41 @@ public class ComputeContextLifetimeCoverageTests
         Assert.Equal(new Shape(pair), context.AllocateUninitialized(pair, DType.Float32).Shape);
         Assert.Equal(24, ComputeContext.Host.AllocateUninitialized(pair, DType.Float32).CopyRawMemory().Length);
         Assert.Throws<NotSupportedException>(() => context.AllocateUninitialized(pair, DType.Utf8));
+        Assert.Throws<NotSupportedException>(() => context.AllocateUninitialized(pair, DType.Int4));
+        Assert.Throws<NotSupportedException>(() => ComputeContext.Host.AllocateUninitialized(pair, DType.UInt4));
         Assert.Throws<ArgumentNullException>(() => context.AllocateUninitialized(pair, null!));
+
+        using var budgeted = new ComputeContext(new StubBackend(ComputeDevice.Cuda, 0))
+        {
+            DeviceMemory = new DeviceMemorySettings { LimitBytes = 64 },
+        };
+        foreach (var complex in (DType[])[DType.Complex64, DType.Complex128])
+            foreach (var where in (ComputeContext[])[context, ComputeContext.Host, budgeted])
+                Assert.Contains("complex", Assert.Throws<NotSupportedException>(() => where.AllocateUninitialized(pair, complex)).Message);
     }
 
-    [Fact]
-    public void TestADonatedFeedFreesItsBytesWhileAKeptOneStillReads()
-    {
-        using var context = new ComputeContext();
-        var a = InputVector<float32>("a");
-        var graph = new InternalComputationGraph([a], [a + a]);
-
-        var donated = (HostTensorData<float32>)Sample();
-        context.Run(graph, new DonatedTensorModelParam("a", ModelParamType.InputParam, donated.Donate()));
-        Assert.True(donated.MaterializationsAreEmpty);
-
-        var shared = (HostTensorData<float32>)Sample();
-        using var reader = shared.GiveAccessTo(context);
-        context.Execute(graph, shared.Donate());
-        Assert.False(shared.MaterializationsAreEmpty);
-        Assert.Equal([1f, 2f, 3f, 4f], Floats(reader));
-    }
-
-    /// <summary>Holds a run open where the value is built: inside the window a disposal has to be
-    /// refused in, and leased on <c>Host</c> rather than on the running context.</summary>
+    /// <summary>Holds a run open once it has held its feeds and before it builds their values:
+    /// inside the window a disposal of its context has to be refused in.</summary>
     private sealed class HeldFeed(
         TensorData data, ManualResetEventSlim reached, ManualResetEventSlim release)
         : TensorDataModelParam("a", ModelParamType.InputParam, data)
     {
-        internal override IShorokooTensorValue ToTensorValue(IShorokooBackend backend)
+        internal override void Held()
         {
             reached.Set();
             release.Wait(TimeSpan.FromSeconds(30));
-            return base.ToTensorValue(backend);
         }
+    }
+
+    /// <summary>A parameter of a kind no run knows how to hold, which is what
+    /// <c>RunFeeds.Prepare</c>'s refusal is for.</summary>
+    private sealed class UnlockableParam : NamedModelParam
+    {
+        public override IShorokooTensorValue ToTensorValue() => throw new NotSupportedException();
+        public override TensorData ToTensorData() => throw new NotSupportedException();
+        public override TensorData<T> ToTensorData<T>() => throw new NotSupportedException();
+        public override TensorDataSequence ToTensorDataSequence() => throw new NotSupportedException();
+        public override TensorDataSequence<T> ToTensorDataSequence<T>() => throw new NotSupportedException();
     }
 
     internal sealed class StubBackend(ComputeDevice device, int? cudaDeviceId)
@@ -809,6 +1416,41 @@ public class ProcessWideBackendCoverageTests
             DefaultBackend.Instance = liveDefault;
             DefaultBackend.ForgetRemembered();
             if (liveRemembered is not null) DefaultBackend.Remember(liveRemembered);
+        }
+    }
+}
+
+/// <summary>
+/// Where the process makes its temporary files, which every test making one reads, so these run
+/// alone.
+/// </summary>
+[Trait("Domain", "Core")]
+[Trait("Purpose", "Coverage")]
+[Collection(ProcessWideTempFolder.Name)]
+public class ProcessWideTempFolderCoverageTests
+{
+    [Fact]
+    public void TestASessionWithNowhereToWriteItsGraphOutIsBuiltAliasingNothing()
+    {
+        var graph = ComputeContextLifetimeCoverageTests.GraphOf("a:float[4] b:float[4]", "O:float[4]",
+            ComputeContextLifetimeCoverageTests.Op("Sub", "a b", "O"));
+        using (var writable = ComputeContextLifetimeCoverageTests.Aliasing(DefaultBackend.Instance, graph))
+            Assert.Single(writable.BindableAliases);
+
+        var blocker = Path.GetTempFileName();
+        var variable = OperatingSystem.IsWindows() ? "TMP" : "TMPDIR";
+        var was = Environment.GetEnvironmentVariable(variable);
+        try
+        {
+            // A file where a folder would have to be, so nothing can be made in the temp folder.
+            Environment.SetEnvironmentVariable(variable, Path.Combine(blocker, "temp"));
+            using var session = ComputeContextLifetimeCoverageTests.Aliasing(DefaultBackend.Instance, graph);
+            Assert.Empty(session.BindableAliases);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(variable, was);
+            File.Delete(blocker);
         }
     }
 }

@@ -64,33 +64,6 @@ namespace Shorokoo
 
     }
 
-    /// <summary>
-    /// A feed the caller has given away rather than lent — <see cref="TensorData.Donate"/>'s, as a
-    /// model parameter. It feeds exactly as <see cref="TensorDataModelParam"/> does, is locked by
-    /// the run exactly as one is, and differs in one step afterwards: the run drops the donated
-    /// handle once it has built the value, leaving its own lock as the only thing naming the
-    /// allocation (Shorokoo/Shorokoo#359).
-    /// </summary>
-    public sealed class DonatedTensorModelParam : TensorDataModelParam
-    {
-        private readonly TensorDonation _donation;
-
-        /// <summary>Wraps <paramref name="donation"/>'s handle as the parameter named
-        /// <paramref name="name"/>.</summary>
-        /// <exception cref="ArgumentNullException"><paramref name="donation"/> is null.</exception>
-        public DonatedTensorModelParam(string name, ModelParamType paramType, TensorDonation donation)
-            : base(name, paramType, (donation ?? throw new ArgumentNullException(nameof(donation))).Tensor)
-        {
-            _donation = donation;
-        }
-
-        /// <inheritdoc/>
-        // Through the donation rather than past it. The two say the same thing today -- taking a
-        // donation back is letting go of the handle it carries -- and a parameter that took a
-        // donation and then let go of something else would stop being one the moment they differed.
-        internal override void DropDonatedHandle() => _donation.Dispose();
-    }
-
     public class TensorDataSequenceModelParam : NamedModelParam
     {
         private TensorDataSequence data;
@@ -244,9 +217,77 @@ namespace Shorokoo
     }
 
 
+    /// <summary>
+    /// A named input or output of a run: the data, and the name of the graph input or output it is.
+    ///
+    /// <para>As a run's input it follows the rule every feed does: the data is <b>consumed</b> by
+    /// the run — a tensor fed as it is is given to it — unless the parameter says otherwise
+    /// (<see cref="FeedMode"/>): passed <see cref="Shared"/> or <see cref="TryConsume"/>, as a
+    /// tensor would be, or made from a <see cref="SharedInput"/>, <see cref="FromIData"/>'s form
+    /// for <c>t.Shared()</c> and <c>t.TryConsume()</c>.</para>
+    /// </summary>
     public abstract class NamedModelParam
     {
         public string ParamName { get; protected set; } = null!;
+
+        /// <summary>
+        /// What a run fed this parameter does with its data: null — the data was given as it is, and
+        /// the run consumes it — or the <see cref="SharedInputMode"/> of the
+        /// <see cref="SharedInput"/> it was made from. Named as a training checkpoint's
+        /// <see cref="TrainingCheckpoint.FeedMode"/> is, which means the same for the state it feeds.
+        /// </summary>
+        public SharedInputMode? FeedMode { get; internal set; }
+
+        /// <summary>
+        /// This parameter, its data to be <b>read</b> by the run it is fed to rather than consumed:
+        /// what <c>t.Shared()</c> is for a tensor, and what a run's message about a tensor it
+        /// consumed asks for at the call that fed it. The data is alive and unchanged when the run
+        /// returns.
+        ///
+        /// <para>A copy of this parameter over the same data, with <see cref="FeedMode"/>
+        /// <see cref="SharedInputMode.Shared"/>. This one is unchanged, and fed as it is still gives
+        /// its data to the run. Nothing is checked here: a run refuses a dead feed before it takes
+        /// anything.</para>
+        /// </summary>
+        public NamedModelParam Shared() => FedAs(SharedInputMode.Shared);
+
+        /// <summary>
+        /// This parameter, its data to be consumed by the run it is fed to where nothing else is
+        /// reading it when that run starts, and read otherwise — decided when the run starts; see
+        /// <see cref="TensorData.TryConsume"/>. A copy over the same data, as <see cref="Shared"/>
+        /// returns.
+        /// </summary>
+        public NamedModelParam TryConsume() => FedAs(SharedInputMode.TryConsume);
+
+        /// <summary>A shallow copy with <see cref="FeedMode"/> set. Every parameter type holds its
+        /// data by reference and nothing it could not share, so the copy feeds the very same
+        /// data.</summary>
+        private NamedModelParam FedAs(SharedInputMode mode)
+        {
+            var copy = (NamedModelParam)MemberwiseClone();
+            copy.FeedMode = mode;
+            return copy;
+        }
+
+        /// <summary>
+        /// What a message about this input calls it, where the caller that built it knew better
+        /// than the graph's own name for it — "the checkpoint's trainable parameter 'w'" for a
+        /// training step's input, whose graph name is an internal identifier. Null for "input
+        /// '<see cref="ParamName"/>'".
+        /// </summary>
+        internal string? Label { get; set; }
+
+        /// <summary>This input as a message names it.</summary>
+        internal string Described => Label ?? $"input '{ParamName}'";
+
+        /// <summary>
+        /// Called by a run once it holds this parameter's data — a reader lock taken, or the data
+        /// consumed — and before it builds the value it is fed. Nothing to do here; the seam through
+        /// which a test holds a run open at exactly that point.
+        /// </summary>
+        internal virtual void Held()
+        {
+        }
 
         public ModelParamType ParamType { get; protected set; }
 
@@ -278,20 +319,6 @@ namespace Shorokoo
         internal virtual IShorokooTensorValue ToTensorValue(IShorokooBackend backend)
             => ToTensorValue();
 
-        /// <summary>
-        /// Gives up the handle a donated feed carries, once the run has built the value from it.
-        /// Does nothing for every other kind of parameter, which the caller keeps.
-        ///
-        /// <para>Called after the value and after the lock, never before either: the value is
-        /// built through this handle, and the lock is what stops the drop from freeing the bytes
-        /// the run is about to read. What is left holding them is the run's own lock, so they go
-        /// back to the allocator when it is released rather than when the caller gets round to
-        /// it.</para>
-        /// </summary>
-        internal virtual void DropDonatedHandle()
-        {
-        }
-
         public abstract TensorData ToTensorData();
 
         public abstract TensorData<T> ToTensorData<T>() where T : IVarType;
@@ -299,12 +326,22 @@ namespace Shorokoo
         public abstract TensorDataSequence ToTensorDataSequence();
         public abstract TensorDataSequence<T> ToTensorDataSequence<T>() where T : IVarType;
 
+        /// <summary>
+        /// The parameter named <paramref name="name"/> over <paramref name="data"/>: a tensor, a
+        /// sequence, an optional or a struct — or a <see cref="SharedInput"/> over one, which the
+        /// parameter records so that a run reads it, or consumes it only when nothing else is
+        /// reading it, rather than consuming it outright.
+        /// </summary>
         public static NamedModelParam FromIData(string name, ModelParamType paramType, IData data)
         {
+            if (data is SharedInput shared)
+            {
+                var param = FromIData(name, paramType, shared.Value);
+                param.FeedMode = shared.Mode;
+                return param;
+            }
             if (data is TensorData td)
                 return new TensorDataModelParam(name, paramType, td);
-            else if (data is TensorDonation donation)
-                return new DonatedTensorModelParam(name, paramType, donation);
             else if (data is OptionalTensorData otd)
                 return new OptionalTensorDataModelParam(name, paramType, otd);
             else if (data is TensorDataSequence tds)

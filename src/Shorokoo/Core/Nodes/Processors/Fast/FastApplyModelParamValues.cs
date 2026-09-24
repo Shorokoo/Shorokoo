@@ -34,11 +34,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         public static InternalComputationGraph Process(
             InternalComputationGraph graph,
             IReadOnlyDictionary<ModelId, TensorData> paramValues)
-            // Detached first: the values belong to the caller, who goes on holding them -- a training
-            // rig keeps the very same tensors as its initial checkpoint -- so the graph takes a
+            // Copied first: the values belong to the caller, who goes on holding them -- a training
+            // rig keeps them, and copies every initial checkpoint from them -- so the graph takes a
             // literal of its own rather than spending theirs. Per node, so a value whose parameter is
             // not in this graph is never copied.
-            => Process(graph, paramValues.ContainsKey, id => paramValues[id].Detach().MoveToAttribute());
+            => Process(graph, paramValues.ContainsKey,
+                id => paramValues[id].CopyTo(Shorokoo.Runtime.ComputeContext.Host).MoveToAttribute());
 
         /// <summary>
         /// The same against parameter <b>descriptions</b> rather than values: what a build binds when
@@ -82,7 +83,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 // for a param actually absent from the supplied set (normally just the counter).
                 var paramValue = !isSupplied(modelId)
                                  && FastInjectRngDrawCounter.IsExecutionCounter(node.IdentifierTemplate)
-                    ? FastInjectRngDrawCounter.ExecutionCounterInitialValue().Detach().MoveToAttribute()
+                    ? FastInjectRngDrawCounter.ExecutionCounterInitialValue().MoveToAttribute()
                     : attributeFor(modelId);
                 var isTrainable = node.Attributes.GetBoolVal(OnnxOpAttributeNames.ShrkAttrIsTrainable) ?? false;
 

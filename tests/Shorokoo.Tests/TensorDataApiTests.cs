@@ -321,11 +321,11 @@ public class TensorDataApiCoverageTests
         Assert.Same(value, literal.ToTensorValue(
             Shorokoo.Core.Backends.DefaultBackend.Instance));
 
-        // A transfer rebuilds a sequence as a plain list of the tensors it moved, so there is no
+        // A copy rebuilds a sequence as a plain list of the tensors it copied, so there is no
         // runtime sequence value left in it either; asking builds one over its elements.
         IData moved = TensorDataSequence
             .Create([TensorData([2L], (float[])[1f, 2f]), TensorData([2L], (float[])[3f, 4f])], DType.Float32)
-            .TransferTo(null);
+            .CopyTo(ComputeContext.Host);
         Assert.False(moved is IOnnxData);
 
         var sequence = moved.ToTensorValue();
@@ -452,6 +452,27 @@ public class TensorDataApiCoverageTests
         Assert.Equal(42f, values[0]);
     }
 
+    [Fact]
+    public void TestAValueWrappedWithoutItsBackendIsCopiedIntoAContextButKeptByTheHostAndOneWrappedWithItIsNot()
+    {
+        using var context = new ComputeContext();
+        var backend = Shorokoo.Core.Backends.DefaultBackend.Instance;
+        var unnamed = TensorData.Create(new Shape(2L), DType.Float32, backend.CreateTensor<float>([1f, 2f], [2L]));
+        var named = TensorData.Create(new Shape(2L), DType.Float32, backend.CreateTensor<float>([1f, 2f], [2L]), backend);
+
+        Assert.Equal("an unrecorded backend", unnamed.AllocatingBackend.Description.Name);
+        Assert.Equal(MemorySpace.Host, unnamed.Space);
+        Assert.NotSame(unnamed, unnamed.To(context));
+        Assert.Same(unnamed, unnamed.ToHost());
+        Assert.Same(backend, named.AllocatingBackend);
+        Assert.Same(named, named.To(context));
+
+        var resident = new OnnxTensorData<float32>(new Shape(2L), new SpyTensorValue { IsHostAccessible = false });
+        Assert.Equal(MemoryKind.Unknown, resident.Space.Kind);
+        Assert.Contains("was not recorded",
+            Assert.Throws<InvalidOperationException>(() => resident.ToHost()).Message);
+    }
+
     /// <summary>A tensor whose storage the provider kept refuses every read, naming the call that
     /// brings it home rather than dereferencing a device address as a host one. Reachable on a
     /// host-only machine only through a value that says it is not host-accessible.</summary>
@@ -497,6 +518,23 @@ public class TensorDataApiCoverageTests
         public Shorokoo.Core.Backends.ShorokooTensorElementType GetSequenceElementType() => throw new NotSupportedException();
     }
     [Fact]
+    public void TestATensorBuiltOverAnArrayHoldsItsOwnCopyOfIt()
+    {
+        byte[] bytes = [1, 0, 0, 0];
+        string[] words = ["a", "b"];
+        var numbers = new HostTensorData<int32>(new Shape(1L), bytes);
+        var built = new HostStringTensorData(new Shape(2L), words);
+        var literal = (HostStringTensorData)TensorData([2L], words);
+
+        bytes[0] = 9;
+        words[0] = "z";
+
+        Assert.Equal(1, numbers.ValueAt<int>(0));
+        Assert.Equal(["a", "b"], built.Strings);
+        Assert.Equal(["a", "b"], literal.Strings);
+    }
+
+    [Fact]
     public void TestStringTensorsTakeExactlyTheirShapeAndRefuseAShortfall()
     {
         string[] two = ["a", "b"];
@@ -518,27 +556,33 @@ public class TensorDataApiCoverageTests
     }
 
     [Fact]
-    public void TestEvalHandsBackATensorBelongingToNobodyThatAnAttributeWillTake()
+    public void TestEvalHandsBackAHostTensorThatAnAttributeWillTake()
     {
         var value = OnnxEngine.Eval(Scalar(2f) + Scalar(3f));
 
-        Assert.Same(ComputeContext.Host, value.Context);
+        Assert.True(value.IsHostResident);
         Assert.Equal(5f, OnnxEngine.Eval(OnnxOp.Constant(value.MoveToAttribute())).As<float32>().AccessMemory()[0]);
     }
 
     [Fact]
-    public void TestDetachIsACopyInHostMemoryThatOutlivesTheContextItCameFrom()
+    public void TestToHostIsTheTensorItselfWhereTheHostCanReadItAndOutlivesTheContextItCameFrom()
     {
         var context = new ComputeContext();
         var onContext = TensorData([2L], (float[])[1f, 2f]).CopyTo(context);
+        var output = context.Execute(Doubling(), onContext.Shared())[0].ToTensorData();
 
-        var detached = onContext.Detach();
-
-        Assert.Same(ComputeContext.Host, detached.Context);
-        Assert.NotSame(onContext, detached);
+        Assert.Same(onContext, onContext.ToHost());
+        Assert.Same(output, output.ToHost());
 
         context.Dispose();
-        Assert.Equal([1f, 2f], detached.As<float32>().AccessMemory<float>().ToArray());
+        Assert.Equal([1f, 2f], onContext.ToHost().As<float32>().AccessMemory<float>().ToArray());
+        Assert.Equal([2f, 4f], output.ToHost().As<float32>().AccessMemory<float>().ToArray());
+    }
+
+    private static InternalComputationGraph Doubling()
+    {
+        var a = InputVector<float32>("a");
+        return new InternalComputationGraph([a], [a + a]);
     }
 
     [Fact]
@@ -549,23 +593,9 @@ public class TensorDataApiCoverageTests
         var t = TensorData([2L], (float[])[1f, 2f]);
         var context = new ComputeContext();
 
-        Assert.Equal([2f, 4f], Floats(context.Execute(graph, t)[0]));
+        Assert.Equal([2f, 4f], Floats(context.Execute(graph, t.Shared())[0]));
         t.As<float32>().AccessModifiableMemory<float>()[0] = 99f;
-        Assert.Equal([198f, 4f], Floats(context.Execute(graph, t)[0]));
-    }
-
-    [Fact]
-    public void TestWritingToALiteralIsSeenByARunFedTheReaderItWasGivenAccessThrough()
-    {
-        var a = InputVector<float32>("a");
-        var graph = new InternalComputationGraph([a], [a + a]);
-        var t = TensorData([2L], (float[])[1f, 2f]);
-        using var context = new ComputeContext();
-        var reader = t.GiveAccessTo(context);
-
-        Assert.Equal([2f, 4f], Floats(context.Execute(graph, reader)[0]));
-        t.As<float32>().AccessModifiableMemory<float>()[0] = 99f;
-        Assert.Equal([198f, 4f], Floats(context.Execute(graph, reader)[0]));
+        Assert.Equal([198f, 4f], Floats(context.Execute(graph, t.Shared())[0]));
     }
 
     [Fact]
@@ -634,7 +664,7 @@ public class TensorDataApiCoverageTests
             Assert.Equal(dtype, back.DType);
             Assert.Equal((long[])[2L, 2L], back.Shape.Dims);
             Assert.Equal(bytes, back.CopyRawMemory());
-            Assert.Same(ComputeContext.Host, back.Context);
+            Assert.Same(HostBackend.Instance, back.AllocatingBackend);
         }
     }
 
@@ -681,7 +711,7 @@ public class TensorDataApiCoverageTests
 
         var back = attribute.CopyToTensorData();
         Assert.Equal((string[])["a", "b"], Assert.IsType<HostStringTensorData>(back).Strings);
-        Assert.Same(ComputeContext.Host, back.Context);
+        Assert.Same(HostBackend.Instance, back.AllocatingBackend);
     }
 
     [Fact]
@@ -745,22 +775,6 @@ public class TensorDataApiCoverageTests
         Assert.Equal([7f, 7f], OnnxEngine.Eval(TensorFill((Vector<int64>)[Scalar(2L)], fill))
             .As<float32>().CopyMemory<float>());
         Assert.False(fill.IsDisposed);
-    }
-
-    // An attribute is immutable, and the move takes the tensor's own array -- so it may only take
-    // it when nothing else can still write it. GiveAccessTo hands out a second handle over the
-    // same bytes, and surrendering this handle's name says nothing about that one's.
-    [Fact]
-    public void TestAMovedAttributeDoesNotShareBytesWithAHandleThatSurvivesTheMove()
-    {
-        var owner = (TensorData<float32>)TensorData([2L], 1f, 2f);
-        var second = (TensorData<float32>)owner.GiveAccessTo(ComputeContext.Host);
-
-        var attribute = owner.MoveToAttribute();
-        second.AccessModifiableMemory<float>()[0] = 99f;
-
-        Assert.Equal([1f, 2f], attribute.Elements<float>().ToArray());
-        Assert.Equal([99f, 2f], second.AccessMemory().ToArray());
     }
 
     private static float[] Floats(NamedModelParam param)

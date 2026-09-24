@@ -58,7 +58,7 @@ public class TerminateLatencyProbeTests
         for (int i = 0; i <= samples; i++)
         {
             var started = Stopwatch.GetTimestamp();
-            chain.Compiled.Execute([chain.X, chain.W]);
+            chain.Compiled.Execute([chain.X.Shared(), chain.W.Shared()]);
             var took = Stopwatch.GetElapsedTime(started);
             if (i > 0 && took < best) best = took;
         }
@@ -78,7 +78,7 @@ public class TerminateLatencyProbeTests
         var started = Stopwatch.GetTimestamp();
         var run = Task.Run(() =>
         {
-            try { chain.Compiled.Execute([chain.X, chain.W], settings); }
+            try { chain.Compiled.Execute([chain.X.Shared(), chain.W.Shared()], settings); }
             catch (OperationCanceledException) { ending = "stopped"; }
             catch (Exception e) { ending = e.GetType().Name; }
             finished.Set();

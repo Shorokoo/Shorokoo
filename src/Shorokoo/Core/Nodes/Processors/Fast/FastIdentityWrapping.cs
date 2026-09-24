@@ -16,7 +16,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// slot of every IF_CLOSE and LOOP_CLOSE node, for
     /// <see cref="FastAddIdentityForOuterScopeValues"/> and <see cref="FastPrepForOnnx"/>;
     /// <see cref="WrapAliasedOutputs"/> wraps a graph output that names something no node
-    /// of its own produces, for function emission in
+    /// of its own produces, for function emission and for a main graph built for a session in
     /// <see cref="Shorokoo.Core.Factory.FastOnnxModelBuilder"/>.
     /// </summary>
     internal static class FastIdentityWrapping
@@ -91,8 +91,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// input names has no node producing the output, and ORT rejects the model when it
         /// builds the function's schema. An output repeating an earlier one is wrapped by the
         /// same rule: a multi-output module function returning one value twice.
-        /// Only function bodies need this — ORT accepts a main-graph output that names a graph
-        /// input, and it is only the function-schema builder that rejects one.
+        /// ORT accepts such an output in a main graph, but hands it back as the very value it was
+        /// fed, or returned already, so a main graph built for a session here is wrapped the same
+        /// way, to give each output memory of its own.
         /// </summary>
         public static void WrapAliasedOutputs(InternalComputationGraph graph)
         {

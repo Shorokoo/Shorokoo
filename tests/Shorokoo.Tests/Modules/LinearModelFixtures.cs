@@ -65,8 +65,8 @@ public partial class StepCountingSgdOptimizer
 /// <summary>
 /// Optimizer-owned state initializer that fills the parameter's shape with a supplied scalar value
 /// — deliberately <b>reads a hyperparameter</b> (see <see cref="InitFromHyperOptimizer"/>) so its
-/// state-init graph consumes a hyper input. Used to exercise the §2.5 value route (state init sees
-/// the hyper's real value at the initial counters, not 0f) and the D5 fail-loud path.
+/// state-init graph consumes a hyper input. Used to exercise the value route (state init sees
+/// the hyper's real value at the initial counters, not 0f) and the fail-loud path.
 /// </summary>
 [StateInitializer(Ownership = StateOwnership.OptimizerOwned)]
 public static partial class InitToScalarFill
@@ -84,7 +84,7 @@ public static partial class InitToScalarFill
 /// <see cref="InitToScalarFill"/>), then carried unchanged. Because its state initializer reads the
 /// LR hyper, the fresh optimizer state equals the LR at the initial counters — so a test can read
 /// that state back and prove the value route feeds the real scheduled value (not the old hardcoded
-/// 0f), and that a runtime LR triggers the D5 fail-loud unless supplied explicitly.
+/// 0f), and that a runtime LR triggers the fail-loud unless supplied explicitly.
 /// </summary>
 [Module]
 public partial class InitFromHyperOptimizer
@@ -100,7 +100,7 @@ public partial class InitFromHyperOptimizer
     }
 }
 
-/// <summary>Impure scheduler module — carries a trainable parameter; rig build must reject it (D4).</summary>
+/// <summary>Impure scheduler module — carries a trainable parameter; rig build must reject it.</summary>
 [Module]
 public partial class ParamScheduler
 {
@@ -112,7 +112,7 @@ public partial class ParamScheduler
     }
 }
 
-/// <summary>Impure scheduler module — carries module state (a StateUpdate); rig build must reject it (D4).</summary>
+/// <summary>Impure scheduler module — carries module state (a StateUpdate); rig build must reject it.</summary>
 [Module]
 public partial class StateScheduler
 {
@@ -126,7 +126,7 @@ public partial class StateScheduler
 }
 
 /// <summary>
-/// Multi-counter scheduler module (D1): consumes both the <c>step</c> and <c>epoch</c> reserved
+/// Multi-counter scheduler module: consumes both the <c>step</c> and <c>epoch</c> reserved
 /// counters, so a test can prove the rig feeds each named counter from the checkpoint. Value is
 /// <c>0.5 − 0.01·step − 0.1·epoch</c> — pure arithmetic over both counters.
 /// </summary>
@@ -174,7 +174,7 @@ public static partial class InitToIntScalarFill
 
 /// <summary>
 /// SGD whose optimizer state is initialized from an <c>int32</c> hyperparameter — the non-float
-/// counterpart of <see cref="InitFromHyperOptimizer"/>, proving the §2.5 value route carries a
+/// counterpart of <see cref="InitFromHyperOptimizer"/>, proving the value route carries a
 /// declared dtype other than <c>float32</c> into state init.
 /// </summary>
 [Module]
@@ -241,7 +241,7 @@ public static partial class InitToVectorSum
 
 /// <summary>
 /// SGD whose optimizer state is initialized from the sum of a <b>vector</b> hyperparameter, proving
-/// the §2.5 value route carries a non-scalar hyperparameter into state init.
+/// the value route carries a non-scalar hyperparameter into state init.
 /// </summary>
 [Module]
 public partial class InitFromVectorHyperOptimizer
@@ -257,7 +257,7 @@ public partial class InitFromVectorHyperOptimizer
     }
 }
 
-/// <summary>Impure scheduler module — draws RNG; rig build must reject it (D4).</summary>
+/// <summary>Impure scheduler module — draws RNG; rig build must reject it.</summary>
 [Module]
 public partial class RngScheduler
 {
@@ -1307,6 +1307,29 @@ public partial class TargetGatedLoss
         var gate = targets.Reduce(ReduceKind.Sum, keepDims: false).Scalar() > Scalar(0f);
         return gate.IfElse(meanSq.Scalar(), meanSq.Scalar() * Scalar(2f));
     }
+}
+
+/// <summary>Cross-entropy that flattens its target before reading it as class indices, as a
+/// sequence model's loss flattens <c>[N, T]</c> labels.</summary>
+[Module]
+public partial class FlattenedTargetCrossEntropyLoss
+{
+    public static Scalar<float32> Inline(Tensor<float32> predictions, Tensor<int64> targets)
+    {
+        var (loss, _) = NN.SoftmaxCrossEntropyLoss(predictions, targets.Reshape(Vector(-1L)),
+            weights: null, ignoreIndex: null, reduction: "mean");
+        return loss.Scalar();
+    }
+}
+
+/// <summary>Negative log-likelihood whose caller feeds int32 class indices, cast to the int64 the
+/// operator reads.</summary>
+[Module]
+public partial class Int32TargetNLLLoss
+{
+    public static Scalar<float32> Inline(Tensor<float32> predictions, Tensor<int32> targets)
+        => NN.NegativeLogLikelihoodLoss(predictions, targets.Cast<int64>(),
+            weight: null, ignoreIndex: null, reduction: "mean").Scalar();
 }
 
 /// <summary>

@@ -235,7 +235,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
             if (stage == GraphKind.ConcreteModel && compressed)
             {
                 var input = TensorData([2], 1.0f, 2.0f);
-                var direct = ComputeContext.Default.Execute(graph, input)[0]
+                var direct = ComputeContext.Default.Execute(graph, input.Shared())[0]
                     .ToTensorData().AccessRawMemory().ToArray();
                 var roundtrip = ComputeContext.Default.Execute(reloaded, input)[0]
                     .ToTensorData().AccessRawMemory().ToArray();
@@ -962,7 +962,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
                 var model = module
                     .ToConcreteArchitecture(module.FromOrderedInputs([.. inputs]))
                     .ToConcreteModel(RngConfig.Default);
-                return ComputeContext.Default.Execute(model, inputs)[0]
+                return ComputeContext.Default.Execute(model, [.. inputs.Select(t => t.Shared())])[0]
                     .ToTensorData().AccessRawMemory().ToArray();
             }
 
@@ -984,7 +984,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
     }
 
     private static byte[] ExecuteToBytes(ComputationGraph model, TensorData numOut, TensorData input)
-        => ComputeContext.Default.Execute(model, numOut, input)[0]
+        => ComputeContext.Default.Execute(model, numOut.Shared(), input.Shared())[0]
             .ToTensorData().AccessRawMemory().ToArray();
 
     /// <summary>The model's weight tensors (raw bytes) keyed by parameter identifier, excluding

@@ -565,17 +565,16 @@ internal class ShapeInferenceInterpreter
     /// node's mini-graph as a CONSTANT attribute — so a runtime value on its way back into a
     /// description has to be converted, and the conversion is what this is.
     ///
-    /// <para><see cref="TensorData.Detach"/> first, because a tensor a session produced belongs to
-    /// the context that ran it and the move refuses one that does: the copy lands in managed
-    /// memory the collector reclaims, where moving the runtime value here would tie a native
-    /// allocation to a record nothing ever disposes. Only small tensors are retained at all, so
-    /// the copy is bounded by <see cref="MaxSmallTensorElements"/> elements.</para>
+    /// <para>A copy in the framework's own host memory is what is moved, not the tensor itself:
+    /// the caller goes on holding the tensor, and the copy lands in managed memory the collector
+    /// reclaims. Only small tensors are retained at all, so the copy is bounded by
+    /// <see cref="MaxSmallTensorElements"/> elements.</para>
     /// </summary>
     private static TensorAttribute? Retained(TensorData data)
     {
         try
         {
-            return data.Detach().MoveToAttribute();
+            return data.CopyTo(ComputeContext.Host).MoveToAttribute();
         }
         catch (Exception) when (CatchShapeInferenceErrors())
         {

@@ -233,7 +233,8 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                     $"Attribute '{def.AttributeName}' is a tensor in a graph's description, so it "
                     + $"takes a {nameof(TensorAttribute)}, not a {val.GetType().Name}. A runtime "
                     + "tensor becomes one with MoveToAttribute(), which hands its bytes over and "
-                    + "spends it -- Detach().MoveToAttribute() where the tensor is still needed.",
+                    + "ends the tensor -- CopyTo(ComputeContext.Host).MoveToAttribute() where the "
+                    + "tensor is still needed.",
                     nameof(vals));
             }
         }

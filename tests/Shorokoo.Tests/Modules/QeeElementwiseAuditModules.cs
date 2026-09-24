@@ -3,9 +3,10 @@ using static Shorokoo.Tests.Modules.QeeAuditVerdicts;
 namespace Shorokoo.Tests.Modules
 {
     // ===================================================================
-    //  Self-checking VALUE-audit modules for the Phase 4 QEE-A2 batch
-    //  (elementwise / comparison / logical / bitwise family, ONNX opset
-    //  21). Unlike the A1 shape-audit modules, these compare the audited
+    //  Self-checking VALUE-audit modules for the QEE audit of the
+    //  elementwise / comparison / logical / bitwise family (ONNX opset
+    //  21). Unlike the pooling and convolution shape-audit modules
+    //  (QeePoolConvAuditModules.cs), these compare the audited
     //  ops' computed VALUES against spec-expected constants (within a
     //  small tolerance for float ops) and return a single Scalar<bit>.
     //
@@ -266,7 +267,7 @@ namespace Shorokoo.Tests.Modules
 
     /// <summary>Full reverse Slice (starts=-1, ends=INT_MIN, steps=-1): the spec clamps
     /// a negative-step exclusive `ends` to −1 so the slice runs backward THROUGH index 0
-    /// ([1,2,3] → [3,2,1]). Pinned in AD-B3: the QEE Slice kernel used to clamp the
+    /// ([1,2,3] → [3,2,1]). Pinned because the QEE Slice kernel used to clamp the
     /// (dim-shifted) ends to 0, dropping the first element and mis-shaping the output to
     /// [2]; ORT computed the spec value. Discovered while implementing reverse-direction
     /// recurrent gradients (which now use a Gather-based flip instead).</summary>

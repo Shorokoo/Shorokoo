@@ -4,7 +4,7 @@ using static Shorokoo.Tests.Utils.QeeAudit;
 namespace Shorokoo.Tests;
 
 /// <summary>
-/// Phase 4 QEE-A2 audit batch: elementwise, comparison, logical and bitwise families
+/// QEE audit batch: elementwise, comparison, logical and bitwise families
 /// (ONNX opset 21). Each module in QeeElementwiseAuditModules.cs compares every audited
 /// op's output against spec-expected constants and returns a single Scalar&lt;bit&gt;;
 /// <see cref="QeeAudit.Check{TModule}"/> validates that bit under both real ONNX Runtime

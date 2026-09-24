@@ -168,7 +168,7 @@ public partial class GLUMatchesManual
 }
 
 /// <summary>
-/// Design §7-1 (the core check): the new param-free <c>[Module] GLU</c> (baked
+/// (the core check): the new param-free <c>[Module] GLU</c> (baked
 /// <c>dim = -1</c>) must equal an INDEPENDENT hand-split reference
 /// <c>a · sigmoid(b)</c>, where <c>[a, b]</c> is <c>x</c> split in half along the
 /// LAST axis. This is the sibling of <see cref="GLUMatchesManual"/> but driving
@@ -195,7 +195,7 @@ public partial class GLUModuleMatchesManual
 }
 
 /// <summary>
-/// Design §7-1 (faithfulness): the <c>[Module] GLU.Call(x)</c> forwarder must equal
+/// (faithfulness): the <c>[Module] GLU.Call(x)</c> forwarder must equal
 /// the underlying static helper <c>GatedLinear.GLU(x, -1)</c> BIT-FOR-BIT (the module
 /// is a thin delegate that bakes <c>dim = -1</c>, so there is no rounding difference).
 /// </summary>
@@ -213,7 +213,7 @@ public partial class GLUModuleEqualsHelper
 }
 
 /// <summary>
-/// Design §7-2 (output shape): the <c>[Module] GLU</c> halves the LAST axis. For an
+/// (output shape): the <c>[Module] GLU</c> halves the LAST axis. For an
 /// <c>[N, …, 2H]</c> input the output is <c>[N, …, H]</c> (the leading dims are
 /// preserved, the last is divided by two). Asserted rank-generically off
 /// <see cref="Tensor{T}.ShapeTensor"/>: every leading dim is unchanged and the last
@@ -252,11 +252,11 @@ public partial class GLUModuleHalvesLastAxis
 // LocalResponseNorm is a hand-rolled PRIMITIVE graph (Pad axis-1 +
 // unrolled channel-window Slice-sum of x², then x·(k+(α/5)·sum)^(−β)) with
 // size baked to 5; LRNHelper.Lrn wraps the native OnnxOp.Lrn op with an
-// arbitrary size. See local-response-norm/design.md §7.
+// arbitrary size.
 // ---------------------------------------------------------------------------
 
 /// <summary>
-/// Design §7-1 (the load-bearing parity anchor): the hand-rolled primitive
+/// (the load-bearing parity anchor): the hand-rolled primitive
 /// <c>[Module] LocalResponseNorm</c> MUST equal the native ONNX <c>LRN</c> op
 /// (via <see cref="LRNHelper.Lrn{T}"/> with the matching <c>size=5</c>/params)
 /// for the SAME hyperparameters. This validates the primitive forward graph
@@ -279,7 +279,7 @@ public partial class NNLocalResponseNormMatchesOp
 }
 
 /// <summary>
-/// Design §7-1 (closed-form value): hand-compute LRN for a <c>[1,5,2,2]</c>
+/// (closed-form value): hand-compute LRN for a <c>[1,5,2,2]</c>
 /// input (5 channels, window <c>size=5</c>) from the SAME primitives the formula
 /// names — <c>Pad</c> axis-1 by <c>[2,2]</c> then an unrolled channel-window
 /// <c>Slice</c>-sum of <c>x²</c>, <c>pool = k + (α/5)·Σ a_{c'}²</c>,
@@ -315,7 +315,7 @@ public partial class NNLocalResponseNormClosedForm
 }
 
 /// <summary>
-/// Design §7-3 (alpha/beta/k coverage — the hypers are LIVE, not baked): drive
+/// (alpha/beta/k coverage — the hypers are LIVE, not baked): drive
 /// the <c>[Module] LocalResponseNorm</c> with NON-default <c>α=1e-3, β=0.5, k=2</c>
 /// and assert it equals <see cref="LRNHelper.Lrn{T}"/> (the native op) with the
 /// SAME params. If <c>α/β/k</c> were silently baked to their <c>[Hyper(…)]</c>
@@ -338,7 +338,7 @@ public partial class NNLocalResponseNormHypersLive
 }
 
 /// <summary>
-/// Design §7-3 (the arbitrary-<c>size</c> helper path the module — baked
+/// (the arbitrary-<c>size</c> helper path the module — baked
 /// <c>size=5</c> — lacks): <see cref="LRNHelper.Lrn{T}"/> with a NON-baked
 /// <c>size=3</c> must match a hand reference built from the same primitives
 /// (pad axis-1 by the floor/ceil split <c>[leftHalf, rightHalf] = [1, 1]</c>,
@@ -448,7 +448,7 @@ public partial class NormActPReLUModel
 }
 
 /// <summary>
-/// Design §7-4 (param-free rig smoke): GLU is PARAM-FREE, so there is no learnable
+/// (param-free rig smoke): GLU is PARAM-FREE, so there is no learnable
 /// slope to move — front it with a tiny trainable scalar pre-weight <c>w</c> (the
 /// <see cref="NNInstanceNormAffineFalseParamModel"/> trick) so SOMETHING moves while
 /// the gradient flows THROUGH the differentiable Split/Sigmoid/Mul gate. Shape:
@@ -503,7 +503,7 @@ public partial class NormActPReLUSharedSlopeModel
 }
 
 /// <summary>
-/// Design §7-4 (param-free rig smoke): LocalResponseNorm is PARAM-FREE (a fixed
+/// (param-free rig smoke): LocalResponseNorm is PARAM-FREE (a fixed
 /// pointwise rescale), so — exactly like <see cref="NormActGLUModel"/> /
 /// <see cref="NNInstanceNormAffineFalseParamModel"/> — front it with a tiny
 /// trainable scalar pre-weight <c>w</c> so SOMETHING moves while the gradient

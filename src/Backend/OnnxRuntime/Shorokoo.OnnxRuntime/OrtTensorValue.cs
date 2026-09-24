@@ -10,16 +10,51 @@ namespace Shorokoo.OnnxRuntime;
 
 internal sealed class OrtTensorValue : IShorokooTensorValue
 {
-    internal OrtValue Inner { get; }
+    private readonly OrtValue _inner;
 
-    public OrtTensorValue(OrtValue inner) { Inner = inner; }
+    // Set once, by Dispose, or by HandedOver when a sequence takes the value over. A value is
+    // released by whoever owns it -- a tensor that died, a backend handed it by a run that consumed
+    // it, or the sequence it went into -- and a caller that still holds it, through ToTensorValue()
+    // say, must be told rather than handed on to ORT.
+    private int _released;
+
+    /// <summary>
+    /// The ORT value this wraps, refused once this has been released: handing ONNX Runtime a freed
+    /// value is not an error it reports but a read of freed native memory, which takes the process
+    /// down with an access violation nothing can catch. Every path to the value comes through here.
+    /// </summary>
+    /// <exception cref="ObjectDisposedException">This value has been released.</exception>
+    internal OrtValue Inner => Volatile.Read(ref _released) == 0 ? _inner : throw Released();
+
+    public OrtTensorValue(OrtValue inner) { _inner = inner; }
+
+    private static ObjectDisposedException Released() => new(
+        nameof(OrtTensorValue),
+        "This runtime value has been released -- the tensor it belonged to was deleted, or consumed "
+        + "by a run whose backend released it, or it was handed into a sequence that owns it now, or "
+        + "it was disposed -- so nothing may read it through this handle.");
 
     public ShorokooOnnxValueType ValueType => (ShorokooOnnxValueType)(int)Inner.OnnxType;
 
-    public ShorokooTensorElementType ElementType =>
-        (ShorokooTensorElementType)(int)Inner.GetTensorTypeAndShape().ElementDataType;
+    public ShorokooTensorElementType ElementType
+    {
+        get
+        {
+            var elementType = Inner.GetTensorTypeAndShape().ElementDataType;
+            GC.KeepAlive(Inner);
+            return (ShorokooTensorElementType)(int)elementType;
+        }
+    }
 
-    public long[] Shape => Inner.GetTensorTypeAndShape().Shape;
+    public long[] Shape
+    {
+        get
+        {
+            var shape = Inner.GetTensorTypeAndShape().Shape;
+            GC.KeepAlive(Inner);
+            return shape;
+        }
+    }
 
     // ORT names the allocator a value was made by on its memory info, and "Cpu" is the one
     // that names host memory -- every other name ("Cuda", "Hip", ...) is the provider's own.
@@ -30,6 +65,9 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
     {
         get
         {
+            // Before the cached answer: a released value is not anywhere any more, and a caller
+            // told it is host memory goes on to read it.
+            if (Volatile.Read(ref _released) != 0) throw Released();
             if (_probed) return _hostAccessible;
             // Payload before the flag, both volatile: a Nullable<bool> is two fields written
             // non-atomically, so a reader on a weakly ordered target could see HasValue true ahead
@@ -49,7 +87,16 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
         // puts an object on the finalization queue for every tensor anyone reads -- the cost
         // OnnxTensorData deliberately refuses to pay by having no finalizer of its own.
         using var info = Inner.GetTensorMemoryInfo();
-        return info.Name == CpuAllocatorName;
+        // The info ORT hands back does not own what it points at -- it is the tensor's own
+        // location, a sub-object of the native value, which OrtReleaseValue frees. So reading
+        // info.Name is a native read through Inner's memory, and the keep-alive belongs after it,
+        // not after the call that produced the info. Rooted only across the first call, a
+        // collection in between frees the value and this reads a dangling pointer -- returning
+        // garbage that may compare equal to "Cpu", which is the direction that hands out a span
+        // over device memory.
+        var host = info.Name == CpuAllocatorName;
+        GC.KeepAlive(Inner);
+        return host;
     }
 
     private volatile bool _hostAccessible;
@@ -64,9 +111,43 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
     /// device EP serves an output it was asked to leave on the host from its pinned allocator, so
     /// treating that name as device memory reports a graph that partly ran on the host as one that
     /// did not.
+    ///
+    /// <para>Measured on a CUDA card rather than read off the source. A graph whose tail ORT gave
+    /// to the host reports its crossing output as <c>CudaPinned</c> and the host node's own output
+    /// as <c>Cpu</c>; a graph that stayed on the card reports <c>Cuda</c> for every output. So the
+    /// name appears exactly where the memory is host-readable, and never on an output the provider
+    /// kept — the inversion this predicate would suffer from if the premise were backwards.</para>
     /// </summary>
     internal static bool IsHostAllocator(string? allocatorName) =>
         allocatorName is CpuAllocatorName or "CudaPinned" or "HipPinned";
+
+    /// <summary>
+    /// Whether this value is a tensor in memory the host cannot read — the execution provider's
+    /// own. A value that is not a tensor answers false: it has no buffer of its own to place.
+    ///
+    /// <para>Deliberately not the negation of <see cref="IsHostAccessible"/>, and the two differ
+    /// in both directions. That one answers false for a sequence, which has no element buffer of
+    /// its own, where this one asks only about memory; and that one admits the plain CPU allocator
+    /// alone, where this one counts the pinned host arenas as host too. The pinned difference is
+    /// the load-bearing one: a pinned element is host memory, so ONNX Runtime's host copy reads it
+    /// back correctly and there is nothing to refuse — while handing out a span over it is a
+    /// wider promise this backend has never measured and does not make.</para>
+    ///
+    /// <para>Not cached, because it is asked once per value, where a sequence is built.</para>
+    /// </summary>
+    internal bool IsInDeviceMemory
+    {
+        get
+        {
+            if (!Inner.IsTensor) return false;
+            using var info = Inner.GetTensorMemoryInfo();
+            // After the name read, for the reason ProbeHostAccessible gives: the info points into
+            // the native value rather than owning anything.
+            var onDevice = !IsHostAllocator(info.Name);
+            GC.KeepAlive(Inner);
+            return onDevice;
+        }
+    }
 
     /// <summary>Refuses a span over memory the host cannot read. The span accessors hand out a
     /// pointer without checking where it points, so this is the difference between an exception
@@ -108,18 +189,67 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
         return Inner.GetTensorMutableDataAsSpan<T>();
     }
 
-    public IReadOnlyList<string> GetStringTensorData() => Inner.GetStringTensorAsArray();
+    // Each of the four accessors below, and the four reads above them, hands ORT a bare handle off
+    // `Inner` and then has no further use for it, so the JIT retires the local at that read --
+    // before the native call even starts. OrtValue is a plain class with an ordinary finalizer that
+    // calls OrtReleaseValue, so a collection on any thread during the call would free the native
+    // value underneath it. Being in scope roots nothing; this does (Shorokoo/Shorokoo#178). The
+    // callers happen to keep these values reachable today, which is safety by reachability rather
+    // than by construction, and a lifetime changed anywhere above here would quietly take it away.
+    // `CoreUtilsCoverageTests.TestEveryNativeCallThroughAnOrtValueKeepsItAliveAndTheGuardStillDetectsEveryEvasion`
+    // is what keeps the next such call from being written without one.
 
-    public int GetValueCount() => Inner.GetValueCount();
+    public IReadOnlyList<string> GetStringTensorData()
+    {
+        var strings = Inner.GetStringTensorAsArray();
+        GC.KeepAlive(Inner);
+        return strings;
+    }
 
-    public IShorokooTensorValue GetValue(int index) =>
-        new OrtTensorValue(Inner.GetValue(index, OrtAllocator.DefaultInstance));
+    public int GetValueCount()
+    {
+        var count = Inner.GetValueCount();
+        GC.KeepAlive(Inner);
+        return count;
+    }
+
+    /// <summary>
+    /// The element at <paramref name="index"/>, copied out of this sequence into host memory.
+    ///
+    /// <para>Host memory unconditionally, because ONNX Runtime offers nothing else: its
+    /// <c>GetValue</c> copies the element with a plain host <c>memcpy</c> whatever allocator it is
+    /// handed, so an element the execution provider left on a card is read through a device
+    /// address by the host and takes the process down with an access violation. That is why
+    /// <see cref="OrtBackend.CreateSequence"/> refuses to pack device tensors into a sequence:
+    /// the sequence this reads is a host one by construction.</para>
+    /// </summary>
+    public IShorokooTensorValue GetValue(int index)
+    {
+        var element = new OrtTensorValue(Inner.GetValue(index, OrtAllocator.DefaultInstance));
+        GC.KeepAlive(Inner);
+        return element;
+    }
 
     public ShorokooTensorElementType GetSequenceElementType()
     {
         var info = Inner.GetTypeInfo();
-        return (ShorokooTensorElementType)(int)info.SequenceTypeInfo.ElementType.TensorTypeAndShapeInfo.ElementDataType;
+        var elementType = info.SequenceTypeInfo.ElementType.TensorTypeAndShapeInfo.ElementDataType;
+        GC.KeepAlive(Inner);
+        return (ShorokooTensorElementType)(int)elementType;
     }
 
-    public void Dispose() => Inner.Dispose();
+    /// <summary>Releases the ORT value, once: a second call does nothing, and every read afterwards
+    /// is refused (<see cref="Inner"/>).</summary>
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _released, 1) != 0) return;
+        _inner.Dispose();
+    }
+
+    /// <summary>
+    /// Marks this released without releasing the ORT value, which is no longer this wrapper's: a
+    /// sequence ONNX Runtime built out of it holds it now, and releases it with itself. Every read
+    /// afterwards is refused, as after <see cref="Dispose"/>, which then does nothing.
+    /// </summary>
+    internal void HandedOver() => Volatile.Write(ref _released, 1);
 }

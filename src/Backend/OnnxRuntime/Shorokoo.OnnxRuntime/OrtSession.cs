@@ -1,5 +1,6 @@
 using Microsoft.ML.OnnxRuntime;
 using Shorokoo.Core.Backends;
+using TensorElementType = Microsoft.ML.OnnxRuntime.Tensors.TensorElementType;
 
 namespace Shorokoo.OnnxRuntime;
 
@@ -25,6 +26,12 @@ internal sealed class OrtSession : IShorokooSession
     private readonly Lazy<OrtAllocator?> _arenaAllocator;
     private OrtMemoryInfo? _ownedArenaMemoryInfo;
 
+    // The same pair for the pinned host arena a CUDA session stages its crossings through. A
+    // second allocator rather than a second reading of the first: they are different arenas with
+    // different figures, and a session with no CUDA provider has no second one at all.
+    private readonly Lazy<OrtAllocator?> _pinnedAllocator;
+    private OrtMemoryInfo? _ownedPinnedMemoryInfo;
+
     // The folder ORT writes this session's profile into, or null when it was not built to record
     // one -- which is the default. Deleted with the session.
     private readonly string? _profileDirectory;
@@ -32,27 +39,75 @@ internal sealed class OrtSession : IShorokooSession
     private NodePlacement? _nodePlacement;
     private bool _profilingEnded;
 
-    public OrtSession(
-        InferenceSession session, int? cudaDeviceId, IShorokooBackend backend)
-        : this(session, cudaDeviceId, backend, profileDirectory: null)
-    {
-    }
+    // The outputs this session may write into the memory of the input each is paired with, on a run
+    // that consumed that input: the pairs its own graph proved (see OrtBackend.CreateSession), each
+    // with the shape and element type ORT inferred for the output. A pair whose output shape ORT
+    // could not settle when the session was built is not here, since nothing could be bound to it
+    // without knowing the output would fit -- a symbolic dim is only known once the run is under
+    // way, and a buffer bound to the wrong shape fails the run. Keyed by output: the proof pairs each
+    // output with one input at most.
+    private readonly Dictionary<string, AliasSlot> _aliases;
+
+    /// <summary>An output this session may write into an input's memory, and what the input's value
+    /// has to be for that to happen.</summary>
+    private sealed record AliasSlot(string Output, string Input, long[] Shape, TensorElementType ElementType);
+
+    /// <summary>
+    /// A pair the graph ONNX Runtime runs proves, and the shape that graph states for the output —
+    /// null where it states none, or leaves a dimension open.
+    /// </summary>
+    internal readonly record struct ProvedAlias(OutputAlias Alias, long[]? StatedShape);
+
+    public IReadOnlyList<OutputAlias> BindableAliases { get; }
 
     public OrtSession(
         InferenceSession session,
         int? cudaDeviceId,
         IShorokooBackend backend,
-        string? profileDirectory)
+        string? profileDirectory,
+        IReadOnlyList<ProvedAlias> outputAliases)
     {
         _session = session;
         _cudaDeviceId = cudaDeviceId;
         _backend = backend;
         _profileDirectory = profileDirectory;
+        _aliases = Slots(session, outputAliases);
+        BindableAliases = [.. _aliases.Values.Select(slot => new OutputAlias(slot.Output, slot.Input))];
         // Nothing to clean up, so nothing to finalize -- every untraced session would otherwise
         // join the finalization queue to run an early return.
         if (profileDirectory is null) GC.SuppressFinalize(this);
         _outputMemory = new Lazy<OutputMemory>(() => DiscoverOutputMemory(session));
         _arenaAllocator = new Lazy<OrtAllocator?>(CreateArenaAllocator);
+        _pinnedAllocator = new Lazy<OrtAllocator?>(CreatePinnedAllocator);
+    }
+
+    /// <summary>
+    /// The pairs of <paramref name="outputAliases"/> this session can bind: the output is one of its
+    /// tensors, and not a string one; the input is one of its inputs; and ORT settled the output's
+    /// shape in full when it built the session.
+    ///
+    /// <para>Settled means the graph ORT wrote out states the shape, and the session reports the
+    /// same one. The session alone cannot say: ORT reports an output it has no shape for as having
+    /// no dimensions, which is what a scalar has too, so a scalar consumed value would pass for an
+    /// output the run then makes <c>[1]</c>, and the run fail on the binding. The graph tells the
+    /// two apart — a scalar's shape is there, and empty.</para>
+    /// </summary>
+    private static Dictionary<string, AliasSlot> Slots(InferenceSession session, IReadOnlyList<ProvedAlias> outputAliases)
+    {
+        var slots = new Dictionary<string, AliasSlot>(outputAliases.Count, StringComparer.Ordinal);
+        if (outputAliases.Count == 0) return slots;
+        var inputs = new HashSet<string>(session.InputNames, StringComparer.Ordinal);
+        var outputs = session.OutputMetadata;
+        foreach (var (alias, shape) in outputAliases)
+        {
+            if (shape is null || !inputs.Contains(alias.Input) || !outputs.TryGetValue(alias.Output, out var output)) continue;
+            // A string tensor's elements are objects rather than bytes in a buffer of its own, and
+            // nothing here proves writing one over another sound, so it is never bound.
+            if (!output.IsTensor || output.ElementDataType == TensorElementType.String) continue;
+            if (!output.Dimensions.Select(d => (long)d).SequenceEqual(shape)) continue;
+            slots.TryAdd(alias.Output, new AliasSlot(alias.Output, alias.Input, shape, output.ElementDataType));
+        }
+        return slots;
     }
 
     /// <summary>
@@ -85,6 +140,140 @@ internal sealed class OrtSession : IShorokooSession
     public IReadOnlyList<string> OutputNames => _session.OutputNames;
 
     public bool HasDeviceMemory => _outputMemory.Value.DeviceMemoryInfo is not null;
+
+    /// <summary>
+    /// The overload below, for a caller that does not ask which outputs went into consumed memory.
+    /// A session built with pairs writes them there all the same. Every run the framework makes
+    /// calls the overload below, so this one serves a caller outside it.
+    /// </summary>
+    public IReadOnlyList<IShorokooTensorValue> RunConsuming(
+        IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
+        IReadOnlyCollection<IShorokooTensorValue> consumed,
+        IReadOnlyList<string> outputNames,
+        IReadOnlySet<string> retainedOutputNames,
+        RunSettings runSettings)
+        => RunConsuming(inputs, consumed, outputNames, retainedOutputNames, runSettings, out _);
+
+    /// <summary>
+    /// Runs the session with <paramref name="consumed"/> handed over, writing each output this
+    /// session was built to alias into the memory of the consumed value its input was fed,
+    /// wherever that can be done (see <see cref="OutputsIntoConsumed"/>), and saying which it did in
+    /// <paramref name="aliasedInputs"/>.
+    ///
+    /// <para>Each consumed value is this backend's from here, on every path, and is released
+    /// through it in the <c>finally</c> below — after the native run, which ONNX Runtime does not
+    /// let go of its inputs before, and before this returns the outputs or rethrows a failure.
+    /// Nothing the caller holds points into one of them any more: the run's outputs are values of
+    /// their own. ONNX Runtime keeps every input until the run ends — its memory planner gives each
+    /// feed an extra use so a caller can read it after <c>Run</c> returns — so there is no earlier
+    /// point at which a consumed input could go.</para>
+    ///
+    /// <para>An aliased output is bound to the consumed value itself, so the node that produces it
+    /// writes straight into that memory rather than into a block of the arena — which is the whole
+    /// saving, since ONNX Runtime holds the value until the run ends either way. What comes back is
+    /// a value of its own over the same memory: ORT counts the references to a buffer, so releasing
+    /// the consumed value below, as every run does, leaves the output whole.</para>
+    ///
+    /// <para>Writing into a consumed value is only safe because it is memory of its own — nothing
+    /// else reads it — and the values runs consume are mostly outputs of earlier runs. So this
+    /// rests on ONNX Runtime never handing out a session's own memory as an output, and it does
+    /// not, measured on 1.26: an output it folded to a constant, and an initializer or a view of
+    /// one handed out as an output, each comes back in a buffer of its own on every run, and a
+    /// write into one reaches neither the session nor any other run's output.
+    /// <c>ComputeContextLifetimeCoverageTests.TestAnOutputTheRuntimeFoldsToAConstantIsMemoryOfItsOwnThatAWriteDoesNotCarryIntoAnotherRun</c>
+    /// fails if a later version starts sharing one.</para>
+    /// </summary>
+    public IReadOnlyList<IShorokooTensorValue> RunConsuming(
+        IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
+        IReadOnlyCollection<IShorokooTensorValue> consumed,
+        IReadOnlyList<string> outputNames,
+        IReadOnlySet<string> retainedOutputNames,
+        RunSettings runSettings,
+        out IReadOnlyList<string?> aliasedInputs)
+    {
+        ArgumentNullException.ThrowIfNull(consumed);
+        aliasedInputs = [];
+        try
+        {
+            if (OutputsIntoConsumed(inputs, consumed, outputNames, retainedOutputNames) is not { } into)
+                return retainedOutputNames.Count == 0
+                    ? Run(inputs, outputNames, runSettings)
+                    : RunRetainingOutputs(inputs, outputNames, retainedOutputNames, runSettings);
+
+            var results = RunBound(inputs, outputNames, retainedOutputNames, into, runSettings);
+            var aliased = new string?[outputNames.Count];
+            for (int i = 0; i < outputNames.Count; i++)
+                if (into.TryGetValue(outputNames[i], out var target)) aliased[i] = target.Input;
+            aliasedInputs = aliased;
+            return results;
+        }
+        finally
+        {
+            // Through the backend, which is the one release path for memory it allocated. Its
+            // release is a disposal, which does not throw, so none of them can be skipped.
+            foreach (var value in consumed) _backend.Release(value);
+        }
+    }
+
+    /// <summary>A consumed value an output is written into, and the input it was fed as.</summary>
+    private readonly record struct AliasTarget(string Input, OrtTensorValue Value);
+
+    /// <summary>
+    /// The outputs this run writes into the memory of a value it consumed, by output name, or null
+    /// when there are none. A pair this session was built with (<see cref="_aliases"/>) is bound
+    /// only where every one of these holds, and the output is produced as usual otherwise:
+    /// <list type="bullet">
+    /// <item>the run consumed the value its input was fed — memory it was only lent is the
+    /// caller's, and writing into it would change a tensor the caller still reads;</item>
+    /// <item>no other input is fed the same value, since the proof was about this input alone;</item>
+    /// <item>it is a value of this runtime, of the output's element type and shape;</item>
+    /// <item>it is in the memory the output is produced in: this session's card for an output the
+    /// run retains there, and the host for any other.</item>
+    /// </list>
+    /// </summary>
+    private Dictionary<string, AliasTarget>? OutputsIntoConsumed(
+        IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
+        IReadOnlyCollection<IShorokooTensorValue> consumed,
+        IReadOnlyList<string> outputNames,
+        IReadOnlySet<string> retainedOutputNames)
+    {
+        if (_aliases.Count == 0 || consumed.Count == 0) return null;
+        var handed = new HashSet<IShorokooTensorValue>(consumed, ReferenceEqualityComparer.Instance);
+        var fedAs = new Dictionary<IShorokooTensorValue, int>(ReferenceEqualityComparer.Instance);
+        foreach (var value in inputs.Values) fedAs[value] = fedAs.GetValueOrDefault(value) + 1;
+        var deviceMemory = _outputMemory.Value.DeviceMemoryInfo;
+
+        Dictionary<string, AliasTarget>? into = null;
+        foreach (var name in outputNames)
+        {
+            if (!_aliases.TryGetValue(name, out var slot) || !inputs.TryGetValue(slot.Input, out var value)) continue;
+            if (!handed.Contains(value) || fedAs[value] != 1 || value is not OrtTensorValue own) continue;
+            var onDevice = deviceMemory is not null && retainedOutputNames.Contains(slot.Output);
+            if (!Fits(own, slot, onDevice ? deviceMemory : null)) continue;
+            (into ??= new Dictionary<string, AliasTarget>(StringComparer.Ordinal))[slot.Output] =
+                new AliasTarget(slot.Input, own);
+        }
+        return into;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="value"/> can take <paramref name="slot"/>'s output: a tensor of its
+    /// element type and shape, in <paramref name="deviceMemory"/>'s device memory where the output is
+    /// produced there, and in host memory where it is null.
+    /// </summary>
+    private static bool Fits(OrtTensorValue value, AliasSlot slot, OrtMemoryInfo? deviceMemory)
+    {
+        if (value.ValueType != ShorokooOnnxValueType.Tensor) return false;
+        if ((int)value.ElementType != (int)slot.ElementType || !value.Shape.AsSpan().SequenceEqual(slot.Shape))
+            return false;
+        if (deviceMemory is null) return value.IsHostAccessible;
+        using var info = value.Inner.GetTensorMemoryInfo();
+        // After the reads, for the reason OrtTensorValue.ProbeHostAccessible gives: the info points
+        // into the native value rather than owning anything.
+        var here = info.Name == deviceMemory.Name && info.Id == deviceMemory.Id;
+        GC.KeepAlive(value);
+        return here;
+    }
 
     public IReadOnlyList<IShorokooTensorValue> Run(
         IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
@@ -158,6 +347,25 @@ internal sealed class OrtSession : IShorokooSession
         var deviceMemoryInfo = _outputMemory.Value.DeviceMemoryInfo;
         if (deviceMemoryInfo is null || retainedOutputNames.Count == 0)
             return Run(inputs, outputNames, runSettings);
+        return RunBound(inputs, outputNames, retainedOutputNames, into: null, runSettings);
+    }
+
+    /// <summary>
+    /// Runs the session through an I/O binding: the outputs in <paramref name="into"/> written into
+    /// the consumed values named there, those in <paramref name="retainedOutputNames"/> left in this
+    /// session's device memory, and every other one fetched back to the host.
+    /// </summary>
+    private IReadOnlyList<IShorokooTensorValue> RunBound(
+        IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
+        IReadOnlyList<string> outputNames,
+        IReadOnlySet<string> retainedOutputNames,
+        Dictionary<string, AliasTarget>? into,
+        RunSettings runSettings)
+    {
+        ArgumentNullException.ThrowIfNull(runSettings);
+        var abortToken = runSettings.CancellationToken;
+        abortToken.ThrowIfCancellationRequested();
+        var deviceMemoryInfo = _outputMemory.Value.DeviceMemoryInfo;
 
         List<IShorokooTensorValue>? borrowed = null;
         try
@@ -166,13 +374,25 @@ internal sealed class OrtSession : IShorokooSession
             foreach (var (k, v) in inputs)
                 binding.BindInput(k, Unwrap(v, ref borrowed));
 
-            // An output bound to a device is allocated there by ORT and left there; one bound to
-            // the host allocator is fetched back exactly as an unbound Run fetches it. ORT sizes
-            // both itself, so a shape it only learns while running is fine.
+            // An output bound to a value is written into that value's memory by the node that
+            // produces it -- a consumed input's, for an aliased one. An output bound to a device is
+            // allocated there by ORT and left there; one bound to the host allocator is fetched back
+            // exactly as an unbound Run fetches it. ORT sizes both of those itself, so a shape it
+            // only learns while running is fine; an aliased one was checked to fit before it got
+            // here. Only a tensor is left on the device, however it was asked: a sequence's elements
+            // are read one by one through ORT's host allocator, which reads an element left in device
+            // memory as though it were host memory, and the process faults.
             var hostMemoryInfo = OrtMemoryInfo.DefaultInstance;
             foreach (var name in outputNames)
-                binding.BindOutputToDevice(
-                    name, retainedOutputNames.Contains(name) ? deviceMemoryInfo : hostMemoryInfo);
+            {
+                if (into is not null && into.TryGetValue(name, out var target))
+                    binding.BindOutput(name, target.Value.Inner);
+                else
+                    binding.BindOutputToDevice(
+                        name, deviceMemoryInfo is not null && retainedOutputNames.Contains(name)
+                              && _session.OutputMetadata[name].IsTensor
+                            ? deviceMemoryInfo : hostMemoryInfo);
+            }
 
             using var runOptions = new RunOptions();
             ConfigureRun(runOptions, runSettings);
@@ -272,8 +492,18 @@ internal sealed class OrtSession : IShorokooSession
 
             // The session is a bare argument whose last read is the call above, so without this
             // the JIT may retire it before the native call returns and a GC on any thread runs
-            // ~InferenceSession underneath it. Nothing else roots it: a CompiledGraph is held
-            // weakly by its context.
+            // ~InferenceSession underneath it -- a CompiledGraph is held weakly by its context, so
+            // there is no strong reference above this one to fall back on.
+            //
+            // Measured rather than assumed, and the measurement is worth recording: removing this
+            // does NOT reproduce a fault. Four hundred probes of a freshly compiled graph held only
+            // in a local, in Release on a card, against a thread collecting and draining
+            // finalizers, all came back with the placement and none took the process down -- because
+            // the caller reaches this through a Lazy whose factory closure holds the session for as
+            // long as the factory runs. That is what roots it today. This line is what makes the
+            // rooting the method's own rather than a property of how it happens to be invoked
+            // (Shorokoo/Shorokoo#178), which is exactly the kind of thing a refactor takes away
+            // silently.
             GC.KeepAlive(session);
 
             var placement = (host, onDevice) switch
@@ -335,14 +565,50 @@ internal sealed class OrtSession : IShorokooSession
     }
 
     /// <summary>ORT's memory info for a CUDA device arena. <c>CudaPinned</c> is the pinned host
-    /// arena that host-to-device copies stage through and is a different allocator.</summary>
+    /// arena that host-to-device copies stage through and is a different allocator —
+    /// <see cref="CudaPinnedArenaMemoryInfo"/>.</summary>
     private static OrtMemoryInfo CudaArenaMemoryInfo(int deviceId)
     {
         return new OrtMemoryInfo("Cuda", OrtAllocatorType.ArenaAllocator, deviceId, OrtMemType.Default);
     }
 
+    /// <summary>ORT's memory info for the pinned host arena of the same device. The memory type is
+    /// what tells it from the device arena above; the name is spelled the way ORT reports it on an
+    /// output it serves from there.</summary>
+    private static OrtMemoryInfo CudaPinnedArenaMemoryInfo(int deviceId)
+    {
+        return new OrtMemoryInfo(
+            "CudaPinned", OrtAllocatorType.ArenaAllocator, deviceId, OrtMemType.CpuOutput);
+    }
+
+    /// <summary>
+    /// The pinned host arena of this session's device, or null on a session with no CUDA provider
+    /// — which has no such arena rather than an empty one.
+    /// </summary>
+    private OrtAllocator? CreatePinnedAllocator()
+    {
+        if (_cudaDeviceId is not { } device) return null;
+        OrtMemoryInfo? owned = null;
+        try
+        {
+            owned = CudaPinnedArenaMemoryInfo(device);
+            var allocator = new OrtAllocator(_session, owned);
+            // The field assignment roots `owned` across the constructor, exactly as above.
+            _ownedPinnedMemoryInfo = owned;
+            return allocator;
+        }
+        catch (Exception)
+        {
+            owned?.Dispose();
+            return null;
+        }
+    }
+
     public ArenaStatistics? ReadArenaStatistics()
         => _arenaAllocator.Value is { } allocator ? OrtArenaStats.Read(allocator) : null;
+
+    public ArenaStatistics? ReadPinnedArenaStatistics()
+        => _pinnedAllocator.Value is { } allocator ? OrtArenaStats.Read(allocator) : null;
 
     /// <summary>
     /// Which execution provider ran each node, read out of the profile ORT has been writing since
@@ -449,6 +715,11 @@ internal sealed class OrtSession : IShorokooSession
             // pointer, so the info outlives it by one statement rather than the other way round.
             _arenaAllocator.Value?.Dispose();
             _ownedArenaMemoryInfo?.Dispose();
+        }
+        if (_pinnedAllocator.IsValueCreated)
+        {
+            _pinnedAllocator.Value?.Dispose();
+            _ownedPinnedMemoryInfo?.Dispose();
         }
         _session.Dispose();
         // After the session, which is what closes the profile file it has been writing.

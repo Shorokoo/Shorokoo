@@ -45,6 +45,20 @@ namespace Shorokoo
         public static OptionalTensorData None<T>() where T : IVarType
             => None(OnnxUtils.GetDType<T>());
 
+        /// <summary>
+        /// This optional's tensor, if it has one, to be <b>read</b> by the run it is fed to rather
+        /// than consumed; see <see cref="TensorData.Shared"/>. An absent optional holds nothing to
+        /// consume, and feeds the same either way.
+        /// </summary>
+        public SharedInput Shared() => new(this, SharedInputMode.Shared);
+
+        /// <summary>
+        /// This optional's tensor, if it has one, to be consumed by the run it is fed to where
+        /// nothing else is reading it when that run starts, and read otherwise; see
+        /// <see cref="TensorData.TryConsume"/>.
+        /// </summary>
+        public SharedInput TryConsume() => new(this, SharedInputMode.TryConsume);
+
         public override string ToString()
             => HasValue ? $"optional:some[{Value}]" : $"optional:none[{DType}]";
     }

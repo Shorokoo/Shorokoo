@@ -73,7 +73,7 @@ public class RngTrainingTests
         var losses = new float[steps];
         for (int i = 0; i < steps; i++)
         {
-            var step = rig.TrainStep(checkpoint, inputBatch, targetBatch);
+            var step = rig.TrainStep(checkpoint, inputBatch.Shared(), targetBatch.Shared());
             losses[i] = step.Loss!.Value;
             checkpoint = step;
         }
@@ -149,7 +149,7 @@ public class RngTrainingTests
             var resumedLosses = new float[totalSteps - resumeAt];
             for (int i = 0; i < resumedLosses.Length; i++)
             {
-                var step = rigC.TrainStep(resumed, inputBatch, targetBatch);
+                var step = rigC.TrainStep(resumed, inputBatch.Shared(), targetBatch.Shared());
                 resumedLosses[i] = step.Loss!.Value;
                 resumed = step;
             }

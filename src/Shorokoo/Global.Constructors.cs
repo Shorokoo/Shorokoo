@@ -525,7 +525,7 @@ namespace Shorokoo
         /// <see cref="Shorokoo.Tensor{T}.Fill(Vector{int64}, TensorAttribute)"/> takes the
         /// resulting <see cref="TensorAttribute"/> directly.</para>
         /// </summary>
-        public static Tensor<T> TensorFill<T>(Vector<int64> shape, TensorData<T> val) where T : IVarType => OnnxOp.ConstantOfShape(shape, val.Detach().MoveToAttribute());
+        public static Tensor<T> TensorFill<T>(Vector<int64> shape, TensorData<T> val) where T : IVarType => OnnxOp.ConstantOfShape(shape, val.CopyTo(Shorokoo.Runtime.ComputeContext.Host).MoveToAttribute());
 
         /// <summary>
         /// Creates a tensor filled with a constant value using generic type T.

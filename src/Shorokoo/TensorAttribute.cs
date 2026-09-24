@@ -196,7 +196,7 @@ namespace Shorokoo
 
         /// <summary>
         /// A <see cref="TensorData"/> holding a copy of these elements, in the framework's own host
-        /// memory and belonging to <see cref="ComputeContext.Host"/>.
+        /// memory.
         ///
         /// <para>A copy, always. This attribute is immutable and every graph that captured it holds
         /// the same one, so a tensor sharing its bytes would be a way to edit a description through
@@ -215,7 +215,7 @@ namespace Shorokoo
         internal TensorData CopyToTensorData(bool atStorageDType)
         {
             if (_values is not null)
-                return TensorData.NewHostStringTensor(Shape, [.. _values], ComputeContext.Host);
+                return TensorData.NewHostStringTensor(Shape, [.. _values]);
             return OnnxUtils.CreateHostTensorData(
                 Shape, atStorageDType ? StorageDType : DType, BytesArray.AsSpan().ToArray());
         }

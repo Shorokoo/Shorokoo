@@ -63,19 +63,35 @@ public class SideBySideBackendCoverageTests
     }
 
     [Fact]
+    public void TestAnIsolatedBackendsSessionWritesAnOutputIntoTheInputItConsumed()
+    {
+        using var context = new ComputeContext(Alt.Value);
+        var a = InputVector<float32>("a");
+        var b = InputVector<float32>("b");
+        var compiled = context.Compile(new InternalComputationGraph([a, b], [a - b]), [[4L], [4L]],
+            trainingStep: false, aliasCandidates: [(0, 0)]);
+
+        var result = compiled.Execute(TensorData([4L], 10f, 20f, 30f, 40f), TensorData([4L], 1f, 2f, 3f, 4f));
+
+        Assert.Equal([9f, 18f, 27f, 36f], result[0].ToTensorData().As<float32>().CopyMemory<float>());
+        Assert.Equal(1L, context.AliasedOutputs);
+    }
+
+    [Fact]
     public void TestTwoBackendsRunOneModelOnOneSetOfInputsInOneProcess()
     {
         var (graph, a, b, expected) = Model();
         var first = new ComputeContext();
         var second = new ComputeContext(Alt.Value);
 
-        Assert.Equal(expected, SideBySideModel.Floats(first.Execute(graph, a, b)[0]));
-        Assert.Equal(expected, SideBySideModel.Floats(second.Execute(graph, a, b)[0]));
-        Assert.Equal(expected, SideBySideModel.Floats(first.Execute(graph, a, b)[0]));
+        Assert.Equal(expected, SideBySideModel.Floats(first.Execute(graph, a.Shared(), b.Shared())[0]));
+        Assert.Equal(expected, SideBySideModel.Floats(second.Execute(graph, a.Shared(), b.Shared())[0]));
+        Assert.Equal(expected, SideBySideModel.Floats(first.Execute(graph, a.Shared(), b.Shared())[0]));
 
         var compiled = second.Compile(graph);
+        Assert.Equal(expected, SideBySideModel.Floats(compiled.Execute(a.Shared(), b.Shared())[0]));
         Assert.Equal(expected, SideBySideModel.Floats(compiled.Execute(a, b)[0]));
-        Assert.Equal(expected, SideBySideModel.Floats(compiled.Execute(a, b)[0]));
+        Assert.True(a.IsDisposed);
         Assert.Equal("alt-runtime", compiled.Backend.Name);
     }
 
@@ -170,10 +186,10 @@ public class SideBySideBackendCoverageTests
         var first = new ComputeContext();
         var second = new ComputeContext(Alt.Value);
 
-        var onFirst = SideBySideModel.Floats(first.Execute(model, input)[0]);
-        var onSecond = SideBySideModel.Floats(second.Execute(model, input)[0]);
+        var onFirst = SideBySideModel.Floats(first.Execute(model, input.Shared())[0]);
+        var onSecond = SideBySideModel.Floats(second.Execute(model, input.Shared())[0]);
 
-        Assert.Equal(onFirst, SideBySideModel.Floats(first.Execute(model, input)[0]));
+        Assert.Equal(onFirst, SideBySideModel.Floats(first.Execute(model, input.Shared())[0]));
         SideBySideModel.AssertAgree(onFirst, onSecond);
 
         Assert.True(onFirst.Distinct().Count() > 1);
@@ -206,7 +222,7 @@ public class SideBySideBackendCoverageTests
         var recorder = new RecordingBackend(Alt.Value);
         var onAlt = new ComputeContext(recorder);
 
-        Assert.Equal(expected, SideBySideModel.Floats(onAlt.Execute(graph, a, b)[0]));
+        Assert.Equal(expected, SideBySideModel.Floats(onAlt.Execute(graph, a.Shared(), b.Shared())[0]));
 
         var isolated = AltLoadContext();
         Assert.Equal(2, recorder.Fed.Count);
@@ -214,15 +230,58 @@ public class SideBySideBackendCoverageTests
 
         var built = recorder.Fed.ToArray();
         recorder.Fed.Clear();
-        Assert.Equal(expected, SideBySideModel.Floats(onAlt.Execute(graph, a, b)[0]));
+        Assert.Equal(expected, SideBySideModel.Floats(onAlt.Execute(graph, a.Shared(), b.Shared())[0]));
         Assert.Equal(built, recorder.Fed);
 
-        Assert.Equal(expected, SideBySideModel.Floats(new ComputeContext().Execute(graph, a, b)[0]));
+        Assert.Equal(expected, SideBySideModel.Floats(new ComputeContext().Execute(graph, a.Shared(), b.Shared())[0]));
         foreach (var literal in (TensorData[])[a, b])
         {
             Assert.Same(AssemblyLoadContext.Default, LoadContextOf(literal.ToTensorValue()));
             Assert.DoesNotContain(literal.ToTensorValue(), built);
         }
+    }
+
+    [Fact]
+    public void TestTwoBackendsOverOneRuntimeReadEachOthersMemoryAndAnIsolatedRuntimeCopiesIt()
+    {
+        var (graph, a, b, expected) = Model();
+        var secondDefault = (IShorokooBackend)Activator.CreateInstance(DefaultBackend.Instance.GetType())!;
+        using var first = new ComputeContext();
+        using var sameRuntime = new ComputeContext(secondDefault);
+        using var isolated = new ComputeContext(Alt.Value);
+
+        Assert.Same(DefaultBackend.Instance.RuntimeIdentity, secondDefault.RuntimeIdentity);
+        Assert.NotSame(DefaultBackend.Instance.RuntimeIdentity, Alt.Value.RuntimeIdentity);
+
+        var fromFirst = first.Execute(graph, a.Shared(), b.Shared())[0].ToTensorData();
+        var fromIsolated = isolated.Execute(graph, a.Shared(), b.Shared())[0].ToTensorData();
+
+        Assert.Same(fromFirst, fromFirst.To(sameRuntime));
+        Assert.Same(fromIsolated, fromIsolated.To(isolated));
+        Assert.Same(a, a.To(isolated));
+        Assert.NotSame(fromFirst, fromFirst.To(isolated));
+        var copied = fromIsolated.To(first);
+        Assert.NotSame(fromIsolated, copied);
+        Assert.Equal(expected, [.. copied.As<float32>().AccessMemory<float>()]);
+    }
+
+    [Fact]
+    public void TestAFedTensorsRuntimeCopyIsReleasedThroughTheBackendThatBuiltIt()
+    {
+        var (graph, a, b, _) = Model();
+        var recorder = new RecordingBackend(Alt.Value);
+        using var onAlt = new ComputeContext(recorder);
+
+        onAlt.Execute(graph, a.Shared(), b.Shared());
+        var built = recorder.Fed.ToArray();
+        Assert.Empty(recorder.Released);
+
+        onAlt.Dispose();
+        Assert.Empty(recorder.Released);
+
+        a.Delete();
+        b.Delete();
+        Assert.True(built.SequenceEqual(recorder.Released, ReferenceEqualityComparer.Instance));
     }
 
     /// <summary>The load context the isolated backend's own assemblies live in. It is what tells a
@@ -275,9 +334,21 @@ public class SideBySideBackendCoverageTests
 
         internal List<ShorokooGraphOptimization> Sessions { get; } = [];
 
+        internal List<IShorokooTensorValue> Released { get; } = [];
+
         public BackendDescription Description => inner.Description;
 
         public MemorySpace MemorySpace => inner.MemorySpace;
+
+        public object RuntimeIdentity => inner.RuntimeIdentity;
+
+        public bool CanAddress(MemoryLocation location) => inner.CanAddress(location);
+
+        public void Release(IShorokooTensorValue value)
+        {
+            Released.Add(value);
+            inner.Release(value);
+        }
 
         public IShorokooSession CreateSession(
             ReadOnlyMemory<byte> modelBytes, ShorokooGraphOptimization graphOptimization,
@@ -348,17 +419,18 @@ public class SideBySideBackendCoverageTests
         var first = new ComputeContext();
         var second = new ComputeContext(Alt.Value);
 
-        var fromAlt = second.Execute(graph, a, b)[0].ToTensorData();
-        var throughDefault = SideBySideModel.Floats(first.Execute(graph, fromAlt, b)[0]);
+        var fromAlt = second.Execute(graph, a.Shared(), b.Shared())[0].ToTensorData();
+        var throughDefault = SideBySideModel.Floats(first.Execute(graph, fromAlt.Shared(), b.Shared())[0]);
         Assert.Equal([.. expected.Zip([10f, 20f, 30f, 40f], (x, y) => x * y + x)], throughDefault);
 
-        var fromDefault = first.Execute(graph, a, b)[0].ToTensorData();
+        var fromDefault = first.Execute(graph, a, b.Shared())[0].ToTensorData();
         Assert.Equal(expected, [.. fromDefault.As<float32>().AccessMemory<float>()]);
         Assert.Equal(
             [.. expected.Zip([10f, 20f, 30f, 40f], (x, y) => x * y + x)],
             SideBySideModel.Floats(second.Execute(graph, fromDefault, b)[0]));
 
         Assert.Equal(expected, [.. fromAlt.As<float32>().AccessMemory<float>()]);
+        Assert.True(fromDefault.IsDisposed);
     }
 
     [Fact]

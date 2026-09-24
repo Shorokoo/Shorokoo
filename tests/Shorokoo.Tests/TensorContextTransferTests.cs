@@ -4,12 +4,13 @@ using Shorokoo.Runtime;
 namespace Shorokoo.Tests;
 
 /// <summary>
-/// A tensor is a handle on an allocation that counts what names it, and moves between compute
-/// contexts by <c>TransferTo</c> / <c>CopyTo</c> / <c>GiveAccessTo</c>.
+/// A tensor is its memory, and never moves: <c>To</c> hands the tensor itself to a context whose
+/// backend can read it where it is and copies otherwise, <c>CopyTo</c> always copies, and
+/// <c>ToHost</c> is <c>To</c> for host memory. None of them touches the source.
 ///
-/// <para>Everything here is host memory and two host contexts, which is the case the rules are
-/// hardest to see working: nothing crashes when a reference is miscounted, so only the assertions
-/// show it. The device pairing is <c>SideBySideBackendHardwareTests</c>'s.</para>
+/// <para>Everything here is host memory and host contexts. The device pairing is
+/// <c>CrossDeviceRoutingCoverageTests</c>' on stubs, and <c>SideBySideBackendHardwareTests</c>' on a
+/// card.</para>
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
@@ -20,223 +21,65 @@ public class TensorContextTransferCoverageTests
     private static float[] Floats(TensorData t) => [.. t.As<float32>().AccessMemory<float>()];
 
     [Fact]
-    public void TestATensorWithNoContextHoldsHostMemory()
+    public void TestATensorBuiltFromAnArrayIsTheFrameworksOwnManagedHostMemory()
     {
         var t = Sample();
 
-        Assert.Same(ComputeContext.Host, t.Context);
+        Assert.Same(HostBackend.Instance, t.AllocatingBackend);
         Assert.Equal(MemorySpace.Host, t.Space);
         Assert.Same(MemoryDevice.For(MemorySpace.Host), t.Device);
+        Assert.True(t.Location.IsManaged);
+        Assert.Equal(new MemoryLocation(MemorySpace.Host, HostBackend.Instance), t.Location);
         Assert.True(t.IsHostResident);
+        Assert.False(t.IsDisposed);
     }
 
     [Fact]
-    public void TestTheHostContextIsExactlyWhatTheNullContextWas()
+    public void TestToAContextThatCanReadTheTensorIsTheSameObjectAndCopiesNothing()
     {
-        Assert.Equal(MemorySpace.Host, ComputeContext.Host.MemorySpace);
-
-        foreach (var round in (Func<TensorData, TensorData>[])[
-            static t => t.TransferTo(null),
-            static t => t.TransferTo(ComputeContext.Host),
-            static t => t.CopyTo(null),
-            static t => t.CopyTo(ComputeContext.Host),
-            static t => t.Detach(),
-            static t => t.TransferTo(new ComputeContext()).TransferTo(null),
-            static t => t.TransferTo(new ComputeContext()).TransferTo(ComputeContext.Host),
-            static t => t.GiveAccessTo(new ComputeContext()).CopyTo(null),
-            static t => t.GiveAccessTo(new ComputeContext()).CopyTo(ComputeContext.Host)])
-        {
-            var result = round(Sample());
-            Assert.Same(ComputeContext.Host, result.Context);
-            Assert.Equal(MemorySpace.Host, result.Space);
-            Assert.Equal([1f, 2f, 3f, 4f], Floats(result));
-        }
-    }
-
-    [Fact]
-    public void TestTransferWithinOneSpaceMovesTheHandleAndNotTheBytes()
-    {
-        var source = Sample();
-        var cpu = new ComputeContext();
-
-        var moved = source.TransferTo(cpu);
-
-        // The whole point: the data did not go anywhere, the handle did.
-        Assert.Equal(MemorySpace.Host, moved.Space);
-        Assert.Same(cpu, moved.Context);
-        Assert.Same(cpu, source.Context);
-        Assert.Equal([1f, 2f, 3f, 4f], Floats(moved));
-
-        // And the source is still readable -- it handed its reference over, it did not lose the
-        // bytes.
-        Assert.Equal([1f, 2f, 3f, 4f], Floats(source));
-    }
-
-    [Fact]
-    public void TestTransferringTwiceInOneSpaceLeavesExactlyOneReference()
-    {
-        var first = new ComputeContext();
-        var second = new ComputeContext();
-        var source = Sample();
-
-        var a = source.TransferTo(first);
-        var b = a.TransferTo(second);
-
-        Assert.Equal([1f, 2f, 3f, 4f], Floats(b));
-
-        // Each transfer handed its own reference over rather than adding one, so the last handle
-        // alone is what the bytes are waiting on.
-        b.Dispose();
-        Assert.Throws<ObjectDisposedException>(() => Floats(source));
-        Assert.Throws<ObjectDisposedException>(() => Floats(a));
-    }
-
-    [Fact]
-    public void TestTransferringASecondHandleOnwardLeavesTheFirstReading()
-    {
-        var owner = Sample();
-        var reader = owner.GiveAccessTo(new ComputeContext());
-
-        var onward = reader.TransferTo(new ComputeContext());
-        onward.Dispose();
-
-        Assert.Equal([1f, 2f, 3f, 4f], Floats(owner));
-    }
-
-    [Fact]
-    public void TestTheHostContextTakesASecondHandleOnBytesAnotherTensorHolds()
-    {
-        var owner = Sample();
-        var reader = owner.GiveAccessTo(new ComputeContext());
-
-        foreach (var onHost in (TensorData[])[owner.GiveAccessTo(null), reader.TransferTo(null)])
-        {
-            Assert.Same(ComputeContext.Host, onHost.Context);
-            Assert.Equal([1f, 2f, 3f, 4f], Floats(onHost));
-        }
-    }
-
-    [Fact]
-    public void TestGiveAccessToLeavesBothHandlesReadingUntilTheLastOneGoes()
-    {
-        var owner = Sample();
-        var cpu = new ComputeContext();
-
-        var reader = owner.GiveAccessTo(cpu);
-
-        Assert.Same(cpu, reader.Context);
-        Assert.Same(ComputeContext.Host, owner.Context);
-        Assert.Equal([1f, 2f, 3f, 4f], Floats(reader));
-
-        // Either one may go first and the other reads on; the bytes wait for the second.
-        reader.Dispose();
-        Assert.Equal([1f, 2f, 3f, 4f], Floats(owner));
-        owner.Dispose();
-        Assert.Throws<ObjectDisposedException>(() => Floats(reader));
-    }
-
-    [Fact]
-    public void TestDisposingOneHandleLeavesTheOtherReadingAndDeletingStopsThemBoth()
-    {
-        var owner = Sample();
-        var reader = owner.GiveAccessTo(new ComputeContext());
-
-        owner.Dispose();
-
-        // The case that was a use-after-free: a second name for a buffer whose first name was
-        // disposed is now a buffer that is simply still alive.
-        Assert.False(reader.IsDisposed);
-        Assert.Equal([1f, 2f, 3f, 4f], Floats(reader));
-
-        // Deletion still invalidates every handle, which is what makes it deletion.
-        Assert.True(reader.TryDelete());
-        Assert.Contains("deleted", Assert.Throws<ObjectDisposedException>(() => Floats(reader)).Message);
-    }
-
-    [Fact]
-    public void TestDonatingSpendsThisHandleAndLeavesTheBytesToTheDonation()
-    {
+        using var cpu = new ComputeContext();
+        var secondBackend = (IShorokooBackend)Activator.CreateInstance(DefaultBackend.Instance.GetType())!;
+        using var alsoCpu = new ComputeContext(secondBackend);
         var t = Sample();
-        var donation = t.Donate();
 
-        Assert.True(t.IsDisposed);
-        Assert.Equal(t.DType, donation.DType);
-        Assert.Equal(t.Shape, donation.Shape);
-        Assert.Throws<ObjectDisposedException>(() => Floats(t));
-        Assert.Throws<ObjectDisposedException>(t.Donate);
-        Assert.Throws<ObjectDisposedException>(() => t.CopyTo(null));
-        Assert.Throws<ObjectDisposedException>(() => t.TransferTo(null));
+        Assert.NotSame(DefaultBackend.Instance, secondBackend);
+        Assert.Same(DefaultBackend.Instance.RuntimeIdentity, secondBackend.RuntimeIdentity);
 
-        var shared = Sample();
-        var reader = shared.GiveAccessTo(null);
-        shared.Donate();
-        Assert.Equal([1f, 2f, 3f, 4f], Floats(reader));
+        foreach (var to in (Func<TensorData, TensorData>[])[
+            x => x.To(cpu), x => x.To(alsoCpu), x => x.To(ComputeContext.Host), x => x.ToHost()])
+            Assert.Same(t, to(t));
 
-        var unfed = Sample();
-        var taken = unfed.GiveAccessTo(null);
-        var abandoned = unfed.Donate();
-        abandoned.Dispose();
-        abandoned.Dispose();
-        Assert.Equal([1f, 2f, 3f, 4f], Floats(taken));
-        taken.Dispose();
-        Assert.Throws<ObjectDisposedException>(() => Floats(taken));
-    }
-
-    [Fact]
-    public void TestASecondHandleIsRefusedOverAnAllocationThatIsAlreadyGone()
-    {
-        var deleted = Sample();
-        Assert.True(deleted.TryDelete());
-        Assert.Throws<ObjectDisposedException>(() => deleted.CloneSharing(ComputeContext.Host));
-
-        var released = Sample();
-        var reader = released.GiveAccessTo(null);
-        released.Dispose();
-        reader.Dispose();
-        Assert.Throws<ObjectDisposedException>(() => reader.CloneSharing(ComputeContext.Host));
-    }
-
-    [Fact]
-    public void TestCopyToAlwaysCopiesAndLeavesTheSourceAlone()
-    {
-        var source = Sample();
-        var cpu = new ComputeContext();
-
-        var copy = source.CopyTo(cpu);
-
-        Assert.Same(cpu, copy.Context);
-        Assert.Equal([1f, 2f, 3f, 4f], Floats(copy));
-
-        // Independent storage: releasing the source leaves the copy whole, which is what makes
-        // CopyTo the way to outlive a context.
-        source.Dispose();
-        Assert.Equal([1f, 2f, 3f, 4f], Floats(copy));
-    }
-
-    [Fact]
-    public void TestCopyToWorksFromASecondHandleAndOutlivesBoth()
-    {
-        var owner = Sample();
-        var reader = owner.GiveAccessTo(new ComputeContext());
-
-        var copy = reader.CopyTo(null);
-        owner.Dispose();
-        reader.Dispose();
-
-        Assert.Equal([1f, 2f, 3f, 4f], Floats(copy));
-    }
-
-    [Fact]
-    public void TestTheRoundTripBetweenTwoHostContextsIsAllNoOpsOnTheData()
-    {
-        var first = new ComputeContext();
-        var second = new ComputeContext();
-
-        var t = Sample().TransferTo(first).TransferTo(second).TransferTo(null);
-
-        Assert.Same(ComputeContext.Host, t.Context);
+        var output = cpu.Execute(Doubling(), t.Shared())[0].ToTensorData();
+        Assert.Same(DefaultBackend.Instance, output.AllocatingBackend);
+        Assert.Same(output, output.To(alsoCpu));
+        Assert.Same(output, output.To(ComputeContext.Host));
+        Assert.Same(output, output.ToHost());
         Assert.Equal([1f, 2f, 3f, 4f], Floats(t));
     }
+
+    [Fact]
+    public void TestCopyToAlwaysMakesAnIndependentCopyAndLeavesTheSourceAlone()
+    {
+        using var cpu = new ComputeContext();
+        var source = Sample();
+
+        foreach (var target in (ComputeContext[])[cpu, ComputeContext.Host])
+        {
+            var copy = (TensorData<float32>)source.CopyTo(target);
+
+            Assert.NotSame(source, copy);
+            Assert.Same(HostBackend.Instance, copy.AllocatingBackend);
+            copy.AccessModifiableMemory<float>()[0] = 9f;
+            Assert.Equal([9f, 2f, 3f, 4f], Floats(copy));
+            Assert.Equal([1f, 2f, 3f, 4f], Floats(source));
+        }
+
+        var kept = source.CopyTo(cpu);
+        source.Delete();
+        Assert.Equal([1f, 2f, 3f, 4f], Floats(kept));
+        Assert.Contains(kept, cpu.Tensors);
+    }
+
     [Fact]
     public void TestAStringTensorCrossesContextsByItsElements()
     {
@@ -245,42 +88,46 @@ public class TensorContextTransferCoverageTests
 
         var copy = strings.CopyTo(context);
 
-        Assert.Same(context, copy.Context);
+        Assert.NotSame(strings, copy);
+        Assert.Contains(copy, context.Tensors);
         Assert.Equal(["a", "b"], ((HostStringTensorData)copy).Strings);
         Assert.Equal(["a", "b"], ((HostStringTensorData)strings).Strings);
+        Assert.Same(strings, strings.To(context));
+        Assert.Same(strings, strings.ToHost());
     }
 
     [Fact]
-    public void TestATransferredFromTensorNamesTheContextThatWillFreeItsBytes()
+    public void TestTheOperationsRefuseADeadTensorADisposedContextAndNoContextAtAll()
     {
-        // A same-space transfer leaves the source readable with its reference handed over -- that
-        // is the documented contract. What it must not leave behind is a source whose Context names
-        // a context that no longer governs its bytes: Context is the only thing on the object that
-        // says whose disposal takes them away.
-        var first = new ComputeContext();
-        var second = new ComputeContext();
-        var tensor = Sample().TransferTo(first);
-        tensor.TransferTo(second);
+        var dead = Sample();
+        dead.Delete();
+        var disposed = new ComputeContext();
+        disposed.Dispose();
 
-        Assert.Same(second, tensor.Context);
-
-        first.Dispose();
-        Assert.Equal([1f, 2f, 3f, 4f], Floats(tensor));
-        second.Dispose();
-        Assert.Throws<ObjectDisposedException>(() => Floats(tensor));
+        Assert.Throws<ObjectDisposedException>(() => dead.To(ComputeContext.Host));
+        Assert.Throws<ObjectDisposedException>(() => dead.CopyTo(ComputeContext.Host));
+        Assert.Throws<ObjectDisposedException>(() => dead.ToHost());
+        Assert.Throws<ObjectDisposedException>(() => Sample().To(disposed));
+        Assert.Throws<ObjectDisposedException>(() => Sample().CopyTo(disposed));
+        Assert.Throws<ArgumentNullException>(() => Sample().To(null!));
+        Assert.Throws<ArgumentNullException>(() => Sample().CopyTo(null!));
     }
 
     [Fact]
-    public void TestATransferFromFrameworkHostMemoryLeavesTheSourceNamingItsNewOwner()
+    public void TestAWriteThroughATensorIsSeenByARunFedWhatToHandedOver()
     {
-        var context = new ComputeContext();
-        var tensor = Sample();
-        Assert.Same(ComputeContext.Host, tensor.Context);
+        using var context = new ComputeContext();
+        var t = (TensorData<float32>)TensorData([2L], (float[])[1f, 2f]);
+        var handed = t.To(context);
 
-        tensor.TransferTo(context);
+        Assert.Equal([2f, 4f], Floats(context.Execute(Doubling(), handed.Shared())[0].ToTensorData()));
+        t.AccessModifiableMemory<float>()[0] = 99f;
+        Assert.Equal([198f, 4f], Floats(context.Execute(Doubling(), handed.Shared())[0].ToTensorData()));
+    }
 
-        Assert.Same(context, tensor.Context);
-        context.Dispose();
-        Assert.Throws<ObjectDisposedException>(() => Floats(tensor));
+    private static InternalComputationGraph Doubling()
+    {
+        var a = InputVector<float32>("a");
+        return new InternalComputationGraph([a], [a + a]);
     }
 }

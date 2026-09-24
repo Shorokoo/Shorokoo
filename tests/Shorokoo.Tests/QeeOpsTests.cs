@@ -605,7 +605,7 @@ public class QeeIntegerWidthTests
         var g = ((ComputationGraph)typeof(TModule)
             .GetProperty("ComputationGraph", BindingFlags.Public | BindingFlags.Static)!.GetValue(null)!).ToInternal();
         var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
-        return ComputeContext.Default.Execute(concrete, input)[0].ToTensorData();
+        return ComputeContext.Default.Execute(concrete, input.Shared())[0].ToTensorData();
     }
 
     [Fact]

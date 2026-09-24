@@ -69,7 +69,8 @@ namespace Shorokoo.Tests.Utils
             byte[][]? csResults = null;
 
             context ??= ComputeContext.Default;
-            var inputData = (IData[])(sampleInputs ?? Array.Empty<TensorData>());
+            // Read, not consumed: the same inputs feed the roundtrip runs and the quick engine too.
+            IData[] inputData = [.. (sampleInputs ?? []).Select(static t => (IData)t.Shared())];
             var resultA = context.Execute(graph, inputData);
             var originalTensorData = resultA.Select(x => x.ToTensorData()).ToArray();
             originalResults = originalTensorData.Select(td => td.AccessRawMemory().ToArray()).ToArray();

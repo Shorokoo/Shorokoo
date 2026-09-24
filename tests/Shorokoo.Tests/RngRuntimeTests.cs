@@ -1485,7 +1485,7 @@ public class RngRuntimeTests
         var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input]))
             .ToConcreteModel(new RngConfig { MasterSeed = 1 });
 
-        float[] Run() => ComputeContext.Default.Execute(concrete, input)[0]
+        float[] Run() => ComputeContext.Default.Execute(concrete, input.Shared())[0]
             .ToTensorData().As<float32>().AccessMemory().ToArray();
 
         int nodeCount = concrete.Nodes.Count;

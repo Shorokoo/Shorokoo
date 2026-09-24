@@ -167,7 +167,7 @@ public class RngLoopTests
         var partial = g.ToConcreteArchitecture(g.FromOrderedInputs([x, TensorData(Array.Empty<long>(), 3L)]))
             .ToConcreteModel(cfg);
         Assert.Equal(HostExpected(cfg, steps: 2),
-            ComputeContext.Default.Execute(partial, x, TensorData(Array.Empty<long>(), 2L))[0]
+            ComputeContext.Default.Execute(partial, x.Shared(), TensorData(Array.Empty<long>(), 2L))[0]
                 .ToTensorData().As<float32>().AccessMemory().ToArray());
 
         // A constant trip count unrolls the loop away by concretization, yet each unrolled copy
@@ -201,7 +201,7 @@ public class RngLoopTests
         var (baseline, plain) = RunRuntimeLoop(cfg, steps: 3);
         var x = TensorData([N], XVals);
         var stepsData = TensorData(Array.Empty<long>(), 3L);
-        float[] Run() => ComputeContext.Default.Execute(plain, x, stepsData)[0]
+        float[] Run() => ComputeContext.Default.Execute(plain, x.Shared(), stepsData.Shared())[0]
             .ToTensorData().As<float32>().AccessMemory().ToArray();
         plain.ApplyRngConfig(ov);
         Assert.Equal(HostExpected(ov, steps: 3, ovKeys), Run());
@@ -247,7 +247,7 @@ public class RngLoopTests
         // Initialization succeeds and executing the valid iteration count — 0 — draws nothing.
         var zeroConcrete = zeroArch.ToConcreteModel(new RngConfig { MasterSeed = 11 });
         Assert.Equal(XVals, ComputeContext.Default
-            .Execute(zeroConcrete, x, TensorData(Array.Empty<long>(), 0L))[0]
+            .Execute(zeroConcrete, x.Shared(), TensorData(Array.Empty<long>(), 0L))[0]
             .ToTensorData().As<float32>().AccessMemory().ToArray());
 
         // The trainable-param analogue of the feed test: the in-loop MODEL_PARAM_ID_REF

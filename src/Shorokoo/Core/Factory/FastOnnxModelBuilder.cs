@@ -195,6 +195,15 @@ namespace Shorokoo.Core.Factory
             // ----- 1. Clone so we never mutate the caller's graph.
             var prepFast = fastGraph.Clone();
 
+            // A model built for a session here gives every output memory of its own. ONNX Runtime
+            // hands back an output that names a graph input, or repeats an earlier output, as the
+            // very value it was fed or has already returned, so two tensors would name one buffer,
+            // and a write into either -- by its owner, or by a later run writing an output over it --
+            // would change the other: the copy of an input its later runs read, say. ONNX Runtime
+            // keeps an Identity over such a value and gives its output memory of its own. Before the
+            // pre-passes, so the Identity is renamed with the rest of the graph.
+            if (prepForOnnx && !vanillaExport) FastIdentityWrapping.WrapAliasedOutputs(prepFast);
+
             // ----- 2. Run the Fast pre-passes in place. Capture the rename map
             // so we can also remap the tensor-info lookup we'll build below.
             var tensorInfoLookup = RunPrePassesAndBuildLookup(prepFast, prepForOnnx, applyExecutionLowerings);

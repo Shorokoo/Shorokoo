@@ -4,7 +4,7 @@ using static Shorokoo.Tests.Utils.QeeAudit;
 namespace Shorokoo.Tests;
 
 /// <summary>
-/// Phase 4 QEE-A1 audit batch: pooling and convolution families (ONNX opset 21). Each
+/// QEE audit batch: pooling and convolution families (ONNX opset 21). Each
 /// module in QeePoolConvAuditModules.cs compares the ShapeTensor() of every op result
 /// against the spec-expected dims and returns a single Scalar&lt;bit&gt;;
 /// <see cref="QeeAudit.Check{TModule}"/> validates that bit under both real ONNX Runtime
@@ -14,8 +14,8 @@ namespace Shorokoo.Tests;
 [Trait("Purpose", "Coverage")]
 public class QeePoolConvAuditTests
 {
-    private static readonly TensorData Image1x1x10x10 = F32Zeros([1L, 1L, 10L, 10L]);
-    private static readonly TensorData Image1x3x10x10 = F32Zeros([1L, 3L, 10L, 10L]);
+    private static TensorData Image1x1x10x10 => F32Zeros([1L, 1L, 10L, 10L]);
+    private static TensorData Image1x3x10x10 => F32Zeros([1L, 3L, 10L, 10L]);
 
     [Fact]
     public void TestQeePoolingShapeAudits()

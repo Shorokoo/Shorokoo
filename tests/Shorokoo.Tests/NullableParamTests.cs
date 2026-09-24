@@ -29,7 +29,7 @@ public class NullableParamTests
         return ((TensorData)outputs[0]).AccessRawMemory().ToArray();
     }
 
-    private static readonly TensorData SampleX = TensorData([3L], 1f, 2f, 3f);
+    private static TensorData SampleX => TensorData([3L], 1f, 2f, 3f);
 
     [Fact]
     public void TestOptionalTensorDataAndHandleSurface()

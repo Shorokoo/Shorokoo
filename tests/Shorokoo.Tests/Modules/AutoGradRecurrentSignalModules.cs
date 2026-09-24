@@ -1,7 +1,7 @@
 namespace Shorokoo.Tests.Modules
 {
     /// <summary>
-    /// Phase 4 AD-B3 modules for the recurrent / signal / misc gradient completion batch
+    /// Modules for the recurrent / signal / misc gradients
     /// (reverse-direction RNN/GRU/LSTM, DFT onesided + inverse, the STFT overlap-add
     /// adjoint, the generic [2-D and 3-D] AffineGrid gradient, training-mode
     /// BatchNormalization, and the tanh-approximation Gelu derivative). Same
@@ -16,7 +16,7 @@ namespace Shorokoo.Tests.Modules
 
     // ===================================================================
     //  Gelu approximate="tanh": the gradient must use the tanh-approximation
-    //  derivative, matching the (QEE-A2-fixed) forward.
+    //  derivative, matching the forward.
     // ===================================================================
 
     /// <summary>loss = Σ gelu(x, approximate="tanh") over a vector spanning both signs —
@@ -260,7 +260,7 @@ namespace Shorokoo.Tests.Modules
     }
 
     // ===================================================================
-    //  STFT overlap-add adjoint (replaces the AD-B1 ZERO-STUB). Signal
+    //  STFT overlap-add adjoint (replaced a zero stub). Signal
     //  [1,8,1], frame_step 2, window length 4 → 3 OVERLAPPING frames, so
     //  the ScatterElements(Add) overlap-add and the onesided zero-padding
     //  (K = 3 of L = 4 bins, the spec default) are both exercised. STFT is
@@ -383,8 +383,8 @@ namespace Shorokoo.Tests.Modules
     }
 
     // ===================================================================
-    //  BatchNormalization training_mode=1 (implemented this batch — was an
-    //  AD-B2 AD003 guard): dx must carry the batch-statistics backprop
+    //  BatchNormalization training_mode=1 (once refused with an AD003 guard):
+    //  dx must carry the batch-statistics backprop
     //  terms, dscale/dbias must use the batch-stat x̂.
     // ===================================================================
 

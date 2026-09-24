@@ -15,30 +15,32 @@ namespace Shorokoo.OnnxRuntime;
 /// CUDA execution provider's allocator, which a session does whether or not any node was placed on
 /// the card.</para>
 ///
-/// <para>Both are then held for the life of the process, per device, and that is the point rather
-/// than an oversight. ORT's tensor keeps a <i>raw</i> pointer to the allocator it was made from and
-/// frees itself through it, so an allocator released while any of its tensors is still alive turns
-/// every later collection of one into a use-after-free; and the arena the allocator draws on
-/// belongs to the session, so the session has to outlive the allocator in turn. A tensor's lifetime
-/// is the caller's business and can be arbitrarily long, so the only lifetime that is certainly
-/// long enough is the process's. Holding it here rather than on the backend matters for the same
-/// reason: a backend is an ordinary object a program may drop while its tensors live on.</para>
+/// <para><b>The allocator is held for the life of the process, and that is the point rather than
+/// an oversight.</b> An ORT tensor frees itself through the allocator that made it, so the
+/// allocator has to outlive every tensor it ever served: measured, releasing a tensor after its
+/// allocator has been released takes the process down. A tensor's lifetime is the caller's
+/// business and can be arbitrarily long, so the only lifetime that is certainly long enough is the
+/// process's. Holding it here rather than on the backend matters for the same reason: a backend is
+/// an ordinary object a program may drop while its tensors live on.</para>
 ///
-/// <para>The cost is bounded and deferred — one session per CUDA device, built on the first tensor
-/// actually allocated on that device, so a program that never puts one there never pays it. An
-/// isolated backend gets its own, because it gets its own copy of this assembly along with the
-/// native runtime it binds, which is exactly right: its allocator belongs to its runtime.</para>
+/// <para>The session it was taken from does <i>not</i> have to outlive it — measured too: a tensor
+/// allocated through it survives the session's disposal, the allocator keeping the arena it draws
+/// on alive by itself. The session is held beside it all the same. Releasing it would give back one
+/// idle session per card and buy nothing else, and holding both is the arrangement every release on
+/// this path has been observed under.</para>
 ///
-/// <para><b>Its arena is not covered by any context's
-/// <see cref="DeviceMemorySettings"/>.</b> This session is built with the defaults — no
-/// <c>LimitBytes</c> — and every tensor a transfer places in device memory is allocated out of it
-/// rather than out of a session the caller compiled. So a context given a budget bounds the
-/// sessions it compiles and not the tensors moved onto its card, and
-/// <c>DeviceMemorySettings.LimitBytes</c>' advice to count the live sessions sharing a card cannot
-/// account for this one, which the caller never asked for and cannot see. Honouring a per-context
-/// budget here needs an allocator per (device, settings) rather than per device, and a rule for
-/// which context's budget governs a tensor that several have touched — see
-/// Shorokoo/Shorokoo#367.</para>
+/// <para><b>One per CUDA device</b>, built on the first tensor actually allocated there, so a
+/// program that never puts one on a card never pays for it. Every compute context on the card
+/// shares it whatever its <see cref="DeviceMemorySettings"/>: its arena has no ceiling of its own,
+/// and a context's device-memory budget is not enforced here but by the context's own accounting of
+/// the tensors attached to it, which refuses a transfer that would take it past its budget before
+/// this is ever asked for the memory. So there is one arena per card to hold, and nothing to
+/// multiply. Nothing ever runs this session, so nothing asks its arena to shrink: it keeps the
+/// blocks it has extended by, and holds the most it has ever been asked for at once.</para>
+///
+/// <para>An isolated backend gets its own, because it gets its own copy of this assembly along
+/// with the native runtime it binds, which is exactly right: its allocator belongs to its
+/// runtime.</para>
 /// </summary>
 internal static class CudaDeviceAllocator
 {
@@ -47,7 +49,7 @@ internal static class CudaDeviceAllocator
     private const int OnnxIrVersion = 10;
     private const int OnnxOpset = 21;
 
-    /// <summary>A device's allocator and the session it was taken from, which has to outlive
+    /// <summary>A device's allocator and the session it was taken from, which is held beside
     /// it.</summary>
     private sealed record Binding(InferenceSession Session, OrtAllocator Allocator);
 
@@ -89,7 +91,7 @@ internal static class CudaDeviceAllocator
         // and its critical finalizer free-able -- while the session constructor is still reading it.
         using var options = new SessionOptions();
         // The shipped settings, and no caller's: this session is never run, and the allocator it
-        // registers is the device's rather than any one session's -- the same reason the cache is
+        // registers is the device's rather than any one context's -- the same reason the cache is
         // keyed on the device alone. Resolved because AppendCuda refuses ArenaExtendStrategy.Auto.
         configureExecutionProvider(options, DeviceMemorySettings.Default.Resolve(reusedAcrossShapes: false));
         var session = new InferenceSession(MinimalModel(), options);

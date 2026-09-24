@@ -198,7 +198,7 @@ public class CSharpModelBuilderCoverageTests
     private static byte[][] Run(InternalComputationGraph graph, TensorData[] inputs)
     {
         var model = graph.ToConcreteArchitecture(graph.FromOrderedInputs([.. inputs])).ToConcreteModel();
-        return [.. Shorokoo.Runtime.ComputeContext.Default.Execute(model, [.. inputs.Cast<IData>()])
+        return [.. Shorokoo.Runtime.ComputeContext.Default.Execute(model, [.. inputs.Select(t => t.Shared())])
             .Select(x => x.ToTensorData().AccessRawMemory().ToArray())];
     }
 

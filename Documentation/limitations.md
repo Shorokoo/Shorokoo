@@ -193,61 +193,100 @@ rest of it.
 
 ### Moving a tensor between memory spaces copies it
 
-A `TensorData` is a handle on an allocation, attached to a compute context, and
-`TransferTo` / `CopyTo` / `GiveAccessTo` move it between contexts; see
-[Moving data between contexts](inference.md#moving-data-between-contexts). Any two host contexts
-share host bytes without copying. Two CUDA contexts on one device share the allocation only when
-they share a native ONNX Runtime — a device allocation means nothing to a runtime that did not make
-it, so two *isolated* backends over one card copy through the host like any other crossing. Crossing
-from the host to a device or back is a real copy, once per crossing. There is no way to have a
-tensor be in two spaces at once, and there is no direct device-to-device path: a tensor moving
-between two different cards goes through the host.
+A `TensorData` is its memory, and it never moves: `To` hands it to a context whose backend can read
+it where it is and copies it otherwise, and `CopyTo` always copies; see
+[Moving data between contexts](inference.md#moving-data-between-contexts). Every host backend reads
+the framework's own host memory as it stands. Two CUDA contexts on one device share an allocation
+only when they share a native ONNX Runtime — a device allocation means nothing to a runtime that did
+not make it, so two *isolated* backends over one card copy through the host like any other
+crossing. Crossing from the host to a device or back is a real copy, once per crossing. There is no
+way to have a tensor be in two spaces at once, and there is no direct device-to-device path: a
+tensor going to a different card goes through the host.
 
-A tensor that came back from a session without the context that produced it being recorded reports
-its space as unknown, and cannot be transferred at all — there is no telling whether another
-context shares it. Bring such a value home on the backend that owns it first.
+A tensor in memory Shorokoo has no name for — a device value produced by a backend on an execution
+provider it does not know, or one wrapped around a runtime value without saying which backend made
+it — reports its space as unknown, and no other backend is handed it as it stands: two such
+allocations compare equal as spaces without being in the same place, so only the backend that made
+one reads it where it is. `To` and `CopyTo` onto any other context copy it instead, through the
+backend that made it. A value wrapped without its backend that the host *can*
+read reports its space as the host: its accessors read it, and `ToHost()` hands it back as it is.
+No runtime is handed it as it stands all the same, since which runtime made it is unknown, so a run
+reads it through a copy and `To` a context that runs copies it. One whose producer was not recorded
+and that the host cannot read cannot be copied at all, and a run fed one is refused before it takes
+anything; wrap such a value with `TensorData.Create(shape, dtype, value, backend)`, naming the
+backend.
 
-### A feed disposed while a run is starting loses that run
+### A feed deleted while a run is starting loses that run
 
-A run locks every tensor it is fed and holds the lock until it returns, so a feed disposed from
-another thread *while the run holds it* is safe: the handle goes, the run reads on, and the bytes
-come back when the run lets go — see
-[A tensor's lifetime](inference.md#a-tensors-lifetime-handles-locks-and-deletion). The lock is
-taken inside the run, one feed at a time, and everything before that is unprotected: the
-`Execute` / `Run` call itself, the expansion and naming of its inputs, and the locking of
-whichever feeds come first. A disposal landing in that window drops the last handle on the
-allocation, so the lock the run then asks for is refused and the call throws
-`ObjectDisposedException`.
+A run holds every tensor it is fed until it returns. One it reads — fed `.Shared()`, or through
+`.TryConsume()` while another run was reading it — it holds under a reader lock, so deleting it from
+another thread *while the run holds it* is refused: `Delete()` and `Dispose()` throw and
+`TryDelete()` declines, and the run reads on. One fed as it is, it holds by having taken it: the
+tensor is dead from then on, so a later `Delete()` finds nothing left to do — see
+[A tensor's lifetime](inference.md#a-tensors-lifetime-locks-and-deletion). Either hold is taken
+inside the run, one feed at a time, and everything before that is unprotected: the `Execute` /
+`Run` call itself, the expansion and naming of its inputs, and the holding of whichever feeds come
+first. A deletion landing in that window ends the tensor, so the lock or the take the run then asks
+for is refused and the call throws `ObjectDisposedException`, saying the tensor was deleted.
 
 The failure is clean — nothing reads freed memory, and no run returns a wrong answer — but the
-run is lost, and it is not a narrow race to be got away with: measured on a loop that handed a
-feed to `Execute` on one thread and disposed it from another as the call was made, 499 of 500
-runs ended that way. It is also the arrangement that
-[One model, two devices](inference.md#one-model-two-devices) invites — staging the next batch
-while the other device is still reading the last one — which is exactly where it is easy to
-write by accident. Give the concurrent run a tensor of its own (`CopyTo`) or wait for it to
-return.
+run is lost, and not always alone. A run checks every feed before it takes any, so one refused
+before it starts takes nothing; but a feed that dies in this window — or that another run starts
+reading, where this one would consume it — refuses the run part-way, and what it had taken by then
+stays consumed. The window is not narrow: it is the whole of the call's setup. It is also the
+arrangement that [One model, two devices](inference.md#one-model-two-devices) invites — staging
+the next batch while the other device is still reading the last one — which is exactly where it
+is easy to write by accident. Give the concurrent run a tensor of its own (`CopyTo`) or wait for
+it to return.
 
-Nothing detects the disposal *coming*; what the lock gives is a refusal at the moment the run
-reaches for bytes that are gone. Closing the window rather than reporting it means taking the
-lock where the caller still holds the handle — at the entry point, before the inputs are
+Nothing detects the deletion *coming*; what the hold gives is a refusal at the moment the run
+reaches for a tensor that is gone. Closing the window rather than reporting it means taking the
+hold where the caller still holds the tensor — at the entry point, before the inputs are
 expanded — which also has to hold for `Run`, for `Eval`, and for the one-shot paths that build
 a session of their own.
 
-### A tensor moved onto a card is not covered by any device-memory budget
+### A device-memory budget counts tensors, not arenas
 
-`ComputeContext.DeviceMemory` bounds the arenas of the sessions that context compiles. It does not
-bound `TransferTo` / `CopyTo` onto that context: placing a tensor in device memory allocates out of
-a separate, process-wide allocator held per CUDA device, built with the defaults and no limit.
+A context's `DeviceMemorySettings.LimitBytes` is kept by counting what is on its books: the bytes of
+the tensors attached to it in the card's memory, and the arena limit of whichever of its runs is
+executing, which is cut to what those tensors leave — see
+[A context's device-memory budget](inference.md#a-contexts-device-memory-budget). What it counts is
+exact. What it does not count is memory the card is holding all the same:
 
-So a context configured with `LimitBytes` can still put an arbitrarily large tensor on the card, and
-`CompiledGraph.DeviceMemory` reports a budget that does not describe that context's whole device
-footprint. Counting live sessions against a card — which `DeviceMemorySettings.LimitBytes` advises —
-cannot account for this allocator, since it is not a session the program compiled.
+- **The allocator tensors are placed from.** A tensor put on a card — by `To`, `CopyTo`,
+  `AllocateUninitialized`, or a run copying a host tensor there to read it — comes out of one
+  allocator per card and runtime, shared by every context over that runtime (a backend loaded in
+  isolation has a runtime, and so an allocator, of its own) and held for the life of the process:
+  an ONNX Runtime tensor frees itself through the allocator that made it, so that allocator has to
+  outlive every tensor it ever served. Nothing ever asks it to shrink, so the blocks it has taken
+  stay taken: a deleted tensor's bytes go back to it rather than to the card, and it goes on holding
+  the most that was ever on the card through it at once, whatever any budget counts now.
+- **What an arena keeps spare.** An arena takes blocks, not bytes, and a block part in use cannot be
+  handed back. Every run under a budget hands back what it can as it ends, but a session's arena can
+  hold more than what is in use in it.
+- **A session's weights between its runs.** A compiled graph's weights live in its session's arena
+  for as long as the session does, and count only against that session's own runs. A context that
+  has compiled several graphs with large weights holds all of them at once, which the budget sees
+  only one at a time. A session rebuilt for a lower limit leaves its old arena alive for as long as
+  outputs its runs left there are.
+- **Memory a dead tensor still holds.** The books count live tensors, and a tensor leaves them the
+  moment it dies, which can be before its memory comes back. One deleted with `DeleteAsync` while a
+  run is reading it holds its memory until that run returns; one a run of another context consumes
+  holds it until that run has finished with it. A budgeted context's own runs close that window,
+  since nothing is placed on the context while one is in flight; a run of another context, reading
+  or consuming a tensor this context also has on its books, leaves it open until that run returns,
+  and for that long the budget undercounts the card.
 
-[#367](https://github.com/Shorokoo/Shorokoo/issues/367) tracks bringing it under a budget, which
-needs an allocator per (device, settings) and a rule for which context's budget governs a tensor
-more than one has touched.
+So a budget is a ceiling on what the context counts, and the card can be holding more: leave it
+headroom, and read `DeviceMemory.Read()` for what the card is really carrying.
+
+Two consequences of how it is kept are costs rather than gaps. A session's arena limit only ever
+comes down: a context that lets go of what it held keeps the smaller arenas its graphs were rebuilt
+with, until the graph is compiled again. And under a budget a context does one thing at a time —
+a transfer onto it waits for its run in flight — so staging the next batch onto a budgeted context
+from another thread does not overlap the step it is staged for. Staging it through a second context
+over the same backend keeps the overlap: the budgeted run reads the batch where it is, and counts it
+then.
 
 ### A fed input's buffer is not recycled inside the run
 
@@ -262,38 +301,56 @@ loss. It is felt by the opposite shape — a pipeline over an input so large tha
 peak, whose output is input-shaped — where the one buffer that can never be recycled is the
 largest in the run.
 
-[`Donate()`](inference.md#feeding-a-large-input-without-a-second-copy) is the lever that does
-exist: it releases the input the instant the run returns instead of when the caller lets go, and
-allocating on the context removes the managed copy beside it. Neither makes the bytes available to
-the run's own intermediates. Doing that means binding an output onto the input through ONNX
-Runtime's I/O binding, which ORT permits and checks nothing about: it buys exactly one
-input-sized buffer, only where an output matches that input's dtype and byte size, and nothing at
-all where the output is a loss.
+[Feeding the input as it is](inference.md#feeding-a-large-input-without-a-second-copy), rather
+than `.Shared()`, is the lever that does exist: the run consumes it, which releases it the instant
+the run returns instead of when the caller lets go, and allocating on the context removes the
+managed copy beside it. Neither makes the bytes available to
+the run's own intermediates. The one thing that does is writing an output into the input through
+ONNX Runtime's I/O binding, which ORT permits and checks nothing about: it buys exactly one
+input-sized buffer, only where an output matches that input's dtype and shape and nothing reads
+the input after the output is written, and nothing at all where the output is a loss. A training
+step does that for the state it replaces, whose lowering proves which outputs qualify —
+[A run that writes an output into what it consumed](inference.md#a-run-that-writes-an-output-into-what-it-consumed).
+A graph you compile yourself marks no outputs, so a pipeline of your own still holds its input
+beside its input-shaped output.
 
-### Sequence-valued models on an isolated CUDA backend
+### A sequence's elements live in host memory
 
-A model whose outputs are *sequences* — `SequenceAt`, `SplitToSequence`, anything producing an ONNX
-sequence type — faults ONNX Runtime when it runs on a backend loaded through
-`IsolatedBackend.Load` or `BackendPackage.TryLoad` onto a CUDA device. The crash is an access
-violation inside ORT's own `OrtValue.GetValue`, so it takes the process down rather than raising.
+A sequence holds host-memory tensors, on every backend. ONNX Runtime will pack a tensor an
+execution provider left on a card into one, and then cannot read it back out: its `GetValue`
+copies an element with a plain host `memcpy` whatever allocator it is handed, so the first read
+of such an element dereferences a device address from the host and takes the process down with an
+access violation that nothing can catch. A sequence built that way is write-only.
 
-It is specific to the combination. The same model runs on an isolated *CPU* backend, and on a CUDA
-backend reached the ordinary way — by referencing `Shorokoo.LinuxGPU` or `Shorokoo.WinGPU` and
-letting discovery find it. Tensor and string values are unaffected in every combination.
+So the ONNX Runtime backend's `CreateSequence` refuses an element that is in the provider's own
+memory. The framework hands it host copies only, so only a caller of `CreateSequence` itself meets
+this; and a refusal, like any failure of `CreateSequence`, releases every value it was handed. The
+tensor those values were copied from is untouched, and it is what to bring home —
+`TensorData.ToHost()` — before building the sequence again. The refusal names the tensor:
 
-Until it is diagnosed, a program that needs sequence outputs on a card should reach its CUDA
-backend by reference rather than by loading it into isolation. That costs the ability to run a
-second ONNX Runtime alongside it, which is the only thing isolation buys.
+```
+A tensor (2:Float) in Shorokoo.WinGPU's own device memory cannot be an element of a sequence:
+ONNX Runtime can pack it into one but reads an element back with a host copy, so nothing could
+ever read it again. ...
+```
 
-[#368](https://github.com/Shorokoo/Shorokoo/issues/368) tracks it, and carries the two leads on
-the path worth ruling out first. It has no pinning test: the pin needs a card.
+None of this touches a model whose *outputs* are sequences — `SequenceAt`, `SplitToSequence`,
+anything producing an ONNX sequence type. ONNX Runtime materializes a run's sequence output in
+host memory whichever execution provider produced it — and a sequence output flagged in
+`Execute(inputs, retainOnDevice)` comes back there too, since only a tensor is left on the card —
+so such a model runs on a CUDA backend, and
+on one loaded through `IsolatedBackend.Load` or `BackendPackage.TryLoad`, like any other; its
+elements read, and the sequence moves to another context element by element.
+
+What would lift this is a device-aware copy inside ONNX Runtime's own `GetValue`, which would
+make a device-resident sequence readable and this refusal unnecessary.
 
 ### Device-memory readings are the device's, and device 0's
 
-Arena configuration is per session and per run — `ComputeContext.DeviceMemory` for the sessions a
-context compiles, `RunSettings` for what a run does, see
-[Device memory](inference.md#device-memory-gpu-backends). Two contexts may differ, and a host
-running two models can give them separate budgets and separate arena strategies.
+Device-memory configuration is per context, per session and per run — `ComputeContext.DeviceMemory`
+for the budget a context keeps on its card and the sessions it compiles, `RunSettings` for what a
+run does, see [Device memory](inference.md#device-memory-gpu-backends). Two contexts may differ, and
+a host running two models can give them separate budgets and separate arena strategies.
 
 What remains process-wide is the *reporting*. `DeviceMemory.Read()` and `Sample()` go to whichever
 CUDA device is current for the calling thread — device 0, because that is what the shipped GPU
@@ -301,9 +358,13 @@ backends use — and what they return is the whole device's usage rather than th
 it, so another process on the card is in your figures. `PeakUsedBytes` is likewise one record for
 the process.
 
-What would improve it is per-allocator figures out of ORT
-([#198](https://github.com/Shorokoo/Shorokoo/issues/198)), which would say what this process holds
-rather than what the device does.
+Per-allocator figures exist for what they cover: `CompiledGraph.ReadArenaStatistics()` reads one
+session's own arena, its bytes and nobody else's, and `ComputeContext.ReadDeviceMemoryUse()` what a
+context holds against its budget — see
+[What one session's arena did](inference.md#what-one-sessions-arena-did). None of them is this
+process's share of the card: nothing reads the allocator tensors are placed from, and a process with
+several sessions has several arenas to add up. For that total, the device's own figure is still the
+one there is.
 
 ### Backprop through dynamic loops
 
@@ -324,6 +385,15 @@ does a `[Hyper]`, which is a constant by the time the model is concretized.
 
 The rejection covers module-owned state inside such a loop as well: an update
 registered there has no value the training graph can carry out of the body.
+
+### A training rig feeds its model tensors and optional tensors
+
+A model may take a `TensorSequence<T>` for inference, but a `TrainingRig` cannot be built over one:
+its stages past concretization — the representative inputs its shape inference is seeded with, the
+batch definition its steps are checked against — know a model input only as a tensor or an
+optional tensor. `TrainingRig.FromScratch` refuses such a model before it builds anything, naming
+the input, with a `NotSupportedException`. Train a model that takes the sequence's tensors as inputs
+of their own, or that builds the sequence from them itself.
 
 ### Conditional execution in a training graph
 

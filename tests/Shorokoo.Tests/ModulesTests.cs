@@ -315,7 +315,7 @@ public class ModulesCoverageTests
         var x = TensorData([2L], 1f, 2f);
         var arch = NestedBigArch(outer: false, inner: true);
         var o = new ComputeContext().Execute(arch.ToConcreteModel(RngConfig.Default),
-            [TensorData([], true), TensorData([], true), x]);
+            [TensorData([], true), TensorData([], true), x.Shared()]);
         Assert.Equal([1f, 2f], Floats(o[0]));
 
         var reloaded = CompressedFormatUtils.LoadFastGraphCore(
@@ -355,11 +355,11 @@ public class ModulesCoverageTests
         TensorData Bit(bool b) => TensorData([], b);
 
         Assert.True(Exclusivity(Modules.TupleGateHyperLayer.ComputationGraph,
-            [Bit(false), x], [Bit(true), x],
+            [Bit(false), x], [Bit(true), x.Shared()],
             paramCount: 0, ifNodes: 1, slot0: [1f, 2f], slot1: [10f, 20f]));
 
         Assert.True(Exclusivity(Modules.SharedDeadParamTwoGatesLayer.ComputationGraph,
-            [Bit(false), x, Bit(false)], [Bit(false), x, Bit(true)],
+            [Bit(false), x, Bit(false)], [Bit(false), x.Shared(), Bit(true)],
             paramCount: 0, ifNodes: 2, slot0: [1f, 2f], slot1: [1f, 2f]));
     }
 
@@ -376,7 +376,7 @@ public class ModulesCoverageTests
             var arch = g.ToConcreteArchitecture(g.FromOrderedInputs(
                 [TensorData([], false), TensorData([], flag), x]));
             var o = new ComputeContext().Execute(arch.ToConcreteModel(RngConfig.Default),
-                [TensorData([], false), TensorData([], flag), x]);
+                [TensorData([], false), TensorData([], flag), x.Shared()]);
             return (arch.InitializeTrainableParams(rngConfig: RngConfig.Default).ModelParams.Length,
                     IfCount(arch), Floats(o[0]));
         }
@@ -400,7 +400,7 @@ public class ModulesCoverageTests
         {
             var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([], mode), x]));
             var o = new ComputeContext().Execute(arch.ToConcreteModel(RngConfig.Default),
-                [TensorData([], mode), x]);
+                [TensorData([], mode), x.Shared()]);
             return arch.InitializeTrainableParams(rngConfig: RngConfig.Default).ModelParams.Length == paramCount
                 && IfCount(arch) == ifNodes
                 && Floats(o[0]).SequenceEqual(expected);
@@ -440,7 +440,7 @@ public class ModulesCoverageTests
             var g = Modules.LoopGateHyperLayer.ComputationGraph;
             TensorData[] hints = [TensorData([], 3L), TensorData([], flag), x];
             var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([.. hints]));
-            return Floats(new ComputeContext().Execute(arch.ToConcreteModel(RngConfig.Default), hints)[0]);
+            return Floats(new ComputeContext().Execute(arch.ToConcreteModel(RngConfig.Default), [hints[0], hints[1], x.Shared()])[0]);
         }
         Assert.Equal([4f, 5f], Run(flag: true));
         Assert.Equal([8f, 16f], Run(flag: false));
@@ -567,7 +567,7 @@ public class ModulesCoverageTests
 
         var inner = Modules.IfInLoopInIfLayer.ComputationGraph;
         var spec = inner.Specialize(inner.FromOrderedInputs([TensorData([], 3L)]));
-        IData[] specRuntime = [x, TensorData([], true)];
+        IData[] specRuntime = [x.Shared(), TensorData([], true)];
         var specModel = spec.ToConcreteArchitecture(spec.FromOrderedInputs([x, TensorData([], true)]))
                             .ToConcreteModel(RngConfig.Default);
         Assert.Equal([10f, 20f], Floats(new ComputeContext().Execute(specModel, specRuntime)[0]));
@@ -762,7 +762,7 @@ public class ModulesCoverageTests
             n.OpType == OpCodes.CONSTANT
             && n.Attributes.Any(a => a.T is { Dims.Length: 2 }));
 
-        var direct = ComputeContext.Default.Execute(concrete, numOut, input)[0]
+        var direct = ComputeContext.Default.Execute(concrete, numOut.Shared(), input.Shared())[0]
             .ToTensorData().AccessRawMemory().ToArray();
         using var ms = new MemoryStream();
         ProtoBuf.Serializer.Serialize(ms, proto);
@@ -814,7 +814,7 @@ public class ModulesCoverageTests
         var outMeta = session.OutputMetadata[outputNames.Single()];
         Assert.Equal(typeof(float), outMeta.ElementType);
 
-        var direct = ComputeContext.Default.Execute(concrete, numOut, input)[0]
+        var direct = ComputeContext.Default.Execute(concrete, numOut, input.Shared())[0]
             .ToTensorData().As<float32>().AccessMemory().ToArray();
         long[] hyperData = [4L];
         int[] scalarDims = [];
@@ -1010,7 +1010,7 @@ public class ModulesCoverageTests
         Assert.DoesNotContain(concreteArch.ToInternal().Nodes, n => n.OpCode == InternalOpCodes.FUNCTION_INVOKE);
     }
 
-    private static readonly TensorData VitPatches = TensorDataWithSmallVals(DType.Float32, [1L, 4L, 6L]);
+    private static TensorData VitPatches => TensorDataWithSmallVals(DType.Float32, [1L, 4L, 6L]);
 
     private static TensorData[] VitHypers(
         long embedDim = 4, long numHeads = 2, long ffnDim = 8, long numLayers = 1,
@@ -1072,8 +1072,8 @@ public class ModulesCoverageTests
         Assert.Equal(originalInputCount - 2, specializedModel.ToInternal().Inputs.Count);
         Assert.Equal(originalInputCount, model.ToInternal().Inputs.Count);
 
-        var expected = ComputeContext.Default.Execute(model, factor, bias, input)[0].ToTensorData().AccessRawMemory().ToArray();
-        var actual   = ComputeContext.Default.Execute(specializedModel, input)[0].ToTensorData().AccessRawMemory().ToArray();
+        var expected = ComputeContext.Default.Execute(model, factor.Shared(), bias.Shared(), input.Shared())[0].ToTensorData().AccessRawMemory().ToArray();
+        var actual   = ComputeContext.Default.Execute(specializedModel, input.Shared())[0].ToTensorData().AccessRawMemory().ToArray();
         Assert.Equal(expected, actual);
 
         var partialHints = new ModelParamList([
@@ -1081,7 +1081,7 @@ public class ModulesCoverageTests
         ]);
         var partial = model.Specialize(partialHints);
         Assert.Equal(originalInputCount - 1, partial.ToInternal().Inputs.Count);
-        var partialActual = ComputeContext.Default.Execute(partial, bias, input)[0].ToTensorData().AccessRawMemory().ToArray();
+        var partialActual = ComputeContext.Default.Execute(partial, bias.Shared(), input.Shared())[0].ToTensorData().AccessRawMemory().ToArray();
         Assert.Equal(expected, partialActual);
 
         var specialized = moduleGraph.Specialize(moduleGraph.FromOrderedInputs([factor, bias]));
@@ -1106,7 +1106,7 @@ public class ModulesCoverageTests
             .ToConcreteModel();
         Assert.Single(fcConcrete.ToInternal().Inputs);
 
-        var fcActual = ComputeContext.Default.Execute(fcConcrete, fcInput)[0].ToTensorData().AccessRawMemory().ToArray();
+        var fcActual = ComputeContext.Default.Execute(fcConcrete, fcInput.Shared())[0].ToTensorData().AccessRawMemory().ToArray();
         var fcRef = fcGraph.ToConcreteArchitecture(fcGraph.FromOrderedInputs([numOut, fcInput])).ToConcreteModel();
         var fcExpected = ComputeContext.Default.Execute(fcRef, numOut, fcInput)[0].ToTensorData().AccessRawMemory().ToArray();
         Assert.Equal(fcExpected, fcActual);
@@ -1116,7 +1116,7 @@ public class ModulesCoverageTests
         RunFloats(g.ToConcreteArchitecture(g.FromOrderedInputs([.. inputs])).ToConcreteModel(), inputs);
 
     private static float[] RunFloats(ComputationGraph model, params TensorData[] inputs)
-        => ComputeContext.Default.Execute(model, inputs)[0].ToTensorData().As<float32>().AccessMemory<float>().ToArray();
+        => ComputeContext.Default.Execute(model, [.. inputs.Select(t => t.Shared())])[0].ToTensorData().As<float32>().AccessMemory<float>().ToArray();
 
     private static void AssertBakedHypersMatchHintedHypers(
         ComputationGraph module, TensorData[] hypers, TensorData input)
@@ -1196,7 +1196,7 @@ public class ModulesCoverageTests
         var g = AnalyticLoopAccumulateCheck.ComputationGraph;
         var x = TensorData(DType.Float32, [4L], 3f, 4f, 5f, 6f);
         var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x])).ToConcreteModel();
-        var direct = ComputeContext.Default.Execute(concrete, x)[0].ToTensorData().AccessRawMemory().ToArray();
+        var direct = ComputeContext.Default.Execute(concrete, x.Shared())[0].ToTensorData().AccessRawMemory().ToArray();
         var proto = Shorokoo.Core.Factory.FastOnnxModelBuilder.BuildOnnxModel(concrete);
         using var ms = new MemoryStream();
         ProtoBuf.Serializer.Serialize(ms, proto);
@@ -1418,7 +1418,7 @@ public class ModulesCoverageTests
         var g = ScalarMultiplyModel.ComputationGraph;
         var model = g.ToConcreteArchitecture(g.FromOrderedInputs([sample])).ToConcreteModel();
         Assert.Equal([1.0f, 2.0f],
-            ComputeContext.Default.Execute(model, sample)[0].ToTensorData().As<float32>().AccessMemory<float>().ToArray());
+            ComputeContext.Default.Execute(model, sample.Shared())[0].ToTensorData().As<float32>().AccessMemory<float>().ToArray());
 
         // Hypers are graph inputs, and come first — the order the message tells the reader to use.
         var lg = Shorokoo.Modules.Layers.Linear.ComputationGraph;
@@ -1431,7 +1431,7 @@ public class ModulesCoverageTests
 
         // A module-typed function invoke is inlined and runs; refusing it would refuse a graph that
         // executes correctly.
-        Assert.Equal([2.0f, 4.0f], ComputeContext.Default.Execute(ModuleInvokeGraph(), sample)[0]
+        Assert.Equal([2.0f, 4.0f], ComputeContext.Default.Execute(ModuleInvokeGraph(), sample.Shared())[0]
             .ToTensorData().As<float32>().AccessMemory<float>().ToArray());
 
 

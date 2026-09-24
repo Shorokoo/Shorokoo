@@ -18,7 +18,7 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         // gradients. The BPTT implementations assume the DEFAULT activations, no
         // clipping, layout=0 and no per-batch sequence_lens; any other combination
         // would make the recomputed forward (and therefore the gradient) silently wrong,
-        // so they throw AD003 instead (AD-B2/AD-B3 pattern: no silent wrongness).
+        // so they throw AD003 instead: no silent wrongness.
         // ------------------------------------------------------------------------------
 
         /// <summary>

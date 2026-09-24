@@ -132,7 +132,7 @@ public class BackendPackageCoverageTests
         Assert.Equal(ComputeDevice.Cpu, backend!.Description.Device);
         Assert.Equal(MemorySpace.Host, backend.MemorySpace);
 
-        using var context = new ComputeContext(backend, detachesOutputs: true);
+        using var context = new ComputeContext(backend);
         var a = InputVector<float32>("a");
         var b = InputVector<float32>("b");
         var graph = new InternalComputationGraph([a, b], [a * b + a]);
@@ -145,9 +145,8 @@ public class BackendPackageCoverageTests
         Assert.Equal([.. av.Zip(bv, (x, y) => x * y + x)],
             result.As<float32>().AccessMemory<float>().ToArray());
 
-        // Detached, so it is still readable once the context that made it is gone.
         context.Dispose();
-        Assert.Same(ComputeContext.Host, result.Context);
+        Assert.Same(backend, result.AllocatingBackend);
         Assert.Equal(4, result.As<float32>().AccessMemory<float>().Length);
     }
 

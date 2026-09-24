@@ -74,7 +74,7 @@ namespace Shorokoo
 
         /// <summary>
         /// The 0-based global training step this checkpoint sits at. Each
-        /// <see cref="TrainingRig.TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct)"/>
+        /// <see cref="TrainingRig.TrainStep(TrainingCheckpoint, IData, IData)"/>
         /// advances it by one and the rig evaluates scheduled hyperparameters at this step, so a
         /// schedule resumes correctly from a saved checkpoint.
         /// </summary>
@@ -89,7 +89,7 @@ namespace Shorokoo
         /// / the counter-agnostic <c>TrainStep</c>) carries <c>null</c> rather than a misleading <c>0</c>.
         /// The loader-driven and explicit-counter paths (<see cref="TrainingRig.Fit(IDataLoader, int, TrainingCheckpoint?)"/>,
         /// <see cref="TrainingRig.TrainStep(TrainingCheckpoint, IDataLoader)"/>,
-        /// <see cref="TrainingRig.TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct, long, long)"/>)
+        /// <see cref="TrainingRig.TrainStep(TrainingCheckpoint, IData, IData, long, long)"/>)
         /// set a concrete value. Persisted as its own presence-gated part of the
         /// <see cref="CheckpointComponents.Counters"/> component (absent on disk ⇒ <c>null</c>, never a
         /// sentinel 0). A scheduled hyperparameter reading the epoch counter sees <c>0</c> for a null epoch.
@@ -108,7 +108,7 @@ namespace Shorokoo
         /// <summary>
         /// The <see cref="TrainingRig"/> this checkpoint belongs to, or <c>null</c> for a bare
         /// checkpoint constructed without one. Every rig-produced checkpoint carries its rig
-        /// (<see cref="TrainingRig.CreateInitialCheckpoint()"/>, <see cref="TrainingRig.TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct)"/>,
+        /// (<see cref="TrainingRig.CreateInitialCheckpoint()"/>, <see cref="TrainingRig.TrainStep(TrainingCheckpoint, IData, IData)"/>,
         /// <see cref="TrainingRig.Train"/>/<see cref="TrainingRig.Fit(TensorDataStruct[], TensorDataStruct[], int, TrainingCheckpoint?)"/>, load, and
         /// <see cref="TrainingRig.AdoptCheckpoint"/> all set it), so <see cref="ToInferenceModel()"/>
         /// can extract the inference model with no re-supplied graph. The rig does not store
@@ -120,13 +120,46 @@ namespace Shorokoo
         /// <summary>
         /// The loss computed for the training step that produced this checkpoint, or <c>null</c> on an
         /// initial or bare checkpoint that no step produced. Set by
-        /// <see cref="TrainingRig.TrainStep(TrainingCheckpoint, TensorDataStruct, TensorDataStruct)"/>
+        /// <see cref="TrainingRig.TrainStep(TrainingCheckpoint, IData, IData)"/>
         /// (which now returns the post-step checkpoint directly) to that step's loss. Carried
         /// unchanged through the counter derivations, and persisted as its own
         /// <see cref="CheckpointComponents.Loss"/> component, independent of the counters (absent, or a
         /// null loss, ⇒ reads back <c>null</c>).
         /// </summary>
         public float? Loss { get; init; }
+
+        /// <summary>
+        /// What a training step fed this checkpoint does with its state — the tensors of
+        /// <see cref="TrainableParams"/>, <see cref="ModelState"/> and <see cref="OptimizerState"/>:
+        /// <c>null</c>, the checkpoint as it is, and the step <b>consumes</b> them, as a run consumes
+        /// any tensor fed as it is; or the mode <see cref="Shared"/> or <see cref="TryConsume"/> asked
+        /// for, which the derivations carry through. A field its struct was built with a mode of its
+        /// own for is fed that way where this is <c>null</c> or <see cref="TryConsume"/>'s, and read
+        /// where this is <see cref="Shared"/>'s.
+        ///
+        /// <para>Consuming is what <c>cp = rig.TrainStep(cp, x, y)</c> wants: the state it
+        /// supersedes is released as the step runs rather than whenever the previous checkpoint is
+        /// collected. A caller that keeps a checkpoint past the step it feeds — the best so far, or
+        /// one to compare against — feeds <c>cp.Shared()</c>.</para>
+        /// </summary>
+        public SharedInputMode? FeedMode { get; init; }
+
+        /// <summary>
+        /// A checkpoint over this one's tensors, to be <b>read</b> by the training step it is fed to
+        /// rather than consumed: every tensor of its state stays alive and unchanged, and the step
+        /// returns new state beside it. A new checkpoint, since this one keeps its own
+        /// <see cref="FeedMode"/>; every other slot is carried through, so it is read, saved and
+        /// resumed from exactly as this one is.
+        /// </summary>
+        public TrainingCheckpoint Shared() => Derive(feedMode: SharedInputMode.Shared);
+
+        /// <summary>
+        /// A checkpoint over this one's tensors, its state to be consumed by the training step it is
+        /// fed to where nothing else is reading it when the step starts, and read otherwise —
+        /// decided tensor by tensor; see <see cref="TensorData.TryConsume"/>. A new checkpoint, as
+        /// <see cref="Shared"/>'s is.
+        /// </summary>
+        public TrainingCheckpoint TryConsume() => Derive(feedMode: SharedInputMode.TryConsume);
 
         /// <summary>
         /// Packages trainable params, model state and optimizer state, plus the run counters and the
@@ -180,7 +213,8 @@ namespace Shorokoo
             long? epoch = null,
             long? batchIndex = null,
             TrainingRig? rig = null,
-            float? loss = null)
+            float? loss = null,
+            SharedInputMode? feedMode = null)
             => new()
             {
                 TrainableParams = trainableParams ?? TrainableParams,
@@ -191,10 +225,12 @@ namespace Shorokoo
                 BatchIndex = batchIndex ?? BatchIndex,
                 Rig = rig ?? Rig,
                 Loss = loss ?? Loss,
+                FeedMode = feedMode ?? FeedMode,
             };
 
         /// <summary>A new checkpoint with <see cref="TrainableParams"/> replaced; every other slot —
-        /// model state, optimizer state, counters, rig and loss — carries through unchanged.</summary>
+        /// model state, optimizer state, counters, rig, loss and <see cref="FeedMode"/> — carries
+        /// through unchanged.</summary>
         public TrainingCheckpoint WithTrainableParams(TensorDataStruct trainableParams)
             => Derive(trainableParams: trainableParams
                 ?? throw new ArgumentNullException(nameof(trainableParams)));

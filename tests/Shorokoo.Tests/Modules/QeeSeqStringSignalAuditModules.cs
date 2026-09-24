@@ -3,9 +3,9 @@ using static Shorokoo.Tests.Modules.QeeAuditVerdicts;
 namespace Shorokoo.Tests.Modules
 {
     // ===================================================================
-    //  Self-checking audit modules for the Phase 4 QEE-A6 batch
-    //  (sequence, optional, string, signal & control-flow family, ONNX
-    //  opset 21). Like the A2–A5 modules, these compare the audited ops'
+    //  Self-checking audit modules for the QEE audit of the sequence,
+    //  optional, string, signal & control-flow family (ONNX opset 21).
+    //  Like the other value-audit modules, these compare the audited ops'
     //  computed VALUES (where QEE has a value path) and inferred SHAPES
     //  (via ShapeTensor) against spec-expected constants and return a
     //  single Scalar<bit>.

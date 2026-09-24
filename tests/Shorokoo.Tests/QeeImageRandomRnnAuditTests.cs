@@ -5,7 +5,7 @@ using static Shorokoo.Tests.Utils.QeeAudit;
 namespace Shorokoo.Tests;
 
 /// <summary>
-/// Phase 4 QEE-A5 audit batch: image/geometry, random/generator and recurrent families
+/// QEE audit batch: image/geometry, random/generator and recurrent families
 /// (ONNX opset 21). Each module in QeeImageRandomRnnAuditModules.cs is self-checking
 /// (single Scalar&lt;bit&gt;). Outputs whose shapes legitimately stay unknown at QEE time
 /// (NonMaxSuppression's data-dependent n, ImageDecoder's data-dependent H/W, Constant
@@ -17,15 +17,15 @@ namespace Shorokoo.Tests;
 [Trait("Purpose", "Coverage")]
 public class QeeImageRandomRnnAuditTests
 {
-    private static readonly TensorData NmsBoxes = F32([1L, 4L, 4L],
+    private static TensorData NmsBoxes => F32([1L, 4L, 4L],
         0.0f, 0.0f, 1.0f, 1.0f,
         0.0f, 0.1f, 1.0f, 1.1f,
         5.0f, 5.0f, 6.0f, 6.0f,
         5.0f, 5.1f, 6.0f, 6.1f);
 
-    private static readonly TensorData NmsScores = F32([1L, 1L, 4L], 0.9f, 0.8f, 0.7f, 0.6f);
+    private static TensorData NmsScores => F32([1L, 1L, 4L], 0.9f, 0.8f, 0.7f, 0.6f);
 
-    private static readonly TensorData RecurrentX = F32Zeros([4L, 2L, 3L]);
+    private static TensorData RecurrentX => F32Zeros([4L, 2L, 3L]);
 
     [Fact]
     public void TestQeeImageGeometryShapeAudits()

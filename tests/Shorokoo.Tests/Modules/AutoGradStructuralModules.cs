@@ -1,7 +1,7 @@
 namespace Shorokoo.Tests.Modules
 {
     /// <summary>
-    /// Phase 4 AD-B1 gradient-correctness modules for the structural op family
+    /// Gradient-correctness modules for the structural op family
     /// (Conv / ConvTranspose / MaxPool / AveragePool / GlobalAveragePool /
     /// BatchNorm / LayerNorm / GroupNorm / InstanceNorm / Concat / Split /
     /// Sum / Min / Max / Mean / Dropout). Same self-checking pattern as

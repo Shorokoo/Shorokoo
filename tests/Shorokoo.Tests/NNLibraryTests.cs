@@ -176,9 +176,9 @@ public class NNLibraryLayerAndInitializerCoverageTests
                 TensorData(DType.Int64, [3L], 2L, 3L, 4L)]));
     }
 
-    /// <summary>Constant (the #440 op-name-collision regression guard), Orthogonal Gram ≈ I,
+    /// <summary>Constant (a guard against an operator-name collision), Orthogonal Gram ≈ I,
     /// configurable UniformRange / NormalDist sample statistics, and the configurable-gain
-    /// Xavier/Kaiming sample std (which excludes the §4.1 √6-double-bake value).</summary>
+    /// Xavier/Kaiming sample std (which excludes the √6-double-bake value).</summary>
     [Fact]
     public void TestInitializerCoverage()
     {
@@ -771,7 +771,7 @@ public class NNLibraryOptimizerTrainingCoverageTests
             var losses = new float[150];
             for (int i = 0; i < losses.Length; i++)
             {
-                ckpt = rig.TrainStep(ckpt, inputBatch, targetBatch);
+                ckpt = rig.TrainStep(ckpt, inputBatch.Shared(), targetBatch.Shared());
                 losses[i] = ckpt.Loss!.Value;
             }
             return losses;
@@ -801,7 +801,7 @@ public class NNLibraryOptimizerTrainingCoverageTests
         var convLosses = new float[15];
         for (int i = 0; i < convLosses.Length; i++)
         {
-            convCkpt = convRig.TrainStep(convCkpt, convInBatch, convTgBatch);
+            convCkpt = convRig.TrainStep(convCkpt, convInBatch.Shared(), convTgBatch.Shared());
             convLosses[i] = convCkpt.Loss!.Value;
         }
         Assert.All(convLosses, l => Assert.True(float.IsFinite(l)));
@@ -879,8 +879,8 @@ public class NNLibraryOptimizerTrainingCoverageTests
     }
 
     /// <summary>Per-step values for Adamax / NAdam / RAdam / Adadelta / Lion / Adafactor / LAMB on
-    /// y = w·x, w₀=1, x=[1], t=[0] ⇒ grad = 2w, all RE-DERIVED in double precision (adadelta's
-    /// design.md w₁ is 2× too large). Sharp discriminators: RAdam's step-1 UN-ADAPTED branch
+    /// y = w·x, w₀=1, x=[1], t=[0] ⇒ grad = 2w, all RE-DERIVED in double precision (a w₁ for
+    /// Adadelta 2× too large was once taken for the reference). Sharp discriminators: RAdam's step-1 UN-ADAPTED branch
     /// (ρ_t=1 ≤ 5) lands at 0.8, Lion's 4-step w₄ = 0.0 fails any β1↔β2 swap, and LAMB's 0.81/0.729
     /// fail a dropped trust ratio (plain Adam would give 0.8004123 at step 2). The LAMB zero-guard
     /// (target == pred ⇒ ‖u‖ = 0) must leave w₁ = 1.0 exactly, not NaN.</summary>
@@ -1050,7 +1050,7 @@ public class NNLibraryLayerTrainingCoverageTests
 
         Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
         var initial = rig.CreateInitialCheckpoint();
-        var step = rig.TrainStep(initial,
+        var step = rig.TrainStep(initial.Shared(),
             MakeBatch("input", "ModelInput", inputData),
             MakeBatch("targets", "Target", targetData));
 
@@ -1178,7 +1178,7 @@ public class NNLibraryBatchNormEvalTrainingCoverageTests
             NNBatchNormEvalGradModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
             [new TensorDataModelParam("input", ModelParamType.InputParam, inputData)], 0.5f);
         var initial = rig.CreateInitialCheckpoint();
-        var step = rig.TrainStep(initial,
+        var step = rig.TrainStep(initial.Shared(),
             MakeBatch("input", "ModelInput", inputData),
             MakeBatch("targets", "Target", TensorData([3L], targetVals)));
 
@@ -1246,7 +1246,7 @@ public class NNLibraryBatchNormEvalTrainingCoverageTests
             NNLayerNormAffineTrueParamModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
             [new TensorDataModelParam("input", ModelParamType.InputParam, lnInput)], 0.5f);
         var initial = rig.CreateInitialCheckpoint();
-        var step = rig.TrainStep(initial,
+        var step = rig.TrainStep(initial.Shared(),
             MakeBatch("input", "ModelInput", lnInput),
             MakeBatch("targets", "Target", TensorData([2L], [1f, 2f])));
 
@@ -1278,7 +1278,7 @@ public class NNLibraryBatchNormTrainAndDropoutCoverageTests
         var rig = TrainingRig.FromScratch(modelGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
             [new TensorDataModelParam("input", ModelParamType.InputParam, inputData)], 0.1f);
         var initial = rig.CreateInitialCheckpoint();
-        var step = rig.TrainStep(initial,
+        var step = rig.TrainStep(initial.Shared(),
             MakeBatch("input", "ModelInput", inputData),
             MakeBatch("targets", "Target", TensorData(outShape, new float[outTotal])));
 
@@ -1360,7 +1360,7 @@ public class NNLibraryBatchNormTrainAndDropoutCoverageTests
             var injected = InjectModelState(fresh.ModelState, injectedState);
             var ckpt = fresh.WithModelState(injected);
             var step = rig.TrainStep(ckpt,
-                MakeBatch("input", "ModelInput", inputData),
+                MakeBatch("input", "ModelInput", inputData).Shared(),
                 MakeBatch("targets", "Target", TensorData(inShape, target)));
             stateAfter = rig.ModelStateDef.Fields.SelectMany(f => Floats(step.ModelState.Fields[f.Name])).ToArray();
             return step.Loss!.Value;
@@ -1562,16 +1562,16 @@ public class NNLibraryRecurrentTrainingCoverageTests
 
         Assert.NotEmpty(rig.TrainableParamStructDef.Fields);
         var initial = rig.CreateInitialCheckpoint();
-        var step = rig.TrainStep(initial,
+        var step = rig.TrainStep(initial.Shared(),
             MakeBatch("input", "ModelInput", inputData),
-            MakeBatch("targets", "Target", targetData));
+            MakeBatch("targets", "Target", targetData).Shared());
 
         Assert.True(float.IsFinite(step.Loss!.Value));
         Assert.True(AnyParamMoved(rig, initial, step));
     }
 
     /// <summary>Recurrent trainability: forward single-layer LSTM and GRU + CrossEntropy +
-    /// SGDMomentum on [L=3,N=4,in=2] (the #440 MemoryAwareScheduler fallback that lets RNN/LSTM/GRU
+    /// SGDMomentum on [L=3,N=4,in=2] (the MemoryAwareScheduler fallback that lets RNN/LSTM/GRU
     /// BPTT scopes build), and hand-unrolled 2-step RNNCell / LSTMCell / GRUCell loops + L2 + SGD on
     /// [L=2,N=4,in=2] (the cell path differentiating through a USER loop).</summary>
     [Fact]

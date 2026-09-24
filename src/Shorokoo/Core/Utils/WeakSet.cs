@@ -10,11 +10,11 @@ namespace Shorokoo.Core.Utils;
 /// <para>Weak because a registry must not be the reason something stays alive. A backend the
 /// program has dropped, a context it has let go of and a tensor it no longer names are all
 /// garbage the moment nothing else holds them, and a list that kept them would turn every
-/// registration into a leak. This is the discipline <c>ComputeContext</c>'s owned storage and
+/// registration into a leak. This is the discipline <c>ComputeContext</c>'s attached tensors and
 /// compiled graphs already follow.</para>
 ///
 /// <para>By reference because two backends are the same backend exactly when they are the same
-/// object, which is also why <c>MaterializedValues</c> keys on identity.
+/// object, and two tensors the same tensor exactly when they are one allocation.
 /// <see cref="ConditionalWeakTable{TKey,TValue}"/> gives both properties at once: its keys are
 /// weak and its comparison is identity, with no comparer to pass and no way to override it.</para>
 /// </summary>
@@ -25,11 +25,24 @@ internal sealed class WeakSet<T>
 
     private static readonly object Present = new();
 
-    /// <summary>Records <paramref name="item"/>. Idempotent.</summary>
-    internal void Add(T item) => _entries.AddOrUpdate(item, Present);
+    /// <summary>
+    /// Records <paramref name="item"/>. Idempotent — and cheap when it is already recorded, which
+    /// is the common case for a context's list: every run re-attaches what it reads, and the lookup
+    /// takes no lock where an add would.
+    /// </summary>
+    internal void Add(T item)
+    {
+        if (!_entries.TryGetValue(item, out _)) _entries.TryAdd(item, Present);
+    }
 
     /// <summary>Forgets <paramref name="item"/>, if it was ever recorded.</summary>
     internal void Remove(T item) => _entries.Remove(item);
+
+    /// <summary>Whether <paramref name="item"/> is recorded.</summary>
+    internal bool Contains(T item) => _entries.TryGetValue(item, out _);
+
+    /// <summary>Forgets everything recorded.</summary>
+    internal void Clear() => _entries.Clear();
 
     /// <summary>
     /// The members still alive, as a list of the caller's own. A snapshot rather than a live view,

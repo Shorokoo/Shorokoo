@@ -4,7 +4,7 @@ using static Shorokoo.Tests.Utils.QeeAudit;
 namespace Shorokoo.Tests;
 
 /// <summary>
-/// Phase 4 QEE-A6 audit batch: sequence, optional, string, signal and control-flow
+/// QEE audit batch: sequence, optional, string, signal and control-flow
 /// families (ONNX opset 21). Each module in QeeSeqStringSignalAuditModules.cs is
 /// self-checking on values (where QEE computes them) and on inferred shapes (via
 /// ShapeTensor). Modules built on Shorokoo-internal op codes or utf8 runtime inputs
@@ -15,7 +15,7 @@ namespace Shorokoo.Tests;
 [Trait("Purpose", "Coverage")]
 public class QeeSeqStringSignalAuditTests
 {
-    private static readonly TensorData FloatMat2x3 = F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f);
+    private static TensorData FloatMat2x3 => F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f);
 
     [Fact]
     public void TestQeeSequenceOptionalAndReverseSequenceAudits()

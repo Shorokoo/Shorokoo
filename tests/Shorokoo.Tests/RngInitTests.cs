@@ -758,8 +758,8 @@ public class RngInitFailLoudTests
             RngBitsInitLayer.ComputationGraph])                  // raw bits
         {
             var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([sample]));
-            Unkeyed(() => ComputeContext.Default.Execute(arch, sample));
-            Assert.Null(Record.Exception(() => ComputeContext.Default.Execute(arch.ToConcreteModel(), sample)));
+            Unkeyed(() => ComputeContext.Default.Execute(arch, sample.Shared()));
+            Assert.Null(Record.Exception(() => ComputeContext.Default.Execute(arch.ToConcreteModel(), sample.Shared())));
         }
 
         Assert.Null(Record.Exception(() => OnnxEngine.Eval(RandomUniform([Scalar(4L)], 0f, 1f))));

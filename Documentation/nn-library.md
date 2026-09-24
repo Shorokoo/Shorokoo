@@ -1691,7 +1691,7 @@ var targetBatch = MakeBatch("targets", "Target", targetData);
 var ckpt = rig.CreateInitialCheckpoint();
 for (int i = 0; i < 15; i++)
 {
-    ckpt = rig.TrainStep(ckpt, inputBatch, targetBatch);  // compiled internally, cached per fed input shape
+    ckpt = rig.TrainStep(ckpt, inputBatch.Shared(), targetBatch.Shared());  // the batch is fed again: read it
     Console.WriteLine($"step {i}: loss {ckpt.Loss}");
 }
 ```

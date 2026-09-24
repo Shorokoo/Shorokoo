@@ -3,9 +3,10 @@ using static Shorokoo.Tests.Modules.QeeAuditVerdicts;
 namespace Shorokoo.Tests.Modules
 {
     // ===================================================================
-    //  Self-checking audit modules for the Phase 4 QEE-A4 batch
-    //  (normalization, softmax, linear-algebra & quantization family,
-    //  ONNX opset 21). Like the A2/A3 modules, these compare the audited
+    //  Self-checking audit modules for the QEE audit of the
+    //  normalization, softmax, linear-algebra & quantization family (ONNX
+    //  opset 21). Like the elementwise and reduction audit modules, these
+    //  compare the audited
     //  ops' computed VALUES (where QEE has a value path) and inferred
     //  SHAPES (via ShapeTensor) against spec-expected constants and
     //  return a single Scalar<bit>.

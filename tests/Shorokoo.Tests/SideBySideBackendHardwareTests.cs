@@ -17,6 +17,11 @@ namespace Shorokoo.Tests;
 /// 340 MB. Build with <c>-p:ShorokooDeployGpuBackend=true</c> to get them, then run with
 /// <c>--filter "Purpose=Hardware"</c>. Without that deployment each test here skips and says
 /// so rather than failing.</para>
+///
+/// <para><b>Without <c>-p:ShorokooGpuTests=true</c>, though</b>: that one makes the process-wide
+/// default backend a CUDA one, which is what <c>GpuExecutionTests</c> needs and the opposite of
+/// what the host half of this pairing needs. The two classes therefore want different builds, and
+/// each skips out of the other's.</para>
 /// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Hardware")]
@@ -46,9 +51,20 @@ public class SideBySideBackendHardwareTests
         // The deployment is only half of what these need. Without this, a machine with the files
         // and no card ran every test here and failed inside ORT's session creation instead of
         // skipping -- which says nothing about the product and reads like a real regression.
-        return DeviceMemory.Read() is null
-            ? "No CUDA device answers on this machine, so the card half of the CPU-and-CUDA pairing "
-              + "cannot run. The deployment is in place; run this on a CUDA machine."
+        if (DeviceMemory.Read() is null)
+            return "No CUDA device answers on this machine, so the card half of the CPU-and-CUDA "
+                + "pairing cannot run. The deployment is in place; run this on a CUDA machine.";
+
+        // And the host half needs the process-wide default backend to be the host one, which is
+        // what -p:ShorokooGpuTests=true takes away: under it `new ComputeContext()` is a CUDA
+        // context, so the pairing is a card against a card and four of these fail on assertions
+        // about where a tensor lives. That switch is for GpuExecutionTests; this class wants the
+        // deployment without it.
+        var backend = DefaultBackend.Instance.GetType().Assembly.GetName().Name ?? "";
+        return backend.EndsWith("GPU", StringComparison.OrdinalIgnoreCase)
+            ? $"The process-wide default backend is '{backend}', so the host half of the "
+              + "CPU-and-CUDA pairing would run on the card as well. Build without "
+              + "-p:ShorokooGpuTests=true to run these."
             : null;
     }
 
@@ -81,21 +97,21 @@ public class SideBySideBackendHardwareTests
         Assert.Equal(0, cuda.Backend.CudaDeviceId);
 
         // The same graph and the same two tensors, on the host and on the card, back and forth.
-        Assert.Equal(expected, Floats(cpu.Execute(graph, ta, tb)[0]));
-        Assert.Equal(expected, Floats(cuda.Execute(graph, ta, tb)[0]));
-        Assert.Equal(expected, Floats(cpu.Execute(graph, ta, tb)[0]));
+        Assert.Equal(expected, Floats(cpu.Execute(graph, ta.Shared(), tb.Shared())[0]));
+        Assert.Equal(expected, Floats(cuda.Execute(graph, ta.Shared(), tb.Shared())[0]));
+        Assert.Equal(expected, Floats(cpu.Execute(graph, ta.Shared(), tb.Shared())[0]));
 
         // A compiled session stays on the backend that built it, and re-runs there.
         var onCard = cuda.Compile(graph);
         Assert.Equal("cuda:0", onCard.Backend.Name);
-        Assert.Equal(expected, Floats(onCard.Execute(ta, tb)[0]));
-        Assert.Equal(expected, Floats(onCard.Execute(ta, tb)[0]));
+        Assert.Equal(expected, Floats(onCard.Execute(ta.Shared(), tb.Shared())[0]));
+        Assert.Equal(expected, Floats(onCard.Execute(ta.Shared(), tb.Shared())[0]));
 
         // What the card produced feeds the host context, and the other way round.
-        var fromCard = cuda.Execute(graph, ta, tb)[0].ToTensorData();
-        var fromHost = cpu.Execute(graph, ta, tb)[0].ToTensorData();
+        var fromCard = cuda.Execute(graph, ta.Shared(), tb.Shared())[0].ToTensorData();
+        var fromHost = cpu.Execute(graph, ta, tb.Shared())[0].ToTensorData();
         float[] twice = [.. expected.Zip(bv, (x, y) => x * y + x)];
-        Assert.Equal(twice, Floats(cpu.Execute(graph, fromCard, tb)[0]));
+        Assert.Equal(twice, Floats(cpu.Execute(graph, fromCard, tb.Shared())[0]));
         Assert.Equal(twice, Floats(cuda.Execute(graph, fromHost, tb)[0]));
     }
 
@@ -109,10 +125,10 @@ public class SideBySideBackendHardwareTests
         Assert.Equal(ComputeDevice.Cpu, cpu.Backend.Device);
         Assert.Equal(ComputeDevice.Cuda, cuda.Backend.Device);
 
-        var onCpu = SideBySideModel.Floats(cpu.Execute(model, input)[0]);
-        var onCard = SideBySideModel.Floats(cuda.Execute(model, input)[0]);
+        var onCpu = SideBySideModel.Floats(cpu.Execute(model, input.Shared())[0]);
+        var onCard = SideBySideModel.Floats(cuda.Execute(model, input.Shared())[0]);
 
-        Assert.Equal(onCpu, SideBySideModel.Floats(cpu.Execute(model, input)[0]));
+        Assert.Equal(onCpu, SideBySideModel.Floats(cpu.Execute(model, input.Shared())[0]));
         SideBySideModel.AssertAgree(onCpu, onCard, SideBySideModel.DeviceTolerance);
 
         // And there is something to agree on: a forward pass that came out constant would read
@@ -120,21 +136,21 @@ public class SideBySideBackendHardwareTests
         Assert.True(onCpu.Distinct().Count() > 1);
 
         // Back to the host afterwards, so neither run left the other's runtime unable to serve.
-        SideBySideModel.AssertAgree(onCpu, SideBySideModel.Floats(cpu.Execute(model, input)[0]));
+        SideBySideModel.AssertAgree(onCpu, SideBySideModel.Floats(cpu.Execute(model, input.Shared())[0]));
 
         // A session compiled on the card stays there, and re-runs there.
         var onCardCompiled = cuda.Compile(model);
         Assert.Equal("cuda:0", onCardCompiled.Backend.Name);
         SideBySideModel.AssertAgree(
-            onCpu, SideBySideModel.Floats(onCardCompiled.Execute(input)[0]),
+            onCpu, SideBySideModel.Floats(onCardCompiled.Execute(input.Shared())[0]),
             SideBySideModel.DeviceTolerance);
         SideBySideModel.AssertAgree(
-            onCpu, SideBySideModel.Floats(onCardCompiled.Execute(input)[0]),
+            onCpu, SideBySideModel.Floats(onCardCompiled.Execute(input.Shared())[0]),
             SideBySideModel.DeviceTolerance);
 
-        var fromCard = cuda.Execute(model, input)[0].ToTensorData();
+        var fromCard = cuda.Execute(model, input.Shared())[0].ToTensorData();
         var fromHost = cpu.Execute(model, input)[0].ToTensorData();
-        var secondPass = SideBySideModel.Floats(cpu.Execute(model, fromHost)[0]);
+        var secondPass = SideBySideModel.Floats(cpu.Execute(model, fromHost.Shared())[0]);
         SideBySideModel.AssertAgree(
             secondPass, SideBySideModel.Floats(cpu.Execute(model, fromCard)[0]),
             SideBySideModel.DeviceTolerance);
@@ -144,7 +160,7 @@ public class SideBySideBackendHardwareTests
     }
 
     [SideBySideCudaFact]
-    public void TestATensorLeftOnTheCardMovesToHostMemoryAndRunsThere()
+    public void TestATensorLeftOnTheCardIsCopiedToHostMemoryAndRunsThere()
     {
         var a = InputVector<float32>("a");
         var b = InputVector<float32>("b");
@@ -159,32 +175,31 @@ public class SideBySideBackendHardwareTests
         Assert.True(compiled.HasDeviceMemory);
 
         // Left where the provider put it: this is the one kind of tensor the host cannot read.
-        var onCard = compiled.Execute([ta, tb], [true])[0].ToTensorData();
+        var onCard = compiled.Execute([ta, tb.Shared()], [true])[0].ToTensorData();
         Assert.Equal(MemoryKind.Cuda, onCard.Space.Kind);
         Assert.False(onCard.IsHostResident);
         Assert.Throws<InvalidOperationException>(() => onCard.As<float32>().AccessMemory<float>());
 
-        // One call brings it home, through the backend that owns the allocation.
+        // One call brings it home, through the backend that made the allocation, and leaves the
+        // source where it was.
         var firstHost = new ComputeContext();
-        var onHost = onCard.TransferTo(firstHost);
+        var onHost = onCard.To(firstHost);
 
         Assert.Equal(MemorySpace.Host, onHost.Space);
         SideBySideModel.AssertAgree(expected, Floats(onHost), SideBySideModel.DeviceTolerance);
+        Assert.False(onCard.IsDisposed);
+        Assert.Equal(MemoryKind.Cuda, onCard.Space.Kind);
 
-        // The move spent the source, which is what a move across spaces means.
-        Assert.True(onCard.IsDisposed);
-
-        // Between two host contexts nothing moves but which context the handle is attached to...
+        // Between two host contexts nothing moves: the second is handed the very same tensor...
         var secondHost = new ComputeContext();
-        var shared = onHost.TransferTo(secondHost);
-        Assert.Same(secondHost, shared.Context);
-        Assert.Same(secondHost, onHost.Context);
+        Assert.Same(onHost, onHost.To(secondHost));
+        Assert.Contains(onHost, secondHost.Tensors);
 
-        // ...and the result runs on the second one, which is where it now lives. Fed back through
-        // the same graph, so the answer is the model applied twice rather than the first answer.
+        // ...and it runs there. Fed back through the same graph, so the answer is the model applied
+        // twice rather than the first answer.
         float[] twice = [.. expected.Zip(bv, (x, y) => x * y + x)];
         SideBySideModel.AssertAgree(
-            twice, Floats(secondHost.Execute(graph, shared, tb)[0].ToTensorData()),
+            twice, Floats(secondHost.Execute(graph, onHost, tb)[0].ToTensorData()),
             SideBySideModel.DeviceTolerance);
     }
 
@@ -207,7 +222,8 @@ public class SideBySideBackendHardwareTests
 
         var retained = compiled.Execute(
             ComputeContext.ExpandStructInputs(
-                [checkpoint.TrainableParams, checkpoint.ModelState, checkpoint.OptimizerState, input, target]),
+                [checkpoint.TrainableParams.Shared(), checkpoint.ModelState.Shared(), checkpoint.OptimizerState.Shared(),
+                 input.Shared(), target.Shared()]),
             [.. Enumerable.Repeat(true, compiled.OutputCount)]);
 
         Assert.NotEmpty(retained);
@@ -219,16 +235,16 @@ public class SideBySideBackendHardwareTests
             Assert.False(state.IsHostResident);
             Assert.True(state.Space.IsKnown);
             Assert.Equal(onCard, state.Space);
-            Assert.Same(cuda, state.Context);
+            Assert.Contains(state, cuda.Tensors);
         }
 
-        var home = retained[0].ToTensorData().TransferTo(null);
+        var home = retained[0].ToTensorData().ToHost();
         Assert.Equal(MemorySpace.Host, home.Space);
         Assert.All(Floats(home), v => Assert.True(float.IsFinite(v)));
 
         // And the loop built on all this still trains, publishing state the host can read.
         using var run = rig.BeginResidentRun(checkpoint);
-        run.Step(input, target);
+        run.Step(input.Shared(), target.Shared());
         var published = run.StepToCheckpoint(input, target);
 
         Assert.Equal(2, published.Step);
@@ -238,7 +254,7 @@ public class SideBySideBackendHardwareTests
     }
 
     [SideBySideCudaFact]
-    public void TestATensorTransferredToTheCardLivesInDeviceMemoryAndRunsThere()
+    public void TestATensorPutOnTheCardLivesInDeviceMemoryAndRunsThere()
     {
         var a = InputVector<float32>("a");
         var b = InputVector<float32>("b");
@@ -251,27 +267,56 @@ public class SideBySideBackendHardwareTests
         var onHost = TensorData([4L], av);
         Assert.Equal(MemorySpace.Host, onHost.Space);
 
-        var onCard = onHost.TransferTo(cuda);
+        var onCard = onHost.To(cuda);
 
         Assert.Equal(MemorySpace.Cuda(0), onCard.Space);
-        Assert.Same(cuda, onCard.Context);
+        Assert.Contains(onCard, cuda.Tensors);
+        Assert.Same(onCard, onCard.To(cuda));
         Assert.False(onCard.IsHostResident);
         Assert.Throws<InvalidOperationException>(() => onCard.As<float32>().AccessMemory<float>());
 
-        // The move spent the source, which is what a move across spaces means.
-        Assert.True(onHost.IsDisposed);
+        // A copy onto the card, and the source untouched.
+        Assert.False(onHost.IsDisposed);
+        Assert.Equal(av, Floats(onHost));
 
         var tb = TensorData([4L], bv);
         SideBySideModel.AssertAgree(
-            expected, Floats(cuda.Execute(graph, onCard, tb)[0]), SideBySideModel.DeviceTolerance);
+            expected, Floats(cuda.Execute(graph, onCard.Shared(), tb)[0]), SideBySideModel.DeviceTolerance);
 
-        // Still there afterwards, and still the card's: a run reads a feed, it does not consume it.
+        // Still there afterwards, and still the card's: fed .Shared(), a run reads a tensor rather
+        // than consuming it.
         Assert.Equal(MemorySpace.Cuda(0), onCard.Space);
 
-        var home = onCard.CopyTo(null);
+        var home = onCard.ToHost();
         Assert.Equal(MemorySpace.Host, home.Space);
         Assert.True(home.IsHostResident);
         Assert.Equal(av, Floats(home));
+    }
+
+    /// <summary>A tensor on the card, fed to a run on the host: read through one host copy, held
+    /// and reused while it is read, and consumed through that copy when it is fed as it is — the
+    /// card's own memory released at the feed.</summary>
+    [SideBySideCudaFact]
+    public void TestATensorOnTheCardIsReadByAHostRunThroughOneCopyAndConsumedThroughIt()
+    {
+        var a = InputVector<float32>("a");
+        var b = InputVector<float32>("b");
+        using var cuda = new ComputeContext(LoadCuda());
+        using var cpu = new ComputeContext();
+        var compiled = cpu.Compile(new InternalComputationGraph([a, b], [a * b + a]));
+        TensorData Run(IData x) => compiled.Execute(x, TensorData([2L], 10f, 20f))[0].ToTensorData();
+        var onCard = TensorData([2L], 1f, 2f).To(cuda);
+        Assert.Equal(MemorySpace.Cuda(0), onCard.Space);
+
+        var first = Run(onCard.Shared());
+        var copy = Assert.Single(cpu.Tensors.Except([first, onCard]));
+        Assert.Equal(MemorySpace.Host, copy.Space);
+        var second = Run(onCard.Shared());
+        Assert.Same(copy, Assert.Single(cpu.Tensors.Except([first, second, onCard])));
+
+        var third = Run(onCard);
+        Assert.True(onCard.IsDisposed && copy.IsDisposed);
+        Assert.All((TensorData[])[first, second, third], t => Assert.Equal([11f, 42f], Floats(t)));
     }
 
     [SideBySideCudaFact]
@@ -305,6 +350,73 @@ public class SideBySideBackendHardwareTests
         Assert.False(empty.IsHostAccessible);
         Assert.Equal(("Cuda", cuda.Description.CudaDeviceId!.Value), AllocatorOf(empty));
         Assert.Empty(cuda.CopyTensorToHost(empty));
+    }
+
+    [SideBySideCudaFact]
+    public void TestASequenceValuedModelRunsOnTheCardAndItsElementsComeBackFromTheHost()
+    {
+        var x = InputVector<float32>("x");
+        var split = new InternalComputationGraph(
+            [x], [OnnxOp.SplitToSequence(x * Scalar(2f), split: Vector(2L, 2L), axis: 0)]);
+        var pick = new InternalComputationGraph(
+            [x], [OnnxOp.SequenceAt(OnnxOp.SplitToSequence(x, split: Vector(2L, 2L), axis: 0), Scalar(1L))]);
+        var input = TensorData([4L], (float[])[1f, 2f, 3f, 4f]);
+
+        using var cuda = new ComputeContext(LoadCuda());
+        var sequence = cuda.Execute(split, input.Shared())[0].ToTensorDataSequence();
+
+        Assert.IsType<OnnxTensorDataSequence<float32>>(sequence);
+        Assert.Equal(2, sequence.Count);
+        Assert.Equal([2f, 4f], Floats(sequence[0]));
+        Assert.Equal([6f, 8f], Floats(sequence[1]));
+        Assert.All(sequence, e => Assert.Equal(MemorySpace.Host, e.Space));
+        Assert.Equal([3f, 4f], Floats(cuda.Execute(pick, input)[0]));
+
+        // And the sequence crosses back to a host context, element by element.
+        Assert.Equal([2f, 4f], Floats(sequence.CopyTo(new ComputeContext())[0]));
+        Assert.Equal([2f, 4f], Floats(sequence.ToHost()[0]));
+    }
+
+    [SideBySideCudaFact]
+    public void TestASequenceOutputAskedToStayOnTheCardComesBackToTheHostWhereItsElementsAreRead()
+    {
+        var x = InputVector<float32>("x");
+        var pair = new InternalComputationGraph([x], [OnnxOp.SequenceConstruct(x, x + x)]);
+        using var cuda = new ComputeContext(LoadCuda());
+
+        var sequence = cuda.Compile(pair)
+            .Execute([TensorData([2L], (float[])[1f, 2f])], [true])[0].ToTensorDataSequence();
+
+        Assert.Equal([1f, 2f], Floats(sequence[0]));
+        Assert.Equal([2f, 4f], Floats(sequence[1]));
+        Assert.All(sequence, e => Assert.Equal(MemorySpace.Host, e.Space));
+    }
+
+    [SideBySideCudaFact]
+    public void TestASequenceRefusesTensorsTheCardHoldsRatherThanBecomingUnreadable()
+    {
+        var cuda = LoadCuda();
+        IShorokooTensorValue OnCard() => cuda.CreateUninitializedTensorInBackendMemory(
+            ShorokooTensorElementType.Float, [2L]);
+        IShorokooTensorValue OnHost() => cuda.CreateTensor<float>([1f, 2f], [2L]);
+
+        // A refusal takes over what it was handed, as the contract requires of any failure, so
+        // every attempt is handed values of its own: reusing one reads a released value.
+        IShorokooTensorValue[] handed = [OnHost(), OnCard()];
+        var refused = Assert.Throws<InvalidOperationException>(() => cuda.CreateSequence(handed));
+        Assert.Contains("CopyTensorToHost", refused.Message);
+        Assert.All(handed, value => Assert.Throws<ObjectDisposedException>(() => value.ValueType));
+        Assert.Throws<InvalidOperationException>(() => cuda.CreateSequence([OnCard()]));
+
+        // The advice the message gives, followed on a tensor the card holds.
+        using var onCard = OnCard();
+        var home = cuda.CreateTensorFromRawBytes(
+            ShorokooTensorElementType.Float, cuda.CopyTensorToHost(onCard), [2L]);
+
+        using var sequence = cuda.CreateSequence([OnHost(), home]);
+        Assert.Equal(2, sequence.GetValueCount());
+        using var element = sequence.GetValue(0);
+        Assert.Equal([1f, 2f], element.GetTensorDataAsSpan<float>().ToArray());
     }
 
     /// <summary>The allocator ONNX Runtime made this value's buffer from, and the device it is on.

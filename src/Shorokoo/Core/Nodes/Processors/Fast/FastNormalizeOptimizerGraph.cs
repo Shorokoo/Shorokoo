@@ -466,7 +466,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     new Dictionary<string, object?>
                     {
                         // The caller's values, which it keeps and reuses for the next parameter.
-                        [OnnxOpAttributeNames.AttrValue] = boundInputs[i].Detach().MoveToAttribute(),
+                        [OnnxOpAttributeNames.AttrValue] =
+                            boundInputs[i].CopyTo(Shorokoo.Runtime.ComputeContext.Host).MoveToAttribute(),
                     },
                     constantAttrDefs);
                 inputNode.FullInputs = new Dictionary<string, List<FastTensorKey?>>();

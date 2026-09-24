@@ -42,6 +42,19 @@ public partial class DigitClassifier
     }
 }
 
+/// <summary>A classifier whose class count is a language model's vocabulary rather than a
+/// handful, so a class-index loss over it has a target the predictions' shape cannot stand in
+/// for.</summary>
+[Module]
+public partial class WideLogitClassifier
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        var w = InitXavier.Init([Scalar(8L), Scalar(50257L)]);
+        return input.MatMul(w);
+    }
+}
+
 [Module]
 public partial class SoftmaxL2Loss
 {

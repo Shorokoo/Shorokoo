@@ -17,7 +17,7 @@ namespace Shorokoo.Core.Utils
     /// </summary>
     /// <param name="HasDeviceMemory">Whether the failing session produces outputs in device memory.</param>
     /// <param name="Reading">The card's memory right now, or <c>null</c> where no CUDA runtime answers.</param>
-    /// <param name="ArenaLimitBytes">This process's configured arena cap, or <c>null</c> when uncapped.</param>
+    /// <param name="ArenaLimitBytes">The failing session's arena cap, or <c>null</c> when uncapped.</param>
     /// <param name="BackendAssemblyName">The loaded backend assembly, for display only.</param>
     internal readonly record struct DeviceFacts(
         bool HasDeviceMemory,
@@ -307,9 +307,10 @@ namespace Shorokoo.Core.Utils
             var text = $"Device: {Bytes(d.UsedBytes)} of {Bytes(d.TotalBytes)} in use across all "
                        + $"processes, {Bytes(d.FreeBytes)} free";
             if (device.ArenaLimitBytes is long limit)
-                text += $"; this session's arena is capped at {Bytes(limit)} (its context's "
-                      + "DeviceMemorySettings.LimitBytes), and any other live session can hold a "
-                      + "budget of its own on top";
+                text += $"; this session's arena is capped at {Bytes(limit)} — what its context's "
+                      + "device-memory budget (DeviceMemorySettings.LimitBytes) left it once the "
+                      + "tensors the context holds on the card were counted — and every other live "
+                      + "session holds an arena of its own on top";
             return text + ".";
         }
 

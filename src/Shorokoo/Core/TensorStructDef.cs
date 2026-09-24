@@ -147,7 +147,11 @@ namespace Shorokoo.Core
         /// <summary>
         /// <see cref="IData"/>-shaped overload of <see cref="FromOrderedData(TensorData[])"/>, for a
         /// definition whose fields are not all tensors — a model taking an <c>OptionalTensor</c>
-        /// input, whose value is an <see cref="OptionalTensorData"/>, present or absent.
+        /// input, whose value is an <see cref="OptionalTensorData"/>, present or absent — and for a
+        /// field given through <c>.Shared()</c> or <c>.TryConsume()</c>, to be fed that way rather
+        /// than as the struct is: <c>rig.InputDef.FromOrderedData(tokens, mask.Shared())</c> keeps
+        /// the mask while a step consumes the tokens (see
+        /// <see cref="TensorDataStruct(TensorStructDef, IEnumerable{KeyValuePair{string, IData}})"/>).
         /// </summary>
         public TensorDataStruct FromOrderedData(params IData[] data)
         {

@@ -262,7 +262,7 @@ public class OnnxExternalDataTests
         var g = FCLayer.ComputationGraph; // weights [4,4] (64 B) + bias [4] (16 B)
         var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([numOut, input])).ToConcreteModel();
         var proto = FastOnnxModelBuilder.BuildOnnxModel(concrete);
-        var direct = ComputeContext.Default.Execute(concrete, numOut, input)[0]
+        var direct = ComputeContext.Default.Execute(concrete, numOut.Shared(), input.Shared())[0]
             .ToTensorData().AccessRawMemory().ToArray();
 
         WithTempDir(dir =>

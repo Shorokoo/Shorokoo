@@ -19,7 +19,7 @@ Which document covers what. For an overview of Shorokoo and an end-to-end exampl
 
 ## 3. Run on CPU or GPU
 
-- [inference.md](inference.md) — execute a model (`OnnxEngine.Eval`, `ComputeContext`), pick the backend, read output values, and use the CPU interpreter for debugging.
+- [inference.md](inference.md) — execute a model (`OnnxEngine.Eval`, `ComputeContext`), feed it (consumed, `.Shared()` or `.TryConsume()`), pick the backend, read output values, and use the CPU interpreter for debugging.
 
 ## 4. Interoperate with the ML ecosystem
 

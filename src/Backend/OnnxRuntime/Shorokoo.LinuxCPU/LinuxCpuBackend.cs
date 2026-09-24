@@ -36,5 +36,5 @@ public sealed class LinuxCpuBackend : OrtBackend
     /// execution-provider step does nothing; sessions still get the usual log-severity
     /// and graph-optimization options.
     /// </summary>
-    public LinuxCpuBackend() : base(static (_, _) => { }, ComputeDevice.Cpu, cudaDeviceId: null) { }
+    public LinuxCpuBackend() { }
 }

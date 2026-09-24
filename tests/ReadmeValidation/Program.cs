@@ -53,11 +53,13 @@ Console.WriteLine($"Checkpoint saved to: {savePath}");
 var inferenceInput = TensorData([4L, 8L], new float[32]);   // same [4 × 8] shape the rig trained on
 var concrete       = result.FinalCheckpoint.ToInferenceModel();
 
-ReadOnlySpan<float> prediction = ComputeContext.Default
-    .Execute(concrete, inferenceInput)[0]
-    .ToTensorData<float32>().AccessMemory();
+// Passed .Shared(): the reloaded model below is run on the same input, and a bare feed is
+// consumed by the run it feeds.
+float[] prediction = ComputeContext.Default
+    .Execute(concrete, inferenceInput.Shared())[0]
+    .ToTensorData<float32>().CopyMemory<float>();
 
-Console.WriteLine($"Inference output ({prediction.Length} values): [{string.Join(", ", prediction.ToArray())}]");
+Console.WriteLine($"Inference output ({prediction.Length} values): [{string.Join(", ", prediction)}]");
 if (prediction.Length != 32) throw new Exception($"Expected 32 output values, got {prediction.Length}");
 
 // ── Reload, as a later process would ─────────────────────────────────────────
@@ -66,9 +68,9 @@ var reloaded = Persistence.Load(savePath);
 var evaluation = Persistence.LoadEvaluationModel(savePath);
 var (reloadedRig, reloadedCheckpoint) = TrainingRig.Load(savePath);
 
-ReadOnlySpan<float> reloadedPrediction = ComputeContext.Default
+float[] reloadedPrediction = ComputeContext.Default
     .Execute(reloaded, inferenceInput)[0]
-    .ToTensorData<float32>().AccessMemory();
+    .ToTensorData<float32>().CopyMemory<float>();
 if (!reloadedPrediction.SequenceEqual(prediction))
     throw new Exception("Reloaded model disagrees with the checkpoint's inference model.");
 

@@ -116,7 +116,7 @@ public class Rank0ParamTrainingTests
         Assert.Equal<float>([0f], Floats(initial.TrainableParams.Fields[bias.Name]));
         Assert.Equal<float>([0f], Floats(initial.ModelState.Fields[calls.Name]));
 
-        var step = rig.TrainStep(initial,
+        var step = rig.TrainStep(initial.Shared(),
             MakeBatch("input", "ModelInput", TensorData([4L], input)),
             MakeBatch("targets", "Target", TensorData([4L], new float[4])));
 

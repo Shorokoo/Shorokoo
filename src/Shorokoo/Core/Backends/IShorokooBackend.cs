@@ -12,19 +12,89 @@ public interface IShorokooBackend
 
     // Where this backend's tensors live. Derived from Description by default, which is right for
     // every backend that allocates on the device it computes on -- i.e. all of them so far -- so
-    // an existing backend need not implement it. Two backends reporting the same space can hand
-    // tensors to each other without copying; see MemorySpace.
+    // an existing backend need not implement it. The same space is necessary for one backend to
+    // read another's allocation in place, and not sufficient: see RuntimeIdentity and CanAddress.
     MemorySpace MemorySpace => Description.Device switch
     {
         ComputeDevice.Cuda => MemorySpace.Cuda(Description.CudaDeviceId ?? 0),
         ComputeDevice.Cpu => MemorySpace.Host,
         // A backend on some other execution provider -- DirectML, ROCm, CoreML -- allocates
         // somewhere this has no name for, and saying "host" would be a guess with teeth: a device
-        // value would report IsHost, so the transfer code would share it with any context at all
-        // and the accessors would dereference a device address as a host one. Unknown is refused
+        // value would report IsHost, so it would be read in place by any host backend at all and
+        // the accessors would dereference a device address as a host one. Unknown is refused
         // cleanly instead, which is the honest answer until such a backend names its own space.
         _ => MemorySpace.UnknownDevice,
     };
+
+    // The runtime this backend's allocations belong to, as an object compared by reference: two
+    // backends answer the same object exactly when an allocation one of them makes is one the
+    // other's sessions can be handed as it stands. It is the second half of a tensor's
+    // MemoryLocation, recorded from the allocating backend when the tensor is made.
+    //
+    // The default is the backend itself, which is the answer that is never wrong: a backend can
+    // always read what it allocated, and a backend that says nothing about sharing its runtime
+    // shares it with nobody. A backend over a runtime that several backends can load together --
+    // ONNX Runtime serving a CPU and a CUDA backend from one native -- overrides this with
+    // something every such backend shares.
+    object RuntimeIdentity => this;
+
+    // Whether memory at `location` is this backend's as it stands, needing no copy to be its own:
+    // the question To(context) asks of the context's backend before deciding between handing the
+    // tensor over and copying it, and a run asks before handing a session a tensor's own value. The
+    // answer is "same device and same runtime" -- and the framework's own managed host memory, which
+    // every backend on the host reads, counts as every host backend's runtime, so To hands a tensor
+    // there over as it is; a run still feeds such a tensor through a value its runtime builds, a
+    // session being handed runtime values only. It is asked of the target backend rather than
+    // decided by the core, because only the backend knows what it can address.
+    //
+    // A location whose space is unknown is addressable only by the one backend that allocated it:
+    // two such allocations compare equal as spaces without being anywhere in particular, so sharing
+    // one between backends would be a guess, while a backend always reads what it allocated. That
+    // one backend is known here only where the runtime is the backend itself -- the default
+    // identity; a runtime several backends share says nothing about which of them made an allocation
+    // it names, and the framework, which knows the backend that allocated each tensor, hands such a
+    // backend its own allocations there itself, and no other backend's.
+    bool CanAddress(MemoryLocation location)
+        => location.Space == MemorySpace
+           && (location.Space.IsKnown
+               ? location.IsManaged || ReferenceEquals(location.Runtime, RuntimeIdentity)
+               : ReferenceEquals(location.Runtime, this));
+
+    // Where a run on this backend reads a tensor of `elementType` it is fed: the memory a tensor has
+    // to be in to be handed to the session as it stands, and the memory a copy made for such a run
+    // is put in -- the question To(context) and a run's read both answer by, so they agree but in
+    // two places: the framework's managed host memory, which To hands over as it is and a run reads
+    // through a copy (see CanAddress); and a consumed feed that no output may be written into, which
+    // goes to the session in host memory for the runtime to copy into its own arena. The default is this
+    // backend's own memory in its own runtime, and the host memory of that runtime for a string
+    // tensor, which every runtime so far keeps there whatever its device.
+    MemoryLocation RunMemoryOf(ShorokooTensorElementType elementType)
+        => new(elementType == ShorokooTensorElementType.String ? MemorySpace.Host : MemorySpace, RuntimeIdentity);
+
+    // Where a run on this backend reads a sequence it is fed, as RunMemoryOf answers for a tensor,
+    // and where its runs leave the sequences they produce, which the framework records them as in.
+    // The default is the host memory of this backend's runtime: ONNX Runtime reads a sequence's
+    // elements through the host whatever its provider (see CreateSequence), and brings a sequence a
+    // run produces to the host even when the run was asked to keep it.
+    MemoryLocation SequenceRunMemory => new(MemorySpace.Host, RuntimeIdentity);
+
+    // Releases a value this backend allocated. Every release the framework makes of a tensor's
+    // memory comes here, to the backend that made it, whichever contexts the tensor was attached
+    // to -- or none -- so a backend that has something to do when its memory comes back has one
+    // place to do it. The default disposes the value, which is what releasing one has always meant.
+    //
+    // Memory a run consumed is the one exception, since the framework hands it over rather than
+    // releasing it: the session it was handed to releases it (IShorokooSession.RunConsuming). That
+    // session is the running backend's, and what it is handed is a value of that backend's runtime --
+    // memory it addresses as it stands, or host memory of its runtime -- so it shares the allocating
+    // backend's runtime, but may be another instance of it; and a session that leaves
+    // RunConsuming to the interface's default has it disposed without coming here. A backend that
+    // counts its releases implements RunConsuming and releases there through this.
+    void Release(IShorokooTensorValue value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        value.Dispose();
+    }
 
     // deviceMemory configures the arena this one session allocates in. It is a parameter, not
     // process state, because that is what ORT's own shape is: each session gets its own arena,
@@ -50,6 +120,27 @@ public interface IShorokooBackend
         DeviceMemorySettings deviceMemory,
         DiagnosticSettings diagnostics)
         => CreateSession(modelBytes, graphOptimization, logSeverity, deviceMemory);
+
+    // The same session, told which of its outputs it may write into the memory of which of its
+    // inputs (output aliasing, see OutputAlias): pairs the model's lowering proved -- nothing reads
+    // the input after the output is written, in the model as handed over. A session may then write
+    // such an output into the input's memory on a run that consumed that input (see
+    // IShorokooSession.RunConsuming), where the two agree in memory, shape and element type.
+    //
+    // The proof is over the model as handed over. A backend that rewrites the graph before it runs
+    // it -- fusing nodes, and so changing which of them read an input -- binds only the pairs its
+    // rewritten graph still proves: OutputAliasProof answers for a serialized model.
+    //
+    // The default drops the pairs and builds the ordinary session, which aliases nothing: always
+    // correct, and exactly what a backend that does not implement this should do.
+    IShorokooSession CreateSession(
+        ReadOnlyMemory<byte> modelBytes,
+        ShorokooGraphOptimization graphOptimization,
+        ShorokooLogSeverity logSeverity,
+        DeviceMemorySettings deviceMemory,
+        DiagnosticSettings diagnostics,
+        IReadOnlyList<OutputAlias> outputAliases)
+        => CreateSession(modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics);
 
     IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged;
 
@@ -101,6 +192,11 @@ public interface IShorokooBackend
     // Left to the default on a device backend, a tensor "moved onto the card" is host bytes with a
     // device context's name on them, which the execution provider then copies over on every single
     // run: the per-run copy that giving a tensor a context exists to remove.
+    //
+    // It takes no device-memory settings, and needs none: a compute context's budget is kept by the
+    // context, which counts the tensors attached to it and refuses a copy that would take it past
+    // its budget before this is ever asked for the memory. A backend allocates; it does not decide
+    // whose budget an allocation is on.
     IShorokooTensorValue CreateTensorInBackendMemory(
         ShorokooTensorElementType elementType,
         byte[] data,

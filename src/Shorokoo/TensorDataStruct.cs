@@ -32,22 +32,59 @@ namespace Shorokoo
         public IData this[int index] => Fields[Definition.Fields[index].Name];
 
         /// <summary>
+        /// The mode each field given through <c>.Shared()</c> or <c>.TryConsume()</c> was given in,
+        /// by name; a field given as it is has none. What <see cref="FieldFeedMode"/> reads.
+        /// </summary>
+        private readonly ImmutableDictionary<string, SharedInputMode> _fieldModes;
+
+        /// <summary>
         /// Creates a new TensorStructData with the specified definition and field data. Every field the
         /// definition declares must be present, and must be the structural kind it is declared as — a
         /// field declared <c>Tensor</c> takes a <see cref="TensorData"/>, one declared
         /// <c>TensorStruct</c> takes a <see cref="TensorDataStruct"/>, and so on. A value that
         /// contradicts its definition throws <see cref="ArgumentException"/>.
+        ///
+        /// <para>A field may be given through <c>.Shared()</c> or <c>.TryConsume()</c> — a
+        /// <see cref="SharedInput"/> over a value of the kind it declares — to be fed that way
+        /// whatever the struct is fed as: <c>rig.InputDef.FromOrderedData(tokens, mask.Shared())</c>
+        /// keeps the mask while a step consumes the tokens. The struct holds the value itself, so
+        /// <see cref="Fields"/>, the indexer and the enumerator read the tensor, not its wrapper; the
+        /// mode is kept beside it, and <see cref="To"/>, <see cref="CopyTo"/> and
+        /// <see cref="ToHost"/> carry it to the struct they build. Where the struct is fed to a run a
+        /// field's mode combines with the struct's own: a field given <c>.Shared()</c> is read even
+        /// when the struct is fed as it is, a struct fed <c>.Shared()</c> has every field read, and
+        /// otherwise a field is fed as it was given, or as the struct is fed where it was given as it
+        /// is.</para>
         /// </summary>
         /// <param name="definition">The struct definition describing the fields</param>
         /// <param name="fields">Field name to value, one per definition field, each of the kind that
         /// field declares — a plain tensor also serves for a field declared <c>Optional</c>, meaning
-        /// present. A key the definition does not declare is not a field of this struct: it is kept in
+        /// present — as it is or through <c>.Shared()</c> or <c>.TryConsume()</c>. A key the
+        /// definition does not declare is not a field of this struct: it is kept in
         /// <see cref="Fields"/> but ignored by everything that reads the struct, including
         /// <see cref="Count"/>, the indexer and the enumerator.</param>
         public TensorDataStruct(TensorStructDef definition, IEnumerable<KeyValuePair<string, IData>> fields)
+            : this(definition, fields, ImmutableDictionary<string, SharedInputMode>.Empty)
+        {
+        }
+
+        /// <summary>The public constructor, over fields some of which were given their modes
+        /// already — <paramref name="modes"/>, by name — by a struct this one is rebuilt from.</summary>
+        private TensorDataStruct(
+            TensorStructDef definition, IEnumerable<KeyValuePair<string, IData>> fields,
+            ImmutableDictionary<string, SharedInputMode> modes)
         {
             Definition = definition ?? throw new ArgumentNullException(nameof(definition));
-            Fields = ImmutableDictionary.CreateRange(fields);
+            ArgumentNullException.ThrowIfNull(fields);
+            var values = ImmutableDictionary.CreateBuilder<string, IData>();
+            foreach (var (name, value) in fields)
+            {
+                // Unwrapped here, and nowhere else: everything that reads Fields sees the value.
+                if (value is SharedInput shared) modes = modes.SetItem(name, shared.Mode);
+                values.Add(name, value is SharedInput { Value: var held } ? held : value);
+            }
+            Fields = values.ToImmutable();
+            _fieldModes = modes;
 
             // Every definition field must be present, and present as the kind the definition declares.
             // Nothing downstream can recover from a value that contradicts its own definition, and the
@@ -119,6 +156,30 @@ namespace Shorokoo
         /// </summary>
         public SharedInput TryConsume() => new(this, SharedInputMode.TryConsume);
 
+        /// <summary>
+        /// How a run fed this struct as <paramref name="structMode"/> says (null: as it is) is fed
+        /// field <paramref name="name"/>: read where the field was given <c>.Shared()</c> or the
+        /// struct is fed that way, and otherwise as the field was given, or as the struct is fed
+        /// where the field was given as it is. Null is as it is, consumed.
+        ///
+        /// <para>Shared wins either way because it is the one mode a caller asks for to keep
+        /// something: a mask built <c>.Shared()</c> into a batch the step consumes, or a checkpoint
+        /// fed <c>.Shared()</c> whose struct had one field built <c>.TryConsume()</c>, would
+        /// otherwise lose what they were built to keep.</para>
+        /// </summary>
+        internal SharedInputMode? FieldFeedMode(string name, SharedInputMode? structMode)
+        {
+            SharedInputMode? given = _fieldModes.TryGetValue(name, out var mode) ? mode : null;
+            return given == SharedInputMode.Shared || structMode == SharedInputMode.Shared
+                ? SharedInputMode.Shared
+                : given ?? structMode;
+        }
+
+        /// <summary>This struct's values under <paramref name="definition"/>, each field fed as it
+        /// was given — for a caller whose definition the same fields are to be read against, in its
+        /// order.</summary>
+        internal TensorDataStruct WithDefinition(TensorStructDef definition) => new(definition, Fields, _fieldModes);
+
         IEnumerator IEnumerable.GetEnumerator()
         {
             return GetEnumerator();
@@ -185,9 +246,9 @@ namespace Shorokoo
 
         /// <summary>
         /// A struct of what <paramref name="operation"/> makes of each field — or this very struct,
-        /// if it made nothing new. What it did make is released if a later field fails: the struct
-        /// that would have held it is never constructed. The sources are never touched, so there is
-        /// nothing of theirs to put back.
+        /// if it made nothing new — each fed as the field it was made from was given. What it did
+        /// make is released if a later field fails: the struct that would have held it is never
+        /// constructed. The sources are never touched, so there is nothing of theirs to put back.
         /// </summary>
         private TensorDataStruct Rebuild(Func<IData, IData> operation)
         {
@@ -210,7 +271,7 @@ namespace Shorokoo
                 foreach (var (key, result) in rebuilt) ReleaseNew(result, Fields[key]);
                 throw;
             }
-            return changed ? new TensorDataStruct(Definition, rebuilt) : this;
+            return changed ? new TensorDataStruct(Definition, rebuilt, _fieldModes) : this;
         }
 
         /// <summary>

@@ -637,6 +637,30 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
+    public void TestAStructsFieldIsFedAsItWasGivenAndReadWhereItOrItsStructIsShared()
+    {
+        using var context = new ComputeContext();
+        var (graph, _, _, _) = Model();
+        TensorStructFieldDef[] fields =
+            [new TensorStructFieldDef("a", DataStructure.Tensor, 1, DType.Float32), new TensorStructFieldDef("b", DataStructure.Tensor, 1, DType.Float32)];
+        var def = new TensorStructDef(fields, "Pair");
+        (bool A, bool B) Consumed(Func<TensorDataStruct, IData> feed, Func<TensorData, IData> b)
+        {
+            var pair = def.FromOrderedData(Sample(), b(Sample()));
+            Assert.Equal([2f, 6f, 12f, 20f], Floats(context.Execute(graph, feed(pair))[0].ToTensorData()));
+            return (((TensorData)pair[0]).IsDisposed, ((TensorData)pair[1]).IsDisposed);
+        }
+
+        Assert.Equal<(bool, bool)>([(true, false), (false, false), (true, false), (true, true), (true, true)], [
+            Consumed(s => s, b => b.Shared()),
+            Consumed(s => s.Shared(), b => b),
+            Consumed(s => s.TryConsume(), b => b.Shared()),
+            Consumed(s => s, b => b.TryConsume()),
+            Consumed(s => s, b => b),
+        ]);
+    }
+
+    [Fact]
     public void TestTheSameTensorFedTwiceInOneCallIsReadIfAnyOccurrenceIsSharedElseFedAsABareOneIfAnyIsBare()
     {
         using var context = new ComputeContext();

@@ -1785,7 +1785,9 @@ namespace Shorokoo.Runtime
         /// <summary>
         /// Expands TensorDataStruct inputs into individual field data entries. A struct fed through
         /// <c>.Shared()</c> or <c>.TryConsume()</c> expands into fields fed the same way, which is
-        /// what a mode on a composite means: it applies to every member.
+        /// what a mode on a composite means: it applies to every member. A field the struct was
+        /// built with through one of them keeps its own, a shared one read even where the struct is
+        /// fed as it is (<see cref="TensorDataStruct.FieldFeedMode"/>).
         /// </summary>
         internal static IData[] ExpandStructInputs(IData[] inputs)
         {
@@ -1805,7 +1807,9 @@ namespace Shorokoo.Runtime
                                 $"field={field.Name}, struct={structData.Definition.TypeName ?? "anonymous"}",
                                 $"TensorDataStruct is missing data for field '{field.Name}'");
                         }
-                        expandedInputs.Add(sharing is { } mode ? new SharedInput(fieldData, mode) : fieldData);
+                        expandedInputs.Add(structData.FieldFeedMode(field.Name, sharing) is { } mode
+                            ? new SharedInput(fieldData, mode)
+                            : fieldData);
                     }
                 }
                 else

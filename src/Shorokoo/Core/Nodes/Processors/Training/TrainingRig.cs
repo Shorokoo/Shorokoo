@@ -1507,12 +1507,13 @@ namespace Shorokoo
             // agree field for field, but a checkpoint read straight from a file carries a def
             // reconstructed from that file, whose field ORDER is the file's. Everything that indexes
             // a struct positionally (TensorDataStruct's indexer, FlattenedFieldsOfType) would then
-            // read the rig's order against the file's. Same values, rig's definition.
+            // read the rig's order against the file's. Same values, rig's definition -- and each
+            // field fed as it was given, as the checkpoint's own FeedMode is carried below.
             return new TrainingCheckpoint
             {
-                TrainableParams = new TensorDataStruct(TrainableParamStructDef, checkpoint.TrainableParams.Fields),
-                ModelState = new TensorDataStruct(ModelStateDef, checkpoint.ModelState.Fields),
-                OptimizerState = new TensorDataStruct(OptimizerStateDef, checkpoint.OptimizerState.Fields),
+                TrainableParams = checkpoint.TrainableParams.WithDefinition(TrainableParamStructDef),
+                ModelState = checkpoint.ModelState.WithDefinition(ModelStateDef),
+                OptimizerState = checkpoint.OptimizerState.WithDefinition(OptimizerStateDef),
                 Step = checkpoint.Step,
                 Epoch = checkpoint.Epoch,
                 BatchIndex = checkpoint.BatchIndex,
@@ -3123,9 +3124,11 @@ namespace Shorokoo
 
         /// <summary>
         /// Adds <paramref name="state"/>'s fields to a step's inputs, each fed as
-        /// <paramref name="feedMode"/> says — as it is, and consumed, when that is null — and
-        /// labelled <paramref name="section"/> and its field's name. No checkpoint holds the rig's
-        /// own initial values (<see cref="CopiesOf"/>), so every field is the caller's to spend.
+        /// <paramref name="feedMode"/> says — as it is, and consumed, when that is null — combined
+        /// with any mode the field was given when the struct was built
+        /// (<see cref="TensorDataStruct.FieldFeedMode"/>), and labelled <paramref name="section"/>
+        /// and its field's name. No checkpoint holds the rig's own initial values
+        /// (<see cref="CopiesOf"/>), so every field is the caller's to spend.
         /// </summary>
         private static void AddState(
             List<IData> inputs, List<string> labels, TensorDataStruct state, SharedInputMode? feedMode,
@@ -3134,7 +3137,7 @@ namespace Shorokoo
             foreach (var field in state.Definition.Fields)
             {
                 var value = state.Fields[field.Name];
-                inputs.Add(feedMode is { } mode ? new SharedInput(value, mode) : value);
+                inputs.Add(state.FieldFeedMode(field.Name, feedMode) is { } mode ? new SharedInput(value, mode) : value);
                 labels.Add($"{section} '{field.Name}'");
             }
         }

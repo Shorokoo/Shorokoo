@@ -727,7 +727,10 @@ consuming it would take its memory from under that run.
   as that element would be; fed `.Shared()`, none of its elements can be deleted while the run
   reads it; and an element fed in the same call on its own counts as one more occurrence of that
   element, so `Execute(e.Shared(), s)` reads `e` and consumes the rest of `s`, `e` living on
-  without the sequence.
+  without the sequence. A struct's field can also be given a mode of its own when the struct is
+  built — `def.FromOrderedData(tokens, mask.Shared())` — and is read however the struct is fed if
+  that mode is `.Shared()`; a struct fed `.Shared()` has every field read, and otherwise each field
+  is fed as it was given, or as the struct is.
 - **The error names the call to change.** Reading a consumed tensor throws
   `ObjectDisposedException` naming the run that took it — its graph and its context — and the
   input it fed; the remedy is to pass it `.Shared()` at that call.

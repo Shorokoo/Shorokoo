@@ -2544,6 +2544,36 @@ public class TrainingRigTrainingLoopCoverageTests
     }
 
     [Fact]
+    public void TestAFieldGivenSharedWhenItsStructWasBuiltIsReadByAStepThatConsumesTheRestOfIt()
+    {
+        var rig = IndexedWeightRig();
+        (bool Input, bool Index) Consumed(
+            Func<TensorDataStruct, IData> feed, Func<TensorData, IData> index, Func<TensorDataStruct, TensorDataStruct>? rebuilt = null)
+        {
+            var batch = rig.InputDef.FromOrderedData(TensorData([4L], [1f, 2f, 3f, 4f]), index(TensorData([4L], [0L, 1L, 2L, 3L])));
+            batch = rebuilt?.Invoke(batch) ?? batch;
+            rig.TrainStep(rig.CreateInitialCheckpoint(), feed(batch), TargetBatch(2f, 4f, 6f, 8f));
+            return (((TensorData)batch[0]).IsDisposed, ((TensorData)batch[1]).IsDisposed);
+        }
+
+        Assert.Equal<(bool, bool)>([(true, false), (false, false), (true, false), (true, true), (true, false)], [
+            Consumed(b => b, i => i.Shared()),
+            Consumed(b => b.Shared(), i => i.Shared()),
+            Consumed(b => b.TryConsume(), i => i.Shared()),
+            Consumed(b => b, i => i.TryConsume()),
+            Consumed(b => b, i => i.Shared(), b => b.CopyTo(ComputeContext.Host)),
+        ]);
+
+        var cp = rig.CreateInitialCheckpoint();
+        var weight = (TensorData)cp.TrainableParams[0];
+        var kept = rig.AdoptCheckpoint(cp.WithTrainableParams(cp.TrainableParams.Definition.FromOrderedData(weight.Shared())));
+        Assert.Same(weight, kept.TrainableParams[0]);
+        rig.TrainStep(kept, Indexed(rig, 0L, 1L, 2L, 3L), TargetBatch(2f, 4f, 6f, 8f));
+        Assert.False(weight.IsDisposed);
+        Assert.All(kept.OptimizerState, t => Assert.True(((TensorData)t).IsDisposed));
+    }
+
+    [Fact]
     public void TestABatchThatDoesNotFitTheRigsDefinitionIsRefusedBeforeTheStepTakesAnything()
     {
         var rig = AdamWScalarRig();

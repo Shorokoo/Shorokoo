@@ -87,7 +87,6 @@ public static class PythonEnvironmentResolver
         if (IsComplete(directory, lockFile))
             return PythonEnvironment.Open(directory, lockFile.PythonVersion, PythonEnvironmentSource.Provisioned);
 
-        var uv = FindUv(options, variables);
         try
         {
             System.IO.Directory.CreateDirectory(root);
@@ -106,8 +105,10 @@ public static class PythonEnvironmentResolver
         try
         {
             using var fileLock = AcquireFileLock(directory + ".lock", options.ProvisioningTimeout - deadline.Elapsed, directory);
+            // uv is looked for only once this process is the one to build: one that finds the
+            // environment built by the process it waited for needs none.
             if (!IsComplete(directory, lockFile))
-                Build(uv, lockFile, directory);
+                Build(FindUv(options, variables), lockFile, directory);
         }
         finally
         {

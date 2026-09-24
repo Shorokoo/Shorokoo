@@ -5,8 +5,6 @@ String tensors are numpy object arrays on the host (torch has no strings); a res
 text -- a match, a count, a frequency -- is a torch tensor on the run's device.
 """
 
-import re
-
 import numpy as np
 import torch
 
@@ -59,7 +57,11 @@ def string_normalizer(x, /, *, case_change_action="NONE", is_case_sensitive=0, l
 
 
 def regex_full_match(x, /, *, pattern):
-    matcher = re.compile(pattern)
+    """RegexFullMatch in RE2's syntax, as ONNX specifies: its \\d, \\w and \\s are ASCII, it has
+    POSIX classes, \\pL and \\x{41}, and neither backreferences nor lookarounds."""
+    import re2
+
+    matcher = re2.compile(pattern)
     found = np.array([matcher.fullmatch(s) is not None for s in x.reshape(-1).tolist()], dtype=bool)
     return _on_device(found.reshape(x.shape), torch.bool)
 

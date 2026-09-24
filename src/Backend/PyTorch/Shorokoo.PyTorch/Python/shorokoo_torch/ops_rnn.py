@@ -21,7 +21,10 @@ _GRU_DEFAULTS = ("Sigmoid", "Tanh")
 _RNN_DEFAULTS = ("Tanh",)
 
 # How many of activation_alpha / activation_beta each activation consumes, and the defaults it
-# falls back to when the lists run out -- the defaults of the ONNX operator of the same name.
+# falls back to when the lists run out -- the defaults of the ONNX operator of the same name. ONNX
+# states none for ScaledTanh, and Shorokoo hands over a node whose ScaledTanh is given no value as
+# it was written; ONNX Runtime reads 0 for the missing alpha and beta of every recurrent operator,
+# so that is what is read here too.
 _ARGUMENTS = {
     "relu": (0, 0, 0.0, 0.0),
     "tanh": (0, 0, 0.0, 0.0),
@@ -31,7 +34,7 @@ _ARGUMENTS = {
     "affine": (1, 1, 1.0, 0.0),
     "leakyrelu": (1, 0, 0.01, 0.0),
     "thresholdedrelu": (1, 0, 1.0, 0.0),
-    "scaledtanh": (1, 1, 1.0, 1.0),
+    "scaledtanh": (1, 1, 0.0, 0.0),
     "hardsigmoid": (1, 1, 0.2, 0.5),
     "elu": (1, 0, 1.0, 0.0),
 }

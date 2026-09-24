@@ -45,6 +45,10 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag "v${{ inputs.version }}"
 
+      # The coverage suite runs models on the PyTorch CPU backend too, whose Python environment is
+      # provisioned with uv, from the backend's lock file, the first time a test needs it.
+      - uses: astral-sh/setup-uv@v6
+
       - name: Build & test
         run: >
           dotnet test tests/Shorokoo.Tests/Shorokoo.Tests.csproj

@@ -59,14 +59,14 @@ public sealed class TorchTensorValue : IShorokooTensorValue
     internal static TorchTensorValue Wrap(
         PyObject value, PyObject description, ShorokooTensorElementType emptySequenceElementType)
     {
-        var kind = description[0].As<int>();
-        var code = description[1].As<int>();
+        var kind = Item<int>(description, 0);
+        var code = Item<int>(description, 1);
         using var dims = description[2];
         var shape = new long[(int)dims.Length()];
-        for (int i = 0; i < shape.Length; i++) shape[i] = dims[i].As<long>();
-        var isHost = description[3].As<bool>();
-        var address = new IntPtr(description[4].As<long>());
-        var byteCount = description[5].As<long>();
+        for (int i = 0; i < shape.Length; i++) shape[i] = Item<long>(dims, i);
+        var isHost = Item<bool>(description, 3);
+        var address = new IntPtr(Item<long>(description, 4));
+        var byteCount = Item<long>(description, 5);
         return kind switch
         {
             0 => new TorchTensorValue(value, ShorokooOnnxValueType.Tensor, (ShorokooTensorElementType)code,
@@ -76,6 +76,14 @@ public sealed class TorchTensorValue : IShorokooTensorValue
             _ => throw new NotSupportedException(
                 "The PyTorch backend produced an absent optional value, which has no representation here yet."),
         };
+    }
+
+    /// <summary>Item <paramref name="index"/> of a Python sequence as <typeparamref name="T"/>,
+    /// releasing the item's own reference now rather than through the finalizer.</summary>
+    private static T Item<T>(PyObject sequence, int index)
+    {
+        using var item = sequence[index];
+        return item.As<T>();
     }
 
     /// <summary>The Python object this wraps, refused once released: a released value's reference
@@ -152,7 +160,7 @@ public sealed class TorchTensorValue : IShorokooTensorValue
         {
             using var list = runtime.StringList.Invoke(Value);
             var strings = new string[(int)list.Length()];
-            for (int i = 0; i < strings.Length; i++) strings[i] = list[i].As<string>();
+            for (int i = 0; i < strings.Length; i++) strings[i] = Item<string>(list, i);
             return strings;
         }
     }

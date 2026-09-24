@@ -58,4 +58,12 @@ public class QeeNormLinalgAuditTests
         Assert.True(QeeAudit.Check<QeeDequantizeInt32VectorScaleReshapeAuditCheck>(I32([1L, 3L], 1000, -6, 2)));
         Assert.True(QeeAudit.Check<QeeDequantizeInt32PerAxisAuditCheck>(I32([2L, 3L], 10, -6, 2, 4, 0, -8)));
     }
+
+    [Fact]
+    public void TestLayerNormalizationOfRowsWithALargeMeanAgreesWithItsFunctionBody()
+        => Assert.True(AutoTest.AdvancedTestGraph<LayerNormalizationOfALargeMeanCheck>([], LargeMeanRows));
+
+    internal static TensorData[] LargeMeanRows =>
+        [F32([4L, 256L], [.. Enumerable.Range(0, 1024).Select(i => 100f + 0.1f * MathF.Sin(1.7f * i))]),
+         F32([256L], [.. Enumerable.Repeat(1f, 256)])];
 }

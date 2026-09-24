@@ -535,4 +535,17 @@ namespace Shorokoo.Tests.Modules
             return mismatch < Scalar(1L);
         }
     }
+
+    /// <summary>LayerNormalization over the last axis agrees with its function body, which centres
+    /// the input before squaring it, on rows whose mean is large next to their spread.</summary>
+    [Module]
+    public partial class LayerNormalizationOfALargeMeanCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x, Tensor<float32> scale)
+        {
+            var centered = x - x.Reduce(ReduceKind.Mean, Vector(-1L), keepDims: true);
+            var twoPass = centered / ((centered * centered).Reduce(ReduceKind.Mean, Vector(-1L), keepDims: true) + Scalar(1e-5f)).Sqrt();
+            return Apart(NN.LayerNormalization(x, scale), twoPass) < Scalar(1L);
+        }
+    }
 }

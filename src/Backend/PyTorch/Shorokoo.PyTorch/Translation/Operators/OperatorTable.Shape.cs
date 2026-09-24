@@ -43,8 +43,8 @@ internal static partial class OperatorTable
             "value_floats" => node.Constant(TorchConstant.Vector(attribute.Floats ?? [])),
             "value_int" => node.Constant(TorchConstant.Scalar(attribute.I)),
             "value_ints" => node.Constant(TorchConstant.Vector(attribute.Ints ?? [])),
-            "value_string" => node.Constant(TorchConstant.StringsOf([], [attribute.S ?? []])),
-            "value_strings" => node.Constant(TorchConstant.StringsOf([attribute.Strings.Count], attribute.Strings)),
+            "value_string" => node.Constant(TorchConstant.StringsOf([], [attribute.S ?? []], node.AttributeDescription(attribute), node.Node.OpType)),
+            "value_strings" => node.Constant(TorchConstant.StringsOf([attribute.Strings.Count], attribute.Strings, node.AttributeDescription(attribute), node.Node.OpType)),
             var other => throw node.Unsupported($"its value attribute '{other}' is not one the translation reads"),
         };
     }

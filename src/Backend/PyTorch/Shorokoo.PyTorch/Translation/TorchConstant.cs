@@ -25,8 +25,31 @@ internal sealed record TorchConstant(
     public static TorchConstant Vector(long[] values) => new(
         ShorokooTensorElementType.Int64, [values.Length], MemoryMarshal.AsBytes(values.AsSpan()).ToArray(), null);
 
-    public static TorchConstant StringsOf(long[] shape, IEnumerable<byte[]> utf8)
-        => new(ShorokooTensorElementType.String, shape, null, [.. utf8.Select(b => Encoding.UTF8.GetString(b))]);
+    /// <summary>A string constant of <paramref name="utf8"/>, which <paramref name="what"/> holds.</summary>
+    /// <exception cref="TorchUnsupportedModelException">One of them is not UTF-8.</exception>
+    public static TorchConstant StringsOf(long[] shape, IEnumerable<byte[]> utf8, string what, string? operatorType)
+        => new(ShorokooTensorElementType.String, shape, null, [.. utf8.Select(b => Text(b, what, operatorType))]);
+
+    private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+
+    /// <summary>
+    /// <paramref name="utf8"/> as text. ONNX strings are bytes, which ONNX Runtime carries as they
+    /// are; the PyTorch backend holds them as text, so bytes that are not UTF-8 are refused rather
+    /// than read with a replacement character where they stood.
+    /// </summary>
+    /// <exception cref="TorchUnsupportedModelException">The bytes are not UTF-8.</exception>
+    public static string Text(byte[] utf8, string what, string? operatorType)
+    {
+        try
+        {
+            return StrictUtf8.GetString(utf8);
+        }
+        catch (DecoderFallbackException)
+        {
+            throw new TorchUnsupportedModelException(TorchUnsupportedReason.UnsupportedModel, null, operatorType,
+                $"{what} holds a string that is not UTF-8 text, and the PyTorch backend holds strings as text.");
+        }
+    }
 
     /// <summary>
     /// The constant a <see cref="TensorProto"/> holds, read from its raw bytes or from whichever
@@ -43,7 +66,7 @@ internal sealed record TorchConstant(
                 $"The tensor '{tensor.Name}' keeps its data in an external file, which the PyTorch backend "
                 + "does not read. Save the model with its tensors inline.");
         if (elementType == ShorokooTensorElementType.String)
-            return StringsOf(shape, tensor.StringDatas);
+            return StringsOf(shape, tensor.StringDatas, $"The tensor '{tensor.Name}'", operatorType);
 
         int byteCount;
         try

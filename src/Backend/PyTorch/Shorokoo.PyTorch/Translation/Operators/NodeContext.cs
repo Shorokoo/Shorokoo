@@ -1,4 +1,3 @@
-using System.Text;
 using Shorokoo.Core.Factory.IR;
 
 namespace Shorokoo.PyTorch.Translation.Operators;
@@ -91,14 +90,18 @@ internal sealed class NodeContext
         {
             AttributeProto.AttributeType.Int => PyLiteral.Int(attribute.I),
             AttributeProto.AttributeType.Float => PyLiteral.Float(attribute.F),
-            AttributeProto.AttributeType.String => PyLiteral.Str(Encoding.UTF8.GetString(attribute.S ?? [])),
+            AttributeProto.AttributeType.String => PyLiteral.Str(TorchConstant.Text(attribute.S ?? [], AttributeDescription(attribute), Node.OpType)),
             AttributeProto.AttributeType.Ints => PyLiteral.List((attribute.Ints ?? []).Select(PyLiteral.Int)),
             AttributeProto.AttributeType.Floats => PyLiteral.List((attribute.Floats ?? []).Select(f => PyLiteral.Float(f))),
-            AttributeProto.AttributeType.Strings => PyLiteral.List(attribute.Strings.Select(s => PyLiteral.Str(Encoding.UTF8.GetString(s)))),
+            AttributeProto.AttributeType.Strings => PyLiteral.List(attribute.Strings.Select(s => PyLiteral.Str(TorchConstant.Text(s, AttributeDescription(attribute), Node.OpType)))),
             AttributeProto.AttributeType.Tensor => Constant(TorchConstant.FromTensor(attribute.T, Node.OpType)),
             var kind => throw Unsupported($"its attribute '{attribute.Name}' is a {kind}, which has no literal"),
         };
     }
+
+    /// <summary>How a refusal names <paramref name="attribute"/> of this node.</summary>
+    public string AttributeDescription(AttributeProto attribute)
+        => $"The attribute '{attribute.Name}' of the {Node.OpType} node '{Node.Name}'";
 
     /// <summary>An attribute's kind, read off the field it fills where a writer left the type
     /// unset; refused where it fills none, which leaves nothing to tell an empty list by.</summary>

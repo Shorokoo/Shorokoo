@@ -8,7 +8,13 @@ internal static partial class OperatorTable
         const string M = "ops_indexing.";
         table.Map("Gather", M + "gather", ["axis"]);
         table.Map("GatherElements", M + "gather_elements", ["axis"]);
+        table.Map("GatherND", M + "gather_nd", ["batch_dims"]);
         table.Map("Slice", M + "slice_", ["starts", "ends", "axes"]);
         table.Map("Compress", M + "compress", ["axis"]);
+        table.Map("ScatterElements", M + "scatter_elements", ["axis", "reduction"]);
+        table.Map("ScatterND", M + "scatter_nd", ["reduction"]);
+        table.Map("TopK", M + "top_k", ["axis", "largest", "sorted"], tuple: true);
+        table.Map("Unique", M + "unique", ["axis", "sorted"], tuple: true);
+        table.Map("NonZero", M + "non_zero", gradient: TorchGradient.NotDifferentiable);
     }
 }

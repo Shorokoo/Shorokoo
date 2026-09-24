@@ -24,6 +24,10 @@ internal static partial class OperatorTable
         table.Map("ConstantOfShape", M + "constant_of_shape", ["value"], gradient: TorchGradient.NotDifferentiable);
         table.Map("Range", M + "range_", gradient: TorchGradient.NotDifferentiable);
         table.Custom("Constant", Constant, gradient: TorchGradient.NotDifferentiable);
+        table.Map("OneHot", M + "one_hot", ["axis"], gradient: TorchGradient.NotDifferentiable);
+        table.Map("EyeLike", M + "eye_like", ["dtype", "k"], gradient: TorchGradient.NotDifferentiable);
+        table.Map("ReverseSequence", M + "reverse_sequence", ["batch_axis", "time_axis"]);
+        table.Map("TensorScatter", M + "tensor_scatter", ["mode", "axis"]);
     }
 
     /// <summary>A Constant node reads its value from whichever of its attributes it carries.</summary>

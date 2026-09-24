@@ -1,6 +1,6 @@
 """ONNX shape and data-movement operators that rearrange or make tensors without indexing into
 them: Reshape, Transpose, Concat, Split, Squeeze/Unsqueeze, Shape, Size, Flatten, Expand, Tile,
-Identity, ConstantOfShape, Range, Trilu, Pad.
+Identity, ConstantOfShape, Range, Trilu, Pad, OneHot, EyeLike, ReverseSequence, TensorScatter.
 
 A result may be a view of an input; the run hands every output over in memory of its own, so a
 view never escapes to the caller.
@@ -174,3 +174,70 @@ def pad(data, pads_in=None, constant_value=None, axes_in=None, /, *, mode="const
             index = _padding_indices(result.shape[axis], before[axis], after[axis], mode, result.device)
             result = torch.index_select(result, axis, index)
     return result
+
+
+def one_hot(indices, depth, values, /, *, axis=-1):
+    """OneHot: `values[1]` where the new `axis` position is the index, `values[0]` elsewhere. A
+    negative index counts back from `depth`; one still out of range selects nothing."""
+    count = int(depth.reshape(-1)[0].item())
+    index = indices.to(torch.int64)
+    index = torch.where(index < 0, index + count, index)
+    axis = axis % (index.ndim + 1)
+    positions = [1] * (index.ndim + 1)
+    positions[axis] = count
+    hot = index.unsqueeze(axis) == torch.arange(count, device=index.device).reshape(positions)
+    if _rt.is_strings(values):
+        return np.where(hot.cpu().numpy(), values[1], values[0]).astype(object)
+    return torch.where(hot, values[1].to(hot.device), values[0].to(hot.device))
+
+
+def eye_like(x, /, *, dtype=None, k=0):
+    """EyeLike: ones on the k-th diagonal of a matrix shaped like `x`, of `dtype` or `x`'s."""
+    rows, cols = x.shape
+    target = x.dtype if dtype is None else _rt.torch_dtype(dtype)
+    device = x.device if isinstance(x, torch.Tensor) else _rt.device()
+    offsets = torch.arange(cols, device=device).unsqueeze(0) - torch.arange(rows, device=device).unsqueeze(1)
+    return (offsets == k).to(target)
+
+
+def reverse_sequence(x, sequence_lens, /, *, batch_axis=1, time_axis=0):
+    """ReverseSequence: the first `sequence_lens[b]` steps of each batch entry reversed along the
+    time axis, the rest kept."""
+    steps = x.shape[time_axis]
+    lengths = sequence_lens.to(torch.int64).to(_device_of(x)).reshape(1, -1)
+    time = torch.arange(steps, device=lengths.device).reshape(-1, 1)
+    source = torch.where(time < lengths, lengths - 1 - time, time)
+    if time_axis == 1:
+        source = source.transpose(0, 1)
+    source = source.reshape(list(source.shape) + [1] * (x.ndim - 2)).expand(x.shape)
+    if _rt.is_strings(x):
+        return np.take_along_axis(x, source.cpu().numpy(), time_axis)
+    return torch.gather(x, time_axis, source.contiguous())
+
+
+def _device_of(value):
+    return value.device if isinstance(value, torch.Tensor) else _rt.device()
+
+
+def tensor_scatter(past_cache, update, write_indices=None, /, *, mode="linear", axis=-2):
+    """TensorScatter: `update` written into each batch entry's cache along `axis`, starting at its
+    write index (0 without one), wrapping around the cache in circular mode."""
+    axis = axis % past_cache.ndim
+    length, window = past_cache.shape[axis], update.shape[axis]
+    batch = past_cache.shape[0]
+    device = _device_of(past_cache)
+    if write_indices is None:
+        starts = torch.zeros(batch, dtype=torch.int64, device=device)
+    else:
+        starts = write_indices.to(torch.int64).to(device).reshape(-1)
+    offsets = torch.arange(length, device=device).unsqueeze(0) - starts.unsqueeze(1)
+    if mode == "circular":
+        offsets = torch.remainder(offsets, length)
+    written = (offsets >= 0) & (offsets < window)
+    shape = [1] * past_cache.ndim
+    shape[0], shape[axis] = batch, length
+    written = written.reshape(shape).expand(past_cache.shape)
+    positions = offsets.clamp(0, max(window - 1, 0)).reshape(shape).expand(past_cache.shape)
+    if window == 0:
+        return past_cache.clone()
+    return torch.where(written, torch.gather(update, axis, positions.contiguous()), past_cache)

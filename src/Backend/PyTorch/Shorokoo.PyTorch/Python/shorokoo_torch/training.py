@@ -31,9 +31,11 @@ def autograd(loss, wrt):
 
 
 def detach(value):
-    """An output with no autograd history: a tensor detached, a sequence element by element."""
+    """An output with no autograd history: a tensor detached, a sequence element by element. A tensor
+    that has none is handed back as it is -- the very object -- since the run recognises an output it
+    wrote into an input's memory by identity."""
     if isinstance(value, torch.Tensor):
-        return value.detach()
+        return value.detach() if value.requires_grad else value
     if isinstance(value, list):
         return [detach(item) for item in value]
     return value

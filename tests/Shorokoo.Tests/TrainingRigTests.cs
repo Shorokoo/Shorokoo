@@ -5605,6 +5605,30 @@ public class TrainingRigNativeTorchCoverageTests
     }
 
     [Fact]
+    public void TestANativeStepOnTorchWritesTheParametersItUpdatesIntoTheOnesItConsumed()
+    {
+        (TrainingCheckpoint Final, long Aliased) Trained(ComputationGraph optimizer, Hyperparameter[] hypers, ComputeContext? context)
+        {
+            var rig = TrainingRig.FromScratch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, optimizer, SampleOf(Four), hypers,
+                ParitySeed, runtimeContext: context, trainingBackend: context is null ? null : TrainingBackend.Native);
+            var checkpoint = rig.CreateInitialCheckpoint();
+            for (int i = 0; i < 3; i++) checkpoint = rig.TrainStep(checkpoint, Four, FourTargets);
+            using var run = rig.BeginResidentRun(checkpoint);
+            run.Step(Four, FourTargets);
+            return (run.StepToCheckpoint(Four, FourTargets), context?.AliasedOutputs ?? 0);
+        }
+        using var sgdContext = new ComputeContext(new TorchCpuBackend()) { OutputAliasing = true };
+        using var adamWContext = new ComputeContext(new TorchCpuBackend()) { OutputAliasing = true };
+        var (sgd, sgdAliased) = Trained(SGDOptimizer.ComputationGraph, Sgd, sgdContext);
+        var (adamW, adamWAliased) = Trained(AdamWOptimizer.ComputationGraph, AdamW, adamWContext);
+
+        AssertClose(Trained(SGDOptimizer.ComputationGraph, Sgd, null).Final, sgd);
+        AssertClose(Trained(AdamWOptimizer.ComputationGraph, AdamW, null).Final, adamW);
+        Assert.Equal(5L, sgdAliased);
+        Assert.Equal(20L, adamWAliased);
+    }
+
+    [Fact]
     public void TestFitResidentRunsCheckpointsAndBatchShapesAgreeOnTorch()
     {
         using var torch = new ComputeContext(new TorchCpuBackend());

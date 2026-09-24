@@ -179,6 +179,7 @@ internal sealed partial class OnnxToPythonTranslator
             foreach (var output in node.Outputs)
                 if (wrtSet.Contains(output)) Rebind(scope, output, "training.leaf");
         }
+        BeforeNode(step.Node);
         var loss = scope.Lookup(step.Loss, step.Node);
         var arguments = step.Wrt.Select(w => scope.Lookup(w, step.Node)).ToList();
         var call = $"training.autograd({loss}, ({string.Concat(arguments.Select(a => a + ", "))}))";

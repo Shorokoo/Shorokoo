@@ -337,9 +337,6 @@ namespace Shorokoo.Core.Utils
             try
             {
                 foreach (var d in data) inner.Add(CopyTensorValue(d.ToTensorValue()));
-                var backend = DefaultBackend.Instance;
-                var sequence = backend.CreateSequence(inner);
-                return CreateTensorDataSequenceFromValue(dtype, sequence, backend);
             }
             catch
             {
@@ -347,6 +344,11 @@ namespace Shorokoo.Core.Utils
                 foreach (var v in inner) v.Dispose();
                 throw;
             }
+
+            // Outside the catch on purpose: CreateSequence takes the copies over, and releases them
+            // itself if it cannot, as the wrapping below releases the sequence if it cannot wrap it.
+            var backend = DefaultBackend.Instance;
+            return CreateTensorDataSequenceFromValue(dtype, backend.CreateSequence(inner), backend);
         }
 
         /// <summary>

@@ -109,7 +109,12 @@ public class CSharpModelBuilderCoverageTests
     /// builds — has no bytes, so codegen throws InvalidOperationException.</summary>
     [Fact]
     public void TestAStringTensorValueConstantCodegens()
-        => AssertCodegens(new InternalComputationGraph([], [Vector("cova", "covb").ToVariable()]), "cova");
+    {
+        AssertCodegens(new InternalComputationGraph([], [Vector("cova", "covb").ToVariable()]), "cova");
+        AssertRoundTrips(new InternalComputationGraph([], [Vector("a\"b", "c\\d\n", "", "é🦀\u0001").ToVariable()]), []);
+        AssertRoundTrips(new InternalComputationGraph([], [Scalar("one").ToVariable()]), []);
+        AssertRoundTrips(new InternalComputationGraph([], [Tensor([2L, 2L], "w", "x", "y", "z").ToVariable()]), []);
+    }
 
     [Fact]
     public void TestCodegenedSourceRebuildsTheGraphItCameFrom()
@@ -206,7 +211,9 @@ public class CSharpModelBuilderCoverageTests
     {
         var model = graph.ToConcreteArchitecture(graph.FromOrderedInputs([.. inputs])).ToConcreteModel();
         return [.. Shorokoo.Runtime.ComputeContext.Default.Execute(model, [.. inputs.Select(t => t.Shared())])
-            .Select(x => x.ToTensorData().AccessRawMemory().ToArray())];
+            .Select(x => x.ToTensorData()).Select(t => t.DType == DType.Utf8
+                ? System.Text.Encoding.UTF8.GetBytes(string.Join("\0", [.. t.Shape.Dims.Select(d => $"{d}"), .. t.Data]))
+                : t.AccessRawMemory().ToArray())];
     }
 
     private static InternalComputationGraph BuildConstantBranchesGraph()

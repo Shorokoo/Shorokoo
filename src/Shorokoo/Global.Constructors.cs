@@ -373,6 +373,8 @@ namespace Shorokoo
         public static Tensor<float32> Tensor(long[] dims, params float[] val) => OnnxOp.Constant(TensorAttribute.Create(dims, val));
         /// <summary>Creates a constant tensor with the given dims from the flat values.</summary>
         public static Tensor<float64> Tensor(long[] dims, params double[] val) => OnnxOp.Constant(TensorAttribute.Create(dims, val));
+        /// <summary>Creates a constant tensor with the given dims from the flat values.</summary>
+        public static Tensor<utf8> Tensor(long[] dims, params string[] val) => OnnxOp.Constant(TensorAttribute.Create(dims, val));
 
 
         /// <summary>Creates a constant <see cref="Tensor{T}"/> from base64-encoded raw IR element data.</summary>

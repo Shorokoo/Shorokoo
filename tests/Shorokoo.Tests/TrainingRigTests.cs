@@ -5088,7 +5088,7 @@ public class BuildProgressCoverageTests
         "Clone", "ApplyIdentifierTemplates", "InlineModulesAndFunctions", "InjectRngDrawCounter",
         "ExtractIdentifierTemplates", "ConvertToIdRefModelParams", "UnpackModelStruct",
         "UnpackTensorStructs", "ConvertModelParamIdRefToModelParam", "Simplify",
-        "LowerAttributeTensorOps", "ExpandAutoGrad", "SimplifyAfterAutoGrad",
+        "LowerAttributeTensorOps", "RejectOversizedConvTransposeOutputShape", "ExpandAutoGrad", "SimplifyAfterAutoGrad",
     ];
 
     [Fact]

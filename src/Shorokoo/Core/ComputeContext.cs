@@ -1067,10 +1067,11 @@ namespace Shorokoo.Runtime
         /// <para>On <see cref="Host"/> the buffer is a managed array, since that is what the
         /// framework's own host memory is; on a real backend it is the memory that backend
         /// allocates in, which on a CUDA one is the card's and so is not writable through a span
-        /// at all. <see cref="TensorData.IsHostResident"/> says which. Either way the tensor is
-        /// attached to this context, as a <see cref="TensorData.CopyTo"/> result is, and on a
-        /// context under a device-memory budget it is refused, as a copy would be, when the budget
-        /// cannot take it.</para>
+        /// at all. <see cref="TensorData.IsHostResident"/> says which. On a real backend the tensor is
+        /// attached to this context, as a <see cref="TensorData.CopyTo"/> result is — <see cref="Host"/>
+        /// keeps no list, so there it is attached to nothing — and on a context under a
+        /// device-memory budget it is refused, as a copy would be, when the budget cannot take
+        /// it.</para>
         /// </summary>
         /// <exception cref="ArgumentNullException"><paramref name="dtype"/> is null.</exception>
         /// <exception cref="NotSupportedException"><paramref name="dtype"/> is

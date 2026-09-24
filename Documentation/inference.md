@@ -90,7 +90,7 @@ var features = Conv(input, w, b, AutoPad.NotSet,
 TensorData result = OnnxEngine.Eval(features);
 
 // Read the numbers out (see core-types.md):
-ReadOnlySpan<float> values = ((TensorData<float32>)result).AccessMemory();
+float[] values = ((TensorData<float32>)result).CopyMemory<float>();
 ```
 
 What `Eval` accepts is the trap here:
@@ -180,7 +180,7 @@ var concrete = graph
     .ToConcreteModel();
 
 var results = ComputeContext.Default.Execute(concrete, input);   // params IData[]
-float[] values = results[0].ToTensorData().As<float32>().AccessMemory<float>().ToArray();
+float[] values = results[0].ToTensorData().As<float32>().CopyMemory<float>();
 ```
 
 When the graph comes from a saved `.srk`/`.zsrk` file, you can catch this mismatch
@@ -721,7 +721,13 @@ consuming it would take its memory from under that run.
 - **Composites apply the mode to everything they hold.** `TensorDataStruct`, `TensorDataSequence`
   and `OptionalTensorData` have `.Shared()` and `.TryConsume()` too; fed as it is, a struct or a
   sequence gives the run every tensor it holds. So does a training checkpoint — see
-  [What a training step consumes](training.md#what-a-training-step-consumes).
+  [What a training step consumes](training.md#what-a-training-step-consumes). A sequence that
+  holds its elements as its own — the copy a sequence's `To`, `CopyTo` or `ToHost` makes — is held
+  element by element: fed as it is, it is refused where another run is reading one of its elements,
+  as that element would be; fed `.Shared()`, none of its elements can be deleted while the run
+  reads it; and an element fed in the same call on its own counts as one more occurrence of that
+  element, so `Execute(e.Shared(), s)` reads `e` and consumes the rest of `s`, `e` living on
+  without the sequence.
 - **The error names the call to change.** Reading a consumed tensor throws
   `ObjectDisposedException` naming the run that took it — its graph and its context — and the
   input it fed; the remedy is to pass it `.Shared()` at that call.
@@ -800,13 +806,16 @@ Two kinds of tensor are also ended by what they belong to. A copy a run made to 
 could not read where it is ([above](#feeding-a-run-consumed-shared-or-tried)) is retired when that
 tensor is written or ends. And the elements of a sequence that holds them as its own — the copy a
 sequence's `To`, `CopyTo` or `ToHost` makes — end when the sequence does, however it ends: an
-element read after a run consumed its sequence names that run.
+element read after a run consumed its sequence names that run. The exception is an element a run
+is reading on its own account when its sequence ends, which lives on without it; and a sequence one
+of whose own elements a run is reading cannot be disposed, as a tensor being read cannot be.
 
 A dead tensor records why, and every access to it afterwards — reading its elements, feeding it,
 `To`, `CopyTo`, `ToHost`, `Shared()`, `TryConsume()`, `MoveToAttribute` — throws
 `ObjectDisposedException` saying so; for a consumed tensor it names the graph and the context whose
-run took it, and says to pass it `.Shared()` at that call. `Shape`, `DType`,
-`ToString()` and `IsDisposed` keep working, so a dead tensor can still say what it was. Ending a
+run took it, and says to pass it `.Shared()` at that call. `Shape`, `DType`, `ToString()`,
+`IsDisposed` and where its memory was — `AllocatingBackend`, `Space`, `Device`, `Location` — keep
+working, so a dead tensor can still say what it was. Ending a
 tensor that is already dead does nothing, so disposing one twice, or at the end of a `using` over a
 tensor a run has consumed, is harmless.
 
@@ -829,7 +838,12 @@ tensor itself, for as long as it runs, giving it up when it returns however it r
 of runs may read one tensor at once. While any of them holds its lock the tensor cannot be
 deleted: `Delete()` and `Dispose()` throw `InvalidOperationException`, and `TryDelete()` declines.
 So nothing frees memory a run is in the middle of reading. A tensor a run consumes it holds by
-taking it, which no other run can then do.
+taking it, which no other run can then do. The copies out of a tensor outside any run take the same
+lock for as long as they copy — `ToHost()`, `CopyTo(...)`, `CopyMemory()`, `ValueAt()`,
+`CopyRawMemory()` and the copy `MoveToAttribute()` makes — so a run that would consume the tensor
+meanwhile is refused, and a delete throws, rather than freeing memory under the copy. A span from
+`AccessMemory()` escapes the call, so no lock can cover it: keep the tensor alive and fed to
+nothing for as long as you hold one.
 
 The lock — or, for a feed the run consumes, the take — happens inside the run, one feed at a time,
 so nothing is held yet while the call is being set up — and a deletion landing in that window ends
@@ -840,7 +854,8 @@ deleting a feed from a second thread is not something to do while a run of it is
 [A feed deleted while a run is starting loses that run](limitations.md#a-feed-deleted-while-a-run-is-starting-loses-that-run).
 
 A context is held the same way — disposing a `ComputeContext` throws, rather than proceeding,
-while a run of it is in flight or while it holds a lock on anything.
+while a run of it is in flight or while it holds a lock on anything — and so is a compiled graph:
+disposing one throws while one of its runs is in flight.
 
 **Deleting.** Three calls, which differ in what they do when a run is reading the tensor:
 
@@ -1400,8 +1415,9 @@ drops out.
 it is, which is how a host tensor fed to a run on the card is read — are refused when what is
 attached plus what they would add passes the limit. So is a `To` of a tensor already on the card
 that the context's backend reads as it stands: nothing is copied, but attaching it puts its bytes
-on the books. The refusal is an `InvalidOperationException` naming the budget, what is attached and
-what was asked for:
+on the books. A struct's or a sequence's `To` and `CopyTo` are checked whole, before any part of
+them is placed, and a part that fails takes what the rest placed off the books again. The refusal
+is an `InvalidOperationException` naming the budget, what is attached and what was asked for:
 
 ```
 CopyTo(context) of Tensor (8388608,):Float32 asks this compute context for 33554432 bytes of CUDA
@@ -1413,7 +1429,9 @@ the context a larger budget.
 
 **A run's arena gets what the context leaves it.** A session's `gpu_mem_limit` is the budget less
 the *discount*: what the context holds on the card outside that session's arena for the length of
-the run — the tensors attached to it there, and those the run reads there or copies there to read.
+the run — the tensors attached to it there, and those the run reads there or copies there to read,
+which for a tensor another runtime holds on the same card is both that tensor and its copy: the
+read attaches the one as well as the other.
 A tensor already on the card is read where it is and never enters the arena, so it stays in the
 discount for the whole run: measured, a session whose arena was capped at 32 MiB read a 64 MiB
 input from the card with its arena never above 256 bytes, while the same bytes handed to an ONNX

@@ -90,9 +90,9 @@ Persistence.SaveTrainingCheckpointToSkpt(result.FinalCheckpoint, "my-model.skpt"
 var inferenceInput = TensorData([4L, 8L], new float[32]);   // same [4 × 8] shape the rig trained on
 var concrete       = result.FinalCheckpoint.ToInferenceModel();
 
-ReadOnlySpan<float> prediction = ComputeContext.Default
+float[] prediction = ComputeContext.Default
     .Execute(concrete, inferenceInput)[0]
-    .ToTensorData<float32>().AccessMemory();
+    .ToTensorData<float32>().CopyMemory<float>();
 ```
 
 In a later process, the file alone is enough — and which call you want depends on what you are doing with it. None of the first two builds a training rig:

@@ -205,14 +205,16 @@ tensor going to a different card goes through the host.
 
 A tensor in memory Shorokoo has no name for — a device value produced by a backend on an execution
 provider it does not know, or one wrapped around a runtime value without saying which backend made
-it — reports its space as unknown, and no context is ever handed it as it stands: two such
-allocations compare equal as spaces without being in the same place. `To` and `CopyTo` copy it
-instead, through the backend that made it. A value wrapped without its backend that the host *can*
+it — reports its space as unknown, and no other backend is handed it as it stands: two such
+allocations compare equal as spaces without being in the same place, so only the backend that made
+one reads it where it is. `To` and `CopyTo` onto any other context copy it instead, through the
+backend that made it. A value wrapped without its backend that the host *can*
 read reports its space as the host: its accessors read it, and `ToHost()` hands it back as it is.
 No runtime is handed it as it stands all the same, since which runtime made it is unknown, so a run
 reads it through a copy and `To` a context that runs copies it. One whose producer was not recorded
-and that the host cannot read cannot be copied at all; wrap such a value with
-`TensorData.Create(shape, dtype, value, backend)`, naming the backend.
+and that the host cannot read cannot be copied at all, and a run fed one is refused before it takes
+anything; wrap such a value with `TensorData.Create(shape, dtype, value, backend)`, naming the
+backend.
 
 ### A feed deleted while a run is starting loses that run
 

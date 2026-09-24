@@ -14,8 +14,8 @@ namespace Shorokoo.Tests;
 [Trait("Purpose", "Coverage")]
 public class QeePoolConvAuditTests
 {
-    private static TensorData Image1x1x10x10 => F32Zeros([1L, 1L, 10L, 10L]);
-    private static TensorData Image1x3x10x10 => F32Zeros([1L, 3L, 10L, 10L]);
+    private static TensorData Image1x1x10x10 => F32Wave([1L, 1L, 10L, 10L]);
+    private static TensorData Image1x3x10x10 => F32Wave([1L, 3L, 10L, 10L]);
 
     [Fact]
     public void TestQeePoolingShapeAudits()
@@ -24,27 +24,31 @@ public class QeePoolConvAuditTests
         Assert.True(QeeAudit.Check<QeeAveragePoolShapeAuditCheck>(Image1x1x10x10));
         Assert.True(QeeAudit.Check<QeeLpPoolGlobalPoolShapeAuditCheck>(Image1x3x10x10));
         Assert.True(QeeAudit.Check<QeeMaxRoiPoolShapeAuditCheck>(
-            F32Zeros([1L, 2L, 8L, 8L]),
+            F32Wave([1L, 2L, 8L, 8L]),
             F32([2L, 5L], 0f, 0f, 0f, 7f, 7f, 0f, 1f, 1f, 6f, 6f)));
         Assert.True(QeeAudit.Check<QeeMaxUnpoolShapeAuditCheck>(
             F32([1L, 1L, 2L, 2L], 6f, 8f, 14f, 16f),
             I64([1L, 1L, 2L, 2L], 0L, 2L, 5L, 7L)));
+        Assert.True(QeeAudit.Check<QeePoolVariantsShapeAuditCheck>(
+            F32Wave([1L, 2L, 11L]), F32Wave([1L, 2L, 9L, 8L]), F32Wave([1L, 1L, 5L, 6L, 4L])));
     }
 
     [Fact]
     public void TestQeeConvolutionShapeAudits()
     {
-        Assert.True(QeeAudit.Check<QeeConvShapeAuditCheck>(F32Zeros([1L, 4L, 9L, 9L])));
-        Assert.True(QeeAudit.Check<QeeConvTransposeShapeAuditCheck>(F32Zeros([1L, 2L, 5L, 5L])));
+        Assert.True(QeeAudit.Check<QeeConvShapeAuditCheck>(F32Wave([1L, 4L, 9L, 9L])));
+        Assert.True(QeeAudit.Check<QeeConvTransposeShapeAuditCheck>(F32Wave([1L, 2L, 5L, 5L])));
         Assert.True(QeeAudit.Check<QeeQuantizedConvShapeAuditCheck>(
             I8Zeros([1L, 1L, 7L, 7L]), I8Zeros([1L, 1L, 3L, 3L]),
             I8([], (sbyte)0), I8([], (sbyte)0),
             F32([], 0.5f), F32([], 0.25f), F32([], 0.5f), I8([], (sbyte)0)));
         Assert.True(QeeAudit.CheckWith<QeeDeformConvShapeAuditCheck>(
-            [F32Zeros([1L, 1L, 4L, 4L]),
+            [F32Wave([1L, 1L, 4L, 4L]),
              F32([1L, 1L, 2L, 2L], 1f, 0f, 0f, 1f),
-             F32Zeros([1L, 8L, 3L, 2L]),
+             F32Wave([1L, 8L, 3L, 2L]),
              F32([1L], 0f)],
             testOnnxRoundtrip: false, testCsRoundtrip: false));
+        Assert.True(QeeAudit.Check<QeeConvVariantsShapeAuditCheck>(
+            F32Wave([2L, 2L, 9L]), F32Wave([1L, 4L, 7L, 6L]), F32Wave([1L, 2L, 5L, 4L, 4L]), F32Wave([1024L])));
     }
 }

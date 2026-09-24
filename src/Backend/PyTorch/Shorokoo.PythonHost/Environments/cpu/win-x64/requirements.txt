@@ -1,0 +1,26 @@
+# Compiled from requirements.in for CPython 3.12 on x86_64-pc-windows-msvc with the index
+# arguments in uv-index.txt beside this file:
+#   uv pip compile requirements.in --python-version 3.12 --python-platform x86_64-pc-windows-msvc $(cat uv-index.txt) --no-header -o requirements.txt
+# Installing it needs the same index arguments; the resolved versions do not record them.
+filelock==4.0.3
+    # via torch
+fsspec==2026.9.0
+    # via torch
+jinja2==3.1.6
+    # via torch
+markupsafe==3.0.3
+    # via jinja2
+mpmath==1.3.0
+    # via sympy
+networkx==3.7
+    # via torch
+numpy==2.5.3
+    # via -r requirements.in
+setuptools==84.0.0
+    # via torch
+sympy==1.14.0
+    # via torch
+torch==2.14.0+cpu
+    # via -r requirements.in
+typing-extensions==4.16.0
+    # via torch

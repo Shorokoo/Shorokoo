@@ -32,18 +32,21 @@ public class QeeImageRandomRnnAuditTests
     [Fact]
     public void TestQeeImageGeometryShapeAudits()
     {
-        var x8 = F32Zeros([1L, 1L, 8L, 8L]);
+        var x8 = F32Wave([1L, 1L, 8L, 8L]);
         Assert.True(QeeAudit.Check<QeeResizeShapeAuditCheck>(x8));
         Assert.True(QeeAudit.QeeOnly<QeeResizeNegativeAxesAuditCheck>(x8));
-        Assert.True(QeeAudit.Check<QeeUpsampleAffineGridSampleAuditCheck>(F32Zeros([1L, 2L, 4L, 4L])));
-        Assert.True(QeeAudit.Check<QeeAffineGridSample5DAuditCheck>(F32Zeros([1L, 1L, 3L, 4L, 4L])));
+        Assert.True(QeeAudit.Check<QeeUpsampleAffineGridSampleAuditCheck>(F32Wave([1L, 2L, 4L, 4L])));
+        Assert.True(QeeAudit.Check<QeeAffineGridSample5DAuditCheck>(F32Wave([1L, 1L, 3L, 4L, 4L])));
         Assert.True(QeeAudit.Check<QeeRoiAlignShapeAuditCheck>(
-            F32Zeros([1L, 2L, 8L, 8L]),
+            F32Wave([1L, 2L, 8L, 8L]),
             F32([3L, 4L], 0f, 0f, 4f, 4f, 1f, 1f, 6f, 6f, 2f, 2f, 7f, 7f),
             I64([3L], 0L, 0L, 0L)));
         Assert.True(QeeAudit.Check<QeeCol2ImCenterCropPadAuditCheck>(
-            F32Zeros([1L, 8L, 12L]),
+            F32Wave([1L, 8L, 12L]),
             F32([3L, 5L], 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f, 11f, 12f, 13f, 14f, 15f)));
+        Assert.True(QeeAudit.Check<QeeResizeModesShapeAuditCheck>(F32Wave([1L, 2L, 5L, 7L])));
+        Assert.True(QeeAudit.Check<QeeSamplingVariantsShapeAuditCheck>(
+            F32Wave([1L, 2L, 5L, 6L]), F32Wave([1L, 8L, 2L, 3L]), F32Wave([1L, 12L, 12L])));
     }
 
     [Fact]

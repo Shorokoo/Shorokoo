@@ -3886,6 +3886,19 @@ namespace Shorokoo.Tests.Modules
     }
 
     [Module]
+    public partial class AutoGradPadConstantValueCheck
+    {
+        public static Scalar<bit> Inline(Scalar<float32> x)
+        {
+            var data = Vector(1f, 2f);
+            var padded = (Tensor<float32>)OnnxOp.Pad(data, Vector(1L, 2L), x, mode: PadMode.Constant);
+            var loss = (padded * padded).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, loss);
+            return (grad - Scalar(6f) * x).Abs() < Scalar(1e-5f);
+        }
+    }
+
+    [Module]
     public partial class AutoGradPadWithSigmoidCheck
     {
         public static Scalar<bit> Inline(Scalar<float32> x)

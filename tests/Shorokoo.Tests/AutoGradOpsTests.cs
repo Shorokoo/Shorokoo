@@ -224,6 +224,7 @@ public class AutoGradTensorLayoutOpsCoverageTests
         Run<AutoGradPadConstantCheck>(5f);
         Run<AutoGradPadConstantWithMultiplyCheck>(5f);
         Run<AutoGradPad2DCheck>(7f);
+        Run<AutoGradPadConstantValueCheck>(3f);
         Run<AutoGradPadWithSigmoidCheck>(0f);
         Run<AutoGradResizeNearestSumLossWithScalesCheck>(1f);
         Run<AutoGradResizeNearestSizesCheck>(2f);

@@ -107,6 +107,132 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>Resize over every coordinate_transformation_mode and nearest_mode: nearest with
+    /// round_prefer_ceil / ceil / round_prefer_floor under half_pixel_symmetric / asymmetric /
+    /// pytorch_half_pixel, linear antialiased under align_corners and a one-pixel axis under
+    /// pytorch_half_pixel, cubic antialiased and cubic with exclude_outside + cubic_coeff_a,
+    /// cubic with a not_smaller aspect policy, and tf_crop_and_resize with nearest and with a
+    /// single-axis roi. Input x is expected as [1,2,5,7].</summary>
+    [Module]
+    public partial class QeeResizeModesShapeAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+        {
+            // floor(5*1.7) = 8, floor(7*0.6) = 4.
+            var nearCeil = Resize(x, Vector(1f, 1f, 1.7f, 0.6f), null, ResizeMode.Nearest,
+                CoordinateTransformationMode.Half_pixel_symmetric, NearestMode.Round_prefer_ceil);
+            // floor(5*0.6) = 3, floor(7*2.5) = 17.
+            var nearAsym = Resize(x, Vector(1f, 1f, 0.6f, 2.5f), null, ResizeMode.Nearest,
+                CoordinateTransformationMode.Asymmetric, NearestMode.Ceil);
+            var nearTorch = Resize(x, null, Vector(1L, 2L, 9L, 3L), ResizeMode.Nearest,
+                CoordinateTransformationMode.Pytorch_half_pixel, NearestMode.Round_prefer_floor);
+            var linearAnti = (Tensor<float32>)OnnxOp.Resize(x, roi: null, scales: null, sizes: Vector(1L, 2L, 3L, 4L),
+                antialias: true, axes: null, coordinateTransformationMode: CoordinateTransformationMode.Align_corners,
+                cubicCoeffA: null, excludeOutside: null, extrapolationValue: null,
+                keepAspectRatioPolicy: null, mode: ResizeMode.Linear, nearestMode: null);
+            var linearOnePixel = Resize(x, null, Vector(1L, 2L, 1L, 10L), ResizeMode.Linear,
+                CoordinateTransformationMode.Pytorch_half_pixel, null);
+            // floor(5*0.6) = 3, floor(7*0.4) = 2.
+            var cubicAnti = (Tensor<float32>)OnnxOp.Resize(x, roi: null, scales: Vector(1f, 1f, 0.6f, 0.4f), sizes: null,
+                antialias: true, axes: null, coordinateTransformationMode: null,
+                cubicCoeffA: null, excludeOutside: null, extrapolationValue: null,
+                keepAspectRatioPolicy: null, mode: ResizeMode.Cubic, nearestMode: null);
+            // floor(5*1.5) = 7, floor(7*1.3) = 9.
+            var cubicExclude = (Tensor<float32>)OnnxOp.Resize(x, roi: null, scales: Vector(1f, 1f, 1.5f, 1.3f), sizes: null,
+                antialias: null, axes: null, coordinateTransformationMode: CoordinateTransformationMode.Asymmetric,
+                cubicCoeffA: -0.5f, excludeOutside: true, extrapolationValue: null,
+                keepAspectRatioPolicy: null, mode: ResizeMode.Cubic, nearestMode: null);
+            // not_smaller: max(3/5, 14/7) = 2 → [10, 14].
+            var cubicPolicy = (Tensor<float32>)OnnxOp.Resize(x, roi: null, scales: null, sizes: Vector(3L, 14L),
+                antialias: null, axes: [2L, 3L], coordinateTransformationMode: CoordinateTransformationMode.Half_pixel_symmetric,
+                cubicCoeffA: null, excludeOutside: null, extrapolationValue: null,
+                keepAspectRatioPolicy: KeepAspectRatioPolicy.not_smaller, mode: ResizeMode.Cubic, nearestMode: null);
+            // floor(5*1.4) = 7, floor(7*0.6) = 4.
+            var cropNearest = (Tensor<float32>)OnnxOp.Resize(x, roi: Vector(0f, 0f, 0.1f, -0.2f, 1f, 1f, 0.8f, 1.3f),
+                scales: Vector(1f, 1f, 1.4f, 0.6f), sizes: null, antialias: null, axes: null,
+                coordinateTransformationMode: CoordinateTransformationMode.Tf_crop_and_resize,
+                cubicCoeffA: null, excludeOutside: null, extrapolationValue: -5f,
+                keepAspectRatioPolicy: null, mode: ResizeMode.Nearest, nearestMode: NearestMode.Floor);
+            // floor(7*1.5) = 10 on the last axis only.
+            var cropAxis = (Tensor<float32>)OnnxOp.Resize(x, roi: Vector(0.1f, 1.2f), scales: Vector(1.5f), sizes: null,
+                antialias: null, axes: [3L], coordinateTransformationMode: CoordinateTransformationMode.Tf_crop_and_resize,
+                cubicCoeffA: null, excludeOutside: null, extrapolationValue: 2f,
+                keepAspectRatioPolicy: null, mode: ResizeMode.Cubic, nearestMode: null);
+
+            var mismatch =
+                ShapeMismatch(nearCeil, Vector(1L, 2L, 8L, 4L)) +
+                ShapeMismatch(nearAsym, Vector(1L, 2L, 3L, 17L)) +
+                ShapeMismatch(nearTorch, Vector(1L, 2L, 9L, 3L)) +
+                ShapeMismatch(linearAnti, Vector(1L, 2L, 3L, 4L)) +
+                ShapeMismatch(linearOnePixel, Vector(1L, 2L, 1L, 10L)) +
+                ShapeMismatch(cubicAnti, Vector(1L, 2L, 3L, 2L)) +
+                ShapeMismatch(cubicExclude, Vector(1L, 2L, 7L, 9L)) +
+                ShapeMismatch(cubicPolicy, Vector(1L, 2L, 10L, 14L)) +
+                ShapeMismatch(cropNearest, Vector(1L, 2L, 7L, 4L)) +
+                ShapeMismatch(cropAxis, Vector(1L, 2L, 5L, 10L));
+            return mismatch < Scalar(1L);
+        }
+
+        private static Tensor<float32> Resize(Tensor<float32> x, Vector<float32>? scales, Vector<int64>? sizes,
+            ResizeMode mode, CoordinateTransformationMode transform, NearestMode? nearest)
+            => (Tensor<float32>)OnnxOp.Resize(x, roi: null, scales: scales, sizes: sizes,
+                antialias: null, axes: null, coordinateTransformationMode: transform,
+                cubicCoeffA: null, excludeOutside: null, extrapolationValue: null,
+                keepAspectRatioPolicy: null, mode: mode, nearestMode: nearest);
+    }
+
+    /// <summary>Sampling and rearrangement variants: GridSample cubic with reflection padding,
+    /// nearest with zeros padding under align_corners, linear with border padding, on a rotated
+    /// and scaled AffineGrid that reaches outside the image; RoiAlign avg with a sampling_ratio
+    /// and spatial_scale under output_half_pixel, and max with an adaptive sampling grid;
+    /// DepthToSpace in DCR and CRD modes and SpaceToDepth back; CenterCropPad cropping one axis
+    /// while padding another; Col2Im with dilations, asymmetric pads and strides. Inputs:
+    /// x [1,2,5,6], d [1,8,2,3], cols [1,12,12].</summary>
+    [Module]
+    public partial class QeeSamplingVariantsShapeAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x, Tensor<float32> d, Tensor<float32> cols)
+        {
+            var theta = Vector(1.1f, -0.4f, 0.1f, 0.5f, 1.2f, -0.2f).Reshape(Vector(1L, 2L, 3L));
+            var grid = (Tensor<float32>)OnnxOp.AffineGrid(theta, Vector(1L, 2L, 4L, 7L), alignCorners: false);
+            var gridCorners = (Tensor<float32>)OnnxOp.AffineGrid(theta, Vector(1L, 2L, 3L, 5L), alignCorners: true);
+            var cubic = (Tensor<float32>)OnnxOp.GridSample(x, grid, alignCorners: false,
+                mode: GridSampleMode.Cubic, paddingMode: GridSamplePaddingMode.Reflection);
+            var nearest = (Tensor<float32>)OnnxOp.GridSample(x, grid, alignCorners: true,
+                mode: GridSampleMode.Nearest, paddingMode: GridSamplePaddingMode.Zeros);
+            var linear = (Tensor<float32>)OnnxOp.GridSample(x, grid, alignCorners: false,
+                mode: GridSampleMode.Linear, paddingMode: GridSamplePaddingMode.Border);
+            var rois = Vector(0.5f, 1f, 9f, 7.5f, 2.2f, 0.3f, 4.9f, 3.1f, -1f, 2f, 5f, 12f).Reshape(Vector(3L, 4L));
+            var batch = Vector(0L, 0L, 0L);
+            var roiAvg = (Tensor<float32>)OnnxOp.RoiAlign(x, rois, batch,
+                coordinateTransformationMode: RoiAlignTransformationMode.Output_half_pixel,
+                mode: RoiAlignMode.Avg, outputHeight: 2, outputWidth: 3, samplingRatio: 2, spatialScale: 0.5f);
+            var roiMax = (Tensor<float32>)OnnxOp.RoiAlign(x, rois, batch,
+                coordinateTransformationMode: RoiAlignTransformationMode.Half_pixel,
+                mode: RoiAlignMode.Max, outputHeight: 3, outputWidth: 2, samplingRatio: 0, spatialScale: 1f);
+            var dcr = (Tensor<float32>)OnnxOp.DepthToSpace(d, 2L, DepthColumnRowMode.DCR);
+            var crd = (Tensor<float32>)OnnxOp.DepthToSpace(d, 2L, DepthColumnRowMode.CRD);
+            var back = (Tensor<float32>)OnnxOp.SpaceToDepth(crd, 2L);
+            var cropPad = (Tensor<float32>)OnnxOp.CenterCropPad(x, Vector(4L, 9L), axes: [2L, 3L]);
+            var image = (Tensor<float32>)OnnxOp.Col2Im(cols, Vector(5L, 6L), Vector(2L, 3L),
+                dilations: [2L, 1L], pads: [1L, 0L, 0L, 1L], strides: [1L, 2L]);
+
+            var mismatch =
+                ShapeMismatch(gridCorners, Vector(1L, 3L, 5L, 2L)) +
+                ShapeMismatch(cubic, Vector(1L, 2L, 4L, 7L)) +
+                ShapeMismatch(nearest, Vector(1L, 2L, 4L, 7L)) +
+                ShapeMismatch(linear, Vector(1L, 2L, 4L, 7L)) +
+                ShapeMismatch(roiAvg, Vector(3L, 2L, 2L, 3L)) +
+                ShapeMismatch(roiMax, Vector(3L, 2L, 3L, 2L)) +
+                ShapeMismatch(dcr, Vector(1L, 2L, 4L, 6L)) +
+                ShapeMismatch(crd, Vector(1L, 2L, 4L, 6L)) +
+                ShapeMismatch(back, Vector(1L, 8L, 2L, 3L)) +
+                ShapeMismatch(cropPad, Vector(1L, 2L, 4L, 9L)) +
+                ShapeMismatch(image, Vector(1L, 2L, 5L, 6L));
+            return mismatch < Scalar(1L);
+        }
+    }
+
     /// <summary>Resize with NEGATIVE axes (spec opset 18+: counted from the back) — QEE-only:
     /// ONNX Runtime 1.25.1's Resize kernel rejects negative axes ("Scale value should be
     /// greater than 0"), so this module is driven through QeeAudit strict-QEE without ORT.

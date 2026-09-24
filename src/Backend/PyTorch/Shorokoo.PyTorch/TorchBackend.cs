@@ -212,8 +212,8 @@ public abstract class TorchBackend : IShorokooBackend
         var runtime = Runtime;
         using (PythonRuntime.Gil())
         {
-            var tensor = runtime.Empty.Invoke(
-                new PyInt((int)elementType), Shape(shape), new PyString(DeviceName));
+            using var dims = Shape(shape);
+            var tensor = PyCall.Invoke(runtime.Empty, (int)elementType, dims, DeviceName);
             return TorchTensorValue.Wrap(runtime, tensor, elementType);
         }
     }
@@ -236,9 +236,8 @@ public abstract class TorchBackend : IShorokooBackend
             {
                 // The bytes are pinned for exactly the call that copies them: from_host copies into
                 // a tensor torch allocated, so nothing keeps pointing into the managed buffer after.
-                var tensor = runtime.FromHost.Invoke(
-                    new PyInt((long)source), new PyInt(byteCount), new PyInt((int)elementType),
-                    Shape(shape), new PyString(device));
+                using var dims = Shape(shape);
+                var tensor = PyCall.Invoke(runtime.FromHost, (long)source, (long)byteCount, (int)elementType, dims, device);
                 return TorchTensorValue.Wrap(runtime, tensor, elementType);
             }
         }
@@ -255,9 +254,10 @@ public abstract class TorchBackend : IShorokooBackend
             foreach (var value in data)
             {
                 ArgumentNullException.ThrowIfNull(value, nameof(data));
-                values.Append(new PyString(value));
+                PyCall.Append(values, value);
             }
-            var array = runtime.Strings.Invoke(values, Shape(shape));
+            using var dims = Shape(shape);
+            var array = runtime.Strings.Invoke(values, dims);
             return TorchTensorValue.Wrap(runtime, array, ShorokooTensorElementType.String);
         }
     }
@@ -357,7 +357,7 @@ public abstract class TorchBackend : IShorokooBackend
     internal static PyList Shape(long[] shape)
     {
         var list = new PyList();
-        foreach (var dim in shape) list.Append(new PyInt(dim));
+        foreach (var dim in shape) PyCall.Append(list, dim);
         return list;
     }
 }

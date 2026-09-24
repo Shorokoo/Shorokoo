@@ -108,7 +108,10 @@ internal sealed class TorchRuntime
             {
                 using var sources = new PyDict();
                 foreach (var (module, source) in SupportPackage())
-                    sources[module] = new PyString(source);
+                {
+                    using var text = new PyString(source);
+                    sources[module] = text;
+                }
                 using var scope = Py.CreateScope();
                 scope.Set("_sources", sources);
                 scope.Exec(Bootstrap);

@@ -141,16 +141,6 @@ public sealed class TorchTensorValue : IShorokooTensorValue
         return new Span<T>((void*)_address, checked((int)(_byteCount / sizeof(T))));
     }
 
-    /// <summary>The host address and size of a host tensor's buffer, for the backend's own copies.</summary>
-    internal (IntPtr Address, long ByteCount) HostBuffer
-    {
-        get
-        {
-            if (Volatile.Read(ref _released) != 0) throw Released();
-            return (_address, _byteCount);
-        }
-    }
-
     public IReadOnlyList<string> GetStringTensorData()
     {
         if (_elementType != ShorokooTensorElementType.String)
@@ -181,7 +171,7 @@ public sealed class TorchTensorValue : IShorokooTensorValue
         var runtime = RuntimeOf();
         using (PythonRuntime.Gil())
         {
-            var element = runtime.SequenceElement.Invoke(Value, new PyInt(index));
+            var element = PyCall.Invoke(runtime.SequenceElement, Value, index);
             return Wrap(runtime, element, _elementType);
         }
     }

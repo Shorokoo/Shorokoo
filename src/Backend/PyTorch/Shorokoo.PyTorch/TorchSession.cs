@@ -110,9 +110,11 @@ internal sealed class TorchSession : IShorokooSession
             try
             {
                 foreach (var constant in model.Constants)
-                    constants.Append(ConstantValue(runtime, constant, backend.DeviceName));
-                var main = runtime.LoadModel.Invoke(
-                    new PyString(model.Source), new PyString($"<shorokoo-model-{hash}>"), constants);
+                {
+                    using var value = ConstantValue(runtime, constant, backend.DeviceName);
+                    constants.Append(value);
+                }
+                var main = PyCall.Invoke(runtime.LoadModel, model.Source, $"<shorokoo-model-{hash}>", constants);
                 return new TorchSession(backend, runtime, model, logSeverity,
                     backend.OnCuda ? deviceMemory.LimitBytes : null, placement, OutputPlacementOf(proto.Graph!, backend.OnCuda),
                     main, constants, runtime.ConstantStorages.Invoke(constants), runtime.ConstantIds.Invoke(constants));
@@ -128,19 +130,17 @@ internal sealed class TorchSession : IShorokooSession
 
     private static unsafe PyObject ConstantValue(TorchRuntime runtime, TorchConstant constant, string device)
     {
-        var shape = TorchBackend.Shape(constant.Shape);
+        using var shape = TorchBackend.Shape(constant.Shape);
         if (constant.Strings is { } strings)
         {
             using var values = new PyList();
-            foreach (var value in strings) values.Append(new PyString(value));
+            foreach (var value in strings) PyCall.Append(values, value);
             return runtime.Strings.Invoke(values, shape);
         }
         var bytes = constant.Bytes!;
         var byteCount = TorchElementTypes.ByteCount(constant.ElementType, constant.Shape);
         fixed (byte* source = bytes)
-            return runtime.FromHost.Invoke(
-                new PyInt((long)source), new PyInt(byteCount), new PyInt((int)constant.ElementType),
-                shape, new PyString(device));
+            return PyCall.Invoke(runtime.FromHost, (long)source, (long)byteCount, (int)constant.ElementType, shape, device);
     }
 
     /// <summary>
@@ -195,7 +195,7 @@ internal sealed class TorchSession : IShorokooSession
         if (!_backend.OnCuda || Volatile.Read(ref _disposed) != 0) return null;
         using (PythonRuntime.Gil())
         {
-            using var figures = _runtime.ArenaStatistics.Invoke(new PyString(_backend.DeviceName));
+            using var figures = PyCall.Invoke(_runtime.ArenaStatistics, _backend.DeviceName);
             if (figures.IsNone()) return null;
             long At(int index)
             {
@@ -393,27 +393,26 @@ internal sealed class TorchSession : IShorokooSession
             using var retainedList = new PyList();
             foreach (var index in wanted)
             {
-                wantedList.Append(new PyInt(index));
-                retainedList.Append((_backend.OnCuda && retainedOutputNames.Contains(_outputNames[index])).ToPython());
+                PyCall.Append(wantedList, index);
+                PyCall.Append(retainedList, _backend.OnCuda && retainedOutputNames.Contains(_outputNames[index]));
             }
             using var aliases = new PyList();
             for (int slot = 0; slot < targets.Length; slot++)
             {
                 var alias = _aliases[slot];
-                using var entry = new PyTuple([
-                    new PyInt(_bindable[slot] ? _outputIndex[alias.Output] : -1), new PyInt(targets[slot]),
-                    (_backend.OnCuda && retainedOutputNames.Contains(alias.Output)).ToPython(),
-                ]);
+                using var output = new PyInt(_bindable[slot] ? _outputIndex[alias.Output] : -1);
+                using var target = new PyInt(targets[slot]);
+                using var retained = (_backend.OnCuda && retainedOutputNames.Contains(alias.Output)).ToPython();
+                using var entry = new PyTuple([output, target, retained]);
                 aliases.Append(entry);
             }
 
             PyObject results;
             try
             {
-                results = _runtime.Run.Invoke(
-                    [_main, args, wantedList, retainedList, new PyString(_backend.DeviceName),
-                     _constantStorages, _constantIds, new PyInt(stop.ToInt64()), new PyInt((int)_logSeverity),
-                     aliases, new PyInt(_limitBytes ?? -1), runSettings.ShrinkArenaAfterRun.ToPython()]);
+                results = PyCall.Invoke(_runtime.Run,
+                    _main, args, wantedList, retainedList, _backend.DeviceName, _constantStorages, _constantIds,
+                    stop.ToInt64(), (int)_logSeverity, aliases, _limitBytes ?? -1L, runSettings.ShrinkArenaAfterRun);
             }
             catch (PythonException ex) when (ex.Type.Name == TorchRuntime.RunStopped && runSettings.CancellationToken.IsCancellationRequested)
             {

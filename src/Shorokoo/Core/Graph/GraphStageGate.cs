@@ -33,13 +33,35 @@ namespace Shorokoo.Graph
         /// <paramref name="operation"/> names the API the caller used, so the message opens with
         /// what the reader typed.
         /// </summary>
-        internal static void RequireRunnableOps(this InternalComputationGraph graph, string operation)
+        /// <para><paramref name="trainingFormat"/> is the format the graph is compiled in:
+        /// <see cref="TrainingFormats.OnnxAutoGrad"/> lets the one <c>AUTO_GRAD</c> node of a training
+        /// step whose gradient is left to the execution backend through, since that backend runs it.
+        /// In any other format such a step is refused in words that say where it does run.</para>
+        internal static void RequireRunnableOps(
+            this InternalComputationGraph graph, string operation, string trainingFormat = TrainingFormats.Onnx)
         {
+            var autoGradRunnable = trainingFormat == TrainingFormats.OnnxAutoGrad;
             foreach (var node in graph.Nodes)
-                if (node.IsUnrunnableModuleOp())
+                if (node.IsUnrunnableModuleOp(autoGradRunnable))
+                {
+                    if (graph.Nodes.Where(n => n.IsUnrunnableModuleOp()).All(n => n.OpCode == InternalOpCodes.AUTO_GRAD))
+                        throw DeferredGradientRefusal(operation);
                     throw Refusal(operation,
                         graph.Nodes.Select(n => (n.OpCode, n.TargetFunction, n.IsUnrunnableModuleOp())));
+                }
         }
+
+        /// <summary>
+        /// The refusal for a graph whose only machinery is an <c>AUTO_GRAD</c> node — the training
+        /// step of a rig on <see cref="TrainingBackend.Native"/>, whose gradient is its execution
+        /// backend's to compute. It is stamped runnable, and is, but only there.
+        /// </summary>
+        private static System.InvalidOperationException DeferredGradientRefusal(string operation)
+            => new($"{operation} cannot run this graph: it carries an AUTO_GRAD node, whose gradient is "
+                + "left to the execution backend. A step whose gradient is left to the execution backend "
+                + "runs only through its TrainingRig (TrainingBackend.Native), which hands it to a backend "
+                + "that computes gradients itself. Train it with TrainStep or Fit, or rebuild the rig "
+                + "with TrainingBackend.Shorokoo for a step any context runs.");
 
         /// <summary>
         /// The refusal for a graph whose <paramref name="nodes"/> carry unrunnable machinery, as

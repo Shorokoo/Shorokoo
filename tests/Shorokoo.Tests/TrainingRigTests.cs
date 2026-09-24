@@ -1,6 +1,7 @@
 using System.Globalization;
 using Microsoft.ML.OnnxRuntime;
 using Shorokoo.Core.Backends;
+using Shorokoo.Tests.Modules;
 using Shorokoo.Core.Factory;
 using Shorokoo.Core.Interpreter;
 using Shorokoo.Core.Factory.IR;
@@ -5324,6 +5325,69 @@ public class TrainingRigTrainingBackendCoverageTests
         Assert.Contains("at that parameter's own shape", Assert.Throws<ArgumentException>(() => Native(
             accepting, ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, VectorRateOptimizer.ComputationGraph, [4L],
             Hyperparameter.Baked((TensorData)TensorData([4L], [0.1f, 0.2f, 0.4f, 0.8f])), Hyperparameter.Runtime())).Message);
+    }
+
+    private static (ModelProto Model, IReadOnlyList<OutputAlias> Aliases) Handed(TrainingRig rig)
+    {
+        var backend = (AutoGradBackend)rig.RuntimeContext.ResolvedBackend;
+        Assert.Throws<NotSupportedException>(() => rig.TrainStep(
+            rig.CreateInitialCheckpoint(), InBatch(1f, 2f, 3f, 4f), TargetBatch(2f, 4f, 6f, 8f)));
+        return Assert.Single(backend.Handed);
+    }
+
+    private static int Ops(ModelProto model, string domain, string opType)
+        => model.Graph.Nodes.Count(n => n.Domain == domain && n.OpType == opType);
+
+    [Fact]
+    public void TestANativeStepIsHandedOverWithOneAutoGradNodeItsDomainAndItsFormat()
+    {
+        using var sgdContext = Accepting();
+        using var adamWContext = Accepting();
+        var sgd = Handed(Native(sgdContext, ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            SGDOptimizer.ComputationGraph, [4L], 0.1f));
+        var adamW = Handed(Native(adamWContext, ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            AdamWOptimizer.ComputationGraph, [4L], 0.001f, 0.9f, 0.999f, 1e-8f, 0.01f));
+
+        foreach (var (model, _) in (IEnumerable<(ModelProto, IReadOnlyList<OutputAlias>)>)[sgd, adamW])
+        {
+            Assert.Equal(1, Ops(model, TrainingFormats.AutoGradDomain, TrainingFormats.AutoGradOpType));
+            Assert.Equal(0, Ops(model, "", InternalOpCodes.AUTO_GRAD));
+            Assert.Single(model.OpsetImports, o => o is { Domain: TrainingFormats.AutoGradDomain, Version: 1 });
+            Assert.Single(model.MetadataProps, m => m is { Key: "shrk_training_format", Value: "onnx-autograd/1" });
+        }
+        Assert.Equal([sgd.Model.Graph.Outputs[0].Name], sgd.Aliases.Select(a => a.Output));
+        Assert.Equal([sgd.Model.Graph.Inputs[0].Name], sgd.Aliases.Select(a => a.Input));
+        Assert.Equal(adamW.Model.Graph.Outputs.Take(4).Select(o => o.Name), adamW.Aliases.Select(a => a.Output));
+        Assert.Equal(adamW.Model.Graph.Inputs.Take(4).Select(i => i.Name), adamW.Aliases.Select(a => a.Input));
+
+        using var accepting = Accepting();
+        var native = Native(accepting, ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            SGDOptimizer.ComputationGraph, [4L], 0.1f);
+        Assert.Contains("runs only through its TrainingRig",
+            Assert.Throws<InvalidOperationException>(() => accepting.Compile(native.TrainingStepPureGraph)).Message);
+    }
+
+    [Fact]
+    public void TestTheSrkDialectKeepsAutoGradAsShorokoosOwn()
+    {
+        using var accepting = Accepting();
+        var step = Native(accepting, ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            SGDOptimizer.ComputationGraph, [4L], 0.1f).TrainingStepPureGraph.ToInternal();
+        ModelProto[] srk =
+        [
+            FastOnnxModelBuilder.BuildInternalOnnxModel(
+                AutoGradScalarSquare.ComputationGraph.ToInternal(), applyExecutionLowerings: false, emitInputsAsNodes: true),
+            FastOnnxModelBuilder.BuildInternalOnnxModel(step, applyExecutionLowerings: false, emitInputsAsNodes: true),
+        ];
+        foreach (var model in srk)
+        {
+            Assert.Equal(1, Ops(model, "", InternalOpCodes.AUTO_GRAD));
+            Assert.Equal(0, Ops(model, TrainingFormats.AutoGradDomain, TrainingFormats.AutoGradOpType));
+            Assert.Equal(["", "Functions"], model.OpsetImports.Select(o => o.Domain));
+            Assert.DoesNotContain(model.MetadataProps, m => m.Key == TrainingFormats.MetadataKey);
+        }
+        Assert.Equal(1, Ops(FastOnnxModelBuilder.BuildInternalOnnxModel(step, prepForOnnx: true),
+            TrainingFormats.AutoGradDomain, TrainingFormats.AutoGradOpType));
     }
 
     [Fact]

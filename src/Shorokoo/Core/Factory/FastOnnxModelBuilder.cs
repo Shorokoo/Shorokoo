@@ -278,6 +278,13 @@ namespace Shorokoo.Core.Factory
             // so user-exported .onnx files are safe too.
             LowerTrainingBatchNormalization(model.Graph, BuildTensorMetaByName(tensorInfoLookup));
 
+            // ----- 5c. Execution dialect only: the one AUTO_GRAD node a training step keeps when
+            // its gradient is left to the execution backend goes out as that backend's operator.
+            // Only such a step reaches here carrying one -- the compile gate refuses AUTO_GRAD in
+            // every other format -- and the .srk dialect keeps the node as Shorokoo's own.
+            if (prepForOnnx && !vanillaExport)
+                EmitDeferredAutoGrad(model);
+
             // ----- 6. Attach TensorStructDef metadata for any struct-typed
             // inputs/outputs so the loader can reconstruct DType identity.
             AddTensorStructMetadata(model, prepFast, tensorInfoLookup);
@@ -336,6 +343,37 @@ namespace Shorokoo.Core.Factory
             }
 
             return model;
+        }
+
+        /// <summary>
+        /// Rewrites each top-level <c>AUTO_GRAD</c> NodeProto of <paramref name="model"/> into
+        /// <see cref="TrainingFormats.AutoGradDomain"/>::<see cref="TrainingFormats.AutoGradOpType"/>,
+        /// and — when there was one — imports that domain and records the step's format in the model
+        /// metadata, which is how a backend recognises what it has been handed. Inputs and outputs
+        /// are the node's own: <c>[loss, wrt…]</c> and <c>[grad…]</c>. A model without the node is
+        /// left exactly as it was built.
+        /// </summary>
+        private static void EmitDeferredAutoGrad(ModelProto model)
+        {
+            var any = false;
+            foreach (var node in model.Graph.Nodes)
+            {
+                if (node.OpType != InternalOpCodes.AUTO_GRAD || node.Domain != "") continue;
+                node.OpType = TrainingFormats.AutoGradOpType;
+                node.Domain = TrainingFormats.AutoGradDomain;
+                any = true;
+            }
+            if (!any) return;
+            model.OpsetImports.Add(new OperatorSetIdProto
+            {
+                Domain = TrainingFormats.AutoGradDomain,
+                Version = TrainingFormats.AutoGradDomainVersion,
+            });
+            model.MetadataProps.Add(new StringStringEntryProto
+            {
+                Key = TrainingFormats.MetadataKey,
+                Value = TrainingFormats.OnnxAutoGrad,
+            });
         }
 
         // ----------- function pruning -----------

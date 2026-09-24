@@ -21,6 +21,26 @@ namespace Shorokoo
         /// backend that computes gradients itself runs it.
         /// </summary>
         public const string OnnxAutoGrad = "onnx-autograd/1";
+
+        /// <summary>The operator domain of the gradient node in an <see cref="OnnxAutoGrad"/>
+        /// step, imported by the model at <see cref="AutoGradDomainVersion"/>.</summary>
+        public const string AutoGradDomain = "ai.shorokoo.training";
+
+        /// <summary>The version of <see cref="AutoGradDomain"/> an <see cref="OnnxAutoGrad"/> step
+        /// imports.</summary>
+        public const int AutoGradDomainVersion = 1;
+
+        /// <summary>The <c>op_type</c> of the gradient node in an <see cref="OnnxAutoGrad"/> step:
+        /// inputs <c>[loss, wrt_0, …, wrt_n-1]</c>, outputs <c>[grad_0, …, grad_n-1]</c>, where
+        /// <c>grad_i</c> is the gradient of the sum of <c>loss</c> with respect to <c>wrt_i</c>,
+        /// shaped and typed as <c>wrt_i</c>, and zero where <c>loss</c> does not depend on it. It has
+        /// no attributes and no subgraph: the forward pass it differentiates is the loss's ancestry
+        /// in the graph around it.</summary>
+        public const string AutoGradOpType = "AutoGrad";
+
+        /// <summary>The model metadata key an <see cref="OnnxAutoGrad"/> step records its format
+        /// under, with the format itself as the value.</summary>
+        public const string MetadataKey = "shrk_training_format";
     }
 
     /// <summary>

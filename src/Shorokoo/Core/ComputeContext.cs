@@ -1691,15 +1691,20 @@ namespace Shorokoo.Runtime
         /// <see cref="OutputAliasProof"/> proves it over the model as built, and the session is built
         /// with those (<see cref="OutputAlias"/>); none on a context that aliases nothing
         /// (<see cref="OutputAliasing"/>).</param>
+        /// <param name="trainingFormat">The format a training step is handed over in (see
+        /// <see cref="TrainingFormats"/>). <see cref="TrainingFormats.OnnxAutoGrad"/> lets the step's
+        /// one <c>AUTO_GRAD</c> node through, to be emitted as the gradient node this context's
+        /// backend runs; everything else compiles as it always has.</param>
         internal CompiledGraph Compile(
             InternalComputationGraph graph,
             IReadOnlyList<long[]?>? inputDims,
             bool trainingStep,
             bool reusedAcrossShapes = false,
             string? description = null,
-            IReadOnlyList<(int Output, int Input)>? aliasCandidates = null)
+            IReadOnlyList<(int Output, int Input)>? aliasCandidates = null,
+            string trainingFormat = TrainingFormats.Onnx)
         {
-            graph.RequireRunnableOps("ComputeContext.Compile");
+            graph.RequireRunnableOps("ComputeContext.Compile", trainingFormat);
             var originalInputNames = ResolveOriginalInputNames(graph);
             return CompileFromModel(
                 () => FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true, inputDims: inputDims),

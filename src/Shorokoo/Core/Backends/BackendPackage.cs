@@ -37,6 +37,10 @@ public enum BackendRejection
 
     /// <summary>It fits this machine, but loading it did not yield a usable backend.</summary>
     NotLoadable,
+
+    /// <summary>It needs an NVIDIA driver this machine does not have: none at all, one too old for
+    /// the CUDA it was built for, or one that sees no device.</summary>
+    MissingCudaDriver,
 }
 
 /// <summary>
@@ -149,9 +153,10 @@ public static class BackendPackage
                 $"'{Path.GetFileName(full)}' carries a [ShorokooBackend] that names no operating "
                 + "system, so there is no way to tell whether it fits this machine.");
 
-        if (!OSPlatform.Create(os.ToUpperInvariant()).Equals(CurrentPlatform()))
+        var systems = os.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (!systems.Any(system => OSPlatform.Create(system.ToUpperInvariant()).Equals(CurrentPlatform())))
             return No(BackendRejection.WrongOperatingSystem,
-                $"'{Path.GetFileName(full)}' is a {os} backend and this is {CurrentOsName()}.");
+                $"'{Path.GetFileName(full)}' is a {string.Join(" or ", systems)} backend and this is {CurrentOsName()}.");
 
         if (!arch.Equals(RuntimeInformation.ProcessArchitecture.ToString(), StringComparison.OrdinalIgnoreCase))
             return No(BackendRejection.WrongArchitecture,
@@ -173,6 +178,12 @@ public static class BackendPackage
             return No(BackendRejection.MissingCudaRuntime,
                 $"'{Path.GetFileName(full)}' needs a CUDA {cuda}.x runtime, which this machine "
                 + "does not have -- no driver, no device, or the toolkit is not installed.");
+
+        if (declared.TryGetValue("requirescudadriver", out var driver) && !string.IsNullOrEmpty(driver)
+            && CudaDriver.Refusal(CudaDriver.Read(), driver) is { } refusal)
+            return No(BackendRejection.MissingCudaDriver,
+                $"'{Path.GetFileName(full)}' needs an NVIDIA driver supporting CUDA {driver} or later, and "
+                + $"{refusal}.");
 
         return new(true, BackendRejection.None, "supported", os, arch, device, selection);
     }

@@ -12,7 +12,12 @@ internal sealed record TranslatedModel(
     IReadOnlyList<TorchConstant> Constants,
     string[] InputNames,
     string[] OutputNames,
-    ShorokooTensorElementType[] OutputSequenceElementTypes);
+    ShorokooTensorElementType[] OutputSequenceElementTypes)
+{
+    /// <summary>The outputs a run may write into consumed inputs' memory (see
+    /// <see cref="OnnxToPythonTranslator.Translate(ModelProto, IReadOnlyList{OutputAlias})"/>).</summary>
+    public IReadOnlyList<AliasSlot> Aliases { get; init; } = [];
+}
 
 /// <summary>
 /// The names a graph's values go by in the Python being written, scope by scope: a subgraph sees
@@ -204,6 +209,7 @@ internal sealed partial class OnnxToPythonTranslator
 
     private void EmitNode(NodeProto node, Scope scope)
     {
+        BeforeNode(node);
         string expression;
         bool returnsTuple;
         var outputs = node.Outputs.ToList();
@@ -250,6 +256,8 @@ internal sealed partial class OnnxToPythonTranslator
             Line(expression);
         else if (returnsTuple)
             Line($"{string.Join(", ", targets)}, = {expression}");
+        else if (AliasedWrite(node, scope, targets))
+            Line($"if {targets[0]} is None: {targets[0]} = {expression}");
         else
             Line($"{targets[0]} = {expression}");
     }

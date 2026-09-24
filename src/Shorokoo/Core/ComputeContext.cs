@@ -1834,6 +1834,16 @@ namespace Shorokoo.Runtime
         /// TensorDataStruct inputs are automatically expanded into individual fields.
         /// </summary>
         internal NamedModelParam[] Execute(InternalComputationGraph graph, params IData[] inputs)
+            => ExecuteRewritten(graph, rewriteModel: null, inputs);
+
+        /// <summary>
+        /// <see cref="Execute(InternalComputationGraph, IData[])"/>, with the ONNX model the backend
+        /// is handed first passed through <paramref name="rewriteModel"/> when one is given. Every
+        /// output of the rewritten model is returned, named as the model names it. For tests that
+        /// run the exact model a backend receives with more of its values exposed.
+        /// </summary>
+        internal NamedModelParam[] ExecuteRewritten(
+            InternalComputationGraph graph, Func<ModelProto, ModelProto>? rewriteModel, params IData[] inputs)
         {
             // Before the arity check below: a module graph's inputs routinely disagree with what the
             // caller passed (its [Hyper] parameters are inputs too), and CR006 would report that
@@ -1854,7 +1864,7 @@ namespace Shorokoo.Runtime
                 .Select((zip) => NamedModelParam.FromIData(zip.Second, ModelParamType.InputParam, zip.First))
                 .ToArray();
 
-            return Run(graph, namedInputs);
+            return Run(graph, namedInputs, rewriteModel);
         }
 
         /// <summary>
@@ -1901,11 +1911,19 @@ namespace Shorokoo.Runtime
         /// session per call (disposed afterwards); use <see cref="Compile(ComputationGraph)"/> for repeated runs.
         /// </summary>
         internal NamedModelParam[] Run(InternalComputationGraph graph, params NamedModelParam[] inputs)
+            => Run(graph, inputs, rewriteModel: null);
+
+        private NamedModelParam[] Run(
+            InternalComputationGraph graph, NamedModelParam[] inputs, Func<ModelProto, ModelProto>? rewriteModel)
         {
             graph.RequireRunnableOps("ComputeContext.Run");
             var originalInputNames = ResolveOriginalInputNames(graph);
             return RunFromModel(
-                () => FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true),
+                () =>
+                {
+                    var model = FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true);
+                    return rewriteModel is null ? model : rewriteModel(model);
+                },
                 originalInputNames,
                 inputs);
         }

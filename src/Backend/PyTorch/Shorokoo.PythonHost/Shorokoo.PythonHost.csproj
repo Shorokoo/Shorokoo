@@ -18,10 +18,12 @@
   </ItemGroup>
 
   <!-- The lock files travel inside the assembly, so an environment is always provisioned from the
-       exact lock the backend was built and tested against. The logical name is the path with
-       slashes, e.g. "Environments/cpu/requirements.txt". -->
+       exact lock the backend was built and tested against: one per environment and platform, each
+       in a folder named by the platform's runtime identifier. The logical name is the path with
+       forward slashes whatever the build machine's separator, e.g.
+       "Environments/cpu/win-x64/requirements.txt"; RecursiveDir carries backslashes on Windows. -->
   <ItemGroup>
-    <EmbeddedResource Include="Environments\**\*.txt" LogicalName="Environments/%(RecursiveDir)%(Filename)%(Extension)" />
+    <EmbeddedResource Include="Environments\**\*.txt" LogicalName="Environments/$([System.String]::Copy('%(RecursiveDir)').Replace('\', '/'))%(Filename)%(Extension)" />
     <None Include="Environments\**\*.in" />
   </ItemGroup>
 

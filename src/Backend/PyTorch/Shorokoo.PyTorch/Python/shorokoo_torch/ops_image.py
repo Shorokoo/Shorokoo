@@ -187,7 +187,11 @@ def resize(x, *inputs, antialias=0, axes=None, coordinate_transformation_mode="h
         y = torch.where(outside, torch.tensor(extrapolation_value, dtype=y.dtype, device=y.device), y)
     if y.dtype != x.dtype:
         if not x.dtype.is_floating_point:
-            y = torch.trunc(y)
+            # Antialiasing rounds to the nearest integer and plain interpolation truncates, as ONNX
+            # Runtime does, and either saturates where a cubic overshoots the type's range.
+            y = _round_half_away(y) if antialias and mode != "nearest" else torch.trunc(y)
+            info = torch.iinfo(x.dtype)
+            y = torch.clamp(y, info.min, info.max)
         y = y.to(x.dtype)
     return y
 

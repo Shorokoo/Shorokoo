@@ -10,7 +10,17 @@ import math
 
 import torch
 
-from .ops_elementwise import _NARROW_UNSIGNED
+from .ops_elementwise import _NARROW_UNSIGNED, _SIGN_BIT
+
+_UNSIGNED = (torch.uint8, torch.uint16, torch.uint32, torch.uint64)
+
+
+def _ordered_uint64(fn):
+    """`fn` over uint64 data, which torch cannot order, as int64 bit patterns with the sign bit
+    flipped, which int64 orders as unsigned."""
+    def over(x, dims, keep):
+        return (fn(x.view(torch.int64) ^ _SIGN_BIT, dims, keep) ^ _SIGN_BIT).view(torch.uint64)
+    return over
 
 
 def _dims(data, axes_input, axes, noop_with_empty_axes):
@@ -29,7 +39,9 @@ def _filled(data, dims, keepdims, value):
     return torch.full(shape, value, dtype=data.dtype, device=data.device)
 
 
-def _reduce(fn, empty_value, data, axes_input, axes, keepdims, noop_with_empty_axes):
+def _reduce(fn, empty_value, data, axes_input, axes, keepdims, noop_with_empty_axes, ordered=False):
+    if ordered and data.dtype == torch.uint64:
+        fn = _ordered_uint64(fn)
     dims = _dims(data, axes_input, axes, noop_with_empty_axes)
     if dims is None:
         return data.clone()
@@ -68,11 +80,13 @@ def reduce_mean(data, axes_input=None, /, *, axes=None, keepdims=1, noop_with_em
 
 
 def reduce_max(data, axes_input=None, /, *, axes=None, keepdims=1, noop_with_empty_axes=0):
-    return _reduce(lambda x, d, k: torch.amax(x, d, keepdim=k), _lowest, data, axes_input, axes, keepdims, noop_with_empty_axes)
+    return _reduce(lambda x, d, k: torch.amax(x, d, keepdim=k), _lowest, data, axes_input, axes, keepdims, noop_with_empty_axes,
+                   ordered=True)
 
 
 def reduce_min(data, axes_input=None, /, *, axes=None, keepdims=1, noop_with_empty_axes=0):
-    return _reduce(lambda x, d, k: torch.amin(x, d, keepdim=k), _highest, data, axes_input, axes, keepdims, noop_with_empty_axes)
+    return _reduce(lambda x, d, k: torch.amin(x, d, keepdim=k), _highest, data, axes_input, axes, keepdims, noop_with_empty_axes,
+                   ordered=True)
 
 
 def reduce_prod(data, axes_input=None, /, *, axes=None, keepdims=1, noop_with_empty_axes=0):
@@ -84,6 +98,9 @@ def reduce_prod(data, axes_input=None, /, *, axes=None, keepdims=1, noop_with_em
 
 
 def reduce_l1(data, axes_input=None, /, *, axes=None, keepdims=1, noop_with_empty_axes=0):
+    if data.dtype in _UNSIGNED:
+        # Its own absolute value; torch has no abs for the wider unsigned types.
+        return reduce_sum(data, axes_input, axes=axes, keepdims=keepdims, noop_with_empty_axes=noop_with_empty_axes)
     return _reduce(lambda x, d, k: torch.sum(torch.abs(x), d, keepdim=k), 0, data, axes_input, axes, keepdims, noop_with_empty_axes)
 
 
@@ -109,6 +126,8 @@ def reduce_log_sum_exp(data, axes_input=None, /, *, axes=None, keepdims=1, noop_
 
 def _arg(fn, data, axis, keepdims, select_last_index):
     work = data.to(torch.int64) if data.dtype in _NARROW_UNSIGNED else data
+    if data.dtype == torch.uint64:
+        work = data.view(torch.int64) ^ _SIGN_BIT
     if work.dim() == 0:
         work = work.reshape(1)
     axis = axis % work.dim()

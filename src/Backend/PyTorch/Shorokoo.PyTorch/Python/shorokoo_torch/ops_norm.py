@@ -65,12 +65,13 @@ def layer_normalization(x, scale, bias=None, /, *, axis=-1, epsilon=1e-5, stash_
     xs = x.to(compute)
     dims = list(range(axis, x.dim()))
     mean = torch.mean(xs, dim=dims, keepdim=True)
-    # The variance as E[x^2] - E[x]^2, as ONNX Runtime computes it: the same up to rounding as
-    # the spec's E[(x - E[x])^2], but only this form agrees with it closely where the variance is
-    # small next to the mean.
-    std = torch.sqrt(torch.mean(torch.square(xs), dim=dims, keepdim=True) - torch.square(mean) + epsilon)
+    # The variance as E[(x - E[x])^2], as the function body ONNX defines computes it. The form
+    # E[x^2] - E[x]^2 cancels away every digit of a variance that is small next to the square of
+    # the mean, down to a negative one and a NaN.
+    centered = xs - mean
+    std = torch.sqrt(torch.mean(torch.square(centered), dim=dims, keepdim=True) + epsilon)
     inv_std = 1 / std
-    y = (xs - mean) / std * scale.to(compute)
+    y = centered / std * scale.to(compute)
     if bias is not None:
         y = y + bias.to(compute)
     return (y.to(x.dtype), mean, inv_std)[:_outputs]
@@ -114,9 +115,14 @@ def lp_normalization(x, /, *, axis=-1, p=2):
     if p == 1:
         norm = torch.sum(torch.abs(x), dim=axis, keepdim=True)
     else:
-        norm = torch.sqrt(torch.sum(torch.square(x), dim=axis, keepdim=True))
-    # A zero norm leaves its zeros as they are, as ONNX Runtime's kernel does.
-    return torch.where(norm == 0, x, x / torch.where(norm == 0, torch.ones_like(norm), norm))
+        squares = torch.sum(torch.square(x), dim=axis, keepdim=True)
+        # The square root only of a nonzero sum, whose gradient is finite.
+        norm = torch.where(squares == 0, squares, torch.sqrt(torch.where(squares == 0, torch.ones_like(squares), squares)))
+    # A zero norm leaves its zeros as they are, as ONNX Runtime's kernel does, and divides the
+    # gradient by 1e-12, as Shorokoo's own rule does, which floors the norm there (by the smallest
+    # normal number of a type that cannot hold 1e-12).
+    floor = max(1e-12, torch.finfo(x.dtype).tiny)
+    return x / torch.where(norm == 0, torch.full_like(norm, floor), norm)
 
 
 def mean_variance_normalization(x, /, *, axes=None):

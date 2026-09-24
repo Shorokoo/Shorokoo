@@ -36,12 +36,11 @@ def gather_elements(data, indices, /, *, axis=0):
     return torch.gather(data, axis, _normalized(indices, data.shape[axis]))
 
 
-def _clamped(value, length, step):
+def _clamped(value, length, lowest, highest):
+    """A Slice start or end counted from the front, clamped to [lowest, highest]."""
     if value < 0:
         value += length
-    if step > 0:
-        return min(max(value, 0), length)
-    return min(max(value, -1), length - 1)
+    return min(max(value, lowest), highest)
 
 
 def slice_(data, starts_in=None, ends_in=None, axes_in=None, steps_in=None, /, *, starts=None, ends=None, axes=None):
@@ -57,17 +56,23 @@ def slice_(data, starts_in=None, ends_in=None, axes_in=None, steps_in=None, /, *
     for start, end, axis, step in zip(starts, ends, axes, steps):
         axis = axis % data.ndim
         length = data.shape[axis]
-        first = _clamped(start, length, step)
-        last = _clamped(end, length, step)
+        if step > 0:
+            first = _clamped(start, length, 0, length)
+            last = _clamped(end, length, 0, length)
+        else:
+            # A negative step starts at an element, and ends at one or at -1, before the first.
+            first = _clamped(start, length, 0, length - 1)
+            last = _clamped(end, length, -1, length - 1)
         if _rt.is_strings(result):
             index = [slice(None)] * result.ndim
-            index[axis] = slice(first, last if last >= 0 else None, step)
+            index[axis] = slice(first, last if last >= 0 else None, step) if first >= 0 else slice(0, 0)
             result = result[tuple(index)]
         elif step > 0:
             result = result.narrow(axis, first, max(last - first, 0))[
                 (slice(None),) * axis + (slice(None, None, step),)]
         else:
-            positions = torch.arange(first, last, step, device=result.device)
+            positions = torch.arange(first, last, step, device=result.device) if first > last \
+                else torch.zeros(0, dtype=torch.int64, device=result.device)
             result = torch.index_select(result, axis, positions)
     return result
 

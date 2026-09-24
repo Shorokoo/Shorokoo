@@ -107,6 +107,8 @@ def abs_(x):
 
 
 def sign(x):
+    if x.dtype == torch.uint64:
+        return (x.view(torch.int64) != 0).to(torch.int64).view(torch.uint64)
     return _widened(torch.sign, x)
 
 
@@ -199,12 +201,21 @@ def _ordered(fn, a, b):
     return _widened(fn, a, b)
 
 
+def _extreme(fn, pairwise, xs):
+    """Max or Min of xs. A floating-point one is `fn` (amax or amin) over the inputs stacked, whose
+    gradient is shared equally among every input that ties for the result, as Shorokoo's own rule
+    shares it; torch's pairwise maximum and minimum would halve it at each tie instead."""
+    if len(xs) > 2 and xs[0].dtype.is_floating_point:
+        return fn(torch.stack(torch.broadcast_tensors(*xs)), 0)
+    return functools.reduce(lambda a, b: _ordered(pairwise, a, b), xs)
+
+
 def max_(*xs):
-    return functools.reduce(lambda a, b: _ordered(torch.maximum, a, b), xs)
+    return _extreme(torch.amax, torch.maximum, xs)
 
 
 def min_(*xs):
-    return functools.reduce(lambda a, b: _ordered(torch.minimum, a, b), xs)
+    return _extreme(torch.amin, torch.minimum, xs)
 
 
 def sum_(*xs):
@@ -216,19 +227,32 @@ def mean(*xs):
 
 
 def clip(x, lo=None, hi=None, /, *, min=None, max=None):
+    """Clip, whose gradient is Shorokoo's rule: 1 where x lies within the bounds, the bounds
+    themselves included, 0 elsewhere, and none to the bounds."""
     if lo is None and min is not None:
         lo = torch.tensor(min, dtype=x.dtype, device=x.device)
     if hi is None and max is not None:
         hi = torch.tensor(max, dtype=x.dtype, device=x.device)
+    if x.dtype == torch.uint64:
+        # As int64 bit patterns with the sign bit flipped, which int64 orders as unsigned.
+        work = x.view(torch.int64) ^ _SIGN_BIT
+        lo = None if lo is None else lo.view(torch.int64) ^ _SIGN_BIT
+        hi = None if hi is None else hi.view(torch.int64) ^ _SIGN_BIT
+        return (clip(work, lo, hi) ^ _SIGN_BIT).view(torch.uint64)
     work = x.to(torch.int64) if x.dtype in _NARROW_UNSIGNED else x
-    result = work.clone()
+    inside = torch.ones_like(work, dtype=torch.bool)
+    result = work.detach()
     if lo is not None:
-        result = torch.maximum(result, lo.to(work.dtype))
+        lo = lo.detach().to(work.dtype)
+        inside = inside & ~(work < lo)
+        result = torch.maximum(result, lo)
     if hi is not None:
         # After the lower bound, so that a lower bound above the upper one yields the upper one,
         # as ONNX specifies.
-        result = torch.minimum(result, hi.to(work.dtype))
-    return result.to(x.dtype)
+        hi = hi.detach().to(work.dtype)
+        inside = inside & ~(work > hi)
+        result = torch.minimum(result, hi)
+    return torch.where(inside, work, result).to(x.dtype)
 
 
 def cumsum(x, axis, /, *, exclusive=0, reverse=0):
@@ -261,8 +285,11 @@ def relu(x):
     return torch.relu(x)
 
 
+# Where an activation's pieces meet, the gradient is that of the piece Shorokoo's own rule takes:
+# the negative one at 0 for LeakyRelu and PRelu, and 0 where HardSigmoid meets its bounds.
+
 def leaky_relu(x, *, alpha=0.01):
-    return torch.where(x >= 0, x, x * alpha)
+    return torch.where(x > 0, x, x * alpha)
 
 
 # The branch torch.where does not select still has its gradient taken, multiplied by zero: an
@@ -286,7 +313,8 @@ def thresholded_relu(x, *, alpha=1.0):
 
 
 def hard_sigmoid(x, *, alpha=0.2, beta=0.5):
-    return torch.clamp(alpha * x + beta, 0, 1)
+    t = alpha * x + beta
+    return torch.where((t > 0) & (t < 1), t, torch.clamp(t, 0, 1).detach())
 
 
 def hard_swish(x):
@@ -320,7 +348,10 @@ def shrink(x, *, lambd=0.5, bias=0.0):
 
 
 def prelu(x, slope):
-    return torch.where(x < 0, x * slope, x)
+    if x.dtype in _NARROW_UNSIGNED or x.dtype == torch.uint64:
+        # Never negative, and torch has no comparison for these types.
+        return x.clone()
+    return torch.where(x > 0, x, x * slope)
 
 
 def _flattened(fn, x, axis, opset):
@@ -402,11 +433,13 @@ def cast(x, *, to, saturate=1, round_mode="up"):
         wide = torch.tensor([v & 0xFFFFFFFFFFFFFFFF for v in parsed], dtype=torch.uint64)
         return cast(wide.reshape(x.shape), to=to).to(_rt.device())
     if target in _FLOAT8 and saturate and x.dtype.is_floating_point:
+        # Beyond the largest finite value, infinities included, saturates to it.
         limit = torch.finfo(target).max
-        bounded = torch.clamp(x, -limit, limit)
-        if target in (torch.float8_e5m2,):
-            bounded = torch.where(torch.isinf(x), x, bounded)
-        return bounded.to(target)
+        return torch.clamp(x, -limit, limit).to(target)
+    if target == torch.float8_e4m3fn and x.dtype.is_floating_point:
+        # Unsaturated, a value that rounds past 448 -- beyond 464, halfway to the next step -- has
+        # no encoding and is NaN; torch saturates it.
+        return torch.where(torch.abs(x) > 464, torch.full_like(x, math.nan), x).to(target)
     if target == torch.bool:
         return x != 0
     if x.dtype in (torch.uint32, torch.uint64) or target in (torch.uint16, torch.uint32):

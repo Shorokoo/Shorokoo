@@ -149,6 +149,10 @@ def _recurrent(x, w, sequence_lens, initial_states, layout, direction, hidden_si
             x.new_zeros((batch, hidden_size)) if s is None else s[d]
             for s in initial_states)
         y, state = run_direction(d, x, lengths, reverse, state)
+        if lengths is not None:
+            # A sequence of length 0 ends in zero states, as ONNX Runtime has it, not its initial ones.
+            empty = (lengths == 0).unsqueeze(1)
+            state = tuple(torch.where(empty, torch.zeros_like(s), s) for s in state)
         ys.append(y)
         for kept, s in zip(finals, state):
             kept.append(s)

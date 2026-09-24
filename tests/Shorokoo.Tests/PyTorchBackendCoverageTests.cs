@@ -456,7 +456,7 @@ public class PyTorchBackendCoverageTests
 
     private static float[] Gradient(string function, params string[] arguments)
         => [.. Evaluated($"""
-            (lambda xs: ((({function})(*xs)).sum().backward(), [v for x in xs for v in x.grad.reshape(-1).tolist()])[1])(
+            (lambda xs: ((({function})(*xs)).sum().backward(), [v for x in xs for v in (torch.zeros_like(x) if x.grad is None else x.grad).reshape(-1).tolist()])[1])(
                 [torch.tensor(a, dtype=torch.float32, requires_grad=True) for a in ({string.Join(", ", arguments)},)])
             """).Trim('[', ']').Split(", ").Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture))];
 

@@ -50,8 +50,10 @@ def split(data, split_input=None, /, *, axis=0, num_outputs=None, split=None, _o
     length = data.shape[axis]
     if sizes is None:
         count = num_outputs if num_outputs is not None else _outputs
+        # ceil(length / count) each, as far as the axis reaches: the last ones may be shorter, or
+        # empty where a full chunk for every output but the last overruns it.
         chunk = -(-length // count)
-        sizes = [chunk] * (count - 1) + [length - chunk * (count - 1)]
+        sizes = [min(chunk, max(length - chunk * i, 0)) for i in range(count)]
     if _rt.is_strings(data):
         return tuple(np.split(data, np.cumsum(sizes)[:-1], axis=axis))
     return tuple(torch.split(data, sizes, axis))
@@ -125,6 +127,11 @@ def range_(start, limit, delta):
 
 def trilu(data, k=None, /, *, upper=1):
     diagonal = int(k.reshape(-1)[0]) if k is not None else 0
+    if data.dtype == torch.uint64:
+        # torch has no triu for the wider unsigned types; the bit patterns only move or become 0.
+        return trilu(data.view(torch.int64), k, upper=upper).view(torch.uint64)
+    if data.dtype in (torch.uint16, torch.uint32):
+        return trilu(data.to(torch.int64), k, upper=upper).to(data.dtype)
     return torch.triu(data, diagonal) if upper else torch.tril(data, diagonal)
 
 

@@ -232,16 +232,20 @@ def leaky_relu(x, *, alpha=0.01):
     return torch.where(x >= 0, x, x * alpha)
 
 
+# The branch torch.where does not select still has its gradient taken, multiplied by zero: an
+# exponential there must see only the values it is selected for, or an overflow to inf in it makes
+# the gradient 0 * inf = NaN. Hence the clamps inside expm1.
+
 def elu(x, *, alpha=1.0):
-    return torch.where(x > 0, x, alpha * torch.expm1(x))
+    return torch.where(x > 0, x, alpha * torch.expm1(torch.clamp(x, max=0)))
 
 
 def selu(x, *, alpha=1.67326319217681884765625, gamma=1.05070102214813232421875):
-    return gamma * torch.where(x > 0, x, alpha * torch.expm1(x))
+    return gamma * torch.where(x > 0, x, alpha * torch.expm1(torch.clamp(x, max=0)))
 
 
 def celu(x, *, alpha=1.0):
-    return torch.clamp(x, min=0) + torch.clamp(alpha * torch.expm1(x / alpha), max=0)
+    return torch.where(x > 0, x, alpha * torch.expm1(torch.clamp(x, max=0) / alpha))
 
 
 def thresholded_relu(x, *, alpha=1.0):
@@ -257,7 +261,9 @@ def hard_swish(x):
 
 
 def softplus(x):
-    return torch.where(x > 0, x + torch.log1p(torch.exp(-x)), torch.log1p(torch.exp(x)))
+    # log(e^x + e^0): max(x, 0) + log1p(exp(-|x|)), without overflow, and with a gradient (the
+    # sigmoid) that stays finite everywhere.
+    return torch.logaddexp(x, torch.zeros_like(x))
 
 
 def softsign(x):

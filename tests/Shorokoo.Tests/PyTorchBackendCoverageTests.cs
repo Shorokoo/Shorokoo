@@ -212,6 +212,25 @@ public class PyTorchBackendCoverageTests
     }
 
     [Fact]
+    public void TestAFunctionCallsShorokooAnnotationsAreNotArgumentsOfTheFunction()
+    {
+        var twice = new FunctionProto { Name = "Twice", Domain = "Functions" };
+        twice.Inputs.Add("a");
+        twice.Outputs.Add("b");
+        twice.Nodes.Add(Node("Add", ["a", "a"], ["b"]));
+        twice.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = 21 });
+        var call = Node("Twice", ["x"], ["y"], domain: "Functions");
+        call.Attributes.Add(new AttributeProto { Name = "shrk_structure", Type = AttributeProto.AttributeType.Strings, Strings = { "Tensor"u8.ToArray() } });
+        call.Attributes.Add(new AttributeProto { Name = "shrk_dtype", Type = AttributeProto.AttributeType.Ints, Ints = [1] });
+        var bogus = Node("Twice", ["x"], ["y"], domain: "Functions");
+        bogus.Attributes.Add(new AttributeProto { Name = "scale", Type = AttributeProto.AttributeType.Int, I = 2 });
+        using var session = Torch.CreateSession(Serialize(Graph(["c", "x"], ["y"], call), twice), default, default, DeviceMemorySettings.Default);
+
+        Assert.Equal([2f, 4f], RunFloats(session, true, [1f, 2f]));
+        Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(Serialize(Graph(["c", "x"], ["y"], bogus), twice), default, default, DeviceMemorySettings.Default));
+    }
+
+    [Fact]
     public void TestAnOutputIsMemoryOfItsOwnEvenWhereTheGraphReturnsItsInput()
     {
         using var session = Torch.CreateSession(Onnx("Identity", (int)ShorokooTensorElementType.Float), default, default, DeviceMemorySettings.Default);
@@ -250,6 +269,141 @@ public class PyTorchBackendCoverageTests
         Assert.Equal(("Relu", TorchUnsupportedReason.UnsupportedUsage), (attribute.Operator, attribute.Reason));
         Assert.Contains("NoSuchOperator", unknown.Message);
         Assert.Contains("bogus", attribute.Message);
+    }
+
+    [Fact]
+    public void TestAnAutoGradNodeIsTorchAutogradsGradientOfItsLoss()
+    {
+        float[] w = [0.5f, -1f, 2f], b = [0.1f, 0.2f, -0.3f], x = [1f, 2f, -0.5f], c = [0.3f, -0.2f, 0.1f];
+        var step = Graph(["w", "b", "x", "c", "u"], ["w2", "gb", "gp", "gu", "loss"],
+            Node("Exp", ["c"], ["p"]),
+            Node("Mul", ["w", "x"], ["m"]),
+            Node("Add", ["m", "b"], ["s"]),
+            Node("Tanh", ["s"], ["t"]),
+            Node("Mul", ["t", "p"], ["tp"]),
+            Node("ReduceSum", ["tp"], ["loss"]),
+            AutoGrad(["loss", "w", "b", "p", "u"], ["gw", "gb", "gp", "gu"]),
+            Node("Sub", ["w", "gw"], ["w2"]));
+        using var session = Torch.CreateSession(TrainingStep(step), ShorokooGraphOptimization.TrainingStep, default, DeviceMemorySettings.Default);
+        var outputs = RunFloats(session, new() { ["w"] = w, ["b"] = b, ["x"] = x, ["c"] = c, ["u"] = [4f] }, ["w2", "gb", "gp", "gu", "loss"]);
+
+        var t = w.Select((wi, i) => MathF.Tanh(wi * x[i] + b[i])).ToArray();
+        var gb = t.Select((ti, i) => MathF.Exp(c[i]) * (1 - ti * ti)).ToArray();
+        AssertNear(w.Select((wi, i) => wi - gb[i] * x[i]).ToArray(), outputs[0]);
+        AssertNear(gb, outputs[1]);
+        AssertNear(t, outputs[2]);
+        Assert.Equal([0f], outputs[3]);
+        AssertNear([t.Select((ti, i) => ti * MathF.Exp(c[i])).Sum()], outputs[4]);
+        Assert.True(((IShorokooBackend)Torch).AcceptsTrainingFormat(TrainingFormats.OnnxAutoGrad));
+        Assert.True(((IShorokooBackend)Torch).AcceptsTrainingFormat(TrainingFormats.Onnx));
+        Assert.False(((IShorokooBackend)Torch).AcceptsTrainingFormat("onnx-autograd/2"));
+    }
+
+    [Fact]
+    public void TestAnAutoGradNodeGivesZerosWhereTheLossIsConstantAndGradientsThroughExponentialActivationsAndAPadValue()
+    {
+        var padValue = Graph(["x", "pads", "w"], ["g"], Node("Pad", ["x", "pads", "w"], ["p"]), Node("Mul", ["p", "p"], ["q"]), Node("ReduceSum", ["q"], ["loss"]), AutoGrad(["loss", "w"], ["g"]));
+        var constant = Graph(["w", "x"], ["g"], Node("ReduceSum", ["x"], ["loss"]), AutoGrad(["loss", "w"], ["g"]));
+        var activations = Graph(["w"], ["g"],
+            Node("Softplus", ["w"], ["a"]), Node("Elu", ["w"], ["e"]), Node("Selu", ["w"], ["s"]), Node("Celu", ["w"], ["c"]),
+            Node("Sum", ["a", "e", "s", "c"], ["y"]), Node("ReduceSum", ["y"], ["loss"]), AutoGrad(["loss", "w"], ["g"]));
+        using var constantSession = Torch.CreateSession(TrainingStep(constant), default, default, DeviceMemorySettings.Default);
+        using var activationSession = Torch.CreateSession(TrainingStep(activations), default, default, DeviceMemorySettings.Default);
+        using var padValueSession = Torch.CreateSession(TrainingStep(padValue), default, default, DeviceMemorySettings.Default);
+        using var x = Torch.CreateTensor([1f, 2f], [2]);
+        using var pads = Torch.CreateTensor([1L, 2L], [2]);
+        using var w = Torch.CreateTensor([3f], []);
+        using var padGradient = padValueSession.Run(new Dictionary<string, IShorokooTensorValue> { ["x"] = x, ["pads"] = pads, ["w"] = w }, ["g"], RunSettings.Default)[0];
+
+        Assert.Equal([0f, 0f], RunFloats(constantSession, new() { ["w"] = [1f, 2f], ["x"] = [3f, 4f] }, ["g"])[0]);
+        AssertNear([4.0507010f, 0f, 3.7817596f], RunFloats(activationSession, new() { ["w"] = [100f, -100f, 1f] }, ["g"])[0]);
+        Assert.Equal([18f], padGradient.GetTensorDataAsSpan<float>().ToArray());
+    }
+
+    [Fact]
+    public void TestAnAutoGradNodeTheBackendCannotDifferentiateIsRefusedAtSessionCreation()
+    {
+        var tanhOnPath = Graph(["w"], ["g"], Node("Tanh", ["w"], ["t"]), Node("ReduceSum", ["t"], ["loss"]), AutoGrad(["loss", "w"], ["g"]));
+        var tanhOffPath = Graph(["w", "x"], ["g"], Node("Tanh", ["x"], ["t"]), Node("Mul", ["t", "w"], ["y"]), Node("ReduceSum", ["y"], ["loss"]), AutoGrad(["loss", "w"], ["g"]));
+        var tanhPastAShape = Graph(["w"], ["g"], Node("Shape", ["w"], ["n"]), Cast("n", "f"), Node("Tanh", ["f"], ["t"]), Node("Mul", ["t", "w"], ["y"]), Node("ReduceSum", ["y"], ["loss"]), AutoGrad(["loss", "w"], ["g"]));
+        var tanhInAFunction = Graph(["w"], ["g"], Node("Squash", ["w"], ["t"], domain: "Functions"), Node("ReduceSum", ["t"], ["loss"]), AutoGrad(["loss", "w"], ["g"]));
+        var tanhInABranch = Graph(["c", "w"], ["g"], Branch("c", Graph([], ["t"], Node("Tanh", ["w"], ["t"])), Graph([], ["t"], Node("Neg", ["w"], ["t"]))), Node("ReduceSum", ["t"], ["loss"]), AutoGrad(["loss", "w"], ["g"]));
+        var inABranch = Graph(["c", "w"], ["g"], Branch("c", Graph([], ["g"], Node("ReduceSum", ["w"], ["loss"]), AutoGrad(["loss", "w"], ["g"])), Graph([], ["g"], Node("Neg", ["w"], ["g"]))));
+        var twice = Graph(["w"], ["g", "h"], Node("ReduceSum", ["w"], ["loss"]), AutoGrad(["loss", "w"], ["g"]), AutoGrad(["loss", "w"], ["h"]));
+        var integer = Graph(["w"], ["g"], Node("ReduceSum", ["w"], ["loss"]), AutoGrad(["loss", "w"], ["g"]));
+        integer.Inputs[0].Type = new TypeProto { TensorType = new TypeProto.Tensor { ElemType = (int)ShorokooTensorElementType.Int64 } };
+        using var refused = OperatorTableGradient("Tanh", "Refused");
+
+        Assert.Equal("Tanh", Refusal(tanhOnPath).Operator);
+        Assert.Equal("Tanh", Refusal(tanhInAFunction).Operator);
+        Assert.Equal("Tanh", Refusal(tanhInABranch).Operator);
+        Torch.CreateSession(TrainingStep(tanhOffPath), default, default, DeviceMemorySettings.Default).Dispose();
+        Torch.CreateSession(TrainingStep(tanhPastAShape), default, default, DeviceMemorySettings.Default).Dispose();
+        Assert.Equal("AutoGrad", Refusal(inABranch).Operator);
+        Assert.Equal("AutoGrad", Refusal(twice).Operator);
+        Assert.Equal("AutoGrad", Refusal(integer).Operator);
+        Assert.Equal("AutoGrad", Refusal(tanhOffPath, version: 2).Operator);
+    }
+
+    private static TorchUnsupportedModelException Refusal(GraphProto step, long version = 1)
+        => Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(TrainingStep(step, version), default, default, DeviceMemorySettings.Default));
+
+    private static IDisposable OperatorTableGradient(string opType, string gradient)
+        => Shorokoo.PyTorch.Translation.Operators.OperatorTable.OverrideGradient(
+            opType, Enum.Parse<Shorokoo.PyTorch.Translation.Operators.TorchGradient>(gradient));
+
+    private static NodeProto AutoGrad(string[] inputs, string[] outputs)
+        => Node(TrainingFormats.AutoGradOpType, inputs, outputs, domain: TrainingFormats.AutoGradDomain);
+
+    private static NodeProto Cast(string input, string output)
+    {
+        var node = Node("Cast", [input], [output]);
+        node.Attributes.Add(new AttributeProto { Name = "to", Type = AttributeProto.AttributeType.Int, I = (int)ShorokooTensorElementType.Float });
+        return node;
+    }
+
+    private static NodeProto Branch(string condition, GraphProto thenBranch, GraphProto elseBranch)
+    {
+        var node = Node("If", [condition], thenBranch.Outputs.Select(o => o.Name).ToArray());
+        node.Attributes.Add(new AttributeProto { Name = "then_branch", Type = AttributeProto.AttributeType.Graph, G = thenBranch });
+        node.Attributes.Add(new AttributeProto { Name = "else_branch", Type = AttributeProto.AttributeType.Graph, G = elseBranch });
+        return node;
+    }
+
+    private static byte[] TrainingStep(GraphProto graph, long version = 1)
+    {
+        var squash = new FunctionProto { Name = "Squash", Domain = "Functions" };
+        squash.Inputs.Add("a");
+        squash.Outputs.Add("b");
+        squash.Nodes.Add(Node("Tanh", ["a"], ["b"]));
+        squash.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = 21 });
+        var model = ProtoBuf.Serializer.Deserialize<ModelProto>(new MemoryStream(Serialize(graph, squash)));
+        model.OpsetImports.Add(new OperatorSetIdProto { Domain = TrainingFormats.AutoGradDomain, Version = version });
+        using var stream = new MemoryStream();
+        ProtoBuf.Serializer.Serialize(stream, model);
+        return stream.ToArray();
+    }
+
+    private static float[][] RunFloats(IShorokooSession session, Dictionary<string, float[]> feeds, string[] outputs)
+    {
+        var inputs = feeds.ToDictionary(f => f.Key, f => Torch.CreateTensor(f.Value, [f.Value.Length]));
+        try
+        {
+            var values = session.Run(inputs, outputs, RunSettings.Default);
+            var floats = values.Select(v => v.GetTensorDataAsSpan<float>().ToArray()).ToArray();
+            foreach (var value in values) value.Dispose();
+            return floats;
+        }
+        finally
+        {
+            foreach (var input in inputs.Values) input.Dispose();
+        }
+    }
+
+    private static void AssertNear(float[] expected, float[] actual)
+    {
+        Assert.Equal(expected.Length, actual.Length);
+        for (int i = 0; i < expected.Length; i++) Assert.True(MathF.Abs(expected[i] - actual[i]) <= 1e-5f * MathF.Max(1f, MathF.Abs(expected[i])));
     }
 
     [Fact]

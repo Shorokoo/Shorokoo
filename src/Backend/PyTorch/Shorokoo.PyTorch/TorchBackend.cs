@@ -52,6 +52,13 @@ public abstract class TorchBackend : IShorokooBackend
     /// so a tensor either makes is one the other's sessions can be handed as it is.</summary>
     public object RuntimeIdentity => TorchRuntime.Identity;
 
+    /// <summary>Both formats: a step Shorokoo has differentiated, and one whose
+    /// <c>ai.shorokoo.training::AutoGrad</c> node torch autograd differentiates
+    /// (<see cref="TrainingFormats.OnnxAutoGrad"/>) — what a rig built with
+    /// <see cref="TrainingBackend.Native"/> hands over.</summary>
+    public bool AcceptsTrainingFormat(string format)
+        => format is TrainingFormats.Onnx or TrainingFormats.OnnxAutoGrad;
+
     /// <summary>torch's name for this backend's device: <c>cpu</c> or <c>cuda:N</c>.</summary>
     public string DeviceName { get; }
 

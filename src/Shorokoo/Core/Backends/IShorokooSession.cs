@@ -28,6 +28,10 @@ public interface IShorokooSession : IDisposable
     // host-resident as Run's do. The returned values are owned by the caller and must be
     // disposed; a retained one is not host-readable (IShorokooTensorValue.IsHostAccessible).
     //
+    // Only a tensor is left in the provider's memory. A sequence output named here comes back to the
+    // host as any other output does: a sequence's elements are read out of it one at a time through
+    // the host, which cannot read an element the provider kept in its own memory.
+    //
     // Inputs may themselves be device-resident values from an earlier run: the provider
     // uses them where they are.
     IReadOnlyList<IShorokooTensorValue> RunRetainingOutputs(
@@ -108,16 +112,19 @@ public interface IShorokooSession : IDisposable
         return RunConsuming(inputs, consumed, outputNames, retainedOutputNames, runSettings);
     }
 
-    // The inputs, by this session's names for them, that a run of it may write an output into the
-    // consumed memory of (see RunConsuming): those of the pairs it was built with that it can bind at
-    // all. The framework feeds a consumed tensor of one of these through a copy in memory it holds,
-    // which the output can then be written into; one of any other input that the run cannot read
-    // where it is goes to the session as the host has it, for the runtime to copy into its own arena
-    // -- inside the limit the session was built with, rather than outside it cutting that limit.
+    // The pairs of those it was built with that a run of this session can bind at all (see
+    // RunConsuming), by this session's names: each output, and the input whose consumed memory it
+    // may be written into. An output is written only into memory where it is produced -- the
+    // provider's own, for one a run keeps there, and the host's for one it fetches back -- so the
+    // framework feeds a consumed tensor of an input paired with an output the run keeps through a
+    // copy in the provider's memory, which the output can then take; one of any other input that the
+    // run cannot read where it is goes to the session as the host has it, for the runtime to copy
+    // into its own arena -- inside the limit the session was built with, rather than outside it
+    // cutting that limit -- and an output the run fetches back may then be written into it there.
     //
     // Defaulted to none, so a backend outside this repository keeps compiling: one that aliases
-    // nothing has no such input.
-    IReadOnlySet<string> AliasableInputs => System.Collections.Frozen.FrozenSet<string>.Empty;
+    // nothing binds no pair.
+    IReadOnlyList<OutputAlias> BindableAliases => [];
 
     // This session's own memory arena as its runtime reports it, or null when the backend has no
     // such figures to give. Cheap enough to call either side of a run, which is how a run's peak

@@ -80,7 +80,7 @@ namespace Shorokoo.Runtime
         {
             _owner = owner;
             _onnxInputNameByOriginal = onnxInputNameByOriginal;
-            _built = new BuiltSession(session, deviceMemory, WrittenIntoOf(session));
+            _built = new BuiltSession(session, deviceMemory, BindableOf(session));
             _outputNames = [.. session.OutputNames];
             _backend = backend;
             _originalInputNames = originalInputNames;
@@ -92,11 +92,7 @@ namespace Shorokoo.Runtime
         }
 
         /// <summary>The outputs the lowering marked as ones a run may write into the memory of an
-        /// input it consumed, and the input each is paired with (test hook).</summary>
-        internal IReadOnlyList<OutputAlias> OutputAliases => _outputAliases;
-
-        /// <summary><see cref="OutputAliases"/> by position: which output, into which input
-        /// (test hook).</summary>
+        /// input it consumed, by position: which output, into which input (test hook).</summary>
         internal IReadOnlyList<(int Output, int Input)> MarkedPairs()
         {
             var session = _built.Session;
@@ -111,7 +107,8 @@ namespace Shorokoo.Runtime
         /// output that outlives a rebuilt session does not keep the managed wrapper of it alive.
         /// </summary>
         private sealed class BuiltSession(
-            IShorokooSession session, DeviceMemorySettings deviceMemory, IReadOnlySet<string> writtenInto)
+            IShorokooSession session, DeviceMemorySettings deviceMemory,
+            IReadOnlyList<(string Output, string Input)> bindable)
         {
             internal IShorokooSession Session { get; } = session;
 
@@ -119,26 +116,36 @@ namespace Shorokoo.Runtime
 
             internal object Arena { get; } = new();
 
-            /// <summary>The inputs, by the names the graph was compiled with, that a run of this
-            /// session may write an output into the consumed memory of.</summary>
-            internal IReadOnlySet<string> WrittenInto { get; } = writtenInto;
+            /// <summary>
+            /// The inputs, by the names the graph was compiled with, whose consumed memory a run of
+            /// this session keeping <paramref name="retained"/> on the device may write an output into:
+            /// those paired with an output it keeps there. An output is produced where it is kept, and
+            /// can be written only into memory there; one the run fetches back can be written only
+            /// into host memory.
+            /// </summary>
+            internal IReadOnlySet<string> WrittenInto(IReadOnlySet<string> retained)
+            {
+                if (bindable.Count == 0 || retained.Count == 0) return System.Collections.Frozen.FrozenSet<string>.Empty;
+                HashSet<string>? inputs = null;
+                foreach (var (output, input) in bindable)
+                    if (retained.Contains(output)) (inputs ??= new(StringComparer.Ordinal)).Add(input);
+                return inputs is null ? System.Collections.Frozen.FrozenSet<string>.Empty : inputs;
+            }
         }
 
         /// <summary>
-        /// The inputs, by the names the graph was compiled with, that a run of
-        /// <paramref name="session"/> may write an output into the consumed memory of — the ones it
-        /// says it can bind (<see cref="IShorokooSession.AliasableInputs"/>), named as a run's feeds
-        /// name them.
+        /// The pairs by which a run of <paramref name="session"/> may write an output into the consumed
+        /// memory of an input (<see cref="IShorokooSession.BindableAliases"/>), each input named as a
+        /// run's feeds name it: by the name the graph was compiled with.
         /// </summary>
-        private IReadOnlySet<string> WrittenIntoOf(IShorokooSession session)
+        private IReadOnlyList<(string Output, string Input)> BindableOf(IShorokooSession session)
         {
-            var aliasable = session.AliasableInputs;
-            if (aliasable.Count == 0) return aliasable;
+            var aliases = session.BindableAliases;
+            if (aliases.Count == 0) return [];
             // A feed whose name the graph did not rename is fed under that name as it is.
-            var named = new HashSet<string>(aliasable, StringComparer.Ordinal);
-            foreach (var (original, own) in _onnxInputNameByOriginal)
-                if (aliasable.Contains(own)) named.Add(original);
-            return named;
+            var originalOf = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var (original, own) in _onnxInputNameByOriginal) originalOf[own] = original;
+            return [.. aliases.Select(alias => (alias.Output, originalOf.GetValueOrDefault(alias.Input, alias.Input)))];
         }
 
         // What a message about a run of this graph calls it, where the compiler knew better than a
@@ -331,10 +338,11 @@ namespace Shorokoo.Runtime
             // locked, every value built and every consumed tensor taken -- so the caller who caught
             // the cancellation and meant to retry had nothing left to retry with.
             runSettings.CancellationToken.ThrowIfCancellationRequested();
-            var feeds = new RunFeeds(_owner, _backend, Identity(description));
+            var budget = _owner.BudgetIn();
+            var feeds = new RunFeeds(_owner, _backend, Identity(description), budget);
             // Under a device-memory budget this waits for any run of the context already in flight:
             // two at once would each be counting the room the other's arena is taking.
-            var entered = _owner.EnterRun(runSettings.CancellationToken);
+            var entered = _owner.EnterRun(budget, runSettings.CancellationToken);
             Exception? failed = null;
             var counted = false;
             try
@@ -355,15 +363,16 @@ namespace Shorokoo.Runtime
                 // Under a budget, the session this run can use -- kept, or built again with the
                 // arena limit what the context now holds leaves -- decided before anything is
                 // taken, so a run the budget cannot fit is refused having consumed nothing.
-                feeds.WrittenInto = _built.WrittenInto;
+                feeds.WrittenInto = _built.WrittenInto(retainedOutputNames ?? ComputeContext.NoOutputsRetained);
                 var built = feeds.Budget is { } limit ? Within(limit, feeds) : _built;
                 var session = built.Session;
 
                 // On this graph's own backend, because that is the runtime about to read the values:
                 // what it can address it is handed as it stands, and anything else -- every literal
                 // in the program, held in managed memory, and a tensor of another device or runtime
-                // -- through a copy that backend builds. Each input is held first -- read-locked, or
-                // consumed -- and its value built after.
+                // -- through a copy that backend builds, or, where it is consumed and no output may
+                // be written into it, in host memory for the runtime to copy into its arena. Each
+                // input is held first -- read-locked, or consumed -- and its value built after.
                 var sessionInputs = feeds.Feed(name =>
                     _onnxInputNameByOriginal.TryGetValue(name, out var mapped) ? mapped : name);
 
@@ -469,7 +478,9 @@ namespace Shorokoo.Runtime
         /// rest (see <see cref="ArenasOf"/>). ONNX Runtime fixes an arena's limit
         /// when the session is built, and building one costs about as much as the graph is large,
         /// so a session is kept for as long as its limit fits and built again only when the discount
-        /// has grown past the room it left — never merely because it has fallen. See
+        /// has grown past the room it left — never merely because it has fallen — or when its limit
+        /// cannot take what the run would have the runtime copy into its arena, which a session
+        /// built with what the budget leaves now may. See
         /// <see cref="ComputeContext.ArenaLimitWithin"/> for the limit a new one gets.</para>
         /// </summary>
         /// <exception cref="InvalidOperationException">What the context holds leaves no room for the
@@ -479,7 +490,8 @@ namespace Shorokoo.Runtime
         {
             var built = _built;
             var plan = feeds.Plan(built.Arena);
-            if (built.DeviceMemory.LimitBytes is { } current && current <= limit - plan.Outside)
+            if (built.DeviceMemory.LimitBytes is { } current && current <= limit - plan.Outside
+                && plan.InArena <= current)
             {
                 feeds.Admit(current, plan);
                 return built;
@@ -503,7 +515,7 @@ namespace Shorokoo.Runtime
                 + "limit cannot come down to what its context's device-memory budget now allows.");
             var deviceMemory = _built.DeviceMemory with { LimitBytes = arenaLimit };
             var session = _owner.BuildSession(_backend, model, Optimization, deviceMemory, _outputAliases);
-            var fresh = new BuiltSession(session, deviceMemory, WrittenIntoOf(session));
+            var fresh = new BuiltSession(session, deviceMemory, BindableOf(session));
             BuiltSession old;
             lock (_sessionGate)
             {
@@ -515,8 +527,10 @@ namespace Shorokoo.Runtime
                 old = _built;
                 _built = fresh;
             }
-            // Outside the gate: every reader calls into the session under it, so once the swap is
-            // made nothing is inside the old one.
+            // Outside the gate. Nothing is inside the old session: a rebuild happens only under a
+            // budget, inside this run's turn at the context's budget gate, where every other run of
+            // the context waits; the other readers of a session call into it under the session's
+            // gate, which the swap was made under.
             old.Session.Dispose();
             return fresh;
         }
@@ -1176,10 +1190,13 @@ namespace Shorokoo.Runtime
         /// <param name="target">What is being read.</param>
         /// <param name="reader">Who is reading it — a run — for a run the tensor has to refuse
         /// meanwhile to name; null for a holder with nothing to say.</param>
+        /// <param name="attach">Whether a tensor locked is attached to this context: false for one
+        /// the reader never reads in this context's memory — an element a run holds only for the
+        /// sequence it is fed, whose value is built in host memory.</param>
         /// <exception cref="ArgumentNullException"><paramref name="target"/> is null.</exception>
         /// <exception cref="ObjectDisposedException">This context has been disposed, or the target
         /// is dead.</exception>
-        internal TensorLease Lock(ILifetimeOwner target, object? reader = null)
+        internal TensorLease Lock(ILifetimeOwner target, object? reader = null, bool attach = true)
         {
             ArgumentNullException.ThrowIfNull(target);
             // The two gates are taken one after the other rather than nested, in either direction:
@@ -1188,7 +1205,7 @@ namespace Shorokoo.Runtime
             // A read attaches the tensor read, as a run's output does: a tensor this context's runs
             // read is one its accounting has to see. Attached with the count, under the one gate;
             // a lock then refused leaves at worst a dead tensor on the list, which the list skips.
-            CountLock(target);
+            CountLock(target, attach);
             try
             {
                 return new TensorLease(this, target, target.Life.AcquireReadLock(reader), reader);
@@ -1201,16 +1218,16 @@ namespace Shorokoo.Runtime
         }
 
         /// <summary>Counts one more lock of this context's on <paramref name="target"/>, and
-        /// attaches it if it is a tensor.</summary>
+        /// attaches it if it is a tensor to be attached.</summary>
         /// <exception cref="ObjectDisposedException">This context has been disposed.</exception>
-        private void CountLock(ILifetimeOwner target)
+        private void CountLock(ILifetimeOwner target, bool attach)
         {
             lock (_gate)
             {
                 ObjectDisposedException.ThrowIf(_disposed, this);
                 _leases++;
                 _locksHeld[target] = _locksHeld.TryGetValue(target, out var held) ? held + 1 : 1;
-                if (target is TensorData tensor && !_isHost) _attached.Add(tensor);
+                if (attach && target is TensorData tensor && !_isHost) _attached.Add(tensor);
             }
         }
 
@@ -1268,20 +1285,21 @@ namespace Shorokoo.Runtime
         /// the run returns. Paired with <see cref="ExitRun"/> in a <c>finally</c>, in both run
         /// paths and nowhere else.
         ///
-        /// <para>Where this context's memory is under its device-memory budget, it first waits for
-        /// the budget gate, so the context's runs go one at a time; what it entered is what <see cref="ExitRun"/> is handed
-        /// back.</para>
+        /// <para>Where this context's memory is under its device-memory budget —
+        /// <paramref name="budget"/>, the reading the run's plan is made against too, so the two
+        /// cannot disagree — it first waits for the budget gate, so the context's runs go one at a
+        /// time; what it entered is what <see cref="ExitRun"/> is handed back.</para>
         /// </summary>
         /// <exception cref="ObjectDisposedException">This context has been disposed, so its
         /// sessions are already gone and there is nothing left to run on.</exception>
         /// <exception cref="OperationCanceledException"><paramref name="cancellation"/> was cancelled
         /// while the run waited for the one before it. Nothing was taken.</exception>
-        internal BudgetGate? EnterRun(CancellationToken cancellation)
+        internal BudgetGate? EnterRun(long? budget, CancellationToken cancellation)
         {
             // The host context runs nothing -- Compile, Execute and Run all refuse there -- and
             // cannot be disposed, so there is no question here for a count to answer.
             if (_isHost) return null;
-            var gate = EnterBudget(cancellation);
+            var gate = EnterBudget(budget, cancellation);
             try
             {
                 lock (_gate)
@@ -1858,13 +1876,14 @@ namespace Shorokoo.Runtime
             // The outputs are the session's, named once it is built; a refusal before then names
             // the graph by its inputs.
             var outputNames = new StrongBox<IReadOnlyList<string>>([]);
-            var feeds = new RunFeeds(this, backend, OneShotRun(originalInputNames, outputNames, backend.Description));
+            var budget = BudgetIn();
+            var feeds = new RunFeeds(this, backend, OneShotRun(originalInputNames, outputNames, backend.Description), budget);
             Exception? failed = null;
             // Before the session, so that everything this context is about to build is inside the
             // window its disposal is refused in -- the session most of all, since disposing the
             // context is what would release it. Under a device-memory budget it also waits for the
             // context's run in flight, if any.
-            var entered = EnterRun(RunSettings.CancellationToken);
+            var entered = EnterRun(budget, RunSettings.CancellationToken);
             try
             {
                 // Everything that can refuse the run over what it is fed, before a session is built

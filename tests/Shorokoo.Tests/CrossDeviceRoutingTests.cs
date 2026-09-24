@@ -605,6 +605,121 @@ public class CrossDeviceRoutingCoverageTests
         Assert.Empty(card.Built);
     }
 
+    [Fact]
+    public void TestAConsumedHostFeedWhosePairedOutputComesHomeGoesToTheSessionFromTheHost()
+    {
+        var card = new StubBackend(ComputeDevice.Cuda, 0) { ReleasesWhatItConsumes = true, Aliases = true };
+        using var context = new ComputeContext(card) { DeviceMemory = Budget(6400) };
+        var compiled = context.Compile(Doubled(), inputDims: null, trainingStep: false, aliasCandidates: [(0, 0)]);
+
+        var state = compiled.Execute(Floats(200))[0].ToTensorData();
+        state = compiled.Execute(state)[0].ToTensorData();
+
+        Assert.Equal([6300L], card.Sessions.Select(s => s.LimitBytes));
+        Assert.Empty(card.Built);
+        Assert.Equal(2L, context.AliasedOutputs);
+        GC.KeepAlive(state);
+    }
+
+    [Fact]
+    public void TestATriedHostFeedNothingElseReadsIsCopiedIntoTheArenaAsAConsumedOneIs()
+    {
+        var card = new StubBackend(ComputeDevice.Cuda, 0) { ReleasesWhatItConsumes = true };
+        using var context = new ComputeContext(card) { DeviceMemory = Budget(6400) };
+        var compiled = context.Compile(Doubled());
+        TensorData Kept(IData a) => compiled.Execute([a], [true])[0].ToTensorData();
+
+        var state = Kept(Floats(200).TryConsume());
+        state = Kept(state.TryConsume());
+
+        Assert.Equal([6300L], card.Sessions.Select(s => s.LimitBytes));
+        Assert.Empty(card.Built);
+        GC.KeepAlive(state);
+    }
+
+    [Fact]
+    public void TestAConsumedFeedWhoseHeldCopyAnotherRunIsReadingGoesToTheSessionFromTheHost()
+    {
+        var card = new StubBackend(ComputeDevice.Cuda, 0) { ReleasesWhatItConsumes = true };
+        using var context = new ComputeContext(card) { DeviceMemory = Budget(6400) };
+        using var reader = new ComputeContext(card);
+        var compiled = context.Compile(Echo());
+        var source = Floats(250);
+        Run(compiled, source.Shared());
+        var copy = Assert.Single(context.Tensors, t => t.Space == MemorySpace.Cuda(0));
+
+        using (reader.Lock(copy))
+            Assert.Equal(new float[250], Run(compiled, source));
+
+        Assert.True(source.IsDisposed);
+    }
+
+    [Fact]
+    public void TestASessionTooSmallForWhatARunHasItsRuntimeCopyInIsBuiltAgainWhereTheBudgetNowHasRoom()
+    {
+        var card = new StubBackend(ComputeDevice.Cuda, 0) { ReleasesWhatItConsumes = true };
+        using var context = new ComputeContext(card) { DeviceMemory = Budget(6400) };
+        var held = Floats(1000).CopyTo(context);
+        var compiled = context.Compile(Echo());
+        held.Delete();
+
+        Assert.Equal(new float[1000], Run(compiled, Floats(1000)));
+        Assert.Equal([2300L, 6300L], card.Sessions.Select(s => s.LimitBytes));
+    }
+
+    [Fact]
+    public void TestAHostTensorFedToTwoInputsIsCountedIntoTheArenaOncePerInput()
+    {
+        var card = new StubBackend(ComputeDevice.Cuda, 0) { ReleasesWhatItConsumes = true };
+        using var context = new ComputeContext(card) { DeviceMemory = Budget(6400) };
+        var compiled = context.Compile(Sum());
+        var twice = Floats(1000);
+
+        Assert.Contains("copy 8000 bytes", Assert.Throws<InvalidOperationException>(() => compiled.Execute(twice, twice)).Message);
+        Assert.False(twice.IsDisposed);
+    }
+
+    [Fact]
+    public void TestARunThatFailsIsHeardOverACopyOfWhatItConsumedThatFailsToBeReleased()
+    {
+        var host = new StubBackend(ComputeDevice.Cpu, null) { FailingReleases = 1 };
+        var card = new StubBackend(ComputeDevice.Cuda, 0) { ReleasesWhatItConsumes = true };
+        using var reading = new ComputeContext(host);
+        using var running = new ComputeContext(card);
+        var onCard = OnCard(running, 1f);
+        Run(reading.Compile(Echo()), onCard.Shared());
+        card.FailsRuns = true;
+
+        Assert.Equal("The stub run failed.",
+            Assert.Throws<InvalidOperationException>(() => running.Compile(Echo()).Execute(onCard)).Message);
+    }
+
+    [Fact]
+    public void TestAListSequenceARunReadsPutsNoneOfItsElementsOnTheRunningContextsBooks()
+    {
+        var card = new StubBackend(ComputeDevice.Cuda, 0);
+        using var budgeted = new ComputeContext(card) { DeviceMemory = Budget(6400) };
+        using var staging = new ComputeContext(card);
+        var sequence = TensorDataSequence.OfElements(
+            [Floats(500).CopyTo(staging), Floats(500).CopyTo(staging)], DType.Float32);
+        var compiled = budgeted.Compile(TensorBesideSequence());
+        long during = -1;
+        card.DuringRun = () => during = budgeted.ReadDeviceMemoryUse().AttachedBytes;
+
+        compiled.Execute(Floats(1), sequence.Shared());
+
+        Assert.Equal(0L, during);
+        Assert.Equal(0L, budgeted.ReadDeviceMemoryUse().AttachedBytes);
+    }
+
+    private static InternalComputationGraph TensorBesideSequence()
+    {
+        var x = InputVector<float32>("x");
+        var seq = InternalOp.ModuleSequenceInput(DType.Float32, null, null, "seq");
+        return new InternalComputationGraph(
+            [x, seq], [OnnxOp.Identity(x, rank: 1), OnnxOp.ConcatFromSequence(seq, axis: 0, newAxis: false)]);
+    }
+
     private static DeviceMemorySettings Budget(long bytes) => new() { LimitBytes = bytes };
 
     /// <summary>A shared feed for input "a" that calls <paramref name="held"/> once the run holds
@@ -1049,7 +1164,7 @@ public class CrossDeviceRoutingCoverageTests
         StubBackend backend, string[] inputNames, string[] outputNames, IReadOnlyList<OutputAlias> aliases)
         : StubSession(backend, inputNames, outputNames), IShorokooSession
     {
-        IReadOnlySet<string> IShorokooSession.AliasableInputs => aliases.Select(alias => alias.Input).ToHashSet();
+        IReadOnlyList<OutputAlias> IShorokooSession.BindableAliases => aliases;
 
         IReadOnlyList<IShorokooTensorValue> IShorokooSession.RunConsuming(
             IReadOnlyDictionary<string, IShorokooTensorValue> inputs,

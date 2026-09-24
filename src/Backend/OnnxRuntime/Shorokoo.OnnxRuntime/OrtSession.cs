@@ -58,11 +58,7 @@ internal sealed class OrtSession : IShorokooSession
     /// </summary>
     internal readonly record struct ProvedAlias(OutputAlias Alias, long[]? StatedShape);
 
-    /// <summary>The pairs this session binds where a run lets it (test hook).</summary>
-    internal IReadOnlyList<OutputAlias> OutputAliases
-        => [.. _aliases.Values.Select(slot => new OutputAlias(slot.Output, slot.Input))];
-
-    public IReadOnlySet<string> AliasableInputs { get; }
+    public IReadOnlyList<OutputAlias> BindableAliases { get; }
 
     public OrtSession(
         InferenceSession session, int? cudaDeviceId, IShorokooBackend backend)
@@ -82,7 +78,7 @@ internal sealed class OrtSession : IShorokooSession
         _backend = backend;
         _profileDirectory = profileDirectory;
         _aliases = Slots(session, outputAliases);
-        AliasableInputs = _aliases.Values.Select(slot => slot.Input).ToHashSet(StringComparer.Ordinal);
+        BindableAliases = [.. _aliases.Values.Select(slot => new OutputAlias(slot.Output, slot.Input))];
         // Nothing to clean up, so nothing to finalize -- every untraced session would otherwise
         // join the finalization queue to run an early return.
         if (profileDirectory is null) GC.SuppressFinalize(this);

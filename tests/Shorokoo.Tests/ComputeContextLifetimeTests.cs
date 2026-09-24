@@ -891,7 +891,7 @@ public class ComputeContextLifetimeCoverageTests
             [consumed], ["O", "Z"], ComputeContext.NoOutputsRetained, RunSettings.Default, out var aliased);
 
         Assert.True(Proves(graph));
-        Assert.Empty(session.OutputAliases);
+        Assert.Empty(session.BindableAliases);
         Assert.All(aliased, Assert.Null);
         Assert.Equal([.. a.Zip(t, (p, q) => p - q)], outputs[0].GetTensorDataAsSpan<float>().ToArray());
         Assert.Equal([.. t.Select(q => 2f * q)], outputs[1].GetTensorDataAsSpan<float>().ToArray());
@@ -910,7 +910,7 @@ public class ComputeContextLifetimeCoverageTests
                 throw OrtFailure("Unable to serialize model as it contains compiled nodes. Please disable any execution providers which generate compiled nodes.");
         });
         using var unaliased = Aliasing(compiling, graph);
-        Assert.Equal((2, 0), (compiling.Builds, unaliased.OutputAliases.Count));
+        Assert.Equal((2, 0), (compiling.Builds, unaliased.BindableAliases.Count));
     }
 
     [Fact]
@@ -1054,7 +1054,7 @@ public class ComputeContextLifetimeCoverageTests
     public void TestAFeedNothingKnowsHowToHoldIsRefusedAndAStructIsToldToFeedItsFields()
     {
         using var context = new ComputeContext();
-        using var feeds = new RunFeeds(context, DefaultBackend.Instance, new RunIdentity(() => "a run"));
+        using var feeds = new RunFeeds(context, DefaultBackend.Instance, new RunIdentity(() => "a run"), budget: null);
         TensorStructFieldDef[] fields = [new TensorStructFieldDef("x", DataStructure.Tensor, 1, DType.Float32)];
         var whole = new TensorStructModelParam("s", ModelParamType.InputParam, new TensorDataStruct(
             new TensorStructDef(fields, "S"), new Dictionary<string, IData> { { "x", Sample() } }));

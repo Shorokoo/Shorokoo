@@ -875,6 +875,29 @@ public class ComputeContextLifetimeCoverageTests
             [new OutputAlias("O", "a")]);
 
     [Fact]
+    public void TestAPairIsDroppedWhereTheGraphTheRuntimeRunsReadsTheInputAfterTheOutputIsWritten()
+    {
+        var graph = GraphOf("a:float[4,4] x:float[4,4] y:float[4,4]", "O:float[4,4] Z:float[4,4]",
+            Op("Transpose", "a", "t"), Op("MatMul", "x t", "m"), Op("MatMul", "y t", "Z"), Op("Sub", "a m", "O"));
+        using var session = Aliasing(DefaultBackend.Instance, graph);
+        float[] a = [.. Enumerable.Range(1, 16).Select(v => (float)v)];
+        float[] t = [.. Enumerable.Range(0, 16).Select(k => a[k % 4 * 4 + k / 4])];
+        IShorokooTensorValue Square(float[] values) => DefaultBackend.Instance.CreateTensor(values, [4L, 4L]);
+        float[] Diagonal(float v) => [.. Enumerable.Range(0, 16).Select(k => k % 5 == 0 ? v : 0f)];
+        var consumed = Square(a);
+        using var x = Square(Diagonal(1f));
+        using var y = Square(Diagonal(2f));
+        var outputs = session.RunConsuming(new Dictionary<string, IShorokooTensorValue> { ["a"] = consumed, ["x"] = x, ["y"] = y },
+            [consumed], ["O", "Z"], ComputeContext.NoOutputsRetained, RunSettings.Default, out var aliased);
+
+        Assert.True(Proves(graph));
+        Assert.Empty(session.OutputAliases);
+        Assert.All(aliased, Assert.Null);
+        Assert.Equal([.. a.Zip(t, (p, q) => p - q)], outputs[0].GetTensorDataAsSpan<float>().ToArray());
+        Assert.Equal([.. t.Select(q => 2f * q)], outputs[1].GetTensorDataAsSpan<float>().ToArray());
+    }
+
+    [Fact]
     public void TestASessionThatCannotWriteItsGraphOutIsBuiltWithoutAliasingOnlyWhereTheRuntimeRefusesItsCompiledNodes()
     {
         var graph = GraphOf("a:float[4] b:float[4]", "O:float[4]", Op("Sub", "a b", "O"));

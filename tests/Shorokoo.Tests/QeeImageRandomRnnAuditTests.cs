@@ -109,4 +109,16 @@ public class QeeImageRandomRnnAuditTests
         Assert.True(QeeAudit.OrtOnly<QeeGruValueAuditCheck>(Wave(4, 2, 3), Wave(2, 15, 3), Wave(2, 15, 5), Wave(2, 30), Wave(2, 2, 5), SeqLens));
         Assert.True(QeeAudit.OrtOnly<QeeLstmValueAuditCheck>(Wave(4, 2, 3), Wave(2, 20, 3), Wave(2, 20, 5), Wave(2, 40), Wave(2, 2, 5), Wave(2, 2, 5), Wave(2, 15), SeqLens));
     }
+
+    [Fact]
+    public void TestCropAndResizeAtScaleOneStillCropsToTheRoi()
+        => Assert.True(AutoTest.AdvancedTestGraph<CropAndResizeAtScaleOneValues>([],
+            [F32([1L, 1L, 1L, 5L], 0f, 1f, 2f, 3f, 4f)],
+            expected: [2, 3, 4, -1, -1, 2, 3, 4, -1, -1]));
+
+    [Fact]
+    public void TestCol2ImOverOneSpatialAxisWithPadsAndStride()
+        => Assert.True(AutoTest.AdvancedTestGraph<Col2Im1DPaddedValues>([],
+            [F32([1L, 3L, 4L], [.. Enumerable.Range(0, 12).Select(i => (float)i)])],
+            expected: [4, 9, 5, 11, 6, 13, 7, 11]));
 }

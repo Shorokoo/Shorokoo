@@ -423,4 +423,32 @@ namespace Shorokoo.Tests.Modules
             return mismatch < Scalar(1L);
         }
     }
+
+    /// <summary>SAME_UPPER then SAME_LOWER MaxPool with dilations: the padding follows the dilated
+    /// kernel, so the output keeps ceil(in/stride) elements. Input x is [1,1,10].</summary>
+    [Module]
+    public partial class SameDilatedMaxPoolValues
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x)
+            => ((Tensor<float32>)OnnxOp.MaxPool(x, AutoPad.SameUpper, false, [2L], [3L], null, 0L, [2L]))
+                .Concat(2L, (Tensor<float32>)OnnxOp.MaxPool(x, AutoPad.SameLower, false, [2L], [3L], null, 0L, [2L]));
+    }
+
+    /// <summary>As <see cref="SameDilatedMaxPoolValues"/>, for LpPool (p = 2).</summary>
+    [Module]
+    public partial class SameDilatedLpPoolValues
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x)
+            => ((Tensor<float32>)OnnxOp.LpPool(x, AutoPad.SameUpper, false, [2L], [3L], 2L, null, [2L]))
+                .Concat(2L, (Tensor<float32>)OnnxOp.LpPool(x, AutoPad.SameLower, false, [2L], [3L], 2L, null, [2L]));
+    }
+
+    /// <summary>As <see cref="SameDilatedMaxPoolValues"/>, for AveragePool (count_include_pad = 0).</summary>
+    [Module]
+    public partial class SameDilatedAveragePoolValues
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x)
+            => ((Tensor<float32>)OnnxOp.AveragePool(x, AutoPad.SameUpper, false, false, [2L], [3L], null, [2L]))
+                .Concat(2L, (Tensor<float32>)OnnxOp.AveragePool(x, AutoPad.SameLower, false, false, [2L], [3L], null, [2L]));
+    }
 }

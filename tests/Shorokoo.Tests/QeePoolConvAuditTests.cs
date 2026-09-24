@@ -51,4 +51,16 @@ public class QeePoolConvAuditTests
         Assert.True(QeeAudit.Check<QeeConvVariantsShapeAuditCheck>(
             F32Wave([2L, 2L, 9L]), F32Wave([1L, 4L, 7L, 6L]), F32Wave([1L, 2L, 5L, 4L, 4L]), F32Wave([1024L])));
     }
+
+    [Fact]
+    public void TestSameAutoPadWithDilationsPadsForTheDilatedKernel()
+    {
+        var x = F32([1L, 1L, 10L], [.. Enumerable.Range(0, 10).Select(i => (float)i)]);
+        Assert.True(AutoTest.AdvancedTestGraph<SameDilatedMaxPoolValues>([], [x],
+            expected: [3, 5, 7, 9, 9, 2, 4, 6, 8, 8]));
+        Assert.True(AutoTest.AdvancedTestGraph<SameDilatedLpPoolValues>([], [x],
+            expected: [3.1622777, 5.9160798, 9.1104336, 12.4498996, 11.4017543, 2, 4.4721360, 7.4833148, 10.7703296, 10]));
+        Assert.True(AutoTest.AdvancedTestGraph<SameDilatedAveragePoolValues>([], [x],
+            expected: [2, 3, 5, 7, 8, 1, 2, 4, 6, 7]));
+    }
 }

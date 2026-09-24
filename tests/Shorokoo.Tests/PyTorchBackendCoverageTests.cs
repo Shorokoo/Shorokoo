@@ -756,6 +756,17 @@ public class PyTorchBackendCoverageTests
 
     private sealed class OffPlatformBackend() : TorchBackend(PythonEnvironmentLock.ForPlatform("cpu", "osx-arm64"), null, null);
 
+    [Fact]
+    public void TestAFunctionCallOmittingTrailingInputsPassesNoneAndOneWithMoreInputsOrOutputsThanTheFunctionIsRefused()
+    {
+        var first = Function("First", ["a", "b"], ["y"], "", Node("Neg", ["a"], ["y"]));
+        using var session = Torch.CreateSession(Serialize(Graph(["x"], ["y"], Node("First", ["x"], ["y"], "Functions")), first), default, default, DeviceMemorySettings.Default);
+
+        Assert.Equal([-1f, -2f], RunFloats(session, new() { ["x"] = [1f, 2f] }, ["y"])[0]);
+        Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(Serialize(Graph(["x"], ["y"], Node("First", ["x", "x", "x"], ["y"], "Functions")), first), default, default, DeviceMemorySettings.Default));
+        Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(Serialize(Graph(["x"], ["y"], Node("First", ["x"], ["y", "z"], "Functions")), first), default, default, DeviceMemorySettings.Default));
+    }
+
     private static PythonEnvironment Resolve(PythonEnvironmentOptions options, string variable)
         => PythonEnvironmentResolver.Resolve(PythonEnvironmentLock.Cpu, options,
             name => name == PythonEnvironmentResolver.EnvironmentVariable ? variable : null);
@@ -855,6 +866,16 @@ public class PyTorchBackendCoverageTests
         {
             Directory.Delete(root, recursive: true);
         }
+    }
+
+    private static FunctionProto Function(string name, string[] inputs, string[] outputs, string overload, params NodeProto[] nodes)
+    {
+        var function = new FunctionProto { Name = name, Domain = "Functions", Overload = overload };
+        function.Inputs.AddRange(inputs);
+        function.Outputs.AddRange(outputs);
+        function.Nodes.AddRange(nodes);
+        function.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = 21 });
+        return function;
     }
 
     /// <summary>y = v + 1, m times over, by a Loop: one node per iteration to stop at.</summary>

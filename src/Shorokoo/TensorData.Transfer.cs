@@ -177,11 +177,15 @@ namespace Shorokoo
         /// budgets; only the one that makes it is asked whether it fits.</para>
         /// </summary>
         internal TensorData SharedCopyFor(IShorokooBackend backend, Action<TensorData>? admit)
-            => CopyAt(RunMemoryOf(backend, DType), () =>
+        {
+            var where = RunMemoryOf(backend, DType);
+            // The copy already held is what nearly every read finds, and finding it builds nothing.
+            return CopyHeldAt(where) ?? CopyAt(where, () =>
             {
                 admit?.Invoke(this);
                 return BuildRunCopy(backend);
             });
+        }
 
         /// <summary>
         /// The copy a run on <paramref name="backend"/> that has taken this tensor consumes in its

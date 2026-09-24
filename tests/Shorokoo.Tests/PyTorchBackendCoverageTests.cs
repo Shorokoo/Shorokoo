@@ -683,6 +683,17 @@ public class PyTorchBackendCoverageTests
         Assert.Equal([new OutputAlias("O1", "b"), new OutputAlias("O2", "c")], session.BindableAliases);
     }
 
+    [Fact]
+    public void TestTwoSessionsOverOneModelWithDifferentPairsEachRunTheirOwnTranslation()
+    {
+        var graph = ComputeContextLifetimeCoverageTests.GraphOf("b:float[3] c:float[3] g:float[3]", "O2:float[3] O1:float[3]", Op("Add", "c g", "O2"), Op("Sub", "b g", "O1"));
+        using var first = Torch.CreateSession(Serialize(graph), default, default, DeviceMemorySettings.Default, DiagnosticSettings.Default, [new OutputAlias("O2", "c")]);
+        using var second = Torch.CreateSession(Serialize(graph), default, default, DeviceMemorySettings.Default, DiagnosticSettings.Default, [new OutputAlias("O1", "b"), new OutputAlias("O2", "c")]);
+
+        Assert.Equal("c,- 101 101 101 9 9 9", AliasedRun(first, graph));
+        Assert.Equal("c,b 101 101 101 9 9 9", AliasedRun(second, graph));
+    }
+
     private static PythonEnvironment Resolve(PythonEnvironmentOptions options, string variable)
         => PythonEnvironmentResolver.Resolve(PythonEnvironmentLock.Cpu, options,
             name => name == PythonEnvironmentResolver.EnvironmentVariable ? variable : null);

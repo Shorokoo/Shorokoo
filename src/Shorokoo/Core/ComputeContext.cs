@@ -1582,7 +1582,7 @@ namespace Shorokoo.Runtime
         /// arena (<see cref="DeviceMemorySettings.LimitBytes"/>).</exception>
         public CompiledGraph Compile(ComputationGraph graph)
         {
-            graph.RequireConcretized("ComputeContext.Compile");
+            graph.RequireSessionRunnable("ComputeContext.Compile");
             return Compile(graph.ToInternal());
         }
 
@@ -1605,7 +1605,7 @@ namespace Shorokoo.Runtime
         /// taken.</exception>
         public NamedModelParam[] Execute(ComputationGraph graph, params IData[] inputs)
         {
-            graph.RequireConcretized("ComputeContext.Execute");
+            graph.RequireSessionRunnable("ComputeContext.Execute");
             return this.Execute(graph.ToInternal(), inputs);
         }
 
@@ -1625,7 +1625,7 @@ namespace Shorokoo.Runtime
         /// taken.</exception>
         public NamedModelParam[] Run(ComputationGraph graph, params NamedModelParam[] inputs)
         {
-            graph.RequireConcretized("ComputeContext.Run");
+            graph.RequireSessionRunnable("ComputeContext.Run");
             return this.Run(graph.ToInternal(), inputs);
         }
 
@@ -1640,7 +1640,7 @@ namespace Shorokoo.Runtime
         public (NamedModelParam[] regularOutputs, ComputationGraph updatedGraph) ExecuteWithState(
             ComputationGraph graph, params IData[] inputs)
         {
-            graph.RequireConcretized("ComputeContext.ExecuteWithState");
+            graph.RequireSessionRunnable("ComputeContext.ExecuteWithState");
             var (regularOutputs, updatedGraph) = ExecuteWithState(graph.ToInternal(), inputs);
             // updatedGraph is either the private copy itself (no state params) or a fresh
             // clone with the new state values — exclusively owned either way.
@@ -1654,7 +1654,7 @@ namespace Shorokoo.Runtime
         public (NamedModelParam[] regularOutputs, ComputationGraph updatedGraph) ExecuteWithState(
             ComputationGraph graph, params NamedModelParam[] inputs)
         {
-            graph.RequireConcretized("ComputeContext.ExecuteWithState");
+            graph.RequireSessionRunnable("ComputeContext.ExecuteWithState");
             var (regularOutputs, updatedGraph) = ExecuteWithState(graph.ToInternal(), inputs);
             return (regularOutputs, new ComputationGraph(updatedGraph, graph.Kind));
         }

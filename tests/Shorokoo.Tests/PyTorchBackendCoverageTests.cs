@@ -782,6 +782,18 @@ public class PyTorchBackendCoverageTests
         Assert.Equal([-1f, -1f], RunFloats(step, new() { ["w"] = [1f, -2f] }, ["g"])[0]);
     }
 
+    [Fact]
+    public void TestALoopThatRunsNoIterationHandsOutEachScanOutputEmptyOfItsBodysDeclaredTypeAndShapeAndOneOfNoTypeIsRefused()
+    {
+        using var session = Torch.CreateSession(Serialize(ScanLoop(typed: true)), default, default, DeviceMemorySettings.Default);
+        using var m = Torch.CreateTensor([0L], []);
+        using var v = Torch.CreateTensor([0f], []);
+        using var scanned = session.Run(new Dictionary<string, IShorokooTensorValue> { ["m"] = m, ["v"] = v }, ["s"], RunSettings.Default)[0];
+
+        Assert.Equal("Int64 0,2,3", $"{scanned.ElementType} {string.Join(",", scanned.Shape)}");
+        Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(Serialize(ScanLoop(typed: false)), default, default, DeviceMemorySettings.Default));
+    }
+
     private static PythonEnvironment Resolve(PythonEnvironmentOptions options, string variable)
         => PythonEnvironmentResolver.Resolve(PythonEnvironmentLock.Cpu, options,
             name => name == PythonEnvironmentResolver.EnvironmentVariable ? variable : null);
@@ -891,6 +903,15 @@ public class PyTorchBackendCoverageTests
         function.Nodes.AddRange(nodes);
         function.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = 21 });
         return function;
+    }
+
+    private static GraphProto ScanLoop(bool typed)
+    {
+        var body = Graph(["i", "c", "x"], ["c2", "x2", "sc"], Node("Identity", ["c"], ["c2"]), Node("Identity", ["x"], ["x2"]),
+            Node("Constant", [], ["sc"], attributes: Tensor("value", 7, [2, 3], [1, 2, 3, 4, 5, 6])));
+        if (typed)
+            body.Outputs[2].Type = new TypeProto { TensorType = new TypeProto.Tensor { ElemType = 7, Shape = new TensorShapeProto { Dims = { new() { DimValue = 2 }, new() { DimValue = 3 } } } } };
+        return Graph(["m", "v"], ["y", "s"], Node("Loop", ["m", "", "v"], ["y", "s"], attributes: new AttributeProto { Name = "body", Type = AttributeProto.AttributeType.Graph, G = body }));
     }
 
     /// <summary>y = v + 1, m times over, by a Loop: one node per iteration to stop at.</summary>

@@ -169,6 +169,7 @@ public class QeeImageRandomRnnAuditTests
         Assert.Equal("1 1 | 0", Written("GRU", false, ["Affine", "ThresholdedRelu"], null, null));
         Assert.Equal("2 1 | 3 4", Written("GRU", true, ["ScaledTanh", "Softsign", "Relu", "Affine"], [2f], [3f, 4f]));
         Assert.Equal("0.1 1 0.01 | 0.5", Written("LSTM", true, ["HardSigmoid", "Tanh", "Elu", "Sigmoid", "Relu", "LeakyRelu"], [0.1f], null));
+        Assert.Equal("2 | 3", Written("LSTM", false, ["Affine", "ScaledTanh", "Tanh"], [2f], [3f]));
     }
 
     [Fact]

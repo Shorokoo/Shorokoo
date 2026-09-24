@@ -169,10 +169,20 @@ else.
 - **Operator coverage is partial.** The elementwise math and activation operators, the
   comparisons and logic operators, the reductions, `MatMul`/`Gemm`, the shape operators
   (`Reshape`, `Transpose`, `Concat`, `Split`, `Squeeze`/`Unsqueeze`, `Shape`, `Expand`, `Tile`,
-  `Pad`, `Constant`, `ConstantOfShape`, `Range`, …), `Gather`/`GatherElements`/`Slice`/`Compress`,
-  and `If`/`Loop` are translated. Convolution and pooling, normalization, recurrent networks,
-  random draws, sequences, strings, signal, image and quantization operators are not yet: a
-  model using one is refused when its session is created, naming it.
+  `Pad`, `Constant`, `ConstantOfShape`, `Range`, `OneHot`, `EyeLike`, `ReverseSequence`,
+  `TensorScatter`, …), the indexing operators (`Gather`, `GatherElements`, `GatherND`, `Slice`,
+  `Compress`, `ScatterElements`, `ScatterND`, `TopK`, `Unique`, `NonZero`), sequences and
+  optionals (`SequenceMap` included), the string operators (`TfIdfVectorizer` included), the
+  random operators and `Dropout`, and `If`/`Loop` are translated, as are functions that take
+  attributes. Convolution and pooling, normalization, recurrent networks, signal, image and
+  quantization operators are not yet: a model using one is refused when its session is created,
+  naming it.
+- **Random draws differ from ONNX Runtime's.** `RandomNormal`, `RandomUniform`, their `Like`
+  forms, `Bernoulli`, `Multinomial` and a training-mode `Dropout` draw from PyTorch's generator:
+  the distribution, shape and element type are the operator's, and a node with a `seed` draws the
+  same values on every run, but not the values ONNX Runtime draws. Shorokoo's own keyed draws
+  (`RandomUniform`, `RandomNormal` and the other keyed generators) are integer arithmetic, and
+  agree with ONNX Runtime exactly.
 - **Linux x64 only.** The lock files are resolved for Linux x64, and so are the packages.
 - **Device memory settings are not applied.** PyTorch's caching allocator is process-wide, so
   a context's `DeviceMemory` budget still bounds the tensors the context holds, but a session's

@@ -5717,7 +5717,7 @@ public class TrainingRigNativeTorchCoverageTests
 [Trait("Purpose", "Hardware")]
 public class TrainingRigNativeTorchHardwareTests
 {
-    [Fact]
+    [TorchCudaFact]
     public void TestModelsTrainAlikeOnTorchCuda()
     {
         string?[] waiting =

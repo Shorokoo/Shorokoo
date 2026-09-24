@@ -1,4 +1,5 @@
 using Shorokoo.Core.Backends;
+using Shorokoo.Core.Factory;
 using Shorokoo.Core.Factory.IR;
 using Shorokoo.PyTorch;
 using Shorokoo.PyTorch.Cpu;
@@ -27,15 +28,17 @@ namespace Shorokoo.Tests.Utils;
 /// depends on a random draw — a random operator's output, and everything computed from it, a node
 /// whose body or function draws included — is compared by kind, dtype and shape only. Shape, Size
 /// and SequenceLength read nothing of their input but its shape, which is still compared, so they
-/// end that dependency. Dropout draws only in training mode, so it counts as a draw unless its
-/// <c>training_mode</c> is absent or false. Everything else, Shorokoo's own keyed generator
-/// included (integer arithmetic in functions), is compared value for value.</para>
+/// end that dependency. Dropout draws only in training mode, so a Dropout of the main graph counts
+/// as a draw only where the <c>training_mode</c> it was given — fed, an initializer, or computed —
+/// is true; one inside a body counts unless it has none. Everything else, Shorokoo's own keyed
+/// generator included (integer arithmetic in functions), is compared value for value.</para>
 ///
-/// <para><b>Which modules run.</b> Every one whose operators the backend translates, decided by the
-/// backend itself: session creation refuses a model using an operator absent from its operator
-/// table (<see cref="TorchUnsupportedReason.UnknownOperator"/>), and that refusal alone skips the
-/// module. Any other failure — an attribute the translation does not handle, a wrong value, an
-/// exception in the run — fails the audit.</para>
+/// <para><b>Every module runs.</b> Every operator Shorokoo builds is one the backend translates, so
+/// any failure on torch — a model it refuses, an operator it has no translation for, an attribute
+/// the translation does not handle, an exception in the run — fails the audit.</para>
+///
+/// <para>The model is built once, the way a session receives it, and that one model is run on both
+/// backends.</para>
 ///
 /// <para><b>Known disagreements.</b> An operator torch computes differently from ONNX Runtime in a
 /// module, for a reason recorded here, is listed in <see cref="KnownDisagreements"/> under the
@@ -56,38 +59,42 @@ internal static class QeeAuditOnTorch
     public static bool Agrees<TModule>(InternalComputationGraph model, TensorData[] inputs, Func<ModelProto, ModelProto>? alterOnTorch = null)
     {
         IData[] feeds = [.. inputs.Select(static t => (IData)t.Shared())];
-        List<NodeProto> nodes = [];
-        Dictionary<string, FunctionProto> functions = [];
-        var reference = Values(ComputeContext.Default.ExecuteRewritten(model, m => ExposeEveryValue(m, nodes, functions), feeds));
+        var built = ExposeEveryValue(FastOnnxModelBuilder.BuildInternalOnnxModel(model, prepForOnnx: true));
+        var reference = Values(ComputeContext.Default.ExecuteModel(model, built, feeds));
+        var known = new Dictionary<string, IData>(reference);
+        foreach (var (input, value) in built.Graph.Inputs.Zip(inputs)) known.TryAdd(input.Name, value);
+        foreach (var initializer in built.Graph.Initializers) known.TryAdd(initializer.Name, Initializer(initializer));
+        var onTorchModel = alterOnTorch is null ? built : alterOnTorch(ProtoBuf.Serializer.DeepClone(built));
+        using var torch = new ComputeContext(Backend.Value);
         Dictionary<string, IData> onTorch;
         try
         {
-            onTorch = Values(new ComputeContext(Backend.Value).ExecuteRewritten(model,
-                m => (alterOnTorch ?? (static altered => altered))(ExposeEveryValue(m, [], [])), feeds));
-        }
-        catch (Exception ex) when (IsUntranslatedOperator(ex))
-        {
-            return true;
+            onTorch = Values(torch.ExecuteModel(model, onTorchModel, feeds));
         }
         catch (Exception)
         {
             return false;
         }
-        var convicted = Convicted(nodes, reference, onTorch, Drawn(nodes, functions, reference));
+        var functions = built.Functions.ToDictionary(f => f.Domain + ":" + f.Name);
+        var convicted = Convicted(built.Graph.Nodes, reference, onTorch, Drawn(built.Graph.Nodes, functions, known));
         return convicted.SetEquals(KnownDisagreements.Keys.Where(k => k.Module == typeof(TModule)).Select(k => k.Operator));
     }
 
-    private static ModelProto ExposeEveryValue(ModelProto model, List<NodeProto> nodes, Dictionary<string, FunctionProto> functions)
+    private static ModelProto ExposeEveryValue(ModelProto model)
     {
         var graph = model.Graph;
-        nodes.AddRange(graph.Nodes);
-        foreach (var function in model.Functions) functions[function.Domain + ":" + function.Name] = function;
         var exposed = graph.Outputs.Select(o => o.Name).Concat(graph.Inputs.Select(i => i.Name)).ToHashSet();
         foreach (var name in graph.Nodes.SelectMany(n => n.Outputs))
             if (name.Length > 0 && exposed.Add(name))
                 graph.Outputs.Add(new ValueInfoProto { Name = name });
         return model;
     }
+
+    /// <summary>An initializer's value, as far as <see cref="Draws"/> reads one: its bytes, the
+    /// elements it holds in <c>int32_data</c> (where a bool is kept) standing in for raw ones.</summary>
+    private static IData Initializer(TensorProto tensor)
+        => Globals.TensorData(DType.UInt8, [tensor.RawData is { Length: > 0 } raw ? raw.Length : tensor.Int32Datas?.Length ?? 0],
+            tensor.RawData is { Length: > 0 } bytes ? bytes : [.. (tensor.Int32Datas ?? []).Select(v => (byte)(v == 0 ? 0 : 1))]);
 
     private static Dictionary<string, IData> Values(NamedModelParam[] outputs)
         => outputs.ToDictionary(p => p.ParamName, p => p switch
@@ -102,20 +109,26 @@ internal static class QeeAuditOnTorch
 
     private static readonly HashSet<string> ShapeReaders = ["Shape", "Size", "SequenceLength"];
 
-    private static HashSet<string> Drawn(List<NodeProto> nodes, Dictionary<string, FunctionProto> functions, Dictionary<string, IData> reference)
+    private static HashSet<string> Drawn(List<NodeProto> nodes, Dictionary<string, FunctionProto> functions, Dictionary<string, IData> known)
     {
         HashSet<string> drawn = [];
         foreach (var node in nodes)
-            if (!ShapeReaders.Contains(node.OpType) && (Draws(node, functions, reference) || Reads(node).Any(drawn.Contains)))
+            if (!ShapeReaders.Contains(node.OpType) && (Draws(node, functions, known) || Reads(node).Any(drawn.Contains)))
                 drawn.UnionWith(node.Outputs);
         return drawn;
     }
 
-    private static bool Draws(NodeProto node, Dictionary<string, FunctionProto> functions, Dictionary<string, IData>? reference)
+    /// <summary>Whether <paramref name="node"/> draws. A Dropout of the main graph is judged by the
+    /// training mode it was actually given — a graph input's fed value, an initializer's, or
+    /// another node's output, all in <paramref name="known"/> — and one inside a body, whose value
+    /// is not exposed, draws unless its mode is absent.</summary>
+    private static bool Draws(NodeProto node, Dictionary<string, FunctionProto> functions, Dictionary<string, IData>? known)
         => RandomOperators.Contains(node.OpType)
             || node.OpType == "Dropout" && node.Inputs.Count > 2 && node.Inputs[2].Length > 0
-                && !(reference is not null && reference.TryGetValue(node.Inputs[2], out var mode)
-                    && mode is TensorData flag && flag.CopyRawMemory().All(b => b == 0))
+                && (known is null
+                    || (known.TryGetValue(node.Inputs[2], out var mode) && mode is TensorData flag
+                        ? flag.CopyRawMemory().Any(b => b != 0)
+                        : throw new InvalidOperationException($"The training mode '{node.Inputs[2]}' of Dropout '{node.Name}' has no value to judge it by.")))
             || node.Attributes.SelectMany(a => a.Graphs.Append(a.G)).OfType<GraphProto>()
                 .SelectMany(g => g.Nodes).Any(n => Draws(n, functions, null))
             || functions.TryGetValue(node.Domain + ":" + node.OpType, out var function)
@@ -133,14 +146,6 @@ internal static class QeeAuditOnTorch
 
     private static IEnumerable<string> Names(GraphProto graph)
         => graph.Nodes.SelectMany(Reads);
-
-    private static bool IsUntranslatedOperator(Exception? ex)
-    {
-        for (; ex is not null; ex = ex.InnerException)
-            if (ex is TorchUnsupportedModelException { Reason: TorchUnsupportedReason.UnknownOperator })
-                return true;
-        return false;
-    }
 
     private static bool Same(IData expected, IData actual, bool values) => (expected, actual) switch
     {

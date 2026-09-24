@@ -78,7 +78,8 @@ public sealed class PythonEnvironment
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(directory);
         ArgumentException.ThrowIfNullOrWhiteSpace(requiredVersion);
-        var full = Path.GetFullPath(directory);
+        // Without a trailing separator, so that one folder named two ways is one environment.
+        var full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(directory));
         if (!System.IO.Directory.Exists(full))
             throw new PythonEnvironmentException(PythonEnvironmentFailure.EnvironmentNotFound,
                 $"There is no Python environment at '{full}' ({Describe(source)}). Create one with "

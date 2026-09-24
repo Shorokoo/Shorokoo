@@ -9,7 +9,7 @@ using Shorokoo.Runtime;
 namespace Shorokoo.Tests.Benchmarks;
 
 // ---------------------------------------------------------------------------
-// The model Shorokoo/Shorokoo#326 reported on, rebuilt from the specification in
+// The model Shorokoo/Shorokoo#326 reported on, rebuilt from the description in
 // that issue: a decoder-only transformer, fp32, over a 50,257-token vocabulary
 // with an untied language-model head.
 //
@@ -88,7 +88,7 @@ public partial class ArenaProbeDecoderLarge
 /// What each <c>ArenaExtendStrategy</c> costs a real training step on a CUDA card
 /// (<see href="https://github.com/Shorokoo/Shorokoo/issues/357">Shorokoo/Shorokoo#357</see>), which
 /// <see cref="ArenaExtendStrategyProbeTests"/> could only answer for the host arena and for a
-/// workload of four chained matmuls. The model is #326's own, rebuilt from its specification, and
+/// workload of four chained matmuls. The model is #326's own, rebuilt from the issue's description, and
 /// the figures come from inside the framework — <see cref="ComputeContext.RunStats"/> reading the
 /// session's own arena either side of every step — rather than from sampling the device, which
 /// cannot tell an arena's blocks from anything else on the card.

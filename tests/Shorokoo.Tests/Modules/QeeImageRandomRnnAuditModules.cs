@@ -362,6 +362,58 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>Dropout: outside training (training_mode false) and at ratio 0 it is the identity
+    /// with an all-true mask; in training at ratio 0.5 (values random, so shape-checked, and every
+    /// element either dropped or scaled by 2) the mask is bool of the input's shape. Input
+    /// x = [1, 2, 3, 4].</summary>
+    [Module]
+    public partial class QeeDropoutAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+        {
+            var (off, offMask) = OnnxOp.Dropout(x, Scalar(0.5f), Scalar(false));
+            var (none, noneMask) = OnnxOp.Dropout(x, Scalar(0f), Scalar(true));
+            var (on, onMask) = OnnxOp.Dropout(x, Scalar(0.5f), Scalar(true), seed: 3L);
+            var kept = (Tensor<float32>)on;
+            var droppedOrScaled = ((Tensor<bit>)OnnxOp.Or(OnnxOp.Equal(kept, Scalar(0f)), OnnxOp.Equal(kept, x * Scalar(2f))))
+                .Cast<int64>().Reduce(ReduceKind.Min, keepDims: false).Scalar();
+            var mismatch =
+                FloatMismatch((Tensor<float32>)off, Vector(1f, 2f, 3f, 4f)) +
+                IntMismatch(((Tensor<bit>)offMask!).Cast<int64>(), Vector(1L, 1L, 1L, 1L)) +
+                FloatMismatch((Tensor<float32>)none, Vector(1f, 2f, 3f, 4f)) +
+                IntMismatch(((Tensor<bit>)noneMask!).Cast<int64>(), Vector(1L, 1L, 1L, 1L)) +
+                ShapeMismatch(kept, Vector(4L)) +
+                ShapeMismatch((Tensor<bit>)onMask!, Vector(4L)) +
+                IntMismatch1(droppedOrScaled, 1L);
+            return mismatch < Scalar(1L);
+        }
+    }
+
+    /// <summary>Shorokoo's keyed generator, which is deterministic integer arithmetic (Threefry-2x32
+    /// over uint32, packed into uint64) and so must match on every backend value for value: the
+    /// standard uniform at 20 and 13 rounds, the dense uniform over [−2, 3), the standard normal,
+    /// raw uint32 and uint64 bits, and a batch of key splits. Input x = zeros [3, 5] (its shape
+    /// is the draws').</summary>
+    [Module]
+    public partial class QeeKeyedRngValueAuditCheck
+    {
+        public static (Tensor<float32>, Tensor<float32>, Tensor<float32>, Tensor<float32>, Tensor<uint32>, Tensor<uint64>, Tensor<uint64>)
+            Inline(Tensor<float32> x)
+        {
+            var shape = x.ShapeTensor();
+            var key = Scalar(0x9E3779B97F4A7C15UL);
+            var substream = Scalar(5UL);
+            return (
+                Shorokoo.Core.Rng.RuntimeRng.StandardUniform(shape, key, substream),
+                Shorokoo.Core.Rng.RuntimeRng.StandardUniform(shape, key, substream, Shorokoo.Core.Rng.Threefry2x32.Rounds13),
+                Shorokoo.Core.Rng.RuntimeRng.Uniform(shape, key, substream, Scalar(-2f), Scalar(3f)),
+                Shorokoo.Core.Rng.RuntimeRng.StandardNormal(shape, key, substream),
+                Shorokoo.Core.Rng.RuntimeRng.BitsU32(shape, key, substream),
+                Shorokoo.Core.Rng.RuntimeRng.BitsU64(shape, key, substream),
+                Shorokoo.Core.Rng.RuntimeRng.BatchSplitKeys(Vector(1UL, 0xFFFFFFFFFFFFFFFFUL, 1UL << 63), Vector(0UL, 7UL, 0xFFFFFFFFUL)));
+        }
+    }
+
     /// <summary>Seeded determinism (ORT-only — QEE never computes random values): two
     /// RandomNormal / RandomUniform nodes with identical seed + distribution params must
     /// produce identical streams per spec.</summary>

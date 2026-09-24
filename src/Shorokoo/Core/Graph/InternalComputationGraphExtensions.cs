@@ -190,6 +190,7 @@ namespace Shorokoo.Graph
 
             // A ConvTranspose output_shape is checked against the input shape it will meet, which only
             // the sample inputs supply; ONNX Runtime would otherwise run a geometry ONNX forbids.
+            Stage("RejectOversizedConvTransposeOutputShape");
             FastRejectOversizedConvTransposeOutputShape.Process(fastGraph, inputHints);
 
             Stage("ExpandAutoGrad");

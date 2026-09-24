@@ -104,6 +104,7 @@ var concreteArchitecture = graph.ToConcreteArchitecture(
 …
 [   4.8s] Concretize: Simplify
 [  12.0s] Concretize: LowerAttributeTensorOps
+[  37.9s] Concretize: RejectOversizedConvTransposeOutputShape
 [  38.4s] Concretize: ExpandAutoGrad
 [  44.1s] Concretize: SimplifyAfterAutoGrad
 [  45.2s] Concretize: Freeze

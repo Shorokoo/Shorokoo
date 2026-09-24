@@ -76,4 +76,13 @@ public class QeePoolConvAuditTests
         Assert.Contains("output_shape [6, 6]", ex.Message);
         Assert.Contains("full extent [4, 4]", ex.Message);
     }
+
+    [Fact]
+    public void TestConvTransposeOutputShapeOnePastTheFullExtentZeroExtendsTheEnd()
+        => Assert.True(AutoTest.AdvancedTestGraph<ConvTransposeOutputShapeOnePastTheFullExtentValues>([],
+            [F32([1L, 1L, 3L, 3L], [.. Enumerable.Range(0, 9).Select(i => (float)i)]), F32([1L, 1L, 3L, 3L], [.. Enumerable.Repeat(1f, 9)])],
+            expected: [0, 0, 1, 1, 3, 2, 2, 0, 0, 0, 1, 1, 3, 2, 2, 0, 0, 0, 1, 1, 3, 2, 2, 0,
+                3, 3, 7, 4, 9, 5, 5, 0, 3, 3, 7, 4, 9, 5, 5, 0, 3, 3, 7, 4, 9, 5, 5, 0,
+                6, 6, 13, 7, 15, 8, 8, 0, 6, 6, 13, 7, 15, 8, 8, 0, 6, 6, 13, 7, 15, 8, 8, 0,
+                0, 0, 0, 0, 0, 0, 0, 0]));
 }

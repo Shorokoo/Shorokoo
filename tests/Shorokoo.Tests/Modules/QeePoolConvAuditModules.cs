@@ -460,4 +460,13 @@ namespace Shorokoo.Tests.Modules
         public static Tensor<float32> Inline(Tensor<float32> x, Tensor<float32> w, Tensor<float32> b)
             => (Tensor<float32>)OnnxOp.ConvTranspose(x, w, b, AutoPad.NotSet, null, 1L, [2L, 2L], null, [6L, 6L], null, [2L, 2L]);
     }
+
+    /// <summary>The ONNX output_shape example: output_shape [10,8] one past the full extent [9,7] zero-extends
+    /// the end. x is [1,1,3,3], w is [1,1,3,3].</summary>
+    [Module]
+    public partial class ConvTransposeOutputShapeOnePastTheFullExtentValues
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x, Tensor<float32> w)
+            => (Tensor<float32>)OnnxOp.ConvTranspose(x, w, Vector(0f), AutoPad.NotSet, null, 1L, null, null, [10L, 8L], null, [3L, 2L]);
+    }
 }

@@ -298,7 +298,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// Returns null if any input slot has no matching sample (so the sample-based strategies
         /// are skipped and the caller relies on constant folding).
         /// </summary>
-        private static TensorData[]? OrderSamples(InternalComputationGraph resolver, ModelParamList sampleInputs)
+        internal static TensorData[]? OrderSamples(InternalComputationGraph resolver, ModelParamList sampleInputs)
         {
             var byName = new Dictionary<string, TensorData>();
             foreach (var p in sampleInputs.ModelParams)

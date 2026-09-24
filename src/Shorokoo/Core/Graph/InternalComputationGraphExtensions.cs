@@ -188,6 +188,10 @@ namespace Shorokoo.Graph
             DebugPrintFast(fastGraph, debugRequests, GraphCreationPoint.AfterLowerAttributeTensorOps);
             FastGraphCycleDetector.AssertAcyclic(fastGraph, "After FastLowerAttributeTensorOps");
 
+            // A ConvTranspose output_shape is checked against the input shape it will meet, which only
+            // the sample inputs supply; ONNX Runtime would otherwise run a geometry ONNX forbids.
+            FastRejectOversizedConvTransposeOutputShape.Process(fastGraph, inputHints);
+
             Stage("ExpandAutoGrad");
             FastProcessAutoGradProcessor.Process(fastGraph);
             DebugPrintFast(fastGraph, debugRequests, GraphCreationPoint.AfterExpandAutoGrad);

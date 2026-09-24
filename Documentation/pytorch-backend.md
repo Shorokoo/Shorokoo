@@ -170,9 +170,12 @@ else.
   comparisons and logic operators, the reductions, `MatMul`/`Gemm`, the shape operators
   (`Reshape`, `Transpose`, `Concat`, `Split`, `Squeeze`/`Unsqueeze`, `Shape`, `Expand`, `Tile`,
   `Pad`, `Constant`, `ConstantOfShape`, `Range`, …), `Gather`/`GatherElements`/`Slice`/`Compress`,
-  and `If`/`Loop` are translated. Convolution and pooling, normalization, recurrent networks,
-  random draws, sequences, strings, signal, image and quantization operators are not yet: a
-  model using one is refused when its session is created, naming it.
+  `If`/`Loop`, the recurrent networks (`RNN`, `GRU`, `LSTM` — `layout=1` included, which ONNX
+  Runtime's CPU kernels refuse), the signal operators (`DFT`, `STFT`, the windows,
+  `MelWeightMatrix`) and `QuantizeLinear`/`DequantizeLinear`/`DynamicQuantizeLinear`/
+  `QLinearMatMul`/`QLinearConv` are translated. Convolution and pooling, normalization, random
+  draws, sequences, strings and image operators are not yet: a model using one is refused when
+  its session is created, naming it.
 - **Linux x64 only.** The lock files are resolved for Linux x64, and so are the packages.
 - **Device memory settings are not applied.** PyTorch's caching allocator is process-wide, so
   a context's `DeviceMemory` budget still bounds the tensors the context holds, but a session's

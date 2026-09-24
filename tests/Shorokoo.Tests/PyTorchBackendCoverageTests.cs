@@ -719,6 +719,31 @@ public class PyTorchBackendCoverageTests
         Assert.True(hung.Took < TimeSpan.FromSeconds(15));
     }
 
+    [Fact]
+    public void TestAProcessWithoutUvWaitsForAnotherThatIsProvisioningAndUsesWhatItProvisioned()
+    {
+        var root = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "shorokoo-wait-" + Guid.NewGuid().ToString("N"))).FullName;
+        var directory = Path.Combine(root, PythonEnvironmentLock.Cpu.CacheKey);
+        try
+        {
+            Task<PythonEnvironment> waiting;
+            using (new FileStream(directory + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
+            {
+                waiting = Task.Run(() => PythonEnvironmentResolver.Resolve(PythonEnvironmentLock.Cpu, new() { CacheDirectory = root, UvPath = Path.Combine(root, "uv") }, _ => null));
+                Thread.Sleep(500);
+                Directory.CreateDirectory(directory);
+                File.Copy(Path.Combine(Torch.Start().Directory, "pyvenv.cfg"), Path.Combine(directory, "pyvenv.cfg"));
+                File.WriteAllText(Path.Combine(directory, ".shorokoo-provisioned"), PythonEnvironmentLock.Cpu.Hash);
+            }
+
+            Assert.Equal(PythonEnvironmentSource.Provisioned, waiting.Result.Source);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     private static PythonEnvironment Resolve(PythonEnvironmentOptions options, string variable)
         => PythonEnvironmentResolver.Resolve(PythonEnvironmentLock.Cpu, options,
             name => name == PythonEnvironmentResolver.EnvironmentVariable ? variable : null);

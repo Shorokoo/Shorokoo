@@ -910,6 +910,37 @@ namespace Shorokoo.Tests.Modules
             => Apart(y.Slice(Vector(2L, 1L), Vector(4L, 2L), axes: Vector(0L, 2L)), Vector(0f).Tensor());
     }
 
+    /// <summary>Activation arguments ONNX Runtime reads otherwise than the spec: a bidirectional
+    /// RNN whose beta list is shorter than its directions ([LeakyRelu, Affine], alpha [0.3, 0.7],
+    /// beta [0.2]) or whose one alpha belongs to its second activation, a GRU leaving Affine's and
+    /// ThresholdedRelu's alpha to their defaults of 1, and a bidirectional LSTM consuming one alpha
+    /// among three activations that take one. The values are ONNX Runtime's, and the PyTorch
+    /// backend must agree with them. Inputs: x [4,2,3], w [2,20,3], r [2,20,5], b [2,40].</summary>
+    [Module]
+    public partial class QeeRecurrentActivationArgumentsValueCheck
+    {
+        public static (Tensor<float32>, Tensor<float32>, Tensor<float32>, Tensor<float32>) Inline(
+            Tensor<float32> x, Tensor<float32> w, Tensor<float32> r, Tensor<float32> b)
+        {
+            var wRnn = w.Slice(Vector(0L), Vector(5L), axes: Vector(1L));
+            var rRnn = r.Slice(Vector(0L), Vector(5L), axes: Vector(1L));
+            var bRnn = b.Slice(Vector(0L), Vector(10L), axes: Vector(1L));
+            var wGru = w.Slice(Vector(0L, 0L), Vector(1L, 15L), axes: Vector(0L, 1L));
+            var rGru = r.Slice(Vector(0L, 0L), Vector(1L, 15L), axes: Vector(0L, 1L));
+            var bGru = b.Slice(Vector(0L, 0L), Vector(1L, 30L), axes: Vector(0L, 1L));
+
+            var (y1, _) = OnnxOp.Rnn(x, wRnn, rRnn, bRnn, null, null,
+                [0.3f, 0.7f], [0.2f], ["LeakyRelu", "Affine"], null, RNNDirection.Bidirectional, 5L, false);
+            var (y2, _) = OnnxOp.Rnn(x, wRnn, rRnn, bRnn, null, null,
+                [0.3f], null, ["Tanh", "LeakyRelu"], null, RNNDirection.Bidirectional, 5L, false);
+            var (y3, _) = OnnxOp.Gru(x, wGru, rGru, bGru, null, null,
+                null, null, ["Affine", "ThresholdedRelu"], null, GRUDirection.Forward, 5L, false);
+            var (y4, _, _) = OnnxOp.Lstm(x, w, r, b, null, null, null, null,
+                [0.1f], null, ["HardSigmoid", "Tanh", "Elu", "Sigmoid", "Relu", "LeakyRelu"], null, LSTMDirection.Bidirectional, 5L, null, false);
+            return ((Tensor<float32>)y1, (Tensor<float32>)y2, (Tensor<float32>)y3, (Tensor<float32>)y4);
+        }
+    }
+
     /// <summary>ImageDecoder values in every pixel format: an RGB PNG, an RGB JPEG and a greyscale
     /// JPEG, each decoded to HWC uint8. ONNX Runtime has no ImageDecoder kernel, so this runs on
     /// the PyTorch backend.</summary>

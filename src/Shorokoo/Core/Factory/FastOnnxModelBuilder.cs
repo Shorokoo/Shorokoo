@@ -278,6 +278,13 @@ namespace Shorokoo.Core.Factory
             // so user-exported .onnx files are safe too.
             LowerTrainingBatchNormalization(model.Graph, BuildTensorMetaByName(tensorInfoLookup));
 
+            // ----- 5b, continued. Every dialect a runtime reads — a backend's session or an exported file,
+            // not the .srk one — gets its recurrent nodes' activation_alpha/activation_beta
+            // written in full, in the form ONNX Runtime reads as the spec does; see
+            // RecurrentActivationArguments.
+            if (flattenFunctionBodies)
+                RecurrentActivationArguments.Normalize(model);
+
             // ----- 5c. Execution dialect only: the one AUTO_GRAD node a training step keeps when
             // its gradient is left to the execution backend goes out as that backend's operator.
             // Only such a step reaches here carrying one -- the compile gate refuses AUTO_GRAD in

@@ -16,7 +16,9 @@ namespace Shorokoo.Runtime
     /// <param name="AttachedTensors">How many tensors those are.</param>
     /// <param name="Added">The bytes the run adds to them: what it reads there in place that the
     /// context has not counted, and the copies it makes there.</param>
-    internal readonly record struct DevicePlan(long Attached, int AttachedTensors, long Added)
+    /// <param name="InArena">The bytes of what it was fed that the runtime copies into the arena
+    /// itself — at least that much of the arena the run needs.</param>
+    internal readonly record struct DevicePlan(long Attached, int AttachedTensors, long Added, long InArena = 0)
     {
         /// <summary>All of it: the discount the session's arena limit is cut from the budget by.</summary>
         internal long Outside => Attached + Added;
@@ -208,6 +210,17 @@ namespace Shorokoo.Runtime
         /// its backend computes in is a device's — or null where there is none.</summary>
         internal long? Budget { get; }
 
+        /// <summary>
+        /// The inputs, by the names the run is fed them under, whose consumed memory an output of the
+        /// session may be written into — fed, where the run cannot read one where it is, through a
+        /// copy the framework makes in the run's memory, which the output can then take. A consumed
+        /// feed of any other input the run cannot read where it is goes to the session as the host
+        /// has it, for the runtime to copy into the arena the session's limit covers — rather than into
+        /// memory outside it, which a budget would cut that limit for. None for a run that aliases
+        /// nothing.
+        /// </summary>
+        internal IReadOnlySet<string> WrittenInto { get; set; } = System.Collections.Frozen.FrozenSet<string>.Empty;
+
         /// <summary>The locks held, whose eviction signals the run listens for.</summary>
         internal IReadOnlyList<TensorLease> Leases => _leases;
 
@@ -311,8 +324,10 @@ namespace Shorokoo.Runtime
         /// <para>That is every live tensor attached to the context there, and what the run adds to
         /// it: each tensor it is fed that it reads in place there and the context has not yet
         /// counted, and each copy it will have to make there of one it cannot read where it is —
-        /// or the copy already held, where one is. A sequence is read through the host and adds
-        /// nothing, and so do the elements it is built from. What is in
+        /// or the copy already held, where one is. A tensor it consumes that goes to the session
+        /// from the host (<see cref="ThroughTheHost"/>) is copied into the arena by the runtime, so
+        /// it is counted there instead (<see cref="DevicePlan.InArena"/>). A sequence is read
+        /// through the host and adds nothing, and so do the elements it is built from. What is in
         /// <paramref name="excludingArena"/> — the arena of the session about to run, where its own
         /// earlier runs left their outputs — is inside that session's limit already, and is left
         /// out.</para>
@@ -325,6 +340,7 @@ namespace Shorokoo.Runtime
             // What the run adds is what is not on the books already, each once however many inputs
             // it is read through.
             long added = 0;
+            long inArena = 0;
             HashSet<TensorData>? adding = null;
             bool Adds(TensorData tensor)
                 => tensor.Space == _space
@@ -351,6 +367,13 @@ namespace Shorokoo.Runtime
                     resident = target.Copy = tensor.CopyHeldAt(where);
                     if (resident is null)
                     {
+                        // Handed to the runtime through the host, it is copied into the arena, which
+                        // the session's limit covers: nothing held outside it.
+                        if (target.Mode == FeedMode.Consume && ThroughTheHost(target, where))
+                        {
+                            inArena += tensor.ByteCount;
+                            continue;
+                        }
                         target.PlannedFresh = true;
                         added += tensor.ByteCount;
                         continue;
@@ -358,7 +381,7 @@ namespace Shorokoo.Runtime
                 }
                 if (Adds(resident)) added += resident.ByteCount;
             }
-            return new DevicePlan(attached, attachedTensors, added);
+            return new DevicePlan(attached, attachedTensors, added, inArena);
         }
 
         /// <summary>
@@ -379,9 +402,21 @@ namespace Shorokoo.Runtime
         /// <summary>
         /// Records the session this run was admitted to — its arena limit, and the plan it was
         /// chosen by — so each copy the run then makes in the context's memory is held to it.
+        /// Refuses the run, before it takes anything, where what the runtime is to copy into that
+        /// arena of what it was fed does not fit in it by itself.
         /// </summary>
+        /// <exception cref="InvalidOperationException">The arena cannot hold what the run was fed.
+        /// Nothing has been taken.</exception>
         internal void Admit(long arenaLimit, DevicePlan plan)
         {
+            if (plan.InArena > arenaLimit)
+                throw new InvalidOperationException(
+                    $"{_run} would have its runtime copy {Figure(plan.InArena)} bytes it was fed into the "
+                    + $"arena it computes in, which its compute context's device-memory budget "
+                    + "(DeviceMemorySettings.LimitBytes) leaves "
+                    + $"{Figure(arenaLimit)} bytes, with {Figure(plan.Outside)} bytes of {_space} held "
+                    + "outside it. Nothing it was fed has been taken. Delete what the context no longer "
+                    + "needs, feed less at once, or give the context a larger budget.");
             _admitted = true;
             _arenaLimit = arenaLimit;
             _plan = plan;
@@ -593,6 +628,17 @@ namespace Shorokoo.Runtime
             if (tensor.FeedsInPlace(_backend))
                 return Hand(tensor, tensor.UncheckedValue(_backend));
 
+            var where = TensorData.RunMemoryOf(_backend, tensor.DType);
+            if (ThroughTheHost(target, where) && tensor.CopyHeldAt(where) is null)
+            {
+                // Already a value of the running backend's runtime in host memory: handed as it is.
+                if (tensor.Location == TensorData.HostMemoryOf(_backend))
+                    return Hand(tensor, tensor.UncheckedValue(_backend));
+                var hosted = target.Copy = tensor.HostRunCopy(_backend, target.Death!);
+                target.Copied = true;
+                return Hand(hosted, hosted.UncheckedValue(_backend));
+            }
+
             // Incompatible memory: the contents go into the run's memory, the tensor is spent, and
             // the copy is what is consumed. Its own memory is released as soon as every value is
             // built rather than after the run, which is the point of consuming it.
@@ -615,6 +661,15 @@ namespace Shorokoo.Runtime
             _handed.Add(value, owner);
             return value;
         }
+
+        /// <summary>
+        /// Whether a consumed feed the run cannot read where it is goes to the session as the host has
+        /// it — a value of the running backend's runtime in host memory, which the runtime copies into
+        /// its own arena — rather than through a copy the framework makes at <paramref name="where"/>,
+        /// the run's memory: where that memory is a device's, and no output may be written into it.
+        /// </summary>
+        private bool ThroughTheHost(Target target, MemoryLocation where)
+            => !where.Space.IsHost && !target.MayBeWrittenInto(WrittenInto);
 
         /// <summary>
         /// The arena the memory behind <paramref name="value"/> was in, where it is a value this run
@@ -729,6 +784,11 @@ namespace Shorokoo.Runtime
                 => _names.Count == 1
                     ? _names[0].ToString()
                     : $"{string.Join(", ", _names.Take(_names.Count - 1))} and {_names[^1]}";
+
+            /// <summary>Whether one of the inputs it feeds is one an output may be written into the
+            /// consumed memory of.</summary>
+            internal bool MayBeWrittenInto(IReadOnlySet<string> writtenInto)
+                => writtenInto.Count > 0 && _names.Exists(name => name.Element < 0 && writtenInto.Contains(name.ParamName));
 
             /// <summary>Records an input that feeds it.</summary>
             internal void Feeds(FeedName name, SharedInputMode? sharing)

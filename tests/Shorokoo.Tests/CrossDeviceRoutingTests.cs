@@ -266,7 +266,7 @@ public class CrossDeviceRoutingCoverageTests
 
         var placed = Floats(100).CopyTo(context);
         var fourth = Kept();
-        Assert.Equal([6300L, 5600L], card.Sessions.Select(s => s.LimitBytes));
+        Assert.Equal([6300L, 5700L], card.Sessions.Select(s => s.LimitBytes));
         compiled.Execute(second.Shared());
         Assert.Equal(2, card.Sessions.Count);
         GC.KeepAlive((object[])[first, third, placed, fourth]);
@@ -280,11 +280,13 @@ public class CrossDeviceRoutingCoverageTests
         var compiled = context.Compile(Echo());
         var fed = Floats(16);
 
-        var refusal = Assert.Throws<InvalidOperationException>(() => compiled.Execute(fed));
-        Assert.Contains("would hold 64 bytes of CUDA device 0 memory outside its own arena", refusal.Message);
-        Assert.Contains("0 bytes of the 0 tensor(s) attached to its compute context there, and 64 bytes more", refusal.Message);
-        Assert.Contains("64-byte device-memory budget", refusal.Message);
-        Assert.Throws<InvalidOperationException>(() => compiled.Execute(fed.Shared()));
+        var consumed = Assert.Throws<InvalidOperationException>(() => compiled.Execute(fed)).Message;
+        Assert.Contains("copy 64 bytes it was fed into the arena it computes in", consumed);
+        Assert.Contains("leaves 63 bytes", consumed);
+        var read = Assert.Throws<InvalidOperationException>(() => compiled.Execute(fed.Shared())).Message;
+        Assert.Contains("would hold 64 bytes of CUDA device 0 memory outside its own arena", read);
+        Assert.Contains("0 bytes of the 0 tensor(s) attached to its compute context there, and 64 bytes more", read);
+        Assert.Contains("64-byte device-memory budget", read);
         Assert.Throws<InvalidOperationException>(() => context.Execute(Echo(), fed));
         Assert.False(fed.IsDisposed);
         Assert.Empty(card.Built);
@@ -569,6 +571,40 @@ public class CrossDeviceRoutingCoverageTests
         Assert.False(unreadable.IsDisposed);
     }
 
+    [Fact]
+    public void TestAConsumedHostFeedNoOutputIsWrittenIntoIsCopiedIntoTheArenaSoALoopKeepsItsSession()
+    {
+        var card = new StubBackend(ComputeDevice.Cuda, 0) { ReleasesWhatItConsumes = true };
+        using var context = new ComputeContext(card) { DeviceMemory = Budget(6400) };
+        var compiled = context.Compile(Doubled());
+        TensorData Kept(IData a) => compiled.Execute([a], [true])[0].ToTensorData();
+
+        var state = Kept(Floats(200));
+        state = Kept(state);
+        state = Kept(state);
+
+        Assert.Equal([6300L], card.Sessions.Select(s => s.LimitBytes));
+        Assert.Empty(card.Built);
+        GC.KeepAlive(state);
+    }
+
+    [Fact]
+    public void TestAConsumedHostValueOfTheCardsOwnRuntimeIsHandedToItAsItIs()
+    {
+        var card = new StubBackend(ComputeDevice.Cuda, 0) { ReleasesWhatItConsumes = true };
+        using var context = new ComputeContext(card) { DeviceMemory = Budget(6400) };
+        var compiled = context.Compile(Doubled());
+        var output = compiled.Execute(Floats(200))[0].ToTensorData();
+        var value = output.ToTensorValue(card);
+
+        compiled.Execute(output);
+
+        Assert.Same(value, card.Handed[^1]);
+        Assert.Contains(value, card.Released);
+        Assert.True(output.IsDisposed);
+        Assert.Empty(card.Built);
+    }
+
     private static DeviceMemorySettings Budget(long bytes) => new() { LimitBytes = bytes };
 
     /// <summary>A shared feed for input "a" that calls <paramref name="held"/> once the run holds
@@ -659,8 +695,9 @@ public class CrossDeviceRoutingCoverageTests
         var fresh = TensorData([2L], (float[])[4f, 6f]);
         Assert.Equal([4f, 6f], Run(fresh));
         Assert.True(fresh.IsDisposed);
-        Assert.Equal([card.Built[1], card.Built[2]], card.Handed);
-        Assert.Equal([card.Built[0], card.Built[1], card.Built[2]], card.Released);
+        Assert.Equal(2, card.Built.Count);
+        Assert.True(card.Handed[1].IsHostAccessible);
+        Assert.Equal([card.Built[0], card.Built[1], card.Handed[1]], card.Released);
     }
 
     [Fact]
@@ -1012,6 +1049,8 @@ public class CrossDeviceRoutingCoverageTests
         StubBackend backend, string[] inputNames, string[] outputNames, IReadOnlyList<OutputAlias> aliases)
         : StubSession(backend, inputNames, outputNames), IShorokooSession
     {
+        IReadOnlySet<string> IShorokooSession.AliasableInputs => aliases.Select(alias => alias.Input).ToHashSet();
+
         IReadOnlyList<IShorokooTensorValue> IShorokooSession.RunConsuming(
             IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
             IReadOnlyCollection<IShorokooTensorValue> consumed, IReadOnlyList<string> outputNames,

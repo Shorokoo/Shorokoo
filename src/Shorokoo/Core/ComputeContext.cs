@@ -79,10 +79,10 @@ namespace Shorokoo.Runtime
             IReadOnlyList<OutputAlias>? outputAliases = null)
         {
             _owner = owner;
-            _built = new BuiltSession(session, deviceMemory);
+            _onnxInputNameByOriginal = onnxInputNameByOriginal;
+            _built = new BuiltSession(session, deviceMemory, WrittenIntoOf(session));
             _outputNames = [.. session.OutputNames];
             _backend = backend;
-            _onnxInputNameByOriginal = onnxInputNameByOriginal;
             _originalInputNames = originalInputNames;
             Optimization = optimization;
             DefaultRunSettings = defaultRunSettings;
@@ -110,13 +110,35 @@ namespace Shorokoo.Runtime
         /// tensors a run leaves there record it: a token of its own rather than the session, so an
         /// output that outlives a rebuilt session does not keep the managed wrapper of it alive.
         /// </summary>
-        private sealed class BuiltSession(IShorokooSession session, DeviceMemorySettings deviceMemory)
+        private sealed class BuiltSession(
+            IShorokooSession session, DeviceMemorySettings deviceMemory, IReadOnlySet<string> writtenInto)
         {
             internal IShorokooSession Session { get; } = session;
 
             internal DeviceMemorySettings DeviceMemory { get; } = deviceMemory;
 
             internal object Arena { get; } = new();
+
+            /// <summary>The inputs, by the names the graph was compiled with, that a run of this
+            /// session may write an output into the consumed memory of.</summary>
+            internal IReadOnlySet<string> WrittenInto { get; } = writtenInto;
+        }
+
+        /// <summary>
+        /// The inputs, by the names the graph was compiled with, that a run of
+        /// <paramref name="session"/> may write an output into the consumed memory of — the ones it
+        /// says it can bind (<see cref="IShorokooSession.AliasableInputs"/>), named as a run's feeds
+        /// name them.
+        /// </summary>
+        private IReadOnlySet<string> WrittenIntoOf(IShorokooSession session)
+        {
+            var aliasable = session.AliasableInputs;
+            if (aliasable.Count == 0) return aliasable;
+            // A feed whose name the graph did not rename is fed under that name as it is.
+            var named = new HashSet<string>(aliasable, StringComparer.Ordinal);
+            foreach (var (original, own) in _onnxInputNameByOriginal)
+                if (aliasable.Contains(own)) named.Add(original);
+            return named;
         }
 
         // What a message about a run of this graph calls it, where the compiler knew better than a
@@ -327,6 +349,7 @@ namespace Shorokoo.Runtime
                 // Under a budget, the session this run can use -- kept, or built again with the
                 // arena limit what the context now holds leaves -- decided before anything is
                 // taken, so a run the budget cannot fit is refused having consumed nothing.
+                feeds.WrittenInto = _built.WrittenInto;
                 var built = feeds.Budget is { } limit ? Within(limit, feeds) : _built;
                 var session = built.Session;
 
@@ -432,7 +455,8 @@ namespace Shorokoo.Runtime
         /// <para>What the budget allows a session is the budget less the <i>discount</i>: the bytes
         /// the context holds in its memory outside that session's arena for the length of the run —
         /// every tensor attached to it there, and what the run itself reads there or copies there to
-        /// read. A tensor the session's own earlier runs left in its arena is inside the limit
+        /// read; not a host tensor it consumes, which the runtime copies into the arena itself unless
+        /// an output may be written into it. A tensor the session's own earlier runs left in its arena is inside the limit
         /// already, where it is, and is not discounted again — and so is one a run wrote into such a
         /// tensor's memory, where one written into memory outside the arena is discounted with the
         /// rest (see <see cref="ArenasOf"/>). ONNX Runtime fixes an arena's limit
@@ -442,7 +466,8 @@ namespace Shorokoo.Runtime
         /// <see cref="ComputeContext.ArenaLimitWithin"/> for the limit a new one gets.</para>
         /// </summary>
         /// <exception cref="InvalidOperationException">What the context holds leaves no room for the
-        /// run's arena. Nothing has been taken.</exception>
+        /// run's arena, or less than what the run would have the runtime copy into it. Nothing has
+        /// been taken.</exception>
         private BuiltSession Within(long limit, RunFeeds feeds)
         {
             var built = _built;
@@ -470,8 +495,8 @@ namespace Shorokoo.Runtime
                 "This compiled graph kept no model to build its session again from, so its arena "
                 + "limit cannot come down to what its context's device-memory budget now allows.");
             var deviceMemory = _built.DeviceMemory with { LimitBytes = arenaLimit };
-            var fresh = new BuiltSession(
-                _owner.BuildSession(_backend, model, Optimization, deviceMemory, _outputAliases), deviceMemory);
+            var session = _owner.BuildSession(_backend, model, Optimization, deviceMemory, _outputAliases);
+            var fresh = new BuiltSession(session, deviceMemory, WrittenIntoOf(session));
             BuiltSession old;
             lock (_sessionGate)
             {

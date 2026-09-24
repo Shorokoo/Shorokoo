@@ -51,6 +51,8 @@ internal sealed class OrtSession : IShorokooSession
     /// has to be for that to happen.</summary>
     private sealed record AliasSlot(string Output, string Input, long[] Shape, TensorElementType ElementType);
 
+    public IReadOnlySet<string> AliasableInputs { get; }
+
     public OrtSession(
         InferenceSession session, int? cudaDeviceId, IShorokooBackend backend)
         : this(session, cudaDeviceId, backend, profileDirectory: null, outputAliases: [])
@@ -69,6 +71,7 @@ internal sealed class OrtSession : IShorokooSession
         _backend = backend;
         _profileDirectory = profileDirectory;
         _aliases = Slots(session, outputAliases);
+        AliasableInputs = _aliases.Select(slot => slot.Input).ToHashSet(StringComparer.Ordinal);
         // Nothing to clean up, so nothing to finalize -- every untraced session would otherwise
         // join the finalization queue to run an early return.
         if (profileDirectory is null) GC.SuppressFinalize(this);

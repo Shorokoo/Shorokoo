@@ -166,6 +166,12 @@ namespace Shorokoo
         /// </summary>
         internal bool IsWhereRunsRead(IShorokooBackend backend) => Location == RunMemoryOf(backend, DType);
 
+        /// <summary>Host memory of <paramref name="backend"/>'s runtime: where the values it builds
+        /// from host bytes are, and where it leaves an output it does not keep in memory of its
+        /// own.</summary>
+        internal static MemoryLocation HostMemoryOf(IShorokooBackend backend)
+            => new(MemorySpace.Host, backend.RuntimeIdentity);
+
         /// <summary>
         /// The copy of this tensor a run on <paramref name="backend"/> reads where it cannot be
         /// handed this tensor itself (<see cref="FeedsInPlace"/>): held by this tensor, keyed by the
@@ -203,6 +209,21 @@ namespace Shorokoo
             if (fresh.TryTake(death) != TakeOutcome.Taken)
                 throw new InvalidOperationException("A copy made for one run was held by another.");
             return fresh;
+        }
+
+        /// <summary>
+        /// The copy a run on <paramref name="backend"/> that has taken this tensor consumes in its
+        /// place where the runtime is to copy it into its own arena: a value of that backend's runtime
+        /// in host memory, holding this tensor's contents, taken with <paramref name="death"/>. Reads
+        /// the contents without the liveness check: the run has taken this tensor.
+        /// </summary>
+        internal TensorData HostRunCopy(IShorokooBackend backend, TensorDeath death)
+        {
+            var copy = BuiltBy(backend, HostCopyOn(backend));
+            // Made for this run alone, so nothing else can hold it: the take cannot fail.
+            if (copy.TryTake(death) != TakeOutcome.Taken)
+                throw new InvalidOperationException("A copy made for one run was held by another.");
+            return copy;
         }
 
         /// <summary>

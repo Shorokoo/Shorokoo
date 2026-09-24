@@ -122,9 +122,13 @@ public sealed record DeviceMemorySettings
     /// the run — the tensors attached to it there, and those the run reads there or copies there to
     /// read. A tensor already on the card is read where it is and never enters the arena, so it
     /// stays in the discount for the whole run; one the session's own earlier runs left in its arena
-    /// is inside the limit already. What the run consumed is released as it returns, and drops out.
-    /// A run that needs more arena than it was left fails with ORT's <c>BFCArena</c> error; one whose
-    /// discount leaves no arena at all is refused before it takes anything it was fed.</para>
+    /// is inside the limit already. A host tensor the run consumes is handed to the session in host
+    /// memory, and ORT copies it into the arena, inside the limit — unless an output may be written
+    /// into it, when it is copied onto the card first, like one the run reads, and discounted. What
+    /// the run consumed is released as it returns, and drops out. A run that needs more arena than it
+    /// was left fails with ORT's <c>BFCArena</c> error; one whose discount leaves no arena at all, or
+    /// less than what it would have ORT copy in, is refused before it takes anything it was
+    /// fed.</para>
     ///
     /// <para><b>Sessions.</b> ORT fixes a session's <c>gpu_mem_limit</c> when the session is built,
     /// and building one costs about as much as the graph is large, so a session is built with the

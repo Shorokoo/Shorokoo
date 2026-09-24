@@ -743,7 +743,13 @@ directly, and one another device or another runtime allocated — is fed through
 run's memory, and the mode decides what becomes of that copy:
 
 - **Consumed**, the contents are copied into the run's memory, the tensor is dead and its own
-  memory released at the feed, and the copy is what the run consumes.
+  memory released at the feed, and the copy is what the run consumes. On a card that copy is ONNX
+  Runtime's own, into the session's arena: the run hands the session the contents in host memory —
+  the tensor itself, where it is a host value of the session's runtime already, such as an output
+  an earlier run brought back, whose memory is then released as the run returns. An input an
+  output may be [written into](#a-run-that-writes-an-output-into-what-it-consumed) is the
+  exception: it is copied onto the card before the run, so the output has card memory to be
+  written into.
 - **Read**, the copy is made on the first such read and kept. It is a `TensorData` of its own:
   held by the tensor it was copied from, locked by each run that reads it, attached to the context
   that read it (so it shows in `context.Tensors`), and read again by every later shared read in
@@ -1411,8 +1417,8 @@ on two contexts' books counts on both; one that dies, is collected, or is taken 
 drops out.
 
 **A transfer it cannot take is refused before it allocates.** `To`, `CopyTo` and
-`AllocateUninitialized` onto the context — and the copy a run makes of a tensor it cannot read where
-it is, which is how a host tensor fed to a run on the card is read — are refused when what is
+`AllocateUninitialized` onto the context — and the copy a run makes on the card of a tensor it
+cannot read where it is, which is how a host tensor a run on the card reads is read — are refused when what is
 attached plus what they would add passes the limit. So is a `To` of a tensor already on the card
 that the context's backend reads as it stands: nothing is copied, but attaching it puts its bytes
 on the books. A struct's or a sequence's `To` and `CopyTo` are checked whole, before any part of
@@ -1436,11 +1442,16 @@ A tensor already on the card is read where it is and never enters the arena, so 
 discount for the whole run: measured, a session whose arena was capped at 32 MiB read a 64 MiB
 input from the card with its arena never above 256 bytes, while the same bytes handed to an ONNX
 Runtime session directly from host memory had to be copied into its arena and did not fit. Through
-Shorokoo that second case does not arise: a host tensor fed to a run on the card is copied onto the
-card before the run, outside the arena, and counted in the discount like any other tensor there.
-What a run consumed is released as it returns, and drops out. A run whose discount leaves its arena
-nothing is refused before it takes anything it was fed; one whose arena needs more than it was left
-fails with ORT's `BFCArena` error. On an RTX 4090, under a 256 MiB budget: with nothing held, a
+Shorokoo a host tensor fed to a run on the card takes one route or the other by how it is fed.
+Read — `.Shared()` — it is copied onto the card before the run, outside the arena, kept there for
+the reads that follow, and counted in the discount like any other tensor there. Consumed, it is
+handed to the session in host memory and copied into the arena, where it counts against the
+session's limit rather than cutting it, so a loop that feeds every run a fresh host batch keeps its
+session; the exception is an input an output may be written into, which is copied onto the card
+like a read one. What a run consumed is released as it returns, and drops out. A run whose discount
+leaves its arena nothing, or less than what it would have the runtime copy in, is refused before it
+takes anything it was fed; one whose arena needs more than it was left fails with ORT's `BFCArena`
+error. On an RTX 4090, under a 256 MiB budget: with nothing held, a
 session got a 252 MiB arena and a run filling 160 MiB of it went through; with a 100 MiB tensor held
 on the card, the session was rebuilt at 152 MiB and the same run failed.
 

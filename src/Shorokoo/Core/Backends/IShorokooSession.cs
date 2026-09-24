@@ -108,6 +108,17 @@ public interface IShorokooSession : IDisposable
         return RunConsuming(inputs, consumed, outputNames, retainedOutputNames, runSettings);
     }
 
+    // The inputs, by this session's names for them, that a run of it may write an output into the
+    // consumed memory of (see RunConsuming): those of the pairs it was built with that it can bind at
+    // all. The framework feeds a consumed tensor of one of these through a copy in memory it holds,
+    // which the output can then be written into; one of any other input that the run cannot read
+    // where it is goes to the session as the host has it, for the runtime to copy into its own arena
+    // -- inside the limit the session was built with, rather than outside it cutting that limit.
+    //
+    // Defaulted to none, so a backend outside this repository keeps compiling: one that aliases
+    // nothing has no such input.
+    IReadOnlySet<string> AliasableInputs => System.Collections.Frozen.FrozenSet<string>.Empty;
+
     // This session's own memory arena as its runtime reports it, or null when the backend has no
     // such figures to give. Cheap enough to call either side of a run, which is how a run's peak
     // is attributed; see ArenaStatistics for why MaxInUseBytes alone cannot be.

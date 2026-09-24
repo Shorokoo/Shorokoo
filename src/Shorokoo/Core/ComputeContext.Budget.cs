@@ -21,7 +21,9 @@ namespace Shorokoo.Runtime
     /// <item><b>Runs.</b> A session's arena limit is the budget less what the context holds in its
     /// memory outside that arena for the length of the run — the <i>discount</i>. A session is kept
     /// while its limit is within what the budget allows, and built again when the discount has grown
-    /// past what it left room for; see <see cref="ArenaLimitWithin"/>. An output a run wrote into
+    /// past what it left room for; see <see cref="ArenaLimitWithin"/>. A host tensor a run consumes
+    /// goes to the session in host memory, for the runtime to copy into the arena, unless an output
+    /// may be written into it (<see cref="IShorokooSession.AliasableInputs"/>). An output a run wrote into
     /// memory it consumed (<see cref="OutputAlias"/>) is where that memory was — outside the arena,
     /// or inside it where the consumed tensor was the session's own earlier output — and is counted
     /// there, once.</item>

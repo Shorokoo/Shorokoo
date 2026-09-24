@@ -153,8 +153,8 @@ internal sealed class OrtSession : IShorokooSession
 
     /// <summary>
     /// The overload below, for a caller that does not ask which outputs went into consumed memory.
-    /// A session built with pairs writes them there all the same; the one-shot runs that call this
-    /// are built with none.
+    /// A session built with pairs writes them there all the same. Every run the framework makes
+    /// calls the overload below, so this one serves a caller outside it.
     /// </summary>
     public IReadOnlyList<IShorokooTensorValue> RunConsuming(
         IReadOnlyDictionary<string, IShorokooTensorValue> inputs,

@@ -1281,6 +1281,14 @@ public class ComputeContextLifetimeCoverageTests
         Assert.Throws<NotSupportedException>(() => context.AllocateUninitialized(pair, DType.Int4));
         Assert.Throws<NotSupportedException>(() => ComputeContext.Host.AllocateUninitialized(pair, DType.UInt4));
         Assert.Throws<ArgumentNullException>(() => context.AllocateUninitialized(pair, null!));
+
+        using var budgeted = new ComputeContext(new StubBackend(ComputeDevice.Cuda, 0))
+        {
+            DeviceMemory = new DeviceMemorySettings { LimitBytes = 64 },
+        };
+        foreach (var complex in (DType[])[DType.Complex64, DType.Complex128])
+            foreach (var where in (ComputeContext[])[context, ComputeContext.Host, budgeted])
+                Assert.Contains("complex", Assert.Throws<NotSupportedException>(() => where.AllocateUninitialized(pair, complex)).Message);
     }
 
     /// <summary>Holds a run open once it has held its feeds and before it builds their values:

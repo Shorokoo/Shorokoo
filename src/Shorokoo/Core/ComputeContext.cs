@@ -1139,8 +1139,9 @@ namespace Shorokoo.Runtime
         /// </summary>
         /// <exception cref="ArgumentNullException"><paramref name="dtype"/> is null.</exception>
         /// <exception cref="NotSupportedException"><paramref name="dtype"/> is
-        /// <see cref="DType.Utf8"/>, whose elements are variable-length, or has no whole-byte
-        /// element stride, or <paramref name="shape"/> has no known element count.</exception>
+        /// <see cref="DType.Utf8"/>, whose elements are variable-length, or complex, which no memory
+        /// here holds, or has no whole-byte element stride; or <paramref name="shape"/> has no known
+        /// element count. Refused alike on every context, before any budget is asked.</exception>
         /// <exception cref="ObjectDisposedException">This context has been disposed.</exception>
         /// <exception cref="InvalidOperationException">This context's device-memory budget cannot
         /// take the tensor alongside what is attached to it
@@ -1157,6 +1158,12 @@ namespace Shorokoo.Runtime
                     "String tensors are variable-length and not byte-stride, so there is no buffer "
                     + "of a fixed size to allocate. Build one from its elements with "
                     + "TensorData(dims, string[]).");
+            // A complex element has a width, so the check below would pass it, and each context
+            // would then refuse it in words of its own, or not at all before a budget did.
+            if (dtype == DType.Complex64 || dtype == DType.Complex128)
+                throw new NotSupportedException(
+                    $"A {dtype} tensor cannot be allocated: no memory here holds complex elements -- "
+                    + "neither the framework's host memory nor an ONNX Runtime backend's.");
             var bits = TensorData.StorageBits(dtype);
             if (bits < 8 || shape.Count < 0)
                 throw new NotSupportedException(

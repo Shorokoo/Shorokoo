@@ -333,7 +333,9 @@ ever read it again. ...
 
 None of this touches a model whose *outputs* are sequences — `SequenceAt`, `SplitToSequence`,
 anything producing an ONNX sequence type. ONNX Runtime materializes a run's sequence output in
-host memory whichever execution provider produced it, so such a model runs on a CUDA backend, and
+host memory whichever execution provider produced it — and a sequence output flagged in
+`Execute(inputs, retainOnDevice)` comes back there too, since only a tensor is left on the card —
+so such a model runs on a CUDA backend, and
 on one loaded through `IsolatedBackend.Load` or `BackendPackage.TryLoad`, like any other; its
 elements read, and the sequence moves to another context element by element.
 

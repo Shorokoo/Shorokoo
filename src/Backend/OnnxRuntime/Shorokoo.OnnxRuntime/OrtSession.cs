@@ -388,7 +388,9 @@ internal sealed class OrtSession : IShorokooSession
             // allocated there by ORT and left there; one bound to the host allocator is fetched back
             // exactly as an unbound Run fetches it. ORT sizes both of those itself, so a shape it
             // only learns while running is fine; an aliased one was checked to fit before it got
-            // here.
+            // here. Only a tensor is left on the device, however it was asked: a sequence's elements
+            // are read one by one through ORT's host allocator, which reads an element left in device
+            // memory as though it were host memory, and the process faults.
             var hostMemoryInfo = OrtMemoryInfo.DefaultInstance;
             foreach (var name in outputNames)
             {
@@ -397,6 +399,7 @@ internal sealed class OrtSession : IShorokooSession
                 else
                     binding.BindOutputToDevice(
                         name, deviceMemoryInfo is not null && retainedOutputNames.Contains(name)
+                              && _session.OutputMetadata[name].IsTensor
                             ? deviceMemoryInfo : hostMemoryInfo);
             }
 

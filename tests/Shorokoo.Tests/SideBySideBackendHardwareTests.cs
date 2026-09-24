@@ -378,6 +378,21 @@ public class SideBySideBackendHardwareTests
     }
 
     [SideBySideCudaFact]
+    public void TestASequenceOutputAskedToStayOnTheCardComesBackToTheHostWhereItsElementsAreRead()
+    {
+        var x = InputVector<float32>("x");
+        var pair = new InternalComputationGraph([x], [OnnxOp.SequenceConstruct(x, x + x)]);
+        using var cuda = new ComputeContext(LoadCuda());
+
+        var sequence = cuda.Compile(pair)
+            .Execute([TensorData([2L], (float[])[1f, 2f])], [true])[0].ToTensorDataSequence();
+
+        Assert.Equal([1f, 2f], Floats(sequence[0]));
+        Assert.Equal([2f, 4f], Floats(sequence[1]));
+        Assert.All(sequence, e => Assert.Equal(MemorySpace.Host, e.Space));
+    }
+
+    [SideBySideCudaFact]
     public void TestASequenceRefusesTensorsTheCardHoldsRatherThanBecomingUnreadable()
     {
         var cuda = LoadCuda();

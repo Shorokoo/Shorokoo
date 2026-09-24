@@ -246,7 +246,9 @@ namespace Shorokoo.Runtime
         /// <paramref name="retainOnDevice"/> in the execution provider's own memory instead of
         /// fetching them back to the host — so a value produced by one call can be fed straight
         /// into the next without crossing the bus. A retained output is not host-readable
-        /// (<see cref="TensorData.IsHostResident"/>); every other output comes back exactly as
+        /// (<see cref="TensorData.IsHostResident"/>). Only a tensor is retained: a sequence output
+        /// comes back to the host however it is flagged, since its elements are read from there.
+        /// Every other output comes back exactly as
         /// <see cref="Execute(IData[])"/>'s do, and on a session with no device memory
         /// (<see cref="HasDeviceMemory"/>) nothing is retained and this <i>is</i>
         /// <see cref="Execute(IData[])"/>.

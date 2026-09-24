@@ -4632,6 +4632,26 @@ public class TrainingRigHyperparameterDTypeCoverageTests
         }
         finally { if (File.Exists(path)) File.Delete(path); }
     }
+
+    [Fact]
+    public void TestATensorGivenToMakeHyperparametersStaysTheCallersWhenAStepConsumesTheStructWhateverItsDType()
+    {
+        var (sample, input, target) = ScalarMultiplyBatches();
+        var rig = TrainingRig.FromScratch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+            SGDOptimizer.ComputationGraph, sample, new SGDOptimizerHyperparameters { LearningRate = Hyperparameter.Runtime() });
+        bool Survives(Func<TensorData, TensorDataStruct> make, TensorData lr)
+        {
+            rig.TrainStep(rig.CreateInitialCheckpoint(), make(lr), input.Shared(), target.Shared());
+            return !lr.IsDisposed;
+        }
+
+        Assert.Equal<bool>([true, true, true, true], [
+            Survives(lr => rig.MakeHyperparameters(lr), TensorData([], 0.1f)),
+            Survives(lr => rig.MakeHyperparameters(lr), TensorData([], 0.1)),
+            Survives(lr => rig.MakeHyperparameters(("learningRate", lr)), TensorData([], 0.1f)),
+            Survives(lr => rig.MakeHyperparameters(("learningRate", lr)), TensorData([], 0.1)),
+        ]);
+    }
 }
 
 [Trait("Domain", "Training")]

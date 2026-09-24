@@ -2534,8 +2534,8 @@ namespace Shorokoo
         /// <param name="checkpoint">Current training state (params, model state, optimizer state, step)</param>
         /// <param name="hyperparams">Values for the schedule-less runtime hyperparameters
         /// (<see cref="HyperparameterStructDef"/> order): a struct, consumed like every other feed
-        /// — <see cref="MakeHyperparameters(float)"/> builds a fresh one per call — or one passed
-        /// through <c>.Shared()</c> to be read every step.</param>
+        /// — <see cref="MakeHyperparameters(float)"/> builds a fresh one per call, copying any tensor
+        /// it is given — or one passed through <c>.Shared()</c> to be read every step.</param>
         /// <param name="trainingInput">Training input data: a <see cref="TensorDataStruct"/>, or one
         /// passed through <c>.Shared()</c> or <c>.TryConsume()</c>.</param>
         /// <param name="trainingOutput">Training target data, in the same forms.</param>
@@ -3933,7 +3933,8 @@ namespace Shorokoo
         /// overload. Convenience for the common case of exactly one dynamic hyperparameter (e.g. the
         /// learning rate); throws if the rig has a different number. For multiple, use the named overload.
         /// The value is converted to the hyperparameter's declared dtype, failing loud if it would not
-        /// survive the conversion.
+        /// survive the conversion. The struct's tensors are its own — built from the value, or copied
+        /// from a tensor given — so a step that consumes the struct takes nothing of the caller's.
         /// </summary>
         public TensorDataStruct MakeHyperparameters(float value) => MakeSingleHyperparameter(value);
 
@@ -3951,7 +3952,9 @@ namespace Shorokoo
 
         /// <summary>Explicitly typed form of <see cref="MakeHyperparameters(float)"/>, for a dtype with
         /// no natural C# literal (e.g. <c>float16</c>) and for a non-scalar hyperparameter; its shape
-        /// must match the shape the rig was built at.</summary>
+        /// must match the shape the rig was built at. The struct holds a copy of
+        /// <paramref name="value"/> whatever its dtype, so <paramref name="value"/> stays yours when a
+        /// step consumes the struct.</summary>
         public TensorDataStruct MakeHyperparameters(TensorData value)
             => MakeSingleHyperparameter(value ?? throw new ArgumentNullException(nameof(value)));
 
@@ -3974,7 +3977,9 @@ namespace Shorokoo
         /// value — a numeric or <c>bool</c> scalar, or a <see cref="TensorData"/> — fitted to that
         /// hyperparameter's declared dtype and checked against its built shape, so a rig may mix dtypes
         /// and shapes: <c>MakeHyperparameters(("learningRate", 0.1f), ("useNesterov", true),
-        /// ("perGroupScale", TensorData([3L], 1f, 2f, 3f)))</c>.
+        /// ("perGroupScale", TensorData([3L], 1f, 2f, 3f)))</c>. A <see cref="TensorData"/> given is
+        /// copied into the struct whatever its dtype, so it stays yours when a step consumes the
+        /// struct.
         /// </summary>
         public TensorDataStruct MakeHyperparameters(params (string name, object value)[] values)
         {
@@ -4010,6 +4015,11 @@ namespace Shorokoo
         /// Packs host values (in <see cref="HyperparameterStructDef"/> field order) into the runtime
         /// hyperparameter struct, fitting each to its field's declared dtype and checking it against the
         /// shape the rig was built at.
+        ///
+        /// <para>The struct owns every tensor in it, whatever it was built from: a step fed it as it
+        /// is consumes them, and a tensor the caller passed in stays the caller's. Fitting a value
+        /// already of the declared dtype hands back the caller's very tensor, which is copied, as a
+        /// value of another dtype is by its conversion.</para>
         /// </summary>
         private TensorDataStruct PackHyperparams(object[] orderedValues)
         {
@@ -4021,6 +4031,7 @@ namespace Shorokoo
                     HyperparameterValues.Of(orderedValues[i]), field.ElementType, field.Name);
                 HyperparameterValues.AssertShape(
                     value, ((TensorData)_initialHyperparamFields[field.Name]).Shape, field.Name);
+                if (ReferenceEquals(value, orderedValues[i])) value = value.CopyTo(ComputeContext.Host);
                 fields[i] = new KeyValuePair<string, IData>(field.Name, value);
             }
             return new TensorDataStruct(HyperparameterStructDef, fields);

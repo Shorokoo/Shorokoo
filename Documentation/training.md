@@ -354,6 +354,9 @@ rig.TrainStep(ckpt,
     inputs, targets);
 ```
 
+`MakeHyperparameters` builds a struct whose tensors are its own: a `TensorData` you give it is
+copied, whatever its dtype, so the step that consumes the struct takes nothing of yours.
+
 > **Migration (breaking).** The positional-hyperparameter `FromScratch` overloads no longer take a
 > `params` array behind the optional `rngConfig` / `mergeContext` / `runtimeContext`. Pass the values as
 > an explicit array in the hyperparameter slot and let the optional arguments follow — every old call
@@ -585,6 +588,9 @@ lives. Drop a kept checkpoint once you are done with it rather than holding it p
   holds the tensor itself — `Fields` and the indexer read `mask`, not a wrapper — and its `To`,
   `CopyTo` and `ToHost` keep each field's mode, as does a checkpoint's state through
   `rig.AdoptCheckpoint`.
+- **Runtime hyperparameters** are fed like a batch: the struct is consumed as it is, and read
+  through `.Shared()`. `MakeHyperparameters` builds a fresh one per call and copies any tensor it is
+  given, so a step never consumes a tensor you passed it.
 - **`Fit` and `Train` over arrays read their batches** — the arrays are a dataset, fed every epoch
   — and feed the initial checkpoint to the first step as `TrainStep` would. `Fit` over a loader
   feeds each batch as the loader built it: `InMemoryDataLoader` gathers a fresh batch per draw,

@@ -59,7 +59,9 @@ public class QeeNormLinalgAuditTests
         Assert.True(QeeAudit.Check<QeeDequantizeInt32PerAxisAuditCheck>(I32([2L, 3L], 10, -6, 2, 4, 0, -8)));
     }
 
-    [Fact]
+    // ONNX Runtime's float32 LayerNormalization takes the variance as E[x²] − E[x]², which cancels catastrophically:
+    // https://github.com/Shorokoo/Shorokoo/issues/384
+    [Fact(Skip = "Shorokoo/Shorokoo#384: ONNX Runtime's LayerNormalization loses a large-mean row's variance to cancellation")]
     public void TestLayerNormalizationOfRowsWithALargeMeanAgreesWithItsFunctionBody()
         => Assert.True(AutoTest.AdvancedTestGraph<LayerNormalizationOfALargeMeanCheck>([], LargeMeanRows));
 

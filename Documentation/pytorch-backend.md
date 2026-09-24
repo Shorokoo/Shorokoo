@@ -169,6 +169,7 @@ whose message names what is missing:
 | `EnvironmentConflict` | the process already runs Python over a different environment |
 | `InterpreterFailed` | CPython itself would not start |
 | `DeviceUnavailable` | a CUDA backend, and no NVIDIA driver fit for CUDA 13, or PyTorch sees no such device |
+| `UnsupportedPlatform` | the machine is not Linux or Windows on x64, the platforms there are lock files for |
 
 ## Training
 
@@ -283,7 +284,8 @@ token. A single node that is one long kernel is not interrupted.
   the distribution, shape and element type are the operator's, and a node with a `seed` draws the
   same values on every run, but not the values ONNX Runtime draws. Shorokoo's own keyed draws
   are integer arithmetic, and agree with ONNX Runtime exactly.
-- **Linux x64 and Windows x64 only**, the platforms there are lock files for.
+- **Linux x64 and Windows x64 only**, the platforms there are lock files for. A backend can be
+  constructed anywhere; elsewhere it refuses to start with `PythonEnvironmentFailure.UnsupportedPlatform`.
 - **Device memory is torch's, per process** — see [Runs](#runs) for what a context's settings
   can and cannot reach.
 - **Node placement records no bytes.** A traced session names the device every node ran on, which

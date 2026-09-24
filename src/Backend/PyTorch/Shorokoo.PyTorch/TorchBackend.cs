@@ -24,15 +24,17 @@ namespace Shorokoo.PyTorch;
 /// </summary>
 public abstract class TorchBackend : IShorokooBackend
 {
-    private readonly PythonEnvironmentLock _lockFile;
+    private readonly Func<PythonEnvironmentLock> _lockFile;
     private readonly PythonEnvironmentOptions _options;
     private readonly int? _cudaDeviceId;
     private readonly object _gate = new();
     private TorchRuntime? _runtime;
 
-    /// <summary>Creates a backend over the environment <paramref name="lockFile"/> describes, on
-    /// the CPU or on CUDA device <paramref name="cudaDeviceId"/>.</summary>
-    protected TorchBackend(PythonEnvironmentLock lockFile, PythonEnvironmentOptions? options, int? cudaDeviceId)
+    /// <summary>Creates a backend over the environment the lock <paramref name="lockFile"/> answers
+    /// describes, on the CPU or on CUDA device <paramref name="cudaDeviceId"/>. The lock is asked for
+    /// when the backend starts, not here, so that a platform no lock exists for is refused the way
+    /// every other reason the environment cannot be had is.</summary>
+    protected TorchBackend(Func<PythonEnvironmentLock> lockFile, PythonEnvironmentOptions? options, int? cudaDeviceId)
     {
         ArgumentNullException.ThrowIfNull(lockFile);
         _lockFile = lockFile;
@@ -83,12 +85,22 @@ public abstract class TorchBackend : IShorokooBackend
             lock (_gate)
             {
                 if (_runtime is not null) return _runtime;
+                PythonEnvironmentLock lockFile;
+                try
+                {
+                    lockFile = _lockFile();
+                }
+                catch (PlatformNotSupportedException ex)
+                {
+                    throw new PythonEnvironmentException(PythonEnvironmentFailure.UnsupportedPlatform,
+                        $"{Description} cannot start: {ex.Message}", ex);
+                }
                 // Before the environment is resolved, since resolving it can mean provisioning several
                 // gigabytes of CUDA libraries for a card the machine turns out not to have.
                 if (_cudaDeviceId is not null && MissingDriver() is { } missing)
                     throw new PythonEnvironmentException(PythonEnvironmentFailure.DeviceUnavailable,
                         $"{Description} cannot start: {missing}");
-                var runtime = TorchRuntime.Start(_lockFile, _options);
+                var runtime = TorchRuntime.Start(lockFile, _options);
                 if (_cudaDeviceId is { } device && device >= runtime.CudaDeviceCount)
                     throw new PythonEnvironmentException(PythonEnvironmentFailure.DeviceUnavailable,
                         $"{Description} needs CUDA device {device}, and torch {runtime.TorchVersion} in "

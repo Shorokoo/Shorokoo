@@ -755,10 +755,10 @@ public class PyTorchBackendCoverageTests
     [Fact]
     public void TestABackendOnAPlatformWithoutALockIsConstructedAndRefusesToStartWithATypedFailure()
     {
-        Assert.Throws<PythonEnvironmentException>(() => new OffPlatformBackend().Start());
+        Assert.Equal(PythonEnvironmentFailure.UnsupportedPlatform, Assert.Throws<PythonEnvironmentException>(() => new OffPlatformBackend().Start()).Failure);
     }
 
-    private sealed class OffPlatformBackend() : TorchBackend(PythonEnvironmentLock.ForPlatform("cpu", "osx-arm64"), null, null);
+    private sealed class OffPlatformBackend() : TorchBackend(() => PythonEnvironmentLock.ForPlatform("cpu", "osx-arm64"), null, null);
 
     [Fact]
     public void TestAFunctionCallOmittingTrailingInputsPassesNoneAndOneWithMoreInputsOrOutputsThanTheFunctionIsRefused()

@@ -43,6 +43,10 @@ public enum PythonEnvironmentFailure
     /// <summary>The environment runs, but cannot serve the device asked for — a CUDA backend over
     /// a build of the framework without CUDA, say.</summary>
     DeviceUnavailable,
+
+    /// <summary>No environment lock exists for this platform: the Python-based backends run on
+    /// Linux and Windows on x64.</summary>
+    UnsupportedPlatform,
 }
 
 /// <summary>

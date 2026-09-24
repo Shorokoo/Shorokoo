@@ -21,5 +21,5 @@ public sealed class TorchCpuBackend : TorchBackend
 
     /// <summary>Creates the backend over the environment <paramref name="options"/> name.</summary>
     public TorchCpuBackend(PythonEnvironmentOptions? options)
-        : base(PythonEnvironmentLock.Cpu, options, cudaDeviceId: null) { }
+        : base(() => PythonEnvironmentLock.Cpu, options, cudaDeviceId: null) { }
 }

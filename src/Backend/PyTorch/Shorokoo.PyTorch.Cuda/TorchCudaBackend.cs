@@ -27,7 +27,7 @@ public sealed class TorchCudaBackend : TorchBackend
     /// <summary>Creates the backend on CUDA device <paramref name="deviceId"/>, over the
     /// environment <paramref name="options"/> name.</summary>
     public TorchCudaBackend(int deviceId, PythonEnvironmentOptions? options = null)
-        : base(PythonEnvironmentLock.Cu13, options, ValidDevice(deviceId)) { }
+        : base(() => PythonEnvironmentLock.Cu13, options, ValidDevice(deviceId)) { }
 
     private static int ValidDevice(int deviceId)
     {

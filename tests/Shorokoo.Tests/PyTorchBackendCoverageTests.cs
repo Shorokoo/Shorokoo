@@ -702,6 +702,23 @@ public class PyTorchBackendCoverageTests
         Torch.CreateSession(RawInitialized(12), default, default, DeviceMemorySettings.Default).Dispose();
     }
 
+    [Fact]
+    public void TestProvisioningInstallsTheLockByHashIntoItsOwnEnvironmentAndGivesUpOnAUvThatHangs()
+    {
+        var installed = FakeUv("""
+            echo "$@" >> LOG
+            if [ "$1" = venv ]; then for last; do :; done; mkdir -p "$last"; fi
+            """);
+        var hung = FakeUv("sleep 20; exit 1", TimeSpan.FromSeconds(2));
+        var install = installed.Log.Single(line => line.StartsWith("pip install", StringComparison.Ordinal));
+
+        Assert.Equal(PythonEnvironmentFailure.NotAVirtualEnvironment, installed.Failure);
+        Assert.Contains($"--python {installed.Directory}", install);
+        Assert.Contains("--require-hashes", install);
+        Assert.Equal(PythonEnvironmentFailure.ProvisioningTimedOut, hung.Failure);
+        Assert.True(hung.Took < TimeSpan.FromSeconds(15));
+    }
+
     private static PythonEnvironment Resolve(PythonEnvironmentOptions options, string variable)
         => PythonEnvironmentResolver.Resolve(PythonEnvironmentLock.Cpu, options,
             name => name == PythonEnvironmentResolver.EnvironmentVariable ? variable : null);
@@ -782,6 +799,25 @@ public class PyTorchBackendCoverageTests
         var graph = ComputeContextLifetimeCoverageTests.GraphOf("x:float[3]", "y:float[3]", Op("Add", "x w", "y"));
         graph.Initializers.Add(new TensorProto { Name = "w", data_type = (int)TensorProto.DataType.Float, Dims = [3], RawData = new byte[bytes] });
         return Serialize(graph);
+    }
+
+    private static (PythonEnvironmentFailure Failure, string[] Log, string Directory, TimeSpan Took) FakeUv(string script, TimeSpan? timeout = null)
+    {
+        var root = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "shorokoo-uv-" + Guid.NewGuid().ToString("N"))).FullName;
+        var (uv, log) = (Path.Combine(root, "uv"), Path.Combine(root, "log"));
+        File.WriteAllText(uv, "#!/bin/sh\n" + script.Replace("LOG", log) + "\n");
+        File.SetUnixFileMode(uv, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        try
+        {
+            var failure = Assert.Throws<PythonEnvironmentException>(() => PythonEnvironmentResolver.Resolve(PythonEnvironmentLock.Cpu,
+                new() { CacheDirectory = root, UvPath = uv, ProvisioningTimeout = timeout ?? TimeSpan.FromMinutes(1) }, _ => null)).Failure;
+            return (failure, File.Exists(log) ? File.ReadAllLines(log) : [], Path.Combine(root, PythonEnvironmentLock.Cpu.CacheKey), clock.Elapsed);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     /// <summary>y = v + 1, m times over, by a Loop: one node per iteration to stop at.</summary>

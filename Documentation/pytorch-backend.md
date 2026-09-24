@@ -128,8 +128,13 @@ downloads several gigabytes of CUDA libraries for a card that is not there.
    `uv pip install --require-hashes` of the lock, which records the hash of every file it may
    install. Two processes starting at once build it once — the second
    waits on a lock file beside it — and a build that was interrupted is started over rather
-   than used. `PythonEnvironmentOptions.CacheDirectory` moves the cache;
-   `PythonEnvironmentOptions.UvPath` or `SHOROKOO_UV` names the uv to use.
+   than used. uv runs without the `UV_` variables that could make it install something else or
+   somewhere else (it keeps `UV_CACHE_DIR`, `UV_PYTHON_INSTALL_DIR`, `UV_NATIVE_TLS` and
+   `UV_HTTP_TIMEOUT`, and the proxy and certificate variables), and each step is stopped if
+   provisioning outlasts `PythonEnvironmentOptions.ProvisioningTimeout`.
+   `PythonEnvironmentOptions.CacheDirectory` moves the cache;
+   `PythonEnvironmentOptions.UvPath` or `SHOROKOO_UV` names the uv to use. An environment built
+   from an older lock stays in the cache until you delete its folder.
 
 An environment you provide must be a **CPython 3.12** virtual environment (a folder with a
 `pyvenv.cfg`) whose base interpreter has a shared library — `libpython3.12.so` on Linux,
@@ -139,7 +144,7 @@ environment made by
 
 ```bash
 uv venv --managed-python -p 3.12 /opt/torch-env
-VIRTUAL_ENV=/opt/torch-env uv pip install torch numpy pillow --index-url https://download.pytorch.org/whl/cpu
+uv pip install --python /opt/torch-env torch numpy pillow --index-url https://download.pytorch.org/whl/cpu
 ```
 
 A distribution's system Python often lacks it, which is refused with
@@ -159,7 +164,7 @@ whose message names what is missing:
 | `UvNotFound` | provisioning needs uv, and there is none |
 | `NetworkUnavailable` | provisioning could not reach the package index |
 | `ProvisioningFailed` | uv failed for another reason; its output is quoted |
-| `ProvisioningTimedOut` | another process held the provisioning lock too long |
+| `ProvisioningTimedOut` | provisioning ran past `ProvisioningTimeout`: another process held its lock, or a uv step had not finished and was stopped |
 | `MissingPackage` | the environment cannot import `torch` or `numpy` |
 | `EnvironmentConflict` | the process already runs Python over a different environment |
 | `InterpreterFailed` | CPython itself would not start |

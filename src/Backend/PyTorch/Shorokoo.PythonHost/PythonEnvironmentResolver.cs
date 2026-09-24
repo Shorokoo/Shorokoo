@@ -108,7 +108,7 @@ public static class PythonEnvironmentResolver
             // uv is looked for only once this process is the one to build: one that finds the
             // environment built by the process it waited for needs none.
             if (!IsComplete(directory, lockFile))
-                Build(FindUv(options, variables), lockFile, directory);
+                Build(FindUv(options, variables), lockFile, directory, options.ProvisioningTimeout, deadline);
         }
         finally
         {
@@ -154,10 +154,12 @@ public static class PythonEnvironmentResolver
 
     private static PythonEnvironmentException TimedOut(string directory, TimeSpan timeout, Exception? inner = null)
         => new(PythonEnvironmentFailure.ProvisioningTimedOut,
-            $"Another process has been provisioning '{directory}' for longer than {timeout}. If none "
-            + $"is, delete '{directory}.lock' and try again.", inner);
+            $"Another process has been provisioning '{directory}' for longer than {timeout}. Its lock is "
+            + "released when it finishes or ends, so wait for it and try again, or allow it longer with "
+            + "PythonEnvironmentOptions.ProvisioningTimeout.", inner);
 
-    private static void Build(string uv, PythonEnvironmentLock lockFile, string directory)
+    private static void Build(
+        string uv, PythonEnvironmentLock lockFile, string directory, TimeSpan timeout, Stopwatch deadline)
     {
         if (System.IO.Directory.Exists(directory))
             System.IO.Directory.Delete(directory, recursive: true);
@@ -166,9 +168,12 @@ public static class PythonEnvironmentResolver
         File.WriteAllText(requirements, lockFile.Requirements);
         try
         {
-            Run(uv, ["python", "install", lockFile.PythonVersion], null);
-            Run(uv, ["venv", "--no-config", "--managed-python", "--python", lockFile.PythonVersion, directory], null);
-            Run(uv, ["pip", "install", "--no-config", "--require-hashes", "-r", requirements, .. lockFile.IndexArguments], directory);
+            // Every step names what it acts on -- the Python version, the environment -- rather than
+            // leaving uv to find it, and installs exactly the files the lock hashes.
+            Run(uv, ["python", "install", "--no-config", lockFile.PythonVersion], timeout, deadline);
+            Run(uv, ["venv", "--no-config", "--managed-python", "--python", lockFile.PythonVersion, directory], timeout, deadline);
+            Run(uv, ["pip", "install", "--no-config", "--require-hashes", "--python", directory, "-r", requirements,
+                .. lockFile.IndexArguments], timeout, deadline);
             File.WriteAllText(Path.Combine(directory, CompleteMarker), lockFile.Hash);
         }
         catch
@@ -183,7 +188,35 @@ public static class PythonEnvironmentResolver
         }
     }
 
-    private static void Run(string uv, string[] arguments, string? virtualEnvironment)
+    /// <summary>
+    /// The variables of the process a uv step runs in: this process's own, which carry the network's
+    /// proxies and certificates, the user's home and the path, without those that would make uv
+    /// install somewhere else or from somewhere else than the step says — every <c>UV_</c> variable
+    /// but the few that only say where uv caches and how it reaches the network, and the variables
+    /// that name another environment or Python — and with uv's progress output turned off.
+    /// </summary>
+    internal static Dictionary<string, string> UvEnvironment(IEnumerable<KeyValuePair<string, string>> inherited)
+    {
+        var environment = new Dictionary<string, string>(
+            RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+        foreach (var (name, value) in inherited)
+        {
+            var upper = name.ToUpperInvariant();
+            if (upper.StartsWith("UV_", StringComparison.Ordinal) ? !KeptUvVariables.Contains(upper) : RedirectingVariables.Contains(upper))
+                continue;
+            environment[name] = value;
+        }
+        environment["UV_NO_PROGRESS"] = "1";
+        return environment;
+    }
+
+    private static readonly HashSet<string> KeptUvVariables =
+        new(StringComparer.Ordinal) { "UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR", "UV_NATIVE_TLS", "UV_HTTP_TIMEOUT" };
+
+    private static readonly HashSet<string> RedirectingVariables =
+        new(StringComparer.Ordinal) { "VIRTUAL_ENV", "CONDA_PREFIX", "PYTHONHOME", "PYTHONPATH" };
+
+    private static void Run(string uv, string[] arguments, TimeSpan timeout, Stopwatch deadline)
     {
         var start = new ProcessStartInfo(uv)
         {
@@ -192,8 +225,10 @@ public static class PythonEnvironmentResolver
             UseShellExecute = false,
         };
         foreach (var argument in arguments) start.ArgumentList.Add(argument);
-        if (virtualEnvironment is not null) start.Environment["VIRTUAL_ENV"] = virtualEnvironment;
-        start.Environment["UV_NO_PROGRESS"] = "1";
+        var inherited = System.Environment.GetEnvironmentVariables().Cast<System.Collections.DictionaryEntry>()
+            .Select(entry => new KeyValuePair<string, string>((string)entry.Key, (string?)entry.Value ?? ""));
+        start.Environment.Clear();
+        foreach (var (name, value) in UvEnvironment(inherited)) start.Environment[name] = value;
 
         var output = new StringBuilder();
         using var process = new Process { StartInfo = start };
@@ -210,12 +245,23 @@ public static class PythonEnvironmentResolver
         }
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
+        var command = $"uv {string.Join(' ', arguments)}";
+        var left = timeout - deadline.Elapsed;
+        if (left < TimeSpan.Zero || !process.WaitForExit(left))
+        {
+            try { process.Kill(entireProcessTree: true); }
+            catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception) { }
+            process.WaitForExit();
+            throw new PythonEnvironmentException(PythonEnvironmentFailure.ProvisioningTimedOut,
+                $"`{command}` had not finished when provisioning had taken {timeout}, so it was stopped. "
+                + "Allow provisioning longer with PythonEnvironmentOptions.ProvisioningTimeout, or provision "
+                + $"an environment elsewhere and name it with {EnvironmentVariable}.");
+        }
         process.WaitForExit();
 
         if (process.ExitCode == 0) return;
         string text;
         lock (output) text = output.ToString().Trim();
-        var command = $"uv {string.Join(' ', arguments)}";
         throw new PythonEnvironmentException(
             LooksLikeNetwork(text) ? PythonEnvironmentFailure.NetworkUnavailable : PythonEnvironmentFailure.ProvisioningFailed,
             LooksLikeNetwork(text)

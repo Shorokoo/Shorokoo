@@ -20,8 +20,9 @@ public sealed record PythonEnvironmentOptions
     /// <c>shorokoo/python-envs</c>.</summary>
     public string? CacheDirectory { get; init; }
 
-    /// <summary>How long to wait for another process that is provisioning the same environment.
-    /// Provisioning downloads the framework, which is more than a gigabyte, so the default is
-    /// generous.</summary>
+    /// <summary>How long provisioning may take: waiting for another process that is provisioning
+    /// the same environment, then building it, a <c>uv</c> step still running when it runs out being
+    /// stopped. Provisioning downloads the framework, which is more than a gigabyte, so the default
+    /// is generous.</summary>
     public TimeSpan ProvisioningTimeout { get; init; } = TimeSpan.FromMinutes(30);
 }

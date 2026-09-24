@@ -123,9 +123,10 @@ downloads several gigabytes of CUDA libraries for a card that is not there.
 3. **The cache.** Otherwise the environment described by the package's lock file for this
    platform (Linux x64 or Windows x64 — each has its own), under
    `$XDG_CACHE_HOME/shorokoo/python-envs/` (or `~/.cache/…`; `%LOCALAPPDATA%\shorokoo\…` on
-   Windows), in a folder named after the lock and a hash of it — `cpu-a8a00e90bef324c8`. If it
+   Windows), in a folder named after the lock and a hash of it — `cpu-b568d348aeca20e7`. If it
    is not there yet it is created with uv: `uv python install 3.12`, `uv venv`, then
-   `uv pip install` of the lock. Two processes starting at once build it once — the second
+   `uv pip install --require-hashes` of the lock, which records the hash of every file it may
+   install. Two processes starting at once build it once — the second
    waits on a lock file beside it — and a build that was interrupted is started over rather
    than used. `PythonEnvironmentOptions.CacheDirectory` moves the cache;
    `PythonEnvironmentOptions.UvPath` or `SHOROKOO_UV` names the uv to use.

@@ -1,3 +1,4 @@
 torch==2.14.0
 numpy
 pillow
+google-re2

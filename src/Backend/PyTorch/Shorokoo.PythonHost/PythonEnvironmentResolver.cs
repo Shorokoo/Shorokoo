@@ -168,7 +168,7 @@ public static class PythonEnvironmentResolver
         {
             Run(uv, ["python", "install", lockFile.PythonVersion], null);
             Run(uv, ["venv", "--no-config", "--managed-python", "--python", lockFile.PythonVersion, directory], null);
-            Run(uv, ["pip", "install", "--no-config", "-r", requirements, .. lockFile.IndexArguments], directory);
+            Run(uv, ["pip", "install", "--no-config", "--require-hashes", "-r", requirements, .. lockFile.IndexArguments], directory);
             File.WriteAllText(Path.Combine(directory, CompleteMarker), lockFile.Hash);
         }
         catch

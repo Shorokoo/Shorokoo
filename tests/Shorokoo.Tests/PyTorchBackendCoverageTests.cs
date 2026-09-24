@@ -494,6 +494,9 @@ public class PyTorchBackendCoverageTests
         Assert.Contains("torch==2.14.0+cu130", windowsCuda.Requirements);
         Assert.Contains("https://download.pytorch.org/whl/cu130", windowsCuda.IndexArguments);
         Assert.Contains("nvidia-cublas", linuxCuda.Requirements);
+        foreach (var platform in PythonEnvironmentLock.Platforms)
+            foreach (var requirements in ((string[])["cpu", "cu13"]).Select(name => PythonEnvironmentLock.ForPlatform(name, platform).Requirements))
+                Assert.DoesNotContain(requirements.Split('\n'), line => line.Contains("==") && !line.TrimEnd().EndsWith('\\'));
         Assert.NotEqual(windowsCpu.Hash, PythonEnvironmentLock.ForPlatform("cpu", "linux-x64").Hash);
         Assert.Throws<PlatformNotSupportedException>(() => PythonEnvironmentLock.ForPlatform("cpu", "osx-arm64"));
         Assert.Throws<PlatformNotSupportedException>(() => PythonEnvironmentLock.ForPlatform("cpu", null));

@@ -144,7 +144,7 @@ public class CompositeTransferCoverageTests
         using var release = new ManualResetEventSlim();
 
         var run = Task.Run(() => Floats(compiled.Run(
-            new HeldSequence(sequence, reached, release) { Sharing = SharedInputMode.Shared })[0].ToTensorData()));
+            new HeldSequence(sequence, reached, release) { FeedMode = SharedInputMode.Shared })[0].ToTensorData()));
         Assert.True(reached.Wait(TimeSpan.FromSeconds(10)));
 
         Assert.Throws<InvalidOperationException>(sequence.Dispose);
@@ -238,7 +238,7 @@ public class CompositeTransferCoverageTests
         using var reached = new ManualResetEventSlim();
         using var release = new ManualResetEventSlim();
         var holding = Task.Run(() => join.Run(
-            new HeldSequence(sequence, reached, release) { Sharing = SharedInputMode.Shared }));
+            new HeldSequence(sequence, reached, release) { FeedMode = SharedInputMode.Shared }));
         Assert.True(reached.Wait(TimeSpan.FromSeconds(10)));
 
         Assert.Equal([1f, 2f, 3f, 4f], Floats(join.Execute(sequence.TryConsume())[0].ToTensorData()));
@@ -294,7 +294,7 @@ public class CompositeTransferCoverageTests
         using var reached = new ManualResetEventSlim();
         using var release = new ManualResetEventSlim();
         var holding = Task.Run(() => Floats(join.Run(
-            new HeldSequence(sequence, reached, release) { Sharing = SharedInputMode.Shared })[0].ToTensorData()));
+            new HeldSequence(sequence, reached, release) { FeedMode = SharedInputMode.Shared })[0].ToTensorData()));
         Assert.True(reached.Wait(TimeSpan.FromSeconds(10)));
 
         Assert.Throws<InvalidOperationException>(element.Delete);

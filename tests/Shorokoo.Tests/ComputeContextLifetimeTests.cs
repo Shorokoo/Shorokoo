@@ -422,7 +422,7 @@ public class ComputeContextLifetimeCoverageTests
         using var release = new ManualResetEventSlim();
 
         var run = Task.Run(() => Floats(compiled.Run(
-            new HeldFeed(fed, reached, release) { Sharing = SharedInputMode.Shared })[0].ToTensorData()));
+            new HeldFeed(fed, reached, release) { FeedMode = SharedInputMode.Shared })[0].ToTensorData()));
         Assert.True(reached.Wait(TimeSpan.FromSeconds(10)));
 
         Assert.Throws<InvalidOperationException>(fed.Delete);
@@ -725,7 +725,7 @@ public class ComputeContextLifetimeCoverageTests
         using var reached = new ManualResetEventSlim();
         using var release = new ManualResetEventSlim();
         var run = Task.Run(() => compiled.Run(
-            new HeldFeed(read, reached, release) { Sharing = SharedInputMode.Shared }));
+            new HeldFeed(read, reached, release) { FeedMode = SharedInputMode.Shared }));
         Assert.True(reached.Wait(TimeSpan.FromSeconds(10)));
 
         var refused = Assert.Throws<InvalidOperationException>(

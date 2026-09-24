@@ -223,7 +223,7 @@ namespace Shorokoo
     /// <para>As a run's input it follows the rule every feed does: the data is <b>consumed</b> by
     /// the run — a tensor fed as it is is given to it — unless it was made from a
     /// <see cref="SharedInput"/>, <see cref="FromIData"/>'s form for <c>t.Shared()</c> and
-    /// <c>t.TryConsume()</c>, which says otherwise (<see cref="Sharing"/>).</para>
+    /// <c>t.TryConsume()</c>, which says otherwise (<see cref="FeedMode"/>).</para>
     /// </summary>
     public abstract class NamedModelParam
     {
@@ -232,9 +232,10 @@ namespace Shorokoo
         /// <summary>
         /// What a run fed this parameter does with its data: null — the data was given as it is, and
         /// the run consumes it — or the <see cref="SharedInputMode"/> of the
-        /// <see cref="SharedInput"/> it was made from.
+        /// <see cref="SharedInput"/> it was made from. Named as a training checkpoint's
+        /// <see cref="TrainingCheckpoint.FeedMode"/> is, which means the same for the state it feeds.
         /// </summary>
-        public SharedInputMode? Sharing { get; internal set; }
+        public SharedInputMode? FeedMode { get; internal set; }
 
         /// <summary>
         /// What a message about this input calls it, where the caller that built it knew better
@@ -304,7 +305,7 @@ namespace Shorokoo
             if (data is SharedInput shared)
             {
                 var param = FromIData(name, paramType, shared.Value);
-                param.Sharing = shared.Mode;
+                param.FeedMode = shared.Mode;
                 return param;
             }
             if (data is TensorData td)

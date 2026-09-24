@@ -610,7 +610,7 @@ public class CrossDeviceRoutingCoverageTests
     /// <summary>A shared feed for input "a" that calls <paramref name="held"/> once the run holds
     /// it, before anything is built for it — where a write or a second run can be landed.</summary>
     private static NamedModelParam Hooked(TensorData data, Action held)
-        => new HookedFeed(data, held) { Sharing = SharedInputMode.Shared };
+        => new HookedFeed(data, held) { FeedMode = SharedInputMode.Shared };
 
     private sealed class HookedFeed(TensorData data, Action held)
         : TensorDataModelParam("a", ModelParamType.InputParam, data)
@@ -737,7 +737,7 @@ public class CrossDeviceRoutingCoverageTests
 
         Assert.Contains("stopped by the test", Assert.Throws<InvalidOperationException>(() => compiled.Run(
             new HookedFeed(taken, () => throw new InvalidOperationException("stopped by the test")),
-            new TensorDataModelParam("b", ModelParamType.InputParam, read) { Sharing = SharedInputMode.Shared })).Message);
+            new TensorDataModelParam("b", ModelParamType.InputParam, read) { FeedMode = SharedInputMode.Shared })).Message);
 
         Assert.Equal([card.Built[0]], card.Released);
         Assert.True(read.TryDelete());

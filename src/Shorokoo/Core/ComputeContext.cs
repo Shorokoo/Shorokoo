@@ -1550,7 +1550,7 @@ namespace Shorokoo.Runtime
         ///
         /// <para>A parameter's data is consumed by the run unless it was made from a
         /// <see cref="SharedInput"/> — <c>NamedModelParam.FromIData(name, type, t.Shared())</c> —
-        /// which says otherwise (<see cref="NamedModelParam.Sharing"/>).</para>
+        /// which says otherwise (<see cref="NamedModelParam.FeedMode"/>).</para>
         /// </summary>
         public NamedModelParam[] Run(ComputationGraph graph, params NamedModelParam[] inputs)
         {

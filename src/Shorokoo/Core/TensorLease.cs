@@ -256,13 +256,13 @@ namespace Shorokoo.Runtime
                 var input = inputs[i];
                 var target = targetOf[i] = TargetOf(SubjectOf(input));
                 var name = new FeedName(input.Label, input.ParamName, Element: -1);
-                target.Feeds(name, input.Sharing);
+                target.Feeds(name, input.FeedMode);
                 // A list sequence's elements are its own, and a run reading or consuming it reads or
                 // consumes them with it -- the sequence value it is fed is built from them. Each is
                 // held as this input feeds the sequence, beside whatever else feeds it.
                 if (target.Subject is TensorDataSequence { OwnElements: { } elements })
                     for (int j = 0; j < elements.Count; j++)
-                        TargetOf(elements[j]).Holds(name with { Element = j }, input.Sharing);
+                        TargetOf(elements[j]).Holds(name with { Element = j }, input.FeedMode);
             }
 
             // Everything that can refuse the run is asked before anything is taken, so a refused run

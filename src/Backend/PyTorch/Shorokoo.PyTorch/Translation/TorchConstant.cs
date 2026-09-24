@@ -32,8 +32,8 @@ internal sealed record TorchConstant(
     /// The constant a <see cref="TensorProto"/> holds, read from its raw bytes or from whichever
     /// typed field ONNX puts that element type in.
     /// </summary>
-    /// <exception cref="TorchUnsupportedModelException">The tensor's data is external, or its
-    /// element type has no torch dtype.</exception>
+    /// <exception cref="TorchUnsupportedModelException">The tensor's data is external, is not the
+    /// size its shape says, or its element type has no torch dtype.</exception>
     public static TorchConstant FromTensor(TensorProto tensor, string? operatorType)
     {
         var shape = tensor.Dims ?? [];
@@ -56,10 +56,7 @@ internal sealed record TorchConstant(
                 $"The tensor '{tensor.Name}' is of element type {elementType}, which the PyTorch backend cannot "
                 + $"hold: {ex.Message}");
         }
-        if (tensor.RawData is { } raw)
-            return new TorchConstant(elementType, shape, raw, null);
-
-        var bytes = elementType switch
+        var bytes = tensor.RawData ?? elementType switch
         {
             ShorokooTensorElementType.Float or ShorokooTensorElementType.Complex64
                 => MemoryMarshal.AsBytes((tensor.FloatDatas ?? []).AsSpan()).ToArray(),
@@ -77,10 +74,12 @@ internal sealed record TorchConstant(
             // patterns and the 8-bit floats' -- is carried one element per int32, in its low bytes.
             _ => Narrowed(tensor.Int32Datas ?? [], TorchElementTypes.ElementSize(elementType)),
         };
-        if (bytes.Length < byteCount)
+        // Exactly, as ONNX Runtime has it: the session copies the constant's bytes by its shape, and
+        // data of another size is a tensor written wrong -- or, empty, one written without its data.
+        if (bytes.Length != byteCount)
             throw new TorchUnsupportedModelException(TorchUnsupportedReason.UnsupportedModel, null, operatorType,
-                $"The tensor '{tensor.Name}' holds {bytes.Length} bytes of data where its shape "
-                + $"[{string.Join(", ", shape)}] of {elementType} needs {byteCount}.");
+                $"The tensor '{tensor.Name}' holds {bytes.Length} bytes of {(tensor.RawData is null ? "typed" : "raw")} data where its "
+                + $"shape [{string.Join(", ", shape)}] of {elementType} needs {byteCount}.");
         return new TorchConstant(elementType, shape, bytes, null);
     }
 

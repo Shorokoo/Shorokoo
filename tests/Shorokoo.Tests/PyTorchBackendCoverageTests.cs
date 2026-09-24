@@ -703,6 +703,7 @@ public class PyTorchBackendCoverageTests
     {
         Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(RawInitialized(4), default, default, DeviceMemorySettings.Default));
         Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(RawInitialized(16), default, default, DeviceMemorySettings.Default));
+        Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(RawInitialized(0), default, default, DeviceMemorySettings.Default));
         Torch.CreateSession(RawInitialized(12), default, default, DeviceMemorySettings.Default).Dispose();
     }
 

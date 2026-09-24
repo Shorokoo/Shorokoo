@@ -287,6 +287,26 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
+    public void TestAGraphThatHandsAnInputBackAsItsOutputGivesTheOutputMemoryOfItsOwn()
+    {
+        using var context = new ComputeContext();
+        var x = InputVector<float32>("x");
+        var passthrough = context.Compile(new InternalComputationGraph([x], [x]), [[4L]], trainingStep: false);
+        var source = Sample();
+        var output = passthrough.Execute(source.Shared())[0].ToTensorData();
+
+        output.As<float32>().WriteMemory<float>(span => span.Fill(9f));
+
+        Assert.Equal([1f, 2f, 3f, 4f], Floats(passthrough.Execute(source.Shared())[0].ToTensorData()));
+
+        var doubled = x * 2f;
+        var twice = context.Compile(new InternalComputationGraph([x], [doubled, doubled]), [[4L]], trainingStep: false)
+            .Execute(Sample());
+        twice[0].ToTensorData().As<float32>().WriteMemory<float>(span => span.Fill(9f));
+        Assert.Equal([2f, 4f, 6f, 8f], Floats(twice[1].ToTensorData()));
+    }
+
+    [Fact]
     public void TestACopyARunReadsInATensorsPlaceCannotBeWrittenSoEveryLaterReadSeesTheTensor()
     {
         using var context = new ComputeContext();

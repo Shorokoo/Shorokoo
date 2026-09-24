@@ -42,6 +42,7 @@ public class PyTorchBackendCoverageTests
         Assert.Equal(3, running.PythonVersion.Major);
         Assert.Equal(12, running.PythonVersion.Minor);
         Assert.True(File.Exists(running.LibPython));
+        Assert.Equal(running.Directory, new TorchCpuBackend(new() { EnvironmentPath = running.Directory + Path.DirectorySeparatorChar }).Start().Directory);
     }
 
     [Fact]

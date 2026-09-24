@@ -237,12 +237,12 @@ backward pass needs is kept by torch's autograd graph until the gradient is take
 where ONNX Runtime gives each session an arena of its own, so the per-session settings map as
 far as they can and no further:
 
-- `LimitBytes` (which the budget of a context sets per session) caps a run at what is allocated on
-  the device when it starts plus the limit, through torch's per-process memory fraction; the
-  allocator's cached blocks are handed back first, so they cannot serve the run past the cap. A run
-  that needs more fails with an `InvalidOperationException` naming the limit. Because the cap is the
-  process's, capped runs on one device take turns, and a run of *another* context on that device
-  while one is in progress is capped too.
+- `LimitBytes` (which the budget of a context sets per session) caps a run at what torch's
+  allocator holds on the device when it starts plus the limit, through torch's per-process memory
+  fraction; the allocator's cached blocks are handed back first, so they cannot serve the run past
+  the cap. A run that needs more fails with an `InvalidOperationException` naming the limit.
+  Because the cap is the process's, a capped run has its device to itself: other torch runs on that
+  device, capped or not, wait for it to finish rather than run under its cap.
 - `ArenaExtend` has no counterpart: torch's allocator grows its own way, configured process-wide by
   `PYTORCH_CUDA_ALLOC_CONF` before the backend starts.
 - `ReadArenaStatistics` reads `torch.cuda.memory_stats`: `InUseBytes`, `MaxInUseBytes`,

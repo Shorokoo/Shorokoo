@@ -465,9 +465,12 @@ def alias_write(slot, op, a, b, live):
 # ---- device memory ---------------------------------------------------------------------------
 
 def _cap(run_device, limit_bytes):
-    """Caps what torch's CUDA caching allocator may hold on the run's device at what is allocated
-    there now plus `limit_bytes`, for the length of the run, and returns what to restore; None
-    where there is nothing to cap. The allocator is the whole process's, so the cap is too."""
+    """Caps what torch's CUDA caching allocator may hold on the run's device at what it holds there
+    now plus `limit_bytes`, for the length of the run, and returns what to restore; None where there
+    is nothing to cap. The allocator is the whole process's, so the cap is too.
+
+    What it holds, not what it has handed out: the fraction caps the memory it reserves from the
+    device, and a segment only partly handed out is reserved all the same."""
     if limit_bytes is None or limit_bytes < 0 or run_device.type != "cuda":
         return None
     index = run_device.index if run_device.index is not None else torch.cuda.current_device()
@@ -476,7 +479,7 @@ def _cap(run_device, limit_bytes):
     # run's. A budgeted run hands them back as it ends too, so there is seldom anything to hand back.
     torch.cuda.empty_cache()
     total = torch.cuda.get_device_properties(index).total_memory
-    allowed = torch.cuda.memory_allocated(index) + limit_bytes
+    allowed = torch.cuda.memory_reserved(index) + limit_bytes
     previous = _memory_fraction(index)
     torch.cuda.set_per_process_memory_fraction(min(1.0, allowed / total), index)
     return (index, previous)

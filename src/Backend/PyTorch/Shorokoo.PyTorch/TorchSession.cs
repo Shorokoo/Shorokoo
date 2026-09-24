@@ -46,9 +46,10 @@ internal sealed class TorchSession : IShorokooSession
     private readonly PyObject _constantIds;
     private int _disposed;
 
-    // torch's CUDA caching allocator is the whole process's, so a cap on it is too: runs under a
-    // limit are serialized per device, so that no two of them set the cap at once.
-    private static readonly ConcurrentDictionary<int, object> CappedRuns = new();
+    // torch's CUDA caching allocator is the whole process's, so a cap on it is too: a run under a
+    // limit has its device to itself, so that no two runs set the cap at once and no run without
+    // one is held to another's; runs without one share it.
+    private static readonly ConcurrentDictionary<int, ReaderWriterLockSlim> DeviceRuns = new();
 
     private TorchSession(
         TorchBackend backend, TorchRuntime runtime, TranslatedModel model, ShorokooLogSeverity logSeverity,
@@ -323,15 +324,21 @@ internal sealed class TorchSession : IShorokooSession
                 registration = token.Register(static flag => Marshal.WriteInt32((IntPtr)flag!, 1), stop);
             }
 
-            var capped = _limitBytes is not null ? CappedRuns.GetOrAdd(_backend.CudaDeviceId, static _ => new object()) : null;
-            if (capped is not null) Monitor.Enter(capped);
+            var device = _backend.OnCuda
+                ? DeviceRuns.GetOrAdd(_backend.CudaDeviceId, static _ => new ReaderWriterLockSlim(LockRecursionPolicy.SupportsRecursion))
+                : null;
+            if (device is null) return Invoke(feeds, wanted, outputNames, retainedOutputNames, targets, stop, runSettings, out aliasedInputs);
+            var capped = _limitBytes is not null;
+            if (capped) device.EnterWriteLock();
+            else device.EnterReadLock();
             try
             {
                 return Invoke(feeds, wanted, outputNames, retainedOutputNames, targets, stop, runSettings, out aliasedInputs);
             }
             finally
             {
-                if (capped is not null) Monitor.Exit(capped);
+                if (capped) device.ExitWriteLock();
+                else device.ExitReadLock();
             }
         }
         finally
@@ -418,8 +425,8 @@ internal sealed class TorchSession : IShorokooSession
             {
                 throw new InvalidOperationException(
                     $"Running the model on {_backend.Description} needed more device memory than the {limit} bytes "
-                    + $"this session's runs may allocate on {_backend.DeviceName} beyond what was allocated there "
-                    + $"when the run started (DeviceMemorySettings.LimitBytes): {ex.Format()}", ex);
+                    + $"this session's runs may allocate on {_backend.DeviceName} beyond what torch's allocator held "
+                    + $"there when the run started (DeviceMemorySettings.LimitBytes): {ex.Format()}", ex);
             }
             catch (PythonException ex)
             {

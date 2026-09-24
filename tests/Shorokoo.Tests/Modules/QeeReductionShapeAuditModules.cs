@@ -491,4 +491,15 @@ namespace Shorokoo.Tests.Modules
         private static Tensor<float32> Flat(Tensor<float32> t) => t.Reshape(Vector(-1L));
         private static Tensor<int64> FlatI(Tensor<int64> t) => t.Reshape(Vector(-1L));
     }
+
+    /// <summary>int64 ReduceMax then ReduceMin over an empty axis. Input xf is any float tensor.</summary>
+    [Module]
+    public partial class EmptyInt64ReduceMaxMinValues
+    {
+        public static Tensor<int64> Inline(Tensor<float32> xf)
+        {
+            var e = xf.Reshape(Vector(-1L)).Slice(Vector(0L), Vector(0L)).Reshape(Vector(1L, 0L)).Cast<int64>();
+            return e.Reduce(ReduceKind.Max, Vector(1L)).Concat(0L, e.Reduce(ReduceKind.Min, Vector(1L)));
+        }
+    }
 }

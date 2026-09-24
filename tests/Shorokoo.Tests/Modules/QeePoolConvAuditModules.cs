@@ -423,4 +423,50 @@ namespace Shorokoo.Tests.Modules
             return mismatch < Scalar(1L);
         }
     }
+
+    /// <summary>SAME_UPPER then SAME_LOWER MaxPool with dilations: the padding follows the dilated
+    /// kernel, so the output keeps ceil(in/stride) elements. Input x is [1,1,10].</summary>
+    [Module]
+    public partial class SameDilatedMaxPoolValues
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x)
+            => ((Tensor<float32>)OnnxOp.MaxPool(x, AutoPad.SameUpper, false, [2L], [3L], null, 0L, [2L]))
+                .Concat(2L, (Tensor<float32>)OnnxOp.MaxPool(x, AutoPad.SameLower, false, [2L], [3L], null, 0L, [2L]));
+    }
+
+    /// <summary>As <see cref="SameDilatedMaxPoolValues"/>, for LpPool (p = 2).</summary>
+    [Module]
+    public partial class SameDilatedLpPoolValues
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x)
+            => ((Tensor<float32>)OnnxOp.LpPool(x, AutoPad.SameUpper, false, [2L], [3L], 2L, null, [2L]))
+                .Concat(2L, (Tensor<float32>)OnnxOp.LpPool(x, AutoPad.SameLower, false, [2L], [3L], 2L, null, [2L]));
+    }
+
+    /// <summary>As <see cref="SameDilatedMaxPoolValues"/>, for AveragePool (count_include_pad = 0).</summary>
+    [Module]
+    public partial class SameDilatedAveragePoolValues
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x)
+            => ((Tensor<float32>)OnnxOp.AveragePool(x, AutoPad.SameUpper, false, false, [2L], [3L], null, [2L]))
+                .Concat(2L, (Tensor<float32>)OnnxOp.AveragePool(x, AutoPad.SameLower, false, false, [2L], [3L], null, [2L]));
+    }
+
+    /// <summary>ConvTranspose whose output_shape exceeds the full extent by a whole stride.
+    /// x and w are [1,1,2,2], b is [1].</summary>
+    [Module]
+    public partial class ConvTransposeOversizedOutputShapeValues
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x, Tensor<float32> w, Tensor<float32> b)
+            => (Tensor<float32>)OnnxOp.ConvTranspose(x, w, b, AutoPad.NotSet, null, 1L, [2L, 2L], null, [6L, 6L], null, [2L, 2L]);
+    }
+
+    /// <summary>The ONNX output_shape example: output_shape [10,8] one past the full extent [9,7] zero-extends
+    /// the end. x is [1,1,3,3], w is [1,1,3,3].</summary>
+    [Module]
+    public partial class ConvTransposeOutputShapeOnePastTheFullExtentValues
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x, Tensor<float32> w)
+            => (Tensor<float32>)OnnxOp.ConvTranspose(x, w, Vector(0f), AutoPad.NotSet, null, 1L, null, null, [10L, 8L], null, [3L, 2L]);
+    }
 }

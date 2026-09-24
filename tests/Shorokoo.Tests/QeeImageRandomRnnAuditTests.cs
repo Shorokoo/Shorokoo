@@ -109,4 +109,20 @@ public class QeeImageRandomRnnAuditTests
         Assert.True(QeeAudit.OrtOnly<QeeGruValueAuditCheck>(Wave(4, 2, 3), Wave(2, 15, 3), Wave(2, 15, 5), Wave(2, 30), Wave(2, 2, 5), SeqLens));
         Assert.True(QeeAudit.OrtOnly<QeeLstmValueAuditCheck>(Wave(4, 2, 3), Wave(2, 20, 3), Wave(2, 20, 5), Wave(2, 40), Wave(2, 2, 5), Wave(2, 2, 5), Wave(2, 15), SeqLens));
     }
+
+    // ONNX Runtime copies the input through when the output shape equals the input shape, ignoring the roi:
+    // https://github.com/Shorokoo/Shorokoo/issues/380
+    [Fact(Skip = "Shorokoo/Shorokoo#380: ONNX Runtime ignores the tf_crop_and_resize roi at an unchanged shape")]
+    public void TestCropAndResizeAtScaleOneStillCropsToTheRoi()
+        => Assert.True(AutoTest.AdvancedTestGraph<CropAndResizeAtScaleOneValues>([],
+            [F32([1L, 1L, 1L, 5L], 0f, 1f, 2f, 3f, 4f)],
+            expected: [2, 3, 4, -1, -1, 2, 3, 4, -1, -1]));
+
+    // ONNX Runtime's 1-D Col2Im with pads returns wrong, run-to-run varying values:
+    // https://github.com/Shorokoo/Shorokoo/issues/381
+    [Fact(Skip = "Shorokoo/Shorokoo#381: ONNX Runtime computes 1-D padded Col2Im wrongly")]
+    public void TestCol2ImOverOneSpatialAxisWithPadsAndStride()
+        => Assert.True(AutoTest.AdvancedTestGraph<Col2Im1DPaddedValues>([],
+            [F32([1L, 3L, 4L], [.. Enumerable.Range(0, 12).Select(i => (float)i)])],
+            expected: [4, 9, 5, 11, 6, 13, 7, 11]));
 }

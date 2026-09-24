@@ -748,6 +748,14 @@ public class PyTorchBackendCoverageTests
         }
     }
 
+    [Fact]
+    public void TestABackendOnAPlatformWithoutALockIsConstructedAndRefusesToStartWithATypedFailure()
+    {
+        Assert.Throws<PythonEnvironmentException>(() => new OffPlatformBackend().Start());
+    }
+
+    private sealed class OffPlatformBackend() : TorchBackend(PythonEnvironmentLock.ForPlatform("cpu", "osx-arm64"), null, null);
+
     private static PythonEnvironment Resolve(PythonEnvironmentOptions options, string variable)
         => PythonEnvironmentResolver.Resolve(PythonEnvironmentLock.Cpu, options,
             name => name == PythonEnvironmentResolver.EnvironmentVariable ? variable : null);

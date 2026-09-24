@@ -52,7 +52,9 @@ public class QeePoolConvAuditTests
             F32Wave([2L, 2L, 9L]), F32Wave([1L, 4L, 7L, 6L]), F32Wave([1L, 2L, 5L, 4L, 4L]), F32Wave([1024L])));
     }
 
-    [Fact]
+    // ONNX Runtime pads SAME_UPPER/SAME_LOWER pools for the undilated kernel and emits too few, shifted windows:
+    // https://github.com/Shorokoo/Shorokoo/issues/379
+    [Fact(Skip = "Shorokoo/Shorokoo#379: ONNX Runtime pads dilated SAME pools for the undilated kernel")]
     public void TestSameAutoPadWithDilationsPadsForTheDilatedKernel()
     {
         var x = F32([1L, 1L, 10L], [.. Enumerable.Range(0, 10).Select(i => (float)i)]);

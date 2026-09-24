@@ -239,7 +239,11 @@ public static class DefaultBackend
 
     /// <summary>Why the deployed <paramref name="assembly"/> discovery chose gave it no backend.</summary>
     internal static string NoBackendFromDeployed(Assembly assembly, string name, string path)
-        => $"'{name}' was found at '{path}' but exposes no concrete {nameof(IShorokooBackend)}.";
+        => IsExplicitOnly(assembly)
+            ? $"'{name}' was found at '{path}', but it is a backend a program must name, which discovery "
+              + "never chooses. Name it: construct its backend and assign DefaultBackend.Instance before "
+              + "the first run, or pass it to new ComputeContext(backend)."
+            : $"'{name}' was found at '{path}' but exposes no concrete {nameof(IShorokooBackend)}.";
 
     /// <summary>
     /// Chooses the one backend among those deployed for the current OS. Nothing deployed

@@ -34,9 +34,9 @@ var rig = TrainingRig.FromScratch(
     trainingBackend: TrainingBackend.Native);
 ```
 
-`backend` here is an `IShorokooBackend` that accepts `TrainingFormats.OnnxAutoGrad`. Everything else
-is the ordinary rig: `TrainStep`, `Fit`, `Train`, `BeginResidentRun`, checkpoints and `.skpt` files
-work unchanged.
+`backend` here is an `IShorokooBackend` that accepts `TrainingFormats.OnnxAutoGrad` — today, the
+PyTorch backends (see [Training on PyTorch](#training-on-pytorch)). Everything else is the ordinary
+rig: `TrainStep`, `Fit`, `Train`, `BeginResidentRun`, checkpoints and `.skpt` files work unchanged.
 
 To move an existing rig, derive a new one; the model, loss, optimizer, hyperparameters, seed and
 contexts carry over, and only the training step is rebuilt:
@@ -54,6 +54,56 @@ TrainingBackend.Native)`; left out, it is `TrainingBackend.Shorokoo`. Read the c
 
 Whether a backend runs a format is its own answer:
 `backend.AcceptsTrainingFormat(TrainingFormats.OnnxAutoGrad)`.
+
+## Training on PyTorch
+
+The [PyTorch backends](pytorch-backend.md) accept both formats, so a rig whose runtime context runs
+on one can leave its gradient to **torch autograd**:
+
+```csharp
+using Shorokoo.PyTorch.Cpu;                  // or Shorokoo.PyTorch.Cuda: new TorchCudaBackend()
+using Shorokoo.Runtime;
+
+using var torch = new ComputeContext(new TorchCpuBackend());
+var rig = TrainingRig.FromScratch(
+    model, loss, optimizer, sampleInputs,
+    new AdamWOptimizerHyperparameters { LearningRate = 0.001f },
+    runtimeContext: torch,
+    trainingBackend: TrainingBackend.Native);
+
+var checkpoint = rig.CreateInitialCheckpoint();
+checkpoint = rig.TrainStep(checkpoint, inputs, targets);
+```
+
+A PyTorch runtime context with the default `TrainingBackend.Shorokoo` works too: torch then runs
+Shorokoo's own backward pass like any other operators. `TrainingBackend.Native` is what hands the
+gradient to torch.
+
+What the step does on torch:
+
+- The forward pass up to the loss runs with gradient recording on, each trainable parameter as a
+  leaf; `torch.autograd.grad` takes the gradient there; the optimizer update runs with recording
+  off, and everything the step returns is detached. The step never keeps an autograd graph past its
+  own run.
+- The optimizer, schedules, hyperparameters and random draws are still Shorokoo's operators. A
+  Dropout mask is drawn by Shorokoo's counter-based generator on either backend, so the masks are
+  identical bit for bit, and a rig trained on torch follows the rig trained by Shorokoo step for
+  step — loss, parameters, model state and optimizer state — up to floating-point rounding, away
+  from the non-smooth points below.
+- A checkpoint is the same checkpoint: saved from a torch rig, it resumes on an ONNX Runtime rig,
+  and the other way round.
+
+Limits of training on torch, besides those of [the native path](#what-differs-on-the-native-path):
+
+- The model must be one the PyTorch backend runs: an operator it does not translate refuses the
+  step's session when it is created, at the first step, with a `TorchUnsupportedModelException`
+  naming it (see the backend's [limitations](pytorch-backend.md#limitations)).
+- An operator the backend runs but does not differentiate through refuses the step the same way,
+  naming it, when it lies between a parameter and the loss. Operators whose outputs carry no
+  gradient — comparisons, shapes, indices — end the path rather than refusing it.
+- Only floating-point parameters (`Float32`, `Float16`, `BFloat16`, `Float64`) are differentiated.
+- Memory: torch keeps what the backward pass needs of the forward pass until the gradient is taken,
+  with no rematerialization.
 
 ## The formats
 

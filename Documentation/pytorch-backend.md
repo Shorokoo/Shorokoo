@@ -1,6 +1,6 @@
 # The PyTorch backend
 
-Related: [inference.md](inference.md) · [operator-support.md](operator-support.md)
+Related: [inference.md](inference.md) · [operator-support.md](operator-support.md) · [training-backends.md](training-backends.md)
 
 Shorokoo can run a model on **PyTorch** instead of ONNX Runtime. The backend translates the
 model Shorokoo hands every backend (serialized ONNX) into Python that calls PyTorch, and runs
@@ -153,6 +153,24 @@ whose message names what is missing:
 | `InterpreterFailed` | CPython itself would not start |
 | `DeviceUnavailable` | a CUDA backend, and PyTorch sees no such device |
 
+## Training
+
+A `TrainingRig` trains on a torch context like on any other: pass it as the rig's `runtimeContext`.
+With `trainingBackend: TrainingBackend.Native` the gradient is computed by **torch autograd** rather
+than by Shorokoo:
+
+```csharp
+using var torch = new ComputeContext(new TorchCpuBackend());
+var rig = TrainingRig.FromScratch(model, loss, optimizer, sampleInputs, hyperparameters,
+    runtimeContext: torch, trainingBackend: TrainingBackend.Native);
+```
+
+Both torch backends accept both training formats (`AcceptsTrainingFormat` is true for
+`TrainingFormats.Onnx` and `TrainingFormats.OnnxAutoGrad`). Everything else about the rig — the
+optimizer, schedules, random draws, checkpoints, resident runs — is unchanged, and a torch-trained
+rig agrees with a Shorokoo-trained one step for step up to floating-point rounding. What the step
+does on torch, and its limits, are in [Training on PyTorch](training-backends.md#training-on-pytorch).
+
 ## Values
 
 Every element type PyTorch has is supported, which includes a few ONNX Runtime cannot build
@@ -170,9 +188,11 @@ else.
   comparisons and logic operators, the reductions, `MatMul`/`Gemm`, the shape operators
   (`Reshape`, `Transpose`, `Concat`, `Split`, `Squeeze`/`Unsqueeze`, `Shape`, `Expand`, `Tile`,
   `Pad`, `Constant`, `ConstantOfShape`, `Range`, …), `Gather`/`GatherElements`/`Slice`/`Compress`,
-  and `If`/`Loop` are translated. Convolution and pooling, normalization, recurrent networks,
-  random draws, sequences, strings, signal, image and quantization operators are not yet: a
-  model using one is refused when its session is created, naming it.
+  and `If`/`Loop` are translated, and so are Shorokoo's own random draws (Dropout masks and the
+  like), which reach the backend as integer operators. Convolution and pooling, normalization,
+  recurrent networks, the ONNX random operators, sequences, strings, signal, image and
+  quantization operators are not yet: a model using one is refused when its session is created,
+  naming it.
 - **Linux x64 only.** The lock files are resolved for Linux x64, and so are the packages.
 - **Device memory settings are not applied.** PyTorch's caching allocator is process-wide, so
   a context's `DeviceMemory` budget still bounds the tensors the context holds, but a session's

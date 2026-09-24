@@ -38,6 +38,8 @@ public class QeeSeqStringSignalAuditTests
             I64([], 4L),
             F32([4L], 1f, 1f, 1f, 1f)));
         Assert.True(QeeAudit.Check<QeeTfIdfShapeAuditCheck>(I64([4L], 1L, 2L, 3L, 4L)));
+        Assert.True(QeeAudit.OrtOnly<QeeStringValueAuditCheck>(Strs([2L], "Hello World", "the  quick fox"),
+            F32([6L], 1f, 0.1f, -3.5f, 1e20f, 1e-5f, 123456789f), I64([3L], -7L, 0L, 9007199254740993L)));
         Assert.True(QeeAudit.QeeOnlyTyped<QeeStringOpsAuditCheck>(
             Strs([2L], "Hello World", "the quick fox"), Strs([2L], "A", "B")));
         Assert.True(QeeAudit.QeeOnlyTyped<QeeInternalControlFlowAuditCheck>(

@@ -1,6 +1,7 @@
 namespace Shorokoo.PyTorch.Translation.Operators;
 
-// Normalization, dropout and losses; the semantics are in shorokoo_torch/ops_norm.py.
+// Normalization and losses; the semantics are in shorokoo_torch/ops_norm.py. Dropout, which draws
+// its mask, is with the random operators.
 internal static partial class OperatorTable
 {
     static partial void RegisterNorm(Registry table)
@@ -14,7 +15,6 @@ internal static partial class OperatorTable
         table.Map("LRN", M + "lrn", ["alpha", "beta", "bias", "size"]);
         table.Map("LpNormalization", M + "lp_normalization", ["axis", "p"]);
         table.Map("MeanVarianceNormalization", M + "mean_variance_normalization", ["axes"]);
-        table.Map("Dropout", M + "dropout", ["seed"], outputs: true);
         table.Map("NegativeLogLikelihoodLoss", M + "negative_log_likelihood_loss", ["ignore_index", "reduction"]);
         table.Map("SoftmaxCrossEntropyLoss", M + "softmax_cross_entropy_loss", ["ignore_index", "reduction"], outputs: true);
     }

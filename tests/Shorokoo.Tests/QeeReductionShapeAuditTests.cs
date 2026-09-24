@@ -41,5 +41,6 @@ public class QeeReductionShapeAuditTests
         Assert.True(QeeAudit.Check<QeeSplitConcatTileSpaceValueAuditCheck>(
             F32([7L], 1f, 2f, 3f, 4f, 5f, 6f, 7f)));
         Assert.True(QeeAudit.Check<QeeOneHotTriluNonZeroValueAuditCheck>(I64([4L], 1L, 3L, -2L, 5L)));
+        Assert.True(QeeAudit.Check<QeeScatterGatherNdEdgeValueAuditCheck>(F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)));
     }
 }

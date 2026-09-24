@@ -248,17 +248,25 @@ token. A single node that is one long kernel is not interrupted.
 - **Operator coverage is partial.** The elementwise math and activation operators, the
   comparisons and logic operators, the reductions, `MatMul`/`Gemm`, the shape operators
   (`Reshape`, `Transpose`, `Concat`, `Split`, `Squeeze`/`Unsqueeze`, `Shape`, `Expand`, `Tile`,
-  `Pad`, `Constant`, `ConstantOfShape`, `Range`, …), `Gather`/`GatherElements`/`Slice`/`Compress`,
-  `If`/`Loop`, convolution and pooling, normalization and the losses, `Einsum`/`Det`/`MatMulInteger`,
-  the image and geometry operators (`Resize`, `GridSample`, `AffineGrid`, `RoiAlign`,
+  `Pad`, `Constant`, `ConstantOfShape`, `Range`, `OneHot`, `EyeLike`, `ReverseSequence`,
+  `TensorScatter`, …), the indexing operators (`Gather`, `GatherElements`, `GatherND`, `Slice`,
+  `Compress`, `ScatterElements`, `ScatterND`, `TopK`, `Unique`, `NonZero`), `If`/`Loop`,
+  convolution and pooling, normalization and the losses, `Einsum`/`Det`/`MatMulInteger`, the
+  image and geometry operators (`Resize`, `GridSample`, `AffineGrid`, `RoiAlign`,
   `NonMaxSuppression`, `CenterCropPad`, `Col2Im`, `DepthToSpace`/`SpaceToDepth`, …), the
   recurrent networks (`RNN`, `GRU`, `LSTM` — `layout=1` included, which ONNX Runtime's CPU
-  kernels refuse), the signal operators (`DFT`, `STFT`, the windows, `MelWeightMatrix`) and the
+  kernels refuse), the signal operators (`DFT`, `STFT`, the windows, `MelWeightMatrix`), the
   quantization operators (`QuantizeLinear`, `DequantizeLinear`, `DynamicQuantizeLinear`,
-  `QLinearMatMul`, `QLinearConv`) are translated, and so are Shorokoo's own random draws
-  (Dropout masks and the like), which reach the backend as integer operators. The ONNX random
-  operators, sequences, strings and `ImageDecoder` are not yet: a model using one is refused
-  when its session is created, naming it.
+  `QLinearMatMul`, `QLinearConv`), sequences and optionals (`SequenceMap` included), the string
+  operators (`TfIdfVectorizer` included), and the ONNX random operators and `Dropout` are
+  translated, as are functions that take attributes and Shorokoo's own random draws, which reach
+  the backend as integer operators. `ImageDecoder` is not yet: a model using it is refused when
+  its session is created, naming it.
+- **ONNX random draws differ from ONNX Runtime's.** `RandomNormal`, `RandomUniform`, their `Like`
+  forms, `Bernoulli`, `Multinomial` and a training-mode `Dropout` draw from PyTorch's generator:
+  the distribution, shape and element type are the operator's, and a node with a `seed` draws the
+  same values on every run, but not the values ONNX Runtime draws. Shorokoo's own keyed draws
+  are integer arithmetic, and agree with ONNX Runtime exactly.
 - **Linux x64 and Windows x64 only**, the platforms there are lock files for.
 - **Device memory is torch's, per process** — see [Runs](#runs) for what a context's settings
   can and cannot reach.

@@ -6,6 +6,7 @@ inputs positionally and its attributes as keywords named as ONNX names them, wit
 
 import functools
 import math
+import re
 
 import numpy as np
 import torch
@@ -14,6 +15,7 @@ import torch.nn.functional as F
 from . import runtime as _rt
 
 _NARROW_UNSIGNED = {torch.uint16: 0xFFFF, torch.uint32: 0xFFFFFFFF}
+_SIGN_BIT = -(2 ** 63)
 
 
 def _emulated(fn, *xs):
@@ -54,13 +56,36 @@ def mul(a, b):
     return _emulated(torch.mul, a, b)
 
 
+def _unsigned_at_least(x, y):
+    """x >= y for int64 tensors holding uint64 bit patterns."""
+    return (x ^ _SIGN_BIT) >= (y ^ _SIGN_BIT)
+
+
+def _divmod_uint64(a, b):
+    """Quotient and remainder of uint64 tensors, which torch has no division kernel for, exactly,
+    in int64 arithmetic on their bit patterns: a divisor of 2**63 or more goes at most once; a
+    smaller one divides half the dividend -- which is below 2**63 -- and the quotient doubled is
+    corrected by the one step the remainder can still hold."""
+    x, y = torch.broadcast_tensors(a.view(torch.int64), b.view(torch.int64))
+    large = y < 0
+    divisor = torch.where(large, torch.ones_like(y), y)
+    quotient = torch.div((x >> 1) & 0x7FFFFFFFFFFFFFFF, divisor, rounding_mode="floor") << 1
+    quotient = quotient + _unsigned_at_least(x - quotient * divisor, divisor).to(torch.int64)
+    quotient = torch.where(large, _unsigned_at_least(x, y).to(torch.int64), quotient)
+    return quotient.view(torch.uint64), (x - quotient * y).view(torch.uint64)
+
+
 def div(a, b):
+    if a.dtype == torch.uint64:
+        return _divmod_uint64(a, b)[0]
     if _is_integral(a):
         return _widened(lambda x, y: torch.div(x, y, rounding_mode="trunc"), a, b)
     return torch.div(a, b)
 
 
 def mod(a, b, *, fmod=0):
+    if a.dtype == torch.uint64:
+        return _divmod_uint64(a, b)[1]
     if fmod:
         return _widened(torch.fmod, a, b)
     return _widened(torch.remainder, a, b)
@@ -166,12 +191,20 @@ def erf(x):
     return torch.erf(x)
 
 
+def _ordered(fn, a, b):
+    """`fn` (maximum or minimum) of a and b; uint64 ones, which torch cannot order, as int64 bit
+    patterns with the sign bit flipped, which int64 orders as unsigned."""
+    if a.dtype == torch.uint64:
+        return (fn(a.view(torch.int64) ^ _SIGN_BIT, b.view(torch.int64) ^ _SIGN_BIT) ^ _SIGN_BIT).view(torch.uint64)
+    return _widened(fn, a, b)
+
+
 def max_(*xs):
-    return functools.reduce(lambda a, b: _widened(torch.maximum, a, b), xs)
+    return functools.reduce(lambda a, b: _ordered(torch.maximum, a, b), xs)
 
 
 def min_(*xs):
-    return functools.reduce(lambda a, b: _widened(torch.minimum, a, b), xs)
+    return functools.reduce(lambda a, b: _ordered(torch.minimum, a, b), xs)
 
 
 def sum_(*xs):
@@ -324,15 +357,34 @@ _FLOAT8 = (torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.float8_e5m2, torch.
 
 
 def _format_number(value):
+    """A number as ONNX Runtime writes it into a string: an integer in decimal, a bool as 1 or 0,
+    a float as printf's %.8g (which turns to exponent notation outside 1e-5..1e8), and the
+    non-finite ones as NaN, INF and -INF."""
     if isinstance(value, float):
         if math.isnan(value):
             return "NaN"
         if math.isinf(value):
             return "INF" if value > 0 else "-INF"
-        return np.format_float_positional(np.float32(value), trim="-") if abs(value) < 1e16 else repr(value)
+        return "%.8g" % value
     if isinstance(value, bool):
         return "1" if value else "0"
     return str(value)
+
+
+_LEADING_INTEGER = re.compile(r"\s*[+-]?\d+")
+
+
+def _parse_number(text, target):
+    """A string read as a number of dtype `target`: a float in plain or exponent notation (INF,
+    -INF and NaN in any case), and an integer from its leading digits, as C's strtoll does."""
+    if target.is_floating_point:
+        return float(text)
+    if target == torch.bool:
+        return bool(_parse_number(text, torch.int64))
+    match = _LEADING_INTEGER.match(text)
+    if match is None:
+        raise ValueError(f"Cast: '{text}' is not an integer")
+    return int(match.group(0))
 
 
 def cast(x, *, to, saturate=1, round_mode="up"):
@@ -344,8 +396,11 @@ def cast(x, *, to, saturate=1, round_mode="up"):
         return _rt.strings([_format_number(v) for v in values], list(x.shape))
     target = _rt.torch_dtype(to)
     if _rt.is_strings(x):
-        parsed = [float(s) if target.is_floating_point else int(float(s)) for s in x.reshape(-1).tolist()]
-        return torch.tensor(parsed, device=_rt.device()).to(target).reshape(x.shape)
+        parsed = [_parse_number(s, target) for s in x.reshape(-1).tolist()]
+        if target.is_floating_point:
+            return torch.tensor(parsed, dtype=torch.float64).to(target).reshape(x.shape).to(_rt.device())
+        wide = torch.tensor([v & 0xFFFFFFFFFFFFFFFF for v in parsed], dtype=torch.uint64)
+        return cast(wide.reshape(x.shape), to=to).to(_rt.device())
     if target in _FLOAT8 and saturate and x.dtype.is_floating_point:
         limit = torch.finfo(target).max
         bounded = torch.clamp(x, -limit, limit)

@@ -1,5 +1,5 @@
 """ONNX normalization and losses: BatchNormalization (inference and training mode), Instance-,
-Layer-, Group-, RMS-, Lp- and MeanVarianceNormalization, LRN, Dropout, NegativeLogLikelihoodLoss
+Layer-, Group-, RMS-, Lp- and MeanVarianceNormalization, LRN, NegativeLogLikelihoodLoss
 and SoftmaxCrossEntropyLoss.
 
 Every helper is functional -- no input is written to, the running statistics of a training-mode
@@ -124,23 +124,6 @@ def mean_variance_normalization(x, /, *, axes=None):
     mean = torch.mean(x, dim=axes, keepdim=True)
     variance = torch.mean(torch.square(x), dim=axes, keepdim=True) - torch.square(mean)
     return (x - mean) / (torch.sqrt(variance) + 1e-9)
-
-
-def dropout(data, ratio=None, training_mode=None, /, *, seed=None, _outputs):
-    training = training_mode is not None and bool(training_mode.reshape(-1)[0].item())
-    rate = 0.5 if ratio is None else float(ratio.reshape(-1)[0].item())
-    if not training or rate == 0:
-        out = data
-        mask = torch.ones(data.shape, dtype=torch.bool, device=data.device)
-    else:
-        generator = None
-        if seed is not None:
-            generator = torch.Generator(device=data.device)
-            generator.manual_seed(int(seed))
-        keep = 1.0 - rate
-        mask = torch.rand(data.shape, generator=generator, device=data.device) < keep
-        out = torch.where(mask, data / keep, torch.zeros_like(data)).to(data.dtype)
-    return (out, mask)[:_outputs]
 
 
 def _nll(log_prob, target, weight, ignore_index, reduction):

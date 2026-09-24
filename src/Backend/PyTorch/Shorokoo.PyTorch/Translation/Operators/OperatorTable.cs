@@ -20,8 +20,8 @@ internal delegate string OperatorEmitter(NodeContext node);
 
 /// <summary>
 /// One operator's translation: the expression it emits and whether that expression is a tuple of
-/// all the node's outputs (in which case the node's outputs are unpacked from it) or the node's
-/// single output.
+/// the node's outputs (in which case the node's outputs are unpacked from its leading elements, so
+/// a node may leave off optional outputs at the end) or the node's single output.
 /// </summary>
 internal sealed record OperatorEntry(string OpType, OperatorEmitter Emit, bool ReturnsTuple, TorchGradient Gradient);
 
@@ -131,14 +131,16 @@ internal static partial class OperatorTable
         /// the node's inputs positionally, then the <paramref name="attributes"/> it carries as
         /// keywords. <paramref name="opset"/> also passes <c>_opset</c>, the node's opset version, for
         /// a function whose semantics changed between versions; <paramref name="outputs"/> passes
-        /// <c>_outputs</c>, the node's output count, for a function that returns a tuple of that many.
+        /// <c>_outputs</c>, the node's output count, for a function that returns a tuple of that many;
+        /// <paramref name="tuple"/> marks a function that returns a tuple of every output the
+        /// operator has, of which the node takes as many as it declares.
         /// </summary>
         public void Map(
             string opType, string function, string[]? attributes = null, bool opset = false,
-            bool outputs = false, TorchGradient gradient = TorchGradient.Differentiable)
+            bool outputs = false, bool tuple = false, TorchGradient gradient = TorchGradient.Differentiable)
         {
             var accepted = attributes ?? [];
-            Custom(opType, node => node.Call(function, accepted, opset, outputs), outputs, gradient);
+            Custom(opType, node => node.Call(function, accepted, opset, outputs), outputs || tuple, gradient);
         }
 
         /// <summary><paramref name="opType"/> translated by an emitter of its own.</summary>

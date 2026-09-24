@@ -23,6 +23,14 @@ namespace Shorokoo.Tests.Utils;
 /// that node's operator; its consumers then disagree as a consequence and are not blamed. A node
 /// with a subgraph reads every outer value the subgraph names as well.</para>
 ///
+/// <para><b>Random draws.</b> torch's generator cannot reproduce ONNX Runtime's, so a value that
+/// depends on a random draw — a random operator's output, and everything computed from it, a node
+/// whose body or function draws included — is compared by kind, dtype and shape only. Shape, Size
+/// and SequenceLength read nothing of their input but its shape, which is still compared, so they
+/// end that dependency. Dropout draws only in training mode, so it counts as a draw unless its
+/// <c>training_mode</c> is absent or false. Everything else, Shorokoo's own keyed generator
+/// included (integer arithmetic in functions), is compared value for value.</para>
+///
 /// <para><b>Which modules run.</b> Every one whose operators the backend translates, decided by the
 /// backend itself: session creation refuses a model using an operator absent from its operator
 /// table (<see cref="TorchUnsupportedReason.UnknownOperator"/>), and that refusal alone skips the
@@ -49,11 +57,12 @@ internal static class QeeAuditOnTorch
     {
         IData[] feeds = [.. inputs.Select(static t => (IData)t.Shared())];
         List<NodeProto> nodes = [];
-        var reference = Values(ComputeContext.Default.ExecuteRewritten(model, m => ExposeEveryValue(m, nodes), feeds));
+        Dictionary<string, FunctionProto> functions = [];
+        var reference = Values(ComputeContext.Default.ExecuteRewritten(model, m => ExposeEveryValue(m, nodes, functions), feeds));
         Dictionary<string, IData> onTorch;
         try
         {
-            onTorch = Values(new ComputeContext(Backend.Value).ExecuteRewritten(model, m => ExposeEveryValue(m, []), feeds));
+            onTorch = Values(new ComputeContext(Backend.Value).ExecuteRewritten(model, m => ExposeEveryValue(m, [], []), feeds));
         }
         catch (Exception ex) when (IsUntranslatedOperator(ex))
         {
@@ -63,14 +72,15 @@ internal static class QeeAuditOnTorch
         {
             return false;
         }
-        var convicted = Convicted(nodes, reference, onTorch);
+        var convicted = Convicted(nodes, reference, onTorch, Drawn(nodes, functions, reference));
         return convicted.SetEquals(KnownDisagreements.Keys.Where(k => k.Module == typeof(TModule)).Select(k => k.Operator));
     }
 
-    private static ModelProto ExposeEveryValue(ModelProto model, List<NodeProto> nodes)
+    private static ModelProto ExposeEveryValue(ModelProto model, List<NodeProto> nodes, Dictionary<string, FunctionProto> functions)
     {
         var graph = model.Graph;
         nodes.AddRange(graph.Nodes);
+        foreach (var function in model.Functions) functions[function.Domain + ":" + function.Name] = function;
         var exposed = graph.Outputs.Select(o => o.Name).Concat(graph.Inputs.Select(i => i.Name)).ToHashSet();
         foreach (var name in graph.Nodes.SelectMany(n => n.Outputs))
             if (name.Length > 0 && exposed.Add(name))
@@ -86,9 +96,34 @@ internal static class QeeAuditOnTorch
             _ => p.ToTensorData(),
         });
 
-    private static HashSet<string> Convicted(List<NodeProto> nodes, Dictionary<string, IData> reference, Dictionary<string, IData> onTorch)
+    private static readonly HashSet<string> RandomOperators =
+        ["RandomNormal", "RandomUniform", "RandomNormalLike", "RandomUniformLike", "Bernoulli", "Multinomial"];
+
+    private static readonly HashSet<string> ShapeReaders = ["Shape", "Size", "SequenceLength"];
+
+    private static HashSet<string> Drawn(List<NodeProto> nodes, Dictionary<string, FunctionProto> functions, Dictionary<string, IData> reference)
     {
-        var disagreeing = reference.Keys.Where(k => !onTorch.TryGetValue(k, out var got) || !Same(reference[k], got)).ToHashSet();
+        HashSet<string> drawn = [];
+        foreach (var node in nodes)
+            if (!ShapeReaders.Contains(node.OpType) && (Draws(node, functions, reference) || Reads(node).Any(drawn.Contains)))
+                drawn.UnionWith(node.Outputs);
+        return drawn;
+    }
+
+    private static bool Draws(NodeProto node, Dictionary<string, FunctionProto> functions, Dictionary<string, IData>? reference)
+        => RandomOperators.Contains(node.OpType)
+            || node.OpType == "Dropout" && node.Inputs.Count > 2 && node.Inputs[2].Length > 0
+                && !(reference is not null && reference.TryGetValue(node.Inputs[2], out var mode)
+                    && mode is TensorData flag && flag.CopyRawMemory().All(b => b == 0))
+            || node.Attributes.SelectMany(a => a.Graphs.Append(a.G)).OfType<GraphProto>()
+                .SelectMany(g => g.Nodes).Any(n => Draws(n, functions, null))
+            || functions.TryGetValue(node.Domain + ":" + node.OpType, out var function)
+                && function.Nodes.Any(n => Draws(n, functions, null));
+
+    private static HashSet<string> Convicted(
+        List<NodeProto> nodes, Dictionary<string, IData> reference, Dictionary<string, IData> onTorch, HashSet<string> drawn)
+    {
+        var disagreeing = reference.Keys.Where(k => !onTorch.TryGetValue(k, out var got) || !Same(reference[k], got, !drawn.Contains(k))).ToHashSet();
         return [.. nodes.Where(n => n.Outputs.Any(disagreeing.Contains) && !Reads(n).Any(disagreeing.Contains)).Select(n => n.OpType)];
     }
 
@@ -106,17 +141,18 @@ internal static class QeeAuditOnTorch
         return false;
     }
 
-    private static bool Same(IData expected, IData actual) => (expected, actual) switch
+    private static bool Same(IData expected, IData actual, bool values) => (expected, actual) switch
     {
-        (TensorData want, TensorData got) => Same(want, got),
-        (TensorDataSequence want, TensorDataSequence got) => want.Count == got.Count && want.Zip(got).All(p => Same(p.First, p.Second)),
-        (OptionalTensorData want, OptionalTensorData got) => want.HasValue == got.HasValue && (!want.HasValue || Same(want.Value!, got.Value!)),
+        (TensorData want, TensorData got) => Same(want, got, values),
+        (TensorDataSequence want, TensorDataSequence got) => want.Count == got.Count && want.Zip(got).All(p => Same(p.First, p.Second, values)),
+        (OptionalTensorData want, OptionalTensorData got) => want.HasValue == got.HasValue && (!want.HasValue || Same(want.Value!, got.Value!, values)),
         _ => false,
     };
 
-    private static bool Same(TensorData expected, TensorData actual)
+    private static bool Same(TensorData expected, TensorData actual, bool values)
     {
         if (expected.DType != actual.DType || !expected.Shape.Equals(actual.Shape)) return false;
+        if (!values) return true;
         if (expected.DType.IsSameElementTypeAs(DType.Utf8)) return expected.Data.SequenceEqual(actual.Data);
         var want = Widened(expected);
         var got = Widened(actual);

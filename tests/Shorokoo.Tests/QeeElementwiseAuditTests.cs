@@ -36,6 +36,9 @@ public class QeeElementwiseAuditTests
             Bits([4L], true, false, true, false), Bits([4L], true, true, false, false)));
         Assert.True(QeeAudit.Check<QeeBitwiseValueAuditCheck>(
             I64([3L], 12L, 10L, 15L), I64([3L], 10L, 5L, 3L)));
+        Assert.True(QeeAudit.Check<QeeUnsignedWraparoundValueAuditCheck>(
+            I64([4L], 4294967295L, 65536L, 1L, 2147483649L), I64([4L], 2L, 65536L, 2L, 1L), I64([4L], 2L, 16L, 31L, 1L),
+            I64([4L], -1L, long.MinValue, -6101065172474983726L, 7L), I64([4L], 3L, 2L, 1000000007L, 7L), I64([4L], 1L, 63L, 4L, 0L)));
         Assert.True(QeeAudit.Check<QeeMiscElementwiseValueAuditCheck>(
             F32([4L], 1f, -1f, 0f, 2f), F32([4L], 0f, 0f, 0f, 1f),
             Bits([4L], true, false, true, false)));

@@ -2845,8 +2845,7 @@ namespace Shorokoo
                     total += field switch
                     {
                         TensorDataStruct nested => SupersededBytes(nested),
-                        TensorData { IsDisposed: false } tensor when tensor.Shape.Count > 0
-                            => tensor.Shape.Count * ElementBytes(tensor.DType),
+                        TensorData { IsDisposed: false } tensor => tensor.ByteCount,
                         _ => 0,
                     };
             return total;
@@ -2890,30 +2889,16 @@ namespace Shorokoo
                     foreach (var fieldDef in data?.Definition.Fields ?? [])
                     {
                         if (data!.Fields[fieldDef.Name] is not TensorData td) continue;
-                        // ElementBytes yields 0 for a dtype with no fixed stride; report that as
-                        // unknown rather than as zero bytes, which would read as an empty tensor.
-                        long stride = ElementBytes(td.DType);
+                        // A dtype with no storage width is reported as unknown rather than as zero
+                        // bytes, which would read as an empty tensor.
                         entries.Add(new TensorInventoryEntry(
                             fieldDef.Name, td.DType.ToString(), td.Shape.Dims,
-                            stride == 0 ? -1 : td.Shape.Count * stride));
+                            TensorData.StorageBits(td.DType) == 0 ? -1 : td.ByteCount));
                     }
                 }
                 catch { /* a partially built struct still contributes what it managed to describe */ }
                 sections.Add(new TensorInventorySection(name, entries));
             }
-        }
-
-        /// <summary>The fixed byte stride of one element of <paramref name="dtype"/>, or 0 if it has none.</summary>
-        private static long ElementBytes(DType dtype)
-        {
-            if (dtype == DType.Bool || dtype == DType.Int8 || dtype == DType.UInt8) return 1;
-            if (dtype == DType.Int16 || dtype == DType.UInt16
-                || dtype == DType.Float16 || dtype == DType.BFloat16) return 2;
-            if (dtype == DType.Int32 || dtype == DType.UInt32 || dtype == DType.Float32) return 4;
-            if (dtype == DType.Int64 || dtype == DType.UInt64 || dtype == DType.Float64
-                || dtype == DType.Complex64) return 8;
-            if (dtype == DType.Complex128) return 16;
-            return 0;
         }
 
         /// <summary>

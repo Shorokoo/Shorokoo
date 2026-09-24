@@ -1158,6 +1158,8 @@ public class ComputeContextLifetimeCoverageTests
         Assert.Equal(new Shape(pair), context.AllocateUninitialized(pair, DType.Float32).Shape);
         Assert.Equal(24, ComputeContext.Host.AllocateUninitialized(pair, DType.Float32).CopyRawMemory().Length);
         Assert.Throws<NotSupportedException>(() => context.AllocateUninitialized(pair, DType.Utf8));
+        Assert.Throws<NotSupportedException>(() => context.AllocateUninitialized(pair, DType.Int4));
+        Assert.Throws<NotSupportedException>(() => ComputeContext.Host.AllocateUninitialized(pair, DType.UInt4));
         Assert.Throws<ArgumentNullException>(() => context.AllocateUninitialized(pair, null!));
     }
 

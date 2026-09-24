@@ -1125,7 +1125,7 @@ namespace Shorokoo.Runtime
                     "String tensors are variable-length and not byte-stride, so there is no buffer "
                     + "of a fixed size to allocate. Build one from its elements with "
                     + "TensorData(dims, string[]).");
-            var bits = dtype.EncodingBitCount;
+            var bits = TensorData.StorageBits(dtype);
             if (bits < 8 || shape.Count < 0)
                 throw new NotSupportedException(
                     $"A tensor of {shape}:{dtype} cannot be allocated as a flat buffer: its "

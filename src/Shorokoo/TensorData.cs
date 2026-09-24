@@ -315,21 +315,28 @@ namespace Shorokoo
             {
                 var elements = Shape.Count;
                 if (elements <= 0) return 0;
-                // Untagged first: a literal standing for a type parameter is a distinct instance of
-                // the dtype it stands for, and the width table compares instances.
-                var dtype = DType.ToNonGenericType();
-                int bits;
-                if (dtype.IsSameElementTypeAs(DType.Int4) || dtype.IsSameElementTypeAs(DType.UInt4)) bits = 4;
-                else if (dtype.IsSameElementTypeAs(DType.Complex64)) bits = 64;
-                else if (dtype.IsSameElementTypeAs(DType.Complex128)) bits = 128;
-                else
-                {
-                    try { bits = dtype.EncodingBitCount; }
-                    // Strings and placeholders: nothing with a width to count.
-                    catch (UnsupportedDTypeException) { bits = 0; }
-                }
-                return bits <= 0 ? 0 : checked(elements * bits + 7) / 8;
+                var bits = StorageBits(DType);
+                return bits == 0 ? 0 : checked(elements * bits + 7) / 8;
             }
+        }
+
+        /// <summary>
+        /// The storage width in bits of one element of <paramref name="dtype"/> — 4 for a four-bit
+        /// type, whose elements pack two to a byte — or 0 for one with no width to count: a string,
+        /// whose elements are variable-length, and a placeholder. The one table every byte count of
+        /// a tensor is read from.
+        /// </summary>
+        internal static int StorageBits(DType dtype)
+        {
+            // Untagged first: a literal standing for a type parameter is a distinct instance of the
+            // dtype it stands for, and the width table compares instances.
+            dtype = dtype.ToNonGenericType();
+            if (dtype.IsSameElementTypeAs(DType.Int4) || dtype.IsSameElementTypeAs(DType.UInt4)) return 4;
+            if (dtype.IsSameElementTypeAs(DType.Complex64)) return 64;
+            if (dtype.IsSameElementTypeAs(DType.Complex128)) return 128;
+            try { return Math.Max(dtype.EncodingBitCount, 0); }
+            // Strings and placeholders: nothing with a width to count.
+            catch (UnsupportedDTypeException) { return 0; }
         }
 
         // The arena this tensor was allocated out of, where it is an output a run left in device

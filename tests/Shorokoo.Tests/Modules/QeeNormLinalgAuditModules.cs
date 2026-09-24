@@ -506,4 +506,16 @@ namespace Shorokoo.Tests.Modules
         private static Scalar<int64> Transposed(Variable dq, Vector<float32> expected)
             => FloatMismatch(((Tensor<float32>)dq).Transpose().Reshape(Vector(-1L)), expected);
     }
+
+    /// <summary>DequantizeLinear of an int32 [1, 3] tensor with no zero point and a one-element
+    /// scale along axis 0, read through a Reshape: [1000, −6, 2] × 0.5 = [500, −3, 1].</summary>
+    [Module]
+    public partial class QeeDequantizeInt32VectorScaleReshapeAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<int32> x)
+        {
+            var dq = (Tensor<float32>)OnnxOp.DequantizeLinear(x, Vector(0.5f), null, 0L);
+            return FloatMismatch(dq.Reshape(Vector(-1L)), Vector(500f, -3f, 1f)) < Scalar(1L);
+        }
+    }
 }

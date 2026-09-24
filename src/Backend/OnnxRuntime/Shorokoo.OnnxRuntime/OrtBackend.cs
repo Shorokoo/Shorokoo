@@ -179,13 +179,27 @@ public abstract class OrtBackend : IShorokooBackend
             {
                 return BuildOnce(modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases);
             }
-            // Aliasing is a saving and never a requirement, so a session that could not be built
-            // while writing its graph out is built again as one that aliases nothing. A model that
-            // cannot be built at all fails again below, with its own error.
-            catch (Exception) { }
+            // ONNX Runtime cannot write out a graph holding nodes an execution provider compiled
+            // (TensorRT, OpenVINO and the like), and refuses to build a session asked to. Aliasing
+            // is a saving and never a requirement, so such a session is built again as one that
+            // aliases nothing. That refusal alone: any other failure is the build's own and goes
+            // to the caller, where caught here it would have been paid for twice when the model
+            // cannot be built at all, and when it could -- an allocation failing while the session
+            // initialized, say -- left the graph a session that never aliases, for its whole life
+            // and without a word.
+            catch (OnnxRuntimeException refusal) when (RefusesToWriteCompiledNodes(refusal)) { }
         }
         return BuildOnce(modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases: null);
     }
+
+    /// <summary>
+    /// Whether <paramref name="failure"/> is ONNX Runtime refusing to write out a graph because an
+    /// execution provider compiled some of its nodes. It says so in this message and in no other
+    /// way; were a later version to word it otherwise, a session on such a provider would fail to
+    /// build rather than quietly alias nothing, which is the direction to fail in.
+    /// </summary>
+    private static bool RefusesToWriteCompiledNodes(OnnxRuntimeException failure)
+        => failure.Message.Contains("contains compiled nodes", StringComparison.Ordinal);
 
     private OrtSession BuildOnce(
         ReadOnlyMemory<byte> modelBytes,

@@ -57,6 +57,10 @@ internal sealed class OrtSession : IShorokooSession
     /// </summary>
     internal readonly record struct ProvedAlias(OutputAlias Alias, long[]? StatedShape);
 
+    /// <summary>The pairs this session binds where a run lets it (test hook).</summary>
+    internal IReadOnlyList<OutputAlias> OutputAliases
+        => [.. _aliases.Select(slot => new OutputAlias(slot.Output, slot.Input))];
+
     public IReadOnlySet<string> AliasableInputs { get; }
 
     public OrtSession(

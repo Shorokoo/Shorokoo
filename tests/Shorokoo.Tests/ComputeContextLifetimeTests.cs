@@ -1,7 +1,10 @@
+using System.Reflection;
 using System.Runtime.CompilerServices;
+using Microsoft.ML.OnnxRuntime;
 using Shorokoo.Core.Backends;
 using Shorokoo.Core.Factory;
 using Shorokoo.Core.Factory.IR;
+using Shorokoo.OnnxRuntime;
 using Shorokoo.Runtime;
 
 namespace Shorokoo.Tests;
@@ -829,6 +832,62 @@ public class ComputeContextLifetimeCoverageTests
         Assert.Empty(context.Compile(graph).MarkedPairs());
         using var unaliased = new ComputeContext { OutputAliasing = false };
         Assert.Empty(unaliased.Compile(graph, [[4L], [4L]], trainingStep: false, aliasCandidates: [(0, 0)]).MarkedPairs());
+    }
+
+    /// <summary>The model a lowering hands a backend for <paramref name="graph"/>.</summary>
+    private static byte[] ModelOf(GraphProto graph)
+    {
+        var model = new ModelProto { IrVersion = 8, Graph = graph };
+        model.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = 17 });
+        var stream = new MemoryStream();
+        ProtoBuf.Serializer.Serialize(stream, model);
+        return stream.ToArray();
+    }
+
+    /// <summary>A session of <paramref name="backend"/> over <paramref name="graph"/>, built to
+    /// write its output O into its input a.</summary>
+    private static OrtSession Aliasing(IShorokooBackend backend, GraphProto graph)
+        => (OrtSession)backend.CreateSession(
+            ModelOf(graph), ShorokooGraphOptimization.EnableAll, ShorokooLogSeverity.Fatal,
+            new DeviceMemorySettings().Resolve(reusedAcrossShapes: false), DiagnosticSettings.Default,
+            [new OutputAlias("O", "a")]);
+
+    [Fact]
+    public void TestASessionThatCannotWriteItsGraphOutIsBuiltWithoutAliasingOnlyWhereTheRuntimeRefusesItsCompiledNodes()
+    {
+        var graph = GraphOf("a:float[4] b:float[4]", "O:float[4]", Op("Sub", "a b", "O"));
+        var transient = new ScriptedBackend(build => { if (build == 0) throw new OutOfMemoryException(); });
+        Assert.Throws<OutOfMemoryException>(() => Aliasing(transient, graph));
+
+        var compiling = new ScriptedBackend(build =>
+        {
+            if (build == 0)
+                throw OrtFailure("Unable to serialize model as it contains compiled nodes. Please disable any execution providers which generate compiled nodes.");
+        });
+        using var unaliased = Aliasing(compiling, graph);
+        Assert.Equal((2, 0), (compiling.Builds, unaliased.OutputAliases.Count));
+    }
+
+    /// <summary>ONNX Runtime's own failure, which only ONNX Runtime constructs.</summary>
+    private static OnnxRuntimeException OrtFailure(string message)
+        => (OnnxRuntimeException)Activator.CreateInstance(
+            typeof(OnnxRuntimeException), BindingFlags.NonPublic | BindingFlags.Instance, binder: null,
+            [Enum.ToObject(typeof(OnnxRuntimeException).Assembly.GetType("Microsoft.ML.OnnxRuntime.ErrorCode")!, 1), message],
+            culture: null)!;
+
+    /// <summary>The CPU backend, calling <c>build</c> with the number of each session it builds,
+    /// from 0, where a provider would be appended.</summary>
+    private sealed class ScriptedBackend : OrtBackend
+    {
+        private readonly int[] _builds;
+
+        internal ScriptedBackend(Action<int> build, ComputeDevice device = ComputeDevice.Cpu)
+            : this([0], build, device) { }
+
+        private ScriptedBackend(int[] builds, Action<int> build, ComputeDevice device)
+            : base((_, _) => build(builds[0]++), device, cudaDeviceId: null) => _builds = builds;
+
+        internal int Builds => _builds[0];
     }
 
     [Fact]

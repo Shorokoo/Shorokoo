@@ -407,8 +407,9 @@ namespace Shorokoo.Runtime
 
         /// <summary>
         /// The arena limit a new session gets for this run under a budget of <paramref name="limit"/>
-        /// bytes — the budget less everything the run will hold outside that session's arena, which
-        /// starts empty — with the run admitted against it.
+        /// bytes — what everything the run will hold outside that session's arena, which starts
+        /// empty, leaves of the budget, rounded as <see cref="ComputeContext.ArenaLimitWithin"/>
+        /// rounds it — with the run admitted against it.
         /// </summary>
         /// <exception cref="InvalidOperationException">What the run would hold leaves the arena
         /// nothing. Nothing has been taken.</exception>

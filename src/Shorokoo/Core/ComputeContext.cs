@@ -1942,8 +1942,10 @@ namespace Shorokoo.Runtime
                 feeds.Prepare(inputs);
 
                 // A one-shot session: built, fed once, and disposed, so no differing shapes can
-                // reach it -- and, under a budget, built with the arena limit what this run holds
-                // on the device leaves, since its arena starts empty and all of that is outside it.
+                // reach it -- and, under a budget, built with the arena limit a kept session would get
+                // for what this run holds on the device, since its arena starts empty and all of that
+                // is outside it: what that leaves of the budget, rounded as for a session kept while
+                // the context's holdings grow a little, though this one is never kept.
                 var deviceMemory = DeviceMemory.Resolve(reusedAcrossShapes: false);
                 if (feeds.Budget is { } limit)
                 {

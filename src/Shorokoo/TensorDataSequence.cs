@@ -263,12 +263,11 @@ namespace Shorokoo
         internal virtual bool FeedsInPlace(IShorokooBackend backend) => false;
 
         /// <summary>
-        /// The memory a run on <paramref name="backend"/> reads a sequence in: host memory of its
-        /// runtime, since ONNX Runtime reads a sequence's elements back with a host copy whatever its
-        /// provider (see <c>IShorokooBackend.CreateSequence</c>). What a copy is keyed by.
+        /// The memory a run on <paramref name="backend"/> reads a sequence in, as the backend answers
+        /// it (<see cref="IShorokooBackend.SequenceRunMemory"/>): host memory of its runtime by default.
+        /// What a copy is keyed by.
         /// </summary>
-        internal static MemoryLocation RunMemoryOf(IShorokooBackend backend)
-            => new(MemorySpace.Host, backend.RuntimeIdentity);
+        internal static MemoryLocation RunMemoryOf(IShorokooBackend backend) => backend.SequenceRunMemory;
 
         /// <summary>
         /// The copy of this sequence a run on <paramref name="backend"/> reads where it cannot be
@@ -771,8 +770,7 @@ namespace Shorokoo
 
         private protected override void ReleaseMemory() => AllocatingBackend.Release(backing);
 
-        private protected override bool AddressableBy(ComputeContext target)
-            => target.ResolvedBackend.CanAddress(Location);
+        private protected override bool AddressableBy(ComputeContext target) => FeedsInPlace(target.ResolvedBackend);
 
         private protected override bool IsHostReadable => Space.IsHost;
 
@@ -784,7 +782,8 @@ namespace Shorokoo
         /// backend can address the memory it is in. A sequence of another runtime is copied into the
         /// running one — which reads the source, so only one in host memory can be.
         /// </summary>
-        internal override bool FeedsInPlace(IShorokooBackend backend) => backend.CanAddress(Location);
+        internal override bool FeedsInPlace(IShorokooBackend backend)
+            => backend.CanAddress(Location) || Location == RunMemoryOf(backend);
 
         /// <summary>A copy of this sequence's value built on <paramref name="backend"/>, element by
         /// element through the host.</summary>

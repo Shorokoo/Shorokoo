@@ -45,17 +45,41 @@ public interface IShorokooBackend
     // host backend's runtime. It is asked of the target backend rather than decided by the core,
     // because only the backend knows what it can address.
     //
-    // A location whose space is unknown is never addressable: two such allocations compare equal
-    // as spaces without being anywhere in particular, so sharing one would be a guess.
+    // A location whose space is unknown is addressable only by the one backend that allocated it:
+    // two such allocations compare equal as spaces without being anywhere in particular, so sharing
+    // one between backends would be a guess, while a backend always reads what it allocated. That
+    // one backend is known only where the runtime is the backend itself -- the default identity; a
+    // runtime several backends share says nothing about which of them made an allocation it names.
     bool CanAddress(MemoryLocation location)
-        => location.Space.IsKnown
-           && location.Space == MemorySpace
-           && (location.IsManaged || ReferenceEquals(location.Runtime, RuntimeIdentity));
+        => location.Space == MemorySpace
+           && (location.Space.IsKnown
+               ? location.IsManaged || ReferenceEquals(location.Runtime, RuntimeIdentity)
+               : ReferenceEquals(location.Runtime, this));
 
-    // Releases a value this backend allocated. Every release of a tensor's memory comes here, to
-    // the backend that made it, whichever contexts the tensor was attached to -- or none -- so a
-    // backend that has something to do when its memory comes back has one place to do it. The
-    // default disposes the value, which is what releasing one has always meant.
+    // Where a run on this backend reads a tensor of `elementType` it is fed: the memory a tensor has
+    // to be in to be handed to the session as it stands, and the memory a copy made for such a run
+    // is put in -- the question To(context) and a run's feed both answer by, so they agree. The
+    // default is this backend's own memory in its own runtime, and the host memory of that runtime
+    // for a string tensor, which every runtime so far keeps there whatever its device.
+    MemoryLocation RunMemoryOf(ShorokooTensorElementType elementType)
+        => new(elementType == ShorokooTensorElementType.String ? MemorySpace.Host : MemorySpace, RuntimeIdentity);
+
+    // Where a run on this backend reads a sequence it is fed, as RunMemoryOf answers for a tensor.
+    // The default is the host memory of this backend's runtime: ONNX Runtime reads a sequence's
+    // elements through the host whatever its provider (see CreateSequence).
+    MemoryLocation SequenceRunMemory => new(MemorySpace.Host, RuntimeIdentity);
+
+    // Releases a value this backend allocated. Every release the framework makes of a tensor's
+    // memory comes here, to the backend that made it, whichever contexts the tensor was attached
+    // to -- or none -- so a backend that has something to do when its memory comes back has one
+    // place to do it. The default disposes the value, which is what releasing one has always meant.
+    //
+    // Memory a run consumed is the one exception, since the framework hands it over rather than
+    // releasing it: the session it was handed to releases it (IShorokooSession.RunConsuming). That
+    // session is the running backend's, which can address the memory as it stands and so shares the
+    // allocating backend's runtime, but may be another instance of it; and a session that leaves
+    // RunConsuming to the interface's default has it disposed without coming here. A backend that
+    // counts its releases implements RunConsuming and releases there through this.
     void Release(IShorokooTensorValue value)
     {
         ArgumentNullException.ThrowIfNull(value);

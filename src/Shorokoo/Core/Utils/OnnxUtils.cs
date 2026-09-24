@@ -407,21 +407,11 @@ namespace Shorokoo.Core.Utils
             where T : IVarType
             => new OnnxTensorData<T>(shape, value, allocatingBackend);
 
-        /// <summary>A tensor over <paramref name="bytes"/> in the framework's own managed host
-        /// memory. The dtype is the element type's own.</summary>
-        internal static TensorData CreateManagedTensorData(Shape shape, DType dtype, byte[] bytes)
-            => (TensorData)CallGeneric(dtype.ToIVarType(), typeof(OnnxUtils),
-                nameof(internalCreateManagedTensorData), shape, bytes);
-
-        internal static TensorData internalCreateManagedTensorData<T>(Shape shape, byte[] bytes)
-            where T : IVarType
-            => new HostTensorData<T>(shape, bytes);
-
         /// <summary>
-        /// A tensor over <paramref name="bytes"/> in the framework's own managed host memory,
-        /// keeping <paramref name="dtype"/> exactly as given. <see cref="CreateManagedTensorData"/>
-        /// derives the dtype from the element type instead, which drops the generic parameter name a
-        /// specialized dtype carries -- the one thing a graph literal's dtype is for.
+        /// A tensor that takes <paramref name="bytes"/> -- an array just made, which nothing else names --
+        /// as its storage in the framework's own managed host memory, keeping <paramref name="dtype"/>
+        /// exactly as given: a specialized dtype carries the generic parameter name a graph literal's
+        /// dtype is for, and a copy of a tensor carries the dtype of what it was copied from.
         /// </summary>
         internal static TensorData CreateHostTensorData(Shape shape, DType dtype, byte[] bytes)
             => (TensorData)CallGeneric(dtype.ToIVarType(), typeof(OnnxUtils),

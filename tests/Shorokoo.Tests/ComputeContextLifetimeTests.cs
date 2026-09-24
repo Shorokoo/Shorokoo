@@ -172,6 +172,18 @@ public class ComputeContextLifetimeCoverageTests
     }
 
     [Fact]
+    public void TestABackendOnAnUnnamedDeviceReadsItsOwnAllocationsThereAndNoOtherBackends()
+    {
+        IShorokooBackend backend = new StubBackend(ComputeDevice.Other, null);
+        IShorokooBackend other = new StubBackend(ComputeDevice.Other, null);
+        var own = new MemoryLocation(MemorySpace.UnknownDevice, backend.RuntimeIdentity);
+
+        Assert.True(backend.CanAddress(own));
+        Assert.False(other.CanAddress(own));
+        Assert.False(backend.CanAddress(new MemoryLocation(MemorySpace.UnknownDevice, other.RuntimeIdentity)));
+    }
+
+    [Fact]
     public void TestTheHostBackendBuildsNeitherASessionNorAValue()
     {
         IShorokooBackend backend = HostBackend.Instance;

@@ -84,16 +84,18 @@ public class CrossDeviceRoutingCoverageTests
     }
 
     [Fact]
-    public void TestAnUnknownMemorySpaceIsNeverSharedAndComesHomeThroughTheBackendThatMadeIt()
+    public void TestAnUnknownMemorySpaceIsReadOnlyByTheBackendThatMadeItAndComesHomeThroughIt()
     {
         var other = new StubBackend(ComputeDevice.Other, null);
         Assert.Equal(MemorySpace.UnknownDevice, ((IShorokooBackend)other).MemorySpace);
         using var context = new ComputeContext(other);
+        using var elsewhere = new ComputeContext(new StubBackend(ComputeDevice.Other, null));
 
         var onUnknown = TensorData([2L], (float[])[3f, 4f]).CopyTo(context);
         Assert.False(onUnknown.Space.IsKnown);
 
-        Assert.NotSame(onUnknown, onUnknown.To(context));
+        Assert.Same(onUnknown, onUnknown.To(context));
+        Assert.NotSame(onUnknown, onUnknown.To(elsewhere));
         var home = onUnknown.ToHost();
 
         Assert.Equal(2, other.HostCopies);
@@ -538,6 +540,35 @@ public class CrossDeviceRoutingCoverageTests
         Assert.Equal(built, card.Built.Count);
     }
 
+    [Fact]
+    public void TestAStringInItsRuntimesHostMemoryReachesACardContextAsItStandsByToAsByAFeed()
+    {
+        using var cpu = new ComputeContext();
+        var card = new StubBackend(ComputeDevice.Cuda, 0) { Runtime = cpu.ResolvedBackend.RuntimeIdentity };
+        using var onCard = new ComputeContext(card);
+        var s = InputVector<utf8>("s");
+        var produced = cpu.Execute(
+            new InternalComputationGraph([s], [OnnxOp.Identity(s, rank: 1)]), TensorData([2L], "a", "b"))[0].ToTensorData();
+
+        Assert.True(produced.FeedsInPlace(card));
+        Assert.Same(produced, produced.To(onCard));
+    }
+
+    [Fact]
+    public void TestAFeedTheRunCanNeitherReadWhereItIsNorCopyIsRefusedBeforeTheRunTakesAnything()
+    {
+        var cpu = new StubBackend(ComputeDevice.Cpu, null);
+        using var context = new ComputeContext(cpu);
+        var compiled = context.Compile(Sum());
+        var bystander = Floats(2);
+        var unreadable = TensorData.Create(new Shape(2L), DType.Float32,
+            new StubValue(ShorokooTensorElementType.Float, new byte[8], [2L], hostAccessible: false));
+
+        Assert.Throws<InvalidOperationException>(() => compiled.Execute(bystander, unreadable.Shared()));
+        Assert.False(bystander.IsDisposed);
+        Assert.False(unreadable.IsDisposed);
+    }
+
     private static DeviceMemorySettings Budget(long bytes) => new() { LimitBytes = bytes };
 
     /// <summary>A shared feed for input "a" that calls <paramref name="held"/> once the run holds
@@ -815,6 +846,12 @@ public class CrossDeviceRoutingCoverageTests
         /// answer otherwise.</summary>
         internal Func<MemoryLocation, bool>? Addresses { get; init; }
 
+        /// <summary>The runtime it says its allocations belong to, where a test shares one with
+        /// another backend; itself otherwise.</summary>
+        internal object? Runtime { get; init; }
+
+        public object RuntimeIdentity => Runtime ?? this;
+
         public BackendDescription Description { get; } = new($"stub-{device}", device, cudaDeviceId);
 
         public bool CanAddress(MemoryLocation location)
@@ -822,8 +859,10 @@ public class CrossDeviceRoutingCoverageTests
             AskedAbout.Add(location);
             return Addresses is { } answer
                 ? answer(location)
-                : location.Space.IsKnown && location.Space == ((IShorokooBackend)this).MemorySpace
-                  && (location.IsManaged || ReferenceEquals(location.Runtime, this));
+                : location.Space == ((IShorokooBackend)this).MemorySpace
+                  && (location.Space.IsKnown
+                      ? location.IsManaged || ReferenceEquals(location.Runtime, RuntimeIdentity)
+                      : ReferenceEquals(location.Runtime, this));
         }
 
         public void Release(IShorokooTensorValue value)

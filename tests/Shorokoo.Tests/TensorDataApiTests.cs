@@ -518,6 +518,23 @@ public class TensorDataApiCoverageTests
         public Shorokoo.Core.Backends.ShorokooTensorElementType GetSequenceElementType() => throw new NotSupportedException();
     }
     [Fact]
+    public void TestATensorBuiltOverAnArrayHoldsItsOwnCopyOfIt()
+    {
+        byte[] bytes = [1, 0, 0, 0];
+        string[] words = ["a", "b"];
+        var numbers = new HostTensorData<int32>(new Shape(1L), bytes);
+        var built = new HostStringTensorData(new Shape(2L), words);
+        var literal = (HostStringTensorData)TensorData([2L], words);
+
+        bytes[0] = 9;
+        words[0] = "z";
+
+        Assert.Equal(1, numbers.ValueAt<int>(0));
+        Assert.Equal(["a", "b"], built.Strings);
+        Assert.Equal(["a", "b"], literal.Strings);
+    }
+
+    [Fact]
     public void TestStringTensorsTakeExactlyTheirShapeAndRefuseAShortfall()
     {
         string[] two = ["a", "b"];

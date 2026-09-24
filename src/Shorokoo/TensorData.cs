@@ -305,9 +305,9 @@ namespace Shorokoo
         /// element's storage width, rounded up to a whole byte. What a compute context's
         /// device-memory budget counts it as.
         ///
-        /// <para>Zero for a string tensor, whose elements are variable-length — and which ONNX
-        /// Runtime keeps in host memory whatever its provider, so no device budget ever holds one —
-        /// and for a dtype with no storage width at all.</para>
+        /// <para>Zero for a string tensor, whose elements are variable-length and so have no width to
+        /// count — a device budget never holds one in any case, since runs read strings from the
+        /// host — and for a dtype with no storage width at all.</para>
         /// </summary>
         internal long ByteCount
         {
@@ -425,12 +425,12 @@ namespace Shorokoo
 
         /// <summary>A tensor over the given bytes, in the framework's own host memory.</summary>
         internal static TensorData NewHostTensor(Shape shape, DType dtype, byte[] bytes)
-            => OnnxUtils.CreateManagedTensorData(shape, dtype, bytes);
+            => OnnxUtils.CreateHostTensorData(shape, dtype, bytes);
 
         /// <summary>A string tensor over the given elements, in the framework's own host
         /// memory.</summary>
         internal static TensorData NewHostStringTensor(Shape shape, string[] values)
-            => new HostStringTensorData(shape, values);
+            => new HostStringTensorData(values, shape);
 
         /// <summary>
         /// Creates TensorData of the given shape and dtype over <paramref name="data"/> — plain
@@ -536,6 +536,13 @@ namespace Shorokoo
         /// its backend builds.
         /// </summary>
         internal virtual bool FeedsInPlace(IShorokooBackend backend) => false;
+
+        /// <summary>
+        /// Whether this tensor's contents can be copied out of its memory at all: from the host,
+        /// or through the backend that made it. Not a value in an execution provider's own memory
+        /// whose backend was never recorded, which nothing knows how to reach.
+        /// </summary>
+        internal virtual bool CanBeCopiedOut => true;
 
         /// <summary>
         /// This tensor's contents as host bytes for a copy to be built from: its own array where it
@@ -648,15 +655,16 @@ namespace Shorokoo
 
         /// <summary>
         /// Whether a run on <paramref name="backend"/> can be handed this value as it stands: the
-        /// backend can address the memory it is in — the same device and the same runtime — or, for
-        /// a string tensor, the value is its own runtime's. ONNX Runtime keeps every string tensor
-        /// in host memory whatever the provider, so a string is fed where it is to a session on a
-        /// card too, and a copy could be put nowhere else.
+        /// backend can address the memory it is in — the same device and the same runtime — or the
+        /// value is exactly where the backend's runs read a tensor of its dtype, as the backend
+        /// answers it: a string tensor in its runtime's host memory, whatever the device. A copy
+        /// could be put nowhere else.
         /// </summary>
         internal override bool FeedsInPlace(IShorokooBackend backend)
-            => backend.CanAddress(Location)
-               || (DType.IsSameElementTypeAs(DType.Utf8) && Space.IsHost
-                   && ReferenceEquals(AllocatingBackend.RuntimeIdentity, backend.RuntimeIdentity));
+            => backend.CanAddress(Location) || IsWhereRunsRead(backend);
+
+        /// <inheritdoc/>
+        internal override bool CanBeCopiedOut => Space.IsHost || AllocatingBackend is not UnrecordedBackend;
 
         /// <inheritdoc/>
         private protected override byte[] CopyContentBytes()

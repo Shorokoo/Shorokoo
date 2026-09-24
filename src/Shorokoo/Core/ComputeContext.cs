@@ -1066,10 +1066,14 @@ namespace Shorokoo.Runtime
             }
         }
 
-        /// <summary>Whether this context's backend can read <paramref name="tensor"/>'s memory as
-        /// it stands — the question <see cref="TensorData.To"/> asks, answered by the
-        /// backend.</summary>
-        internal bool CanAddress(TensorData tensor) => ResolvedBackend.CanAddress(tensor.Location);
+        /// <summary>Whether this context's runs can use <paramref name="tensor"/>'s memory as it
+        /// stands — the question <see cref="TensorData.To"/> asks, answered by the backend: it can
+        /// address the memory, or the tensor is where its runs read one of its dtype.</summary>
+        internal bool CanAddress(TensorData tensor)
+        {
+            var backend = ResolvedBackend;
+            return backend.CanAddress(tensor.Location) || tensor.IsWhereRunsRead(backend);
+        }
 
         /// <summary>Whether <paramref name="tensor"/> is on this context's books.</summary>
         internal bool Attaches(TensorData tensor) => _attached.Contains(tensor);

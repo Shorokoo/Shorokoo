@@ -150,13 +150,21 @@ namespace Shorokoo
 
         /// <summary>
         /// The memory a run on <paramref name="backend"/> reads a tensor of <paramref name="dtype"/>
-        /// in: the backend's own, in its own runtime — and host memory for a string tensor, which
-        /// ONNX Runtime keeps there whatever its provider. What a copy made for such a run is keyed
-        /// by.
+        /// in, as the backend answers it (<see cref="IShorokooBackend.RunMemoryOf"/>): its own memory in
+        /// its own runtime, and host memory for a string tensor. What a copy made for such a run is
+        /// keyed by, and where one is put.
         /// </summary>
         internal static MemoryLocation RunMemoryOf(IShorokooBackend backend, DType dtype)
-            => new(dtype.IsSameElementTypeAs(DType.Utf8) ? MemorySpace.Host : backend.MemorySpace,
-                backend.RuntimeIdentity);
+            => backend.RunMemoryOf(dtype.IsSameElementTypeAs(DType.Utf8)
+                ? ShorokooTensorElementType.String : (ShorokooTensorElementType)(int)dtype);
+
+        /// <summary>
+        /// Whether this tensor is exactly where a run on <paramref name="backend"/> reads one of its
+        /// dtype, as the backend answers it (<see cref="RunMemoryOf"/>): that backend's context has
+        /// nothing to move even where the backend cannot address the memory — a string tensor in the
+        /// host memory of a card's runtime, say, which is where that runtime reads every string.
+        /// </summary>
+        internal bool IsWhereRunsRead(IShorokooBackend backend) => Location == RunMemoryOf(backend, DType);
 
         /// <summary>
         /// The copy of this tensor a run on <paramref name="backend"/> reads where it cannot be
@@ -373,23 +381,17 @@ namespace Shorokoo
 
         private TensorData CopyIntoBackendMemory(ComputeContext target)
         {
-            if (DType.IsSameElementTypeAs(DType.Utf8)) return CopyToManagedHost();
-
             var backend = target.ResolvedBackend;
-            var value = backend.CreateTensorInBackendMemory(
-                (ShorokooTensorElementType)(int)DType, HostBytes(), (long[])Shape);
-            try
-            {
-                return Create(Shape, DType, value, backend);
-            }
-            catch
-            {
-                // Nothing else references it yet, and on a card it is an allocation that has just
-                // been filled across the bus -- left to a finalizer it is a device leak for as long
-                // as that takes.
-                backend.Release(value);
-                throw;
-            }
+            // Where the target's runs read this dtype from the host -- a string, on any device --
+            // the copy is the framework's own host memory, which they read as they read any.
+            if (RunMemoryOf(backend, DType).Space.IsHost) return CopyToManagedHost();
+
+            // Straight from the contents, under a reader lock for the length of the copy: a managed
+            // tensor's own array, which the backend copies out of and keeps nothing of, rather than a
+            // host copy of it first. The same builder a run's copy takes, so the two carry the same
+            // dtype, and a value the wrapping fails on goes back to the backend.
+            return Reading(() => BuiltBy(backend, backend.CreateTensorInBackendMemory(
+                (ShorokooTensorElementType)(int)DType, ContentBytesForCopy(), (long[])Shape)));
         }
 
         /// <summary>

@@ -41,16 +41,21 @@ namespace Shorokoo
         // it no longer has: a batch a run consumed is garbage from the moment the run takes it.
         private byte[]? _bytes;
 
-        /// <summary>Creates a tensor of <paramref name="shape"/> over <paramref name="bytes"/>,
-        /// which it takes as its own storage rather than copying.</summary>
+        /// <summary>
+        /// Creates a tensor of <paramref name="shape"/> holding a copy of <paramref name="bytes"/>.
+        ///
+        /// <para>A copy, so that the tensor is the only name for its memory: holding the caller's
+        /// array would leave a second one, through which a write reaches the tensor without it
+        /// knowing — and a run that had copied the old contents would go on reading them.</para>
+        /// </summary>
         public HostTensorData(Shape shape, byte[] bytes)
-            : base(shape, HostBackend.Instance, MemorySpace.Host)
+            : this(shape, [.. bytes ?? throw new ArgumentNullException(nameof(bytes))], OnnxUtils.GetDType<T>())
         {
-            _bytes = bytes ?? throw new ArgumentNullException(nameof(bytes));
         }
 
-        /// <summary>The same, carrying <paramref name="actualDType"/> exactly as given — a
-        /// specialized dtype's generic parameter name included.</summary>
+        /// <summary>A tensor that takes <paramref name="bytes"/> — an array the framework has just
+        /// made and nothing else names — as its own storage, carrying <paramref name="actualDType"/>
+        /// exactly as given, a specialized dtype's generic parameter name included.</summary>
         internal HostTensorData(Shape shape, byte[] bytes, DType actualDType)
             : base(shape, actualDType, HostBackend.Instance, MemorySpace.Host)
         {
@@ -91,7 +96,7 @@ namespace Shorokoo
                 throw new ArgumentException(
                     $"Supplied data of {supplied.Length} bytes is less than shape size {required} bytes.",
                     nameof(values));
-            return new HostTensorData<T>(shape, supplied[..required].ToArray());
+            return new HostTensorData<T>(shape, supplied[..required].ToArray(), OnnxUtils.GetDType<T>());
         }
 
         /// <summary>The raw storage bytes boxed as objects, for debugging/diagnostics.</summary>

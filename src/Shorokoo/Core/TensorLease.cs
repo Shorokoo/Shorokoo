@@ -260,7 +260,7 @@ namespace Shorokoo.Runtime
             // spends nothing. A feed can still die or be locked by another thread in between, which
             // is then a refusal part-way; what was taken by then stays taken, and is released when
             // the run gives up.
-            foreach (var target in targets) target.RefuseIfCannotBeHeld(_run);
+            foreach (var target in targets) target.RefuseIfCannotBeHeld(_run, _backend);
 
             _inputs = inputs;
             _targets = targets;
@@ -748,11 +748,19 @@ namespace Shorokoo.Runtime
             }
 
             /// <summary>Refuses, before anything is taken, a feed that is dead — nothing can be read
-            /// or consumed — or one to be consumed that another run is reading.</summary>
-            internal void RefuseIfCannotBeHeld(RunIdentity run)
+            /// or consumed — one to be consumed that another run is reading, and a tensor the run
+            /// can neither be handed where it is nor have copied.</summary>
+            internal void RefuseIfCannotBeHeld(RunIdentity run, IShorokooBackend backend)
             {
                 if (Life.Death is not null) throw Refusal();
                 if (Mode == FeedMode.Consume && Life.IsLocked) throw BeingRead(run);
+                if (Subject is TensorData tensor && !(IsFed && tensor.FeedsInPlace(backend)) && !tensor.CanBeCopiedOut)
+                    throw new InvalidOperationException(
+                        $"{tensor.Describe()} cannot be fed to {run} as {Inputs}: the run cannot be handed "
+                        + "its memory where it is, and nothing can copy it out, because it is in an "
+                        + "execution provider's own memory and the backend that made it was never "
+                        + "recorded. Nothing the run was fed has been taken. Wrap the value with "
+                        + "TensorData.Create(shape, dtype, value, backend) to say which backend made it.");
             }
 
             /// <summary>What an access to it throws now that it is dead.</summary>

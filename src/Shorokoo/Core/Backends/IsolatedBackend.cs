@@ -442,6 +442,10 @@ public static class IsolatedBackend
 
         public bool CanAddress(MemoryLocation location) => _inner.CanAddress(location);
 
+        public MemoryLocation RunMemoryOf(ShorokooTensorElementType elementType) => _inner.RunMemoryOf(elementType);
+
+        public MemoryLocation SequenceRunMemory => _inner.SequenceRunMemory;
+
         public void Release(IShorokooTensorValue value) => _inner.Release(value);
     }
 }

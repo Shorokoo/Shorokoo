@@ -39,12 +39,20 @@ namespace Shorokoo
         // Let go of when the tensor dies, as HostTensorData lets go of its bytes.
         private string[]? _values;
 
-        /// <summary>Creates a string tensor of <paramref name="shape"/> over
-        /// <paramref name="values"/>, which it takes as its own storage rather than copying.</summary>
+        /// <summary>Creates a string tensor of <paramref name="shape"/> holding a copy of
+        /// <paramref name="values"/> — its own array, so that no write through the caller's reaches it
+        /// unseen; see <see cref="HostTensorData{T}"/>'s constructor.</summary>
         public HostStringTensorData(Shape shape, string[] values)
+            : this([.. values ?? throw new ArgumentNullException(nameof(values))], shape)
+        {
+        }
+
+        /// <summary>A string tensor that takes <paramref name="values"/> — an array the framework has
+        /// just made and nothing else names — as its own storage.</summary>
+        internal HostStringTensorData(string[] values, Shape shape)
             : base(shape, HostBackend.Instance, MemorySpace.Host)
         {
-            _values = values ?? throw new ArgumentNullException(nameof(values));
+            _values = values;
         }
 
         /// <summary>
@@ -68,7 +76,7 @@ namespace Shorokoo
                 throw new ArgumentException(
                     $"Supplied data of {values.Length} strings is less than shape size {required} "
                     + "strings.", nameof(values));
-            return new HostStringTensorData(shape, values.Length == required ? values : values[..required]);
+            return new HostStringTensorData(values[..required], shape);
         }
 
         /// <summary>

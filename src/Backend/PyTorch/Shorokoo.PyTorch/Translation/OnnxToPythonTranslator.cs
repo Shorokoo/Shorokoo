@@ -138,7 +138,10 @@ internal sealed partial class OnnxToPythonTranslator
         for (int i = 0; i < model.Functions.Count; i++)
         {
             var function = model.Functions[i];
-            _functions[FunctionKey(function.Domain, function.Name)] = ($"f{i}", function);
+            if (!_functions.TryAdd(FunctionKey(function.Domain, function.Name, function.Overload), ($"f{i}", function)))
+                throw new TorchUnsupportedModelException(TorchUnsupportedReason.UnsupportedModel, function.Domain, function.Name,
+                    $"The model defines the function {function.Name} of domain '{function.Domain}'"
+                    + (function.Overload.Length > 0 ? $", overload '{function.Overload}'," : "") + " more than once.");
         }
         var training = AutoGradStep.Find(model, graph, modelOpsets, _functions.Values.Select(f => f.Proto));
 
@@ -181,7 +184,8 @@ internal sealed partial class OnnxToPythonTranslator
         return opsets;
     }
 
-    private static string FunctionKey(string domain, string name) => domain + "\u0001" + name;
+    /// <summary>What names a model-local function, and a call of it: its domain, name and overload.</summary>
+    internal static string FunctionKey(string domain, string name, string overload) => domain + "\u0001" + name + "\u0001" + overload;
 
     private static bool TakesAttributes(FunctionProto function)
         => function.Attributes.Count > 0 || function.AttributeProtoes.Count > 0;
@@ -216,7 +220,7 @@ internal sealed partial class OnnxToPythonTranslator
         foreach (var attribute in call.Attributes.Where(a => declared.Contains(a.Name)))
             values[attribute.Name] = attribute;
 
-        var key = FunctionKey(function.Domain, function.Name) + "\u0001" + FunctionAttributes.Key(values);
+        var key = FunctionKey(function.Domain, function.Name, function.Overload) + "\u0001" + FunctionAttributes.Key(values);
         if (_specialized.TryGetValue(key, out var specialization)) return specialization;
         specialization = $"{name}_{_specialized.Count}";
         _specialized[key] = specialization;
@@ -329,7 +333,7 @@ internal sealed partial class OnnxToPythonTranslator
         string expression;
         bool returnsTuple;
         var outputs = node.Outputs.ToList();
-        if (_functions.TryGetValue(FunctionKey(node.Domain, node.OpType), out var function))
+        if (_functions.TryGetValue(FunctionKey(node.Domain, node.OpType, node.Overload), out var function))
         {
             // A call's attributes bind the function's declared ones. Shorokoo also annotates the
             // calls it writes with shrk_* attributes (the structure and types of the values

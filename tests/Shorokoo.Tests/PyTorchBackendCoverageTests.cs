@@ -784,6 +784,7 @@ public class PyTorchBackendCoverageTests
 
         Assert.Equal([-1f, 2f], RunFloats(session, new() { ["x"] = [1f, -2f] }, ["y"])[0]);
         Assert.Equal([-1f, -1f], RunFloats(step, new() { ["w"] = [1f, -2f] }, ["g"])[0]);
+        Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(Serialize(Graph(["x"], ["y"], call), overloads[0], overloads[0]), default, default, DeviceMemorySettings.Default));
     }
 
     [Fact]

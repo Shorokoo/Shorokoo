@@ -58,7 +58,7 @@ internal sealed record AutoGradStep(int Index, NodeProto Node)
                 throw Refusal($"it differentiates with respect to '{wrt}', a tensor of ONNX element type {type}, "
                     + "and a gradient is taken with respect to floating-point tensors only");
 
-        var byKey = functionList.ToDictionary(f => FunctionKey(f.Domain, f.Name), StringComparer.Ordinal);
+        var byKey = functionList.ToDictionary(f => FunctionKey(f.Domain, f.Name, f.Overload), StringComparer.Ordinal);
         CheckPath([.. graph.Nodes.Take(step.Index)], [.. step.Wrt], [step.Loss], byKey);
         return step;
     }
@@ -73,7 +73,8 @@ internal sealed record AutoGradStep(int Index, NodeProto Node)
         return graph.Initializers.FirstOrDefault(i => i.Name == name)?.data_type ?? 0;
     }
 
-    private static string FunctionKey(string domain, string name) => domain + "\u0001" + name;
+    private static string FunctionKey(string domain, string name, string overload)
+        => OnnxToPythonTranslator.FunctionKey(domain, name, overload);
 
     /// <summary>
     /// Refuses an operator the backend does not differentiate through (<see cref="TorchGradient.Refused"/>)
@@ -107,7 +108,7 @@ internal sealed record AutoGradStep(int Index, NodeProto Node)
     private static void CheckNode(
         NodeProto node, HashSet<string> dependent, IReadOnlyDictionary<string, FunctionProto> functions)
     {
-        if (functions.TryGetValue(FunctionKey(node.Domain, node.OpType), out var function))
+        if (functions.TryGetValue(FunctionKey(node.Domain, node.OpType, node.Overload), out var function))
         {
             var seeds = function.Inputs
                 .Where((_, i) => i < node.Inputs.Count && dependent.Contains(node.Inputs[i]))
@@ -129,7 +130,7 @@ internal sealed record AutoGradStep(int Index, NodeProto Node)
     }
 
     private static bool CarriesGradient(NodeProto node, IReadOnlyDictionary<string, FunctionProto> functions)
-        => functions.ContainsKey(FunctionKey(node.Domain, node.OpType)) || GradientOf(node) != TorchGradient.NotDifferentiable;
+        => functions.ContainsKey(FunctionKey(node.Domain, node.OpType, node.Overload)) || GradientOf(node) != TorchGradient.NotDifferentiable;
 
     private static TorchGradient? GradientOf(NodeProto node)
         => node.Domain is "" or "ai.onnx" ? OperatorTable.GradientOf(node.OpType) : null;

@@ -1,7 +1,7 @@
 # Shorokoo.PyTorch.Cpu
 
 [Shorokoo](https://github.com/Shorokoo/Shorokoo) execution backend running on
-**the CPU** through PyTorch, in an embedded CPython (Linux x64).
+**the CPU** through PyTorch, in an embedded CPython (Linux x64 and Windows x64).
 
 ```bash
 dotnet add package Shorokoo

@@ -110,21 +110,17 @@ public sealed class PythonEnvironment
                 $"'{config}' names no home for its base interpreter, so there is no Python library "
                 + "to embed.");
 
-        var pythonHome = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-            ? binHome
-            : Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(binHome)) ?? binHome;
-        var libPython = LibPythonCandidates(pythonHome, version).FirstOrDefault(File.Exists)
+        var windows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+        var pythonHome = PythonHomeOf(binHome, windows);
+        var libPython = LibPythonCandidates(pythonHome, version, windows).FirstOrDefault(File.Exists)
             ?? throw new PythonEnvironmentException(PythonEnvironmentFailure.LibPythonNotFound,
                 $"The base interpreter of '{full}', at '{pythonHome}', has no shared Python library "
-                + $"({string.Join(", ", LibPythonCandidates(pythonHome, version).Select(Path.GetFileName).Distinct())}) "
+                + $"({string.Join(", ", LibPythonCandidates(pythonHome, version, windows).Select(Path.GetFileName).Distinct())}) "
                 + "to embed. A distribution's system Python often ships without one; a Python "
                 + $"installed by `uv python install {requiredVersion}` has it, and `uv venv "
                 + "--managed-python` makes the environment over that one.");
 
-        var sitePackages = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-            ? Path.Combine(full, "Lib", "site-packages")
-            : Path.Combine(full, "lib", $"python{version.Major}.{version.Minor}", "site-packages");
-        return new PythonEnvironment(full, pythonHome, libPython, sitePackages, version, source);
+        return new PythonEnvironment(full, pythonHome, libPython, SitePackagesOf(full, version, windows), version, source);
     }
 
     private static string Describe(PythonEnvironmentSource source) => source switch
@@ -135,10 +131,23 @@ public sealed class PythonEnvironment
         _ => "the running environment",
     };
 
-    private static IEnumerable<string> LibPythonCandidates(string home, Version version)
+    /// <summary>
+    /// The base installation a virtual environment's <c>pyvenv.cfg</c> <c>home</c> names: on Windows
+    /// <c>home</c> is the installation's own folder, holding <c>python.exe</c> and the library; elsewhere
+    /// it is the installation's <c>bin</c>, one level below it.
+    /// </summary>
+    internal static string PythonHomeOf(string binHome, bool windows)
+        => windows
+            ? Path.TrimEndingDirectorySeparator(binHome)
+            : Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(binHome)) ?? binHome;
+
+    /// <summary>Where the shared Python library of the installation at <paramref name="home"/> can
+    /// be, in the order they are tried: <c>python312.dll</c> beside <c>python.exe</c> on Windows,
+    /// <c>lib/libpython3.12.so</c> (or <c>.dylib</c>) elsewhere.</summary>
+    internal static IEnumerable<string> LibPythonCandidates(string home, Version version, bool windows)
     {
         var mm = $"{version.Major}.{version.Minor}";
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        if (windows)
         {
             yield return Path.Combine(home, $"python{version.Major}{version.Minor}.dll");
             yield break;
@@ -150,6 +159,13 @@ public sealed class PythonEnvironment
             yield return Path.Combine(home, lib, $"libpython{mm}.{extension}.1.0");
         }
     }
+
+    /// <summary>A virtual environment's <c>site-packages</c>: <c>Lib\site-packages</c> on Windows,
+    /// <c>lib/python3.12/site-packages</c> elsewhere.</summary>
+    internal static string SitePackagesOf(string environment, Version version, bool windows)
+        => windows
+            ? Path.Combine(environment, "Lib", "site-packages")
+            : Path.Combine(environment, "lib", $"python{version.Major}.{version.Minor}", "site-packages");
 
     private static Dictionary<string, string> ReadConfig(string path)
     {

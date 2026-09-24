@@ -56,10 +56,15 @@ public static class PythonEnvironmentResolver
 
     /// <summary>The folder cached environments live in.</summary>
     internal static string CacheRoot(PythonEnvironmentOptions options, Func<string, string?> variables)
+        => CacheRoot(options, variables, RuntimeInformation.IsOSPlatform(OSPlatform.Windows));
+
+    /// <summary>The same, on Windows or not as <paramref name="windows"/> says, whatever this
+    /// machine is.</summary>
+    internal static string CacheRoot(PythonEnvironmentOptions options, Func<string, string?> variables, bool windows)
     {
         if (!string.IsNullOrWhiteSpace(options.CacheDirectory)) return Path.GetFullPath(options.CacheDirectory);
         string root;
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        if (windows)
             root = variables("LOCALAPPDATA") is { Length: > 0 } local
                 ? local
                 : Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);

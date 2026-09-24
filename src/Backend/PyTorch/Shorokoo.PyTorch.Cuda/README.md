@@ -1,7 +1,7 @@
 # Shorokoo.PyTorch.Cuda
 
 [Shorokoo](https://github.com/Shorokoo/Shorokoo) execution backend running on
-**an NVIDIA GPU (CUDA 13)** through PyTorch, in an embedded CPython (Linux x64).
+**an NVIDIA GPU (CUDA 13)** through PyTorch, in an embedded CPython (Linux x64 and Windows x64).
 
 ```bash
 dotnet add package Shorokoo

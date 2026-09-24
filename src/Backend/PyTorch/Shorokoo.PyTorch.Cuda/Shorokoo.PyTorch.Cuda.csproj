@@ -10,7 +10,7 @@
 
     <IsPackable>true</IsPackable>
     <Description>Shorokoo execution backend running on an NVIDIA GPU through PyTorch (CUDA 13), in an embedded CPython. The Python environment (torch for CUDA 13) is provisioned with uv on first use, or named with SHOROKOO_PYTHON_ENV. Install alongside the Shorokoo package and name it explicitly: new ComputeContext(new TorchCudaBackend()).</Description>
-    <PackageTags>shorokoo;pytorch;torch;backend;linux;cuda;machine-learning</PackageTags>
+    <PackageTags>shorokoo;pytorch;torch;backend;linux;windows;cuda;machine-learning</PackageTags>
   </PropertyGroup>
 
   <ItemGroup>

@@ -31,8 +31,9 @@ namespace Shorokoo.Core.Factory
     /// model that leaves Shorokoo — for a backend or as an exported file.</para>
     ///
     /// <para>A node is left as written where the rewrite cannot know what it means: an
-    /// activation ONNX does not name, a list of activations of the wrong length, or an attribute
-    /// that refers to a function's attribute.</para>
+    /// activation ONNX does not name, a list of activations of the wrong length, an attribute
+    /// that refers to a function's attribute, or an activation left without a value the spec
+    /// gives no default for (<c>ScaledTanh</c>'s alpha and beta).</para>
     /// </summary>
     internal static class RecurrentActivationArguments
     {
@@ -40,9 +41,8 @@ namespace Shorokoo.Core.Factory
         private const string Beta = "activation_beta";
 
         /// <summary>Whether each activation takes an alpha and a beta, and the defaults of the
-        /// ONNX operator of its name. ONNX's <c>ScaledTanh</c> states no default; 1 is used for
-        /// both, the identity-like scaling, as the PyTorch backend reads it.</summary>
-        private static readonly Dictionary<string, (bool TakesAlpha, bool TakesBeta, float Alpha, float Beta)> Arguments =
+        /// ONNX operator of its name; null where ONNX states none (<c>ScaledTanh</c>).</summary>
+        private static readonly Dictionary<string, (bool TakesAlpha, bool TakesBeta, float? Alpha, float? Beta)> Arguments =
             new(StringComparer.OrdinalIgnoreCase)
             {
                 ["Relu"] = (false, false, 0f, 0f),
@@ -53,7 +53,7 @@ namespace Shorokoo.Core.Factory
                 ["Affine"] = (true, true, 1f, 0f),
                 ["LeakyRelu"] = (true, false, 0.01f, 0f),
                 ["ThresholdedRelu"] = (true, false, 1f, 0f),
-                ["ScaledTanh"] = (true, true, 1f, 1f),
+                ["ScaledTanh"] = (true, true, null, null),
                 ["HardSigmoid"] = (true, true, 0.2f, 0.5f),
                 ["Elu"] = (true, false, 1f, 0f),
             };
@@ -100,23 +100,27 @@ namespace Shorokoo.Core.Factory
             if (names.Length != perDirection.Length * directions || names.Any(n => !Arguments.ContainsKey(n)))
                 return;
 
-            var alphas = Consumed(names, alpha?.Floats, n => (Arguments[n].TakesAlpha, Arguments[n].Alpha));
-            var betas = Consumed(names, beta?.Floats, n => (Arguments[n].TakesBeta, Arguments[n].Beta));
+            if (Consumed(names, alpha?.Floats, n => (Arguments[n].TakesAlpha, Arguments[n].Alpha)) is not { } alphas
+                || Consumed(names, beta?.Floats, n => (Arguments[n].TakesBeta, Arguments[n].Beta)) is not { } betas)
+                return;
             bool positional = node.OpType == "RNN";
             Write(node, Alpha, positional ? Positional(alphas) : Ordered(alphas));
             Write(node, Beta, positional ? Positional(betas) : Ordered(betas));
         }
 
         /// <summary>Per activation, the value ONNX gives it from <paramref name="given"/> read in
-        /// order, or null for one that takes none.</summary>
-        private static float?[] Consumed(string[] names, float[]? given, Func<string, (bool Takes, float Default)> argument)
+        /// order, or null for one that takes none; null altogether where one that takes a value is
+        /// given none and has no default.</summary>
+        private static float?[]? Consumed(string[] names, float[]? given, Func<string, (bool Takes, float? Default)> argument)
         {
             var values = new float?[names.Length];
             int next = 0;
             for (int i = 0; i < names.Length; i++)
             {
                 var (takes, fallback) = argument(names[i]);
-                if (takes) values[i] = given is not null && next < given.Length ? given[next++] : fallback;
+                if (!takes) continue;
+                values[i] = given is not null && next < given.Length ? given[next++] : fallback;
+                if (values[i] is null) return null;
             }
             return values;
         }

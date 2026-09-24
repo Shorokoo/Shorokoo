@@ -226,7 +226,8 @@ namespace Shorokoo
     /// default, or through <see cref="TryConsume"/> — or it is moved into an attribute
     /// (<see cref="MoveToAttribute"/>). Two kinds of tensor belong to something else and end with
     /// it: a copy a run made of a tensor it could not read where it was, which ends when that tensor
-    /// is written to or dies, and an element of a list sequence, which ends with its sequence.
+    /// is written to or dies or lets its copies go, and an element of a list sequence, which ends
+    /// with its sequence.
     /// Nothing else ends a tensor's life — disposing a context it is attached to does not — and a
     /// tensor nothing references is reclaimed like any other object, its memory released through its
     /// backend's ordinary path. A dead tensor's shape, dtype, <see cref="ToString"/> and where its
@@ -334,8 +335,8 @@ namespace Shorokoo
         /// <summary>
         /// The storage width in bits of one element of <paramref name="dtype"/> — 4 for a four-bit
         /// type, whose elements pack two to a byte — or 0 for one with no width to count: a string,
-        /// whose elements are variable-length, and a placeholder. The one table every byte count of
-        /// a tensor is read from.
+        /// whose elements are variable-length, and a placeholder. What <see cref="ByteCount"/>, and so
+        /// every count a device-memory budget keeps, is read from.
         /// </summary>
         internal static int StorageBits(DType dtype)
         {

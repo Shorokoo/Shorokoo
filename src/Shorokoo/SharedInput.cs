@@ -25,8 +25,9 @@ namespace Shorokoo
     /// A feed a run is not simply given: a tensor, sequence, struct or optional wrapped with a
     /// <see cref="Mode"/> that says what the run does with it instead. <c>t.Shared()</c> and
     /// <c>t.TryConsume()</c> make one, and it is an <see cref="IData"/> like any other feed, so it
-    /// goes straight into <c>Execute</c>, <c>Run</c>, <c>TrainStep</c> and every other call that
-    /// turns its arguments into run inputs.
+    /// goes straight into <c>Execute</c>, <c>TrainStep</c> and every other call that turns
+    /// <see cref="IData"/> arguments into run inputs. <c>Run</c> takes parameters rather than
+    /// feeds, and a parameter carries the same choice as its <c>FeedMode</c>.
     ///
     /// <para><b>Why it exists.</b> A tensor fed to a run as it is — bare — is <b>consumed</b> by
     /// it: the run takes the tensor when it starts, and the tensor is dead from then on, its memory
@@ -41,7 +42,9 @@ namespace Shorokoo
     /// reads it exactly as <c>Shared</c> does.</description></item>
     /// </list>
     ///
-    /// <para>On a composite — a struct, a sequence — the mode applies to every member. The same
+    /// <para>On a composite — a struct, a sequence — the mode applies to every member, except a
+    /// struct's field given a mode of its own when the struct was built, which keeps it unless the
+    /// struct is fed <c>.Shared()</c>: that reads every field. The same
     /// tensor fed more than once in one call is taken at most once and bound to every input it
     /// feeds: if any occurrence is shared it is not consumed, otherwise a bare occurrence consumes
     /// it, and otherwise it follows <see cref="SharedInputMode.TryConsume"/>.</para>

@@ -48,9 +48,11 @@ namespace Shorokoo
         string ILifetimeOwner.Describe() => Describe();
 
         /// <summary>
-        /// True once this tensor is dead — deleted, consumed by a run, or moved into an attribute.
-        /// Its shape, dtype, <see cref="ToString"/> and where its memory was stay readable as
-        /// metadata; every other access throws, saying how it died.
+        /// True once this tensor is dead — deleted, consumed by a run, or moved into an attribute;
+        /// retired, where it is a copy a run made of another tensor that was written or let its
+        /// copies go; or ended with the list sequence it was an element of. Its shape, dtype,
+        /// <see cref="ToString"/> and where its memory was stay readable as metadata; every other
+        /// access throws, saying how it died.
         /// </summary>
         public bool IsDisposed => _life.Death is not null;
 
@@ -284,8 +286,9 @@ namespace Shorokoo
         /// <summary>
         /// Takes the copy held at <paramref name="where"/> for a run that is consuming this tensor,
         /// marking it dead with <paramref name="death"/>, or null when there is none it can take.
-        /// This tensor has already been taken by that run, so nothing else can be reading it
-        /// through the copy.
+        /// This tensor has already been taken by that run, so no run can be reading it through the
+        /// copy; a caller reading the copy itself, having found it on a context's list, leaves it to
+        /// be retired instead.
         /// </summary>
         internal TensorData? TakeCopyAt(MemoryLocation where, TensorDeath death)
             => Volatile.Read(ref _copies)?.Take(where, death);
@@ -400,11 +403,12 @@ namespace Shorokoo
             + "CopyTo(...) before the move where both are needed.");
 
         /// <summary>A copy a run made of a tensor it could not read where it was, retired because
-        /// that tensor was written to or ended.</summary>
+        /// that tensor was written to or ended, or let the copies of it go.</summary>
         internal static TensorDeath Retired { get; } = new("retired", what =>
             $"{what} was a copy a run made of another tensor, in memory the run could read, and was "
-            + "released because the tensor it was copied from was written to or ended. Nothing may "
-            + "read it any more; read the tensor it was copied from instead.");
+            + "released: the tensor it was copied from was written to or ended, or let go of the "
+            + "copies runs had made of it, as a training step does of its batch's once it has read "
+            + "it. Nothing may read it any more; read the tensor it was copied from instead.");
 
         /// <summary>
         /// Consumed by <paramref name="run"/>, which it fed as <paramref name="inputs"/> — fed as it

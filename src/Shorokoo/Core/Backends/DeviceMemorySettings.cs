@@ -74,8 +74,9 @@ public enum ArenaExtendStrategy
 ///
 /// <para>The tensors a context places on its card — <c>To</c>, <c>CopyTo</c>,
 /// <c>AllocateUninitialized</c>, and the copies its runs make of memory they cannot read where it
-/// is — come out of none of those arenas. They are allocated from one allocator per card, shared by
-/// every context in the process whatever its settings and held for the life of the process; the
+/// is — come out of none of those arenas. They are allocated from one allocator per card and
+/// runtime, shared by every context over that runtime whatever its settings — a backend loaded in
+/// isolation has a runtime, and so an allocator, of its own — and held for the life of the process; the
 /// budget is kept by counting them against the context they are attached to, not by that
 /// allocator.</para>
 ///
@@ -147,7 +148,7 @@ public sealed record DeviceMemorySettings
     /// <see cref="RunSettings.ShrinkArenaAfterRun"/> says.</para>
     ///
     /// <para><b>What it does not count.</b> The budget counts tensors, not arenas. The blocks an
-    /// arena keeps spare, the one allocator per card that tensors are placed from — which holds the
+    /// arena keeps spare, the one allocator per card and runtime that tensors are placed from — which holds the
     /// most it was ever asked for at once — and the weights a session keeps in its arena for as long
     /// as it lives are not in it: a session's weights count only against its own runs, so a context
     /// that has compiled several graphs with large weights is holding every one of them at once, and

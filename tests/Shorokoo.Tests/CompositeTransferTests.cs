@@ -35,6 +35,25 @@ public class CompositeTransferCoverageTests
     }
 
     [Fact]
+    public void TestASequenceOrAStructIsRefusedADisposedContextAsATensorIs()
+    {
+        var disposed = new ComputeContext();
+        disposed.Dispose();
+        var produced = TensorDataSequence.Create([Sample(1f)], DType.Float32);
+        var fieldless = new TensorDataStruct(new TensorStructDef([], "ModelInput"), []);
+
+        Func<object>[] transfers =
+        [
+            () => produced.To(disposed), () => produced.CopyTo(disposed),
+            () => fieldless.To(disposed), () => fieldless.CopyTo(disposed),
+        ];
+        foreach (var transfer in transfers)
+            Assert.Contains("was given a compute context that has been disposed",
+                Assert.Throws<ObjectDisposedException>(transfer).Message);
+        Assert.False(produced.IsDisposed);
+    }
+
+    [Fact]
     public void TestASequenceIsItselfWhereverItsElementsCanBeRead()
     {
         using var context = new ComputeContext();

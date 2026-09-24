@@ -12,9 +12,10 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
 {
     private readonly OrtValue _inner;
 
-    // Set once, by Dispose. A value is released by whoever owns it -- a tensor that died, or a
-    // backend handed it by a run that consumed it -- and a caller that still holds it, through
-    // ToTensorValue() say, must be told rather than handed on to ORT.
+    // Set once, by Dispose, or by HandedOver when a sequence takes the value over. A value is
+    // released by whoever owns it -- a tensor that died, a backend handed it by a run that consumed
+    // it, or the sequence it went into -- and a caller that still holds it, through ToTensorValue()
+    // say, must be told rather than handed on to ORT.
     private int _released;
 
     /// <summary>
@@ -30,8 +31,8 @@ internal sealed class OrtTensorValue : IShorokooTensorValue
     private static ObjectDisposedException Released() => new(
         nameof(OrtTensorValue),
         "This runtime value has been released -- the tensor it belonged to was deleted, or consumed "
-        + "by a run whose backend released it, or it was disposed -- so its memory is gone and "
-        + "nothing may read it.");
+        + "by a run whose backend released it, or it was handed into a sequence that owns it now, or "
+        + "it was disposed -- so nothing may read it through this handle.");
 
     public ShorokooOnnxValueType ValueType => (ShorokooOnnxValueType)(int)Inner.OnnxType;
 

@@ -237,6 +237,11 @@ namespace Shorokoo.Runtime
         /// it; the same goes for a sequence, a struct or an optional. Outputs are new tensors,
         /// attached to the context that compiled this graph.</para>
         /// </summary>
+        /// <exception cref="InvalidOperationException">The compiling context is under a device-memory
+        /// budget, and what the run would hold in the context's memory outside its session's arena
+        /// leaves nothing of the budget for the arena, or its arena cannot take what it was fed
+        /// beside what the context holds (<see cref="DeviceMemorySettings.LimitBytes"/>). Nothing it
+        /// was fed has been taken.</exception>
         public NamedModelParam[] Execute(params IData[] inputs)
             => Run(NameInputs(inputs), retainedOutputNames: null, DefaultRunSettings);
 
@@ -306,8 +311,15 @@ namespace Shorokoo.Runtime
         }
 
         /// <summary>
-        /// Executes the compiled graph with pre-built named inputs.
+        /// Executes the compiled graph with pre-built named inputs. A parameter's data is consumed
+        /// by the run unless the parameter says otherwise (<see cref="NamedModelParam.FeedMode"/>),
+        /// as <see cref="ComputeContext.Run(ComputationGraph, NamedModelParam[])"/> describes.
         /// </summary>
+        /// <exception cref="InvalidOperationException">The compiling context is under a device-memory
+        /// budget, and what the run would hold in the context's memory outside its session's arena
+        /// leaves nothing of the budget for the arena, or its arena cannot take what it was fed
+        /// beside what the context holds (<see cref="DeviceMemorySettings.LimitBytes"/>). Nothing it
+        /// was fed has been taken.</exception>
         public NamedModelParam[] Run(params NamedModelParam[] inputs)
             => Run(inputs, retainedOutputNames: null, DefaultRunSettings);
 
@@ -680,8 +692,8 @@ namespace Shorokoo.Runtime
     /// <code>
     /// var cpu  = new ComputeContext(new LinuxCpuBackend());
     /// var cuda = new ComputeContext(new LinuxGpuBackend());
-    /// cpu.Execute(graph, input);   // on the host
-    /// cuda.Execute(graph, input);  // the same graph, on the card
+    /// cpu.Execute(graph, input.Shared());   // on the host, reading input
+    /// cuda.Execute(graph, input);           // the same graph, on the card, consuming it
     /// </code>
     /// A context constructed without one runs on the process default
     /// (<see cref="Shorokoo.Core.Backends.DefaultBackend.Instance"/>), which is what
@@ -1044,9 +1056,10 @@ namespace Shorokoo.Runtime
         ///
         /// <para>A tensor becomes attached by being an output of one of this context's runs, by
         /// being read by one (fed <c>.Shared()</c>, or through <c>.TryConsume()</c> while another
-        /// run held it), by being the copy one of its runs read in a tensor's place, and by
+        /// run held it), by being the copy one of its runs read in a tensor's place, by
         /// <see cref="TensorData.To"/> or <see cref="TensorData.CopyTo"/> with this context as the
-        /// target; <see cref="Detach"/> takes one off. A tensor a run consumes is dead, and is on no
+        /// target, and by <see cref="AllocateUninitialized(Shape, DType)"/> on it;
+        /// <see cref="Detach"/> takes one off. A tensor a run consumes is dead, and is on no
         /// list. The list is weak and it is not ownership: it never keeps a tensor alive, never ends
         /// one's life, and a tensor that dies or is collected drops out of it. <see cref="Host"/>'s
         /// is always empty.</para>
@@ -1196,6 +1209,9 @@ namespace Shorokoo.Runtime
         /// <exception cref="NotSupportedException">The element type has no flat byte
         /// buffer — see the overload above.</exception>
         /// <exception cref="ObjectDisposedException">This context has been disposed.</exception>
+        /// <exception cref="InvalidOperationException">This context's device-memory budget cannot
+        /// take the tensor alongside what is attached to it
+        /// (<see cref="DeviceMemorySettings.LimitBytes"/>).</exception>
         public TensorData<T> AllocateUninitialized<T>(Shape shape) where T : IVarType
             => (TensorData<T>)AllocateUninitialized(shape, OnnxUtils.GetDType<T>());
 
@@ -1262,7 +1278,7 @@ namespace Shorokoo.Runtime
         /// <summary>
         /// One signal for every tensor this run has locked, plus whatever the caller asked to
         /// stop the run with. Null when there is nothing to link — the caller's settings then go
-        /// to the backend untouched.
+        /// to the backend with no token of this run's linked into them.
         ///
         /// <para>This is how a locker discharges its one obligation: the backend is handed the
         /// linked token as <c>RunSettings.CancellationToken</c>, so a deliberate delete of
@@ -1561,6 +1577,9 @@ namespace Shorokoo.Runtime
         /// Compiles the graph into a reusable <see cref="CompiledGraph"/>: the ONNX model and
         /// session are built once, so repeated executions only feed new data.
         /// </summary>
+        /// <exception cref="InvalidOperationException">This context is under a device-memory budget,
+        /// and what is attached to it in its memory leaves nothing of the budget for the session's
+        /// arena (<see cref="DeviceMemorySettings.LimitBytes"/>).</exception>
         public CompiledGraph Compile(ComputationGraph graph)
         {
             graph.RequireConcretized("ComputeContext.Compile");
@@ -1580,6 +1599,10 @@ namespace Shorokoo.Runtime
         /// alive, and <c>t.TryConsume()</c> is consumed only when nothing else is reading it — see
         /// <see cref="CompiledGraph.Execute(IData[])"/>.</para>
         /// </summary>
+        /// <exception cref="InvalidOperationException">This context is under a device-memory
+        /// budget that cannot take the run, as <see cref="Compile(ComputationGraph)"/> and
+        /// <see cref="CompiledGraph.Execute(IData[])"/> refuse one. Nothing it was fed has been
+        /// taken.</exception>
         public NamedModelParam[] Execute(ComputationGraph graph, params IData[] inputs)
         {
             graph.RequireConcretized("ComputeContext.Execute");
@@ -1596,6 +1619,10 @@ namespace Shorokoo.Runtime
         /// <c>p.TryConsume()</c>, or made from a <see cref="SharedInput"/> —
         /// <c>NamedModelParam.FromIData(name, type, t.Shared())</c>.</para>
         /// </summary>
+        /// <exception cref="InvalidOperationException">This context is under a device-memory
+        /// budget that cannot take the run, as <see cref="Compile(ComputationGraph)"/> and
+        /// <see cref="CompiledGraph.Execute(IData[])"/> refuse one. Nothing it was fed has been
+        /// taken.</exception>
         public NamedModelParam[] Run(ComputationGraph graph, params NamedModelParam[] inputs)
         {
             graph.RequireConcretized("ComputeContext.Run");
@@ -1829,8 +1856,9 @@ namespace Shorokoo.Runtime
         /// Expands TensorDataStruct inputs into individual field data entries. A struct fed through
         /// <c>.Shared()</c> or <c>.TryConsume()</c> expands into fields fed the same way, which is
         /// what a mode on a composite means: it applies to every member. A field the struct was
-        /// built with through one of them keeps its own, a shared one read even where the struct is
-        /// fed as it is (<see cref="TensorDataStruct.FieldFeedMode"/>).
+        /// built with through one of them keeps its own unless the struct is fed <c>.Shared()</c>,
+        /// and a shared one is read even where the struct is fed as it is
+        /// (<see cref="TensorDataStruct.FieldFeedMode"/>).
         /// </summary>
         internal static IData[] ExpandStructInputs(IData[] inputs)
         {

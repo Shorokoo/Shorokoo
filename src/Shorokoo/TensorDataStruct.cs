@@ -22,6 +22,12 @@ namespace Shorokoo
 
         public DType DType => Shorokoo.DType.GetOrCreateForTensorStruct(Definition);
 
+        /// <summary>
+        /// The field values by name — each the value itself, not the <c>.Shared()</c> or
+        /// <c>.TryConsume()</c> it may have been given through. The mode a field was given stays with
+        /// this struct: a struct built again from these values, with the public constructor, feeds
+        /// every field as the struct is fed unless it is given its mode again.
+        /// </summary>
         public ImmutableDictionary<string, IData> Fields { get; private set; }
 
         /// <summary>The number of fields the definition declares — the same fields the indexer and the
@@ -46,7 +52,7 @@ namespace Shorokoo
         ///
         /// <para>A field may be given through <c>.Shared()</c> or <c>.TryConsume()</c> — a
         /// <see cref="SharedInput"/> over a value of the kind it declares — to be fed that way
-        /// whatever the struct is fed as: <c>rig.InputDef.FromOrderedData(tokens, mask.Shared())</c>
+        /// rather than as the struct is: <c>rig.InputDef.FromOrderedData(tokens, mask.Shared())</c>
         /// keeps the mask while a step consumes the tokens. The struct holds the value itself, so
         /// <see cref="Fields"/>, the indexer and the enumerator read the tensor, not its wrapper; the
         /// mode is kept beside it, and <see cref="To"/>, <see cref="CopyTo"/> and
@@ -143,15 +149,17 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// This struct to be <b>read</b> by the run it is fed to — every member of it — rather than
-        /// consumed. Fed as it is, a struct's members are consumed as a bare tensor is; see
+        /// This struct to be <b>read</b> by the run it is fed to — every member of it, whatever mode
+        /// a field was given — rather than consumed. Fed as it is, a struct's members are consumed
+        /// as a bare tensor is, except a field given a mode of its own, which is fed that way; see
         /// <see cref="TensorData.Shared"/>.
         /// </summary>
         public SharedInput Shared() => new(this, SharedInputMode.Shared);
 
         /// <summary>
         /// This struct's members to be consumed by the run it is fed to where nothing else is
-        /// reading them when that run starts, and read otherwise — decided member by member; see
+        /// reading them when that run starts, and read otherwise — decided member by member, and a
+        /// field given <c>.Shared()</c> of its own read all the same; see
         /// <see cref="TensorData.TryConsume"/>.
         /// </summary>
         public SharedInput TryConsume() => new(this, SharedInputMode.TryConsume);
@@ -193,11 +201,15 @@ namespace Shorokoo
         /// either way.
         /// </summary>
         /// <exception cref="ArgumentNullException"><paramref name="target"/> is null.</exception>
+        /// <exception cref="ObjectDisposedException">A field is dead, or <paramref name="target"/>
+        /// has been disposed.</exception>
         /// <exception cref="InvalidOperationException"><paramref name="target"/>'s device-memory
-        /// budget cannot take what the struct's fields would put on it. Nothing is placed.</exception>
+        /// budget cannot take what the struct's fields would put on it. Nothing is left placed, as
+        /// for a sequence (<see cref="TensorDataSequence.CopyTo"/>).</exception>
         public TensorDataStruct To(Shorokoo.Runtime.ComputeContext target)
         {
             ArgumentNullException.ThrowIfNull(target);
+            TensorData.RefuseDisposedTarget(target, nameof(To));
             return target.PlaceAll(BytesPlacedOnto(target, copying: false), () => $"To(context) of {this}",
                 () => Rebuild(field => Apply(field, t => t.To(target), q => q.To(target), u => u.To(target))));
         }
@@ -205,11 +217,15 @@ namespace Shorokoo
         /// <summary>An independent copy of this struct, every tensor in it copied into
         /// <paramref name="target"/>'s memory and attached to it. This struct is untouched.</summary>
         /// <exception cref="ArgumentNullException"><paramref name="target"/> is null.</exception>
+        /// <exception cref="ObjectDisposedException">A field is dead, or <paramref name="target"/>
+        /// has been disposed.</exception>
         /// <exception cref="InvalidOperationException"><paramref name="target"/>'s device-memory
-        /// budget cannot take the copies. Nothing is copied.</exception>
+        /// budget cannot take the copies. Nothing is left placed, as for a sequence
+        /// (<see cref="TensorDataSequence.CopyTo"/>).</exception>
         public TensorDataStruct CopyTo(Shorokoo.Runtime.ComputeContext target)
         {
             ArgumentNullException.ThrowIfNull(target);
+            TensorData.RefuseDisposedTarget(target, nameof(CopyTo));
             return target.PlaceAll(BytesPlacedOnto(target, copying: true), () => $"CopyTo(context) of {this}",
                 () => Rebuild(field => Apply(field, t => t.CopyTo(target), q => q.CopyTo(target), u => u.CopyTo(target))));
         }
@@ -243,6 +259,7 @@ namespace Shorokoo
 
         /// <summary>This struct where the host can read it, field by field under each field's own
         /// <c>ToHost</c>. The very same struct when every field already is host-readable.</summary>
+        /// <exception cref="ObjectDisposedException">A field is dead.</exception>
         public TensorDataStruct ToHost()
             => Rebuild(field => Apply(field,
                 static t => t.ToHost(), static q => q.ToHost(), static u => u.ToHost()));

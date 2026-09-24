@@ -133,7 +133,9 @@ namespace Shorokoo
         /// <see cref="TrainableParams"/>, <see cref="ModelState"/> and <see cref="OptimizerState"/>:
         /// <c>null</c>, the checkpoint as it is, and the step <b>consumes</b> them, as a run consumes
         /// any tensor fed as it is; or the mode <see cref="Shared"/> or <see cref="TryConsume"/> asked
-        /// for, which the derivations carry through.
+        /// for, which the derivations carry through. A field its struct was built with a mode of its
+        /// own for is fed that way where this is <c>null</c> or <see cref="TryConsume"/>'s, and read
+        /// where this is <see cref="Shared"/>'s.
         ///
         /// <para>Consuming is what <c>cp = rig.TrainStep(cp, x, y)</c> wants: the state it
         /// supersedes is released as the step runs rather than whenever the previous checkpoint is
@@ -143,17 +145,19 @@ namespace Shorokoo
         public SharedInputMode? FeedMode { get; init; }
 
         /// <summary>
-        /// This checkpoint, to be <b>read</b> by the training step it is fed to rather than
-        /// consumed: every tensor of its state stays alive and unchanged, and the step returns new
-        /// state beside it. The same checkpoint otherwise — every slot carried through — so it is
-        /// read, saved and resumed from exactly as this one is.
+        /// A checkpoint over this one's tensors, to be <b>read</b> by the training step it is fed to
+        /// rather than consumed: every tensor of its state stays alive and unchanged, and the step
+        /// returns new state beside it. A new checkpoint, since this one keeps its own
+        /// <see cref="FeedMode"/>; every other slot is carried through, so it is read, saved and
+        /// resumed from exactly as this one is.
         /// </summary>
         public TrainingCheckpoint Shared() => Derive(feedMode: SharedInputMode.Shared);
 
         /// <summary>
-        /// This checkpoint, its state to be consumed by the training step it is fed to where
-        /// nothing else is reading it when the step starts, and read otherwise — decided tensor by
-        /// tensor; see <see cref="TensorData.TryConsume"/>.
+        /// A checkpoint over this one's tensors, its state to be consumed by the training step it is
+        /// fed to where nothing else is reading it when the step starts, and read otherwise —
+        /// decided tensor by tensor; see <see cref="TensorData.TryConsume"/>. A new checkpoint, as
+        /// <see cref="Shared"/>'s is.
         /// </summary>
         public TrainingCheckpoint TryConsume() => Derive(feedMode: SharedInputMode.TryConsume);
 
@@ -225,7 +229,8 @@ namespace Shorokoo
             };
 
         /// <summary>A new checkpoint with <see cref="TrainableParams"/> replaced; every other slot —
-        /// model state, optimizer state, counters, rig and loss — carries through unchanged.</summary>
+        /// model state, optimizer state, counters, rig, loss and <see cref="FeedMode"/> — carries
+        /// through unchanged.</summary>
         public TrainingCheckpoint WithTrainableParams(TensorDataStruct trainableParams)
             => Derive(trainableParams: trainableParams
                 ?? throw new ArgumentNullException(nameof(trainableParams)));

@@ -349,9 +349,9 @@ var rig = TrainingRig.FromScratch(model, loss, MyOptimizer.ComputationGraph, sam
         PerGroupScale = Hyperparameter.Runtime(3L),                 // float32 vector, host-supplied
     });
 
-rig.TrainStep(ckpt,
+ckpt = rig.TrainStep(ckpt,
     rig.MakeHyperparameters(("perGroupScale", TensorData([3L], 1f, 2f, 3f))),
-    inputs, targets);
+    inputs.Shared(), targets.Shared());
 ```
 
 `MakeHyperparameters` builds a struct whose tensors are its own: a `TensorData` you give it is
@@ -561,8 +561,8 @@ the run on to state of its own, and that step lets its copies go as it returns.
 
 - **A checkpoint** feeds its trainable parameters, model state and optimizer state as its
   `FeedMode` says. `null` — every checkpoint a step or a load hands you — is as it is, consumed.
-  `cp.Shared()` returns the same checkpoint to be read instead, and `cp.TryConsume()` one to be
-  consumed only where nothing else is reading it; the derivations (`WithStep`, `WithCounters`,
+  `cp.Shared()` returns a checkpoint over the same tensors to be read instead, and
+  `cp.TryConsume()` one to be consumed only where nothing else is reading it; the derivations (`WithStep`, `WithCounters`,
   `WithTrainableParams`, …) and `rig.AdoptCheckpoint` carry the mode through, since they share its
   tensors. Reading a consumed checkpoint's state throws, naming the training step that took it and
   the section it fed ("the checkpoint's trainable parameter …").
@@ -584,7 +584,7 @@ the run on to state of its own, and that step lets its copies go as it returns.
   anything else is refused with an `ArgumentException` naming the struct definitions to build it
   from (`rig.InputDef.FromOrderedData(...)`).
 - **A field can be fed its own way.** Build a struct with a field passed `.Shared()` or
-  `.TryConsume()` and that field is fed so wherever the struct goes:
+  `.TryConsume()` and that field is fed so rather than as the struct is:
   `rig.InputDef.FromOrderedData(tokens, mask.Shared())` keeps the mask while the step consumes the
   tokens. A field given `.Shared()` is read however the struct is fed, a struct fed `.Shared()` has
   every field read, and otherwise each field is fed as it was given, or as the struct is. The struct
@@ -707,7 +707,7 @@ peak without it and 320 MiB with it, and the card's own peak fell by the same 38
 state, since neither the state a step consumes nor the state it produces sits in the arena beside
 the step's working memory any more. Under a device-memory budget the state is still counted —
 once, where it lives — see
-[inference.md](inference.md#a-run-that-writes-an-output-into-what-it-consumed).
+[inference.md](inference.md#a-contexts-device-memory-budget).
 
 ### What construction costs
 
@@ -770,9 +770,9 @@ you do with it. A resident run's retained steps do not go through any of this �
 that state itself — but its `StepToCheckpoint` steps bring state home for you to keep, so those are
 reclaimed like any other.
 
-If you **keep** your checkpoints — feeding them `.Shared()` and holding the best so far, or
-comparing a step against the one before it — then nothing is superseded and a collection would
-reclaim nothing. The rig notices: it watches one checkpoint weakly, and each time one survives the
+If you **keep** your checkpoints — every one of them, fed `.Shared()` and held — then nothing is
+superseded and a collection would reclaim nothing. (Keeping a few — the best so far, or the one
+before the last — leaves the rest to be reclaimed as usual, and changes nothing here.) The rig notices: it watches one checkpoint weakly, and each time one survives the
 collection it doubles the budget, backing off until keeping checkpoints costs you no collections at
 all. It snaps back the moment a watched checkpoint does not survive.
 
@@ -1321,7 +1321,7 @@ These are in namespace `Shorokoo` (covered by `using Shorokoo;`), except `Schedu
 | `TensorDataModelParam` | Concrete `NamedModelParam` wrapping one `TensorData`. | `new TensorDataModelParam(name, ModelParamType.InputParam, tensorData)` |
 | `ModelParamType` (enum) | Tags a param's role. | `Undefined`, `HyperParam`, `TrainableParam`, `InputParam`, `OutputParam` |
 | `ModelParamList` | A set of named params (e.g. loaded weights). | `new ModelParamList(IEnumerable<(string name, TensorData data)>)` |
-| `TensorDataStruct` | A struct-shaped bundle of named `TensorData` fields; the form `Train`/`TrainStep` expect for inputs/targets. | Build: `new TensorDataStruct(structDef, fields)` where `structDef` is a `TensorStructDef` (namespace `Shorokoo.Core`) and `fields` are `KeyValuePair<string, IData>` — one per definition field, each of the kind that field declares (a value contradicting its definition throws), as it is or through `.Shared()` / `.TryConsume()` to be fed that way whatever the struct is fed as. Read: `.Fields` (an `ImmutableDictionary<string, IData>` of name → value), `.Count`, or the `[int]` indexer. |
+| `TensorDataStruct` | A struct-shaped bundle of named `TensorData` fields; the form `Train`/`TrainStep` expect for inputs/targets. | Build: `new TensorDataStruct(structDef, fields)` where `structDef` is a `TensorStructDef` (namespace `Shorokoo.Core`) and `fields` are `KeyValuePair<string, IData>` — one per definition field, each of the kind that field declares (a value contradicting its definition throws), as it is or through `.Shared()` / `.TryConsume()` to be fed that way rather than as the struct is (a struct fed `.Shared()` has every field read). Read: `.Fields` (an `ImmutableDictionary<string, IData>` of name → value), `.Count`, or the `[int]` indexer. |
 | `SharedInput` | A value to be **read** by the run it feeds rather than consumed (`Mode` `Shared`), or consumed only if nothing else is reading it (`TryConsume`). | `x.Shared()` / `x.TryConsume()` on a `TensorData`, `TensorDataStruct`, `TensorDataSequence` or `OptionalTensorData`. A checkpoint's own `.Shared()` / `.TryConsume()` return a checkpoint, carrying the mode as its `FeedMode`, and a `NamedModelParam`'s a copy of the parameter with its `FeedMode` set. A struct's field may be given as one when the struct is built. |
 | `SaveReport` | What a checkpoint save cost: `BytesWritten`, the disjoint `Write` / `Flush` / `Commit` phases, their sum `Elapsed`, and `BytesPerSecond`. | Returned by every checkpoint save — see [What a save costs](#what-a-save-costs). |
 | `Schedule` (namespace `Shorokoo.Core.Training`) | A `step → value` hyperparameter schedule; assign one to a `Hyperparameter` property to make it [`Scheduled`](#hyperparameter-kinds-hyperparameter). | A `Schedules.…` factory, then the combinators on the result (`WithWarmup`, `Then`, `Scale`, `Clamp`, `Shift`, `PerEpoch`). Preview with `.At(step)`. |

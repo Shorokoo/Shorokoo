@@ -57,7 +57,8 @@ namespace Shorokoo
     ///
     /// <para>A batch is fed to the step that trains on it the way any feed is: a struct as it is is
     /// <b>consumed</b> by that step — its tensors dead from then on, their memory released with
-    /// the step — which is what a batch built per draw wants, and what
+    /// the step, but for a field built into it with a mode of its own — which is what a batch built
+    /// per draw wants, and what
     /// <see cref="InMemoryDataLoader"/> produces. A loader that hands out tensors it keeps and
     /// hands out again passes them <c>.Shared()</c>, so that each step reads them and leaves them
     /// alive — and lets go, as it returns, of the copies it made to read them.</para>

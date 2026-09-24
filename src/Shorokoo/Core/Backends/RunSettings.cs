@@ -18,8 +18,8 @@ namespace Shorokoo.Core.Backends;
 /// using Shorokoo.Core.Backends;
 ///
 /// var compiled = ctx.Compile(graph);
-/// compiled.Execute(inputs);                                                   // the context's default
-/// compiled.Execute(inputs, new RunSettings { ShrinkArenaAfterRun = true });    // this run only
+/// compiled.Execute(x.Shared());                                           // the context's default
+/// compiled.Execute([x], new RunSettings { ShrinkArenaAfterRun = true });   // this run only
 /// </code>
 /// </summary>
 public sealed record RunSettings

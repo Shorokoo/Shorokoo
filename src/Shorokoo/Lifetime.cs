@@ -352,10 +352,11 @@ namespace Shorokoo
         /// deleted by someone who found it on a context's list — is replaced.
         ///
         /// <para>The caller vouches for the source's memory: a reader holding its lock, or a caller
-        /// that has just checked it is alive. A release of the source that ran while the copy was
-        /// being built found nothing to retire, and would leave the copy outliving the memory it
-        /// was copied from; only a caller holding no lock can get there, and it is told the source
-        /// is gone.</para>
+        /// that has just checked it is alive. A release of the source that comes while the copy is
+        /// being built waits for it, on this object, and retires it. One that finished before the
+        /// copy was begun found nothing to retire, and would leave a copy read from memory already
+        /// released held with nothing to end it; only a caller holding no lock can get there, and
+        /// the copy is retired and the caller told the source is gone.</para>
         /// </summary>
         /// <exception cref="ObjectDisposedException">The source's memory was released while the copy
         /// was being made.</exception>
@@ -386,9 +387,11 @@ namespace Shorokoo
 
         /// <summary>
         /// Takes the copy held at <paramref name="where"/> for a run that has taken the source, marking
-        /// it dead with <paramref name="death"/>, or null when there is none it can take. A copy
-        /// still being read by a run that has let go of the source but not of the copy yet is retired
-        /// instead — it goes when that run returns — and the consuming run makes one of its own.
+        /// it dead with <paramref name="death"/>, or null when there is none it can take. No run can
+        /// be reading it — a run lets go of a copy before the source it read through it — but a
+        /// caller outside one can, having found it on a context's list: a copy being read that way is
+        /// retired instead, going when that caller is done, and the consuming run makes one of its
+        /// own.
         /// </summary>
         internal TCopy? Take(MemoryLocation where, TensorDeath death)
         {

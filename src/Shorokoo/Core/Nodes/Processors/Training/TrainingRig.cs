@@ -2478,8 +2478,9 @@ namespace Shorokoo
         ///
         /// <para><b>What the step consumes.</b> Its arguments are fed the way any run's inputs are:
         /// as they are, they are <b>consumed</b> — the checkpoint's state, the input and the target
-        /// are dead once the step has started, and their memory is released with it rather than
-        /// whenever they are collected. That is what <c>cp = rig.TrainStep(cp, x, y)</c> with a
+        /// are dead once the step has started, but for a field built into one of them with a mode of
+        /// its own, and their memory is released with the step rather than whenever they are
+        /// collected. That is what <c>cp = rig.TrainStep(cp, x, y)</c> with a
         /// batch built per step wants. To use one again, pass it <c>.Shared()</c> — a checkpoint you
         /// keep, a batch you feed every step — or <c>.TryConsume()</c> to have it consumed only when
         /// nothing else is reading it. A checkpoint from <see cref="CreateInitialCheckpoint()"/> is
@@ -3538,7 +3539,9 @@ namespace Shorokoo
         /// </summary>
         /// <param name="loader">The data loader owning the (input, target) batch stream and its position.</param>
         /// <param name="numEpochs">Number of additional epochs to train, counted from the loader's resume epoch.</param>
-        /// <param name="initialCheckpoint">State to resume from; defaults to <see cref="CreateInitialCheckpoint()"/>.</param>
+        /// <param name="initialCheckpoint">State to resume from; defaults to <see cref="CreateInitialCheckpoint()"/>.
+        /// Fed to the first step as <c>TrainStep</c> feeds one: consumed as it is, read when passed
+        /// <c>.Shared()</c>.</param>
         /// <returns>Final checkpoint (with advanced step / epoch / batch) and the per-epoch mean losses.</returns>
         public TrainingResult Fit(
             IDataLoader loader,

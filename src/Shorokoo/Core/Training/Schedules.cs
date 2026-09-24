@@ -20,7 +20,7 @@ namespace Shorokoo.Core.Training
     ///     });
     /// var ckpt = rig.CreateInitialCheckpoint();
     /// for (int step = 0; step &lt; totalSteps; step++)
-    ///     ckpt = rig.TrainStep(ckpt, inS, outS); // compiled once internally; schedule applied automatically
+    ///     ckpt = rig.TrainStep(ckpt, inS.Shared(), outS.Shared()); // compiled once internally; schedule applied automatically
     /// </code>
     /// </summary>
     public sealed class Schedule

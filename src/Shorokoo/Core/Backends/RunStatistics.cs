@@ -9,15 +9,17 @@ namespace Shorokoo.Core.Backends;
 /// <param name="PeakKind">
 /// <see cref="MemoryFigureKind.Measured"/> when this run pushed the arena's high-water mark up, so
 /// the mark is where the arena stood at this run's own high point — weights and everything else it
-/// was already holding included, which is <see cref="PriorPeakBytes"/>, so only the difference
-/// belongs to this run. <see cref="MemoryFigureKind.UpperBound"/> when it did not: some earlier run
+/// was already holding included — rather than what the run itself used; see
+/// <see cref="PriorPeakBytes"/> for when the difference is. <see cref="MemoryFigureKind.UpperBound"/>
+/// when it did not: some earlier run
 /// holds the mark, this run stayed under it, and how far under is not something the arena records.
 /// </param>
 /// <param name="PriorPeakBytes">
 /// The arena's high-water mark as this run found it, read just before it started. A session's
 /// initializers are allocated from this same arena, so on the first run of a graph with weights in
 /// it this is the weights and <see cref="PeakBytes"/> minus this is what the run itself added; on a
-/// later run it is whatever the highest run before it reached.
+/// later run it is whatever the highest run before it reached, and the difference only how far this
+/// run passed that.
 /// </param>
 /// <param name="Arena">The arena's figures as the run left them.</param>
 public readonly record struct RunMemoryRecord(

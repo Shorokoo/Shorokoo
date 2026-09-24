@@ -56,10 +56,10 @@
   <!--
     -p:ShorokooGpuTests=true deploys Shorokoo.WinGPU as the default backend instead of
     Shorokoo.WinCPU, which is what CudaFactAttribute gates on: it skips unless the discovered
-    backend's assembly name ends in "GPU". Opt-in rather than the default, because a CPU-only
-    Windows box (CI included) has no card and would fail every one of those tests instead of
-    skipping them. Exactly one of the two deploys, since two backend assemblies side by side are
-    what DefaultBackend's discovery refuses.
+    backend's assembly name ends in "GPU", and that a card answers. Opt-in rather than the default
+    because it changes the backend every test in the process runs on, as below; a box with no card
+    skips those tests either way. Exactly one of the two deploys, since two backend assemblies side
+    by side are what DefaultBackend's discovery refuses.
 
     PAIR IT WITH THE Purpose=Hardware FILTER, AND NOTHING ELSE. It changes the PROCESS-WIDE default
     backend, and the coverage suite is written against a host one: a literal built with TensorData

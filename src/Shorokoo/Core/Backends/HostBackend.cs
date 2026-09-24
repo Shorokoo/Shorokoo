@@ -15,8 +15,9 @@ namespace Shorokoo.Core.Backends;
 /// graph is described with — so this backend is a home for tensors, not a factory for values.</para>
 ///
 /// <para>Attached to <see cref="MemoryDevice.For"/> of <see cref="MemorySpace.Host"/>, alongside
-/// every CPU backend the process loads: they share the memory, which is what lets a CPU context
-/// read a tensor built from a C# array without a copy.</para>
+/// every CPU backend the process loads: they share the memory, which is what lets <c>To</c> hand a
+/// tensor built from a C# array to a CPU context as it stands. A run on that context still reads it
+/// through a copy its runtime builds, since a session is handed runtime values only.</para>
 /// </summary>
 public sealed class HostBackend : IShorokooBackend
 {

@@ -7,7 +7,8 @@ namespace Shorokoo.Core.Backends;
 /// </summary>
 public enum MemoryFigureKind
 {
-    /// <summary>The figure is what was used.</summary>
+    /// <summary>The figure was read at the high point it describes: where the memory stood then,
+    /// everything already held there included — not what one run alone used.</summary>
     Measured,
 
     /// <summary>Whatever was used was no more than this, and may have been far less.</summary>

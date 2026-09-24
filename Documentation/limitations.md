@@ -255,7 +255,8 @@ exact. What it does not count is memory the card is holding all the same:
 
 - **The allocator tensors are placed from.** A tensor put on a card — by `To`, `CopyTo`,
   `AllocateUninitialized`, or a run copying a host tensor there to read it — comes out of one
-  allocator per card, shared by every context in the process and held for the life of the process:
+  allocator per card and runtime, shared by every context over that runtime (a backend loaded in
+  isolation has a runtime, and so an allocator, of its own) and held for the life of the process:
   an ONNX Runtime tensor frees itself through the allocator that made it, so that allocator has to
   outlive every tensor it ever served. Nothing ever asks it to shrink, so the blocks it has taken
   stay taken: a deleted tensor's bytes go back to it rather than to the card, and it goes on holding
@@ -321,9 +322,11 @@ copies an element with a plain host `memcpy` whatever allocator it is handed, so
 of such an element dereferences a device address from the host and takes the process down with an
 access violation that nothing can catch. A sequence built that way is write-only.
 
-So `IShorokooBackend.CreateSequence` refuses an element that is in the provider's own memory,
-while the caller still holds the tensor and can bring it home —
-`CopyTensorToHost`, or `TensorData.ToHost()` for a tensor. The refusal names the tensor:
+So the ONNX Runtime backend's `CreateSequence` refuses an element that is in the provider's own
+memory. The framework hands it host copies only, so only a caller of `CreateSequence` itself meets
+this; and a refusal, like any failure of `CreateSequence`, releases every value it was handed. The
+tensor those values were copied from is untouched, and it is what to bring home —
+`TensorData.ToHost()` — before building the sequence again. The refusal names the tensor:
 
 ```
 A tensor (2:Float) in Shorokoo.WinGPU's own device memory cannot be an element of a sequence:

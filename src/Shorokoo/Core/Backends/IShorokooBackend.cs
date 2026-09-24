@@ -62,9 +62,10 @@ public interface IShorokooBackend
 
     // Where a run on this backend reads a tensor of `elementType` it is fed: the memory a tensor has
     // to be in to be handed to the session as it stands, and the memory a copy made for such a run
-    // is put in -- the question To(context) and a run's read both answer by, so they agree. A
-    // consumed feed that no output may be written into is the one that goes elsewhere: to the
-    // session in host memory, for the runtime to copy into its own arena. The default is this
+    // is put in -- the question To(context) and a run's read both answer by, so they agree but in
+    // two places: the framework's managed host memory, which To hands over as it is and a run reads
+    // through a copy (see CanAddress); and a consumed feed that no output may be written into, which
+    // goes to the session in host memory for the runtime to copy into its own arena. The default is this
     // backend's own memory in its own runtime, and the host memory of that runtime for a string
     // tensor, which every runtime so far keeps there whatever its device.
     MemoryLocation RunMemoryOf(ShorokooTensorElementType elementType)

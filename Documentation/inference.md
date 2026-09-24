@@ -401,7 +401,7 @@ plus `Eval<T>(Tensor<T>)` returning a typed `TensorData<T>`),
 `TensorData` implements it, so pass `TensorData` values directly — as they are, to be consumed,
 or through `.Shared()` or `.TryConsume()`. `Execute`, `Run` and
 `CompiledGraph.Execute` return `NamedModelParam[]`; read each output with
-`namedModelParam.ToTensorData()` then `AccessMemory()`. `ExecuteWithState` returns
+`namedModelParam.ToTensorData()` then `CopyMemory<T>()`, or `ValueAt<T>(i)` for one element. `ExecuteWithState` returns
 `(NamedModelParam[] regularOutputs, ComputationGraph updatedGraph)` — feed the updated
 graph to the next call. `Eval` is the exception: it returns `TensorData` (or
 `TensorData[]`) directly.
@@ -736,8 +736,9 @@ consuming it would take its memory from under that run.
   input it fed; the remedy is to pass it `.Shared()` at that call.
 - On a tensor, struct, sequence or optional, `.Shared()` and `.TryConsume()` return a
   `SharedInput`: an `IData` carrying the value and its `Mode`, accepted wherever an input is. On a
-  training checkpoint they return the checkpoint itself with its `FeedMode` set, which its
-  derivations (`WithStep`, …) and `rig.AdoptCheckpoint` keep, since they share its tensors. `Run`,
+  training checkpoint they return a new checkpoint over the same tensors with its `FeedMode` set —
+  the original keeps its own — which its derivations (`WithStep`, …) and `rig.AdoptCheckpoint`
+  keep, since they share its tensors. `Run`,
   which takes `NamedModelParam`s, reads each one's `FeedMode` instead — `null` for as it is — and
   on a parameter they return a copy of it over the same data with its `FeedMode` set:
   `graph.Run(p.Shared())` reads `p`'s tensor, and leaves `p` itself as it was.
@@ -815,7 +816,8 @@ of them:
 
 Two kinds of tensor are also ended by what they belong to. A copy a run made to read a tensor it
 could not read where it is ([above](#feeding-a-run-consumed-shared-or-tried)) is retired when that
-tensor is written or ends. And the elements of a sequence that holds them as its own — the copy a
+tensor is written or ends, or lets its copies go — as a training step does of the copies it made to
+read its batch. And the elements of a sequence that holds them as its own — the copy a
 sequence's `To`, `CopyTo` or `ToHost` makes — end when the sequence does, however it ends: an
 element read after a run consumed its sequence names that run. The exception is an element a run
 is reading on its own account when its sequence ends, which lives on without it; and a sequence one
@@ -915,10 +917,13 @@ touches the tensor it is called on:
 
 Whether a backend can read a tensor's memory as it stands is asked of that backend, and the answer
 is **the same device and the same runtime**. The framework's own host memory — every tensor built
-from a C# array — is readable by every host backend. A device allocation is meaningful only to the
-runtime that made it: two backends over one loaded ONNX Runtime share a card allocation — a CPU
-backend and a CUDA backend in one process, or two instances of one — while two isolated runtimes
-on one card, which is what `IsolatedBackend` produces, do not, and copy through the host. A run's
+from a C# array — counts as every host backend's, so `To` hands such a tensor to a host context as
+it stands; a run there still reads it through a copy its runtime builds, since a session is handed
+runtime values only. A device allocation is meaningful only to the runtime that made it, on its
+own device: two backends over one loaded ONNX Runtime share a card allocation — two instances of
+the CUDA backend, say — while a CPU backend beside them, in another memory space, reads it through
+a copy, and two isolated runtimes on one card, which is what `IsolatedBackend` produces, copy
+through the host. A run's
 outputs come back on the host unless you asked for them to be retained
 (`CompiledGraph.Execute(inputs, retainOnDevice)`), so the copy arises for a tensor you put on the
 card or kept there deliberately.
@@ -1383,8 +1388,8 @@ budget or strategy, compile it on a context that carries one. `RunSettings` ORT 
 instead, so those are settled per call.
 
 The tensors a context places on the card are not in any of those arenas: they come out of one
-allocator per card, shared by every context in the process whatever its settings and held for the
-life of the process. The budget counts them by what is attached to the context, not by that
+allocator per card and runtime, shared by every context over that runtime whatever its settings — a
+backend loaded in isolation has its own — and held for the life of the process. The budget counts them by what is attached to the context, not by that
 allocator.
 
 Where one process must serve both a training loop and a variable-shape inference path, give them a
@@ -1427,7 +1432,9 @@ cannot read where it is, which is how a host tensor a run on the card reads is r
 attached plus what they would add passes the limit. So is a `To` of a tensor already on the card
 that the context's backend reads as it stands: nothing is copied, but attaching it puts its bytes
 on the books. A struct's or a sequence's `To` and `CopyTo` are checked whole, before any part of
-them is placed, and a part that fails takes what the rest placed off the books again. The refusal
+them is placed — but for a sequence a run produced, whose elements are only made as they are read,
+so that each is checked as it is copied — and a part that fails takes what the rest placed off the
+books again, releasing any copies already made. The refusal
 is an `InvalidOperationException` naming the budget, what is attached and what was asked for:
 
 ```

@@ -22,6 +22,15 @@ namespace Shorokoo
         {
         }
 
+        /// <summary>
+        /// Element <paramref name="index"/>. Of a sequence built from tensors — what
+        /// <see cref="TensorDataSequence.To"/>, <see cref="TensorDataSequence.CopyTo"/> and
+        /// <see cref="TensorDataSequence.ToHost"/> make of one they copy — it is the sequence's own
+        /// element, not a copy: fed to a run as it is, it is consumed there and the sequence goes on
+        /// holding a dead element, so feed it <c>.Shared()</c> to keep the sequence whole. Of a
+        /// sequence a run produced it is a new tensor over a copy of the element, the caller's to use
+        /// up or delete.
+        /// </summary>
         public abstract new TensorData<T> this[int index] { get; }
 
         public abstract new IEnumerator<TensorData<T>> GetEnumerator();
@@ -328,6 +337,14 @@ namespace Shorokoo
 
         internal abstract TensorData GetAt(int index);
 
+        /// <summary>
+        /// Element <paramref name="index"/>. Of a sequence built from tensors — what
+        /// <see cref="To"/>, <see cref="CopyTo"/> and <see cref="ToHost"/> make of one they copy —
+        /// it is the sequence's own element, not a copy: fed to a run as it is, it is consumed there
+        /// and the sequence goes on holding a dead element, so feed it <c>.Shared()</c> to keep the
+        /// sequence whole. Of a sequence a run produced it is a new tensor over a copy of the
+        /// element, the caller's to use up or delete.
+        /// </summary>
         public TensorData this[int index] => GetAt(index);
 
         internal abstract IEnumerator<TensorData> InternalGetEnumerator();
@@ -569,11 +586,17 @@ namespace Shorokoo
         /// delete them from under it when disposed.</para>
         /// </summary>
         /// <exception cref="ArgumentNullException"><paramref name="target"/> is null.</exception>
-        /// <exception cref="ObjectDisposedException">This sequence has been disposed.</exception>
+        /// <exception cref="ObjectDisposedException">This sequence has been disposed, or
+        /// <paramref name="target"/> has.</exception>
+        /// <exception cref="InvalidOperationException"><paramref name="target"/>'s device-memory
+        /// budget cannot take what the sequence would put on it — its elements handed over as they
+        /// stand, or the copy. Nothing is left placed; see <see cref="CopyTo"/> for when that is
+        /// known.</exception>
         public TensorDataSequence To(ComputeContext target)
         {
             ArgumentNullException.ThrowIfNull(target);
             ThrowIfDisposed();
+            TensorData.RefuseDisposedTarget(target, nameof(To));
             if (!AddressableBy(target)) return CopyInto(target, nameof(To));
             AttachElementsTo(target);
             return this;
@@ -582,13 +605,18 @@ namespace Shorokoo
         /// <summary>An independent copy of this sequence, its elements copied into
         /// <paramref name="target"/>'s memory and attached to it. This sequence is untouched.</summary>
         /// <exception cref="ArgumentNullException"><paramref name="target"/> is null.</exception>
-        /// <exception cref="ObjectDisposedException">This sequence has been disposed.</exception>
+        /// <exception cref="ObjectDisposedException">This sequence has been disposed, or
+        /// <paramref name="target"/> has.</exception>
         /// <exception cref="InvalidOperationException"><paramref name="target"/>'s device-memory
-        /// budget cannot take the copies. Nothing is copied.</exception>
+        /// budget cannot take the copies. Nothing is left placed. Of a sequence built from tensors
+        /// that is known before anything is copied; a sequence a run produced mints its elements only
+        /// as they are read, so it is refused at the element that does not fit, and the copies made
+        /// before it are released.</exception>
         public TensorDataSequence CopyTo(ComputeContext target)
         {
             ArgumentNullException.ThrowIfNull(target);
             ThrowIfDisposed();
+            TensorData.RefuseDisposedTarget(target, nameof(CopyTo));
             return CopyInto(target, nameof(CopyTo));
         }
 

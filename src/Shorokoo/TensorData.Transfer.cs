@@ -47,6 +47,9 @@ namespace Shorokoo
         /// the copy, or this very tensor where it is already there and not yet on the target's
         /// books — would pass its <see cref="DeviceMemorySettings.LimitBytes"/>. Nothing is copied
         /// or attached.</exception>
+        /// <exception cref="InvalidOperationException">This tensor is in device memory whose producer was
+        /// not recorded (<see cref="Create(Shape, DType, IShorokooTensorValue)"/>), so nothing can
+        /// read it back to copy.</exception>
         public TensorData To(ComputeContext target)
         {
             ArgumentNullException.ThrowIfNull(target);
@@ -72,6 +75,9 @@ namespace Shorokoo
         /// <exception cref="InvalidOperationException"><paramref name="target"/>'s device-memory
         /// budget cannot take the copy alongside what is attached to it in its memory
         /// (<see cref="DeviceMemorySettings.LimitBytes"/>). Nothing is copied.</exception>
+        /// <exception cref="InvalidOperationException">This tensor is in device memory whose producer was
+        /// not recorded (<see cref="Create(Shape, DType, IShorokooTensorValue)"/>), so nothing can
+        /// read it back.</exception>
         public TensorData CopyTo(ComputeContext target)
         {
             ArgumentNullException.ThrowIfNull(target);
@@ -109,6 +115,9 @@ namespace Shorokoo
         /// the memory, which is the only thing that knows how to reach it.</para>
         /// </summary>
         /// <exception cref="ObjectDisposedException">This tensor is dead.</exception>
+        /// <exception cref="InvalidOperationException">This tensor is in device memory whose producer was
+        /// not recorded (<see cref="Create(Shape, DType, IShorokooTensorValue)"/>), so nothing can
+        /// read it back.</exception>
         public TensorData ToHost()
         {
             ThrowIfDisposed();
@@ -270,7 +279,10 @@ namespace Shorokoo
         /// it. To keep the tensor as well, move a copy of it: <c>CopyTo(ComputeContext.Host)</c>.</para>
         /// </summary>
         /// <exception cref="ObjectDisposedException">This tensor is dead.</exception>
-        /// <exception cref="InvalidOperationException">A run is reading this tensor.</exception>
+        /// <exception cref="InvalidOperationException">A run is reading this tensor; or it is in
+        /// device memory whose producer was not recorded
+        /// (<see cref="Create(Shape, DType, IShorokooTensorValue)"/>), so nothing can read it
+        /// back.</exception>
         public TensorAttribute MoveToAttribute()
         {
             ThrowIfDisposed();
@@ -324,9 +336,10 @@ namespace Shorokoo
 
         /// <summary>
         /// Refuses a target that has been disposed, naming the operation the caller actually made.
-        /// Attaching refuses one too, but only after a copy onto it would already have been paid for.
+        /// Attaching refuses one too, but only after a copy onto it would already have been paid for,
+        /// and a composite with nothing of its own to attach would not be refused at all.
         /// </summary>
-        private static void RefuseDisposedTarget(ComputeContext target, string operation)
+        internal static void RefuseDisposedTarget(ComputeContext target, string operation)
         {
             if (!target.IsDisposed) return;
             throw new ObjectDisposedException(

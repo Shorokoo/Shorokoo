@@ -283,9 +283,9 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// Takes over a step's result. The state it superseded was the step's to deal with: this
-        /// run's own was consumed by it, and anything else it only read, letting go of the copies
-        /// it read it through.
+        /// Takes over a step's result. The state it superseded was the step's to deal with: it
+        /// consumed this run's own, and a checkpoint the run began from passed as it is, and only
+        /// read anything else, letting go of the copies it read it through.
         /// </summary>
         private TrainingCheckpoint Advance(TrainingCheckpoint next)
         {

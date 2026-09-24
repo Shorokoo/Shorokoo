@@ -35,7 +35,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             InternalComputationGraph graph,
             IReadOnlyDictionary<ModelId, TensorData> paramValues)
             // Copied first: the values belong to the caller, who goes on holding them -- a training
-            // rig keeps the very same tensors as its initial checkpoint -- so the graph takes a
+            // rig keeps them, and copies every initial checkpoint from them -- so the graph takes a
             // literal of its own rather than spending theirs. Per node, so a value whose parameter is
             // not in this graph is never copied.
             => Process(graph, paramValues.ContainsKey,

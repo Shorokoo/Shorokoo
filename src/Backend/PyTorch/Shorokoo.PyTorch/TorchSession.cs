@@ -13,9 +13,9 @@ namespace Shorokoo.PyTorch;
 /// A model translated to Python and loaded into the interpreter, with its constants on the
 /// backend's device: calling it runs the model.
 ///
-/// <para>The translation's compiled code is cached by the model's hash, so a second session over
-/// the same model — a context compiling the same graph again — compiles nothing; each session holds
-/// its own constants.</para>
+/// <para>The translation's compiled code is cached by the translation's hash, so a second session
+/// over the same model and pairs — a context compiling the same graph again — compiles nothing; each
+/// session holds its own constants.</para>
 ///
 /// <para>Every output is handed over as memory of its own — never an input's, a constant's or
 /// another output's, even where the model's graph returns one of those as it is (an
@@ -97,7 +97,9 @@ internal sealed class TorchSession : IShorokooSession
         // Translated before torch is started, so that a model this backend cannot run is refused
         // without first provisioning an environment to not run it in.
         var model = OnnxToPythonTranslator.Translate(proto, outputAliases);
-        var hash = Convert.ToHexStringLower(SHA256.HashData(modelBytes.Span))[..32];
+        // The translation's own hash names its compiled code: what it writes depends on the pairs the
+        // session was asked for as well as on the model.
+        var hash = Convert.ToHexStringLower(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(model.Source)))[..32];
         var placement = diagnostics.TraceNodePlacement ? Placement(proto.Graph!, backend.DeviceName) : null;
 
         var runtime = backend.Runtime;

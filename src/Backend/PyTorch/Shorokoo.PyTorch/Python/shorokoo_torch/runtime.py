@@ -6,6 +6,7 @@ string dtype; they always stay on the host. Sequences are Python lists; an absen
 None. Element types travel as ONNX TensorProto.DataType codes.
 """
 
+import collections
 import contextvars
 import ctypes
 import linecache
@@ -259,17 +260,26 @@ def _export_all(outputs, args, moved, wanted, retained, aliasing, constant_stora
 
 # ---- models ----------------------------------------------------------------------------------
 
-_compiled = {}
+_compiled = collections.OrderedDict()
+_COMPILED_KEPT = 64
 
 
 def load_model(source, filename, constants):
     """The `main` function of a translated model, with `constants` bound. The compiled code is
-    cached by `filename`, which names the model's hash; the constants are the session's own."""
+    cached by `filename`, which names the hash of `source`; the constants are the session's own.
+
+    The cache keeps the models loaded last, and the source lines tracebacks show for them: a session
+    holds its own code, so one whose code has left the cache runs on, its tracebacks without lines."""
     code = _compiled.get(filename)
     if code is None:
         code = compile(source, filename, "exec")
         _compiled[filename] = code
         linecache.cache[filename] = (len(source), None, source.splitlines(True), filename)
+        while len(_compiled) > _COMPILED_KEPT:
+            evicted, _ = _compiled.popitem(last=False)
+            linecache.cache.pop(evicted, None)
+    else:
+        _compiled.move_to_end(filename)
     namespace = {"__name__": "shorokoo_model", "_C": constants, "_stop": stop_point, "_alias_write": alias_write}
     exec(code, namespace)
     return namespace["main"]

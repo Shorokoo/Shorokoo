@@ -3393,6 +3393,13 @@ namespace Shorokoo
         /// <see cref="CreateInitialCheckpoint()"/>, so a minimal call is
         /// <c>rig.Fit(inputs, targets, numEpochs: 10)</c>. The trainstep is compiled and run through the
         /// rig's <see cref="RuntimeContext"/> (set at construction), the single compiled graph per rig.
+        ///
+        /// <para>The arrays are fed as <see cref="Train"/> feeds them: they are a dataset, fed once per
+        /// epoch, so every step <b>reads</b> its batch, never consumes it, and the batches are all
+        /// alive and unchanged when this returns. <paramref name="initialCheckpoint"/> is fed to the
+        /// first step as <c>TrainStep</c> feeds one — consumed as it is, read when passed
+        /// <c>.Shared()</c> — and the default, a fresh <see cref="CreateInitialCheckpoint()"/>, is
+        /// consumed by that step.</para>
         /// </summary>
         public TrainingResult Fit(
             TensorDataStruct[] trainingInputs,
@@ -3406,7 +3413,8 @@ namespace Shorokoo
         /// <paramref name="trainingInputs"/> — the target-free counterpart of
         /// <see cref="Fit(TensorDataStruct[], TensorDataStruct[], int, TrainingCheckpoint?)"/>
         /// (Shorokoo/Shorokoo#331), for a model that computes its own loss. Throws when the rig's loss
-        /// does read a target.
+        /// does read a target. Its batches are read, never consumed, and the checkpoint fed as that
+        /// overload's are.
         /// </summary>
         public TrainingResult Fit(
             TensorDataStruct[] trainingInputs,

@@ -793,7 +793,7 @@ namespace Shorokoo.Core.Factory
                 if (def is null) continue;
                 model.MetadataProps.Add(new StringStringEntryProto
                 {
-                    Key = $"{OnnxOpAttributeNames.ShrkMetaTensorStructDefPrefix}{dtype.ProtoTypeNum}",
+                    Key = OnnxOpAttributeNames.ShrkMetaTensorStructDefPrefix + dtype.ProtoTypeNum.ToString(System.Globalization.CultureInfo.InvariantCulture),
                     Value = def.ToJson(),
                 });
             }
@@ -2083,7 +2083,7 @@ namespace Shorokoo.Core.Factory
                     infos[i].MetadataProps.Add(new StringStringEntryProto
                     {
                         Key = OnnxOpAttributeNames.ShrkAttrRecordedOutputShape,
-                        Value = string.Join(",", recorded),
+                        Value = RepresentativeInputMetadata.FormatDims(recorded),
                     });
                 if (!emitOutputMetadata) continue;
                 if (InternalComputationGraph.OutputNameOf(node) is { } name)

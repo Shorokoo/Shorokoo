@@ -2644,6 +2644,31 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         Assert.Equal([3L], OutputShapeOf(Persistence.ImportOnnx(WriteOnnx(P(Guid.NewGuid() + ".onnx"), foreign))));
     }
 
+    private static T UnderCulture<T>(string name, Func<T> action)
+    {
+        var culture = System.Globalization.CultureInfo.CurrentCulture;
+        try
+        {
+            System.Globalization.CultureInfo.CurrentCulture = new System.Globalization.CultureInfo(name);
+            return action();
+        }
+        finally { System.Globalization.CultureInfo.CurrentCulture = culture; }
+    }
+
+    [Fact]
+    public void TestAnExportUnderACultureWithItsOwnMinusSignImportsBackWithItsNegativeMarkers()
+    {
+        var g = OptionalPassThroughLayer.ComputationGraph;
+        var model = g.ToConcreteArchitecture(new ModelParamList([
+            new OptionalTensorDataModelParam("bias", ModelParamType.InputParam, OptionalTensorData.None(DType.Float32))])).ToConcreteModel();
+        var path = UnderCulture("sv-SE", () => { var p = P(Guid.NewGuid() + ".onnx"); Persistence.ExportOnnx(model, p); return p; });
+        var imported = Persistence.ImportOnnx(path).ToInternal();
+        Assert.Equal([-1L], RecordedOutputShapes.Get(imported.OutputNodes[0]));
+        Assert.Equal([-1L], RepresentativeInputShapes.Get(imported.InputNodes[0]));
+        var importedUnderSv = UnderCulture("sv-SE", () => Persistence.ImportOnnx(path)).ToInternal();
+        Assert.Equal([-1L], RecordedOutputShapes.Get(importedUnderSv.OutputNodes[0]));
+    }
+
     [Fact]
     public void TestImportOnnxRefusesAnOutputOfUnknownRankThatNoInputShapeSettlesNamingIt()
     {

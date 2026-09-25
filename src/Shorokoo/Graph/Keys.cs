@@ -118,7 +118,7 @@ namespace Shorokoo.Graph
             if (parts.Length != 2)
                 throw new FormatException($"Invalid TensorKey format: {s}");
 
-            return new TensorKey(NodeKey.Parse(parts[0]), int.Parse(parts[1]));
+            return new TensorKey(NodeKey.Parse(parts[0]), int.Parse(parts[1], System.Globalization.NumberStyles.AllowLeadingSign, System.Globalization.CultureInfo.InvariantCulture));
         }
 
         /// <summary>
@@ -135,7 +135,7 @@ namespace Shorokoo.Graph
             var parts = s.Split(':');
             if (parts.Length == 2 &&
                 NodeKey.TryParse(parts[0], out var nodeKey) &&
-                int.TryParse(parts[1], out var outputIndex))
+                int.TryParse(parts[1], System.Globalization.NumberStyles.AllowLeadingSign, System.Globalization.CultureInfo.InvariantCulture, out var outputIndex))
             {
                 result = new TensorKey(nodeKey, outputIndex);
                 return true;
@@ -165,7 +165,7 @@ namespace Shorokoo.Graph
             => HashCode.Combine(NodeKey, OutputIndex);
 
         public override string ToString()
-            => $"{NodeKey}:{OutputIndex}";
+            => string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{NodeKey}:{OutputIndex}");
 
         public int CompareTo(TensorKey other)
         {

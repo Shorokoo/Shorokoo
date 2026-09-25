@@ -90,7 +90,7 @@ namespace Shorokoo.Core.Factory.IR
                 if (prop.Key.StartsWith(ShrkMetaTensorStructDefPrefix))
                 {
                     var protoTypeNumStr = prop.Key.Substring(ShrkMetaTensorStructDefPrefix.Length);
-                    if (int.TryParse(protoTypeNumStr, out var protoTypeNum))
+                    if (int.TryParse(protoTypeNumStr, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var protoTypeNum))
                     {
                         try
                         {
@@ -591,21 +591,8 @@ namespace Shorokoo.Core.Factory.IR
                 : null;
             fastGraph.AddOutput(value, MetadataOf(ShrkAttrOutputName) ?? fallbackName, declaredRank);
             if (MetadataOf(ShrkAttrRecordedOutputShape) is { } recorded
-                && TryParseDims(recorded) is { } dims)
+                && RepresentativeInputMetadata.TryParseDims(recorded) is { } dims)
                 Shorokoo.Core.Graph.RecordedOutputShapes.Set(fastGraph.Nodes[^1], dims);
-        }
-
-        /// <summary>Comma-separated dims (empty for a scalar), or <c>null</c> where malformed.</summary>
-        private static long[]? TryParseDims(string text)
-        {
-            if (text.Length == 0) return [];
-            var parts = text.Split(',');
-            var dims = new long[parts.Length];
-            for (int i = 0; i < parts.Length; i++)
-                if (!long.TryParse(parts[i], System.Globalization.NumberStyles.AllowLeadingSign,
-                        System.Globalization.CultureInfo.InvariantCulture, out dims[i]))
-                    return null;
-            return dims;
         }
 
         /// <summary>

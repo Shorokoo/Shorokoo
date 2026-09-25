@@ -101,7 +101,7 @@ namespace Shorokoo.Core.Graph
             var name = UnescapePartName(escapedName);
 
             var dedupeIndexString = subparts[1];
-            if (!int.TryParse(dedupeIndexString, out int deduplicationIndex))
+            if (!int.TryParse(dedupeIndexString, System.Globalization.NumberStyles.AllowLeadingSign, System.Globalization.CultureInfo.InvariantCulture, out int deduplicationIndex))
                 throw new ArgumentException($"Invalid part string format: invalid deduplication index in part string '{partString}'", nameof(partString));
 
             int? loopIndex = null;
@@ -110,7 +110,7 @@ namespace Shorokoo.Core.Graph
                 if (subparts.Length != 3)
                     throw new ArgumentException("Invalid loop part string format: missing loop index.", nameof(partString));
                 var loopIndexString = subparts[2];
-                if (!int.TryParse(loopIndexString, out var theLoopIndex))
+                if (!int.TryParse(loopIndexString, System.Globalization.NumberStyles.AllowLeadingSign, System.Globalization.CultureInfo.InvariantCulture, out var theLoopIndex))
                     throw new ArgumentException($"Invalid part string format: invalid loop index in part string '{partString}'", nameof(partString));
 
                 loopIndex = theLoopIndex;
@@ -126,11 +126,11 @@ namespace Shorokoo.Core.Graph
         {
             string retval;
             if (this.Type == ModelParamIdentifierTemplatePartType.Loop)
-                return retval = $"Loop#{this.DeduplicationIndex}:{this.LoopIndex}";
+                return retval = string.Create(System.Globalization.CultureInfo.InvariantCulture, $"Loop#{this.DeduplicationIndex}:{this.LoopIndex}");
 
             var escapedName = EscapePartName(this.Name);
 
-            retval = $"{escapedName}#{this.DeduplicationIndex}";
+            retval = string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{escapedName}#{this.DeduplicationIndex}");
 
             Debug.Assert(Parse(
                     retval, 

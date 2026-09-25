@@ -2828,6 +2828,21 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
     }
 
     [Fact]
+    public void TestAForeignNodeWithItsTrailingOptionalOutputsOmittedReExports()
+    {
+        var model = BuildForeignAddModel("w", [10f, 20f, 30f, 40f]);
+        var unique = new NodeProto { OpType = "Unique", Name = "unique0" };
+        unique.Inputs.Add("y");
+        unique.Outputs.Add("u");
+        model.Graph.Nodes.Add(unique);
+        model.Graph.Outputs[0] = Named("u", FloatInputX(Symbolic("N")));
+        var imported = Persistence.ImportOnnx(WriteOnnx(P(Guid.NewGuid() + ".onnx"), model));
+        var path = P(Guid.NewGuid() + ".onnx");
+        Persistence.ExportOnnx(imported, path);
+        Assert.Equal([11f, 22f, 33f, 44f], RunFloatVecModel(Persistence.ImportOnnx(path), 1f, 2f, 3f, 4f));
+    }
+
+    [Fact]
     public void TestImportOnnxRefusesAnOutputOfUnknownRankThatNoInputShapeSettlesNamingIt()
     {
         var g = new GraphProto { Name = "foreign" };

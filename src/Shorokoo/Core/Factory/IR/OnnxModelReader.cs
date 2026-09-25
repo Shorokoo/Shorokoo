@@ -1233,7 +1233,7 @@ namespace Shorokoo.Core.Factory.IR
                 fullInputs[""] = inputKeys.ToList();
 
                 var outputKeys = AllocateAndRecordOutputs(nodeKey, nodeProto.Outputs, tensorKeys, baseIndex: 0);
-                fullOutputs[""] = outputKeys.Select(k => (FastTensorKey?)k).ToList();
+                fullOutputs[""] = PadOutputsWithNulls(outputKeys, nodeDef);
             }
 
             // Target function from attribute, if any.
@@ -1351,6 +1351,19 @@ namespace Shorokoo.Core.Factory.IR
             if (numNewTrailingNulls <= 0) return currentInputs;
             var padded = new FastTensorKey?[currentInputs.Length + numNewTrailingNulls];
             Array.Copy(currentInputs, padded, currentInputs.Length);
+            return padded;
+        }
+
+        /// <summary>
+        /// <paramref name="outputs"/>, followed by an absent output for each trailing optional one
+        /// the node omits — ONNX lets a node leave off its unused trailing outputs (a Unique asked
+        /// for its values alone, say) — so the node has every output its definition declares.
+        /// </summary>
+        private static List<FastTensorKey?> PadOutputsWithNulls(FastTensorKey[] outputs, NodeDefinition nodeDef)
+        {
+            var padded = outputs.Select(k => (FastTensorKey?)k).ToList();
+            var declared = nodeDef.OutputDefs.TakeWhile(x => x.VariadicCountDef is null).Count();
+            while (padded.Count < declared) padded.Add(null);
             return padded;
         }
 

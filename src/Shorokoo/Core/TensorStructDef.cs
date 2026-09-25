@@ -104,6 +104,13 @@ namespace Shorokoo.Core
         public string? TypeName { get; }
 
         /// <summary>
+        /// The IStruct interface this definition was extracted from, or null for one built by hand
+        /// (a <see cref="TensorDataStruct"/> sample's, a training rig's). Not part of equality: it
+        /// says which name the structure is written under, not what the structure is.
+        /// </summary>
+        internal Type? DeclaringType { get; init; }
+
+        /// <summary>
         /// Creates a new TensorStructDef with the specified fields and optional type name.
         /// </summary>
         public TensorStructDef(IEnumerable<TensorStructFieldDef> fields, string? typeName = null)

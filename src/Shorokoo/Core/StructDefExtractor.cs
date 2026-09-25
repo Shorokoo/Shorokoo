@@ -76,7 +76,7 @@ namespace Shorokoo.Core
                 }
             }
 
-            return new TensorStructDef(fields, type.FullName);
+            return new TensorStructDef(fields, type.FullName) { DeclaringType = type };
         }
 
         /// <summary>

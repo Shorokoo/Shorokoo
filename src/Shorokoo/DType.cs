@@ -145,7 +145,7 @@ namespace Shorokoo
             {
                 // Check if we already have a DType for this struct definition
                 if (_tensorStructRegistry.TryGetValue(def, out var existing))
-                    return existing;
+                    return AdoptDeclaringType(existing, def);
 
                 // Create a new DType with a unique iType in the 2000-2999 range
                 if (_nextTensorStructIType > 2999)
@@ -161,6 +161,20 @@ namespace Shorokoo
 
                 return newDType;
             }
+        }
+
+        /// <summary>
+        /// A structure is registered once, under the first definition that names it. When that one
+        /// was built by hand and <paramref name="def"/> is the same structure as an IStruct interface
+        /// declares it, the interface's definition takes its place: its name is the one C# can
+        /// resolve, and what a struct dtype is called — in generated source, in a signature — must
+        /// not depend on which of the two happened to be registered first. Called under the lock.
+        /// </summary>
+        private static DType AdoptDeclaringType(DType existing, TensorStructDef def)
+        {
+            if (def.DeclaringType is not null && _tensorStructDefRegistry[existing].DeclaringType is null)
+                _tensorStructDefRegistry[existing] = def;
+            return existing;
         }
 
         /// <summary>
@@ -185,7 +199,7 @@ namespace Shorokoo
             lock (_tensorStructRegistryLock)
             {
                 if (_tensorStructRegistry.TryGetValue(def, out var existing))
-                    return existing;
+                    return AdoptDeclaringType(existing, def);
 
                 if (_tensorStructITypeToDType.TryGetValue(protoTypeNum, out var occupant))
                     return occupant;
@@ -491,6 +505,10 @@ namespace Shorokoo
             {
                 return $"{this.sType}<{this.genericTypeParamName}>";
             }
+            // A struct is called what its registered definition calls it, which an IStruct
+            // interface can rename after the dtype was made (see AdoptDeclaringType).
+            if (this.TensorStructDef?.TypeName is { } structName)
+                return structName;
             return this.sType;
         }
 

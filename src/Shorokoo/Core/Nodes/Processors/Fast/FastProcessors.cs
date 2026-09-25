@@ -3670,7 +3670,19 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// </summary>
     internal static class FastConvertModelParamIdRefToModelParam
     {
-        public static void Process(
+        /// <summary>
+        /// What <see cref="Process"/> could not resolve: the <c>MODEL_PARAM_ID_REF</c> sites whose
+        /// initializer values QEE could not evaluate, and the graph inputs QEE held no value for
+        /// while it tried. Such a site produces no candidate model id, so the rewrite fills it with
+        /// an empty CONSTANT and its parameter would silently vanish from the architecture — see
+        /// <see cref="ThrowIfAParamNeedsAnInputWithoutAValue"/>, which the caller runs on these.
+        /// </summary>
+        public sealed record Unresolved(IReadOnlyList<FastNode> Sites, IReadOnlySet<FastTensorKey> InputsWithoutAValue)
+        {
+            public static readonly Unresolved None = new([], new HashSet<FastTensorKey>());
+        }
+
+        public static Unresolved Process(
             InternalComputationGraph graph,
             FastExtractIdentifierTemplates.IdentifierTemplateInfos identifierTemplatesInfo,
             ModelParamList inputHints,
@@ -3678,6 +3690,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
+            var unresolvedSites = new List<FastNode>();
             bool hasIdRef = false;
             for (int i = 0; i < graph.Nodes.Count; i++)
             {
@@ -3687,7 +3700,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     break;
                 }
             }
-            if (!hasIdRef) return;
+            if (!hasIdRef) return Unresolved.None;
 
             // Template composition: purely structural, no CG needed. Every template here names a
             // parameter definition — FastExtractIdentifierTemplates drops bare references, whose
@@ -3725,11 +3738,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var engine = new QuickExecutionEngine();
             var initialInputs = FastProcessorHelper.SampleRuntimeInputs(graph, inputHints, engine);
             var store = engine.Run(graph, initialInputs);
+            var unresolved = new Unresolved(unresolvedSites, graph.Inputs
+                .Where(k => !(initialInputs is not null && initialInputs.TryGetValue(k, out var rt) && HoldsAValue(rt)))
+                .ToHashSet());
             // The parameter each output key carries, scanned once and used twice: to record an
             // initializer input that IS a parameter, and to check below that such a source is read
             // somewhere other than the initializer it feeds.
             var paramIds = ParamIdsByOutputKey(graph, store);
-            var candidateModelIdInfos = ExtractModelIdInfosFromStore(graph, store, paramIds);
+            var candidateModelIdInfos = ExtractModelIdInfosFromStore(graph, store, paramIds, unresolvedSites);
             var perSiteRealizedIds = ExtractPerSiteRealizedIds(graph, store);
 
             // If QEE couldn't resolve every MODEL_PARAM_ID_REF node's model ID (e.g., the
@@ -3747,7 +3763,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // entering as split counters, so no stream enumeration is needed or stored.
             FastWireRngKeyDerivation.CreateRngSeedAndWireChains(graph);
 
-            if (candidateModelIdInfos.IsEmpty) return;
+            if (candidateModelIdInfos.IsEmpty) return unresolved;
 
             // Liveness filter: ExtractModelIdInfosFromStore returns every model ID a
             // MODEL_PARAM_ID_REF node could produce, even ones whose value never reaches
@@ -3791,7 +3807,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // dead id-refs in the graph, tripping the forbidden-op validation. Since
             // `candidateModelIdInfos` is non-empty above, this guard only fires when
             // there is genuinely nothing to do.
-            if (liveModelIdInfos.IsEmpty && deadModelIdInfos.IsEmpty) return;
+            if (liveModelIdInfos.IsEmpty && deadModelIdInfos.IsEmpty) return unresolved;
 
             // Fold away the IF branches whose parameters the mask just pruned, so those dead
             // ID_REF sites leave the graph rather than being backfilled below. Any dead site
@@ -3800,7 +3816,110 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             FoldBranchesOwningOnlyDeadParams(graph, store, liveModelIds, perSiteRealizedIds);
 
             NativeConvertTrainableParamIdRef(graph, liveModelIdInfos, deadModelIdInfos, paramIdentifierTemplates, perSiteRealizedIds, paramIds.Single);
+            return unresolved;
         }
+
+        /// <summary>
+        /// Whether QEE was handed an actual value for an input — every element of it, not only its
+        /// shape. A tensor over the engine's size limit arrives as its shape alone, and a sequence
+        /// holds a value only when each of its elements does.
+        /// </summary>
+        private static bool HoldsAValue(IRuntimeTensor input) => input switch
+        {
+            RuntimeTensor tensor => tensor.HasAnyData,
+            RuntimeOptionalTensor optional => optional.HasValue == false
+                || (optional.ValueTensor is { } value && value.HasAnyData),
+            RuntimeSequenceTensor sequence => sequence.Tensors is { } elements && elements.All(e => e.HasAnyData),
+            _ => false,
+        };
+
+        /// <summary>
+        /// A parameter site that <see cref="Process"/> left unresolved, or a
+        /// <c>MODEL_PARAM_ID_REF</c> that survived it, means a parameter's definition did not
+        /// resolve. When the reason is that the definition needs the <em>value</em> of an input
+        /// whose sample gave QEE none to evaluate it with — e.g. <c>InitSimple.Init([sizes[0]])</c>
+        /// for a <c>sizes</c> sample too large for QEE to hold, or a struct field it cannot read —
+        /// say so, naming that input, rather than dropping the parameter silently or reporting the
+        /// pipeline. Anything else falls through to the caller's post-stage op check, which reports
+        /// the internals a contributor needs.
+        /// </summary>
+        public static void ThrowIfAParamNeedsAnInputWithoutAValue(InternalComputationGraph graph, Unresolved unresolved)
+        {
+            var sites = graph.Nodes.Where(n => n.OpCode == InternalOpCodes.MODEL_PARAM_ID_REF)
+                .Concat(unresolved.Sites).Distinct().ToList();
+            if (sites.Count == 0) return;
+
+            var inputs = InputsFeedingParamInitializers(graph, sites)
+                .Where(i => unresolved.InputsWithoutAValue.Contains(graph.Inputs[i]))
+                .ToList();
+            if (inputs.Count == 0) return;
+
+            // No count and no "trainable": one site realizes one param per iteration slot, sites can
+            // share a param, and an id-ref can carry an updateable state param instead.
+            var values = inputs.Count == 1 ? "value" : "values";
+            throw new InvalidOperationException(
+                $"ToConcreteArchitecture: a parameter's definition depends on the {values} of "
+                + $"{DescribeInputs(graph, inputs)}, whose sample gives the lowering no {values} to "
+                + "evaluate it with: it holds only the values of a tensor of at most "
+                + $"{QuickExecutionEngine.DefaultMaxDataElements} elements, of a sequence of such tensors "
+                + "or of an optional holding one. Derive the parameter's shape from the input's shape, "
+                + "or from a smaller input.");
+        }
+
+        /// <summary>
+        /// Graph-input indices that feed the initializer inputs of one of the given
+        /// <c>MODEL_PARAM_ID_REF</c> nodes — inputs from index 2 on, the shape input first. The
+        /// backward walk follows producer edges and the close-to-open edge
+        /// <see cref="FastProcessorHelper.RemoveUnreachableNodes"/> uses, and resolves LOOP_OPEN
+        /// carry keys — whose FastNodeKey is no node's own — through
+        /// <see cref="FastProcessorHelper.BuildNodeByKey"/>, so a shape derived inside a loop or
+        /// branch body still reaches its input.
+        /// </summary>
+        private static IEnumerable<int> InputsFeedingParamInitializers(
+            InternalComputationGraph graph, IReadOnlyList<FastNode> idRefNodes)
+        {
+            var producerByOutput = graph.BuildProducerByOutputMap();
+            var nodeByKey = FastProcessorHelper.BuildNodeByKey(graph);
+            var reached = new HashSet<FastTensorKey>();
+            var queue = new Queue<FastTensorKey>();
+
+            void EnqueueInputsOf(FastNode node)
+            {
+                foreach (var (_, slots) in node.FullInputs)
+                    foreach (var s in slots)
+                        if (s is FastTensorKey k && !k.IsEmpty) queue.Enqueue(k);
+            }
+
+            foreach (var node in idRefNodes)
+            {
+                var inputs = node.Inputs;
+                for (int i = 2; i < inputs.Count; i++)
+                    if (inputs[i] is FastTensorKey k && !k.IsEmpty) queue.Enqueue(k);
+            }
+
+            while (queue.Count > 0)
+            {
+                var key = queue.Dequeue();
+                if (key.IsEmpty || !reached.Add(key)) continue;
+                if (!producerByOutput.TryGetValue(key, out var producer)
+                    && !nodeByKey.TryGetValue(key.FastNodeKey, out producer)) continue;
+
+                EnqueueInputsOf(producer);
+                // A close node's entry values (trip count, initial carries) live on its open node.
+                if (producer.GraphOpenNodeKey is FastNodeKey openKey && !openKey.IsEmpty
+                    && nodeByKey.TryGetValue(openKey, out var openNode))
+                    EnqueueInputsOf(openNode);
+            }
+
+            return Enumerable.Range(0, graph.Inputs.Count).Where(i => reached.Contains(graph.Inputs[i]));
+        }
+
+        private static string DescribeInputs(InternalComputationGraph graph, List<int> inputIndices)
+            => string.Join(", ", inputIndices.Select(i =>
+            {
+                var name = i < graph.InputUniqueNames.Count ? graph.InputUniqueNames[i] : null;
+                return string.IsNullOrEmpty(name) ? $"input #{i}" : $"input '{name}' (#{i})";
+            }));
 
         /// <summary>
         /// Per <c>MODEL_PARAM_ID_REF</c> site, the ordered set of specific model ids it realizes,
@@ -4589,7 +4708,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         private static ImmutableArray<TrainableParamInfo> ExtractModelIdInfosFromStore(
             InternalComputationGraph graph,
             Dictionary<FastTensorKey, IRuntimeTensor> store,
-            (Dictionary<FastTensorKey, ModelId> Single, HashSet<FastTensorKey> Many) paramIds)
+            (Dictionary<FastTensorKey, ModelId> Single, HashSet<FastTensorKey> Many) paramIds,
+            List<FastNode>? unresolvedSites = null)
         {
             var result = new Dictionary<ModelId, TrainableParamInfo>();
             // Per resolved model id, whether the winning node is a bare reference rather than the
@@ -4672,7 +4792,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         if (td is null) { allAvailable = false; break; }
                         paramValues.Add(td);
                     }
-                    if (!allAvailable) continue;
+                    if (!allAvailable)
+                    {
+                        if (unresolvedSites is not null && !unresolvedSites.Contains(node)) unresolvedSites.Add(node);
+                        continue;
+                    }
 
                     // Prefer the real definition for a given model id: a bare reference
                     // (IModel.GetTrainableParam, whose initializer function is only metadata) must

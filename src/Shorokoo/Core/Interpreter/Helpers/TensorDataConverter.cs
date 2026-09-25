@@ -174,7 +174,7 @@ internal static class TensorDataConverter
     }
 
     /// <summary>
-    /// Converts an input <see cref="IData"/> (plain tensor or optional) into the matching
+    /// Converts an input <see cref="IData"/> (plain tensor, optional or sequence) into the matching
     /// <see cref="IRuntimeTensor"/> for the QuickExecutionEngine input store.
     ///
     /// <para>A <see cref="SharedInput"/> is read through: the engine is not a compute context's
@@ -187,6 +187,13 @@ internal static class TensorDataConverter
             SharedInput shared => ToRuntimeInput(shared.Value, maxElements, reference),
             OptionalTensorData opt => ToRuntimeOptional(opt, maxElements, reference),
             TensorData td => ToRuntimeTensor(td, maxElements, reference),
+            TensorDataSequence seq => new RuntimeSequenceTensor
+            {
+                DType = seq.DType,
+                ReferenceTensor = reference,
+                Count = seq.Count,
+                Tensors = [.. seq.Select(element => ToRuntimeTensor(element, maxElements, reference))],
+            },
             _ => throw new InvalidTensorOperationException(ErrorCodes.FW008, data.GetType().Name, "ToRuntimeInput",
                 $"Unsupported input IData type for the QuickExecutionEngine: {data.GetType().Name}"),
         };

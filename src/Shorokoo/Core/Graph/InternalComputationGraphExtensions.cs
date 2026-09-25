@@ -156,9 +156,14 @@ namespace Shorokoo.Graph
             FastGraphCycleDetector.AssertAcyclic(fastGraph, "After FastUnpackTensorStructs");
 
             Stage("ConvertModelParamIdRefToModelParam");
-            FastConvertModelParamIdRefToModelParam.Process(
+            var unresolvedParams = FastConvertModelParamIdRefToModelParam.Process(
                 fastGraph, identifierTemplatesInfo, inputHints, computeContext);
             DebugPrintFast(fastGraph, debugRequests, GraphCreationPoint.AfterProcessTrainableParameters);
+            // A param whose definition needs an input's value cannot be built from a sample that
+            // gives none. That is the caller's to fix, so name the input — before the op check below
+            // reports a leftover id-ref in terms of the pipeline, and instead of dropping the param
+            // silently when other params in the graph did resolve.
+            FastConvertModelParamIdRefToModelParam.ThrowIfAParamNeedsAnInputWithoutAValue(fastGraph, unresolvedParams);
             AssertFastGraphDoesNotContainOps(fastGraph,
                 new[] { InternalOpCodes.MODEL_PARAM_ID_REF },
                 "After FastConvertModelParamIdRefToModelParam");

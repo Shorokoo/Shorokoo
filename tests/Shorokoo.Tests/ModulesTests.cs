@@ -1218,6 +1218,9 @@ public class ModulesCoverageTests
 
     private static NamedModelParam In(string name, TensorData t) => new TensorDataModelParam(name, ModelParamType.InputParam, t);
 
+    private static NamedModelParam SeqIn(string name, params TensorData[] elements)
+        => new TensorDataSequenceModelParam(name, ModelParamType.InputParam, TensorDataSequence.OfElements([.. elements], DType.Float32));
+
     private static ComputationGraph Concretize(ComputationGraph graph, params NamedModelParam[] samples)
         => graph.ToConcreteArchitecture(new ModelParamList(samples));
 
@@ -1226,6 +1229,18 @@ public class ModulesCoverageTests
 
     private static ComputationGraph PairThenShapedParams
         => ModuleFactory.ComputationGraph((Func<GenericPairStruct, Tensor<float32>, Tensor<float32>>)PairThenShapedParamsLayer.Inline);
+
+    [Fact]
+    public void TestAParamShapedByASequenceInputIsBuiltFromItsSampleAndOneItCannotReadIsRefusedNamingTheInput()
+    {
+        var x = TensorData([2L], 1f, 2f);
+        var big = TensorData([300L], Enumerable.Repeat(2L, 300).ToArray());
+        long[][] expected = [[1L], [2L]];
+        Assert.Equal(expected, ParamShapes(Concretize(SeqCountShapedParamLayer.ComputationGraph,
+            In("input", x), SeqIn("seq", TensorData(DType.Float32, [], 1f), TensorData(DType.Float32, [], 2f)))));
+        Assert.Contains("'sizes'", Assert.Throws<InvalidOperationException>(
+            () => Concretize(ValueShapedParamLayer.ComputationGraph, In("input", x), In("sizes", big))).Message);
+    }
 
     [Fact]
     public void TestAParamShapedByAnInputAfterAStructInputIsBuiltFromThatInputsSample()

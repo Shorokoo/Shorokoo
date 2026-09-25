@@ -1618,6 +1618,15 @@ public class ModulesCoverageTests
         Assert.Equal(rankOnly, RecordedOutputs(nonZeroArch.ToConcreteModel()));
     }
 
+    [Fact]
+    public void TestAnOutputTakenFromARunIsRunOnTheContextTheLoweringWasGiven()
+    {
+        using var context = new ComputeContext { Diagnostics = new Shorokoo.Core.Backends.DiagnosticSettings { CollectRunStatistics = true } };
+        var g = StringSplitLayer.ComputationGraph;
+        g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData(DType.Utf8, [2L], "a b", "c")]), context);
+        Assert.NotEmpty(context.RunStats.RecentRuns);
+    }
+
     private sealed class RanklessStringNormalizer : QuickOp
     {
         public override string OpCode => OpCodes.STRING_NORMALIZER;

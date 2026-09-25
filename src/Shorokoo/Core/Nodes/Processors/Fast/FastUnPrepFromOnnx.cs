@@ -42,8 +42,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 StripCloseInputIdentities(fnFast);
                 FastProcessorHelper.RemoveUnreachableNodes(fnFast);
 
-                var newFn = new Function(fnFast, fn.FunctionType, defaultName: fn.DefaultName, friendlyName: fn.FriendlyName,
-                    fn.StateOwnership);
+                var newFn = fn.WithBody(fnFast);
                 oldToNew[fn] = newFn;
             }
 

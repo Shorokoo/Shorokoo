@@ -214,6 +214,21 @@ public class RngAlgorithmTests
         Assert.Contains(callOps, op => op.Contains("split"));
         Assert.DoesNotContain(proto.Graph.Nodes, n => n.OpType.Contains("RngSplit"));
     }
+
+    private static string[] RngTags(Shorokoo.Core.Factory.IR.ModelProto proto)
+        => [.. proto.Functions.Select(f => $"{f.Name}|{f.MetadataProps.FirstOrDefault(p => p.Key == Function.IRRngAlgorithmParamName)?.Value}|" +
+            f.MetadataProps.FirstOrDefault(p => p.Key == Function.IRRngFunctionKindParamName)?.Value).Order()];
+
+    [Fact]
+    public void TestAnImportedRngModelReExportsItsFunctionsTagged()
+    {
+        var g = (ComputationGraph)typeof(RngSplitThenDraw).GetProperty("ComputationGraph")!.GetValue(null)!;
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([2L, 2L], 0f, 0f, 0f, 0f)])).ToConcreteModel();
+        var proto = FastOnnxModelBuilder.BuildOnnxModel(concrete);
+        using var bytes = new MemoryStream();
+        ProtoBuf.Serializer.Serialize(bytes, proto);
+        Assert.Equal(RngTags(proto), RngTags(FastOnnxModelBuilder.BuildOnnxModel(OnnxModelImporter.FromOnnxModel(bytes.ToArray()))));
+    }
 }
 
 /// <summary>

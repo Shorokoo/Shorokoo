@@ -86,18 +86,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 foreach (var (argsKey, specializedBody) in perArgs)
                 {
                     var concreteFast = ConcretizeInPlace(specializedBody, concreteFunctions, soleSpecialization, genericFunctions);
-                    var concrete = new Function(concreteFast, fn.FunctionType,
-                        defaultName: fn.DefaultName,
-                        friendlyName: fn.FriendlyName,
-                        stateOwnership: fn.StateOwnership)
-                    {
-                        // Defensive: an RNG algorithm function only ever reaches a graph after
-                        // this pass, or on reload of one already erased, so nothing here carries
-                        // the tags today. Dropping them would silently make such a function
-                        // inlinable, which is not a thing to leave to the pass ordering.
-                        RngAlgorithm = fn.RngAlgorithm,
-                        RngFunctionKind = fn.RngFunctionKind,
-                    };
+                    var concrete = fn.WithBody(concreteFast);
                     concreteFunctions[(fn, argsKey)] = concrete;
                     soleSpecialization[fn] = soleSpecialization.ContainsKey(fn) ? null : concrete;
                 }

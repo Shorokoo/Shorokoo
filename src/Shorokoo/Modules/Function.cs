@@ -233,6 +233,19 @@ namespace Shorokoo.Core
         }
 
         /// <summary>
+        /// This function over another body — what a pass that rewrites function bodies builds in its
+        /// place — keeping everything else about it: its type, names, state ownership and RNG
+        /// tags (<see cref="RngAlgorithm"/>, <see cref="RngFunctionKind"/>), which a rebuild that
+        /// dropped would turn an RNG algorithm function into an ordinary, inlinable one.
+        /// </summary>
+        internal Function WithBody(InternalComputationGraph fastGraph)
+            => new(fastGraph, FunctionType, DefaultName, FriendlyName, StateOwnership)
+            {
+                RngAlgorithm = RngAlgorithm,
+                RngFunctionKind = RngFunctionKind,
+            };
+
+        /// <summary>
         /// Builds a <c>FUNCTION_INVOKE</c> of this function. Arguments are positional over the
         /// body's whole input list — for a module-typed function that is
         /// <c>[hyperparams..., runtime inputs...]</c>, so its hyperparameter values are passed

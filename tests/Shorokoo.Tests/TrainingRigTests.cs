@@ -526,7 +526,7 @@ public class TrainingRigFromScratchCoverageTests
         var checkpoint = rig.CreateInitialCheckpoint();
 
         var hints = new ModelParamList(
-            [new KeyValuePair<string, TensorData>(modelGraph.ToInternal().Inputs[0].ToString(), TensorData(inputShape, new float[totalElements]))],
+            [new KeyValuePair<string, TensorData>(modelGraph.InputNames[0]!, TensorData(inputShape, new float[totalElements]))],
             ModelParamType.InputParam);
         var ctx = new ComputeContext();
         var concrete = modelGraph.ToConcreteArchitecture(hints, ctx, null);
@@ -1758,7 +1758,7 @@ public class TrainingRigTrainingLoopCoverageTests
     {
         var x = TensorData([2L], 1f, 2f);
         var rig = TrainingRig.FromScratch(modelGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
-            [new TensorDataModelParam("input", ModelParamType.InputParam, x)], 0.1f);
+            [new TensorDataModelParam(modelGraph.InputNames[0]!, ModelParamType.InputParam, x)], 0.1f);
         var step = rig.TrainStep(rig.CreateInitialCheckpoint(),
             NNLibraryTrainingFixtures.MakeBatch("input", "ModelInput", x),
             NNLibraryTrainingFixtures.MakeBatch("targets", "Target", TensorData([2L], 0f, 0f)));
@@ -1769,7 +1769,7 @@ public class TrainingRigTrainingLoopCoverageTests
     {
         var x = TensorData([2L], 1f, 2f);
         var rig = TrainingRig.FromScratch(modelGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
-            [new TensorDataModelParam("input", ModelParamType.InputParam, x)], 0.1f);
+            [new TensorDataModelParam(modelGraph.InputNames[0]!, ModelParamType.InputParam, x)], 0.1f);
         return rig.TrainStep(rig.CreateInitialCheckpoint(),
             NNLibraryTrainingFixtures.MakeBatch("input", "ModelInput", x),
             NNLibraryTrainingFixtures.MakeBatch("targets", "Target", TensorData([2L], 0f, 0f))).Loss!.Value;
@@ -1792,7 +1792,7 @@ public class TrainingRigTrainingLoopCoverageTests
     {
         var x = TensorData([2L], 1f, 2f);
         var rig = TrainingRig.FromScratch(modelGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
-            [new TensorDataModelParam("input", ModelParamType.InputParam, x)], 0.1f);
+            [new TensorDataModelParam(modelGraph.InputNames[0]!, ModelParamType.InputParam, x)], 0.1f);
         var step = rig.TrainStep(rig.CreateInitialCheckpoint(),
             NNLibraryTrainingFixtures.MakeBatch("input", "ModelInput", x),
             NNLibraryTrainingFixtures.MakeBatch("targets", "Target", TensorData([2L], 0f, 0f)));
@@ -5193,7 +5193,7 @@ public class BuildProgressCoverageTests
         var (reports, sink) = Watched();
         var model = ScalarMultiplyModel.ComputationGraph;
         var hints = new ModelParamList(
-            [new KeyValuePair<string, TensorData>(model.ToInternal().Inputs[0].ToString(), TensorData([4L], new float[4]))],
+            [new KeyValuePair<string, TensorData>(model.InputNames[0]!, TensorData([4L], new float[4]))],
             ModelParamType.InputParam);
         string[] stages = ["Thaw", .. ConcretizePasses, "Freeze", "Done"];
         BuildPhase[] concretizeOnly = [BuildPhase.Concretize];
@@ -5675,8 +5675,8 @@ public abstract class NativeClassifierParity<TBackend> : NativeParityCases<TBack
         string?[] waiting =
         [
             TrainsAlike(NNBatchNormTrainGradModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, batchNorm, Target([3L], 0.5f, -0.25f, 1f), [0.1f]),
-            TrainsAlike(NNBatchNormAnalyticMomentum09Model.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Input([1L, 1L, 2L, 2L], 1f, 2f, 3f, 4f), Target([1L, 1L, 2L, 2L], 0.5f, -1f, 2f, 0f), [0.1f]),
-            TrainsAlike(NNBatchNormAnalyticRank2Model.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Input([2L, 1L], 1f, 3f), Target([2L, 1L], 0.5f, 2f), [0.1f]),
+            TrainsAlike(NNBatchNormAnalyticMomentum09Model.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Inputs(("x", TensorData([1L, 1L, 2L, 2L], 1f, 2f, 3f, 4f))), Target([1L, 1L, 2L, 2L], 0.5f, -1f, 2f, 0f), [0.1f]),
+            TrainsAlike(NNBatchNormAnalyticRank2Model.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Inputs(("x", TensorData([2L, 1L], 1f, 3f))), Target([2L, 1L], 0.5f, 2f), [0.1f]),
         ];
         AssertNoneWaitingOnAnOperator(waiting);
     }

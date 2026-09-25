@@ -37,8 +37,10 @@ namespace Shorokoo.Core.Graph
         /// <summary>
         /// Refuses (<see cref="ErrorCodes.FW056"/>) a lowering of <paramref name="graph"/> whose
         /// <paramref name="samples"/> leave any data input without a sample, listing every such
-        /// input, or give more samples than it has data inputs, stating both counts. Samples bind to the data inputs by position, as the lowering binds them; a
-        /// generic module's type-placeholder slots take none.
+        /// input, give more samples than it has data inputs, stating both counts, or name a sample
+        /// for another input than the one at its position, listing every such sample. Samples bind
+        /// to the data inputs by position, as the lowering binds them; a generic module's
+        /// type-placeholder slots take none.
         /// </summary>
         internal static void RequireSampleForEveryInput(InternalComputationGraph graph, ModelParamList samples)
         {
@@ -49,15 +51,31 @@ namespace Shorokoo.Core.Graph
                     $"({string.Join(", ", dataInputs.Select(i => $"'{NameOf(graph, i) ?? $"#{i}"}'"))}) but " +
                     $"{samples.ModelParams.Length} sample(s) were given. Give exactly one sample per " +
                     "input, in declaration order; a generic module's type-placeholder slots take none.");
-            if (samples.ModelParams.Length == dataInputs.Count) return;
-            var missing = dataInputs.Skip(samples.ModelParams.Length)
-                .Select(i => $"'{NameOf(graph, i) ?? $"#{i}"}'");
-            throw new ModelException(ErrorCodes.FW056, "ToConcreteArchitecture",
-                $"no sample was given for input(s) {string.Join(", ", missing)}. Every input of the " +
-                "graph needs a sample, [Hyper] inputs included, one per input in declaration order: " +
-                "the lowering records each sample's shape on the concrete architecture, which is " +
-                "what training and ONNX export read the input's shape from. Build the list with " +
-                "graph.FromOrderedInputs([...]).");
+            if (samples.ModelParams.Length < dataInputs.Count)
+            {
+                var missing = dataInputs.Skip(samples.ModelParams.Length)
+                    .Select(i => $"'{NameOf(graph, i) ?? $"#{i}"}'");
+                throw new ModelException(ErrorCodes.FW056, "ToConcreteArchitecture",
+                    $"no sample was given for input(s) {string.Join(", ", missing)}. Every input of the " +
+                    "graph needs a sample, [Hyper] inputs included, one per input in declaration order: " +
+                    "the lowering records each sample's shape on the concrete architecture, which is " +
+                    "what training and ONNX export read the input's shape from. Build the list with " +
+                    "graph.FromOrderedInputs([...]).");
+            }
+
+            // Samples bind by position; a name is not consulted to bind one, so a sample named for
+            // another input is a sample in the wrong place, and binding it anyway would lower the
+            // graph at the wrong shapes. An unnamed sample binds where it stands.
+            var misnamed = dataInputs
+                .Select((inputIndex, k) => (Position: k, Sample: samples.ModelParams[k].ParamName, Input: NameOf(graph, inputIndex)))
+                .Where(x => !string.IsNullOrEmpty(x.Sample) && x.Input is not null && x.Sample != x.Input)
+                .Select(x => $"sample #{x.Position} is named '{x.Sample}' but input #{x.Position} is '{x.Input}'")
+                .ToList();
+            if (misnamed.Count > 0)
+                throw new ModelException(ErrorCodes.FW056, "ToConcreteArchitecture",
+                    $"{string.Join("; ", misnamed)}. Samples bind to the graph's inputs by position, one per " +
+                    "input in declaration order; name each after the input at its position, or build the " +
+                    "list with graph.FromOrderedInputs([...]).");
         }
 
         /// <summary>

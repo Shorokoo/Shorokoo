@@ -1280,6 +1280,25 @@ public class ModulesCoverageTests
             PairSample.Of(1f, 2f), In("x", Image())).Kind);
     }
 
+    private static string Misnamed(ComputationGraph graph, params NamedModelParam[] samples)
+    {
+        var ex = Assert.Throws<ModelException>(() => Concretize(graph, samples));
+        Assert.Equal(ErrorCodes.FW056, ex.ErrorCode);
+        return ex.Message;
+    }
+
+    [Fact]
+    public void TestASampleNamedForAnotherInputThanTheOneAtItsPositionIsRefused()
+    {
+        var x = TensorData([2L], 1f, 2f);
+        var two = TensorData(DType.Int64, [], 2L);
+        Assert.Contains("'x'", Misnamed(SimplestLayer.ComputationGraph, In("x", x)));
+        Assert.Contains("'input'", Misnamed(SimplestLayer.ComputationGraph, In("x", x)));
+        Assert.Contains("'input'", Misnamed(FCLayer.ComputationGraph, In("input", two), In("numOutFeatures", x)));
+        Assert.Contains("'seq'", Misnamed(SeqCountShapedParamLayer.ComputationGraph, In("input", x), SeqIn("s", TensorData(DType.Float32, [], 1f))));
+        Assert.Equal(GraphKind.ConcreteArchitecture, Concretize(SimplestLayer.ComputationGraph, In("", x)).Kind);
+    }
+
     private static void DetectedAsItsOwnKind(ComputationGraph graph)
     {
         Assert.Equal(graph.Kind, SrkFileFormat.DetectStage(graph.ToInternal()));

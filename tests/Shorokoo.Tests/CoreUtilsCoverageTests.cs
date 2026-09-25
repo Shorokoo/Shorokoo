@@ -2526,7 +2526,7 @@ public class CoreUtilsCoverageTests
             var model = ScalarMultiplyModel.ComputationGraph;
             var hints = new ModelParamList(
                 [new KeyValuePair<string, TensorData>(
-                    model.ToInternal().Inputs[0].ToString(), TensorData([4L], new float[4]))],
+                    model.InputNames[0]!, TensorData([4L], new float[4]))],
                 ModelParamType.InputParam);
 
             model.ToConcreteArchitecture(hints, new ComputeContext(),

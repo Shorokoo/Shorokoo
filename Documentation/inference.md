@@ -188,7 +188,11 @@ pipeline, applied in order:
    input** of the graph, `[Hyper]` inputs included, one per input in declaration order
    (`graph.FromOrderedInputs([...])`), a sequence input included; a graph left
    without one is refused with **`FW056`**, which names every input missing its
-   sample, and so are more samples than the graph has inputs, stating both counts. The shape of each sample
+   sample, and so are more samples than the graph has inputs, stating both counts.
+   Samples bind to the inputs **by position**: a sample may be unnamed, but one named
+   for another input than the one at its position is refused with `FW056` too, naming
+   both. A struct input's sample stands for all its fields, and once lowered the
+   input is one input per field, named `<struct>.<field>`. The shape of each sample
    (never its values) is recorded on the architecture's input as its **representative
    shape** — the shape the model was concretized at. Every input of a concrete
    architecture and of every concrete model made from it carries one: it survives

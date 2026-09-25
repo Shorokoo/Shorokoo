@@ -32,10 +32,16 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// input's hint is an optional — present or absent — and every other supported hint a
         /// tensor. Asking every hint for a tensor threw on an absent optional, so a model taking
         /// one could not be lowered with the arrangement the input exists for
-        /// (Shorokoo/Shorokoo#314).
+        /// (Shorokoo/Shorokoo#314). A sequence or struct hint gives the engines no value to
+        /// evaluate with — <c>null</c>, as for an input with no hint — rather than throwing: every
+        /// input needs a sample, a sequence input included, so its sample must be accepted.
         /// </summary>
-        internal static IData? HintValue(NamedModelParam hint) =>
-            hint is OptionalTensorDataModelParam optional ? optional.ToOptionalTensorData() : hint.ToTensorData();
+        internal static IData? HintValue(NamedModelParam hint) => hint switch
+        {
+            OptionalTensorDataModelParam optional => optional.ToOptionalTensorData(),
+            { Structure: DataStructure.Tensor } => hint.ToTensorData(),
+            _ => null,
+        };
 
         /// <summary>
         /// Copies a freshly computed result onto storage of its own, then releases the backend

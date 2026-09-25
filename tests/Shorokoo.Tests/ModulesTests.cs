@@ -1204,6 +1204,43 @@ public class ModulesCoverageTests
         Assert.Equal(inputOnly, RecordedShapes(specialized.ToConcreteArchitecture(specialized.FromOrderedInputs([input]))));
     }
 
+    private static ComputationGraph SequenceInputArch(TensorData x)
+        => SeqHypersLayer.ComputationGraph.ToConcreteArchitecture(new ModelParamList(
+        [
+            new TensorDataSequenceModelParam("scales", ModelParamType.InputParam,
+                TensorDataSequence.OfElements([TensorData(DType.Float32, [], 1.5f)], DType.Float32)),
+            new TensorDataModelParam("input", ModelParamType.InputParam, x),
+        ]));
+
+    [Fact]
+    public void TestAModuleWithASequenceInputConcretizesGivenASequenceSample()
+        => Assert.Equal(GraphKind.ConcreteArchitecture, SequenceInputArch(TensorData([2L], 1f, 2f)).Kind);
+
+    private static void DetectedAsItsOwnKind(ComputationGraph graph)
+    {
+        Assert.Equal(graph.Kind, SrkFileFormat.DetectStage(graph.ToInternal()));
+        var bytes = CompressedFormatUtils.SaveFastGraphToBinary(graph.ToInternal(), stage: null, compressed: false);
+        Assert.Equal(graph.Kind, CompressedFormatUtils.LoadFastGraphFromBinary(bytes).Kind);
+    }
+
+    [Fact]
+    public void TestAConcreteGraphWithNoInputOrOnlySequenceInputsIsNotDetectedAsAModule()
+    {
+        var x = TensorData([2L], 1f, 2f);
+        var fc = FCLayer.ComputationGraph;
+        var fcArch = fc.ToConcreteArchitecture(fc.FromOrderedInputs([TensorData(DType.Int64, [], 2L), x]));
+        var fcBoth = new ModelParamList([("numOutFeatures", TensorData(DType.Int64, [], 2L)), ("input", x)]);
+        var seqArch = SequenceInputArch(x);
+        var inputOnly = new ModelParamList([("input", x)]);
+
+        DetectedAsItsOwnKind(fcArch.Specialize(fcBoth));
+        DetectedAsItsOwnKind(fcArch.ToConcreteModel().Specialize(fcBoth));
+        DetectedAsItsOwnKind(seqArch.Specialize(inputOnly));
+        DetectedAsItsOwnKind(seqArch.ToConcreteModel().Specialize(inputOnly));
+        Assert.Empty(fcArch.Specialize(fcBoth).InputNames);
+        Assert.Equal(["scales"], seqArch.Specialize(inputOnly).InputNames);
+    }
+
     [Fact]
     public void TestAConcreteGraphWhoseInputRecordsNoShapeIsRefusedNamingIt()
     {

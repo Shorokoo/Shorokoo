@@ -68,6 +68,15 @@ namespace Shorokoo.Core.Factory
     public static class FastOnnxModelBuilder
     {
         /// <summary>
+        /// Name given to every model's main <see cref="GraphProto"/>. The ONNX spec requires a
+        /// non-empty graph name (the reference checker rejects an empty one), and a
+        /// <see cref="Shorokoo.Graph.ComputationGraph"/> carries no name of its own, so a fixed
+        /// one keeps repeated exports byte-identical. <c>main_graph</c> follows the PyTorch
+        /// exporter's convention. Nothing reads it back on import.
+        /// </summary>
+        private const string MainGraphName = "main_graph";
+
+        /// <summary>
         /// Build an externally loadable ("vanilla" dialect) ONNX <see cref="ModelProto"/>
         /// from a <see cref="Shorokoo.Graph.GraphKind.ConcreteModel"/>-kind
         /// <see cref="Shorokoo.Graph.ComputationGraph"/>. The input graph is not
@@ -239,7 +248,7 @@ namespace Shorokoo.Core.Factory
 
             // ----- 3. Build the main GraphProto by walking the Fast graph.
             var graphProto = BuildGraphProto(
-                graphName: "",
+                graphName: MainGraphName,
                 fastGraph: prepFast,
                 opset: opset,
                 isFunction: false,

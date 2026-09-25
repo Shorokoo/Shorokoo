@@ -2488,15 +2488,10 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
     }
 
     /// <summary>
-    /// Pin: <c>ExportOnnx</c> promises a standard vanilla <c>.onnx</c>, but leaves
-    /// <c>GraphProto.name</c> empty — a field the ONNX spec requires to be non-empty, so the
-    /// reference <c>onnx.checker</c> rejects every file the framework exports.
-    /// <c>FastOnnxModelBuilder.BuildOnnxModel</c> passes the empty string for the main graph;
-    /// every other caller of <c>BuildGraphProto</c> supplies a real name. Tracked as
-    /// Shorokoo/Shorokoo#281, open — naming the main graph flips this green with its body
-    /// unchanged.
+    /// <c>ExportOnnx</c> writes a non-empty <c>GraphProto.name</c>: the ONNX spec requires one,
+    /// and the reference <c>onnx.checker</c> rejects a file without it.
     /// </summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#281: every exported .onnx leaves GraphProto.name empty, which the reference onnx.checker rejects")]
+    [Fact]
     public void TestExportedOnnxNamesItsGraph()
     {
         var (model, _, _) = BuildSkptModel();

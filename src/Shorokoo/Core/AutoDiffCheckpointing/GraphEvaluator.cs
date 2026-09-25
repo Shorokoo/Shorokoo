@@ -73,7 +73,10 @@ internal class GraphEvaluator
     {
         var nodes = graph.Nodes;
         var ortWalk = OrtExecutionOrder.Compute(nodes);
-        var walk = order == EvaluationOrder.OrtOrder ? ortWalk : Enumerable.Range(0, nodes.Count).ToArray();
+        // The output nodes run nothing and hold nothing: a graph output is never released anyway.
+        var walk = order == EvaluationOrder.OrtOrder
+            ? ortWalk
+            : Enumerable.Range(0, graph.BodyEnd).ToArray();
 
         // Tensor key → last walk position that reads it.
         var tensorLastUse = BuildTensorLastUse(nodes, walk);
@@ -365,7 +368,7 @@ internal class GraphEvaluator
     private static Dictionary<FastTensorKey, List<string>> BuildConsumerOpCodes(IList<FastNode> nodes)
     {
         var consumers = new Dictionary<FastTensorKey, List<string>>();
-        foreach (var node in nodes)
+        foreach (var node in nodes.Where(n => !Shorokoo.Core.Nodes.NodeDefinitions.InternalOpCodes.IsGraphOutputOp(n.OpCode)))
             foreach (var input in node.Inputs)
             {
                 if (input is null) continue;

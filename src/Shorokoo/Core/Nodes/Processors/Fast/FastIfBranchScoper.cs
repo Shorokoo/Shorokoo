@@ -55,6 +55,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var inputs = graph.Inputs;
             graph.Nodes = SinkLevel(graph.Nodes, ctx);
             graph.SetInputs(inputs);
+            graph.MoveOutputsToEnd();
 
             System.Diagnostics.Debug.Assert(graph.IsLinearOrderValid(),
                 "FastIfBranchScoper.ScopeAllIfBranches: scoping left the graph in an invalid linear order.");
@@ -133,6 +134,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                             }
 
                     if (InternalOpCodes.IsModelInputOp(n.OpCode) ||
+                        InternalOpCodes.IsGraphOutputOp(n.OpCode) ||
                         n.OpCode == InternalOpCodes.MODEL_PARAM_DATA ||
                         n.OpCode == InternalOpCodes.MODEL_PARAM)
                         Pinned.Add(n.Key);

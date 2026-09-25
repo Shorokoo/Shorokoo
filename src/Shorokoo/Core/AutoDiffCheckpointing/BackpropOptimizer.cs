@@ -1,3 +1,4 @@
+using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Core.AutoDiffCheckpointing;
 using Shorokoo.Core.Graph;
 using Shorokoo.Graph;
@@ -118,7 +119,9 @@ internal class SimpleBackpropOptimizer
         // return the original graph reference so no-op rebuilds reuse the source instance.
         var firstSeen = new HashSet<FastTensorKey>();
         bool anyRecompute = false;
-        foreach (var node in graph.Nodes)
+        // An output node reads the value it outputs, and recomputing it for that read would
+        // only duplicate the value that is already there: it keeps the original.
+        foreach (var node in graph.Nodes.Where(n => !InternalOpCodes.IsGraphOutputOp(n.OpCode)))
         {
             foreach (var input in node.Inputs)
             {
@@ -152,6 +155,11 @@ internal class SimpleBackpropOptimizer
         var newNodes = new List<FastNode>(copy.Nodes.Count);
         foreach (var node in copy.Nodes)
         {
+            if (InternalOpCodes.IsGraphOutputOp(node.OpCode))
+            {
+                newNodes.Add(node);
+                continue;
+            }
             foreach (var (slotName, slot) in node.FullInputs)
             {
                 for (int i = 0; i < slot.Count; i++)
@@ -181,6 +189,7 @@ internal class SimpleBackpropOptimizer
 
         copy.Nodes = newNodes;
         copy.SetInputs(graph.Inputs);
+        copy.MoveOutputsToEnd();
         return copy;
     }
 
@@ -254,7 +263,9 @@ internal class SimpleBackpropOptimizer
         GraphEvaluationResult baseEval)
     {
         // Positions below are walk positions: NodeDetails is in the evaluation's execution
-        // order, which is ORT's rather than the linear order.
+        // order, which is ORT's rather than the linear order. The output nodes run nothing, so
+        // the walk leaves them out; so does this.
+        nodes = nodes.Where(n => !InternalOpCodes.IsGraphOutputOp(n.OpCode)).ToList();
         if (baseEval.NodeDetails.Count == nodes.Count)
             nodes = baseEval.NodeDetails.Select(d => nodes[d.NodeIndex]).ToList();
 

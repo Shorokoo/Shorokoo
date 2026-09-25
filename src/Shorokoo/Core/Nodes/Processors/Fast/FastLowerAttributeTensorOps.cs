@@ -212,9 +212,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // each an empty placeholder, so whatever reads one stays unresolved).
             {
                 var resolver = graph.Clone();
-                resolver.Outputs = new List<FastTensorKey>(keys);
-                resolver.OutputUniqueNames = new List<string?>(new string?[keys.Count]);
-                resolver.OutputRankOverrides = null;
+                resolver.SetOutputs(keys);
                 FastProcessorHelper.RemoveUnreachableNodes(resolver, keepUnreadInputs: false);
                 TryResolveWithQee(resolver, keys, resolved, samples: null);
             }
@@ -223,9 +221,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             if (sampleInputs is not null && AnyUnresolved(resolved))
             {
                 var resolver = graph.Clone();
-                resolver.Outputs = new List<FastTensorKey>(keys);
-                resolver.OutputUniqueNames = new List<string?>(new string?[keys.Count]);
-                resolver.OutputRankOverrides = null;
+                resolver.SetOutputs(keys);
                 FastProcessorHelper.RemoveUnreachableNodes(resolver);
 
                 var orderedSamples = BindSamplesToTheInputsItReads(resolver, sampleInputs);

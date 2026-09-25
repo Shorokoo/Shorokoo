@@ -871,7 +871,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         var nodeLines = g.Nodes
             .Select(n => $"{n.OpCode}({string.Join(",", n.Inputs.Select(k => k is null ? "-" : "x"))})")
             .OrderBy(x => x, StringComparer.Ordinal);
-        return $"inputs=[{string.Join(",", g.InputNames)}] outputs=[{string.Join(",", g.OutputUniqueNames)}]\n"
+        return $"inputs=[{string.Join(",", g.InputNames)}] outputs=[{string.Join(",", g.OutputNames)}]\n"
              + string.Join("\n", nodeLines);
     }
 

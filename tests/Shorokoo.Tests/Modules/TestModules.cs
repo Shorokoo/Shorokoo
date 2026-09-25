@@ -83,9 +83,9 @@ namespace Shorokoo.Tests.Modules
 
     // Returns a rank-pinned Vector<float32>. Constructing the auto-generated
     // Module<Tensor<float32>, Vector<float32>> goes through
-    // ModuleHelper.CreateFunctionSignature, which derives a per-output rank override
-    // from the compile-time output type — Vector<T> hits the IVector→1 branch and
-    // produces OutputRankOverrides = [1]. The C# codegen path on the generated
+    // ModuleHelper.CreateFunctionSignature, which declares each output's rank on its
+    // output node from the compile-time output type — Vector<T> hits the IVector→1 branch
+    // and produces OutputRankOverrides = [1]. The C# codegen path on the generated
     // Function relies on that override to emit `Vector<float32>` (rather than
     // `Tensor<float32>`) as the return type, so this is the natural circumstance
     // that exercises rank-override propagation end-to-end.

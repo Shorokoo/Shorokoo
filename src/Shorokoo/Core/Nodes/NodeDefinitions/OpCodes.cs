@@ -25,6 +25,13 @@ internal static class InternalOpCodes
     public const string GENERIC_TYPE_INPUT = "#GenericTypeInput#";
     public const string MODEL_PARAM_DATA = "#ModelParamData#";
 
+    /// <summary>
+    /// One of the graph's outputs: reads the value it names and produces nothing. The output
+    /// nodes form the suffix of a graph's node list, in output order, just as the input nodes
+    /// form its prefix; the output's name and declared rank are its attributes.
+    /// </summary>
+    public const string GRAPH_OUTPUT = "#GraphOutput#";
+
     public const string MODULE_SET_HYPERPARAMS = "ShrkModuleSetHyperparams";
     // public const string READY_MODULE_TO_MODEL = "ShrkReadyModuleToModel";
     public const string MODEL_INVOKE = "ShrkModelInvoke";
@@ -207,6 +214,12 @@ internal static class InternalOpCodes
         || opCode == MODEL_SEQUENCE_INPUT
         || opCode == MODEL_TENSORSTRUCT_INPUT
         || opCode == GENERIC_TYPE_INPUT;
+
+    /// <summary>True when <paramref name="opCode"/> marks one of the graph's own outputs
+    /// (<see cref="GRAPH_OUTPUT"/>). Such a node is the graph's boundary, not an op: it is never
+    /// executed, and outside the <c>.srk</c> dialect never emitted as a node — the graph's output
+    /// ValueInfos name what it reads.</summary>
+    public static bool IsGraphOutputOp(string opCode) => opCode == GRAPH_OUTPUT;
 }
 
 internal static class OpCodes

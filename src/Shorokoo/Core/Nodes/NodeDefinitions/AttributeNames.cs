@@ -280,6 +280,21 @@ public static class OnnxOpAttributeNames
     /// open its node list — so this is where an input's name lives, and what the <c>.srk</c> dialect
     /// carries it in.</summary>
     public const string ShrkAttrInputName = "shrk_input_name";
+
+    /// <summary>On a graph-output node (<see cref="InternalOpCodes.GRAPH_OUTPUT"/>): the output's
+    /// signature name. The graph keeps no output list of its own — its outputs are the output nodes
+    /// that close its node list — so this is where an output's name lives.</summary>
+    public const string ShrkAttrOutputName = "shrk_output_name";
+
+    /// <summary>On a graph-output node: the rank the output's declared type fixes — a
+    /// <c>Scalar&lt;T&gt;</c> return is rank 0, a <c>Vector&lt;T&gt;</c> rank 1 — where it fixes
+    /// one. Only a module signature declares its outputs this way; absent everywhere else. Distinct
+    /// from <see cref="ShrkAttrRecordedOutputShape"/>, which a sample, not a type, decides.</summary>
+    public const string ShrkAttrDeclaredRank = "shrk_declared_rank";
+
+    /// <summary>On a graph-output node: the dims the output had at the samples the graph was
+    /// concretized at. Reserved: nothing records it yet.</summary>
+    public const string ShrkAttrRecordedOutputShape = "shrk_recorded_output_shape";
     public const string ShrkAttrHyperparamIndex = "shrk_hyperparam_index";
     public const string ShrkAttrGenericTypeConstraints = "shrk_generic_type_constraints";
     public const string ShrkAttrGenericTypeArgs = "shrk_generic_type_args";
@@ -343,13 +358,5 @@ public static class OnnxOpAttributeNames
     /// <summary>Model-level metadata prop carrying the graph's <c>GraphKind</c> (canonical
     /// stage name, e.g. "concrete-model") so a serialized graph reloads as the same kind.</summary>
     public const string ShrkMetaGraphKind = "shrk_graph_kind";
-
-    /// <summary>Model-level metadata prop carrying the graph's signature output names
-    /// (<c>InternalComputationGraph.OutputUniqueNames</c>) as a positional JSON string array.
-    /// Written on internal-dialect exports, whose graph-output ValueInfos must keep the raw
-    /// <c>N{k}_T{s}</c> tensor ids (the loader parses node/tensor keys out of them), so the
-    /// human-readable signature names ride a side channel instead of a rename. (An input's name
-    /// rides on its node, <see cref="ShrkAttrInputName"/>.)</summary>
-    public const string ShrkMetaOutputNames = "shrk_output_names";
 }
 

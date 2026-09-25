@@ -289,7 +289,7 @@ public class AutoDiffCheckpointingCoverageTests
     private static InternalComputationGraph InOrder(InternalComputationGraph graph, IEnumerable<int> order)
     {
         var copy = graph.Clone();
-        copy.Nodes = order.Select(i => graph.Nodes[i]).ToList();
+        copy.Nodes = [.. order.Select(i => graph.Nodes[i]), .. copy.OutputNodes];
         return copy;
     }
 
@@ -456,7 +456,7 @@ public class AutoDiffCheckpointingCoverageTests
         Assert.True(reordered.IsLinearOrderValid());
 
         var walk = OrtExecutionOrder.Compute(graph.Nodes);
-        Assert.Equal(graph.Nodes.Count, walk.Distinct().Count());
+        Assert.Equal(graph.BodyEnd, walk.Distinct().Count());
         Assert.True(InOrder(graph, walk).IsLinearOrderValid());
 
         var untouched = new MemoryAwareGraphOptimizer().OptimizeWithShapeInfo(graph, shapeInfo);

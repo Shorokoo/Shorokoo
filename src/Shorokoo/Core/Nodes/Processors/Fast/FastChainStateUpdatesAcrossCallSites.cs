@@ -128,7 +128,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             var key = FastNodeKey.New();
             var output = new FastTensorKey(key, 0);
-            graph.Nodes.Add(new FastNode
+            graph.InsertAtBodyEnd(new FastNode
             {
                 Key = key,
                 OpCode = InternalOpCodes.WITH_STATE_DEPS,
@@ -138,7 +138,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 FullInputs = { [""] = [graph.Outputs[0], .. branchLinks.Select(k => (FastTensorKey?)k)] },
                 FullOutputs = { [""] = [output] },
             });
-            graph.Outputs[0] = output;
+            graph.RetargetOutput(0, output);
         }
 
         /// <summary>

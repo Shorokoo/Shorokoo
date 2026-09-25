@@ -146,8 +146,7 @@ namespace Shorokoo.Onnx
         /// <summary>
         /// Builds the graph from an already-deserialized <see cref="IR.ModelProto"/>: the
         /// post-parse half of <see cref="FromOnnxModelWithKindTag(Stream, string?, IReadOnlyDictionary{string, long[]}?)"/>
-        /// (external-data materialization, the reader, signature-name restoration, and the
-        /// kind-tag consistency check). Split out so a boundary (e.g.
+        /// (external-data materialization, the reader, and the kind-tag consistency check). Split out so a boundary (e.g.
         /// <c>Persistence.ImportOnnx</c>) can inspect or validate the proto between parsing
         /// it and building the graph without re-deserializing.
         /// </summary>
@@ -166,8 +165,6 @@ namespace Shorokoo.Onnx
             // the reader has re-attached; any other input takes it from the caller or the file.
             Shorokoo.Core.Graph.RepresentativeInputShapes.RecordFromOnnx(graph, model.Graph, inputShapes);
 
-            RestoreSignatureIONames(model, graph);
-
             // An input left unshaped is the caller's to supply (FW058), which a tag declaring a
             // concrete kind does not change: say so before the tag check reports the same input as
             // a corrupt file. Module machinery under a concrete tag is corruption, whatever the
@@ -185,41 +182,6 @@ namespace Shorokoo.Onnx
                     "The file is corrupt or was written by an incompatible tool.");
 
             return (graph, taggedKind);
-        }
-
-        /// <summary>
-        /// Restores the graph's human-readable signature output names from the
-        /// <c>shrk_output_names</c> model metadata written by internal-dialect exports (whose
-        /// graph-output ValueInfos must keep raw <c>N{k}_T{s}</c> tensor ids). Applied only when the
-        /// list parses and its length matches the reconstructed graph's output count; otherwise (a
-        /// foreign model, say) the proto names stand. (An input's name rides on its own node or
-        /// ValueInfo.)
-        /// </summary>
-        private static void RestoreSignatureIONames(IR.ModelProto model, InternalComputationGraph graph)
-        {
-            foreach (var prop in model.MetadataProps)
-            {
-                var target = prop.Key switch
-                {
-                    OnnxOpAttributeNames.ShrkMetaOutputNames => graph.OutputUniqueNames,
-                    _ => null,
-                };
-                if (target is null) continue;
-
-                List<string?>? names;
-                try
-                {
-                    names = System.Text.Json.JsonSerializer.Deserialize<List<string?>>(prop.Value);
-                }
-                catch (System.Text.Json.JsonException)
-                {
-                    continue;
-                }
-                if (names is null || names.Count != target.Count) continue;
-
-                target.Clear();
-                target.AddRange(names);
-            }
         }
 
         /// <summary>Internal-graph form of <see cref="FromOnnxModel(Stream, string?)"/>.</summary>

@@ -75,6 +75,15 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .AttributeStrings(ShrkAttrGenericTypeConstraints)
                 .Output("genericTypeInfo", "T", rank: "R"),
 
+            // GRAPH_OUTPUT: one of the graph's outputs, in the suffix of its node list. Reads the
+            // value it outputs and produces nothing.
+            Op(GRAPH_OUTPUT)
+                .Any<AnyLike>("T")
+                .AttributeString(ShrkAttrOutputName)
+                .AttributeLong(ShrkAttrDeclaredRank)
+                .AttributeLongs(ShrkAttrRecordedOutputShape)
+                .Input("value", "T"),
+
             Op(MODEL_PARAM_DATA)
                 .Tensor<AnyLike>("T")
                 .AttributeTensor(ShrkAttrTensorData, "T", "R")

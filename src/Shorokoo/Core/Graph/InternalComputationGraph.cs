@@ -162,25 +162,150 @@ namespace Shorokoo.Graph
         }
 
         /// <summary>
-        /// Tensor keys corresponding to <c>ComputationGraph.Outputs</c>, in order.
+        /// The graph's outputs, in order: the value each output node
+        /// (<see cref="InternalOpCodes.GRAPH_OUTPUT"/>) in the suffix of <see cref="Nodes"/> reads.
+        /// Like <see cref="Inputs"/>, a read-only view rebuilt on each access; add, remove or
+        /// retarget an output through its node (<see cref="AddOutput"/>, <see cref="SetOutputs"/>,
+        /// <see cref="RetargetOutput"/>). Two outputs may read one value, and an output may read an
+        /// input or a constant directly.
         /// </summary>
-        public List<FastTensorKey> Outputs { get; set; } = new();
+        public IReadOnlyList<FastTensorKey> Outputs
+        {
+            get
+            {
+                var count = OutputCount;
+                var start = Nodes.Count - count;
+                var keys = new FastTensorKey[count];
+                for (int i = 0; i < count; i++)
+                    keys[i] = OutputKeyOf(Nodes[start + i]);
+                return keys;
+            }
+        }
+
+        /// <summary>The name of each output, in <see cref="Outputs"/> order, read off its node's
+        /// <see cref="OnnxOpAttributeNames.ShrkAttrOutputName"/> attribute (null where it has none).</summary>
+        public IReadOnlyList<string?> OutputNames => OutputNodes.Select(OutputNameOf).ToArray();
+
+        /// <summary>The rank each output's declared type fixes, in <see cref="Outputs"/> order
+        /// (<see cref="OnnxOpAttributeNames.ShrkAttrDeclaredRank"/>; null where it declares none).</summary>
+        public IReadOnlyList<int?> OutputDeclaredRanks => OutputNodes.Select(DeclaredRankOf).ToArray();
+
+        /// <summary>The output nodes: the suffix of <see cref="Nodes"/> they form.</summary>
+        public IReadOnlyList<FastNode> OutputNodes
+        {
+            get
+            {
+                var count = OutputCount;
+                return Nodes.GetRange(Nodes.Count - count, count);
+            }
+        }
+
+        /// <summary>The number of outputs. The body — every node that is neither an input nor an
+        /// output — ends at <see cref="BodyEnd"/>.</summary>
+        public int OutputCount
+        {
+            get
+            {
+                int i = Nodes.Count;
+                while (i > 0 && InternalOpCodes.IsGraphOutputOp(Nodes[i - 1].OpCode)) i--;
+                return Nodes.Count - i;
+            }
+        }
+
+        /// <summary>The index in <see cref="Nodes"/> of the first output node (or the count, when
+        /// there is none): where the body ends.</summary>
+        public int BodyEnd => Nodes.Count - OutputCount;
+
+        /// <summary>The value an output node outputs: its one input.</summary>
+        public static FastTensorKey OutputKeyOf(FastNode outputNode)
+        {
+            Debug.Assert(InternalOpCodes.IsGraphOutputOp(outputNode.OpCode));
+            foreach (var group in outputNode.FullInputs.Values)
+                foreach (var key in group)
+                    if (key is { } k) return k;
+            throw new System.InvalidOperationException($"Output node {outputNode.Key} reads no value.");
+        }
+
+        /// <summary>An output node's <see cref="OnnxOpAttributeNames.ShrkAttrOutputName"/>, or null.</summary>
+        public static string? OutputNameOf(FastNode outputNode)
+            => outputNode.Attributes.GetAttributeVals().TryGetValue(OnnxOpAttributeNames.ShrkAttrOutputName, out var name)
+                ? name as string
+                : null;
+
+        /// <summary>Sets an output node's <see cref="OnnxOpAttributeNames.ShrkAttrOutputName"/>.</summary>
+        public static void SetOutputName(FastNode outputNode, string? name)
+            => outputNode.Attributes = outputNode.Attributes.SetAttributes((OnnxOpAttributeNames.ShrkAttrOutputName, name));
+
+        /// <summary>An output node's <see cref="OnnxOpAttributeNames.ShrkAttrDeclaredRank"/>, or null.</summary>
+        public static int? DeclaredRankOf(FastNode outputNode)
+            => outputNode.Attributes.GetAttributeVals().TryGetValue(OnnxOpAttributeNames.ShrkAttrDeclaredRank, out var rank)
+                && rank is long r
+                ? (int)r
+                : null;
+
+        /// <summary>A new output node reading <paramref name="value"/>.</summary>
+        public static FastNode NewOutputNode(FastTensorKey value, string? name = null, int? declaredRank = null)
+            => new()
+            {
+                Key = FastNodeKey.New(),
+                OpCode = InternalOpCodes.GRAPH_OUTPUT,
+                Attributes = OnnxCSharpAttributes.FromCSharpVals(
+                    new Dictionary<string, object?>
+                    {
+                        [OnnxOpAttributeNames.ShrkAttrOutputName] = name,
+                        [OnnxOpAttributeNames.ShrkAttrDeclaredRank] = (long?)declaredRank,
+                    },
+                    Definitions.NodeDefinitions[InternalOpCodes.GRAPH_OUTPUT].AttributeDefs),
+                FullInputs = { [""] = [value] },
+            };
+
+        /// <summary>Makes <paramref name="value"/> the last output.</summary>
+        public void AddOutput(FastTensorKey value, string? name = null, int? declaredRank = null)
+            => Nodes.Add(NewOutputNode(value, name, declaredRank));
+
+        /// <summary>Makes the graph's outputs exactly <paramref name="values"/>, unnamed and
+        /// undeclared, replacing every output node wherever it stands. For a pass that points a
+        /// graph at the values it wants evaluated.</summary>
+        public void SetOutputs(IEnumerable<FastTensorKey> values)
+        {
+            var list = values.ToList();
+            Nodes.RemoveAll(n => InternalOpCodes.IsGraphOutputOp(n.OpCode));
+            foreach (var value in list)
+                AddOutput(value);
+        }
+
+        /// <summary>Points output <paramref name="index"/> at <paramref name="value"/>, keeping its
+        /// name and declared rank.</summary>
+        public void RetargetOutput(int index, FastTensorKey value)
+        {
+            if (index < 0 || index >= OutputCount)
+                throw new System.ArgumentOutOfRangeException(nameof(index));
+            Nodes[BodyEnd + index].FullInputs = new Dictionary<string, List<FastTensorKey?>> { [""] = [value] };
+        }
+
+        /// <summary>Puts <paramref name="nodes"/> at the end of the body, right before the outputs.</summary>
+        public void InsertAtBodyEnd(IEnumerable<FastNode> nodes) => Nodes.InsertRange(BodyEnd, nodes);
+
+        /// <summary>Puts <paramref name="node"/> at the end of the body, right before the outputs.</summary>
+        public void InsertAtBodyEnd(FastNode node) => Nodes.Insert(BodyEnd, node);
 
         /// <summary>
-        /// Original <see cref="Variable.UniqueName"/> for each entry in <see cref="Outputs"/>,
-        /// captured when the graph is built and re-applied when the Variable view is rebuilt.
+        /// Moves every output node, wherever it stands in <see cref="Nodes"/>, to the end, keeping
+        /// the outputs' relative order and every other node's. For a whole-list reorderer, which
+        /// places nodes by their data dependencies and so lets an output node that reads an early
+        /// value drift into the body.
         /// </summary>
-        public List<string?> OutputUniqueNames { get; set; } = new();
+        public void MoveOutputsToEnd()
+        {
+            var outputs = Nodes.Where(n => InternalOpCodes.IsGraphOutputOp(n.OpCode)).ToList();
+            if (outputs.Count == 0) return;
+            Nodes.RemoveAll(n => InternalOpCodes.IsGraphOutputOp(n.OpCode));
+            Nodes.AddRange(outputs);
+        }
 
         /// <summary>
-        /// Optional overrides for the rank of each output, mirroring
-        /// <c>ComputationGraph.OutputRankOverrides</c>.
-        /// </summary>
-        public int?[]? OutputRankOverrides { get; set; }
-
-        /// <summary>
-        /// Empty-graph constructor. Callers populate <see cref="Nodes"/> (input nodes first),
-        /// <see cref="Outputs"/>, etc. directly (used by
+        /// Empty-graph constructor. Callers populate <see cref="Nodes"/> (input nodes first,
+        /// output nodes last) directly (used by
         /// <see cref="InternalComputationGraphConverter"/> and the Fast processors).
         /// </summary>
         public InternalComputationGraph() { }
@@ -203,11 +328,15 @@ namespace Shorokoo.Graph
         /// nodes reference the existing forward-graph tensors directly. Stand-ins
         /// listed in this map are dropped from <see cref="Nodes"/>, so the result has no
         /// inputs of its own: it is a body fragment for the host to splice.</para>
+        ///
+        /// <para>Each of <paramref name="outputs"/> gets an output node, in order, closing the
+        /// node list, named by the output's <see cref="Variable.UniqueName"/> and declaring the
+        /// rank <paramref name="declaredOutputRanks"/> gives it, if any.</para>
         /// </summary>
         public InternalComputationGraph(
             ImmutableArray<Variable> inputs,
             ImmutableArray<Variable> outputs,
-            ImmutableArray<int?>? outputRankOverrides = null,
+            ImmutableArray<int?>? declaredOutputRanks = null,
             IReadOnlyDictionary<Variable, FastTensorKey>? externalInputKeys = null)
         {
             Debug.Assert(inputs.All(x => x.OwningNode.IsModelInput));
@@ -237,9 +366,8 @@ namespace Shorokoo.Graph
                     "which is not one of its declared inputs.");
             ImmutableArray<Node> orderedNodes = [.. inputNodes, .. bodyNodes];
 
-            var ranks = outputRankOverrides?.ToArray() ?? outputs.Select(x => x.Rank).ToArray();
             InternalComputationGraphConverter.PopulateFromNodes(
-                this, orderedNodes, inputs, outputs, ranks,
+                this, orderedNodes, inputs, outputs, declaredOutputRanks?.ToArray(),
                 useSequentialIds: false, externalInputKeys: externalInputKeys);
             Debug.Assert(IsLinearOrderValid(), "IsLinearOrderValid()");
         }
@@ -263,14 +391,7 @@ namespace Shorokoo.Graph
         /// </summary>
         public InternalComputationGraph Clone()
         {
-            var copy = new InternalComputationGraph
-            {
-                Outputs = new List<FastTensorKey>(this.Outputs),
-                OutputUniqueNames = new List<string?>(this.OutputUniqueNames),
-                OutputRankOverrides = this.OutputRankOverrides is null
-                    ? null
-                    : (int?[])this.OutputRankOverrides.Clone(),
-            };
+            var copy = new InternalComputationGraph();
 
             foreach (var node in this.Nodes)
                 copy.Nodes.Add(CloneNode(node));
@@ -303,13 +424,14 @@ namespace Shorokoo.Graph
         }
 
         /// <summary>
-        /// Computes the module / model signature strings for this graph. Operates on Fast
+        /// Computes the module / model signature strings for this graph, each output at the rank
+        /// <paramref name="outputRanks"/> gives it. Operates on Fast
         /// keys: the input/output IValues consumed by
-        /// <see cref="ModuleHelper.CreateFunctionSignatureString(Variable[], Variable[], Variable[], int?[])"/>
+        /// <see cref="ModuleHelper.CreateFunctionSignatureString(Variable[], Variable[], Variable[], IReadOnlyList{int?})"/>
         /// are pulled out of the converter's <see cref="FastTensorKey"/> →
         /// <see cref="Variable"/> mapping.
         /// </summary>
-        internal (string moduleSignature, string modelSignature) GetSignatureStrings()
+        internal (string moduleSignature, string modelSignature) GetSignatureStrings(IReadOnlyList<int?> outputRanks)
         {
             var tensorMapping = InternalComputationGraphConverter.BuildTensorMapping(this);
 
@@ -325,12 +447,13 @@ namespace Shorokoo.Graph
             var inputs = actualInputs.Skip(hyperParamCount).Select(k => tensorMapping[k]).ToArray();
             var outputs = this.Outputs.Select(k => tensorMapping[k]).ToArray();
 
-            return ModuleHelper.CreateFunctionSignatureString(hyperParams, inputs, outputs, this.OutputRankOverrides);
+            return ModuleHelper.CreateFunctionSignatureString(hyperParams, inputs, outputs, outputRanks);
         }
 
         /// <summary>
         /// Returns true iff <see cref="Nodes"/> is in a valid linear order: the input nodes form
-        /// its prefix (no input node after the first body node), every node's
+        /// its prefix (no input node after the first body node), the output nodes its suffix (no
+        /// output node before the last body node), every node's
         /// data-input producers and (for close nodes) the matching open appear at strictly
         /// smaller indices, every LOOP/IF OPEN has a matching CLOSE referencing the same
         /// key with no two scopes overlapping, and every scope strictly containing a
@@ -350,6 +473,11 @@ namespace Shorokoo.Graph
             if (FindMisplacedInput() is int misplaced)
             {
                 error = $"InternalComputationGraph: input node #{misplaced} ({Nodes[misplaced].OpCode}) follows body node #{misplaced - 1} ({Nodes[misplaced - 1].OpCode}) — input nodes must form a prefix of graph.Nodes.";
+                return false;
+            }
+            if (FindMisplacedOutput() is int stray)
+            {
+                error = $"InternalComputationGraph: output node #{stray} precedes body node #{stray + 1} ({Nodes[stray + 1].OpCode}) — output nodes must form a suffix of graph.Nodes.";
                 return false;
             }
             var outputToNode = new System.Collections.Generic.Dictionary<FastTensorKey, int>(n * 2);
@@ -459,6 +587,16 @@ namespace Shorokoo.Graph
             int i = InputCount;
             for (; i < Nodes.Count; i++)
                 if (InternalOpCodes.IsModelInputOp(Nodes[i].OpCode))
+                    return i;
+            return null;
+        }
+
+        /// <summary>The index of the last output node that precedes a node other than an output,
+        /// or null when the output nodes form a suffix of <see cref="Nodes"/>.</summary>
+        internal int? FindMisplacedOutput()
+        {
+            for (int i = BodyEnd - 1; i >= 0; i--)
+                if (InternalOpCodes.IsGraphOutputOp(Nodes[i].OpCode))
                     return i;
             return null;
         }

@@ -92,7 +92,7 @@ namespace Shorokoo.Core
         public string ModelSignatureString => _signatures.Value.modelSignature;
         public string ModuleSignatureString => _signatures.Value.moduleSignature;
         private Lazy<(string moduleSignature, string modelSignature)> _signatures
-            => __signatures ??= new Lazy<(string, string)>(() => OriginalFastGraph.GetSignatureStrings());
+            => __signatures ??= new Lazy<(string, string)>(() => OriginalFastGraph.GetSignatureStrings(OutputRankOverrides));
         private Lazy<(string moduleSignature, string modelSignature)>? __signatures;
 
         public FunctionType FunctionType { get; }
@@ -142,6 +142,12 @@ namespace Shorokoo.Core
         internal ImmutableArray<Variable> HyperparamInputs { get { EnsureConvertedSnapshot(); return _hyperparamInputs; } }
         internal ImmutableArray<Variable> NonHyperparamInputs { get { EnsureConvertedSnapshot(); return _nonHyperparamInputs; } }
         internal ImmutableArray<Variable> Outputs { get { EnsureConvertedSnapshot(); return _outputs; } }
+        /// <summary>
+        /// The rank a call of this function gives each of its outputs. A module signature has no
+        /// computation to take a rank from — its outputs are placeholders standing for the C#
+        /// return types — so each is the rank its output node declares, if any. Every other
+        /// function's output has the rank its body computes.
+        /// </summary>
         internal ImmutableArray<int?> OutputRankOverrides { get { EnsureConvertedSnapshot(); return _outputRankOverrides; } }
 
         /// <summary>
@@ -193,9 +199,9 @@ namespace Shorokoo.Core
                 .Where(x => x.InputType != Shorokoo.Core.Nodes.NodeDefinitions.InputType.Hyperparam)
                 .ToImmutableArray();
             _outputs = built.outputs;
-            _outputRankOverrides = body.OutputRankOverrides is null
-                ? built.outputs.Select(x => x.Rank).ToImmutableArray()
-                : body.OutputRankOverrides.ToImmutableArray();
+            _outputRankOverrides = FunctionType == FunctionType.ModuleSignature
+                ? [.. body.OutputDeclaredRanks]
+                : [.. built.outputs.Zip(body.OutputDeclaredRanks, (output, declared) => declared ?? output.Rank)];
             _convertedSnapshotComputed = true;
         }
 

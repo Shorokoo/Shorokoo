@@ -100,17 +100,18 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var claimed = new HashSet<FastTensorKey>(graph.Inputs);
             var identityAttrDefs = Definitions.NodeDefinitions[OpCodes.IDENTITY].AttributeDefs;
 
-            for (int i = 0; i < graph.Outputs.Count; i++)
+            var outputs = graph.Outputs;
+            for (int i = 0; i < outputs.Count; i++)
             {
-                var output = graph.Outputs[i];
+                var output = outputs[i];
                 if (output.IsEmpty || claimed.Add(output)) continue;
 
                 var idKey = FastNodeKey.New();
                 var idOutputKey = new FastTensorKey(idKey, 0);
-                // Appended at the very end, where every scope is closed, so the linear order
+                // At the end of the body, where every scope is closed, so the linear order
                 // stays valid. The value being wrapped is a formal parameter (or an output
                 // already emitted), so it is in scope there.
-                graph.Nodes.Add(new FastNode
+                graph.InsertAtBodyEnd(new FastNode
                 {
                     Key = idKey,
                     OpCode = OpCodes.IDENTITY,
@@ -127,7 +128,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         [""] = new List<FastTensorKey?> { idOutputKey },
                     },
                 });
-                graph.Outputs[i] = idOutputKey;
+                graph.RetargetOutput(i, idOutputKey);
                 claimed.Add(idOutputKey);
             }
         }

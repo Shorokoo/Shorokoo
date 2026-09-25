@@ -67,9 +67,7 @@ namespace Shorokoo.Core.Nodes.Processors.Training
             // included, since none of these counts reads one (the check above), so the resolver
             // is input-free.
             var resolverGraph = graph.Clone();
-            resolverGraph.Outputs = new List<FastTensorKey>(iterCountKeys);
-            resolverGraph.OutputUniqueNames = new List<string?>(new string?[iterCountKeys.Count]);
-            resolverGraph.OutputRankOverrides = null;
+            resolverGraph.SetOutputs(iterCountKeys);
             FastProcessorHelper.RemoveUnreachableNodes(resolverGraph, keepUnreadInputs: false);
 
             var resolvedData = ResolveIterCountValues(resolverGraph, iterCountKeys, compute);
@@ -112,10 +110,6 @@ namespace Shorokoo.Core.Nodes.Processors.Training
                 }
             }
 
-            // Rewire graph outputs in case any output is itself a former iter-count tensor.
-            for (int i = 0; i < graph.Outputs.Count; i++)
-                if (remap.TryGetValue(graph.Outputs[i], out var newKey))
-                    graph.Outputs[i] = newKey;
 
             // CONSTANT has no inputs, so the new nodes are topologically valid at the
             // start of the body.

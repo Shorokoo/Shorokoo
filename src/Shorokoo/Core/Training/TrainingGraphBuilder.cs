@@ -165,7 +165,7 @@ public static class TrainingGraphBuilder
                 var fieldDef = stateStructDef.Fields[i];
                 var getField = Nodes.Processors.Fast.FastInternalOp.TensorStructGetField(
                     stateStructInputKey.Value, fieldDef.Name, fieldDef.ElementType, fieldDef.Rank, fieldDef.Structure);
-                fastGraph.Nodes.Add(getField);
+                fastGraph.InsertAtBodyEnd(getField);
                 headNodesInOrder.Add(getField);
                 stateFieldKeys[i] = new FastTensorKey(getField.Key, 0);
             }
@@ -207,7 +207,7 @@ public static class TrainingGraphBuilder
             var fieldDef = modelInputStructDef.Fields[i];
             var getField = Nodes.Processors.Fast.FastInternalOp.TensorStructGetField(
                 modelInputStructInputKey, fieldDef.Name, fieldDef.ElementType, fieldDef.Rank, fieldDef.Structure);
-            fastGraph.Nodes.Add(getField);
+            fastGraph.InsertAtBodyEnd(getField);
             headNodesInOrder.Add(getField);
             modelInputFieldKeys[i] = new FastTensorKey(getField.Key, 0);
         }
@@ -250,7 +250,7 @@ public static class TrainingGraphBuilder
 
         // Step 10 (was step 9): emit AUTO_GRAD node.
         var autoGradNode = Nodes.Processors.Fast.FastInternalOp.AutoGrad(lossOutputKey, rebuiltParamFieldKeys);
-        fastGraph.Nodes.Add(autoGradNode);
+        fastGraph.InsertAtBodyEnd(autoGradNode);
         var gradientKeys = new FastTensorKey[rebuiltParamFieldKeys.Length];
         for (int i = 0; i < rebuiltParamFieldKeys.Length; i++)
             gradientKeys[i] = new FastTensorKey(autoGradNode.Key, i);
@@ -263,7 +263,7 @@ public static class TrainingGraphBuilder
         var stateOutputDType = DType.GetOrCreateForTensorStruct(stateStructDef);
         var updatedStateStructNode = Nodes.Processors.Fast.FastInternalOp.TensorStructCreate(
             stateOutputDType, stateUpdateOutputs);
-        fastGraph.Nodes.Add(updatedStateStructNode);
+        fastGraph.InsertAtBodyEnd(updatedStateStructNode);
         var updatedStateStructKey = new FastTensorKey(updatedStateStructNode.Key, 0);
 
         // Step 13 (was step 12): finalize fastGraph's inputs and outputs.
@@ -275,9 +275,7 @@ public static class TrainingGraphBuilder
         fastGraph.SetInputs(finalInputs);
 
         // Outputs: [loss, gradient_struct, state_struct].
-        fastGraph.Outputs = new List<FastTensorKey> { lossOutputKey, gradientStructKey, updatedStateStructKey };
-        fastGraph.OutputUniqueNames = new List<string?>(new string?[3]);
-        fastGraph.OutputRankOverrides = null;
+        fastGraph.SetOutputs([lossOutputKey, gradientStructKey, updatedStateStructKey]);
 
         Nodes.Processors.Fast.FastProcessorHelper.RemoveUnreachableNodes(fastGraph);
 
@@ -355,9 +353,7 @@ public static class TrainingGraphBuilder
             Shorokoo.Core.Graph.RepresentativeInputShapes.Set(
                 targetInputNode, TrainingRig.RepresentativeTargetShape(concreteModel, lossGraph));
         }
-        graph.Outputs = [lossOutputKey];
-        graph.OutputUniqueNames = [null];
-        graph.OutputRankOverrides = null;
+        graph.SetOutputs([lossOutputKey]);
 
         Nodes.Processors.Fast.FastProcessorHelper.RemoveUnreachableNodes(graph);
 

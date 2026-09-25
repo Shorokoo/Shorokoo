@@ -162,8 +162,8 @@ namespace Shorokoo.Core.Nodes.Processors.Training
                 }
             }
 
-            // Rewire every input slot of every surviving node, replacing keys that match
-            // a remap entry with the chain's terminus.
+            // Rewire every input slot of every surviving node (the output nodes among them),
+            // replacing keys that match a remap entry with the chain's terminus.
             foreach (var node in graph.Nodes)
             {
                 if (nodesToRemove.Contains(node.Key)) continue;
@@ -176,13 +176,6 @@ namespace Shorokoo.Core.Nodes.Processors.Training
                             slots[i] = ResolveRemap(remap, tk);
                     }
                 }
-            }
-
-            // Rewire graph outputs.
-            for (int i = 0; i < graph.Outputs.Count; i++)
-            {
-                if (remap.ContainsKey(graph.Outputs[i]))
-                    graph.Outputs[i] = ResolveRemap(remap, graph.Outputs[i]);
             }
 
             graph.Nodes.RemoveAll(n => nodesToRemove.Contains(n.Key));
@@ -207,7 +200,7 @@ namespace Shorokoo.Core.Nodes.Processors.Training
 
             // Append one state output per field — the value that field ends the forward holding.
             foreach (var su in currentByField)
-                graph.Outputs.Add(su);
+                graph.AddOutput(su);
 
             FastProcessorHelper.RemoveUnreachableNodes(graph);
 

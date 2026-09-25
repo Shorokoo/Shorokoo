@@ -87,10 +87,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             }
 
             foreach (var key in newStateOutputs)
-            {
-                graph.Outputs.Add(key);
-                graph.OutputUniqueNames.Add(null);
-            }
+                graph.AddOutput(key);
         }
 
         /// <summary>

@@ -220,7 +220,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // The initialization graph takes no input at all — each chunk below drops the inputs
             // its initializer does not read, which is every one — and each parameter's
             // initializer output becomes a graph output.
-            workGraph.OutputRankOverrides = null;
 
             var builder = ImmutableDictionary.CreateBuilder<ModelId, TensorData>();
             for (int i = 0; i < collectedOutputKeys.Count; i++)
@@ -297,8 +296,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             InternalComputationGraph workGraph, FastTensorKey outputKey)
         {
             var chunk = workGraph.Clone();
-            chunk.Outputs = new List<FastTensorKey> { outputKey };
-            chunk.OutputUniqueNames = new List<string?> { null };
+            chunk.SetOutputs([outputKey]);
             FastProcessorHelper.RemoveUnreachableNodes(chunk, keepUnreadInputs: false);
             return chunk;
         }

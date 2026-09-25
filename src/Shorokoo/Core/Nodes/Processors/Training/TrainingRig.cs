@@ -1814,7 +1814,7 @@ namespace Shorokoo
                 var f = TrainableParamStructDef.Fields[i];
                 var node = Shorokoo.Core.Nodes.Processors.Fast.FastInternalOp.TensorStructGetField(
                     trainableParamStructInputKey, f.Name, f.ElementType, f.Rank, f.Structure);
-                fastTraining.Nodes.Add(node);
+                fastTraining.InsertAtBodyEnd(node);
                 headNodesInOrder.Add(node);
                 paramFieldKeys[i] = new FastTensorKey(node.Key, 0);
             }
@@ -1825,7 +1825,7 @@ namespace Shorokoo
                 var f = gradStructDef.Fields[i];
                 var node = Shorokoo.Core.Nodes.Processors.Fast.FastInternalOp.TensorStructGetField(
                     gradStructOutputKey, f.Name, f.ElementType, f.Rank, f.Structure);
-                fastTraining.Nodes.Add(node);
+                fastTraining.InsertAtBodyEnd(node);
                 gradFieldKeys[i] = new FastTensorKey(node.Key, 0);
             }
 
@@ -1932,7 +1932,7 @@ namespace Shorokoo
                     var f = hyperFields[i];
                     var node = Shorokoo.Core.Nodes.Processors.Fast.FastInternalOp.TensorStructGetField(
                         hyperparamsInputKey.Value, f.Name, f.ElementType, f.Rank, f.Structure);
-                    fastTraining.Nodes.Add(node);
+                    fastTraining.InsertAtBodyEnd(node);
                     headNodesInOrder.Add(node);
                     hyperparamKeys[runtimeIndices[i]] = new FastTensorKey(node.Key, 0);
                     _initialHyperparamFields[f.Name] = SeedOf(runtimeIndices[i]);
@@ -2002,7 +2002,7 @@ namespace Shorokoo
                 // keeps the literal.
                 var node = Shorokoo.Core.Nodes.Processors.Fast.FastInternalOp.Constant(
                     _hyperparamInitialCounterValues[h]!.CopyTo(ComputeContext.Host).MoveToAttribute());
-                fastTraining.Nodes.Add(node);
+                fastTraining.InsertAtBodyEnd(node);
                 headNodesInOrder.Add(node);
                 hyperparamKeys[h] = new FastTensorKey(node.Key, 0);
             }
@@ -2059,7 +2059,7 @@ namespace Shorokoo
                     var f = OptimizerStateDef.Fields[i];
                     var node = Shorokoo.Core.Nodes.Processors.Fast.FastInternalOp.TensorStructGetField(
                         optStateInputKey.Value, f.Name, f.ElementType, f.Rank, f.Structure);
-                    fastTraining.Nodes.Add(node);
+                    fastTraining.InsertAtBodyEnd(node);
                     headNodesInOrder.Add(node);
                     optStateFieldKeys[i] = new FastTensorKey(node.Key, 0);
                 }
@@ -2092,7 +2092,7 @@ namespace Shorokoo
             var paramDType = DType.GetOrCreateForTensorStruct(TrainableParamStructDef);
             var updatedParamStructNode = Shorokoo.Core.Nodes.Processors.Fast.FastInternalOp.TensorStructCreate(
                 paramDType, updatedParamKeys);
-            fastTraining.Nodes.Add(updatedParamStructNode);
+            fastTraining.InsertAtBodyEnd(updatedParamStructNode);
             var updatedParamStructKey = new FastTensorKey(updatedParamStructNode.Key, 0);
 
             // Pack updated optimizer state into struct (if non-empty).
@@ -2102,7 +2102,7 @@ namespace Shorokoo
                 var optStateDType = DType.GetOrCreateForTensorStruct(OptimizerStateDef);
                 var optStateOutputNode = Shorokoo.Core.Nodes.Processors.Fast.FastInternalOp.TensorStructCreate(
                     optStateDType, updatedOptStateFieldKeys);
-                fastTraining.Nodes.Add(optStateOutputNode);
+                fastTraining.InsertAtBodyEnd(optStateOutputNode);
                 updatedOptStateStructKey = new FastTensorKey(optStateOutputNode.Key, 0);
             }
 
@@ -2133,9 +2133,7 @@ namespace Shorokoo
             newOutputs.Add(lossOutputKey);
 
             fastTraining.SetInputs(newInputs);
-            fastTraining.Outputs = newOutputs;
-            fastTraining.OutputUniqueNames = new List<string?>(new string?[newOutputs.Count]);
-            fastTraining.OutputRankOverrides = null;
+            fastTraining.SetOutputs(newOutputs);
 
             Stage("PruneAndOrderTrainingStep");
             Shorokoo.Core.Nodes.Processors.Fast.FastProcessorHelper.RemoveUnreachableNodes(fastTraining);
@@ -3928,8 +3926,7 @@ namespace Shorokoo
                 var built = builtByIndex[h];
                 var mapped = built.CounterNames.Select(c => counterKeyByName[c]).ToArray();
                 var replayed = Shorokoo.Core.Nodes.Processors.Fast.FastReplay.ReplayInto(composed, built.Graph, mapped);
-                composed.Outputs.Add(replayed[0]);
-                composed.OutputUniqueNames.Add(NameOf(h));
+                composed.AddOutput(replayed[0], NameOf(h));
                 scheduledNames.Add(NameOf(h));
             }
 
@@ -3945,7 +3942,7 @@ namespace Shorokoo
         internal static ComputationGraph SplitSchedulerOutput(ComputationGraph composedScheduler, string outputName)
         {
             var composed = composedScheduler.ToInternal().Clone();
-            int oi = composed.OutputUniqueNames.IndexOf(outputName);
+            int oi = composed.OutputNames.ToList().IndexOf(outputName);
             if (oi < 0)
                 throw new System.IO.InvalidDataException(
                     $"The composed scheduler model has no output named '{outputName}'; the checkpoint's " +
@@ -3974,8 +3971,7 @@ namespace Shorokoo
             var g = new InternalComputationGraph();
             foreach (var n in composed.Nodes)
                 if (reachedNodes.Contains(n.Key)) g.Nodes.Add(n);
-            g.Outputs.Add(outKey);
-            g.OutputUniqueNames.Add(outputName);
+            g.AddOutput(outKey, outputName);
             return new ComputationGraph(g, GraphKind.ConcreteModel);
         }
 

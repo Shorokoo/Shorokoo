@@ -115,7 +115,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
         /// <summary>
         /// Removes nodes from <see cref="InternalComputationGraph.Nodes"/> that are not
-        /// reachable from the graph's outputs. This cleans up dead nodes left behind
+        /// reachable from the graph's output nodes, which are kept. This cleans up dead nodes left behind
         /// by native in-place processors that disconnect nodes without removing them.
         /// The graph's inputs are kept, read or not, unless <paramref name="keepUnreadInputs"/>
         /// is false: then an input no output reaches is removed with the rest.
@@ -145,8 +145,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     worklist.Enqueue(nk);
             }
 
-            foreach (var outputKey in graph.Outputs)
-                EnqueueTensor(outputKey);
+            // The output nodes are the roots: kept, and everything they read.
+            foreach (var outputNode in graph.OutputNodes)
+                if (reachable.Add(outputNode.Key))
+                    worklist.Enqueue(outputNode.Key);
 
             // Graph inputs must keep their producer (MODEL_*INPUT) nodes alive even
             // if no path from any output reaches them — otherwise graph.Inputs ends
@@ -266,13 +268,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     if (nodeKeyMap.TryGetValue(openKey, out var newOpenKey))
                         node.GraphOpenNodeKey = newOpenKey;
                 }
-            }
-
-            // Phase 4: remap graph-level outputs (the inputs are their nodes' outputs, remapped above)
-            for (int i = 0; i < sub.Outputs.Count; i++)
-            {
-                if (tensorKeyMap.TryGetValue(sub.Outputs[i], out var newTk))
-                    sub.Outputs[i] = newTk;
             }
 
             // Validation: all GraphOpenNodeKey references must resolve to a node in the subgraph.
@@ -1036,9 +1031,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     : new HashSet<FastTensorKey>(subFastGraph.Outputs);
 
                 // Insert the callee's body nodes with remapped inputs. Its input nodes stay behind:
-                // each formal is bound to the caller's argument, so nothing spliced reads them.
+                // each formal is bound to the caller's argument, so nothing spliced reads them. So
+                // do its output nodes: what they read, the invoke's outputs now name (below).
                 var unboundFormals = new HashSet<FastTensorKey>(formals.Where(k => !inputRemap.ContainsKey(k)));
-                foreach (var subNode in subFastGraph.Nodes.Skip(formals.Count))
+                var subOutputs = subFastGraph.Outputs;
+                foreach (var subNode in subFastGraph.Nodes.Take(subFastGraph.BodyEnd).Skip(formals.Count))
                 {
                     if (unboundFormals.Count > 0 && subNode.Inputs.Any(k => k is FastTensorKey fk && unboundFormals.Contains(fk)))
                         throw new InvalidOperationException(
@@ -1066,12 +1063,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 // FastReplay.ReplayInto states: a pass-through output names a formal
                 // parameter, so it travels inputRemap like every other callee reference.
                 var invokeOutputs = fastNode.Outputs;
-                for (int i = 0; i < invokeOutputs.Count && i < subFastGraph.Outputs.Count; i++)
+                for (int i = 0; i < invokeOutputs.Count && i < subOutputs.Count; i++)
                 {
                     if (invokeOutputs[i] is FastTensorKey invokeOutKey)
-                        outputRemap[invokeOutKey] = inputRemap.TryGetValue(subFastGraph.Outputs[i], out var remapped)
+                        outputRemap[invokeOutKey] = inputRemap.TryGetValue(subOutputs[i], out var remapped)
                             ? remapped
-                            : subFastGraph.Outputs[i];
+                            : subOutputs[i];
                 }
 
                 // Don't add the invoke node itself — it's been replaced by the subgraph.
@@ -1085,7 +1082,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             graph.Nodes = newNodes;
 
-            // Apply output remaps to all node inputs and graph outputs
+            // Apply output remaps to all node inputs (the output nodes' among them)
             if (outputRemap.Count > 0)
             {
                 // Resolve transitive remap chains
@@ -1108,12 +1105,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                                 inputList[j] = replacement;
                         }
                     }
-                }
-
-                for (int i = 0; i < graph.Outputs.Count; i++)
-                {
-                    if (outputRemap.TryGetValue(graph.Outputs[i], out var replacement))
-                        graph.Outputs[i] = replacement;
                 }
             }
 
@@ -2770,12 +2761,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 }
             }
 
-            for (int i = 0; i < graph.Outputs.Count; i++)
-            {
-                if (ctx.Remap.TryGetValue(graph.Outputs[i], out var replacement))
-                    graph.Outputs[i] = replacement;
-            }
-
             graph.Nodes = finalNodes;
         }
     }
@@ -3247,13 +3232,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                             inputList[j] = replacement;
                     }
                 }
-            }
-
-            // Also remap graph outputs.
-            for (int i = 0; i < graph.Outputs.Count; i++)
-            {
-                if (remap.TryGetValue(graph.Outputs[i], out var replacement))
-                    graph.Outputs[i] = replacement;
             }
 
             // Rebuild graph.Nodes: drop nodesToRemove, splice each origin node's
@@ -4428,12 +4406,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         }
                     }
                 }
-
-                for (int i = 0; i < graph.Outputs.Count; i++)
-                {
-                    if (remap.TryGetValue(graph.Outputs[i], out var replacement))
-                        graph.Outputs[i] = replacement;
-                }
             }
 
             System.Diagnostics.Debug.Assert(graph.IsLinearOrderValid(), "graph.IsLinearOrderValid()");
@@ -5109,11 +5081,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     }
                 }
             }
-            for (int i = 0; i < graph.Outputs.Count; i++)
-            {
-                if (remap.TryGetValue(graph.Outputs[i], out var replacement))
-                    graph.Outputs[i] = replacement;
-            }
 
             // Drop the folded IF_OPEN / IF_CLOSE pairs. The losing branch's body
             // nodes are now unreachable from graph.Outputs and from any surviving
@@ -5329,11 +5296,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                             inputList[j] = replacement;
                     }
                 }
-            }
-            for (int i = 0; i < graph.Outputs.Count; i++)
-            {
-                if (remap.TryGetValue(graph.Outputs[i], out var replacement))
-                    graph.Outputs[i] = replacement;
             }
 
             // Drop the folded consumer nodes; put any freshly-minted scalar
@@ -5634,8 +5596,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     foreach (var ik in kvp.Value)
                         if (ik is FastTensorKey ikt && bodyOutputKeys.Contains(ikt)) return false;
             }
-            foreach (var outK in graph.Outputs)
-                if (bodyOutputKeys.Contains(outK)) return false;
 
             // OPEN outputs may be consumed by body nodes OR by the matching CLOSE
             // (CLOSE's break input typically threads through OPEN's vestigal-true
@@ -5657,8 +5617,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     foreach (var ik in kvp.Value)
                         if (ik is FastTensorKey ikt && openOutputKeys.Contains(ikt)) return false;
             }
-            foreach (var outK in graph.Outputs)
-                if (openOutputKeys.Contains(outK)) return false;
 
             return true;
         }
@@ -6385,9 +6343,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     }
                 }
             }
-            for (int i = 0; i < graph.Outputs.Count; i++)
-                if (remap.TryGetValue(graph.Outputs[i], out var rep))
-                    graph.Outputs[i] = rep;
         }
 
         private static long? ReadConstantLong(FastNode constNode)
@@ -6432,7 +6387,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             {
                 var op = node.OpCode;
 
-                if (InternalOpCodes.IsModelInputOp(op) || op == InternalOpCodes.MODEL_PARAM_DATA)
+                // An output node computes nothing to fold, and reading a constant does not make
+                // the constant worth folding.
+                if (InternalOpCodes.IsModelInputOp(op) || InternalOpCodes.IsGraphOutputOp(op)
+                    || op == InternalOpCodes.MODEL_PARAM_DATA)
                     continue;
 
                 // RNG is graph-only (#136): a SHRK_RNG_SPLIT is never a host-side constant. It
@@ -6559,12 +6517,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                             list[j] = rep;
                     }
                 }
-            }
-
-            for (int i = 0; i < graph.Outputs.Count; i++)
-            {
-                if (oldToNewKey.TryGetValue(graph.Outputs[i], out var rep))
-                    graph.Outputs[i] = rep;
             }
 
             FastProcessorHelper.RemoveUnreachableNodes(graph);

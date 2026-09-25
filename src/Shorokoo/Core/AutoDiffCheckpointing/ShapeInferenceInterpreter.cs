@@ -453,12 +453,11 @@ internal class ShapeInferenceInterpreter
                 seqNodeKey, realOutputKeys.Cast<FastTensorKey?>());
             miniGraph.Nodes.Add(seqNode);
             sequenceOutKey = new FastTensorKey(seqNodeKey, 0);
-            miniGraph.Outputs.Add(sequenceOutKey.Value);
+            miniGraph.SetOutputs([sequenceOutKey.Value]);
         }
         else
         {
-            foreach (var k in freshOutputKeys)
-                if (k.HasValue) miniGraph.Outputs.Add(k.Value);
+            miniGraph.SetOutputs(realOutputKeys);
         }
 
         Shorokoo.NamedModelParam[] results;
@@ -472,10 +471,8 @@ internal class ShapeInferenceInterpreter
             // SEQUENCE_CONSTRUCT rejects). Retry without the wrap.
             if (useSequenceWrap)
             {
-                miniGraph.Nodes.RemoveAt(miniGraph.Nodes.Count - 1);
-                miniGraph.Outputs.Clear();
-                foreach (var k in freshOutputKeys)
-                    if (k.HasValue) miniGraph.Outputs.Add(k.Value);
+                miniGraph.SetOutputs(realOutputKeys);
+                miniGraph.Nodes.RemoveAt(miniGraph.BodyEnd - 1);
                 useSequenceWrap = false;
                 try { results = _computeContext.Execute(miniGraph); }
                 catch (Exception) when (CatchShapeInferenceErrors())

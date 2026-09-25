@@ -302,9 +302,9 @@ namespace Shorokoo.Core
                     .Where(n => n is not null)
                     .Distinct()
                     .ToArray();
-                System.Diagnostics.Debug.Assert(tracedNodes.Length == fastGraph.Nodes.Count,
+                System.Diagnostics.Debug.Assert(tracedNodes.Length == fastGraph.Nodes.Count - fastGraph.OutputCount,
                     "GraphBuilder pin resolution: the rebuilt traced-node set must match the " +
-                    "constructor's lowering 1:1 — a mismatch means the duplicate-key guard is " +
+                    "constructor's lowering 1:1 (the output nodes it adds aside) — a mismatch means the duplicate-key guard is " +
                     "checking a different node set than the one the graph was built from.");
                 var duplicatedKeys = tracedNodes.GroupBy(n => n!.Key)
                     .Where(g => g.Count() > 1).Select(g => g.Key).ToHashSet();

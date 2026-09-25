@@ -156,16 +156,16 @@ namespace Shorokoo.Core
             var inputInputs = FlattenTuples(inputs).Select((x, i) => ModuleParamInputBasedOn(x, InputType.ReadyInput, $"h{i}").ToVariable()).ToArray();
             var outputInputs = FlattenTuples(outputs).Select((x, i) => ModuleParamInputBasedOn(x, InputType.ReadyInput, $"h{i}").ToVariable()).ToArray();
 
-            return CreateFunctionSignatureString(hyperparamInputs, inputInputs, outputInputs, null);
+            return CreateFunctionSignatureString(hyperparamInputs, inputInputs, outputInputs, [.. outputInputs.Select(x => x.Rank)]);
         }
 
-        internal static (string moduleSignature, string modelSignature) CreateFunctionSignatureString(Variable[] hyperparams, Variable[] inputs, Variable[] outputs, int?[]? outputOverrideRanks)
+        /// <summary>The module and model signature strings: each output is written at the rank
+        /// <paramref name="outputRanks"/> gives it.</summary>
+        internal static (string moduleSignature, string modelSignature) CreateFunctionSignatureString(Variable[] hyperparams, Variable[] inputs, Variable[] outputs, IReadOnlyList<int?> outputRanks)
         {
             var signatureHyperparamPart = string.Join(", ", hyperparams.Select(ToSignatureString));
             var signatureInputPart = string.Join(", ", inputs.Select(ToSignatureString));
-            var signatureOutputPart = outputOverrideRanks is null ?
-                    string.Join(", ", outputs.Select(ToSignatureString)) :
-                    string.Join(",", outputs.Zip(outputOverrideRanks).Select(x => ToSignatureStringWithOverride(x.First, x.Second)));
+            var signatureOutputPart = string.Join(", ", outputs.Zip(outputRanks).Select(x => ToSignatureStringWithOverride(x.First, x.Second)));
 
             return ($"{signatureHyperparamPart} | {signatureInputPart} > {signatureOutputPart}",
                 $"{signatureInputPart} > {signatureOutputPart}");
@@ -213,13 +213,13 @@ namespace Shorokoo.Core
 
             var outputTypes = FlattenTuples(outputs).ToList();
             var outputVariables = outputTypes.Select((x) => InternalGlobals.DefaultVariable(x)).ToArray();
-            var rankOverrides = outputTypes.Select((x) =>
+            var declaredRanks = outputTypes.Select((x) =>
                                 x.IsAssignableTo(typeof(IVector)) ? 1 :
                                 x.IsAssignableTo(typeof(IScalar)) ? 0 :
                                 (int?)null).ToArray();
 
 
-            var graph = new InternalComputationGraph([.. hyperparamInputs, .. inputInputs], [..outputVariables], [..rankOverrides]);
+            var graph = new InternalComputationGraph([.. hyperparamInputs, .. inputInputs], [..outputVariables], [..declaredRanks]);
 
             return StoreCachedSignature(signature, graph);
         }

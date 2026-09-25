@@ -140,8 +140,7 @@ public class ModulesCoverageTests
     private static string? ModelParamSignature(ComputationGraph g)
         => g.ToInternal().InputTensors.Single(v => v.Type == DType.Model).ModuleFn?.ModelSignatureString;
 
-    // Shorokoo/Shorokoo#392: the signature joins outputs with "," when OutputRankOverrides is set and ", " when a reload leaves it null.
-    [Fact(Skip = "Shorokoo/Shorokoo#392")]
+    [Fact]
     public void TestAMultiOutputModuleSignatureStringReadsTheSameAfterASrkRoundTrip()
         => Assert.Equal(Signatures(Modules.CallerOfSwapSub.ComputationGraph), Signatures(SrkRoundTrip(Modules.CallerOfSwapSub.ComputationGraph)));
 

@@ -52,9 +52,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         {
             var keys = nodes.SelectMany(n => (FastTensorKey[])[n.Inputs[0]!.Value, n.Inputs[1]!.Value]).Distinct().ToList();
             var resolver = graph.Clone();
-            resolver.Outputs = keys;
-            resolver.OutputUniqueNames = [.. new string?[keys.Count]];
-            resolver.OutputRankOverrides = null;
+            resolver.SetOutputs(keys);
             FastProcessorHelper.RemoveUnreachableNodes(resolver);
 
             IData[]? samples = null;

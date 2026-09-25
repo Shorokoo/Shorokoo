@@ -103,10 +103,6 @@ internal static class FastReplaceTrainableParamsWithInputProcessor
             }
         }
 
-        // Rewire graph outputs in case any output is itself a former param key.
-        for (int i = 0; i < graph.Outputs.Count; i++)
-            if (remap.TryGetValue(graph.Outputs[i], out var newKey))
-                graph.Outputs[i] = newKey;
 
         graph.Nodes.RemoveAll(n => paramNodeKeys.Contains(n.Key));
 

@@ -5,14 +5,15 @@ using Shorokoo.Core.Nodes.Processors.Helpers;
 using System;
 using System.Collections.Generic;
 using Shorokoo.Core.Nodes.Processors.AutoGrad;
+using Shorokoo.Core.Nodes.NodeDefinitions;
 
 namespace Shorokoo.Core.Nodes.Processors.Fast
 {
     /// <summary>
     /// Inlines a source <see cref="InternalComputationGraph"/> into a target graph by cloning the
-    /// source's non-input nodes (with fresh keys), remapping every reference to a source-input
-    /// key onto a caller-provided <see cref="FastTensorKey"/>, and appending the cloned nodes
-    /// to <see cref="InternalComputationGraph.Nodes"/>.
+    /// source's body nodes (with fresh keys), remapping every reference to a source-input
+    /// key onto a caller-provided <see cref="FastTensorKey"/>, and putting the cloned nodes at
+    /// the end of the target's body.
     ///
     /// <para>
     /// Replaces the CG-side <c>ReplayLossGraph</c> in <c>TrainingGraphBuilder</c> and
@@ -24,8 +25,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     {
         /// <summary>
         /// Splices a clone of <paramref name="source"/> into <paramref name="target"/>:
-        /// every node of <paramref name="source"/> except its input-producing nodes is cloned,
-        /// re-keyed, and appended to <paramref name="target"/>.<see cref="InternalComputationGraph.Nodes"/>.
+        /// every node of <paramref name="source"/> except its input and output nodes is cloned,
+        /// re-keyed, and put at the end of <paramref name="target"/>'s body, before its outputs.
         /// References to <paramref name="source"/>'s input keys are rewritten to point at the
         /// matching entry of <paramref name="mappedInputs"/>.
         /// </summary>
@@ -75,10 +76,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             foreach (var ik in clone.Inputs)
                 if (!ik.IsEmpty) inputNodeKeys.Add(ik.FastNodeKey);
 
-            // 4. Splice body nodes into target, rewriting references to source inputs.
+            // 4. Splice body nodes into target, rewriting references to source inputs. The
+            //    source's output nodes stay behind: what they read is returned instead.
+            var outputKeys = clone.Outputs;
+            var spliced = new List<FastNode>(clone.Nodes.Count);
             foreach (var node in clone.Nodes)
             {
-                if (inputNodeKeys.Contains(node.Key))
+                if (inputNodeKeys.Contains(node.Key) || InternalOpCodes.IsGraphOutputOp(node.OpCode))
                     continue;
 
                 foreach (var (_, slots) in node.FullInputs)
@@ -90,14 +94,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     }
                 }
 
-                target.Nodes.Add(node);
+                spliced.Add(node);
             }
+            target.InsertAtBodyEnd(spliced);
 
             // 5. Map cloned outputs through the remap.
-            var outputs = new FastTensorKey[clone.Outputs.Count];
-            for (int i = 0; i < clone.Outputs.Count; i++)
+            var outputs = new FastTensorKey[outputKeys.Count];
+            for (int i = 0; i < outputKeys.Count; i++)
             {
-                var k = clone.Outputs[i];
+                var k = outputKeys[i];
                 outputs[i] = remap.TryGetValue(k, out var mapped) ? mapped : k;
             }
             return outputs;

@@ -40,7 +40,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             var structDType = DType.GetOrCreateForTensorStruct(structDefinition);
             var node = FastInternalOp.TensorStructCreate(structDType, gradientKeys);
-            graph.Nodes.Add(node);
+            graph.InsertAtBodyEnd(node);
             return new FastTensorKey(node.Key, 0);
         }
     }

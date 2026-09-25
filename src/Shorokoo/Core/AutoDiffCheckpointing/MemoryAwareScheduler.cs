@@ -47,7 +47,8 @@ internal class MemoryAwareScheduler
         if (nodes.Count <= 2)
             return graph;
 
-        var preferred = MemoryAwareTopologicalSort(nodes, shapeInfo);
+        // The output nodes are no part of what runs; Realize keeps them closing the list.
+        var preferred = MemoryAwareTopologicalSort(nodes.Take(graph.BodyEnd).ToList(), shapeInfo);
 
         // Reordering is a pure optimization and the INPUT order is already a valid
         // topological order, so if the greedy scope model cannot make progress fall back
@@ -75,8 +76,9 @@ internal class MemoryAwareScheduler
             return graph;
 
         // Build a fresh graph that reuses everything except the node order.
-        // The scheduler orders every node by memory alone; the inputs go back to the front, in
-        // their own order, which moves nothing a body node needs later.
+        // The scheduler orders every body node by memory alone; the inputs go back to the front,
+        // in their own order, which moves nothing a body node needs later, and the outputs stay
+        // at the end.
         var copy = graph.Clone();
         copy.Nodes = reordered.ToList();
         copy.SetInputs(graph.Inputs);

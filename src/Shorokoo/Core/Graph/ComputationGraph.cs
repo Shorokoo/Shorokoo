@@ -55,10 +55,8 @@ namespace Shorokoo.Graph
         }
 
         private readonly ImmutableArray<FrozenNode> _nodes;
-        private readonly ImmutableArray<FastTensorKey> _outputs;
         private readonly ImmutableArray<string?> _inputNames;
         private readonly ImmutableArray<string?> _outputNames;
-        private readonly ImmutableArray<int?>? _outputRankOverrides;
 
         /// <summary>
         /// What this graph is — a <see cref="GraphKind.Module"/>, a
@@ -88,15 +86,16 @@ namespace Shorokoo.Graph
                 throw new System.InvalidOperationException(
                     $"ComputationGraph: input node #{misplaced} ({graph.Nodes[misplaced].OpCode}) follows a body node; " +
                     "a graph's input nodes must form the prefix of its node list.");
+            // Likewise its outputs are the output nodes that close it.
+            if (graph.FindMisplacedOutput() is int stray)
+                throw new System.InvalidOperationException(
+                    $"ComputationGraph: output node #{stray} precedes a body node ({graph.Nodes[stray + 1].OpCode}); " +
+                    "a graph's output nodes must form the suffix of its node list.");
             RepresentativeInputShapes.Verify(graph, kind);
             Kind = kind;
             _nodes = graph.Nodes.Select(Freeze).ToImmutableArray();
             _inputNames = [.. graph.InputNames];
-            _outputs = [.. graph.Outputs];
-            _outputNames = [.. graph.OutputUniqueNames];
-            _outputRankOverrides = graph.OutputRankOverrides is null
-                ? null
-                : [.. graph.OutputRankOverrides];
+            _outputNames = [.. graph.OutputNames];
         }
 
         /// <summary>Re-stamping constructor: shares the frozen (immutable) data.</summary>
@@ -105,9 +104,7 @@ namespace Shorokoo.Graph
             Kind = kind;
             _nodes = source._nodes;
             _inputNames = source._inputNames;
-            _outputs = source._outputs;
             _outputNames = source._outputNames;
-            _outputRankOverrides = source._outputRankOverrides;
         }
 
         private static FrozenNode Freeze(FastNode node) => new()
@@ -158,7 +155,8 @@ namespace Shorokoo.Graph
         /// </summary>
         public IReadOnlyList<string?> InputNames => _inputNames;
 
-        /// <summary>Original <c>UniqueName</c> of each graph output, in declaration order.</summary>
+        /// <summary>The name of each graph output, in declaration order, read off the output nodes
+        /// that close the graph.</summary>
         public IReadOnlyList<string?> OutputNames => _outputNames;
 
         /// <summary>
@@ -170,12 +168,7 @@ namespace Shorokoo.Graph
         /// </summary>
         public InternalComputationGraph ToInternal()
         {
-            var graph = new InternalComputationGraph
-            {
-                Outputs = [.. _outputs],
-                OutputUniqueNames = [.. _outputNames],
-                OutputRankOverrides = _outputRankOverrides?.ToArray(),
-            };
+            var graph = new InternalComputationGraph();
             foreach (var node in _nodes)
                 graph.Nodes.Add(Thaw(node));
             System.Diagnostics.Debug.Assert(graph.IsLinearOrderValid(), "thawed.IsLinearOrderValid()");

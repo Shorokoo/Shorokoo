@@ -271,12 +271,13 @@ namespace Shorokoo.Core.Factory
 
         /// <summary>
         /// True for nodes that are part of the model boundary rather than ops
-        /// emitted as <c>NodeProto</c>: graph inputs (variants), parameter data,
+        /// emitted as <c>NodeProto</c>: graph inputs (variants), graph outputs, parameter data,
         /// and the open side of an open/close pair.
         /// </summary>
         public static bool IsBoundaryOrOpen(FastNode node)
             => IsOpenOpCode(node.OpCode)
             || InternalOpCodes.IsModelInputOp(node.OpCode)
+            || InternalOpCodes.IsGraphOutputOp(node.OpCode)
             || node.OpCode == InternalOpCodes.MODEL_PARAM_DATA;
 
         public static bool IsOpenOpCode(string opCode)

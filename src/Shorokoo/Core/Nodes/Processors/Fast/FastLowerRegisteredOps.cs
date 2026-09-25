@@ -157,8 +157,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             for (int i = 0, present = 0; i < standIns.Length; i++)
                 if (standIns[i] is not null) standInKeyBySlot[i] = built.Inputs[present++];
 
-            // The stand-ins are the built graph's input prefix; the decomposition is what follows it.
-            List<FastNode> body = [.. built.Nodes.Skip(built.InputCount)];
+            // The stand-ins are the built graph's input prefix and its output nodes its suffix; the
+            // decomposition is what lies between.
+            List<FastNode> body = [.. built.Nodes.Take(built.BodyEnd).Skip(built.InputCount)];
             if (body.Count == 0) return null;
 
             foreach (var node in body)

@@ -118,8 +118,12 @@ internal static partial class FastListAllSpecificModelIdsUsed
         finalNodes.AddRange(context.NewNodes); // shared constants come first
         context.NewNodes.Clear();
 
+        var outputs = workGraph.Outputs;
         foreach (var node in workGraph.Nodes)
         {
+            // The output nodes are replaced below by one reading the combined mask.
+            if (InternalOpCodes.IsGraphOutputOp(node.OpCode)) continue;
+
             // LOOP_OPEN / LOOP_CLOSE mutate the node in place AND add mask-computing nodes
             // that become new INPUTS of the same (possibly mutated) node. Those new nodes
             // must be placed BEFORE the node itself in topological order so QEE can
@@ -154,11 +158,11 @@ internal static partial class FastListAllSpecificModelIdsUsed
 
         // Combined mask of all graph outputs.
         var combinedOutputMask = CombineMasks(
-            workGraph.Outputs.Select(o => context.TensorMasks.TryGetValue(o, out var m) ? m : context.EmptyMaskKey),
+            outputs.Select(o => context.TensorMasks.TryGetValue(o, out var m) ? m : context.EmptyMaskKey),
             context, finalNodes);
 
         workGraph.Nodes = finalNodes;
-        workGraph.Outputs = new List<FastTensorKey> { combinedOutputMask };
+        workGraph.SetOutputs([combinedOutputMask]);
 
         // Run QEE. Use an oversized MaxDataElements so mask vectors (length numModelIds) are
         // fully materialized — the default 256 would drop data on anything but tiny models.

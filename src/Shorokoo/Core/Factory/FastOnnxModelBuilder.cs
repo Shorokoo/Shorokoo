@@ -80,11 +80,12 @@ namespace Shorokoo.Core.Factory
         /// <para>
         /// Graph inputs and outputs are named from the graph's signature
         /// (<see cref="InternalComputationGraph.InputNames"/> /
-        /// <see cref="InternalComputationGraph.OutputUniqueNames"/>), deduplicated
+        /// <see cref="InternalComputationGraph.OutputNames"/>), deduplicated
         /// deterministically; unnamed slots fall back to <c>input_{i}</c> /
         /// <c>output_{i}</c>. Dtypes are always stamped on the I/O ValueInfos, and
         /// dimensions are stamped wherever they are known (known rank → per-dim
-        /// symbolic entries, unknown rank → fully dynamic).
+        /// symbolic entries, unknown rank → fully dynamic); an output whose rank the ops do not
+        /// tell takes the rank its output node declares.
         /// <see cref="Shorokoo.Onnx.OnnxModelImporter"/> round-trips the names.
         /// </para>
         /// </summary>
@@ -144,7 +145,9 @@ namespace Shorokoo.Core.Factory
         /// <param name="emitInputsAsNodes">Native <c>.srk</c> on-disk dialect only: emit every top-level
         /// model-input op as an ordinary <see cref="NodeProto"/> (carrying all its attributes, incl. the
         /// representative-input shape) in graph-input order, and emit no graph-input
-        /// <see cref="ValueInfoProto"/>s; the loader rebuilds the input list from those nodes. Off
+        /// <see cref="ValueInfoProto"/>s; the loader rebuilds the input list from those nodes. The
+        /// output nodes are emitted as nodes too, closing the node list, so an output's name and
+        /// declared rank ride on them; the graph-output ValueInfos still name the output values. Off
         /// (default) for the execution/compile path, which must keep proper ONNX graph inputs for ONNX
         /// Runtime.</param>
         /// <param name="inputDims">Execution path only: the concrete dimensions to stamp on each top-level
@@ -186,6 +189,22 @@ namespace Shorokoo.Core.Factory
                 node.Attributes = node.Attributes.SetAttributes(
                     (OnnxOpAttributeNames.ShrkAttrRank, (object?)(long?)dims.Length));
             }
+        }
+
+        /// <summary>
+        /// Gives each output of <paramref name="prepFast"/> whose rank <paramref name="lookup"/>
+        /// leaves unknown the rank its output node declares, where it declares one: the rank its
+        /// type fixes, which is what the value will have whatever the inputs.
+        /// </summary>
+        private static void DeclareOutputRanks(
+            InternalComputationGraph prepFast, Dictionary<FastTensorKey, FastTensorInfo> lookup)
+        {
+            var outputs = prepFast.Outputs;
+            var declaredRanks = prepFast.OutputDeclaredRanks;
+            for (int i = 0; i < outputs.Count; i++)
+                if (declaredRanks[i] is int declared
+                    && lookup.TryGetValue(outputs[i], out var info) && info.Rank is null)
+                    info.Rank = declared;
         }
 
         /// <summary>
@@ -260,6 +279,7 @@ namespace Shorokoo.Core.Factory
             // An output whose rank the op-level lookup cannot tell (a loop carry fed by a
             // per-iteration parameter, say) takes it from shape inference at the representative
             // inputs, so an exported file gives every output a shape too (Shorokoo/Shorokoo#387).
+            if (vanillaExport) DeclareOutputRanks(prepFast, tensorInfoLookup);
             if (vanillaExport) InferMissingOutputRanks(fastGraph, prepFast, tensorInfoLookup);
 
             // Reorder so each IF body has then-block nodes positionally first
@@ -308,6 +328,9 @@ namespace Shorokoo.Core.Factory
                 // its signature name rides in the ValueInfo's metadata; a vanilla file is named from
                 // the signature outright (ApplySignatureIONames).
                 emitInputNameMetadata: !vanillaExport && !emitInputsAsNodes,
+                // Likewise an output's name and declared rank ride in its ValueInfo's metadata in the
+                // internal dialects that keep no output nodes.
+                emitOutputMetadata: !vanillaExport && !emitInputsAsNodes,
                 inputDims: inputDims,
                 stripCheckpointStamp: stripCheckpointStamp);
 
@@ -385,22 +408,6 @@ namespace Shorokoo.Core.Factory
             // parameter at ModelId [0], serialized as a plain initializer like any other
             // MODEL_PARAM_DATA and reloaded the same way.)
 
-            // ----- 6c. Internal dialect only: the graph-output ValueInfos must keep their
-            // raw N{k}_T{s} tensor ids (the loader parses node/tensor keys out of them),
-            // so the human-readable output names ride model metadata instead — the
-            // loader restores them into OutputUniqueNames positionally. Names come
-            // from prepFast for the same reason ApplySignatureIONames uses it.
-            // (An input's name rides on its own node, or on its ValueInfo's metadata.)
-            if (!vanillaExport)
-            {
-                if (prepFast.OutputUniqueNames.Count > 0)
-                    model.MetadataProps.Add(new StringStringEntryProto
-                    {
-                        Key = OnnxOpAttributeNames.ShrkMetaOutputNames,
-                        Value = System.Text.Json.JsonSerializer.Serialize(prepFast.OutputUniqueNames),
-                    });
-            }
-
             // ----- 7. User-facing export only: enforce the vanilla dialect, then
             // finish the model boundary — typed graph outputs and signature-derived
             // I/O names. The internal dialect (.srk persistence, execution pipeline)
@@ -411,10 +418,9 @@ namespace Shorokoo.Core.Factory
                 StampGraphOutputTypes(model.Graph, prepFast, tensorInfoLookup);
                 // Names come from prepFast, not the original fastGraph: the proto's
                 // I/O slots are built positionally from prepFast's inputs and outputs, and
-                // an input's name rides on its own node (an output's in the name list
-                // every pass maintains alongside) — pairing against the original graph
-                // would silently mislabel I/O the day a pre-pass adds or drops one.
-                ApplySignatureIONames(model.Graph, prepFast.InputNames, prepFast.OutputUniqueNames);
+                // each name rides on its own input or output node — pairing against the
+                // original graph would silently mislabel I/O the day a pre-pass adds or drops one.
+                ApplySignatureIONames(model.Graph, prepFast.InputNames, prepFast.OutputNames);
             }
 
             return model;
@@ -632,10 +638,11 @@ namespace Shorokoo.Core.Factory
             // CreateOutputInfos emits exactly one ValueInfoProto per prepFast output;
             // a mismatch is a builder bug, and silently truncating here would ship
             // untyped (or wrongly typed) outputs.
-            Debug.Assert(prepFast.Outputs.Count == graph.Outputs.Count,
+            var outputs = prepFast.Outputs;
+            Debug.Assert(outputs.Count == graph.Outputs.Count,
                 "StampGraphOutputTypes: graph.Outputs must mirror prepFast.Outputs 1:1.");
-            for (int i = 0; i < prepFast.Outputs.Count; i++)
-                graph.Outputs[i] = CreateTypedValueInfo(prepFast.Outputs[i], tensorInfoLookup);
+            for (int i = 0; i < outputs.Count; i++)
+                graph.Outputs[i] = CreateTypedValueInfo(outputs[i], tensorInfoLookup);
         }
 
         /// <summary>
@@ -1714,7 +1721,8 @@ namespace Shorokoo.Core.Factory
                 opset: opset,
                 isFunction: true,
                 tensorInfoLookup: fnTensorInfoLookup,
-                stripCheckpointStamp: stripCheckpointStamp);
+                stripCheckpointStamp: stripCheckpointStamp,
+                emitOutputMetadata: true);
             if (forSession && fnTensorInfoLookup is not null)
                 WriteDequantizeZeroPoints(fnGraphProto, BuildTensorMetaByName(fnTensorInfoLookup));
 
@@ -1794,7 +1802,8 @@ namespace Shorokoo.Core.Factory
             bool emitRepresentativeMetadata = false,
             bool emitInputNameMetadata = false,
             IReadOnlyList<long[]?>? inputDims = null,
-            bool stripCheckpointStamp = true)
+            bool stripCheckpointStamp = true,
+            bool emitOutputMetadata = false)
         {
             // .srk dialect (top-level graph only): every model-input op is emitted as an ordinary
             // NodeProto (carrying all its attributes — including the representative-input shape) instead
@@ -1900,12 +1909,15 @@ namespace Shorokoo.Core.Factory
             // so they are valid at the front), and emit no graph-input ValueInfoProtos — the reader
             // reconstructs the input list from these nodes in this order.
             if (inputsAsNodes)
-                topLevelNodes.AddRange(BuildInputNodeProtos(fastGraph, opset, stripCheckpointStamp));
+                topLevelNodes.AddRange(BuildBoundaryNodeProtos(fastGraph.InputNodes, opset, stripCheckpointStamp));
             foreach (var (idx, proto) in protoByIndex.OrderBy(kv => kv.Key))
             {
                 if (swallowed.Contains(idx)) continue;
                 topLevelNodes.Add(proto);
             }
+            // .srk dialect: the output nodes close the node list the same way, in output order.
+            if (inputsAsNodes)
+                topLevelNodes.AddRange(BuildBoundaryNodeProtos(fastGraph.OutputNodes, opset, stripCheckpointStamp));
 
             var initializers = isFunction
                 ? Array.Empty<TensorProto>()
@@ -1913,7 +1925,7 @@ namespace Shorokoo.Core.Factory
             var inputInfos = inputsAsNodes
                 ? Array.Empty<ValueInfoProto>()
                 : CreateInputInfos(fastGraph, emitRepresentativeMetadata, emitInputNameMetadata, inputDims);
-            var outputInfos = CreateOutputInfos(fastGraph);
+            var outputInfos = CreateOutputInfos(fastGraph, emitOutputMetadata);
 
             return (GraphProto)OnnxIRFactory.CreateGraph(
                 graphName,
@@ -1924,20 +1936,22 @@ namespace Shorokoo.Core.Factory
         }
 
         /// <summary>
-        /// Builds the NodeProto for each model-input op, in graph-input order, for the native <c>.srk</c>
-        /// dialect (which emits inputs as ordinary nodes rather than graph-input ValueInfoProtos). Each is
+        /// Builds the NodeProto for each of <paramref name="boundaryNodes"/> — the input nodes, in
+        /// graph-input order, or the output nodes, in output order — for the native <c>.srk</c>
+        /// dialect (which emits them as ordinary nodes rather than graph-input ValueInfoProtos). Each is
         /// resolved and emitted through the same path as any interior node, so it carries all of the op's
-        /// attributes verbatim. The reader collects these nodes, in this order, as the graph's inputs.
+        /// attributes verbatim. The reader collects these nodes, in this order, as the graph's inputs
+        /// and outputs.
         /// </summary>
-        private static NodeProto[] BuildInputNodeProtos(InternalComputationGraph fastGraph, OpSetVersion opset, bool stripCheckpointStamp)
+        private static NodeProto[] BuildBoundaryNodeProtos(IReadOnlyList<FastNode> boundaryNodes, OpSetVersion opset, bool stripCheckpointStamp)
         {
             var protos = new List<NodeProto>();
-            foreach (var producer in fastGraph.InputNodes)
+            foreach (var node in boundaryNodes)
             {
-                var info = FastOpsetResolver.Resolve(producer, graphOpenNode: null, opset, stripCheckpointStamp)
+                var info = FastOpsetResolver.Resolve(node, graphOpenNode: null, opset, stripCheckpointStamp)
                     ?? throw new InvalidOperationException(
-                        $"FastOnnxModelBuilder: model-input op {producer.OpCode} did not resolve to an emittable node.");
-                protos.Add(FastOnnxProtoFactory.CreateNodeProto(producer, info, graphAttributes: null));
+                        $"FastOnnxModelBuilder: boundary op {node.OpCode} did not resolve to an emittable node.");
+                protos.Add(FastOnnxProtoFactory.CreateNodeProto(node, info, graphAttributes: null));
             }
             return protos.ToArray();
         }
@@ -2073,11 +2087,35 @@ namespace Shorokoo.Core.Factory
             return infos;
         }
 
-        private static ValueInfoProto[] CreateOutputInfos(InternalComputationGraph fastGraph)
+        /// <summary>
+        /// One ValueInfo per output, named by the value it outputs. With
+        /// <paramref name="emitOutputMetadata"/>, the output's name and declared rank ride in the
+        /// ValueInfo's metadata, as an input's name does in its own: the dialects that keep no output
+        /// nodes (a function body's formal outputs, the internal execution dialect) have nowhere else
+        /// to carry them.
+        /// </summary>
+        private static ValueInfoProto[] CreateOutputInfos(InternalComputationGraph fastGraph, bool emitOutputMetadata)
         {
-            var infos = new ValueInfoProto[fastGraph.Outputs.Count];
-            for (int i = 0; i < fastGraph.Outputs.Count; i++)
-                infos[i] = FastOnnxProtoFactory.CreateGraphOutputInfo(fastGraph.Outputs[i]);
+            var outputNodes = fastGraph.OutputNodes;
+            var infos = new ValueInfoProto[outputNodes.Count];
+            for (int i = 0; i < outputNodes.Count; i++)
+            {
+                var node = outputNodes[i];
+                infos[i] = FastOnnxProtoFactory.CreateGraphOutputInfo(InternalComputationGraph.OutputKeyOf(node));
+                if (!emitOutputMetadata) continue;
+                if (InternalComputationGraph.OutputNameOf(node) is { } name)
+                    infos[i].MetadataProps.Add(new StringStringEntryProto
+                    {
+                        Key = OnnxOpAttributeNames.ShrkAttrOutputName,
+                        Value = name,
+                    });
+                if (InternalComputationGraph.DeclaredRankOf(node) is int rank)
+                    infos[i].MetadataProps.Add(new StringStringEntryProto
+                    {
+                        Key = OnnxOpAttributeNames.ShrkAttrDeclaredRank,
+                        Value = rank.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    });
+            }
             return infos;
         }
     }

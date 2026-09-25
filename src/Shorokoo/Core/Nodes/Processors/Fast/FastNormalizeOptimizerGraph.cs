@@ -225,9 +225,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     initOutputs.Add(initNode.FullOutputs[""][0]!.Value);
                 }
 
-                stateInitGraph.Outputs = initOutputs;
-                stateInitGraph.OutputUniqueNames = initOutputs.Select(_ => (string?)null).ToList();
-                stateInitGraph.OutputRankOverrides = null;
+                stateInitGraph.SetOutputs(initOutputs);
                 FastProcessorHelper.RemoveUnreachableNodes(stateInitGraph);
             }
 
@@ -356,36 +354,21 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             // Pass 5: unwrap WITH_STATE_DEPS from the primary outputs and append the updated-state
             // tensors as outputs in state order. The link / deps nodes become dead and are pruned.
-            var newOutputs = new List<FastTensorKey>(graph.Outputs.Count + stateNodes.Count);
-            foreach (var outKey in graph.Outputs)
+            // A primary output keeps its name; the state outputs have none.
+            var primaryOutputs = graph.Outputs;
+            for (int i = 0; i < primaryOutputs.Count; i++)
             {
+                var outKey = primaryOutputs[i];
                 if (producerByOutput.TryGetValue(outKey, out var producer)
                     && producer.OpCode == InternalOpCodes.WITH_STATE_DEPS
                     && producer.FullInputs.TryGetValue("", out var wsdSlots)
                     && wsdSlots.Count > 0
                     && wsdSlots[0] is FastTensorKey wsdMain
                     && !wsdMain.IsEmpty)
-                {
-                    newOutputs.Add(wsdMain);
-                }
-                else
-                {
-                    newOutputs.Add(outKey);
-                }
+                    graph.RetargetOutput(i, wsdMain);
             }
-
-            int primaryOutputCount = newOutputs.Count;
             foreach (var upd in updatedStateKeys)
-                newOutputs.Add(upd!.Value);
-
-            var newOutputNames = new List<string?>(newOutputs.Count);
-            for (int i = 0; i < newOutputs.Count; i++)
-                newOutputNames.Add(i < primaryOutputCount && i < graph.OutputUniqueNames.Count
-                    ? graph.OutputUniqueNames[i] : null);
-
-            graph.Outputs = newOutputs;
-            graph.OutputUniqueNames = newOutputNames;
-            graph.OutputRankOverrides = null;
+                graph.AddOutput(upd!.Value);
 
             FastProcessorHelper.RemoveUnreachableNodes(graph);
 

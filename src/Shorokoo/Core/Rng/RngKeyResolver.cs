@@ -102,12 +102,8 @@ internal static class RngKeyResolver
             keys = AppendBatchSplit(keys, countersKey, batchSplit, nodes);
         }
 
-        var graph = new InternalComputationGraph
-        {
-            Nodes = nodes,
-            Outputs = [keys],
-            OutputUniqueNames = [null],
-        };
+        var graph = new InternalComputationGraph { Nodes = nodes };
+        graph.AddOutput(keys);
 
         NamedModelParam[] run;
         try

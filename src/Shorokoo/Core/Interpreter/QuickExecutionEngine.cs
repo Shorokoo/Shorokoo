@@ -206,6 +206,9 @@ public sealed class QuickExecutionEngine
         Dictionary<FastTensorKey, IRuntimeTensor> store,
         QuickRunState state)
     {
+        // An output node computes nothing: the value it names is already in the store.
+        if (InternalOpCodes.IsGraphOutputOp(node.OpCode)) return null;
+
         var outputKeys = node.Outputs;
 
         if (InternalOpCodes.IsModelInputOp(node.OpCode))

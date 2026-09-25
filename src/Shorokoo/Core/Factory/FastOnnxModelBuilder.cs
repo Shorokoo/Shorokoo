@@ -165,9 +165,11 @@ namespace Shorokoo.Core.Factory
                 inputDims: inputDims);
 
         /// <summary>
-        /// Gives each top-level tensor input of <paramref name="graph"/> that declares no rank the
-        /// rank of its recorded representative shape (see <see cref="RepresentativeInputShapes"/>).
-        /// Only the rank: the exported input keeps symbolic dims, so it still accepts any size.
+        /// Gives each top-level tensor or optional input of <paramref name="graph"/> that declares
+        /// no rank the rank of its recorded representative shape (see
+        /// <see cref="RepresentativeInputShapes"/>) — an optional's the rank of its element, where
+        /// it was concretized present. Only the rank: the exported input keeps symbolic dims, so it
+        /// still accepts any size.
         /// </summary>
         private static void DeclareRepresentativeRanks(InternalComputationGraph graph)
         {
@@ -175,9 +177,11 @@ namespace Shorokoo.Core.Factory
             foreach (var key in graph.Inputs)
             {
                 if (!producers.TryGetValue(key, out var node)
-                    || node.OpCode != InternalOpCodes.MODEL_TENSOR_INPUT
+                    || !RepresentativeInputShapes.CarriesShape(node)
                     || node.Attributes.GetLongVal(OnnxOpAttributeNames.ShrkAttrRank) is not null
-                    || RepresentativeInputShapes.Get(node) is not { } dims)
+                    || RepresentativeInputShapes.Get(node) is not { } dims
+                    || (node.OpCode == InternalOpCodes.MODEL_OPTIONAL_INPUT
+                        && dims.AsSpan().SequenceEqual(RepresentativeInputShapes.AbsentOptionalShape)))
                     continue;
                 node.Attributes = node.Attributes.SetAttributes(
                     (OnnxOpAttributeNames.ShrkAttrRank, (object?)(long?)dims.Length));

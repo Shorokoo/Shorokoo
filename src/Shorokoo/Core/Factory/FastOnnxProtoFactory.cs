@@ -237,8 +237,9 @@ namespace Shorokoo.Core.Factory
                     $"FastOnnxProtoFactory.ReadInputMetadata: input node {node.OpCode} (Key={node.Key}) has no {OnnxOpAttributeNames.AttrDtype} attribute.");
 
             int? rank = null;
-            // Only the tensor-shaped variants carry a rank attribute.
+            // Only the tensor-shaped variants carry a rank attribute — an optional's is its element's.
             if (node.OpCode == InternalOpCodes.MODEL_TENSOR_INPUT
+             || node.OpCode == InternalOpCodes.MODEL_OPTIONAL_INPUT
              || node.OpCode == InternalOpCodes.GENERIC_TYPE_INPUT)
             {
                 var rl = attrs.GetLongVal(OnnxOpAttributeNames.ShrkAttrRank);

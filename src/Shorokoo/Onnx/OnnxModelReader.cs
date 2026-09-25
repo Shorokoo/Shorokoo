@@ -168,6 +168,14 @@ namespace Shorokoo.Onnx
 
             RestoreSignatureIONames(model, graph);
 
+            // An input left unshaped is the caller's to supply (FW058), which a tag declaring a
+            // concrete kind does not change: say so before the tag check reports the same input as
+            // a corrupt file. Module machinery under a concrete tag is corruption, whatever the
+            // inputs, and stays the tag check's to report.
+            if (taggedKind is { } tagged && tagged != Shorokoo.Graph.GraphKind.Module
+                && !graph.Nodes.Any(Shorokoo.Core.Graph.FastNodeClassification.IsModuleStageMachinery))
+                Shorokoo.Core.Graph.RepresentativeInputShapes.ThrowIfImportLeftAnInputUnshaped(graph, "the ONNX model");
+
             if (taggedKind is { } kind &&
                 Shorokoo.Core.Utils.SrkFileFormat.DescribeKindViolation(graph, kind) is { } violation)
                 throw new InvalidDataException(

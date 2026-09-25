@@ -23,6 +23,9 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
             Op(MODEL_OPTIONAL_INPUT)
                 .Optional<AnyLike>("T")
                 .AttributeDType(AttrDtype, "T")
+                // Optional: the rank of the element, where known. ONNX export declares it from the
+                // representative shape below, as it does a tensor input's.
+                .AttributeLong(ShrkAttrRank, "R")
                 .AttributeEnum<InputType>(ShrkAttrInputType, ["Hyperparam", "ReadyInput", "ModelInput", "GenericType"], defaultValue: "ReadyInput")
                 // On every input of a concrete graph: the dims of the element the model was
                 // concretized at when the optional was supplied present, and a single -1 when it

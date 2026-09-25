@@ -2523,6 +2523,10 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         Assert.Equal([1, 0, 1], ExportedIoRanks(SharedWorkAroundAnIfLayer.ComputationGraph, x3, TensorData(DType.Float32, [], 2f)));
         Assert.Equal([1, -1, 1], ExportedIoRanks(SequenceElementAddLayer.ComputationGraph, NamedIn("x", x3),
             new TensorDataSequenceModelParam("s", ModelParamType.InputParam, TensorDataSequence.OfElements([x3], DType.Float32))));
+        Assert.Equal([1, 1, 1], ExportedIoRanks(NullableBiasLayer.ComputationGraph, NamedIn("x", x3),
+            new OptionalTensorDataModelParam("bias", ModelParamType.InputParam, OptionalTensorData.Some(x3))));
+        Assert.Equal([1, -1, 1], ExportedIoRanks(NullableBiasLayer.ComputationGraph, NamedIn("x", x3),
+            new OptionalTensorDataModelParam("bias", ModelParamType.InputParam, OptionalTensorData.None(DType.Float32))));
     }
 
     private static NamedModelParam NamedIn(string name, TensorData t) => new TensorDataModelParam(name, ModelParamType.InputParam, t);
@@ -2579,6 +2583,22 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         Assert.Equal([1L, 4L], ImportedShapeOfX(FloatInputX(new TensorShapeProto.Dimension(), Fixed(4))));
         Assert.Equal([], ImportedShapeOfX(FloatInputX()));
         Assert.Equal([3L, 4L], ImportedShapeOfX(FloatInputX(Symbolic("N"), Fixed(4)), new() { ["x"] = [3L, 4L] }));
+    }
+
+    [Fact]
+    public void TestImportOnnxRefusesAKindTaggedFileWithAnUnshapedInputAsFW058()
+    {
+        var (model, _, _) = BuildSkptModel();
+        var exported = P(Guid.NewGuid() + ".onnx");
+        Persistence.ExportOnnx(model, exported);
+        ModelProto proto;
+        using (var fs = File.OpenRead(exported)) proto = ProtoBuf.Serializer.Deserialize<ModelProto>(fs);
+        var input = proto.Graph.Inputs[^1];
+        input.Type.TensorType.Shape = null!;
+        input.MetadataProps.RemoveAll(e => e.Key == RepresentativeInputMetadata.Key);
+        var path = WriteOnnx(P(Guid.NewGuid() + ".onnx"), proto);
+        Assert.Equal(ErrorCodes.FW058, Assert.Throws<ModelException>(() => Persistence.ImportOnnx(path)).ErrorCode);
+        Assert.Equal(ErrorCodes.FW058, Assert.Throws<ModelException>(() => OnnxModelImporter.FromOnnxModel(path)).ErrorCode);
     }
 
     [Fact]

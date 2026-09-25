@@ -384,6 +384,7 @@ namespace Shorokoo.Core.Factory
             {
                 ThrowIfNotVanillaDialect(model);
                 StampGraphOutputTypes(model.Graph, prepFast, tensorInfoLookup);
+                DeclareSequenceInputElementRanks(model.Graph, prepFast);
                 // Names come from prepFast, not the original fastGraph: the proto's
                 // I/O slots are built positionally from prepFast's inputs and outputs, and
                 // each name rides on its own input or output node — pairing against the
@@ -614,6 +615,26 @@ namespace Shorokoo.Core.Factory
                 var typed = CreateTypedValueInfo(outputs[i], tensorInfoLookup);
                 typed.MetadataProps.AddRange(graph.Outputs[i].MetadataProps);
                 graph.Outputs[i] = typed;
+            }
+        }
+
+        /// <summary>
+        /// Gives each sequence input of the exported <paramref name="graph"/> that declares no element
+        /// shape the rank of the one its elements shared at the samples the model was concretized at
+        /// (<see cref="RepresentativeInputShapes"/>), as a tensor input takes the rank of its
+        /// representative shape: only the rank, so the exported input still accepts elements of any size.
+        /// </summary>
+        private static void DeclareSequenceInputElementRanks(GraphProto graph, InternalComputationGraph prepFast)
+        {
+            var inputNodes = prepFast.InputNodes;
+            for (int i = 0; i < inputNodes.Count && i < graph.Inputs.Count; i++)
+            {
+                if (inputNodes[i].OpCode != InternalOpCodes.MODEL_SEQUENCE_INPUT
+                    || RepresentativeInputShapes.Get(inputNodes[i]) is not { } dims
+                    || graph.Inputs[i].Type?.SequenceType?.ElemType?.TensorType is not { Shape: null } element)
+                    continue;
+                element.Shape = new TensorShapeProto();
+                for (int d = 0; d < dims.Length; d++) element.Shape.Dims.Add(new TensorShapeProto.Dimension());
             }
         }
 

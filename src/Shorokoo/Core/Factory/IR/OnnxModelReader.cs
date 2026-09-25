@@ -815,6 +815,7 @@ namespace Shorokoo.Core.Factory.IR
                 // optional into an absent one on the way back (Shorokoo/Shorokoo#314).
                 if (fastNode.OpCode is InternalOpCodes.MODEL_TENSOR_INPUT
                                     or InternalOpCodes.MODEL_OPTIONAL_INPUT
+                                    or InternalOpCodes.MODEL_SEQUENCE_INPUT
                     && inputProto.MetadataProps.FirstOrDefault(p => p.Key == RepresentativeInputMetadata.Key)
                         is { } reprProp)
                     RepresentativeInputMetadata.Apply(fastNode, reprProp.Value);

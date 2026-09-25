@@ -293,11 +293,13 @@ namespace Shorokoo.Core.Graph
 
         /// <summary>
         /// Records a representative shape on each tensor or optional input of a graph read from
-        /// the ONNX <paramref name="graphProto"/>: the one in <paramref name="inputShapes"/> where
+        /// the ONNX <paramref name="graphProto"/>, and the shape its elements share on each sequence
+        /// input: the one in <paramref name="inputShapes"/> where
         /// it names the input, else the one a Shorokoo export carried (already on the node), else
         /// the shape the file declares, each symbolic (<c>dim_param</c>) or unset dimension taken
-        /// as <c>1</c>, as is a negative <c>dim_value</c>. An input the file declares no shape for is left without one; the entry
-        /// points that freeze the graph refuse it
+        /// as <c>1</c>, as is a negative <c>dim_value</c> (a sequence's, its element's). An input the
+        /// file declares no shape for is left without one; the entry points that freeze the graph
+        /// refuse it, a sequence input excepted
         /// (<see cref="ThrowIfImportLeftAnInputUnshaped"/>). A name in
         /// <paramref name="inputShapes"/> that is no input, or a shape of another rank than the
         /// file declares or contradicting a dimension it fixes, is refused.
@@ -314,7 +316,7 @@ namespace Shorokoo.Core.Graph
             var inputNodes = graph.Inputs
                 .Select(k => producers.TryGetValue(k, out var n) ? n : null)
                 .OfType<FastNode>()
-                .Where(CarriesShape)
+                .Where(n => CarriesShape(n) || n.OpCode == InternalOpCodes.MODEL_SEQUENCE_INPUT)
                 .ToList();
 
             if (inputShapes is not null)
@@ -391,11 +393,11 @@ namespace Shorokoo.Core.Graph
         }
 
         /// <summary>The dimensions a graph input's declared type gives, or <c>null</c> when it
-        /// declares no shape (unknown rank). An optional input's are its element's.</summary>
+        /// declares no shape (unknown rank). An optional or sequence input's are its element's.</summary>
         private static List<Factory.IR.TensorShapeProto.Dimension>? DeclaredDimsOf(Factory.IR.ValueInfoProto proto)
         {
             var type = proto.Type;
-            if (type?.OptionalType?.ElemType is { } element) type = element;
+            if ((type?.OptionalType?.ElemType ?? type?.SequenceType?.ElemType) is { } element) type = element;
             return type?.TensorType?.Shape?.Dims;
         }
 

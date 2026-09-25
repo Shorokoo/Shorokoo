@@ -216,10 +216,13 @@ was concretized at. For a foreign model it is read from the input's declared
 shape: each fixed dimension (`dim_value`) as written, and each **symbolic**
 (`dim_param`) or unset dimension — or one written with a negative `dim_value`, which
 some tools use for "unknown" — as **`1`**, so an input declared `[N, 3, 224, 224]`
-records `[1, 3, 224, 224]`. An input declared with no shape at all has no rank to
-go on, and the import refuses it with **`FW058`**, naming it. Give such an input its
+records `[1, 3, 224, 224]`. A sequence input records the shape its elements are
+declared with, by the same rules (and none where they declare none). An input declared
+with no shape at all has no rank to go on, and the import refuses it with **`FW058`**,
+naming it. Give such an input its
 shape — or override any derived one — with the overload that takes input shapes,
-keyed by ONNX graph input name (see below for outputs):
+keyed by ONNX graph input name — for a sequence input, the shape of its elements
+(see below for outputs):
 
 ```csharp
 var shapes = new Dictionary<string, long[]> { ["input"] = [1, 3, 224, 224] };

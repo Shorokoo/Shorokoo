@@ -2521,7 +2521,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         Assert.Equal([0, 0, 2, 2], ExportedIoRanks(LoopLayer.ComputationGraph, four, two, x23));
         Assert.Equal([0, 1, 0, 1], ExportedIoRanks(IfLoopBodyLayer.ComputationGraph, two, x3, TensorData(DType.Bool, [], true)));
         Assert.Equal([1, 0, 1], ExportedIoRanks(SharedWorkAroundAnIfLayer.ComputationGraph, x3, TensorData(DType.Float32, [], 2f)));
-        Assert.Equal([1, -1, 1], ExportedIoRanks(SequenceElementAddLayer.ComputationGraph, NamedIn("x", x3),
+        Assert.Equal([1, 1, 1], ExportedIoRanks(SequenceElementAddLayer.ComputationGraph, NamedIn("x", x3),
             new TensorDataSequenceModelParam("s", ModelParamType.InputParam, TensorDataSequence.OfElements([x3], DType.Float32))));
         Assert.Equal([1, 1, 1], ExportedIoRanks(NullableBiasLayer.ComputationGraph, NamedIn("x", x3),
             new OptionalTensorDataModelParam("bias", ModelParamType.InputParam, OptionalTensorData.Some(x3))));
@@ -2788,6 +2788,43 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
             Assert.Contains("'y'", ex.Message);
             Assert.DoesNotContain("input shapes", ex.Message);
         }
+    }
+
+    private string ForeignSequenceAtModelFile(params TensorShapeProto.Dimension[]? elementDims)
+    {
+        var g = new GraphProto { Name = "foreign" };
+        g.Inputs.Add(new ValueInfoProto { Name = "s", Type = new TypeProto { SequenceType = new TypeProto.Sequence { ElemType = FloatInputX(elementDims).Type } } });
+        g.Initializers.Add(new TensorProto { Name = "i", data_type = 7, Dims = [], RawData = BitConverter.GetBytes(0L) });
+        var at = new NodeProto { OpType = "SequenceAt", Name = "at0" };
+        at.Inputs.AddRange(["s", "i"]);
+        at.Outputs.Add("y");
+        g.Nodes.Add(at);
+        g.Outputs.Add(Named("y", FloatInputX(null)));
+        var model = new ModelProto { IrVersion = 10, Graph = g };
+        model.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = 21 });
+        return WriteOnnx(P(Guid.NewGuid() + ".onnx"), model);
+    }
+
+    private static long[]? InputShapeOf(ComputationGraph graph) => RepresentativeInputShapes.Get(graph.ToInternal().InputNodes[0]);
+
+    [Fact]
+    public void TestASequenceInputsElementShapeIsImportedGivenAndExportedAndReadBack()
+    {
+        var declared = ForeignSequenceAtModelFile(Fixed(3));
+        var open = ForeignSequenceAtModelFile(Symbolic("N"));
+        Assert.Equal([3L], InputShapeOf(Persistence.ImportOnnx(declared)));
+        Assert.Equal([3L], OutputShapeOf(Persistence.ImportOnnx(declared)));
+        Assert.Equal([5L], OutputShapeOf(Persistence.ImportOnnx(open, new Dictionary<string, long[]> { ["s"] = [5L] })));
+        Assert.Equal([5L], OutputShapeOf(OnnxModelImporter.FromOnnxModel(open, new Dictionary<string, long[]> { ["s"] = [5L] })));
+        Assert.Throws<ArgumentException>(() => Persistence.ImportOnnx(declared, new Dictionary<string, long[]> { ["s"] = [4L] }));
+
+        var x3 = TensorData(DType.Float32, [3L], 1f, 2f, 3f);
+        var g = SequenceElementAddLayer.ComputationGraph;
+        var model = g.ToConcreteArchitecture(new ModelParamList([NamedIn("x", x3),
+            new TensorDataSequenceModelParam("s", ModelParamType.InputParam, TensorDataSequence.OfElements([x3], DType.Float32))])).ToConcreteModel();
+        var path = P(Guid.NewGuid() + ".onnx");
+        Persistence.ExportOnnx(model, path);
+        Assert.Equal([3L], RepresentativeInputShapes.Get(Persistence.ImportOnnx(path).ToInternal().InputNodes[1]));
     }
 
     [Fact]

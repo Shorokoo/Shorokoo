@@ -38,7 +38,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast;
 ///   <item>Default op: <c>mask(output) = OR(mask(inputs))</c>.</item>
 ///   <item><c>MODEL_PARAM_ID_REF</c>: adds a one-hot bit for its specific model ID to
 ///     the combined input mask.</item>
-///   <item><c>IF_CLOSE</c>: <c>mask(output_i) = condMask | Where(cond, thenMask_i, elseMask_i)</c>.
+///   <item><c>IF_CLOSE</c>: <c>mask(output_i) = condMask | select(cond, thenMask_i, elseMask_i)</c>,
+///     the select being the <c>IF_CLOSE</c> itself, carrying each branch's mask as an extra slot.
 ///     Because the IF conditions are already folded to CONSTANT booleans by
 ///     <see cref="FastUnpackModelStruct"/> replacing each <c>MODEL_HYPERPARAM</c> with the
 ///     caller's hyperparam tensor, QEE evaluates the condition-gated mask to one
@@ -115,12 +116,22 @@ internal static partial class FastListAllSpecificModelIdsUsed
         // after each original node. For LOOP_OPEN / LOOP_CLOSE we modify the node in place
         // to add extra carry / scan slots for the mask tensors.
         var finalNodes = new List<FastNode>(workGraph.Nodes.Count + context.NewNodes.Count + 128);
-        finalNodes.AddRange(context.NewNodes); // shared constants come first
+        // The shared constants open the body, after the input nodes, which stay the graph's
+        // prefix: a graph whose inputs are not its prefix is malformed, and the engine refuses
+        // to copy one, which it does to lower an op (a Softsign) before walking it.
+        var sharedConstants = context.NewNodes.ToList();
         context.NewNodes.Clear();
+        int inputCount = workGraph.InputCount;
 
         var outputs = workGraph.Outputs;
         foreach (var node in workGraph.Nodes)
         {
+            if (finalNodes.Count == inputCount && sharedConstants.Count > 0)
+            {
+                finalNodes.AddRange(sharedConstants);
+                sharedConstants.Clear();
+            }
+
             // The output nodes are replaced below by one reading the combined mask.
             if (InternalOpCodes.IsGraphOutputOp(node.OpCode)) continue;
 
@@ -156,6 +167,7 @@ internal static partial class FastListAllSpecificModelIdsUsed
             }
         }
 
+        finalNodes.AddRange(sharedConstants); // a graph of input nodes alone
         // Combined mask of all graph outputs.
         var combinedOutputMask = CombineMasks(
             outputs.Select(o => context.TensorMasks.TryGetValue(o, out var m) ? m : context.EmptyMaskKey),
@@ -173,10 +185,11 @@ internal static partial class FastListAllSpecificModelIdsUsed
         {
             store = engine.Run(workGraph, initialInputs);
         }
-        catch
+        catch (ShorokooException)
         {
-            // If QEE can't run the extended graph for any reason, fall back to "all candidates
-            // used" rather than risk pruning a live param.
+            // If QEE refuses the extended graph, fall back to "all candidates used" rather than
+            // risk pruning a live param. Only a refusal: a fault — a malformed mask graph, a
+            // failed assertion — propagates, since swallowing it would silently stop pruning.
             return candidateModelIds;
         }
 
@@ -325,14 +338,14 @@ internal static partial class FastListAllSpecificModelIdsUsed
     }
 
     /// <summary>
-    /// <c>IF_CLOSE</c> mask: <c>mask(output_i) = condMask | Where(cond, thenMask_i, elseMask_i)</c>.
+    /// <c>IF_CLOSE</c> mask: <c>mask(output_i) = condMask | select(cond, thenMask_i, elseMask_i)</c>.
     ///
     /// FullInputs are grouped by branch: <c>"then_branch"</c> and <c>"else_branch"</c>. The
     /// condition comes from the paired <c>IF_OPEN</c>'s Input[0]; its mask propagates into
     /// every output so that a condition computed from a trainable param would count it live.
-    /// The actual branch-select uses the original-graph condition tensor (already present in
-    /// the graph, pointed to by the cloned IF_OPEN's inputs), broadcast across the mask
-    /// vector length via <c>Where</c>.
+    /// The select is the <c>IF_CLOSE</c> itself: each output's branch masks are appended to
+    /// its branch groups, and the mask it selects is read off an extra output — the one way a
+    /// value computed inside a branch reaches anything after it.
     /// </summary>
     private static void HandleIfClose(FastNode node, MaskBuildContext ctx)
     {
@@ -348,32 +361,33 @@ internal static partial class FastListAllSpecificModelIdsUsed
         FastTensorKey condMask = condKey is FastTensorKey ck && !ck.IsEmpty && ctx.TensorMasks.TryGetValue(ck, out var cm)
             ? cm : ctx.EmptyMaskKey;
 
-        node.FullInputs.TryGetValue("then_branch", out var thenInputs);
-        node.FullInputs.TryGetValue("else_branch", out var elseInputs);
-        thenInputs ??= new List<FastTensorKey?>();
-        elseInputs ??= new List<FastTensorKey?>();
-
-        if (node.FullOutputs.TryGetValue("", out var outputs))
+        if (!node.FullInputs.TryGetValue("then_branch", out var thenInputs)
+            || !node.FullInputs.TryGetValue("else_branch", out var elseInputs)
+            || !node.FullOutputs.TryGetValue("", out var outputs)
+            || thenInputs.Count != outputs.Count || elseInputs.Count != outputs.Count)
         {
-            int n = outputs.Count;
-            for (int i = 0; i < n; i++)
-            {
-                var ok = outputs[i];
-                if (ok is null || ok.Value.IsEmpty) continue;
+            HandleDefault(node, ctx);
+            return;
+        }
 
-                FastTensorKey thenMask = i < thenInputs.Count && thenInputs[i] is FastTensorKey tk && !tk.IsEmpty
-                    && ctx.TensorMasks.TryGetValue(tk, out var tm) ? tm : ctx.EmptyMaskKey;
-                FastTensorKey elseMask = i < elseInputs.Count && elseInputs[i] is FastTensorKey ek && !ek.IsEmpty
-                    && ctx.TensorMasks.TryGetValue(ek, out var em) ? em : ctx.EmptyMaskKey;
+        // A branch's masks are computed inside the branch, which nothing after the IF_CLOSE may
+        // read. So each output's pair of branch masks rides through the IF_CLOSE itself, as an
+        // extra slot on each branch and an extra output, and the IF selects between them exactly
+        // as it selects the values: by its condition, which the engine knows here.
+        int n = outputs.Count;
+        for (int i = 0; i < n; i++)
+        {
+            FastTensorKey thenMask = thenInputs[i] is FastTensorKey tk && !tk.IsEmpty
+                && ctx.TensorMasks.TryGetValue(tk, out var tm) ? tm : ctx.EmptyMaskKey;
+            FastTensorKey elseMask = elseInputs[i] is FastTensorKey ek && !ek.IsEmpty
+                && ctx.TensorMasks.TryGetValue(ek, out var em) ? em : ctx.EmptyMaskKey;
+            thenInputs.Add(thenMask);
+            elseInputs.Add(elseMask);
+            var selected = new FastTensorKey(node.Key, n + i);
+            outputs.Add(selected);
 
-                FastTensorKey selected;
-                if (condKey is FastTensorKey condTk && !condTk.IsEmpty)
-                    selected = CreateWhere(condTk, thenMask, elseMask, ctx.NewNodes);
-                else
-                    selected = thenMask; // No condition — treat both as potentially used.
-
-                ctx.TensorMasks[ok.Value] = CombineMasks(new[] { condMask, selected }, ctx, ctx.NewNodes);
-            }
+            if (outputs[i] is FastTensorKey ok && !ok.IsEmpty)
+                ctx.TensorMasks[ok] = CombineMasks(new[] { condMask, selected }, ctx, ctx.NewNodes);
         }
     }
 }
@@ -704,23 +718,6 @@ internal static partial class FastListAllSpecificModelIdsUsed
             acc = CreateBinaryOp(OpCodes.OR, acc.Value, m, newNodes);
         }
         return acc ?? ctx.EmptyMaskKey;
-    }
-
-    /// <summary>
-    /// Emits <c>Where(cond, thenMask, elseMask)</c> with scalar <c>cond</c> broadcast across
-    /// both mask vectors. ONNX's Where handles the broadcasting; we don't need to pre-expand
-    /// the condition.
-    /// </summary>
-    private static FastTensorKey CreateWhere(
-        FastTensorKey cond, FastTensorKey thenK, FastTensorKey elseK, List<FastNode> newNodes)
-    {
-        var nodeKey = FastNodeKey.New();
-        var outputKey = new FastTensorKey(nodeKey, 0);
-        newNodes.Add(FastNodeCreationHelpers.CreateFastNode(
-            nodeKey, OpCodes.WHERE,
-            new Dictionary<string, object?>(),
-            new FastTensorKey?[] { cond, thenK, elseK }));
-        return outputKey;
     }
 
     /// <summary>

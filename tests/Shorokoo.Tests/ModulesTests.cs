@@ -407,6 +407,39 @@ public class ModulesCoverageTests
         }
     }
 
+    [Fact]
+    public void TestAGateWithAPrunedParamOnEachBranchFoldsUnderAnOpTheEngineLowers()
+    {
+        var g = Modules.ParamOnBothBranchesSoftsignLayer.ComputationGraph;
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([], false), TensorData([], true), TensorData([2L], 1f, 2f)]));
+        Assert.Empty(arch.InitializeTrainableParams(rngConfig: RngConfig.Default).ModelParams);
+    }
+
+    private static InternalComputationGraph AtIdRefStage(ComputationGraph module)
+    {
+        var g = module.ToInternal().Clone();
+        FastApplyIdentifierTemplates.Process(g);
+        FastInlineModulesAndFunctions.Process(g);
+        FastProcessorHelper.RemoveUnreachableNodes(g);
+        FastInjectRngDrawCounter.Process(g);
+        FastExtractIdentifierTemplates.Process(g);
+        FastConvertToIdRefModelParams.Process(g);
+        FastUnpackModelStruct.Process(g);
+        FastExpandStructOutputs.Process(g);
+        FastUnpackTensorStructs.Process(g);
+        return g;
+    }
+
+    [Fact]
+    public void TestTheLiveParamMaskExcludesAnUnusedCandidateOnAGraphTheEngineLowers()
+    {
+        var g = Modules.SoftsignOfParamLayer.ComputationGraph;
+        var hints = g.FromOrderedInputs([TensorData([2L], 1f, 2f)]);
+        var live = g.ToConcreteArchitecture(hints).GetConcreteModelParamInfos().ModelIds.Single();
+        var dead = new ModelId([.. live.Vals.SetItem(live.Vals.Length - 1, live.Vals[^1] + 1)]);
+        Assert.Equal([live], FastListAllSpecificModelIdsUsed.Process(AtIdRefStage(g), hints, [live, dead]).ToArray());
+    }
+
     /// <summary>The fold is not specific to a bit-valued gate on the then branch: a computed
     /// condition folds, and so does a parameter living on the else branch.</summary>
     [Fact]

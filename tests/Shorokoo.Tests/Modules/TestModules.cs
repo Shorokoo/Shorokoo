@@ -326,6 +326,28 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary><see cref="ParamOnBothBranchesLayer"/> under a Softsign, an op the
+    /// QuickExecutionEngine lowers before it walks a graph.</summary>
+    [Module]
+    public partial class ParamOnBothBranchesSoftsignLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input, [Hyper] Scalar<bit> outer, [Hyper] Scalar<bit> flag)
+        {
+            var a = InitSimple.Init(input.ShapeTensor());
+            var b = InitSimple.Init(input.ShapeTensor());
+            var inner = flag.IfElse(input + a, input - b);
+            return outer.IfElse(inner, input * Scalar(9f)).Softsign();
+        }
+    }
+
+    /// <summary>A parameter under a Softsign.</summary>
+    [Module]
+    public partial class SoftsignOfParamLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => (input * InitSimple.Init(input.ShapeTensor())).Softsign();
+    }
+
     /// <summary>A rank-0 trainable param behind nested gates — the stand-in emitter's
     /// no-dims path, which cannot EXPAND.</summary>
     [Module]

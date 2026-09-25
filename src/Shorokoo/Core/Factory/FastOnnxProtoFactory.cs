@@ -94,7 +94,7 @@ namespace Shorokoo.Core.Factory
                 name: key.ToString(),
                 type: dtype,
                 structure: structure,
-                targetFunctionName: null,
+                targetFunctionName: inputNode.TargetFunction is { } signature ? OnnxFunctionName.Encode(signature.DefaultName) : null,
                 inputTypeName: inputTypeName,
                 defaultValue: defaultValue);
 

@@ -149,8 +149,7 @@ public class ModulesCoverageTests
     public void TestAGenericModuleBodyReadsBackAfterASrkRoundTrip()
         => Assert.Equal(Signatures(NonGenericCallerOfGenericModule.ComputationGraph), Signatures(SrkRoundTrip(NonGenericCallerOfGenericModule.ComputationGraph)));
 
-    // Shorokoo/Shorokoo#390: the .srk writer drops a model-typed input's signature function, so its MODEL_INVOKE has no callee.
-    [Fact(Skip = "Shorokoo/Shorokoo#390")]
+    [Fact]
     public void TestAModelTypedParameterKeepsItsSignatureThroughASrkRoundTrip()
     {
         var input = TensorData([2L], 1f, 2f);

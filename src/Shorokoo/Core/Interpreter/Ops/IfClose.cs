@@ -148,19 +148,26 @@ internal sealed class IfCloseOp : QuickOp
             if (allEqual) resultShape = new Shape(exact);
             maxShape = new Shape(max);
         }
-        else
+        else if (thenRt?.Shape is null || elseRt?.Shape is null)
         {
             resultShape = thenRt?.Shape ?? elseRt?.Shape;
             maxShape = resultShape;
         }
 
+        // Branches of different ranks leave the rank itself to the condition, which is not known
+        // here: neither branch's may be claimed for the result.
+        var thenRank = thenRt?.Shape?.Dims.Length ?? thenRt?.Rank;
+        var elseRank = elseRt?.Shape?.Dims.Length ?? elseRt?.Rank;
+        bool ranksDiffer = thenRank is not null && elseRank is not null && thenRank != elseRank;
+
         var merged = RuntimeTensorFactory.Create(dtype, resultShape);
-        var mergedMaxRank = Math.Max(thenRt?.MaxRank ?? 0, elseRt?.MaxRank ?? 0);
+        var mergedMaxRank = Math.Max(Math.Max(thenRt?.MaxRank ?? 0, elseRt?.MaxRank ?? 0),
+            ranksDiffer ? Math.Max(thenRank!.Value, elseRank!.Value) : 0);
         int? maxRankOut = mergedMaxRank == 0 ? (thenRt?.Rank ?? elseRt?.Rank ?? merged.Rank) : mergedMaxRank;
         return merged with
         {
             MaxShape = maxShape ?? merged.MaxShape,
-            Rank = thenRt?.Rank ?? elseRt?.Rank ?? merged.Rank,
+            Rank = ranksDiffer ? null : thenRt?.Rank ?? elseRt?.Rank ?? merged.Rank,
             MaxRank = maxRankOut,
         };
     }

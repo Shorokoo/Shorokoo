@@ -418,6 +418,27 @@ public class QeeOpsCoverageTests
             => throw new InvalidOperationException();
     }
 
+    private static RuntimeTensor IfOfUnknownFlag(TensorData x, bool sampleFlag)
+    {
+        var g = RankByFlagLayer.ComputationGraph;
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([x, TensorData(DType.Bool, [], sampleFlag)])).ToInternal();
+        var initial = new Dictionary<Shorokoo.Core.Graph.FastTensorKey, IRuntimeTensor>
+        {
+            [arch.Inputs[0]] = new RuntimeTensor { DType = DType.Float32, Shape = x.Shape },
+            [arch.Inputs[1]] = new RuntimeTensor { DType = DType.Bool, Shape = new Shape(System.Array.Empty<long>()) },
+        };
+        return Assert.IsType<RuntimeTensor>(new QuickExecutionEngine().Run(arch, initial)[arch.Outputs[0]]);
+    }
+
+    [Fact]
+    public void TestAnIfOfUnknownConditionSettlesOnlyWhatItsBranchesShare()
+    {
+        var x23 = TensorData(DType.Float32, [2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f);
+        Assert.Null(IfOfUnknownFlag(x23, true).Shape);
+        Assert.Null(IfOfUnknownFlag(x23, true).Rank);
+        Assert.Equal([6L], IfOfUnknownFlag(TensorData([6L], 1f, 2f, 3f, 4f, 5f, 6f), true).Shape!.Dims);
+    }
+
     private sealed class ThrowingAbsStub : QuickOp
     {
         public override string OpCode => OpCodes.ABS;

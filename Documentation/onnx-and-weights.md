@@ -97,8 +97,7 @@ parameters is refused up front (`XD008`) with the actual vs required kind named.
   leave the pair mismatched — every in-process failure rolls the whole pair back.
 
 `BuildOnnxModel(ComputationGraph graph, OpSetVersion opset = OPS_21,
-bool prepForOnnx = false,
-RepresentativeInputForm representativeForm = Passthrough)` requires a
+bool prepForOnnx = false)` requires a
 `GraphKind.ConcreteModel` graph — anything else fails fast with `FW045` naming the
 actual and required kinds (only a concrete model can satisfy the vanilla-ONNX
 guarantee). It clones the graph (no mutation), lowers it for ONNX, and emits
@@ -125,19 +124,16 @@ imported one does. Models up to opset 26 execute on the bundled ONNX Runtime
 1.26 — see [limitations.md](limitations.md) for the stamping policy and
 [operator-support.md](operator-support.md) for the per-operator picture.
 
-`representativeForm` (`RepresentativeInputForm`, namespace
-`Shorokoo.Core.Factory`) decides what becomes of the model's **representative
-input shapes** — the dims each input was concretized at, recorded on the graph's
-input nodes and always dims-only (no values). `Passthrough` (the default) leaves
-them out of the exported file; `VanillaMetadata` writes each input's
-representative shape into that input's own graph-input `ValueInfoProto` metadata
-(key `shrk_repr_input`), which `OnnxModelImporter` re-attaches on import. An
-`OptionalTensor` input records one too — its element's dims when the model was
-concretized with the optional present, and a single `-1` when it was concretized
-absent, which is how the arrangement survives a round trip. It is
-plain metadata: the `ValueInfoProto`'s own dims stay symbolic either way, so no
-external consumer sees a frozen batch dimension. `Persistence.ExportOnnx` below
-passes `VanillaMetadata`.
+Every exported input also carries its **representative shape** — the dims of the
+sample the model was concretized at, which every input of a concrete graph records
+(see [inference.md](inference.md#the-lowering-pipeline)) — in that input's own
+graph-input `ValueInfoProto` metadata (key `shrk_repr_input`), which the importers
+re-attach, so an exported model imports back as the concrete graph it was. It is
+always dims-only (no values). An `OptionalTensor` input records one too — its
+element's dims when the model was concretized with the optional present, and a
+single `-1` when it was concretized absent, which is how the arrangement survives a
+round trip. It is plain metadata: the `ValueInfoProto`'s own dims stay symbolic, so
+no external consumer sees a frozen batch dimension.
 
 ### The vanilla dialect is a guarantee
 
@@ -168,12 +164,17 @@ Exported graph inputs and outputs are named from the model's signature — the
 names by which the graph's inputs are addressed in Shorokoo (e.g. `[Hyper]` /
 input parameter names), deduplicated deterministically (`x`, `x_2`, …).
 Unnamed slots fall back to `input_{i}` / `output_{i}`. Every input and output
-`ValueInfoProto` carries its dtype; dimension info is stamped wherever it is
-known — a statically known rank produces that many symbolic (dynamic) dims
-named `{name}_dim{i}`, a known rank-0 value is stamped as a true scalar, and a
-rank-agnostic `Tensor<T>` boundary stays fully dynamic. Tools like Netron or
-`InferenceSession.InputMetadata` therefore see the model's logical signature
-directly, and `OnnxModelImporter` round-trips the names.
+`ValueInfoProto` carries its dtype and a **shape** — the reference
+`onnx.checker` requires at least a rank on each of the main graph's inputs and
+outputs, and an exported model passes it. The rank is the declared one where the
+signature states it (`Scalar<T>`, `Vec<T>`, …); a rank-agnostic `Tensor<T>` input
+takes the rank of the representative shape it was concretized at, and an output
+whose rank the ops do not state takes the rank shape inference gives it at those
+representative inputs. The dims themselves stay **symbolic** — named
+`{name}_dim{i}` — so the file accepts any size of that rank; a rank-0 value is
+stamped as a true scalar. Tools like Netron or `InferenceSession.InputMetadata`
+therefore see the model's logical signature directly, and `OnnxModelImporter`
+round-trips the names.
 
 ### Parameters in the exported graph
 
@@ -203,6 +204,25 @@ the model's metadata props), so an imported graph's `Kind` is the kind it was
 saved with. Foreign models have no tag and are classified by op-scanning. A tag
 that is structurally impossible for the model's content (a hand-edited or
 corrupt file) fails the import loudly.
+
+Every input of an imported concrete model records a **representative shape**, as
+every input of a concrete graph does. A model Shorokoo exported carries the one it
+was concretized at. For a foreign model it is read from the input's declared
+shape: each fixed dimension (`dim_value`) as written, and each **symbolic**
+(`dim_param`) or unset dimension as **`1`** — so an input declared `[N, 3, 224, 224]`
+records `[1, 3, 224, 224]`. An input declared with no shape at all has no rank to
+go on, and the import refuses it with **`FW058`**, naming it. Give such an input its
+shape — or override any derived one — with the overload that takes input shapes,
+keyed by ONNX graph input name:
+
+```csharp
+var shapes = new Dictionary<string, long[]> { ["input"] = [1, 3, 224, 224] };
+ComputationGraph g = OnnxModelImporter.FromOnnxModel("model.onnx", shapes);
+// also: FromOnnxModel(byteArray, shapes, externalDataDirectory), FromOnnxModel(stream, shapes, ...)
+```
+
+A shape given for an input the file shapes must be of the rank the file declares,
+and a key that names no input is refused.
 
 A node calling one of the model's own functions with a different number of inputs
 than that function's body declares is refused on import for the same reason: the
@@ -454,8 +474,14 @@ Persistence.ExportOnnx(model, "model.onnx", externalData: new OnnxExternalDataOp
 ComputationGraph g = Persistence.ImportOnnx("foreign.onnx");
 ComputationGraph gRenamed = Persistence.ImportOnnx("foreign.onnx", scheme);
 
+// An input the file declares no shape for is given one (keyed by ONNX input name).
+var shapes = new Dictionary<string, long[]> { ["input"] = [1, 3, 224, 224] };
+ComputationGraph gShaped = Persistence.ImportOnnx("foreign.onnx", shapes);
+ComputationGraph gBoth = Persistence.ImportOnnx("foreign.onnx", scheme, shapes);
+
 // One-call native landing: foreign .onnx → .skpt checkpoint (+ the imported model).
 ComputationGraph landed = Persistence.ImportOnnxToCheckpoint("foreign.onnx", "model.skpt");
+ComputationGraph landedShaped = Persistence.ImportOnnxToCheckpoint("foreign.onnx", "model.skpt", shapes);
 ```
 
 - `ExportOnnx` requires a **concrete model** (`GraphKind.ConcreteModel`) and writes
@@ -475,7 +501,13 @@ ComputationGraph landed = Persistence.ImportOnnxToCheckpoint("foreign.onnx", "mo
   reloaded natively: its identifier becomes `[k]:TrainableParam#0.name#0`, where `name`
   is the ONNX initializer name by default, or the scheme's translation of it when a
   `namingScheme` is given. A Shorokoo-produced `.onnx` already carries canonical
-  identifiers, which are kept as-is.
+  identifiers, which are kept as-is. Each input records a representative shape, derived
+  from the file as [`OnnxModelImporter`](#import-from-onnx) derives it — a symbolic or
+  unset dimension taken as `1` — and an input the file declares no shape for is refused
+  with `FW058` unless the overload taking `inputShapes` gives it one. Every import entry
+  point has that overload: `ImportOnnx(path, inputShapes)`,
+  `ImportOnnx(path, namingScheme, inputShapes)`, and the same two for
+  `ImportOnnxToCheckpoint`.
 - `ImportOnnxToCheckpoint` performs the same import and lands the result straight in a
   native `.skpt` via the container writer (see [.skpt](skpt-checkpoints.md)); the write
   is atomic, so a failed import leaves any existing checkpoint untouched.

@@ -184,7 +184,20 @@ pipeline, applied in order:
    stay live. Returns a copy; the original is untouched.
 2. **`ToConcreteArchitecture(inputHints)`** — inlines every sub-module and
    function so trainable parameters become visible at the top level, and uses
-   `inputHints` to resolve shape-dependent parameters.
+   `inputHints` to resolve shape-dependent parameters. It needs **a sample for every
+   input** of the graph, `[Hyper]` inputs included, one per input in declaration order
+   (`graph.FromOrderedInputs([...])`); a graph left without one is refused with
+   **`FW056`**, which names every input missing its sample. The shape of each sample
+   (never its values) is recorded on the architecture's input as its **representative
+   shape** — the shape the model was concretized at. Every input of a concrete
+   architecture and of every concrete model made from it carries one: it survives
+   `ToConcreteModel`, `Specialize` and a `.srk`/`.skpt` round trip, a training rig
+   rebuilds its shape inference from it, and ONNX export reads an input's rank from it
+   where the signature states none (see
+   [onnx-and-weights.md](onnx-and-weights.md#graph-inputoutput-names-and-shapes)). A
+   concrete graph with an input that carries none — hand-built, or saved before the
+   shapes were recorded — is refused wherever it is frozen or loaded, with **`FW057`**
+   naming the input; lower it again from its module.
 3. **`ToConcreteModel(...)`** — binds parameter values (loaded weights, or the
    initializer defaults when called with no argument) into the architecture.
 

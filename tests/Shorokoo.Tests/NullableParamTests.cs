@@ -109,6 +109,13 @@ public class NullableParamTests
     }
 
     [Fact]
+    public void TestAnAbsentOptionalHandedToASubModuleStaysAbsent()
+    {
+        Assert.True(AutoTest.AdvancedTestGraph<NullableBiasAbsentCheck>(hyperparamInputs: [], runtimeInputs: [TensorData([2L], 1f, 2f)]));
+        Assert.True(AutoTest.AdvancedTestGraph<OptionalPassThroughAbsentCheck>(hyperparamInputs: [], runtimeInputs: [TensorData([2L], 1f, 2f)]));
+    }
+
+    [Fact]
     public void TestOptionalTensorImplicitlyCastsToNullableTensor()
     {
         OptionalTensor<float32> present = OptionalTensor<float32>(Vector(1f, 2f, 3f));

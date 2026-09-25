@@ -32,7 +32,7 @@ environment; this one says what is JAX's own.
   element types compiles it (XLA); later runs with that signature reuse the program. Where the
   model's inputs have fixed shapes, it is compiled when its session is created.
 - **Unsupported models fail when the session is created**, with a `JaxUnsupportedModelException`
-  naming the operator: what JAX cannot hold (strings, sequences, operators whose output shape their
+  naming the operator where one is at fault: what JAX cannot hold (strings, sequences, operators whose output shape their
   input's values decide), and — where the inputs' shapes are fixed — a shape, count or axis the graph
   computes from an input's values. See [Shapes](#shapes) and [Limitations](#limitations).
 
@@ -110,9 +110,14 @@ Control flow follows the same rule:
   input's value compiles both branches into XLA's conditional, which requires both to produce
   outputs of the same shapes and element types; one that does not is refused, naming `If`.
 - A `Loop` whose trip count and conditions are known is unrolled (up to 64 iterations; beyond, it is
-  compiled once as an XLA loop, its body seeing its iteration number as a value). One whose trip
-  count or condition is an input's value compiles as an XLA while loop — without scan outputs, whose
-  length would then depend on the values; one with scan outputs is refused, naming `Loop`.
+  compiled once as an XLA loop, its body seeing its iteration number as a value). One whose count is
+  known but whose condition is an input's value runs its whole count as an XLA loop that stops
+  changing its values once the condition turns false — and stays differentiable. One whose trip
+  count is itself an input's value, or that has none, compiles as an XLA while loop, which JAX cannot
+  differentiate: a training step with one between its parameters and its loss is refused, naming
+  `Loop`. Either kind runs without scan outputs, whose length would then depend on the values; one
+  with scan outputs is refused, naming `Loop`.
+- A random draw inside a loop compiled as an XLA loop draws afresh every iteration.
 
 A training rig unrolls the loops on its loss path anyway (see
 [training-backends.md](training-backends.md#what-differs-on-the-native-path)).

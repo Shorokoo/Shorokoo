@@ -209,8 +209,12 @@ internal sealed partial class OnnxToPythonTranslator
     /// the default path reads its own.
     ///
     /// <para>A tensor differentiated with respect to is a leaf, as it is on every backend: where a
-    /// node makes one, that node and everything it is computed from run before the function, and the
-    /// function reads the value only as its parameter, so no gradient flows back past it.</para>
+    /// node makes one, the nodes it is computed from run first, before the function, to give the
+    /// function its argument; and inside the function every forward node runs from the function's
+    /// parameters, the name of each tensor differentiated with respect to taken back to its
+    /// parameter right after the node that makes it. So the gradient flows along every path from a
+    /// parameter to the loss but through those tensors, as a recorded tape's does; XLA computes what
+    /// the nodes run twice compute once.</para>
     /// </summary>
     private void EmitTransformedTrainingStep(GraphProto graph, Scope scope, AutoGradStep step)
     {
@@ -229,11 +233,14 @@ internal sealed partial class OnnxToPythonTranslator
         for (int i = 0; i < forward.Count; i++)
             if (before[i]) EmitNode(forward[i], scope);
 
-        // What the function makes that the rest of the step reads, in the order it is made.
+        // What the function makes that the rest of the step reads, in the order it is made; the
+        // tensors differentiated with respect to are read as they were before the function.
         var readAfter = graph.Nodes.Skip(step.Index + 1).SelectMany(AutoGradStep.Reads)
             .Concat(graph.Outputs.Select(o => o.Name)).ToHashSet(StringComparer.Ordinal);
-        var carried = forward.Where((_, i) => !before[i]).SelectMany(n => n.Outputs)
-            .Where(name => name.Length > 0 && readAfter.Contains(name)).Distinct(StringComparer.Ordinal).ToList();
+        var wrtSet = wrt.ToHashSet(StringComparer.Ordinal);
+        var carried = forward.SelectMany(n => n.Outputs)
+            .Where(name => name.Length > 0 && readAfter.Contains(name) && !wrtSet.Contains(name))
+            .Distinct(StringComparer.Ordinal).ToList();
 
         var name = $"g{_nextGraph++}";
         var body = new Scope(scope, Dialect);
@@ -241,8 +248,12 @@ internal sealed partial class OnnxToPythonTranslator
         Line($"def {name}({string.Join(", ", parameters)}):");
         _indent++;
         EndStatement(body);
-        for (int i = 0; i < forward.Count; i++)
-            if (!before[i]) EmitNode(forward[i], body);
+        foreach (var node in forward)
+        {
+            EmitNode(node, body);
+            foreach (var output in node.Outputs)
+                if (wrtSet.Contains(output)) body.Bind(output, parameters[wrt.IndexOf(output)]);
+        }
         var loss = body.Lookup(step.Loss, step.Node);
         var values = carried.Select(c => body.Lookup(c, null) + ", ");
         Line($"return ({loss}, ({string.Concat(values)}))");

@@ -37,9 +37,11 @@ internal sealed class JaxRuntime
         LoadModel = runtime.GetAttr("load_model");
         Prepare = runtime.GetAttr("prepare");
         ArenaStatistics = runtime.GetAttr("arena_statistics");
-        JaxVersion = runtime.InvokeMethod("jax_version").As<string>();
+        using var version = runtime.InvokeMethod("jax_version");
+        JaxVersion = version.As<string>();
         using var cuda = new PyString("cuda");
-        CudaDeviceCount = runtime.InvokeMethod("device_count", cuda).As<int>();
+        using var count = runtime.InvokeMethod("device_count", cuda);
+        CudaDeviceCount = count.As<int>();
     }
 
     /// <summary>The environment JAX was imported from.</summary>

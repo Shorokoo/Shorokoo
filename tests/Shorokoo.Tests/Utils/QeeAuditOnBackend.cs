@@ -110,7 +110,8 @@ internal sealed class QeeAuditOnBackend(
             return Refused(ex) is { } refused
                 && (JaxDialect.RefusedOperators.ContainsKey(refused.Operator ?? "") && refused.Reason == JaxUnsupportedReason.UnknownOperator
                     || knownRefusals?.GetValueOrDefault(typeof(TModule)) == refused.Operator && refused.Reason == JaxUnsupportedReason.UnsupportedUsage
-                    || refused.Reason == JaxUnsupportedReason.UnsupportedModel && HoldsStrings(built.Graph));
+                    || refused is { Reason: JaxUnsupportedReason.UnsupportedModel, Operator: null } && HoldsStrings(built.Graph)
+                       && refused.Message.Contains("element type String", StringComparison.Ordinal));
         }
         if (knownRefusals?.ContainsKey(typeof(TModule)) == true) return false;
         var functions = built.Functions.ToDictionary(f => f.Domain + ":" + f.Name);

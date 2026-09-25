@@ -12,6 +12,7 @@ would compute them in 32. That is a setting of the whole process's JAX.
 """
 
 import collections
+import contextlib
 import contextvars
 import ctypes
 import linecache
@@ -110,9 +111,34 @@ def concrete(*values):
     return not any(isinstance(v, jax.Array) for v in values)
 
 
+# Types numpy computes in without widening -- summing, multiplying and rounding in the narrow type
+# itself -- where XLA and torch accumulate wider. A value of one is never a shape, so it is left to
+# jax.numpy even where it is known, and the concrete path cannot give another answer than the traced.
+_NARROW_FLOATS = {np.dtype(np.float16), np.dtype(jnp.bfloat16), *(np.dtype(t) for t in
+                  (jnp.float8_e4m3fn, jnp.float8_e4m3fnuz, jnp.float8_e5m2, jnp.float8_e5m2fnuz))}
+
+
 def xp(*values):
-    """numpy where every value is concrete, so the result is too; jax.numpy otherwise."""
-    return np if concrete(*values) else jnp
+    """numpy where every value is concrete, so the result is too; jax.numpy otherwise, and for any
+    value of a floating-point type narrower than 32 bits."""
+    if not concrete(*values):
+        return jnp
+    narrow = any(getattr(v, "dtype", None) in _NARROW_FLOATS for v in values)
+    return jnp if narrow else np
+
+
+def divide(a, b):
+    """a / b, rounded as a division is. XLA rewrites a division by a value it knows when it compiles
+    -- a constant, or anything it computes from constants alone, however it got there -- into a
+    multiplication by its reciprocal, which can land one ulp off the quotient, and a rounding after it
+    (QuantizeLinear, a pooling bin's edge) on another integer; so the divisor is hidden from that
+    rewrite."""
+    if concrete(a, b):
+        return xp(a, b).divide(a, b)
+    # Hidden at the shape it divides at: a scalar hidden and then broadcast is rewritten all the same.
+    b = jnp.asarray(b, dtype=getattr(b, "dtype", None))
+    b = jnp.broadcast_to(b, jnp.broadcast_shapes(jnp.shape(a), b.shape))
+    return jnp.divide(a, jax.lax.optimization_barrier(b))
 
 
 def ints(value, operator, what):
@@ -277,8 +303,12 @@ def load_model(source, filename, constants, device_name):
     return Model(namespace["main"], constants, device_of(device_name))
 
 
-def prepare(model, inputs):
-    model.prepare(inputs)
+def prepare(model, inputs, severity=None):
+    token = _warning_severity.set(severity)
+    try:
+        model.prepare(inputs)
+    finally:
+        _warning_severity.reset(token)
 
 
 def run(model, args, wanted, retained, severity=None):
@@ -334,15 +364,31 @@ def arena_statistics(device_name):
 # ---- random draws -----------------------------------------------------------------------------
 
 class _Keys:
-    """The keys a run draws from: split off the run's key, one per draw, in the order the model's
-    draws are traced."""
+    """The keys a run draws from: the run's key folded with the number of the draw, in the order the
+    model's draws are traced, and with the iteration number of every compiled loop the draw is
+    inside. The run's key itself never changes: a body XLA compiles once (a scanned or while Loop, an
+    If's branch) is traced once, so a key it replaced would be the same every iteration, and a value
+    of that body's own trace would leak out of it into the draws after it."""
 
     def __init__(self, key):
         self._key = key
+        self._count = 0
+        self._iterations = []
 
     def next(self):
-        self._key, key = jax.random.split(self._key)
+        key = jax.random.fold_in(self._key, self._count)
+        self._count += 1
+        for iteration in self._iterations:
+            key = jax.random.fold_in(key, iteration)
         return key
+
+    @contextlib.contextmanager
+    def iteration(self, number):
+        self._iterations.append(number)
+        try:
+            yield
+        finally:
+            self._iterations.pop()
 
 
 _keys = contextvars.ContextVar("shorokoo_jax_keys", default=None)
@@ -354,6 +400,12 @@ def next_key(seed=None):
     if seed is not None:
         return jax.random.key(int(np.float32(seed).view(np.uint32)))
     return _keys.get().next()
+
+
+def loop_iteration(number):
+    """Marks the draws traced inside it as those of iteration `number` of a loop compiled once."""
+    keys = _keys.get()
+    return keys.iteration(number) if keys is not None else contextlib.nullcontext()
 
 
 def _fresh_key():

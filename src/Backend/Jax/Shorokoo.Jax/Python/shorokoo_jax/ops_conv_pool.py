@@ -373,7 +373,7 @@ def max_roi_pool(x, rois, /, *, pooled_shape, spatial_scale=1.0):
 
     def bins(start, end, count, size):
         length = jnp.maximum(end - start + 1, np.float32(1))
-        step = length / np.float32(count)
+        step = _rt.divide(length, np.float32(count))
         k = np.arange(count, dtype=np.float32)
         lo = jnp.clip(jnp.floor(k * step[:, None]) + start[:, None], 0, size)
         hi = jnp.clip(jnp.ceil((k + 1) * step[:, None]) + start[:, None], 0, size)

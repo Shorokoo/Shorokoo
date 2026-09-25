@@ -542,7 +542,7 @@ public class PyTorchBackendCoverageTests
         return stream.ToArray();
     }
 
-    private static float[][] RunFloats(IShorokooSession session, Dictionary<string, float[]> feeds, string[] outputs)
+    internal static float[][] RunFloats(IShorokooSession session, Dictionary<string, float[]> feeds, string[] outputs)
     {
         var inputs = feeds.ToDictionary(f => f.Key, f => Torch.CreateTensor(f.Value, [f.Value.Length]));
         try
@@ -1070,10 +1070,10 @@ public class PyTorchBackendCoverageTests
 
     internal static AttributeProto Int(string name, long value) => new() { Name = name, Type = AttributeProto.AttributeType.Int, I = value };
 
-    private static AttributeProto Str(string name, string value)
+    internal static AttributeProto Str(string name, string value)
         => new() { Name = name, Type = AttributeProto.AttributeType.String, S = System.Text.Encoding.UTF8.GetBytes(value) };
 
-    private static AttributeProto Tensor(string name, int elementType, long[] dims, long[] values)
+    internal static AttributeProto Tensor(string name, int elementType, long[] dims, long[] values)
         => new() { Name = name, Type = AttributeProto.AttributeType.Tensor, T = new TensorProto { data_type = elementType, Dims = dims, Int64Datas = values } };
 
     internal static byte[] Typed(int opset, string[] inputs, string[] outputs, NodeProto[] nodes, params FunctionProto[] functions)

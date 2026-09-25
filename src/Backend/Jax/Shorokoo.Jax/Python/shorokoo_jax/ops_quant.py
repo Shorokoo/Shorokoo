@@ -62,7 +62,7 @@ def quantize_linear(x, y_scale, y_zero_point=None, /, *, axis=1, block_size=0, o
     target = _target(y_zero_point, output_dtype)
     work = _computed(x)
     scale = _parameter(y_scale, x, axis, block_size).astype(work)
-    scaled = x.astype(work) / scale
+    scaled = _rt.divide(x.astype(work), scale)
     if target in _rt.FLOAT8:
         if y_zero_point is not None:
             scaled = scaled + _parameter(y_zero_point, x, axis, block_size).astype(work)
@@ -92,9 +92,9 @@ def dynamic_quantize_linear(x, /, *, _outputs):
     zero = np.zeros((), dtype=np.float32)
     lo = xp.minimum(xp.min(x), 0).astype(np.float32) if x.size else zero
     hi = xp.maximum(xp.max(x), 0).astype(np.float32) if x.size else zero
-    scale = xp.where(hi == lo, np.float32(1), (hi - lo) / np.float32(255))
-    zero_point = xp.round(xp.clip(0 - lo / scale, 0, 255))
-    y = xp.clip(xp.round(x.astype(np.float32) / scale) + zero_point, 0, 255)
+    scale = xp.where(hi == lo, np.float32(1), _rt.divide(hi - lo, np.float32(255)))
+    zero_point = xp.round(xp.clip(0 - _rt.divide(lo, scale), 0, 255))
+    y = xp.clip(xp.round(_rt.divide(x.astype(np.float32), scale)) + zero_point, 0, 255)
     return (y.astype(np.uint8), scale, zero_point.astype(np.uint8))[:_outputs]
 
 

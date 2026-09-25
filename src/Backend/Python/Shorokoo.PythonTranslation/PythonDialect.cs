@@ -60,6 +60,10 @@ internal abstract class PythonDialect
     /// or null where it runs it.</summary>
     public virtual string? Refusal(NodeProto node) => null;
 
+    /// <summary>Whether the backend holds sequences and optionals; one that does not refuses a graph
+    /// that takes or returns one.</summary>
+    public virtual bool HoldsSequences => true;
+
     /// <summary>Why the backend cannot hold a tensor of <paramref name="elementType"/>, or null
     /// where it can.</summary>
     public virtual string? Refusal(ShorokooTensorElementType elementType) => null;

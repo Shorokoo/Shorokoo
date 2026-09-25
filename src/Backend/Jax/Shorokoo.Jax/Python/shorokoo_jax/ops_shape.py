@@ -112,10 +112,10 @@ def range_(start, limit, delta):
 
 
 def trilu(data, k=None, /, *, upper=1):
-    diagonal = _rt.number(k, "Trilu", "its diagonal") if k is not None else 0
-    xp = _rt.xp(data)
+    diagonal = 0 if k is None else (int(_rt.number(k, "Trilu", "")) if _rt.concrete(k) else jnp.reshape(k, (-1,))[0])
+    xp = _rt.xp(data, diagonal)
     rows, cols = data.shape[-2], data.shape[-1]
-    offsets = np.arange(cols)[None, :] - np.arange(rows)[:, None]
+    offsets = xp.asarray(np.arange(cols)[None, :] - np.arange(rows)[:, None])
     keep = offsets >= diagonal if upper else offsets <= diagonal
     return xp.where(keep, data, xp.zeros((), dtype=data.dtype))
 

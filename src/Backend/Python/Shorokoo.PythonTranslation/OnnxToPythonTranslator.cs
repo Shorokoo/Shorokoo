@@ -132,17 +132,6 @@ internal sealed partial class OnnxToPythonTranslator
     /// <summary>The backend the translation is written for.</summary>
     public PythonDialect Dialect { get; }
 
-    /// <summary>Translates <paramref name="model"/> for the backend <paramref name="dialect"/> names.</summary>
-    /// <exception cref="NotSupportedException">The model uses something the backend cannot run: the
-    /// dialect's own exception.</exception>
-    public static TranslatedModel Translate(ModelProto model, PythonDialect dialect)
-    {
-        ArgumentNullException.ThrowIfNull(model);
-        ArgumentNullException.ThrowIfNull(dialect);
-        var graph = model.Graph ?? throw dialect.Unsupported(
-            UnsupportedReason.UnsupportedModel, null, null, "The model has no graph.");
-        return new OnnxToPythonTranslator(dialect).Run(model, graph);
-    }
 
     private TranslatedModel Run(ModelProto model, GraphProto graph)
     {
@@ -186,11 +175,16 @@ internal sealed partial class OnnxToPythonTranslator
             [.. graph.Outputs.Select(o => (ShorokooTensorElementType)(o.Type?.SequenceType?.ElemType?.TensorType?.ElemType ?? 0))]);
     }
 
-    /// <summary>Refuses a graph input or output of an element type the backend cannot hold.</summary>
+    /// <summary>Refuses a graph input or output of an element type the backend cannot hold, or a
+    /// sequence or optional one where it holds neither.</summary>
     private void CheckInterface(GraphProto graph)
     {
         foreach (var value in graph.Inputs.Concat(graph.Outputs))
         {
+            if (!Dialect.HoldsSequences && value.Type is { } kind && (kind.SequenceType is not null || kind.OptionalType is not null))
+                throw Dialect.Unsupported(UnsupportedReason.UnsupportedModel, null, null,
+                    $"The {Dialect.BackendName} backend cannot run a graph whose input or output '{value.Name}' is a "
+                    + $"{(kind.SequenceType is not null ? "sequence" : "optional")}: it holds neither.");
             var type = value.Type?.TensorType?.ElemType ?? value.Type?.SequenceType?.ElemType?.TensorType?.ElemType ?? 0;
             if (type > 0 && Dialect.Refusal((ShorokooTensorElementType)type) is { } why)
                 throw Dialect.Unsupported(UnsupportedReason.UnsupportedModel, null, null,
@@ -394,6 +388,9 @@ internal sealed partial class OnnxToPythonTranslator
                  && Dialect.Refusal(node) is null)
         {
             var context = new NodeContext(this, node, scope, _opsets.GetValueOrDefault("", 21));
+            foreach (var attribute in node.Attributes.Where(a => a.Name is "to" or "dtype" && a.Type == AttributeProto.AttributeType.Int))
+                if (Dialect.Refusal((ShorokooTensorElementType)attribute.I) is { } why)
+                    throw context.Unsupported($"its attribute '{attribute.Name}' names element type {(ShorokooTensorElementType)attribute.I}, and {why}");
             expression = entry.Emit(context);
             returnsTuple = entry.ReturnsTuple;
             if (returnsTuple) expression += $"[:{outputs.Count}]";

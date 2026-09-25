@@ -294,18 +294,23 @@ def leaky_relu(x, *, alpha=0.01):
 
 # The branch torch.where does not select still has its gradient taken, multiplied by zero: an
 # exponential there must see only the values it is selected for, or an overflow to inf in it makes
-# the gradient 0 * inf = NaN. Hence the clamps inside expm1.
+# the gradient 0 * inf = NaN. Hence the clamp inside expm1 -- a `where`, since torch.clamp passes no
+# gradient at its bound, and at x = 0 the negative piece's gradient is Shorokoo's rule.
+
+def _nonpositive(x):
+    return torch.where(x > 0, torch.zeros_like(x), x)
+
 
 def elu(x, *, alpha=1.0):
-    return torch.where(x > 0, x, alpha * torch.expm1(torch.clamp(x, max=0)))
+    return torch.where(x > 0, x, alpha * torch.expm1(_nonpositive(x)))
 
 
 def selu(x, *, alpha=1.67326319217681884765625, gamma=1.05070102214813232421875):
-    return gamma * torch.where(x > 0, x, alpha * torch.expm1(torch.clamp(x, max=0)))
+    return gamma * torch.where(x > 0, x, alpha * torch.expm1(_nonpositive(x)))
 
 
 def celu(x, *, alpha=1.0):
-    return torch.where(x > 0, x, alpha * torch.expm1(torch.clamp(x, max=0) / alpha))
+    return torch.where(x > 0, x, alpha * torch.expm1(_nonpositive(x) / alpha))
 
 
 def thresholded_relu(x, *, alpha=1.0):

@@ -93,7 +93,7 @@ internal sealed class JaxSession : IShorokooSession
                         using var entry = new PyTuple([code, dims]);
                         inputs.Append(entry);
                     }
-                    PyCall.Invoke(runtime.Prepare, loaded, inputs).Dispose();
+                    PyCall.Invoke(runtime.Prepare, loaded, inputs, (int)logSeverity).Dispose();
                 }
                 return new JaxSession(backend, runtime, model, logSeverity, placement, loaded);
             }
@@ -106,10 +106,14 @@ internal sealed class JaxSession : IShorokooSession
     }
 
     /// <summary>A failure JAX raised, as the backend reports it: a model that needs, as a number,
-    /// something its inputs' values decide is one the backend cannot run
-    /// (<see cref="JaxUnsupportedModelException"/>); anything else is a failure of the run.</summary>
+    /// something its inputs' values decide, or anything else JAX does not implement — a mode, a
+    /// gradient — is one the backend cannot run (<see cref="JaxUnsupportedModelException"/>);
+    /// anything else is a failure of the run.</summary>
     private static Exception Refusal(JaxBackend backend, PythonException ex, string what)
     {
+        if (ex.Type.Name == "NotImplementedError")
+            return new JaxUnsupportedModelException(JaxUnsupportedReason.UnsupportedUsage, null, null,
+                $"The JAX backend cannot run the model: {ex.Message}", ex);
         if (ex.Type.Name == JaxRuntime.DataDependentShape)
         {
             string? op = null;

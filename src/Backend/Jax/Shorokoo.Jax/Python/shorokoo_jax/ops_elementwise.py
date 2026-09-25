@@ -37,7 +37,7 @@ def mul(a, b):
 def div(a, b):
     xp = _rt.xp(a, b)
     if not _rt.is_integral(a):
-        return xp.divide(a, b)
+        return _rt.divide(a, b) if _rt.concrete(b) else xp.divide(a, b)
     if _is_unsigned(a):
         return xp.floor_divide(a, b)
     # Integer division truncates toward zero; floor division rounds down, so a quotient of operands
@@ -58,7 +58,9 @@ def pow_(x, y):
         return xp.power(x.astype(np.float64), y.astype(np.float64)).astype(x.dtype)
     if not _rt.is_integral(x):
         return xp.power(x, y.astype(x.dtype))
-    return xp.power(x, y.astype(x.dtype)).astype(x.dtype)
+    # numpy refuses an integer to a negative integer power; jax.numpy, as torch, gives what the
+    # integer arithmetic does.
+    return jnp.power(x, y.astype(x.dtype)).astype(x.dtype)
 
 
 def neg(x):
@@ -237,7 +239,10 @@ def sigmoid(x):
 
 def relu(x):
     xp = _rt.xp(x)
-    return xp.maximum(x, xp.zeros((), dtype=x.dtype)) if _rt.is_integral(x) else xp.where(x > 0, x, xp.zeros_like(x))
+    if _rt.is_integral(x):
+        return xp.maximum(x, xp.zeros((), dtype=x.dtype))
+    # NaN is kept, as max(0, x) keeps it; the gradient at 0 is the negative piece's, 0.
+    return xp.where((x > 0) | xp.isnan(x), x, xp.zeros_like(x))
 
 
 # Where an activation's pieces meet, the gradient is that of the piece Shorokoo's own rule takes:
@@ -250,25 +255,31 @@ def leaky_relu(x, *, alpha=0.01):
 
 # The branch `where` does not select still has its gradient taken, multiplied by zero: an
 # exponential there must see only the values it is selected for, or an overflow to inf in it makes
-# the gradient 0 * inf = NaN. Hence the clamps inside expm1.
+# the gradient 0 * inf = NaN. Hence the clamp inside expm1 -- a `where`, not a minimum, whose
+# gradient would be split between x and 0 where they tie, at x = 0, and halve the negative piece's
+# there.
 
 def _alpha(value, x):
     return np.asarray(value, dtype=x.dtype)
 
 
+def _nonpositive(xp, x):
+    return xp.where(x > 0, xp.zeros_like(x), x)
+
+
 def elu(x, *, alpha=1.0):
     xp = _rt.xp(x)
-    return xp.where(x > 0, x, _alpha(alpha, x) * xp.expm1(xp.minimum(x, 0)))
+    return xp.where(x > 0, x, _alpha(alpha, x) * xp.expm1(_nonpositive(xp, x)))
 
 
 def selu(x, *, alpha=1.67326319217681884765625, gamma=1.05070102214813232421875):
     xp = _rt.xp(x)
-    return _alpha(gamma, x) * xp.where(x > 0, x, _alpha(alpha, x) * xp.expm1(xp.minimum(x, 0)))
+    return _alpha(gamma, x) * xp.where(x > 0, x, _alpha(alpha, x) * xp.expm1(_nonpositive(xp, x)))
 
 
 def celu(x, *, alpha=1.0):
     xp = _rt.xp(x)
-    return xp.where(x > 0, x, _alpha(alpha, x) * xp.expm1(xp.minimum(x, 0) / _alpha(alpha, x)))
+    return xp.where(x > 0, x, _alpha(alpha, x) * xp.expm1(_nonpositive(xp, x) / _alpha(alpha, x)))
 
 
 def thresholded_relu(x, *, alpha=1.0):

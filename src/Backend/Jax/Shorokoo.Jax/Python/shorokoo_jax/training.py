@@ -9,6 +9,8 @@ forward pass, the backward pass JAX derives from it and the optimizer update as 
 import jax
 import jax.numpy as jnp
 
+from . import runtime as _rt
+
 
 def value_and_grad(forward, wrt):
     """(the values `forward` carries out, the gradient of the sum of its loss with respect to each
@@ -22,5 +24,13 @@ def value_and_grad(forward, wrt):
         return jnp.sum(loss), carried
 
     argnums = tuple(range(len(wrt)))
-    (_, carried), gradients = jax.value_and_grad(objective, argnums=argnums, has_aux=True)(*wrt)
+    try:
+        (_, carried), gradients = jax.value_and_grad(objective, argnums=argnums, has_aux=True)(*wrt)
+    except ValueError as ex:
+        if "while_loop" not in str(ex):
+            raise
+        raise _rt.DataDependentShape("Loop", None, (
+            "A Loop whose trip count is computed from the values of an input is compiled as a while loop, "
+            "which JAX cannot differentiate, and this one lies between the loss and a tensor the step "
+            "differentiates it with respect to")) from ex
     return carried, gradients

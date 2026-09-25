@@ -62,8 +62,14 @@ internal sealed class JaxDialect : PythonDialect
 
     public override string? Refusal(NodeProto node) => Refused.GetValueOrDefault(node.OpType);
 
-    public override string? Refusal(ShorokooTensorElementType elementType)
-        => elementType == ShorokooTensorElementType.String ? NoStrings : null;
+    public override bool HoldsSequences => false;
+
+    public override string? Refusal(ShorokooTensorElementType elementType) => elementType switch
+    {
+        ShorokooTensorElementType.String => NoStrings,
+        > ShorokooTensorElementType.Float8E5M2FNUZ => "JAX has no 4-bit types",
+        _ => null,
+    };
 
     public override NotSupportedException Unsupported(
         UnsupportedReason reason, string? domain, string? operatorType, string message)

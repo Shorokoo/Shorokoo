@@ -21,7 +21,7 @@ def _product(fn, operands):
 
 
 def matmul(a, b):
-    if _rt.concrete(a, b):
+    if _rt.xp(a, b) is np:
         return _product(np.matmul, [a, b])
     return _product(lambda x, y: jnp.matmul(x, y, precision=_rt.PRECISION), [a, b])
 
@@ -31,16 +31,23 @@ def gemm(a, b, c=None, /, *, alpha=1.0, beta=1.0, transA=0, transB=0):
     b = b.T if transB else b
     product = matmul(a, b)
     if alpha != 1.0:
-        product = (product * np.asarray(alpha, dtype=product.dtype)).astype(product.dtype)
+        product = _scaled(product, alpha)
     if c is None:
         return product
-    addend = c if beta == 1.0 else (c * np.asarray(beta, dtype=c.dtype)).astype(c.dtype)
+    addend = c if beta == 1.0 else _scaled(c, beta)
     return _add(product, addend.astype(product.dtype))
+
+
+def _scaled(x, factor):
+    """x times a float attribute, in x's type: an integer one scaled in floating point and truncated,
+    as torch scales it, rather than by the factor truncated first."""
+    work = np.float64 if _rt.is_integral(x) else x.dtype
+    return (x.astype(work) * np.asarray(factor, dtype=work)).astype(x.dtype)
 
 
 def einsum(*inputs, equation):
     equation = equation.replace(" ", "")
-    if _rt.concrete(*inputs):
+    if _rt.xp(*inputs) is np:
         return _product(lambda *xs: np.einsum(equation, *xs), list(inputs))
     return _product(lambda *xs: jnp.einsum(equation, *xs, precision=_rt.PRECISION), list(inputs))
 

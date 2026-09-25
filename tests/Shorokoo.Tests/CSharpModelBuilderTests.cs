@@ -116,10 +116,6 @@ public class CSharpModelBuilderCoverageTests
         AssertRoundTrips(new InternalComputationGraph([], [Tensor([2L, 2L], "w", "x", "y", "z").ToVariable()]), []);
     }
 
-    /// <summary>Fails: DType.GetOrCreateForTensorStruct keys on structure alone, so a struct whose
-    /// structure was first registered under its short name — as a TensorDataStruct sample built
-    /// with nameof(TheStruct) registers it — keeps that name, and StructTypeName emits it
-    /// unqualified, which the generated source cannot resolve (CS0246).</summary>
     [Fact]
     public void TestAStructFirstRegisteredUnderItsShortNameCodegensSourceThatCompiles()
     {
@@ -451,8 +447,6 @@ public interface CovGenericPair<T> : IStruct where T : IVarType
     Scalar<T> CovGenericPairFieldB { get; }
 }
 
-/// <summary>An IStruct whose field names are unique to this file, registered under its short name
-/// by the one test that uses it.</summary>
 public interface CovShortNamedPair : IStruct
 {
     Scalar<float32> CovShortNamedFieldA { get; }

@@ -435,8 +435,10 @@ catch (InvalidOperationException) { /* "ModelIds [...] and [...] both map to the
 ```
 
 The entry point this page recommends — `ToConcreteModel(weights, namingScheme)` — goes
-through `ToModelId`, which is as forgiving as `ToName`: a candidate the patterns leave
-unnamed gets no entry in the table, an unknown third-party name gives `null` back, and
+through `ToModelId`, which is forgiving where `ToName` is not — `ModelIdNamingScheme.ToName`
+throws `InvalidOperationException` for a ModelId no pattern covers, while `ToModelId` names
+each candidate with `TryToName` instead: a candidate the patterns leave unnamed gets no
+entry in the table, an unknown third-party name gives `null` back, and
 `ToConcreteModel` drops it. The one refusal is a collision — two candidates the patterns
 give the same name — which throws `InvalidOperationException` naming both ModelIds and
 the name, since binding either would be a guess. The table is rebuilt whenever a call

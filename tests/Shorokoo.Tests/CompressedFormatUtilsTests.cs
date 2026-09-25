@@ -2499,7 +2499,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         Persistence.ExportOnnx(model, path);
 
         using var fs = File.OpenRead(path);
-        Assert.NotEqual("", ProtoBuf.Serializer.Deserialize<ModelProto>(fs).Graph.Name);
+        Assert.Equal("main_graph", ProtoBuf.Serializer.Deserialize<ModelProto>(fs).Graph.Name);
     }
 
     [Fact]

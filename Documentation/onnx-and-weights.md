@@ -167,7 +167,7 @@ Unnamed slots fall back to `input_{i}` / `output_{i}`. Every input and output
 `ValueInfoProto` carries its dtype and a **shape** — the reference
 `onnx.checker` requires at least a rank on each of the main graph's inputs and
 outputs, and an exported model passes it. The rank is the declared one where the
-signature states it (`Scalar<T>`, `Vec<T>`, …); otherwise it is the rank observed at
+signature states it (`Scalar<T>`, `Vector<T>`, …); otherwise it is the rank observed at
 the samples the model was concretized at — a rank-agnostic `Tensor<T>` input takes the
 rank of its representative shape, and a rank-agnostic output the rank of the shape it
 recorded when the graph was evaluated at those samples' real values. An output whose

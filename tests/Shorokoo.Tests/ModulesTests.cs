@@ -1230,6 +1230,82 @@ public class ModulesCoverageTests
         Assert.Equal(inputOnly, RecordedShapes(specialized.ToConcreteArchitecture(specialized.FromOrderedInputs([input]))));
     }
 
+    private static string?[] PrefixInputNames(ComputationGraph graph)
+    {
+        var g = graph.ToInternal();
+        Assert.Equal(g.Nodes.Count(n => InternalOpCodes.IsModelInputOp(n.OpCode)), g.InputCount);
+        return [.. graph.InputNames];
+    }
+
+    private static ComputationGraph OnnxRoundTrip(ComputationGraph graph)
+    {
+        using var ms = new MemoryStream();
+        ProtoBuf.Serializer.Serialize(ms, FastOnnxModelBuilder.BuildOnnxModel(graph));
+        return OnnxModelImporter.FromOnnxModel(ms.ToArray());
+    }
+
+    [Fact]
+    public void TestTheInputsAreTheNamedInputNodesOpeningTheGraphThroughConcretizationSaveExportAndSpecialize()
+    {
+        var g = FCLayer.ComputationGraph;
+        var outFeatures = TensorData(DType.Int64, [], 4L);
+        var input = TensorData(DType.Float32, [2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f);
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([outFeatures, input]));
+        var hyper = new ModelParamList([("numOutFeatures", outFeatures)]);
+        string?[] both = ["numOutFeatures", "input"];
+        string?[] inputOnly = ["input"];
+
+        Assert.Equal(both, PrefixInputNames(g));
+        Assert.Equal(both, PrefixInputNames(SrkRoundTrip(g)));
+        Assert.Equal(both, PrefixInputNames(arch));
+        Assert.Equal(both, PrefixInputNames(SrkRoundTrip(arch)));
+        Assert.Equal(both, PrefixInputNames(OnnxRoundTrip(arch.ToConcreteModel())));
+        Assert.Equal(inputOnly, PrefixInputNames(g.Specialize(hyper)));
+        Assert.Equal(inputOnly, PrefixInputNames(arch.Specialize(hyper)));
+        Assert.Equal(inputOnly, PrefixInputNames(SrkRoundTrip(arch.ToConcreteModel().Specialize(hyper))));
+    }
+
+    [Fact]
+    public void TestTheInputsAreDerivedFromTheNodePrefixAndAnInputNodeAfterABodyNodeIsRefused()
+    {
+        var x = InvokeInput("x");
+        var g = new InternalComputationGraph([x], [x * Scalar(2f)]);
+        Assert.Equal([InternalComputationGraph.InputKeyOf(g.Nodes[0])], g.Inputs);
+
+        var y = FastInternalOp.RuntimeInput(DType.Float32, 1, "y");
+        g.InsertInput(0, y);
+        Assert.Equal(["y", "x"], g.InputNames);
+        Assert.Equal(InternalComputationGraph.InputKeyOf(y), g.Inputs[0]);
+        Assert.True(g.TryValidateLinearOrder(out _));
+
+        var constant = g.Nodes.Single(n => n.OpCode == OpCodes.CONSTANT);
+        g.Nodes.Remove(constant);
+        g.Nodes.Insert(0, constant);
+        Assert.Empty(g.Inputs);
+        Assert.False(g.TryValidateLinearOrder(out _));
+        Assert.Throws<InvalidOperationException>(() => ComputationGraph.FromInternal(g, GraphKind.Module));
+    }
+
+    private static Tensor<float32> CallsHyperScaledGain(Tensor<float32> t) => HyperScaledGainSubModel.Model(Scalar(2f)).Call(t);
+
+    private static int InputNodeCount(InternalComputationGraph g) => g.Nodes.Count(n => InternalOpCodes.IsModelInputOp(n.OpCode));
+
+    private static InternalComputationGraph Inlined(InternalComputationGraph g)
+    {
+        FastInlineModulesAndFunctions.Process(g);
+        return g;
+    }
+
+    [Fact]
+    public void TestInliningAndFlatteningLeaveNoInputNodeOfTheCalleeBehind()
+    {
+        var x = InvokeInput("x");
+        Assert.Equal(1, InputNodeCount(ModuleFn((Func<Tensor<float32>, Tensor<float32>>)CallsHyperScaledGain).GetFastFlattenedGraph()));
+        Assert.Equal(1, InputNodeCount(Inlined(HyperScaledGainNoRefModel.ComputationGraph.ToInternal())));
+        Assert.Equal(1, InputNodeCount(Inlined(new InternalComputationGraph([x],
+            [ModuleFn((Func<Tensor<float32>, Scalar<float32>, Tensor<float32>>)ScaledByHyper).Call(Scalar(3f), x)[0]]))));
+    }
+
     private static ComputationGraph SequenceInputArch(TensorData x)
         => SeqHypersLayer.ComputationGraph.ToConcreteArchitecture(new ModelParamList(
         [

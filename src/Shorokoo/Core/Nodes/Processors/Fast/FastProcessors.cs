@@ -28,20 +28,23 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     internal static class FastProcessorHelper
     {
         /// <summary>
-        /// The value an input hint carries, as the kind of value it is: an <c>OptionalTensor</c>
-        /// input's hint is an optional — present or absent — and every other supported hint a
-        /// tensor. Asking every hint for a tensor threw on an absent optional, so a model taking
-        /// one could not be lowered with the arrangement the input exists for
-        /// (Shorokoo/Shorokoo#314). A sequence or struct hint gives the engines no value to
-        /// evaluate with — <c>null</c>, as for an input with no hint — rather than throwing: every
-        /// input needs a sample, a sequence input included, so its sample must be accepted.
+        /// The sample inputs <paramref name="inputHints"/> gives <paramref name="graph"/>, as the
+        /// <see cref="QuickExecutionEngine"/> takes them — keyed by the input each is bound to
+        /// (<see cref="RepresentativeInputShapes.BindSamplesToLoweredInputs"/>), each as the kind of
+        /// value it is: a tensor, an optional (present or absent, Shorokoo/Shorokoo#314) or a
+        /// sequence. An input whose sample the engine cannot take (a nested struct field) or that
+        /// has none is left out, so the engine treats it as unknown. <c>null</c> when none is bound.
         /// </summary>
-        internal static IData? HintValue(NamedModelParam hint) => hint switch
+        internal static Dictionary<FastTensorKey, IRuntimeTensor>? SampleRuntimeInputs(
+            InternalComputationGraph graph, ModelParamList? inputHints, QuickExecutionEngine engine)
         {
-            OptionalTensorDataModelParam optional => optional.ToOptionalTensorData(),
-            { Structure: DataStructure.Tensor } => hint.ToTensorData(),
-            _ => null,
-        };
+            var bound = RepresentativeInputShapes.BindSamplesToLoweredInputs(graph, inputHints);
+            var inputs = new Dictionary<FastTensorKey, IRuntimeTensor>();
+            for (int i = 0; i < bound.Length; i++)
+                if (bound[i] is { } value && value is not TensorDataStruct)
+                    inputs[graph.Inputs[i]] = TensorDataConverter.ToRuntimeInput(value, engine.MaxDataElements);
+            return inputs.Count == 0 ? null : inputs;
+        }
 
         /// <summary>
         /// Copies a freshly computed result onto storage of its own, then releases the backend
@@ -2871,13 +2874,21 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 }
 
                 var newGraphInputs = new List<FastTensorKey>(graph.Inputs.Count);
+                // The names move in step with the inputs: a struct input's name becomes one per
+                // field, "<struct>.<field>", so every later input keeps its own name. Left as it
+                // was, each name after a struct input named the input before it — the name
+                // Specialize removes an input by, and the one an input is reported under.
+                var newGraphInputNames = new List<string?>(graph.Inputs.Count);
                 var newNodes = new List<FastNode>();
 
-                foreach (var inputKey in graph.Inputs)
+                for (int inputIndex = 0; inputIndex < graph.Inputs.Count; inputIndex++)
                 {
+                    var inputKey = graph.Inputs[inputIndex];
+                    var inputName = inputIndex < graph.InputUniqueNames.Count ? graph.InputUniqueNames[inputIndex] : null;
                     if (!structInputProducerByOutput.TryGetValue(inputKey, out var structInputNode))
                     {
                         newGraphInputs.Add(inputKey);
+                        newGraphInputNames.Add(inputName);
                         continue;
                     }
 
@@ -2915,6 +2926,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         newNodes.Add(fieldNode);
                         fieldKeys.Add(fieldTensorKey);
                         newGraphInputs.Add(fieldTensorKey);
+                        newGraphInputNames.Add(inputName is null ? null : $"{inputName}.{field.Name}");
                     }
 
                     structFields[inputKey] = fieldKeys;
@@ -2930,6 +2942,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 graph.Nodes.InsertRange(0, newNodes);
                 graph.Inputs.Clear();
                 foreach (var k in newGraphInputs) graph.Inputs.Add(k);
+                if (graph.InputUniqueNames.Count > 0) graph.InputUniqueNames = newGraphInputNames;
             }
 
             // Maps a TensorStruct-typed sequence's output FastTensorKey to the list of
@@ -3710,21 +3723,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // Provide sample inputs so shape-dependent initializer params (e.g., conv weight shapes
             // computed from ChannelsNCHW) can be fully evaluated.
             var engine = new QuickExecutionEngine();
-            Dictionary<FastTensorKey, IRuntimeTensor>? initialInputs = null;
-            if (inputHints is not null && inputHints.ModelParams.Length > 0)
-            {
-                initialInputs = new Dictionary<FastTensorKey, IRuntimeTensor>();
-                var graphInputKeys = graph.Inputs;
-                for (int i = 0; i < Math.Min(graphInputKeys.Count, inputHints.ModelParams.Length); i++)
-                {
-                    var data = FastProcessorHelper.HintValue(inputHints.ModelParams[i]);
-                    if (data is not null)
-                    {
-                        initialInputs[graphInputKeys[i]] = TensorDataConverter.ToRuntimeInput(
-                            data, engine.MaxDataElements);
-                    }
-                }
-            }
+            var initialInputs = FastProcessorHelper.SampleRuntimeInputs(graph, inputHints, engine);
             var store = engine.Run(graph, initialInputs);
             // The parameter each output key carries, scanned once and used twice: to record an
             // initializer input that IS a parameter, and to check below that such a source is read
@@ -3854,20 +3853,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
             var engine = new QuickExecutionEngine();
-            Dictionary<FastTensorKey, IRuntimeTensor>? initialInputs = null;
-            if (inputHints is not null && inputHints.ModelParams.Length > 0)
-            {
-                initialInputs = new Dictionary<FastTensorKey, IRuntimeTensor>();
-                var graphInputKeys = graph.Inputs;
-                for (int i = 0; i < Math.Min(graphInputKeys.Count, inputHints.ModelParams.Length); i++)
-                {
-                    var data = FastProcessorHelper.HintValue(inputHints.ModelParams[i]);
-                    if (data is not null)
-                    {
-                        initialInputs[graphInputKeys[i]] = TensorDataConverter.ToRuntimeInput(data, engine.MaxDataElements);
-                    }
-                }
-            }
+            var initialInputs = FastProcessorHelper.SampleRuntimeInputs(graph, inputHints, engine);
             var store = engine.Run(graph, initialInputs);
             return ExtractModelIdInfosFromStore(graph, store, ParamIdsByOutputKey(graph, store));
         }

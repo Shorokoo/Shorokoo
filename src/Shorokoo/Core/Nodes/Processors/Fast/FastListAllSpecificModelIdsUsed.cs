@@ -163,7 +163,7 @@ internal static partial class FastListAllSpecificModelIdsUsed
         // Run QEE. Use an oversized MaxDataElements so mask vectors (length numModelIds) are
         // fully materialized — the default 256 would drop data on anything but tiny models.
         var engine = new QuickExecutionEngine { MaxDataElements = MaxMaskVectorLength };
-        var initialInputs = BuildInitialInputs(inputHints, graph.Inputs, engine);
+        var initialInputs = FastProcessorHelper.SampleRuntimeInputs(graph, inputHints, engine);
         Dictionary<FastTensorKey, IRuntimeTensor> store;
         try
         {
@@ -911,31 +911,5 @@ internal static partial class FastListAllSpecificModelIdsUsed
             Attributes = attrs,
             FullOutputs = { [""] = new List<FastTensorKey?> { tensorKey } },
         };
-    }
-
-    /// <summary>
-    /// Prepares the initial-input dictionary passed to QEE. Mirrors the existing logic in
-    /// <see cref="FastConvertModelParamIdRefToModelParam"/>: for every graph input
-    /// that has a matching entry in <paramref name="inputHints"/>, feed QEE the runtime
-    /// tensor so shape-dependent ops inside the graph can evaluate fully.
-    /// </summary>
-    private static Dictionary<FastTensorKey, IRuntimeTensor>? BuildInitialInputs(
-        ModelParamList inputHints,
-        IReadOnlyList<FastTensorKey> graphInputKeys,
-        QuickExecutionEngine engine)
-    {
-        if (inputHints is null || inputHints.ModelParams.Length == 0)
-            return null;
-
-        var dict = new Dictionary<FastTensorKey, IRuntimeTensor>();
-        int limit = System.Math.Min(graphInputKeys.Count, inputHints.ModelParams.Length);
-        for (int i = 0; i < limit; i++)
-        {
-            var data = FastProcessorHelper.HintValue(inputHints.ModelParams[i]);
-            if (data is null) continue;
-            dict[graphInputKeys[i]] = Shorokoo.Core.Interpreter.Helpers.TensorDataConverter.ToRuntimeInput(
-                data, engine.MaxDataElements);
-        }
-        return dict.Count == 0 ? null : dict;
     }
 }

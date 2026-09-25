@@ -1026,6 +1026,48 @@ namespace Shorokoo.Tests.Modules
     }
 
     [Module]
+    public partial class SeqCountShapedParamLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input, TensorSequence<float32> seq)
+        {
+            var scale = InitSimple.Init([Scalar(1L)]);
+            var weights = InitSimple.Init([seq.Count]);
+            return input * weights * scale;
+        }
+    }
+
+    [Module]
+    public partial class ValueShapedParamLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input, Vector<int64> sizes)
+        {
+            var weights = InitSimple.Init([sizes[0L]]);
+            return input * weights;
+        }
+    }
+
+    [Module]
+    public partial class SeqThenConvTransposeLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x, [Hyper] TensorSequence<float32> scales)
+            => Convolution.ConvTranspose(x, 2L, kernelSize: [2L, 2L], stride: [2L, 2L], outputShape: [7L, 7L]);
+    }
+
+    [Module]
+    public partial class OptionalThenConvTransposeLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x, OptionalTensor<float32> bias)
+            => Convolution.ConvTranspose(x, 2L, kernelSize: [2L, 2L], stride: [2L, 2L], outputShape: [7L, 7L]);
+    }
+
+    [Module]
+    public partial class SequenceElementAddLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x, TensorSequence<float32> s)
+            => x + s[Scalar(0L)];
+    }
+
+    [Module]
     public partial class SeqHypersSequenceCalled
     {
         public static Tensor<float32> Inline(Tensor<float32> inputs)

@@ -796,6 +796,22 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    public static class PairThenShapedParamsLayer
+    {
+        public static Tensor<float32> Inline(GenericPairStruct pair, Tensor<float32> input)
+        {
+            var scale = InitSimple.Init([Scalar(1L)]);
+            var weights = InitSimple.Init(input.ShapeTensor());
+            return input * weights * scale * (pair.First + pair.Second);
+        }
+    }
+
+    public static class PairThenConvTransposeLayer
+    {
+        public static Tensor<float32> Inline(GenericPairStruct pair, Tensor<float32> x)
+            => Convolution.ConvTranspose(x, 2L, kernelSize: [2L, 2L], stride: [2L, 2L], outputShape: [7L, 7L]) * pair.First;
+    }
+
     /// <summary>A sample for <see cref="SimplePairSum"/>'s struct input.</summary>
     public static class PairSample
     {

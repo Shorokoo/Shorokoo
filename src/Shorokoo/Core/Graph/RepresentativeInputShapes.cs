@@ -35,21 +35,6 @@ namespace Shorokoo.Core.Graph
             => node.OpCode is InternalOpCodes.MODEL_TENSOR_INPUT or InternalOpCodes.MODEL_OPTIONAL_INPUT;
 
         /// <summary>
-        /// The dims to record for one sample, or <c>null</c> for a sample with no single shape (a
-        /// sequence). An absent optional records <see cref="AbsentOptionalShape"/>, not nothing.
-        /// Reading the shape off the sample rather than converting the sample to a tensor is what
-        /// lets an absent optional through at all: it has no tensor value
-        /// (Shorokoo/Shorokoo#314).
-        /// </summary>
-        internal static long[]? ShapeOf(NamedModelParam sample) => sample switch
-        {
-            OptionalTensorDataModelParam optional =>
-                optional.Data is { HasValue: true, Value: { } value } ? value.Shape.Dims : AbsentOptionalShape,
-            { Structure: DataStructure.Tensor } => sample.ToTensorData().Shape.Dims,
-            _ => null,
-        };
-
-        /// <summary>
         /// Refuses (<see cref="ErrorCodes.FW056"/>) a lowering of <paramref name="graph"/> whose
         /// <paramref name="samples"/> leave any data input without a sample, listing every such
         /// input, or give more samples than it has data inputs, stating both counts. Samples bind to the data inputs by position, as the lowering binds them; a
@@ -76,33 +61,73 @@ namespace Shorokoo.Core.Graph
         }
 
         /// <summary>
-        /// Records each input's sample shape, binding <paramref name="samples"/> to the graph's
-        /// inputs by position, as the lowering does. A struct sample stands for the inputs the
-        /// lowering unpacks its input into, one per field in declaration order. An input without a
-        /// sample, or whose sample has no single shape, is left as it is (<see cref="Verify"/>
-        /// names the former).
+        /// Records each input's sample shape on the input it is bound to
+        /// (<see cref="BindSamplesToLoweredInputs"/>). An input without a sample, or whose sample
+        /// has no single shape, is left as it is (<see cref="Verify"/> names the former).
         /// </summary>
         internal static void Record(InternalComputationGraph graph, ModelParamList samples)
         {
-            var shapes = samples.ModelParams.SelectMany(FlatShapesOf).ToList();
+            var bound = BindSamplesToLoweredInputs(graph, samples);
             var producers = graph.BuildProducerByOutputMap();
-            for (int i = 0; i < graph.Inputs.Count && i < shapes.Count; i++)
+            for (int i = 0; i < graph.Inputs.Count; i++)
             {
                 if (!producers.TryGetValue(graph.Inputs[i], out var node) || !CarriesShape(node)) continue;
-                if (shapes[i] is { } dims) Set(node, dims);
+                if (bound[i] is { } value && ShapeOf(value) is { } dims) Set(node, dims);
             }
         }
 
-        private static IEnumerable<long[]?> FlatShapesOf(NamedModelParam sample)
-            => sample is TensorStructModelParam structSample ? FlatShapesOf(structSample.StructData) : [ShapeOf(sample)];
-
-        private static IEnumerable<long[]?> FlatShapesOf(IData data) => data switch
+        /// <summary>
+        /// The sample value bound to each input of <paramref name="graph"/> — a graph in lowering,
+        /// whose struct inputs <c>FastUnpackTensorStructs</c> may already have expanded into one
+        /// input per field — in input order, <c>null</c> where no sample reaches the input. The one
+        /// binding every lowering stage uses, so the stages that evaluate the graph at the samples
+        /// and the one that records their shapes cannot disagree about which sample is whose.
+        ///
+        /// <para>Samples bind by position, as <see cref="RequireSampleForEveryInput"/> checks them: a
+        /// struct sample stands for its struct's fields, in declaration order, which is the order
+        /// the unpacking gives them as inputs; a generic module's type-placeholder slots take none.
+        /// Each value is the sample's own — a tensor, an optional, a sequence, or a field's value,
+        /// whatever kind it is.</para>
+        /// </summary>
+        internal static IData?[] BindSamplesToLoweredInputs(InternalComputationGraph graph, ModelParamList? samples)
         {
-            TensorDataStruct fields => fields.SelectMany(FlatShapesOf),
-            TensorData tensor => [tensor.Shape.Dims],
-            OptionalTensorData { HasValue: true, Value: { } value } => [value.Shape.Dims],
-            OptionalTensorData => [AbsentOptionalShape],
+            var bound = new IData?[graph.Inputs.Count];
+            if (samples is null) return bound;
+            var values = samples.ModelParams.SelectMany(ValuesOf).ToList();
+            var producers = graph.BuildProducerByOutputMap();
+            int next = 0;
+            for (int i = 0; i < graph.Inputs.Count && next < values.Count; i++)
+            {
+                if (producers.TryGetValue(graph.Inputs[i], out var node) && node.OpCode == InternalOpCodes.GENERIC_TYPE_INPUT)
+                    continue;
+                bound[i] = values[next++];
+            }
+            return bound;
+        }
+
+        private static IEnumerable<IData?> ValuesOf(NamedModelParam sample) => sample switch
+        {
+            TensorStructModelParam structSample => structSample.Definition.Fields.Select(field =>
+                structSample.StructData.Fields.TryGetValue(field.Name, out var value) ? value : null),
+            OptionalTensorDataModelParam optional => [optional.ToOptionalTensorData()],
+            TensorDataSequenceModelParam sequence => [sequence.ToTensorDataSequence()],
+            { Structure: DataStructure.Tensor } => [sample.ToTensorData()],
             _ => [null],
+        };
+
+        /// <summary>
+        /// The dims to record for one sample value, or <c>null</c> for a value with no single shape
+        /// (a sequence, a struct). An absent optional records <see cref="AbsentOptionalShape"/>, not
+        /// nothing: reading the shape off the value rather than converting it to a tensor is what
+        /// lets an absent optional through at all, as it has no tensor value (Shorokoo/Shorokoo#314).
+        /// </summary>
+        private static long[]? ShapeOf(IData value) => value switch
+        {
+            SharedInput shared => ShapeOf(shared.Value),
+            TensorData tensor => tensor.Shape.Dims,
+            OptionalTensorData { HasValue: true, Value: { } present } => present.Shape.Dims,
+            OptionalTensorData => AbsentOptionalShape,
+            _ => null,
         };
 
         /// <summary>Indices of <paramref name="graph"/>'s inputs that take a value: all but a

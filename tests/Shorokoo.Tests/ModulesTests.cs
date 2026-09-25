@@ -1216,6 +1216,36 @@ public class ModulesCoverageTests
     public void TestAModuleWithASequenceInputConcretizesGivenASequenceSample()
         => Assert.Equal(GraphKind.ConcreteArchitecture, SequenceInputArch(TensorData([2L], 1f, 2f)).Kind);
 
+    private static NamedModelParam In(string name, TensorData t) => new TensorDataModelParam(name, ModelParamType.InputParam, t);
+
+    private static ComputationGraph Concretize(ComputationGraph graph, params NamedModelParam[] samples)
+        => graph.ToConcreteArchitecture(new ModelParamList(samples));
+
+    private static long[][] ParamShapes(ComputationGraph arch)
+        => [.. arch.InitializeTrainableParams().ModelParams.Select(p => p.ToTensorData().Shape.Dims).OrderBy(d => string.Join(",", d))];
+
+    private static ComputationGraph PairThenShapedParams
+        => ModuleFactory.ComputationGraph((Func<GenericPairStruct, Tensor<float32>, Tensor<float32>>)PairThenShapedParamsLayer.Inline);
+
+    [Fact]
+    public void TestAParamShapedByAnInputAfterAStructInputIsBuiltFromThatInputsSample()
+    {
+        long[][] expected = [[1L], [2L, 3L]];
+        Assert.Equal(expected, ParamShapes(Concretize(PairThenShapedParams,
+            PairSample.Of(1f, 2f), In("input", TensorData(DType.Float32, [2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)))));
+    }
+
+    [Fact]
+    public void TestAStructInputsFieldsAreNamedAfterItSoSpecializeRemovesTheInputItNames()
+    {
+        var x = TensorData(DType.Float32, [2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f);
+        var arch = Concretize(PairThenShapedParams, PairSample.Of(1f, 2f), In("input", x));
+        long[]?[] shapes = [[], [], [2L, 3L]];
+        Assert.Equal(["pair.First", "pair.Second", "input"], arch.InputNames);
+        Assert.Equal(["pair.First", "pair.Second"], arch.Specialize(new ModelParamList([("input", x)])).InputNames);
+        Assert.Equal(shapes, RecordedShapes(arch));
+    }
+
     private static void DetectedAsItsOwnKind(ComputationGraph graph)
     {
         Assert.Equal(graph.Kind, SrkFileFormat.DetectStage(graph.ToInternal()));

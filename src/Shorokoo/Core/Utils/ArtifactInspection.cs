@@ -126,7 +126,7 @@ namespace Shorokoo
     public sealed class TrainingCheckpointArtifactInfo
     {
         /// <summary>Checkpoint format version from the marker tensor
-        /// (<see cref="TrainingCheckpoint"/> writes version 3; the loader reads version 3 only).</summary>
+        /// (<see cref="TrainingCheckpoint"/> writes version 1, the only version the loader reads).</summary>
         public long FormatVersion { get; }
 
         /// <summary>The 0-based global training step the checkpoint was saved at.</summary>
@@ -649,7 +649,8 @@ namespace Shorokoo
                 // opens with the container magic too. Such a file has no readable .srk header, so
                 // an unreadable one gets a second look as SafeTensors. The converse cannot happen:
                 // a real container's bytes 4–7 (header length, then the JSON's first bytes) read as
-                // a length far past MaxSafeTensorsHeaderBytes.
+                // a length far past MaxSafeTensorsHeaderBytes, and they are all zero only for a
+                // header length of 0, which is never a readable container.
                 var srk = InspectSrkContainer(filePath, stream, fileLen, prefix, prefixRead, observations);
                 if (srk.Srk!.Header is null && prefixRead == 8
                     && TryInspectSafeTensors(filePath, stream, fileLen, prefix, []) is { } imitator)
@@ -1412,8 +1413,8 @@ namespace Shorokoo
             List<InspectedTensorInfo> tensors, List<string> observations)
         {
             // Locate the marker in the header listing; its declared extent gives the file position of
-            // its payload bytes. The marker is a fixed 16 bytes: int64[2] = [version, step] (format v3).
-            // Epoch and batch index moved out into their own presence-gated int64 scalars, read
+            // its payload bytes. The marker is a fixed 16 bytes: int64[2] = [version, step].
+            // Epoch and batch index are kept in their own presence-gated int64 scalars, read
             // separately below — the marker never grows, so any other marker length is malformed (the
             // same strict shape the Load path enforces; there are no released files of any older shape).
             const int MarkerBytes = 16;

@@ -533,7 +533,7 @@ Recognized formats and what is reported:
 
 | `Kind` | Recognized by | Reported |
 |---|---|---|
-| `SrkGraph` | `.srk` container magic | the header — format version, lifecycle stage, compression, payload SHA-256, producer (`result.Srk.Header`, an `SrkHeader`) |
+| `SrkGraph` | `.srk` container magic (a file that opens with it but has no readable container header and parses as SafeTensors is reported as `SafeTensors`) | the header — format version, lifecycle stage, compression, payload SHA-256, producer (`result.Srk.Header`, an `SrkHeader`) |
 | `SafeTensors` | 8-byte header-length prefix + valid JSON header | tensor listing (name, dtype, shape, byte size), total payload size, `__metadata__` (`result.SafeTensors`) |
 | `TrainingCheckpoint` | the `__shorokoo_checkpoint__` marker tensor in a SafeTensors header | checkpoint format version, the run counters (global step, epoch, batch index), and the per-section (`trainable` / `model_state` / `opt_state`) tensor listing (`result.TrainingCheckpoint`); `result.SafeTensors` is populated too |
 | `CompressedSafeTensors` | Zstd frame magic whose decompressed content starts with a valid SafeTensors length prefix + JSON header (`.zsafetensor`, written by `CompressedFormatUtils.SaveCompressedSafeTensors`) | the same details as `SafeTensors` (`result.SafeTensors`), read by stream-decompressing only the prefix and header — the tensor payload is never decompressed; sizes describe the decompressed content |

@@ -1027,7 +1027,7 @@ public class PyTorchBackendCoverageTests
         return function;
     }
 
-    private static GraphProto ScanLoop(bool typed)
+    internal static GraphProto ScanLoop(bool typed)
     {
         var body = Graph(["i", "c", "x"], ["c2", "x2", "sc"], Node("Identity", ["c"], ["c2"]), Node("Identity", ["x"], ["x2"]),
             Node("Constant", [], ["sc"], attributes: Tensor("value", 7, [2, 3], [1, 2, 3, 4, 5, 6])));
@@ -1047,7 +1047,7 @@ public class PyTorchBackendCoverageTests
         return Graph(["m", "v"], ["y"], loop);
     }
 
-    private static float[] RunFloats(IShorokooSession session, bool condition, float[] x)
+    internal static float[] RunFloats(IShorokooSession session, bool condition, float[] x)
     {
         using var c = Torch.CreateTensor([condition], []);
         using var input = Torch.CreateTensor(x, [x.Length]);

@@ -15,8 +15,9 @@ environment**, which it can provision itself the first time you use it.
 ## Facts
 
 - Packages: `Shorokoo.PyTorch.Cpu` and `Shorokoo.PyTorch.Cuda`, for **Linux x64 and Windows x64**. Each
-  brings `Shorokoo.PyTorch` (the translator and the backend) and `Shorokoo.PythonHost` (the
-  embedded interpreter). Neither ships PyTorch itself: that lives in the Python environment.
+  brings `Shorokoo.PyTorch` (the backend), `Shorokoo.PythonTranslation` (the translator, which the
+  [JAX backend](jax-backend.md) shares) and `Shorokoo.PythonHost` (the embedded interpreter).
+  Neither ships PyTorch itself: that lives in the Python environment.
 - A torch backend is **always named**: `new ComputeContext(new TorchCpuBackend())`. It is
   never a candidate for [auto-discovery](inference.md#auto-discovery), so referencing it
   beside an ONNX Runtime package does not make discovery ambiguous, and `ComputeContext.Default`
@@ -29,7 +30,8 @@ environment**, which it can provision itself the first time you use it.
   `TorchUnsupportedModelException` naming the operator (or attribute) the backend cannot run.
   Operator coverage is partial today; see [Limitations](#limitations).
 - One process runs **one** Python interpreter over **one** environment, shared by every torch
-  backend in it.
+  and [JAX](jax-backend.md) backend in it. The environments provisioned from the lock files hold
+  PyTorch and JAX together, one per CUDA major version.
 
 ## Installing
 
@@ -46,8 +48,9 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
 The first run that needs PyTorch then downloads CPython 3.12 and the locked packages into the
-cache. That needs the network and takes a while: the CPU environment is under 1 GB, the CUDA
-one several GB (the NVIDIA libraries come with it). Every later run, in any process, reuses it.
+cache. That needs the network and takes a while: the CPU environment is about 1.5 GB, the CUDA
+one about 7 GB (the NVIDIA libraries come with it). Both hold JAX as well, which the
+[JAX backend](jax-backend.md) uses. Every later run, in any process, reuses it.
 
 On a machine without network access, provision an environment elsewhere (or build one by
 hand, see below) and name it with `SHOROKOO_PYTHON_ENV`.
@@ -86,7 +89,7 @@ Console.WriteLine(environment);             // "/home/me/.cache/shorokoo/python-
 | device | the host | `cuda:N` — device 0 by default, `new TorchCudaBackend(1)` for another |
 | environment | PyTorch's CPU build | PyTorch built for CUDA 13 |
 | machine needs | nothing | an NVIDIA driver recent enough for CUDA 13; the CUDA libraries come with the environment |
-| environment lock | torch `2.14.0+cpu` | Linux: PyPI's torch `2.14.0` (CUDA 13); Windows: `2.14.0+cu130` from PyTorch's `cu130` index |
+| environment lock | torch `2.14.0+cpu`, jax `0.11.2` | Linux: PyPI's torch `2.14.0` (CUDA 13) and `jax[cuda13]` `0.11.2`; Windows: `2.14.0+cu130` from PyTorch's `cu130` index, and jax `0.11.2` for the CPU |
 | `Description.Device` / `MemorySpace` | `Cpu` / host | `Cuda` / `MemorySpace.Cuda(N)` |
 
 On CUDA, a tensor moved to the context (`TensorData.To(context)`) is on the card, and a run
@@ -166,7 +169,7 @@ whose message names what is missing:
 | `NetworkUnavailable` | provisioning could not reach the package index |
 | `ProvisioningFailed` | uv failed for another reason; its output is quoted |
 | `ProvisioningTimedOut` | provisioning ran past `ProvisioningTimeout`: another process held its lock, or a uv step had not finished and was stopped |
-| `MissingPackage` | the environment cannot import `torch` or `numpy` |
+| `MissingPackage` | the environment cannot import `torch` or `numpy` (`jax` for a JAX backend) |
 | `EnvironmentConflict` | the process already runs Python over a different environment |
 | `InterpreterFailed` | CPython itself would not start |
 | `DeviceUnavailable` | a CUDA backend, and no NVIDIA driver fit for CUDA 13, or PyTorch sees no such device |

@@ -35,7 +35,8 @@ var rig = TrainingRig.FromScratch(
 ```
 
 `backend` here is an `IShorokooBackend` that accepts `TrainingFormats.OnnxAutoGrad` — today, the
-PyTorch backends (see [Training on PyTorch](#training-on-pytorch)). Everything else is the ordinary
+PyTorch backends (see [Training on PyTorch](#training-on-pytorch)) and the JAX backends (see
+[Training on JAX](#training-on-jax)). Everything else is the ordinary
 rig: `TrainStep`, `Fit`, `Train`, `BeginResidentRun`, checkpoints and `.skpt` files work unchanged.
 
 To move an existing rig, derive a new one; the model, loss, optimizer, hyperparameters, seed and
@@ -104,6 +105,47 @@ Limits of training on torch, besides those of [the native path](#what-differs-on
 - Only floating-point parameters (`Float32`, `Float16`, `BFloat16`, `Float64`) are differentiated.
 - Memory: torch keeps what the backward pass needs of the forward pass until the gradient is taken,
   with no rematerialization.
+
+## Training on JAX
+
+The [JAX backends](jax-backend.md) accept both formats too. With `TrainingBackend.Native` on a JAX
+runtime context, the gradient is computed by **JAX**, and **XLA compiles the whole training step**:
+
+```csharp
+using Shorokoo.Jax.Cpu;                      // or Shorokoo.Jax.Cuda: new JaxCudaBackend()
+using Shorokoo.Runtime;
+
+using var jax = new ComputeContext(new JaxCpuBackend());
+var rig = TrainingRig.FromScratch(
+    model, loss, optimizer, sampleInputs,
+    new AdamWOptimizerHyperparameters { LearningRate = 0.001f },
+    runtimeContext: jax,
+    trainingBackend: TrainingBackend.Native);
+```
+
+What the step does on JAX:
+
+- The forward pass up to the loss is written as a function of the trainable parameters, returning
+  the loss and every value the rest of the step reads; `jax.value_and_grad` differentiates it, and the
+  optimizer update reads its gradients. The step is traced whole and compiled by XLA as one program
+  per batch shape — the forward pass, the backward pass JAX derives from it and the update, fused
+  across one another.
+- As on torch, the optimizer, schedules, hyperparameters and random draws are Shorokoo's operators, so
+  a rig trained on JAX follows the rig trained by Shorokoo step for step up to floating-point rounding,
+  and a checkpoint moves freely between the two.
+- The first step of each batch shape compiles its program, which the rig's compiled-step cache then
+  keeps (`CompiledTrainStepShapeKeys`).
+
+Limits of training on JAX, besides those of [the native path](#what-differs-on-the-native-path):
+
+- The model must be one the JAX backend runs: an operator it refuses — strings, sequences, operators
+  whose output shape their input's values decide, a shape computed from an input's values — refuses
+  the step's session, at the first step, with a `JaxUnsupportedModelException` naming it (see the
+  backend's [limitations](jax-backend.md#limitations)).
+- Only floating-point parameters (`Float32`, `Float16`, `BFloat16`, `Float64`) are differentiated.
+- Memory: what the backward pass needs of the forward pass is XLA's to keep or recompute. A step
+  writes its updated parameters into memory of its own; JAX arrays are never written in place, so the
+  rig's output aliasing binds nothing on JAX.
 
 ## The formats
 

@@ -57,15 +57,17 @@ public sealed class PythonEnvironmentLock
     /// <summary>The cache folder's name: the lock's name and its hash.</summary>
     public string CacheKey => $"{Name}-{Hash}";
 
-    /// <summary>The PyTorch CPU build for this machine's platform, from PyTorch's own <c>cpu</c>
-    /// index.</summary>
+    /// <summary>The CPU environment for this machine's platform: PyTorch's CPU build, from PyTorch's
+    /// own <c>cpu</c> index, and JAX, which every CPU backend of either family runs in.</summary>
     /// <exception cref="PlatformNotSupportedException">This is not Linux or Windows on x64, which
     /// are the platforms locks exist for.</exception>
     public static PythonEnvironmentLock Cpu => CpuLock.Value;
 
-    /// <summary>The PyTorch build for CUDA 13 for this machine's platform: PyPI's default wheel on
-    /// Linux, and on Windows — where PyPI's wheel is the CPU build — the <c>cu130</c> one from
-    /// PyTorch's own index.</summary>
+    /// <summary>The CUDA 13 environment for this machine's platform: PyTorch built for CUDA 13 —
+    /// PyPI's default wheel on Linux, and on Windows, where PyPI's wheel is the CPU build, the
+    /// <c>cu130</c> one from PyTorch's own index — and JAX, with its CUDA 13 plugin on Linux (JAX
+    /// builds one for no other system). Both frameworks load the one set of NVIDIA libraries the
+    /// environment holds.</summary>
     /// <exception cref="PlatformNotSupportedException">This is not Linux or Windows on x64.</exception>
     public static PythonEnvironmentLock Cu13 => Cu13Lock.Value;
 

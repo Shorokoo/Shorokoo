@@ -504,7 +504,8 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
 12. Nearest mode only; other modes throw.
 13. Builds, but ONNX Runtime has no `ImageDecoder` kernel, so a model using it
     is refused when its session is created. It runs on the
-    [PyTorch backend](pytorch-backend.md).
+    [PyTorch backend](pytorch-backend.md); the [JAX backend](jax-backend.md) refuses it, its output
+    shape being decided by the bytes it decodes.
 
 ## Random
 

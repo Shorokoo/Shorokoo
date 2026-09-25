@@ -9,7 +9,7 @@
     <NoWarn>$(NoWarn);CS1591</NoWarn>
 
     <IsPackable>true</IsPackable>
-    <Description>The embedded CPython host behind Shorokoo's Python-based backends: finds or provisions the Python environment a backend needs (with uv, from a lock file), starts one interpreter per process through pythonnet, and keeps the GIL discipline. You normally do not install this directly; install Shorokoo.PyTorch.Cpu or Shorokoo.PyTorch.Cuda.</Description>
+    <Description>The embedded CPython host behind Shorokoo's Python-based backends: finds or provisions the Python environment a backend needs (with uv, from a lock file), starts one interpreter per process through pythonnet, and keeps the GIL discipline. You normally do not install this directly; install a PyTorch or JAX backend package, which brings it.</Description>
     <PackageTags>shorokoo;python;pythonnet;backend;machine-learning</PackageTags>
   </PropertyGroup>
 

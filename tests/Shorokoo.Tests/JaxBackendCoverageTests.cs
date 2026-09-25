@@ -100,6 +100,140 @@ public class JaxBackendCoverageTests
         Assert.False(((IShorokooBackend)Jax).AcceptsTrainingFormat("onnx-autograd/2"));
     }
 
+    [Fact]
+    public void TestWhatJaxCannotHoldIsRefusedAtSessionCreationNamingIt()
+    {
+        var reshapedByValue = Shaped(PyTorchBackendCoverageTests.Graph(["x", "s"], ["y"], Node("Reshape", ["x", "s"], ["y"])), ("x", 1, [4]), ("s", 7, [2]));
+        var reshapedByShape = Shaped(PyTorchBackendCoverageTests.Graph(["x"], ["y"], Node("Shape", ["x"], ["s"]), Node("Reshape", ["x", "s"], ["y"])), ("x", 1, [4]));
+
+        Assert.Equal(("NonZero", JaxUnsupportedReason.UnknownOperator), Refusal(PyTorchBackendCoverageTests.Onnx("NonZero", 1)));
+        Assert.Equal(("SequenceLength", JaxUnsupportedReason.UnknownOperator), Refusal(PyTorchBackendCoverageTests.Onnx("SequenceLength", 1)));
+        Assert.Equal(((string?)null, JaxUnsupportedReason.UnsupportedModel), Refusal(PyTorchBackendCoverageTests.Onnx("Identity", (int)ShorokooTensorElementType.String)));
+        Assert.Equal(("Reshape", JaxUnsupportedReason.UnsupportedUsage), Refusal(Serialize(reshapedByValue)));
+        Jax.CreateSession(Serialize(reshapedByShape), default, default, DeviceMemorySettings.Default).Dispose();
+    }
+
+    [Fact]
+    public void TestAModelOfUnfixedShapeIsCompiledForEachShapeItIsFed()
+    {
+        using var session = Jax.CreateSession(Serialize(PyTorchBackendCoverageTests.Graph(["x"], ["y"], Node("Shape", ["x"], ["s"]), Node("Cast", ["s"], ["f"], attributes: Int("to", 1)), Node("Mul", ["x", "f"], ["y"]))), default, default, DeviceMemorySettings.Default);
+
+        Assert.Equal([2f, 4f], RunFloats(session, new() { ["x"] = [1f, 2f] }, ["y"])[0]);
+        Assert.Equal([3f, 6f, 9f], RunFloats(session, new() { ["x"] = [1f, 2f, 3f] }, ["y"])[0]);
+    }
+
+    [Fact]
+    public void TestControlFlowOnAnInputsValueCompilesAsXlaControlFlow()
+    {
+        var then = PyTorchBackendCoverageTests.Graph([], ["y"], Node("Add", ["x", "x"], ["y"]));
+        var otherwise = PyTorchBackendCoverageTests.Graph([], ["e"], Node("Neg", ["x"], ["e"]));
+        var longer = PyTorchBackendCoverageTests.Graph([], ["e"], Node("Concat", ["x", "x"], ["e"], attributes: Int("axis", 0)));
+        using var branch = Jax.CreateSession(Serialize(PyTorchBackendCoverageTests.Graph(["c", "x"], ["y"], Branch("c", then, otherwise))), default, default, DeviceMemorySettings.Default);
+        using var counting = Jax.CreateSession(Serialize(CountingLoop()), default, default, DeviceMemorySettings.Default);
+        using var scanning = Jax.CreateSession(Serialize(ScanLoop(typed: true)), default, default, DeviceMemorySettings.Default);
+        using var uneven = Jax.CreateSession(Serialize(PyTorchBackendCoverageTests.Graph(["c", "x"], ["y"], Branch("c", then, longer))), default, default, DeviceMemorySettings.Default);
+
+        Assert.Equal([2f, 4f], Branched(branch, true));
+        Assert.Equal([-1f, -2f], Branched(branch, false));
+        Assert.Equal([5f], Counted(counting, "y", 5));
+        Assert.Equal("If", Assert.Throws<JaxUnsupportedModelException>(() => Branched(uneven, true)).Operator);
+        Assert.Equal("Loop", Assert.Throws<JaxUnsupportedModelException>(() => Counted(scanning, "s", 2)).Operator);
+    }
+
+    [Fact]
+    public void TestARunCancelledBeforeItStartsIsRefusedAndOneWithALiveTokenRuns()
+    {
+        using var session = Jax.CreateSession(PyTorchBackendCoverageTests.Onnx("Neg", 1), default, default, DeviceMemorySettings.Default);
+        using var x = Jax.CreateTensor([1f], [1]);
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+
+        Assert.Throws<OperationCanceledException>(() => session.Run(new Dictionary<string, IShorokooTensorValue> { ["x0"] = x }, ["y"], new RunSettings { CancellationToken = cancelled.Token }));
+        using var y = session.Run(new Dictionary<string, IShorokooTensorValue> { ["x0"] = x }, ["y"], new RunSettings { CancellationToken = new CancellationTokenSource().Token })[0];
+        Assert.Equal([-1f], y.GetTensorDataAsSpan<float>().ToArray());
+    }
+
+    [Fact]
+    public void TestACpuSessionHasNoArenaFiguresBindsNoAliasRetainsNothingAndRunsEveryNodeOnTheHost()
+    {
+        var graph = ComputeContextLifetimeCoverageTests.GraphOf("a:float[2] b:float[2]", "O:float[2]",
+            ComputeContextLifetimeCoverageTests.Op("Sub", "a b", "t"), ComputeContextLifetimeCoverageTests.Op("Neg", "t", "O"));
+        using var traced = Jax.CreateSession(Serialize(graph), default, default, DeviceMemorySettings.Default, new DiagnosticSettings { TraceNodePlacement = true }, [new OutputAlias("O", "a")]);
+        using var a = Jax.CreateTensor([5f, 7f], [2]);
+        using var b = Jax.CreateTensor([1f, 2f], [2]);
+        var consumed = Jax.CreateTensor([5f, 7f], [2]);
+        var feeds = new Dictionary<string, IShorokooTensorValue> { ["a"] = consumed, ["b"] = b };
+        using var kept = traced.RunConsuming(feeds, [consumed], ["O"], new HashSet<string> { "O" }, RunSettings.Default)[0];
+
+        Assert.False(traced.HasDeviceMemory);
+        Assert.True(kept.IsHostAccessible);
+        Assert.Equal([-4f, -5f], kept.GetTensorDataAsSpan<float>().ToArray());
+        Assert.Throws<ObjectDisposedException>(() => consumed.IsHostAccessible);
+        Assert.Empty(traced.BindableAliases);
+        Assert.Null(traced.ReadArenaStatistics());
+        Assert.Equal(SessionOutputPlacement.Host, traced.OutputPlacement);
+        Assert.Equal([("Sub", "cpu"), ("Neg", "cpu")], traced.ReadNodePlacement()!.Nodes.Select(n => (n.OpType, n.Provider)));
+    }
+
+    [Fact]
+    public void TestEveryJaxBackendSharesOneRuntimeApartFromTorchsAndNamesItsOwnMemory()
+    {
+        var cuda = new JaxCudaBackend(1);
+
+        Assert.Same(Jax.RuntimeIdentity, cuda.RuntimeIdentity);
+        Assert.NotSame(Jax.RuntimeIdentity, new TorchCpuBackend().RuntimeIdentity);
+        Assert.Equal(MemorySpace.Host, ((IShorokooBackend)Jax).MemorySpace);
+        Assert.Equal(MemorySpace.Cuda(1), ((IShorokooBackend)cuda).MemorySpace);
+        Assert.Equal("cuda:1", cuda.DeviceName);
+        Assert.Equal(Jax.Start().Directory, new TorchCpuBackend().Start().Directory);
+        Assert.Contains("jax==0.11.2", PythonEnvironmentLock.Cpu.Requirements);
+        Assert.Contains("jax-cuda13-plugin==0.11.2", PythonEnvironmentLock.ForPlatform("cu13", "linux-x64").Requirements);
+        Assert.DoesNotContain("jax-cuda13-plugin", PythonEnvironmentLock.ForPlatform("cu13", "win-x64").Requirements);
+    }
+
+    [NoCudaDriverFact]
+    public void TestTheCudaBackendOnAMachineWithoutADriverRefusesToStartBeforeProvisioningAnything()
+    {
+        var cache = Path.Combine(Path.GetTempPath(), "shorokoo-nodriver-" + Guid.NewGuid().ToString("N"));
+        var refusal = Assert.Throws<PythonEnvironmentException>(() => new JaxCudaBackend(0, new() { CacheDirectory = cache }).Start());
+
+        Assert.Equal(PythonEnvironmentFailure.DeviceUnavailable, refusal.Failure);
+        Assert.False(Directory.Exists(cache));
+    }
+
+    private static (string? Operator, JaxUnsupportedReason Reason) Refusal(byte[] model)
+    {
+        var refused = Assert.Throws<JaxUnsupportedModelException>(() => Jax.CreateSession(model, default, default, DeviceMemorySettings.Default));
+        return (refused.Operator, refused.Reason);
+    }
+
+    private static GraphProto Shaped(GraphProto graph, params (string Name, int Type, long[] Dims)[] inputs)
+    {
+        foreach (var (name, type, dims) in inputs)
+        {
+            var shape = new TensorShapeProto();
+            shape.Dims.AddRange(dims.Select(d => new TensorShapeProto.Dimension { DimValue = d }));
+            graph.Inputs.Single(i => i.Name == name).Type = new TypeProto { TensorType = new TypeProto.Tensor { ElemType = type, Shape = shape } };
+        }
+        return graph;
+    }
+
+    private static float[] Branched(IShorokooSession session, bool condition)
+    {
+        using var c = Jax.CreateTensor([condition], []);
+        using var x = Jax.CreateTensor([1f, 2f], [2]);
+        using var y = session.Run(new Dictionary<string, IShorokooTensorValue> { ["c"] = c, ["x"] = x }, ["y"], RunSettings.Default)[0];
+        return y.GetTensorDataAsSpan<float>().ToArray();
+    }
+
+    private static float[] Counted(IShorokooSession session, string output, long iterations)
+    {
+        using var m = Jax.CreateTensor([iterations], []);
+        using var v = Jax.CreateTensor([0f], []);
+        using var y = session.Run(new Dictionary<string, IShorokooTensorValue> { ["m"] = m, ["v"] = v }, [output], RunSettings.Default)[0];
+        return y.GetTensorDataAsSpan<float>().ToArray();
+    }
+
     private static float[][] RunFloats(IShorokooSession session, Dictionary<string, float[]> feeds, string[] outputs)
     {
         var inputs = feeds.ToDictionary(f => f.Key, f => Jax.CreateTensor(f.Value, [f.Value.Length]));

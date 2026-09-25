@@ -712,8 +712,8 @@ namespace Shorokoo
 
         /// <summary>An imported ONNX model's graph input declares no shape, so no representative
         /// shape can be derived for it (supply one with the ImportOnnx overload that takes input
-        /// shapes), or a graph output declares none and evaluating the model at its inputs'
-        /// shapes gives none either</summary>
+        /// shapes), or a graph output declares none and neither evaluating nor running the model
+        /// at its inputs' shapes gives one</summary>
         public const string FW058 = "FW058";
 
         /// <summary>Binding weights into a concrete architecture left a parameter without a value:

@@ -2735,6 +2735,61 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         Assert.Equal(["x"], ReimportedOutputNames(imported));
     }
 
+    private static ValueInfoProto StringInput(string name, params TensorShapeProto.Dimension[]? dims)
+    {
+        var tensor = new TypeProto.Tensor { ElemType = 8 };
+        if (dims is not null)
+        {
+            tensor.Shape = new TensorShapeProto();
+            tensor.Shape.Dims.AddRange(dims);
+        }
+        return new ValueInfoProto { Name = name, Type = new TypeProto { TensorType = tensor } };
+    }
+
+    private sealed class RanklessStringOp(string opCode, int outputs) : Shorokoo.Core.Interpreter.QuickOp
+    {
+        public override string OpCode => opCode;
+        protected override Shorokoo.Core.Interpreter.RuntimeTensor[] Compute(
+            Shorokoo.Core.Interpreter.RuntimeTensor?[] inputs, OnnxCSharpAttributes attrs, int maxDataElements)
+            => [.. Enumerable.Range(0, outputs).Select(_ => new Shorokoo.Core.Interpreter.RuntimeTensor { DType = DType.Utf8 })];
+    }
+
+    private string ForeignStringModelFile(NodeProto node)
+    {
+        var g = new GraphProto { Name = "foreign" };
+        g.Inputs.Add(StringInput("s", Fixed(2)));
+        node.Inputs.Add("s");
+        g.Nodes.Add(node);
+        g.Outputs.Add(StringInput(node.Outputs[0], null));
+        var model = new ModelProto { IrVersion = 10, Graph = g };
+        model.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = 21 });
+        return WriteOnnx(P(Guid.NewGuid() + ".onnx"), model);
+    }
+
+    private static AttributeProto StringAttribute(string name, string value)
+        => new() { Name = name, Type = AttributeProto.AttributeType.String, S = System.Text.Encoding.UTF8.GetBytes(value) };
+
+    [Fact]
+    public void TestImportOnnxRecordsAnUnshapedOutputTheEngineCannotComputeFromARunElseRefusesItWithoutAdvisingInputShapes()
+    {
+        var split = new NodeProto { OpType = "StringSplit", Name = "split0", Outputs = { "y", "n" } };
+        split.Attributes.Add(StringAttribute("delimiter", " "));
+        var normalize = new NodeProto { OpType = "StringNormalizer", Name = "normalize0", Outputs = { "y" } };
+        normalize.Attributes.AddRange([StringAttribute("case_change_action", "LOWER"), StringAttribute("locale", "xx_XX")]);
+        var splitPath = ForeignStringModelFile(split);
+        var normalizePath = ForeignStringModelFile(normalize);
+
+        using (Shorokoo.Core.Interpreter.OpRegistry.Override(new RanklessStringOp(OpCodes.STRING_SPLIT, 2)))
+            Assert.Equal([2L, 0L], OutputShapeOf(Persistence.ImportOnnx(splitPath)));
+        using (Shorokoo.Core.Interpreter.OpRegistry.Override(new RanklessStringOp(OpCodes.STRING_NORMALIZER, 1)))
+        {
+            var ex = Assert.Throws<ModelException>(() => Persistence.ImportOnnx(normalizePath));
+            Assert.Equal(ErrorCodes.FW058, ex.ErrorCode);
+            Assert.Contains("'y'", ex.Message);
+            Assert.DoesNotContain("input shapes", ex.Message);
+        }
+    }
+
     [Fact]
     public void TestImportOnnxRefusesAnOutputOfUnknownRankThatNoInputShapeSettlesNamingIt()
     {

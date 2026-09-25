@@ -398,6 +398,10 @@ namespace Shorokoo.Core.Graph
         /// <summary>Each output's shape at <paramref name="graph"/>'s representative inputs, in
         /// output order, <c>null</c> where the engine leaves it unknown.</summary>
         private static long[]?[] ShapesAtRepresentativeInputs(InternalComputationGraph graph)
+            => ShapesFrom(graph, StoreAtRepresentativeInputs(graph), partial: true);
+
+        /// <summary>The engine's evaluation of <paramref name="graph"/> at its representative inputs.</summary>
+        private static Dictionary<FastTensorKey, IRuntimeTensor> StoreAtRepresentativeInputs(InternalComputationGraph graph)
         {
             var engine = new QuickExecutionEngine { MaxDataElements = ShapeInferenceInterpreter.MaxSmallTensorElements };
             var inputs = TrainingRig.ReadRepresentativeInputs(graph, representSequences: true);
@@ -405,7 +409,7 @@ namespace Shorokoo.Core.Graph
             var keys = graph.Inputs;
             for (int i = 0; i < keys.Count; i++) initial[keys[i]] = inputs[i];
             AddParameterStandIns(graph, initial);
-            return ShapesFrom(graph, engine.Run(graph, initial), partial: true);
+            return engine.Run(graph, initial);
         }
 
         /// <summary>
@@ -536,8 +540,10 @@ namespace Shorokoo.Core.Graph
         /// each symbolic (<c>dim_param</c>), unset or negative dimension as <c>1</c> — an optional's
         /// element's, and a sequence's element's (<see cref="NoSharedElementShape"/> where it
         /// declares none). An output the file gives no rank is evaluated at the representative
-        /// inputs the import recorded, where every input records one; one left without a shape even
-        /// so is refused by the entry points that freeze the graph
+        /// inputs the import recorded, where every input records one: by the engine, else — for an
+        /// op the engine cannot compute — by a run at zeros of those shapes, else, where the engine
+        /// settled its rank alone, as that rank with each dimension <c>1</c>. One left without a
+        /// shape even so is refused by the entry points that freeze the graph
         /// (<see cref="ThrowIfImportLeftAnOutputUnshaped"/>).
         /// </summary>
         internal static void RecordFromOnnx(InternalComputationGraph graph, Factory.IR.GraphProto graphProto)
@@ -549,10 +555,11 @@ namespace Shorokoo.Core.Graph
                     Set(outputNodes[i], dims);
 
             if (FirstOutputWithoutShape(graph) is null || !EveryInputIsRepresented(graph)) return;
-            var evaluated = ShapesAtRepresentativeInputs(graph);
-            for (int i = 0; i < outputNodes.Count; i++)
-                if (Get(outputNodes[i]) is null && evaluated[i] is { } dims)
-                    Set(outputNodes[i], dims);
+            var store = StoreAtRepresentativeInputs(graph);
+            if (RecordFrom(graph, store, partial: false)) return;
+            if (!BindsAWeight(graph))
+                RecordFromARun(graph, ZeroInputsAtRecordedShapes(graph), computeContext: null, out _);
+            RecordFrom(graph, store, partial: true);
         }
 
         /// <summary>Whether every input of <paramref name="graph"/> can be stood in for at its
@@ -589,12 +596,13 @@ namespace Shorokoo.Core.Graph
                 .Select(i => InternalComputationGraph.OutputNameOf(outputNodes[i]) ?? $"#{i}")
                 .ToList();
             if (unshaped.Count == 0) return;
+            bool everyInputShaped = graph.InputNodes.All(n => RepresentativeInputShapes.Get(n) is not null);
             throw new ModelException(ErrorCodes.FW058, origin,
                 $"output(s) {string.Join(", ", unshaped.Select(n => $"'{n}'"))} declare no shape, and " +
-                "evaluating the model at its inputs' recorded shapes gives none either, so no shape can " +
-                "be recorded for them — and every output of an imported model records one. Declare the " +
-                "output's shape in the file, or give the inputs the shapes it is computed at with the " +
-                "overload that takes input shapes.");
+                "neither evaluating the model at its inputs' recorded shapes nor running it there gives " +
+                "one, so no shape can be recorded for them — and every output of an imported model " +
+                "records one. Declare the output's shape in the file" + (everyInputShaped ? "." :
+                ", or give the inputs the shapes it is computed at with the overload that takes input shapes."));
         }
     }
 }

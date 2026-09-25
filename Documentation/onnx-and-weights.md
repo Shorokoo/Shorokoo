@@ -235,8 +235,9 @@ Every output of an imported concrete model records a shape too, as every output 
 concrete graph does. A model Shorokoo exported carries the one it was concretized at;
 for a foreign model it is read from the output's declared shape by the same rules as an
 input's (a symbolic, unset or negative dimension taken as `1`). An output declared with
-no shape is evaluated at the inputs' recorded shapes, and one that evaluation leaves
-without a shape is refused with **`FW058`**, naming it.
+no shape is evaluated at the inputs' recorded shapes — where an op cannot be evaluated
+without running it (some string ops), the model is run once at zeros of those shapes —
+and one that leaves without a shape is refused with **`FW058`**, naming it.
 
 A node calling one of the model's own functions with a different number of inputs
 than that function's body declares is refused on import for the same reason: the

@@ -52,13 +52,19 @@ namespace Shorokoo.Core.Graph
         /// <summary>
         /// Refuses (<see cref="ErrorCodes.FW056"/>) a lowering of <paramref name="graph"/> whose
         /// <paramref name="samples"/> leave any data input without a sample, listing every such
-        /// input. Samples bind to the data inputs by position, as the lowering binds them; a
+        /// input, or give more samples than it has data inputs, stating both counts. Samples bind to the data inputs by position, as the lowering binds them; a
         /// generic module's type-placeholder slots take none.
         /// </summary>
         internal static void RequireSampleForEveryInput(InternalComputationGraph graph, ModelParamList samples)
         {
             var dataInputs = DataInputIndices(graph);
-            if (samples.ModelParams.Length >= dataInputs.Count) return;
+            if (samples.ModelParams.Length > dataInputs.Count)
+                throw new ModelException(ErrorCodes.FW056, "ToConcreteArchitecture",
+                    $"the graph has {dataInputs.Count} input(s) " +
+                    $"({string.Join(", ", dataInputs.Select(i => $"'{NameOf(graph, i) ?? $"#{i}"}'"))}) but " +
+                    $"{samples.ModelParams.Length} sample(s) were given. Give exactly one sample per " +
+                    "input, in declaration order; a generic module's type-placeholder slots take none.");
+            if (samples.ModelParams.Length == dataInputs.Count) return;
             var missing = dataInputs.Skip(samples.ModelParams.Length)
                 .Select(i => $"'{NameOf(graph, i) ?? $"#{i}"}'");
             throw new ModelException(ErrorCodes.FW056, "ToConcreteArchitecture",

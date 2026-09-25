@@ -1154,6 +1154,25 @@ public class ModulesCoverageTests
         Assert.DoesNotContain("'numIterations'", MissingSamples(ConditionalTrainableParamInLoopLayer.ComputationGraph, two));
     }
 
+    private static string ExtraSamples(ComputationGraph graph, params TensorData[] samples)
+    {
+        var ex = Assert.Throws<ModelException>(() => graph.ToConcreteArchitecture(
+            new ModelParamList(samples.Select((t, i) => ((string)$"s{i}", t)))));
+        Assert.Equal(ErrorCodes.FW056, ex.ErrorCode);
+        return ex.Message;
+    }
+
+    [Fact]
+    public void TestConcretizingWithMoreSamplesThanInputsIsRefusedGivingBothCounts()
+    {
+        var x = TensorData([2L], 1f, 2f);
+        var two = TensorData(DType.Int64, [], 2L);
+        Assert.Contains("1 input(s)", ExtraSamples(SimplestLayer.ComputationGraph, x, x));
+        Assert.Contains("2 sample(s)", ExtraSamples(SimplestLayer.ComputationGraph, x, x));
+        Assert.Contains("2 input(s)", ExtraSamples(FCLayer.ComputationGraph, two, x, x));
+        Assert.Contains("3 sample(s)", ExtraSamples(FCLayer.ComputationGraph, two, x, x));
+    }
+
     private static long[]?[] RecordedShapes(ComputationGraph graph)
     {
         var g = graph.ToInternal();

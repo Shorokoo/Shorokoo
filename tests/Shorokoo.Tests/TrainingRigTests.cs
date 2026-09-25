@@ -730,6 +730,17 @@ public class TrainingRigRepresentativeInputCoverageTests
             ],
             0.01f);
 
+    [Fact]
+    public void TestARigGivenMoreSamplesThanTheModelHasInputsIsRefused()
+    {
+        var x = new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([2L], 1f, 2f));
+        var ex = Assert.Throws<ModelException>(() => TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [x, x], 0.01f));
+        Assert.Equal(ErrorCodes.FW056, ex.ErrorCode);
+        Assert.Contains("2 sample(s)", ex.Message);
+    }
+
     private static Shorokoo.Core.Graph.FastNode TensorInputNode(ComputationGraph graph)
         => graph.ToInternal().Nodes.First(
             n => n.OpCode == Shorokoo.Core.Nodes.NodeDefinitions.InternalOpCodes.MODEL_TENSOR_INPUT);

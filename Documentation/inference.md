@@ -186,8 +186,9 @@ pipeline, applied in order:
    function so trainable parameters become visible at the top level, and uses
    `inputHints` to resolve shape-dependent parameters. It needs **a sample for every
    input** of the graph, `[Hyper]` inputs included, one per input in declaration order
-   (`graph.FromOrderedInputs([...])`); a graph left without one is refused with
-   **`FW056`**, which names every input missing its sample. The shape of each sample
+   (`graph.FromOrderedInputs([...])`), a sequence input included; a graph left
+   without one is refused with **`FW056`**, which names every input missing its
+   sample, and so are more samples than the graph has inputs, stating both counts. The shape of each sample
    (never its values) is recorded on the architecture's input as its **representative
    shape** — the shape the model was concretized at. Every input of a concrete
    architecture and of every concrete model made from it carries one: it survives

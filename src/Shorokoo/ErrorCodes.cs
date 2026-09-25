@@ -695,8 +695,9 @@ namespace Shorokoo
         /// hyperparameter, or took a model as an argument)</summary>
         public const string FW055 = "FW055";
 
-        /// <summary>ToConcreteArchitecture was not given a sample for every input of the graph it
-        /// lowers (the message lists the inputs that have none)</summary>
+        /// <summary>ToConcreteArchitecture was not given exactly one sample per input of the graph it
+        /// lowers (the message lists the inputs that have none, or states both counts when there are
+        /// more samples than inputs)</summary>
         public const string FW056 = "FW056";
 
         /// <summary>An input of a concrete-architecture or concrete-model graph carries no

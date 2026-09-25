@@ -176,13 +176,27 @@ namespace Shorokoo.Core.Graph
 
         private static IEnumerable<IData?> ValuesOf(NamedModelParam sample) => sample switch
         {
-            TensorStructModelParam structSample => structSample.Definition.Fields.Select(field =>
-                structSample.StructData.Fields.TryGetValue(field.Name, out var value) ? value : null),
+            TensorStructModelParam structSample => FieldValuesOf(structSample.Definition, structSample.StructData),
             OptionalTensorDataModelParam optional => [optional.ToOptionalTensorData()],
             TensorDataSequenceModelParam sequence => [sequence.ToTensorDataSequence()],
             { Structure: DataStructure.Tensor } => [sample.ToTensorData()],
             _ => [null],
         };
+
+        /// <summary>
+        /// A struct sample's field values, one per input its lowering gives it: a field that is
+        /// itself a struct stands for its own fields, in turn, and a missing field is <c>null</c>
+        /// for each input it would have bound.
+        /// </summary>
+        private static IEnumerable<IData?> FieldValuesOf(TensorStructDef definition, TensorDataStruct? data)
+            => definition.Fields.SelectMany(field =>
+            {
+                IData? value = data is not null && data.Fields.TryGetValue(field.Name, out var v) ? v : null;
+                if (value is SharedInput shared) value = shared.Value;
+                return field.Structure == DataStructure.TensorStruct && field.ElementType.TensorStructDef is { } nested
+                    ? FieldValuesOf(nested, value as TensorDataStruct)
+                    : [value];
+            });
 
         /// <summary>
         /// The dims to record for one sample value, or <c>null</c> for a value with no single shape

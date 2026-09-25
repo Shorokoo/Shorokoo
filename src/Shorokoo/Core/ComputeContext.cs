@@ -1885,31 +1885,34 @@ namespace Shorokoo.Runtime
         {
             var expandedInputs = new List<IData>();
             foreach (var input in inputs)
+                Expand(input, expandedInputs);
+            return expandedInputs.ToArray();
+
+            // A struct field that is itself a struct expands in turn, as its lowering gives it one
+            // input per field of its own.
+            static void Expand(IData input, List<IData> into)
             {
                 var (value, sharing) = input is SharedInput shared
                     ? (shared.Value, (SharedInputMode?)shared.Mode)
                     : (input, null);
-                if (value is TensorDataStruct structData)
+                if (value is not TensorDataStruct structData)
                 {
-                    foreach (var field in structData.Definition.Fields)
-                    {
-                        if (!structData.Fields.TryGetValue(field.Name, out var fieldData))
-                        {
-                            throw new InvalidTensorOperationException(ErrorCodes.CR006, "Execute",
-                                $"field={field.Name}, struct={structData.Definition.TypeName ?? "anonymous"}",
-                                $"TensorDataStruct is missing data for field '{field.Name}'");
-                        }
-                        expandedInputs.Add(structData.FieldFeedMode(field.Name, sharing) is { } mode
-                            ? new SharedInput(fieldData, mode)
-                            : fieldData);
-                    }
+                    into.Add(input);
+                    return;
                 }
-                else
+                foreach (var field in structData.Definition.Fields)
                 {
-                    expandedInputs.Add(input);
+                    if (!structData.Fields.TryGetValue(field.Name, out var fieldData))
+                    {
+                        throw new InvalidTensorOperationException(ErrorCodes.CR006, "Execute",
+                            $"field={field.Name}, struct={structData.Definition.TypeName ?? "anonymous"}",
+                            $"TensorDataStruct is missing data for field '{field.Name}'");
+                    }
+                    Expand(structData.FieldFeedMode(field.Name, sharing) is { } mode
+                        ? new SharedInput(fieldData, mode)
+                        : fieldData, into);
                 }
             }
-            return expandedInputs.ToArray();
         }
 
         /// <summary>

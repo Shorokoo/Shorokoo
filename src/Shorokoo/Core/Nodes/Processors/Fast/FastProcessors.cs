@@ -2872,6 +2872,53 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                                 structInputProducerByOutput[tk] = node;
                 }
 
+                // One input per field, of the field's own kind: a tensor field a MODEL_TENSOR_INPUT,
+                // an optional one a MODEL_OPTIONAL_INPUT, a sequence one a MODEL_SEQUENCE_INPUT —
+                // each the kind a sample of that field binds to and a run feeds — and a struct field
+                // its own fields' inputs, in turn, standing behind a key of its own that GETFIELD
+                // resolves as it resolves the struct input's.
+                List<FastTensorKey?> LowerStructFields(TensorStructDef structDef, string? structName, List<FastNode> into)
+                {
+                    var keys = new List<FastTensorKey?>(structDef.Fields.Length);
+                    foreach (var field in structDef.Fields)
+                    {
+                        var fieldName = structName is null ? null : $"{structName}.{field.Name}";
+                        if (field.Structure == DataStructure.TensorStruct && field.ElementType.TensorStructDef is { } nested)
+                        {
+                            var nestedKey = new FastTensorKey(FastNodeKey.New(), 0);
+                            structFields[nestedKey] = LowerStructFields(nested, fieldName, into);
+                            structDtypeByKey[nestedKey] = field.ElementType;
+                            keys.Add(nestedKey);
+                            continue;
+                        }
+                        var opCode = field.Structure switch
+                        {
+                            DataStructure.Optional => InternalOpCodes.MODEL_OPTIONAL_INPUT,
+                            DataStructure.Sequence => InternalOpCodes.MODEL_SEQUENCE_INPUT,
+                            _ => InternalOpCodes.MODEL_TENSOR_INPUT,
+                        };
+                        var attributes = new Dictionary<string, object?>
+                        {
+                            [OnnxOpAttributeNames.AttrDtype] = field.ElementType,
+                            [OnnxOpAttributeNames.ShrkAttrInputName] = fieldName,
+                        };
+                        if (opCode != InternalOpCodes.MODEL_SEQUENCE_INPUT)
+                            attributes[OnnxOpAttributeNames.ShrkAttrRank] = (long?)field.Rank;
+                        var fieldNodeKey = FastNodeKey.New();
+                        var fieldTensorKey = new FastTensorKey(fieldNodeKey, 0);
+                        into.Add(new FastNode
+                        {
+                            Key = fieldNodeKey,
+                            OpCode = opCode,
+                            Attributes = OnnxCSharpAttributes.FromCSharpVals(
+                                attributes, Definitions.NodeDefinitions[opCode].AttributeDefs),
+                            FullOutputs = { [""] = new List<FastTensorKey?> { fieldTensorKey } },
+                        });
+                        keys.Add(fieldTensorKey);
+                    }
+                    return keys;
+                }
+
                 // Each struct input is replaced, where it stands in the input prefix, by one input
                 // per field. The names move with the inputs: a struct input's name becomes one per
                 // field, "<struct>.<field>", so every later input keeps its own name — the name
@@ -2898,34 +2945,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         + "this — a null structDef here means the node was constructed by hand or its "
                         + "DType lost its TensorStructDef somewhere upstream.");
 
-                    // One MODEL_TENSOR_INPUT FastNode per field. Matches CG's
-                    // `InternalOp.RuntimeInput(field.ElementType, field.Rank, defaultName)`.
-                    var fieldKeys = new List<FastTensorKey?>(structDef.Fields.Length);
-                    var tensorInputDefs = Definitions.NodeDefinitions[InternalOpCodes.MODEL_TENSOR_INPUT].AttributeDefs;
-                    foreach (var field in structDef.Fields)
-                    {
-                        var fieldNodeKey = FastNodeKey.New();
-                        var fieldTensorKey = new FastTensorKey(fieldNodeKey, 0);
-                        var fieldAttrs = OnnxCSharpAttributes.FromCSharpVals(
-                            new Dictionary<string, object?>
-                            {
-                                [OnnxOpAttributeNames.AttrDtype] = field.ElementType,
-                                [OnnxOpAttributeNames.ShrkAttrRank] = (long?)field.Rank,
-                                [OnnxOpAttributeNames.ShrkAttrInputName] = inputName is null ? null : $"{inputName}.{field.Name}",
-                            },
-                            tensorInputDefs);
-                        var fieldNode = new FastNode
-                        {
-                            Key = fieldNodeKey,
-                            OpCode = InternalOpCodes.MODEL_TENSOR_INPUT,
-                            Attributes = fieldAttrs,
-                            FullOutputs = { [""] = new List<FastTensorKey?> { fieldTensorKey } },
-                        };
-                        newInputNodes.Add(fieldNode);
-                        fieldKeys.Add(fieldTensorKey);
-                    }
-
-                    structFields[inputKey] = fieldKeys;
+                    structFields[inputKey] = LowerStructFields(structDef, inputName, newInputNodes);
                 }
 
                 graph.Nodes.RemoveRange(0, inputNodes.Count);
@@ -3190,6 +3210,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         if (gFieldIdx < 0 || gFieldIdx >= gFields.Count || gFields[gFieldIdx] is null) break;
                         if (node.Outputs.Count == 0 || node.Outputs[0] is not FastTensorKey gOut || gOut.IsEmpty) break;
                         remap[gOut] = gFields[gFieldIdx]!.Value;
+                        // A field that is itself a struct is read through this GETFIELD's output
+                        // by the GETFIELDs of its own fields, so they resolve it as they would it.
+                        if (structFields.ContainsKey(gFields[gFieldIdx]!.Value))
+                            identityMap[gOut] = gFields[gFieldIdx]!.Value;
                         nodesToRemove.Add(node.Key);
                         break;
                     }

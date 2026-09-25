@@ -194,7 +194,9 @@ pipeline, applied in order:
    both, and so is a sample of another rank than its input's type declares (a `Scalar`
    given a vector, most often two samples swapped), naming the input and the sample's
    shape. A struct input's sample stands for all its fields, and once lowered the
-   input is one input per field, named `<struct>.<field>`. The shape of each sample
+   input is one input per field, named `<struct>.<field>`, of the field's own kind —
+   a tensor, an optional or a sequence input — and a field that is itself a struct is
+   its fields' inputs in turn, `<struct>.<field>.<subfield>`. The shape of each sample
    (never its values) is recorded on the architecture's input as its **representative
    shape** — the shape the model was concretized at. Every input of a concrete
    architecture and of every concrete model made from it carries one: it survives

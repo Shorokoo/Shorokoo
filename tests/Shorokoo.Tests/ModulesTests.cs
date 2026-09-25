@@ -1539,6 +1539,39 @@ public class ModulesCoverageTests
         Assert.Equal(shapes, RecordedShapes(arch));
     }
 
+    private static TensorStructModelParam StructIn<TStruct>(params (string Field, IData Value)[] fields) where TStruct : IStruct
+        => new("s", ModelParamType.InputParam, new TensorDataStruct(
+            StructDefExtractor.ExtractFromType<TStruct>(), fields.Select(f => KeyValuePair.Create(f.Field, f.Value))));
+
+    private static float[] RunStructInput<TStruct>(Func<TStruct, Tensor<float32>> body, TensorStructModelParam sample) where TStruct : IStruct
+    {
+        var arch = Concretize(ModuleFactory.ComputationGraph(body), sample);
+        return Floats(ComputeContext.Default.Execute(arch.ToConcreteModel(), sample.StructData.Shared())[0]);
+    }
+
+    private static float[] RunStructInputOnTheEngine<TStruct>(Func<TStruct, Tensor<float32>> body, TensorStructModelParam sample) where TStruct : IStruct
+    {
+        var model = Concretize(ModuleFactory.ComputationGraph(body), sample).ToConcreteModel().ToInternal();
+        var output = new QuickExecutionEngine().Execute(model, ComputeContext.ExpandStructInputs([sample.StructData]))[0];
+        return ((TensorData<float32>)output).AccessMemory().ToArray();
+    }
+
+    [Fact]
+    public void TestAStructInputWithASequenceAnOptionalOrAStructFieldConcretizesAndRuns()
+    {
+        var a = TensorData([2L], 1f, 2f);
+        var ten = TensorData([2L], 10f, 20f);
+        var pair = ((TensorStructModelParam)PairSample.Of(2f, 3f)).StructData;
+        Assert.Equal([11f, 22f], RunStructInput<SeqFieldStruct>(SeqFieldStructLayer.Inline,
+            StructIn<SeqFieldStruct>(("A", a), ("S", TensorDataSequence.OfElements([ten], DType.Float32)))));
+        Assert.Equal([5f, 10f], RunStructInput<NestedPairStruct>(NestedPairStructLayer.Inline,
+            StructIn<NestedPairStruct>(("A", a), ("P", pair))));
+        Assert.Equal([11f, 22f], RunStructInput<OptionalFieldStruct>(OptionalFieldStructLayer.Inline,
+            StructIn<OptionalFieldStruct>(("A", a), ("B", OptionalTensorData.Some(ten)))));
+        Assert.Equal([1f, 2f], RunStructInputOnTheEngine<OptionalFieldStruct>(OptionalFieldStructLayer.Inline,
+            StructIn<OptionalFieldStruct>(("A", a), ("B", OptionalTensorData.None(DType.Float32)))));
+    }
+
     [Fact]
     public void TestGeometryResolvesBesideAnAbsentOptionalASequenceOrAStructInput()
     {

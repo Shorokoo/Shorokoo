@@ -98,6 +98,14 @@ namespace Shorokoo.Core.Factory
                 inputTypeName: inputTypeName,
                 defaultValue: defaultValue);
 
+            // A generic type slot's constraints follow its parameter name in the denotation
+            // ("T:FloatLike"), which is where the reader looks for them.
+            if (inputNode.OpCode == InternalOpCodes.GENERIC_TYPE_INPUT
+                && dtype.GenericTypeParamName is { } paramName
+                && inputNode.Attributes.GetAttributeVals().GetValueOrDefault(OnnxOpAttributeNames.ShrkAttrGenericTypeConstraints)
+                    is string[] { Length: > 0 } constraints)
+                valueInfo.Type.Denotation = $"{paramName}:{string.Join(",", constraints)}";
+
             if (emitRepresentativeMetadata
                 && inputNode.OpCode is InternalOpCodes.MODEL_TENSOR_INPUT
                                     or InternalOpCodes.MODEL_OPTIONAL_INPUT

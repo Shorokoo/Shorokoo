@@ -1722,6 +1722,7 @@ namespace Shorokoo.Core.Factory
                 isFunction: true,
                 tensorInfoLookup: fnTensorInfoLookup,
                 stripCheckpointStamp: stripCheckpointStamp,
+                emitInputNameMetadata: true,
                 emitOutputMetadata: true);
             if (forSession && fnTensorInfoLookup is not null)
                 WriteDequantizeZeroPoints(fnGraphProto, BuildTensorMetaByName(fnTensorInfoLookup));

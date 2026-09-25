@@ -6440,7 +6440,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             {
                 var op = node.OpCode;
 
-                if (IsModelInputOpCode(op) || op == InternalOpCodes.MODEL_PARAM_DATA)
+                if (InternalOpCodes.IsModelInputOp(op) || op == InternalOpCodes.MODEL_PARAM_DATA)
                     continue;
 
                 // RNG is graph-only (#136): a SHRK_RNG_SPLIT is never a host-side constant. It
@@ -6584,18 +6584,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             return true;
         }
 
-        private static bool IsModelInputOpCode(string opCode) =>
-            opCode == InternalOpCodes.MODEL_TENSOR_INPUT ||
-            opCode == InternalOpCodes.MODEL_OPTIONAL_INPUT ||
-            opCode == InternalOpCodes.MODEL_SEQUENCE_INPUT ||
-            opCode == InternalOpCodes.MODEL_TENSORSTRUCT_INPUT ||
-            opCode == InternalOpCodes.GENERIC_TYPE_INPUT;
-
         // Ops whose output is a DataStructure.Sequence. MODEL_INVOKE/FUNCTION_INVOKE and the
         // model-struct ops (MODEL_HYPERPARAM, MODULE_SET_HYPERPARAMS, GET_MODEL_ID) can also
         // carry sequence outputs but are guaranteed to be gone before FoldConstants runs (the
         // ComputationGraph → fast pipeline asserts them removed upstream). MODEL_SEQUENCE_INPUT
-        // is covered separately by IsModelInputOpCode and LOOP_CLOSE scan outputs are covered
+        // is covered separately by InternalOpCodes.IsModelInputOp and LOOP_CLOSE scan outputs are covered
         // by the "#CLOSE" suffix skip above.
         private static bool IsSequenceProducingOpCode(string opCode) =>
             opCode == OpCodes.SEQUENCE_EMPTY ||

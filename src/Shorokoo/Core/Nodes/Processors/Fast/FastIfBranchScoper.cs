@@ -130,7 +130,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                                 if (boundaryKeys.Contains(tk)) Pinned.Add(n.Key);
                             }
 
-                    if (FastOpsetResolver.IsModelInputOpCode(n.OpCode) ||
+                    if (InternalOpCodes.IsModelInputOp(n.OpCode) ||
                         n.OpCode == InternalOpCodes.MODEL_PARAM_DATA ||
                         n.OpCode == InternalOpCodes.MODEL_PARAM)
                         Pinned.Add(n.Key);

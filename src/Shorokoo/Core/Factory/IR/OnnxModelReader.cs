@@ -561,7 +561,7 @@ namespace Shorokoo.Core.Factory.IR
             var alreadyInputs = new HashSet<FastTensorKey>(fastGraph.Inputs);
             foreach (var node in fastGraph.Nodes)
             {
-                if (!FastOpsetResolver.IsModelInputOpCode(node.OpCode)) continue;
+                if (!InternalOpCodes.IsModelInputOp(node.OpCode)) continue;
                 var key = node.Outputs.FirstOrDefault(k => k is not null && !k.Value.IsEmpty);
                 if (key is null || !alreadyInputs.Add(key.Value)) continue;
                 fastGraph.Inputs.Add(key.Value);

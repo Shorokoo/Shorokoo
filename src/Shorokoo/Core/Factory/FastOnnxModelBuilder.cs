@@ -1935,7 +1935,7 @@ namespace Shorokoo.Core.Factory
             var producerByOutputKey = new Dictionary<FastTensorKey, FastNode>();
             foreach (var node in fastGraph.Nodes)
             {
-                if (!FastOpsetResolver.IsModelInputOpCode(node.OpCode)) continue;
+                if (!InternalOpCodes.IsModelInputOp(node.OpCode)) continue;
                 foreach (var slot in node.FullOutputs.Values)
                     foreach (var k in slot)
                         if (k is FastTensorKey tk && !tk.IsEmpty)
@@ -2074,7 +2074,7 @@ namespace Shorokoo.Core.Factory
             var producerByOutputKey = new Dictionary<FastTensorKey, FastNode>();
             foreach (var node in fastGraph.Nodes)
             {
-                if (!FastOpsetResolver.IsModelInputOpCode(node.OpCode)
+                if (!InternalOpCodes.IsModelInputOp(node.OpCode)
                  && node.OpCode != InternalOpCodes.MODEL_PARAM_DATA) continue;
                 foreach (var slot in node.FullOutputs.Values)
                     foreach (var k in slot)

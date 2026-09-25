@@ -276,7 +276,7 @@ namespace Shorokoo.Core.Factory
         /// </summary>
         public static bool IsBoundaryOrOpen(FastNode node)
             => IsOpenOpCode(node.OpCode)
-            || IsModelInputOpCode(node.OpCode)
+            || InternalOpCodes.IsModelInputOp(node.OpCode)
             || node.OpCode == InternalOpCodes.MODEL_PARAM_DATA;
 
         public static bool IsOpenOpCode(string opCode)
@@ -288,13 +288,6 @@ namespace Shorokoo.Core.Factory
             => opCode == OpCodes.IF_CLOSE
             || opCode == OpCodes.LOOP_CLOSE
             || opCode == OpCodes.SEQUENCE_MAP_CLOSE;
-
-        public static bool IsModelInputOpCode(string opCode)
-            => opCode == InternalOpCodes.MODEL_TENSOR_INPUT
-            || opCode == InternalOpCodes.MODEL_OPTIONAL_INPUT
-            || opCode == InternalOpCodes.MODEL_SEQUENCE_INPUT
-            || opCode == InternalOpCodes.MODEL_TENSORSTRUCT_INPUT
-            || opCode == InternalOpCodes.GENERIC_TYPE_INPUT;
 
         private static string? NormalizeStackTrace(string? trace)
             => string.IsNullOrEmpty(trace) ? null : trace;

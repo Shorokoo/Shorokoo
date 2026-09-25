@@ -146,7 +146,7 @@ namespace Shorokoo.Core.Nodes.Processors.Training
                 if (current.IsEmpty || !seen.Add(current)) continue;
                 if (graphInputs.Contains(current)) return true;
                 if (!nodesByKey.TryGetValue(current.FastNodeKey, out var producer)) continue;
-                if (Shorokoo.Core.Factory.FastOpsetResolver.IsModelInputOpCode(producer.OpCode)) return true;
+                if (Shorokoo.Core.Nodes.NodeDefinitions.InternalOpCodes.IsModelInputOp(producer.OpCode)) return true;
                 foreach (var (_, ins) in producer.FullInputs)
                     foreach (var ik in ins)
                         if (ik is FastTensorKey k) worklist.Push(k);

@@ -104,7 +104,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
         /// <summary>An input or a parameter is read by a branch, never owned by it.</summary>
         private static bool IsNobodysArm(FastNode node)
-            => FastOpsetResolver.IsModelInputOpCode(node.OpCode)
+            => InternalOpCodes.IsModelInputOp(node.OpCode)
             || node.OpCode == InternalOpCodes.MODEL_PARAM
             || node.OpCode == InternalOpCodes.MODEL_PARAM_DATA;
     }

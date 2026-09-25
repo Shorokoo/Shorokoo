@@ -74,11 +74,7 @@ namespace Shorokoo.Core.Nodes
         public bool IsOpenNode { get; protected set; }
         public bool IsCloseNode { get; protected set; }
 
-        public bool IsModelInput => NodeDef.OpName == InternalOpCodes.MODEL_TENSOR_INPUT || 
-                                    NodeDef.OpName == InternalOpCodes.MODEL_OPTIONAL_INPUT || 
-                                    NodeDef.OpName == InternalOpCodes.MODEL_SEQUENCE_INPUT ||
-                                    NodeDef.OpName == InternalOpCodes.MODEL_TENSORSTRUCT_INPUT ||
-                                    NodeDef.OpName == InternalOpCodes.GENERIC_TYPE_INPUT;
+        public bool IsModelInput => InternalOpCodes.IsModelInputOp(NodeDef.OpName);
 
         /// <summary>
         /// Returns true if this is an initialized model parameter (MODEL_PARAM_DATA).

@@ -208,7 +208,7 @@ public sealed class QuickExecutionEngine
     {
         var outputKeys = node.Outputs;
 
-        if (IsFastModelInputOpCode(node.OpCode))
+        if (InternalOpCodes.IsModelInputOp(node.OpCode))
         {
             var outKey = outputKeys.FirstOrDefault(k => k is not null);
             if (outKey is not null && !store.ContainsKey(outKey.Value))
@@ -372,11 +372,4 @@ public sealed class QuickExecutionEngine
             store[k.Value] = new RuntimeTensor { DType = DType.Invalid };
         }
     }
-
-    private static bool IsFastModelInputOpCode(string opCode) =>
-        opCode == InternalOpCodes.MODEL_TENSOR_INPUT ||
-        opCode == InternalOpCodes.MODEL_OPTIONAL_INPUT ||
-        opCode == InternalOpCodes.MODEL_SEQUENCE_INPUT ||
-        opCode == InternalOpCodes.MODEL_TENSORSTRUCT_INPUT ||
-        opCode == InternalOpCodes.GENERIC_TYPE_INPUT;
 }

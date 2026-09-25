@@ -1326,6 +1326,34 @@ public class ModulesCoverageTests
         Assert.Throws<InvalidOperationException>(() => ComputationGraph.FromInternal(g, GraphKind.Module));
     }
 
+    [Fact]
+    public void TestSetInputsRefusesToDropAReadInputAndRemovingUnreachableNodesRefusesAStrayOutputNode()
+    {
+        var x = InvokeInput("x");
+        var g = new InternalComputationGraph([x], [x * Scalar(2f)]);
+        g.InsertInput(0, FastInternalOp.RuntimeInput(DType.Float32, 1, "y"));
+        Assert.Throws<ArgumentException>(() => g.SetInputs([g.Inputs[0]]));
+        Assert.Equal(["y", "x"], g.InputNames);
+        g.SetInputs([g.Inputs[1]]);
+        Assert.Equal(["x"], g.InputNames);
+
+        var output = g.OutputNodes[0];
+        g.Nodes.Remove(output);
+        g.Nodes.Insert(g.InputCount, output);
+        Assert.False(g.TryValidateLinearOrder(out _));
+        Assert.Throws<InvalidOperationException>(() => FastProcessorHelper.RemoveUnreachableNodes(g));
+        Assert.Contains(output, g.Nodes);
+    }
+
+    [Fact]
+    public void TestAStructOutputsFieldsAreNamedAfterItAsAStructInputsAre()
+    {
+        var g = StructInATupleOutputLayer.ComputationGraph;
+        var arch = Concretize(g, In("a", TensorData(DType.Float32, [], 3f)), In("x", TensorData([2L], 1f, 2f)));
+        string?[] names = [$"{g.OutputNames[0]}.First", $"{g.OutputNames[0]}.Second", "x"];
+        Assert.Equal(names, arch.OutputNames);
+    }
+
     private static Tensor<float32> CallsHyperScaledGain(Tensor<float32> t) => HyperScaledGainSubModel.Model(Scalar(2f)).Call(t);
 
     private static int InputNodeCount(InternalComputationGraph g) => g.Nodes.Count(n => InternalOpCodes.IsModelInputOp(n.OpCode));

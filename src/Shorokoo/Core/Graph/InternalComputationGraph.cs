@@ -138,7 +138,8 @@ namespace Shorokoo.Graph
         /// <summary>
         /// Makes the graph's inputs exactly <paramref name="order"/>: the input nodes producing those
         /// keys, wherever they stand in <see cref="Nodes"/>, are moved to the front in that order.
-        /// Any other input node is removed. Every other node keeps its relative order. For a pass
+        /// Any other input node is removed, which is refused, leaving the graph as it was, where a
+        /// node still reads its value. Every other node keeps its relative order. For a pass
         /// that builds its new inputs piecemeal and settles their order at the end.
         /// </summary>
         public void SetInputs(IEnumerable<FastTensorKey> order)
@@ -157,6 +158,21 @@ namespace Shorokoo.Graph
             foreach (var node in Nodes)
                 if (!InternalOpCodes.IsModelInputOp(node.OpCode))
                     reordered.Add(node);
+
+            // An input node left out is removed, which is only sound for one nothing reads:
+            // dropping one that is read would leave its readers reading nothing.
+            if (byKey.Count > 0)
+            {
+                var read = Nodes.SelectMany(n => n.FullInputs.Values.SelectMany(group => group))
+                    .OfType<FastTensorKey>()
+                    .ToHashSet();
+                var stillRead = byKey.Keys.Where(read.Contains).ToList();
+                if (stillRead.Count > 0)
+                    throw new System.ArgumentException(
+                        $"the input(s) {string.Join(", ", stillRead.Select(k => InputNameOf(byKey[k]) ?? k.ToString()))} " +
+                        "are left out of the new inputs but still read by the graph; only an input nothing reads can be removed.",
+                        nameof(order));
+            }
             Nodes.Clear();
             Nodes.AddRange(reordered);
         }

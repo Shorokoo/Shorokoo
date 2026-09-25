@@ -64,14 +64,18 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     continue;
                 }
 
-                // The struct output gives way to one output per field.
+                // The struct output gives way to one output per field, named after it as a struct
+                // input's fields are: <output>.<field>.
                 changed = true;
+                var structName = InternalComputationGraph.OutputNameOf(outputNode);
                 foreach (var fieldDef in structDef.Fields)
                 {
                     var getField = FastInternalOp.TensorStructGetField(
                         outKey, fieldDef.Name, fieldDef.ElementType, fieldDef.Rank, fieldDef.Structure);
                     newNodes.Add(getField);
-                    newOutputNodes.Add(InternalComputationGraph.NewOutputNode(new FastTensorKey(getField.Key, 0)));
+                    newOutputNodes.Add(InternalComputationGraph.NewOutputNode(
+                        new FastTensorKey(getField.Key, 0),
+                        structName is null ? null : $"{structName}.{fieldDef.Name}"));
                 }
             }
 

@@ -122,6 +122,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// </summary>
         public static void RemoveUnreachableNodes(InternalComputationGraph graph, bool keepUnreadInputs = true)
         {
+            // The output nodes are the roots, found as the suffix of the node list. One that
+            // drifted into the body is no root, and would be swept as unreachable — silently
+            // dropping an output — so it is refused instead.
+            if (graph.FindMisplacedOutput() is int stray)
+                throw new InvalidOperationException(
+                    $"RemoveUnreachableNodes: output node #{stray} precedes body node #{stray + 1} " +
+                    $"({graph.Nodes[stray + 1].OpCode}); output nodes must form a suffix of the graph's nodes.");
+
             // Build output FastTensorKey → FastNodeKey mapping.
             var tensorToNodeKey = new Dictionary<FastTensorKey, FastNodeKey>();
             var nodesByKey = new Dictionary<FastNodeKey, FastNode>();

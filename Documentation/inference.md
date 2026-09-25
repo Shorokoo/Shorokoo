@@ -208,7 +208,8 @@ pipeline, applied in order:
    the shape it has when the graph is evaluated at those samples — at their real
    values, since a value can decide a shape (a flag choosing a branch, the axes a
    `Squeeze` drops) — and keeps it through save and load; a struct output is one output
-   per field, an absent optional output records that it was absent, and a sequence
+   per field, named `<output>.<field>` as a struct input's fields are, an absent optional
+   output records that it was absent, and a sequence
    output the shape its elements share. The shapes are computed by the
    `QuickExecutionEngine`; an output it cannot compute (string values, for instance) is
    taken from a run of the graph at the samples, on the compute context

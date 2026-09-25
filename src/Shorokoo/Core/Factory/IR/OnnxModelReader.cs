@@ -214,13 +214,6 @@ namespace Shorokoo.Core.Factory.IR
 
             CreateFastNodes(fastGraph, EnumerateNodesInProtoOrder(functionProto.Nodes), tensorKeys, functionsMap, opset);
 
-            // The rule a traced initializer body is held to (FW055) holds for one read back from a
-            // file too — a file written before the rule existed would otherwise reach the runtime
-            // with model machinery nothing can lower.
-            if (functionType is FunctionType.TrainableParamInitializer or FunctionType.StateParamInitializer
-                && fastGraph.Nodes.Any(n => Node.IsModelOpCode(n.OpCode) || Node.IsModuleInvoke(n.OpCode, n.TargetFunction)))
-                throw Node.ModelInInitializer(friendlyName ?? defaultName);
-
             foreach (var outputName in functionProto.Outputs)
             {
                 fastGraph.Outputs.Add(tensorKeys[outputName]);

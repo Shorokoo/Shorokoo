@@ -59,7 +59,7 @@ namespace Shorokoo.Core.Graph
         /// body executes. Whether an invoke <em>can</em> run is a property of the callee's body, not
         /// of its <see cref="FunctionType"/>, and this scan deliberately does not descend into
         /// bodies. An initializer body carries no module machinery at all — one that would is
-        /// refused where it is traced or read back (FW055) — and an invoke of any other body that
+        /// refused where it is traced (FW055) — and an invoke of any other body that
         /// does carry live machinery is left to fail downstream.</para>
         ///
         /// <para>This is the executability question, and <see cref="IsModuleStageMachinery"/> the

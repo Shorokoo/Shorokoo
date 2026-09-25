@@ -148,6 +148,16 @@ public class ModulesCoverageTests
     public void TestAGenericModuleBodyReadsBackAfterASrkRoundTrip()
         => Assert.Equal(Signatures(NonGenericCallerOfGenericModule.ComputationGraph), Signatures(SrkRoundTrip(NonGenericCallerOfGenericModule.ComputationGraph)));
 
+    private static string[] BodyInputs(ComputationGraph g)
+        => [.. g.ToInternal().LocalFunctions.SelectMany(f => f.Body.ToInternal().InputNodes.Select(n =>
+            $"{f.DefaultName}.{InternalComputationGraph.InputNameOf(n)}:" +
+            string.Join(",", (string[]?)n.Attributes.GetAttributeVals().GetValueOrDefault(OnnxOpAttributeNames.ShrkAttrGenericTypeConstraints) ?? [])))
+            .Order()];
+
+    [Fact]
+    public void TestAModuleBodyKeepsItsInputNamesAndTypeConstraintsThroughASrkRoundTrip()
+        => Assert.Equal(BodyInputs(NonGenericCallerOfGenericModule.ComputationGraph), BodyInputs(SrkRoundTrip(NonGenericCallerOfGenericModule.ComputationGraph)));
+
     [Fact]
     public void TestAModelTypedParameterKeepsItsSignatureThroughASrkRoundTrip()
     {

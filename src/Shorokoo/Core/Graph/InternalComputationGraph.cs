@@ -111,9 +111,20 @@ namespace Shorokoo.Graph
                 ? name as string
                 : null;
 
-        /// <summary>Sets an input node's <see cref="OnnxOpAttributeNames.ShrkAttrInputName"/>.</summary>
+        /// <summary>Sets an input node's <see cref="OnnxOpAttributeNames.ShrkAttrInputName"/>, or
+        /// clears it where <paramref name="name"/> is no name of its own (<see cref="NameOrNull"/>).</summary>
         public static void SetInputName(FastNode inputNode, string? name)
-            => inputNode.Attributes = inputNode.Attributes.SetAttributes((OnnxOpAttributeNames.ShrkAttrInputName, name));
+            => inputNode.Attributes = inputNode.Attributes.SetAttributes((OnnxOpAttributeNames.ShrkAttrInputName, NameOrNull(name)));
+
+        /// <summary>
+        /// <paramref name="name"/> where it is a name an input or output was given, else <c>null</c>:
+        /// for none, a blank one, or the string form of a tensor key — what
+        /// <see cref="Variable.UniqueName"/> falls back to for a value nobody named. A graph's
+        /// boundary nodes carry a real name or none: a key-derived one differs every time the graph
+        /// is built, so storing it would make every serialization of the graph differ too.
+        /// </summary>
+        public static string? NameOrNull(string? name)
+            => string.IsNullOrWhiteSpace(name) || TensorKey.TryParse(name, out _) ? null : name;
 
         /// <summary>Makes <paramref name="inputNode"/> the input at <paramref name="position"/>
         /// (0 ≤ position ≤ <see cref="InputCount"/>), shifting the later inputs along.</summary>
@@ -248,9 +259,10 @@ namespace Shorokoo.Graph
                 ? name as string
                 : null;
 
-        /// <summary>Sets an output node's <see cref="OnnxOpAttributeNames.ShrkAttrOutputName"/>.</summary>
+        /// <summary>Sets an output node's <see cref="OnnxOpAttributeNames.ShrkAttrOutputName"/>, or
+        /// clears it where <paramref name="name"/> is no name of its own (<see cref="NameOrNull"/>).</summary>
         public static void SetOutputName(FastNode outputNode, string? name)
-            => outputNode.Attributes = outputNode.Attributes.SetAttributes((OnnxOpAttributeNames.ShrkAttrOutputName, name));
+            => outputNode.Attributes = outputNode.Attributes.SetAttributes((OnnxOpAttributeNames.ShrkAttrOutputName, NameOrNull(name)));
 
         /// <summary>An output node's <see cref="OnnxOpAttributeNames.ShrkAttrDeclaredRank"/>, or null.</summary>
         public static int? DeclaredRankOf(FastNode outputNode)
@@ -268,7 +280,7 @@ namespace Shorokoo.Graph
                 Attributes = OnnxCSharpAttributes.FromCSharpVals(
                     new Dictionary<string, object?>
                     {
-                        [OnnxOpAttributeNames.ShrkAttrOutputName] = name,
+                        [OnnxOpAttributeNames.ShrkAttrOutputName] = NameOrNull(name),
                         [OnnxOpAttributeNames.ShrkAttrDeclaredRank] = (long?)declaredRank,
                     },
                     Definitions.NodeDefinitions[InternalOpCodes.GRAPH_OUTPUT].AttributeDefs),

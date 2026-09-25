@@ -2681,6 +2681,32 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         }
     }
 
+    private static IEnumerable<string> BoundaryNamesIn(ModelProto model)
+    {
+        string[] keys = [OnnxOpAttributeNames.ShrkAttrInputName, OnnxOpAttributeNames.ShrkAttrOutputName];
+        IEnumerable<ValueInfoProto> infos = [.. model.Graph.Inputs, .. model.Graph.Outputs, .. model.Functions.SelectMany(f => f.ValueInfoes)];
+        IEnumerable<NodeProto> nodes = [.. model.Graph.Nodes, .. model.Functions.SelectMany(f => f.Nodes)];
+        return [.. infos.SelectMany(i => i.MetadataProps).Where(p => keys.Contains(p.Key)).Select(p => p.Value),
+            .. nodes.SelectMany(n => n.Attributes).Where(a => keys.Contains(a.Name) && a.S is not null).Select(a => System.Text.Encoding.UTF8.GetString(a.S))];
+    }
+
+    private static ModelProto SrkModelOf(ComputationGraph g)
+        => FastOnnxModelBuilder.BuildInternalOnnxModel(g.ToInternal(), stage: g.Kind, applyExecutionLowerings: false, emitInputsAsNodes: true);
+
+    [Fact]
+    public void TestNoSerializedInputOrOutputNameIsATensorKeyStandingInForAMissingName()
+    {
+        var x23 = TensorData(DType.Float32, [2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f);
+        var fc = FCLayer.ComputationGraph;
+        var fcArch = fc.ToConcreteArchitecture(fc.FromOrderedInputs([TensorData(DType.Int64, [], 4L), x23]));
+        var tuple = StructInATupleOutputLayer.ComputationGraph;
+        var tupleArch = tuple.ToConcreteArchitecture(tuple.FromOrderedInputs([TensorData(DType.Float32, [], 3f), TensorData([2L], 1f, 2f)]));
+        foreach (var model in (ModelProto[])[SrkModelOf(fc), SrkModelOf(fcArch), SrkModelOf(tuple), SrkModelOf(tupleArch),
+                     FastOnnxModelBuilder.BuildInternalOnnxModel(fcArch.ToInternal()), FastOnnxModelBuilder.BuildOnnxModel(fcArch.ToConcreteModel())])
+            Assert.DoesNotContain(BoundaryNamesIn(model), name => TensorKey.TryParse(name, out _));
+        Assert.Equal([null, null, "x"], tupleArch.OutputNames);
+    }
+
     [Fact]
     public void TestImportOnnxRefusesAnOutputOfUnknownRankThatNoInputShapeSettlesNamingIt()
     {

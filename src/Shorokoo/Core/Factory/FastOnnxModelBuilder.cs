@@ -2050,11 +2050,13 @@ namespace Shorokoo.Core.Factory
                 var node = inputNodes[i];
                 infos[i] = FastOnnxProtoFactory.CreateGraphInputInfo(
                     node, InternalComputationGraph.InputKeyOf(node), emitRepresentativeMetadata, concreteDims: inputDims?[i]);
-                if (emitInputNameMetadata && InternalComputationGraph.InputNameOf(node) is { } name)
+                // Written whether or not the input has a name — empty where it has none — so the
+                // reader never takes the ValueInfo's raw tensor id for one.
+                if (emitInputNameMetadata)
                     infos[i].MetadataProps.Add(new StringStringEntryProto
                     {
                         Key = OnnxOpAttributeNames.ShrkAttrInputName,
-                        Value = name,
+                        Value = InternalComputationGraph.InputNameOf(node) ?? "",
                     });
             }
             return infos;
@@ -2086,12 +2088,11 @@ namespace Shorokoo.Core.Factory
                         Value = RepresentativeInputMetadata.FormatDims(recorded),
                     });
                 if (!emitOutputMetadata) continue;
-                if (InternalComputationGraph.OutputNameOf(node) is { } name)
-                    infos[i].MetadataProps.Add(new StringStringEntryProto
-                    {
-                        Key = OnnxOpAttributeNames.ShrkAttrOutputName,
-                        Value = name,
-                    });
+                infos[i].MetadataProps.Add(new StringStringEntryProto
+                {
+                    Key = OnnxOpAttributeNames.ShrkAttrOutputName,
+                    Value = InternalComputationGraph.OutputNameOf(node) ?? "",
+                });
                 if (InternalComputationGraph.DeclaredRankOf(node) is int rank)
                     infos[i].MetadataProps.Add(new StringStringEntryProto
                     {

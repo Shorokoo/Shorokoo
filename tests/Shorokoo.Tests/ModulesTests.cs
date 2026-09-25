@@ -1357,13 +1357,9 @@ public class ModulesCoverageTests
     }
 
     [Fact]
-    public void TestAStructOutputsFieldsAreNamedAfterItAsAStructInputsAre()
-    {
-        var g = StructInATupleOutputLayer.ComputationGraph;
-        var arch = Concretize(g, In("a", TensorData(DType.Float32, [], 3f)), In("x", TensorData([2L], 1f, 2f)));
-        string?[] names = [$"{g.OutputNames[0]}.First", $"{g.OutputNames[0]}.Second", "x"];
-        Assert.Equal(names, arch.OutputNames);
-    }
+    public void TestAStructOutputsFieldsAreUnnamedWhereItIsUnnamed()
+        => Assert.Equal([null, null, "x"], Concretize(StructInATupleOutputLayer.ComputationGraph,
+            In("a", TensorData(DType.Float32, [], 3f)), In("x", TensorData([2L], 1f, 2f))).OutputNames);
 
     private static Tensor<float32> CallsHyperScaledGain(Tensor<float32> t) => HyperScaledGainSubModel.Model(Scalar(2f)).Call(t);
 

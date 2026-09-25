@@ -578,6 +578,14 @@ namespace Shorokoo.Core.Factory.IR
         }
 
         /// <summary>
+        /// An input's or output's name: the one its ValueInfo's metadata gives, where a Shorokoo
+        /// dialect wrote it — empty for none — else, in a file that says nothing, the ValueInfo's
+        /// own name <paramref name="fallbackName"/>.
+        /// </summary>
+        private static string? NameFrom(string? metadata, string fallbackName)
+            => metadata is null ? fallbackName : metadata.Length == 0 ? null : metadata;
+
+        /// <summary>
         /// Closes <paramref name="fastGraph"/> with an output node reading <paramref name="value"/>,
         /// named, ranked and shaped as <paramref name="info"/>'s metadata says (the writer's
         /// <c>CreateOutputInfos</c>), and named <paramref name="fallbackName"/> where it says nothing.
@@ -592,7 +600,7 @@ namespace Shorokoo.Core.Factory.IR
                     System.Globalization.CultureInfo.InvariantCulture, out var parsed)
                 ? parsed
                 : null;
-            fastGraph.AddOutput(value, MetadataOf(ShrkAttrOutputName) ?? fallbackName, declaredRank);
+            fastGraph.AddOutput(value, NameFrom(MetadataOf(ShrkAttrOutputName), fallbackName), declaredRank);
             if (MetadataOf(ShrkAttrRecordedOutputShape) is { } recorded
                 && RepresentativeInputMetadata.TryParseDims(recorded) is { } dims)
                 Shorokoo.Core.Graph.RecordedOutputShapes.Set(fastGraph.Nodes[^1], dims);
@@ -814,7 +822,7 @@ namespace Shorokoo.Core.Factory.IR
                 // The input's name: the signature name an internal-dialect ValueInfo carries in its
                 // metadata (its own name is the raw tensor id), else the ValueInfo's name.
                 InternalComputationGraph.SetInputName(fastNode,
-                    inputProto.MetadataProps.FirstOrDefault(p => p.Key == ShrkAttrInputName)?.Value ?? inputProto.Name);
+                    NameFrom(inputProto.MetadataProps.FirstOrDefault(p => p.Key == ShrkAttrInputName)?.Value, inputProto.Name));
 
                 results.Add((inputProto, key, fastNode));
             }

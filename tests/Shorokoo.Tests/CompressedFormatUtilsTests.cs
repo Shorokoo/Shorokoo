@@ -2586,6 +2586,15 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
     }
 
     [Fact]
+    public void TestImportOnnxTakesANegativeDimAsUnsetAndRefusesAGivenShapeContradictingAFixedDim()
+    {
+        Assert.Equal([1L, 4L], ImportedShapeOfX(FloatInputX(Fixed(-1), Fixed(4))));
+        Assert.Equal([3L, 4L], ImportedShapeOfX(FloatInputX(Fixed(-1), Fixed(4)), new() { ["x"] = [3L, 4L] }));
+        Assert.Throws<ArgumentException>(() => ImportedShapeOfX(FloatInputX(Fixed(2), Fixed(4)), new() { ["x"] = [3L, 4L] }));
+        Assert.Throws<ArgumentException>(() => ImportedShapeOfX(FloatInputX(Symbolic("N"), Fixed(4)), new() { ["x"] = [3L, 5L] }));
+    }
+
+    [Fact]
     public void TestImportOnnxRefusesAKindTaggedFileWithAnUnshapedInputAsFW058()
     {
         var (model, _, _) = BuildSkptModel();

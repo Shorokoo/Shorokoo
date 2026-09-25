@@ -248,11 +248,11 @@ namespace Shorokoo.Core.Graph
         /// the ONNX <paramref name="graphProto"/>: the one in <paramref name="inputShapes"/> where
         /// it names the input, else the one a Shorokoo export carried (already on the node), else
         /// the shape the file declares, each symbolic (<c>dim_param</c>) or unset dimension taken
-        /// as <c>1</c>. An input the file declares no shape for is left without one; the entry
+        /// as <c>1</c>, as is a negative <c>dim_value</c>. An input the file declares no shape for is left without one; the entry
         /// points that freeze the graph refuse it
         /// (<see cref="ThrowIfImportLeftAnInputUnshaped"/>). A name in
         /// <paramref name="inputShapes"/> that is no input, or a shape of another rank than the
-        /// file declares, is refused.
+        /// file declares or contradicting a dimension it fixes, is refused.
         /// </summary>
         internal static void RecordFromOnnx(
             InternalComputationGraph graph,
@@ -282,11 +282,21 @@ namespace Shorokoo.Core.Graph
                         throw new System.ArgumentException(
                             $"the shape given for input '{name}' must be concrete dimensions, none negative.",
                             nameof(inputShapes));
-                    if (protoByName.TryGetValue(name, out var proto) && DeclaredDimsOf(proto) is { } declared
-                        && declared.Count != dims.Length)
-                        throw new System.ArgumentException(
-                            $"input '{name}' is declared with rank {declared.Count}, but the shape given " +
-                            $"for it has rank {dims.Length}.", nameof(inputShapes));
+                    if (protoByName.TryGetValue(name, out var proto) && DeclaredDimsOf(proto) is { } declared)
+                    {
+                        if (declared.Count != dims.Length)
+                            throw new System.ArgumentException(
+                                $"input '{name}' is declared with rank {declared.Count}, but the shape given " +
+                                $"for it has rank {dims.Length}.", nameof(inputShapes));
+                        var contradicted = Enumerable.Range(0, dims.Length)
+                            .Where(d => FixedSizeOf(declared[d]) is { } size && size != dims[d])
+                            .Select(d => $"dimension {d} is fixed at {declared[d].DimValue} but given as {dims[d]}")
+                            .ToList();
+                        if (contradicted.Count > 0)
+                            throw new System.ArgumentException(
+                                $"the shape given for input '{name}' contradicts the one the model declares: " +
+                                $"{string.Join("; ", contradicted)}.", nameof(inputShapes));
+                    }
                 }
             }
 
@@ -297,9 +307,18 @@ namespace Shorokoo.Core.Graph
                     Set(node, given);
                 else if (Get(node) is null
                          && protoByName.TryGetValue(name, out var proto) && DeclaredDimsOf(proto) is { } declared)
-                    Set(node, [.. declared.Select(d => d.ShouldSerializeDimValue() ? d.DimValue : 1L)]);
+                    Set(node, [.. declared.Select(d => FixedSizeOf(d) ?? 1L)]);
             }
         }
+
+        /// <summary>
+        /// The size a declared dimension fixes, or <c>null</c> for one it leaves open: a symbolic
+        /// (<c>dim_param</c>) or unset one, and a negative <c>dim_value</c>, which some writers use
+        /// for "unknown" and which no concrete shape can hold (and <c>-1</c> would read back as an
+        /// absent optional's marker).
+        /// </summary>
+        private static long? FixedSizeOf(Factory.IR.TensorShapeProto.Dimension dim)
+            => dim.ShouldSerializeDimValue() && dim.DimValue >= 0 ? dim.DimValue : null;
 
         /// <summary>
         /// Refuses (<see cref="ErrorCodes.FW058"/>) an imported graph with a tensor or optional

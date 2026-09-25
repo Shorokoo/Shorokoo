@@ -209,7 +209,8 @@ Every input of an imported concrete model records a **representative shape**, as
 every input of a concrete graph does. A model Shorokoo exported carries the one it
 was concretized at. For a foreign model it is read from the input's declared
 shape: each fixed dimension (`dim_value`) as written, and each **symbolic**
-(`dim_param`) or unset dimension as **`1`** — so an input declared `[N, 3, 224, 224]`
+(`dim_param`) or unset dimension — or one written with a negative `dim_value`, which
+some tools use for "unknown" — as **`1`**, so an input declared `[N, 3, 224, 224]`
 records `[1, 3, 224, 224]`. An input declared with no shape at all has no rank to
 go on, and the import refuses it with **`FW058`**, naming it. Give such an input its
 shape — or override any derived one — with the overload that takes input shapes,
@@ -221,8 +222,9 @@ ComputationGraph g = OnnxModelImporter.FromOnnxModel("model.onnx", shapes);
 // also: FromOnnxModel(byteArray, shapes, externalDataDirectory), FromOnnxModel(stream, shapes, ...)
 ```
 
-A shape given for an input the file shapes must be of the rank the file declares,
-and a key that names no input is refused.
+A shape given for an input the file shapes must be of the rank the file declares and
+agree with each dimension it fixes; a shape that contradicts it, and a key that names
+no input, are refused with an `ArgumentException`.
 
 A node calling one of the model's own functions with a different number of inputs
 than that function's body declares is refused on import for the same reason: the

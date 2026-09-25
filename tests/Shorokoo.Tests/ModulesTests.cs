@@ -144,8 +144,7 @@ public class ModulesCoverageTests
     public void TestAMultiOutputModuleSignatureStringReadsTheSameAfterASrkRoundTrip()
         => Assert.Equal(Signatures(Modules.CallerOfSwapSub.ComputationGraph), Signatures(SrkRoundTrip(Modules.CallerOfSwapSub.ComputationGraph)));
 
-    // Shorokoo/Shorokoo#391: a reloaded generic body fails NodeBuilder's type-constraint check when rebuilt.
-    [Fact(Skip = "Shorokoo/Shorokoo#391")]
+    [Fact]
     public void TestAGenericModuleBodyReadsBackAfterASrkRoundTrip()
         => Assert.Equal(Signatures(NonGenericCallerOfGenericModule.ComputationGraph), Signatures(SrkRoundTrip(NonGenericCallerOfGenericModule.ComputationGraph)));
 

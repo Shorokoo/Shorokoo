@@ -335,7 +335,12 @@ namespace Shorokoo.Core.Factory.IR
                 case AttributeProto.AttributeType.Strings:
                     return attribute.Strings.Select(Encoding.UTF8.GetString).ToArray();
                 case AttributeProto.AttributeType.Tensor:
-                    return CreateTensorData(attribute.T);
+                    var tensorAttribute = CreateTensorData(attribute.T);
+                    if (!string.IsNullOrEmpty(attribute.RefAttrName) &&
+                        attribute.RefAttrName.StartsWith("GenericParam:"))
+                        return tensorAttribute.WithDType(DType.CreateWithGenericParam(
+                            tensorAttribute.DType, attribute.RefAttrName.Substring("GenericParam:".Length)));
+                    return tensorAttribute;
                 case AttributeProto.AttributeType.Tensors:
                     return attribute.Tensors.Select(t => CreateTensorData(t)).ToArray();
                 case AttributeProto.AttributeType.Graph:

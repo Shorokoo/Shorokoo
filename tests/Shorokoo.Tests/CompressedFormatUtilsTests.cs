@@ -2617,6 +2617,33 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         Assert.Equal([3L, 4L], ImportedShapeOfY(FloatInputX(Symbolic("N"), Fixed(4)), FloatInputX(null), new() { ["x"] = [3L, 4L] }));
     }
 
+    private static long[]? OutputShapeOf(ComputationGraph graph) => RecordedOutputShapes.Get(graph.ToInternal().OutputNodes[0]);
+
+    [Fact]
+    public void TestAStringInputModelRecordsItsOutputShapeThroughConcretizationExportAndImport()
+    {
+        var x = TensorData(DType.Utf8, [2L], "a b", "c");
+        var model = StringSplitLayer.ComputationGraph.ToConcreteArchitecture(
+            StringSplitLayer.ComputationGraph.FromOrderedInputs([x])).ToConcreteModel();
+        var exported = P(Guid.NewGuid() + ".onnx");
+        Persistence.ExportOnnx(model, exported);
+
+        var g = new GraphProto { Name = "foreign" };
+        g.Inputs.Add(new ValueInfoProto { Name = "s", Type = new TypeProto { TensorType = new TypeProto.Tensor { ElemType = 8, Shape = new TensorShapeProto { Dims = { Fixed(3) } } } } });
+        var identity = new NodeProto { OpType = "Identity", Name = "id0" };
+        identity.Inputs.Add("s");
+        identity.Outputs.Add("y");
+        g.Nodes.Add(identity);
+        g.Outputs.Add(new ValueInfoProto { Name = "y", Type = new TypeProto { TensorType = new TypeProto.Tensor { ElemType = 8 } } });
+        var foreign = new ModelProto { IrVersion = 10, Graph = g };
+        foreign.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = 21 });
+
+        Assert.Equal([2L, 2L], OutputShapeOf(model));
+        Assert.Equal([2L, 2L], OutputShapeOf(Persistence.ImportOnnx(exported)));
+        Assert.Equal([2L, 2L], OutputShapeOf(CompressedFormatUtils.LoadFastGraphFromBinary(CompressedFormatUtils.SaveFastGraphToBinary(model, compressed: true))));
+        Assert.Equal([3L], OutputShapeOf(Persistence.ImportOnnx(WriteOnnx(P(Guid.NewGuid() + ".onnx"), foreign))));
+    }
+
     [Fact]
     public void TestImportOnnxRefusesAnOutputOfUnknownRankThatNoInputShapeSettlesNamingIt()
     {

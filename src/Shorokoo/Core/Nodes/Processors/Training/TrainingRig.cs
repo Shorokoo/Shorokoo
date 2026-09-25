@@ -1187,12 +1187,19 @@ namespace Shorokoo
         /// <para>The threshold decides only how faithful the description is, never whether it is legal:
         /// a values-elided attribute is readable as "shape and dtype, no values" at any threshold, so
         /// this one and the engines' read thresholds no longer have to agree.</para>
+        ///
+        /// <para>A string tensor has no zero bytes to be made of, so its payload is empty strings; any
+        /// other dtype without a fixed whole-byte width (a packed 4-bit or a complex type) is described
+        /// by shape and dtype alone, whatever its size.</para>
         /// </summary>
         internal static TensorAttribute RepresentativeInputFor(Shape shape, DType dtype)
         {
             if (shape.Count > Shorokoo.Core.AutoDiffCheckpointing.ShapeInferenceInterpreter.MaxSmallTensorElements)
                 return TensorAttribute.WithoutValues(shape, dtype);
-            var bytesPerElement = dtype.EncodingBitCount / 8;
+            if (dtype == DType.Utf8)
+                return TensorAttribute.OverStrings(shape, [.. Enumerable.Repeat("", checked((int)shape.Count))]);
+            if (RecordedOutputShapes.ByteWidthOf(dtype) is not int bytesPerElement)
+                return TensorAttribute.WithoutValues(shape, dtype);
             return TensorAttribute.OverBytes(shape, dtype, new byte[shape.Count * bytesPerElement]);
         }
 

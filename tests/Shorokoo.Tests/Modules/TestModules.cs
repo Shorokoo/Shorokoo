@@ -1698,6 +1698,17 @@ namespace Shorokoo.Tests.Modules
             => (Globals.TensorSequence<float32>(x, x), Globals.TensorSequence<float32>(x, a));
     }
 
+    /// <summary>A string input split on spaces: an op the QuickExecutionEngine does not compute.</summary>
+    [Module]
+    public partial class StringSplitLayer
+    {
+        public static Tensor<utf8> Inline(Tensor<utf8> x)
+        {
+            var (split, _) = OnnxOp.StringSplit(x, delimiter: " ");
+            return (Tensor<utf8>)split;
+        }
+    }
+
     /// <summary>An optional output: the optional input it is handed.</summary>
     [Module]
     public partial class OptionalPassThroughLayer

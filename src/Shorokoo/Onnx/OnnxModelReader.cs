@@ -168,9 +168,13 @@ namespace Shorokoo.Onnx
             // A Shorokoo export carries each input's representative shape in its metadata, which
             // the reader has re-attached; any other input takes it from the caller or the file.
             Shorokoo.Core.Graph.RepresentativeInputShapes.RecordFromOnnx(graph, model.Graph, inputShapes);
-            // Each output likewise: the shape a Shorokoo export wrote, else the one the file
-            // declares, else the one it has at the input shapes just recorded.
-            Shorokoo.Core.Graph.RecordedOutputShapes.RecordFromOnnx(graph, model.Graph);
+            // Each output of a foreign model likewise: the one the file declares, else the one it has
+            // at the input shapes just recorded. A model a Shorokoo builder wrote is tagged, and
+            // every output of a concrete one already carries the shape recorded when it was
+            // concretized — on its output node, or in its metadata — so nothing is derived for it: a
+            // concrete one missing a shape is refused when frozen, and a module needs none.
+            if (taggedKind is null)
+                Shorokoo.Core.Graph.RecordedOutputShapes.RecordFromOnnx(graph, model.Graph);
 
             // An input left unshaped is the caller's to supply (FW058), which a tag declaring a
             // concrete kind does not change: say so before the tag check reports the same input as

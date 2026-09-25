@@ -207,7 +207,11 @@ pipeline, applied in order:
    values, since a value can decide a shape (a flag choosing a branch, the axes a
    `Squeeze` drops) — and keeps it through the same steps; a struct output is one output
    per field, an absent optional output records that it was absent, and a sequence
-   output the shape its elements share. ONNX export reads an output's rank from it where
+   output the shape its elements share. The shapes are computed by the
+   `QuickExecutionEngine`; an output it cannot compute (string values, for instance) is
+   taken from a run of the graph at the samples, and where that run cannot be made
+   either, the output records the rank the engine found, with each dimension it could
+   not settle taken as `1`. ONNX export reads an output's rank from it where
    the signature states none, and a concrete graph with an output that records none is
    refused with `FW057` naming the output.
 3. **`ToConcreteModel(...)`** — binds parameter values (loaded weights, or the

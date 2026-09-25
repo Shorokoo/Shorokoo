@@ -76,19 +76,126 @@ namespace Shorokoo.Core.Graph
         /// unresolved — a shape hanging on the values of a large tensor — is the walk repeated with
         /// the samples' values in full. The parameters are not initialized at this stage, so each
         /// stands in by the shape and dtype its node declares.</para>
+        ///
+        /// <para>An output the engine cannot compute at all — an operator it has no kernel for, such
+        /// as the string ops — is then taken from a real run of the graph at the samples on the
+        /// default compute context, each parameter bound to zeros of its declared shape. That run
+        /// costs a session and a buffer per parameter, so it is made only when an output is left
+        /// unresolved by the engine. Where the run cannot be made either — the compute context
+        /// refuses the graph on this machine, say — an output whose rank the engine did settle
+        /// records it, each dimension it left open taken as <c>1</c>, as an ONNX import takes a
+        /// symbolic one (<see cref="RecordFromOnnx"/>).</para>
         /// </summary>
         internal static void RecordAtSamples(InternalComputationGraph graph, ModelParamList samples)
         {
-            var unresolved = Evaluate(graph, samples, ShapeInferenceInterpreter.MaxSmallTensorElements);
-            if (unresolved) Evaluate(graph, samples, int.MaxValue);
+            var store = Evaluate(graph, samples, ShapeInferenceInterpreter.MaxSmallTensorElements);
+            if (RecordFrom(graph, store, partial: false)) return;
+            store = Evaluate(graph, samples, int.MaxValue);
+            if (RecordFrom(graph, store, partial: false)) return;
+            if (RecordFromARun(graph, samples)) return;
+            RecordFrom(graph, store, partial: true);
         }
 
-        private static bool Evaluate(InternalComputationGraph graph, ModelParamList samples, int maxDataElements)
+        /// <summary>
+        /// Records each output still without a shape from a run of <paramref name="graph"/> at
+        /// <paramref name="samples"/>, its parameters bound to zeros of their declared shapes. Left
+        /// as it is where a parameter declares no concrete shape or a dtype zeros cannot be written
+        /// in, as there is then nothing to bind it to, and where the compute context cannot run the
+        /// graph. Whether every output then records a shape.
+        /// </summary>
+        private static bool RecordFromARun(InternalComputationGraph graph, ModelParamList samples)
+        {
+            var zeros = new Dictionary<ModelId, TensorAttribute>();
+            foreach (var node in graph.Nodes)
+            {
+                if (node.OpCode != InternalOpCodes.MODEL_PARAM
+                    || node.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrLocalModelId) is not { } id
+                    || id is [0])
+                    continue;
+                if (node.Attributes.GetLongsVal(OnnxOpAttributeNames.ShrkAttrShape) is not { } dims
+                    || dims.Any(d => d < 0)
+                    || node.Attributes.GetDTypeVal(OnnxOpAttributeNames.ShrkAttrDtype) is not { } dtype
+                    || ZerosOf(new Shape(dims), dtype) is not { } value)
+                    return false;
+                zeros[new ModelId(id)] = value;
+            }
+
+            var run = FastApplyModelParamValues.Process(graph, zeros);
+            if (FastWireRngKeyDerivation.FindRngSeedNode(run) is not null && run.TryGetRngSeed() is null)
+                run.ApplyRngConfig(RngConfig.Default);
+            var inputs = RepresentativeInputShapes.BindSamplesToLoweredInputs(graph, samples)
+                .Select(value => value is null ? null : SharedOf(value))
+                .ToArray();
+            if (inputs.Any(value => value is null)) return false;
+
+            NamedModelParam[] outputs;
+            try { outputs = Shorokoo.Runtime.ComputeContext.Default.Execute(run, inputs!); }
+            catch (Exception e) when (e is not (OutOfMemoryException or InsufficientExecutionStackException))
+            {
+                // The graph is one the engine could not finish either, so a context that cannot run
+                // it leaves the ranks the engine settled; see RecordAtSamples.
+                return false;
+            }
+            var outputNodes = graph.OutputNodes;
+            for (int i = 0; i < outputNodes.Count && i < outputs.Length; i++)
+                if (Get(outputNodes[i]) is null && ShapeOf(outputs[i]) is { } dims)
+                    Set(outputNodes[i], dims);
+            return FirstOutputWithoutShape(graph) is null;
+        }
+
+        /// <summary>Zeros — empty strings for a string — of <paramref name="shape"/>, or <c>null</c>
+        /// for a dtype whose elements have no fixed whole-byte width.</summary>
+        private static TensorAttribute? ZerosOf(Shape shape, DType dtype)
+            => dtype == DType.Utf8
+                ? TensorAttribute.OverStrings(shape, [.. Enumerable.Repeat("", checked((int)shape.Count))])
+                : ByteWidthOf(dtype) is int width
+                    ? TensorAttribute.OverBytes(shape, dtype, new byte[shape.Count * width])
+                    : null;
+
+        /// <summary>A sample as a run reads it without taking it: the caller keeps its samples.</summary>
+        private static IData? SharedOf(IData value) => value switch
+        {
+            SharedInput shared => shared,
+            TensorData tensor => tensor.Shared(),
+            OptionalTensorData optional => optional.Shared(),
+            TensorDataSequence sequence => sequence.Shared(),
+            _ => null,
+        };
+
+        /// <summary>The dims to record for one output of a run.</summary>
+        private static long[]? ShapeOf(NamedModelParam output) => output switch
+        {
+            OptionalTensorDataModelParam optional => optional.ToOptionalTensorData() is { HasValue: true, Value: { } present }
+                ? present.Shape.Dims
+                : RepresentativeInputShapes.AbsentOptionalShape,
+            TensorDataSequenceModelParam sequence => sequence.ToTensorDataSequence() is { Count: > 0 } elements
+                && elements.All(e => e.Shape.Dims.AsSpan().SequenceEqual(elements[0].Shape.Dims))
+                    ? elements[0].Shape.Dims
+                    : NoSharedElementShape,
+            { Structure: DataStructure.Tensor } => output.ToTensorData().Shape.Dims,
+            _ => null,
+        };
+
+        /// <summary>
+        /// The bytes one element of <paramref name="dtype"/> takes, or <c>null</c> for a dtype
+        /// with no fixed whole-byte width (a string, a packed 4-bit or a complex type), whose
+        /// elements cannot be written as raw bytes.
+        /// </summary>
+        internal static int? ByteWidthOf(DType dtype)
+            => dtype == DType.Utf8 || dtype == DType.Int4 || dtype == DType.UInt4
+               || dtype == DType.Complex64 || dtype == DType.Complex128
+               || dtype.IsGenericType || dtype == DType.Invalid
+               || dtype == DType.Module || dtype == DType.Model || dtype.TensorStructDef is not null
+                ? null
+                : dtype.EncodingBitCount / 8;
+
+        private static Dictionary<FastTensorKey, IRuntimeTensor> Evaluate(
+            InternalComputationGraph graph, ModelParamList samples, int maxDataElements)
         {
             var engine = new QuickExecutionEngine { MaxDataElements = maxDataElements };
             var initial = FastProcessorHelper.SampleRuntimeInputs(graph, samples, engine) ?? [];
             AddParameterStandIns(graph, initial);
-            return !RecordFrom(graph, engine.Run(graph, initial));
+            return engine.Run(graph, initial);
         }
 
         /// <summary>
@@ -135,7 +242,7 @@ namespace Shorokoo.Core.Graph
             var keys = graph.Inputs;
             for (int i = 0; i < keys.Count; i++) initial[keys[i]] = inputs[i];
             AddParameterStandIns(graph, initial);
-            return ShapesFrom(graph, engine.Run(graph, initial));
+            return ShapesFrom(graph, engine.Run(graph, initial), partial: true);
         }
 
         /// <summary>
@@ -151,34 +258,40 @@ namespace Shorokoo.Core.Graph
         }
 
         /// <summary>
-        /// Records each output's shape from the engine's <paramref name="store"/>; whether every
-        /// output got one.
+        /// Records the shape of each output still without one from the engine's
+        /// <paramref name="store"/> — with <paramref name="partial"/>, one whose rank alone it
+        /// settled too, each open dimension as <c>1</c>; whether every output then records one.
         /// </summary>
-        private static bool RecordFrom(InternalComputationGraph graph, Dictionary<FastTensorKey, IRuntimeTensor> store)
+        private static bool RecordFrom(
+            InternalComputationGraph graph, Dictionary<FastTensorKey, IRuntimeTensor> store, bool partial)
         {
-            var shapes = ShapesFrom(graph, store);
+            var shapes = ShapesFrom(graph, store, partial);
             var outputNodes = graph.OutputNodes;
             for (int i = 0; i < outputNodes.Count; i++)
-                if (shapes[i] is { } dims) Set(outputNodes[i], dims);
-            return shapes.All(dims => dims is not null);
+                if (Get(outputNodes[i]) is null && shapes[i] is { } dims) Set(outputNodes[i], dims);
+            return FirstOutputWithoutShape(graph) is null;
         }
 
-        private static long[]?[] ShapesFrom(InternalComputationGraph graph, Dictionary<FastTensorKey, IRuntimeTensor> store)
-            => [.. graph.Outputs.Select(key => store.TryGetValue(key, out var value) ? ShapeOf(value) : null)];
+        private static long[]?[] ShapesFrom(
+            InternalComputationGraph graph, Dictionary<FastTensorKey, IRuntimeTensor> store, bool partial)
+            => [.. graph.Outputs.Select(key => store.TryGetValue(key, out var value) ? ShapeOf(value, partial) : null)];
 
         /// <summary>The dims to record for one evaluated value, or <c>null</c> where the evaluation
-        /// left its shape unknown.</summary>
-        private static long[]? ShapeOf(IRuntimeTensor value) => value switch
+        /// left its shape — or, with <paramref name="partial"/>, its rank — unknown.</summary>
+        private static long[]? ShapeOf(IRuntimeTensor value, bool partial) => value switch
         {
-            RuntimeTensor tensor => Definite(tensor),
+            RuntimeTensor tensor => Definite(tensor, partial),
             RuntimeOptionalTensor { HasValue: false } => RepresentativeInputShapes.AbsentOptionalShape,
-            RuntimeOptionalTensor { HasValue: true, ValueTensor: { } present } => Definite(present),
-            RuntimeSequenceTensor sequence => SharedElementShapeOf(sequence),
+            RuntimeOptionalTensor { HasValue: true, ValueTensor: { } present } => Definite(present, partial),
+            RuntimeSequenceTensor sequence => SharedElementShapeOf(sequence) ?? (partial ? NoSharedElementShape : null),
             _ => null,
         };
 
-        private static long[]? Definite(RuntimeTensor tensor)
-            => tensor.DType != DType.Invalid && tensor.HasDefiniteShape ? tensor.Shape!.Dims : null;
+        private static long[]? Definite(RuntimeTensor tensor, bool partial = false)
+            => tensor.DType == DType.Invalid || tensor.Shape is not { } shape ? null
+                : tensor.HasDefiniteShape ? shape.Dims
+                : partial ? [.. shape.Dims.Select(d => d < 0 ? 1L : d)]
+                : null;
 
         private static long[]? SharedElementShapeOf(RuntimeSequenceTensor sequence)
         {
@@ -224,8 +337,9 @@ namespace Shorokoo.Core.Graph
         }
 
         /// <summary>
-        /// Records a shape on each output of a graph read from the ONNX <paramref name="graphProto"/>
-        /// that does not already carry the one a Shorokoo export wrote: the shape the file declares
+        /// Records a shape on each output of a graph read from a foreign ONNX
+        /// <paramref name="graphProto"/> — one no Shorokoo builder wrote, so it carries no graph-kind
+        /// tag, and whose ops make it concrete: the shape the file declares
         /// for it, taken as <see cref="RepresentativeInputShapes.RecordFromOnnx"/> takes an input's —
         /// each symbolic (<c>dim_param</c>), unset or negative dimension as <c>1</c> — an optional's
         /// element's, and a sequence's element's (<see cref="NoSharedElementShape"/> where it
@@ -236,13 +350,13 @@ namespace Shorokoo.Core.Graph
         /// </summary>
         internal static void RecordFromOnnx(InternalComputationGraph graph, Factory.IR.GraphProto graphProto)
         {
+            if (graph.Nodes.Any(FastNodeClassification.IsModuleStageMachinery)) return;
             var outputNodes = graph.OutputNodes;
             for (int i = 0; i < outputNodes.Count && i < graphProto.Outputs.Count; i++)
                 if (Get(outputNodes[i]) is null && DeclaredShapeOf(graphProto.Outputs[i]) is { } dims)
                     Set(outputNodes[i], dims);
 
-            if (FirstOutputWithoutShape(graph) is null || !EveryInputIsRepresented(graph)
-                || graph.Nodes.Any(FastNodeClassification.IsModuleStageMachinery)) return;
+            if (FirstOutputWithoutShape(graph) is null || !EveryInputIsRepresented(graph)) return;
             var evaluated = ShapesAtRepresentativeInputs(graph);
             for (int i = 0; i < outputNodes.Count; i++)
                 if (Get(outputNodes[i]) is null && evaluated[i] is { } dims)

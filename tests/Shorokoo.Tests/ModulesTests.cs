@@ -1305,6 +1305,102 @@ public class ModulesCoverageTests
             [ModuleFn((Func<Tensor<float32>, Scalar<float32>, Tensor<float32>>)ScaledByHyper).Call(Scalar(3f), x)[0]]))));
     }
 
+    private static string?[] SuffixOutputNames(ComputationGraph graph)
+    {
+        var g = graph.ToInternal();
+        Assert.Equal(g.Nodes.Count(n => InternalOpCodes.IsGraphOutputOp(n.OpCode)), g.OutputCount);
+        return [.. graph.OutputNames];
+    }
+
+    private static float[][] RunAll(ComputationGraph model, TensorData input)
+        => [.. ComputeContext.Default.Execute(model, input.Shared()).Select(o => o.ToTensorData().As<float32>().AccessMemory<float>().ToArray())];
+
+    private static ComputationGraph RepeatedInputAndConstantOutputsModel()
+    {
+        var x = InvokeInput("x");
+        var doubled = x * Scalar(2f);
+        var g = new InternalComputationGraph([x], [x, doubled, doubled, Vector(5f)]);
+        string[] names = ["same", "doubled", "again", "five"];
+        for (int i = 0; i < names.Length; i++)
+            InternalComputationGraph.SetOutputName(g.OutputNodes[i], names[i]);
+        RepresentativeInputShapes.Set(g.InputNodes[0], [2L]);
+        return ComputationGraph.FromInternal(g, GraphKind.ConcreteModel);
+    }
+
+    [Fact]
+    public void TestTheOutputsAreDerivedFromTheNodeSuffixAndAnOutputNodeBeforeABodyNodeIsRefused()
+    {
+        var x = InvokeInput("x");
+        var g = new InternalComputationGraph([x], [x * Scalar(2f)]);
+        Assert.Equal([InternalComputationGraph.OutputKeyOf(g.Nodes[^1])], g.Outputs);
+
+        g.AddOutput(g.Inputs[0], "x again", declaredRank: 1);
+        int?[] ranks = [null, 1];
+        Assert.Equal(g.Inputs[0], g.Outputs[1]);
+        Assert.Equal("x again", g.OutputNames[1]);
+        Assert.Equal(ranks, g.OutputDeclaredRanks);
+        Assert.True(g.TryValidateLinearOrder(out _));
+
+        var output = g.OutputNodes[0];
+        g.Nodes.Remove(output);
+        g.Nodes.Insert(g.InputCount, output);
+        Assert.Single(g.Outputs);
+        Assert.False(g.TryValidateLinearOrder(out _));
+        Assert.Throws<InvalidOperationException>(() => ComputationGraph.FromInternal(g, GraphKind.Module));
+    }
+
+    [Fact]
+    public void TestRepeatedInputAndConstantOutputsRunAndRoundTripWithTheirNames()
+    {
+        var model = RepeatedInputAndConstantOutputsModel();
+        var input = TensorData([2L], 1f, 2f);
+        float[][] expected = [[1f, 2f], [2f, 4f], [2f, 4f], [5f]];
+        string?[] names = ["same", "doubled", "again", "five"];
+        foreach (var g in (ComputationGraph[])[model, SrkRoundTrip(model), OnnxRoundTrip(model)])
+        {
+            Assert.Equal(names, SuffixOutputNames(g));
+            Assert.Equal(expected, RunAll(g, input));
+        }
+    }
+
+    [Fact]
+    public void TestDeclaredOutputRanksAndNamesSurviveASrkSaveAFunctionBodyAndAnExport()
+    {
+        var sig = ModuleHelper.CreateFunctionSignature(
+            [], [typeof(Tensor<float32>)], [typeof(Vector<float32>), typeof(Scalar<float32>), typeof(Tensor<float32>)]);
+        int?[] declared = [1, 0, null];
+        Assert.Equal(declared, sig.OriginalFastGraph.OutputDeclaredRanks);
+        Assert.Equal(declared, SrkRoundTrip(sig.Body).ToInternal().OutputDeclaredRanks);
+
+        var x = InvokeInput("x");
+        var caller = ComputationGraph.FromInternal(new InternalComputationGraph([x], [.. sig.Call(x)]), GraphKind.Module);
+        var reloaded = SrkRoundTrip(caller).ToInternal().LocalFunctions.Single();
+        Assert.Equal(declared, reloaded.OriginalFastGraph.OutputDeclaredRanks);
+        Assert.Equal(sig.OriginalFastGraph.OutputNames, reloaded.OriginalFastGraph.OutputNames);
+        Assert.Equal(sig.ModuleSignatureString, reloaded.ModuleSignatureString);
+
+        var scalar = new InternalComputationGraph([], [OnnxOp.Identity(Scalar(1f), rank: null)], System.Collections.Immutable.ImmutableArray.Create<int?>(0));
+        var exported = FastOnnxModelBuilder.BuildOnnxModel(ComputationGraph.FromInternal(scalar, GraphKind.ConcreteModel));
+        Assert.Empty(exported.Graph.Outputs[0].Type.TensorType.Shape.Dims);
+    }
+
+    private static int OutputNodeCount(InternalComputationGraph g) => g.Nodes.Count(n => InternalOpCodes.IsGraphOutputOp(n.OpCode));
+
+    [Fact]
+    public void TestInliningFlatteningAndSplicingLeaveNoOutputNodeOfTheCalleeBehind()
+    {
+        var x = InvokeInput("x");
+        Assert.Equal(1, OutputNodeCount(ModuleFn((Func<Tensor<float32>, Tensor<float32>>)CallsHyperScaledGain).GetFastFlattenedGraph()));
+        Assert.Equal(1, OutputNodeCount(Inlined(CallerOfRepeatedOutputSub.ComputationGraph.ToInternal())));
+        Assert.Equal(1, OutputNodeCount(Inlined(CallerOfSwapSub.ComputationGraph.ToInternal())));
+
+        var host = new InternalComputationGraph([x], [x * Scalar(2f)]);
+        var spliced = FastReplay.ReplayInto(host, RepeatedOutputSub.ComputationGraph.ToInternal(), [host.Outputs[0]]);
+        Assert.Equal(1, OutputNodeCount(host));
+        Assert.Equal(spliced[0], spliced[1]);
+        Assert.True(host.TryValidateLinearOrder(out _));
+    }
+
     private static ComputationGraph SequenceInputArch(TensorData x)
         => SeqHypersLayer.ComputationGraph.ToConcreteArchitecture(new ModelParamList(
         [

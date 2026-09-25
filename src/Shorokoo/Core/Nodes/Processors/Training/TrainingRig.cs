@@ -1125,7 +1125,8 @@ namespace Shorokoo
         /// <param name="representSequences">Whether a sequence input is described too, rather than
         /// refused: as a sequence of elements of the shape its sample's elements shared, where one
         /// was recorded, and of elements of unknown shape otherwise. For a pass that only infers
-        /// what it can (ONNX export's output ranks); training needs every input exactly.</param>
+        /// what it can (the output shapes a composed or imported graph records); training needs
+        /// every input exactly.</param>
         internal static IRuntimeTensor[] ReadRepresentativeInputs(InternalComputationGraph concreteArch, bool representSequences = false)
         {
             var producerByOutput = BuildProducerByOutputMap(concreteArch);
@@ -3930,6 +3931,8 @@ namespace Shorokoo
                 scheduledNames.Add(NameOf(h));
             }
 
+            // Each output records its value's shape at the counters' representative zero.
+            RecordedOutputShapes.RecordAtRepresentativeInputs(composed);
             return (new ComputationGraph(composed, GraphKind.ConcreteModel), scheduledNames);
         }
 
@@ -3967,11 +3970,12 @@ namespace Shorokoo
                 }
             }
 
-            // The counter inputs it reads come along as nodes, still leading, names and all.
+            // The counter inputs it reads come along as nodes, still leading, names and all, and so
+            // does its output node, recorded shape and all.
             var g = new InternalComputationGraph();
             foreach (var n in composed.Nodes)
                 if (reachedNodes.Contains(n.Key)) g.Nodes.Add(n);
-            g.AddOutput(outKey, outputName);
+            g.Nodes.Add(composed.OutputNodes[oi]);
             return new ComputationGraph(g, GraphKind.ConcreteModel);
         }
 
@@ -4454,6 +4458,10 @@ namespace Shorokoo
                 // AutoGradShapeOp for why it is never registered.
                 using (Shorokoo.Core.Interpreter.OpRegistry.Override(Shorokoo.Core.Interpreter.Ops.AutoGradShapeOp.Instance))
                     shapeInfo = shapeInferencer.Infer(graph, allInputs);
+
+            // And its outputs record the shapes they have at those exemplars, which the inference
+            // just gave: before the optimizer, whose rewritten graph carries the output nodes on.
+            RecordedOutputShapes.Record(graph, shapeInfo);
 
             // A parameter's shape is declared by its initializer and baked into the arch, and every
             // other part of the framework holds to it — binding a value of another shape into the

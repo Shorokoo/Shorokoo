@@ -2527,6 +2527,10 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
             new OptionalTensorDataModelParam("bias", ModelParamType.InputParam, OptionalTensorData.Some(x3))));
         Assert.Equal([1, -1, 1], ExportedIoRanks(NullableBiasLayer.ComputationGraph, NamedIn("x", x3),
             new OptionalTensorDataModelParam("bias", ModelParamType.InputParam, OptionalTensorData.None(DType.Float32))));
+        Assert.Equal([2, 0, 2], ExportedIoRanks(RankByFlagLayer.ComputationGraph, x23, TensorData(DType.Bool, [], true)));
+        Assert.Equal([2, 0, 1], ExportedIoRanks(RankByFlagLayer.ComputationGraph, x23, TensorData(DType.Bool, [], false)));
+        Assert.Equal([2, 1, 1], ExportedIoRanks(SqueezeByAxesLayer.ComputationGraph,
+            TensorData(DType.Float32, [2L, 1L], 1f, 2f), TensorData(DType.Int64, [1L], 1L)));
     }
 
     private static NamedModelParam NamedIn(string name, TensorData t) => new TensorDataModelParam(name, ModelParamType.InputParam, t);
@@ -2583,6 +2587,58 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         Assert.Equal([1L, 4L], ImportedShapeOfX(FloatInputX(new TensorShapeProto.Dimension(), Fixed(4))));
         Assert.Equal([], ImportedShapeOfX(FloatInputX()));
         Assert.Equal([3L, 4L], ImportedShapeOfX(FloatInputX(Symbolic("N"), Fixed(4)), new() { ["x"] = [3L, 4L] }));
+    }
+
+    private static ValueInfoProto Named(string name, ValueInfoProto value)
+    {
+        value.Name = name;
+        return value;
+    }
+
+    private long[]? ImportedShapeOfY(ValueInfoProto x, ValueInfoProto y, Dictionary<string, long[]>? given = null)
+    {
+        var model = BuildForeignAddModel("w", [10f, 20f, 30f, 40f]);
+        model.Graph.Inputs[0] = x;
+        model.Graph.Outputs[0] = Named("y", y);
+        var path = WriteOnnx(P(Guid.NewGuid() + ".onnx"), model);
+        var g = (given is null ? Persistence.ImportOnnx(path) : Persistence.ImportOnnx(path, given)).ToInternal();
+        return RecordedOutputShapes.Get(g.OutputNodes[0]);
+    }
+
+    [Fact]
+    public void TestImportOnnxRecordsEachOutputsDeclaredShapeElseItsShapeAtTheRecordedInputs()
+    {
+        Assert.Equal([4L], ImportedShapeOfY(FloatInputX(Fixed(4)), FloatInputX(Fixed(4))));
+        Assert.Equal([1L], ImportedShapeOfY(FloatInputX(Fixed(4)), FloatInputX(Symbolic("N"))));
+        Assert.Equal([1L], ImportedShapeOfY(FloatInputX(Fixed(4)), FloatInputX(Fixed(-1))));
+        Assert.Equal([], ImportedShapeOfY(FloatInputX(Fixed(4)), FloatInputX()));
+        Assert.Equal([4L], ImportedShapeOfY(FloatInputX(Fixed(4)), FloatInputX(null)));
+        Assert.Equal([1L, 4L], ImportedShapeOfY(FloatInputX(Symbolic("N"), Fixed(4)), FloatInputX(null)));
+        Assert.Equal([3L, 4L], ImportedShapeOfY(FloatInputX(Symbolic("N"), Fixed(4)), FloatInputX(null), new() { ["x"] = [3L, 4L] }));
+    }
+
+    [Fact]
+    public void TestImportOnnxRefusesAnOutputOfUnknownRankThatNoInputShapeSettlesNamingIt()
+    {
+        var g = new GraphProto { Name = "foreign" };
+        g.Inputs.Add(new ValueInfoProto
+        {
+            Name = "s",
+            Type = new TypeProto { SequenceType = new TypeProto.Sequence { ElemType = new TypeProto { TensorType = new TypeProto.Tensor { ElemType = 1 } } } },
+        });
+        g.Initializers.Add(new TensorProto { Name = "i", data_type = 7, Dims = [], RawData = BitConverter.GetBytes(0L) });
+        var at = new NodeProto { OpType = "SequenceAt", Name = "at0" };
+        at.Inputs.AddRange(["s", "i"]);
+        at.Outputs.Add("y");
+        g.Nodes.Add(at);
+        g.Outputs.Add(Named("y", FloatInputX(null)));
+        var model = new ModelProto { IrVersion = 10, Graph = g };
+        model.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = 21 });
+        var path = WriteOnnx(P(Guid.NewGuid() + ".onnx"), model);
+
+        var ex = Assert.Throws<ModelException>(() => Persistence.ImportOnnx(path));
+        Assert.Equal(ErrorCodes.FW058, ex.ErrorCode);
+        Assert.Contains("'y'", ex.Message);
     }
 
     [Fact]

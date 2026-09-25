@@ -1658,4 +1658,50 @@ namespace Shorokoo.Tests.Modules
                 pooled.MatMul(wHead));
         }
     }
+
+    /// <summary>An output whose rank its flag decides: the input as it is, or flattened.</summary>
+    [Module]
+    public partial class RankByFlagLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x, Scalar<bit> flag)
+            => flag.IfElse(x, (Tensor<float32>)OnnxOp.Reshape(x, Vector(-1L), false));
+    }
+
+    /// <summary>An output whose rank the values of its axes decide.</summary>
+    [Module]
+    public partial class SqueezeByAxesLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x, Vector<int64> axes)
+            => (Tensor<float32>)OnnxOp.Squeeze(x, axes);
+    }
+
+    /// <summary>A struct output.</summary>
+    [Module]
+    public partial class StructOutputLayer
+    {
+        public static GenericPairStruct Inline(Scalar<float32> a) => TensorStruct<GenericPairStruct>(a, a);
+    }
+
+    /// <summary>A struct output beside a tensor output.</summary>
+    [Module]
+    public partial class StructInATupleOutputLayer
+    {
+        public static (GenericPairStruct, Tensor<float32>) Inline(Scalar<float32> a, Tensor<float32> x)
+            => (TensorStruct<GenericPairStruct>(a, a), x);
+    }
+
+    /// <summary>A sequence of like elements and one of unlike elements.</summary>
+    [Module]
+    public partial class SequenceOutputsLayer
+    {
+        public static (TensorSequence<float32>, TensorSequence<float32>) Inline(Scalar<float32> a, Tensor<float32> x)
+            => (Globals.TensorSequence<float32>(x, x), Globals.TensorSequence<float32>(x, a));
+    }
+
+    /// <summary>An optional output: the optional input it is handed.</summary>
+    [Module]
+    public partial class OptionalPassThroughLayer
+    {
+        public static OptionalTensor<float32> Inline(OptionalTensor<float32> bias) => bias;
+    }
 }

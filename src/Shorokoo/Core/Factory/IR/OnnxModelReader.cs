@@ -579,8 +579,9 @@ namespace Shorokoo.Core.Factory.IR
 
         /// <summary>
         /// Closes <paramref name="fastGraph"/> with an output node reading <paramref name="value"/>,
-        /// named and ranked as <paramref name="info"/>'s metadata says (the writer's
+        /// named, ranked and shaped as <paramref name="info"/>'s metadata says (the writer's
         /// <c>CreateOutputInfos</c>), and named <paramref name="fallbackName"/> where it says nothing.
+        /// A malformed recorded shape is skipped, as a malformed representative input shape is.
         /// </summary>
         private static void AddOutputNode(InternalComputationGraph fastGraph, FastTensorKey value, ValueInfoProto? info, string fallbackName)
         {
@@ -589,6 +590,22 @@ namespace Shorokoo.Core.Factory.IR
                 ? int.Parse(rank, System.Globalization.CultureInfo.InvariantCulture)
                 : null;
             fastGraph.AddOutput(value, MetadataOf(ShrkAttrOutputName) ?? fallbackName, declaredRank);
+            if (MetadataOf(ShrkAttrRecordedOutputShape) is { } recorded
+                && TryParseDims(recorded) is { } dims)
+                Shorokoo.Core.Graph.RecordedOutputShapes.Set(fastGraph.Nodes[^1], dims);
+        }
+
+        /// <summary>Comma-separated dims (empty for a scalar), or <c>null</c> where malformed.</summary>
+        private static long[]? TryParseDims(string text)
+        {
+            if (text.Length == 0) return [];
+            var parts = text.Split(',');
+            var dims = new long[parts.Length];
+            for (int i = 0; i < parts.Length; i++)
+                if (!long.TryParse(parts[i], System.Globalization.NumberStyles.AllowLeadingSign,
+                        System.Globalization.CultureInfo.InvariantCulture, out dims[i]))
+                    return null;
+            return dims;
         }
 
         /// <summary>

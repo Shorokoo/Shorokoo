@@ -360,6 +360,10 @@ public static class TrainingGraphBuilder
         // A target nothing reads is no input of the evaluation graph.
         if (!takesTarget)
             graph.Nodes.Remove(targetInputNode);
+
+        // And its loss output records its shape at the representative inputs, as the model's own
+        // outputs did.
+        Shorokoo.Core.Graph.RecordedOutputShapes.RecordAtRepresentativeInputs(graph);
         System.Diagnostics.Debug.Assert(graph.TryValidateLinearOrder(out var orderError),
             "evaluation graph.IsLinearOrderValid(): " + orderError);
         return graph;

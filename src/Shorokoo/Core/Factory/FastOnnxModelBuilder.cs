@@ -192,53 +192,23 @@ namespace Shorokoo.Core.Factory
         }
 
         /// <summary>
-        /// Gives each output of <paramref name="prepFast"/> whose rank <paramref name="lookup"/>
-        /// leaves unknown the rank its output node declares, where it declares one: the rank its
-        /// type fixes, which is what the value will have whatever the inputs.
+        /// Gives each tensor or optional output of <paramref name="prepFast"/> its rank: the one its
+        /// output node declares, where it declares one — the rank its type fixes — and else the rank
+        /// of the shape it recorded at the samples the graph was concretized at
+        /// (<see cref="RecordedOutputShapes"/>), as an input takes the rank of its representative
+        /// shape. An output whose rank varies with its inputs is so exported at its samples' rank.
+        /// Only the rank: the exported output keeps symbolic dims. An absent optional recorded no
+        /// element shape, and a sequence output is left as the lookup has it.
         /// </summary>
         private static void DeclareOutputRanks(
             InternalComputationGraph prepFast, Dictionary<FastTensorKey, FastTensorInfo> lookup)
         {
-            var outputs = prepFast.Outputs;
-            var declaredRanks = prepFast.OutputDeclaredRanks;
-            for (int i = 0; i < outputs.Count; i++)
-                if (declaredRanks[i] is int declared
-                    && lookup.TryGetValue(outputs[i], out var info) && info.Rank is null)
-                    info.Rank = declared;
-        }
-
-        /// <summary>
-        /// Fills in the rank of each tensor output of <paramref name="prepFast"/> that
-        /// <paramref name="lookup"/> leaves unknown, from shape inference of
-        /// <paramref name="source"/> (the graph <paramref name="prepFast"/> was prepared from, with
-        /// its outputs in the same positions) at its recorded representative inputs. A sequence
-        /// input is represented by the element shape its sample's elements shared, where one was
-        /// recorded, and by elements of unknown shape otherwise, so an output that does not depend
-        /// on its elements' shape still gets its rank. Does nothing when every output's rank is
-        /// known, or when a tensor or optional input records no representative shape.
-        /// </summary>
-        private static void InferMissingOutputRanks(
-            InternalComputationGraph source,
-            InternalComputationGraph prepFast,
-            Dictionary<FastTensorKey, FastTensorInfo> lookup)
-        {
-            var missing = Enumerable.Range(0, Math.Min(prepFast.Outputs.Count, source.Outputs.Count))
-                .Where(i => lookup.TryGetValue(prepFast.Outputs[i], out var info)
-                    && info.Structure == DataStructure.Tensor && info.Rank is null)
-                .ToList();
-            if (missing.Count == 0) return;
-
-            var producers = source.BuildProducerByOutputMap();
-            if (source.Inputs.Any(k => !producers.TryGetValue(k, out var node)
-                    || (node.OpCode != InternalOpCodes.MODEL_SEQUENCE_INPUT
-                        && (!RepresentativeInputShapes.CarriesShape(node) || RepresentativeInputShapes.Get(node) is null))))
-                return;
-
-            var inferred = new Shorokoo.Core.AutoDiffCheckpointing.ShapeInferenceInterpreter(Shorokoo.Runtime.ComputeContext.Default)
-                .Infer(source, TrainingRig.ReadRepresentativeInputs(source, representSequences: true));
-            foreach (var i in missing)
-                if (inferred.GetTensorInfo(source.Outputs[i])?.Shape is { } shape)
-                    lookup[prepFast.Outputs[i]].Rank = shape.Dims.Length;
+            var outputNodes = prepFast.OutputNodes;
+            foreach (var node in outputNodes)
+                if ((InternalComputationGraph.DeclaredRankOf(node) ?? RecordedOutputShapes.RankOf(node)) is int rank
+                    && lookup.TryGetValue(InternalComputationGraph.OutputKeyOf(node), out var info)
+                    && info.Structure is DataStructure.Tensor or DataStructure.Optional)
+                    info.Rank = rank;
         }
 
         private static ModelProto BuildOnnxModelCore(
@@ -276,11 +246,9 @@ namespace Shorokoo.Core.Factory
             // so we can also remap the tensor-info lookup we'll build below.
             var tensorInfoLookup = RunPrePassesAndBuildLookup(prepFast, prepForOnnx, applyExecutionLowerings);
 
-            // An output whose rank the op-level lookup cannot tell (a loop carry fed by a
-            // per-iteration parameter, say) takes it from shape inference at the representative
-            // inputs, so an exported file gives every output a shape too (Shorokoo/Shorokoo#387).
+            // Each output likewise takes its declared rank, else the rank it recorded at the samples,
+            // so an exported file gives every output a shape too (Shorokoo/Shorokoo#387).
             if (vanillaExport) DeclareOutputRanks(prepFast, tensorInfoLookup);
-            if (vanillaExport) InferMissingOutputRanks(fastGraph, prepFast, tensorInfoLookup);
 
             // Reorder so each IF body has then-block nodes positionally first
             // and else-block nodes positionally second. The Fast back-walk used
@@ -642,7 +610,11 @@ namespace Shorokoo.Core.Factory
             Debug.Assert(outputs.Count == graph.Outputs.Count,
                 "StampGraphOutputTypes: graph.Outputs must mirror prepFast.Outputs 1:1.");
             for (int i = 0; i < outputs.Count; i++)
-                graph.Outputs[i] = CreateTypedValueInfo(outputs[i], tensorInfoLookup);
+            {
+                var typed = CreateTypedValueInfo(outputs[i], tensorInfoLookup);
+                typed.MetadataProps.AddRange(graph.Outputs[i].MetadataProps);
+                graph.Outputs[i] = typed;
+            }
         }
 
         /// <summary>
@@ -1926,7 +1898,7 @@ namespace Shorokoo.Core.Factory
             var inputInfos = inputsAsNodes
                 ? Array.Empty<ValueInfoProto>()
                 : CreateInputInfos(fastGraph, emitRepresentativeMetadata, emitInputNameMetadata, inputDims);
-            var outputInfos = CreateOutputInfos(fastGraph, emitOutputMetadata);
+            var outputInfos = CreateOutputInfos(fastGraph, emitOutputMetadata, emitRepresentativeMetadata);
 
             return (GraphProto)OnnxIRFactory.CreateGraph(
                 graphName,
@@ -2093,9 +2065,13 @@ namespace Shorokoo.Core.Factory
         /// <paramref name="emitOutputMetadata"/>, the output's name and declared rank ride in the
         /// ValueInfo's metadata, as an input's name does in its own: the dialects that keep no output
         /// nodes (a function body's formal outputs, the internal execution dialect) have nowhere else
-        /// to carry them.
+        /// to carry them. With <paramref name="emitRecordedShapeMetadata"/> (every dialect whose
+        /// main-graph outputs are graph outputs), its recorded shape (<see cref="RecordedOutputShapes"/>)
+        /// rides there too, as an input's representative shape does, so the model imports back as the
+        /// concrete graph it was.
         /// </summary>
-        private static ValueInfoProto[] CreateOutputInfos(InternalComputationGraph fastGraph, bool emitOutputMetadata)
+        private static ValueInfoProto[] CreateOutputInfos(
+            InternalComputationGraph fastGraph, bool emitOutputMetadata, bool emitRecordedShapeMetadata)
         {
             var outputNodes = fastGraph.OutputNodes;
             var infos = new ValueInfoProto[outputNodes.Count];
@@ -2103,6 +2079,12 @@ namespace Shorokoo.Core.Factory
             {
                 var node = outputNodes[i];
                 infos[i] = FastOnnxProtoFactory.CreateGraphOutputInfo(InternalComputationGraph.OutputKeyOf(node));
+                if (emitRecordedShapeMetadata && RecordedOutputShapes.Get(node) is { } recorded)
+                    infos[i].MetadataProps.Add(new StringStringEntryProto
+                    {
+                        Key = OnnxOpAttributeNames.ShrkAttrRecordedOutputShape,
+                        Value = string.Join(",", recorded),
+                    });
                 if (!emitOutputMetadata) continue;
                 if (InternalComputationGraph.OutputNameOf(node) is { } name)
                     infos[i].MetadataProps.Add(new StringStringEntryProto

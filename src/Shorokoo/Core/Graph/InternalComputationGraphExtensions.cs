@@ -148,6 +148,10 @@ namespace Shorokoo.Graph
             FastGraphCycleDetector.AssertAcyclic(fastGraph, "After FastUnpackModelStruct");
 
             Stage("UnpackTensorStructs");
+            // A struct output becomes one output per field first, so the unpacking resolves each
+            // field to the value it holds rather than leaving the output reading the struct it
+            // removes.
+            FastExpandStructOutputs.Process(fastGraph);
             FastUnpackTensorStructs.Process(fastGraph);
             DebugPrintFast(fastGraph, debugRequests, GraphCreationPoint.AfterUnpackTensorStructs);
             AssertFastGraphDoesNotContainOps(fastGraph,
@@ -221,6 +225,13 @@ namespace Shorokoo.Graph
             // node, so the architecture — and every concrete model made from it — carries the
             // shape it was concretized at (see RepresentativeInputShapes).
             RepresentativeInputShapes.Record(fastGraph, inputHints);
+
+            // Likewise the shape each output has at those samples — evaluated at their real values,
+            // since an output's shape can hang on a value (a flag choosing a branch, the axes a
+            // Squeeze drops) — so the architecture records what it produces as well as what it
+            // takes (see RecordedOutputShapes).
+            Stage("RecordOutputShapes");
+            RecordedOutputShapes.RecordAtSamples(fastGraph, inputHints);
 
             // No terminal report here: both callers have work left after this returns (the public
             // wrapper freezes the result, the rig build goes on to compose the trainstep), and a

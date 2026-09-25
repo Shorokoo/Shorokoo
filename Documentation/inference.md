@@ -202,7 +202,14 @@ pipeline, applied in order:
    [onnx-and-weights.md](onnx-and-weights.md#graph-inputoutput-names-and-shapes)). A
    concrete graph with an input that carries none — hand-built, or saved before the
    shapes were recorded — is refused wherever it is frozen or loaded, with **`FW057`**
-   naming the input; lower it again from its module.
+   naming the input; lower it again from its module. Each **output** likewise records
+   the shape it has when the graph is evaluated at those samples — at their real
+   values, since a value can decide a shape (a flag choosing a branch, the axes a
+   `Squeeze` drops) — and keeps it through the same steps; a struct output is one output
+   per field, an absent optional output records that it was absent, and a sequence
+   output the shape its elements share. ONNX export reads an output's rank from it where
+   the signature states none, and a concrete graph with an output that records none is
+   refused with `FW057` naming the output.
 3. **`ToConcreteModel(...)`** — binds parameter values (loaded weights, or the
    initializer defaults when called with no argument) into the architecture.
 

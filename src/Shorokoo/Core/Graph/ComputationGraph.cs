@@ -92,6 +92,7 @@ namespace Shorokoo.Graph
                     $"ComputationGraph: output node #{stray} precedes a body node ({graph.Nodes[stray + 1].OpCode}); " +
                     "a graph's output nodes must form the suffix of its node list.");
             RepresentativeInputShapes.Verify(graph, kind);
+            RecordedOutputShapes.Verify(graph, kind);
             Kind = kind;
             _nodes = graph.Nodes.Select(Freeze).ToImmutableArray();
             _inputNames = [.. graph.InputNames];

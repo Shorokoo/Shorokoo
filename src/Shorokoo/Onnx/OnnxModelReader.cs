@@ -109,9 +109,10 @@ namespace Shorokoo.Onnx
         }
 
         /// <summary>
-        /// Freezes an imported graph under its tagged kind, or the op-scanned one. Every input of a
-        /// concrete one records a representative shape by now, but for one of unknown rank the
-        /// caller gave none for, which is refused (<see cref="ErrorCodes.FW058"/>), naming it.
+        /// Freezes an imported graph under its tagged kind, or the op-scanned one. Every input and
+        /// output of a concrete one records a shape by now, but for an input of unknown rank the
+        /// caller gave none for, or an output of unknown rank that evaluating the model does not
+        /// settle, which is refused (<see cref="ErrorCodes.FW058"/>), naming it.
         /// </summary>
         private static ComputationGraph Wrap((InternalComputationGraph Graph, Shorokoo.Graph.GraphKind? TaggedKind) import)
             => Freeze(import.Graph, import.TaggedKind, "the ONNX model");
@@ -122,7 +123,10 @@ namespace Shorokoo.Onnx
         {
             var kind = taggedKind ?? Shorokoo.Core.Utils.SrkFileFormat.DetectStageByOps(graph);
             if (kind != Shorokoo.Graph.GraphKind.Module)
+            {
                 Shorokoo.Core.Graph.RepresentativeInputShapes.ThrowIfImportLeftAnInputUnshaped(graph, origin);
+                Shorokoo.Core.Graph.RecordedOutputShapes.ThrowIfImportLeftAnOutputUnshaped(graph, origin);
+            }
             return new(graph, kind);
         }
 
@@ -164,6 +168,9 @@ namespace Shorokoo.Onnx
             // A Shorokoo export carries each input's representative shape in its metadata, which
             // the reader has re-attached; any other input takes it from the caller or the file.
             Shorokoo.Core.Graph.RepresentativeInputShapes.RecordFromOnnx(graph, model.Graph, inputShapes);
+            // Each output likewise: the shape a Shorokoo export wrote, else the one the file
+            // declares, else the one it has at the input shapes just recorded.
+            Shorokoo.Core.Graph.RecordedOutputShapes.RecordFromOnnx(graph, model.Graph);
 
             // An input left unshaped is the caller's to supply (FW058), which a tag declaring a
             // concrete kind does not change: say so before the tag check reports the same input as
@@ -171,7 +178,10 @@ namespace Shorokoo.Onnx
             // inputs, and stays the tag check's to report.
             if (taggedKind is { } tagged && tagged != Shorokoo.Graph.GraphKind.Module
                 && !graph.Nodes.Any(Shorokoo.Core.Graph.FastNodeClassification.IsModuleStageMachinery))
+            {
                 Shorokoo.Core.Graph.RepresentativeInputShapes.ThrowIfImportLeftAnInputUnshaped(graph, "the ONNX model");
+                Shorokoo.Core.Graph.RecordedOutputShapes.ThrowIfImportLeftAnOutputUnshaped(graph, "the ONNX model");
+            }
 
             if (taggedKind is { } kind &&
                 Shorokoo.Core.Utils.SrkFileFormat.DescribeKindViolation(graph, kind) is { } violation)

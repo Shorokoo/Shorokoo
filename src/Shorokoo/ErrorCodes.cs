@@ -701,11 +701,14 @@ namespace Shorokoo
         public const string FW056 = "FW056";
 
         /// <summary>An input of a concrete-architecture or concrete-model graph carries no
-        /// representative shape — the sample shape the graph was concretized at</summary>
+        /// representative shape — the sample shape the graph was concretized at — or an output
+        /// records no shape — the shape it has at those samples</summary>
         public const string FW057 = "FW057";
 
         /// <summary>An imported ONNX model's graph input declares no shape, so no representative
-        /// shape can be derived for it; supply one with the ImportOnnx overload that takes input shapes</summary>
+        /// shape can be derived for it (supply one with the ImportOnnx overload that takes input
+        /// shapes), or a graph output declares none and evaluating the model at its inputs'
+        /// shapes gives none either</summary>
         public const string FW058 = "FW058";
 
         #endregion

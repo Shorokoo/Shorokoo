@@ -578,14 +578,20 @@ namespace Shorokoo.Core
                 return [InternalOp.TensorStructCreate(dtype, fieldValues)];
             }
 
+            // A collection's or a tuple's elements are formatted one by one, so a struct among them
+            // becomes its struct value as a struct returned alone does.
             if (retval is System.Collections.IEnumerable enumerable)
-                return enumerable.Cast<IModuleParam>().Select(x => x.ToVariable()).ToArray();
+                return [.. enumerable.Cast<object>().Select(FormatElement)];
 
             if (retval is ITuple tuple)
-                return tuple.Cast<IModuleParam>().Select(x => x.ToVariable()).ToArray();
+                return [.. Enumerable.Range(0, tuple.Length).Select(i => FormatElement(tuple[i]!))];
 
             throw new InvalidTensorOperationException(ErrorCodes.FW002, "Return Value Processing", $"return type {retval.GetType().Name}", "Unsupported return value type - expected Variable[], IModuleParam[], IModuleParam, or ITuple");
         }
+
+        /// <summary>One element of a returned collection or tuple, as the single value it is.</summary>
+        private static Variable FormatElement(object element)
+            => element is IModuleParam param ? param.ToVariable() : Format(element).Single();
 
         internal static T Reformat<T>(Variable[] vars)
         {

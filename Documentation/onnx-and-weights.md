@@ -167,10 +167,13 @@ Unnamed slots fall back to `input_{i}` / `output_{i}`. Every input and output
 `ValueInfoProto` carries its dtype and a **shape** — the reference
 `onnx.checker` requires at least a rank on each of the main graph's inputs and
 outputs, and an exported model passes it. The rank is the declared one where the
-signature states it (`Scalar<T>`, `Vec<T>`, …); a rank-agnostic `Tensor<T>` input
-takes the rank of the representative shape it was concretized at, and an output
-whose rank the ops do not state takes the rank shape inference gives it at those
-representative inputs. The dims themselves stay **symbolic** — named
+signature states it (`Scalar<T>`, `Vec<T>`, …); otherwise it is the rank observed at
+the samples the model was concretized at — a rank-agnostic `Tensor<T>` input takes the
+rank of its representative shape, and a rank-agnostic output the rank of the shape it
+recorded when the graph was evaluated at those samples' real values. An output whose
+rank varies with its inputs — an `IfElse` choosing between a matrix and its flattened
+copy, a `Squeeze` whose axes are an input — is therefore exported at the rank it had at
+the samples, exactly as an input is. The dims themselves stay **symbolic** — named
 `{name}_dim{i}` — so the file accepts any size of that rank; a rank-0 value is
 stamped as a true scalar. Tools like Netron or `InferenceSession.InputMetadata`
 therefore see the model's logical signature directly, and `OnnxModelImporter`
@@ -214,7 +217,7 @@ some tools use for "unknown" — as **`1`**, so an input declared `[N, 3, 224, 2
 records `[1, 3, 224, 224]`. An input declared with no shape at all has no rank to
 go on, and the import refuses it with **`FW058`**, naming it. Give such an input its
 shape — or override any derived one — with the overload that takes input shapes,
-keyed by ONNX graph input name:
+keyed by ONNX graph input name (see below for outputs):
 
 ```csharp
 var shapes = new Dictionary<string, long[]> { ["input"] = [1, 3, 224, 224] };
@@ -225,6 +228,13 @@ ComputationGraph g = OnnxModelImporter.FromOnnxModel("model.onnx", shapes);
 A shape given for an input the file shapes must be of the rank the file declares and
 agree with each dimension it fixes; a shape that contradicts it, and a key that names
 no input, are refused with an `ArgumentException`.
+
+Every output of an imported concrete model records a shape too, as every output of a
+concrete graph does. A model Shorokoo exported carries the one it was concretized at;
+for a foreign model it is read from the output's declared shape by the same rules as an
+input's (a symbolic, unset or negative dimension taken as `1`). An output declared with
+no shape is evaluated at the inputs' recorded shapes, and one that evaluation leaves
+without a shape is refused with **`FW058`**, naming it.
 
 A node calling one of the model's own functions with a different number of inputs
 than that function's body declares is refused on import for the same reason: the

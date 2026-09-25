@@ -1332,6 +1332,9 @@ public class ModulesCoverageTests
         for (int i = 0; i < names.Length; i++)
             InternalComputationGraph.SetOutputName(g.OutputNodes[i], names[i]);
         RepresentativeInputShapes.Set(g.InputNodes[0], [2L]);
+        long[][] shapes = [[2L], [2L], [2L], [1L]];
+        for (int i = 0; i < shapes.Length; i++)
+            RecordedOutputShapes.Set(g.OutputNodes[i], shapes[i]);
         return ComputationGraph.FromInternal(g, GraphKind.ConcreteModel);
     }
 
@@ -1388,6 +1391,7 @@ public class ModulesCoverageTests
         Assert.Equal(sig.ModuleSignatureString, reloaded.ModuleSignatureString);
 
         var scalar = new InternalComputationGraph([], [OnnxOp.Identity(Scalar(1f), rank: null)], System.Collections.Immutable.ImmutableArray.Create<int?>(0));
+        RecordedOutputShapes.Set(scalar.OutputNodes[0], []);
         var exported = FastOnnxModelBuilder.BuildOnnxModel(ComputationGraph.FromInternal(scalar, GraphKind.ConcreteModel));
         Assert.Empty(exported.Graph.Outputs[0].Type.TensorType.Shape.Dims);
     }
@@ -1543,6 +1547,84 @@ public class ModulesCoverageTests
             var ex = Assert.Throws<ModelException>(() => ComputationGraph.FromInternal(stripped, kind));
             Assert.Equal(ErrorCodes.FW057, ex.ErrorCode);
             Assert.Contains("'input'", ex.Message);
+            Assert.Throws<InvalidOperationException>(() => ComputationGraph.FromInternal(stripped, GraphKind.Module).WithKind(kind));
+            Assert.Equal(GraphKind.Module, ComputationGraph.FromInternal(stripped).Kind);
+        }
+    }
+
+    private static long[]?[] RecordedOutputs(ComputationGraph graph)
+        => [.. graph.ToInternal().OutputNodes.Select(RecordedOutputShapes.Get)];
+
+    private static NamedModelParam Flag(bool value) => In("flag", TensorData(DType.Bool, [], value));
+
+    private static NamedModelParam Axes(params long[] axes) => In("axes", TensorData(DType.Int64, [axes.Length], [.. axes]));
+
+    private static NamedModelParam OptionalIn(string name, TensorData t)
+        => new OptionalTensorDataModelParam(name, ModelParamType.InputParam, OptionalTensorData.Some(t));
+
+    [Fact]
+    public void TestEveryOutputRecordsTheShapeItHasAtTheSampleValues()
+    {
+        var x23 = TensorData(DType.Float32, [2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f);
+        var x21 = TensorData(DType.Float32, [2L, 1L], 1f, 2f);
+        var a = TensorData(DType.Float32, [], 1f);
+        Assert.Equal([[2L, 3L]], RecordedOutputs(Concretize(RankByFlagLayer.ComputationGraph, In("x", x23), Flag(true))));
+        Assert.Equal([[6L]], RecordedOutputs(Concretize(RankByFlagLayer.ComputationGraph, In("x", x23), Flag(false))));
+        Assert.Equal([[2L]], RecordedOutputs(Concretize(SqueezeByAxesLayer.ComputationGraph, In("x", x21), Axes(1L))));
+        Assert.Equal([[2L, 1L]], RecordedOutputs(Concretize(SqueezeByAxesLayer.ComputationGraph,
+            In("x", TensorData(DType.Float32, [1L, 2L, 1L], 1f, 2f)), Axes(0L))));
+        Assert.Equal([[], []], RecordedOutputs(Concretize(StructOutputLayer.ComputationGraph, In("a", a))));
+        Assert.Equal([[2L, 3L], RecordedOutputShapes.NoSharedElementShape],
+            RecordedOutputs(Concretize(SequenceOutputsLayer.ComputationGraph, In("a", a), In("x", x23))));
+        Assert.Equal([[2L, 3L]], RecordedOutputs(Concretize(OptionalPassThroughLayer.ComputationGraph, OptionalIn("bias", x23))));
+        Assert.Equal([RepresentativeInputShapes.AbsentOptionalShape],
+            RecordedOutputs(Concretize(OptionalPassThroughLayer.ComputationGraph, AbsentIn("bias"))));
+    }
+
+    [Fact]
+    public void TestEveryOutputKeepsItsRecordedShapeThroughConcretizationSaveExportAndSpecialize()
+    {
+        var x23 = TensorData(DType.Float32, [2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f);
+        var arch = Concretize(RankByFlagLayer.ComputationGraph, In("x", x23), Flag(true));
+        var model = arch.ToConcreteModel();
+        var flag = new ModelParamList([("flag", TensorData(DType.Bool, [], false))]);
+        long[]?[] kept = [[2L, 3L]];
+
+        Assert.Equal(kept, RecordedOutputs(model));
+        Assert.Equal(kept, RecordedOutputs(SrkRoundTrip(arch)));
+        Assert.Equal(kept, RecordedOutputs(SrkRoundTrip(model)));
+        Assert.Equal(kept, RecordedOutputs(OnnxRoundTrip(model)));
+        Assert.Equal(kept, RecordedOutputs(arch.Specialize(flag)));
+        Assert.Equal(kept, RecordedOutputs(model.Specialize(flag)));
+    }
+
+    private static float[][] RunStructOutputs(ComputationGraph graph, params NamedModelParam[] samples)
+        => [.. ComputeContext.Default.Execute(Concretize(graph, samples).ToConcreteModel(), [.. samples.Select(s => s.ToTensorData().Shared())])
+            .Select(o => o.ToTensorData().As<float32>().AccessMemory<float>().ToArray())];
+
+    [Fact]
+    public void TestAStructOutputRunsAsOneOutputPerFieldAloneOrBesideATensorOutput()
+    {
+        var a = In("a", TensorData(DType.Float32, [], 3f));
+        float[][] fields = [[3f], [3f]];
+        float[][] fieldsAndTensor = [[3f], [3f], [1f, 2f]];
+        Assert.Equal(fields, RunStructOutputs(StructOutputLayer.ComputationGraph, a));
+        Assert.Equal(fieldsAndTensor, RunStructOutputs(StructInATupleOutputLayer.ComputationGraph, a, In("x", TensorData([2L], 1f, 2f))));
+    }
+
+    [Fact]
+    public void TestAConcreteGraphWhoseOutputRecordsNoShapeIsRefusedNamingIt()
+    {
+        var arch = Concretize(RankByFlagLayer.ComputationGraph, In("x", TensorData([2L], 1f, 2f)), Flag(true));
+        foreach (var kind in (GraphKind[])[GraphKind.ConcreteArchitecture, GraphKind.ConcreteModel])
+        {
+            var stripped = (kind == GraphKind.ConcreteModel ? arch.ToConcreteModel() : arch).ToInternal();
+            InternalComputationGraph.SetOutputName(stripped.OutputNodes[0], "y");
+            var node = stripped.OutputNodes[0];
+            node.Attributes = node.Attributes.SetAttributes((OnnxOpAttributeNames.ShrkAttrRecordedOutputShape, null));
+            var ex = Assert.Throws<ModelException>(() => ComputationGraph.FromInternal(stripped, kind));
+            Assert.Equal(ErrorCodes.FW057, ex.ErrorCode);
+            Assert.Contains("'y'", ex.Message);
             Assert.Throws<InvalidOperationException>(() => ComputationGraph.FromInternal(stripped, GraphKind.Module).WithKind(kind));
             Assert.Equal(GraphKind.Module, ComputationGraph.FromInternal(stripped).Kind);
         }
@@ -2282,7 +2364,7 @@ public class ModulesCoverageTests
         Assert.Equal(GraphKind.ConcreteModel, frozen.Kind);
         Assert.Equal(GraphKind.ConcreteModel, ComputationGraph.FromInternal(model.ToInternal()).Kind);
 
-        Assert.Single(ComputeContext.Default.Execute(model, sample));
+        Assert.Single(ComputeContext.Default.Execute(model, sample.Shared()));
 
         Assert.Same(moduleGraph, moduleGraph.WithKind(GraphKind.Module));
         Assert.Equal(GraphKind.Module, arch.WithKind(GraphKind.Module).Kind);

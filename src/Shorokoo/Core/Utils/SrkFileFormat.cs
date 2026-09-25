@@ -150,9 +150,10 @@ namespace Shorokoo.Core.Utils
                     return GraphKind.Module;
             }
 
-            // Every concrete graph records a representative shape on each of its inputs; a graph
-            // with an input that has none was never concretized.
-            if (Shorokoo.Core.Graph.RepresentativeInputShapes.FirstInputWithoutShape(graph) is not null)
+            // Every concrete graph records a representative shape on each of its inputs, and the
+            // shape it produces on each of its outputs; a graph missing one was never concretized.
+            if (Shorokoo.Core.Graph.RepresentativeInputShapes.FirstInputWithoutShape(graph) is not null
+                || Shorokoo.Core.Graph.RecordedOutputShapes.FirstOutputWithoutShape(graph) is not null)
                 return GraphKind.Module;
 
             return DetectStageByOps(graph);
@@ -229,6 +230,11 @@ namespace Shorokoo.Core.Utils
                 && Shorokoo.Core.Graph.RepresentativeInputShapes.FirstInputWithoutShape(graph) is { } unshaped)
                 return "every input of a concrete graph records the shape it was concretized at, " +
                        $"but this graph's input '{unshaped}' carries none.";
+            if (kind is GraphKind.ConcreteArchitecture or GraphKind.ConcreteModel
+                && moduleOps == 0
+                && Shorokoo.Core.Graph.RecordedOutputShapes.FirstOutputWithoutShape(graph) is { } unrecorded)
+                return "every output of a concrete graph records the shape it has at the samples the graph " +
+                       $"was concretized at, but this graph's output '{unrecorded}' records none.";
 
             switch (kind)
             {

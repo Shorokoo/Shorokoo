@@ -292,8 +292,9 @@ public static class OnnxOpAttributeNames
     /// from <see cref="ShrkAttrRecordedOutputShape"/>, which a sample, not a type, decides.</summary>
     public const string ShrkAttrDeclaredRank = "shrk_declared_rank";
 
-    /// <summary>On a graph-output node: the dims the output had at the samples the graph was
-    /// concretized at. Reserved: nothing records it yet.</summary>
+    /// <summary>On a graph-output node of a concrete graph: the dims the output has at the samples
+    /// the graph was concretized at (see <c>RecordedOutputShapes</c>). Every output of a concrete
+    /// graph records one.</summary>
     public const string ShrkAttrRecordedOutputShape = "shrk_recorded_output_shape";
     public const string ShrkAttrHyperparamIndex = "shrk_hyperparam_index";
     public const string ShrkAttrGenericTypeConstraints = "shrk_generic_type_constraints";

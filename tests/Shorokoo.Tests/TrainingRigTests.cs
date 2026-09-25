@@ -741,6 +741,35 @@ public class TrainingRigRepresentativeInputCoverageTests
         Assert.Contains("2 sample(s)", ex.Message);
     }
 
+    private static long[]?[] OutputShapesOf(ComputationGraph graph)
+        => [.. graph.ToInternal().OutputNodes.Select(Shorokoo.Core.Graph.RecordedOutputShapes.Get)];
+
+    [Fact]
+    public void TestEveryGraphARigComposesRecordsItsOutputShapesCoverage()
+    {
+        var step = InputScalar<int64>("step");
+        var scheduler = new ComputationGraph(
+            new InternalComputationGraph([step], [Scalar(0.3f) - step.Cast<float32>() * Scalar(0.05f)]),
+            GraphKind.Module);
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
+            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([4L], 1f, 2f, 3f, 4f))],
+            new SGDOptimizerHyperparameters { LearningRate = Hyperparameter.Scheduled(scheduler) });
+        var model = rig.ExtractInferenceModel(rig.CreateInitialCheckpoint());
+        var composedScheduler = rig.BuildComposedSchedulerModel().Graph!;
+        long[]?[] prediction = [[4L]];
+        long[]?[] scalar = [[]];
+
+        Assert.Equal(prediction, OutputShapesOf(rig.ConcreteArchConstituent));
+        Assert.Equal(prediction, OutputShapesOf(model));
+        Assert.All(OutputShapesOf(rig.TrainingStepPureGraph), Assert.NotNull);
+        Assert.Equal(scalar, OutputShapesOf(new ComputationGraph(
+            Shorokoo.Core.Training.TrainingGraphBuilder.ComposeEvaluationGraph(model.ToInternal(), L2Loss.ComputationGraph.ToInternal()),
+            GraphKind.ConcreteModel)));
+        Assert.Equal(scalar, OutputShapesOf(composedScheduler));
+        Assert.Equal(scalar, OutputShapesOf(TrainingRig.SplitSchedulerOutput(composedScheduler, composedScheduler.OutputNames[0]!)));
+    }
+
     private static Shorokoo.Core.Graph.FastNode TensorInputNode(ComputationGraph graph)
         => graph.ToInternal().Nodes.First(
             n => n.OpCode == Shorokoo.Core.Nodes.NodeDefinitions.InternalOpCodes.MODEL_TENSOR_INPUT);
@@ -5105,6 +5134,7 @@ public class BuildProgressCoverageTests
         "ExtractIdentifierTemplates", "ConvertToIdRefModelParams", "UnpackModelStruct",
         "UnpackTensorStructs", "ConvertModelParamIdRefToModelParam", "Simplify",
         "LowerAttributeTensorOps", "RejectOversizedConvTransposeOutputShape", "ExpandAutoGrad", "SimplifyAfterAutoGrad",
+        "RecordOutputShapes",
     ];
 
     [Fact]

@@ -644,7 +644,10 @@ introduced in recent opsets: the float8 family (`Float8E4M3FN`,
 `Float8E4M3FNUZ`, `Float8E5M2`, `Float8E5M2FNUZ`, plus `Float8E8M0` added at
 opset 24), `Float4E2M1` (opset 23), and `Int2`/`UInt2` (opset 25) are not
 supported as tensor element types. `Complex64`/`Complex128` are likewise not
-supported.
+supported. This is Shorokoo's own tensor storage (`TensorData` and the graph DSL): the
+[PyTorch](pytorch-backend.md#values) and [JAX](jax-backend.md#values) backends hold complex and
+float8 tensors at the backend level (`IShorokooTensorValue`), but a Shorokoo model cannot declare
+them.
 
 ### Gradient coverage
 

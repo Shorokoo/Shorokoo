@@ -132,6 +132,21 @@ public class CSharpModelBuilderCoverageTests
     }
 
     [Fact]
+    public void TestNumericLiteralsCodegenInvariantlyWhateverTheCurrentCulture()
+    {
+        var culture = System.Globalization.CultureInfo.CurrentCulture;
+        try
+        {
+            System.Globalization.CultureInfo.CurrentCulture = new System.Globalization.CultureInfo("sv-SE");
+            AssertCodegens(BuildConstantBranchesGraph(), "1.5d");
+            AssertCodegens(new InternalComputationGraph([], [Scalar(-1.5f).ToVariable(), Vector(-7L, 8L).ToVariable(),
+                OnnxOp.Flatten(OnnxOp.LeakyRelu(Tensor([1L, 2L], 1f, 2f).ToVariable(), alpha: -0.25f), axis: -1)]),
+                "-1.5f", "-7L", "-0.25f", "-1L");
+        }
+        finally { System.Globalization.CultureInfo.CurrentCulture = culture; }
+    }
+
+    [Fact]
     public void TestCodegenedSourceRebuildsTheGraphItCameFrom()
     {
         TensorData[] two = [TensorData([], 1f), TensorData([], 2f)];

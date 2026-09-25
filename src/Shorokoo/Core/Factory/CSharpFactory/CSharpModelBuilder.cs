@@ -674,17 +674,17 @@ public static class " + modelName + @"
             }
             else if (tensorDataAttribute.DType == DType.Float32)
             {
-                var paramList = tensorDataAttribute.Elements<float>().ToArray().Select(x => $"{x}f");
+                var paramList = tensorDataAttribute.Elements<float>().ToArray().Select(x => $"{Literal(x)}f");
                 dataParams = string.Join(", ", paramList);
             }
             else if (tensorDataAttribute.DType == DType.Float64)
             {
-                var paramList = tensorDataAttribute.Elements<double>().ToArray().Select(x => $"{x}d");
+                var paramList = tensorDataAttribute.Elements<double>().ToArray().Select(x => $"{Literal(x)}d");
                 dataParams = string.Join(", ", paramList);
             }
             else if (tensorDataAttribute.DType == DType.Int16)
             {
-                var paramList = tensorDataAttribute.Elements<short>().ToArray().Select(x => $"{x}").ToList();
+                var paramList = tensorDataAttribute.Elements<short>().ToArray().Select(x => Literal(x)).ToList();
                 var useCollectionExpression = (paramList.Count >= 4);
                 if (!useCollectionExpression)
                     paramList = paramList.Select(x => $"(short){x}").ToList();
@@ -695,17 +695,17 @@ public static class " + modelName + @"
             }
             else if (tensorDataAttribute.DType == DType.Int32)
             {
-                var paramList = tensorDataAttribute.Elements<int>().ToArray().Select(x => $"{x}");
+                var paramList = tensorDataAttribute.Elements<int>().ToArray().Select(x => Literal(x));
                 dataParams = string.Join(", ", paramList);
             }
             else if (tensorDataAttribute.DType == DType.Int64)
             {
-                var paramList = tensorDataAttribute.Elements<long>().ToArray().Select(x => $"{x}L");
+                var paramList = tensorDataAttribute.Elements<long>().ToArray().Select(x => $"{Literal(x)}L");
                 dataParams = string.Join(", ", paramList);
             }
             else if (tensorDataAttribute.DType == DType.UInt16)
             {
-                var paramList = tensorDataAttribute.Elements<ushort>().ToArray().Select(x => $"{x}").ToList();
+                var paramList = tensorDataAttribute.Elements<ushort>().ToArray().Select(x => Literal(x)).ToList();
                 var useCollectionExpression = (paramList.Count >= 4);
                 if (!useCollectionExpression)
                     paramList = paramList.Select(x => $"(ushort){x}").ToList();
@@ -716,7 +716,7 @@ public static class " + modelName + @"
             }
             else if (tensorDataAttribute.DType == DType.UInt32)
             {
-                var paramList = tensorDataAttribute.Elements<uint>().ToArray().Select(x => $"{x}").ToList();
+                var paramList = tensorDataAttribute.Elements<uint>().ToArray().Select(x => Literal(x)).ToList();
                 var useCollectionExpression = (paramList.Count >= 4);
                 if (!useCollectionExpression)
                     paramList = paramList.Select(x => $"(uint){x}").ToList();
@@ -727,7 +727,7 @@ public static class " + modelName + @"
             }
             else if (tensorDataAttribute.DType == DType.UInt64)
             {
-                var paramList = tensorDataAttribute.Elements<ulong>().ToArray().Select(x => $"{x}UL");
+                var paramList = tensorDataAttribute.Elements<ulong>().ToArray().Select(x => $"{Literal(x)}UL");
                 dataParams = string.Join(", ", paramList);
             }
             else if (tensorDataAttribute.DType == DType.Bool)
@@ -747,7 +747,7 @@ public static class " + modelName + @"
             else if (shape.Dims.Length == 1)
                 csharpExpression = dataParams == string.Empty ? $"EmptyVector<{dtype.ToIVarType().Name}>()" : $"Vector({dataParams})";
             else
-                csharpExpression = $"Tensor([{string.Join(", ", shape.Dims)}], {dataParams})";
+                csharpExpression = $"Tensor([{string.Join(", ", shape.Dims.Select(d => Literal(d)))}], {dataParams})";
 
             var outputTensor = node.Outputs[0]!;
             var outputTensorName = GetSanitizedVariableName(outputTensor);
@@ -1287,6 +1287,11 @@ public static class " + modelName + @"
             return $"DType.{name}";
         }
 
+        /// <summary>A number as a C# literal spells it, whatever the current culture's minus sign
+        /// and decimal separator.</summary>
+        private static string Literal<T>(T value) where T : IFormattable
+            => value.ToString(null, System.Globalization.CultureInfo.InvariantCulture);
+
         private static string EscapeString(string input)
         {
             return input.Replace("\\", "\\\\")
@@ -1443,9 +1448,9 @@ public static class " + modelName + @"
                     if (attributes.IsDefaultValue(attrName))
                         attrValue = "null";
                     else if (attrType is AttributeType.Long)
-                        attrValue = attributes.GetLongVal(attrName).ToString().AssertNotNull() + "L";
+                        attrValue = Literal(attributes.GetLongVal(attrName).AssertNotNull()) + "L";
                     else if (attrType is AttributeType.Float)
-                        attrValue = attributes.GetFloatVal(attrName).ToString().AssertNotNull() + "f";
+                        attrValue = Literal(attributes.GetFloatVal(attrName).AssertNotNull()) + "f";
                     else if (attrType is AttributeType.Bool)
                         attrValue = attributes.GetBoolVal(attrName).AssertNotNull() ? "true" : "false";
                     else if (attrType is AttributeType.String)
@@ -1479,9 +1484,9 @@ public static class " + modelName + @"
                         attrValue = listOf(enumsVal.Select(enumDef.ToCSharpFullName), enumDef.EnumType.Name);
                     }
                     else if (attrType is AttributeType.Longs)
-                        attrValue = listOf(attributes.GetLongsVal(attrName).AssertNotNull().Select(x => $"{x}L"), "long");
+                        attrValue = listOf(attributes.GetLongsVal(attrName).AssertNotNull().Select(x => $"{Literal(x)}L"), "long");
                     else if (attrType is AttributeType.Floats)
-                        attrValue = listOf(attributes.GetFloatsVal(attrName).AssertNotNull().Select(x => $"{x}f"), "float");
+                        attrValue = listOf(attributes.GetFloatsVal(attrName).AssertNotNull().Select(x => $"{Literal(x)}f"), "float");
                     else if (attrType is AttributeType.Bools)
                         attrValue = listOf(attributes.GetBoolsVal(attrName).AssertNotNull().Select(x => x ? "true" : "false"), "bool");
                     else if (attrType is AttributeType.Strings)
@@ -1584,7 +1589,7 @@ public static class " + modelName + @"
                 var fullPlaceholder = result[startIdx..(endIdx + 1)];
                 var keyword = result[(startIdx + placeholder.Length)..endIdx];
 
-                var attrValue = numOutputs.ToString().AssertNotNull() + "L";
+                var attrValue = Literal(numOutputs) + "L";
                 if (keyword.StartsWith("param"))
                     attrValue += ", ";
 

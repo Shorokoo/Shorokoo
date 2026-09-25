@@ -23,7 +23,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\..\Shorokoo\Shorokoo.csproj" />
-    <ProjectReference Include="..\Shorokoo.PythonHost\Shorokoo.PythonHost.csproj" />
+    <ProjectReference Include="..\..\Python\Shorokoo.PythonHost\Shorokoo.PythonHost.csproj" />
+    <ProjectReference Include="..\..\Python\Shorokoo.PythonTranslation\Shorokoo.PythonTranslation.csproj" />
   </ItemGroup>
 
   <ItemGroup>

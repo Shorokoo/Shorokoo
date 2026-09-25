@@ -178,17 +178,19 @@
   </Target>
 
   <!--
-    The PyTorch backends, referenced the ordinary way: their assemblies deploy beside Shorokoo.dll
-    and the ONNX Runtime backend above, and discovery still finds exactly one candidate, because a
-    torch backend's manifest declares it explicit-only and DefaultBackend never counts one. The
-    tests name them (new ComputeContext(new TorchCpuBackend())). Neither ships a native library:
-    torch comes from the Python environment, which the tests resolve as a user's program does:
-    SHOROKOO_PYTHON_ENV, or else the CPU environment provisioned with uv into the user cache on the
-    first run that needs it.
+    The PyTorch and JAX backends, referenced the ordinary way: their assemblies deploy beside
+    Shorokoo.dll and the ONNX Runtime backend above, and discovery still finds exactly one
+    candidate, because each of their manifests declares it explicit-only and DefaultBackend never
+    counts one. The tests name them (new ComputeContext(new TorchCpuBackend())). None ships a native
+    library: torch and JAX come from one Python environment, which the tests resolve as a user's
+    program does: SHOROKOO_PYTHON_ENV, or else the CPU environment provisioned with uv into the user
+    cache on the first run that needs it.
   -->
   <ItemGroup>
     <ProjectReference Include="..\..\src\Backend\PyTorch\Shorokoo.PyTorch.Cpu\Shorokoo.PyTorch.Cpu.csproj" />
     <ProjectReference Include="..\..\src\Backend\PyTorch\Shorokoo.PyTorch.Cuda\Shorokoo.PyTorch.Cuda.csproj" />
+    <ProjectReference Include="..\..\src\Backend\Jax\Shorokoo.Jax.Cpu\Shorokoo.Jax.Cpu.csproj" />
+    <ProjectReference Include="..\..\src\Backend\Jax\Shorokoo.Jax.Cuda\Shorokoo.Jax.Cuda.csproj" />
   </ItemGroup>
 
   <Import Project="..\..\src\Backend\OnnxRuntime\Shorokoo.OnnxRuntime\build\Shorokoo.OnnxRuntime.targets" />

@@ -5,7 +5,7 @@ using Python.Runtime;
 using Shorokoo.Core.Backends;
 using Shorokoo.Core.Factory.IR;
 using Shorokoo.PythonHost;
-using Shorokoo.PyTorch.Translation;
+using Shorokoo.PythonTranslation;
 
 namespace Shorokoo.PyTorch;
 
@@ -97,7 +97,7 @@ internal sealed class TorchSession : IShorokooSession
             proto = ProtoBuf.Serializer.Deserialize<ModelProto>(stream);
         // Translated before torch is started, so that a model this backend cannot run is refused
         // without first provisioning an environment to not run it in.
-        var model = OnnxToPythonTranslator.Translate(proto, outputAliases);
+        var model = OnnxToPythonTranslator.Translate(proto, outputAliases, TorchDialect.Instance);
         // The translation's own hash names its compiled code: what it writes depends on the pairs the
         // session was asked for as well as on the model.
         var hash = Convert.ToHexStringLower(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(model.Source)))[..32];
@@ -128,7 +128,7 @@ internal sealed class TorchSession : IShorokooSession
         }
     }
 
-    private static unsafe PyObject ConstantValue(TorchRuntime runtime, TorchConstant constant, string device)
+    private static unsafe PyObject ConstantValue(TorchRuntime runtime, PythonConstant constant, string device)
     {
         using var shape = TorchBackend.Shape(constant.Shape);
         if (constant.Strings is { } strings)
@@ -138,7 +138,7 @@ internal sealed class TorchSession : IShorokooSession
             return runtime.Strings.Invoke(values, shape);
         }
         var bytes = constant.Bytes!;
-        var byteCount = TorchElementTypes.ByteCount(constant.ElementType, constant.Shape);
+        var byteCount = PythonElementTypes.ByteCount(constant.ElementType, constant.Shape);
         fixed (byte* source = bytes)
             return PyCall.Invoke(runtime.FromHost, (long)source, (long)byteCount, (int)constant.ElementType, shape, device);
     }

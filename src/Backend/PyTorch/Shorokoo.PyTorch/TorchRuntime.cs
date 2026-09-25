@@ -1,4 +1,3 @@
-using System.Text;
 using Python.Runtime;
 using Shorokoo.PythonHost;
 
@@ -106,15 +105,7 @@ internal sealed class TorchRuntime
         {
             try
             {
-                using var sources = new PyDict();
-                foreach (var (module, source) in SupportPackage())
-                {
-                    using var text = new PyString(source);
-                    sources[module] = text;
-                }
-                using var scope = Py.CreateScope();
-                scope.Set("_sources", sources);
-                scope.Exec(Bootstrap);
+                PythonRuntime.InstallEmbeddedPackage(typeof(TorchRuntime).Assembly, "shorokoo_torch");
                 using var runtime = Py.Import("shorokoo_torch.runtime");
                 return new TorchRuntime(environment, runtime);
             }
@@ -126,59 +117,6 @@ internal sealed class TorchRuntime
                     + $"{PythonEnvironmentResolver.EnvironmentVariable} unset to have an environment provisioned.",
                     ex);
             }
-        }
-    }
-
-    /// <summary>
-    /// Makes the support package importable from the sources embedded in this assembly: a finder
-    /// on <c>sys.meta_path</c> serves <c>shorokoo_torch</c> and its modules from memory, and gives
-    /// tracebacks their source lines.
-    /// </summary>
-    private const string Bootstrap = """
-        import importlib.abc, importlib.util, linecache, sys
-
-        class _ShorokooTorchSources(importlib.abc.MetaPathFinder, importlib.abc.Loader):
-            def __init__(self, sources):
-                self.sources = dict(sources)
-
-            def _filename(self, name):
-                return "<embedded>/" + name.replace(".", "/") + (".py" if name != "shorokoo_torch" else "/__init__.py")
-
-            def find_spec(self, name, path, target=None):
-                if name not in self.sources:
-                    return None
-                return importlib.util.spec_from_loader(
-                    name, self, origin=self._filename(name), is_package=(name == "shorokoo_torch"))
-
-            def create_module(self, spec):
-                return None
-
-            def exec_module(self, module):
-                source = self.sources[module.__name__]
-                filename = self._filename(module.__name__)
-                linecache.cache[filename] = (len(source), None, source.splitlines(True), filename)
-                module.__file__ = filename
-                exec(compile(source, filename, "exec"), module.__dict__)
-
-            def get_source(self, name):
-                return self.sources[name]
-
-        if not any(isinstance(f, _ShorokooTorchSources) for f in sys.meta_path):
-            sys.meta_path.insert(0, _ShorokooTorchSources(_sources))
-        """;
-
-    /// <summary>The embedded support package, keyed by module name.</summary>
-    private static IEnumerable<(string Module, string Source)> SupportPackage()
-    {
-        var assembly = typeof(TorchRuntime).Assembly;
-        foreach (var name in assembly.GetManifestResourceNames())
-        {
-            if (!name.StartsWith("shorokoo_torch/", StringComparison.Ordinal) || !name.EndsWith(".py", StringComparison.Ordinal))
-                continue;
-            using var stream = assembly.GetManifestResourceStream(name)!;
-            using var reader = new StreamReader(stream, Encoding.UTF8);
-            var file = Path.GetFileNameWithoutExtension(name["shorokoo_torch/".Length..]);
-            yield return (file == "__init__" ? "shorokoo_torch" : "shorokoo_torch." + file, reader.ReadToEnd());
         }
     }
 }

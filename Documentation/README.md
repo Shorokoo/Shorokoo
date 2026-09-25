@@ -22,6 +22,7 @@ Which document covers what. For an overview of Shorokoo and an end-to-end exampl
 
 - [inference.md](inference.md) — execute a model (`OnnxEngine.Eval`, `ComputeContext`), feed it (consumed, `.Shared()` or `.TryConsume()`), pick the backend, read output values, and use the CPU interpreter for debugging.
 - [pytorch-backend.md](pytorch-backend.md) — run a model on PyTorch (CPU or CUDA) instead of ONNX Runtime: the `Shorokoo.PyTorch.*` packages, the Python environment they provision or use, and what they do not run yet.
+- [jax-backend.md](jax-backend.md) — run a model on JAX (CPU or CUDA), compiled by XLA once per input shape: the `Shorokoo.Jax.*` packages, what a program compiled for fixed shapes can and cannot run, and training with XLA compiling the whole step.
 
 ## 4. Interoperate with the ML ecosystem
 

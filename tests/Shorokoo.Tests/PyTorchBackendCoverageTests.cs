@@ -17,7 +17,7 @@ public class PyTorchBackendCoverageTests
 {
     private static readonly TorchCpuBackend Torch = new();
 
-    private static readonly ShorokooTensorElementType[] EveryTorchType =
+    internal static readonly ShorokooTensorElementType[] EveryTorchType =
     [
         ShorokooTensorElementType.Float, ShorokooTensorElementType.UInt8, ShorokooTensorElementType.Int8,
         ShorokooTensorElementType.UInt16, ShorokooTensorElementType.Int16, ShorokooTensorElementType.Int32,
@@ -507,20 +507,20 @@ public class PyTorchBackendCoverageTests
         => Assert.Throws<TorchUnsupportedModelException>(() => Torch.CreateSession(TrainingStep(step, version), default, default, DeviceMemorySettings.Default));
 
     private static IDisposable OperatorTableGradient(string opType, string gradient)
-        => Shorokoo.PyTorch.Translation.Operators.OperatorTable.OverrideGradient(
-            opType, Enum.Parse<Shorokoo.PyTorch.Translation.Operators.TorchGradient>(gradient));
+        => Shorokoo.PythonTranslation.Operators.OperatorTable.OverrideGradient(
+            opType, Enum.Parse<Shorokoo.PythonTranslation.Operators.GradientRule>(gradient));
 
-    private static NodeProto AutoGrad(string[] inputs, string[] outputs)
+    internal static NodeProto AutoGrad(string[] inputs, string[] outputs)
         => Node(TrainingFormats.AutoGradOpType, inputs, outputs, domain: TrainingFormats.AutoGradDomain);
 
-    private static NodeProto Cast(string input, string output)
+    internal static NodeProto Cast(string input, string output)
     {
         var node = Node("Cast", [input], [output]);
         node.Attributes.Add(new AttributeProto { Name = "to", Type = AttributeProto.AttributeType.Int, I = (int)ShorokooTensorElementType.Float });
         return node;
     }
 
-    private static NodeProto Branch(string condition, GraphProto thenBranch, GraphProto elseBranch)
+    internal static NodeProto Branch(string condition, GraphProto thenBranch, GraphProto elseBranch)
     {
         var node = Node("If", [condition], thenBranch.Outputs.Select(o => o.Name).ToArray());
         node.Attributes.Add(new AttributeProto { Name = "then_branch", Type = AttributeProto.AttributeType.Graph, G = thenBranch });
@@ -528,7 +528,7 @@ public class PyTorchBackendCoverageTests
         return node;
     }
 
-    private static byte[] TrainingStep(GraphProto graph, long version = 1, params FunctionProto[] functions)
+    internal static byte[] TrainingStep(GraphProto graph, long version = 1, params FunctionProto[] functions)
     {
         var squash = new FunctionProto { Name = "Squash", Domain = "Functions" };
         squash.Inputs.Add("a");
@@ -542,7 +542,7 @@ public class PyTorchBackendCoverageTests
         return stream.ToArray();
     }
 
-    private static float[][] RunFloats(IShorokooSession session, Dictionary<string, float[]> feeds, string[] outputs)
+    internal static float[][] RunFloats(IShorokooSession session, Dictionary<string, float[]> feeds, string[] outputs)
     {
         var inputs = feeds.ToDictionary(f => f.Key, f => Torch.CreateTensor(f.Value, [f.Value.Length]));
         try
@@ -558,7 +558,7 @@ public class PyTorchBackendCoverageTests
         }
     }
 
-    private static void AssertNear(float[] expected, float[] actual)
+    internal static void AssertNear(float[] expected, float[] actual)
     {
         Assert.Equal(expected.Length, actual.Length);
         for (int i = 0; i < expected.Length; i++) Assert.True(MathF.Abs(expected[i] - actual[i]) <= 1e-5f * MathF.Max(1f, MathF.Abs(expected[i])));
@@ -924,7 +924,7 @@ public class PyTorchBackendCoverageTests
         => Assert.Throws<PythonEnvironmentException>(
             () => PythonEnvironmentResolver.Resolve(PythonEnvironmentLock.Cpu, options, _ => null)).Failure;
 
-    private static int ElementSize(ShorokooTensorElementType type) => type switch
+    internal static int ElementSize(ShorokooTensorElementType type) => type switch
     {
         ShorokooTensorElementType.Complex64 => 8,
         ShorokooTensorElementType.Complex128 => 16,
@@ -1027,7 +1027,7 @@ public class PyTorchBackendCoverageTests
         return function;
     }
 
-    private static GraphProto ScanLoop(bool typed)
+    internal static GraphProto ScanLoop(bool typed)
     {
         var body = Graph(["i", "c", "x"], ["c2", "x2", "sc"], Node("Identity", ["c"], ["c2"]), Node("Identity", ["x"], ["x2"]),
             Node("Constant", [], ["sc"], attributes: Tensor("value", 7, [2, 3], [1, 2, 3, 4, 5, 6])));
@@ -1047,7 +1047,7 @@ public class PyTorchBackendCoverageTests
         return Graph(["m", "v"], ["y"], loop);
     }
 
-    private static float[] RunFloats(IShorokooSession session, bool condition, float[] x)
+    internal static float[] RunFloats(IShorokooSession session, bool condition, float[] x)
     {
         using var c = Torch.CreateTensor([condition], []);
         using var input = Torch.CreateTensor(x, [x.Length]);
@@ -1055,7 +1055,7 @@ public class PyTorchBackendCoverageTests
         return y.GetTensorDataAsSpan<float>().ToArray();
     }
 
-    private static NodeProto Node(string opType, string[] inputs, string[] outputs, string domain = "", params AttributeProto[] attributes)
+    internal static NodeProto Node(string opType, string[] inputs, string[] outputs, string domain = "", params AttributeProto[] attributes)
     {
         var node = new NodeProto { OpType = opType, Name = $"{opType}:{string.Join(",", outputs)}", Domain = domain };
         node.Inputs.AddRange(inputs);
@@ -1066,17 +1066,17 @@ public class PyTorchBackendCoverageTests
 
     private static readonly (string, float[], long[]) X23 = ("x", [3f, 1f, 3f, 2f, 5f, 1f], [2, 3]);
 
-    private static TypeProto FloatTensor => new() { TensorType = new TypeProto.Tensor { ElemType = 1 } };
+    internal static TypeProto FloatTensor => new() { TensorType = new TypeProto.Tensor { ElemType = 1 } };
 
-    private static AttributeProto Int(string name, long value) => new() { Name = name, Type = AttributeProto.AttributeType.Int, I = value };
+    internal static AttributeProto Int(string name, long value) => new() { Name = name, Type = AttributeProto.AttributeType.Int, I = value };
 
-    private static AttributeProto Str(string name, string value)
+    internal static AttributeProto Str(string name, string value)
         => new() { Name = name, Type = AttributeProto.AttributeType.String, S = System.Text.Encoding.UTF8.GetBytes(value) };
 
-    private static AttributeProto Tensor(string name, int elementType, long[] dims, long[] values)
+    internal static AttributeProto Tensor(string name, int elementType, long[] dims, long[] values)
         => new() { Name = name, Type = AttributeProto.AttributeType.Tensor, T = new TensorProto { data_type = elementType, Dims = dims, Int64Datas = values } };
 
-    private static byte[] Typed(int opset, string[] inputs, string[] outputs, NodeProto[] nodes, params FunctionProto[] functions)
+    internal static byte[] Typed(int opset, string[] inputs, string[] outputs, NodeProto[] nodes, params FunctionProto[] functions)
     {
         var graph = Graph(inputs, outputs, nodes);
         foreach (var input in graph.Inputs) input.Type = FloatTensor;
@@ -1112,7 +1112,7 @@ public class PyTorchBackendCoverageTests
         return results;
     }
 
-    private static GraphProto Graph(string[] inputs, string[] outputs, params NodeProto[] nodes)
+    internal static GraphProto Graph(string[] inputs, string[] outputs, params NodeProto[] nodes)
     {
         var graph = new GraphProto { Name = "g" };
         graph.Inputs.AddRange(inputs.Select(name => new ValueInfoProto { Name = name }));
@@ -1132,7 +1132,7 @@ public class PyTorchBackendCoverageTests
         return stream.ToArray();
     }
 
-    private static byte[] Onnx(string opType, int elementType, string domain = "", AttributeProto? attribute = null)
+    internal static byte[] Onnx(string opType, int elementType, string domain = "", AttributeProto? attribute = null)
     {
         static ValueInfoProto Value(string name, int type)
             => new() { Name = name, Type = new TypeProto { TensorType = new TypeProto.Tensor { ElemType = type } } };

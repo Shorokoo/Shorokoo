@@ -13,6 +13,8 @@ using Shorokoo.Modules.Optimizers;
 using Shorokoo.Core.Nodes.Processors.Training;
 using Shorokoo.PyTorch;
 using Shorokoo.PyTorch.Cpu;
+using Shorokoo.Jax;
+using Shorokoo.Jax.Cpu;
 using System.Runtime.CompilerServices;
 using static Shorokoo.Tests.TrainingRigHelpers;
 
@@ -406,24 +408,25 @@ internal static class TrainingRigHelpers
     internal static readonly RngConfig ParitySeed = new() { MasterSeed = 11 };
 
     /// <summary>The same model, loss and optimizer trained <paramref name="steps"/> steps from one
-    /// initial checkpoint twice — Shorokoo's own gradient on the default context, torch autograd on a
-    /// torch CPU context with <see cref="TrainingBackend.Native"/> — agreeing at every step on loss,
-    /// parameters, model state and optimizer state within <paramref name="tol"/> relative. Returns
-    /// null, or the operator the torch backend does not translate yet.</summary>
-    internal static string? TrainsAlikeOnTorch(
-        ComputationGraph model, ComputationGraph loss, ComputationGraph optimizer,
+    /// initial checkpoint twice — Shorokoo's own gradient on the default context, the gradient
+    /// <paramref name="backend"/> computes itself on a context of it with
+    /// <see cref="TrainingBackend.Native"/> — agreeing at every step on loss, parameters, model state
+    /// and optimizer state within <paramref name="tol"/> relative. Returns null, or the operator the
+    /// backend does not translate yet.</summary>
+    internal static string? TrainsAlikeOn(
+        IShorokooBackend backend, ComputationGraph model, ComputationGraph loss, ComputationGraph optimizer,
         TensorDataStruct input, TensorDataStruct target, Hyperparameter[] hypers,
-        Func<TrainingRig, int, IData>? runtimeHypers = null, IShorokooBackend? backend = null,
+        Func<TrainingRig, int, IData>? runtimeHypers = null,
         int steps = 3, float tol = 1e-4f,
         [CallerArgumentExpression(nameof(model))] string modelName = "",
         [CallerArgumentExpression(nameof(loss))] string lossName = "")
     {
-        using var torch = new ComputeContext(backend ?? new TorchCpuBackend());
+        using var context = new ComputeContext(backend);
         var reference = TrainingRig.FromScratch(model, loss, optimizer, SampleOf(input), hypers, ParitySeed);
         try
         {
             var native = TrainingRig.FromScratch(model, loss, optimizer, SampleOf(input), hypers, ParitySeed,
-                runtimeContext: torch, trainingBackend: TrainingBackend.Native);
+                runtimeContext: context, trainingBackend: TrainingBackend.Native);
             var expected = reference.CreateInitialCheckpoint();
             var actual = expected;
             for (int step = 0; step < steps; step++)
@@ -448,7 +451,7 @@ internal static class TrainingRigHelpers
             ? rig.TrainStep(checkpoint.Shared(), input.Shared(), target.Shared())
             : rig.TrainStep(checkpoint.Shared(), runtimeHypers(rig, step), input.Shared(), target.Shared());
 
-    /// <summary>Fails with every case that could not be compared because the torch backend does not
+    /// <summary>Fails with every case that could not be compared because the backend does not
     /// translate one of its operators yet, each naming the operator.</summary>
     internal static void AssertNoneWaitingOnAnOperator(string?[] cases)
     {
@@ -469,6 +472,8 @@ internal static class TrainingRigHelpers
         for (; ex is not null; ex = ex.InnerException)
             if (ex is TorchUnsupportedModelException { Reason: TorchUnsupportedReason.UnknownOperator } unknown)
                 return unknown.Operator;
+            else if (ex is JaxUnsupportedModelException { Reason: JaxUnsupportedReason.UnknownOperator } unknownOnJax)
+                return unknownOnJax.Operator;
         return null;
     }
 
@@ -5522,71 +5527,186 @@ public class TrainingRigTrainingBackendCoverageTests
     }
 }
 
-[Trait("Domain", "Training")]
-[Trait("Purpose", "Coverage")]
-public class TrainingRigNativeTorchCoverageTests
+/// <summary>The same model, loss and optimizer trained on Shorokoo's own gradient and on the gradient
+/// <typeparamref name="TBackend"/> computes itself (<see cref="TrainingBackend.Native"/>), step for
+/// step alike: one line per case, run for every backend that computes gradients.</summary>
+public abstract class NativeParityCases<TBackend> where TBackend : IShorokooBackend, new()
 {
-    private static readonly Hyperparameter[] Sgd = [0.05f];
-    private static readonly Hyperparameter[] Momentum = [0.05f, 0.9f];
-    private static readonly Hyperparameter[] AdamW = [0.01f, 0.9f, 0.999f, 1e-8f, 0.01f];
-    private static readonly Hyperparameter[] Adam = [0.01f, 0.9f, 0.999f, 1e-8f];
+    internal static readonly Hyperparameter[] Sgd = [0.05f];
+    internal static readonly Hyperparameter[] Momentum = [0.05f, 0.9f];
+    internal static readonly Hyperparameter[] AdamW = [0.01f, 0.9f, 0.999f, 1e-8f, 0.01f];
+    internal static readonly Hyperparameter[] Adam = [0.01f, 0.9f, 0.999f, 1e-8f];
 
-    private static TensorDataStruct Four => Input([4L], 1f, 2f, 3f, 4f);
-    private static TensorDataStruct FourTargets => Target([4L], 2f, 4f, 6f, 8f);
-    private static TensorDataStruct Eight => Input([8L], 1f, -2f, 3f, 0.5f, 5f, -1.5f, 7f, 2f);
-    private static TensorDataStruct EightTargets => Target([8L], 0.5f, 1f, -1f, 2f, 0f, 3f, -2f, 1f);
-    private static TensorDataStruct Digits => Input([4L, 64L], NNLibraryTrainingFixtures.Ramp(256, 0.01f, -1.2f));
-    private static TensorDataStruct DigitClasses => Target(TensorData([4L], [3L, 7L, 0L, 9L]));
-    private static TensorDataStruct DigitScores => Target([4L, 10L], NNLibraryTrainingFixtures.Ramp(40, 0.025f, 0f));
+    internal static TensorDataStruct Four => Input([4L], 1f, 2f, 3f, 4f);
+    internal static TensorDataStruct FourTargets => Target([4L], 2f, 4f, 6f, 8f);
+    internal static TensorDataStruct Eight => Input([8L], 1f, -2f, 3f, 0.5f, 5f, -1.5f, 7f, 2f);
+    internal static TensorDataStruct EightTargets => Target([8L], 0.5f, 1f, -1f, 2f, 0f, 3f, -2f, 1f);
+    internal static TensorDataStruct Digits => Input([4L, 64L], NNLibraryTrainingFixtures.Ramp(256, 0.01f, -1.2f));
+    internal static TensorDataStruct DigitClasses => Target(TensorData([4L], [3L, 7L, 0L, 9L]));
+    internal static TensorDataStruct DigitScores => Target([4L, 10L], NNLibraryTrainingFixtures.Ramp(40, 0.025f, 0f));
 
+    internal static string? TrainsAlike(
+        ComputationGraph model, ComputationGraph loss, ComputationGraph optimizer,
+        TensorDataStruct input, TensorDataStruct target, Hyperparameter[] hypers,
+        Func<TrainingRig, int, IData>? runtimeHypers = null, int steps = 3,
+        [CallerArgumentExpression(nameof(model))] string modelName = "",
+        [CallerArgumentExpression(nameof(loss))] string lossName = "")
+        => TrainsAlikeOn(new TBackend(), model, loss, optimizer, input, target, hypers, runtimeHypers, steps: steps, modelName: modelName, lossName: lossName);
+}
+
+/// <summary>Models, optimizers, shape and indexing operators, random draws, schedules, runtime
+/// hyperparameters, and the rig's runs and checkpoints, on the gradient <typeparamref name="TBackend"/>
+/// computes.</summary>
+public abstract class NativeTrainingParity<TBackend> : NativeParityCases<TBackend> where TBackend : IShorokooBackend, new()
+{
     [Fact]
-    public void TestModelsAndOptimizersTrainAlikeOnTorch()
+    public void TestModelsAndOptimizersTrainAlike()
     {
         string?[] waiting =
         [
-            TrainsAlikeOnTorch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Four, FourTargets, Sgd),
-            TrainsAlikeOnTorch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDMomentumOptimizer.ComputationGraph, Four, FourTargets, Momentum),
-            TrainsAlikeOnTorch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph, Four, FourTargets, AdamW),
-            TrainsAlikeOnTorch(ScalarMultiplyParamFromParamModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Four, FourTargets, [0.002f]),
-            TrainsAlikeOnTorch(ScalarMultiplyWithBatchNormModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Eight, EightTargets, [0.5f]),
-            TrainsAlikeOnTorch(ScalarMultiplyWithBatchNormModel.ComputationGraph, L2Loss.ComputationGraph, SGDMomentumOptimizer.ComputationGraph, Eight, EightTargets, [0.5f, 0.9f]),
-            TrainsAlikeOnTorch(ScalarMultiplyGatedByParamModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph, Four, FourTargets, AdamW),
+            TrainsAlike(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Four, FourTargets, Sgd),
+            TrainsAlike(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDMomentumOptimizer.ComputationGraph, Four, FourTargets, Momentum),
+            TrainsAlike(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph, Four, FourTargets, AdamW),
+            TrainsAlike(ScalarMultiplyParamFromParamModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Four, FourTargets, [0.002f]),
+            TrainsAlike(ScalarMultiplyWithBatchNormModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Eight, EightTargets, [0.5f]),
+            TrainsAlike(ScalarMultiplyWithBatchNormModel.ComputationGraph, L2Loss.ComputationGraph, SGDMomentumOptimizer.ComputationGraph, Eight, EightTargets, [0.5f, 0.9f]),
+            TrainsAlike(ScalarMultiplyGatedByParamModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph, Four, FourTargets, AdamW),
         ];
         AssertNoneWaitingOnAnOperator(waiting);
     }
 
     [Fact]
-    public void TestShapeAndIndexingOperatorsTrainAlikeOnTorch()
+    public void TestShapeAndIndexingOperatorsTrainAlike()
     {
         string?[] waiting =
         [
-            TrainsAlikeOnTorch(ScalarMultiplyAndSliceModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Eight, Target([4L], 1f, 2f, 3f, 4f), Sgd),
-            TrainsAlikeOnTorch(ScalarMultiplyAndTileModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Four, Target([8L], 2f, 4f, 6f, 8f, 1f, 1f, 1f, 1f), Sgd),
-            TrainsAlikeOnTorch(ScalarMultiplyAndClipModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Input([4L], 0.25f, -0.5f, 1.5f, -3f), FourTargets, Sgd),
-            TrainsAlikeOnTorch(ScalarMultiplyAndExpandNoOpModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Eight, EightTargets, Sgd),
-            TrainsAlikeOnTorch(ScalarMultiplyAndScatterModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Four, FourTargets, Sgd),
-            TrainsAlikeOnTorch(ScalarMultiplyAndSplitModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Four, Target([2L], 2f, 4f), Sgd),
-            TrainsAlikeOnTorch(ScalarMultiplyWithQeeFoldableLoopIterCountModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Four, FourTargets, Sgd),
-            TrainsAlikeOnTorch(IndexedWeightModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Inputs(("x", TensorData([4L], [1f, 2f, 3f, 4f])), ("index", TensorData([4L], [3L, 0L, 0L, 2L]))), FourTargets, Sgd),
+            TrainsAlike(ScalarMultiplyAndSliceModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Eight, Target([4L], 1f, 2f, 3f, 4f), Sgd),
+            TrainsAlike(ScalarMultiplyAndTileModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Four, Target([8L], 2f, 4f, 6f, 8f, 1f, 1f, 1f, 1f), Sgd),
+            TrainsAlike(ScalarMultiplyAndClipModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Input([4L], 0.25f, -0.5f, 1.5f, -3f), FourTargets, Sgd),
+            TrainsAlike(ScalarMultiplyAndExpandNoOpModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Eight, EightTargets, Sgd),
+            TrainsAlike(ScalarMultiplyAndScatterModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Four, FourTargets, Sgd),
+            TrainsAlike(ScalarMultiplyAndSplitModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Four, Target([2L], 2f, 4f), Sgd),
+            TrainsAlike(ScalarMultiplyWithQeeFoldableLoopIterCountModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Four, FourTargets, Sgd),
+            TrainsAlike(IndexedWeightModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Inputs(("x", TensorData([4L], [1f, 2f, 3f, 4f])), ("index", TensorData([4L], [3L, 0L, 0L, 2L]))), FourTargets, Sgd),
         ];
         AssertNoneWaitingOnAnOperator(waiting);
     }
 
     [Fact]
-    public void TestRandomDrawsSchedulesAndRuntimeHyperparametersTrainAlikeOnTorch()
+    public void TestRandomDrawsSchedulesAndRuntimeHyperparametersTrainAlike()
     {
         var cosine = Schedules.Cosine(0.05f, 6).WithWarmup(2);
         var scheduler = TrainingRigScheduleCoverageTests.SchedulerModule(step => Scalar(0.3f) - step.Cast<float32>() * Scalar(0.05f));
         string?[] waiting =
         [
-            TrainsAlikeOnTorch(RngRigDropoutModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Eight, EightTargets, [0.05f]),
-            TrainsAlikeOnTorch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Four, FourTargets, [cosine], steps: 4),
-            TrainsAlikeOnTorch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Four, FourTargets, [Hyperparameter.Scheduled(scheduler)]),
-            TrainsAlikeOnTorch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDMomentumOptimizer.ComputationGraph, Four, FourTargets, [Hyperparameter.Runtime(), 0.9f], (rig, step) => rig.MakeHyperparameters(0.01f * (step + 1))),
+            TrainsAlike(RngRigDropoutModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Eight, EightTargets, [0.05f]),
+            TrainsAlike(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Four, FourTargets, [cosine], steps: 4),
+            TrainsAlike(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Four, FourTargets, [Hyperparameter.Scheduled(scheduler)]),
+            TrainsAlike(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDMomentumOptimizer.ComputationGraph, Four, FourTargets, [Hyperparameter.Runtime(), 0.9f], (rig, step) => rig.MakeHyperparameters(0.01f * (step + 1))),
         ];
         AssertNoneWaitingOnAnOperator(waiting);
     }
 
+    [Fact]
+    public void TestFitResidentRunsCheckpointsAndBatchShapesAgree()
+    {
+        using var native = new ComputeContext(new TBackend());
+        TrainingRig Rig(ComputeContext? context) => TrainingRig.FromScratch(DigitClassifier.ComputationGraph, SoftmaxL2Loss.ComputationGraph,
+            AdamWOptimizer.ComputationGraph, SampleOf(Digits), AdamW, ParitySeed, runtimeContext: context,
+            trainingBackend: context is null ? null : TrainingBackend.Native);
+        var (reference, nativeRig) = (Rig(null), Rig(native));
+        var start = reference.CreateInitialCheckpoint();
+        var three = reference.Fit([Digits, Digits, Digits], [DigitScores, DigitScores, DigitScores], 1, start.Shared()).FinalCheckpoint;
+        var path = TempPath("native_" + typeof(TBackend).Name) + ".skpt";
+        try
+        {
+            AssertClose(three, nativeRig.Fit([Digits, Digits, Digits], [DigitScores, DigitScores, DigitScores], 1, start.Shared()).FinalCheckpoint);
+            using (var run = nativeRig.BeginResidentRun(start.Shared()))
+            {
+                run.Step(Digits, DigitScores);
+                run.Step(Digits, DigitScores);
+                AssertClose(three, run.StepToCheckpoint(Digits, DigitScores));
+            }
+            Persistence.SaveTrainingCheckpointToSkpt(nativeRig.TrainStep(nativeRig.TrainStep(start.Shared(), Digits, DigitScores), Digits, DigitScores), path);
+            var (loaded, checkpoint) = TrainingRig.Load(path);
+            AssertClose(three, loaded.TrainStep(checkpoint, Digits, DigitScores));
+            nativeRig.TrainStep(start.Shared(), Input([2L, 64L], NNLibraryTrainingFixtures.Ramp(128, 0.01f, -0.5f)), Target([2L, 10L], NNLibraryTrainingFixtures.Ramp(20, 0.05f, 0f)));
+            Assert.Equal(2, nativeRig.CompiledTrainStepShapeKeys.Count);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+}
+
+public abstract class NativeClassifierParity<TBackend> : NativeParityCases<TBackend> where TBackend : IShorokooBackend, new()
+{
+    [Fact]
+    public void TestClassifiersTrainAlike()
+    {
+        var (conv, classes) = NNLibraryTrainingFixtures.MakeTinyConvBatch();
+        string?[] waiting =
+        [
+            TrainsAlike(DigitClassifier.ComputationGraph, SoftmaxL2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph, Digits, DigitScores, AdamW),
+            TrainsAlike(DigitClassifier.ComputationGraph, CrossEntropyLoss.ComputationGraph, SGDOptimizer.ComputationGraph, Digits, DigitClasses, [0.1f]),
+            TrainsAlike(NNTinyConvClassifier.ComputationGraph, CrossEntropyLoss.ComputationGraph, SGDMomentumOptimizer.ComputationGraph, Inputs(("input", conv)), Target(classes), [0.2f, 0.9f]),
+            TrainsAlike(BilinearRigModel.ComputationGraph, L2Loss.ComputationGraph, AdamOptimizer.ComputationGraph, Inputs(("x1", TensorData([2L, 3L], [0.5f, -1f, 0.25f, 1f, -0.5f, 0.75f])), ("x2", TensorData([2L, 4L], [0.3f, -0.5f, 0.2f, -0.1f, 0.4f, 0.6f, -0.2f, 0.8f]))), Target([2L], 0.5f, -0.5f), Adam),
+            TrainsAlike(EmbeddingPaddingRigModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Inputs(("x", TensorData([3L], [0.5f, -1f, 0.25f]))), Target([3L], 1f, 2f, 3f), [0.1f]),
+        ];
+        AssertNoneWaitingOnAnOperator(waiting);
+    }
+
+    [Fact]
+    public void TestBatchNormLayersTrainAlike()
+    {
+        var batchNorm = Input([2L, 3L, 2L, 2L], NNLibraryTrainingFixtures.Ramp(24, 0.25f, -2.5f));
+        string?[] waiting =
+        [
+            TrainsAlike(NNBatchNormTrainGradModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, batchNorm, Target([3L], 0.5f, -0.25f, 1f), [0.1f]),
+            TrainsAlike(NNBatchNormAnalyticMomentum09Model.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Input([1L, 1L, 2L, 2L], 1f, 2f, 3f, 4f), Target([1L, 1L, 2L, 2L], 0.5f, -1f, 2f, 0f), [0.1f]),
+            TrainsAlike(NNBatchNormAnalyticRank2Model.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Input([2L, 1L], 1f, 3f), Target([2L, 1L], 0.5f, 2f), [0.1f]),
+        ];
+        AssertNoneWaitingOnAnOperator(waiting);
+    }
+}
+
+public abstract class NativeRecurrentParity<TBackend> : NativeParityCases<TBackend> where TBackend : IShorokooBackend, new()
+{
+    [Fact]
+    public void TestRecurrentLayersAndAnRnnCellTrainAlike()
+    {
+        var sequence = Input([3L, 4L, 2L], NNLibraryTrainingFixtures.Ramp(24, 0.1f, -1f));
+        var cells = Input([2L, 4L, 2L], NNLibraryTrainingFixtures.Ramp(16, 0.1f, -0.7f));
+        string?[] waiting =
+        [
+            TrainsAlike(LstmForwardTrainModel.ComputationGraph, CrossEntropyLoss.ComputationGraph, SGDMomentumOptimizer.ComputationGraph, sequence, Target(TensorData([4L], [0L, 1L, 0L, 1L])), [0.2f, 0.9f]),
+            TrainsAlike(GruForwardTrainModel.ComputationGraph, CrossEntropyLoss.ComputationGraph, SGDMomentumOptimizer.ComputationGraph, sequence, Target(TensorData([4L], [0L, 1L, 0L, 1L])), [0.2f, 0.9f]),
+            TrainsAlike(RnnCellTrainModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, cells, Target([4L, 2L], 0.5f, -0.5f, 1f, 0f, 0.25f, 0.75f, -1f, 0.1f), [0.1f]),
+        ];
+        AssertNoneWaitingOnAnOperator(waiting);
+    }
+}
+
+public abstract class NativeGatedCellParity<TBackend> : NativeParityCases<TBackend> where TBackend : IShorokooBackend, new()
+{
+    [Fact]
+    public void TestLstmAndGruCellsTrainAlike()
+    {
+        var cells = Input([2L, 4L, 2L], NNLibraryTrainingFixtures.Ramp(16, 0.1f, -0.7f));
+        string?[] waiting =
+        [
+            TrainsAlike(LstmCellTrainModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, cells, Target([4L, 2L], 0.5f, -0.5f, 1f, 0f, 0.25f, 0.75f, -1f, 0.1f), [0.1f]),
+            TrainsAlike(GruCellTrainModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, cells, Target([4L, 2L], 0.5f, -0.5f, 1f, 0f, 0.25f, 0.75f, -1f, 0.1f), [0.1f]),
+        ];
+        AssertNoneWaitingOnAnOperator(waiting);
+    }
+}
+
+[Trait("Domain", "Training")]
+[Trait("Purpose", "Coverage")]
+public class TrainingRigNativeTorchCoverageTests : NativeTrainingParity<TorchCpuBackend>
+{
     [Fact]
     public void TestANativeStepOnTorchWritesTheParametersItUpdatesIntoTheOnesItConsumed()
     {
@@ -5611,106 +5731,51 @@ public class TrainingRigNativeTorchCoverageTests
         Assert.Equal(20L, adamWAliased);
     }
 
+    [Trait("Domain", "Training")]
+    [Trait("Purpose", "Coverage")]
+    public class Classifiers : NativeClassifierParity<TorchCpuBackend>;
+
+    [Trait("Domain", "Training")]
+    [Trait("Purpose", "Coverage")]
+    public class RecurrentLayers : NativeRecurrentParity<TorchCpuBackend>;
+
+    [Trait("Domain", "Training")]
+    [Trait("Purpose", "Coverage")]
+    public class GatedRecurrentCells : NativeGatedCellParity<TorchCpuBackend>;
+}
+
+/// <summary>A training step whose gradient JAX computes, compiled whole by XLA, trains as Shorokoo's
+/// own does.</summary>
+[Trait("Domain", "Training")]
+[Trait("Purpose", "Coverage")]
+public class TrainingRigNativeJaxCoverageTests : NativeTrainingParity<JaxCpuBackend>
+{
     [Fact]
-    public void TestFitResidentRunsCheckpointsAndBatchShapesAgreeOnTorch()
+    public void TestANativeStepOnJaxBindsNoOutputIntoAConsumedParameterAndTrainsAlike()
     {
-        using var torch = new ComputeContext(new TorchCpuBackend());
-        TrainingRig Rig(ComputeContext? context) => TrainingRig.FromScratch(DigitClassifier.ComputationGraph, SoftmaxL2Loss.ComputationGraph,
-            AdamWOptimizer.ComputationGraph, SampleOf(Digits), AdamW, ParitySeed, runtimeContext: context,
-            trainingBackend: context is null ? null : TrainingBackend.Native);
-        var (reference, native) = (Rig(null), Rig(torch));
+        using var context = new ComputeContext(new JaxCpuBackend()) { OutputAliasing = true };
+        var reference = TrainingRig.FromScratch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph, SampleOf(Four), AdamW, ParitySeed);
+        var native = TrainingRig.FromScratch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph, SampleOf(Four), AdamW, ParitySeed,
+            runtimeContext: context, trainingBackend: TrainingBackend.Native);
         var start = reference.CreateInitialCheckpoint();
-        var three = reference.Fit([Digits, Digits, Digits], [DigitScores, DigitScores, DigitScores], 1, start.Shared()).FinalCheckpoint;
-        var path = TempPath("native_torch") + ".skpt";
-        try
-        {
-            AssertClose(three, native.Fit([Digits, Digits, Digits], [DigitScores, DigitScores, DigitScores], 1, start.Shared()).FinalCheckpoint);
-            using (var run = native.BeginResidentRun(start.Shared()))
-            {
-                run.Step(Digits, DigitScores);
-                run.Step(Digits, DigitScores);
-                AssertClose(three, run.StepToCheckpoint(Digits, DigitScores));
-            }
-            Persistence.SaveTrainingCheckpointToSkpt(native.TrainStep(native.TrainStep(start.Shared(), Digits, DigitScores), Digits, DigitScores), path);
-            var (loaded, checkpoint) = TrainingRig.Load(path);
-            AssertClose(three, loaded.TrainStep(checkpoint, Digits, DigitScores));
-            native.TrainStep(start.Shared(), Input([2L, 64L], NNLibraryTrainingFixtures.Ramp(128, 0.01f, -0.5f)), Target([2L, 10L], NNLibraryTrainingFixtures.Ramp(20, 0.05f, 0f)));
-            Assert.Equal(2, native.CompiledTrainStepShapeKeys.Count);
-        }
-        finally
-        {
-            File.Delete(path);
-        }
+        using var run = native.BeginResidentRun(start.Shared());
+        run.Step(Four, FourTargets);
+
+        AssertClose(reference.TrainStep(reference.TrainStep(start.Shared(), Four, FourTargets), Four, FourTargets), run.StepToCheckpoint(Four, FourTargets));
+        Assert.Equal(0L, context.AliasedOutputs);
     }
 
     [Trait("Domain", "Training")]
     [Trait("Purpose", "Coverage")]
-    public class Classifiers
-    {
-        [Fact]
-        public void TestClassifiersTrainAlikeOnTorch()
-        {
-            var (conv, classes) = NNLibraryTrainingFixtures.MakeTinyConvBatch();
-            string?[] waiting =
-            [
-                TrainsAlikeOnTorch(DigitClassifier.ComputationGraph, SoftmaxL2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph, Digits, DigitScores, AdamW),
-                TrainsAlikeOnTorch(DigitClassifier.ComputationGraph, CrossEntropyLoss.ComputationGraph, SGDOptimizer.ComputationGraph, Digits, DigitClasses, [0.1f]),
-                TrainsAlikeOnTorch(NNTinyConvClassifier.ComputationGraph, CrossEntropyLoss.ComputationGraph, SGDMomentumOptimizer.ComputationGraph, Inputs(("input", conv)), Target(classes), [0.2f, 0.9f]),
-                TrainsAlikeOnTorch(BilinearRigModel.ComputationGraph, L2Loss.ComputationGraph, AdamOptimizer.ComputationGraph, Inputs(("x1", TensorData([2L, 3L], [0.5f, -1f, 0.25f, 1f, -0.5f, 0.75f])), ("x2", TensorData([2L, 4L], [0.3f, -0.5f, 0.2f, -0.1f, 0.4f, 0.6f, -0.2f, 0.8f]))), Target([2L], 0.5f, -0.5f), Adam),
-                TrainsAlikeOnTorch(EmbeddingPaddingRigModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Inputs(("x", TensorData([3L], [0.5f, -1f, 0.25f]))), Target([3L], 1f, 2f, 3f), [0.1f]),
-            ];
-            AssertNoneWaitingOnAnOperator(waiting);
-        }
-
-        [Fact]
-        public void TestBatchNormLayersTrainAlikeOnTorch()
-        {
-            var batchNorm = Input([2L, 3L, 2L, 2L], NNLibraryTrainingFixtures.Ramp(24, 0.25f, -2.5f));
-            string?[] waiting =
-            [
-                TrainsAlikeOnTorch(NNBatchNormTrainGradModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, batchNorm, Target([3L], 0.5f, -0.25f, 1f), [0.1f]),
-                TrainsAlikeOnTorch(NNBatchNormAnalyticMomentum09Model.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Input([1L, 1L, 2L, 2L], 1f, 2f, 3f, 4f), Target([1L, 1L, 2L, 2L], 0.5f, -1f, 2f, 0f), [0.1f]),
-                TrainsAlikeOnTorch(NNBatchNormAnalyticRank2Model.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Input([2L, 1L], 1f, 3f), Target([2L, 1L], 0.5f, 2f), [0.1f]),
-            ];
-            AssertNoneWaitingOnAnOperator(waiting);
-        }
-    }
+    public class Classifiers : NativeClassifierParity<JaxCpuBackend>;
 
     [Trait("Domain", "Training")]
     [Trait("Purpose", "Coverage")]
-    public class RecurrentLayers
-    {
-        [Fact]
-        public void TestRecurrentLayersAndAnRnnCellTrainAlikeOnTorch()
-        {
-            var sequence = Input([3L, 4L, 2L], NNLibraryTrainingFixtures.Ramp(24, 0.1f, -1f));
-            var cells = Input([2L, 4L, 2L], NNLibraryTrainingFixtures.Ramp(16, 0.1f, -0.7f));
-            string?[] waiting =
-            [
-                TrainsAlikeOnTorch(LstmForwardTrainModel.ComputationGraph, CrossEntropyLoss.ComputationGraph, SGDMomentumOptimizer.ComputationGraph, sequence, Target(TensorData([4L], [0L, 1L, 0L, 1L])), [0.2f, 0.9f]),
-                TrainsAlikeOnTorch(GruForwardTrainModel.ComputationGraph, CrossEntropyLoss.ComputationGraph, SGDMomentumOptimizer.ComputationGraph, sequence, Target(TensorData([4L], [0L, 1L, 0L, 1L])), [0.2f, 0.9f]),
-                TrainsAlikeOnTorch(RnnCellTrainModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, cells, Target([4L, 2L], 0.5f, -0.5f, 1f, 0f, 0.25f, 0.75f, -1f, 0.1f), [0.1f]),
-            ];
-            AssertNoneWaitingOnAnOperator(waiting);
-        }
-    }
+    public class RecurrentLayers : NativeRecurrentParity<JaxCpuBackend>;
 
     [Trait("Domain", "Training")]
     [Trait("Purpose", "Coverage")]
-    public class GatedRecurrentCells
-    {
-        [Fact]
-        public void TestLstmAndGruCellsTrainAlikeOnTorch()
-        {
-            var cells = Input([2L, 4L, 2L], NNLibraryTrainingFixtures.Ramp(16, 0.1f, -0.7f));
-            string?[] waiting =
-            [
-                TrainsAlikeOnTorch(LstmCellTrainModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, cells, Target([4L, 2L], 0.5f, -0.5f, 1f, 0f, 0.25f, 0.75f, -1f, 0.1f), [0.1f]),
-                TrainsAlikeOnTorch(GruCellTrainModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, cells, Target([4L, 2L], 0.5f, -0.5f, 1f, 0f, 0.25f, 0.75f, -1f, 0.1f), [0.1f]),
-            ];
-            AssertNoneWaitingOnAnOperator(waiting);
-        }
-    }
+    public class GatedRecurrentCells : NativeGatedCellParity<JaxCpuBackend>;
 }
 
 [Trait("Domain", "Training")]
@@ -5722,11 +5787,30 @@ public class TrainingRigNativeTorchHardwareTests
     {
         string?[] waiting =
         [
-            TrainsAlikeOnTorch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph, Input([4L], 1f, 2f, 3f, 4f), Target([4L], 2f, 4f, 6f, 8f), [0.01f, 0.9f, 0.999f, 1e-8f, 0.01f], backend: new Shorokoo.PyTorch.Cuda.TorchCudaBackend()),
-            TrainsAlikeOnTorch(ScalarMultiplyWithBatchNormModel.ComputationGraph, L2Loss.ComputationGraph, SGDMomentumOptimizer.ComputationGraph, Input([8L], 1f, -2f, 3f, 0.5f, 5f, -1.5f, 7f, 2f), Target([8L], 0.5f, 1f, -1f, 2f, 0f, 3f, -2f, 1f), [0.5f, 0.9f], backend: new Shorokoo.PyTorch.Cuda.TorchCudaBackend()),
-            TrainsAlikeOnTorch(DigitClassifier.ComputationGraph, SoftmaxL2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph, Input([4L, 64L], NNLibraryTrainingFixtures.Ramp(256, 0.01f, -1.2f)), Target([4L, 10L], NNLibraryTrainingFixtures.Ramp(40, 0.025f, 0f)), [0.01f, 0.9f, 0.999f, 1e-8f, 0.01f], backend: new Shorokoo.PyTorch.Cuda.TorchCudaBackend()),
-            TrainsAlikeOnTorch(RngRigDropoutModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Input([8L], 1f, -2f, 3f, 0.5f, 5f, -1.5f, 7f, 2f), Target([8L], 0.5f, 1f, -1f, 2f, 0f, 3f, -2f, 1f), [0.05f], backend: new Shorokoo.PyTorch.Cuda.TorchCudaBackend()),
-            TrainsAlikeOnTorch(NNTinyConvClassifier.ComputationGraph, CrossEntropyLoss.ComputationGraph, SGDMomentumOptimizer.ComputationGraph, Inputs(("input", NNLibraryTrainingFixtures.MakeTinyConvBatch().input)), Target(NNLibraryTrainingFixtures.MakeTinyConvBatch().target), [0.2f, 0.9f], backend: new Shorokoo.PyTorch.Cuda.TorchCudaBackend()),
+            TrainsAlikeOn(new Shorokoo.PyTorch.Cuda.TorchCudaBackend(), ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph, Input([4L], 1f, 2f, 3f, 4f), Target([4L], 2f, 4f, 6f, 8f), [0.01f, 0.9f, 0.999f, 1e-8f, 0.01f]),
+            TrainsAlikeOn(new Shorokoo.PyTorch.Cuda.TorchCudaBackend(), ScalarMultiplyWithBatchNormModel.ComputationGraph, L2Loss.ComputationGraph, SGDMomentumOptimizer.ComputationGraph, Input([8L], 1f, -2f, 3f, 0.5f, 5f, -1.5f, 7f, 2f), Target([8L], 0.5f, 1f, -1f, 2f, 0f, 3f, -2f, 1f), [0.5f, 0.9f]),
+            TrainsAlikeOn(new Shorokoo.PyTorch.Cuda.TorchCudaBackend(), DigitClassifier.ComputationGraph, SoftmaxL2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph, Input([4L, 64L], NNLibraryTrainingFixtures.Ramp(256, 0.01f, -1.2f)), Target([4L, 10L], NNLibraryTrainingFixtures.Ramp(40, 0.025f, 0f)), [0.01f, 0.9f, 0.999f, 1e-8f, 0.01f]),
+            TrainsAlikeOn(new Shorokoo.PyTorch.Cuda.TorchCudaBackend(), RngRigDropoutModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Input([8L], 1f, -2f, 3f, 0.5f, 5f, -1.5f, 7f, 2f), Target([8L], 0.5f, 1f, -1f, 2f, 0f, 3f, -2f, 1f), [0.05f]),
+            TrainsAlikeOn(new Shorokoo.PyTorch.Cuda.TorchCudaBackend(), NNTinyConvClassifier.ComputationGraph, CrossEntropyLoss.ComputationGraph, SGDMomentumOptimizer.ComputationGraph, Inputs(("input", NNLibraryTrainingFixtures.MakeTinyConvBatch().input)), Target(NNLibraryTrainingFixtures.MakeTinyConvBatch().target), [0.2f, 0.9f]),
+        ];
+        AssertNoneWaitingOnAnOperator(waiting);
+    }
+}
+
+[Trait("Domain", "Training")]
+[Trait("Purpose", "Hardware")]
+public class TrainingRigNativeJaxHardwareTests
+{
+    [JaxCudaFact]
+    public void TestModelsTrainAlikeOnJaxCuda()
+    {
+        string?[] waiting =
+        [
+            TrainsAlikeOn(new Shorokoo.Jax.Cuda.JaxCudaBackend(), ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph, Input([4L], 1f, 2f, 3f, 4f), Target([4L], 2f, 4f, 6f, 8f), [0.01f, 0.9f, 0.999f, 1e-8f, 0.01f]),
+            TrainsAlikeOn(new Shorokoo.Jax.Cuda.JaxCudaBackend(), ScalarMultiplyWithBatchNormModel.ComputationGraph, L2Loss.ComputationGraph, SGDMomentumOptimizer.ComputationGraph, Input([8L], 1f, -2f, 3f, 0.5f, 5f, -1.5f, 7f, 2f), Target([8L], 0.5f, 1f, -1f, 2f, 0f, 3f, -2f, 1f), [0.5f, 0.9f]),
+            TrainsAlikeOn(new Shorokoo.Jax.Cuda.JaxCudaBackend(), DigitClassifier.ComputationGraph, SoftmaxL2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph, Input([4L, 64L], NNLibraryTrainingFixtures.Ramp(256, 0.01f, -1.2f)), Target([4L, 10L], NNLibraryTrainingFixtures.Ramp(40, 0.025f, 0f)), [0.01f, 0.9f, 0.999f, 1e-8f, 0.01f]),
+            TrainsAlikeOn(new Shorokoo.Jax.Cuda.JaxCudaBackend(), RngRigDropoutModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, Input([8L], 1f, -2f, 3f, 0.5f, 5f, -1.5f, 7f, 2f), Target([8L], 0.5f, 1f, -1f, 2f, 0f, 3f, -2f, 1f), [0.05f]),
+            TrainsAlikeOn(new Shorokoo.Jax.Cuda.JaxCudaBackend(), NNTinyConvClassifier.ComputationGraph, CrossEntropyLoss.ComputationGraph, SGDMomentumOptimizer.ComputationGraph, Inputs(("input", NNLibraryTrainingFixtures.MakeTinyConvBatch().input)), Target(NNLibraryTrainingFixtures.MakeTinyConvBatch().target), [0.2f, 0.9f]),
         ];
         AssertNoneWaitingOnAnOperator(waiting);
     }

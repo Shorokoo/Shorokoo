@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PlatformTarget>x64</PlatformTarget>
+
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+
+    <IsPackable>true</IsPackable>
+    <Description>Shorokoo execution backend running on the CPU through JAX and XLA, in an embedded CPython; it also computes a training step's gradient with JAX. The Python environment is provisioned with uv on first use, or named with SHOROKOO_PYTHON_ENV. Install alongside the Shorokoo package and name it explicitly: new ComputeContext(new JaxCpuBackend()).</Description>
+    <PackageTags>shorokoo;jax;xla;backend;linux;windows;cpu;machine-learning</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Shorokoo.Jax\Shorokoo.Jax.csproj" />
+  </ItemGroup>
+</Project>

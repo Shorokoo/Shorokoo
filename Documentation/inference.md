@@ -512,11 +512,12 @@ one is how a long `Fit` is stopped — see
   or `ComputeContext.Backend` where the work is submitted. See
   [Which device am I on?](#which-device-am-i-on).
 - Besides the ONNX Runtime backends there are PyTorch ones, `Shorokoo.PyTorch.Cpu` and
-  `Shorokoo.PyTorch.Cuda`, which run a model with PyTorch in an embedded Python. They are
-  never discovered: a program names one for the contexts that should run on it —
+  `Shorokoo.PyTorch.Cuda`, and JAX ones, `Shorokoo.Jax.Cpu` and `Shorokoo.Jax.Cuda`, which run a
+  model with PyTorch or with JAX and XLA in an embedded Python. They are never discovered: a
+  program names one for the contexts that should run on it —
   `new ComputeContext(new TorchCpuBackend())` — so they can be referenced beside an ONNX
   Runtime package without making discovery ambiguous. See
-  [pytorch-backend.md](pytorch-backend.md).
+  [pytorch-backend.md](pytorch-backend.md) and [jax-backend.md](jax-backend.md).
 
 ### The backend types
 
@@ -537,13 +538,15 @@ differ only in the execution provider
 they configure: the GPU ones append the CUDA provider on device 0, the CPU ones leave
 ORT on its default provider.
 
-The PyTorch backends follow the same naming, one per package, but are not ONNX Runtime
+The PyTorch and JAX backends follow the same naming, one per package, but are not ONNX Runtime
 backends and take no part in discovery:
 
 | package | backend type | fully qualified |
 |---|---|---|
 | `Shorokoo.PyTorch.Cpu` | `TorchCpuBackend` | `Shorokoo.PyTorch.Cpu.TorchCpuBackend` |
 | `Shorokoo.PyTorch.Cuda` | `TorchCudaBackend` | `Shorokoo.PyTorch.Cuda.TorchCudaBackend` |
+| `Shorokoo.Jax.Cpu` | `JaxCpuBackend` | `Shorokoo.Jax.Cpu.JaxCpuBackend` |
+| `Shorokoo.Jax.Cuda` | `JaxCudaBackend` | `Shorokoo.Jax.Cuda.JaxCudaBackend` |
 
 ### Auto-discovery
 
@@ -674,7 +677,7 @@ One check is not free of native code: a backend declaring a CUDA requirement is 
 binding the CUDA runtime and asking it for the device's memory, which initialises this
 process's CUDA context on the card if it has none yet. So probing a GPU backend touches the
 driver even when the answer turns out to be no. A backend that brings its own CUDA libraries
-and needs only the driver (the [PyTorch](pytorch-backend.md) CUDA backend) declares that instead;
+and needs only the driver (the [PyTorch](pytorch-backend.md) and [JAX](jax-backend.md) CUDA backends) declares that instead;
 it is verified through the driver API, which initialises the driver but creates no context, and
 refused as `MissingCudaDriver` where there is no driver, one too old, or no device. Every other rejection — wrong OS, wrong
 architecture, a native that is not deployed — is decided from metadata and file paths alone.

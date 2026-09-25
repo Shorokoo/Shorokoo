@@ -2595,6 +2595,20 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
     }
 
     [Fact]
+    public void TestImportOnnxDoesNotTakeAnInitializerAlsoListedAsAGraphInputForAnInput()
+    {
+        foreach (var w in (ValueInfoProto[])[OnnxFloatVec("w", 4), FloatInputX(null)])
+        {
+            var model = BuildForeignAddModel("w", [10f, 20f, 30f, 40f]);
+            w.Name = "w";
+            model.Graph.Inputs.Add(w);
+            var path = WriteOnnx(P(Guid.NewGuid() + ".onnx"), model);
+            Assert.Equal(["x"], Persistence.ImportOnnx(path).InputNames);
+            Assert.Equal([11f, 22f, 33f, 44f], RunFloatVecModel(Persistence.ImportOnnx(path), 1f, 2f, 3f, 4f));
+        }
+    }
+
+    [Fact]
     public void TestImportOnnxRefusesAKindTaggedFileWithAnUnshapedInputAsFW058()
     {
         var (model, _, _) = BuildSkptModel();

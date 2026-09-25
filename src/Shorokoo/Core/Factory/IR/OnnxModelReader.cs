@@ -526,7 +526,13 @@ namespace Shorokoo.Core.Factory.IR
             // the CG ComputationGraph constructor only marks IsModelInput nodes as inputs
             // — the FastCG equivalent uses the explicit Inputs list, so we record them here
             // and skip initializer producers from that list.
-            foreach (var (info, key, fastNode) in CreateFastInputTensors(graphProto.Inputs, functionsMap, tensorStructDefs))
+            // A graph input that names an initializer is that initializer's declaration, not a
+            // data input: files written for IR version < 4 had to list every initializer among
+            // the inputs. The initializer supplies its value; taken as an input as well it would
+            // demand a value of its own at every run.
+            var initializerNames = graphProto.Initializers.Select(i => i.Name).ToHashSet(StringComparer.Ordinal);
+            var dataInputs = graphProto.Inputs.Where(i => !initializerNames.Contains(i.Name)).ToList();
+            foreach (var (info, key, fastNode) in CreateFastInputTensors(dataInputs, functionsMap, tensorStructDefs))
             {
                 fastGraph.Nodes.Add(fastNode);
                 tensorKeys[info.Name] = key;

@@ -60,6 +60,9 @@ internal sealed class QeeAuditOnBackend(
 
     private static readonly Dictionary<(Type Module, string Operator), string> JaxKnownDisagreements = new()
     {
+        [(typeof(QeeEmptyReduceNoIdentityCheck), "ReduceMax")] = "ONNX: an empty reduction yields -inf or the type's minimum; JAX does, ORT yields 0",
+        [(typeof(QeeEmptyReduceNoIdentityCheck), "ReduceMin")] = "ONNX: an empty reduction yields +inf or the type's maximum; JAX does, ORT yields 0",
+        [(typeof(QeeEmptyReduceNoIdentityCheck), "ReduceMean")] = "ONNX: an empty ReduceMean is undefined; JAX yields NaN, ORT 0",
     };
 
     /// <summary>The modules the JAX backend refuses because their graph computes, from an input's

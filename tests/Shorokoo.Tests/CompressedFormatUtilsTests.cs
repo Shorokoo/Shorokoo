@@ -2707,6 +2707,34 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         Assert.Equal([null, null, "x"], tupleArch.OutputNames);
     }
 
+    private IReadOnlyList<string?> ReimportedOutputNames(ComputationGraph model)
+    {
+        var path = P(Guid.NewGuid() + ".onnx");
+        Persistence.ExportOnnx(model, path);
+        return Persistence.ImportOnnx(path).OutputNames;
+    }
+
+    [Fact]
+    public void TestAnExportedOutputNamedAsAnInputImportsBackUnderItsOwnName()
+    {
+        var x3 = TensorData(DType.Float32, [3L], 1f, 2f, 3f);
+        var bias = OptionalPassThroughLayer.ComputationGraph.ToConcreteArchitecture(new ModelParamList([
+            new OptionalTensorDataModelParam("bias", ModelParamType.InputParam, OptionalTensorData.Some(x3))])).ToConcreteModel();
+        var tuple = StructInATupleOutputLayer.ComputationGraph;
+        var tupleModel = tuple.ToConcreteArchitecture(tuple.FromOrderedInputs([TensorData(DType.Float32, [], 3f), x3])).ToConcreteModel();
+        var g = new GraphProto { Name = "foreign" };
+        g.Inputs.Add(OnnxFloatVec("x", 4));
+        g.Outputs.Add(OnnxFloatVec("x", 4));
+        var foreign = new ModelProto { IrVersion = 10, Graph = g };
+        foreign.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = 21 });
+        var imported = Persistence.ImportOnnx(WriteOnnx(P(Guid.NewGuid() + ".onnx"), foreign));
+
+        Assert.Equal(["bias"], ReimportedOutputNames(bias));
+        Assert.Equal("x", ReimportedOutputNames(tupleModel)[^1]);
+        Assert.Equal(["x"], imported.OutputNames);
+        Assert.Equal(["x"], ReimportedOutputNames(imported));
+    }
+
     [Fact]
     public void TestImportOnnxRefusesAnOutputOfUnknownRankThatNoInputShapeSettlesNamingIt()
     {

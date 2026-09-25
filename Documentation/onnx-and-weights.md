@@ -163,7 +163,9 @@ every caller, and keeps every function those bodies name.
 Exported graph inputs and outputs are named from the model's signature — the
 names by which the graph's inputs are addressed in Shorokoo (e.g. `[Hyper]` /
 input parameter names), deduplicated deterministically (`x`, `x_2`, …).
-Unnamed slots fall back to `input_{i}` / `output_{i}`. Every input and output
+Unnamed slots fall back to `input_{i}` / `output_{i}`. An output renamed this way —
+one passing an input of the same name straight through, say — keeps its own name in
+its `ValueInfoProto` metadata, and `ImportOnnx` gives it back. Every input and output
 `ValueInfoProto` carries its dtype and a **shape** — the reference
 `onnx.checker` requires at least a rank on each of the main graph's inputs and
 outputs, and an exported model passes it. The rank is the declared one where the

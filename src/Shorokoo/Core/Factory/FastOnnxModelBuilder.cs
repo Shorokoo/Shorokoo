@@ -679,7 +679,17 @@ namespace Shorokoo.Core.Factory
             for (int i = 0; i < graph.Outputs.Count; i++)
             {
                 var oldName = graph.Outputs[i].Name;
-                var newName = Assign(i < outputNames.Count ? outputNames[i] : null, $"output_{i}");
+                var preferred = UsableSignatureName(i < outputNames.Count ? outputNames[i] : null);
+                var newName = Assign(preferred, $"output_{i}");
+                // An output whose name another value already holds (an input it passes through, say)
+                // is written under a suffixed one; its own rides in the metadata, which the importer
+                // reads it back from.
+                if (preferred is not null && newName != preferred)
+                    graph.Outputs[i].MetadataProps.Add(new StringStringEntryProto
+                    {
+                        Key = OnnxOpAttributeNames.ShrkAttrOutputName,
+                        Value = preferred,
+                    });
                 if (rename.TryGetValue(oldName, out var sourceName))
                 {
                     bridges.Add((sourceName, newName));

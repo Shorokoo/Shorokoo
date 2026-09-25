@@ -4107,7 +4107,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             {
                 var modelId = paramInfo.SpecificModelId;
                 var dtype = paramInfo.TargetFn.Outputs[0].DType;
-                var rank = paramInfo.TargetFn.OutputRankOverrides[0];
+                var rank = paramInfo.TargetFn.OutputRanks[0];
                 var idTemplateString = idTemplateInfos.GetSpecificIdentifierTemplate(modelId).ToString();
 
                 var initializerParamKeys = new List<FastTensorKey?>();
@@ -4716,7 +4716,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 // ordinary value and may be a parameter like any other. Which it is comes off the
                 // declared output rank, never off the position.
                 bool takesShapeInput =
-                    (fn.OutputRankOverrides.Length > 0 ? fn.OutputRankOverrides[0] : null) != 0;
+                    (fn.OutputRanks.Length > 0 ? fn.OutputRanks[0] : null) != 0;
                 for (int i = 2; i < inputs.Count; i++)
                 {
                     bool mayBeParam = i > 2 || !takesShapeInput;

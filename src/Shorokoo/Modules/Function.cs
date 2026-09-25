@@ -92,7 +92,7 @@ namespace Shorokoo.Core
         public string ModelSignatureString => _signatures.Value.modelSignature;
         public string ModuleSignatureString => _signatures.Value.moduleSignature;
         private Lazy<(string moduleSignature, string modelSignature)> _signatures
-            => __signatures ??= new Lazy<(string, string)>(() => OriginalFastGraph.GetSignatureStrings(OutputRankOverrides));
+            => __signatures ??= new Lazy<(string, string)>(() => OriginalFastGraph.GetSignatureStrings(OutputRanks));
         private Lazy<(string moduleSignature, string modelSignature)>? __signatures;
 
         public FunctionType FunctionType { get; }
@@ -143,12 +143,13 @@ namespace Shorokoo.Core
         internal ImmutableArray<Variable> NonHyperparamInputs { get { EnsureConvertedSnapshot(); return _nonHyperparamInputs; } }
         internal ImmutableArray<Variable> Outputs { get { EnsureConvertedSnapshot(); return _outputs; } }
         /// <summary>
-        /// The rank a call of this function gives each of its outputs. A module signature has no
-        /// computation to take a rank from — its outputs are placeholders standing for the C#
-        /// return types — so each is the rank its output node declares, if any. Every other
-        /// function's output has the rank its body computes.
+        /// The effective rank of each output: the rank a call of this function gives it. A module
+        /// signature has no computation to take a rank from — its outputs are placeholders standing
+        /// for the C# return types — so each is the rank its output node declares, or null when it
+        /// declares none. Every other function's output has the rank its output node declares, or
+        /// else the rank its body computes.
         /// </summary>
-        internal ImmutableArray<int?> OutputRankOverrides { get { EnsureConvertedSnapshot(); return _outputRankOverrides; } }
+        internal ImmutableArray<int?> OutputRanks { get { EnsureConvertedSnapshot(); return _outputRanks; } }
 
         /// <summary>
         /// Primary representation of the function body: the frozen (immutable)
@@ -178,7 +179,7 @@ namespace Shorokoo.Core
         private ImmutableArray<Variable> _hyperparamInputs;
         private ImmutableArray<Variable> _nonHyperparamInputs;
         private ImmutableArray<Variable> _outputs;
-        private ImmutableArray<int?> _outputRankOverrides;
+        private ImmutableArray<int?> _outputRanks;
 
         // Materializes the Variable snapshot directly from OriginalFastGraph via
         // BuildNodes. Shielded from any active outer trace by an isolated trace:
@@ -199,7 +200,7 @@ namespace Shorokoo.Core
                 .Where(x => x.InputType != Shorokoo.Core.Nodes.NodeDefinitions.InputType.Hyperparam)
                 .ToImmutableArray();
             _outputs = built.outputs;
-            _outputRankOverrides = FunctionType == FunctionType.ModuleSignature
+            _outputRanks = FunctionType == FunctionType.ModuleSignature
                 ? [.. body.OutputDeclaredRanks]
                 : [.. built.outputs.Zip(body.OutputDeclaredRanks, (output, declared) => declared ?? output.Rank)];
             _convertedSnapshotComputed = true;
@@ -260,7 +261,7 @@ namespace Shorokoo.Core
             return InternalOp.FunctionInvoke(tensors,
                     this.Outputs.Select(x => x.Structure()).ToArray(),
                     this.Outputs.Select(x => x.DType).ToArray(),
-                    this.OutputRankOverrides.Select(x => x ?? -1).ToArray(),
+                    this.OutputRanks.Select(x => x ?? -1).ToArray(),
                     targetFn: this,
                     genericTypeArgs: null);
         }

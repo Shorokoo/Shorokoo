@@ -147,9 +147,9 @@ namespace Shorokoo.Core.Factory.CSharpFactory
                     paramList += ", ";
 
                 if (targetFunction.Outputs.Length == 1)
-                    paramList += GetModuleAwareTypeDefString(targetFunction.Outputs[0], targetFunction.OutputRankOverrides[0]);
+                    paramList += GetModuleAwareTypeDefString(targetFunction.Outputs[0], targetFunction.OutputRanks[0]);
                 else
-                    paramList += $"({string.Join(", ", targetFunction.Outputs.Zip(targetFunction.OutputRankOverrides).Select(x => GetModuleAwareTypeDefString(x.First, x.Second)))})";
+                    paramList += $"({string.Join(", ", targetFunction.Outputs.Zip(targetFunction.OutputRanks).Select(x => GetModuleAwareTypeDefString(x.First, x.Second)))})";
 
                 return $"Model<{paramList}>";
             }
@@ -157,7 +157,7 @@ namespace Shorokoo.Core.Factory.CSharpFactory
             {
                 var hyperParamList = string.Join(", ", targetFunction.HyperparamInputs.Select(x => GetModuleAwareTypeDefString(x, x.Rank)));
                 var nonHyperParamList = string.Join(", ", targetFunction.NonHyperparamInputs.Select(x => GetModuleAwareTypeDefString(x, x.Rank)));
-                var outputsList = string.Join(", ", targetFunction.Outputs.Zip(targetFunction.OutputRankOverrides).Select(x => GetModuleAwareTypeDefString(x.First, x.Second)));
+                var outputsList = string.Join(", ", targetFunction.Outputs.Zip(targetFunction.OutputRanks).Select(x => GetModuleAwareTypeDefString(x.First, x.Second)));
 
                 if (targetFunction.HyperparamInputs.Length > 1)
                     hyperParamList = $"({hyperParamList})";
@@ -175,7 +175,7 @@ namespace Shorokoo.Core.Factory.CSharpFactory
             }
         }
 
-        public static string GetModuleAwareTypeDefString(Variable variable, int? rankOverride)
+        public static string GetModuleAwareTypeDefString(Variable variable, int? rank)
         {
             // Model/module params are scalar nodes distinguished by runtime DType (formerly the generic
             // Variable<IModelVarType> / Variable<IModuleVarType>).
@@ -184,7 +184,7 @@ namespace Shorokoo.Core.Factory.CSharpFactory
             else if(variable is Variable moduleVariable && moduleVariable.Type == DType.Module)
                 return GetModuleAwareTypeDefString(moduleVariable.ModuleFn.AssertNotNull(), asModel: false);
 
-            return GetTypeDefString(variable, rankOverride);
+            return GetTypeDefString(variable, rank);
         }
 
         public static string GetModuleAwareTypeDefString(Variable tensor)

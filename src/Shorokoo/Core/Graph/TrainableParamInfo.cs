@@ -57,9 +57,9 @@ namespace Shorokoo.Core.Graph
         {
             get
             {
-                var declaredRank = TargetFn.OutputRankOverrides.Length > 0
-                    ? TargetFn.OutputRankOverrides[0] : null;
-                if (declaredRank == 0) return Shape.Scalar;
+                var rank = TargetFn.OutputRanks.Length > 0
+                    ? TargetFn.OutputRanks[0] : null;
+                if (rank == 0) return Shape.Scalar;
                 if (TrainableParamInputParamValues.IsDefaultOrEmpty)
                     throw new InvalidOperationException(
                         $"Parameter initializer '{TargetFn.DefaultName}' takes no initializer input and "

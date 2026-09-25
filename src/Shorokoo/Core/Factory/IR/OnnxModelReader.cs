@@ -1078,7 +1078,7 @@ namespace Shorokoo.Core.Factory.IR
             var attrDefs = Definitions.NodeDefinitions[InternalOpCodes.FUNCTION_INVOKE].AttributeDefs;
             var fastFnGraph = function.OriginalFastGraph;
             var fnOutputs = function.Outputs;
-            var fnRankOverrides = function.OutputRankOverrides;
+            var fnOutputRanks = function.OutputRanks;
 
             var attrs = nodeProto.Attributes.Any(a => a.Name == ShrkAttrStructure)
                 ? ParseAttributes(nodeProto, Definitions.NodeDefinitions[InternalOpCodes.FUNCTION_INVOKE]).Item1
@@ -1087,7 +1087,7 @@ namespace Shorokoo.Core.Factory.IR
                     {
                         [ShrkAttrStructure] = fnOutputs.Select(x => x.Structure()).ToArray(),
                         [ShrkAttrDtype] = fnOutputs.Select(x => x.DType).ToArray(),
-                        [ShrkAttrRank] = fnRankOverrides.Select(x => (long)(x ?? -1)).ToArray(),
+                        [ShrkAttrRank] = fnOutputRanks.Select(x => (long)(x ?? -1)).ToArray(),
                         [ShrkAttrGenericTypeArgs] = (DType[]?)null,
                     },
                     attrDefs);

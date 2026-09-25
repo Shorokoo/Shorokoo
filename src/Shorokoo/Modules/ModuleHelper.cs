@@ -118,9 +118,9 @@ namespace Shorokoo.Core
         // The signature string is computed from the internal graph node; callers cross the module
         // boundary explicitly with IModuleParam.ToVariable() before reaching here.
         internal static string ToSignatureString(Variable variable)
-            => ToSignatureStringWithOverride(variable, variable.Rank);
+            => ToSignatureStringAtRank(variable, variable.Rank);
 
-        internal static string ToSignatureStringWithOverride(Variable variable, int? rank)
+        internal static string ToSignatureStringAtRank(Variable variable, int? rank)
         {
             // Model/module params are scalar nodes distinguished by their runtime DType (formerly the
             // generic ImmutableScalar<IModelVarType> / ImmutableScalar<IModuleVarType>).
@@ -165,7 +165,7 @@ namespace Shorokoo.Core
         {
             var signatureHyperparamPart = string.Join(", ", hyperparams.Select(ToSignatureString));
             var signatureInputPart = string.Join(", ", inputs.Select(ToSignatureString));
-            var signatureOutputPart = string.Join(", ", outputs.Zip(outputRanks).Select(x => ToSignatureStringWithOverride(x.First, x.Second)));
+            var signatureOutputPart = string.Join(", ", outputs.Zip(outputRanks).Select(x => ToSignatureStringAtRank(x.First, x.Second)));
 
             return ($"{signatureHyperparamPart} | {signatureInputPart} > {signatureOutputPart}",
                 $"{signatureInputPart} > {signatureOutputPart}");

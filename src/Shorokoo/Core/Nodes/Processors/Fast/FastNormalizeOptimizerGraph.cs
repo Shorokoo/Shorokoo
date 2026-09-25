@@ -302,8 +302,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             }
 
             var originalInputPositions = new Dictionary<FastTensorKey, int>();
+            var originalInputs = graph.Inputs;
             for (int i = 0; i < hyperparamCount + mandatoryParamAndGradInputs; i++)
-                originalInputPositions[graph.Inputs[i]] = i;
+                originalInputPositions[originalInputs[i]] = i;
 
             var updatedStateKeys = new FastTensorKey?[stateNodes.Count];
             foreach (var linkNode in stateUpdateLinkNodes)
@@ -395,9 +396,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             var dtypes = new DType[hyperparamCount];
             var ranks = new int?[hyperparamCount];
+            var hyperInputs = graph.Inputs;
             for (int h = 0; h < hyperparamCount; h++)
             {
-                if (!producerByOutput.TryGetValue(graph.Inputs[h], out var producer))
+                if (!producerByOutput.TryGetValue(hyperInputs[h], out var producer))
                     throw new InvalidOperationException(
                         $"Optimizer graph hyperparameter input {h} has no producer node.");
                 if (producer.OpCode != InternalOpCodes.MODEL_TENSOR_INPUT)

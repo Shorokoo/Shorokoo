@@ -154,8 +154,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var built = new InternalComputationGraph(presentStandIns, [.. outputs.Select(x => x!)]);
 
             var standInKeyBySlot = new FastTensorKey?[inputs.Length];
+            var builtInputs = built.Inputs;
             for (int i = 0, present = 0; i < standIns.Length; i++)
-                if (standIns[i] is not null) standInKeyBySlot[i] = built.Inputs[present++];
+                if (standIns[i] is not null) standInKeyBySlot[i] = builtInputs[present++];
 
             // The stand-ins are the built graph's input prefix and its output nodes its suffix; the
             // decomposition is what lies between.
@@ -176,9 +177,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             }
 
             var terminalOutputs = body[^1].Outputs;
+            var builtOutputs = built.Outputs;
             if (terminalOutputs.Count != declaredOutputs) return null;
             for (int i = 0; i < declaredOutputs; i++)
-                if (terminalOutputs[i] != built.Outputs[i]) return null;
+                if (terminalOutputs[i] != builtOutputs[i]) return null;
 
             return new LoweredPlan(body, standInKeyBySlot);
         }

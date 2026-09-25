@@ -204,8 +204,9 @@ namespace Shorokoo.Core.Graph
         private static List<int> DataInputIndices(InternalComputationGraph graph)
         {
             var producers = graph.BuildProducerByOutputMap();
-            return [.. Enumerable.Range(0, graph.Inputs.Count).Where(i =>
-                !(producers.TryGetValue(graph.Inputs[i], out var node)
+            var inputs = graph.Inputs;
+            return [.. Enumerable.Range(0, inputs.Count).Where(i =>
+                !(producers.TryGetValue(inputs[i], out var node)
                   && node.OpCode == InternalOpCodes.GENERIC_TYPE_INPUT))];
         }
 

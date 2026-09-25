@@ -39,10 +39,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             InternalComputationGraph graph, ModelParamList? inputHints, QuickExecutionEngine engine)
         {
             var bound = RepresentativeInputShapes.BindSamplesToLoweredInputs(graph, inputHints);
+            var inputKeys = graph.Inputs;
             var inputs = new Dictionary<FastTensorKey, IRuntimeTensor>();
             for (int i = 0; i < bound.Length; i++)
                 if (bound[i] is { } value && value is not TensorDataStruct)
-                    inputs[graph.Inputs[i]] = TensorDataConverter.ToRuntimeInput(value, engine.MaxDataElements);
+                    inputs[inputKeys[i]] = TensorDataConverter.ToRuntimeInput(value, engine.MaxDataElements);
             return inputs.Count == 0 ? null : inputs;
         }
 
@@ -3828,8 +3829,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 .Concat(unresolved.Sites).Distinct().ToList();
             if (sites.Count == 0) return;
 
+            var inputKeys = graph.Inputs;
             var inputs = InputsFeedingParamInitializers(graph, sites)
-                .Where(i => unresolved.InputsWithoutAValue.Contains(graph.Inputs[i]))
+                .Where(i => unresolved.InputsWithoutAValue.Contains(inputKeys[i]))
                 .ToList();
             if (inputs.Count == 0) return;
 

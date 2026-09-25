@@ -451,8 +451,9 @@ public static class TrainingGraphBuilder
     {
         var reached = ReachableFromOutputs(graph);
         var consumed = new HashSet<int>();
-        for (int i = 0; i < count && i < graph.Inputs.Count; i++)
-            if (reached.Contains(graph.Inputs[i])) consumed.Add(i);
+        var inputs = graph.Inputs;
+        for (int i = 0; i < count && i < inputs.Count; i++)
+            if (reached.Contains(inputs[i])) consumed.Add(i);
         return consumed;
     }
 

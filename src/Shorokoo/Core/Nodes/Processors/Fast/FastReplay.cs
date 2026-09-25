@@ -66,9 +66,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             //    remap is also consulted when mapping the cloned outputs back onto
             //    target keys, so passthrough outputs (source.Outputs[i] == source.Inputs[j])
             //    surface as the matching mappedInputs[j].
-            var remap = new Dictionary<FastTensorKey, FastTensorKey>(clone.Inputs.Count);
-            for (int i = 0; i < clone.Inputs.Count; i++)
-                remap[clone.Inputs[i]] = mappedInputs[i];
+            var cloneInputs = clone.Inputs;
+            var remap = new Dictionary<FastTensorKey, FastTensorKey>(cloneInputs.Count);
+            for (int i = 0; i < cloneInputs.Count; i++)
+                remap[cloneInputs[i]] = mappedInputs[i];
 
             // 3. Identify input-producing nodes; these are dropped during splicing because
             //    the caller's mappedInputs already supply those values from target's side.

@@ -131,10 +131,11 @@ public sealed class QuickExecutionEngine
     public IData[] Execute(InternalComputationGraph graph, params IData[] inputs)
     {
         var store = Run(graph, inputs);
-        var outputs = new IData[graph.Outputs.Count];
-        for (int i = 0; i < graph.Outputs.Count; i++)
+        var outputKeys = graph.Outputs;
+        var outputs = new IData[outputKeys.Count];
+        for (int i = 0; i < outputKeys.Count; i++)
         {
-            if (!store.TryGetValue(graph.Outputs[i], out var rt))
+            if (!store.TryGetValue(outputKeys[i], out var rt))
                 throw new InvalidTensorOperationException(ErrorCodes.CR006, "Execute", $"output #{i}",
                     "Graph output was not produced by execution");
             outputs[i] = TensorDataConverter.ToOutputData(rt)

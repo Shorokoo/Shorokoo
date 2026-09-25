@@ -4438,7 +4438,7 @@ namespace Shorokoo
             // rather than carrying a real zero buffer — the same threshold the model-input exemplars
             // use. These exemplars outlive the pass on the rig (OptimizationInputs), so a
             // multi-megabyte target would otherwise stay allocated for as long as the rig does.
-            while (idx < graph.Inputs.Count)
+            while (idx < allInputs.Length)
                 allInputs[idx++] = RepresentativeRuntimeInputFor(targetShape, targetDType);
 
             // The step graph is a concrete graph like the model it trains, so its inputs record the
@@ -4482,10 +4482,11 @@ namespace Shorokoo
             // just been inferred for the optimizer pass, so holding each to its parameter costs
             // nothing and fails here, at build, rather than after a step. A dimension inference
             // leaves symbolic (-1) constrains nothing.
-            for (int p = 0; p < TrainableParamStructDef.Fields.Length && p < graph.Outputs.Count; p++)
+            var stepOutputs = graph.Outputs;
+            for (int p = 0; p < TrainableParamStructDef.Fields.Length && p < stepOutputs.Count; p++)
             {
                 var field = TrainableParamStructDef.Fields[p];
-                if (shapeInfo.GetTensorInfo(graph.Outputs[p]) is not { } updatedInfo) continue;
+                if (shapeInfo.GetTensorInfo(stepOutputs[p]) is not { } updatedInfo) continue;
                 var updatedDims = updatedInfo.Shape.Dims;
                 var declaredDims = paramSlots[field.Name].Shape.Dims;
                 if (updatedDims.Contains(-1L) || updatedDims.SequenceEqual(declaredDims)) continue;

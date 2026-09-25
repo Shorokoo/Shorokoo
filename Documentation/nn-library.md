@@ -406,7 +406,12 @@ Convolution.ConvTranspose(x, outChannels, long[] kernelSize,
   same output (it only changes the claimed shape; it is not literal output
   zero-padding). PyTorch's `output_padding < max(stride, dilation)` guard is **not**
   re-imposed here — ONNX Runtime validates the geometry. `output_shape` names the
-  target spatial size directly and, when given, overrides `output_padding`.
+  target spatial size directly and, when given, overrides `output_padding`. It may
+  reach past the full extent `stride * (in - 1) + output_padding + (kernel - 1) * dilation + 1`
+  by one element, which zero-extends the end as in ONNX's own `output_shape` example
+  (none under `auto_pad: SameUpper`); any further and ONNX would need negative begin
+  pads, so concretizing the model refuses it with **FW054**, naming the output_shape
+  and the full extent. Raise `output_padding` instead to reach a larger size.
   Transposed conv is **zeros-only** (no `padding_mode`): its "padding" is an
   output-shape crop, not an input border.
 

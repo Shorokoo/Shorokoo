@@ -1,6 +1,6 @@
 # Training models
 
-Related: [defining-models.md](defining-models.md) · [nn-library.md](nn-library.md) · [inference.md](inference.md)
+Related: [defining-models.md](defining-models.md) · [nn-library.md](nn-library.md) · [inference.md](inference.md) · [training-backends.md](training-backends.md)
 
 ## Facts
 
@@ -9,7 +9,9 @@ Related: [defining-models.md](defining-models.md) · [nn-library.md](nn-library.
 - `TrainingRig` is the entry point. It runs autodiff on the composed graph and
   produces a trainable step.
 - Gradients are produced by automatic differentiation; you do not write backward
-  passes.
+  passes. Shorokoo differentiates the step itself by default; a rig built with
+  `trainingBackend: TrainingBackend.Native` leaves the gradient to the backend that runs the
+  step instead — see [training-backends.md](training-backends.md).
 - `TrainStep` moves the whole training state through host memory every step. On a GPU that is what
   sets the pace, so a long run belongs in a `rig.BeginResidentRun()` loop (or in `Fit` / `Train`,
   which already use one) — see [Keeping training state on the device](#keeping-training-state-on-the-device).
@@ -792,7 +794,9 @@ so it is the context whose session actually executes training. It is the sole co
 `TrainStep`, `Train` and `Fit` — none of them takes a per-call context override, so a rig has exactly
 one set of compiled training-step sessions (one per fed input shape) that the `Fit`/`Train` loop and a
 manual `TrainStep` loop all share.
-Every `With…` derivation keeps the same two contexts.
+Every `With…` derivation keeps the same two contexts. A third piece of runtime configuration rides
+alongside them, equally never persisted: the rig's `TrainingBackend`, which decides whether Shorokoo
+or the runtime context's backend computes the gradient — see [training-backends.md](training-backends.md).
 
 **What the two can usefully differ in: the backend, and how its sessions and runs are
 configured.** A `ComputeContext` carries `DeviceMemory` — a budget on what it holds on the card,

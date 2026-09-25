@@ -275,6 +275,62 @@ namespace Shorokoo.Tests.Modules
         private static Tensor<float32> Flat(Tensor<float32> t) => t.Reshape(Vector(-1L));
     }
 
+    /// <summary>DFT, STFT, window and MelWeightMatrix values from runtime inputs: a complex
+    /// [2,6,2] signal forward and back (the inverse recovers it), a real odd-length signal full
+    /// and onesided (a prefix of the full one), dft_length padding and truncation, axis inputs
+    /// 2 and −3 on a [2,3,4,2] signal (inverse on the latter); STFT with a runtime Hann window
+    /// ([2,5,5,2]) and windowless with frame_length 6, two-sided ([2,5,6,2]); symmetric float64
+    /// Hamming, periodic Blackman; MelWeightMatrix [17,6] in float32 and float64.
+    /// Scalars: winSize 8, frameStep 3; the mel matrix is made from them (6 bins, dft_length 32,
+    /// 8000 Hz, 100–3500 Hz) so that it is computed at run time.</summary>
+    [Module]
+    public partial class QeeSignalValueAuditCheck
+    {
+        public static Scalar<bit> Inline(
+            Tensor<float32> cplx, Tensor<float32> real7, Tensor<float32> sig4, Tensor<float32> stftSig,
+            Scalar<int64> winSize, Scalar<int64> frameStep)
+        {
+            var melBins = winSize - Scalar(2L);
+            var dftLen = winSize * Scalar(4L);
+            var sampleRate = winSize * Scalar(1000L);
+            var low = Scalar(100f);
+            var high = Scalar(3500f);
+            var dftC = (Tensor<float32>)OnnxOp.Dft(cplx, null, null, inverse: false);
+            var invC = (Tensor<float32>)OnnxOp.Dft(dftC, null, null, inverse: true);
+            var dftFull = (Tensor<float32>)OnnxOp.Dft(real7, null, null, inverse: false);
+            var dftOne = (Tensor<float32>)OnnxOp.Dft(real7, null, null, inverse: false, onesided: true);
+            var dftPad = (Tensor<float32>)OnnxOp.Dft(real7, Scalar(10L), null, inverse: false);
+            var dftTrunc = (Tensor<float32>)OnnxOp.Dft(cplx, Scalar(4L), null, inverse: false);
+            var dftAx2 = (Tensor<float32>)OnnxOp.Dft(sig4, null, Scalar(2L), inverse: false);
+            var dftAxNeg = (Tensor<float32>)OnnxOp.Dft(sig4, null, Scalar(-3L), inverse: true);
+
+            var hann = (Tensor<float32>)OnnxOp.HannWindow(winSize, outputDatatype: DType.Float32);
+            var stftWin = (Tensor<float32>)OnnxOp.STFT(stftSig, frameStep, window: hann, frameLength: null, onesided: true);
+            var stftLen = (Tensor<float32>)OnnxOp.STFT(stftSig, frameStep, window: null, frameLength: Scalar(6L), onesided: false);
+            var hamm = (Tensor<float64>)OnnxOp.HammingWindow(winSize, outputDatatype: DType.Float64, periodic: false);
+            var black = (Tensor<float32>)OnnxOp.BlackmanWindow(winSize, outputDatatype: DType.Float32, periodic: true);
+            var mel = (Tensor<float32>)OnnxOp.MelWeightMatrix(melBins, dftLen, sampleRate, low, high, outputDatatype: DType.Float32);
+            var melD = (Tensor<float64>)OnnxOp.MelWeightMatrix(melBins, dftLen, sampleRate, low, high, outputDatatype: DType.Float64);
+
+            var mismatch =
+                Apart(invC, cplx) +
+                Apart(dftOne, dftFull.Slice(Vector(0L), Vector(4L), axes: Vector(1L))) +
+                ShapeMismatch(dftC, Vector(2L, 6L, 2L)) +
+                ShapeMismatch(dftOne, Vector(1L, 4L, 2L)) +
+                ShapeMismatch(dftPad, Vector(1L, 10L, 2L)) +
+                ShapeMismatch(dftTrunc, Vector(2L, 4L, 2L)) +
+                ShapeMismatch(dftAx2, Vector(2L, 3L, 4L, 2L)) +
+                ShapeMismatch(dftAxNeg, Vector(2L, 3L, 4L, 2L)) +
+                ShapeMismatch(stftWin, Vector(2L, 5L, 5L, 2L)) +
+                ShapeMismatch(stftLen, Vector(2L, 5L, 6L, 2L)) +
+                ShapeMismatch(hamm, Vector(8L)) +
+                ShapeMismatch(black, Vector(8L)) +
+                ShapeMismatch(mel, Vector(17L, 6L)) +
+                ShapeMismatch(melD, Vector(17L, 6L));
+            return mismatch < Scalar(1L);
+        }
+    }
+
     /// <summary>TfIdfVectorizer output extent = max(ngram_indexes) + 1 (= 5 here), NOT the
     /// pool length (= 3) — pins this batch's shape fix, ORT-validated. 1-D [4] → [5] and
     /// 2-D [1,4] → [1,5]. Pool: unigrams {1},{2} + bigram (3,4); mode TF.
@@ -330,6 +386,81 @@ namespace Shorokoo.Tests.Modules
                 ShapeMismatch(regex, Vector(2L)) +
                 ShapeMismatch((Tensor<int64>)numSplits, Vector(2L));
             return (mismatch < Scalar(1L), normStop, (Tensor<utf8>)splitY);
+        }
+    }
+
+    /// <summary>String VALUES, which QEE does not compute, so ORT-validated only: StringConcat,
+    /// StringNormalizer (LOWER; UPPER dropping stopwords ignoring case; NONE dropping them
+    /// case-sensitively; in the C locale, which every machine has), RegexFullMatch, StringSplit (at a delimiter, where adjacent delimiters
+    /// make an empty piece; at whitespace runs without one; maxsplit 1), Unique over strings, and
+    /// Cast between numbers and strings: a float as printf's %.8g, an integer and a bool in
+    /// decimal, and strings read back as floats (exponent form, INF in any case) and as integers;
+    /// a reversing Slice of strings whose start clamps to the first; TfIdfVectorizer weighting by
+    /// output position in TFIDF and IDF modes; RegexFullMatch in RE2's syntax, whose \d and \s
+    /// are ASCII, with POSIX classes, \pL, \x{41} and \z.
+    /// Inputs x = ["Hello World", "the  quick fox"], f = [1, 0.1, −3.5, 1e20, 1e−5, 123456789],
+    /// i = [−7, 0, 9007199254740993].</summary>
+    [Module]
+    public partial class QeeStringValueAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<utf8> x, Tensor<float32> f, Tensor<int64> i)
+        {
+            var (split, splitCount) = OnnxOp.StringSplit(x, delimiter: " ");
+            var (spaced, spacedCount) = OnnxOp.StringSplit(x);
+            var (once, onceCount) = OnnxOp.StringSplit(x, delimiter: " ", maxsplit: 1L);
+            var (unique, _, uniqueInverse, _) = OnnxOp.Unique(Strings("b", "a", "b"));
+            var mismatch =
+                Mismatch(OnnxOp.StringConcat(x, Strings("!", "?")), Strings("Hello World!", "the  quick fox?")) +
+                Mismatch(OnnxOp.StringNormalizer(x, caseChangeAction: "LOWER", locale: "C"), Strings("hello world", "the  quick fox")) +
+                Mismatch(OnnxOp.StringNormalizer(Strings("The", "cat", "THE", "Sat"), caseChangeAction: "UPPER",
+                    isCaseSensitive: 0L, locale: "C", stopwords: ["the"]), Strings("CAT", "SAT")) +
+                Mismatch(OnnxOp.StringNormalizer(Strings("The", "the", "a"), caseChangeAction: "NONE",
+                    isCaseSensitive: 1L, locale: "C", stopwords: ["the"]), Strings("The", "a")) +
+                IntMismatch(((Tensor<bit>)OnnxOp.RegexFullMatch(Strings("abc123", "abc", "123"), "[a-z]+\\d+")).Cast<int64>(),
+                    Vector(1L, 0L, 0L)) +
+                Mismatch(split, Strings("Hello", "World", "", "", "the", "", "quick", "fox")) +
+                IntMismatch((Tensor<int64>)splitCount, Vector(2L, 4L)) +
+                Mismatch(spaced, Strings("Hello", "World", "", "the", "quick", "fox")) +
+                IntMismatch((Tensor<int64>)spacedCount, Vector(2L, 3L)) +
+                Mismatch(once, Strings("Hello", "World", "the", " quick fox")) +
+                IntMismatch((Tensor<int64>)onceCount, Vector(2L, 2L)) +
+                Mismatch(unique, Strings("a", "b")) +
+                IntMismatch((Tensor<int64>)uniqueInverse, Vector(1L, 0L, 1L)) +
+                Mismatch(OnnxOp.Cast(f, null, DType.Utf8),
+                    Strings("1", "0.1", "-3.5", "1e+20", "9.9999997e-06", "1.2345679e+08")) +
+                Mismatch(OnnxOp.Cast(i, null, DType.Utf8), Strings("-7", "0", "9007199254740993")) +
+                Mismatch(OnnxOp.Cast(Vector(true, false), null, DType.Utf8), Strings("1", "0")) +
+                FloatMismatch((Tensor<float32>)OnnxOp.Cast(Strings("3.5", "-1e3", "0.25"), null, DType.Float32),
+                    Vector(3.5f, -1000f, 0.25f)) +
+                IntMismatch(((Tensor<bit>)OnnxOp.IsInf((Tensor<float32>)OnnxOp.Cast(Strings("INF", "-inf"), null, DType.Float32))).Cast<int64>(),
+                    Vector(1L, 1L)) +
+                IntMismatch((Tensor<int64>)OnnxOp.Cast(Strings("42", "-17"), null, DType.Int64), Vector(42L, -17L)) +
+                Mismatch(x.Slice(Vector(-4L), Vector(-10L), Vector(0L), Vector(-1L)), Strings("Hello World")) +
+                FloatMismatch(TfIdf(i, "TFIDF"), Vector(0.5f, 1.5f, 5f)) +
+                FloatMismatch(TfIdf(i, "IDF"), Vector(0.5f, 1.5f, 2.5f)) +
+                IntMismatch(Matches(Strings("123", "١٢٣"), @"\d+"), Vector(1L, 0L)) +
+                IntMismatch(Matches(Strings(" ", "\u00a0"), @"\s"), Vector(1L, 0L)) +
+                IntMismatch(Matches(Strings("abc", "ab1"), "[[:alpha:]]+"), Vector(1L, 0L)) +
+                IntMismatch(Matches(Strings("é", "1"), @"\pL+"), Vector(1L, 0L)) +
+                IntMismatch(Matches(Strings("A", "a"), @"\x{41}\z"), Vector(1L, 0L));
+            return mismatch < Scalar(1L);
+        }
+
+        private static Tensor<utf8> Strings(params string[] values) => (Tensor<utf8>)OnnxOp.Constant(values);
+
+        private static Tensor<int64> Matches(Tensor<utf8> x, string pattern)
+            => ((Tensor<bit>)OnnxOp.RegexFullMatch(x, pattern)).Cast<int64>();
+
+        private static Tensor<float32> TfIdf(Tensor<int64> i, string mode)
+            => (Tensor<float32>)OnnxOp.TfIdfVectorizer(i.Slice(Vector(0L), Vector(1L)) * Scalar(0L) + Vector(1L, 2L, 3L, 4L, 1L), maxGramLength: 2L, maxSkipCount: 0L,
+                minGramLength: 1L, mode: mode, ngramCounts: [0L, 2L], ngramIndexes: [2L, 0L, 1L],
+                poolInt64s: [1L, 2L, 3L, 4L], poolStrings: null, weights: [0.5f, 1.5f, 2.5f]);
+
+        private static Scalar<int64> Mismatch(Variable actual, Tensor<utf8> expected)
+        {
+            var flat = ((Tensor<utf8>)actual).Reshape(Vector(-1L));
+            return ShapeMismatch(flat, expected.TShape)
+                + ((Tensor<bit>)OnnxOp.Not(OnnxOp.Equal(flat, expected))).Cast<int64>().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
         }
     }
 

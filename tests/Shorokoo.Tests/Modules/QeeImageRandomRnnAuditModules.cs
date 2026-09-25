@@ -1,4 +1,5 @@
 using static Shorokoo.Tests.Modules.QeeAuditVerdicts;
+using static Shorokoo.Tests.Modules.RecurrentAuditVerdicts;
 
 namespace Shorokoo.Tests.Modules
 {
@@ -102,6 +103,157 @@ namespace Shorokoo.Tests.Modules
                 ShapeMismatch(cubic, Vector(1L, 1L, 16L, 16L)) +
                 ShapeMismatch(anti, Vector(1L, 1L, 4L, 4L)) +
                 ShapeMismatch(cropResize, Vector(1L, 1L, 4L, 4L));
+            return mismatch < Scalar(1L);
+        }
+    }
+
+    /// <summary>Resize over every coordinate_transformation_mode and nearest_mode: nearest with
+    /// round_prefer_ceil / ceil / round_prefer_floor under half_pixel_symmetric / asymmetric /
+    /// pytorch_half_pixel, linear antialiased under align_corners and a one-pixel axis under
+    /// pytorch_half_pixel, cubic antialiased and cubic with exclude_outside + cubic_coeff_a,
+    /// cubic with a not_smaller aspect policy, and tf_crop_and_resize with nearest and with a
+    /// single-axis roi. Input x is expected as [1,2,5,7].</summary>
+    [Module]
+    public partial class QeeResizeModesShapeAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+        {
+            // floor(5*1.7) = 8, floor(7*0.6) = 4.
+            var nearCeil = Resize(x, Vector(1f, 1f, 1.7f, 0.6f), null, ResizeMode.Nearest,
+                CoordinateTransformationMode.Half_pixel_symmetric, NearestMode.Round_prefer_ceil);
+            // floor(5*0.6) = 3, floor(7*2.5) = 17.
+            var nearAsym = Resize(x, Vector(1f, 1f, 0.6f, 2.5f), null, ResizeMode.Nearest,
+                CoordinateTransformationMode.Asymmetric, NearestMode.Ceil);
+            var nearTorch = Resize(x, null, Vector(1L, 2L, 9L, 3L), ResizeMode.Nearest,
+                CoordinateTransformationMode.Pytorch_half_pixel, NearestMode.Round_prefer_floor);
+            var linearAnti = (Tensor<float32>)OnnxOp.Resize(x, roi: null, scales: null, sizes: Vector(1L, 2L, 3L, 4L),
+                antialias: true, axes: null, coordinateTransformationMode: CoordinateTransformationMode.Align_corners,
+                cubicCoeffA: null, excludeOutside: null, extrapolationValue: null,
+                keepAspectRatioPolicy: null, mode: ResizeMode.Linear, nearestMode: null);
+            var linearOnePixel = Resize(x, null, Vector(1L, 2L, 1L, 10L), ResizeMode.Linear,
+                CoordinateTransformationMode.Pytorch_half_pixel, null);
+            // floor(5*0.6) = 3, floor(7*0.4) = 2.
+            var cubicAnti = (Tensor<float32>)OnnxOp.Resize(x, roi: null, scales: Vector(1f, 1f, 0.6f, 0.4f), sizes: null,
+                antialias: true, axes: null, coordinateTransformationMode: null,
+                cubicCoeffA: null, excludeOutside: null, extrapolationValue: null,
+                keepAspectRatioPolicy: null, mode: ResizeMode.Cubic, nearestMode: null);
+            // floor(5*1.5) = 7, floor(7*1.3) = 9.
+            var cubicExclude = (Tensor<float32>)OnnxOp.Resize(x, roi: null, scales: Vector(1f, 1f, 1.5f, 1.3f), sizes: null,
+                antialias: null, axes: null, coordinateTransformationMode: CoordinateTransformationMode.Asymmetric,
+                cubicCoeffA: -0.5f, excludeOutside: true, extrapolationValue: null,
+                keepAspectRatioPolicy: null, mode: ResizeMode.Cubic, nearestMode: null);
+            // not_smaller: max(3/5, 14/7) = 2 → [10, 14].
+            var cubicPolicy = (Tensor<float32>)OnnxOp.Resize(x, roi: null, scales: null, sizes: Vector(3L, 14L),
+                antialias: null, axes: [2L, 3L], coordinateTransformationMode: CoordinateTransformationMode.Half_pixel_symmetric,
+                cubicCoeffA: null, excludeOutside: null, extrapolationValue: null,
+                keepAspectRatioPolicy: KeepAspectRatioPolicy.not_smaller, mode: ResizeMode.Cubic, nearestMode: null);
+            // floor(5*1.4) = 7, floor(7*0.6) = 4.
+            var cropNearest = (Tensor<float32>)OnnxOp.Resize(x, roi: Vector(0f, 0f, 0.1f, -0.2f, 1f, 1f, 0.8f, 1.3f),
+                scales: Vector(1f, 1f, 1.4f, 0.6f), sizes: null, antialias: null, axes: null,
+                coordinateTransformationMode: CoordinateTransformationMode.Tf_crop_and_resize,
+                cubicCoeffA: null, excludeOutside: null, extrapolationValue: -5f,
+                keepAspectRatioPolicy: null, mode: ResizeMode.Nearest, nearestMode: NearestMode.Floor);
+            // floor(7*1.5) = 10 on the last axis only.
+            var cropAxis = (Tensor<float32>)OnnxOp.Resize(x, roi: Vector(0.1f, 1.2f), scales: Vector(1.5f), sizes: null,
+                antialias: null, axes: [3L], coordinateTransformationMode: CoordinateTransformationMode.Tf_crop_and_resize,
+                cubicCoeffA: null, excludeOutside: null, extrapolationValue: 2f,
+                keepAspectRatioPolicy: null, mode: ResizeMode.Cubic, nearestMode: null);
+
+            var mismatch =
+                ShapeMismatch(nearCeil, Vector(1L, 2L, 8L, 4L)) +
+                ShapeMismatch(nearAsym, Vector(1L, 2L, 3L, 17L)) +
+                ShapeMismatch(nearTorch, Vector(1L, 2L, 9L, 3L)) +
+                ShapeMismatch(linearAnti, Vector(1L, 2L, 3L, 4L)) +
+                ShapeMismatch(linearOnePixel, Vector(1L, 2L, 1L, 10L)) +
+                ShapeMismatch(cubicAnti, Vector(1L, 2L, 3L, 2L)) +
+                ShapeMismatch(cubicExclude, Vector(1L, 2L, 7L, 9L)) +
+                ShapeMismatch(cubicPolicy, Vector(1L, 2L, 10L, 14L)) +
+                ShapeMismatch(cropNearest, Vector(1L, 2L, 7L, 4L)) +
+                ShapeMismatch(cropAxis, Vector(1L, 2L, 5L, 10L));
+            return mismatch < Scalar(1L);
+        }
+
+        private static Tensor<float32> Resize(Tensor<float32> x, Vector<float32>? scales, Vector<int64>? sizes,
+            ResizeMode mode, CoordinateTransformationMode transform, NearestMode? nearest)
+            => (Tensor<float32>)OnnxOp.Resize(x, roi: null, scales: scales, sizes: sizes,
+                antialias: null, axes: null, coordinateTransformationMode: transform,
+                cubicCoeffA: null, excludeOutside: null, extrapolationValue: null,
+                keepAspectRatioPolicy: null, mode: mode, nearestMode: nearest);
+    }
+
+    /// <summary>Resize of uint8 values: linear and cubic with antialias, which round to the nearest
+    /// integer and saturate where a cubic overshoots the type's range, and linear without it,
+    /// which truncates. Input x = [0, 255, 255, 0, 0, 255, 0, 0] as [1, 1, 1, 8].</summary>
+    [Module]
+    public partial class QeeResizeUInt8ValueAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<uint8> x)
+        {
+            var mismatch =
+                IntMismatch(Resized(x, 0.6f, ResizeMode.Linear, true), Vector(96L, 198L, 32L, 128L)) +
+                IntMismatch(Resized(x, 0.6f, ResizeMode.Cubic, true), Vector(111L, 218L, 20L, 141L)) +
+                IntMismatch(Resized(x, 2.5f, ResizeMode.Cubic, true),
+                    Vector(0L, 21L, 128L, 234L, 255L, 255L, 234L, 128L, 21L, 0L, 0L, 23L, 151L, 250L, 212L, 83L, 0L, 0L, 0L, 0L)) +
+                IntMismatch(Resized(x, 1.7f, ResizeMode.Linear, false),
+                    Vector(0L, 97L, 247L, 255L, 217L, 67L, 0L, 0L, 127L, 232L, 82L, 0L, 0L));
+            return mismatch < Scalar(1L);
+        }
+
+        private static Tensor<int64> Resized(Tensor<uint8> x, float scale, ResizeMode mode, bool antialias)
+            => ((Tensor<uint8>)OnnxOp.Resize(x, roi: null, scales: Vector(1f, 1f, 1f, scale), sizes: null,
+                antialias: antialias, axes: null, coordinateTransformationMode: null, cubicCoeffA: null, excludeOutside: null,
+                extrapolationValue: null, keepAspectRatioPolicy: null, mode: mode, nearestMode: null))
+                .Cast<int64>().Reshape(Vector(-1L));
+    }
+
+    /// <summary>Sampling and rearrangement variants: GridSample cubic with reflection padding,
+    /// nearest with zeros padding under align_corners, linear with border padding, on a rotated
+    /// and scaled AffineGrid that reaches outside the image; RoiAlign avg with a sampling_ratio
+    /// and spatial_scale under output_half_pixel, and max with an adaptive sampling grid;
+    /// DepthToSpace in DCR and CRD modes and SpaceToDepth back; CenterCropPad cropping one axis
+    /// while padding another; Col2Im with dilations, asymmetric pads and strides. Inputs:
+    /// x [1,2,5,6], d [1,8,2,3], cols [1,12,12].</summary>
+    [Module]
+    public partial class QeeSamplingVariantsShapeAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x, Tensor<float32> d, Tensor<float32> cols)
+        {
+            var theta = Vector(1.1f, -0.4f, 0.1f, 0.5f, 1.2f, -0.2f).Reshape(Vector(1L, 2L, 3L));
+            var grid = (Tensor<float32>)OnnxOp.AffineGrid(theta, Vector(1L, 2L, 4L, 7L), alignCorners: false);
+            var gridCorners = (Tensor<float32>)OnnxOp.AffineGrid(theta, Vector(1L, 2L, 3L, 5L), alignCorners: true);
+            var cubic = (Tensor<float32>)OnnxOp.GridSample(x, grid, alignCorners: false,
+                mode: GridSampleMode.Cubic, paddingMode: GridSamplePaddingMode.Reflection);
+            var nearest = (Tensor<float32>)OnnxOp.GridSample(x, grid, alignCorners: true,
+                mode: GridSampleMode.Nearest, paddingMode: GridSamplePaddingMode.Zeros);
+            var linear = (Tensor<float32>)OnnxOp.GridSample(x, grid, alignCorners: false,
+                mode: GridSampleMode.Linear, paddingMode: GridSamplePaddingMode.Border);
+            var rois = Vector(0.5f, 1f, 9f, 7.5f, 2.2f, 0.3f, 4.9f, 3.1f, -1f, 2f, 5f, 12f).Reshape(Vector(3L, 4L));
+            var batch = Vector(0L, 0L, 0L);
+            var roiAvg = (Tensor<float32>)OnnxOp.RoiAlign(x, rois, batch,
+                coordinateTransformationMode: RoiAlignTransformationMode.Output_half_pixel,
+                mode: RoiAlignMode.Avg, outputHeight: 2, outputWidth: 3, samplingRatio: 2, spatialScale: 0.5f);
+            var roiMax = (Tensor<float32>)OnnxOp.RoiAlign(x, rois, batch,
+                coordinateTransformationMode: RoiAlignTransformationMode.Half_pixel,
+                mode: RoiAlignMode.Max, outputHeight: 3, outputWidth: 2, samplingRatio: 0, spatialScale: 1f);
+            var dcr = (Tensor<float32>)OnnxOp.DepthToSpace(d, 2L, DepthColumnRowMode.DCR);
+            var crd = (Tensor<float32>)OnnxOp.DepthToSpace(d, 2L, DepthColumnRowMode.CRD);
+            var back = (Tensor<float32>)OnnxOp.SpaceToDepth(crd, 2L);
+            var cropPad = (Tensor<float32>)OnnxOp.CenterCropPad(x, Vector(4L, 9L), axes: [2L, 3L]);
+            var image = (Tensor<float32>)OnnxOp.Col2Im(cols, Vector(5L, 6L), Vector(2L, 3L),
+                dilations: [2L, 1L], pads: [1L, 0L, 0L, 1L], strides: [1L, 2L]);
+
+            var mismatch =
+                ShapeMismatch(gridCorners, Vector(1L, 3L, 5L, 2L)) +
+                ShapeMismatch(cubic, Vector(1L, 2L, 4L, 7L)) +
+                ShapeMismatch(nearest, Vector(1L, 2L, 4L, 7L)) +
+                ShapeMismatch(linear, Vector(1L, 2L, 4L, 7L)) +
+                ShapeMismatch(roiAvg, Vector(3L, 2L, 2L, 3L)) +
+                ShapeMismatch(roiMax, Vector(3L, 2L, 3L, 2L)) +
+                ShapeMismatch(dcr, Vector(1L, 2L, 4L, 6L)) +
+                ShapeMismatch(crd, Vector(1L, 2L, 4L, 6L)) +
+                ShapeMismatch(back, Vector(1L, 8L, 2L, 3L)) +
+                ShapeMismatch(cropPad, Vector(1L, 2L, 4L, 9L)) +
+                ShapeMismatch(image, Vector(1L, 2L, 5L, 6L));
             return mismatch < Scalar(1L);
         }
     }
@@ -362,6 +514,58 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>Dropout: outside training (training_mode false) and at ratio 0 it is the identity
+    /// with an all-true mask; in training at ratio 0.5 (values random, so shape-checked, and every
+    /// element either dropped or scaled by 2) the mask is bool of the input's shape. Input
+    /// x = [1, 2, 3, 4].</summary>
+    [Module]
+    public partial class QeeDropoutAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+        {
+            var (off, offMask) = OnnxOp.Dropout(x, Scalar(0.5f), Scalar(false));
+            var (none, noneMask) = OnnxOp.Dropout(x, Scalar(0f), Scalar(true));
+            var (on, onMask) = OnnxOp.Dropout(x, Scalar(0.5f), Scalar(true), seed: 3L);
+            var kept = (Tensor<float32>)on;
+            var droppedOrScaled = ((Tensor<bit>)OnnxOp.Or(OnnxOp.Equal(kept, Scalar(0f)), OnnxOp.Equal(kept, x * Scalar(2f))))
+                .Cast<int64>().Reduce(ReduceKind.Min, keepDims: false).Scalar();
+            var mismatch =
+                FloatMismatch((Tensor<float32>)off, Vector(1f, 2f, 3f, 4f)) +
+                IntMismatch(((Tensor<bit>)offMask!).Cast<int64>(), Vector(1L, 1L, 1L, 1L)) +
+                FloatMismatch((Tensor<float32>)none, Vector(1f, 2f, 3f, 4f)) +
+                IntMismatch(((Tensor<bit>)noneMask!).Cast<int64>(), Vector(1L, 1L, 1L, 1L)) +
+                ShapeMismatch(kept, Vector(4L)) +
+                ShapeMismatch((Tensor<bit>)onMask!, Vector(4L)) +
+                IntMismatch1(droppedOrScaled, 1L);
+            return mismatch < Scalar(1L);
+        }
+    }
+
+    /// <summary>Shorokoo's keyed generator, which is deterministic integer arithmetic (Threefry-2x32
+    /// over uint32, packed into uint64) and so must match on every backend value for value: the
+    /// standard uniform at 20 and 13 rounds, the dense uniform over [−2, 3), the standard normal,
+    /// raw uint32 and uint64 bits, and a batch of key splits. Input x = zeros [3, 5] (its shape
+    /// is the draws').</summary>
+    [Module]
+    public partial class QeeKeyedRngValueAuditCheck
+    {
+        public static (Tensor<float32>, Tensor<float32>, Tensor<float32>, Tensor<float32>, Tensor<uint32>, Tensor<uint64>, Tensor<uint64>)
+            Inline(Tensor<float32> x)
+        {
+            var shape = x.ShapeTensor();
+            var key = Scalar(0x9E3779B97F4A7C15UL);
+            var substream = Scalar(5UL);
+            return (
+                Shorokoo.Core.Rng.RuntimeRng.StandardUniform(shape, key, substream),
+                Shorokoo.Core.Rng.RuntimeRng.StandardUniform(shape, key, substream, Shorokoo.Core.Rng.Threefry2x32.Rounds13),
+                Shorokoo.Core.Rng.RuntimeRng.Uniform(shape, key, substream, Scalar(-2f), Scalar(3f)),
+                Shorokoo.Core.Rng.RuntimeRng.StandardNormal(shape, key, substream),
+                Shorokoo.Core.Rng.RuntimeRng.BitsU32(shape, key, substream),
+                Shorokoo.Core.Rng.RuntimeRng.BitsU64(shape, key, substream),
+                Shorokoo.Core.Rng.RuntimeRng.BatchSplitKeys(Vector(1UL, 0xFFFFFFFFFFFFFFFFUL, 1UL << 63), Vector(0UL, 7UL, 0xFFFFFFFFUL)));
+        }
+    }
+
     /// <summary>Seeded determinism (ORT-only — QEE never computes random values): two
     /// RandomNormal / RandomUniform nodes with identical seed + distribution params must
     /// produce identical streams per spec.</summary>
@@ -581,4 +785,234 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+
+    // ===================================================================
+    //  Recurrent family: value audits. QEE computes no recurrent values,
+    //  so these run on ONNX Runtime (and every value is compared on the
+    //  PyTorch backend); the bit checks the identities any correct
+    //  implementation satisfies: Y_h is Y's last step (the first, for the
+    //  reverse direction) and Y is zero past a sequence's length.
+    //  Weights arrive as runtime inputs so nothing is folded away.
+    // ===================================================================
+
+    /// <summary>RNN values: forward with B and initial_h; reverse with Relu and clip;
+    /// bidirectional with sequence_lens, initial_h and Affine / ScaledTanh alpha-beta lists.
+    /// Inputs: x [4,2,3], w [2,5,3], r [2,5,5], b [2,10], h0 [2,2,5], seqLens [4,2].</summary>
+    [Module]
+    public partial class QeeRnnValueAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x, Tensor<float32> w, Tensor<float32> r,
+            Tensor<float32> b, Tensor<float32> h0, Tensor<int32> seqLens)
+        {
+            var (y1, yh1) = OnnxOp.Rnn(x, First(w), First(r), First(b), null, First(h0),
+                null, null, null, null, RNNDirection.Forward, 5L, false);
+            var (y2, yh2) = OnnxOp.Rnn(x, First(w), First(r), null, null, null,
+                null, null, ["Relu"], 0.8f, RNNDirection.Reverse, 5L, false);
+            var (y3, yh3) = OnnxOp.Rnn(x, w, r, b, seqLens, h0,
+                [0.7f, 0.9f], [0.2f, 0.5f], ["Affine", "ScaledTanh"], null, RNNDirection.Bidirectional, 5L, false);
+
+            var mismatch =
+                ShapeMismatch((Tensor<float32>)y3, Vector(4L, 2L, 2L, 5L)) +
+                ShapeMismatch((Tensor<float32>)yh3, Vector(2L, 2L, 5L)) +
+                Apart(Step((Tensor<float32>)y1, 3L), (Tensor<float32>)yh1) +
+                Apart(Step((Tensor<float32>)y2, 0L), (Tensor<float32>)yh2) +
+                PastLength((Tensor<float32>)y3);
+            return mismatch < Scalar(1L);
+        }
+    }
+
+    /// <summary>GRU values: forward with linear_before_reset, B and initial_h; reverse
+    /// without it, with clip; bidirectional with sequence_lens and HardSigmoid / Softsign /
+    /// Sigmoid / ScaledTanh alpha-beta lists. Inputs: x [4,2,3], w [2,15,3], r [2,15,5],
+    /// b [2,30], h0 [2,2,5], seqLens [4,2].</summary>
+    [Module]
+    public partial class QeeGruValueAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x, Tensor<float32> w, Tensor<float32> r,
+            Tensor<float32> b, Tensor<float32> h0, Tensor<int32> seqLens)
+        {
+            var (y1, yh1) = OnnxOp.Gru(x, First(w), First(r), First(b), null, First(h0),
+                null, null, null, null, GRUDirection.Forward, 5L, false, linearBeforeReset: true);
+            var (y2, yh2) = OnnxOp.Gru(x, First(w), First(r), First(b), null, null,
+                null, null, null, 0.6f, GRUDirection.Reverse, 5L, false, linearBeforeReset: false);
+            var (y3, yh3) = OnnxOp.Gru(x, w, r, b, seqLens, h0,
+                [0.3f, 0.9f], [0.4f, 1.2f], ["HardSigmoid", "Softsign", "Sigmoid", "ScaledTanh"], null,
+                GRUDirection.Bidirectional, 5L, false, linearBeforeReset: true);
+
+            var mismatch =
+                ShapeMismatch((Tensor<float32>)y3, Vector(4L, 2L, 2L, 5L)) +
+                ShapeMismatch((Tensor<float32>)yh3, Vector(2L, 2L, 5L)) +
+                Apart(Step((Tensor<float32>)y1, 3L), (Tensor<float32>)yh1) +
+                Apart(Step((Tensor<float32>)y2, 0L), (Tensor<float32>)yh2) +
+                PastLength((Tensor<float32>)y3);
+            return mismatch < Scalar(1L);
+        }
+    }
+
+    /// <summary>LSTM values: forward with B, initial_h, initial_c, peepholes and clip;
+    /// reverse with input_forget; bidirectional with sequence_lens and a six-entry activation
+    /// list (HardSigmoid / Elu / Softplus on the reverse half). Inputs: x [4,2,3],
+    /// w [2,20,3], r [2,20,5], b [2,40], h0 [2,2,5], c0 [2,2,5], p [2,15], seqLens [4,2].</summary>
+    [Module]
+    public partial class QeeLstmValueAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x, Tensor<float32> w, Tensor<float32> r,
+            Tensor<float32> b, Tensor<float32> h0, Tensor<float32> c0, Tensor<float32> p, Tensor<int32> seqLens)
+        {
+            var (y1, yh1, _) = OnnxOp.Lstm(x, First(w), First(r), First(b), null, First(h0), First(c0), First(p),
+                null, null, null, 0.9f, LSTMDirection.Forward, 5L, null, false);
+            var (y2, yh2, _) = OnnxOp.Lstm(x, First(w), First(r), First(b), null, null, null, null,
+                null, null, null, null, LSTMDirection.Reverse, 5L, inputForget: true, layout: false);
+            var (y3, yh3, yc3) = OnnxOp.Lstm(x, w, r, b, seqLens, h0, c0, p,
+                [0.3f, 0.8f], [0.4f], ["Sigmoid", "Tanh", "Tanh", "HardSigmoid", "Elu", "Softplus"], null,
+                LSTMDirection.Bidirectional, 5L, null, false);
+
+            var mismatch =
+                ShapeMismatch((Tensor<float32>)y3, Vector(4L, 2L, 2L, 5L)) +
+                ShapeMismatch((Tensor<float32>)yh3, Vector(2L, 2L, 5L)) +
+                ShapeMismatch((Tensor<float32>)yc3, Vector(2L, 2L, 5L)) +
+                Apart(Step((Tensor<float32>)y1, 3L), (Tensor<float32>)yh1) +
+                Apart(Step((Tensor<float32>)y2, 0L), (Tensor<float32>)yh2) +
+                PastLength((Tensor<float32>)y3);
+            return mismatch < Scalar(1L);
+        }
+    }
+
+    /// <summary>layout=1 (batch-first) against layout=0 on the same data, for bidirectional
+    /// RNN, GRU and LSTM with sequence_lens and initial states: Y is layout 0's Y permuted
+    /// [seq,dirs,batch,hidden] → [batch,seq,dirs,hidden], and Y_h / Y_c are transposed. ONNX
+    /// Runtime's CPU kernels refuse layout=1, so this runs on the PyTorch backend. Inputs as in
+    /// <see cref="QeeLstmValueAuditCheck"/>.</summary>
+    [Module]
+    public partial class QeeRecurrentBatchFirstValueCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x, Tensor<float32> w, Tensor<float32> r,
+            Tensor<float32> b, Tensor<float32> h0, Tensor<float32> c0, Tensor<float32> p, Tensor<int32> seqLens)
+        {
+            var xB = BatchFirst(x);
+            var h0B = BatchFirst(h0);
+            var c0B = BatchFirst(c0);
+            var wRnn = w.Slice(Vector(0L), Vector(5L), axes: Vector(1L));
+            var rRnn = r.Slice(Vector(0L), Vector(5L), axes: Vector(1L));
+            var bRnn = b.Slice(Vector(0L), Vector(10L), axes: Vector(1L));
+            var wGru = w.Slice(Vector(0L), Vector(15L), axes: Vector(1L));
+            var rGru = r.Slice(Vector(0L), Vector(15L), axes: Vector(1L));
+            var bGru = b.Slice(Vector(0L), Vector(30L), axes: Vector(1L));
+
+            var (yR, yhR) = OnnxOp.Rnn(x, wRnn, rRnn, bRnn, seqLens, h0, null, null, null, null, RNNDirection.Bidirectional, 5L, false);
+            var (yRB, yhRB) = OnnxOp.Rnn(xB, wRnn, rRnn, bRnn, seqLens, h0B, null, null, null, null, RNNDirection.Bidirectional, 5L, true);
+            var (yG, yhG) = OnnxOp.Gru(x, wGru, rGru, bGru, seqLens, h0, null, null, null, null, GRUDirection.Bidirectional, 5L, false, true);
+            var (yGB, yhGB) = OnnxOp.Gru(xB, wGru, rGru, bGru, seqLens, h0B, null, null, null, null, GRUDirection.Bidirectional, 5L, true, true);
+            var (yL, yhL, ycL) = OnnxOp.Lstm(x, w, r, b, seqLens, h0, c0, p, null, null, null, null, LSTMDirection.Bidirectional, 5L, null, false);
+            var (yLB, yhLB, ycLB) = OnnxOp.Lstm(xB, w, r, b, seqLens, h0B, c0B, p, null, null, null, null, LSTMDirection.Bidirectional, 5L, null, true);
+
+            var mismatch =
+                Apart(SeqFirstY((Tensor<float32>)yRB), (Tensor<float32>)yR) +
+                Apart(BatchFirst((Tensor<float32>)yhRB), (Tensor<float32>)yhR) +
+                Apart(SeqFirstY((Tensor<float32>)yGB), (Tensor<float32>)yG) +
+                Apart(BatchFirst((Tensor<float32>)yhGB), (Tensor<float32>)yhG) +
+                Apart(SeqFirstY((Tensor<float32>)yLB), (Tensor<float32>)yL) +
+                Apart(BatchFirst((Tensor<float32>)yhLB), (Tensor<float32>)yhL) +
+                Apart(BatchFirst((Tensor<float32>)ycLB), (Tensor<float32>)ycL) +
+                ShapeMismatch((Tensor<float32>)yLB, Vector(2L, 4L, 2L, 5L));
+            return mismatch < Scalar(1L);
+        }
+
+        private static Tensor<float32> BatchFirst(Tensor<float32> t) => (Tensor<float32>)OnnxOp.Transpose(t, [1L, 0L, 2L]);
+
+        private static Tensor<float32> SeqFirstY(Tensor<float32> y) => (Tensor<float32>)OnnxOp.Transpose(y, [1L, 2L, 0L, 3L]);
+    }
+
+    internal static class RecurrentAuditVerdicts
+    {
+        internal static Tensor<float32> First(Tensor<float32> t)
+            => t.Slice(Vector(0L), Vector(1L), axes: Vector(0L));
+
+        internal static Tensor<float32> Step(Tensor<float32> y, long t)
+            => y.Slice(Vector(t), Vector(t + 1L), axes: Vector(0L)).Reshape(Vector(-1L));
+
+        internal static Scalar<int64> PastLength(Tensor<float32> y)
+            => Apart(y.Slice(Vector(2L, 1L), Vector(4L, 2L), axes: Vector(0L, 2L)), Vector(0f).Tensor());
+    }
+
+    /// <summary>Activation arguments ONNX Runtime reads otherwise than the spec: a bidirectional
+    /// RNN whose beta list is shorter than its directions ([LeakyRelu, Affine], alpha [0.3, 0.7],
+    /// beta [0.2]) or whose one alpha belongs to its second activation, a GRU leaving Affine's and
+    /// ThresholdedRelu's alpha to their defaults of 1, and a bidirectional LSTM consuming one alpha
+    /// among three activations that take one, and a GRU and a bidirectional RNN whose ScaledTanh is
+    /// given no alpha or beta, which ONNX states no default for. The values are ONNX Runtime's, and the PyTorch backend must
+    /// agree with them. Inputs: x [4,2,3], w [2,20,3], r [2,20,5], b [2,40].</summary>
+    [Module]
+    public partial class QeeRecurrentActivationArgumentsValueCheck
+    {
+        public static (Tensor<float32>, Tensor<float32>, Tensor<float32>, Tensor<float32>, Tensor<float32>, Tensor<float32>) Inline(
+            Tensor<float32> x, Tensor<float32> w, Tensor<float32> r, Tensor<float32> b)
+        {
+            var wRnn = w.Slice(Vector(0L), Vector(5L), axes: Vector(1L));
+            var rRnn = r.Slice(Vector(0L), Vector(5L), axes: Vector(1L));
+            var bRnn = b.Slice(Vector(0L), Vector(10L), axes: Vector(1L));
+            var wGru = w.Slice(Vector(0L, 0L), Vector(1L, 15L), axes: Vector(0L, 1L));
+            var rGru = r.Slice(Vector(0L, 0L), Vector(1L, 15L), axes: Vector(0L, 1L));
+            var bGru = b.Slice(Vector(0L, 0L), Vector(1L, 30L), axes: Vector(0L, 1L));
+
+            var (y1, _) = OnnxOp.Rnn(x, wRnn, rRnn, bRnn, null, null,
+                [0.3f, 0.7f], [0.2f], ["LeakyRelu", "Affine"], null, RNNDirection.Bidirectional, 5L, false);
+            var (y2, _) = OnnxOp.Rnn(x, wRnn, rRnn, bRnn, null, null,
+                [0.3f], null, ["Tanh", "LeakyRelu"], null, RNNDirection.Bidirectional, 5L, false);
+            var (y3, _) = OnnxOp.Gru(x, wGru, rGru, bGru, null, null,
+                null, null, ["Affine", "ThresholdedRelu"], null, GRUDirection.Forward, 5L, false);
+            var (y4, _, _) = OnnxOp.Lstm(x, w, r, b, null, null, null, null,
+                [0.1f], null, ["HardSigmoid", "Tanh", "Elu", "Sigmoid", "Relu", "LeakyRelu"], null, LSTMDirection.Bidirectional, 5L, null, false);
+            var (y5, _) = OnnxOp.Gru(x, wGru, rGru, bGru, null, null,
+                null, null, ["ScaledTanh", "Tanh"], null, GRUDirection.Forward, 5L, false);
+            var (y6, _) = OnnxOp.Rnn(x, wRnn, rRnn, bRnn, null, null,
+                [0.3f], null, ["LeakyRelu", "ScaledTanh"], null, RNNDirection.Bidirectional, 5L, false);
+            return ((Tensor<float32>)y1, (Tensor<float32>)y2, (Tensor<float32>)y3, (Tensor<float32>)y4, (Tensor<float32>)y5,
+                (Tensor<float32>)y6);
+        }
+    }
+
+    /// <summary>ImageDecoder values in every pixel format: an RGB PNG, an RGB JPEG and a greyscale
+    /// JPEG, each decoded to HWC uint8. ONNX Runtime has no ImageDecoder kernel, so this runs on
+    /// the PyTorch backend.</summary>
+    [Module]
+    public partial class QeeImageDecoderValueCheck
+    {
+        public static (Tensor<uint8>, Tensor<uint8>, Tensor<uint8>, Tensor<uint8>, Tensor<uint8>, Tensor<uint8>) Inline(
+            Vector<uint8> png, Vector<uint8> jpeg, Vector<uint8> greyJpeg)
+            => ((Tensor<uint8>)OnnxOp.ImageDecoder(png, pixelFormat: "RGB"),
+                (Tensor<uint8>)OnnxOp.ImageDecoder(png, pixelFormat: "BGR"),
+                (Tensor<uint8>)OnnxOp.ImageDecoder(png, pixelFormat: "Grayscale"),
+                (Tensor<uint8>)OnnxOp.ImageDecoder(jpeg),
+                (Tensor<uint8>)OnnxOp.ImageDecoder(jpeg, pixelFormat: "Grayscale"),
+                (Tensor<uint8>)OnnxOp.ImageDecoder(greyJpeg, pixelFormat: "BGR"));
+    }
+
+    /// <summary>tf_crop_and_resize at scale 1 still crops to the roi: linear over scales, then nearest over sizes.
+    /// Input x is [1,1,1,5].</summary>
+    [Module]
+    public partial class CropAndResizeAtScaleOneValues
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x)
+        {
+            var roi = Vector(0f, 0f, 0f, 0.5f, 1f, 1f, 1f, 1.5f);
+            var linear = (Tensor<float32>)OnnxOp.Resize(x, roi: roi, scales: Vector(1f, 1f, 1f, 1f), sizes: null,
+                antialias: null, axes: null, coordinateTransformationMode: CoordinateTransformationMode.Tf_crop_and_resize,
+                cubicCoeffA: null, excludeOutside: null, extrapolationValue: -1f,
+                keepAspectRatioPolicy: null, mode: ResizeMode.Linear, nearestMode: null);
+            var nearest = (Tensor<float32>)OnnxOp.Resize(x, roi: roi, scales: null, sizes: Vector(1L, 1L, 1L, 5L),
+                antialias: null, axes: null, coordinateTransformationMode: CoordinateTransformationMode.Tf_crop_and_resize,
+                cubicCoeffA: null, excludeOutside: null, extrapolationValue: -1f,
+                keepAspectRatioPolicy: null, mode: ResizeMode.Nearest, nearestMode: null);
+            return linear.Concat(3L, nearest);
+        }
+    }
+
+    /// <summary>1-D Col2Im with pads and a stride. Input cols is [1,3,4].</summary>
+    [Module]
+    public partial class Col2Im1DPaddedValues
+    {
+        public static Tensor<float32> Inline(Tensor<float32> cols)
+            => (Tensor<float32>)OnnxOp.Col2Im(cols, Vector(8L), Vector(3L), dilations: [1L], pads: [1L, 1L], strides: [2L]);
+    }
 }

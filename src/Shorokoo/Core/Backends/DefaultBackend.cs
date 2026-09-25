@@ -232,11 +232,18 @@ public static class DefaultBackend
                 "or add such a package as a dependency.");
 
         var path = Path.Combine(dir, chosen.Assembly + ".dll");
-        return Remembering(InstantiateBackend(Assembly.LoadFrom(path)))
-            ?? throw new InvalidOperationException(
-                $"'{chosen.Assembly}' was found at '{path}' but exposes no concrete " +
-                $"{nameof(IShorokooBackend)}.");
+        var assembly = Assembly.LoadFrom(path);
+        return Remembering(InstantiateBackend(assembly))
+            ?? throw new InvalidOperationException(NoBackendFromDeployed(assembly, chosen.Assembly, path));
     }
+
+    /// <summary>Why the deployed <paramref name="assembly"/> discovery chose gave it no backend.</summary>
+    internal static string NoBackendFromDeployed(Assembly assembly, string name, string path)
+        => IsExplicitOnly(assembly)
+            ? $"'{name}' was found at '{path}', but it is a backend a program must name, which discovery "
+              + "never chooses. Name it: construct its backend and assign DefaultBackend.Instance before "
+              + "the first run, or pass it to new ComputeContext(backend)."
+            : $"'{name}' was found at '{path}' but exposes no concrete {nameof(IShorokooBackend)}.";
 
     /// <summary>
     /// Chooses the one backend among those deployed for the current OS. Nothing deployed
@@ -345,10 +352,18 @@ public static class DefaultBackend
         return usable[0].Backend;
     }
 
+    /// <summary>Whether <paramref name="asm"/> declares itself a backend a program must name
+    /// (<see cref="ShorokooBackendAttribute.Selection"/>).</summary>
+    internal static bool IsExplicitOnly(Assembly asm)
+        => asm.GetCustomAttribute<ShorokooBackendAttribute>()?.Selection == ShorokooBackendAttribute.ExplicitSelection;
+
     private static IShorokooBackend? InstantiateBackend(Assembly asm)
     {
         try
         {
+            // A backend whose manifest says it is used only where a program names it is never
+            // discovery's answer, whatever its assembly is called.
+            if (IsExplicitOnly(asm)) return null;
             var type = asm.GetExportedTypes().FirstOrDefault(t =>
                 typeof(IShorokooBackend).IsAssignableFrom(t)
                 && !t.IsAbstract

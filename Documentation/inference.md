@@ -511,6 +511,12 @@ one is how a long `Fit` is stopped — see
 - Which backend you ended up on is a question you can ask — `DefaultBackend.Describe()`,
   or `ComputeContext.Backend` where the work is submitted. See
   [Which device am I on?](#which-device-am-i-on).
+- Besides the ONNX Runtime backends there are PyTorch ones, `Shorokoo.PyTorch.Cpu` and
+  `Shorokoo.PyTorch.Cuda`, which run a model with PyTorch in an embedded Python. They are
+  never discovered: a program names one for the contexts that should run on it —
+  `new ComputeContext(new TorchCpuBackend())` — so they can be referenced beside an ONNX
+  Runtime package without making discovery ambiguous. See
+  [pytorch-backend.md](pytorch-backend.md).
 
 ### The backend types
 
@@ -530,6 +536,14 @@ All four implement `IShorokooBackend`, take a parameterless constructor, and
 differ only in the execution provider
 they configure: the GPU ones append the CUDA provider on device 0, the CPU ones leave
 ORT on its default provider.
+
+The PyTorch backends follow the same naming, one per package, but are not ONNX Runtime
+backends and take no part in discovery:
+
+| package | backend type | fully qualified |
+|---|---|---|
+| `Shorokoo.PyTorch.Cpu` | `TorchCpuBackend` | `Shorokoo.PyTorch.Cpu.TorchCpuBackend` |
+| `Shorokoo.PyTorch.Cuda` | `TorchCudaBackend` | `Shorokoo.PyTorch.Cuda.TorchCudaBackend` |
 
 ### Auto-discovery
 
@@ -653,13 +667,16 @@ else
 declaration out of the file's metadata, so a backend for another operating
 system, another architecture, or one whose native libraries are not deployed with it is
 refused without the backend or its ONNX Runtime being loaded. `BackendProbe.Reason` says
-which it was (`WrongOperatingSystem`, `MissingNative`, `MissingCudaRuntime`, …) and `Detail`
-names the file or library that is wrong.
+which it was (`WrongOperatingSystem`, `MissingNative`, `MissingCudaRuntime`,
+`MissingCudaDriver`, …) and `Detail` names the file or library that is wrong.
 
 One check is not free of native code: a backend declaring a CUDA requirement is verified by
 binding the CUDA runtime and asking it for the device's memory, which initialises this
 process's CUDA context on the card if it has none yet. So probing a GPU backend touches the
-driver even when the answer turns out to be no. Every other rejection — wrong OS, wrong
+driver even when the answer turns out to be no. A backend that brings its own CUDA libraries
+and needs only the driver (the [PyTorch](pytorch-backend.md) CUDA backend) declares that instead;
+it is verified through the driver API, which initialises the driver but creates no context, and
+refused as `MissingCudaDriver` where there is no driver, one too old, or no device. Every other rejection — wrong OS, wrong
 architecture, a native that is not deployed — is decided from metadata and file paths alone.
 
 A backend's natives are looked for in both of the places a .NET build puts them: flat

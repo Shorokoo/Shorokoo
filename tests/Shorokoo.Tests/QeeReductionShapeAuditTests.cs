@@ -41,5 +41,14 @@ public class QeeReductionShapeAuditTests
         Assert.True(QeeAudit.Check<QeeSplitConcatTileSpaceValueAuditCheck>(
             F32([7L], 1f, 2f, 3f, 4f, 5f, 6f, 7f)));
         Assert.True(QeeAudit.Check<QeeOneHotTriluNonZeroValueAuditCheck>(I64([4L], 1L, 3L, -2L, 5L)));
+        Assert.True(QeeAudit.Check<QeeScatterGatherNdEdgeValueAuditCheck>(F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)));
     }
+
+    // ONNX Runtime yields 0 for an empty int64 ReduceMax/ReduceMin instead of the type's minimum/maximum:
+    // https://github.com/Shorokoo/Shorokoo/issues/382
+    [Fact(Skip = "Shorokoo/Shorokoo#382: ONNX Runtime yields 0 for an empty int64 ReduceMax/ReduceMin")]
+    public void TestInt64ReduceMaxAndMinOverAnEmptyAxisYieldTheTypeExtremes()
+        => Assert.True(AutoTest.AdvancedTestGraph<EmptyInt64ReduceMaxMinValues>([],
+            [F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)],
+            expected: [long.MinValue, long.MaxValue]));
 }

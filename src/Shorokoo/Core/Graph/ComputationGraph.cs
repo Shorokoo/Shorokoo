@@ -226,6 +226,21 @@ namespace Shorokoo.Graph
         }
 
         /// <summary>
+        /// <see cref="RequireConcretized"/> for the paths that hand the graph to a backend's
+        /// session, which also refuse the one concretized graph that still carries machinery: the
+        /// training step of a rig on <see cref="TrainingBackend.Native"/>, whose <c>AUTO_GRAD</c>
+        /// node only its rig hands to a backend that runs it
+        /// (<see cref="GraphStageGate.DeferredGradientRefusal"/>).
+        /// </summary>
+        internal void RequireSessionRunnable(string operation)
+        {
+            RequireConcretized(operation);
+            var machinery = _nodes.Where(n => n.IsUnrunnableOpCode()).ToList();
+            if (machinery.Count > 0 && machinery.All(n => n.OpCode == InternalOpCodes.AUTO_GRAD))
+                throw GraphStageGate.DeferredGradientRefusal(operation);
+        }
+
+        /// <summary>
         /// Fail-fast check for operations that work on any concretized graph (a concrete
         /// architecture, a concrete model, or a lowered step graph) but not on a module
         /// graph — execution and RNG binding, whose machinery is wired at concretization.

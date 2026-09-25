@@ -1,5 +1,7 @@
 using Shorokoo.Runtime;
+using Shorokoo.Core.Factory;
 using Shorokoo.Core.Interpreter;
+using Shorokoo.PyTorch.Cpu;
 using static Shorokoo.Tests.Utils.QeeAudit;
 
 namespace Shorokoo.Tests;
@@ -27,21 +29,29 @@ public class QeeImageRandomRnnAuditTests
 
     private static TensorData RecurrentX => F32Zeros([4L, 2L, 3L]);
 
+    private static TensorData SeqLens => I32([2L], 4, 2);
+
+    private static TensorData EmptySequence => I32([2L], 4, 0);
+
     [Fact]
     public void TestQeeImageGeometryShapeAudits()
     {
-        var x8 = F32Zeros([1L, 1L, 8L, 8L]);
+        var x8 = F32Wave([1L, 1L, 8L, 8L]);
         Assert.True(QeeAudit.Check<QeeResizeShapeAuditCheck>(x8));
         Assert.True(QeeAudit.QeeOnly<QeeResizeNegativeAxesAuditCheck>(x8));
-        Assert.True(QeeAudit.Check<QeeUpsampleAffineGridSampleAuditCheck>(F32Zeros([1L, 2L, 4L, 4L])));
-        Assert.True(QeeAudit.Check<QeeAffineGridSample5DAuditCheck>(F32Zeros([1L, 1L, 3L, 4L, 4L])));
+        Assert.True(QeeAudit.Check<QeeUpsampleAffineGridSampleAuditCheck>(F32Wave([1L, 2L, 4L, 4L])));
+        Assert.True(QeeAudit.Check<QeeAffineGridSample5DAuditCheck>(F32Wave([1L, 1L, 3L, 4L, 4L])));
         Assert.True(QeeAudit.Check<QeeRoiAlignShapeAuditCheck>(
-            F32Zeros([1L, 2L, 8L, 8L]),
+            F32Wave([1L, 2L, 8L, 8L]),
             F32([3L, 4L], 0f, 0f, 4f, 4f, 1f, 1f, 6f, 6f, 2f, 2f, 7f, 7f),
             I64([3L], 0L, 0L, 0L)));
         Assert.True(QeeAudit.Check<QeeCol2ImCenterCropPadAuditCheck>(
-            F32Zeros([1L, 8L, 12L]),
+            F32Wave([1L, 8L, 12L]),
             F32([3L, 5L], 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f, 11f, 12f, 13f, 14f, 15f)));
+        Assert.True(QeeAudit.Check<QeeResizeModesShapeAuditCheck>(F32Wave([1L, 2L, 5L, 7L])));
+        Assert.True(QeeAudit.OrtOnly<QeeResizeUInt8ValueAuditCheck>(U8([1L, 1L, 1L, 8L], 0, 255, 255, 0, 0, 255, 0, 0)));
+        Assert.True(QeeAudit.Check<QeeSamplingVariantsShapeAuditCheck>(
+            F32Wave([1L, 2L, 5L, 6L]), F32Wave([1L, 8L, 2L, 3L]), F32Wave([1L, 12L, 12L])));
     }
 
     [Fact]
@@ -67,6 +77,38 @@ public class QeeImageRandomRnnAuditTests
         Assert.Equal(3, img.MaxRank);
     }
 
+    private const string Png = "iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAIAAAASFvFNAAAAHUlEQVR42mP4z8DA8J+BgeE/E7eI3InpKf//MwAAPP4G/q61Bd4AAAAASUVORK5CYII=";
+
+    private const string Jpeg = "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAIBAQEBAQIBAQECAgICAgQDAgICAgUEBAMEBgUGBgYFBgYGBwkIBgcJBwYGCAsICQoKCgoKBggLDAsKDAkKCgr/2wBDAQICAgICAgUDAwUKBwYHCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgr/wAARCAAIABADAREAAhEBAxEB/8QAFAABAAAAAAAAAAAAAAAAAAAABf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/xAAUAQEAAAAAAAAAAAAAAAAAAAAI/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEQMRAD8APFc2CBUBO//Z";
+
+    private const string GreyJpeg = "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAIBAQEBAQIBAQECAgICAgQDAgICAgUEBAMEBgUGBgYFBgYGBwkIBgcJBwYGCAsICQoKCgoKBggLDAsKDAkKCgr/wAALCAAIAAgBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACP/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AGb//2Q==";
+
+    private static TensorData Encoded(string base64)
+    {
+        var bytes = Convert.FromBase64String(base64);
+        return U8([bytes.Length], bytes);
+    }
+
+    private static double[] Repeat(int times, params double[] run) => [.. Enumerable.Repeat(run, times).SelectMany(r => r)];
+
+    [Fact]
+    public void TestImageDecoderDecodesPngAndJpegToHwcInEveryPixelFormatOnTorch()
+    {
+        Assert.True(AutoTest.AdvancedTestGraph<QeeImageDecoderValueCheck>([],
+            [Encoded(Png), Encoded(Jpeg), Encoded(GreyJpeg)],
+            context: new ComputeContext(new TorchCpuBackend()),
+            tolerance: 0,
+            expected:
+            [
+                255, 0, 0, 0, 255, 0, 0, 0, 255, 10, 20, 30, 200, 150, 100, 255, 255, 255,
+                0, 0, 255, 0, 255, 0, 255, 0, 0, 30, 20, 10, 100, 150, 200, 255, 255, 255,
+                76, 150, 29, 18, 159, 255,
+                .. Repeat(8, [.. Repeat(8, 200, 100, 50), .. Repeat(8, 128, 128, 128)]),
+                .. Repeat(8, [.. Repeat(8, 124), .. Repeat(8, 128)]),
+                .. Repeat(64, 77, 77, 77),
+            ]));
+    }
+
     [Fact]
     public void TestQeeRandomGeneratorAndRecurrentShapeAudits()
     {
@@ -76,6 +118,9 @@ public class QeeImageRandomRnnAuditTests
             testCsRoundtrip: false));
         Assert.True(QeeAudit.CheckWith<QeeRandomSeededDeterminismCheck>(
             [], qee: QeeStrictness.None, testCsRoundtrip: false));
+        Assert.True(QeeAudit.OrtOnly<QeeDropoutAuditCheck>(F32([4L], 1f, 2f, 3f, 4f)));
+        Assert.True(QeeAudit.OrtOnly<QeeKeyedRngValueAuditCheck>(F32Zeros([3L, 5L])));
+        Assert.True(QeeAudit.OrtOnly<RtLoweredUniform>(F32Zeros([3L, 5L])));
         Assert.True(QeeAudit.Check<QeeRangeConstantOfShapeAuditCheck>());
 
         var strings = QeeAudit.Outputs<QeeConstantStringCheck>();
@@ -93,4 +138,74 @@ public class QeeImageRandomRnnAuditTests
         Assert.True(QeeAudit.Check<QeeGruShapeAuditCheck>(RecurrentX));
         Assert.True(QeeAudit.Check<QeeLstmShapeAuditCheck>(RecurrentX, I32([2L], 4, 4)));
     }
+
+    private static string Written(string op, bool bidirectional, string[] activations, float[]? alpha, float[]? beta, bool exported = false)
+    {
+        var x = InputTensor<float32>("x", rank: 3);
+        var w = InputTensor<float32>("w", rank: 3);
+        var r = InputTensor<float32>("r", rank: 3);
+        var y = op switch
+        {
+            "RNN" => OnnxOp.Rnn(x, w, r, null, null, null, alpha, beta, activations, null,
+                bidirectional ? RNNDirection.Bidirectional : RNNDirection.Forward, 5L, false).y,
+            "GRU" => OnnxOp.Gru(x, w, r, null, null, null, alpha, beta, activations, null,
+                bidirectional ? GRUDirection.Bidirectional : GRUDirection.Forward, 5L, false).y,
+            _ => OnnxOp.Lstm(x, w, r, null, null, null, null, null, alpha, beta, activations, null,
+                bidirectional ? LSTMDirection.Bidirectional : LSTMDirection.Forward, 5L, null, false).y,
+        };
+        var graph = new InternalComputationGraph([x, w, r], [y]);
+        var node = (exported ? FastOnnxModelBuilder.BuildOnnxModel(graph) : FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true))
+            .Graph.Nodes.Single(n => n.OpType == op);
+        string List(string name) => string.Join(" ", node.Attributes.SingleOrDefault(a => a.Name == name)?.Floats ?? []);
+        return $"{List("activation_alpha")} | {List("activation_beta")}";
+    }
+
+    [Fact]
+    public void TestRecurrentActivationArgumentsReachTheBackendOnePerConsumingActivationWithTheirDefaults()
+    {
+        Assert.Equal("0.3 0.7 | 0.2 0.2", Written("RNN", true, ["LeakyRelu", "Affine"], [0.3f, 0.7f], [0.2f]));
+        Assert.Equal("0.3 0.3 | ", Written("RNN", true, ["Tanh", "LeakyRelu"], [0.3f], null));
+        Assert.Equal("0.01 | ", Written("RNN", false, ["LeakyRelu"], null, null));
+        Assert.Equal(" | ", Written("RNN", true, ["Tanh", "Relu"], [0.5f], [0.5f]));
+        Assert.Equal("1 1 | 0", Written("GRU", false, ["Affine", "ThresholdedRelu"], null, null));
+        Assert.Equal("2 1 | 3 4", Written("GRU", true, ["ScaledTanh", "Softsign", "Relu", "Affine"], [2f], [3f, 4f]));
+        Assert.Equal("0.1 1 0.01 | 0.5", Written("LSTM", true, ["HardSigmoid", "Tanh", "Elu", "Sigmoid", "Relu", "LeakyRelu"], [0.1f], null));
+        Assert.Equal("2 0 | 3 0", Written("LSTM", false, ["Affine", "ScaledTanh", "Tanh"], [2f], [3f]));
+        Assert.Equal("0.3 0 | 0 0", Written("RNN", true, ["LeakyRelu", "ScaledTanh"], [0.3f], null));
+        Assert.Equal("2 | 3", Written("LSTM", false, ["Affine", "ScaledTanh", "Tanh"], [2f], [3f], exported: true));
+        Assert.Equal("0.3 | ", Written("RNN", true, ["LeakyRelu", "ScaledTanh"], [0.3f], null, exported: true));
+    }
+
+    [Fact]
+    public void TestRecurrentValueAudits()
+    {
+        Assert.True(QeeAudit.OrtOnly<QeeRnnValueAuditCheck>(Wave(4, 2, 3), Wave(2, 5, 3), Wave(2, 5, 5), Wave(2, 10), Wave(2, 2, 5), SeqLens));
+        Assert.True(QeeAudit.OrtOnly<QeeGruValueAuditCheck>(Wave(4, 2, 3), Wave(2, 15, 3), Wave(2, 15, 5), Wave(2, 30), Wave(2, 2, 5), SeqLens));
+        Assert.True(QeeAudit.OrtOnly<QeeLstmValueAuditCheck>(Wave(4, 2, 3), Wave(2, 20, 3), Wave(2, 20, 5), Wave(2, 40), Wave(2, 2, 5), Wave(2, 2, 5), Wave(2, 15), SeqLens));
+        Assert.True(QeeAudit.OrtOnly<QeeRecurrentActivationArgumentsValueCheck>(Wave(4, 2, 3), Wave(2, 20, 3), Wave(2, 20, 5), Wave(2, 40)));
+    }
+
+    [Fact]
+    public void TestRecurrentNetworksEndAnEmptySequenceInZeroStates()
+    {
+        Assert.True(QeeAudit.OrtOnly<QeeRnnValueAuditCheck>(Wave(4, 2, 3), Wave(2, 5, 3), Wave(2, 5, 5), Wave(2, 10), Wave(2, 2, 5), EmptySequence));
+        Assert.True(QeeAudit.OrtOnly<QeeGruValueAuditCheck>(Wave(4, 2, 3), Wave(2, 15, 3), Wave(2, 15, 5), Wave(2, 30), Wave(2, 2, 5), EmptySequence));
+        Assert.True(QeeAudit.OrtOnly<QeeLstmValueAuditCheck>(Wave(4, 2, 3), Wave(2, 20, 3), Wave(2, 20, 5), Wave(2, 40), Wave(2, 2, 5), Wave(2, 2, 5), Wave(2, 15), EmptySequence));
+    }
+
+    // ONNX Runtime copies the input through when the output shape equals the input shape, ignoring the roi:
+    // https://github.com/Shorokoo/Shorokoo/issues/380
+    [Fact(Skip = "Shorokoo/Shorokoo#380: ONNX Runtime ignores the tf_crop_and_resize roi at an unchanged shape")]
+    public void TestCropAndResizeAtScaleOneStillCropsToTheRoi()
+        => Assert.True(AutoTest.AdvancedTestGraph<CropAndResizeAtScaleOneValues>([],
+            [F32([1L, 1L, 1L, 5L], 0f, 1f, 2f, 3f, 4f)],
+            expected: [2, 3, 4, -1, -1, 2, 3, 4, -1, -1]));
+
+    // ONNX Runtime's 1-D Col2Im with pads returns wrong, run-to-run varying values:
+    // https://github.com/Shorokoo/Shorokoo/issues/381
+    [Fact(Skip = "Shorokoo/Shorokoo#381: ONNX Runtime computes 1-D padded Col2Im wrongly")]
+    public void TestCol2ImOverOneSpatialAxisWithPadsAndStride()
+        => Assert.True(AutoTest.AdvancedTestGraph<Col2Im1DPaddedValues>([],
+            [F32([1L, 3L, 4L], [.. Enumerable.Range(0, 12).Select(i => (float)i)])],
+            expected: [4, 9, 5, 11, 6, 13, 7, 11]));
 }

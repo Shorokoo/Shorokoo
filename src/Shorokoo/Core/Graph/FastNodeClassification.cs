@@ -68,9 +68,15 @@ namespace Shorokoo.Core.Graph
         /// classification one: an initializer-typed invoke marks a graph as pre-lowering while
         /// running perfectly well.</para>
         /// </summary>
-        public static bool IsUnrunnableModuleOp(this FastNode node)
+        ///
+        /// <para><paramref name="autoGradRunnable"/> is true only when the graph is compiled for a
+        /// backend that computes gradients itself (<see cref="TrainingFormats.OnnxAutoGrad"/>): there
+        /// the <see cref="InternalOpCodes.AUTO_GRAD"/> node a native training step keeps is what the
+        /// backend runs, not machinery left unlowered.</para>
+        public static bool IsUnrunnableModuleOp(this FastNode node, bool autoGradRunnable = false)
             => !node.IsModelInput()
                 && node.OpCode != InternalOpCodes.FUNCTION_INVOKE
+                && !(autoGradRunnable && node.OpCode == InternalOpCodes.AUTO_GRAD)
                 && InternalOpCodes.IsModuleStageOp(node.OpCode);
 
         /// <summary>

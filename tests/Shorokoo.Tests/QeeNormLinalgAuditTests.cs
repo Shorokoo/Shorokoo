@@ -1,3 +1,4 @@
+using Shorokoo.Core.Factory;
 using Shorokoo.Core.Interpreter;
 using static Shorokoo.Tests.Utils.QeeAudit;
 
@@ -27,5 +28,74 @@ public class QeeNormLinalgAuditTests
         Assert.True(QeeAudit.Check<QeeEinsumDetAuditCheck>(F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)));
         Assert.True(QeeAudit.Check<QeeQuantizationValueAuditCheck>(
             F32([2L, 2L], 1.25f, -0.5f, 0.6f, 3.1f)));
+        Assert.True(QeeAudit.Check<QeeNormLossVariantsAuditCheck>(
+            F32Wave([2L, 4L, 3L, 2L]), I64([2L, 3L, 2L], 0L, 1L, 2L, 3L, 2L, 1L, 3L, 3L, 0L, 2L, 1L, 2L)));
     }
+
+    [Fact]
+    public void TestQuantizationRuntimeValueAudits()
+    {
+        Assert.True(QeeAudit.OrtOnly<QeeQuantizationRuntimeValueAuditCheck>(
+            F32([2L, 4L], 0.625f, -1.3f, 2.2f, 40f, -0.1f, 3.75f, -50f, 0.875f),
+            I8([2L, 4L], 10, -20, 30, -128, 127, 0, -3, 64)));
+        Assert.True(QeeAudit.OrtOnly<QeeQLinearValueAuditCheck>(
+            I8([2L, 3L], 1, -2, 3, 4, 0, -5),
+            U8([2L, 3L], 125, 118, 140, 100, 130, 121),
+            U8([1L, 2L, 6L, 6L], [.. Enumerable.Range(0, 72).Select(i => (byte)(i * 37 % 256))])));
+    }
+
+    [Fact]
+    public void TestDequantizeLinearOfInt32WithoutZeroPointKeepsItsValuesThroughAReshape()
+    {
+        Assert.True(QeeAudit.Check<QeeDequantizeInt32ReshapeAuditCheck>(I32([3L], 1000, -6, 2)));
+    }
+
+    [Fact]
+    public void TestDequantizeLinearWithoutZeroPointKeepsItsValuesThroughAReshapeOrATransposeForEveryInputType()
+    {
+        Assert.True(QeeAudit.Check<QeeDequantizeWithoutZeroPointReshapeTransposeAuditCheck>(
+            I8([3L], 100, -6, 2), TensorData([3L], (short)1000, (short)-6, (short)2),
+            TensorData([3L], (ushort)1000, (ushort)6, (ushort)2), I32([3L], 1000, -6, 2)));
+        Assert.True(QeeAudit.Check<QeeDequantizeInt32VectorScaleReshapeAuditCheck>(I32([1L, 3L], 1000, -6, 2)));
+        Assert.True(QeeAudit.Check<QeeDequantizeInt32PerAxisAuditCheck>(I32([2L, 3L], 10, -6, 2, 4, 0, -8)));
+        Assert.True(QeeAudit.Check<QeeDequantizeInt32OneElementScaleAuditCheck>(I32([3L], 1000, -6, 2)));
+    }
+
+    [Fact]
+    public void TestDequantizeLinearPerAxisKeepsItsValuesThroughATransposeOfAKnownRank()
+    {
+        Assert.True(QeeAudit.Check<QeeDequantizePerAxisTransposeAuditCheck>(I8([2L, 3L], 10, -6, 2, 4, 0, -8)));
+    }
+
+    [Fact]
+    public void TestDequantizeLinearIsWrittenAsAuthoredWhereOnnxRuntimeDoesNotMoveItAndInExportedFiles()
+    {
+        TensorData[] arithmetic = [I8([3L], 100, -6, 2), I32([3L], 1000, -6, 2)];
+        TensorData[] readThrough = [I8([3L], 100, -6, 2), TensorData([3L], (short)1000, (short)-6, (short)2),
+            TensorData([3L], (ushort)1000, (ushort)6, (ushort)2), I32([3L], 1000, -6, 2)];
+        Assert.True(QeeAudit.Check<QeeDequantizeIntoArithmeticAuditCheck>(arithmetic));
+        Assert.Equal([2, 2, 2], DequantizeInputs(QeeDequantizeIntoArithmeticAuditCheck.ComputationGraph, false, arithmetic));
+        Assert.Equal([2, 2, 2, 2, 2, 2, 2],
+            DequantizeInputs(QeeDequantizeWithoutZeroPointReshapeTransposeAuditCheck.ComputationGraph, true, readThrough));
+    }
+
+    private static int[] DequantizeInputs(ComputationGraph module, bool exported, TensorData[] inputs)
+    {
+        var g = module.ToInternal();
+        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([.. inputs])).ToConcreteModel();
+        var model = exported
+            ? FastOnnxModelBuilder.BuildOnnxModel(concrete)
+            : FastOnnxModelBuilder.BuildInternalOnnxModel(concrete, prepForOnnx: true);
+        return [.. model.Graph.Nodes.Where(n => n.OpType == OpCodes.DEQUANTIZE_LINEAR).Select(n => n.Inputs.Count(i => i.Length > 0))];
+    }
+
+    // ONNX Runtime's float32 LayerNormalization takes the variance as E[x²] − E[x]², which cancels catastrophically:
+    // https://github.com/Shorokoo/Shorokoo/issues/384
+    [Fact(Skip = "Shorokoo/Shorokoo#384: ONNX Runtime's LayerNormalization loses a large-mean row's variance to cancellation")]
+    public void TestLayerNormalizationOfRowsWithALargeMeanAgreesWithItsFunctionBody()
+        => Assert.True(AutoTest.AdvancedTestGraph<LayerNormalizationOfALargeMeanCheck>([], LargeMeanRows));
+
+    internal static TensorData[] LargeMeanRows =>
+        [F32([4L, 256L], [.. Enumerable.Range(0, 1024).Select(i => 100f + 0.1f * MathF.Sin(1.7f * i))]),
+         F32([256L], [.. Enumerable.Repeat(1f, 256)])];
 }

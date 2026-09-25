@@ -23,7 +23,9 @@ public sealed class ShorokooBackendAttribute : Attribute
     /// <summary>Declares this assembly a backend for <paramref name="os"/> on
     /// <paramref name="architecture"/>, running on <paramref name="device"/>.</summary>
     /// <param name="os">"windows", "linux" or "osx", as
-    /// <see cref="System.Runtime.InteropServices.OSPlatform"/> spells them, lower-cased.</param>
+    /// <see cref="System.Runtime.InteropServices.OSPlatform"/> spells them, lower-cased — or several,
+    /// separated by semicolons, for a backend whose assembly runs on each of them as it is because it
+    /// carries no natives of its own (<c>"linux;windows"</c>).</param>
     /// <param name="architecture">"x64", "arm64", as
     /// <see cref="System.Runtime.InteropServices.Architecture"/> spells them, lower-cased.</param>
     /// <param name="device">"cpu" or "cuda".</param>
@@ -34,7 +36,8 @@ public sealed class ShorokooBackendAttribute : Attribute
         Device = device;
     }
 
-    /// <summary>The operating system this backend's natives are built for.</summary>
+    /// <summary>The operating system this backend's natives are built for, or the operating
+    /// systems, separated by semicolons.</summary>
     public string Os { get; }
 
     /// <summary>The processor architecture this backend's natives are built for.</summary>
@@ -61,4 +64,28 @@ public sealed class ShorokooBackendAttribute : Attribute
     /// A probe on a machine without it answers no rather than throwing from a driver call.
     /// </summary>
     public string? RequiresCudaRuntime { get; set; }
+
+    /// <summary>
+    /// The oldest CUDA version, "major.minor", the machine's NVIDIA driver has to support for this
+    /// backend to run, or null when it needs no driver. For a backend that brings its own CUDA
+    /// libraries — PyTorch's CUDA build does — and so needs of the machine only the driver, where
+    /// <see cref="RequiresCudaRuntime"/> would demand a toolkit it does not use. A probe on a machine
+    /// with no driver, one too old, or no device answers no, saying which.
+    /// </summary>
+    public string? RequiresCudaDriver { get; set; }
+
+    /// <summary>
+    /// How a program comes to use this backend: null for a backend <see cref="DefaultBackend"/>
+    /// may discover, or <see cref="ExplicitSelection"/> for one that is only ever used where a
+    /// program names it — <c>new ComputeContext(new TorchCpuBackend())</c>.
+    ///
+    /// <para>An explicit backend can be deployed beside a discoverable one without making
+    /// discovery ambiguous, because discovery never counts it, and
+    /// <see cref="BackendPackage.TryLoad"/> does not load it: it binds no native ONNX Runtime for
+    /// isolation to give it. <see cref="BackendPackage.Probe"/> reads it like any other.</para>
+    /// </summary>
+    public string? Selection { get; set; }
+
+    /// <summary>The <see cref="Selection"/> of a backend a program must name to use.</summary>
+    public const string ExplicitSelection = "explicit";
 }

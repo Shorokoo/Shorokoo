@@ -37,6 +37,10 @@ public enum BackendRejection
 
     /// <summary>It fits this machine, but loading it did not yield a usable backend.</summary>
     NotLoadable,
+
+    /// <summary>It needs an NVIDIA driver this machine does not have: none at all, one too old for
+    /// the CUDA it was built for, or one that sees no device.</summary>
+    MissingCudaDriver,
 }
 
 /// <summary>
@@ -49,10 +53,17 @@ public enum BackendRejection
 /// <param name="Os">The operating system it declares, when it declared one.</param>
 /// <param name="Architecture">The architecture it declares, when it declared one.</param>
 /// <param name="Device">The device it declares, when it declared one.</param>
+/// <param name="Selection">How it is selected, when it declared that: null for a backend
+/// discovery may pick, <see cref="ShorokooBackendAttribute.ExplicitSelection"/> for one a program
+/// has to name.</param>
 public readonly record struct BackendProbe(
     bool Supported, BackendRejection Reason, string Detail,
-    string? Os = null, string? Architecture = null, string? Device = null)
+    string? Os = null, string? Architecture = null, string? Device = null, string? Selection = null)
 {
+    /// <summary>Whether the backend is one a program must name to use, which discovery never
+    /// picks (see <see cref="ShorokooBackendAttribute.Selection"/>).</summary>
+    public bool IsExplicitOnly => Selection == ShorokooBackendAttribute.ExplicitSelection;
+
     /// <inheritdoc/>
     public override string ToString() => Supported ? "supported" : $"{Reason}: {Detail}";
 }
@@ -130,8 +141,9 @@ public static class BackendPackage
         var os = declared.GetValueOrDefault("os", "");
         var arch = declared.GetValueOrDefault("architecture", "");
         var device = declared.GetValueOrDefault("device", "");
+        var selection = declared.GetValueOrDefault("selection");
         BackendProbe No(BackendRejection reason, string detail)
-            => new(false, reason, detail, os, arch, device);
+            => new(false, reason, detail, os, arch, device, selection);
 
         // Before OSPlatform.Create, which throws on an empty string: a manifest that names no
         // operating system is one this machine is not, and saying so is this method's whole job.
@@ -141,9 +153,10 @@ public static class BackendPackage
                 $"'{Path.GetFileName(full)}' carries a [ShorokooBackend] that names no operating "
                 + "system, so there is no way to tell whether it fits this machine.");
 
-        if (!OSPlatform.Create(os.ToUpperInvariant()).Equals(CurrentPlatform()))
+        var systems = os.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (!systems.Any(system => OSPlatform.Create(system.ToUpperInvariant()).Equals(CurrentPlatform())))
             return No(BackendRejection.WrongOperatingSystem,
-                $"'{Path.GetFileName(full)}' is a {os} backend and this is {CurrentOsName()}.");
+                $"'{Path.GetFileName(full)}' is a {string.Join(" or ", systems)} backend and this is {CurrentOsName()}.");
 
         if (!arch.Equals(RuntimeInformation.ProcessArchitecture.ToString(), StringComparison.OrdinalIgnoreCase))
             return No(BackendRejection.WrongArchitecture,
@@ -166,7 +179,13 @@ public static class BackendPackage
                 $"'{Path.GetFileName(full)}' needs a CUDA {cuda}.x runtime, which this machine "
                 + "does not have -- no driver, no device, or the toolkit is not installed.");
 
-        return new(true, BackendRejection.None, "supported", os, arch, device);
+        if (declared.TryGetValue("requirescudadriver", out var driver) && !string.IsNullOrEmpty(driver)
+            && CudaDriver.Refusal(CudaDriver.Read(), driver) is { } refusal)
+            return No(BackendRejection.MissingCudaDriver,
+                $"'{Path.GetFileName(full)}' needs an NVIDIA driver supporting CUDA {driver} or later, and "
+                + $"{refusal}.");
+
+        return new(true, BackendRejection.None, "supported", os, arch, device, selection);
     }
 
     /// <summary>
@@ -190,6 +209,18 @@ public static class BackendPackage
         backend = null;
         var probe = Probe(assemblyPath);
         if (!probe.Supported) { failure = probe; return false; }
+        if (probe.IsExplicitOnly)
+        {
+            failure = probe with
+            {
+                Supported = false,
+                Reason = BackendRejection.NotLoadable,
+                Detail = $"'{Path.GetFileName(assemblyPath)}' is a backend a program constructs by name, and "
+                    + "binds no native ONNX Runtime for this to load it over: reference its package and "
+                    + "construct its backend.",
+            };
+            return false;
+        }
 
         var full = Path.GetFullPath(assemblyPath);
         var directory = Path.GetDirectoryName(full)!;

@@ -41,6 +41,45 @@ public class BackendPackageCoverageTests
     }
 
     [Fact]
+    public void TestTheTorchBackendsProbeAsExplicitOnlyAndDiscoveryNeverCountsThem()
+    {
+        var cpu = BackendPackage.Probe(Beside("Shorokoo.PyTorch.Cpu"));
+        var cuda = BackendPackage.Probe(Beside("Shorokoo.PyTorch.Cuda"));
+        var loaded = typeof(Shorokoo.PyTorch.Cpu.TorchCpuBackend).Assembly;
+
+        var driver = CudaDriver.Refusal(CudaDriver.Read(), "13.0") is null ? BackendRejection.None : BackendRejection.MissingCudaDriver;
+
+        Assert.Equal((BackendRejection.None, "cpu", true, "linux;windows"), (cpu.Reason, cpu.Device, cpu.IsExplicitOnly, cpu.Os));
+        Assert.Equal((driver, "cuda", true, "linux;windows"), (cuda.Reason, cuda.Device, cuda.IsExplicitOnly, cuda.Os));
+        Assert.False(BackendPackage.Probe(NativeBackend).IsExplicitOnly);
+        Assert.False(BackendPackage.TryLoad(Beside("Shorokoo.PyTorch.Cpu"), out var none, out var refusal));
+        Assert.Null(none);
+        Assert.Equal(BackendRejection.NotLoadable, refusal.Reason);
+        Assert.True(DefaultBackend.IsExplicitOnly(loaded));
+        Assert.Contains("DefaultBackend.Instance", DefaultBackend.NoBackendFromDeployed(loaded, "Shorokoo.LinuxCPU", "Shorokoo.LinuxCPU.dll"));
+        Assert.False(DefaultBackend.IsExplicitOnly(DefaultBackend.Instance.GetType().Assembly));
+        Assert.Contains(loaded, DefaultBackend.DiscoverableAssemblies(AppDomain.CurrentDomain.GetAssemblies()));
+        Assert.Single(DefaultBackend.LoadedCandidates(
+            DefaultBackend.DiscoverableAssemblies(AppDomain.CurrentDomain.GetAssemblies()).Select(a => a.GetName().Name ?? "")));
+    }
+
+    [Fact]
+    public void TestABackendNeedingANewerDriverThanTheMachineHasIsRefusedSayingWhatIsMissing()
+    {
+        Assert.Equal(13000, CudaDriver.VersionNumber("13.0"));
+        Assert.Equal(12040, CudaDriver.VersionNumber("12.4"));
+        Assert.Equal(13000, CudaDriver.VersionNumber("13"));
+        Assert.Null(CudaDriver.VersionNumber("thirteen"));
+        Assert.Equal("12.8", CudaDriver.VersionText(12080));
+        Assert.Contains("no NVIDIA driver", CudaDriver.Refusal(default, "13.0"));
+        Assert.Contains("up to 12.8", CudaDriver.Refusal(new CudaDriverReading(true, 12080, 1), "13.0"));
+        Assert.Contains("does not say", CudaDriver.Refusal(new CudaDriverReading(true, 0, 1), "13.0"));
+        Assert.Contains("no CUDA device", CudaDriver.Refusal(new CudaDriverReading(true, 13020, 0), "13.0"));
+        Assert.Null(CudaDriver.Refusal(new CudaDriverReading(true, 13000, 1), "13.0"));
+        Assert.Contains("12.4.1", CudaDriver.Refusal(new CudaDriverReading(true, 13000, 1), "12.4.1"));
+    }
+
+    [Fact]
     public void TestEveryWayOfNotBeingALoadableBackendIsAnAnswerAndNotAThrow()
     {
         (string Path, BackendRejection Reason, string Contains)[] cases =

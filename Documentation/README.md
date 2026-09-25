@@ -11,6 +11,7 @@ Which document covers what. For an overview of Shorokoo and an end-to-end exampl
 ## 2. Train them
 
 - [training.md](training.md) — compose model + loss + optimizer with `TrainingRig`, run the training loop, and save / resume checkpoints across process restarts.
+- [training-backends.md](training-backends.md) — who computes a training step's gradient: Shorokoo's own autodiff (`TrainingBackend.Shorokoo`, the default) or the execution backend (`TrainingBackend.Native`), the step formats a backend accepts, and what differs on the native path.
 - [nn-library.md](nn-library.md) — the `Shorokoo.Modules` package: ready-made initializers, layers (`Linear`, `Conv2d`, `BatchNorm2d`, …), losses, and optimizers to build and train with.
 - [rng-configuration.md](rng-configuration.md) — seed and reproduce a model's randomness with `RngConfig`: parameter initialization and runtime draws (Dropout masks, sampling), master-seed re-rolls, per-stream overrides, and how the identity rides save/load.
 - [rng-pinning.md](rng-pinning.md) — keep a module's random streams stable under refactoring with `Rng.Pin` and the stream report's per-scope pin skeleton.
@@ -20,6 +21,7 @@ Which document covers what. For an overview of Shorokoo and an end-to-end exampl
 ## 3. Run on CPU or GPU
 
 - [inference.md](inference.md) — execute a model (`OnnxEngine.Eval`, `ComputeContext`), feed it (consumed, `.Shared()` or `.TryConsume()`), pick the backend, read output values, and use the CPU interpreter for debugging.
+- [pytorch-backend.md](pytorch-backend.md) — run a model on PyTorch (CPU or CUDA) instead of ONNX Runtime: the `Shorokoo.PyTorch.*` packages, the Python environment they provision or use, and what they do not run yet.
 
 ## 4. Interoperate with the ML ecosystem
 

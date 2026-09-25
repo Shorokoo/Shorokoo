@@ -1354,6 +1354,7 @@ public class ModulesCoverageTests
     public void TestEagerEvalRefusesAModuleOutputAndNamesTheLowering()
     {
         var x = Tensor([2L], 1.0f, 2.0f);
+        var three = Scalar(3.0f);
         var sample = TensorData([2L], 1.0f, 2.0f);
         var linearInput = Tensor([4L, 4L], [.. Enumerable.Repeat(0.5f, 16)]);
         Variable[] noInputs = [];
@@ -1371,6 +1372,8 @@ public class ModulesCoverageTests
                 () => new ComputeContext().Eval(ScalarMultiplyModel.Call(x))),
             ("Tensor.Eval", InternalOpCodes.CREATE_MODULE, nameof(ScalarMultiplyModel),
                 () => ScalarMultiplyModel.Call(x).Eval()),
+            ("OnnxEngine.Eval", InternalOpCodes.AUTO_GRAD, null,
+                () => OnnxEngine.Eval(Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(three, three * three))),
             ("Eval(...).With", InternalOpCodes.CREATE_MODULE, nameof(ScalarMultiplyModel),
                 () => noInputs.Eval(ScalarMultiplyModel.Call(x)).With([])),
             ("ComputeContext.Execute", InternalOpCodes.MODEL_PARAM_REF, null,

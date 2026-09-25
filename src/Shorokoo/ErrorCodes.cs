@@ -525,7 +525,7 @@ namespace Shorokoo
 
         #endregion
 
-        #region Framework Error Codes (FW001-FW053)
+        #region Framework Error Codes (FW001-FW054)
         
         /// <summary>Loop operation not implemented</summary>
         public const string FW001 = "FW001";
@@ -685,6 +685,10 @@ namespace Shorokoo
 
         /// <summary>C# code generation reached an attribute type or DType it has no way to write as a literal</summary>
         public const string FW053 = "FW053";
+
+        /// <summary>An operator's attributes are invalid for the input shapes it is concretized against
+        /// (e.g. a ConvTranspose output_shape that would need negative begin pads)</summary>
+        public const string FW054 = "FW054";
 
         #endregion
 

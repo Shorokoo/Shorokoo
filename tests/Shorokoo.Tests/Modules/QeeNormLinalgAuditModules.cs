@@ -164,6 +164,58 @@ namespace Shorokoo.Tests.Modules
         private static Tensor<int64> FlatI(Tensor<int64> t) => t.Reshape(Vector(-1L));
     }
 
+    /// <summary>Normalization and loss variants on non-trivial data: SoftmaxCrossEntropyLoss over
+    /// spatial dims with weights + ignore_index (mean, with log_prob) and without (sum, none),
+    /// NegativeLogLikelihoodLoss with weights + ignore_index (mean) and without (none);
+    /// training-mode BatchNormalization with a momentum; LayerNormalization over axis 1 without
+    /// bias; InstanceNormalization, GroupNormalization with one channel per group, LRN of even
+    /// size, LpNormalization p=2, MeanVarianceNormalization over one axis. Inputs: s [2,4,3,2],
+    /// labels [2,3,2] int64.</summary>
+    [Module]
+    public partial class QeeNormLossVariantsAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> s, Tensor<int64> labels)
+        {
+            var weights = Vector(0.5f, 1f, 2f, 1.5f);
+            var (sceMean, logProb) = NN.SoftmaxCrossEntropyLoss(s, labels, weights, ignoreIndex: 1L, reduction: "mean");
+            var (sceSum, _) = NN.SoftmaxCrossEntropyLoss(s, labels, reduction: "sum");
+            var (sceNone, _) = NN.SoftmaxCrossEntropyLoss(s, labels, reduction: "none");
+            var nllMean = NN.NegativeLogLikelihoodLoss(s, labels, weights, ignoreIndex: 2L, reduction: "mean");
+            var nllNone = NN.NegativeLogLikelihoodLoss(s, labels, reduction: "none");
+            var scale = Vector(1.5f, -0.5f, 2f, 1f);
+            var bias = Vector(0.1f, 0.2f, -0.3f, 0f);
+            var (bn, runMean, runVar) = s.BatchNormalizationFullOuputs(scale, bias, Vector(0.2f, -0.1f, 0f, 0.3f),
+                Vector(1f, 2f, 0.5f, 1.5f), momentum: 0.7f, trainingMode: true);
+            var scaleLn = s.Slice(Vector(0L), Vector(1L)).Reshape(Vector(4L, 3L, 2L));
+            var (ln, lnMean, lnInv) = NN.LayerNormalizationFullOutputs(s, scaleLn, axis: 1);
+            var inst = (Tensor<float32>)OnnxOp.InstanceNormalization(s, scale, bias, epsilon: 1e-3f);
+            var group = NN.GroupNormalization(s, scale, bias, numGroups: 4);
+            var lrn = (Tensor<float32>)OnnxOp.Lrn(s, alpha: 0.02f, beta: 0.6f, bias: 2f, size: 5L);
+            var lp = (Tensor<float32>)OnnxOp.LpNormalization(s, axis: -1, p: 2);
+            var mvn = s.MeanVarianceNormalization((long[])[1]);
+
+            var mismatch =
+                IntMismatch(sceMean.ShapeTensor().ShapeTensor(), Vector(0L)) +
+                ShapeMismatch(logProb!, Vector(2L, 4L, 3L, 2L)) +
+                IntMismatch(sceSum.ShapeTensor().ShapeTensor(), Vector(0L)) +
+                ShapeMismatch(sceNone, Vector(2L, 3L, 2L)) +
+                IntMismatch(nllMean.ShapeTensor().ShapeTensor(), Vector(0L)) +
+                ShapeMismatch(nllNone, Vector(2L, 3L, 2L)) +
+                ShapeMismatch(bn, Vector(2L, 4L, 3L, 2L)) +
+                ShapeMismatch(runMean, Vector(4L)) +
+                ShapeMismatch(runVar, Vector(4L)) +
+                ShapeMismatch(ln, Vector(2L, 4L, 3L, 2L)) +
+                ShapeMismatch(lnMean!, Vector(2L, 1L, 1L, 1L)) +
+                ShapeMismatch(lnInv!, Vector(2L, 1L, 1L, 1L)) +
+                ShapeMismatch(inst, Vector(2L, 4L, 3L, 2L)) +
+                ShapeMismatch(group, Vector(2L, 4L, 3L, 2L)) +
+                ShapeMismatch(lrn, Vector(2L, 4L, 3L, 2L)) +
+                ShapeMismatch(lp, Vector(2L, 4L, 3L, 2L)) +
+                ShapeMismatch(mvn, Vector(2L, 4L, 3L, 2L));
+            return mismatch < Scalar(1L);
+        }
+    }
+
     /// <summary>MatMul numpy semantics with VALUES: 2-D×2-D, the 1-D edge cases
     /// ([K]×[K,N] → [N], [M,K]×[K] → [M], [K]×[K] → scalar — ranks checked via
     /// shape-of-shape), batched 3-D×2-D broadcast; Gemm transA / transB / alpha+beta /
@@ -317,5 +369,245 @@ namespace Shorokoo.Tests.Modules
 
         private static Tensor<float32> Flat(Tensor<float32> t) => t.Reshape(Vector(-1L));
         private static Tensor<int64> FlatI(Tensor<int64> t) => t.Reshape(Vector(-1L));
+    }
+
+    /// <summary>Quantization VALUES from runtime inputs, so that none is folded (QEE computes no
+    /// blocked values, so this runs on ONNX Runtime only): QuantizeLinear
+    /// per-tensor int8 with a tie (2.5 → 2) and saturation both ways, per-axis uint8 along
+    /// axis 1, blocked (block 2 along axis 1), int16 and uint16 targets; DequantizeLinear
+    /// per-tensor, per-axis, blocked and from int32; DynamicQuantizeLinear's three outputs.
+    /// Inputs f = [[0.625,−1.3,2.2,40],[−0.1,3.75,−50,0.875]], i8 = [[10,−20,30,−128],[127,0,−3,64]].</summary>
+    [Module]
+    public partial class QeeQuantizationRuntimeValueAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> f, Tensor<int8> i8)
+        {
+            var blockScale = Vector(0.5f, 1f, 0.25f, 2f).Reshape(Vector(2L, 2L));
+            var qT = (Tensor<int8>)OnnxOp.QuantizeLinear(f, Scalar(0.25f), Scalar((sbyte)3));
+            var qAxis = (Tensor<uint8>)OnnxOp.QuantizeLinear(f, Vector(0.5f, 0.25f, 1f, 2f).Tensor(),
+                Vector((byte)10, (byte)20, (byte)30, (byte)40), axis: 1);
+            var qBlock = (Tensor<int8>)OnnxOp.QuantizeLinear(f, blockScale,
+                Vector((sbyte)0, (sbyte)0, (sbyte)0, (sbyte)0).Reshape(Vector(2L, 2L)), axis: 1, blockSize: 2);
+            var q16 = (Tensor<int16>)OnnxOp.QuantizeLinear(f, Scalar(0.01f), Scalar((short)-7));
+            var qu16 = (Tensor<uint16>)OnnxOp.QuantizeLinear(f, Scalar(0.005f), Scalar((ushort)1000));
+
+            var dq = (Tensor<float32>)OnnxOp.DequantizeLinear(i8, Scalar(0.5f), Scalar((sbyte)-2), null);
+            var dqAxis = (Tensor<float32>)OnnxOp.DequantizeLinear(i8, Vector(0.5f, 0.25f, 1f, 2f),
+                Vector((sbyte)1, (sbyte)2, (sbyte)3, (sbyte)4), axis: 1);
+            var dqBlock = (Tensor<float32>)OnnxOp.DequantizeLinear(i8, blockScale, null, axis: 1, blockSize: 2);
+            var dq32 = (Tensor<float32>)OnnxOp.DequantizeLinear(i8.Cast<int32>() * Scalar(1000), Scalar(0.001f), null, null);
+
+            var (dy, dScale, dZp) = OnnxOp.DynamicQuantizeLinear(f);
+
+            var mismatch =
+                IntMismatch(FlatI(qT.Cast<int64>()), Vector(5L, -2L, 12L, 127L, 3L, 18L, -128L, 7L)) +
+                IntMismatch(FlatI(qAxis.Cast<int64>()), Vector(11L, 15L, 32L, 60L, 10L, 35L, 0L, 40L)) +
+                IntMismatch(FlatI(qBlock.Cast<int64>()), Vector(1L, -3L, 2L, 40L, 0L, 15L, -25L, 0L)) +
+                IntMismatch(FlatI(q16.Cast<int64>()), Vector(55L, -137L, 213L, 3993L, -17L, 368L, -5007L, 81L)) +
+                IntMismatch(FlatI(qu16.Cast<int64>()), Vector(1125L, 740L, 1440L, 9000L, 980L, 1750L, 0L, 1175L)) +
+                FloatMismatch(Flat(dq), Vector(6f, -9f, 16f, -63f, 64.5f, 1f, -0.5f, 33f)) +
+                FloatMismatch(Flat(dqAxis), Vector(4.5f, -5.5f, 27f, -264f, 63f, -0.5f, -6f, 120f)) +
+                FloatMismatch(Flat(dqBlock), Vector(5f, -10f, 30f, -128f, 31.75f, 0f, -6f, 128f)) +
+                FloatMismatch(Flat(dq32 - i8.Cast<float32>()), Vector(0f)) +
+                IntMismatch(FlatI(((Tensor<uint8>)dy).Cast<int64>()), Vector(144L, 138L, 148L, 255L, 142L, 153L, 0L, 144L)) +
+                FloatMismatch(((Tensor<float32>)dScale).Reshape(Vector(1L)), Vector(90f / 255f)) +
+                IntMismatch(((Tensor<uint8>)dZp).Cast<int64>().Reshape(Vector(1L)), Vector(142L));
+            return mismatch < Scalar(1L);
+        }
+
+        private static Tensor<float32> Flat(Tensor<float32> t) => t.Reshape(Vector(-1L));
+        private static Tensor<int64> FlatI(Tensor<int64> t) => t.Reshape(Vector(-1L));
+    }
+
+    /// <summary>QLinearMatMul and QLinearConv VALUES (QEE computes neither, so this runs on ONNX
+    /// Runtime only): int8 per-tensor and uint8 with a per-column b scale and zero point;
+    /// QLinearConv uint8 × int8 with per-output-channel w scales, an int32 bias, group 2,
+    /// asymmetric pads, strides and dilations, and SAME_LOWER. Inputs a8 = [[1,−2,3],[4,0,−5]],
+    /// au = [[125,118,140],[100,130,121]], x [1,2,6,6] uint8 with x[i] = 37·i mod 256.</summary>
+    [Module]
+    public partial class QeeQLinearValueAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<int8> a8, Tensor<uint8> au, Tensor<uint8> x)
+        {
+            var b8 = Vector((sbyte)3, (sbyte)-1, (sbyte)0, (sbyte)2, (sbyte)5, (sbyte)-4).Reshape(Vector(3L, 2L));
+            var bu = Vector((byte)130, (byte)120, (byte)128, (byte)140, (byte)100, (byte)129).Reshape(Vector(3L, 2L));
+            var mm8 = (Tensor<int8>)OnnxOp.QLinearMatMul(
+                a8, Scalar(0.05f), Scalar((sbyte)1), b8, Scalar(0.1f), Scalar((sbyte)0), Scalar(0.02f), Scalar((sbyte)-3));
+            var mmu = (Tensor<uint8>)OnnxOp.QLinearMatMul(
+                au, Scalar(0.02f), Scalar((byte)120), bu, Vector(0.05f, 0.03f), Vector((byte)128, (byte)125),
+                Scalar(0.01f), Scalar((byte)100));
+
+            var w = Vector((sbyte)1, (sbyte)-2, (sbyte)3, (sbyte)0, (sbyte)1, (sbyte)-1, (sbyte)2, (sbyte)1, (sbyte)-3,
+                (sbyte)-1, (sbyte)0, (sbyte)2, (sbyte)1, (sbyte)1, (sbyte)0, (sbyte)-2, (sbyte)3, (sbyte)1,
+                (sbyte)2, (sbyte)2, (sbyte)-1, (sbyte)0, (sbyte)-3, (sbyte)1, (sbyte)1, (sbyte)0, (sbyte)1,
+                (sbyte)0, (sbyte)1, (sbyte)1, (sbyte)-1, (sbyte)2, (sbyte)0, (sbyte)3, (sbyte)-2, (sbyte)1).Reshape(Vector(4L, 1L, 3L, 3L));
+            var wScale = Vector(0.1f, 0.05f, 0.2f, 0.08f);
+            var bias = Vector(50, -30, 0, 200);
+            var conv = (Tensor<uint8>)OnnxOp.QLinearConv(x, Scalar(0.04f), Scalar((byte)110), w, wScale, Scalar((sbyte)0),
+                Scalar(0.03f), Scalar((byte)128), bias,
+                autoPad: AutoPad.NotSet, dilations: [1L, 2L], group: 2L, kernelShape: [3L, 3L],
+                pads: [1L, 2L, 0L, 1L], strides: [2L, 1L]);
+            var same = (Tensor<uint8>)OnnxOp.QLinearConv(x, Scalar(0.04f), Scalar((byte)110), w, wScale, Scalar((sbyte)0),
+                Scalar(0.03f), Scalar((byte)128), null,
+                autoPad: AutoPad.SameLower, dilations: null, group: 2L, kernelShape: [3L, 3L], pads: null, strides: [2L, 2L]);
+
+            var mismatch =
+                IntMismatch(FlatI(mm8.Cast<int64>()), Vector(0L, -7L, -8L, 2L)) +
+                IntMismatch(FlatI(mmu.Cast<int64>()), Vector(45L, 102L, 93L, 115L)) +
+                ShapeMismatch(conv, Vector(1L, 4L, 3L, 5L)) +
+                IntMismatch(FlatI(conv.Cast<int64>()), Vector(
+                    168L, 124L, 144L, 75L, 122L, 60L, 225L, 213L, 155L, 143L, 137L, 30L, 58L, 239L, 184L,
+                    136L, 98L, 88L, 132L, 136L, 139L, 139L, 131L, 109L, 93L, 141L, 124L, 142L, 138L, 135L,
+                    174L, 164L, 130L, 130L, 51L, 0L, 148L, 124L, 154L, 108L, 216L, 148L, 2L, 236L, 140L,
+                    155L, 159L, 139L, 151L, 149L, 136L, 93L, 176L, 223L, 141L, 169L, 180L, 140L, 105L, 173L)) +
+                ShapeMismatch(same, Vector(1L, 4L, 3L, 3L)) +
+                IntMismatch(FlatI(same.Cast<int64>()), Vector(
+                    181L, 98L, 98L, 24L, 192L, 109L, 135L, 37L, 194L, 136L, 119L, 139L, 133L, 138L, 128L, 136L, 132L, 140L,
+                    154L, 120L, 120L, 1L, 144L, 135L, 138L, 90L, 149L, 129L, 122L, 146L, 134L, 182L, 140L, 167L, 146L, 185L));
+            return mismatch < Scalar(1L);
+        }
+
+        private static Tensor<int64> FlatI(Tensor<int64> t) => t.Reshape(Vector(-1L));
+    }
+
+    /// <summary>DequantizeLinear of an int32 tensor with no zero point, read through a Reshape:
+    /// [1000, −6, 2] × 0.5 = [500, −3, 1].</summary>
+    [Module]
+    public partial class QeeDequantizeInt32ReshapeAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<int32> x)
+        {
+            var dq = (Tensor<float32>)OnnxOp.DequantizeLinear(x, Scalar(0.5f), null, null);
+            return FloatMismatch(dq.Reshape(Vector(-1L)), Vector(500f, -3f, 1f)) < Scalar(1L);
+        }
+    }
+
+    /// <summary>DequantizeLinear with no zero point, of int8, int16, uint16 and int32 tensors, each
+    /// read through a Reshape (× 0.5) and through a Transpose (× 0.25).</summary>
+    [Module]
+    public partial class QeeDequantizeWithoutZeroPointReshapeTransposeAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<int8> a, Tensor<int16> b, Tensor<uint16> c, Tensor<int32> d)
+        {
+            var mismatch =
+                Reshaped(OnnxOp.DequantizeLinear(a, Scalar(0.5f), null, null), Vector(50f, -3f, 1f)) +
+                Transposed(OnnxOp.DequantizeLinear(a.Reshape(Vector(1L, 3L)), Scalar(0.25f), null, null), Vector(25f, -1.5f, 0.5f)) +
+                Reshaped(OnnxOp.DequantizeLinear(b, Scalar(0.5f), null, null), Vector(500f, -3f, 1f)) +
+                Transposed(OnnxOp.DequantizeLinear(b.Reshape(Vector(1L, 3L)), Scalar(0.25f), null, null), Vector(250f, -1.5f, 0.5f)) +
+                Reshaped(OnnxOp.DequantizeLinear(c, Scalar(0.5f), null, null), Vector(500f, 3f, 1f)) +
+                Transposed(OnnxOp.DequantizeLinear(c.Reshape(Vector(1L, 3L)), Scalar(0.25f), null, null), Vector(250f, 1.5f, 0.5f)) +
+                Transposed(OnnxOp.DequantizeLinear(d.Reshape(Vector(1L, 3L)), Scalar(0.25f), null, null), Vector(250f, -1.5f, 0.5f));
+            return mismatch < Scalar(1L);
+        }
+
+        private static Scalar<int64> Reshaped(Variable dq, Vector<float32> expected)
+            => FloatMismatch(((Tensor<float32>)dq).Reshape(Vector(-1L)), expected);
+
+        private static Scalar<int64> Transposed(Variable dq, Vector<float32> expected)
+            => FloatMismatch(((Tensor<float32>)dq).Transpose().Reshape(Vector(-1L)), expected);
+    }
+
+    /// <summary>DequantizeLinear of an int32 [1, 3] tensor with no zero point and a one-element
+    /// scale along axis 0, read through a Reshape: [1000, −6, 2] × 0.5 = [500, −3, 1].</summary>
+    [Module]
+    public partial class QeeDequantizeInt32VectorScaleReshapeAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<int32> x)
+        {
+            var dq = (Tensor<float32>)OnnxOp.DequantizeLinear(x, Vector(0.5f), null, 0L);
+            return FloatMismatch(dq.Reshape(Vector(-1L)), Vector(500f, -3f, 1f)) < Scalar(1L);
+        }
+    }
+
+    /// <summary>DequantizeLinear of an int32 [2, 3] tensor per axis — along axis 1 with a zero
+    /// point, and along axis −2 without one, of the tensor reshaped so its rank is known — read
+    /// through a Transpose. x = [[10, −6, 2], [4, 0, −8]].</summary>
+    [Module]
+    public partial class QeeDequantizeInt32PerAxisAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<int32> x)
+        {
+            var columns = (Tensor<float32>)OnnxOp.DequantizeLinear(x, Vector(0.5f, 2f, 0.25f), Vector(2, -2, 0), 1L);
+            var rows = (Tensor<float32>)OnnxOp.DequantizeLinear(x.Reshape(Vector(2L, 3L)), Vector(0.5f, 0.25f), null, -2L);
+            var mismatch =
+                FloatMismatch(columns.Transpose().Reshape(Vector(-1L)), Vector(4f, 1f, -8f, 4f, 0.5f, -2f)) +
+                FloatMismatch(rows.Transpose().Reshape(Vector(-1L)), Vector(5f, 1f, -3f, 0f, 1f, -2f));
+            return mismatch < Scalar(1L);
+        }
+    }
+
+    /// <summary>LayerNormalization over the last axis agrees with its function body, which centres
+    /// the input before squaring it, on rows whose mean is large next to their spread.</summary>
+    [Module]
+    public partial class LayerNormalizationOfALargeMeanCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x, Tensor<float32> scale)
+        {
+            var centered = x - x.Reduce(ReduceKind.Mean, Vector(-1L), keepDims: true);
+            var twoPass = centered / ((centered * centered).Reduce(ReduceKind.Mean, Vector(-1L), keepDims: true) + Scalar(1e-5f)).Sqrt();
+            return Apart(NN.LayerNormalization(x, scale), twoPass) < Scalar(1L);
+        }
+    }
+
+    /// <summary>DequantizeLinear of an int32 [3] tensor with no zero point and a one-element scale at
+    /// the default axis — per tensor, since the scale has one element — read as it is and through
+    /// a Reshape: [1000, −6, 2] × 0.5 = [500, −3, 1].</summary>
+    [Module]
+    public partial class QeeDequantizeInt32OneElementScaleAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<int32> x)
+        {
+            var dq = (Tensor<float32>)OnnxOp.DequantizeLinear(x, Vector(0.5f), null, null);
+            return FloatMismatch(dq, Vector(500f, -3f, 1f)) + FloatMismatch(dq.Reshape(Vector(-1L)), Vector(500f, -3f, 1f)) < Scalar(1L);
+        }
+    }
+
+    /// <summary>DequantizeLinear read by arithmetic rather than moved through: an int8 tensor times 2,
+    /// and an int32 tensor per tensor and along axis 0, each plus 1. a = [100, −6, 2],
+    /// b = [1000, −6, 2].</summary>
+    [Module]
+    public partial class QeeDequantizeIntoArithmeticAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<int8> a, Tensor<int32> b)
+        {
+            var mismatch =
+                FloatMismatch((Tensor<float32>)OnnxOp.DequantizeLinear(a, Scalar(0.5f), null, null) * Scalar(2f), Vector(100f, -6f, 2f)) +
+                FloatMismatch((Tensor<float32>)OnnxOp.DequantizeLinear(b, Scalar(0.5f), null, null) + Scalar(1f), Vector(501f, -2f, 2f)) +
+                FloatMismatch((Tensor<float32>)OnnxOp.DequantizeLinear(b, Vector(0.5f, 2f, 0.25f), null, 0L) + Scalar(1f), Vector(501f, -11f, 1.5f));
+            return mismatch < Scalar(1L);
+        }
+    }
+
+    /// <summary>DequantizeLinear of an int8 tensor of known rank along its last axis, with a zero
+    /// point, read through a Transpose that names no permutation: [2, 3], and [1, 2, 3] by an
+    /// Unsqueeze, whose zero point is far enough from x that x − zero_point leaves int8.
+    /// x = [[10, −6, 2], [4, 0, −8]].</summary>
+    [Module]
+    public partial class QeeDequantizePerAxisTransposeAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<int8> x)
+        {
+            var matrix = x.Reshape(Vector(2L, 3L));
+            var columns = (Tensor<float32>)OnnxOp.DequantizeLinear(matrix, Vector(0.5f, 2f, 0.25f),
+                Vector((sbyte)2, (sbyte)-2, (sbyte)0), 1L);
+            var unsqueezed = (Tensor<float32>)OnnxOp.DequantizeLinear(OnnxOp.Unsqueeze(matrix, Vector(0L)), Vector(0.5f, 2f, 0.25f),
+                Vector((sbyte)100, (sbyte)-100, (sbyte)127), -1L);
+            var mismatch =
+                FloatMismatch(columns.Transpose().Reshape(Vector(-1L)), Vector(4f, 1f, -8f, 4f, 0.5f, -2f)) +
+                FloatMismatch(unsqueezed.Transpose().Reshape(Vector(-1L)), Vector(-45f, -48f, 188f, 200f, -31.25f, -33.75f));
+            return mismatch < Scalar(1L);
+        }
+    }
+
+    /// <summary>Dropout whose training mode is fed at run time: fed false, it passes x through.
+    /// x = [1, 2, 3, 4].</summary>
+    [Module]
+    public partial class QeeDropoutFedModeAuditCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x, Scalar<bit> training)
+        {
+            var (output, _) = OnnxOp.Dropout(x, Scalar(0.5f), training);
+            return FloatMismatch((Tensor<float32>)output, Vector(1f, 2f, 3f, 4f)) < Scalar(1L);
+        }
     }
 }

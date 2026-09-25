@@ -1582,7 +1582,7 @@ namespace Shorokoo.Runtime
         /// arena (<see cref="DeviceMemorySettings.LimitBytes"/>).</exception>
         public CompiledGraph Compile(ComputationGraph graph)
         {
-            graph.RequireConcretized("ComputeContext.Compile");
+            graph.RequireSessionRunnable("ComputeContext.Compile");
             return Compile(graph.ToInternal());
         }
 
@@ -1605,7 +1605,7 @@ namespace Shorokoo.Runtime
         /// taken.</exception>
         public NamedModelParam[] Execute(ComputationGraph graph, params IData[] inputs)
         {
-            graph.RequireConcretized("ComputeContext.Execute");
+            graph.RequireSessionRunnable("ComputeContext.Execute");
             return this.Execute(graph.ToInternal(), inputs);
         }
 
@@ -1625,7 +1625,7 @@ namespace Shorokoo.Runtime
         /// taken.</exception>
         public NamedModelParam[] Run(ComputationGraph graph, params NamedModelParam[] inputs)
         {
-            graph.RequireConcretized("ComputeContext.Run");
+            graph.RequireSessionRunnable("ComputeContext.Run");
             return this.Run(graph.ToInternal(), inputs);
         }
 
@@ -1640,7 +1640,7 @@ namespace Shorokoo.Runtime
         public (NamedModelParam[] regularOutputs, ComputationGraph updatedGraph) ExecuteWithState(
             ComputationGraph graph, params IData[] inputs)
         {
-            graph.RequireConcretized("ComputeContext.ExecuteWithState");
+            graph.RequireSessionRunnable("ComputeContext.ExecuteWithState");
             var (regularOutputs, updatedGraph) = ExecuteWithState(graph.ToInternal(), inputs);
             // updatedGraph is either the private copy itself (no state params) or a fresh
             // clone with the new state values — exclusively owned either way.
@@ -1654,7 +1654,7 @@ namespace Shorokoo.Runtime
         public (NamedModelParam[] regularOutputs, ComputationGraph updatedGraph) ExecuteWithState(
             ComputationGraph graph, params NamedModelParam[] inputs)
         {
-            graph.RequireConcretized("ComputeContext.ExecuteWithState");
+            graph.RequireSessionRunnable("ComputeContext.ExecuteWithState");
             var (regularOutputs, updatedGraph) = ExecuteWithState(graph.ToInternal(), inputs);
             return (regularOutputs, new ComputationGraph(updatedGraph, graph.Kind));
         }
@@ -1691,15 +1691,20 @@ namespace Shorokoo.Runtime
         /// <see cref="OutputAliasProof"/> proves it over the model as built, and the session is built
         /// with those (<see cref="OutputAlias"/>); none on a context that aliases nothing
         /// (<see cref="OutputAliasing"/>).</param>
+        /// <param name="trainingFormat">The format a training step is handed over in (see
+        /// <see cref="TrainingFormats"/>). <see cref="TrainingFormats.OnnxAutoGrad"/> lets the step's
+        /// one <c>AUTO_GRAD</c> node through, to be emitted as the gradient node this context's
+        /// backend runs; everything else compiles as it always has.</param>
         internal CompiledGraph Compile(
             InternalComputationGraph graph,
             IReadOnlyList<long[]?>? inputDims,
             bool trainingStep,
             bool reusedAcrossShapes = false,
             string? description = null,
-            IReadOnlyList<(int Output, int Input)>? aliasCandidates = null)
+            IReadOnlyList<(int Output, int Input)>? aliasCandidates = null,
+            string trainingFormat = TrainingFormats.Onnx)
         {
-            graph.RequireRunnableOps("ComputeContext.Compile");
+            graph.RequireRunnableOps("ComputeContext.Compile", trainingFormat);
             var originalInputNames = ResolveOriginalInputNames(graph);
             return CompileFromModel(
                 () => FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true, inputDims: inputDims),
@@ -1829,6 +1834,18 @@ namespace Shorokoo.Runtime
         /// TensorDataStruct inputs are automatically expanded into individual fields.
         /// </summary>
         internal NamedModelParam[] Execute(InternalComputationGraph graph, params IData[] inputs)
+            => ExecuteModel(graph, model: null, inputs);
+
+        /// <summary>
+        /// <see cref="Execute(InternalComputationGraph, IData[])"/>, handing the backend
+        /// <paramref name="model"/> — the model built from <paramref name="graph"/> for a session
+        /// (<see cref="FastOnnxModelBuilder.BuildInternalOnnxModel"/> with <c>prepForOnnx</c>),
+        /// possibly rewritten — instead of building one, when it is given. Every output of that model
+        /// is returned, named as the model names it. For tests that run the exact model a backend
+        /// receives, with more of its values exposed, on several backends from one build.
+        /// </summary>
+        internal NamedModelParam[] ExecuteModel(
+            InternalComputationGraph graph, ModelProto? model, params IData[] inputs)
         {
             // Before the arity check below: a module graph's inputs routinely disagree with what the
             // caller passed (its [Hyper] parameters are inputs too), and CR006 would report that
@@ -1849,7 +1866,7 @@ namespace Shorokoo.Runtime
                 .Select((zip) => NamedModelParam.FromIData(zip.Second, ModelParamType.InputParam, zip.First))
                 .ToArray();
 
-            return Run(graph, namedInputs);
+            return Run(graph, namedInputs, model);
         }
 
         /// <summary>
@@ -1896,11 +1913,14 @@ namespace Shorokoo.Runtime
         /// session per call (disposed afterwards); use <see cref="Compile(ComputationGraph)"/> for repeated runs.
         /// </summary>
         internal NamedModelParam[] Run(InternalComputationGraph graph, params NamedModelParam[] inputs)
+            => Run(graph, inputs, model: null);
+
+        private NamedModelParam[] Run(InternalComputationGraph graph, NamedModelParam[] inputs, ModelProto? model)
         {
             graph.RequireRunnableOps("ComputeContext.Run");
             var originalInputNames = ResolveOriginalInputNames(graph);
             return RunFromModel(
-                () => FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true),
+                () => model ?? FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true),
                 originalInputNames,
                 inputs);
         }

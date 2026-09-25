@@ -107,6 +107,45 @@ public class OnnxControlFlowImportTests
     }
 
     [Fact]
+    public void TestADequantizeLinearInAFunctionBodyKeepsItsValuesThroughAReshape()
+    {
+        var graph = Import(DequantizeReshapeInCalledFunction());
+        var x = TensorData(DType.Int8, [3L], (sbyte)100, (sbyte)-6, (sbyte)2);
+        AssertTensorEquals(TensorData(DType.Float32, [3L], 50f, -3f, 1f), new ComputeContext().Execute(graph, x.Shared())[0].ToTensorData());
+    }
+
+    private static ModelProto DequantizeReshapeInCalledFunction()
+    {
+        const int Int8Elem = 3;
+        var fn = new FunctionProto { Name = "DqFn", Domain = "Functions" };
+        fn.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = 21 });
+        fn.Inputs.Add("fn_x");
+        fn.Outputs.Add("fn_y");
+        fn.ValueInfoes.Add(TensorInfo("fn_x", Int8Elem, 3));
+        fn.ValueInfoes.Add(TensorInfo("fn_y", FloatElem, 3));
+        fn.Nodes.Add(ConstantNode("scale", Init("scale", FloatElem, [], BitConverter.GetBytes(0.5f))));
+        fn.Nodes.Add(Node("DequantizeLinear", "dq", ["fn_x", "scale"], ["dq_out"]));
+        fn.Nodes.Add(ConstantNode("flat", Init("flat", Int64Elem, [1L], BitConverter.GetBytes(-1L))));
+        fn.Nodes.Add(Node("Reshape", "reshape", ["dq_out", "flat"], ["fn_y"]));
+
+        var graph = new GraphProto { Name = "dq_fn_graph" };
+        graph.Inputs.Add(TensorInfo("x", Int8Elem, 3));
+        var call = Node("DqFn", "call_fn", ["x"], ["y"]);
+        call.Domain = "Functions";
+        graph.Nodes.Add(call);
+        graph.Outputs.Add(TensorInfo("y", FloatElem, 3));
+
+        var model = WrapModel(graph);
+        model.OpsetImports.Add(new OperatorSetIdProto { Domain = "Functions", Version = 1 });
+        model.Functions.Add(fn);
+        return model;
+    }
+
+    private static NodeProto ConstantNode(string output, TensorProto value)
+        => Node("Constant", output + "_const", [], [output],
+            new AttributeProto { Name = "value", Type = AttributeProto.AttributeType.Tensor, T = value });
+
+    [Fact]
     public void TestScanImportFailsWithActionableError()
     {
         var body = new GraphProto { Name = "scan_body" };

@@ -23,7 +23,8 @@ namespace Shorokoo.Tests.Utils
     /// (ComputationGraph → ToConcreteArchitecture → ToConcreteModel) and runs both audit
     /// passes on that single concrete model: the strict QuickExecutionEngine-only
     /// self-check, then the full <c>AutoTest.TestGraph</c> pipeline (ORT execute, ONNX
-    /// save/load roundtrip, C# codegen, QEE dtype pass).
+    /// save/load roundtrip, C# codegen, QEE dtype pass), then the same model on the PyTorch CPU
+    /// backend, which must agree with ORT (<see cref="QeeAuditOnTorch"/>).
     /// </summary>
     public static class QeeAudit
     {
@@ -62,12 +63,14 @@ namespace Shorokoo.Tests.Utils
             if (qee != QeeStrictness.None && !QeePass(concreteModel, allInputs, qee))
                 return false;
 
-            return !autoTest || AutoTest.TestGraph(
-                concreteModel,
-                testOnnxRoundtrip: testOnnxRoundtrip,
-                testCsRoundtrip: testCsRoundtrip,
-                sampleInputs: allInputs,
-                testQuickEngineExecution: testQuickEngineExecution);
+            return !autoTest
+                || AutoTest.TestGraph(
+                    concreteModel,
+                    testOnnxRoundtrip: testOnnxRoundtrip,
+                    testCsRoundtrip: testCsRoundtrip,
+                    sampleInputs: allInputs,
+                    testQuickEngineExecution: testQuickEngineExecution)
+                && QeeAuditOnTorch.Agrees<TModule>(concreteModel, allInputs);
         }
 
         /// <summary>QEE output tensors in declaration order — for outputs whose shapes are
@@ -81,7 +84,7 @@ namespace Shorokoo.Tests.Utils
                 : throw new InvalidOperationException($"missing output {k}"))];
         }
 
-        private static InternalComputationGraph Lower<TModule>(
+        internal static InternalComputationGraph Lower<TModule>(
             TensorData[] allInputs, Dictionary<string, DType>? genericTypes, RngConfig? rngConfig)
         {
             var prop = typeof(TModule).GetProperty("ComputationGraph", BindingFlags.Public | BindingFlags.Static)
@@ -137,7 +140,11 @@ namespace Shorokoo.Tests.Utils
         public static TensorData U8(long[] dims, params byte[] vals) => Globals.TensorData(dims, vals);
         public static TensorData Bits(long[] dims, params bool[] vals) => Globals.TensorData(dims, vals);
         public static TensorData Strs(long[] dims, params string[] vals) => Globals.TensorData(dims, vals);
+        public static TensorData Wave(params long[] dims)
+            => F32(dims, [.. Enumerable.Range(0, (int)dims.Aggregate(1L, (a, b) => a * b)).Select(i => 0.6f * MathF.Sin(0.37f * i + dims.Length))]);
         public static TensorData F32Zeros(long[] dims) => Globals.TensorDataWithDefaultVals(DType.Float32, dims);
+        public static TensorData F32Wave(long[] dims)
+            => Globals.TensorData(dims, [.. Enumerable.Range(0, (int)dims.Aggregate(1L, (a, b) => a * b)).Select(i => MathF.Sin(1.7f * i) * (1 + i % 3))]);
         public static TensorData I8Zeros(long[] dims) => Globals.TensorDataWithDefaultVals(DType.Int8, dims);
     }
 }

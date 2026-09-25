@@ -177,6 +177,20 @@
           SkipUnchangedFiles="true" />
   </Target>
 
+  <!--
+    The PyTorch backends, referenced the ordinary way: their assemblies deploy beside Shorokoo.dll
+    and the ONNX Runtime backend above, and discovery still finds exactly one candidate, because a
+    torch backend's manifest declares it explicit-only and DefaultBackend never counts one. The
+    tests name them (new ComputeContext(new TorchCpuBackend())). Neither ships a native library:
+    torch comes from the Python environment, which the tests resolve as a user's program does:
+    SHOROKOO_PYTHON_ENV, or else the CPU environment provisioned with uv into the user cache on the
+    first run that needs it.
+  -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Backend\PyTorch\Shorokoo.PyTorch.Cpu\Shorokoo.PyTorch.Cpu.csproj" />
+    <ProjectReference Include="..\..\src\Backend\PyTorch\Shorokoo.PyTorch.Cuda\Shorokoo.PyTorch.Cuda.csproj" />
+  </ItemGroup>
+
   <Import Project="..\..\src\Backend\OnnxRuntime\Shorokoo.OnnxRuntime\build\Shorokoo.OnnxRuntime.targets" />
 
   <ItemGroup>

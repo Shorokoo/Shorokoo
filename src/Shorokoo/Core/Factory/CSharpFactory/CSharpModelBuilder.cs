@@ -659,12 +659,20 @@ public static class " + modelName + @"
                 return null;
 
             var tensorDataAttribute = attributes.GetAttributeVal(AttrValue).AssertNotNull();
-            if (tensorDataAttribute.Bytes.Length > 500)
+            // Strings are checked first: their elements are variable-length and have no flat
+            // bytes to measure, and there is no raw-data form to fall back to, so a string
+            // constant is always written as literals, whatever its size.
+            if (tensorDataAttribute.DType != DType.Utf8 && tensorDataAttribute.Bytes.Length > 500)
                 return null;
 
             string dataParams;
             var dtype = tensorDataAttribute.DType;
-            if (tensorDataAttribute.DType == DType.Float32)
+            if (tensorDataAttribute.DType == DType.Utf8)
+            {
+                var paramList = tensorDataAttribute.Values.Select(x => Microsoft.CodeAnalysis.CSharp.SymbolDisplay.FormatLiteral(x, quote: true));
+                dataParams = string.Join(", ", paramList);
+            }
+            else if (tensorDataAttribute.DType == DType.Float32)
             {
                 var paramList = tensorDataAttribute.Elements<float>().ToArray().Select(x => $"{x}f");
                 dataParams = string.Join(", ", paramList);

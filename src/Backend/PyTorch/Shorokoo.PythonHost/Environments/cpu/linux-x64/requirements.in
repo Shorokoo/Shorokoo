@@ -1,0 +1,4 @@
+torch==2.14.0+cpu
+numpy
+pillow
+google-re2

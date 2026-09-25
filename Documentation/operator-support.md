@@ -474,7 +474,7 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
 | CenterCropPad | 🟡 [3] | ✅ | ✅ |
 | Col2Im | ✅ | 🟡 [1] | ✅ |
 | GridSample | ✅ | 🟡 [1] | 🟡 [4] |
-| ImageDecoder | ✅ | 🟡 [5] | N/A |
+| ImageDecoder | 🟡 [13] | 🟡 [5] | N/A |
 | NonMaxSuppression | ✅ | 🟡 [6] | N/A (index output) |
 | Resize | 🟡 [7] | 🟡 [8] | 🟡 [9] |
 | RoiAlign | ✅ | 🟡 [1] | 🟡 [10] |
@@ -502,6 +502,9 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
 11. Deprecated operator; supported by lowering to an equivalent Resize at
     export.
 12. Nearest mode only; other modes throw.
+13. Builds, but ONNX Runtime has no `ImageDecoder` kernel, so a model using it
+    is refused when its session is created. It runs on the
+    [PyTorch backend](pytorch-backend.md).
 
 ## Random
 

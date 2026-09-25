@@ -134,6 +134,32 @@ public class ModulesCoverageTests
         Assert.Contains(bodies, n => n.OpCode == InternalOpCodes.MODEL_INVOKE);
     }
 
+    private static string[] Signatures(ComputationGraph g)
+        => [.. g.ToInternal().LocalFunctions.Select(f => $"{f.DefaultName}: {f.ModuleSignatureString}").Order()];
+
+    private static string? ModelParamSignature(ComputationGraph g)
+        => g.ToInternal().InputTensors.Single(v => v.Type == DType.Model).ModuleFn?.ModelSignatureString;
+
+    // Shorokoo/Shorokoo#392: the signature joins outputs with "," when OutputRankOverrides is set and ", " when a reload leaves it null.
+    [Fact(Skip = "Shorokoo/Shorokoo#392")]
+    public void TestAMultiOutputModuleSignatureStringReadsTheSameAfterASrkRoundTrip()
+        => Assert.Equal(Signatures(Modules.CallerOfSwapSub.ComputationGraph), Signatures(SrkRoundTrip(Modules.CallerOfSwapSub.ComputationGraph)));
+
+    // Shorokoo/Shorokoo#391: a reloaded generic body fails NodeBuilder's type-constraint check when rebuilt.
+    [Fact(Skip = "Shorokoo/Shorokoo#391")]
+    public void TestAGenericModuleBodyReadsBackAfterASrkRoundTrip()
+        => Assert.Equal(Signatures(NonGenericCallerOfGenericModule.ComputationGraph), Signatures(SrkRoundTrip(NonGenericCallerOfGenericModule.ComputationGraph)));
+
+    // Shorokoo/Shorokoo#390: the .srk writer drops a model-typed input's signature function, so its MODEL_INVOKE has no callee.
+    [Fact(Skip = "Shorokoo/Shorokoo#390")]
+    public void TestAModelTypedParameterKeepsItsSignatureThroughASrkRoundTrip()
+    {
+        var input = TensorData([2L], 1f, 2f);
+        Assert.Equal(ModelParamSignature(CallsAModelParameter.ComputationGraph), ModelParamSignature(SrkRoundTrip(CallsAModelParameter.ComputationGraph)));
+        Assert.Equal([1f, 2f], ConcretizeAndRun(SrkRoundTrip(HyperModelGainModel.ComputationGraph), input));
+        Assert.Equal([2f, 4f], ConcretizeAndRun(SrkRoundTrip(PassesAGenericCallerAsAModelParameter.ComputationGraph), input));
+    }
+
     [Fact]
     public void TestFromOrderedInputsRefusesMoreValuesThanTheGraphHasDataInputs()
     {

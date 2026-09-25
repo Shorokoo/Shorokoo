@@ -30,6 +30,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 {
                     [OnnxOpAttributeNames.AttrDtype] = dtype,
                     [OnnxOpAttributeNames.ShrkAttrRank] = (long?)rank,
+                    [OnnxOpAttributeNames.ShrkAttrInputName] = defaultName,
                 },
                 attrDefs);
 
@@ -53,6 +54,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 {
                     [OnnxOpAttributeNames.AttrDtype] = structDType,
                     [OnnxOpAttributeNames.ShrkAttrInputType] = (InputType?)null,
+                    [OnnxOpAttributeNames.ShrkAttrInputName] = defaultName,
                 },
                 attrDefs);
 

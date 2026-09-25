@@ -55,7 +55,6 @@ namespace Shorokoo.Graph
         }
 
         private readonly ImmutableArray<FrozenNode> _nodes;
-        private readonly ImmutableArray<FastTensorKey> _inputs;
         private readonly ImmutableArray<FastTensorKey> _outputs;
         private readonly ImmutableArray<string?> _inputNames;
         private readonly ImmutableArray<string?> _outputNames;
@@ -82,12 +81,18 @@ namespace Shorokoo.Graph
             if (graph is null) throw new System.ArgumentNullException(nameof(graph));
             // Every concrete graph passes here, so this is where the invariant that each of its
             // inputs records the shape it was concretized at is held.
+            // The graph's inputs are the input nodes that open its node list; it keeps no other
+            // record of them, so a graph whose input nodes do not form that prefix has lost track
+            // of an input.
+            if (graph.FindMisplacedInput() is int misplaced)
+                throw new System.InvalidOperationException(
+                    $"ComputationGraph: input node #{misplaced} ({graph.Nodes[misplaced].OpCode}) follows a body node; " +
+                    "a graph's input nodes must form the prefix of its node list.");
             RepresentativeInputShapes.Verify(graph, kind);
             Kind = kind;
             _nodes = graph.Nodes.Select(Freeze).ToImmutableArray();
-            _inputs = [.. graph.Inputs];
+            _inputNames = [.. graph.InputNames];
             _outputs = [.. graph.Outputs];
-            _inputNames = [.. graph.InputUniqueNames];
             _outputNames = [.. graph.OutputUniqueNames];
             _outputRankOverrides = graph.OutputRankOverrides is null
                 ? null
@@ -99,9 +104,8 @@ namespace Shorokoo.Graph
         {
             Kind = kind;
             _nodes = source._nodes;
-            _inputs = source._inputs;
-            _outputs = source._outputs;
             _inputNames = source._inputNames;
+            _outputs = source._outputs;
             _outputNames = source._outputNames;
             _outputRankOverrides = source._outputRankOverrides;
         }
@@ -148,9 +152,9 @@ namespace Shorokoo.Graph
         }
 
         /// <summary>
-        /// Original <c>UniqueName</c> of each graph input, in declaration order. A generic
-        /// <c>[Module]</c>'s type-placeholder slots are listed here but take no value, so this is
-        /// one entry longer than <c>FromOrderedInputs</c> accepts for such a graph.
+        /// The name of each graph input, in declaration order, read off the input nodes that open
+        /// the graph. A generic <c>[Module]</c>'s type-placeholder slots are listed here but take no
+        /// value, so this is one entry longer than <c>FromOrderedInputs</c> accepts for such a graph.
         /// </summary>
         public IReadOnlyList<string?> InputNames => _inputNames;
 
@@ -168,9 +172,7 @@ namespace Shorokoo.Graph
         {
             var graph = new InternalComputationGraph
             {
-                Inputs = [.. _inputs],
                 Outputs = [.. _outputs],
-                InputUniqueNames = [.. _inputNames],
                 OutputUniqueNames = [.. _outputNames],
                 OutputRankOverrides = _outputRankOverrides?.ToArray(),
             };

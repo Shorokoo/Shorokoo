@@ -108,10 +108,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             refNode.IdentifierTemplate = ModelParamIdentifierTemplate.LocalTrainableParam(
                 new ModelId(counterSlot), CounterName, 0, ImmutableArray<int>.Empty).ToString();
 
-            // Prepend the counter nodes (top-level scope; they reference nothing in the host
-            // graph) and wire its state-dependent int64 scalar output into every feed.
+            // Put the counter nodes at the start of the body (top-level scope; they reference
+            // nothing in the host graph, and the counter body takes no input) and wire its
+            // state-dependent int64 scalar output into every feed.
             var substreamIndexKey = counterGraph.Outputs[0];
-            graph.Nodes.InsertRange(0, counterGraph.Nodes);
+            System.Diagnostics.Debug.Assert(counterGraph.InputCount == 0, "the counter body takes no input");
+            graph.InsertAtBodyStart(counterGraph.Nodes);
             foreach (var feed in feeds)
             {
                 var inputs = feed.FullInputs[""];

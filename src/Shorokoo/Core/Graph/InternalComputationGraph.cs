@@ -47,9 +47,119 @@ namespace Shorokoo.Graph
         public List<FastNode> Nodes { get; set; } = new();
 
         /// <summary>
-        /// Tensor keys corresponding to <c>ComputationGraph.Inputs</c>, in order.
+        /// The graph's inputs, in order: the output key of each input node
+        /// (<see cref="InternalOpCodes.IsModelInputOp"/>) in the prefix of <see cref="Nodes"/>
+        /// those nodes form. The graph keeps no input list of its own — this is a read-only view,
+        /// rebuilt on each access; add or remove an input by adding or removing its node
+        /// (<see cref="InsertInput"/>). The prefix order is the input order: a generic
+        /// <c>[Module]</c>'s type slots, then hyperparameters, then runtime inputs.
         /// </summary>
-        public List<FastTensorKey> Inputs { get; set; } = new();
+        public IReadOnlyList<FastTensorKey> Inputs
+        {
+            get
+            {
+                var count = InputCount;
+                var keys = new FastTensorKey[count];
+                for (int i = 0; i < count; i++)
+                    keys[i] = InputKeyOf(Nodes[i]);
+                return keys;
+            }
+        }
+
+        /// <summary>The name of each input, in <see cref="Inputs"/> order, read off its node's
+        /// <see cref="OnnxOpAttributeNames.ShrkAttrInputName"/> attribute (null where it has none).</summary>
+        public IReadOnlyList<string?> InputNames
+        {
+            get
+            {
+                var count = InputCount;
+                var names = new string?[count];
+                for (int i = 0; i < count; i++)
+                    names[i] = InputNameOf(Nodes[i]);
+                return names;
+            }
+        }
+
+        /// <summary>The input nodes: the prefix of <see cref="Nodes"/> they form.</summary>
+        public IReadOnlyList<FastNode> InputNodes => Nodes.GetRange(0, InputCount);
+
+        /// <summary>The number of inputs, which is also the index in <see cref="Nodes"/> at which the
+        /// body — every node that is not an input, initializers included — starts.</summary>
+        public int InputCount
+        {
+            get
+            {
+                int i = 0;
+                while (i < Nodes.Count && InternalOpCodes.IsModelInputOp(Nodes[i].OpCode)) i++;
+                return i;
+            }
+        }
+
+        /// <summary>The tensor an input node produces: its one output.</summary>
+        public static FastTensorKey InputKeyOf(FastNode inputNode)
+        {
+            Debug.Assert(InternalOpCodes.IsModelInputOp(inputNode.OpCode));
+            foreach (var group in inputNode.FullOutputs.Values)
+                foreach (var key in group)
+                    if (key is { } k) return k;
+            throw new System.InvalidOperationException($"Input node {inputNode.Key} ({inputNode.OpCode}) has no output.");
+        }
+
+        /// <summary>An input node's <see cref="OnnxOpAttributeNames.ShrkAttrInputName"/>, or null.</summary>
+        public static string? InputNameOf(FastNode inputNode)
+            => inputNode.Attributes.GetAttributeVals().TryGetValue(OnnxOpAttributeNames.ShrkAttrInputName, out var name)
+                ? name as string
+                : null;
+
+        /// <summary>Sets an input node's <see cref="OnnxOpAttributeNames.ShrkAttrInputName"/>.</summary>
+        public static void SetInputName(FastNode inputNode, string? name)
+            => inputNode.Attributes = inputNode.Attributes.SetAttributes((OnnxOpAttributeNames.ShrkAttrInputName, name));
+
+        /// <summary>Makes <paramref name="inputNode"/> the input at <paramref name="position"/>
+        /// (0 ≤ position ≤ <see cref="InputCount"/>), shifting the later inputs along.</summary>
+        public void InsertInput(int position, FastNode inputNode)
+        {
+            if (!InternalOpCodes.IsModelInputOp(inputNode.OpCode))
+                throw new System.ArgumentException($"'{inputNode.OpCode}' is not an input op.", nameof(inputNode));
+            if (position < 0 || position > InputCount)
+                throw new System.ArgumentOutOfRangeException(nameof(position));
+            Nodes.Insert(position, inputNode);
+        }
+
+        /// <summary>Makes <paramref name="inputNode"/> the last input.</summary>
+        public void AddInput(FastNode inputNode) => InsertInput(InputCount, inputNode);
+
+        /// <summary>Puts <paramref name="nodes"/> at the start of the body, right after the inputs.</summary>
+        public void InsertAtBodyStart(IEnumerable<FastNode> nodes) => Nodes.InsertRange(InputCount, nodes);
+
+        /// <summary>Puts <paramref name="node"/> at the start of the body, right after the inputs.</summary>
+        public void InsertAtBodyStart(FastNode node) => Nodes.Insert(InputCount, node);
+
+        /// <summary>
+        /// Makes the graph's inputs exactly <paramref name="order"/>: the input nodes producing those
+        /// keys, wherever they stand in <see cref="Nodes"/>, are moved to the front in that order.
+        /// Any other input node is removed. Every other node keeps its relative order. For a pass
+        /// that builds its new inputs piecemeal and settles their order at the end.
+        /// </summary>
+        public void SetInputs(IEnumerable<FastTensorKey> order)
+        {
+            var byKey = new Dictionary<FastTensorKey, FastNode>();
+            foreach (var node in Nodes)
+                if (InternalOpCodes.IsModelInputOp(node.OpCode))
+                    byKey[InputKeyOf(node)] = node;
+            var reordered = new List<FastNode>(Nodes.Count);
+            foreach (var key in order)
+            {
+                if (!byKey.Remove(key, out var node))
+                    throw new System.ArgumentException($"{key} is not produced by an input node of this graph, or is listed twice.", nameof(order));
+                reordered.Add(node);
+            }
+            foreach (var node in Nodes)
+                if (!InternalOpCodes.IsModelInputOp(node.OpCode))
+                    reordered.Add(node);
+            Nodes.Clear();
+            Nodes.AddRange(reordered);
+        }
 
         /// <summary>
         /// Tensor keys corresponding to <c>ComputationGraph.Outputs</c>, in order.
@@ -57,15 +167,8 @@ namespace Shorokoo.Graph
         public List<FastTensorKey> Outputs { get; set; } = new();
 
         /// <summary>
-        /// Original <see cref="Variable.UniqueName"/> for each entry in <see cref="Inputs"/>,
-        /// captured when the graph is built and re-applied when the Variable view is
-        /// rebuilt. Preserves human-readable input names across the round-trip.
-        /// </summary>
-        public List<string?> InputUniqueNames { get; set; } = new();
-
-        /// <summary>
-        /// Original <see cref="Variable.UniqueName"/> for each entry in <see cref="Outputs"/>.
-        /// Same purpose as <see cref="InputUniqueNames"/>.
+        /// Original <see cref="Variable.UniqueName"/> for each entry in <see cref="Outputs"/>,
+        /// captured when the graph is built and re-applied when the Variable view is rebuilt.
         /// </summary>
         public List<string?> OutputUniqueNames { get; set; } = new();
 
@@ -76,7 +179,7 @@ namespace Shorokoo.Graph
         public int?[]? OutputRankOverrides { get; set; }
 
         /// <summary>
-        /// Empty-graph constructor. Callers populate <see cref="Nodes"/>, <see cref="Inputs"/>,
+        /// Empty-graph constructor. Callers populate <see cref="Nodes"/> (input nodes first),
         /// <see cref="Outputs"/>, etc. directly (used by
         /// <see cref="InternalComputationGraphConverter"/> and the Fast processors).
         /// </summary>
@@ -85,7 +188,8 @@ namespace Shorokoo.Graph
         /// <summary>
         /// Builds a <see cref="InternalComputationGraph"/> directly from an
         /// <see cref="Variable"/>-shaped graph. Walks back from <paramref name="outputs"/>
-        /// to collect every reachable <see cref="Node"/>, sorts by
+        /// to collect every reachable <see cref="Node"/>, puts the input nodes first in
+        /// <paramref name="inputs"/> order, and sorts the rest by
         /// <see cref="Node.OrderingHintNumber"/> (each Node's monotonic creation counter,
         /// which by construction places every producer before its consumers and every
         /// LoopAPI body node between its scope's OPEN and CLOSE), and lowers the result
@@ -97,8 +201,8 @@ namespace Shorokoo.Graph
         /// <c>MODEL_TENSOR_INPUT</c> leaves to host-graph <see cref="FastTensorKey"/>s
         /// instead of fresh ones — used by the AUTO_GRAD splice so that gradient body
         /// nodes reference the existing forward-graph tensors directly. Stand-ins
-        /// listed in this map are dropped from <see cref="Nodes"/>; their host keys
-        /// take the corresponding slots in <see cref="Inputs"/>.</para>
+        /// listed in this map are dropped from <see cref="Nodes"/>, so the result has no
+        /// inputs of its own: it is a body fragment for the host to splice.</para>
         /// </summary>
         public InternalComputationGraph(
             ImmutableArray<Variable> inputs,
@@ -119,12 +223,19 @@ namespace Shorokoo.Graph
                         ErrorCodes.FW046, output.InvalidReason ?? Looper.BodyValueReadAfterLoopGuidance);
 
             var tensors = Visitors.ReversePreOrder(ImmutableArray<Variable>.Empty, outputs).ToHashSet();
-            var orderedNodes = tensors.Select(x => x.OwningNode)
-                                      .Concat(inputs.Select(x => x.OwningNode))
-                                      .NotNulls()
-                                      .Distinct()
-                                      .OrderBy(n => n.OrderingHintNumber)
-                                      .ToImmutableArray();
+            var inputNodes = inputs.Select(x => x.OwningNode).Distinct().ToList();
+            var declared = inputNodes.ToHashSet();
+            var bodyNodes = tensors.Select(x => x.OwningNode)
+                                   .NotNulls()
+                                   .Distinct()
+                                   .Where(n => !declared.Contains(n))
+                                   .OrderBy(n => n.OrderingHintNumber)
+                                   .ToList();
+            if (bodyNodes.FirstOrDefault(n => n.IsModelInput) is { } stray)
+                throw new System.InvalidOperationException(
+                    $"InternalComputationGraph: the graph reads input node '{stray.OpCode}' ({stray.Key}), " +
+                    "which is not one of its declared inputs.");
+            ImmutableArray<Node> orderedNodes = [.. inputNodes, .. bodyNodes];
 
             var ranks = outputRankOverrides?.ToArray() ?? outputs.Select(x => x.Rank).ToArray();
             InternalComputationGraphConverter.PopulateFromNodes(
@@ -154,9 +265,7 @@ namespace Shorokoo.Graph
         {
             var copy = new InternalComputationGraph
             {
-                Inputs = new List<FastTensorKey>(this.Inputs),
                 Outputs = new List<FastTensorKey>(this.Outputs),
-                InputUniqueNames = new List<string?>(this.InputUniqueNames),
                 OutputUniqueNames = new List<string?>(this.OutputUniqueNames),
                 OutputRankOverrides = this.OutputRankOverrides is null
                     ? null
@@ -194,21 +303,6 @@ namespace Shorokoo.Graph
         }
 
         /// <summary>
-        /// Replaces this graph's state with the contents of <paramref name="other"/>. Used by
-        /// the Fast* processors to "write back" a new graph onto an existing InternalComputationGraph
-        /// reference so that callers holding the reference see the mutation.
-        /// </summary>
-        public void CopyFrom(InternalComputationGraph other)
-        {
-            if (other is null) throw new System.ArgumentNullException(nameof(other));
-
-            this.Nodes = other.Nodes;
-            this.Inputs = other.Inputs;
-            this.Outputs = other.Outputs;
-            this.OutputRankOverrides = other.OutputRankOverrides;
-        }
-
-        /// <summary>
         /// Computes the module / model signature strings for this graph. Operates on Fast
         /// keys: the input/output IValues consumed by
         /// <see cref="ModuleHelper.CreateFunctionSignatureString(Variable[], Variable[], Variable[], int?[])"/>
@@ -235,7 +329,8 @@ namespace Shorokoo.Graph
         }
 
         /// <summary>
-        /// Returns true iff <see cref="Nodes"/> is in a valid linear order: every node's
+        /// Returns true iff <see cref="Nodes"/> is in a valid linear order: the input nodes form
+        /// its prefix (no input node after the first body node), every node's
         /// data-input producers and (for close nodes) the matching open appear at strictly
         /// smaller indices, every LOOP/IF OPEN has a matching CLOSE referencing the same
         /// key with no two scopes overlapping, and every scope strictly containing a
@@ -252,6 +347,11 @@ namespace Shorokoo.Graph
         internal bool TryValidateLinearOrder(out string? error)
         {
             var n = Nodes.Count;
+            if (FindMisplacedInput() is int misplaced)
+            {
+                error = $"InternalComputationGraph: input node #{misplaced} ({Nodes[misplaced].OpCode}) follows body node #{misplaced - 1} ({Nodes[misplaced - 1].OpCode}) — input nodes must form a prefix of graph.Nodes.";
+                return false;
+            }
             var outputToNode = new System.Collections.Generic.Dictionary<FastTensorKey, int>(n * 2);
             var nodeKeyToIndex = new System.Collections.Generic.Dictionary<FastNodeKey, int>(n);
             for (int i = 0; i < n; i++)
@@ -307,8 +407,6 @@ namespace Shorokoo.Graph
             //     does allow a close node to consume from an outer enclosing scope; that's
             //     the only place we differ from ONNX's strict subgraph-output rule, and the
             //     check naturally permits it because outer scopes also contain the close.)
-            var graphInputs = new System.Collections.Generic.HashSet<FastTensorKey>(this.Inputs);
-
             for (int i = 0; i < n; i++)
             {
                 var node = Nodes[i];
@@ -318,7 +416,6 @@ namespace Shorokoo.Graph
                     foreach (var inputKey in kvp.Value)
                     {
                         if (inputKey is null || inputKey.Value.IsEmpty) continue;
-                        if (graphInputs.Contains(inputKey.Value)) continue;
                         if (!outputToNode.TryGetValue(inputKey.Value, out var srcIdx)) continue;
 
                         if (srcIdx >= i)
@@ -353,6 +450,17 @@ namespace Shorokoo.Graph
 
             error = null;
             return true;
+        }
+
+        /// <summary>The index of the first input node that follows a body node, or null when the
+        /// input nodes form a prefix of <see cref="Nodes"/>. One pass over the op codes.</summary>
+        internal int? FindMisplacedInput()
+        {
+            int i = InputCount;
+            for (; i < Nodes.Count; i++)
+                if (InternalOpCodes.IsModelInputOp(Nodes[i].OpCode))
+                    return i;
+            return null;
         }
     }
 }

@@ -952,13 +952,13 @@ namespace Shorokoo
         /// sequence.</exception>
         private static void RequireNoSequenceInput(InternalComputationGraph model)
         {
-            var producers = BuildProducerByOutputMap(model);
-            for (int i = 0; i < model.Inputs.Count; i++)
+            var inputNodes = model.InputNodes;
+            for (int i = 0; i < inputNodes.Count; i++)
             {
-                if (!producers.TryGetValue(model.Inputs[i], out var node)
-                    || node.OpCode != InternalOpCodes.MODEL_SEQUENCE_INPUT) continue;
-                var name = i < model.InputUniqueNames.Count && !string.IsNullOrEmpty(model.InputUniqueNames[i])
-                    ? $"'{model.InputUniqueNames[i]}' (#{i})"
+                var node = inputNodes[i];
+                if (node.OpCode != InternalOpCodes.MODEL_SEQUENCE_INPUT) continue;
+                var name = InternalComputationGraph.InputNameOf(node) is { Length: > 0 } inputName
+                    ? $"'{inputName}' (#{i})"
                     : $"#{i}";
                 throw new NotSupportedException(
                     $"A training rig feeds its model tensors and optional tensors, and the model's input {name} "
@@ -1129,11 +1129,12 @@ namespace Shorokoo
         internal static IRuntimeTensor[] ReadRepresentativeInputs(InternalComputationGraph concreteArch, bool representSequences = false)
         {
             var producerByOutput = BuildProducerByOutputMap(concreteArch);
-            var inputs = new IRuntimeTensor[concreteArch.Inputs.Count];
-            for (int i = 0; i < concreteArch.Inputs.Count; i++)
+            var archInputs = concreteArch.Inputs;
+            var inputs = new IRuntimeTensor[archInputs.Count];
+            for (int i = 0; i < archInputs.Count; i++)
             {
                 if (representSequences
-                    && producerByOutput.TryGetValue(concreteArch.Inputs[i], out var sequenceNode)
+                    && producerByOutput.TryGetValue(archInputs[i], out var sequenceNode)
                     && sequenceNode.OpCode == InternalOpCodes.MODEL_SEQUENCE_INPUT)
                 {
                     var elementType = sequenceNode.Attributes.GetDTypeVal(OnnxOpAttributeNames.AttrDtype) ?? DType.Invalid;
@@ -1146,10 +1147,10 @@ namespace Shorokoo
                     };
                     continue;
                 }
-                if (!producerByOutput.TryGetValue(concreteArch.Inputs[i], out var node)
+                if (!producerByOutput.TryGetValue(archInputs[i], out var node)
                     || node.OpCode is not (InternalOpCodes.MODEL_TENSOR_INPUT or InternalOpCodes.MODEL_OPTIONAL_INPUT))
                     throw new InvalidOperationException(
-                        $"Concrete arch input {concreteArch.Inputs[i]} is not a MODEL_TENSOR_INPUT or " +
+                        $"Concrete arch input {archInputs[i]} is not a MODEL_TENSOR_INPUT or " +
                         "MODEL_OPTIONAL_INPUT node; cannot read its representative input.");
 
                 var dtype = node.Attributes.GetDTypeVal(OnnxOpAttributeNames.AttrDtype)
@@ -1158,7 +1159,7 @@ namespace Shorokoo
                         "cannot re-materialize its representative input.");
                 var dims = RepresentativeInputShapes.Get(node)
                     ?? throw new InvalidOperationException(
-                        $"Concrete arch input {concreteArch.Inputs[i]} carries no representative-input shape.");
+                        $"Concrete arch input {archInputs[i]} carries no representative-input shape.");
 
                 inputs[i] = node.OpCode == InternalOpCodes.MODEL_OPTIONAL_INPUT
                     ? (dims.AsSpan().SequenceEqual(RepresentativeInputShapes.AbsentOptionalShape)
@@ -1753,8 +1754,8 @@ namespace Shorokoo
                 var targetDtype = targetProducer.Attributes.GetDTypeVal(OnnxOpAttributeNames.AttrDtype)
                     ?? throw new InvalidOperationException("Loss graph target input has no AttrDtype.");
                 var targetRank = (int?)targetProducer.Attributes.GetLongVal(OnnxOpAttributeNames.ShrkAttrRank);
-                var targetFieldName = lossGraph.InputUniqueNames.Count > 1
-                    ? lossGraph.InputUniqueNames[1] ?? "targets"
+                var targetFieldName = lossGraph.InputNames.Count > 1
+                    ? lossGraph.InputNames[1] ?? "targets"
                     : "targets";
                 if (Shorokoo.Core.Training.TrainingGraphBuilder.LossReadsTarget(lossGraph))
                 {
@@ -1922,7 +1923,7 @@ namespace Shorokoo
                 var hyperDType = DType.GetOrCreateForTensorStruct(HyperparameterStructDef);
                 var hyperInputNode = Shorokoo.Core.Nodes.Processors.Fast.FastInternalOp.TensorStructInput(
                     hyperDType, "hyperparams");
-                fastTraining.Nodes.Add(hyperInputNode);
+                fastTraining.AddInput(hyperInputNode);
                 headNodesInOrder.Add(hyperInputNode);
                 hyperparamsInputKey = new FastTensorKey(hyperInputNode.Key, 0);
 
@@ -1967,7 +1968,7 @@ namespace Shorokoo
                     if (!needed.Contains(cn)) continue;
                     var counterNode = Shorokoo.Core.Nodes.Processors.Fast.FastInternalOp.RuntimeInput(
                         DType.Int64, rank: 0, cn);
-                    fastTraining.Nodes.Add(counterNode);
+                    fastTraining.AddInput(counterNode);
                     headNodesInOrder.Add(counterNode);
                     var key = new FastTensorKey(counterNode.Key, 0);
                     counterKeyByName[cn] = key;
@@ -2049,7 +2050,7 @@ namespace Shorokoo
                 var optStateDType = DType.GetOrCreateForTensorStruct(OptimizerStateDef);
                 var optStateInputNode = Shorokoo.Core.Nodes.Processors.Fast.FastInternalOp.TensorStructInput(
                     optStateDType, "optimizer_state");
-                fastTraining.Nodes.Add(optStateInputNode);
+                fastTraining.AddInput(optStateInputNode);
                 headNodesInOrder.Add(optStateInputNode);
                 optStateInputKey = new FastTensorKey(optStateInputNode.Key, 0);
 
@@ -2108,23 +2109,17 @@ namespace Shorokoo
             // Step 9: reorder fastTraining.Inputs and Outputs to the TrainStep convention.
             // Original order: [model_inputs_struct, targets, param_struct, state_struct?]
             // Target order:   [param_struct, state_struct?, optimizer_state_struct?, hyperparams_struct?, step_counter?, model_inputs_struct, targets]
+            // Every input's name rides on its node, so reordering the nodes reorders the names.
             var modelInputsStructKey = fastTraining.Inputs[0];
             var targetsKey = fastTraining.Inputs[1];
-            var modelInputsName = fastTraining.InputUniqueNames.Count > 0 ? fastTraining.InputUniqueNames[0] : null;
-            var targetsName = fastTraining.InputUniqueNames.Count > 1 ? fastTraining.InputUniqueNames[1] : null;
-            var paramStructName = fastTraining.InputUniqueNames.Count > 2 ? fastTraining.InputUniqueNames[2] : null;
-            var stateStructName = stateStructInputKey is not null && fastTraining.InputUniqueNames.Count > 3
-                ? fastTraining.InputUniqueNames[3] : null;
 
-            var newInputs = new List<FastTensorKey>();
-            var newInputNames = new List<string?>();
-            newInputs.Add(trainableParamStructInputKey); newInputNames.Add(paramStructName);
-            if (stateStructInputKey is FastTensorKey ssk) { newInputs.Add(ssk); newInputNames.Add(stateStructName); }
-            if (optStateInputKey is FastTensorKey osk) { newInputs.Add(osk); newInputNames.Add("optimizer_state"); }
-            if (hyperparamsInputKey is FastTensorKey hpk) { newInputs.Add(hpk); newInputNames.Add("hyperparams"); }
-            foreach (var (key, cn) in counterInputsInOrder) { newInputs.Add(key); newInputNames.Add(cn); }
-            newInputs.Add(modelInputsStructKey); newInputNames.Add(modelInputsName);
-            newInputs.Add(targetsKey); newInputNames.Add(targetsName);
+            var newInputs = new List<FastTensorKey> { trainableParamStructInputKey };
+            if (stateStructInputKey is FastTensorKey ssk) newInputs.Add(ssk);
+            if (optStateInputKey is FastTensorKey osk) newInputs.Add(osk);
+            if (hyperparamsInputKey is FastTensorKey hpk) newInputs.Add(hpk);
+            foreach (var (key, _) in counterInputsInOrder) newInputs.Add(key);
+            newInputs.Add(modelInputsStructKey);
+            newInputs.Add(targetsKey);
 
             // Original outputs: [loss, gradient_struct, state_struct]
             // Target outputs:   [updated_param_struct, state_struct, updated_optimizer_state?, loss]
@@ -2137,8 +2132,7 @@ namespace Shorokoo
             if (updatedOptStateStructKey is FastTensorKey uosk) newOutputs.Add(uosk);
             newOutputs.Add(lossOutputKey);
 
-            fastTraining.Inputs = newInputs;
-            fastTraining.InputUniqueNames = newInputNames;
+            fastTraining.SetInputs(newInputs);
             fastTraining.Outputs = newOutputs;
             fastTraining.OutputUniqueNames = new List<string?>(new string?[newOutputs.Count]);
             fastTraining.OutputRankOverrides = null;
@@ -2147,15 +2141,13 @@ namespace Shorokoo
             Shorokoo.Core.Nodes.Processors.Fast.FastProcessorHelper.RemoveUnreachableNodes(fastTraining);
 
             // Move tracked head nodes (param-field GETFIELDs, hyperparam CONSTANTs,
-            // optimizer-state INPUT and GETFIELDs) to the front in creation order.
-            // They have no body dependencies and the body is already nested by
-            // construction, so no Kahn re-sort is needed.
-            var headKeys = new HashSet<FastNodeKey>(headNodesInOrder.Select(n => n.Key));
-            var rebuiltTraining = new List<FastNode>(fastTraining.Nodes.Count);
-            rebuiltTraining.AddRange(headNodesInOrder);
-            foreach (var n in fastTraining.Nodes)
-                if (!headKeys.Contains(n.Key)) rebuiltTraining.Add(n);
-            fastTraining.Nodes = rebuiltTraining;
+            // optimizer-state GETFIELDs) to the start of the body in creation order; the
+            // inputs among them already lead the node list. They depend on nothing but the
+            // inputs and the body is already nested by construction, so no Kahn re-sort is needed.
+            var headBodyNodes = headNodesInOrder.Where(n => !InternalOpCodes.IsModelInputOp(n.OpCode)).ToList();
+            var headKeys = new HashSet<FastNodeKey>(headBodyNodes.Select(n => n.Key));
+            fastTraining.Nodes.RemoveAll(n => headKeys.Contains(n.Key));
+            fastTraining.InsertAtBodyStart(headBodyNodes);
             System.Diagnostics.Debug.Assert(fastTraining.IsLinearOrderValid(), "fastTraining.IsLinearOrderValid()");
 
             // Step 10: lower to an executable form. LowerGraph runs its Fast pipeline
@@ -2285,11 +2277,13 @@ namespace Shorokoo
 
             // Each input must be a named reserved counter (int64 scalar), with no duplicates.
             var producerByOutput = BuildProducerByOutputMap(g);
-            var counterNames = new string[g.Inputs.Count];
+            var gInputs = g.Inputs;
+            var gInputNames = g.InputNames;
+            var counterNames = new string[gInputs.Count];
             var seen = new HashSet<string>(StringComparer.Ordinal);
-            for (int i = 0; i < g.Inputs.Count; i++)
+            for (int i = 0; i < gInputs.Count; i++)
             {
-                var inName = i < g.InputUniqueNames.Count ? g.InputUniqueNames[i] : null;
+                var inName = gInputNames[i];
                 if (inName is null || Array.IndexOf(CounterInputNames, inName) < 0)
                     throw new ArgumentException(
                         $"Scheduler module for hyperparameter '{name}' has input '{inName ?? "(unnamed)"}', " +
@@ -2300,7 +2294,7 @@ namespace Shorokoo
                         $"Scheduler module for hyperparameter '{name}' takes the counter '{inName}' more than once.",
                         nameof(module));
 
-                var inProducer = producerByOutput[g.Inputs[i]];
+                var inProducer = producerByOutput[gInputs[i]];
                 var inDType = inProducer.Attributes.GetDTypeVal(OnnxOpAttributeNames.AttrDtype);
                 var inRank = (int?)inProducer.Attributes.GetLongVal(OnnxOpAttributeNames.ShrkAttrRank);
                 if (inDType != DType.Int64 || (inRank is int ir && ir != 0))
@@ -3923,11 +3917,9 @@ namespace Shorokoo
                 if (!needed.Contains(cn)) continue;
                 var node = Shorokoo.Core.Nodes.Processors.Fast.FastInternalOp.RuntimeInput(DType.Int64, rank: 0, cn);
                 RepresentativeInputShapes.Set(node, []);
-                composed.Nodes.Add(node);
+                composed.AddInput(node);
                 var key = new FastTensorKey(node.Key, 0);
                 counterKeyByName[cn] = key;
-                composed.Inputs.Add(key);
-                composed.InputUniqueNames.Add(cn);
             }
 
             var scheduledNames = new List<string>(scheduledIndices.Count);
@@ -3978,15 +3970,10 @@ namespace Shorokoo
                 }
             }
 
+            // The counter inputs it reads come along as nodes, still leading, names and all.
             var g = new InternalComputationGraph();
             foreach (var n in composed.Nodes)
                 if (reachedNodes.Contains(n.Key)) g.Nodes.Add(n);
-            for (int i = 0; i < composed.Inputs.Count; i++)
-                if (reachedKeys.Contains(composed.Inputs[i]))
-                {
-                    g.Inputs.Add(composed.Inputs[i]);
-                    g.InputUniqueNames.Add(i < composed.InputUniqueNames.Count ? composed.InputUniqueNames[i] : null);
-                }
             g.Outputs.Add(outKey);
             g.OutputUniqueNames.Add(outputName);
             return new ComputationGraph(g, GraphKind.ConcreteModel);

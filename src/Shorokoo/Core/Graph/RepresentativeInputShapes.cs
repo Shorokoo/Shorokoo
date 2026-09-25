@@ -87,9 +87,10 @@ namespace Shorokoo.Core.Graph
         {
             var bound = BindSamplesToLoweredInputs(graph, samples);
             var producers = graph.BuildProducerByOutputMap();
-            for (int i = 0; i < graph.Inputs.Count; i++)
+            var inputs = graph.Inputs;
+            for (int i = 0; i < inputs.Count; i++)
             {
-                if (!producers.TryGetValue(graph.Inputs[i], out var node) || bound[i] is not { } value) continue;
+                if (!producers.TryGetValue(inputs[i], out var node) || bound[i] is not { } value) continue;
                 if (CarriesShape(node) && ShapeOf(value) is { } dims) Set(node, dims);
                 else if (node.OpCode == InternalOpCodes.MODEL_SEQUENCE_INPUT && SharedElementShapeOf(value) is { } element)
                     Set(node, element);
@@ -125,14 +126,15 @@ namespace Shorokoo.Core.Graph
         /// </summary>
         internal static IData?[] BindSamplesToLoweredInputs(InternalComputationGraph graph, ModelParamList? samples)
         {
-            var bound = new IData?[graph.Inputs.Count];
+            var inputs = graph.Inputs;
+            var bound = new IData?[inputs.Count];
             if (samples is null) return bound;
             var values = samples.ModelParams.SelectMany(ValuesOf).ToList();
             var producers = graph.BuildProducerByOutputMap();
             int next = 0;
-            for (int i = 0; i < graph.Inputs.Count && next < values.Count; i++)
+            for (int i = 0; i < inputs.Count && next < values.Count; i++)
             {
-                if (producers.TryGetValue(graph.Inputs[i], out var node) && node.OpCode == InternalOpCodes.GENERIC_TYPE_INPUT)
+                if (producers.TryGetValue(inputs[i], out var node) && node.OpCode == InternalOpCodes.GENERIC_TYPE_INPUT)
                     continue;
                 bound[i] = values[next++];
             }
@@ -182,9 +184,10 @@ namespace Shorokoo.Core.Graph
         internal static void Record(InternalComputationGraph graph, IReadOnlyList<IRuntimeTensor> exemplars)
         {
             var producers = graph.BuildProducerByOutputMap();
-            for (int i = 0; i < graph.Inputs.Count && i < exemplars.Count; i++)
+            var inputs = graph.Inputs;
+            for (int i = 0; i < inputs.Count && i < exemplars.Count; i++)
             {
-                if (!producers.TryGetValue(graph.Inputs[i], out var node) || !CarriesShape(node)) continue;
+                if (!producers.TryGetValue(inputs[i], out var node) || !CarriesShape(node)) continue;
                 var dims = exemplars[i] switch
                 {
                     RuntimeOptionalTensor { HasValue: false } => AbsentOptionalShape,
@@ -230,15 +233,12 @@ namespace Shorokoo.Core.Graph
         /// </summary>
         internal static string? FirstInputWithoutShape(InternalComputationGraph graph)
         {
-            if (graph.Inputs.Count == 0) return null;
-            var inputKeys = new HashSet<FastNodeKey>(graph.Inputs.Select(k => k.FastNodeKey));
-            var nodes = new Dictionary<FastNodeKey, FastNode>();
-            foreach (var node in graph.Nodes)
-                if (inputKeys.Contains(node.Key)) nodes[node.Key] = node;
-            for (int i = 0; i < graph.Inputs.Count; i++)
+            var inputNodes = graph.InputNodes;
+            for (int i = 0; i < inputNodes.Count; i++)
             {
-                if (!nodes.TryGetValue(graph.Inputs[i].FastNodeKey, out var node) || !CarriesShape(node)) continue;
-                if (Get(node) is null) return NameOf(graph, i) ?? node.FriendlyName ?? $"#{i}";
+                var node = inputNodes[i];
+                if (!CarriesShape(node)) continue;
+                if (Get(node) is null) return InternalComputationGraph.InputNameOf(node) ?? node.FriendlyName ?? $"#{i}";
             }
             return null;
         }
@@ -327,11 +327,11 @@ namespace Shorokoo.Core.Graph
         /// </summary>
         internal static void ThrowIfImportLeftAnInputUnshaped(InternalComputationGraph graph, string origin)
         {
-            var producers = graph.BuildProducerByOutputMap();
             var unshaped = new List<string>();
-            for (int i = 0; i < graph.Inputs.Count; i++)
-                if (producers.TryGetValue(graph.Inputs[i], out var node) && CarriesShape(node) && Get(node) is null)
-                    unshaped.Add(node.FriendlyName ?? NameOf(graph, i) ?? $"#{i}");
+            var inputNodes = graph.InputNodes;
+            for (int i = 0; i < inputNodes.Count; i++)
+                if (inputNodes[i] is var node && CarriesShape(node) && Get(node) is null)
+                    unshaped.Add(node.FriendlyName ?? InternalComputationGraph.InputNameOf(node) ?? $"#{i}");
             if (unshaped.Count == 0) return;
             throw new ModelException(ErrorCodes.FW058, origin,
                 $"input(s) {string.Join(", ", unshaped.Select(n => $"'{n}'"))} declare no shape, so their " +
@@ -352,6 +352,6 @@ namespace Shorokoo.Core.Graph
         }
 
         private static string? NameOf(InternalComputationGraph graph, int i)
-            => i < graph.InputUniqueNames.Count ? graph.InputUniqueNames[i] : null;
+            => graph.InputNames is var names && i < names.Count ? names[i] : null;
     }
 }

@@ -204,12 +204,12 @@ namespace Shorokoo.Core.Factory.IR
 
             var infosByName = functionProto.ValueInfoes.ToDictionary(x => x.Name, x => x);
             var inputInfos = functionProto.Inputs.Select(name => infosByName[name]).ToList();
+            // The formal parameters become the body's input nodes, in parameter order, ahead of
+            // everything else: a Shorokoo graph's inputs are the prefix of its node list.
             foreach (var (info, key, fastNode) in CreateFastInputTensors(inputInfos, functionsMap, tensorStructDefs))
             {
                 fastGraph.Nodes.Add(fastNode);
                 tensorKeys[info.Name] = key;
-                fastGraph.Inputs.Add(key);
-                fastGraph.InputUniqueNames.Add(info.Name);
             }
 
             CreateFastNodes(fastGraph, EnumerateNodesInProtoOrder(functionProto.Nodes), tensorKeys, functionsMap, opset);
@@ -522,10 +522,8 @@ namespace Shorokoo.Core.Factory.IR
 
             var tensorKeys = new Dictionary<string, FastTensorKey>();
 
-            // Model inputs first. CG order: inputs precede initializers in the build, but
-            // the CG ComputationGraph constructor only marks IsModelInput nodes as inputs
-            // — the FastCG equivalent uses the explicit Inputs list, so we record them here
-            // and skip initializer producers from that list.
+            // Model inputs first: a graph's inputs are the input nodes that open its node list,
+            // so the initializers and the body follow them.
             // A graph input that names an initializer is that initializer's declaration, not a
             // data input: files written for IR version < 4 had to list every initializer among
             // the inputs. The initializer supplies its value; taken as an input as well it would
@@ -536,8 +534,6 @@ namespace Shorokoo.Core.Factory.IR
             {
                 fastGraph.Nodes.Add(fastNode);
                 tensorKeys[info.Name] = key;
-                fastGraph.Inputs.Add(key);
-                fastGraph.InputUniqueNames.Add(info.Name);
             }
 
             // Initializers (MODEL_PARAM_DATA producers). These are reachable from the
@@ -554,19 +550,13 @@ namespace Shorokoo.Core.Factory.IR
             CreateFastNodes(fastGraph, EnumerateNodesInProtoOrder(graphProto.Nodes), tensorKeys, functionsMap, opset);
 
             // .srk dialect: the model-input ops were serialized as ordinary NodeProtos (materialized
-            // above by CreateFastNodes) rather than graph-input ValueInfoProtos, so rebuild the input
-            // list from those input-op nodes in serialized order. A node whose output key is already a
-            // graph input (the vanilla / execution path, which declared inputs via graphProto.Inputs)
-            // is skipped, so this is a no-op there.
-            var alreadyInputs = new HashSet<FastTensorKey>(fastGraph.Inputs);
-            foreach (var node in fastGraph.Nodes)
-            {
-                if (!InternalOpCodes.IsModelInputOp(node.OpCode)) continue;
-                var key = node.Outputs.FirstOrDefault(k => k is not null && !k.Value.IsEmpty);
-                if (key is null || !alreadyInputs.Add(key.Value)) continue;
-                fastGraph.Inputs.Add(key.Value);
-                fastGraph.InputUniqueNames.Add(key.Value.ToString());
-            }
+            // above by CreateFastNodes, after the initializers) rather than graph-input
+            // ValueInfoProtos, each carrying its name as an attribute. Move them to the front, in
+            // serialized order, which is the input order. A no-op for the dialects that declare
+            // their inputs through graphProto.Inputs.
+            var inputNodes = fastGraph.Nodes.Where(n => InternalOpCodes.IsModelInputOp(n.OpCode)).ToList();
+            fastGraph.Nodes.RemoveAll(n => InternalOpCodes.IsModelInputOp(n.OpCode));
+            fastGraph.Nodes.InsertRange(0, inputNodes);
 
             // Outputs (in proto declaration order).
             foreach (var output in graphProto.Outputs)
@@ -790,6 +780,11 @@ namespace Shorokoo.Core.Factory.IR
                     && inputProto.MetadataProps.FirstOrDefault(p => p.Key == RepresentativeInputMetadata.Key)
                         is { } reprProp)
                     RepresentativeInputMetadata.Apply(fastNode, reprProp.Value);
+
+                // The input's name: the signature name an internal-dialect ValueInfo carries in its
+                // metadata (its own name is the raw tensor id), else the ValueInfo's name.
+                InternalComputationGraph.SetInputName(fastNode,
+                    inputProto.MetadataProps.FirstOrDefault(p => p.Key == ShrkAttrInputName)?.Value ?? inputProto.Name);
 
                 results.Add((inputProto, key, fastNode));
             }

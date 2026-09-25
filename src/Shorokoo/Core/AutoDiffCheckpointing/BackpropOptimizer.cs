@@ -180,6 +180,7 @@ internal class SimpleBackpropOptimizer
         }
 
         copy.Nodes = newNodes;
+        copy.SetInputs(graph.Inputs);
         return copy;
     }
 

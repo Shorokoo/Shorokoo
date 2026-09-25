@@ -238,7 +238,7 @@ namespace Shorokoo.Graph
         /// <param name="graph">The graph to specialize (e.g. a concrete model or architecture).</param>
         /// <param name="inputValues">
         /// Values to bake in, matched by name against
-        /// <see cref="InternalComputationGraph.InputUniqueNames"/>. Build one with
+        /// <see cref="InternalComputationGraph.InputNames"/>. Build one with
         /// <see cref="FromOrderedInputs"/> when the names match positional order. Names that have
         /// no corresponding graph input, and non-tensor entries (sequences, structs), are silently
         /// ignored.
@@ -264,19 +264,15 @@ namespace Shorokoo.Graph
                 return fastGraph;
 
             var constantAttrDefs = Definitions.NodeDefinitions[OpCodes.CONSTANT].AttributeDefs;
-            var specializedIndices = new List<int>();
+            var specialized = new List<FastNode>();
 
-            for (int i = 0; i < fastGraph.Inputs.Count; i++)
+            foreach (var node in fastGraph.InputNodes)
             {
-                var name = i < fastGraph.InputUniqueNames.Count ? fastGraph.InputUniqueNames[i] : null;
+                var name = InternalComputationGraph.InputNameOf(node);
                 if (name is null || !valueByName.TryGetValue(name, out var td))
                     continue;
 
-                var node = fastGraph.FindNode(fastGraph.Inputs[i].FastNodeKey);
-                if (node is null)
-                    continue;
-
-                // Replace the input node in-place with a CONSTANT node, preserving its
+                // Replace the input node with a CONSTANT node, preserving its
                 // output key so all downstream consumers remain valid without remapping.
                 node.OpCode = OpCodes.CONSTANT;
                 node.Attributes = OnnxCSharpAttributes.FromCSharpVals(
@@ -290,20 +286,16 @@ namespace Shorokoo.Graph
                 node.FullInputs = new Dictionary<string, List<FastTensorKey?>>();
                 node.TargetFunction = null;
 
-                specializedIndices.Add(i);
+                specialized.Add(node);
             }
 
-            if (specializedIndices.Count == 0)
+            if (specialized.Count == 0)
                 return fastGraph;
 
-            // Remove baked-in entries from both lists in reverse order to keep indices stable.
-            for (int j = specializedIndices.Count - 1; j >= 0; j--)
-            {
-                var idx = specializedIndices[j];
-                fastGraph.Inputs.RemoveAt(idx);
-                if (idx < fastGraph.InputUniqueNames.Count)
-                    fastGraph.InputUniqueNames.RemoveAt(idx);
-            }
+            // The constants are body nodes now, so they leave the input prefix for the body's start.
+            var moved = specialized.ToHashSet();
+            fastGraph.Nodes.RemoveAll(moved.Contains);
+            fastGraph.InsertAtBodyStart(specialized);
 
             FastSimplify.Process(fastGraph);
 
@@ -694,7 +686,7 @@ namespace Shorokoo.Graph
             // reads the graph's inputs that way; zipping them here would spend the caller's first
             // value on a placeholder and misname every hint after it (Shorokoo/Shorokoo#253).
             var dataInputNames = graph.Inputs
-                .Zip(graph.InputUniqueNames)
+                .Zip(graph.InputNames)
                 .Where(x => graph.FindNode(x.First.FastNodeKey) is not { OpCode: InternalOpCodes.GENERIC_TYPE_INPUT })
                 .Select(x => x.Second);
 

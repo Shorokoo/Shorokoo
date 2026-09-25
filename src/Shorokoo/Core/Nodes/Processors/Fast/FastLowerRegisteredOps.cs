@@ -157,8 +157,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             for (int i = 0, present = 0; i < standIns.Length; i++)
                 if (standIns[i] is not null) standInKeyBySlot[i] = built.Inputs[present++];
 
-            var standInKeys = new HashSet<FastTensorKey>(built.Inputs);
-            List<FastNode> body = [.. built.Nodes.Where(n => !ProducesAny(n, standInKeys))];
+            // The stand-ins are the built graph's input prefix; the decomposition is what follows it.
+            List<FastNode> body = [.. built.Nodes.Skip(built.InputCount)];
             if (body.Count == 0) return null;
 
             foreach (var node in body)
@@ -191,14 +191,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
         private static bool IsLowerable(FastNode node, IReadOnlySet<string> opCodes)
             => opCodes.Contains(node.OpCode) && OpLoweringRegistry.TryGet(node.OpCode, out _);
-
-        private static bool ProducesAny(FastNode node, HashSet<FastTensorKey> keys)
-        {
-            foreach (var group in node.FullOutputs)
-                foreach (var key in group.Value)
-                    if (key is { } k && keys.Contains(k)) return true;
-            return false;
-        }
 
         /// <summary>
         /// Dtype and rank for every tensor in <paramref name="graph"/>, or nothing when the graph

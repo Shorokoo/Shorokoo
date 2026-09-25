@@ -274,6 +274,12 @@ public static class OnnxOpAttributeNames
     public const string ShrkAttrRngAlgorithm = "shrk_rng_algorithm";
     public const string ShrkAttrRelativeModelId = "shrk_relative_model_id";
     public const string ShrkAttrInputType = "shrk_input_type";
+
+    /// <summary>On a graph-input node (<see cref="InternalOpCodes.IsModelInputOp"/>): the input's
+    /// signature name. The graph keeps no input list of its own — its inputs are the input nodes that
+    /// open its node list — so this is where an input's name lives, and what the <c>.srk</c> dialect
+    /// carries it in.</summary>
+    public const string ShrkAttrInputName = "shrk_input_name";
     public const string ShrkAttrHyperparamIndex = "shrk_hyperparam_index";
     public const string ShrkAttrGenericTypeConstraints = "shrk_generic_type_constraints";
     public const string ShrkAttrGenericTypeArgs = "shrk_generic_type_args";
@@ -338,15 +344,12 @@ public static class OnnxOpAttributeNames
     /// stage name, e.g. "concrete-model") so a serialized graph reloads as the same kind.</summary>
     public const string ShrkMetaGraphKind = "shrk_graph_kind";
 
-    /// <summary>Model-level metadata prop carrying the graph's signature input names
-    /// (<c>InternalComputationGraph.InputUniqueNames</c>) as a positional JSON string array.
-    /// Written on internal-dialect exports, whose graph-I/O ValueInfos must keep the raw
-    /// <c>N{k}_T{s}</c> tensor ids (the loader parses node/tensor keys out of them), so the
-    /// human-readable signature names ride a side channel instead of a rename.</summary>
-    public const string ShrkMetaInputNames = "shrk_input_names";
-
     /// <summary>Model-level metadata prop carrying the graph's signature output names
-    /// (<c>InternalComputationGraph.OutputUniqueNames</c>); see <see cref="ShrkMetaInputNames"/>.</summary>
+    /// (<c>InternalComputationGraph.OutputUniqueNames</c>) as a positional JSON string array.
+    /// Written on internal-dialect exports, whose graph-output ValueInfos must keep the raw
+    /// <c>N{k}_T{s}</c> tensor ids (the loader parses node/tensor keys out of them), so the
+    /// human-readable signature names ride a side channel instead of a rename. (An input's name
+    /// rides on its node, <see cref="ShrkAttrInputName"/>.)</summary>
     public const string ShrkMetaOutputNames = "shrk_output_names";
 }
 

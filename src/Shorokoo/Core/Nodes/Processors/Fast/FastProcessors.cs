@@ -117,8 +117,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// Removes nodes from <see cref="InternalComputationGraph.Nodes"/> that are not
         /// reachable from the graph's outputs. This cleans up dead nodes left behind
         /// by native in-place processors that disconnect nodes without removing them.
+        /// The graph's inputs are kept, read or not, unless <paramref name="keepUnreadInputs"/>
+        /// is false: then an input no output reaches is removed with the rest.
         /// </summary>
-        public static void RemoveUnreachableNodes(InternalComputationGraph graph)
+        public static void RemoveUnreachableNodes(InternalComputationGraph graph, bool keepUnreadInputs = true)
         {
             // Build output FastTensorKey → FastNodeKey mapping.
             var tensorToNodeKey = new Dictionary<FastTensorKey, FastNodeKey>();
@@ -149,8 +151,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // Graph inputs must keep their producer (MODEL_*INPUT) nodes alive even
             // if no path from any output reaches them — otherwise graph.Inputs ends
             // up referencing a tensor produced by a node that no longer exists.
-            foreach (var inputKey in graph.Inputs)
-                EnqueueTensor(inputKey);
+            if (keepUnreadInputs)
+                foreach (var inputKey in graph.Inputs)
+                    EnqueueTensor(inputKey);
 
             while (worklist.Count > 0)
             {
@@ -265,12 +268,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 }
             }
 
-            // Phase 4: remap graph-level inputs and outputs
-            for (int i = 0; i < sub.Inputs.Count; i++)
-            {
-                if (tensorKeyMap.TryGetValue(sub.Inputs[i], out var newTk))
-                    sub.Inputs[i] = newTk;
-            }
+            // Phase 4: remap graph-level outputs (the inputs are their nodes' outputs, remapped above)
             for (int i = 0; i < sub.Outputs.Count; i++)
             {
                 if (tensorKeyMap.TryGetValue(sub.Outputs[i], out var newTk))
@@ -1011,16 +1009,17 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 callerInputKeys.AddRange(hyperparamNodeKeys);
                 callerInputKeys.AddRange(isFunction ? fastNode.Inputs : fastNode.Inputs.Skip(1));
 
-                Debug.Assert(callerInputKeys.Count == subFastGraph.Inputs.Count,
+                var formals = subFastGraph.Inputs;
+                Debug.Assert(callerInputKeys.Count == formals.Count,
                     $"FastInlineModulesAndFunctions: caller inputs ({callerInputKeys.Count}) != " +
-                    $"subgraph inputs ({subFastGraph.Inputs.Count}) for {fastNode.OpCode}");
+                    $"subgraph inputs ({formals.Count}) for {fastNode.OpCode}");
 
                 // Build input remap: subgraph input key → caller input key
                 var inputRemap = new Dictionary<FastTensorKey, FastTensorKey>();
-                for (int i = 0; i < subFastGraph.Inputs.Count && i < callerInputKeys.Count; i++)
+                for (int i = 0; i < formals.Count && i < callerInputKeys.Count; i++)
                 {
                     if (callerInputKeys[i] is FastTensorKey callerKey)
-                        inputRemap[subFastGraph.Inputs[i]] = callerKey;
+                        inputRemap[formals[i]] = callerKey;
                 }
 
                 // A [Module(Checkpoint = true)] invoke: everything spliced in from it is one
@@ -1036,9 +1035,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     ? null
                     : new HashSet<FastTensorKey>(subFastGraph.Outputs);
 
-                // Insert subgraph nodes with remapped inputs
-                foreach (var subNode in subFastGraph.Nodes)
+                // Insert the callee's body nodes with remapped inputs. Its input nodes stay behind:
+                // each formal is bound to the caller's argument, so nothing spliced reads them.
+                var unboundFormals = new HashSet<FastTensorKey>(formals.Where(k => !inputRemap.ContainsKey(k)));
+                foreach (var subNode in subFastGraph.Nodes.Skip(formals.Count))
                 {
+                    if (unboundFormals.Count > 0 && subNode.Inputs.Any(k => k is FastTensorKey fk && unboundFormals.Contains(fk)))
+                        throw new InvalidOperationException(
+                            $"FastInlineModulesAndFunctions: the body of {fastNode.OpCode} reads a formal parameter " +
+                            "the call site passes no argument for.");
                     foreach (var kvp in subNode.FullInputs)
                     {
                         var inputList = kvp.Value;
@@ -2873,22 +2878,20 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                                 structInputProducerByOutput[tk] = node;
                 }
 
-                var newGraphInputs = new List<FastTensorKey>(graph.Inputs.Count);
-                // The names move in step with the inputs: a struct input's name becomes one per
-                // field, "<struct>.<field>", so every later input keeps its own name. Left as it
-                // was, each name after a struct input named the input before it — the name
+                // Each struct input is replaced, where it stands in the input prefix, by one input
+                // per field. The names move with the inputs: a struct input's name becomes one per
+                // field, "<struct>.<field>", so every later input keeps its own name — the name
                 // Specialize removes an input by, and the one an input is reported under.
-                var newGraphInputNames = new List<string?>(graph.Inputs.Count);
-                var newNodes = new List<FastNode>();
+                var inputNodes = graph.InputNodes;
+                var newInputNodes = new List<FastNode>(inputNodes.Count);
 
-                for (int inputIndex = 0; inputIndex < graph.Inputs.Count; inputIndex++)
+                foreach (var inputNode in inputNodes)
                 {
-                    var inputKey = graph.Inputs[inputIndex];
-                    var inputName = inputIndex < graph.InputUniqueNames.Count ? graph.InputUniqueNames[inputIndex] : null;
+                    var inputKey = InternalComputationGraph.InputKeyOf(inputNode);
+                    var inputName = InternalComputationGraph.InputNameOf(inputNode);
                     if (!structInputProducerByOutput.TryGetValue(inputKey, out var structInputNode))
                     {
-                        newGraphInputs.Add(inputKey);
-                        newGraphInputNames.Add(inputName);
+                        newInputNodes.Add(inputNode);
                         continue;
                     }
 
@@ -2914,6 +2917,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                             {
                                 [OnnxOpAttributeNames.AttrDtype] = field.ElementType,
                                 [OnnxOpAttributeNames.ShrkAttrRank] = (long?)field.Rank,
+                                [OnnxOpAttributeNames.ShrkAttrInputName] = inputName is null ? null : $"{inputName}.{field.Name}",
                             },
                             tensorInputDefs);
                         var fieldNode = new FastNode
@@ -2923,26 +2927,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                             Attributes = fieldAttrs,
                             FullOutputs = { [""] = new List<FastTensorKey?> { fieldTensorKey } },
                         };
-                        newNodes.Add(fieldNode);
+                        newInputNodes.Add(fieldNode);
                         fieldKeys.Add(fieldTensorKey);
-                        newGraphInputs.Add(fieldTensorKey);
-                        newGraphInputNames.Add(inputName is null ? null : $"{inputName}.{field.Name}");
                     }
 
                     structFields[inputKey] = fieldKeys;
-                    nodesToRemove.Add(structInputNode.Key);
                 }
 
-                // Insert field-input nodes at the front of graph.Nodes. Their
-                // outputs are graph inputs (no producer edges visible to
-                // `EnsureTopologicalOrder` because graph inputs are treated as
-                // pre-available), so placing them at the top keeps graph.Nodes
-                // in a topologically-valid order without needing a re-sort
-                // pass just for the new MODEL_TENSOR_INPUT entries.
-                graph.Nodes.InsertRange(0, newNodes);
-                graph.Inputs.Clear();
-                foreach (var k in newGraphInputs) graph.Inputs.Add(k);
-                if (graph.InputUniqueNames.Count > 0) graph.InputUniqueNames = newGraphInputNames;
+                graph.Nodes.RemoveRange(0, inputNodes.Count);
+                graph.Nodes.InsertRange(0, newInputNodes);
             }
 
             // Maps a TensorStruct-typed sequence's output FastTensorKey to the list of
@@ -3911,13 +3904,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     EnqueueInputsOf(openNode);
             }
 
-            return Enumerable.Range(0, graph.Inputs.Count).Where(i => reached.Contains(graph.Inputs[i]));
+            var graphInputs = graph.Inputs;
+            return Enumerable.Range(0, graphInputs.Count).Where(i => reached.Contains(graphInputs[i]));
         }
 
         private static string DescribeInputs(InternalComputationGraph graph, List<int> inputIndices)
             => string.Join(", ", inputIndices.Select(i =>
             {
-                var name = i < graph.InputUniqueNames.Count ? graph.InputUniqueNames[i] : null;
+                var names = graph.InputNames;
+                var name = i < names.Count ? names[i] : null;
                 return string.IsNullOrEmpty(name) ? $"input #{i}" : $"input '{name}' (#{i})";
             }));
 
@@ -4392,13 +4387,16 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             }
 
             // Splice the new graph: shared nodes (MODEL_PARAMs + per-site sequences + site
-            // transform constants) go at the front — they have no dependencies on the original
-            // graph. Each ID_REF is replaced in-place by its per-replacement subgraph (possibly
-            // empty for a direct reference), which inherits the ID_REF's surrounding scope (so
-            // nesting is preserved). All other original nodes stay in their existing positions.
+            // transform constants) go at the start of the body — they have no dependencies on the
+            // original graph. Each ID_REF is replaced in-place by its per-replacement subgraph
+            // (possibly empty for a direct reference), which inherits the ID_REF's surrounding
+            // scope (so nesting is preserved). All other original nodes stay in their existing
+            // positions.
+            var inputCount = graph.InputCount;
             var rebuilt = new List<FastNode>(graph.Nodes.Count + newNodes.Count);
+            rebuilt.AddRange(graph.Nodes.Take(inputCount));
             rebuilt.AddRange(newNodes);
-            foreach (var node in graph.Nodes)
+            foreach (var node in graph.Nodes.Skip(inputCount))
             {
                 if (perIdRefReplacements.TryGetValue(node.Key, out var replacement))
                     rebuilt.AddRange(replacement);
@@ -5338,20 +5336,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     graph.Outputs[i] = replacement;
             }
 
-            // Drop the folded consumer nodes; prepend any freshly-minted scalar
-            // CONSTANTs (for SEQUENCE_LENGTH) — they have no inputs, so the front
-            // is a topologically valid placement and CONSTANTs carry no scope of
-            // their own. Sweep any producers whose only consumers just
+            // Drop the folded consumer nodes; put any freshly-minted scalar
+            // CONSTANTs (for SEQUENCE_LENGTH) at the start of the body — they have no
+            // inputs, so that is a topologically valid placement and CONSTANTs carry
+            // no scope of their own. Sweep any producers whose only consumers just
             // disappeared (a SEQUENCE_CONSTRUCT whose AT/LENGTH consumers are all
             // folded, or an upstream trainable-param kept alive solely by the
             // construct).
-            if (nodesToAdd.Count > 0)
-            {
-                var combined = new List<FastNode>(graph.Nodes.Count + nodesToAdd.Count);
-                combined.AddRange(nodesToAdd);
-                combined.AddRange(graph.Nodes);
-                graph.Nodes = combined;
-            }
+            graph.InsertAtBodyStart(nodesToAdd);
             graph.Nodes.RemoveAll(n => nodesToRemove.Contains(n.Key));
             FastProcessorHelper.RemoveUnreachableNodes(graph);
             System.Diagnostics.Debug.Assert(graph.IsLinearOrderValid(), "graph.IsLinearOrderValid()");
@@ -6549,16 +6541,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 oldToNewKey[oldKey] = newKey;
             }
 
-            // Prepend the new CONSTANT nodes. They have no inputs, so the front of
-            // the node list is a topologically valid position — every existing
-            // consumer (which used to read from the original constant subgraph)
-            // now reads from a freshly-prepended CONSTANT that comes before it.
-            // Constants carry no scope of their own, so this also keeps OPEN/CLOSE
-            // nesting intact.
-            var combined = new List<FastNode>(graph.Nodes.Count + nodesToAdd.Count);
-            combined.AddRange(nodesToAdd);
-            combined.AddRange(graph.Nodes);
-            graph.Nodes = combined;
+            // Put the new CONSTANT nodes at the start of the body. They have no inputs,
+            // so that is a topologically valid position — every existing consumer (which
+            // used to read from the original constant subgraph) now reads from a fresh
+            // CONSTANT that comes before it. Constants carry no scope of their own, so
+            // this also keeps OPEN/CLOSE nesting intact.
+            graph.InsertAtBodyStart(nodesToAdd);
 
             foreach (var node in graph.Nodes)
             {

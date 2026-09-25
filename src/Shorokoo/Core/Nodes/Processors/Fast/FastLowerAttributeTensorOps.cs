@@ -208,15 +208,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         {
             var resolved = new TensorData?[keys.Count];
 
-            // Strategy 1: constant-fold via QEE on an input-free pruned clone.
+            // Strategy 1: constant-fold via QEE on a pruned clone, its inputs left unfed (QEE gives
+            // each an empty placeholder, so whatever reads one stays unresolved).
             {
                 var resolver = graph.Clone();
-                resolver.Inputs = new List<FastTensorKey>();
-                resolver.InputUniqueNames = new List<string?>();
                 resolver.Outputs = new List<FastTensorKey>(keys);
                 resolver.OutputUniqueNames = new List<string?>(new string?[keys.Count]);
                 resolver.OutputRankOverrides = null;
-                FastProcessorHelper.RemoveUnreachableNodes(resolver);
+                FastProcessorHelper.RemoveUnreachableNodes(resolver, keepUnreadInputs: false);
                 TryResolveWithQee(resolver, keys, resolved, samples: null);
             }
 
@@ -308,16 +307,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         {
             var bound = RepresentativeInputShapes.BindSamplesToLoweredInputs(resolver, sampleInputs);
             var inputs = resolver.Inputs;
-            var names = resolver.InputUniqueNames;
 
             // Pruned with no input kept alive, only the input nodes an output reaches survive.
-            resolver.Inputs = [];
-            FastProcessorHelper.RemoveUnreachableNodes(resolver);
+            FastProcessorHelper.RemoveUnreachableNodes(resolver, keepUnreadInputs: false);
             var surviving = resolver.Nodes.Select(n => n.Key).ToHashSet();
             var read = Enumerable.Range(0, inputs.Count).Where(i => surviving.Contains(inputs[i].FastNodeKey)).ToList();
 
-            resolver.Inputs = [.. read.Select(i => inputs[i])];
-            resolver.InputUniqueNames = [.. read.Select(i => i < names.Count ? names[i] : null)];
             var samples = new IData[read.Count];
             for (int j = 0; j < read.Count; j++)
             {

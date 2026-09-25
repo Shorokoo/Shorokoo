@@ -142,8 +142,8 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
     [Fact]
     public void TestTheRawFormatWritersLeaveThePreviousFileIntactWhenACommitCrashes()
     {
-        var graphA = new InternalComputationGraph([InputTensor<float32>("in")],
-            [InputTensor<float32>("in") + Scalar(1.0f)]);
+        var inputA = InputTensor<float32>("in");
+        var graphA = new InternalComputationGraph([inputA], [inputA + Scalar(1.0f)]);
         var input = InputTensor<float32>("in");
         var graphB = new InternalComputationGraph([input], [input * Scalar(2.0f)]);
         var srcA = P("src-a.zsrk");
@@ -871,7 +871,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         var nodeLines = g.Nodes
             .Select(n => $"{n.OpCode}({string.Join(",", n.Inputs.Select(k => k is null ? "-" : "x"))})")
             .OrderBy(x => x, StringComparer.Ordinal);
-        return $"inputs=[{string.Join(",", g.InputUniqueNames)}] outputs=[{string.Join(",", g.OutputUniqueNames)}]\n"
+        return $"inputs=[{string.Join(",", g.InputNames)}] outputs=[{string.Join(",", g.OutputUniqueNames)}]\n"
              + string.Join("\n", nodeLines);
     }
 

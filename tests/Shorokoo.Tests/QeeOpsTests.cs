@@ -195,7 +195,6 @@ public class QeeOpsCoverageTests
         var partial = new InternalComputationGraph
         {
             Nodes = [.. graph.Nodes.Where(n => n.OpCode != InternalOpCodes.MODEL_TENSOR_INPUT)],
-            Inputs = graph.Inputs,
             Outputs = graph.Outputs,
         };
         var seeded = new Dictionary<Core.Graph.FastTensorKey, IRuntimeTensor>();

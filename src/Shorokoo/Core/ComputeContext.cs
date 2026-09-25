@@ -1782,11 +1782,11 @@ namespace Shorokoo.Runtime
 
         private static string[] ResolveOriginalInputNames(InternalComputationGraph graph)
         {
-            var names = new string[graph.Inputs.Count];
-            for (int i = 0; i < graph.Inputs.Count; i++)
-                names[i] = graph.InputUniqueNames.Count > i && graph.InputUniqueNames[i] is string n
-                    ? n
-                    : graph.Inputs[i].ToString();
+            var inputNodes = graph.InputNodes;
+            var names = new string[inputNodes.Count];
+            for (int i = 0; i < inputNodes.Count; i++)
+                names[i] = InternalComputationGraph.InputNameOf(inputNodes[i])
+                    ?? InternalComputationGraph.InputKeyOf(inputNodes[i]).ToString();
             return names;
         }
 
@@ -1800,6 +1800,10 @@ namespace Shorokoo.Runtime
         /// </summary>
         public TensorData[] Eval(Variable[] outputs)
         {
+            // A context that cannot run says so before the expression is looked at: building the
+            // graph can itself refuse, and that would hide which of the two is wrong.
+            RefuseHostContext("run");
+            ObjectDisposedException.ThrowIf(_disposed, this);
             var graph = new InternalComputationGraph([], [.. outputs]);
             graph.RequireRunnableOps("ComputeContext.Eval");
             return this.Execute(graph).Select(x => x.ToTensorData()).ToArray();

@@ -807,6 +807,7 @@ internal class Rematerializer
         }
 
         copy.Nodes = newNodes;
+        copy.SetInputs(graph.Inputs);
         return (copy, newToOriginal);
     }
 

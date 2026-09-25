@@ -79,7 +79,7 @@ namespace Shorokoo.Core.Factory
         ///
         /// <para>
         /// Graph inputs and outputs are named from the graph's signature
-        /// (<see cref="InternalComputationGraph.InputUniqueNames"/> /
+        /// (<see cref="InternalComputationGraph.InputNames"/> /
         /// <see cref="InternalComputationGraph.OutputUniqueNames"/>), deduplicated
         /// deterministically; unnamed slots fall back to <c>input_{i}</c> /
         /// <c>output_{i}</c>. Dtypes are always stamped on the I/O ValueInfos, and
@@ -304,6 +304,10 @@ namespace Shorokoo.Core.Factory
                 // lets the model import back as the concrete graph it was. (The .srk dialect emits
                 // the input nodes themselves, attribute and all.)
                 emitRepresentativeMetadata: !emitInputsAsNodes,
+                // The internal dialects keep a graph input's raw tensor id as its ValueInfo name, so
+                // its signature name rides in the ValueInfo's metadata; a vanilla file is named from
+                // the signature outright (ApplySignatureIONames).
+                emitInputNameMetadata: !vanillaExport && !emitInputsAsNodes,
                 inputDims: inputDims,
                 stripCheckpointStamp: stripCheckpointStamp);
 
@@ -381,19 +385,14 @@ namespace Shorokoo.Core.Factory
             // parameter at ModelId [0], serialized as a plain initializer like any other
             // MODEL_PARAM_DATA and reloaded the same way.)
 
-            // ----- 6c. Internal dialect only: the graph-I/O ValueInfos must keep their
+            // ----- 6c. Internal dialect only: the graph-output ValueInfos must keep their
             // raw N{k}_T{s} tensor ids (the loader parses node/tensor keys out of them),
-            // so the human-readable signature names ride model metadata instead — the
-            // loader restores them into Input/OutputUniqueNames positionally. Names come
-            // from prepFast for the same lockstep reason ApplySignatureIONames uses it.
+            // so the human-readable output names ride model metadata instead — the
+            // loader restores them into OutputUniqueNames positionally. Names come
+            // from prepFast for the same reason ApplySignatureIONames uses it.
+            // (An input's name rides on its own node, or on its ValueInfo's metadata.)
             if (!vanillaExport)
             {
-                if (prepFast.InputUniqueNames.Count > 0)
-                    model.MetadataProps.Add(new StringStringEntryProto
-                    {
-                        Key = OnnxOpAttributeNames.ShrkMetaInputNames,
-                        Value = System.Text.Json.JsonSerializer.Serialize(prepFast.InputUniqueNames),
-                    });
                 if (prepFast.OutputUniqueNames.Count > 0)
                     model.MetadataProps.Add(new StringStringEntryProto
                     {
@@ -411,12 +410,11 @@ namespace Shorokoo.Core.Factory
                 ThrowIfNotVanillaDialect(model);
                 StampGraphOutputTypes(model.Graph, prepFast, tensorInfoLookup);
                 // Names come from prepFast, not the original fastGraph: the proto's
-                // I/O slots are built positionally from prepFast.Inputs/Outputs, and
-                // any pass that mutates those lists maintains the name lists in
-                // lockstep (the convention every Fast processor follows) — pairing
-                // against the original graph's lists would silently mislabel I/O the
-                // day a pre-pass adds or drops a graph input.
-                ApplySignatureIONames(model.Graph, prepFast.InputUniqueNames, prepFast.OutputUniqueNames);
+                // I/O slots are built positionally from prepFast's inputs and outputs, and
+                // an input's name rides on its own node (an output's in the name list
+                // every pass maintains alongside) — pairing against the original graph
+                // would silently mislabel I/O the day a pre-pass adds or drops one.
+                ApplySignatureIONames(model.Graph, prepFast.InputNames, prepFast.OutputUniqueNames);
             }
 
             return model;
@@ -1794,6 +1792,7 @@ namespace Shorokoo.Core.Factory
             Dictionary<FastTensorKey, FastTensorInfo>? tensorInfoLookup = null,
             bool emitInputsAsNodes = false,
             bool emitRepresentativeMetadata = false,
+            bool emitInputNameMetadata = false,
             IReadOnlyList<long[]?>? inputDims = null,
             bool stripCheckpointStamp = true)
         {
@@ -1913,7 +1912,7 @@ namespace Shorokoo.Core.Factory
                 : CreateInitializerTensors(fastGraph);
             var inputInfos = inputsAsNodes
                 ? Array.Empty<ValueInfoProto>()
-                : CreateInputInfos(fastGraph, emitRepresentativeMetadata, inputDims);
+                : CreateInputInfos(fastGraph, emitRepresentativeMetadata, emitInputNameMetadata, inputDims);
             var outputInfos = CreateOutputInfos(fastGraph);
 
             return (GraphProto)OnnxIRFactory.CreateGraph(
@@ -1932,22 +1931,9 @@ namespace Shorokoo.Core.Factory
         /// </summary>
         private static NodeProto[] BuildInputNodeProtos(InternalComputationGraph fastGraph, OpSetVersion opset, bool stripCheckpointStamp)
         {
-            var producerByOutputKey = new Dictionary<FastTensorKey, FastNode>();
-            foreach (var node in fastGraph.Nodes)
+            var protos = new List<NodeProto>();
+            foreach (var producer in fastGraph.InputNodes)
             {
-                if (!InternalOpCodes.IsModelInputOp(node.OpCode)) continue;
-                foreach (var slot in node.FullOutputs.Values)
-                    foreach (var k in slot)
-                        if (k is FastTensorKey tk && !tk.IsEmpty)
-                            producerByOutputKey[tk] = node;
-            }
-
-            var protos = new List<NodeProto>(fastGraph.Inputs.Count);
-            foreach (var key in fastGraph.Inputs)
-            {
-                if (!producerByOutputKey.TryGetValue(key, out var producer))
-                    throw new InvalidOperationException(
-                        $"FastOnnxModelBuilder: graph input {key} has no model-input producing node.");
                 var info = FastOpsetResolver.Resolve(producer, graphOpenNode: null, opset, stripCheckpointStamp)
                     ?? throw new InvalidOperationException(
                         $"FastOnnxModelBuilder: model-input op {producer.OpCode} did not resolve to an emittable node.");
@@ -2062,37 +2048,29 @@ namespace Shorokoo.Core.Factory
         }
 
         private static ValueInfoProto[] CreateInputInfos(
-            InternalComputationGraph fastGraph, bool emitRepresentativeMetadata,
+            InternalComputationGraph fastGraph, bool emitRepresentativeMetadata, bool emitInputNameMetadata,
             IReadOnlyList<long[]?>? inputDims = null)
         {
-            if (inputDims is not null && inputDims.Count != fastGraph.Inputs.Count)
+            var inputNodes = fastGraph.InputNodes;
+            if (inputDims is not null && inputDims.Count != inputNodes.Count)
                 throw new InvalidOperationException(
                     $"FastOnnxModelBuilder: {inputDims.Count} concrete input shape(s) were supplied for a graph " +
-                    $"with {fastGraph.Inputs.Count} input(s); they must correspond one-to-one in input order.");
-            // Map graph-input keys back to their producing node so we can read
-            // dtype/rank/structure off the node's attributes.
-            var producerByOutputKey = new Dictionary<FastTensorKey, FastNode>();
-            foreach (var node in fastGraph.Nodes)
+                    $"with {inputNodes.Count} input(s); they must correspond one-to-one in input order.");
+            // dtype/rank/structure are read off each input node's attributes.
+            var infos = new ValueInfoProto[inputNodes.Count];
+            for (int i = 0; i < inputNodes.Count; i++)
             {
-                if (!InternalOpCodes.IsModelInputOp(node.OpCode)
-                 && node.OpCode != InternalOpCodes.MODEL_PARAM_DATA) continue;
-                foreach (var slot in node.FullOutputs.Values)
-                    foreach (var k in slot)
-                        if (k is FastTensorKey tk && !tk.IsEmpty)
-                            producerByOutputKey[tk] = node;
+                var node = inputNodes[i];
+                infos[i] = FastOnnxProtoFactory.CreateGraphInputInfo(
+                    node, InternalComputationGraph.InputKeyOf(node), emitRepresentativeMetadata, concreteDims: inputDims?[i]);
+                if (emitInputNameMetadata && InternalComputationGraph.InputNameOf(node) is { } name)
+                    infos[i].MetadataProps.Add(new StringStringEntryProto
+                    {
+                        Key = OnnxOpAttributeNames.ShrkAttrInputName,
+                        Value = name,
+                    });
             }
-
-            var infos = new List<ValueInfoProto>(fastGraph.Inputs.Count);
-            for (int i = 0; i < fastGraph.Inputs.Count; i++)
-            {
-                var key = fastGraph.Inputs[i];
-                if (!producerByOutputKey.TryGetValue(key, out var producer))
-                    throw new InvalidOperationException(
-                        $"FastOnnxModelBuilder: graph input {key} has no producing node in the Fast graph.");
-                infos.Add(FastOnnxProtoFactory.CreateGraphInputInfo(
-                    producer, key, emitRepresentativeMetadata, concreteDims: inputDims?[i]));
-            }
-            return infos.ToArray();
+            return infos;
         }
 
         private static ValueInfoProto[] CreateOutputInfos(InternalComputationGraph fastGraph)

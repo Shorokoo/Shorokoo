@@ -175,12 +175,13 @@ namespace Shorokoo.Graph
                 fastGraph.Nodes.Add(fastNode);
             }
 
+            // An input's name lives on its node. A stand-in the host keys externally has none here.
+            var nodeByKey = fastGraph.Nodes.ToDictionary(n => n.Key);
             foreach (var input in inputs)
-            {
-                FastTensorKey key = variableToKey.TryGetValue(input, out var mk) ? mk : FastTensorKey.FromCgKey(input.Key);
-                fastGraph.Inputs.Add(key);
-                fastGraph.InputUniqueNames.Add(input.UniqueName);
-            }
+                if (variableToKey.TryGetValue(input, out var key)
+                    && (externalInputKeys is null || !externalInputKeys.ContainsKey(input))
+                    && nodeByKey.TryGetValue(key.FastNodeKey, out var inputNode))
+                    InternalComputationGraph.SetInputName(inputNode, input.UniqueName);
             foreach (var output in outputs)
             {
                 FastTensorKey key = variableToKey.TryGetValue(output, out var mk) ? mk : FastTensorKey.FromCgKey(output.Key);
@@ -458,13 +459,13 @@ namespace Shorokoo.Graph
             // Restore original UniqueNames so that human-readable graph-input/output names
             // survive FastCG processor passes (loop unrolling, simplify, etc. otherwise
             // replace them with TensorKey.ToString()-style strings).
-            ApplyOriginalNames(inputs, fastGraph.InputUniqueNames);
+            ApplyOriginalNames(inputs, fastGraph.InputNames);
             ApplyOriginalNames(outputs, fastGraph.OutputUniqueNames);
 
             return (nodesInOrder.ToImmutableArray(), tensorsByKey, inputs, outputs);
         }
 
-        private static void ApplyOriginalNames(ImmutableArray<Variable> variables, List<string?> names)
+        private static void ApplyOriginalNames(ImmutableArray<Variable> variables, IReadOnlyList<string?> names)
         {
             for (int i = 0; i < variables.Length && i < names.Count; i++)
             {

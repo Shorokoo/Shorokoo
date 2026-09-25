@@ -79,7 +79,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             }
 
             // Pass 1b: scan every reference (FullInputs / FullOutputs slots,
-            // GraphOpenNodeKey, graph.Inputs, graph.Outputs) for FastNodeKeys
+            // GraphOpenNodeKey, graph.Outputs) for FastNodeKeys
             // that don't correspond to any node in graph.Nodes. These are
             // "phantom" producers — typically zombie nodes (e.g.
             // LOOP_INDEX_VARIABLE) whose Variable outputs survive in
@@ -101,7 +101,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     foreach (var k in slot)
                         if (k is FastTensorKey tk) referenced.Add(tk.FastNodeKey);
             }
-            foreach (var k in graph.Inputs) referenced.Add(k.FastNodeKey);
             foreach (var k in graph.Outputs) referenced.Add(k.FastNodeKey);
 
             foreach (var key in referenced)
@@ -122,8 +121,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 RewriteSlots(node.FullOutputs, oldToNew);
             }
 
-            for (int i = 0; i < graph.Inputs.Count; i++)
-                graph.Inputs[i] = RewriteTensorKey(graph.Inputs[i], oldToNew);
             for (int i = 0; i < graph.Outputs.Count; i++)
                 graph.Outputs[i] = RewriteTensorKey(graph.Outputs[i], oldToNew);
 

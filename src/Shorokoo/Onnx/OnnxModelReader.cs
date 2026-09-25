@@ -188,12 +188,12 @@ namespace Shorokoo.Onnx
         }
 
         /// <summary>
-        /// Restores the graph's human-readable signature I/O names from the
-        /// <c>shrk_input_names</c> / <c>shrk_output_names</c> model metadata written by
-        /// internal-dialect exports (whose graph-I/O ValueInfos must keep raw
-        /// <c>N{k}_T{s}</c> tensor ids). Applied only when a list parses and its length
-        /// matches the reconstructed graph's I/O count; otherwise (a foreign model, say)
-        /// the proto names stand.
+        /// Restores the graph's human-readable signature output names from the
+        /// <c>shrk_output_names</c> model metadata written by internal-dialect exports (whose
+        /// graph-output ValueInfos must keep raw <c>N{k}_T{s}</c> tensor ids). Applied only when the
+        /// list parses and its length matches the reconstructed graph's output count; otherwise (a
+        /// foreign model, say) the proto names stand. (An input's name rides on its own node or
+        /// ValueInfo.)
         /// </summary>
         private static void RestoreSignatureIONames(IR.ModelProto model, InternalComputationGraph graph)
         {
@@ -201,7 +201,6 @@ namespace Shorokoo.Onnx
             {
                 var target = prop.Key switch
                 {
-                    OnnxOpAttributeNames.ShrkMetaInputNames => graph.InputUniqueNames,
                     OnnxOpAttributeNames.ShrkMetaOutputNames => graph.OutputUniqueNames,
                     _ => null,
                 };

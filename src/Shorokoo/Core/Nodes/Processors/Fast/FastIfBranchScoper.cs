@@ -52,7 +52,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var ctx = new Context(graph);
             if (!ctx.HasIf) return;
 
+            var inputs = graph.Inputs;
             graph.Nodes = SinkLevel(graph.Nodes, ctx);
+            graph.SetInputs(inputs);
 
             System.Diagnostics.Debug.Assert(graph.IsLinearOrderValid(),
                 "FastIfBranchScoper.ScopeAllIfBranches: scoping left the graph in an invalid linear order.");

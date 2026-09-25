@@ -105,8 +105,6 @@ internal static class RngKeyResolver
         var graph = new InternalComputationGraph
         {
             Nodes = nodes,
-            Inputs = [],
-            InputUniqueNames = [],
             Outputs = [keys],
             OutputUniqueNames = [null],
         };

@@ -209,17 +209,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             Dictionary<Function, Function?> soleSpecialization,
             HashSet<Function> genericFunctions)
         {
-            // Identify GENERIC_TYPE_INPUT nodes (and the input keys they produce) so they
-            // can be removed in a single pass.
-            var genericInputKeys = new HashSet<FastTensorKey>();
+            // Identify GENERIC_TYPE_INPUT nodes so they can be removed in a single pass.
             var nodesToRemove = new HashSet<FastNodeKey>();
             foreach (var node in graph.Nodes)
-            {
-                if (node.OpCode != InternalOpCodes.GENERIC_TYPE_INPUT) continue;
-                nodesToRemove.Add(node.Key);
-                foreach (var k in node.Outputs.NotNulls())
-                    genericInputKeys.Add(k);
-            }
+                if (node.OpCode == InternalOpCodes.GENERIC_TYPE_INPUT)
+                    nodesToRemove.Add(node.Key);
 
             var nodeByKey = FastProcessorHelper.BuildNodeByKey(graph);
 
@@ -244,20 +238,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             foreach (var (node, concrete) in rebindings)
                 node.TargetFunction = concrete;
 
-            // Drop generic-typed entries from Inputs / InputUniqueNames in lockstep so they
-            // stay positionally aligned.
-            var newInputs = new List<FastTensorKey>(graph.Inputs.Count);
-            var newInputNames = new List<string?>(graph.Inputs.Count);
-            for (int i = 0; i < graph.Inputs.Count; i++)
-            {
-                if (genericInputKeys.Contains(graph.Inputs[i])) continue;
-                newInputs.Add(graph.Inputs[i]);
-                if (i < graph.InputUniqueNames.Count)
-                    newInputNames.Add(graph.InputUniqueNames[i]);
-            }
-            graph.Inputs = newInputs;
-            graph.InputUniqueNames = newInputNames;
-
+            // (The GENERIC_TYPE_INPUT nodes' removal above removed them from the inputs.)
             return graph;
         }
 

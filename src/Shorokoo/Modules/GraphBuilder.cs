@@ -247,11 +247,11 @@ namespace Shorokoo.Core
 
             // Add input parameters after the generic type inputs. User Inline signatures
             // are written inputs-first / hyperparameters-last, but the framework keeps its
-            // graph input list ordered hyperparameters-first (every downstream consumer —
+            // graph inputs ordered hyperparameters-first (every downstream consumer —
             // module-call inlining, signatures, concretization — relies on that order). The
             // body was already invoked with fnInputs in declaration order above, so only the
-            // graph's input *list* is reordered here; the produced graph is identical to the
-            // legacy hyperparameters-first layout.
+            // order of the input nodes opening the graph follows this list; the produced graph
+            // is identical to the legacy hyperparameters-first layout.
             var fnInputVars = fnInputs.Select(x => x.ToVariable()).ToList();
             allInputs.AddRange(fnInputVars.Where(IsHyperparamInput));
             allInputs.AddRange(fnInputVars.Where(v => !IsHyperparamInput(v)));

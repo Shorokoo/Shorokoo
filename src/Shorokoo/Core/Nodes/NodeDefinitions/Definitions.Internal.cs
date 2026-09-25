@@ -27,6 +27,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 // representative shape below, as it does a tensor input's.
                 .AttributeLong(ShrkAttrRank, "R")
                 .AttributeEnum<InputType>(ShrkAttrInputType, ["Hyperparam", "ReadyInput", "ModelInput", "GenericType"], defaultValue: "ReadyInput")
+                .AttributeString(ShrkAttrInputName)
                 // On every input of a concrete graph: the dims of the element the model was
                 // concretized at when the optional was supplied present, and a single -1 when it
                 // was supplied absent. That makes a concrete architecture with an optional input as
@@ -41,6 +42,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .AttributeDType(AttrDtype, "T")
                 .AttributeLong(ShrkAttrRank, "R")
                 .AttributeEnum<InputType>(ShrkAttrInputType, ["Hyperparam", "ReadyInput", "ModelInput", "GenericType"], defaultValue: "ReadyInput")
+                .AttributeString(ShrkAttrInputName)
                 // Optional: the [Hyper(defaultValue)] default for a defaulted hyperparameter input,
                 // as an invariant-culture literal. A string rather than a float because a hyperparameter
                 // is any supported scalar dtype (#125) and a float cannot hold every int64/float64 default.
@@ -57,6 +59,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Sequence<AnyLike>("T")
                 .AttributeDType(AttrDtype, "T")
                 .AttributeEnum<InputType>(ShrkAttrInputType, ["Hyperparam", "ReadyInput", "ModelInput", "GenericType"], defaultValue: "ReadyInput")
+                .AttributeString(ShrkAttrInputName)
                 // Optional: the dims every element of the sample the graph was concretized at
                 // shares, where they share one — a sequence has no single shape otherwise. ONNX
                 // export's shape inference represents the input by it.
@@ -67,6 +70,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Tensor<AnyLike>("T", tracksModuleFn: true)
                 .AttributeDType(AttrDtype, "T")
                 .AttributeEnum<InputType>(ShrkAttrInputType, ["Hyperparam", "ReadyInput", "ModelInput", "GenericType"], defaultValue: "GenericType")
+                .AttributeString(ShrkAttrInputName)
                 .AttributeLong(ShrkAttrRank, "R")
                 .AttributeStrings(ShrkAttrGenericTypeConstraints)
                 .Output("genericTypeInfo", "T", rank: "R"),
@@ -258,6 +262,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .TensorStruct<IStruct>("T")
                 .AttributeDType(AttrDtype, "T")
                 .AttributeEnum<InputType>(ShrkAttrInputType, ["Hyperparam", "ReadyInput", "ModelInput", "GenericType"], defaultValue: "ReadyInput")
+                .AttributeString(ShrkAttrInputName)
                 .Output("modelInput", "T"),
 
             // TENSOR_STRUCT_GETFIELD: Extracts a single field from a TensorStruct.

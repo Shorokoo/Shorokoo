@@ -984,8 +984,8 @@ public class TrainingRigRepresentativeInputCoverageTests
 
         Assert.Equal(3, original.Inputs.Count);
         Assert.Equal(original.Inputs.Count, reloaded.Inputs.Count);
-        Assert.Equal(original.InputUniqueNames, reloaded.InputUniqueNames);
-        Assert.Equal(3, reloaded.InputUniqueNames.Distinct().Count());
+        Assert.Equal(original.InputNames, reloaded.InputNames);
+        Assert.Equal(3, reloaded.InputNames.Distinct().Count());
 
         long[][] expectDims = [[4L], [2048L], [2L, 3L]];
         DType[] expectDtype = [DType.Float32, DType.Int64, DType.Float32];

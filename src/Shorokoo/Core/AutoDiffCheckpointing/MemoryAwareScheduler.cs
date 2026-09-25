@@ -75,8 +75,11 @@ internal class MemoryAwareScheduler
             return graph;
 
         // Build a fresh graph that reuses everything except the node order.
+        // The scheduler orders every node by memory alone; the inputs go back to the front, in
+        // their own order, which moves nothing a body node needs later.
         var copy = graph.Clone();
         copy.Nodes = reordered.ToList();
+        copy.SetInputs(graph.Inputs);
         System.Diagnostics.Debug.Assert(copy.IsLinearOrderValid(), "copy.IsLinearOrderValid()");
         return copy;
     }
@@ -211,14 +214,10 @@ internal class MemoryAwareScheduler
 
         // Track what's available: starts EMPTY, populated by each scheduled node's outputs.
         // Crucially we don't seed with graph.Inputs even though those tensor keys are
-        // "available externally" — every graph-input key is also the output of a
-        // MODEL_TENSOR_INPUT node in graph.Nodes, and downstream code that compiles the
-        // reordered graph (InternalComputationGraphConverter) requires strict producer-then-
-        // consumer ordering: each consumer's input tensors must already appear as some
-        // earlier node's output in the linear order. Seeding with graph.Inputs would let
-        // a consumer be picked before its MODEL_TENSOR_INPUT producer, producing a graph
-        // that passes IsLinearOrderValid (which treats graph inputs as always-available)
-        // but blows up at compile time.
+        // "available externally" — every graph-input key is also the output of an input
+        // node in graph.Nodes, and the linear order requires each consumer's input tensors
+        // to appear as some earlier node's output. Seeding with graph.Inputs would let a
+        // consumer be picked before its input node.
         var available = new HashSet<FastTensorKey>();
 
         bool DepsMet(FastNode n)

@@ -38,10 +38,11 @@ namespace Shorokoo.Tests.Utils;
 /// <para><b>Every module runs.</b> Every operator Shorokoo builds is one the backends translate, so
 /// any failure — a model a backend refuses, an operator it has no translation for, an attribute the
 /// translation does not handle, an exception in the run — fails the audit. The one exception is a
-/// JAX refusal of what JAX cannot hold: an operator the JAX backend refuses outright
-/// (<see cref="JaxDialect.RefusedOperators"/>, strings, sequences and data-dependent shapes), or one
-/// listed in <see cref="JaxKnownRefusals"/> for a module whose graph computes a shape from an input's
-/// values. A listed module that no longer refuses fails the audit as well.</para>
+/// JAX refusal of what JAX cannot hold: a model with a string input, output or initializer, an
+/// operator the JAX backend refuses outright (<see cref="JaxDialect.RefusedOperators"/>, strings,
+/// sequences and data-dependent shapes), or one listed in <see cref="JaxKnownRefusals"/> for a
+/// module whose graph computes a shape from an input's values. A listed module that no longer
+/// refuses fails the audit as well.</para>
 ///
 /// <para>The model is built once, the way a session receives it, and that one model is run on both
 /// backends.</para>
@@ -108,13 +109,20 @@ internal sealed class QeeAuditOnBackend(
         {
             return Refused(ex) is { } refused
                 && (JaxDialect.RefusedOperators.ContainsKey(refused.Operator ?? "") && refused.Reason == JaxUnsupportedReason.UnknownOperator
-                    || knownRefusals?.GetValueOrDefault(typeof(TModule)) == refused.Operator && refused.Reason == JaxUnsupportedReason.UnsupportedUsage);
+                    || knownRefusals?.GetValueOrDefault(typeof(TModule)) == refused.Operator && refused.Reason == JaxUnsupportedReason.UnsupportedUsage
+                    || refused.Reason == JaxUnsupportedReason.UnsupportedModel && HoldsStrings(built.Graph));
         }
         if (knownRefusals?.ContainsKey(typeof(TModule)) == true) return false;
         var functions = built.Functions.ToDictionary(f => f.Domain + ":" + f.Name);
         var convicted = Convicted(built.Graph.Nodes, reference, onBackend, Drawn(built.Graph.Nodes, functions, known));
         return convicted.SetEquals(knownDisagreements.Keys.Where(k => k.Module == typeof(TModule)).Select(k => k.Operator));
     }
+
+    /// <summary>Whether <paramref name="graph"/> takes, returns or holds a string tensor, which JAX
+    /// has no type for.</summary>
+    private static bool HoldsStrings(GraphProto graph)
+        => graph.Inputs.Concat(graph.Outputs).Any(v => v.Type?.TensorType?.ElemType == (int)TensorProto.DataType.String)
+            || graph.Initializers.Any(i => i.data_type == (int)TensorProto.DataType.String);
 
     private JaxUnsupportedModelException? Refused(Exception? ex)
     {

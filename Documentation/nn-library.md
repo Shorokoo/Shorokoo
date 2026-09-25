@@ -183,6 +183,13 @@ initializer states its shape in its `Scalar<T>` return type and takes no shape i
 *its* first input may be a parameter like any other.) The initializers run in dependency order, so
 a chain — one parameter from another, from a third — works too.
 
+The value handed over may also be **computed from parameters** — `ProductOf.Init([vocab, d], emb * Scalar(2f), wv)`,
+or the output of a module called on one. Such a value has no constant to fold to either, so the
+computation is carried along and evaluated when the parameters are initialized, after the ones it
+reads. It has to be plain tensor arithmetic over parameters created outside any loop: a
+computation that runs through a loop or a branch, reads a parameter standing for a different one on
+each trip, or draws randomness is refused at concretization, naming the initializer.
+
 Two shapes are refused by name rather than guessed at. A source the model reads **nowhere else**:
 a parameter no forward path reads gets no gradient, so it cannot be trained, and the stages after
 concretization drop it — the concrete model would end up carrying fewer parameters than the
@@ -199,8 +206,8 @@ hyperparameter, and no model-typed input. Building such a body is refused with *
 names the initializer, when the graph of the module using it is built — and for an initializer
 called from another, when the called one's body is built, however deep it sits. Where the value
 you want comes out of a layer, compute it in the `[Module]` that declares the parameter and pass
-it to the initializer as a `Tensor<T>` input, or write the computation in the initializer itself
-from tensor operations.
+it to the initializer as a `Tensor<T>` input — computed from parameters as above, or from
+constants — or write the computation in the initializer itself from tensor operations.
 
 ## Layers (`Shorokoo.Modules.Layers`)
 

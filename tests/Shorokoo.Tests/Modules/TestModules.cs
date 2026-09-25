@@ -1626,6 +1626,40 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>Drives InitDoublingAnotherParam with a value computed from a parameter: a parameter
+    /// at 1, and beside it the double of its double.</summary>
+    [Module]
+    public partial class UsesInitFromAComputedValue
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+        {
+            var source = InitSimple.Init(input.ShapeTensor());
+            return input * source * InitDoublingAnotherParam.Init(input.ShapeTensor(), source * Scalar(2f));
+        }
+    }
+
+    /// <summary>The same, the parameter read by nothing but the computation handed to the initializer.</summary>
+    [Module]
+    public partial class UsesInitFromAComputedValueOnly
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+        {
+            var source = InitSimple.Init(input.ShapeTensor());
+            return input * InitDoublingAnotherParam.Init(input.ShapeTensor(), source * Scalar(2f));
+        }
+    }
+
+    /// <summary>The same, the value computed by a module call.</summary>
+    [Module]
+    public partial class UsesInitFromAModuleComputedValue
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+        {
+            var source = InitSimple.Init(input.ShapeTensor());
+            return input * source * InitDoublingAnotherParam.Init(input.ShapeTensor(), DoublerSub.Call(source));
+        }
+    }
+
     /// <summary>An initializer whose body loops: its loop's subgraph inputs still need types in the
     /// emitted body.</summary>
     [TrainableParamInitializer]

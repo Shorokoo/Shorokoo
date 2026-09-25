@@ -4072,22 +4072,42 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var sourceIds = liveParamInfos.SelectMany(x => x.SourceParamIds).ToHashSet();
             if (sourceIds.Count == 0) return;
 
-            // Output keys that carry a source parameter, and the consumers each key has beyond the
-            // initializer slots of a parameter definition (a MODEL_PARAM_ID_REF's inputs from index
-            // 2 on). A graph output counts as a reader too.
+            // Output keys that carry a source parameter, and the values the outputs read other
+            // than through the initializer slots of a parameter definition (a MODEL_PARAM_ID_REF's
+            // inputs from index 2 on) — walked back from the outputs, so a value computed from a
+            // source only to be handed to an initializer (source * 2) is no forward read of it.
             var keysBySourceId = new Dictionary<ModelId, List<FastTensorKey>>();
             foreach (var (key, id) in paramIdByOutputKey)
                 if (sourceIds.Contains(id))
                     (keysBySourceId.TryGetValue(id, out var l) ? l : keysBySourceId[id] = []).Add(key);
 
-            var readElsewhere = new HashSet<FastTensorKey>(graph.Outputs);
-            foreach (var node in graph.Nodes)
+            var producers = graph.BuildProducerByOutputMap();
+            var nodeByKey = graph.Nodes.ToDictionary(n => n.Key);
+            var readElsewhere = new HashSet<FastTensorKey>();
+            var reachedNodes = new HashSet<FastNodeKey>();
+            var pending = new Stack<FastNode>();
+            void Reach(FastNode node)
             {
+                if (reachedNodes.Add(node.Key)) pending.Push(node);
+            }
+            foreach (var key in graph.Outputs)
+            {
+                readElsewhere.Add(key);
+                if (producers.TryGetValue(key, out var p)) Reach(p);
+            }
+            while (pending.Count > 0)
+            {
+                var node = pending.Pop();
                 bool isParamDefinition = node.OpCode == InternalOpCodes.MODEL_PARAM_ID_REF;
                 var inputs = node.Inputs;
                 for (int i = 0; i < inputs.Count; i++)
-                    if (!(isParamDefinition && i >= 2) && inputs[i] is FastTensorKey k)
-                        readElsewhere.Add(k);
+                {
+                    if ((isParamDefinition && i >= 2) || inputs[i] is not FastTensorKey k) continue;
+                    readElsewhere.Add(k);
+                    if (producers.TryGetValue(k, out var p)) Reach(p);
+                }
+                if (node.GraphOpenNodeKey is FastNodeKey open && nodeByKey.TryGetValue(open, out var openNode))
+                    Reach(openNode);
             }
 
             foreach (var (id, keys) in keysBySourceId)
@@ -4150,20 +4170,59 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     var sourceId = paramInfo.TrainableParamInputSourceIds[i];
                     if (sourceId is not null)
                     {
-                        if (!liveParamKeyByModelId.TryGetValue(sourceId.Value, out var sourceKey))
-                            throw new InvalidOperationException(
-                                $"Parameter initializer '{paramInfo.TargetFn.DefaultName}' of the parameter at "
-                                + $"ModelId [{string.Join(", ", modelId.Vals)}] is passed the value of the "
-                                + $"parameter at ModelId [{string.Join(", ", sourceId.Value.Vals)}], which this "
-                                + "architecture does not carry — it was pruned as unreachable, or it is created "
-                                + "inside a branch this one is not.");
-                        initializerParamKeys.Add(sourceKey);
+                        initializerParamKeys.Add(LiveSourceKey(sourceId.Value));
+                        continue;
+                    }
+                    if (!paramInfo.TrainableParamInputComputations.IsDefaultOrEmpty
+                        && paramInfo.TrainableParamInputComputations[i] is { } computation)
+                    {
+                        initializerParamKeys.Add(CloneComputation(computation));
                         continue;
                     }
                     var constKey = FastNodeKey.New();
                     newNodes.Add(CreateConstantTensorDataNode(
                         constKey, paramInfo.TrainableParamInputParamValues[i]!));
                     initializerParamKeys.Add(new FastTensorKey(constKey, 0));
+                }
+
+                FastTensorKey LiveSourceKey(ModelId sourceId)
+                    => liveParamKeyByModelId.TryGetValue(sourceId, out var sourceKey)
+                        ? sourceKey
+                        : throw new InvalidOperationException(
+                            $"Parameter initializer '{paramInfo.TargetFn.DefaultName}' of the parameter at "
+                            + $"ModelId [{string.Join(", ", modelId.Vals)}] is passed the value of the "
+                            + $"parameter at ModelId [{string.Join(", ", sourceId.Vals)}], which this "
+                            + "architecture does not carry — it was pruned as unreachable, or it is created "
+                            + "inside a branch this one is not.");
+
+                // A computed input is laid down again right here, after the parameters it reads and
+                // before the one it initializes, reading those parameters' definitions: the copy in
+                // the body stays where it is for whatever else reads it.
+                FastTensorKey CloneComputation(ParamInitComputation computation)
+                {
+                    var remap = computation.Sources.ToDictionary(kv => kv.Key, kv => LiveSourceKey(kv.Value));
+                    foreach (var original in computation.Nodes)
+                    {
+                        var cloneKey = FastNodeKey.New();
+                        foreach (var slots in original.FullOutputs.Values)
+                            foreach (var slot in slots)
+                                if (slot is FastTensorKey ok && !ok.IsEmpty)
+                                    remap[ok] = new FastTensorKey(cloneKey, ok.OutputIndex);
+                        newNodes.Add(new FastNode
+                        {
+                            Key = cloneKey,
+                            OpCode = original.OpCode,
+                            Attributes = original.Attributes,
+                            FriendlyName = original.FriendlyName,
+                            TargetFunction = original.TargetFunction,
+                            IdentifierTemplate = original.IdentifierTemplate,
+                            FullInputs = original.FullInputs.ToDictionary(g => g.Key,
+                                g => g.Value.Select(k => k is FastTensorKey key && remap.TryGetValue(key, out var r) ? r : k).ToList()),
+                            FullOutputs = original.FullOutputs.ToDictionary(g => g.Key,
+                                g => g.Value.Select(k => k is FastTensorKey key && remap.TryGetValue(key, out var r) ? r : k).ToList()),
+                        });
+                    }
+                    return remap[computation.Result];
                 }
 
                 var tpKey = FastNodeKey.New();
@@ -4723,6 +4782,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // parameter has no value until materialization runs. Such an input is kept as a
             // dependency on that parameter instead (Shorokoo/Shorokoo#324).
             var (paramIdByOutputKey, multiParamKeys) = paramIds;
+            Dictionary<FastTensorKey, FastNode>? producers = null;
 
             foreach (var node in graph.Nodes)
             {
@@ -4740,6 +4800,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
                 // Gather all iterations for each initializer param (inputs[2+]).
                 var initParamIterations = new List<List<RuntimeTensor?>>();
+                // Per initializer input, the computation that fills it from other parameters,
+                // where it is one (see CaptureParamComputation): used for an input that folds to no
+                // constant because a parameter it reads has no value yet.
+                var initParamComputations = new List<ParamInitComputation?>();
                 // The parameter each initializer input names, where it names one. The SHAPE input
                 // (the first, at inputs[2]) is excluded: the shape has to be known before anything
                 // is initialized, so it must fold to a constant like every other id-determining
@@ -4764,6 +4828,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     initParamSources.Add(
                         mayBeParam && inputs[i] is FastTensorKey sk && paramIdByOutputKey.TryGetValue(sk, out var srcId)
                             ? srcId : null);
+                    initParamComputations.Add(
+                        mayBeParam && initParamSources[^1] is null && inputs[i] is FastTensorKey ck
+                            ? CaptureParamComputation(ck, producers ??= graph.BuildProducerByOutputMap(),
+                                paramIdByOutputKey, multiParamKeys, node)
+                            : null);
                     if (inputs[i] is null || !store.TryGetValue(inputs[i]!.Value, out var paramRaw))
                     {
                         initParamIterations.Add([]);
@@ -4779,6 +4848,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     var modelId = ModelId.FromLongVals(filteredId);
 
                     var paramValues = ImmutableArray.CreateBuilder<TensorAttribute?>(initParamIterations.Count);
+                    var computations = new ParamInitComputation?[initParamIterations.Count];
                     bool allAvailable = true;
                     for (int p = 0; p < initParamIterations.Count; p++)
                     {
@@ -4793,6 +4863,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         // into the description costs nothing.
                         var td = paramRt is not null
                             ? TensorDataConverter.ToTensorData(paramRt)?.MoveToAttribute() : null;
+                        if (td is null && initParamComputations[p] is { } computation)
+                        {
+                            // No constant, because a parameter it reads has no value yet: it is
+                            // computed at materialization, after those parameters.
+                            computations[p] = computation;
+                            paramValues.Add(null);
+                            continue;
+                        }
                         if (td is null) { allAvailable = false; break; }
                         paramValues.Add(td);
                     }
@@ -4825,6 +4903,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         SpecificModelId = modelId,
                         TrainableParamInputParamValues = paramValues.ToImmutable(),
                         TrainableParamInputSourceIds = [.. initParamSources],
+                        TrainableParamInputComputations = [.. computations],
                         TargetFn = fn,
                     };
                 }
@@ -4843,6 +4922,82 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             return [.. result.Values];
         }
+
+        /// <summary>
+        /// The computation filling an initializer input of <paramref name="site"/> from other
+        /// parameters' values — the nodes between those parameters and <paramref name="result"/> —
+        /// or <c>null</c> where the input reads no parameter, or reads a graph input (whose sample
+        /// value, not a parameter, is then what it lacks; see
+        /// <see cref="FastConvertModelParamIdRefToModelParam.ThrowIfAParamNeedsAnInputWithoutAValue"/>).
+        ///
+        /// <para>Only a computation that can run on its own at materialization qualifies: constants
+        /// and ordinary deterministic ops over parameters that each stand for one parameter. One
+        /// that reads a parameter standing for a different one on each loop trip, sits in or reads
+        /// out of a control-flow scope, or draws randomness is refused, naming the initializer, as
+        /// is one reading a value this build has no way to carry there.</para>
+        /// </summary>
+        private static ParamInitComputation? CaptureParamComputation(
+            FastTensorKey result,
+            Dictionary<FastTensorKey, FastNode> producers,
+            Dictionary<FastTensorKey, ModelId> paramIdByOutputKey,
+            HashSet<FastTensorKey> multiParamKeys,
+            FastNode site)
+        {
+            var sources = new Dictionary<FastTensorKey, ModelId>();
+            var visited = new HashSet<FastNodeKey>();
+            var nodes = new List<FastNode>();
+            string? refusal = null;
+            bool readsAnInput = false;
+
+            void Visit(FastTensorKey key)
+            {
+                if (key.IsEmpty || refusal is not null) return;
+                if (paramIdByOutputKey.TryGetValue(key, out var id)) { sources[key] = id; return; }
+                if (multiParamKeys.Contains(key))
+                {
+                    refusal = "reads a parameter that stands for a different one on each iteration of a loop";
+                    return;
+                }
+                if (!producers.TryGetValue(key, out var producer)) { refusal = "reads a value with no producer"; return; }
+                if (!visited.Add(producer.Key)) return;
+                if (InternalOpCodes.IsModelInputOp(producer.OpCode)) { readsAnInput = true; return; }
+                if (producer.GraphOpenNodeKey is not null
+                    || Shorokoo.Core.Factory.FastOpsetResolver.IsOpenOpCode(producer.OpCode)
+                    || Shorokoo.Core.Factory.FastOpsetResolver.IsCloseOpCode(producer.OpCode))
+                {
+                    refusal = $"computes it through control flow ({producer.OpCode})";
+                    return;
+                }
+                if (IsRandomDraw(producer.OpCode)
+                    || (producer.OpCode.StartsWith('#') && producer.OpCode != OpCodes.CONSTANT))
+                {
+                    refusal = $"computes it with {producer.OpCode}, which cannot be evaluated at initialization";
+                    return;
+                }
+                foreach (var input in producer.Inputs)
+                    if (input is FastTensorKey k) Visit(k);
+                nodes.Add(producer);
+            }
+
+            Visit(result);
+            if (readsAnInput || (refusal is null && sources.Count == 0)) return null;
+            if (refusal is not null)
+                throw new InvalidOperationException(
+                    $"The initializer of the parameter '{site.IdentifierTemplate}' is passed a value computed "
+                    + $"from another parameter, and the computation {refusal}. A value computed from "
+                    + "parameters is evaluated when the parameters are initialized, after the ones it "
+                    + "reads, so it has to be plain tensor arithmetic over parameters created outside any "
+                    + "loop or branch. Compute it inside the initializer from the parameter itself, or pass "
+                    + "the parameter and let the initializer compute the rest.");
+            return new ParamInitComputation(result, [.. nodes], sources.ToImmutableDictionary());
+        }
+
+        private static bool IsRandomDraw(string opCode)
+            => opCode is OpCodes.RANDOM_NORMAL or OpCodes.RANDOM_NORMAL_LIKE or OpCodes.RANDOM_UNIFORM
+                or OpCodes.RANDOM_UNIFORM_LIKE or OpCodes.MULTINOMIAL or OpCodes.BERNOULLI or OpCodes.DROPOUT
+                or InternalOpCodes.SHRK_RANDOM_UNIFORM or InternalOpCodes.SHRK_RANDOM_NORMAL or InternalOpCodes.SHRK_RANDOM_BITS
+                or InternalOpCodes.SHRK_RNG_SPLIT or InternalOpCodes.SHRK_RNG_UNIFORM or InternalOpCodes.SHRK_RNG_NORMAL
+                or InternalOpCodes.SHRK_RNG_BITS;
 
         /// <summary>
         /// Output keys that carry a parameter, split into the sites naming exactly ONE and the

@@ -303,8 +303,8 @@ namespace Shorokoo.Core.Nodes
                     "reads a model's parameter or hyperparameter, or takes a model as an argument. An " +
                     "initializer only computes its parameter's value: build it from tensor operations, " +
                     "and call other initializers' Init where a shared recipe helps. A model belongs in " +
-                    "the [Module] that declares the parameter, which can pass the initializer any value " +
-                    "it computes as an argument.");
+                    "the [Module] that declares the parameter, which can pass the initializer a value it " +
+                    "computes from constants and parameters — through a layer if need be — as an argument.");
 
             // Loops do a lot of strange things that override the normal way nodes are constructed.
             (this.FullInputs, this.FullOutputs) = LoopAPI.ProcessNode(this);

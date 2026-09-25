@@ -97,6 +97,17 @@ public class ModulesCoverageTests
         => Assert.True(AutoTest.AdvancedTestGraphWithModuleGraphRoundtrip<Modules.UsesInitFromAnotherParam>(
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)], expected: [2.0, 4.0]));
 
+    [Fact]
+    public void TestAnInitializerTakingAValueComputedFromAnotherParameterLowersIt()
+    {
+        Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitFromAComputedValue>(
+            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)], expected: [4.0, 8.0]));
+        Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitFromAModuleComputedValue>(
+            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)], expected: [4.0, 8.0]));
+        Assert.Contains("read by nothing", Assert.Throws<InvalidOperationException>(
+            () => ArchOf(Modules.UsesInitFromAComputedValueOnly.ComputationGraph)).Message);
+    }
+
     private static string[] EmittedFunctions(InternalComputationGraph g, bool nativeDialect = false)
         => [.. (nativeDialect
                 ? FastOnnxModelBuilder.BuildInternalOnnxModel(g, applyExecutionLowerings: false, emitInputsAsNodes: true)

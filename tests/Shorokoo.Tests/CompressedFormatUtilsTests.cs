@@ -2502,8 +2502,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         Assert.NotEqual("", ProtoBuf.Serializer.Deserialize<ModelProto>(fs).Graph.Name);
     }
 
-    // Open bug Shorokoo/Shorokoo#387: graph input/output ValueInfos are written with no shape.
-    [Fact(Skip = "Shorokoo/Shorokoo#387: exported graph inputs and outputs carry no shape")]
+    [Fact]
     public void TestExportedOnnxGivesEveryGraphInputAndOutputAShape()
     {
         var (model, _, _) = BuildSkptModel();
@@ -2513,6 +2512,24 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         using var fs = File.OpenRead(path);
         var graph = ProtoBuf.Serializer.Deserialize<ModelProto>(fs).Graph;
         Assert.All(graph.Inputs.Concat(graph.Outputs), v => Assert.NotNull(v.Type.TensorType.Shape));
+
+        var four = TensorData(DType.Int64, [], 4L);
+        var two = TensorData(DType.Int64, [], 2L);
+        var x23 = TensorData(DType.Float32, [2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f);
+        var x3 = TensorData(DType.Float32, [3L], 1f, 2f, 3f);
+        Assert.Equal([0, 2, 2], ExportedIoRanks(FCLayer.ComputationGraph, four, x23));
+        Assert.Equal([0, 0, 2, 2], ExportedIoRanks(LoopLayer.ComputationGraph, four, two, x23));
+        Assert.Equal([0, 1, 0, 1], ExportedIoRanks(IfLoopBodyLayer.ComputationGraph, two, x3, TensorData(DType.Bool, [], true)));
+        Assert.Equal([1, 0, 1], ExportedIoRanks(SharedWorkAroundAnIfLayer.ComputationGraph, x3, TensorData(DType.Float32, [], 2f)));
+    }
+
+    private int[] ExportedIoRanks(ComputationGraph g, params TensorData[] samples)
+    {
+        var path = P(Guid.NewGuid() + ".onnx");
+        Persistence.ExportOnnx(g.ToConcreteArchitecture(g.FromOrderedInputs([.. samples])).ToConcreteModel(), path);
+        using var fs = File.OpenRead(path);
+        var graph = ProtoBuf.Serializer.Deserialize<ModelProto>(fs).Graph;
+        return [.. graph.Inputs.Concat(graph.Outputs).Select(v => v.Type.TensorType.Shape?.Dims.Count ?? -1)];
     }
 
     private static TensorShapeProto.Dimension Fixed(long size) => new() { DimValue = size };

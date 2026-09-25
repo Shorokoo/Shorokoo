@@ -164,6 +164,56 @@ namespace Shorokoo.Core.Factory
                 applyExecutionLowerings: applyExecutionLowerings, emitInputsAsNodes: emitInputsAsNodes,
                 inputDims: inputDims);
 
+        /// <summary>
+        /// Gives each top-level tensor input of <paramref name="graph"/> that declares no rank the
+        /// rank of its recorded representative shape (see <see cref="RepresentativeInputShapes"/>).
+        /// Only the rank: the exported input keeps symbolic dims, so it still accepts any size.
+        /// </summary>
+        private static void DeclareRepresentativeRanks(InternalComputationGraph graph)
+        {
+            var producers = graph.BuildProducerByOutputMap();
+            foreach (var key in graph.Inputs)
+            {
+                if (!producers.TryGetValue(key, out var node)
+                    || node.OpCode != InternalOpCodes.MODEL_TENSOR_INPUT
+                    || node.Attributes.GetLongVal(OnnxOpAttributeNames.ShrkAttrRank) is not null
+                    || RepresentativeInputShapes.Get(node) is not { } dims)
+                    continue;
+                node.Attributes = node.Attributes.SetAttributes(
+                    (OnnxOpAttributeNames.ShrkAttrRank, (object?)(long?)dims.Length));
+            }
+        }
+
+        /// <summary>
+        /// Fills in the rank of each tensor output of <paramref name="prepFast"/> that
+        /// <paramref name="lookup"/> leaves unknown, from shape inference of
+        /// <paramref name="source"/> (the graph <paramref name="prepFast"/> was prepared from, with
+        /// its outputs in the same positions) at its recorded representative inputs. Does nothing
+        /// when every output's rank is known, or when an input records no representative shape.
+        /// </summary>
+        private static void InferMissingOutputRanks(
+            InternalComputationGraph source,
+            InternalComputationGraph prepFast,
+            Dictionary<FastTensorKey, FastTensorInfo> lookup)
+        {
+            var missing = Enumerable.Range(0, Math.Min(prepFast.Outputs.Count, source.Outputs.Count))
+                .Where(i => lookup.TryGetValue(prepFast.Outputs[i], out var info)
+                    && info.Structure == DataStructure.Tensor && info.Rank is null)
+                .ToList();
+            if (missing.Count == 0) return;
+
+            var producers = source.BuildProducerByOutputMap();
+            if (source.Inputs.Any(k => !producers.TryGetValue(k, out var node)
+                    || !RepresentativeInputShapes.CarriesShape(node) || RepresentativeInputShapes.Get(node) is null))
+                return;
+
+            var inferred = new Shorokoo.Core.AutoDiffCheckpointing.ShapeInferenceInterpreter(Shorokoo.Runtime.ComputeContext.Default)
+                .Infer(source, TrainingRig.ReadRepresentativeInputs(source));
+            foreach (var i in missing)
+                if (inferred.GetTensorInfo(source.Outputs[i])?.Shape is { } shape)
+                    lookup[prepFast.Outputs[i]].Rank = shape.Dims.Length;
+        }
+
         private static ModelProto BuildOnnxModelCore(
             InternalComputationGraph fastGraph,
             OpSetVersion opset,
@@ -188,9 +238,21 @@ namespace Shorokoo.Core.Factory
             // pre-passes, so the Identity is renamed with the rest of the graph.
             if (prepForOnnx && !vanillaExport) FastIdentityWrapping.WrapAliasedOutputs(prepFast);
 
+            // The ONNX checker requires every main-graph input and output to carry at least a rank
+            // (Shorokoo/Shorokoo#387). An input declared without one takes the rank of the shape it
+            // was concretized at, which every concrete graph records; its dims stay symbolic. Before
+            // the pre-passes, so the tensor-info lookup they build carries the rank through to the
+            // outputs derived from it.
+            if (vanillaExport) DeclareRepresentativeRanks(prepFast);
+
             // ----- 2. Run the Fast pre-passes in place. Capture the rename map
             // so we can also remap the tensor-info lookup we'll build below.
             var tensorInfoLookup = RunPrePassesAndBuildLookup(prepFast, prepForOnnx, applyExecutionLowerings);
+
+            // An output whose rank the op-level lookup cannot tell (a loop carry fed by a
+            // per-iteration parameter, say) takes it from shape inference at the representative
+            // inputs, so an exported file gives every output a shape too (Shorokoo/Shorokoo#387).
+            if (vanillaExport) InferMissingOutputRanks(fastGraph, prepFast, tensorInfoLookup);
 
             // Reorder so each IF body has then-block nodes positionally first
             // and else-block nodes positionally second. The Fast back-walk used

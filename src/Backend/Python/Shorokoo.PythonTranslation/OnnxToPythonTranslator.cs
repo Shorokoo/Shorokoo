@@ -47,6 +47,10 @@ internal sealed class Scope(Scope? parent, PythonDialect dialect)
     /// statement being written.</summary>
     public void Assign(string identifier) => _lastRead[identifier] = Statement;
 
+    /// <summary>Records <paramref name="identifier"/>, a local this function assigns, as read by the
+    /// statement being written, where the statement reads it other than through <see cref="Lookup"/>.</summary>
+    public void Read(string identifier) => _lastRead[identifier] = Statement;
+
     public void EndStatement(int position, int indent)
     {
         Ends.Add((position, indent));

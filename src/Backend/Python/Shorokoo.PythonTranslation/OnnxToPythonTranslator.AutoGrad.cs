@@ -257,6 +257,7 @@ internal sealed partial class OnnxToPythonTranslator
         {
             var targets = carried.Select(c => Define(scope, c)).ToList();
             Line($"{string.Join(", ", targets)}, = {results}[0]");
+            scope.Read(results);
             EndStatement(scope);
         }
         var gradients = step.Node.Outputs.Select(o => o.Length == 0 ? "_" : Define(scope, o)).ToList();
@@ -264,6 +265,7 @@ internal sealed partial class OnnxToPythonTranslator
         {
             var picked = step.Wrt.Select(w => $"{results}[1][{wrt.IndexOf(w)}], ");
             Line($"{string.Join(", ", gradients)}, = ({string.Concat(picked)})");
+            scope.Read(results);
             EndStatement(scope);
         }
         for (int i = step.Index + 1; i < graph.Nodes.Count; i++) EmitNode(graph.Nodes[i], scope);

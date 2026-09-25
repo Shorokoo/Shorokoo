@@ -581,13 +581,16 @@ namespace Shorokoo.Core.Factory.IR
         /// Closes <paramref name="fastGraph"/> with an output node reading <paramref name="value"/>,
         /// named, ranked and shaped as <paramref name="info"/>'s metadata says (the writer's
         /// <c>CreateOutputInfos</c>), and named <paramref name="fallbackName"/> where it says nothing.
-        /// A malformed recorded shape is skipped, as a malformed representative input shape is.
+        /// A malformed declared rank or recorded shape is skipped, as a malformed representative input
+        /// shape is.
         /// </summary>
         private static void AddOutputNode(InternalComputationGraph fastGraph, FastTensorKey value, ValueInfoProto? info, string fallbackName)
         {
             string? MetadataOf(string key) => info?.MetadataProps.FirstOrDefault(p => p.Key == key)?.Value;
             int? declaredRank = MetadataOf(ShrkAttrDeclaredRank) is { } rank
-                ? int.Parse(rank, System.Globalization.CultureInfo.InvariantCulture)
+                && int.TryParse(rank, System.Globalization.NumberStyles.None,
+                    System.Globalization.CultureInfo.InvariantCulture, out var parsed)
+                ? parsed
                 : null;
             fastGraph.AddOutput(value, MetadataOf(ShrkAttrOutputName) ?? fallbackName, declaredRank);
             if (MetadataOf(ShrkAttrRecordedOutputShape) is { } recorded

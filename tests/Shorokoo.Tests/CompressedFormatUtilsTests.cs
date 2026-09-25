@@ -2670,6 +2670,18 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
     }
 
     [Fact]
+    public void TestImportOnnxSkipsAMalformedDeclaredOutputRankAsItDoesAMalformedRecordedShape()
+    {
+        foreach (var value in (string[])["one", "99999999999", ""])
+        {
+            var model = BuildForeignAddModel("w", [10f, 20f, 30f, 40f]);
+            model.Graph.Outputs[0].MetadataProps.Add(new StringStringEntryProto { Key = OnnxOpAttributeNames.ShrkAttrDeclaredRank, Value = value });
+            model.Graph.Outputs[0].MetadataProps.Add(new StringStringEntryProto { Key = OnnxOpAttributeNames.ShrkAttrRecordedOutputShape, Value = value });
+            Assert.Equal([11f, 22f, 33f, 44f], RunFloatVecModel(Persistence.ImportOnnx(WriteOnnx(P(Guid.NewGuid() + ".onnx"), model)), 1f, 2f, 3f, 4f));
+        }
+    }
+
+    [Fact]
     public void TestImportOnnxRefusesAnOutputOfUnknownRankThatNoInputShapeSettlesNamingIt()
     {
         var g = new GraphProto { Name = "foreign" };

@@ -398,9 +398,8 @@ id string off the concrete model.
 
 `ToModelId` is the reverse direction, and the one
 `ToConcreteModel(weights, namingScheme)` uses to **import**: it names every candidate ModelId
-once into a name → ModelId table, then looks the third-party name up in it. See
-[§7](#7-error-handling) — the lookup returns `null` for an unknown name, but building the
-table over an incompletely covered set of candidates throws.
+into a name → ModelId table, then looks the third-party name up in it, returning `null`
+for an unknown name. See [§7](#7-error-handling) for the one case that throws.
 
 ## 7. Error Handling
 
@@ -415,8 +414,7 @@ ones — and the most common failure does not throw at all.
 | The format names a map the scheme was not given | `KeyNotFoundException` |
 | The format references a capture the pattern does not bind | `KeyNotFoundException` |
 | A pattern or format has an unmatched `{`, or an unparsable range constraint | `FormatException` |
-| `ToModelId` is given candidates the patterns do not name in full | `ArgumentNullException` — "Value cannot be null. (Parameter 'key')" |
-| `ToModelId` is given two candidates the patterns give the same name | `ArgumentException` — "An item with the same key has already been added" |
+| `ToModelId` is given two candidates the patterns give the same name | `InvalidOperationException` naming both ModelIds and the name |
 
 ```csharp
 // No pattern matches: null, not an exception.
@@ -430,24 +428,24 @@ catch (InvalidOperationException) { /* "Shorokoo ID 'B#1' does not match pattern
 try { var n = pattern.ToName(id); }
 catch (KeyNotFoundException) { /* "Key '9' not found in map 'bnParam'" */ }
 
-// The reverse direction is not forgiving in the same way: ToModelId names every
-// candidate before it looks anything up, and an unnamed one lands as a null key.
-try { var id2 = partialScheme.ToModelId("layer1.0.conv1.weight", candidates); }
-catch (ArgumentNullException) { /* "Value cannot be null. (Parameter 'key')" */ }
+// The reverse direction names every candidate before it looks anything up, so two
+// candidates sharing a name throw even when looking up a third.
+try { var id2 = collidingScheme.ToModelId("layer1.0.conv1.weight", candidates); }
+catch (InvalidOperationException) { /* "ModelIds [...] and [...] both map to the name '...'" */ }
 ```
 
-The two `ToModelId` rows are worth reading twice, because the entry point this page
-recommends — `ToConcreteModel(weights, namingScheme)` — goes through them. The lookup
-itself is as forgiving as `ToName`: an unknown third-party name gives `null` back. The
-table it looks in is not. That table is built over *every* candidate first, so a single
-parameter the patterns leave unnamed puts a `null` key into it, and the failure arrives
-as a bare `ArgumentNullException` naming neither the parameter nor the scheme. Do not
-read it as a complaint about the name you passed; it means the pattern set has a hole
-somewhere else in the model. Prefer an entry point that checks coverage before it gets
-there: `Persistence.ImportSafeTensors` names every parameter first and refuses with an
-`InvalidDataException` — "required model parameter '…' maps to no source tensor name
-under the naming scheme — add a rule covering it" — which says *which* parameter is
-uncovered.
+The entry point this page recommends — `ToConcreteModel(weights, namingScheme)` — goes
+through `ToModelId`, which is as forgiving as `ToName`: a candidate the patterns leave
+unnamed gets no entry in the table, an unknown third-party name gives `null` back, and
+`ToConcreteModel` drops it. The one refusal is a collision — two candidates the patterns
+give the same name — which throws `InvalidOperationException` naming both ModelIds and
+the name, since binding either would be a guess. The table is rebuilt whenever a call
+passes a different candidate set, so one scheme can bind weights into several graphs.
+Where a hole in the patterns should fail loudly rather than leave a parameter at its
+initial value, prefer `Persistence.ImportSafeTensors`: it names every parameter first and
+refuses with an `InvalidDataException` — "required model parameter '…' maps to no source
+tensor name under the naming scheme — add a rule covering it" — which says *which*
+parameter is uncovered.
 
 A `null` is not ignored downstream either: export refuses a scheme that leaves any
 weight unnamed, and import treats the parameter as one the scheme does not

@@ -173,10 +173,7 @@ public class ParamNameDslCoverageTests
         Assert.Equal("wild.1", wildcard.ToName(shorokooIds[1]));
     }
 
-    // Open bug Shorokoo/Shorokoo#82: SimplePatternNamingScheme.buildReverseCache keys its table on
-    // ToName(candidate), which is null for any candidate no pattern covers, so ToModelId dies with
-    // ArgumentNullException("key"), naming neither the uncovered parameter nor the scheme.
-    [Fact(Skip = "Shorokoo/Shorokoo#82 - an unnamed candidate lands as a null reverse-cache key")]
+    [Fact]
     public void TestSimplePatternSchemeToModelIdOverPartiallyCoveredCandidatesNamesTheUncoveredParam()
     {
         var (infos, shorokooIdScheme) = LoopLayerParams.Value;
@@ -189,6 +186,64 @@ public class ParamNameDslCoverageTests
         Assert.True(ResolvesOrNamesTheGap(scheme, "outer.weight", candidates, infos.ParamInfos[0].ModelId, uncovered));
         Assert.True(ResolvesOrNamesTheGap(scheme, "not.in.the.scheme", candidates, null, uncovered));
     }
+
+    [Fact]
+    public void TestModelIdSchemeToModelIdSkipsCandidatesNoFormatCovers()
+    {
+        var infos = LoopLayerParams.Value.Infos;
+        var candidates = infos.ParamInfos.Select(p => p.ModelId).ToImmutableArray();
+        var scheme = SchemeOf(new ModelIdFormat(match: "[1, 1]", format: "outer.weight"));
+
+        Assert.Equal(infos.ParamInfos[0].ModelId, scheme.ToModelId("outer.weight", candidates));
+        Assert.Null(scheme.ToModelId("not.in.the.scheme", candidates));
+    }
+
+    [Fact]
+    public void TestToModelIdOverCandidatesSharingANameNamesBothModelIdsAndTheName()
+    {
+        var (infos, shorokooIdScheme) = LoopLayerParams.Value;
+        var candidates = infos.ParamInfos.Select(p => p.ModelId).ToImmutableArray();
+        var (first, second) = (infos.ParamInfos[1].ModelId, infos.ParamInfos[2].ModelId);
+        var modelIdScheme = SchemeOf(
+            new ModelIdFormat(match: "[1, 1]", format: "outer.weight"),
+            new ModelIdFormat(match: "[1, 2, *, 1]", format: "block.weight"));
+        var patternScheme = new SimplePatternNamingScheme(
+            [new SimplePatternScheme("TrainableParam#0.LoopLayer#0.Loop#0:{idx}.InitSimple#{p}", "block.weight")],
+            shorokooIdScheme, ModuleParamSetNamingScheme.PyTorchFrameworkId);
+
+        Assert.True(NamesTheCollision(() => modelIdScheme.ToModelId("outer.weight", candidates), first, second, "block.weight"));
+        Assert.True(NamesTheCollision(() => patternScheme.ToModelId("block.weight", candidates), first, second, "block.weight"));
+    }
+
+    [Fact]
+    public void TestToModelIdResolvesAgainstTheCandidatesOfEachCallNotOfTheFirst()
+    {
+        var (infos, shorokooIdScheme) = LoopLayerParams.Value;
+        var candidates = infos.ParamInfos.Select(p => p.ModelId).ToImmutableArray();
+        var outerId = infos.ParamInfos[0].ModelId;
+        var modelIdScheme = SchemeOf(
+            new ModelIdFormat(match: "[1, 1]", format: "outer.weight"),
+            new ModelIdFormat(match: "[1, 2, *, 1]", format: "block{2}.weight"));
+        var patternScheme = new SimplePatternNamingScheme(
+            [
+                new SimplePatternScheme("TrainableParam#0.LoopLayer#0.InitSimple#{p}", "outer.weight"),
+                new SimplePatternScheme("TrainableParam#0.LoopLayer#0.Loop#0:{idx}.InitSimple#{p}", "block{idx}.weight"),
+            ],
+            shorokooIdScheme, ModuleParamSetNamingScheme.PyTorchFrameworkId);
+
+        Assert.Equal(outerId, modelIdScheme.ToModelId("outer.weight", candidates));
+        Assert.Null(modelIdScheme.ToModelId("outer.weight", candidates.RemoveAt(0)));
+        Assert.Equal(outerId, modelIdScheme.ToModelId("outer.weight", candidates));
+        Assert.Equal(outerId, patternScheme.ToModelId("outer.weight", candidates));
+        Assert.Null(patternScheme.ToModelId("outer.weight", candidates.RemoveAt(0)));
+        Assert.Equal(outerId, patternScheme.ToModelId("outer.weight", candidates));
+    }
+
+    private static bool NamesTheCollision(Func<ModelId?> toModelId, ModelId first, ModelId second, string name)
+        => Record.Exception(() => toModelId()) is InvalidOperationException ex
+            && ex.Message.Contains(string.Join(",", first.Vals))
+            && ex.Message.Contains(string.Join(",", second.Vals))
+            && ex.Message.Contains(name);
 
     private static bool ResolvesOrNamesTheGap(
         SimplePatternNamingScheme scheme, string paramName, ImmutableArray<ModelId> candidates,

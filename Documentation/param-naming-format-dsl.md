@@ -334,18 +334,16 @@ public class ModelIdNamingScheme : ModuleParamSetNamingScheme
 ```
 
 `ToModelId` is the reverse direction used when binding weights: it names every
-candidate ModelId once into a name → ModelId table, then looks the third-party name up
-in it and returns null when the name is not there. Only that final lookup is forgiving.
-Building the table is not, and it happens first, over *every* candidate — so a scheme
-with a hole in it throws before any lookup: a candidate no format matches throws
-`InvalidOperationException` out of `ToName`, and two candidates that map to the same
-name throw `ArgumentException` as the table is filled.
+candidate ModelId into a name → ModelId table, then looks the third-party name up in it
+and returns null when the name is not there. A candidate no format matches gets no
+entry, so a partial scheme simply resolves fewer names — `ToConcreteModel` drops the
+names that resolve to nothing. Two candidates that map to the same name are a broken
+scheme rather than a partial one: `ToModelId` throws `InvalidOperationException`
+naming both ModelIds and the shared name. The table is rebuilt whenever a call passes a
+different candidate set, so one scheme can bind weights into several graphs.
 
-The uncovered-candidate case is expected rather than exceptional at the entry points
-that bind weights: `Persistence.ImportSafeTensors` calls `ToName` per parameter inside a
-`catch (InvalidOperationException)` and reads the throw as "this scheme does not cover
-that parameter", then reports the uncovered parameter by name. A partial scheme is
-therefore diagnosable through import and abrupt through a bare `ToModelId`.
+`Persistence.ImportSafeTensors` goes further for the uncovered case: it names every
+required parameter first and reports any the scheme does not cover, by name.
 
 The inherited `ToName(string shorokooId)` overload throws
 `NotSupportedException` — a scheme keyed on ModelIds cannot translate a canonical
@@ -367,8 +365,7 @@ classes.
 | Value matches none of a range map's ranges | `KeyNotFoundException` |
 | Range count differs from output count | `FormatException` |
 | Unmatched `{` in the format string | `FormatException` |
-| `ToModelId` is given a candidate ModelId no format matches | `InvalidOperationException` — from `ToName`, while the reverse table is built |
-| `ToModelId` is given two candidates that map to the same name | `ArgumentException` — "An item with the same key has already been added" |
+| `ToModelId` is given two candidates that map to the same name | `InvalidOperationException` naming both ModelIds and the name |
 
 ```csharp
 // No matching format
@@ -383,8 +380,8 @@ catch (IndexOutOfRangeException ex) { /* Format references invalid index */ }
 try { var name = namedMapScheme.ToName(new ModelId(1, 3, 1, 2, 2, 99, 1)); }
 catch (KeyNotFoundException ex) { /* Key 99 not in map 'moduleMap' */ }
 
-// ToModelId names every candidate before looking anything up, so a hole in the
-// scheme surfaces here even for a name the scheme does cover.
-try { var id = scheme.ToModelId("fc.bias", candidatesIncludingOneNoFormatMatches); }
-catch (InvalidOperationException ex) { /* "No matching pattern for ModelId [...]" */ }
+// ToModelId names every candidate before looking anything up, so two candidates
+// sharing a name surface here even when looking up a third name.
+try { var id = scheme.ToModelId("fc.bias", candidatesTwoOfWhichShareAName); }
+catch (InvalidOperationException ex) { /* "ModelIds [...] and [...] both map to the name '...'" */ }
 ```

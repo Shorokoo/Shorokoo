@@ -74,9 +74,8 @@ namespace Shorokoo.Core
         /// (<c>[TrainableParamInitializer]</c> / <c>[StateInitializer]</c>). An initializer body
         /// computes ONE parameter's value and owns no parameter space of its own, so a nested
         /// <c>Init</c> call in it is an ordinary call of that initializer's body — a value — not
-        /// the definition of a second parameter (Shorokoo/Shorokoo#323). Each body build enters
-        /// its own trace, so a [Module] body first built from inside an initializer body still
-        /// defines its own parameters.
+        /// the definition of a second parameter (Shorokoo/Shorokoo#323). Such a body may not create
+        /// or reference a model at all (FW055).
         /// </summary>
         internal static bool IsParamInitializerBodyTracing
             => TraceContext.Current?.ParamInitializerName is not null;

@@ -197,7 +197,9 @@ no parameter space, so nothing in its body may bring a model in: no `Foo.Model(.
 a model of it — no `ModelSequence`, no `IModel.GetTrainableParam`, no read of a model's
 hyperparameter, and no model-typed input. Building such a body is refused with **FW055**, which
 names the initializer, when the graph of the module using it is built — and for an initializer
-called from another, when the called one's body is built, however deep it sits. Where the value
+called from another, when the called one's body is built, however deep it sits. A saved `.srk`
+whose initializer does any of this (one written before the rule) is refused with the same FW055
+when it is loaded. Where the value
 you want comes out of a layer, compute it in the `[Module]` that declares the parameter and pass
 it to the initializer as a `Tensor<T>` input, or write the computation in the initializer itself
 from tensor operations.

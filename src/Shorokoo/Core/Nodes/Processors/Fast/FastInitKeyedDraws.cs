@@ -80,7 +80,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // Backstop: anything still invoked after flattening must not smuggle a draw past the
             // top-level scan. An initializer body can only call other initializers (inlined above)
             // and the RNG algorithm functions (never inlined, excluded here) — calling a module is
-            // refused when the body is built (FW055) — so this is not expected to fire; it stays
+            // refused when the body is built or read back from a file (FW055) — so this is not
+            // expected to fire; it stays
             // so that a call some future path leaves standing fails loudly instead of drawing
             // unkeyed, non-reproducible backend randomness.
             var nested = body.Nodes

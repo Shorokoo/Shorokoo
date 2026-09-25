@@ -50,6 +50,21 @@ public class ModulesCoverageTests
         RefusedAtBuild(() => Modules.UsesStateInitCallingAModuleCallingInitializer.ComputationGraph, "InitCallingAModuleInALoop");
     }
 
+    private static void RefusedAtLoad(string file, string initializer)
+    {
+        var bytes = File.ReadAllBytes(TestDataPaths.Of("modules", "legacy-initializers", file));
+        var ex = Assert.Throws<ModuleException>(() => CompressedFormatUtils.LoadFastGraphFromBinary(bytes));
+        Assert.Equal(ErrorCodes.FW055, ex.ErrorCode);
+        Assert.Equal(initializer, ex.ModuleName);
+    }
+
+    [Fact]
+    public void TestASavedModelWhoseInitializerCallsAModuleIsRefusedWhenItIsLoaded()
+    {
+        RefusedAtLoad("init-calling-a-module.srk", "InitCallingAModule");
+        RefusedAtLoad("init-calling-a-param-owning-module.srk", "InitCallingAParamOwningModule");
+    }
+
     [Fact]
     public void TestAnInitializerWhoseBodyLoopsRunsWithNothingToFlatten()
         => Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitLoopingWithoutACall>(

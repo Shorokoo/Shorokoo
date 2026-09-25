@@ -301,14 +301,7 @@ namespace Shorokoo.Core.Nodes
             this.StackTrace = stackTrace is null ? new StackTrace(fNeedFileInfo: true).ToString() : stackTrace;
 
             if (GraphTrace.ParamInitializerBodyName is { } initializerName && this.TouchesAModel())
-                throw new ModuleException(ErrorCodes.FW055, initializerName,
-                    "a [TrainableParamInitializer] or [StateInitializer] body may not create or reference " +
-                    "a model, but this one does — it calls a module, creates a model or a ModelSequence, " +
-                    "reads a model's parameter or hyperparameter, or takes a model as an argument. An " +
-                    "initializer only computes its parameter's value: build it from tensor operations, " +
-                    "and call other initializers' Init where a shared recipe helps. A model belongs in " +
-                    "the [Module] that declares the parameter, which can pass the initializer any value " +
-                    "it computes as an argument.");
+                throw ModelInInitializer(initializerName);
 
             // Loops do a lot of strange things that override the normal way nodes are constructed.
             (this.FullInputs, this.FullOutputs) = LoopAPI.ProcessNode(this);
@@ -344,20 +337,39 @@ namespace Shorokoo.Core.Nodes
         /// </summary>
         private bool TouchesAModel()
         {
-            if (this.OpCode is InternalOpCodes.CREATE_MODULE or InternalOpCodes.MODULE_SET_HYPERPARAMS
-                    or InternalOpCodes.MODEL_INVOKE or InternalOpCodes.MODEL_HYPERPARAM
-                    or InternalOpCodes.GET_MODEL_ID or InternalOpCodes.NEW_MODEL_LIKE
-                    or InternalOpCodes.MODEL_PARAM_REF or InternalOpCodes.MODEL_PARAM_MODEL_REF
-                    or InternalOpCodes.MODEL_PARAM_ID_REF
-                || this.OpCode.StartsWith(InternalOpCodes.SUBMODEL, StringComparison.Ordinal))
-                return true;
-            if (this.OpCode == InternalOpCodes.FUNCTION_INVOKE
-                && this.TargetFunction?.FunctionType is FunctionType.Module or FunctionType.ModuleSignature)
+            if (IsModelOpCode(this.OpCode) || IsModuleInvoke(this.OpCode, this.TargetFunction))
                 return true;
             static bool IsModelTyped(Variable? v) => v?.Type == DType.Model || v?.Type == DType.Module;
             return this.FullInputs.Values.Any(xs => xs.Any(IsModelTyped))
                 || this.FullOutputs.Values.Any(xs => xs.Any(IsModelTyped));
         }
+
+        /// <summary>Whether <paramref name="opCode"/> creates a model or reads anything off one.</summary>
+        internal static bool IsModelOpCode(string opCode)
+            => opCode is InternalOpCodes.CREATE_MODULE or InternalOpCodes.MODULE_SET_HYPERPARAMS
+                   or InternalOpCodes.MODEL_INVOKE or InternalOpCodes.MODEL_HYPERPARAM
+                   or InternalOpCodes.GET_MODEL_ID or InternalOpCodes.NEW_MODEL_LIKE
+                   or InternalOpCodes.MODEL_PARAM_REF or InternalOpCodes.MODEL_PARAM_MODEL_REF
+                   or InternalOpCodes.MODEL_PARAM_ID_REF
+               || opCode.StartsWith(InternalOpCodes.SUBMODEL, StringComparison.Ordinal);
+
+        /// <summary>Whether a node of <paramref name="opCode"/> calling <paramref name="target"/>
+        /// calls a module.</summary>
+        internal static bool IsModuleInvoke(string opCode, Function? target)
+            => opCode == InternalOpCodes.FUNCTION_INVOKE
+               && target?.FunctionType is FunctionType.Module or FunctionType.ModuleSignature;
+
+        /// <summary>The FW055 refusal of a parameter initializer body that creates or references a
+        /// model — raised where such a body is traced, and where one is read back from a file.</summary>
+        internal static ModuleException ModelInInitializer(string initializerName)
+            => new ModuleException(ErrorCodes.FW055, initializerName,
+                    "a [TrainableParamInitializer] or [StateInitializer] body may not create or reference " +
+                    "a model, but this one does — it calls a module, creates a model or a ModelSequence, " +
+                    "reads a model's parameter or hyperparameter, or takes a model as an argument. An " +
+                    "initializer only computes its parameter's value: build it from tensor operations, " +
+                    "and call other initializers' Init where a shared recipe helps. A model belongs in " +
+                    "the [Module] that declares the parameter, which can pass the initializer any value " +
+                    "it computes as an argument.");
 
         /// <summary>
         /// Assigns TensorKeys to all output tensors and the connecting tensor (if any).

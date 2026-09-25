@@ -393,6 +393,26 @@ public class JaxBackendCoverageTests
 
     private static AttributeProto Float(string name, float value) => new() { Name = name, Type = AttributeProto.AttributeType.Float, F = value };
 
+    // #389: past the unroll limit the body is scanned, so a constant it carries is traced and a
+    // Reshape reading it is refused as a shape computed from an input's values.
+    [Fact(Skip = "Open issue #389: a Loop of more than 64 iterations whose carried constant feeds a shape is refused on JAX")]
+    public void TestALongLoopCarryingAConstantShapeRunsAsAShortOneDoes()
+    {
+        foreach (var count in (long[])[64, 65])
+        {
+            var trips = new TensorProto { Name = "n", data_type = (int)TensorProto.DataType.Int64, Int64Datas = [count], Dims = [] };
+            var start = new TensorProto { Name = "s0", data_type = (int)TensorProto.DataType.Int64, Int64Datas = [2, 3], Dims = [2] };
+            var body = PyTorchBackendCoverageTests.Graph(["i", "c", "s"], ["c2", "s2"], Node("Identity", ["c"], ["c2"]), Node("Reshape", ["x", "s"], ["r"]), Node("Shape", ["r"], ["s2"]));
+            var graph = PyTorchBackendCoverageTests.Graph(["x"], ["y"], Node("Loop", ["n", "", "s0"], ["y"], attributes: new AttributeProto { Name = "body", Type = AttributeProto.AttributeType.Graph, G = body }));
+            graph.Initializers.AddRange([trips, start]);
+            using var session = Jax.CreateSession(Serialize(graph), default, default, DeviceMemorySettings.Default);
+            using var x = Jax.CreateTensor(new float[6], [6]);
+            using var y = session.Run(new Dictionary<string, IShorokooTensorValue> { ["x"] = x }, ["y"], RunSettings.Default)[0];
+
+            Assert.Equal([2L, 3L], y.GetTensorDataAsSpan<long>().ToArray());
+        }
+    }
+
     private static AttributeProto Ints(string name, params long[] values) => new() { Name = name, Type = AttributeProto.AttributeType.Ints, Ints = values };
 
     private static float[][] RunFloats(IShorokooSession session, Dictionary<string, float[]> feeds, string[] outputs)

@@ -1060,7 +1060,6 @@ public static class " + modelName + @"
             Debug.Assert(node.OpName == InternalOpCodes.TENSOR_STRUCT_CREATE);
 
             var structDType = node.Attributes.GetDTypeVal(OnnxOpAttributeNames.AttrDtype).AssertNotNull();
-            var structDef = structDType.TensorStructDef.AssertNotNull();
 
             // Positional field references in TensorStructDef order — TensorStructCreate takes an
             // ordered Variable[] (no field-name labels) and the inputs to the graph node are
@@ -1068,7 +1067,7 @@ public static class " + modelName + @"
             var fieldRefs = node.Inputs.Select(input => currentNames[input!]).ToList();
 
             var createExpression =
-                $"Shorokoo.Globals.TensorStructCreate<{StructTypeName(structDef)}>({string.Join(", ", fieldRefs)})";
+                $"Shorokoo.Globals.TensorStructCreate<{StructTypeName(structDType)}>({string.Join(", ", fieldRefs)})";
 
             var outputTensor = node.Outputs[0]!;
             var outputTensorName = GetSanitizedVariableName(outputTensor);
@@ -1185,9 +1184,8 @@ public static class " + modelName + @"
 
             if (node.OpName == OpCodes.SEQUENCE_EMPTY)
             {
-                var structDef = node.Attributes.GetDTypeVal(OnnxOpAttributeNames.AttrDtype)
-                    .AssertNotNull().TensorStructDef.AssertNotNull();
-                return $"OnnxOp.SequenceEmpty(Shorokoo.Globals.StructDType<{StructTypeName(structDef)}>())";
+                var structDType = node.Attributes.GetDTypeVal(OnnxOpAttributeNames.AttrDtype).AssertNotNull();
+                return $"OnnxOp.SequenceEmpty(Shorokoo.Globals.StructDType<{StructTypeName(structDType)}>())";
             }
 
             return null;
@@ -1207,19 +1205,22 @@ public static class " + modelName + @"
         
 
         /// <summary>
-        /// The struct's IStruct interface as it is written in C#. A struct built at runtime carries
-        /// no such type and there is nothing to emit, so codegen fails here rather than writing
-        /// source that does not compile.
+        /// The struct's IStruct interface as it is written in C#: the interface its structure was
+        /// seen declared by (<see cref="DType.StructDeclaringType"/>), whatever name the dtype was
+        /// first registered under — a hand-built definition's short name need not resolve — else
+        /// the registered name. A struct built at runtime carries no such type and there is nothing
+        /// to emit, so codegen fails here rather than writing source that does not compile.
         /// </summary>
-        private static string StructTypeName(TensorStructDef structDef)
+        private static string StructTypeName(DType structDType)
         {
-            if (structDef.TypeName is null)
+            var typeName = structDType.StructDeclaringType?.FullName ?? structDType.TensorStructDef.AssertNotNull().TypeName;
+            if (typeName is null)
                 throw new UnsupportedDTypeException(ErrorCodes.FW053, "TensorStruct", "code template",
                     "A TensorStruct with no IStruct type name has no code generator");
 
-            var name = CSharpTypeName(structDef.TypeName);
+            var name = CSharpTypeName(typeName);
             if (name.Contains('`'))
-                throw new UnsupportedDTypeException(ErrorCodes.FW053, structDef.TypeName, "code template",
+                throw new UnsupportedDTypeException(ErrorCodes.FW053, typeName, "code template",
                     "A TensorStruct whose IStruct type has no C# spelling has no code generator");
 
             return name;

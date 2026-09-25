@@ -19,6 +19,20 @@ namespace Shorokoo.Tests;
 public class DTypeStringCoverageTests
 {
     [Fact]
+    public void TestAStructDTypesNameAndDefinitionNeverChangeOnceRegistered()
+    {
+        var dtype = DType.GetOrCreateForTensorStruct(new TensorStructDef(
+            [new TensorStructFieldDef("CovPinnedFieldA", DataStructure.Tensor, 0, DType.Float32),
+             new TensorStructFieldDef("CovPinnedFieldB", DataStructure.Tensor, 0, DType.Float32)],
+            nameof(CovPinnedPair)));
+        var json = dtype.TensorStructDef!.ToJson();
+        Assert.Same(dtype, DType.GetOrCreateForTensorStruct(StructDefExtractor.ExtractFromType<CovPinnedPair>()));
+        Assert.Equal(nameof(CovPinnedPair), dtype.ToString());
+        Assert.Equal((string)dtype, dtype.ToString());
+        Assert.Equal(json, dtype.TensorStructDef!.ToJson());
+    }
+
+    [Fact]
     public void TestDTypeStringConversionArmsAndOrtStringTensorRoundtrip()
     {
         Assert.Equal(8, DType.Utf8.ProtoTypeNum);
@@ -185,4 +199,10 @@ public class DTypeStringCoverageTests
         Assert.Equal(new Shape(2L, 2L), bound.Shape);
         Assert.Equal(values, bound.Values);
     }
+}
+
+public interface CovPinnedPair : IStruct
+{
+    Scalar<float32> CovPinnedFieldA { get; }
+    Scalar<float32> CovPinnedFieldB { get; }
 }

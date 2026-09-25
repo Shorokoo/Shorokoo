@@ -11,6 +11,7 @@ using Shorokoo.Core.Nodes;
 using Shorokoo.Core.Nodes.AutoDiff;
 using Shorokoo.Core.Training;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 
@@ -60,6 +61,16 @@ namespace Shorokoo
         /// Returns null for non-TensorStruct DTypes.
         /// </summary>
         public TensorStructDef? TensorStructDef => IsTensorStructType && _tensorStructDefRegistry.TryGetValue(this, out var def) ? def : null;
+
+        /// <summary>
+        /// The IStruct interface this struct dtype's structure was first seen declared by, or null
+        /// when none has been (a struct built only by hand). Tracked apart from the registered
+        /// definition, which never changes: what generated source spells the type as must not hang
+        /// on which of the two was registered first, and what the dtype is called must not change
+        /// once it has been seen.
+        /// </summary>
+        internal Type? StructDeclaringType
+            => IsTensorStructType && _tensorStructDeclaringTypes.TryGetValue(this, out var type) ? type : null;
 
 
         /// <summary>The 16-bit brain floating point data type.</summary>
@@ -124,11 +135,13 @@ namespace Shorokoo
         public static DType GenericType8 { get; private set; } = new DType("GenericType8", 1008, default(int), null);
 
         // TensorStruct type registry - maps TensorStructDef to DType instances
-        // iType range 2000-2999 is reserved for TensorStruct DTypes
+        // iType range 2000-2999 is reserved for TensorStruct DTypes. Read without the lock, so
+        // concurrent collections; written under it, so the registries change together.
         private static readonly object _tensorStructRegistryLock = new object();
-        private static readonly Dictionary<TensorStructDef, DType> _tensorStructRegistry = new Dictionary<TensorStructDef, DType>();
-        private static readonly Dictionary<DType, TensorStructDef> _tensorStructDefRegistry = new Dictionary<DType, TensorStructDef>();
-        private static readonly Dictionary<int, DType> _tensorStructITypeToDType = new Dictionary<int, DType>();
+        private static readonly ConcurrentDictionary<TensorStructDef, DType> _tensorStructRegistry = new();
+        private static readonly ConcurrentDictionary<DType, TensorStructDef> _tensorStructDefRegistry = new();
+        private static readonly ConcurrentDictionary<int, DType> _tensorStructITypeToDType = new();
+        private static readonly ConcurrentDictionary<DType, Type> _tensorStructDeclaringTypes = new();
         private static int _nextTensorStructIType = 2000;
 
         /// <summary>
@@ -145,7 +158,7 @@ namespace Shorokoo
             {
                 // Check if we already have a DType for this struct definition
                 if (_tensorStructRegistry.TryGetValue(def, out var existing))
-                    return AdoptDeclaringType(existing, def);
+                    return NoteDeclaringType(existing, def);
 
                 // Create a new DType with a unique iType in the 2000-2999 range
                 if (_nextTensorStructIType > 2999)
@@ -159,22 +172,21 @@ namespace Shorokoo
                 _tensorStructDefRegistry[newDType] = def;
                 _tensorStructITypeToDType[iType] = newDType;
 
-                return newDType;
+                return NoteDeclaringType(newDType, def);
             }
         }
 
         /// <summary>
-        /// A structure is registered once, under the first definition that names it. When that one
-        /// was built by hand and <paramref name="def"/> is the same structure as an IStruct interface
-        /// declares it, the interface's definition takes its place: its name is the one C# can
-        /// resolve, and what a struct dtype is called — in generated source, in a signature — must
-        /// not depend on which of the two happened to be registered first. Called under the lock.
+        /// A structure is registered once, under the first definition that names it, and keeps that
+        /// definition — its name and its serialized form — for the life of the process. Where
+        /// <paramref name="def"/> is the structure as an IStruct interface declares it, the first
+        /// such interface is noted beside it (<see cref="StructDeclaringType"/>), for generated
+        /// source to spell the type by. Called under the lock.
         /// </summary>
-        private static DType AdoptDeclaringType(DType existing, TensorStructDef def)
+        private static DType NoteDeclaringType(DType dtype, TensorStructDef def)
         {
-            if (def.DeclaringType is not null && _tensorStructDefRegistry[existing].DeclaringType is null)
-                _tensorStructDefRegistry[existing] = def;
-            return existing;
+            if (def.DeclaringType is { } type) _tensorStructDeclaringTypes.TryAdd(dtype, type);
+            return dtype;
         }
 
         /// <summary>
@@ -199,7 +211,7 @@ namespace Shorokoo
             lock (_tensorStructRegistryLock)
             {
                 if (_tensorStructRegistry.TryGetValue(def, out var existing))
-                    return AdoptDeclaringType(existing, def);
+                    return NoteDeclaringType(existing, def);
 
                 if (_tensorStructITypeToDType.TryGetValue(protoTypeNum, out var occupant))
                     return occupant;
@@ -213,7 +225,7 @@ namespace Shorokoo
                 if (protoTypeNum >= _nextTensorStructIType)
                     _nextTensorStructIType = protoTypeNum + 1;
 
-                return newDType;
+                return NoteDeclaringType(newDType, def);
             }
         }
 
@@ -505,10 +517,6 @@ namespace Shorokoo
             {
                 return $"{this.sType}<{this.genericTypeParamName}>";
             }
-            // A struct is called what its registered definition calls it, which an IStruct
-            // interface can rename after the dtype was made (see AdoptDeclaringType).
-            if (this.TensorStructDef?.TypeName is { } structName)
-                return structName;
             return this.sType;
         }
 

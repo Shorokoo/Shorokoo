@@ -188,8 +188,11 @@ namespace Shorokoo.Core.Factory
         /// Fills in the rank of each tensor output of <paramref name="prepFast"/> that
         /// <paramref name="lookup"/> leaves unknown, from shape inference of
         /// <paramref name="source"/> (the graph <paramref name="prepFast"/> was prepared from, with
-        /// its outputs in the same positions) at its recorded representative inputs. Does nothing
-        /// when every output's rank is known, or when an input records no representative shape.
+        /// its outputs in the same positions) at its recorded representative inputs. A sequence
+        /// input is represented by the element shape its sample's elements shared, where one was
+        /// recorded, and by elements of unknown shape otherwise, so an output that does not depend
+        /// on its elements' shape still gets its rank. Does nothing when every output's rank is
+        /// known, or when a tensor or optional input records no representative shape.
         /// </summary>
         private static void InferMissingOutputRanks(
             InternalComputationGraph source,
@@ -204,11 +207,12 @@ namespace Shorokoo.Core.Factory
 
             var producers = source.BuildProducerByOutputMap();
             if (source.Inputs.Any(k => !producers.TryGetValue(k, out var node)
-                    || !RepresentativeInputShapes.CarriesShape(node) || RepresentativeInputShapes.Get(node) is null))
+                    || (node.OpCode != InternalOpCodes.MODEL_SEQUENCE_INPUT
+                        && (!RepresentativeInputShapes.CarriesShape(node) || RepresentativeInputShapes.Get(node) is null))))
                 return;
 
             var inferred = new Shorokoo.Core.AutoDiffCheckpointing.ShapeInferenceInterpreter(Shorokoo.Runtime.ComputeContext.Default)
-                .Infer(source, TrainingRig.ReadRepresentativeInputs(source));
+                .Infer(source, TrainingRig.ReadRepresentativeInputs(source, representSequences: true));
             foreach (var i in missing)
                 if (inferred.GetTensorInfo(source.Outputs[i])?.Shape is { } shape)
                     lookup[prepFast.Outputs[i]].Rank = shape.Dims.Length;

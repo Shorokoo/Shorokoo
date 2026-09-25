@@ -89,9 +89,25 @@ namespace Shorokoo.Core.Graph
             var producers = graph.BuildProducerByOutputMap();
             for (int i = 0; i < graph.Inputs.Count; i++)
             {
-                if (!producers.TryGetValue(graph.Inputs[i], out var node) || !CarriesShape(node)) continue;
-                if (bound[i] is { } value && ShapeOf(value) is { } dims) Set(node, dims);
+                if (!producers.TryGetValue(graph.Inputs[i], out var node) || bound[i] is not { } value) continue;
+                if (CarriesShape(node) && ShapeOf(value) is { } dims) Set(node, dims);
+                else if (node.OpCode == InternalOpCodes.MODEL_SEQUENCE_INPUT && SharedElementShapeOf(value) is { } element)
+                    Set(node, element);
             }
+        }
+
+        /// <summary>
+        /// The shape every element of a sequence sample shares, or <c>null</c> for an empty
+        /// sequence, one whose elements differ in shape, or a value that is no sequence. Recorded
+        /// on a sequence input — as an aid, not as the invariant a tensor input's shape is — so
+        /// shape inference over a concrete graph can stand the input in by elements of that shape.
+        /// </summary>
+        private static long[]? SharedElementShapeOf(IData value)
+        {
+            if (value is SharedInput shared) value = shared.Value;
+            if (value is not TensorDataSequence { Count: > 0 } sequence) return null;
+            var first = sequence[0].Shape.Dims;
+            return sequence.All(e => e.Shape.Dims.AsSpan().SequenceEqual(first)) ? first : null;
         }
 
         /// <summary>

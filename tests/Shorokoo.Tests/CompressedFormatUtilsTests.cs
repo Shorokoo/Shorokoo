@@ -2521,15 +2521,25 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         Assert.Equal([0, 0, 2, 2], ExportedIoRanks(LoopLayer.ComputationGraph, four, two, x23));
         Assert.Equal([0, 1, 0, 1], ExportedIoRanks(IfLoopBodyLayer.ComputationGraph, two, x3, TensorData(DType.Bool, [], true)));
         Assert.Equal([1, 0, 1], ExportedIoRanks(SharedWorkAroundAnIfLayer.ComputationGraph, x3, TensorData(DType.Float32, [], 2f)));
+        Assert.Equal([1, -1, 1], ExportedIoRanks(SequenceElementAddLayer.ComputationGraph, NamedIn("x", x3),
+            new TensorDataSequenceModelParam("s", ModelParamType.InputParam, TensorDataSequence.OfElements([x3], DType.Float32))));
     }
 
+    private static NamedModelParam NamedIn(string name, TensorData t) => new TensorDataModelParam(name, ModelParamType.InputParam, t);
+
+    private static TypeProto.Tensor? TensorTypeOf(TypeProto type)
+        => type.TensorType ?? type.SequenceType?.ElemType?.TensorType ?? type.OptionalType?.ElemType?.TensorType;
+
     private int[] ExportedIoRanks(ComputationGraph g, params TensorData[] samples)
+        => ExportedIoRanks(g, [.. g.FromOrderedInputs([.. samples]).ModelParams]);
+
+    private int[] ExportedIoRanks(ComputationGraph g, params NamedModelParam[] samples)
     {
         var path = P(Guid.NewGuid() + ".onnx");
-        Persistence.ExportOnnx(g.ToConcreteArchitecture(g.FromOrderedInputs([.. samples])).ToConcreteModel(), path);
+        Persistence.ExportOnnx(g.ToConcreteArchitecture(new ModelParamList(samples)).ToConcreteModel(), path);
         using var fs = File.OpenRead(path);
         var graph = ProtoBuf.Serializer.Deserialize<ModelProto>(fs).Graph;
-        return [.. graph.Inputs.Concat(graph.Outputs).Select(v => v.Type.TensorType.Shape?.Dims.Count ?? -1)];
+        return [.. graph.Inputs.Concat(graph.Outputs).Select(v => TensorTypeOf(v.Type)?.Shape?.Dims.Count ?? -1)];
     }
 
     private static TensorShapeProto.Dimension Fixed(long size) => new() { DimValue = size };

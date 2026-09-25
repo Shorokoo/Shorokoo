@@ -1121,12 +1121,31 @@ namespace Shorokoo
         /// <see cref="ShapeInferenceInterpreter"/> is fed directly — a values-less one simply arrives
         /// with its data null, which is what a shape-driven pass wants anyway.
         /// </summary>
-        internal static IRuntimeTensor[] ReadRepresentativeInputs(InternalComputationGraph concreteArch)
+        /// <param name="concreteArch">The concrete graph whose inputs to describe.</param>
+        /// <param name="representSequences">Whether a sequence input is described too, rather than
+        /// refused: as a sequence of elements of the shape its sample's elements shared, where one
+        /// was recorded, and of elements of unknown shape otherwise. For a pass that only infers
+        /// what it can (ONNX export's output ranks); training needs every input exactly.</param>
+        internal static IRuntimeTensor[] ReadRepresentativeInputs(InternalComputationGraph concreteArch, bool representSequences = false)
         {
             var producerByOutput = BuildProducerByOutputMap(concreteArch);
             var inputs = new IRuntimeTensor[concreteArch.Inputs.Count];
             for (int i = 0; i < concreteArch.Inputs.Count; i++)
             {
+                if (representSequences
+                    && producerByOutput.TryGetValue(concreteArch.Inputs[i], out var sequenceNode)
+                    && sequenceNode.OpCode == InternalOpCodes.MODEL_SEQUENCE_INPUT)
+                {
+                    var elementType = sequenceNode.Attributes.GetDTypeVal(OnnxOpAttributeNames.AttrDtype) ?? DType.Invalid;
+                    inputs[i] = new RuntimeSequenceTensor
+                    {
+                        DType = elementType,
+                        TemplateTensor = RepresentativeInputShapes.Get(sequenceNode) is { } element
+                            ? RepresentativeRuntimeInputFor(new Shape(element), elementType)
+                            : new RuntimeTensor { DType = elementType },
+                    };
+                    continue;
+                }
                 if (!producerByOutput.TryGetValue(concreteArch.Inputs[i], out var node)
                     || node.OpCode is not (InternalOpCodes.MODEL_TENSOR_INPUT or InternalOpCodes.MODEL_OPTIONAL_INPUT))
                     throw new InvalidOperationException(

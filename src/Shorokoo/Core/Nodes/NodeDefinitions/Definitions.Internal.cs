@@ -54,6 +54,10 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Sequence<AnyLike>("T")
                 .AttributeDType(AttrDtype, "T")
                 .AttributeEnum<InputType>(ShrkAttrInputType, ["Hyperparam", "ReadyInput", "ModelInput", "GenericType"], defaultValue: "ReadyInput")
+                // Optional: the dims every element of the sample the graph was concretized at
+                // shares, where they share one — a sequence has no single shape otherwise. ONNX
+                // export's shape inference represents the input by it.
+                .AttributeLongs(ShrkAttrRepresentativeInputShape)
                 .Output("modelInput", "T"),
 
             Op(GENERIC_TYPE_INPUT)

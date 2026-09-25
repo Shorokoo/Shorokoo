@@ -300,6 +300,16 @@ namespace Shorokoo.Core.Nodes
 
             this.StackTrace = stackTrace is null ? new StackTrace(fNeedFileInfo: true).ToString() : stackTrace;
 
+            if (GraphTrace.ParamInitializerBodyName is { } initializerName && this.TouchesAModel())
+                throw new ModuleException(ErrorCodes.FW055, initializerName,
+                    "a [TrainableParamInitializer] or [StateInitializer] body may not create or reference " +
+                    "a model, but this one does — it calls a module, creates a model or a ModelSequence, " +
+                    "reads a model's parameter or hyperparameter, or takes a model as an argument. An " +
+                    "initializer only computes its parameter's value: build it from tensor operations, " +
+                    "and call other initializers' Init where a shared recipe helps. A model belongs in " +
+                    "the [Module] that declares the parameter, which can pass the initializer any value " +
+                    "it computes as an argument.");
+
             // Loops do a lot of strange things that override the normal way nodes are constructed.
             (this.FullInputs, this.FullOutputs) = LoopAPI.ProcessNode(this);
 
@@ -323,6 +333,30 @@ namespace Shorokoo.Core.Nodes
 
             Debug.Assert(!(this.OpCode == InternalOpCodes.MODEL_INVOKE && this.Inputs[0]!.ModuleFn is null));
             Debug.Assert(this.Outputs.NotNulls().All(x => x.ModuleFn is null || x.Type == DType.Model || x.Type == DType.Module || x.Type == DType.Int64));
+        }
+
+        /// <summary>
+        /// Whether this node creates a model, calls one, or reads anything off one — what a
+        /// parameter initializer's body may not do. Checked for every node such a body builds, so a
+        /// model reached any way at all (<c>X.Model()</c>, <c>X.Call(...)</c>, a module function's
+        /// <c>Call</c>, a <c>ModelSequence</c>, <c>IModel.GetTrainableParam</c>, a hyperparameter
+        /// read, a model-typed argument) is refused where it enters the body.
+        /// </summary>
+        private bool TouchesAModel()
+        {
+            if (this.OpCode is InternalOpCodes.CREATE_MODULE or InternalOpCodes.MODULE_SET_HYPERPARAMS
+                    or InternalOpCodes.MODEL_INVOKE or InternalOpCodes.MODEL_HYPERPARAM
+                    or InternalOpCodes.GET_MODEL_ID or InternalOpCodes.NEW_MODEL_LIKE
+                    or InternalOpCodes.MODEL_PARAM_REF or InternalOpCodes.MODEL_PARAM_MODEL_REF
+                    or InternalOpCodes.MODEL_PARAM_ID_REF
+                || this.OpCode.StartsWith(InternalOpCodes.SUBMODEL, StringComparison.Ordinal))
+                return true;
+            if (this.OpCode == InternalOpCodes.FUNCTION_INVOKE
+                && this.TargetFunction?.FunctionType is FunctionType.Module or FunctionType.ModuleSignature)
+                return true;
+            static bool IsModelTyped(Variable? v) => v?.Type == DType.Model || v?.Type == DType.Module;
+            return this.FullInputs.Values.Any(xs => xs.Any(IsModelTyped))
+                || this.FullOutputs.Values.Any(xs => xs.Any(IsModelTyped));
         }
 
         /// <summary>

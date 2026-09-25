@@ -525,7 +525,7 @@ namespace Shorokoo
 
         #endregion
 
-        #region Framework Error Codes (FW001-FW054)
+        #region Framework Error Codes (FW001-FW055)
         
         /// <summary>Loop operation not implemented</summary>
         public const string FW001 = "FW001";
@@ -689,6 +689,11 @@ namespace Shorokoo
         /// <summary>An operator's attributes are invalid for the input shapes it is concretized against
         /// (e.g. a ConvTranspose output_shape that would need negative begin pads)</summary>
         public const string FW054 = "FW054";
+
+        /// <summary>A [TrainableParamInitializer] or [StateInitializer] body created or referenced a model
+        /// (called a module, created a model or a ModelSequence, read a model's parameter or
+        /// hyperparameter, or took a model as an argument)</summary>
+        public const string FW055 = "FW055";
 
         #endregion
 

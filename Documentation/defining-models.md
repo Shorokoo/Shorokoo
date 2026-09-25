@@ -66,10 +66,14 @@ the type name; the generator rejects that with error `MSG003`.)
 
 An initializer may take inputs beyond the shape, and two of the shapes those take
 are worth knowing: an `Init(...)` call **inside** an initializer body is the called
-initializer's body evaluated as a value rather than a second parameter, so the
-shipped parameterized initializers compose; and an input typed `Tensor<T>` may be
+initializer's body evaluated as a value rather than a second parameter — only the
+top-level initializer defines one — so the shipped parameterized initializers compose,
+trainable and `[StateInitializer]` alike; and an input typed `Tensor<T>` may be
 **another trainable parameter**, which reaches the body as the value that parameter
-was initialized to. See *Writing your own* in
+was initialized to. What an initializer body may **not** do is create or reference a
+model: no `Foo.Model(...)`, no `Foo.Call(...)` of any `[Module]`, no `ModelSequence`,
+no `GetTrainableParam`, no model-typed input. It is refused with `FW055` when the
+graph using the initializer is built. See *Writing your own* in
 [nn-library.md](nn-library.md#initializers-shorokoomodulesinitializers).
 
 ## Hyperparameter baking
@@ -161,7 +165,8 @@ model need one class, not N. See
 3. Write `public static <OutputType> Inline(<input tensors...>, <[Hyper] hypers...>)`.
 4. Build the output from tensor ops, `NN.*` ops, sub-modules (`Other.Model(...).Call(...)`),
    and weights from a `[TrainableParamInitializer]` — whose own body may in turn call
-   another initializer or start from a parameter already built here.
+   another initializer or start from a parameter already built here, but may not create
+   or call a model (`FW055`).
 5. Ensure the project references the generator as an analyzer (see below).
 6. Build, then call `MyLayer.Call(...)` or use `MyLayer.ComputationGraph`.
 

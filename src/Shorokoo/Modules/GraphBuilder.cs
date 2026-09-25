@@ -131,9 +131,14 @@ namespace Shorokoo.Core
         /// placeholders to preserve generic type information through the graph building process.
         /// <paramref name="invokeTarget"/> is the reflection-invoke receiver: null for static
         /// methods, or the delegate's bound target for compiler-generated lambda methods.
+        /// A non-null <paramref name="paramInitializerName"/> marks the body as that
+        /// <c>[TrainableParamInitializer]</c> / <c>[StateInitializer]</c>'s, which may compute
+        /// tensors and call other initializers but may not create or reference a model: every
+        /// node the body builds is checked as it is created, and the first that touches a model
+        /// throws <see cref="ErrorCodes.FW055"/> (see <c>Node</c>'s constructor).
         /// </summary>
         internal static InternalComputationGraph BuildInternalComputationGraphFromMethod(
-            MethodInfo methodInfo, object? invokeTarget = null, bool isParamInitializerBody = false)
+            MethodInfo methodInfo, object? invokeTarget = null, string? paramInitializerName = null)
         {
             if (methodInfo == null)
                 throw new ArgumentNullException(nameof(methodInfo));
@@ -153,7 +158,7 @@ namespace Shorokoo.Core
             // looper stack, the Rng.Pin recordings, the StateUpdate registrations — belongs to
             // this build alone and is restored on exit (a destructive clear here would wipe the
             // OUTER body's records), and no records leak between builds.
-            using var buildScope = GraphTrace.EnterModuleBuild(isParamInitializerBody);
+            using var buildScope = GraphTrace.EnterModuleBuild(paramInitializerName);
 
             // Extract generic parameter information before instantiation
             MethodInfo originalGenericMethod = methodInfo;

@@ -236,10 +236,10 @@ namespace Shorokoo.Core.Factory
             bool stripCheckpointStamp = prepForOnnx || vanillaExport || applyExecutionLowerings;
 
             // Same split for function bodies: the dialects ORT will run or a user will export
-            // cannot express module machinery hiding inside one (Shorokoo/Shorokoo#276), so those
-            // bodies go out flattened. The .srk dialect keeps the body as authored, so a reloaded
-            // module still shows its sub-module boundary instead of a copy of the callee inlined
-            // into every caller.
+            // write each body with the calls it makes inlined — an initializer calling another
+            // initializer's Init, say — so those bodies go out flattened. The .srk dialect keeps
+            // the body as authored, so a reloaded module still shows the calls it makes instead
+            // of a copy of each callee inlined into every caller.
             bool flattenFunctionBodies = prepForOnnx || vanillaExport || applyExecutionLowerings;
 
             // The model a backend's session is built from, as against an exported file or the .srk
@@ -1634,37 +1634,14 @@ namespace Shorokoo.Core.Factory
             // ONNX-name namespace,
             // so the per-graph counter inside FastUseUniqueNames restarts at 1
             // for each function — matches how ONNX FunctionProtos are scoped.
-            // Flattened for the dialects that cannot express an inlinable MODEL_INVOKE /
-            // FUNCTION_INVOKE inside a body: emitting one left ShrkCreateModule /
-            // ShrkModuleSetHyperparams / ShrkModelInvoke in the FunctionProto for ORT to fail type
-            // inference on (Shorokoo/Shorokoo#276). Both forms hand back a fresh mutable copy, so
-            // there is nothing to clone.
+            // Flattened for the dialects ORT runs or a user exports: every inlinable invoke in the
+            // body — a nested initializer's Init is one — is spliced in, so the body the runtime
+            // reads is the one the keyed-draw substitution keyed. An initializer body can hold no
+            // module machinery for this to leave behind: building one that touches a model is
+            // refused (FW055). Both forms hand back a fresh mutable copy, so there is nothing to
+            // clone.
             var fnFast = flattenBody ? function.GetFastFlattenedGraph() : function.OriginalFastGraph;
 
-            // Inlining a hyper-bearing callee leaves its MODEL_HYPERPARAM reads live, and with them
-            // the MODULE_SET_HYPERPARAMS / CREATE_MODULE chain they read from. The pipeline folds
-            // that chain in a later stage, which a body emitted from here never reaches — so fold
-            // it here, or the body still ships the machinery flattening was meant to remove.
-            if (flattenBody)
-            {
-                // Flattening also moves a callee's MODEL_PARAM_REF into the body. The parameter
-                // chain that would turn one into a model weight only runs over a whole graph, and
-                // this body is not one — the model's parameter inventory never saw this reference,
-                // so nothing will ever be fed for it. Lower it to its own initializer's value
-                // (Shorokoo/Shorokoo#287), then inline the invokes that produces.
-                // To fixpoint, not once: the initializer just spliced in can own parameters of its
-                // own, and a single round leaves those refs in the body for ORT to reject. The
-                // initializer call graph is finite and acyclic — flattening itself would not
-                // terminate otherwise — so this settles, at the nesting depth of the deepest chain.
-                while (FastLowerBodyParamRefs.Process(fnFast))
-                    FastInlineModulesAndFunctions.Process(fnFast);
-                FastUnpackModelStruct.Process(fnFast);
-                // Inlining leaves the callee's own input ops and hyperparameter chain behind,
-                // unreferenced. The pipeline prunes them right after its inline stage; a body
-                // emitted from here never reaches that, and an orphaned model-input op becomes a
-                // function input with nothing to type it.
-                FastProcessorHelper.RemoveUnreachableNodes(fnFast);
-            }
             // Before the pre-passes, so the inserted Identity is renamed with the rest of the body.
             FastIdentityWrapping.WrapAliasedOutputs(fnFast);
             // A body carrying a Loop or an If needs a tensor-info lookup: it is what types that

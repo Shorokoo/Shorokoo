@@ -577,21 +577,21 @@ public class RngInitFrozenDerivationTests
     }
 }
 
-/// <summary>Helper module holding the random draw that <see cref="RngInitNestedDrawInit"/> factors out.</summary>
-[Module]
-public partial class RngInitNestedDrawHelper
+/// <summary>Helper initializer holding the random draw that <see cref="RngInitNestedDrawInit"/> factors out.</summary>
+[TrainableParamInitializer]
+public static partial class RngInitNestedDrawHelper
 {
     public static Tensor<float32> Inline(Vector<int64> shape)
         => RandomUniform(shape, low: -1.0f, high: 1.0f);
 }
 
-/// <summary>A custom initializer whose random draw is nested inside a called function instead of
+/// <summary>A custom initializer whose random draw is nested inside a called initializer instead of
 /// inline in its own body.</summary>
 [TrainableParamInitializer]
 public static partial class RngInitNestedDrawInit
 {
     public static Tensor<float32> Inline(Vector<int64> shape)
-        => RngInitNestedDrawHelper.Call(shape);
+        => RngInitNestedDrawHelper.Init(shape);
 }
 
 [Module]
@@ -602,28 +602,6 @@ public partial class RngInitNestedDrawLayer
         var w = RngInitNestedDrawInit.Init(x.ShapeTensor());
         return x * w;
     }
-}
-
-/// <summary>A module that owns a parameter of its own, drawn: called from an initializer body its
-/// draw belongs to a parameter over there, so it carries no key here and cannot be inlined.</summary>
-[Module]
-public partial class RngInitParamOwningDrawLayer
-{
-    public static Tensor<float32> Inline(Tensor<float32> x) => x * Uniform.Init(x.ShapeTensor());
-}
-
-[TrainableParamInitializer]
-public static partial class RngInitCallingAParamOwningDraw
-{
-    public static Tensor<float32> Inline(Vector<int64> shape)
-        => RngInitParamOwningDrawLayer.Call(Globals.TensorFill(shape, 1.0f));
-}
-
-[Module]
-public partial class RngInitCallingAParamOwningDrawLayer
-{
-    public static Tensor<float32> Inline(Tensor<float32> x)
-        => x * RngInitCallingAParamOwningDraw.Init(x.ShapeTensor());
 }
 
 /// <summary>Parameters whose initializers draw with attribute-carried distributions — the
@@ -678,17 +656,6 @@ public class RngInitFailLoudTests
         Assert.True(a.Distinct().Count() > 1);                // not a degenerate fill
         Assert.Equal(a, Init(123));                           // reproducible for a config
         Assert.False(a.SequenceEqual(Init(124)));             // derived from the master seed
-    }
-
-    [Fact]
-    public void TestADrawInACallThatCannotBeInlinedIsRefusedByName()
-    {
-        var g = RngInitCallingAParamOwningDrawLayer.ComputationGraph;
-        var sample = TensorData([2L, 2L], 1f, 1f, 1f, 1f);
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([sample]));
-        var ex = Assert.Throws<NotSupportedException>(() => arch.InitializeTrainableParams());
-        Assert.Contains("RngInitCallingAParamOwningDraw", ex.Message);
-        Assert.Contains("call another initializer's Init", ex.Message);
     }
 
     [Fact]

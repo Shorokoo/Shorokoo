@@ -36,15 +36,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     ///
     /// <para>The substitution runs on the initializer's <b>flattened</b> body
     /// (<see cref="Function.GetFastFlattenedGraph"/>), so a draw factored into a called
-    /// function or sub-module is inlined to the top level and keyed like an inline draw —
-    /// each inlined call site becomes its own node and its own sub-stream ordinal. That covers
-    /// a nested <c>Init</c> call too: inside an initializer body such a call is emitted as an
-    /// ordinary invoke of the called initializer's body rather than as a second parameter
-    /// definition, so the shipped parameterized initializers are reachable from a custom one
-    /// and draw on the parameter being created (Shorokoo/Shorokoo#323). A draw
-    /// inside a call that survives flattening cannot be keyed and is rejected loudly
-    /// rather than left to lower through the generic ONNX fallback into unkeyed,
-    /// non-reproducible backend randomness.</para>
+    /// initializer is inlined to the top level and keyed like an inline draw — each inlined
+    /// call site becomes its own node and its own sub-stream ordinal. Inside an initializer
+    /// body a nested <c>Init</c> call is emitted as an ordinary invoke of the called
+    /// initializer's body rather than as a second parameter definition, so the shipped
+    /// parameterized initializers are reachable from a custom one and draw on the parameter
+    /// being created (Shorokoo/Shorokoo#323). Nothing else an initializer body may call
+    /// survives flattening except the RNG algorithm functions themselves: a body that calls a
+    /// module is refused when it is built (FW055). A draw inside any other call left standing
+    /// is still refused loudly rather than drawn unkeyed.</para>
     /// </summary>
     internal static class FastInitKeyedDraws
     {
@@ -67,24 +67,22 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// <c>FastInitializeModelParams.ResolveInitKeys</c>; the host folds nothing itself, #136)
         /// under the named <paramref name="algorithm"/>, or <c>null</c> if it contains no
         /// random ops (the caller then keeps the original). Draws nested in called
-        /// functions/sub-modules are reached by flattening the body first; a draw inside a
-        /// call that survives flattening throws, since it carries no ModelId or key and would
-        /// otherwise silently resolve through the ONNX fallback to real backend randomness —
-        /// no error, no entry in the RNG stream report.
+        /// initializers are reached by flattening the body first.
         /// </summary>
         public static Function? BuildKeyedDraws(
             Function fn, ulong streamKey, string streamName, string algorithm)
         {
-            // Flatten so a draw factored into a called function/sub-module becomes a
-            // top-level node the substitution below can intercept. Shipping initializers
-            // contain no calls, so their flattened body is node-identical to the original.
+            // Flatten so a draw factored into a called initializer becomes a top-level node the
+            // substitution below can intercept. Shipping initializers contain no calls, so their
+            // flattened body is node-identical to the original.
             var body = fn.GetFastFlattenedGraph().Clone();
 
-            // Backstop: anything still invoked after flattening (a non-inlinable call, or
-            // a nested parameter definition) must not smuggle a draw past the top-level
-            // scan. Only nodes whose target function actually executes count — inlining
-            // leaves dead ShrkCreateModule metadata behind, which still names the (now
-            // spliced-in) module function.
+            // Backstop: anything still invoked after flattening must not smuggle a draw past the
+            // top-level scan. An initializer body can only call other initializers (inlined above)
+            // and the RNG algorithm functions (never inlined, excluded here) — calling a module is
+            // refused when the body is built (FW055) — so this is not expected to fire; it stays
+            // so that a call some future path leaves standing fails loudly instead of drawing
+            // unkeyed, non-reproducible backend randomness.
             var nested = body.Nodes
                 .Where(n => n.OpCode == InternalOpCodes.FUNCTION_INVOKE ||
                             n.OpCode == InternalOpCodes.MODEL_INVOKE ||
@@ -108,7 +106,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     "call another initializer's Init (whose body IS inlined and keyed on this " +
                     "parameter), or move the draw (RandomUniform/RandomNormal/RandomBits) directly " +
                     "into the initializer's body.");
-
 
             var newNodes = new List<FastNode>(body.Nodes.Count);
             int randomOrdinal = 0;

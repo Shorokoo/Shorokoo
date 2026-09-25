@@ -281,9 +281,10 @@ namespace Shorokoo.Core
             // Use the factored GraphBuilder code to build the function body in its
             // primary FastCG form. The Function ctor stores it directly; the legacy
             // CG view is materialized lazily on demand.
+            var name = defaultName ?? FriendlyDeclaringTypeName(referenceMethod) ?? referenceMethod.Name;
             var fastGraph = GraphBuilder.BuildInternalComputationGraphFromMethod(
                 methodToBuild, invokeTarget,
-                isParamInitializerBody: isTrainableParamInitializer || isStateParamInitializer);
+                paramInitializerName: isTrainableParamInitializer || isStateParamInitializer ? name : null);
 
             var fnType = FunctionType.Module;
             if (isStateParamInitializer)
@@ -297,7 +298,6 @@ namespace Shorokoo.Core
                 fnType = FunctionType.TrainableParamInitializer;
             }
 
-            var name = defaultName ?? FriendlyDeclaringTypeName(referenceMethod) ?? referenceMethod.Name;
             var fn = new Function(fastGraph, fnType, name, name,
                 isStateParamInitializer ? stateOwnership : (StateOwnership?)null);
 
@@ -365,10 +365,14 @@ namespace Shorokoo.Core
         {
             RejectVariableParam(type);
 
+            // DoNotWrapExceptions: the constructor builds the input's node, which a parameter
+            // initializer's body refuses (FW055); that refusal must reach the author as itself.
             if (type.IsAssignableTo(typeof(IModel)))
-                return (IModel)type.GetConstructor([typeof(InputType)]).AssertNotNull().Invoke([inputType]);
+                return (IModel)type.GetConstructor([typeof(InputType)]).AssertNotNull()
+                    .Invoke(BindingFlags.DoNotWrapExceptions, null, [inputType], null);
             else if (type.IsAssignableTo(typeof(IModule)))
-                return (IModule)type.GetConstructor([typeof(InputType)]).AssertNotNull().Invoke([inputType]);
+                return (IModule)type.GetConstructor([typeof(InputType)]).AssertNotNull()
+                    .Invoke(BindingFlags.DoNotWrapExceptions, null, [inputType], null);
 
             // Check for ITensorStruct BEFORE extracting DType (TensorStruct<T> has IStruct as type arg, not a numeric type)
             if (type.IsAssignableTo(typeof(ITensorStruct)))

@@ -27,40 +27,36 @@ public class ModulesCoverageTests
             hyperparamInputs: [], runtimeInputs: x, expected: [1.0, 2.0]));
     }
 
-    [Fact]
-    public void TestAnInitializerCallingAModuleFlattensThatCallInItsFunctionBody()
+    private static void RefusedAtBuild(Func<ComputationGraph> build, string initializer)
     {
-        TensorData[] x = [TensorData(DType.Float32, [2L], 1f, 2f)];
-        Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitCallingAModule>(
-            hyperparamInputs: [], runtimeInputs: x, expected: [2.0, 4.0]));
-        Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitCallingHyperModule>(
-            hyperparamInputs: [], runtimeInputs: x, expected: [2.0, 4.0]));
+        var ex = Assert.Throws<ModuleException>(() => build());
+        Assert.Equal(ErrorCodes.FW055, ex.ErrorCode);
+        Assert.Equal(initializer, ex.ModuleName);
     }
 
     [Fact]
-    public void TestAnInitializerCallingAParamOwningModuleFlattensThatCallInItsFunctionBody()
-        => Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitCallingAParamOwningModule>(
-            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)], expected: [1.0, 2.0]));
-
-    [Fact]
-    public void TestAnInitializerCallingAModuleInALoopFlattensThatCallInItsFunctionBody()
-        => Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitCallingAModuleInALoop>(
-            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)], expected: [4.0, 8.0]));
+    public void TestAnInitializerThatCreatesOrReferencesAModelIsRefusedWhenItsBodyIsBuilt()
+    {
+        RefusedAtBuild(() => Modules.UsesInitCallingAModule.ComputationGraph, "InitCallingAModule");
+        RefusedAtBuild(() => Modules.UsesInitCallingAParamOwningModule.ComputationGraph, "InitCallingAParamOwningModule");
+        RefusedAtBuild(() => Modules.UsesInitCallingHyperModule.ComputationGraph, "InitCallingHyperModule");
+        RefusedAtBuild(() => Modules.UsesInitCreatingAModel.ComputationGraph, "InitCreatingAModel");
+        RefusedAtBuild(() => Modules.UsesInitCallingAModelFromASequence.ComputationGraph, "InitCallingAModelFromASequence");
+        RefusedAtBuild(() => Modules.UsesInitReadingAModelsParam.ComputationGraph, "InitReadingAModelsParam");
+        RefusedAtBuild(() => Modules.UsesInitTakingAModel.ComputationGraph, "InitTakingAModel");
+        RefusedAtBuild(() => Modules.UsesStateInitCallingAModule.ComputationGraph, "StateInitCallingAModule");
+        RefusedAtBuild(() => Modules.UsesStateInitCreatingAModel.ComputationGraph, "StateInitCreatingAModel");
+        RefusedAtBuild(() => Modules.UsesInitCallingAModelCreatingInitializer.ComputationGraph, "StateInitCreatingAModel");
+        RefusedAtBuild(() => Modules.UsesStateInitCallingAModuleCallingInitializer.ComputationGraph, "InitCallingAModuleInALoop");
+    }
 
     [Fact]
     public void TestAnInitializerWhoseBodyLoopsRunsWithNothingToFlatten()
         => Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitLoopingWithoutACall>(
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)], expected: [4.0, 8.0]));
 
-    [Fact]
-    public void TestAParamOwningCalleeReachedThroughANestedInitializerLowersToo()
-        => Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitCallingANestedParamOwningModule>(
-            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)], expected: [1.0, 2.0]));
-
-    [Fact]
-    public void TestAParamOwningCalleeReachedThroughAModelSequenceLowersToo()
-        => Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitCallingAParamOwningModuleFromASequence>(
-            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)], expected: [1.0, 2.0]));
+    private static string[] ParamNames(ComputationGraph module)
+        => [.. ArchOf(module).InitializeTrainableParams(rngConfig: RngConfig.Default).ModelParams.Select(p => p.ParamName)];
 
     // An Init call inside an initializer body is that initializer's body, not a second parameter:
     // the graph carries one parameter, at the called initializer's value. The roundtrip overload is
@@ -74,8 +70,24 @@ public class ModulesCoverageTests
             hyperparamInputs: [], runtimeInputs: x, expected: [2.0, 4.0]));
         Assert.True(AutoTest.AdvancedTestGraphWithModuleGraphRoundtrip<Modules.UsesStateInitCallingAnotherInitializer>(
             hyperparamInputs: [], runtimeInputs: x, expected: [2.0, 4.0]));
+        Assert.True(AutoTest.AdvancedTestGraphWithModuleGraphRoundtrip<Modules.UsesStateInitCallingAStateInitializer>(
+            hyperparamInputs: [], runtimeInputs: x, expected: [2.0, 4.0]));
+        Assert.True(AutoTest.AdvancedTestGraphWithModuleGraphRoundtrip<Modules.UsesInitCallingAStateInitializer>(
+            hyperparamInputs: [], runtimeInputs: x, expected: [2.0, 4.0]));
+        Assert.True(AutoTest.AdvancedTestGraphWithModuleGraphRoundtrip<Modules.UsesInitCallingAnInitializerCallingAnother>(
+            hyperparamInputs: [], runtimeInputs: x, expected: [3.0, 6.0]));
         Assert.True(AutoTest.AdvancedTestGraphWithModuleGraphRoundtrip<Modules.UsesInitCallingAGenericInitializer>(
             hyperparamInputs: [], runtimeInputs: x, expected: [3.0, 6.0]));
+    }
+
+    [Fact]
+    public void TestOnlyTheTopLevelInitializerOfANestedCallIsAParameter()
+    {
+        Assert.Equal(["TrainableParam#0.InitCallingAnotherInitializer#0"], ParamNames(Modules.UsesInitCallingAnotherInitializer.ComputationGraph));
+        Assert.Equal(["TrainableParam#0.StateInitCallingAnotherInitializer#0"], ParamNames(Modules.UsesStateInitCallingAnotherInitializer.ComputationGraph));
+        Assert.Equal(["TrainableParam#0.StateInitCallingAStateInitializer#0"], ParamNames(Modules.UsesStateInitCallingAStateInitializer.ComputationGraph));
+        Assert.Equal(["TrainableParam#0.InitCallingAStateInitializer#0"], ParamNames(Modules.UsesInitCallingAStateInitializer.ComputationGraph));
+        Assert.Equal(["TrainableParam#0.InitCallingAnInitializerCallingAnother#0"], ParamNames(Modules.UsesInitCallingAnInitializerCallingAnother.ComputationGraph));
     }
 
     // A parameter passed to another parameter's initializer stays a graph edge through lowering,
@@ -84,35 +96,6 @@ public class ModulesCoverageTests
     public void TestAnInitializerTakingAnotherParametersValueLowersIt()
         => Assert.True(AutoTest.AdvancedTestGraphWithModuleGraphRoundtrip<Modules.UsesInitFromAnotherParam>(
             hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)], expected: [2.0, 4.0]));
-
-    [Fact]
-    public void TestAnInitializerTakingABareParamReferenceLowersIt()
-        => Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitWithBareParamRef>(
-            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)], expected: [1.0, 2.0]));
-
-    // The referenced parameter is the second of two at different values, so neither the other
-    // parameter nor a value fabricated from the initializer the reference borrows as metadata
-    // (always the first one the module reaches) produces 2.
-    [Fact]
-    public void TestABareParamReferenceResolvesToTheParameterItNamesAndNowhereElse()
-        => Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitWithBareParamRefToTheSecondParam>(
-            hyperparamInputs: [], runtimeInputs: [TensorData(DType.Float32, [2L], 1f, 2f)],
-            expected: [2.0, 4.0]));
-
-    /// <summary>A bare reference whose definition is not already in hand where it stands — built
-    /// before the defining call, outside the loop holding it, or addressed against a model out of a
-    /// ModelSequence — is left unresolved. Tracked as Shorokoo/Shorokoo#320.</summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#320: an emitted body resolves a bare parameter reference only against a definition already in hand")]
-    public void TestABareParamReferenceResolvesWhereItsDefinitionIsNotAlreadyInHand()
-    {
-        TensorData[] x = [TensorData(DType.Float32, [2L], 1f, 2f)];
-        Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitWithBareParamRefBeforeItsDefinition>(
-            hyperparamInputs: [], runtimeInputs: x, expected: [1.0, 2.0]));
-        Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitWithBareParamRefOutsideTheLoopDefiningIt>(
-            hyperparamInputs: [], runtimeInputs: x, expected: [1.0, 2.0]));
-        Assert.True(AutoTest.AdvancedTestGraph<Modules.UsesInitWithBareParamRefThroughASequence>(
-            hyperparamInputs: [], runtimeInputs: x, expected: [1.0, 2.0]));
-    }
 
     private static string[] EmittedFunctions(InternalComputationGraph g, bool nativeDialect = false)
         => [.. (nativeDialect
@@ -129,20 +112,22 @@ public class ModulesCoverageTests
     [Fact]
     public void TestOnlyTheFunctionProtosTheEmittedModelStillReachesAreWritten()
     {
-        var namedByAttribute = Modules.UsesInitCallingAModule.ComputationGraph.ToInternal();
-        var namedByOpType = ArchOf(Modules.UsesInitCallingAParamOwningModule.ComputationGraph);
-        Assert.Equal(["InitCallingAModule"], EmittedFunctions(namedByAttribute));
-        Assert.Equal(["InitCallingAParamOwningModule"], EmittedFunctions(namedByOpType));
-        Assert.Equal(["DoublerSub", "InitCallingAModule"], EmittedFunctions(namedByAttribute, nativeDialect: true));
+        var namedByAttribute = Modules.UsesInitCallingAnInitializerCallingAnother.ComputationGraph.ToInternal();
+        var namedByOpType = ArchOf(Modules.UsesInitCallingAnInitializerCallingAnother.ComputationGraph);
+        Assert.Equal(["InitCallingAnInitializerCallingAnother"], EmittedFunctions(namedByAttribute));
+        Assert.Equal(["InitCallingAnInitializerCallingAnother"], EmittedFunctions(namedByOpType));
         Assert.Equal(
-            ["InitCallingAParamOwningModule", "InitSimple", "SimplestLayer"],
+            ["InitCallingAnInitializerCallingAnother", "InitTwos", "StateInitCallingAnotherInitializer"],
+            EmittedFunctions(namedByAttribute, nativeDialect: true));
+        Assert.Equal(
+            ["InitCallingAnInitializerCallingAnother", "InitTwos", "StateInitCallingAnotherInitializer"],
             EmittedFunctions(namedByOpType, nativeDialect: true));
     }
 
     [Fact]
     public void TestTheNativeContainerKeepsASubModuleBoundaryThatOnnxExportFlattens()
     {
-        var g = Modules.UsesInitCallingAModule.ComputationGraph;
+        var g = Modules.CallerOfCallerOfPassThroughSub.ComputationGraph;
         var reloaded = CompressedFormatUtils.LoadFastGraphFromBinary(
             CompressedFormatUtils.SaveFastGraphToBinary(g, compressed: false)).ToInternal();
         var bodies = reloaded.LocalFunctions.SelectMany(f => f.Body.ToInternal().Nodes);

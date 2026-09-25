@@ -43,10 +43,10 @@ namespace Shorokoo.Core
 
         /// <summary>Enters the trace for one graph-builder body trace; the builder harvests
         /// <see cref="StateUpdates"/> and <see cref="Pins"/> after the body returns.
-        /// <paramref name="isParamInitializerBody"/> marks the body as a parameter
+        /// A non-null <paramref name="paramInitializerName"/> marks the body as that parameter
         /// initializer's (see <see cref="IsParamInitializerBodyTracing"/>).</summary>
-        internal static Scope EnterModuleBuild(bool isParamInitializerBody = false)
-            => new Scope(TraceContext.Enter(isModuleBuild: true, isParamInitializerBody));
+        internal static Scope EnterModuleBuild(string? paramInitializerName = null)
+            => new Scope(TraceContext.Enter(isModuleBuild: true, paramInitializerName));
 
         /// <summary>Enters an isolated trace — same loop tracking as any trace, but nothing
         /// records into it and nothing harvests it. Shields internal node rebuilds from an
@@ -79,7 +79,14 @@ namespace Shorokoo.Core
         /// defines its own parameters.
         /// </summary>
         internal static bool IsParamInitializerBodyTracing
-            => TraceContext.Current?.IsParamInitializerBody == true;
+            => TraceContext.Current?.ParamInitializerName is not null;
+
+        /// <summary>
+        /// The name of the parameter initializer whose body is being traced on the current
+        /// thread, or <c>null</c> when the trace in progress (if any) is not an initializer body's
+        /// (see <see cref="IsParamInitializerBodyTracing"/>).
+        /// </summary>
+        internal static string? ParamInitializerBodyName => TraceContext.Current?.ParamInitializerName;
 
         /// <summary>
         /// The loop-tracing state of the current trace. Requires a trace in progress on the
@@ -160,22 +167,23 @@ namespace Shorokoo.Core
     /// </summary>
     internal sealed class TraceContext : AmbientScope<TraceContext>
     {
-        private TraceContext(bool isModuleBuild, bool isParamInitializerBody)
+        private TraceContext(bool isModuleBuild, string? paramInitializerName)
         {
             IsModuleBuild = isModuleBuild;
-            IsParamInitializerBody = isParamInitializerBody;
+            ParamInitializerName = paramInitializerName;
         }
 
-        internal static TraceContext Enter(bool isModuleBuild, bool isParamInitializerBody = false)
-            => EnterScope(new TraceContext(isModuleBuild, isParamInitializerBody));
+        internal static TraceContext Enter(bool isModuleBuild, string? paramInitializerName = null)
+            => EnterScope(new TraceContext(isModuleBuild, paramInitializerName));
 
         /// <summary>Whether this trace is a graph-builder body trace, whose entry point
         /// harvests the registries at build exit (as opposed to an isolated trace).</summary>
         internal bool IsModuleBuild { get; }
 
-        /// <summary>Whether the body this trace is building is a parameter initializer's
-        /// (see <see cref="GraphTrace.IsParamInitializerBodyTracing"/>).</summary>
-        internal bool IsParamInitializerBody { get; }
+        /// <summary>The name of the parameter initializer whose body this trace is building, or
+        /// <c>null</c> when it is not building one (see
+        /// <see cref="GraphTrace.IsParamInitializerBodyTracing"/>).</summary>
+        internal string? ParamInitializerName { get; }
 
         /// <summary>The loop-tracing state of this trace (see <see cref="LooperStack"/>).</summary>
         internal LooperStack Loopers { get; } = new LooperStack();

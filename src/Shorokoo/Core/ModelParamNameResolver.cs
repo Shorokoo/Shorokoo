@@ -13,6 +13,7 @@ using Shorokoo.Core.Training;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 using Shorokoo.Core.Utils;
 using System;
+using System.Threading;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Diagnostics;
@@ -470,23 +471,27 @@ namespace Shorokoo.Core
     /// </summary>
     internal sealed class ReverseNameCache
     {
-        private ImmutableArray<ModelId> cachedCandidates;
-        private Dictionary<string, ModelId>? table;
+        // One immutable pair, published whole: a scheme may be shared across threads, and a table
+        // read separately from the candidates it was built from could be paired with another's.
+        private sealed record Snapshot(ImmutableArray<ModelId> Candidates, Dictionary<string, ModelId> Table);
+
+        private Snapshot? snapshot;
 
         public ModelId? Resolve(string paramName, ImmutableArray<ModelId> candidates, Func<ModelId, string?> tryToName)
         {
-            if (table is null || !sameCandidates(candidates))
+            var current = Volatile.Read(ref snapshot);
+            if (current is null || !sameCandidates(candidates, current.Candidates))
             {
-                table = build(candidates, tryToName);
-                cachedCandidates = candidates;
+                current = new Snapshot(candidates, build(candidates, tryToName));
+                Volatile.Write(ref snapshot, current);
             }
 
-            return table.TryGetValue(paramName, out var modelId) ? modelId : null;
+            return current.Table.TryGetValue(paramName, out var modelId) ? modelId : null;
         }
 
-        private bool sameCandidates(ImmutableArray<ModelId> candidates)
-            => candidates == cachedCandidates
-            || (!candidates.IsDefault && !cachedCandidates.IsDefault && candidates.SequenceEqual(cachedCandidates));
+        private static bool sameCandidates(ImmutableArray<ModelId> candidates, ImmutableArray<ModelId> cached)
+            => candidates == cached
+            || (!candidates.IsDefault && !cached.IsDefault && candidates.SequenceEqual(cached));
 
         private static Dictionary<string, ModelId> build(ImmutableArray<ModelId> candidates, Func<ModelId, string?> tryToName)
         {

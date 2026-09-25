@@ -337,7 +337,10 @@ public class ModelIdNamingScheme : ModuleParamSetNamingScheme
 candidate ModelId into a name → ModelId table, then looks the third-party name up in it
 and returns null when the name is not there. A candidate no format matches gets no
 entry, so a partial scheme simply resolves fewer names — `ToConcreteModel` drops the
-names that resolve to nothing. Two candidates that map to the same name are a broken
+names that resolve to nothing. Dropping a *name* never leaves a *parameter* empty,
+though: every parameter of the graph must still receive a value, and one the scheme
+leaves uncovered fails the bind with an `InvalidOperationException` naming that
+parameter. Two candidates that map to the same name are a broken
 scheme rather than a partial one: `ToModelId` throws `InvalidOperationException`
 naming both ModelIds and the shared name. The table is rebuilt whenever a call passes a
 different candidate set, so one scheme can bind weights into several graphs.

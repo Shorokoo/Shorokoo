@@ -441,9 +441,11 @@ unnamed gets no entry in the table, an unknown third-party name gives `null` bac
 give the same name — which throws `InvalidOperationException` naming both ModelIds and
 the name, since binding either would be a guess. The table is rebuilt whenever a call
 passes a different candidate set, so one scheme can bind weights into several graphs.
-Where a hole in the patterns should fail loudly rather than leave a parameter at its
-initial value, prefer `Persistence.ImportSafeTensors`: it names every parameter first and
-refuses with an `InvalidDataException` — "required model parameter '…' maps to no source
+Dropping a name never leaves a parameter empty: every parameter of the graph must still
+receive a value, so a parameter the patterns leave uncovered fails the bind with an
+`InvalidOperationException` naming that parameter. To have the hole reported against the
+scheme before any value is bound, use `Persistence.ImportSafeTensors`: it names every
+parameter first and refuses with an `InvalidDataException` — "required model parameter '…' maps to no source
 tensor name under the naming scheme — add a rule covering it" — which says *which*
 parameter is uncovered.
 

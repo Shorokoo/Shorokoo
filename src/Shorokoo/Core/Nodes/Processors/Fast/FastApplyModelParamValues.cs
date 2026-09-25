@@ -81,10 +81,16 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 // used; in practice this fallback only fires for an interchange import that omits
                 // it. The cheap dictionary lookup is tested first so the identifier parse runs only
                 // for a param actually absent from the supplied set (normally just the counter).
-                var paramValue = !isSupplied(modelId)
-                                 && FastInjectRngDrawCounter.IsExecutionCounter(node.IdentifierTemplate)
-                    ? FastInjectRngDrawCounter.ExecutionCounterInitialValue().MoveToAttribute()
-                    : attributeFor(modelId);
+                bool supplied = isSupplied(modelId);
+                if (!supplied && !FastInjectRngDrawCounter.IsExecutionCounter(node.IdentifierTemplate))
+                    throw new InvalidOperationException(
+                        $"No value is bound for parameter '{node.IdentifierTemplate ?? modelId.ToString()}': "
+                        + "every parameter of a concrete model needs one, and the values supplied do not "
+                        + "include it. When binding by name, check that the naming scheme covers it and "
+                        + "that the values carry the name it gives.");
+                var paramValue = supplied
+                    ? attributeFor(modelId)
+                    : FastInjectRngDrawCounter.ExecutionCounterInitialValue().MoveToAttribute();
                 var isTrainable = node.Attributes.GetBoolVal(OnnxOpAttributeNames.ShrkAttrIsTrainable) ?? false;
 
                 // Binding is the last point at which a value and the model that is to use it are

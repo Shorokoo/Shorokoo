@@ -2502,6 +2502,19 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         Assert.NotEqual("", ProtoBuf.Serializer.Deserialize<ModelProto>(fs).Graph.Name);
     }
 
+    // Open bug Shorokoo/Shorokoo#387: graph input/output ValueInfos are written with no shape.
+    [Fact(Skip = "Shorokoo/Shorokoo#387: exported graph inputs and outputs carry no shape")]
+    public void TestExportedOnnxGivesEveryGraphInputAndOutputAShape()
+    {
+        var (model, _, _) = BuildSkptModel();
+        var path = P("io-shapes.onnx");
+        Persistence.ExportOnnx(model, path);
+
+        using var fs = File.OpenRead(path);
+        var graph = ProtoBuf.Serializer.Deserialize<ModelProto>(fs).Graph;
+        Assert.All(graph.Inputs.Concat(graph.Outputs), v => Assert.NotNull(v.Type.TensorType.Shape));
+    }
+
     [Fact]
     public void TestOnnxExportImportRoundTripThirdPartyModelsAndCheckpointLanding()
     {

@@ -15,16 +15,18 @@ namespace Shorokoo.Tests;
 [Trait("Purpose", "Coverage")]
 public class ParamNameDslCoverageTests
 {
-    private static readonly Lazy<(ConcreteModelParamInfos Infos, ModelIdNamingScheme ShorokooIdScheme)> LoopLayerParams =
-        new(BuildLoopLayerParams);
-
-    private static (ConcreteModelParamInfos, ModelIdNamingScheme) BuildLoopLayerParams()
+    private static readonly Lazy<InternalComputationGraph> LoopLayerArch = new(() =>
     {
         var model = LoopLayer.Model(Scalar(10L), Scalar(3L));
         var output = model.Call(Vector(1f, 2f, 3f, 4f, 5f));
-        var arch = new InternalComputationGraph([], [output]).ToConcreteArchitecture(new ModelParamList());
-        return (arch.GetConcreteModelParamInfos(), arch.GetShorokooIdNamingScheme());
-    }
+        return new InternalComputationGraph([], [output]).ToConcreteArchitecture(new ModelParamList());
+    });
+
+    private static readonly Lazy<(ConcreteModelParamInfos Infos, ModelIdNamingScheme ShorokooIdScheme)> LoopLayerParams =
+        new(() => (LoopLayerArch.Value.GetConcreteModelParamInfos(), LoopLayerArch.Value.GetShorokooIdNamingScheme()));
+
+    private static readonly ModelIdFormat OuterFormat = new(match: "[1, 1]", format: "outer.weight");
+    private static readonly ModelIdFormat BlockFormat = new(match: "[1, 2, *, 1]", format: "block{2}.weight");
 
     private static ModelIdNamingScheme SchemeOf(params ModelIdFormat[] formats)
         => new(formats, ModuleParamSetNamingScheme.PyTorchFrameworkId);
@@ -174,17 +176,16 @@ public class ParamNameDslCoverageTests
     }
 
     [Fact]
-    public void TestSimplePatternSchemeToModelIdOverPartiallyCoveredCandidatesNamesTheUncoveredParam()
+    public void TestSimplePatternSchemeToModelIdSkipsCandidatesNoPatternCovers()
     {
         var (infos, shorokooIdScheme) = LoopLayerParams.Value;
         var candidates = infos.ParamInfos.Select(p => p.ModelId).ToImmutableArray();
         var scheme = new SimplePatternNamingScheme(
             [new SimplePatternScheme("TrainableParam#0.LoopLayer#0.InitSimple#{p}", "outer.weight")],
             shorokooIdScheme, ModuleParamSetNamingScheme.PyTorchFrameworkId);
-        var uncovered = infos.ParamInfos[1];
 
-        Assert.True(ResolvesOrNamesTheGap(scheme, "outer.weight", candidates, infos.ParamInfos[0].ModelId, uncovered));
-        Assert.True(ResolvesOrNamesTheGap(scheme, "not.in.the.scheme", candidates, null, uncovered));
+        Assert.Equal(infos.ParamInfos[0].ModelId, scheme.ToModelId("outer.weight", candidates));
+        Assert.Null(scheme.ToModelId("not.in.the.scheme", candidates));
     }
 
     [Fact]
@@ -196,6 +197,7 @@ public class ParamNameDslCoverageTests
 
         Assert.Equal(infos.ParamInfos[0].ModelId, scheme.ToModelId("outer.weight", candidates));
         Assert.Null(scheme.ToModelId("not.in.the.scheme", candidates));
+        Assert.Equal(infos.ParamInfos[0].ModelId, scheme.ToModelId("outer.weight", candidates.Add(candidates[0])));
     }
 
     [Fact]
@@ -239,21 +241,39 @@ public class ParamNameDslCoverageTests
         Assert.Equal(outerId, patternScheme.ToModelId("outer.weight", candidates));
     }
 
+    [Fact]
+    public void TestToModelIdUnderConcurrentCallsResolvesEachCallAgainstItsOwnCandidates()
+    {
+        var infos = LoopLayerParams.Value.Infos;
+        var candidates = infos.ParamInfos.Select(p => p.ModelId).ToImmutableArray();
+        var withoutOuter = candidates.RemoveAt(0);
+        var outerId = infos.ParamInfos[0].ModelId;
+        var scheme = SchemeOf(OuterFormat, BlockFormat);
+        int wrong = 0;
+
+        Thread[] threads =
+        [
+            new(() => { for (int i = 0; i < 400_000; i++) if (scheme.ToModelId("outer.weight", candidates) != outerId) Interlocked.Increment(ref wrong); }),
+            new(() => { for (int i = 0; i < 400_000; i++) if (scheme.ToModelId("outer.weight", withoutOuter) is not null) Interlocked.Increment(ref wrong); }),
+        ];
+        foreach (var t in threads) t.Start();
+        foreach (var t in threads) t.Join();
+
+        Assert.Equal(0, wrong);
+    }
+
+    [Fact]
+    public void TestToConcreteModelWithASchemeLeavingAParameterUncoveredNamesThatParameter()
+    {
+        var arch = LoopLayerArch.Value;
+        var values = arch.InitializeTrainableParams(SchemeOf(OuterFormat, BlockFormat));
+        var ex = Assert.Throws<InvalidOperationException>(() => arch.ToConcreteModel(values, SchemeOf(BlockFormat)));
+        Assert.Contains(LoopLayerParams.Value.Infos.ParamInfos[0].ToShorokooIdString(), ex.Message);
+    }
+
     private static bool NamesTheCollision(Func<ModelId?> toModelId, ModelId first, ModelId second, string name)
         => Record.Exception(() => toModelId()) is InvalidOperationException ex
             && ex.Message.Contains(string.Join(",", first.Vals))
             && ex.Message.Contains(string.Join(",", second.Vals))
             && ex.Message.Contains(name);
-
-    private static bool ResolvesOrNamesTheGap(
-        SimplePatternNamingScheme scheme, string paramName, ImmutableArray<ModelId> candidates,
-        ModelId? expected, ConcreteModelParamInfo uncovered)
-    {
-        try { return scheme.ToModelId(paramName, candidates).Equals(expected); }
-        catch (InvalidOperationException ex)
-        {
-            return ex.Message.Contains(uncovered.ToShorokooIdString())
-                || ex.Message.Contains(string.Join(",", uncovered.ModelId.Vals));
-        }
-    }
 }

@@ -468,7 +468,7 @@ public class ModulesCoverageTests
     public void TestLoopInvariantHoistingStaysInsideIfScopes()
     {
         var x = TensorData([2L], 1f, 2f);
-        TensorData[] gated = [TensorData([], 3L), TensorData([], true), x];
+        TensorData[] gated = [TensorData([], 3L), x, TensorData([], true)];
 
         Assert.True(Ordered(Modules.InvariantGateInLoopLayer.ComputationGraph, gated, scoped: false,
             OpCodes.LOOP_OPEN, OpCodes.IF_OPEN, OpCodes.IF_CLOSE, OpCodes.ADD, OpCodes.LOOP_CLOSE));
@@ -504,7 +504,7 @@ public class ModulesCoverageTests
     public void TestAnIfElsesBranchesAreScopedIntoTheIfThatSelectsThem()
     {
         var x = TensorData([2L], 1f, 2f);
-        TensorData[] gated = [TensorData([], 3L), TensorData([], true), x];
+        TensorData[] gated = [TensorData([], 3L), x, TensorData([], true)];
 
         Assert.True(Ordered(Modules.LoopOptionalLayer.ComputationGraph, [TensorData([], 3L), x, x], scoped: true,
             OpCodes.OPTIONAL_HAS_ELEMENT, OpCodes.LOOP_OPEN, OpCodes.IF_OPEN, OpCodes.OPTIONAL_GET_ELEMENT, OpCodes.IF_CLOSE));
@@ -1506,6 +1506,16 @@ public class ModulesCoverageTests
         Assert.Contains("'input'", Misnamed(FCLayer.ComputationGraph, In("input", two), In("numOutFeatures", x)));
         Assert.Contains("'seq'", Misnamed(SeqCountShapedParamLayer.ComputationGraph, In("input", x), SeqIn("s", TensorData(DType.Float32, [], 1f))));
         Assert.Equal(GraphKind.ConcreteArchitecture, Concretize(SimplestLayer.ComputationGraph, In("", x)).Kind);
+    }
+
+    [Fact]
+    public void TestASampleWhoseRankContradictsItsInputsDeclaredRankIsRefused()
+    {
+        var x3 = TensorData([3L], 1f, 2f, 3f);
+        var one = TensorData(DType.Float32, [], 2f);
+        Assert.Contains("'s'", Misnamed(TensorTimesScalarLayer.ComputationGraph, In("", one), In("", x3)));
+        Assert.Contains("'numOutFeatures'", Misnamed(FCLayer.ComputationGraph, In("", TensorData(DType.Int64, [1L], 2L)), In("", x3)));
+        Assert.Equal(GraphKind.ConcreteArchitecture, Concretize(TensorTimesScalarLayer.ComputationGraph, In("", x3), In("", one)).Kind);
     }
 
     private static void DetectedAsItsOwnKind(ComputationGraph graph)

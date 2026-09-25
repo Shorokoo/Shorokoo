@@ -1726,6 +1726,13 @@ namespace Shorokoo.Tests.Modules
                 y * InitSimple.Init(y.ShapeTensor()));
     }
 
+    /// <summary>A tensor scaled by a scalar: an input of no declared rank beside one of rank 0.</summary>
+    [Module]
+    public partial class TensorTimesScalarLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x, Scalar<float32> s) => x * s;
+    }
+
     /// <summary>An optional output: the optional input it is handed.</summary>
     [Module]
     public partial class OptionalPassThroughLayer

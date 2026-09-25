@@ -37,8 +37,10 @@ namespace Shorokoo.Core.Graph
         /// <summary>
         /// Refuses (<see cref="ErrorCodes.FW056"/>) a lowering of <paramref name="graph"/> whose
         /// <paramref name="samples"/> leave any data input without a sample, listing every such
-        /// input, give more samples than it has data inputs, stating both counts, or name a sample
-        /// for another input than the one at its position, listing every such sample. Samples bind
+        /// input, give more samples than it has data inputs, stating both counts, name a sample
+        /// for another input than the one at its position, listing every such sample, or give an
+        /// input whose type declares its rank (<see cref="OnnxOpAttributeNames.ShrkAttrRank"/>) a
+        /// sample of another rank, listing every such input. Samples bind
         /// to the data inputs by position, as the lowering binds them; a generic module's
         /// type-placeholder slots take none.
         /// </summary>
@@ -76,7 +78,38 @@ namespace Shorokoo.Core.Graph
                     $"{string.Join("; ", misnamed)}. Samples bind to the graph's inputs by position, one per " +
                     "input in declaration order; name each after the input at its position, or build the " +
                     "list with graph.FromOrderedInputs([...]).");
+
+            // An input whose type fixes its rank (a Scalar, a Vector) cannot take a sample of another:
+            // the lowering would record that sample's shape, and export would declare a rank the
+            // input's type contradicts. Most often it is two samples given in the wrong order.
+            var producers = graph.BuildProducerByOutputMap();
+            var inputs = graph.Inputs;
+            var misranked = dataInputs
+                .Select((inputIndex, k) => (Position: k, Input: inputIndex,
+                    Declared: producers.TryGetValue(inputs[inputIndex], out var node) && CarriesShape(node)
+                        ? node.Attributes.GetLongVal(OnnxOpAttributeNames.ShrkAttrRank) : null,
+                    Dims: SampleValueOf(samples.ModelParams[k]) is { } value ? ShapeOf(value) : null))
+                .Where(x => x.Declared is long declared && x.Dims is { } dims && !IsMarker(dims) && dims.Length != declared)
+                .Select(x => $"input #{x.Position} '{NameOf(graph, x.Input) ?? $"#{x.Input}"}' is declared with " +
+                    $"rank {x.Declared}, but its sample has shape [{string.Join(", ", x.Dims!)}]")
+                .ToList();
+            if (misranked.Count > 0)
+                throw new ModelException(ErrorCodes.FW056, "ToConcreteArchitecture",
+                    $"{string.Join("; ", misranked)}. Each sample must have the rank its input's type " +
+                    "declares; samples bind to the graph's inputs by position, one per input in " +
+                    "declaration order, so check that they are given in that order.");
         }
+
+        private static bool IsMarker(long[] dims) => dims is [< 0];
+
+        /// <summary>The value of a tensor or optional sample, or <c>null</c> for any other.</summary>
+        private static IData? SampleValueOf(NamedModelParam sample) => sample switch
+        {
+            OptionalTensorDataModelParam optional => optional.ToOptionalTensorData(),
+            TensorStructModelParam or TensorDataSequenceModelParam => null,
+            { Structure: DataStructure.Tensor } => sample.ToTensorData(),
+            _ => null,
+        };
 
         /// <summary>
         /// Records each input's sample shape on the input it is bound to

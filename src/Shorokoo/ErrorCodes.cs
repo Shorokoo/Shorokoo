@@ -697,7 +697,10 @@ namespace Shorokoo
 
         /// <summary>ToConcreteArchitecture was not given exactly one sample per input of the graph it
         /// lowers (the message lists the inputs that have none, or states both counts when there are
-        /// more samples than inputs)</summary>
+        /// more samples than inputs), a sample is named for another input than the one at its
+        /// position (the message lists each such sample and the input at its position), or a sample
+        /// has another rank than its input's type declares — a Scalar given a vector, say (the
+        /// message lists each such input and its sample's shape)</summary>
         public const string FW056 = "FW056";
 
         /// <summary>An input of a concrete-architecture or concrete-model graph carries no

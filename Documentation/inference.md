@@ -191,7 +191,9 @@ pipeline, applied in order:
    sample, and so are more samples than the graph has inputs, stating both counts.
    Samples bind to the inputs **by position**: a sample may be unnamed, but one named
    for another input than the one at its position is refused with `FW056` too, naming
-   both. A struct input's sample stands for all its fields, and once lowered the
+   both, and so is a sample of another rank than its input's type declares (a `Scalar`
+   given a vector, most often two samples swapped), naming the input and the sample's
+   shape. A struct input's sample stands for all its fields, and once lowered the
    input is one input per field, named `<struct>.<field>`. The shape of each sample
    (never its values) is recorded on the architecture's input as its **representative
    shape** — the shape the model was concretized at. Every input of a concrete

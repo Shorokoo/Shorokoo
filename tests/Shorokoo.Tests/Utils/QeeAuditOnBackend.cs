@@ -69,6 +69,9 @@ internal sealed class QeeAuditOnBackend(
     /// values, a number an operator needs when the model is compiled, and that operator.</summary>
     private static readonly Dictionary<Type, string> JaxKnownRefusals = new()
     {
+        [typeof(QeeWindowValueAuditCheck)] = "HannWindow",
+        [typeof(QeeSignalValueAuditCheck)] = "HannWindow",
+        [typeof(QeeDftStftMelAuditCheck)] = "STFT",
     };
 
     private static readonly Dictionary<(Type Module, string Operator), string> TorchKnownDisagreements = new()

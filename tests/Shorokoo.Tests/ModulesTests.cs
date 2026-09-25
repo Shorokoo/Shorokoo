@@ -1221,6 +1221,9 @@ public class ModulesCoverageTests
     private static NamedModelParam SeqIn(string name, params TensorData[] elements)
         => new TensorDataSequenceModelParam(name, ModelParamType.InputParam, TensorDataSequence.OfElements([.. elements], DType.Float32));
 
+    private static NamedModelParam AbsentIn(string name)
+        => new OptionalTensorDataModelParam(name, ModelParamType.InputParam, OptionalTensorData.None(DType.Float32));
+
     private static ComputationGraph Concretize(ComputationGraph graph, params NamedModelParam[] samples)
         => graph.ToConcreteArchitecture(new ModelParamList(samples));
 
@@ -1229,6 +1232,11 @@ public class ModulesCoverageTests
 
     private static ComputationGraph PairThenShapedParams
         => ModuleFactory.ComputationGraph((Func<GenericPairStruct, Tensor<float32>, Tensor<float32>>)PairThenShapedParamsLayer.Inline);
+
+    private static ComputationGraph PairThenConvTranspose
+        => ModuleFactory.ComputationGraph((Func<GenericPairStruct, Tensor<float32>, Tensor<float32>>)PairThenConvTransposeLayer.Inline);
+
+    private static TensorData Image() => TensorData(DType.Float32, [1L, 1L, 3L, 3L], 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f);
 
     [Fact]
     public void TestAParamShapedByASequenceInputIsBuiltFromItsSampleAndOneItCannotReadIsRefusedNamingTheInput()
@@ -1259,6 +1267,17 @@ public class ModulesCoverageTests
         Assert.Equal(["pair.First", "pair.Second", "input"], arch.InputNames);
         Assert.Equal(["pair.First", "pair.Second"], arch.Specialize(new ModelParamList([("input", x)])).InputNames);
         Assert.Equal(shapes, RecordedShapes(arch));
+    }
+
+    [Fact]
+    public void TestGeometryResolvesBesideAnAbsentOptionalASequenceOrAStructInput()
+    {
+        Assert.Equal(GraphKind.ConcreteArchitecture, Concretize(OptionalThenConvTransposeLayer.ComputationGraph,
+            In("x", Image()), AbsentIn("bias")).Kind);
+        Assert.Equal(GraphKind.ConcreteArchitecture, Concretize(SeqThenConvTransposeLayer.ComputationGraph,
+            SeqIn("scales", TensorData(DType.Float32, [], 1f)), In("x", Image())).Kind);
+        Assert.Equal(GraphKind.ConcreteArchitecture, Concretize(PairThenConvTranspose,
+            PairSample.Of(1f, 2f), In("x", Image())).Kind);
     }
 
     private static void DetectedAsItsOwnKind(ComputationGraph graph)

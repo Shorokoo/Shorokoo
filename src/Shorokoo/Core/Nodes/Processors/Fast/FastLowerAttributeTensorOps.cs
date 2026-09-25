@@ -229,7 +229,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 resolver.OutputRankOverrides = null;
                 FastProcessorHelper.RemoveUnreachableNodes(resolver);
 
-                var orderedSamples = OrderSamples(resolver, sampleInputs);
+                var orderedSamples = BindSamplesToTheInputsItReads(resolver, sampleInputs);
                 if (orderedSamples is not null)
                 {
                     TryResolveWithQee(resolver, keys, resolved, orderedSamples);
@@ -256,7 +256,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         private static void TryResolveWithQee(
-            InternalComputationGraph resolver, List<FastTensorKey> keys, TensorData?[] resolved, TensorData[]? samples)
+            InternalComputationGraph resolver, List<FastTensorKey> keys, TensorData?[] resolved, IData[]? samples)
         {
             try
             {
@@ -280,39 +280,51 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
         private static void TryResolveWithOrt(
             InternalComputationGraph resolver, List<FastTensorKey> keys, TensorData?[] resolved,
-            TensorData[] samples, ComputeContext? compute)
+            IData[] samples, ComputeContext? compute)
         {
             // The one point in this pass that runs a graph, and so the one point that may require
             // a backend. Everything above resolves without one. The samples are the caller's --
             // the sample inputs a model is concretized against -- so the run reads them and leaves
             // them whole: consuming them would spend what the caller passed in to describe a shape.
             var results = (compute ?? ComputeContext.Default).Execute(
-                resolver, [.. samples.Select(static sample => (IData)sample.Shared())]);
+                resolver, [.. samples.Select(static sample =>
+                    sample is SharedInput ? sample : (IData)new SharedInput(sample, SharedInputMode.Shared))]);
             for (int i = 0; i < keys.Count; i++)
                 if (resolved[i] is null)
                     resolved[i] = results[i].ToTensorData();
         }
 
         /// <summary>
-        /// Orders the supplied sample inputs to match the resolver graph's input slots by name.
-        /// Returns null if any input slot has no matching sample (so the sample-based strategies
-        /// are skipped and the caller relies on constant folding).
+        /// The samples for the inputs <paramref name="resolver"/> actually reads, in its input order,
+        /// narrowing its inputs to those. Samples bind to inputs as every lowering stage binds them
+        /// (<see cref="RepresentativeInputShapes.BindSamplesToLoweredInputs"/>); an input the
+        /// resolver's outputs do not depend on is dropped, so a sample the evaluation cannot take —
+        /// an absent optional, a sequence, a struct — gets in the way only where the geometry
+        /// genuinely depends on it. Returns null when an input the resolver reads has no sample the
+        /// evaluation can take, so the sample-based strategies are skipped and the caller relies on
+        /// constant folding.
         /// </summary>
-        internal static TensorData[]? OrderSamples(InternalComputationGraph resolver, ModelParamList sampleInputs)
+        internal static IData[]? BindSamplesToTheInputsItReads(InternalComputationGraph resolver, ModelParamList sampleInputs)
         {
-            var byName = new Dictionary<string, TensorData>();
-            foreach (var p in sampleInputs.ModelParams)
-                byName[p.ParamName] = p.ToTensorData();
+            var bound = RepresentativeInputShapes.BindSamplesToLoweredInputs(resolver, sampleInputs);
+            var inputs = resolver.Inputs;
+            var names = resolver.InputUniqueNames;
 
-            var ordered = new TensorData[resolver.Inputs.Count];
-            for (int i = 0; i < resolver.Inputs.Count; i++)
+            // Pruned with no input kept alive, only the input nodes an output reaches survive.
+            resolver.Inputs = [];
+            FastProcessorHelper.RemoveUnreachableNodes(resolver);
+            var surviving = resolver.Nodes.Select(n => n.Key).ToHashSet();
+            var read = Enumerable.Range(0, inputs.Count).Where(i => surviving.Contains(inputs[i].FastNodeKey)).ToList();
+
+            resolver.Inputs = [.. read.Select(i => inputs[i])];
+            resolver.InputUniqueNames = [.. read.Select(i => i < names.Count ? names[i] : null)];
+            var samples = new IData[read.Count];
+            for (int j = 0; j < read.Count; j++)
             {
-                var name = i < resolver.InputUniqueNames.Count ? resolver.InputUniqueNames[i] : null;
-                if (name is null || !byName.TryGetValue(name, out var td))
-                    return null;
-                ordered[i] = td;
+                if (bound[read[j]] is not { } sample || sample is TensorDataStruct) return null;
+                samples[j] = sample;
             }
-            return ordered;
+            return samples;
         }
     }
 }

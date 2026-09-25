@@ -57,10 +57,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             resolver.OutputRankOverrides = null;
             FastProcessorHelper.RemoveUnreachableNodes(resolver);
 
-            TensorData[]? samples = null;
+            IData[]? samples = null;
             if (resolver.Inputs.Count > 0)
             {
-                samples = sampleInputs is null ? null : FastLowerAttributeTensorOps.OrderSamples(resolver, sampleInputs);
+                samples = sampleInputs is null ? null : FastLowerAttributeTensorOps.BindSamplesToTheInputsItReads(resolver, sampleInputs);
                 if (samples is null) return null;
             }
 

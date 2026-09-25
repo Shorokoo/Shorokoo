@@ -90,7 +90,7 @@ public class FastProcessorsCoverageTests
         // a TensorDataStruct shape AdvancedTestGraph's flat TensorData[] API cannot model).
         var graph = SimplePairSum.ComputationGraph;
         Assert.Contains(graph.ToInternal().Nodes, n => n.OpCode == InternalOpCodes.MODEL_TENSORSTRUCT_INPUT);
-        var concreteArch = graph.ToConcreteArchitecture(new ModelParamList());
+        var concreteArch = graph.ToConcreteArchitecture(new ModelParamList([PairSample.Of(1f, 2f)]));
         Assert.DoesNotContain(concreteArch.ToInternal().Nodes, n => n.OpCode == InternalOpCodes.MODEL_TENSORSTRUCT_INPUT);
         Assert.DoesNotContain(concreteArch.ToInternal().Nodes, n => n.OpCode == InternalOpCodes.TENSOR_STRUCT_CREATE);
         Assert.DoesNotContain(concreteArch.ToInternal().Nodes, n => n.OpCode == InternalOpCodes.TENSOR_STRUCT_GETFIELD);

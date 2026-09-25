@@ -705,7 +705,8 @@ public class ModulesCoverageTests
             runtimeInputs: [TensorDataWithSmallVals(DType.Float32, [1L, 3L, 4L, 4L])]);
         AssertSaveLoadOnly<SimplePairSum>(
             hyperparamInputs: [],
-            runtimeInputs: []);
+            runtimeInputs: [],
+            samples: [PairSample.Of(1f, 2f)]);
 
         AssertGenericSaveLoadOnly<SimpleGenericLayer>();
         AssertGenericSaveLoadOnly<GenericComposedLayer>();
@@ -1135,17 +1136,72 @@ public class ModulesCoverageTests
             [TensorData(DType.Int64, [], 5L)], input);
     }
 
-    private static string ConcretizeWithNoHints(ComputationGraph graph)
-        => Assert.IsType<InvalidOperationException>(Record.Exception(
-            () => graph.ToConcreteArchitecture(new ModelParamList([])))).Message;
+    private static string MissingSamples(ComputationGraph graph, params TensorData[] samples)
+    {
+        var ex = Assert.Throws<ModelException>(() => graph.ToConcreteArchitecture(graph.FromOrderedInputs([.. samples])));
+        Assert.Equal(ErrorCodes.FW056, ex.ErrorCode);
+        return ex.Message;
+    }
 
     [Fact]
-    public void TestConcretizingWithoutTheHintAParamShapeNeedsFailsWithACatchableExceptionNotAnAssertion()
+    public void TestConcretizingWithoutASampleForEveryInputIsRefusedNamingEachMissingOne()
     {
-        Assert.Contains("input 'input'", ConcretizeWithNoHints(SimplestLayer.ComputationGraph));
-        Assert.Contains("input 'input'", ConcretizeWithNoHints(ConditionalTrainableParamInLoopLayer.ComputationGraph));
-        Assert.DoesNotContain("threshold", ConcretizeWithNoHints(ConditionalTrainableParamInLoopLayer.ComputationGraph));
-        Assert.Contains("input 'input'", ConcretizeWithNoHints(StaticAndInputShapedParamsLayer.ComputationGraph));
+        var two = TensorData(DType.Int64, [], 2L);
+        Assert.Contains("'input'", MissingSamples(SimplestLayer.ComputationGraph));
+        Assert.Contains("'input'", MissingSamples(StaticAndInputShapedParamsLayer.ComputationGraph));
+        Assert.Contains("'input'", MissingSamples(FCLayer.ComputationGraph, two));
+        Assert.Contains("'numIterations', 'threshold', 'input'", MissingSamples(ConditionalTrainableParamInLoopLayer.ComputationGraph));
+        Assert.DoesNotContain("'numIterations'", MissingSamples(ConditionalTrainableParamInLoopLayer.ComputationGraph, two));
+    }
+
+    private static long[]?[] RecordedShapes(ComputationGraph graph)
+    {
+        var g = graph.ToInternal();
+        var producers = g.BuildProducerByOutputMap();
+        return [.. g.Inputs.Select(k => RepresentativeInputShapes.Get(producers[k]))];
+    }
+
+    private static ComputationGraph SrkRoundTrip(ComputationGraph graph)
+        => CompressedFormatUtils.LoadFastGraphFromBinary(CompressedFormatUtils.SaveFastGraphToBinary(graph, compressed: true));
+
+    [Fact]
+    public void TestEveryInputRecordsItsSampleShapeThroughConcretizationSaveAndSpecialize()
+    {
+        var g = FCLayer.ComputationGraph;
+        var outFeatures = TensorData(DType.Int64, [], 4L);
+        var input = TensorData(DType.Float32, [2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f);
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([outFeatures, input]));
+        var hyper = new ModelParamList([("numOutFeatures", outFeatures)]);
+        var specialized = g.Specialize(hyper);
+        long[]?[] both = [[], [2L, 3L]];
+        long[]?[] inputOnly = [[2L, 3L]];
+
+        Assert.Equal(both, RecordedShapes(arch));
+        Assert.Equal(both, RecordedShapes(arch.ToConcreteModel()));
+        Assert.Equal(both, RecordedShapes(SrkRoundTrip(arch)));
+        Assert.Equal(both, RecordedShapes(SrkRoundTrip(arch.ToConcreteModel())));
+        Assert.Equal(inputOnly, RecordedShapes(arch.Specialize(hyper)));
+        Assert.Equal(inputOnly, RecordedShapes(arch.ToConcreteModel().Specialize(hyper)));
+        Assert.Equal(inputOnly, RecordedShapes(specialized.ToConcreteArchitecture(specialized.FromOrderedInputs([input]))));
+    }
+
+    [Fact]
+    public void TestAConcreteGraphWhoseInputRecordsNoShapeIsRefusedNamingIt()
+    {
+        var g = FCLayer.ComputationGraph;
+        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs(
+            [TensorData(DType.Int64, [], 4L), TensorData(DType.Float32, [1L, 2L], 1f, 2f)]));
+        foreach (var kind in (GraphKind[])[GraphKind.ConcreteArchitecture, GraphKind.ConcreteModel])
+        {
+            var stripped = (kind == GraphKind.ConcreteModel ? arch.ToConcreteModel() : arch).ToInternal();
+            var node = stripped.BuildProducerByOutputMap()[stripped.Inputs[1]];
+            node.Attributes = node.Attributes.SetAttributes((OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape, null));
+            var ex = Assert.Throws<ModelException>(() => ComputationGraph.FromInternal(stripped, kind));
+            Assert.Equal(ErrorCodes.FW057, ex.ErrorCode);
+            Assert.Contains("'input'", ex.Message);
+            Assert.Throws<InvalidOperationException>(() => ComputationGraph.FromInternal(stripped, GraphKind.Module).WithKind(kind));
+            Assert.Equal(GraphKind.Module, ComputationGraph.FromInternal(stripped).Kind);
+        }
     }
 
     [Fact]
@@ -1902,12 +1958,11 @@ public class ModulesCoverageTests
             () => model.WithKind(GraphKind.Module));
         Assert.Contains("initialized", exBackToModule.Message);
 
-        var misStamped = ComputationGraph.FromInternal(
+        var detected = ComputationGraph.FromInternal(
             ModuleFactory.ComputationGraph((Func<Tensor<float32>, Tensor<float32>>)MachineryFreeBody)
                 .ToInternal());
-        Assert.Equal(GraphKind.ConcreteModel, misStamped.Kind);
-        var reStamped = misStamped.WithKind(GraphKind.Module);
-        var relowered = reStamped.ToConcreteArchitecture(reStamped.FromOrderedInputs([sample]));
+        Assert.Equal(GraphKind.Module, detected.Kind);
+        var relowered = detected.ToConcreteArchitecture(detected.FromOrderedInputs([sample]));
         Assert.Equal(GraphKind.ConcreteArchitecture, relowered.Kind);
     }
 
@@ -1927,7 +1982,8 @@ public class ModulesCoverageTests
     private static void AssertSaveLoadOnly<TModule>(
         TensorData[] hyperparamInputs,
         TensorData[] runtimeInputs,
-        System.Collections.Generic.Dictionary<string, DType>? genericTypes = null)
+        System.Collections.Generic.Dictionary<string, DType>? genericTypes = null,
+        NamedModelParam[]? samples = null)
     {
         var prop = typeof(TModule).GetProperty("ComputationGraph",
             System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)!;
@@ -1944,7 +2000,8 @@ public class ModulesCoverageTests
         allInputs.AddRange(hyperparamInputs);
         allInputs.AddRange(runtimeInputs);
 
-        var concreteArch = moduleGraph.ToConcreteArchitecture(moduleGraph.FromOrderedInputs([.. allInputs]));
+        var concreteArch = moduleGraph.ToConcreteArchitecture(
+            samples is null ? moduleGraph.FromOrderedInputs([.. allInputs]) : new ModelParamList(samples));
         var archData = CompressedFormatUtils.SaveFastGraphToBinary(concreteArch, compressed: true);
         concreteArch = CompressedFormatUtils.LoadFastGraphCore(archData, "<roundtrip>", null).Graph;
 

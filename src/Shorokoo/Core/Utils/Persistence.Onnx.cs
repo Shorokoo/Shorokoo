@@ -20,11 +20,11 @@ namespace Shorokoo
     /// <see cref="ExportOnnx(ComputationGraph, string, OpSetVersion, OnnxExternalDataOptions)"/>
     /// writes a concrete model
     /// to a standard, externally-loadable ("vanilla" dialect) <c>.onnx</c>, and
-    /// <see cref="ImportOnnx"/> turns a foreign vanilla <c>.onnx</c> back into a native
+    /// <see cref="ImportOnnx(string, ModuleParamSetNamingScheme?)"/> turns a foreign vanilla <c>.onnx</c> back into a native
     /// runnable <see cref="ComputationGraph"/> — with each ONNX initializer's name adopted
     /// as the parameter identifier at the boundary (optionally translated through the same
     /// <see cref="ModuleParamSetNamingScheme"/> surface the safetensors import uses).
-    /// <see cref="ImportOnnxToCheckpoint"/> lands the imported model straight in a native
+    /// <see cref="ImportOnnxToCheckpoint(string, string, ModuleParamSetNamingScheme?)"/> lands the imported model straight in a native
     /// <c>.skpt</c> in one call, via the standard container writer.
     ///
     /// <para>Importing a vanilla ONNX is lossy by design — a concrete model's module
@@ -49,7 +49,7 @@ namespace Shorokoo
         /// <paramref name="externalData"/> switches to the standard ONNX external-data layout —
         /// initializers at or above its threshold move to a <c>{file name}.data</c> side file — which
         /// removes that ceiling. The pair is still standard ONNX that any conforming runtime loads,
-        /// and <see cref="ImportOnnx"/> reads it back transparently.</para>
+        /// and <see cref="ImportOnnx(string, ModuleParamSetNamingScheme?)"/> reads it back transparently.</para>
         ///
         /// <para>The write is atomic (staged beside <paramref name="filePath"/> and committed by
         /// rename — both files together when there is a side file, so a failed export leaves the
@@ -82,12 +82,10 @@ namespace Shorokoo
                 throw new ArgumentException("ONNX path cannot be null or empty.", nameof(filePath));
 
             // BuildOnnxModel enforces the concrete-model kind and the vanilla-dialect guarantee, naming
-            // offending ops on failure. In VanillaMetadata mode it also normalizes (downgrades large
-            // representative tensors to shape-only, via a pre-pass) and writes each input's
-            // representative-input info into that input's own ValueInfoProto metadata — no out-of-band,
-            // cross-graph pairing here; the builder owns it end-to-end. ImportOnnx re-attaches on load.
-            var model = FastOnnxModelBuilder.BuildOnnxModel(
-                concreteModel, opset, representativeForm: RepresentativeInputForm.VanillaMetadata);
+            // offending ops on failure. It also writes each input's representative shape into that
+            // input's own ValueInfoProto metadata — no out-of-band, cross-graph pairing here; the
+            // builder owns it end-to-end. ImportOnnx re-attaches on load.
+            var model = FastOnnxModelBuilder.BuildOnnxModel(concreteModel, opset);
             // Through the exporter rather than straight to the writer: it owns the 2 GB
             // protobuf-ceiling pre-check (XD007) and the external-data layout, either of which a
             // serialization here of its own would silently skip.
@@ -117,6 +115,14 @@ namespace Shorokoo
         /// <para>Fails loudly, naming the offending op and the file, on a construct the reader
         /// cannot ingest (an op outside the vanilla ONNX dialect Shorokoo reads, or a node in
         /// an unknown domain); a truncated or garbage file fails loudly naming the file.</para>
+        ///
+        /// <para>Like every concrete graph, the imported one records a representative shape on each
+        /// input (see <see cref="ComputationGraph.ToConcreteArchitecture"/>). A model Shorokoo
+        /// exported carries the sample shape it was concretized at; for any other, each input's
+        /// shape is read from the file — a fixed dimension (<c>dim_value</c>) as written, a
+        /// symbolic one (<c>dim_param</c>) or an unset one as <c>1</c>. An input whose declared
+        /// type has no shape at all (unknown rank) is refused with <see cref="ErrorCodes.FW058"/>,
+        /// naming it: supply its shape with the overload that takes input shapes.</para>
         /// </summary>
         /// <param name="filePath">Path of the <c>.onnx</c> file to import.</param>
         /// <param name="namingScheme">Optional scheme translating foreign initializer names to
@@ -125,6 +131,39 @@ namespace Shorokoo
         public static ComputationGraph ImportOnnx(
             string filePath,
             ModuleParamSetNamingScheme? namingScheme = null)
+            => ImportOnnxCore(filePath, namingScheme, inputShapes: null);
+
+        /// <summary>
+        /// <see cref="ImportOnnx(string, ModuleParamSetNamingScheme?)"/>, recording the given
+        /// representative shape on each input <paramref name="inputShapes"/> names instead of the
+        /// one derived from the file. This is how a model with an input of unknown rank is
+        /// imported; a shape given for an input the file does shape replaces the derived one, and
+        /// must be of the rank the file declares. Each key is an ONNX graph input name; naming
+        /// anything else is refused.
+        /// </summary>
+        /// <param name="filePath">Path of the <c>.onnx</c> file to import.</param>
+        /// <param name="inputShapes">Concrete dims for each named input, e.g.
+        /// <c>{ ["input"] = [1, 3, 224, 224] }</c>.</param>
+        public static ComputationGraph ImportOnnx(
+            string filePath,
+            IReadOnlyDictionary<string, long[]> inputShapes)
+            => ImportOnnxCore(filePath, null, inputShapes ?? throw new ArgumentNullException(nameof(inputShapes)));
+
+        /// <summary>
+        /// <see cref="ImportOnnx(string, IReadOnlyDictionary{string, long[]})"/> with each foreign
+        /// initializer name translated through <paramref name="namingScheme"/>, as
+        /// <see cref="ImportOnnx(string, ModuleParamSetNamingScheme?)"/> does.
+        /// </summary>
+        public static ComputationGraph ImportOnnx(
+            string filePath,
+            ModuleParamSetNamingScheme? namingScheme,
+            IReadOnlyDictionary<string, long[]> inputShapes)
+            => ImportOnnxCore(filePath, namingScheme, inputShapes ?? throw new ArgumentNullException(nameof(inputShapes)));
+
+        private static ComputationGraph ImportOnnxCore(
+            string filePath,
+            ModuleParamSetNamingScheme? namingScheme,
+            IReadOnlyDictionary<string, long[]>? inputShapes)
         {
             if (string.IsNullOrWhiteSpace(filePath))
                 throw new ArgumentException("ONNX path cannot be null or empty.", nameof(filePath));
@@ -175,7 +214,7 @@ namespace Shorokoo
             try
             {
                 var fullDir = Path.GetDirectoryName(Path.GetFullPath(filePath));
-                (graph, taggedKind) = OnnxModelImporter.FromModelProtoWithKindTag(model, fullDir);
+                (graph, taggedKind) = OnnxModelImporter.FromModelProtoWithKindTag(model, fullDir, inputShapes);
             }
             catch (Exception e) when (e is ProtoBuf.ProtoException
                 or EndOfStreamException
@@ -191,13 +230,14 @@ namespace Shorokoo
                     "Shorokoo's importer cannot ingest.", e);
             }
 
-            // (Representative-input info written by ExportOnnx rides each input's ValueInfoProto metadata
-            // and is re-attached by the reader as it builds the input nodes — nothing to do here.)
 
             // Assign identifiers on the mutable internal graph, then freeze — a
             // ComputationGraph is immutable, so the naming must happen before it is wrapped.
             AdoptInitializerIdentifiers(graph, namingScheme, filePath);
-            return new ComputationGraph(graph, taggedKind ?? SrkFileFormat.DetectStage(graph));
+            // Every input of a concrete import records a representative shape by now — the one
+            // ExportOnnx wrote, the caller's, or the one the file declares — except an input of
+            // unknown rank the caller gave none for, which is refused here, naming it.
+            return OnnxModelImporter.Freeze(graph, taggedKind, $"'{filePath}'");
         }
 
         /// <summary>
@@ -218,11 +258,43 @@ namespace Shorokoo
             string onnxPath,
             string checkpointPath,
             ModuleParamSetNamingScheme? namingScheme = null)
+            => ImportOnnxToCheckpointCore(onnxPath, checkpointPath, namingScheme, inputShapes: null);
+
+        /// <summary>
+        /// <see cref="ImportOnnxToCheckpoint(string, string, ModuleParamSetNamingScheme?)"/> with each
+        /// input <paramref name="inputShapes"/> names given that representative shape, as
+        /// <see cref="ImportOnnx(string, IReadOnlyDictionary{string, long[]})"/> does — the route for
+        /// a model with an input of unknown rank.
+        /// </summary>
+        public static ComputationGraph ImportOnnxToCheckpoint(
+            string onnxPath,
+            string checkpointPath,
+            IReadOnlyDictionary<string, long[]> inputShapes)
+            => ImportOnnxToCheckpointCore(onnxPath, checkpointPath, null,
+                inputShapes ?? throw new ArgumentNullException(nameof(inputShapes)));
+
+        /// <summary>
+        /// <see cref="ImportOnnxToCheckpoint(string, string, IReadOnlyDictionary{string, long[]})"/>
+        /// with each foreign initializer name translated through <paramref name="namingScheme"/>.
+        /// </summary>
+        public static ComputationGraph ImportOnnxToCheckpoint(
+            string onnxPath,
+            string checkpointPath,
+            ModuleParamSetNamingScheme? namingScheme,
+            IReadOnlyDictionary<string, long[]> inputShapes)
+            => ImportOnnxToCheckpointCore(onnxPath, checkpointPath, namingScheme,
+                inputShapes ?? throw new ArgumentNullException(nameof(inputShapes)));
+
+        private static ComputationGraph ImportOnnxToCheckpointCore(
+            string onnxPath,
+            string checkpointPath,
+            ModuleParamSetNamingScheme? namingScheme,
+            IReadOnlyDictionary<string, long[]>? inputShapes)
         {
             if (string.IsNullOrWhiteSpace(checkpointPath))
                 throw new ArgumentException("Checkpoint path cannot be null or empty.", nameof(checkpointPath));
 
-            var model = ImportOnnx(onnxPath, namingScheme);
+            var model = ImportOnnxCore(onnxPath, namingScheme, inputShapes);
             if (model.Kind != GraphKind.ConcreteModel)
                 throw new InvalidOperationException(SrkFileFormat.KindMismatchMessage(
                     "Persistence.ImportOnnxToCheckpoint", "a 'concrete-model' graph", model.Kind,

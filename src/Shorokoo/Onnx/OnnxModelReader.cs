@@ -53,14 +53,35 @@ namespace Shorokoo.Onnx
             => Wrap(FromOnnxModelWithKindTag(inputStream, externalDataDirectory));
 
         /// <summary>
+        /// <see cref="FromOnnxModel(Stream, string?)"/>, recording the given representative shape
+        /// on each input <paramref name="inputShapes"/> names (by ONNX graph input name) instead
+        /// of the one derived from the file — the route for a model with an input of unknown rank.
+        /// </summary>
+        public static ComputationGraph FromOnnxModel(
+            Stream inputStream, IReadOnlyDictionary<string, long[]> inputShapes, string? externalDataDirectory = null)
+            => Wrap(FromOnnxModelWithKindTag(inputStream, externalDataDirectory,
+                inputShapes ?? throw new ArgumentNullException(nameof(inputShapes))));
+
+        /// <summary>
         /// Imports an ONNX model from a file path. External tensor data (if any)
         /// resolves against the file's directory.
         /// </summary>
         public static ComputationGraph FromOnnxModel(string filePath)
+            => FromOnnxModelFile(filePath, inputShapes: null);
+
+        /// <summary>
+        /// <see cref="FromOnnxModel(string)"/>, recording the given representative shape on each
+        /// input <paramref name="inputShapes"/> names (by ONNX graph input name) instead of the
+        /// one derived from the file — the route for a model with an input of unknown rank.
+        /// </summary>
+        public static ComputationGraph FromOnnxModel(string filePath, IReadOnlyDictionary<string, long[]> inputShapes)
+            => FromOnnxModelFile(filePath, inputShapes ?? throw new ArgumentNullException(nameof(inputShapes)));
+
+        private static ComputationGraph FromOnnxModelFile(string filePath, IReadOnlyDictionary<string, long[]>? inputShapes)
         {
             using var fileReaderStream = File.OpenRead(filePath);
             return Wrap(FromOnnxModelWithKindTag(
-                fileReaderStream, Path.GetDirectoryName(Path.GetFullPath(filePath))));
+                fileReaderStream, Path.GetDirectoryName(Path.GetFullPath(filePath)), inputShapes));
         }
 
         /// <summary>
@@ -74,9 +95,36 @@ namespace Shorokoo.Onnx
             return Wrap(FromOnnxModelWithKindTag(stream, externalDataDirectory));
         }
 
+        /// <summary>
+        /// <see cref="FromOnnxModel(byte[], string?)"/>, recording the given representative shape
+        /// on each input <paramref name="inputShapes"/> names (by ONNX graph input name) instead
+        /// of the one derived from the file — the route for a model with an input of unknown rank.
+        /// </summary>
+        public static ComputationGraph FromOnnxModel(
+            byte[] rawData, IReadOnlyDictionary<string, long[]> inputShapes, string? externalDataDirectory = null)
+        {
+            using var stream = new MemoryStream(rawData);
+            return Wrap(FromOnnxModelWithKindTag(stream, externalDataDirectory,
+                inputShapes ?? throw new ArgumentNullException(nameof(inputShapes))));
+        }
+
+        /// <summary>
+        /// Freezes an imported graph under its tagged kind, or the op-scanned one. Every input of a
+        /// concrete one records a representative shape by now, but for one of unknown rank the
+        /// caller gave none for, which is refused (<see cref="ErrorCodes.FW058"/>), naming it.
+        /// </summary>
         private static ComputationGraph Wrap((InternalComputationGraph Graph, Shorokoo.Graph.GraphKind? TaggedKind) import)
-            => new(import.Graph,
-                import.TaggedKind ?? Shorokoo.Core.Utils.SrkFileFormat.DetectStage(import.Graph));
+            => Freeze(import.Graph, import.TaggedKind, "the ONNX model");
+
+        /// <summary>The freeze <see cref="Wrap"/> performs, shared with <c>Persistence.ImportOnnx</c>.</summary>
+        internal static ComputationGraph Freeze(
+            InternalComputationGraph graph, Shorokoo.Graph.GraphKind? taggedKind, string origin)
+        {
+            var kind = taggedKind ?? Shorokoo.Core.Utils.SrkFileFormat.DetectStageByOps(graph);
+            if (kind != Shorokoo.Graph.GraphKind.Module)
+                Shorokoo.Core.Graph.RepresentativeInputShapes.ThrowIfImportLeftAnInputUnshaped(graph, origin);
+            return new(graph, kind);
+        }
 
         /// <summary>
         /// Internal-graph import that also surfaces the graph-kind metadata tag the
@@ -86,27 +134,37 @@ namespace Shorokoo.Onnx
         /// fails loudly — the file is corrupt or written by an incompatible tool.
         /// </summary>
         internal static (InternalComputationGraph Graph, Shorokoo.Graph.GraphKind? TaggedKind)
-            FromOnnxModelWithKindTag(Stream inputStream, string? externalDataDirectory = null)
+            FromOnnxModelWithKindTag(
+                Stream inputStream,
+                string? externalDataDirectory = null,
+                IReadOnlyDictionary<string, long[]>? inputShapes = null)
         {
             var model = ProtoBuf.Serializer.Deserialize<IR.ModelProto>(inputStream);
-            return FromModelProtoWithKindTag(model, externalDataDirectory);
+            return FromModelProtoWithKindTag(model, externalDataDirectory, inputShapes);
         }
 
         /// <summary>
         /// Builds the graph from an already-deserialized <see cref="IR.ModelProto"/>: the
-        /// post-parse half of <see cref="FromOnnxModelWithKindTag(Stream, string?)"/>
+        /// post-parse half of <see cref="FromOnnxModelWithKindTag(Stream, string?, IReadOnlyDictionary{string, long[]}?)"/>
         /// (external-data materialization, the reader, signature-name restoration, and the
         /// kind-tag consistency check). Split out so a boundary (e.g.
         /// <c>Persistence.ImportOnnx</c>) can inspect or validate the proto between parsing
         /// it and building the graph without re-deserializing.
         /// </summary>
         internal static (InternalComputationGraph Graph, Shorokoo.Graph.GraphKind? TaggedKind)
-            FromModelProtoWithKindTag(IR.ModelProto model, string? externalDataDirectory = null)
+            FromModelProtoWithKindTag(
+                IR.ModelProto model,
+                string? externalDataDirectory = null,
+                IReadOnlyDictionary<string, long[]>? inputShapes = null)
         {
             OnnxExternalData.LoadIntoModel(model, externalDataDirectory);
             var taggedKind = Shorokoo.Core.Utils.SrkFileFormat.TryReadKindTag(model);
             var reader = new OnnxModelReader(model);
             var graph = reader.BuildInternalComputationGraph();
+
+            // A Shorokoo export carries each input's representative shape in its metadata, which
+            // the reader has re-attached; any other input takes it from the caller or the file.
+            Shorokoo.Core.Graph.RepresentativeInputShapes.RecordFromOnnx(graph, model.Graph, inputShapes);
 
             RestoreSignatureIONames(model, graph);
 

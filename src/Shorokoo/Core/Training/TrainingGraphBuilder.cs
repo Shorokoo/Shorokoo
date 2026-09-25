@@ -360,6 +360,10 @@ public static class TrainingGraphBuilder
         var takesTarget = LossReadsTarget(lossGraph);
         if (takesTarget)
         {
+            // A composed graph is as concrete as the model in it, so its new input records a shape
+            // too: the target the loss reads at the model's own representative inputs.
+            Shorokoo.Core.Graph.RepresentativeInputShapes.Set(
+                targetInputNode, TrainingRig.RepresentativeTargetShape(concreteModel, lossGraph));
             graph.Inputs = [.. graph.Inputs, targetInputKey];
             graph.InputUniqueNames = [.. graph.InputUniqueNames, UniqueTargetName(graph, lossTargetName)];
         }

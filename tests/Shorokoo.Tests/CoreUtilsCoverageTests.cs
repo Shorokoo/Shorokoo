@@ -785,7 +785,9 @@ public class CoreUtilsCoverageTests
         Assert.Equal(RunSettings.Default, new ComputeContext().RunSettings);
 
         var x = InputTensor<float32>("x", rank: 1);
-        var graph = new ComputationGraph(new InternalComputationGraph([x], [x + x]), GraphKind.ConcreteModel);
+        var inner = new InternalComputationGraph([x], [x + x]);
+        Shorokoo.Core.Graph.RepresentativeInputShapes.Set(inner.FindNode(inner.Inputs[0].FastNodeKey)!, [2L]);
+        var graph = new ComputationGraph(inner, GraphKind.ConcreteModel);
         var compiled = configured.Compile(graph);
         Assert.Equal(budget, compiled.DeviceMemory);
         Assert.Equal(shrinking, compiled.DefaultRunSettings);

@@ -133,7 +133,10 @@ namespace Shorokoo.Core.Utils
         /// absence <c>ToConcreteArchitecture</c> asserts on its output) present →
         /// <see cref="GraphKind.Module"/>; unmaterialized trainable parameters
         /// (<c>MODEL_PARAM</c> nodes) present → <see cref="GraphKind.ConcreteArchitecture"/>;
-        /// otherwise <see cref="GraphKind.ConcreteModel"/>. This is what the writer records
+        /// otherwise <see cref="GraphKind.ConcreteModel"/> — unless an input carries no
+        /// representative shape, which every concrete graph records on each input
+        /// (<see cref="Shorokoo.Core.Graph.RepresentativeInputShapes"/>), making the graph a
+        /// <see cref="GraphKind.Module"/>. This is what the writer records
         /// in the header, and the fallback classification used when a file's recorded stage is
         /// missing or is not one this build defines.
         /// </summary>
@@ -147,6 +150,23 @@ namespace Shorokoo.Core.Utils
                     return GraphKind.Module;
             }
 
+            // Every concrete graph records a representative shape on each of its inputs; a graph
+            // with an input that has none was never concretized.
+            if (Shorokoo.Core.Graph.RepresentativeInputShapes.FirstInputWithoutShape(graph) is not null)
+                return GraphKind.Module;
+
+            return DetectStageByOps(graph);
+        }
+
+        /// <summary>
+        /// <see cref="DetectStage(InternalComputationGraph)"/> from the ops alone, not the inputs'
+        /// representative shapes: what an importer stamps a foreign graph it is about to give those
+        /// shapes, and refuses where it cannot.
+        /// </summary>
+        internal static GraphKind DetectStageByOps(InternalComputationGraph graph)
+        {
+            if (graph.Nodes.Any(n => InternalOpCodes.IsModuleStageOp(n.OpCode)))
+                return GraphKind.Module;
             return graph.Nodes.Any(n => n.OpCode == InternalOpCodes.MODEL_PARAM)
                 ? GraphKind.ConcreteArchitecture
                 : GraphKind.ConcreteModel;
@@ -203,6 +223,12 @@ namespace Shorokoo.Core.Utils
                              Shorokoo.Core.Nodes.Processors.Fast.FastWireRngKeyDerivation.RngSeedIdentifierTemplate)
                     initializedParams++;
             }
+
+            if (kind is GraphKind.ConcreteArchitecture or GraphKind.ConcreteModel
+                && moduleOps == 0
+                && Shorokoo.Core.Graph.RepresentativeInputShapes.FirstInputWithoutShape(graph) is { } unshaped)
+                return "every input of a concrete graph records the shape it was concretized at, " +
+                       $"but this graph's input '{unshaped}' carries none.";
 
             switch (kind)
             {

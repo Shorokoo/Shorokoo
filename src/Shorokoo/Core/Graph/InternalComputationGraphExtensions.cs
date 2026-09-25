@@ -57,8 +57,11 @@ namespace Shorokoo.Graph
         /// <see cref="Shorokoo.Core.Nodes.Processors.Fast.FastWireRngKeyDerivation"/>.</para>
         /// </summary>
         /// <param name="graph">The module graph to lower (e.g. <c>MyModel.ComputationGraph</c>).</param>
-        /// <param name="inputHints">Sample inputs (names + shapes/values) used as shape hints and as
-        /// QEE/ORT resolution fallbacks during lowering; build one with <see cref="FromOrderedInputs"/>.</param>
+        /// <param name="inputHints">Sample inputs (names + shapes/values), one for every input of the
+        /// graph — <c>[Hyper]</c> inputs included — used as shape hints and as QEE/ORT resolution
+        /// fallbacks during lowering, and recorded (shape only) on the architecture's inputs. A
+        /// missing one is refused with <see cref="ErrorCodes.FW056"/>, naming it. Build one with
+        /// <see cref="FromOrderedInputs"/>.</param>
         /// <param name="computeContext">Optional context used to resolve values while lowering.</param>
         /// <param name="debugRequests">Optional hook to dump the graph at each lowering stage.</param>
         /// <param name="progress">The reporter the pipeline names each stage to as it enters it, or
@@ -90,6 +93,10 @@ namespace Shorokoo.Graph
             // (Shorokoo/Shorokoo#286).
             if (NeedsGenericErasure(graph))
                 graph = FastToConcreteDataType.Process(graph);
+
+            // A sample for every input, checked before any work: the shapes recorded from them at
+            // the end are what makes the architecture self-describing.
+            RepresentativeInputShapes.RequireSampleForEveryInput(graph, inputHints);
 
             Stage("Clone");
             var fastGraph = graph.Clone();
@@ -149,15 +156,9 @@ namespace Shorokoo.Graph
             FastGraphCycleDetector.AssertAcyclic(fastGraph, "After FastUnpackTensorStructs");
 
             Stage("ConvertModelParamIdRefToModelParam");
-            var unresolvedParamSites = FastConvertModelParamIdRefToModelParam.Process(
+            FastConvertModelParamIdRefToModelParam.Process(
                 fastGraph, identifierTemplatesInfo, inputHints, computeContext);
             DebugPrintFast(fastGraph, debugRequests, GraphCreationPoint.AfterProcessTrainableParameters);
-            // A param whose shape needs an input's value cannot be built without a hint for that
-            // input. That is user error, so name the input — before the op check below reports a
-            // leftover id-ref in terms of the pipeline, and instead of dropping the param silently
-            // when other params in the graph did resolve.
-            FastConvertModelParamIdRefToModelParam.ThrowIfAParamShapeNeedsAnUnhintedInput(
-                fastGraph, unresolvedParamSites, inputHints);
             AssertFastGraphDoesNotContainOps(fastGraph,
                 new[] { InternalOpCodes.MODEL_PARAM_ID_REF },
                 "After FastConvertModelParamIdRefToModelParam");
@@ -210,6 +211,11 @@ namespace Shorokoo.Graph
             // must contain none of the canonical module-stage ops (InternalOpCodes.ModuleStageOps)
             // that SrkFileFormat.DetectStage classifies a module graph by.
             AssertFastGraphDoesNotContainOps(fastGraph, InternalOpCodes.IsModuleStageOp, "Fast final graph validation");
+
+            // Record the shape of each input's sample (dims only, never its values) on the input
+            // node, so the architecture — and every concrete model made from it — carries the
+            // shape it was concretized at (see RepresentativeInputShapes).
+            RepresentativeInputShapes.Record(fastGraph, inputHints);
 
             // No terminal report here: both callers have work left after this returns (the public
             // wrapper freezes the result, the rig build goes on to compose the trainstep), and a

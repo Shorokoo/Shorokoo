@@ -525,7 +525,7 @@ namespace Shorokoo
 
         #endregion
 
-        #region Framework Error Codes (FW001-FW055)
+        #region Framework Error Codes (FW001-FW058)
         
         /// <summary>Loop operation not implemented</summary>
         public const string FW001 = "FW001";
@@ -694,6 +694,18 @@ namespace Shorokoo
         /// (called a module, created a model or a ModelSequence, read a model's parameter or
         /// hyperparameter, or took a model as an argument)</summary>
         public const string FW055 = "FW055";
+
+        /// <summary>ToConcreteArchitecture was not given a sample for every input of the graph it
+        /// lowers (the message lists the inputs that have none)</summary>
+        public const string FW056 = "FW056";
+
+        /// <summary>An input of a concrete-architecture or concrete-model graph carries no
+        /// representative shape — the sample shape the graph was concretized at</summary>
+        public const string FW057 = "FW057";
+
+        /// <summary>An imported ONNX model's graph input declares no shape, so no representative
+        /// shape can be derived for it; supply one with the ImportOnnx overload that takes input shapes</summary>
+        public const string FW058 = "FW058";
 
         #endregion
 

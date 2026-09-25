@@ -253,17 +253,16 @@ public static class OnnxOpAttributeNames
     public const string ShrkAttrRank = "shrk_rank";
     public const string ShrkAttrShape = "shrk_shape";
     public const string ShrkAttrTensorData = "shrk_tensor_data";
-    /// <summary>Optional, on a MODEL_TENSOR_INPUT node only: the concrete input dimensions (an int64
-    /// list, empty for a scalar), recording the shape the model was concretized at — whatever the
-    /// input's size — so a concrete architecture is self-describing for training-graph shape inference
-    /// without carrying separate sample inputs (never an inline tensor payload, and never the user's
-    /// values). The shape-inference read path rebuilds a representative input from these dims plus the
-    /// node's dtype (<see cref="Shorokoo.TrainingRig.RepresentativeInputFor"/>) — shape and dtype, with
-    /// zeros only while they are small enough to be read. In the native
-    /// <c>.srk</c> dialect a MODEL_TENSOR_INPUT is serialized as a NodeProto, so this attribute
-    /// round-trips on disk (making the saved arch self-describing); the vanilla ONNX export/compile
-    /// path keeps the input as a graph input and carries the info in <c>metadata_props</c> instead
-    /// (see <c>Persistence.ExportOnnx</c>).</summary>
+    /// <summary>On a MODEL_TENSOR_INPUT or MODEL_OPTIONAL_INPUT node: the concrete dimensions of the
+    /// sample the graph was concretized at (an int64 list, empty for a scalar; a single <c>-1</c> for
+    /// an optional supplied absent) — never an inline tensor payload, and never the user's values.
+    /// Every input of a concrete-architecture or concrete-model graph carries it
+    /// (<see cref="Shorokoo.Core.Graph.RepresentativeInputShapes"/>): it is what training shape
+    /// inference rebuilds a representative input from, with the node's dtype
+    /// (<see cref="Shorokoo.TrainingRig.RepresentativeInputFor"/>), and what ONNX export reads an
+    /// input's rank from where the input declares none. In the native <c>.srk</c> dialect the input
+    /// node is serialized as a NodeProto, so the attribute round-trips on disk; the dialects that keep
+    /// the input as a graph input carry it in that input's <c>metadata_props</c> instead.</summary>
     public const string ShrkAttrRepresentativeInputShape = "shrk_representative_input_shape";
     public const string ShrkAttrStructure = "shrk_structure";
     public const string ShrkAttrDtype = "shrk_dtype";

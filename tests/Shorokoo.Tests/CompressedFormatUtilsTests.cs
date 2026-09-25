@@ -1,6 +1,7 @@
 using System.IO.Compression;
 using System.Text.Json.Nodes;
 using Shorokoo.Core.Factory;
+using Shorokoo.Core.Graph;
 using Shorokoo.Core.Factory.IR;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 using Shorokoo.Runtime;
@@ -838,16 +839,16 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         Assert.Equal(GraphKind.ConcreteArchitecture, reloaded.Kind);
         Assert.Equal(GraphKind.ConcreteModel, reloaded.ToConcreteModel().Kind);
 
-        (ComputationGraph Graph, GraphKind Kind)[] cases =
-            [(moduleGraph, GraphKind.Module), (arch, GraphKind.ConcreteArchitecture)];
-        foreach (var (graph, kind) in cases)
+        (ComputationGraph Graph, GraphKind Kind, GraphKind Detected)[] cases =
+            [(moduleGraph, GraphKind.Module, GraphKind.Module), (arch, GraphKind.ConcreteArchitecture, GraphKind.ConcreteModel)];
+        foreach (var (graph, kind, detected) in cases)
         {
             var proto = FastOnnxModelBuilder.BuildInternalOnnxModel(graph.ToInternal(), stage: graph.Kind);
             using var ms = new MemoryStream();
             ProtoBuf.Serializer.Serialize(ms, proto);
             var viaOnnx = OnnxModelImporter.FromOnnxModel(ms.ToArray());
             Assert.Equal(kind, viaOnnx.Kind);
-            Assert.Equal(GraphKind.ConcreteModel, SrkFileFormat.DetectStage(viaOnnx.ToInternal()));
+            Assert.Equal(detected, SrkFileFormat.DetectStage(viaOnnx.ToInternal()));
         }
 
         // Module machinery tagged concrete-model is structurally impossible: refused at import.
@@ -2473,8 +2474,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         var viaExporter = Path.Combine(exporterDir, "same.onnx");
         Persistence.ExportOnnx(model, viaFacade, externalData: new OnnxExternalDataOptions { SizeThreshold = 0 });
         OnnxModelExporter.SaveWithExternalData(
-            FastOnnxModelBuilder.BuildOnnxModel(model, OpSetVersion.OPS_21,
-                representativeForm: RepresentativeInputForm.VanillaMetadata),
+            FastOnnxModelBuilder.BuildOnnxModel(model, OpSetVersion.OPS_21),
             viaExporter, new OnnxExternalDataOptions { SizeThreshold = 0 });
         Assert.Equal(File.ReadAllBytes(viaExporter), File.ReadAllBytes(viaFacade));
         Assert.Equal(File.ReadAllBytes(viaExporter + ".data"), File.ReadAllBytes(viaFacade + ".data"));
@@ -2513,6 +2513,60 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         using var fs = File.OpenRead(path);
         var graph = ProtoBuf.Serializer.Deserialize<ModelProto>(fs).Graph;
         Assert.All(graph.Inputs.Concat(graph.Outputs), v => Assert.NotNull(v.Type.TensorType.Shape));
+    }
+
+    private static TensorShapeProto.Dimension Fixed(long size) => new() { DimValue = size };
+
+    private static TensorShapeProto.Dimension Symbolic(string name) => new() { DimParam = name };
+
+    private static ValueInfoProto FloatInputX(params TensorShapeProto.Dimension[]? dims)
+    {
+        var tensor = new TypeProto.Tensor { ElemType = 1 };
+        if (dims is not null)
+        {
+            tensor.Shape = new TensorShapeProto();
+            tensor.Shape.Dims.AddRange(dims);
+        }
+        return new ValueInfoProto { Name = "x", Type = new TypeProto { TensorType = tensor } };
+    }
+
+    private string ForeignAddModelFile(ValueInfoProto x)
+    {
+        var model = BuildForeignAddModel("w", [10f, 20f, 30f, 40f]);
+        model.Graph.Inputs[0] = x;
+        return WriteOnnx(P(Guid.NewGuid() + ".onnx"), model);
+    }
+
+    private long[]? ImportedShapeOfX(ValueInfoProto x, Dictionary<string, long[]>? given = null)
+    {
+        var path = ForeignAddModelFile(x);
+        var g = (given is null ? Persistence.ImportOnnx(path) : Persistence.ImportOnnx(path, given)).ToInternal();
+        return RepresentativeInputShapes.Get(g.BuildProducerByOutputMap()[g.Inputs[0]]);
+    }
+
+    [Fact]
+    public void TestImportOnnxRecordsEachInputsDeclaredShapeTakingOneForASymbolicOrUnsetDim()
+    {
+        Assert.Equal([2L, 4L], ImportedShapeOfX(FloatInputX(Fixed(2), Fixed(4))));
+        Assert.Equal([1L, 4L], ImportedShapeOfX(FloatInputX(Symbolic("N"), Fixed(4))));
+        Assert.Equal([1L, 4L], ImportedShapeOfX(FloatInputX(new TensorShapeProto.Dimension(), Fixed(4))));
+        Assert.Equal([], ImportedShapeOfX(FloatInputX()));
+        Assert.Equal([3L, 4L], ImportedShapeOfX(FloatInputX(Symbolic("N"), Fixed(4)), new() { ["x"] = [3L, 4L] }));
+    }
+
+    [Fact]
+    public void TestImportOnnxRefusesAnInputOfUnknownRankUntilItsShapeIsGiven()
+    {
+        var path = ForeignAddModelFile(FloatInputX(null));
+        Dictionary<string, long[]> shapes = new() { ["x"] = [4L] };
+        Assert.Equal(ErrorCodes.FW058, Assert.Throws<ModelException>(() => Persistence.ImportOnnx(path)).ErrorCode);
+        Assert.Equal(ErrorCodes.FW058, Assert.Throws<ModelException>(() => OnnxModelImporter.FromOnnxModel(path)).ErrorCode);
+        Assert.Equal(ErrorCodes.FW058, Assert.Throws<ModelException>(() => Persistence.ImportOnnxToCheckpoint(path, P("unranked.skpt"))).ErrorCode);
+        Assert.Contains("'x'", Assert.Throws<ModelException>(() => Persistence.ImportOnnx(path)).Message);
+        Assert.Equal([11f, 22f, 33f, 44f], RunFloatVecModel(Persistence.ImportOnnx(path, shapes), 1f, 2f, 3f, 4f));
+        Assert.Equal([11f, 22f, 33f, 44f], RunFloatVecModel(OnnxModelImporter.FromOnnxModel(path, shapes), 1f, 2f, 3f, 4f));
+        Assert.Equal([11f, 22f, 33f, 44f], RunFloatVecModel(Persistence.ImportOnnxToCheckpoint(path, P("ranked.skpt"), shapes), 1f, 2f, 3f, 4f));
+        Assert.Throws<ArgumentException>(() => Persistence.ImportOnnx(path, new Dictionary<string, long[]> { ["y"] = [4L] }));
     }
 
     [Fact]

@@ -5151,7 +5151,7 @@ public class BuildProgressCoverageTests
             new AdamWOptimizerHyperparameters { LearningRate = 0.1f }, progress: sink);
 
         BuildPhase[] phases = [BuildPhase.Concretize, BuildPhase.TrainingStep, BuildPhase.Initialize];
-        string[] concretize = ["Thaw", .. ConcretizePasses, "BindRngConfig", "WriteRepresentativeInputs"];
+        string[] concretize = ["Thaw", .. ConcretizePasses, "BindRngConfig"];
         string[] trainingStep =
         [
             "NormalizeOptimizerGraph", "ComposeModelLossAndAutoGrad", "ReplayOptimizerPerParameter",

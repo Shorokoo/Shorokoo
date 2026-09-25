@@ -56,7 +56,7 @@ namespace Shorokoo.Core.Factory
         /// attributes; the structure (Tensor/Optional/Sequence/TensorStruct) is
         /// implied by the input op code.
         ///
-        /// <para>When <paramref name="emitRepresentativeMetadata"/> is set (vanilla ONNX export), the
+        /// <para>When <paramref name="emitRepresentativeMetadata"/> is set (every dialect that keeps inputs as graph inputs), the
         /// producing <c>MODEL_TENSOR_INPUT</c> node's representative-input attribute is encoded into this
         /// ValueInfoProto's own metadata — a graph input has no attribute bag, so this is where a
         /// vanilla-loadable graph carries it. The node and the ValueInfoProto being built for it are both

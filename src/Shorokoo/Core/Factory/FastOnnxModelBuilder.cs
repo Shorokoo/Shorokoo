@@ -20,23 +20,6 @@ using Shorokoo.Onnx;
 namespace Shorokoo.Core.Factory
 {
     /// <summary>
-    /// Selects how a graph's <c>MODEL_TENSOR_INPUT</c> representative-input attributes are treated when
-    /// building an ONNX <see cref="ModelProto"/>.
-    /// </summary>
-    public enum RepresentativeInputForm
-    {
-        /// <summary>Leave the representative-input shape attribute exactly as the in-memory build set
-        /// it. Native <c>.srk</c> (the attribute rides on the emitted input NodeProtos) and the
-        /// execution/compile path (inputs are graph inputs, so the attribute is simply not serialized)
-        /// both use this — no ONNX metadata.</summary>
-        Passthrough,
-
-        /// <summary>Vanilla ONNX export: emit each input's representative-shape attribute into its own
-        /// graph-input <see cref="ValueInfoProto"/> metadata.</summary>
-        VanillaMetadata,
-    }
-
-    /// <summary>
     /// Builds an ONNX <see cref="ModelProto"/> directly from a
     /// <see cref="InternalComputationGraph"/>. Runs the standard pre-passes, then
     /// walks the graph emitting protos. Every step works against
@@ -108,8 +91,7 @@ namespace Shorokoo.Core.Factory
         public static ModelProto BuildOnnxModel(
             Shorokoo.Graph.ComputationGraph graph,
             OpSetVersion opset = OpSetVersion.OPS_21,
-            bool prepForOnnx = false,
-            RepresentativeInputForm representativeForm = RepresentativeInputForm.Passthrough)
+            bool prepForOnnx = false)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
             // The reliable-kind form of the FW045 gate: only a concrete model can satisfy
@@ -124,12 +106,11 @@ namespace Shorokoo.Core.Factory
                     "(ToConcreteArchitecture -> ToConcreteModel) and export that. Shorokoo's own .srk/.zsrk " +
                     "persistence (CompressedFormatUtils.SaveFastGraphToFile/SaveFastGraphToBinary) accepts every graph kind. " +
                     Shorokoo.Core.Utils.SrkFileFormat.WithKindRemedyHint);
-            return BuildOnnxModelCore(graph.ToInternal(), opset, prepForOnnx, vanillaExport: true, stage: graph.Kind,
-                representativeForm: representativeForm);
+            return BuildOnnxModelCore(graph.ToInternal(), opset, prepForOnnx, vanillaExport: true, stage: graph.Kind);
         }
 
         /// <summary>
-        /// Internal-graph form of <see cref="BuildOnnxModel(Shorokoo.Graph.ComputationGraph, OpSetVersion, bool, RepresentativeInputForm)"/> for callers below the
+        /// Internal-graph form of <see cref="BuildOnnxModel(Shorokoo.Graph.ComputationGraph, OpSetVersion, bool)"/> for callers below the
         /// readonly wrapper (no stamped kind — the vanilla-dialect op scan is the gate).
         /// </summary>
         internal static ModelProto BuildOnnxModel(
@@ -147,7 +128,7 @@ namespace Shorokoo.Core.Factory
         /// names and module-stage graphs serialize their Shorokoo-internal ops
         /// unchecked. Files produced this way are re-importable only by
         /// <see cref="Shorokoo.Onnx.OnnxModelImporter"/>; use
-        /// <see cref="BuildOnnxModel(Shorokoo.Graph.ComputationGraph, OpSetVersion, bool, RepresentativeInputForm)"/> for anything meant to leave Shorokoo.
+        /// <see cref="BuildOnnxModel(Shorokoo.Graph.ComputationGraph, OpSetVersion, bool)"/> for anything meant to leave Shorokoo.
         /// </summary>
         /// <param name="fastGraph">The graph to serialize.</param>
         /// <param name="opset">Default-domain opset stamp (raised as required).</param>
@@ -166,10 +147,6 @@ namespace Shorokoo.Core.Factory
         /// <see cref="ValueInfoProto"/>s; the loader rebuilds the input list from those nodes. Off
         /// (default) for the execution/compile path, which must keep proper ONNX graph inputs for ONNX
         /// Runtime.</param>
-        /// <param name="representativeForm">How the representative-input shape attribute is treated (see
-        /// <see cref="RepresentativeInputForm"/>). The internal dialect is always
-        /// <see cref="RepresentativeInputForm.Passthrough"/>: native <c>.srk</c> serializes the attribute
-        /// on the emitted input nodes, and the execution path leaves it unserialized on graph inputs.</param>
         /// <param name="inputDims">Execution path only: the concrete dimensions to stamp on each top-level
         /// graph input, positionally over <see cref="InternalComputationGraph.Inputs"/> (a null entry, or a
         /// null list, keeps that input rank-only / symbolic). The pre-passes never add, drop or reorder
@@ -182,11 +159,10 @@ namespace Shorokoo.Core.Factory
             Shorokoo.Graph.GraphKind? stage = null,
             bool applyExecutionLowerings = true,
             bool emitInputsAsNodes = false,
-            RepresentativeInputForm representativeForm = RepresentativeInputForm.Passthrough,
             IReadOnlyList<long[]?>? inputDims = null)
             => BuildOnnxModelCore(fastGraph, opset, prepForOnnx, vanillaExport: false, stage: stage,
                 applyExecutionLowerings: applyExecutionLowerings, emitInputsAsNodes: emitInputsAsNodes,
-                representativeForm: representativeForm, inputDims: inputDims);
+                inputDims: inputDims);
 
         private static ModelProto BuildOnnxModelCore(
             InternalComputationGraph fastGraph,
@@ -196,7 +172,6 @@ namespace Shorokoo.Core.Factory
             Shorokoo.Graph.GraphKind? stage = null,
             bool applyExecutionLowerings = true,
             bool emitInputsAsNodes = false,
-            RepresentativeInputForm representativeForm = RepresentativeInputForm.Passthrough,
             IReadOnlyList<long[]?>? inputDims = null)
         {
             if (fastGraph is null) throw new ArgumentNullException(nameof(fastGraph));
@@ -254,7 +229,11 @@ namespace Shorokoo.Core.Factory
                 isFunction: false,
                 tensorInfoLookup: tensorInfoLookup,
                 emitInputsAsNodes: emitInputsAsNodes,
-                emitRepresentativeMetadata: representativeForm == RepresentativeInputForm.VanillaMetadata,
+                // A graph input has no attribute bag, so wherever the inputs are graph inputs each
+                // one's representative shape rides in its ValueInfoProto metadata instead; that is what
+                // lets the model import back as the concrete graph it was. (The .srk dialect emits
+                // the input nodes themselves, attribute and all.)
+                emitRepresentativeMetadata: !emitInputsAsNodes,
                 inputDims: inputDims,
                 stripCheckpointStamp: stripCheckpointStamp);
 

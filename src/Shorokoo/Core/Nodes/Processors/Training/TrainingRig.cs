@@ -243,8 +243,9 @@ namespace Shorokoo
         ///
         /// <para>It is also <b>self-describing for shape inference</b>: each <c>MODEL_TENSOR_INPUT</c>
         /// node carries the shape the model was concretized at, as dims-only
-        /// <see cref="OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape"/> (see
-        /// <see cref="WriteRepresentativeInputs(InternalComputationGraph, long[][])"/>). The two
+        /// <see cref="OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape"/>, recorded by
+        /// <c>ToConcreteArchitecture</c> as on every concrete graph (see
+        /// <see cref="RepresentativeInputShapes"/>). The two
         /// training-graph shape-inference sites reconstruct their <c>sampleInputs[]</c> off that
         /// attribute plus the node's dtype (<see cref="ReadRepresentativeInputs"/>), so no separate
         /// sample-input field is stored on the rig. In the native <c>.srk</c> dialect a
@@ -985,8 +986,8 @@ namespace Shorokoo
         /// <see cref="DeriveFromConcreteArch"/> to compose and optimize the trainstep. The sample
         /// inputs are consumed here (parameter shape resolution, liveness pruning, concretization value
         /// fallbacks) and NOT stored: everything the derivation path later needs is captured on the
-        /// concrete arch itself (structure + RNG identity + the representative-input attributes written
-        /// onto its <c>MODEL_TENSOR_INPUT</c> nodes below).
+        /// concrete arch itself (structure + RNG identity + the representative-input attributes
+        /// <c>ToConcreteArchitecture</c> records on its input nodes).
         /// </summary>
         private static TrainingRig BuildInitialRig(
             RigConstituents constituents,
@@ -1037,13 +1038,6 @@ namespace Shorokoo
             // and a reachability sweep here, which is graph-sized work, not bookkeeping.
             Concretizing("BindRngConfig");
             concreteArch.ApplyRngConfig(c.RngConfig);
-
-            // Make the concrete arch self-describing: record the representative shape (dims only —
-            // never the user's values) on each model-input node, so every re-derivation's shape
-            // inference reconstructs its sampleInputs off the arch and no separate exemplar field
-            // is stored. Done once here; the attribute rides along on Clone() and survives re-seeding.
-            Concretizing("WriteRepresentativeInputs");
-            WriteRepresentativeInputs(concreteArch, sampleInputs);
 
             return DeriveFromConcreteArch(
                 c, concreteArch, mergeContext, runtimeContext, trainingBackend, reporter);
@@ -1117,86 +1111,17 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// Writes a representative shape onto each of the concrete arch's <c>MODEL_TENSOR_INPUT</c> nodes
-        /// (in graph-input order, one per <paramref name="sampleInputs"/>), making the arch self-describing
-        /// for training-graph shape inference. Never records the user's sample values. Only concretization
-        /// (already done) needed input values; from here on only shapes matter, so this records exactly
-        /// the shape.
-        /// </summary>
-        private static void WriteRepresentativeInputs(InternalComputationGraph concreteArch, NamedModelParam[] sampleInputs)
-            => WriteRepresentativeInputs(concreteArch, sampleInputs.Select(RepresentativeShapeOf).ToArray());
-
-        /// <summary>
-        /// The single negative dim recorded for an optional input the rig was built with ABSENT. A
-        /// concretized shape never holds one, so it cannot be confused with a real shape — and
-        /// recording it rather than recording nothing keeps a MISSING attribute meaning what it
-        /// means on a tensor input: an arch that was not built self-describing, which
-        /// <see cref="ReadRepresentativeInputs"/> refuses rather than reading as some default.
-        /// </summary>
-        private static readonly long[] AbsentOptionalShape = [-1L];
-
-        /// <summary>
-        /// The dims to record for one sample, or <c>null</c> when the sample's input node carries no
-        /// representative-shape attribute to record them on. An absent optional records
-        /// <see cref="AbsentOptionalShape"/>, not nothing. Reading the shape off the sample rather
-        /// than converting the sample to a tensor is what lets an absent optional through at all: it
-        /// has no tensor value, and asking for one threw before the shape was ever needed
-        /// (Shorokoo/Shorokoo#314).
-        /// </summary>
-        private static long[]? RepresentativeShapeOf(NamedModelParam sample) => sample switch
-        {
-            OptionalTensorDataModelParam optional =>
-                optional.Data is { HasValue: true, Value: { } value } ? value.Shape.Dims : AbsentOptionalShape,
-            { Structure: DataStructure.Tensor } => sample.ToTensorData().Shape.Dims,
-            _ => null,
-        };
-
-        /// <summary>
-        /// Dims-shaped counterpart of
-        /// <see cref="WriteRepresentativeInputs(InternalComputationGraph, NamedModelParam[])"/>:
-        /// records <see cref="OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape"/> — the dims,
-        /// whatever the input's size — on each input node that carries the attribute (the node's own
-        /// dtype attribute completes the pair), and records nothing for a <c>null</c> entry. An
-        /// optional input records <see cref="AbsentOptionalShape"/> when the optional was supplied
-        /// absent, which is how <see cref="ReadRepresentativeInputs"/> reads its presence back — a
-        /// value, so that a MISSING attribute stays the loud error it already is on a tensor input.
-        /// The concrete arch's input ops serialize as NodeProtos in the native <c>.srk</c>
-        /// dialect, so the attribute round-trips on disk verbatim and the saved arch is
-        /// self-describing — no separate manifest input-shape field is needed.
-        /// </summary>
-        private static void WriteRepresentativeInputs(InternalComputationGraph concreteArch, long[]?[] inputShapes)
-        {
-            if (concreteArch.Inputs.Count != inputShapes.Length)
-                throw new InvalidOperationException(
-                    $"Concrete arch has {concreteArch.Inputs.Count} input(s) but {inputShapes.Length} " +
-                    "input shape(s) were supplied; they must correspond one-to-one in declaration order.");
-            var producerByOutput = BuildProducerByOutputMap(concreteArch);
-            for (int i = 0; i < concreteArch.Inputs.Count; i++)
-            {
-                if (!producerByOutput.TryGetValue(concreteArch.Inputs[i], out var node))
-                    throw new InvalidOperationException(
-                        $"Concrete arch input {concreteArch.Inputs[i]} has no producing node.");
-                if (node.OpCode is not (InternalOpCodes.MODEL_TENSOR_INPUT or InternalOpCodes.MODEL_OPTIONAL_INPUT))
-                    continue;
-                if (inputShapes[i] is not { } dims) continue;
-                node.Attributes = node.Attributes.SetAttributes(
-                    (OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape, (object?)dims));
-            }
-        }
-
-        /// <summary>
         /// Reconstructs the <c>sampleInputs[]</c> array for shape inference off the concrete arch's
-        /// representative-input attributes (in graph-input order) — the derivation-path counterpart of
-        /// <see cref="WriteRepresentativeInputs(InternalComputationGraph, NamedModelParam[])"/>. Reads
+        /// representative-input attributes (in graph-input order), which every concrete graph carries
+        /// (<see cref="RepresentativeInputShapes"/>). Reads
         /// each node's <see cref="OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape"/> dims plus its
         /// dtype and describes each input via <see cref="RepresentativeInputFor"/> (real zeros while the
         /// values are small enough to be read, shape and dtype alone above that, so no large buffer is
-        /// materialized); a node without the attribute fails loud (the arch was not built
-        /// self-describing). Each description becomes the runtime tensor
+        /// materialized). Each description becomes the runtime tensor
         /// <see cref="ShapeInferenceInterpreter"/> is fed directly — a values-less one simply arrives
         /// with its data null, which is what a shape-driven pass wants anyway.
         /// </summary>
-        private static IRuntimeTensor[] ReadRepresentativeInputs(InternalComputationGraph concreteArch)
+        internal static IRuntimeTensor[] ReadRepresentativeInputs(InternalComputationGraph concreteArch)
         {
             var producerByOutput = BuildProducerByOutputMap(concreteArch);
             var inputs = new IRuntimeTensor[concreteArch.Inputs.Count];
@@ -1212,16 +1137,12 @@ namespace Shorokoo
                     ?? throw new InvalidOperationException(
                         "Concrete arch input node records a representative-input shape but no dtype; " +
                         "cannot re-materialize its representative input.");
-                var dims = node.Attributes.GetLongsVal(OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape)
+                var dims = RepresentativeInputShapes.Get(node)
                     ?? throw new InvalidOperationException(
-                        "Concrete arch input node carries no representative-input shape attribute: the rig " +
-                        "was not built through BuildInitialRig (which records one on every model input), or " +
-                        "the arch was saved by an older Shorokoo that recorded small inputs as an inline " +
-                        "representative tensor instead of dims (there is no legacy read path; rebuild the " +
-                        "rig from its source graphs and re-save).");
+                        $"Concrete arch input {concreteArch.Inputs[i]} carries no representative-input shape.");
 
                 inputs[i] = node.OpCode == InternalOpCodes.MODEL_OPTIONAL_INPUT
-                    ? (dims.AsSpan().SequenceEqual(AbsentOptionalShape)
+                    ? (dims.AsSpan().SequenceEqual(RepresentativeInputShapes.AbsentOptionalShape)
                         ? new RuntimeOptionalTensor { DType = dtype, HasValue = false }
                         : new RuntimeOptionalTensor
                         {
@@ -1304,6 +1225,22 @@ namespace Shorokoo
         /// replace, which is the pair the whole composed graph was inferred with before, so it can
         /// choke on nothing the build did not already choke on.</para>
         /// </summary>
+        /// <summary>
+        /// The target shape <paramref name="lossGraph"/> reads alongside
+        /// <paramref name="concreteModel"/>'s prediction at the model's own representative inputs —
+        /// what a graph composing the two records as its target input's representative shape.
+        /// </summary>
+        internal static long[] RepresentativeTargetShape(
+            InternalComputationGraph concreteModel, InternalComputationGraph lossGraph)
+        {
+            var shapeInferencer = new ShapeInferenceInterpreter(ComputeContext.Default);
+            var prediction = shapeInferencer.Infer(concreteModel, ReadRepresentativeInputs(concreteModel))
+                    .GetTensorInfo(concreteModel.Outputs[0])
+                ?? throw new InvalidOperationException(
+                    "Shape inference of the concrete model failed to produce an output shape.");
+            return DeriveTargetExemplar(lossGraph, shapeInferencer, prediction.Shape, prediction.DType).Shape.Dims;
+        }
+
         private static (Shape Shape, DType DType) DeriveTargetExemplar(
             InternalComputationGraph lossGraph,
             ShapeInferenceInterpreter shapeInferencer,
@@ -3966,6 +3903,7 @@ namespace Shorokoo
             {
                 if (!needed.Contains(cn)) continue;
                 var node = Shorokoo.Core.Nodes.Processors.Fast.FastInternalOp.RuntimeInput(DType.Int64, rank: 0, cn);
+                RepresentativeInputShapes.Set(node, []);
                 composed.Nodes.Add(node);
                 var key = new FastTensorKey(node.Key, 0);
                 counterKeyByName[cn] = key;
@@ -4489,6 +4427,10 @@ namespace Shorokoo
             // multi-megabyte target would otherwise stay allocated for as long as the rig does.
             while (idx < graph.Inputs.Count)
                 allInputs[idx++] = RepresentativeRuntimeInputFor(targetShape, targetDType);
+
+            // The step graph is a concrete graph like the model it trains, so its inputs record the
+            // shapes it is built at too — the exemplars just assembled for its shape inference.
+            RepresentativeInputShapes.Record(graph, allInputs);
 
             // The field's value where one is in hand, else its description as the engine reads it:
             // shape and dtype, and data only where the description carries any.

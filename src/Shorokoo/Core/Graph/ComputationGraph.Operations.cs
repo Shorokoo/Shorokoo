@@ -38,8 +38,12 @@ namespace Shorokoo.Graph
         /// <para>See <see cref="InternalComputationGraphExtensions.ToConcreteArchitecture"/> for
         /// the concreteness contract (static ModelIds) the returned graph satisfies.</para>
         /// </summary>
-        /// <param name="inputHints">Sample inputs (names + shapes/values) used as shape hints and as
-        /// QEE/ORT resolution fallbacks during lowering; build one with <see cref="FromOrderedInputs"/>.</param>
+        /// <param name="inputHints">Sample inputs (names + shapes/values), one for every input of the
+        /// graph — <c>[Hyper]</c> inputs included — used as shape hints and as QEE/ORT resolution
+        /// fallbacks during lowering. Each sample's shape (never its values) is recorded on the
+        /// architecture's input as the shape it was concretized at, and rides on to every concrete
+        /// model made from it. A missing sample is refused with <see cref="ErrorCodes.FW056"/>,
+        /// naming the input. Build one with <see cref="FromOrderedInputs"/>.</param>
         /// <param name="computeContext">Optional context used to resolve values while lowering.</param>
         /// <param name="debugRequests">Optional hook to dump the graph at each lowering stage.</param>
         /// <param name="progress">Optional sink this lowering reports each stage to as it enters it, so

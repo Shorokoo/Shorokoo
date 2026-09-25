@@ -796,6 +796,22 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>A sample for <see cref="SimplePairSum"/>'s struct input.</summary>
+    public static class PairSample
+    {
+        public static NamedModelParam Of(float first, float second)
+            => new TensorStructModelParam("pair", ModelParamType.InputParam, new TensorDataStruct(
+                new TensorStructDef(
+                    [new TensorStructFieldDef("First", DataStructure.Tensor, 0, DType.Float32),
+                     new TensorStructFieldDef("Second", DataStructure.Tensor, 0, DType.Float32)],
+                    nameof(GenericPairStruct)),
+                new Dictionary<string, IData>
+                {
+                    ["First"] = TensorData(DType.Float32, [], first),
+                    ["Second"] = TensorData(DType.Float32, [], second),
+                }));
+    }
+
     #endregion
 
     #region TensorStruct in Control Flow (FastUnpackTensorStructs coverage)

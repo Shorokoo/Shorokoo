@@ -80,6 +80,9 @@ namespace Shorokoo.Graph
         internal ComputationGraph(InternalComputationGraph graph, GraphKind kind)
         {
             if (graph is null) throw new System.ArgumentNullException(nameof(graph));
+            // Every concrete graph passes here, so this is where the invariant that each of its
+            // inputs records the shape it was concretized at is held.
+            RepresentativeInputShapes.Verify(graph, kind);
             Kind = kind;
             _nodes = graph.Nodes.Select(Freeze).ToImmutableArray();
             _inputs = [.. graph.Inputs];

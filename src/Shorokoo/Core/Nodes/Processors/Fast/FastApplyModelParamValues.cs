@@ -83,8 +83,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 // for a param actually absent from the supplied set (normally just the counter).
                 bool supplied = isSupplied(modelId);
                 if (!supplied && !FastInjectRngDrawCounter.IsExecutionCounter(node.IdentifierTemplate))
-                    throw new InvalidOperationException(
-                        $"No value is bound for parameter '{node.IdentifierTemplate ?? modelId.ToString()}': "
+                    throw new ModelException(ErrorCodes.FW059,
+                        $"parameter '{node.IdentifierTemplate ?? modelId.ToString()}'",
+                        $"no value is bound for parameter '{node.IdentifierTemplate ?? modelId.ToString()}': "
                         + "every parameter of a concrete model needs one, and the values supplied do not "
                         + "include it. When binding by name, check that the naming scheme covers it and "
                         + "that the values carry the name it gives.");

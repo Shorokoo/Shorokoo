@@ -339,7 +339,7 @@ and returns null when the name is not there. A candidate no format matches gets 
 entry, so a partial scheme simply resolves fewer names — `ToConcreteModel` drops the
 names that resolve to nothing. Dropping a *name* never leaves a *parameter* empty,
 though: every parameter of the graph must still receive a value, and one the scheme
-leaves uncovered fails the bind with an `InvalidOperationException` naming that
+leaves uncovered fails the bind with a `ModelException` (**`FW059`**) naming that
 parameter. Two candidates that map to the same name are a broken
 scheme rather than a partial one: `ToModelId` throws `InvalidOperationException`
 naming both ModelIds and the shared name. The table is rebuilt whenever a call passes a

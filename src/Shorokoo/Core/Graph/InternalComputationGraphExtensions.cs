@@ -384,7 +384,8 @@ namespace Shorokoo.Graph
         /// value names to graph parameters with the given framework's naming convention (default:
         /// Shorokoo's own scheme). For weights exported from another framework, use the overload that
         /// takes an explicit <see cref="ModuleParamSetNamingScheme"/>. Requires a concrete architecture
-        /// from <see cref="ToConcreteArchitecture"/>; names that do not resolve are silently dropped.
+        /// from <see cref="ToConcreteArchitecture"/>; names that do not resolve are silently dropped,
+        /// but a parameter no value reaches is refused with <see cref="ErrorCodes.FW059"/>.
         /// </summary>
         /// <param name="graph">The concrete architecture to bind weights into.</param>
         /// <param name="trainableParamValues">Values to bind (e.g. loaded from a SafeTensors file).</param>
@@ -413,7 +414,8 @@ namespace Shorokoo.Graph
         /// Binds loaded trainable-parameter values into a concrete (weight-filled) graph using an
         /// explicit <paramref name="namingScheme"/> to remap value names onto graph parameter ids —
         /// the form to use for third-party (PyTorch/timm) checkpoints. Requires a concrete architecture
-        /// from <see cref="ToConcreteArchitecture"/>; names that do not resolve are silently dropped.
+        /// from <see cref="ToConcreteArchitecture"/>; names that do not resolve are silently dropped,
+        /// but a parameter no value reaches is refused with <see cref="ErrorCodes.FW059"/>.
         /// </summary>
         /// <param name="graph">The concrete architecture to bind weights into.</param>
         /// <param name="trainableParamValues">Values to bind.</param>

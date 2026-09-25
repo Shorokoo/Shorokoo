@@ -525,7 +525,7 @@ namespace Shorokoo
 
         #endregion
 
-        #region Framework Error Codes (FW001-FW058)
+        #region Framework Error Codes (FW001-FW059)
         
         /// <summary>Loop operation not implemented</summary>
         public const string FW001 = "FW001";
@@ -712,6 +712,11 @@ namespace Shorokoo
         /// shapes), or a graph output declares none and evaluating the model at its inputs'
         /// shapes gives none either</summary>
         public const string FW058 = "FW058";
+
+        /// <summary>Binding weights into a concrete architecture left a parameter without a value:
+        /// the values supplied do not include it, or the naming scheme binding them by name gives
+        /// none of them its name (the message names the parameter)</summary>
+        public const string FW059 = "FW059";
 
         #endregion
 

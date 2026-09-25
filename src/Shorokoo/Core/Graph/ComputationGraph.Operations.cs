@@ -121,7 +121,8 @@ namespace Shorokoo.Graph
         /// Shorokoo's own scheme). For weights exported from another framework, use the overload that
         /// takes an explicit <see cref="ModuleParamSetNamingScheme"/>. Requires a
         /// <see cref="GraphKind.ConcreteArchitecture"/>; names that do not resolve are silently
-        /// dropped. The result is stamped <see cref="GraphKind.ConcreteModel"/>.
+        /// dropped, but a parameter no value reaches is refused with <see cref="ErrorCodes.FW059"/>,
+        /// naming it. The result is stamped <see cref="GraphKind.ConcreteModel"/>.
         /// </summary>
         /// <param name="trainableParamValues">Values to bind (e.g. loaded from a SafeTensors file).</param>
         /// <param name="frameworkId">Naming convention of the value names; defaults to <c>FrameworkId.Shorokoo</c>.</param>
@@ -139,7 +140,8 @@ namespace Shorokoo.Graph
         /// explicit <paramref name="namingScheme"/> to remap value names onto graph parameter ids —
         /// the form to use for third-party (PyTorch/timm) checkpoints. Requires a
         /// <see cref="GraphKind.ConcreteArchitecture"/>; names that do not resolve are silently
-        /// dropped. The result is stamped <see cref="GraphKind.ConcreteModel"/>.
+        /// dropped, but a parameter no value reaches is refused with <see cref="ErrorCodes.FW059"/>,
+        /// naming it. The result is stamped <see cref="GraphKind.ConcreteModel"/>.
         /// </summary>
         /// <param name="trainableParamValues">Values to bind.</param>
         /// <param name="namingScheme">Maps each value's name to a graph ModelId.</param>

@@ -263,11 +263,12 @@ public class ParamNameDslCoverageTests
     }
 
     [Fact]
-    public void TestToConcreteModelWithASchemeLeavingAParameterUncoveredNamesThatParameter()
+    public void TestToConcreteModelWithASchemeLeavingAParameterUncoveredIsRefusedAsFW059NamingThatParameter()
     {
         var arch = LoopLayerArch.Value;
         var values = arch.InitializeTrainableParams(SchemeOf(OuterFormat, BlockFormat));
-        var ex = Assert.Throws<InvalidOperationException>(() => arch.ToConcreteModel(values, SchemeOf(BlockFormat)));
+        var ex = Assert.Throws<ModelException>(() => arch.ToConcreteModel(values, SchemeOf(BlockFormat)));
+        Assert.Equal(ErrorCodes.FW059, ex.ErrorCode);
         Assert.Contains(LoopLayerParams.Value.Infos.ParamInfos[0].ToShorokooIdString(), ex.Message);
     }
 

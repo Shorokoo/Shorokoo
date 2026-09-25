@@ -10,15 +10,15 @@
     <NoWarn>$(NoWarn);CS1591</NoWarn>
 
     <IsPackable>true</IsPackable>
-    <Description>PyTorch backend logic for Shorokoo (device-neutral): translates a Shorokoo graph to Python and runs it with PyTorch in an embedded interpreter. You normally do not install this directly; install Shorokoo.PyTorch.Cpu or Shorokoo.PyTorch.Cuda.</Description>
-    <PackageTags>shorokoo;pytorch;torch;backend;machine-learning</PackageTags>
+    <Description>JAX backend logic for Shorokoo (device-neutral): translates a Shorokoo graph to Python calling jax.numpy and runs it in an embedded interpreter, compiled by XLA once per input shape. It also computes a training step's gradient with JAX, so XLA compiles the whole step. You normally do not install this directly; install Shorokoo.Jax.Cpu or Shorokoo.Jax.Cuda.</Description>
+    <PackageTags>shorokoo;jax;xla;backend;machine-learning</PackageTags>
   </PropertyGroup>
 
   <!-- The Python support package travels inside the assembly and is imported from memory, so the
        helpers a translated model calls are always the ones this assembly was built with. The
-       logical name is the module's path, e.g. "shorokoo_torch/ops_elementwise.py". -->
+       logical name is the module's path, e.g. "shorokoo_jax/ops_elementwise.py". -->
   <ItemGroup>
-    <EmbeddedResource Include="Python\shorokoo_torch\*.py" LogicalName="shorokoo_torch/%(Filename)%(Extension)" />
+    <EmbeddedResource Include="Python\shorokoo_jax\*.py" LogicalName="shorokoo_jax/%(Filename)%(Extension)" />
   </ItemGroup>
 
   <ItemGroup>
@@ -28,8 +28,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <InternalsVisibleTo Include="Shorokoo.PyTorch.Cpu" />
-    <InternalsVisibleTo Include="Shorokoo.PyTorch.Cuda" />
+    <InternalsVisibleTo Include="Shorokoo.Jax.Cpu" />
+    <InternalsVisibleTo Include="Shorokoo.Jax.Cuda" />
     <InternalsVisibleTo Include="Shorokoo.Tests" />
   </ItemGroup>
 </Project>

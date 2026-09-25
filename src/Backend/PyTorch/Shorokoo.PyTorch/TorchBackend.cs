@@ -2,6 +2,7 @@ using System.Runtime.InteropServices;
 using Python.Runtime;
 using Shorokoo.Core.Backends;
 using Shorokoo.PythonHost;
+using Shorokoo.PythonTranslation;
 
 namespace Shorokoo.PyTorch;
 
@@ -182,7 +183,7 @@ public abstract class TorchBackend : IShorokooBackend
     public IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged
     {
         ArgumentNullException.ThrowIfNull(data);
-        return FromHost(TorchElementTypes.Of<T>(), MemoryMarshal.AsBytes(data.AsSpan()), shape, "cpu");
+        return FromHost(PythonElementTypes.Of<T>(), MemoryMarshal.AsBytes(data.AsSpan()), shape, "cpu");
     }
 
     /// <summary>A tensor of these bytes, in host memory whatever this backend's device —
@@ -208,7 +209,7 @@ public abstract class TorchBackend : IShorokooBackend
         ShorokooTensorElementType elementType, long[] shape)
     {
         ArgumentNullException.ThrowIfNull(shape);
-        TorchElementTypes.ByteCount(elementType, shape);
+        PythonElementTypes.ByteCount(elementType, shape);
         var runtime = Runtime;
         using (PythonRuntime.Gil())
         {
@@ -225,7 +226,7 @@ public abstract class TorchBackend : IShorokooBackend
         if (elementType == ShorokooTensorElementType.String)
             throw new NotSupportedException(
                 "String tensors are variable-length and not byte-stride; use CreateStringTensor instead.");
-        var byteCount = TorchElementTypes.ByteCount(elementType, shape);
+        var byteCount = PythonElementTypes.ByteCount(elementType, shape);
         if (bytes.Length < byteCount)
             throw new ArgumentException(
                 $"Supplied data of {bytes.Length} bytes is less than shape size {byteCount} bytes.", nameof(bytes));

@@ -1,0 +1,5 @@
+torch==2.14.0
+jax[cuda13]==0.11.2
+numpy
+pillow
+google-re2

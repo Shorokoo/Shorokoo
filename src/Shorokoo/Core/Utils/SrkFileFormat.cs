@@ -135,8 +135,10 @@ namespace Shorokoo.Core.Utils
         /// (<c>MODEL_PARAM</c> nodes) present → <see cref="GraphKind.ConcreteArchitecture"/>;
         /// otherwise <see cref="GraphKind.ConcreteModel"/> — unless an input carries no
         /// representative shape, which every concrete graph records on each input
-        /// (<see cref="Shorokoo.Core.Graph.RepresentativeInputShapes"/>), making the graph a
-        /// <see cref="GraphKind.Module"/>. This is what the writer records
+        /// (<see cref="Shorokoo.Core.Graph.RepresentativeInputShapes"/>), or an output no recorded
+        /// shape, making the graph a <see cref="GraphKind.Module"/>; and unless an output records
+        /// the unresolved marker (<see cref="Shorokoo.Core.Graph.RecordedOutputShapes.UnresolvedShape"/>),
+        /// which only a <see cref="GraphKind.ConcreteArchitecture"/> carries. This is what the writer records
         /// in the header, and the fallback classification used when a file's recorded stage is
         /// missing or is not one this build defines.
         /// </summary>
@@ -156,7 +158,13 @@ namespace Shorokoo.Core.Utils
                 || Shorokoo.Core.Graph.RecordedOutputShapes.FirstOutputWithoutShape(graph) is not null)
                 return GraphKind.Module;
 
-            return DetectStageByOps(graph);
+            // An output whose shape the weights decide is left unsettled on an architecture alone:
+            // a graph carrying one is no concrete model, whatever parameters it has left.
+            var byOps = DetectStageByOps(graph);
+            return byOps == GraphKind.ConcreteModel
+                   && Shorokoo.Core.Graph.RecordedOutputShapes.FirstUnresolvedOutput(graph) is not null
+                ? GraphKind.ConcreteArchitecture
+                : byOps;
         }
 
         /// <summary>
@@ -260,6 +268,10 @@ namespace Shorokoo.Core.Utils
                     if (uninitializedParams > 0)
                         return "a concrete model must have all model parameters initialized, " +
                                $"but this graph carries {uninitializedParams} unmaterialized parameter(s).";
+                    if (Shorokoo.Core.Graph.RecordedOutputShapes.FirstUnresolvedOutput(graph) is { } unresolved)
+                        return "every output of a concrete model records a settled shape, but this graph's " +
+                               $"output {unresolved} records none, only the marker a concrete architecture " +
+                               "carries for a shape its weights decide.";
                     return null;
 
                 default:

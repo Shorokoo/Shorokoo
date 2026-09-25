@@ -702,7 +702,9 @@ namespace Shorokoo
 
         /// <summary>An input of a concrete-architecture or concrete-model graph carries no
         /// representative shape — the sample shape the graph was concretized at — or an output
-        /// records no shape — the shape it has at those samples</summary>
+        /// records no shape — the shape it has at those samples — or an output of a concrete model
+        /// records a shape still unresolved, one its weights could not settle either (the message
+        /// names the output, and carries a failed run as the inner exception)</summary>
         public const string FW057 = "FW057";
 
         /// <summary>An imported ONNX model's graph input declares no shape, so no representative

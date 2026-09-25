@@ -1582,20 +1582,77 @@ public class ModulesCoverageTests
     }
 
     [Fact]
-    public void TestEveryOutputKeepsItsRecordedShapeThroughConcretizationSaveExportAndSpecialize()
+    public void TestEveryOutputKeepsItsRecordedShapeThroughConcretizationSaveAndExportAndSpecializeReRecordsIt()
     {
         var x23 = TensorData(DType.Float32, [2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f);
         var arch = Concretize(RankByFlagLayer.ComputationGraph, In("x", x23), Flag(true));
         var model = arch.ToConcreteModel();
         var flag = new ModelParamList([("flag", TensorData(DType.Bool, [], false))]);
         long[]?[] kept = [[2L, 3L]];
+        long[]?[] flattened = [[6L]];
 
         Assert.Equal(kept, RecordedOutputs(model));
         Assert.Equal(kept, RecordedOutputs(SrkRoundTrip(arch)));
         Assert.Equal(kept, RecordedOutputs(SrkRoundTrip(model)));
         Assert.Equal(kept, RecordedOutputs(OnnxRoundTrip(model)));
-        Assert.Equal(kept, RecordedOutputs(arch.Specialize(flag)));
-        Assert.Equal(kept, RecordedOutputs(model.Specialize(flag)));
+        Assert.Equal(flattened, RecordedOutputs(arch.Specialize(flag)));
+        Assert.Equal(flattened, RecordedOutputs(model.Specialize(flag)));
+        Assert.Equal(1, FastOnnxModelBuilder.BuildOnnxModel(model.Specialize(flag)).Graph.Outputs[0].Type.TensorType.Shape.Dims.Count);
+    }
+
+    [Fact]
+    public void TestAnOutputWhoseShapeHangsOnAParameterIsRecordedFromTheModelsOwnWeights()
+    {
+        var x23 = TensorData(DType.Float32, [2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f);
+        var rankArch = Concretize(RankByParamLayer.ComputationGraph, In("x", x23));
+        var nonZeroArch = Concretize(NonZeroOfParamLayer.ComputationGraph, In("x", TensorData([3L], 1f, 2f, 3f)));
+        long[]?[] kept = [[2L, 3L]];
+        long[]?[] rankOnly = [[1L, 1L]];
+        long[]?[] unresolved = [RecordedOutputShapes.UnresolvedShape];
+
+        Assert.Equal(unresolved, RecordedOutputs(rankArch));
+        Assert.Equal(kept, RecordedOutputs(rankArch.ToConcreteModel()));
+        Assert.Equal(kept, RecordedOutputs(rankArch.ToConcreteModel(RngConfig.Default)));
+        Assert.Equal(kept, RecordedOutputs(rankArch.ToConcreteModel(rankArch.InitializeTrainableParams())));
+        Assert.Equal(kept, RecordedOutputs(rankArch.ToConcreteModel(rankArch.InitializeTrainableParams(), ModuleParamSetNamingScheme.CreateShorokooNamingScheme(rankArch.GetConcreteModelParamInfos()))));
+        Assert.Equal(rankOnly, RecordedOutputs(nonZeroArch.ToConcreteModel()));
+    }
+
+    private sealed class RanklessStringNormalizer : QuickOp
+    {
+        public override string OpCode => OpCodes.STRING_NORMALIZER;
+        protected override RuntimeTensor[] Compute(RuntimeTensor?[] inputs, OnnxCSharpAttributes attrs, int maxDataElements)
+            => [new RuntimeTensor { DType = DType.Utf8 }];
+    }
+
+    [Fact]
+    public void TestAnOutputNeitherTheEngineNorARunSettlesIsUnresolvedOnTheArchitectureAndRefusedOnTheModel()
+    {
+        using var rankless = OpRegistry.Override(new RanklessStringNormalizer());
+        var arch = Concretize(UnknownLocaleNormalizerBesideAWeightLayer.ComputationGraph,
+            In("s", TensorData(DType.Utf8, [2L], "a", "b")), In("y", TensorData([2L], 1f, 2f)));
+        long[]?[] recorded = [RecordedOutputShapes.UnresolvedShape, [2L]];
+        Assert.Equal(recorded, RecordedOutputs(arch));
+
+        var ex = Assert.Throws<ModelException>(() => arch.ToConcreteModel());
+        Assert.Equal(ErrorCodes.FW057, ex.ErrorCode);
+        Assert.Contains("output #0", ex.Message);
+        Assert.NotNull(ex.InnerException);
+
+        var model = Concretize(RankByFlagLayer.ComputationGraph, In("x", TensorData([2L], 1f, 2f)), Flag(true)).ToConcreteModel().ToInternal();
+        RecordedOutputShapes.Set(model.OutputNodes[0], RecordedOutputShapes.UnresolvedShape);
+        Assert.Equal(ErrorCodes.FW057, Assert.Throws<ModelException>(() => ComputationGraph.FromInternal(model, GraphKind.ConcreteModel)).ErrorCode);
+        Assert.Equal(GraphKind.ConcreteArchitecture, SrkFileFormat.DetectStage(model));
+        Assert.NotNull(SrkFileFormat.DescribeKindViolation(model, GraphKind.ConcreteModel));
+    }
+
+    [Fact]
+    public void TestAStopwordNormalizerRecordsItsRankWhetherOrNotTheMachineHasItsLocale()
+    {
+        var arch = Concretize(StopwordNormalizerLayer.ComputationGraph, In("x", TensorData(DType.Utf8, [3L], "a", "B", "c")));
+        Assert.Single(RecordedOutputs(arch)[0]!);
+        Assert.Single(RecordedOutputs(arch.ToConcreteModel())[0]!);
+        Assert.Single(FastOnnxModelBuilder.BuildOnnxModel(arch.ToConcreteModel()).Graph.Outputs[0].Type.TensorType.Shape.Dims);
     }
 
     private static float[][] RunStructOutputs(ComputationGraph graph, params NamedModelParam[] samples)

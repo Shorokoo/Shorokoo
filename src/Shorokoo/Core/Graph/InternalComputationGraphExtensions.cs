@@ -231,7 +231,7 @@ namespace Shorokoo.Graph
             // Squeeze drops) — so the architecture records what it produces as well as what it
             // takes (see RecordedOutputShapes).
             Stage("RecordOutputShapes");
-            RecordedOutputShapes.RecordAtSamples(fastGraph, inputHints);
+            RecordedOutputShapes.RecordAtSamples(fastGraph, inputHints, computeContext);
 
             // No terminal report here: both callers have work left after this returns (the public
             // wrapper freezes the result, the rig build goes on to compose the trainstep), and a
@@ -309,6 +309,13 @@ namespace Shorokoo.Graph
             fastGraph.InsertAtBodyStart(specialized);
 
             FastSimplify.Process(fastGraph);
+
+            // A baked value can decide an output's shape — a flag choosing a branch — so a concrete
+            // graph's outputs have their recorded shapes settled again against it (see
+            // RecordedOutputShapes.Rerecord). A module graph records none to settle.
+            if (RecordedOutputShapes.RecordsEveryOutput(fastGraph)
+                && !fastGraph.Nodes.Any(FastNodeClassification.IsModuleStageMachinery))
+                RecordedOutputShapes.Rerecord(fastGraph);
 
             return fastGraph;
         }
@@ -441,6 +448,11 @@ namespace Shorokoo.Graph
             if (concrete.TryGetRngSeed() is null &&
                 FastWireRngKeyDerivation.FindRngSeedNode(concrete) is not null)
                 concrete.ApplyRngConfig(RngConfig.Default);
+
+            // The architecture recorded no output shape that hangs on a weight's values, as it had
+            // none; with the weights bound, every output's shape is settled against them, and one
+            // that still cannot be is refused, naming it (see RecordedOutputShapes.Rerecord).
+            RecordedOutputShapes.Rerecord(concrete);
             return concrete;
         }
 

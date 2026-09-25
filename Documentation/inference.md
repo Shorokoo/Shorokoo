@@ -205,13 +205,21 @@ pipeline, applied in order:
    naming the input; lower it again from its module. Each **output** likewise records
    the shape it has when the graph is evaluated at those samples — at their real
    values, since a value can decide a shape (a flag choosing a branch, the axes a
-   `Squeeze` drops) — and keeps it through the same steps; a struct output is one output
+   `Squeeze` drops) — and keeps it through save and load; a struct output is one output
    per field, an absent optional output records that it was absent, and a sequence
    output the shape its elements share. The shapes are computed by the
    `QuickExecutionEngine`; an output it cannot compute (string values, for instance) is
-   taken from a run of the graph at the samples, and where that run cannot be made
-   either, the output records the rank the engine found, with each dimension it could
-   not settle taken as `1`. ONNX export reads an output's rank from it where
+   taken from a run of the graph at the samples, on the compute context
+   `ToConcreteArchitecture` was given, when the graph has no parameter; where no run
+   is made, or the run fails (a locale the machine lacks, say), the output records the
+   rank the engine found, with each dimension it could not settle taken as `1`. The
+   parameters have no values yet at this step, so an output whose shape hangs on a
+   parameter's **values** is recorded as *unresolved* on the architecture;
+   `ToConcreteModel` records every output again with the weights it binds, and
+   `Specialize` with the values it bakes, so neither keeps a shape that no longer holds.
+   A concrete model has no unresolved output: one whose shape even its weights cannot
+   settle is refused by `ToConcreteModel` with `FW057`, naming the output and carrying
+   the failure as the inner exception. ONNX export reads an output's rank from it where
    the signature states none, and a concrete graph with an output that records none is
    refused with `FW057` naming the output.
 3. **`ToConcreteModel(...)`** — binds parameter values (loaded weights, or the

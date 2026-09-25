@@ -1709,10 +1709,49 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>A string input dropping a stopword in the default locale, which not every
+    /// machine has: an op the QuickExecutionEngine gives a rank but no extent.</summary>
+    [Module]
+    public partial class StopwordNormalizerLayer
+    {
+        public static Tensor<utf8> Inline(Tensor<utf8> x) => NN.StringNormalizer(x, caseChangeAction: "LOWER", stopwords: ["a"]);
+    }
+
+    /// <summary>A string normalized in a locale no machine has, beside a weighted output.</summary>
+    [Module]
+    public partial class UnknownLocaleNormalizerBesideAWeightLayer
+    {
+        public static (Tensor<utf8>, Tensor<float32>) Inline(Tensor<utf8> s, Tensor<float32> y)
+            => (NN.StringNormalizer(s, caseChangeAction: "LOWER", locale: "xx_XX", stopwords: ["a"]),
+                y * InitSimple.Init(y.ShapeTensor()));
+    }
+
     /// <summary>An optional output: the optional input it is handed.</summary>
     [Module]
     public partial class OptionalPassThroughLayer
     {
         public static OptionalTensor<float32> Inline(OptionalTensor<float32> bias) => bias;
+    }
+
+    /// <summary>An output whose rank a parameter's value decides: the input as it is while the
+    /// parameter sums positive, else flattened.</summary>
+    [Module]
+    public partial class RankByParamLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x)
+        {
+            var w = InitSimple.Init(x.ShapeTensor());
+            var sum = (Scalar<float32>)OnnxOp.ReduceSum(w, null, keepdims: false, noopWithEmptyAxes: null);
+            var positive = (Scalar<bit>)OnnxOp.Greater(sum, Scalar(0f));
+            return positive.IfElse(x, (Tensor<float32>)OnnxOp.Reshape(x, Vector(-1L), false));
+        }
+    }
+
+    /// <summary>An output whose dims a parameter's values decide.</summary>
+    [Module]
+    public partial class NonZeroOfParamLayer
+    {
+        public static Tensor<int64> Inline(Tensor<float32> x)
+            => (Tensor<int64>)OnnxOp.NonZero(InitSimple.Init([Scalar(3L)]) * x);
     }
 }

@@ -191,6 +191,18 @@ rest of it.
 
 ## Current limitations (could be lifted)
 
+### Little-endian platforms only
+
+Shorokoo runs only on little-endian machines, which covers every platform .NET
+officially supports (x64, x86, Arm64, Arm32). Tensor data, ONNX raw data and
+every file format Shorokoo reads or writes — SafeTensors, `.srk`, `.skpt` and
+training checkpoints — are little-endian, and tensor bytes move between memory
+and disk unconverted. On a big-endian host (such as IBM Z) every one of them
+would be silently misread, so the first use of Shorokoo there fails instead, with
+a `TypeInitializationException` whose inner exception is a
+`PlatformNotSupportedException`. Supporting big-endian hosts would mean
+byte-swapping every tensor and every persisted field on the way in and out.
+
 ### Moving a tensor between memory spaces copies it
 
 A `TensorData` is its memory, and it never moves: `To` hands it to a context whose backend can read

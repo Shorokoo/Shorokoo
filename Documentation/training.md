@@ -122,8 +122,7 @@ whichever side of the seam the loss sits on. And `ExtractInferenceModel` hands b
 authored**, so a loss-computing model yields an inference model that returns a loss and demands the
 labels; author the prediction path as its own module if you also need one.
 
-Note that folding the loss into the model is no longer the way to get a *validation loss* out of a
-checkpoint: `Persistence.LoadEvaluationModel(path)` composes a saved checkpoint's model with its loss
+Folding the loss into the model is not the way to get a *validation loss* out of a checkpoint: `Persistence.LoadEvaluationModel(path)` composes a saved checkpoint's model with its loss
 and needs no rig ([#329](https://github.com/Shorokoo/Shorokoo/issues/329)). Fold the loss in when the
 loss genuinely needs more inputs than the slot carries — that is what this shape is for.
 
@@ -359,46 +358,23 @@ ckpt = rig.TrainStep(ckpt,
 `MakeHyperparameters` builds a struct whose tensors are its own: a `TensorData` you give it is
 copied, whatever its dtype, so the step that consumes the struct takes nothing of yours.
 
-> **Migration (breaking).** The positional-hyperparameter `FromScratch` overloads no longer take a
-> `params` array behind the optional `rngConfig` / `mergeContext` / `runtimeContext`. Pass the values as
-> an explicit array in the hyperparameter slot and let the optional arguments follow — every old call
-> that named or passed an `rngConfig` or a context moves the same way, and every one of them is now a
-> compile error rather than a changed meaning:
->
-> | old | new |
-> |---|---|
-> | `(sample, rng, null, null, 0.05f)` | `(sample, [0.05f], rng)` |
-> | `(sample, rng, mergeContext: null, runtimeContext: null, 0.05f)` | `(sample, [0.05f], rng)` |
-> | `(sample, rng, merge, runtime, 0.05f)` | `(sample, [0.05f], rng, merge, runtime)` |
-> | `(sample, rng)` / `(sample, rng, merge)` — the old empty `params` expansion | `(sample, [], rng)` / `(sample, [], rng, merge)` |
->
-> The bare `FromScratch(model, loss, opt, sample, 0.05f)` params form is unchanged, and so is an array
-> passed alone. Two edges: reaching a context past `rngConfig` needs the context named
-> (`(sample, [0.05f], mergeContext: ctx)`, else the collection expression is matched against the named-set
-> overload and the error names `IOptimizerHyperparameters`), and a literal `null` in the hyperparameter
-> slot alongside any optional is now ambiguous between the named-set and array overloads — pass the set,
-> or cast.
+The positional-hyperparameter `FromScratch` overloads take the hyperparameter values as an array in
+the hyperparameter slot, followed by the optional `rngConfig` / `mergeContext` / `runtimeContext`:
+`(sample, [0.05f], rng)`, `(sample, [0.05f], rng, merge, runtime)`, `(sample, [], rng)`. The bare
+`FromScratch(model, loss, opt, sample, 0.05f)` params form takes the values alone. To pass a context
+without an `rngConfig`, name it (`(sample, [0.05f], mergeContext: ctx)`); a literal `null` in the
+hyperparameter slot alongside an optional argument is ambiguous between the named-set and array overloads,
+so pass the set or cast.
 
-> **Migration (breaking).** `Hyperparameter.BakedValue` is now the `TensorData` the constant was built
-> from — carrying its shape as well as its dtype (with `BakedDType` alongside) — not a `float`; `MakeHyperparameters`'s named overload takes
-> `(string name, object value)` pairs rather than `(string, float)` — existing call sites such as
-> `MakeHyperparameters(("learningRate", 0.1f))` are unaffected. `HyperAttribute.DefaultValue` is
-> `object?` (the host literal the constructor took) rather than `float`, and a graph input's
-> `HyperDefaultValue` is the default's invariant literal (`string?`) rather than a `float?`, so an
-> `int64` / `float64` / `bool` default survives the graph round-trip exactly. In a training `.skpt`, the
-> rig block's `bakedHypers` map is gone: each baked binding now records its own `dtype`, `shape` and
-> base64 `value`, and a runtime binding records its `shape`, so `rigVersion` stays `1` and older-shaped
-> files (none exist in the wild) are not read.
-
-> **Migration (breaking).** `HyperValue` is renamed **`Hyperparameter`** and is now an explicit
-> `Baked`/`Scheduled`/`Runtime` union. `HyperValue.Constant(v)` → `Hyperparameter.Baked(v)` (a bare
-> `float` still converts implicitly); `HyperValue.Runtime(seed)` → **`Hyperparameter.Runtime()`** (the
-> seed is gone — the shape placeholder is internal); the undocumented `InitialValue` is removed. The
-> public per-step hyperparameter entry point is renamed `MakeHyperparams` → `MakeHyperparameters`; the
-> low-level struct-def / index plumbing behind it (`HyperparameterStructDef`,
-> `DynamicHyperparameterIndices`) is now `internal` build machinery — inspect the dynamic hyperparameter
-> names via `DynamicHyperparameterNames`. Fresh-checkpoint creation can now **fail loud** (see
-> `CreateInitialCheckpoint` below).
+A `Hyperparameter` is a `Baked` / `Scheduled` / `Runtime` union. `Hyperparameter.Baked(v)` bakes a
+constant (a bare `float` converts implicitly), and its `BakedValue` is the `TensorData` it was built from,
+shape and dtype included (`BakedDType` alongside). `Hyperparameter.Runtime()` is fed per step through
+`MakeHyperparameters`, whose named overload takes `(string name, object value)` pairs; the dynamic
+hyperparameter names are listed by `DynamicHyperparameterNames`. `HyperAttribute.DefaultValue` is the host
+literal the attribute was given (`object?`), and a graph input's `HyperDefaultValue` is that default's
+invariant literal (`string?`), so an `int64` / `float64` / `bool` default round-trips exactly. In a training
+`.skpt` each baked binding records its own `dtype`, `shape` and base64 `value`, and a runtime binding
+records its `shape`. Creating a fresh checkpoint can fail loud (see `CreateInitialCheckpoint` below).
 
 ## `TrainingRig` API
 

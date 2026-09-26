@@ -168,10 +168,8 @@ follows the eager frameworks instead, the same choice it makes for `Reshape` bel
 emits the attribute explicitly. (The lower-level `NN.Reduce` takes a `bool?` with no default,
 where `null` omits the attribute and so keeps ONNX's reading.)
 
-**This default changed.** It was previously `true`. Code that omits `keepDims` now gets the
-reduced dimensions dropped, with no compile error to flag it — so a reduction whose result is
-broadcast back against its own input needs an explicit `keepDims: true`. Usually the shapes
-stop matching and you get an error, but where the remaining dimensions happen to agree
+A reduction whose result is broadcast back against its own input needs an explicit
+`keepDims: true`. Without it, usually the shapes stop matching and you get an error, but where the remaining dimensions happen to agree
 (`[N, C]` with `N == C`, common in attention and square hidden dims) it broadcasts along the
 wrong axis and silently computes the wrong numbers.
 
@@ -347,17 +345,12 @@ TensorData result = compiled.Execute(input)[0].ToTensorData();
 Variable literal = Globals.Tensor(result.CopyTo(ComputeContext.Host).MoveToAttribute());
 ```
 
-### Changing code that passed a `TensorData` as an attribute
+### Passing a `TensorData` as an attribute
 
-The slots listed above used to take a `TensorData`. Code that passed one does not compile any
-more, and the fix is a `.MoveToAttribute()` at the call site:
+The slots listed above take a `TensorAttribute`; give them a `TensorData` by moving it with
+`.MoveToAttribute()` at the call site:
 
 ```csharp
-// before
-Tensor<float32>.Fill(shape, Globals.TensorData(1, 1.0f));
-Globals.TrainableTensor(myWeights, "w");
-
-// after
 Tensor<float32>.Fill(shape, Globals.TensorData(1, 1.0f).MoveToAttribute());
 Globals.TrainableTensor(myWeights.MoveToAttribute(), "w");     // myWeights is spent
 ```

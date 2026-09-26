@@ -407,7 +407,7 @@ public static TrainingRig FromScratch(
     ComputationGraph modelGraph,      // GraphKind.Module, or a ToConcreteArchitecture result
     ComputationGraph lossGraph,       // kind must be GraphKind.Module
     ComputationGraph optimizerGraph,  // kind must be GraphKind.Module
-    NamedModelParam[] sampleInputs,            // names + sample shapes for model inputs
+    IData[] sampleInputs,                      // one sample per model input, in declaration order
     IOptimizerHyperparameters hyperparameters, // named set, e.g. new AdamWOptimizerHyperparameters { ... }
     RngConfig? rngConfig = null,              // seeds the run — see "Seeding the run" below
     ComputeContext? mergeContext = null,      // build/merge-phase context (rig.MergeContext); null ⇒ Default
@@ -420,8 +420,9 @@ public static TrainingRig FromScratch(
 //   FromScratch(model, loss, opt, sampleInputs, Hyperparameter[] hyperparameters,
 //               RngConfig? rngConfig = null,
 //               ComputeContext? mergeContext = null, ComputeContext? runtimeContext = null)
-// Each of the three forms above also has a twin taking a ModelParamList (model.FromOrderedInputs([…]))
-// for sampleInputs.
+// Each of the three forms above binds its samples by position. Each also has twins binding them by
+// name, taking a NamedModelParam[] or a ModelParamList for sampleInputs: each sample goes to the
+// model input of its name, in any order (see "Sample inputs" below).
 
 // Fresh initial checkpoint: host copies of the rig's initial values, new every call, so a step
 // consumes it like any other checkpoint and the rig keeps its own values for the next one. Optimizer
@@ -977,7 +978,7 @@ var concrete = MyModel.ComputationGraph.ToConcreteArchitecture(
     inputHints, progress: new SynchronousBuildProgress(p => Console.WriteLine(p)));
 ```
 
-— which reports `Concretize`, its own thaw and freeze included, and ends complete. The four
+— which reports `Concretize`, its own thaw and freeze included, and ends complete. The
 positional-hyperparameter shorthands cannot take a sink, since a `params Hyperparameter[]` must come
 last; on each, passing the values as an array instead reaches the overload that can —
 `FromScratch(model, loss, opt, sample, [0.01f], progress: sink)`,
@@ -1331,8 +1332,24 @@ These are in namespace `Shorokoo` (covered by `using Shorokoo;`), except `Schedu
 | `Schedule` (namespace `Shorokoo.Core.Training`) | A `step → value` hyperparameter schedule; assign one to a `Hyperparameter` property to make it [`Scheduled`](#hyperparameter-kinds-hyperparameter). | A `Schedules.…` factory, then the combinators on the result (`WithWarmup`, `Then`, `Scale`, `Clamp`, `Shift`, `PerEpoch`). Preview with `.At(step)`. |
 | `Schedules` (static, namespace `Shorokoo.Core.Training`) | The factories: `Constant`, `Linear`, `Cosine`, `CosineWithWarmup`, `StepDecay`, `Exponential`, `OneCycle`. | Call one — `Schedules.Cosine(1e-3f, totalSteps)`. See [Schedule factories and combinators](#schedule-factories-and-combinators). |
 
-`sampleInputs` for `FromScratch` is a `NamedModelParam[]` describing each model input
-by name and sample shape. `Train`/`TrainStep` take `TensorDataStruct` batches — `TrainStep` as they
+### Sample inputs
+
+`sampleInputs` for `FromScratch` gives one sample per data input of the model — what its shape
+is, and the values concretization reads — in either of two forms:
+
+- **Positional**, an `IData[]` of bare values (`TensorData`, or `OptionalTensorData` for an optional
+  input) in the model's input declaration order, each bound to the input at its position:
+  `FromScratch(model, loss, opt, [TensorData([4L, 64L], new float[256])], hypers)`. Too few or too many
+  is refused with `FW056`.
+- **Named**, a `NamedModelParam[]` or a `ModelParamList`, each sample bound to the model input of its
+  name, in any order: `FromScratch(model, loss, opt, [new TensorDataModelParam("input",
+  ModelParamType.InputParam, x)], hypers)`. An input no sample names, a sample naming no input, and a
+  name given twice are refused with `FW056`, the message naming each offender and listing the model's
+  inputs.
+
+In either form a sample whose rank contradicts its input's declared rank is refused with `FW056` too.
+
+`Train`/`TrainStep` take `TensorDataStruct` batches — `TrainStep` as they
 are, to be consumed, or through `.Shared()` to be read and kept; `Train` and `Fit` over arrays read
 every batch, since they feed the arrays again each epoch, and leave them all alive
 ([What a training step consumes](#what-a-training-step-consumes)).
@@ -1351,9 +1368,7 @@ every batch, since they feed the arrays again each epoch, and leave them all ali
        MyModel.ComputationGraph,
        L2Loss.ComputationGraph,
        SGDMomentumOptimizer.ComputationGraph,
-       new NamedModelParam[] {
-           new TensorDataModelParam("input", ModelParamType.InputParam,
-                                    TensorData([4L, 64L], new float[256])) },
+       [TensorData([4L, 64L], new float[256])],      // one sample per model input, in order
        new SGDMomentumOptimizerHyperparameters {
            LearningRate  = Schedules.CosineWithWarmup(0.5f, warmupSteps: 100, totalSteps: 1000),
            MomentumCoeff = 0.9f,          // baked constant

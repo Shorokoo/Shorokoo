@@ -42,7 +42,7 @@ public class GlobalConstructorsCoverageTests
             {
                 var module = BackendFreeLiterals.ComputationGraph;
                 var concrete = module
-                    .ToConcreteArchitecture(module.FromOrderedInputs([sample]))
+                    .ToConcreteArchitecture([sample])
                     .ToConcreteModel();
                 Persistence.ExportOnnx(concrete, onnx);
             });

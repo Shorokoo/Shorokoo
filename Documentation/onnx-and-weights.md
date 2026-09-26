@@ -621,10 +621,11 @@ using static Shorokoo.Globals;
 ModelParamList weights = SafeTensorLoader.LoadModelParamSet("weights.safetensors");
 
 // Lower the module graph to a concrete architecture first. This inlines sub-modules so the
-// trainable parameters are visible at the top level; pass sample inputs as shape hints.
+// trainable parameters are visible at the top level; pass sample inputs as shape hints, one per
+// input in declaration order (or a ModelParamList of NamedModelParams, to bind each by its name).
 var input = TensorData([1L, 3L, 224L, 224L], myPixelFloatArray);
-ComputationGraph arch = MyModel.ComputationGraph.ToConcreteArchitecture(
-    MyModel.ComputationGraph.FromOrderedInputs([input]));  // arch.Kind == GraphKind.ConcreteArchitecture
+ComputationGraph arch = MyModel.ComputationGraph.ToConcreteArchitecture([input]);
+// arch.Kind == GraphKind.ConcreteArchitecture
 
 // Bind by parameter name into a concrete (weight-filled) graph:
 ComputationGraph concrete = arch.ToConcreteModel(weights);  // concrete.Kind == GraphKind.ConcreteModel

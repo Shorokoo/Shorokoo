@@ -717,7 +717,12 @@ namespace Shorokoo
         /// <param name="modelGraph">The model's InternalComputationGraph (typically a source-generated module's static graph property)</param>
         /// <param name="lossGraph">The loss function's computation graph (2 inputs: predictions, targets; 1 output: loss)</param>
         /// <param name="optimizerGraph">The optimizer's computation graph (inputs: hyperparams + param + grad; outputs: updated_param). Optimizer state is created inside the module body via optimizer-owned [StateInitializer] Init calls and updated via Globals.StateUpdate — never declared in the signature.</param>
-        /// <param name="sampleInputs">Sample model inputs (one per model graph input) used to resolve parameter shapes and seed shape inference. Only the shapes matter, not the values.</param>
+        /// <param name="sampleInputs">Sample model inputs, one per data input of the model graph in its
+        /// declaration order, each bound to the input at its position — a <see cref="TensorData"/>, or an
+        /// <see cref="OptionalTensorData"/> for an optional input. Used to resolve parameter shapes and seed
+        /// shape inference. Too few, too many, or one whose rank contradicts its input's declared rank is
+        /// refused with <see cref="ErrorCodes.FW056"/>. The overloads taking <see cref="NamedModelParam"/>s
+        /// or a <see cref="ModelParamList"/> bind samples by name instead.</param>
         /// <param name="hyperparameters">
         /// The optimizer's named hyperparameters — typically the source-generated set, e.g.
         /// <c>new AdamWOptimizerHyperparameters { LearningRate = Schedules.Cosine(3e-4f, total), WeightDecay = 1e-4f }</c>.
@@ -756,7 +761,7 @@ namespace Shorokoo
             ComputationGraph modelGraph,
             ComputationGraph lossGraph,
             ComputationGraph optimizerGraph,
-            NamedModelParam[] sampleInputs,
+            IData[] sampleInputs,
             IOptimizerHyperparameters hyperparameters,
             RngConfig? rngConfig = null,
             ComputeContext? mergeContext = null,
@@ -765,7 +770,7 @@ namespace Shorokoo
             TrainingBackend? trainingBackend = null)
         {
             if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
-            return FromScratchCore(modelGraph, lossGraph, optimizerGraph, sampleInputs,
+            return FromScratchCore(modelGraph, lossGraph, optimizerGraph, Positional(sampleInputs),
                 hyperparameters.InOptimizerOrder(), hyperparameters.HyperparameterNames, rngConfig,
                 mergeContext, runtimeContext, progress, trainingBackend);
         }
@@ -774,20 +779,21 @@ namespace Shorokoo
         /// Lower-level overload that takes the hyperparameter values positionally (in the optimizer's
         /// declared order) rather than as a named set. Each <see cref="Hyperparameter"/>'s kind still
         /// decides baked-vs-runtime; a bare <c>float</c> implicitly converts to a baked constant, so
-        /// <c>FromScratch(model, loss, opt, sample, 0.01f)</c> bakes a single learning rate. Generated
+        /// <c>FromScratch(model, loss, opt, [sample], 0.01f)</c> bakes a single learning rate. Generated
         /// graph fields fall back to <c>hyperparam_{i}</c> names since no names are supplied. A <c>params</c>
         /// array must come last, so this shape takes no <see cref="RngConfig"/>, compute context or
         /// progress sink; hand the values to the overload below as an array for those:
-        /// <c>FromScratch(model, loss, opt, sample, [0.01f], rngConfig)</c>, or
-        /// <c>…, [0.01f], progress: sink)</c>.
+        /// <c>FromScratch(model, loss, opt, [sample], [0.01f], rngConfig)</c>, or
+        /// <c>…, [0.01f], progress: sink)</c>. The samples bind by position, one per data input in
+        /// declaration order.
         /// </summary>
         public static TrainingRig FromScratch(
             ComputationGraph modelGraph,
             ComputationGraph lossGraph,
             ComputationGraph optimizerGraph,
-            NamedModelParam[] sampleInputs,
+            IData[] sampleInputs,
             params Hyperparameter[] hyperparameters)
-            => FromScratchCore(modelGraph, lossGraph, optimizerGraph, sampleInputs, hyperparameters,
+            => FromScratchCore(modelGraph, lossGraph, optimizerGraph, Positional(sampleInputs), hyperparameters,
                 names: null, rngConfig: null, mergeContext: null, runtimeContext: null, progress: null,
                 trainingBackend: null);
 
@@ -800,8 +806,68 @@ namespace Shorokoo
         /// (<see cref="RngConfig.Default"/> / <see cref="ComputeContext.Default"/>, and no progress sink).
         /// Supplying any of them selects this overload — an array alone still binds the <c>params</c>
         /// overload above, to the same effect. Name an argument you reach past
-        /// <paramref name="rngConfig"/> (<c>FromScratch(model, loss, opt, sample, [0.01f], progress: sink)</c>),
-        /// and pass an empty array for an optimizer that takes no hyperparameters at all.
+        /// <paramref name="rngConfig"/> (<c>FromScratch(model, loss, opt, [sample], [0.01f], progress: sink)</c>),
+        /// and pass an empty array for an optimizer that takes no hyperparameters at all. The samples
+        /// bind by position, one per data input in declaration order.
+        /// </summary>
+        public static TrainingRig FromScratch(
+            ComputationGraph modelGraph,
+            ComputationGraph lossGraph,
+            ComputationGraph optimizerGraph,
+            IData[] sampleInputs,
+            Hyperparameter[] hyperparameters,
+            RngConfig? rngConfig = null,
+            ComputeContext? mergeContext = null,
+            ComputeContext? runtimeContext = null,
+            IProgress<BuildProgress>? progress = null,
+            TrainingBackend? trainingBackend = null)
+            => FromScratchCore(modelGraph, lossGraph, optimizerGraph, Positional(sampleInputs), hyperparameters,
+                names: null, rngConfig: rngConfig, mergeContext: mergeContext,
+                runtimeContext: runtimeContext, progress: progress, trainingBackend: trainingBackend);
+
+        /// <summary>
+        /// Creates a TrainingRig from scratch as the positional-sample overload does, at samples bound
+        /// <b>by name</b>: each <see cref="NamedModelParam"/> to the model input of its
+        /// <see cref="NamedModelParam.ParamName"/>, in any order. A data input no sample names, a sample
+        /// naming no input, a name given twice, or a sample whose rank contradicts its input's declared
+        /// rank is refused with <see cref="ErrorCodes.FW056"/>, the message naming each offender and
+        /// listing the model's inputs.
+        /// </summary>
+        public static TrainingRig FromScratch(
+            ComputationGraph modelGraph,
+            ComputationGraph lossGraph,
+            ComputationGraph optimizerGraph,
+            NamedModelParam[] sampleInputs,
+            IOptimizerHyperparameters hyperparameters,
+            RngConfig? rngConfig = null,
+            ComputeContext? mergeContext = null,
+            ComputeContext? runtimeContext = null,
+            IProgress<BuildProgress>? progress = null,
+            TrainingBackend? trainingBackend = null)
+        {
+            if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
+            return FromScratchCore(modelGraph, lossGraph, optimizerGraph, Named(sampleInputs),
+                hyperparameters.InOptimizerOrder(), hyperparameters.HyperparameterNames, rngConfig,
+                mergeContext, runtimeContext, progress, trainingBackend);
+        }
+
+        /// <summary>
+        /// Named-sample overload with positional hyperparameter values; the samples bind by name, as on
+        /// the overload above, and the hyperparameters as on the positional-sample <c>params</c> overload.
+        /// </summary>
+        public static TrainingRig FromScratch(
+            ComputationGraph modelGraph,
+            ComputationGraph lossGraph,
+            ComputationGraph optimizerGraph,
+            NamedModelParam[] sampleInputs,
+            params Hyperparameter[] hyperparameters)
+            => FromScratchCore(modelGraph, lossGraph, optimizerGraph, Named(sampleInputs), hyperparameters,
+                names: null, rngConfig: null, mergeContext: null, runtimeContext: null, progress: null,
+                trainingBackend: null);
+
+        /// <summary>
+        /// Named-sample overload with an explicit hyperparameter array, an RNG configuration, the compute
+        /// contexts and the progress sink, resolved as on the positional-sample overload of the same shape.
         /// </summary>
         public static TrainingRig FromScratch(
             ComputationGraph modelGraph,
@@ -814,15 +880,13 @@ namespace Shorokoo
             ComputeContext? runtimeContext = null,
             IProgress<BuildProgress>? progress = null,
             TrainingBackend? trainingBackend = null)
-            => FromScratchCore(modelGraph, lossGraph, optimizerGraph, sampleInputs, hyperparameters,
+            => FromScratchCore(modelGraph, lossGraph, optimizerGraph, Named(sampleInputs), hyperparameters,
                 names: null, rngConfig: rngConfig, mergeContext: mergeContext,
                 runtimeContext: runtimeContext, progress: progress, trainingBackend: trainingBackend);
 
         /// <summary>
-        /// Convenience overload that accepts a <see cref="ModelParamList"/> for sample inputs,
-        /// as returned by <c>model.FromOrderedInputs([…])</c>, so you can write
-        /// <c>FromScratch(model, Losses.L2Loss, Optimizers.Adam, model.FromOrderedInputs([…]), hypers)</c>
-        /// without constructing <see cref="TensorDataModelParam"/> objects by hand.
+        /// Named-sample overload taking the samples as a <see cref="ModelParamList"/>; they bind by name,
+        /// as on the <see cref="NamedModelParam"/> array overloads.
         /// </summary>
         public static TrainingRig FromScratch(
             ComputationGraph modelGraph,
@@ -843,10 +907,7 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// Convenience overload that accepts a <see cref="ModelParamList"/> for sample inputs
-        /// with positional hyperparameter values. As on the <see cref="NamedModelParam"/> pair, an
-        /// <see cref="RngConfig"/>, a compute context or a progress sink means handing the values to the
-        /// overload below as an array instead.
+        /// <see cref="ModelParamList"/> named-sample overload with positional hyperparameter values.
         /// </summary>
         public static TrainingRig FromScratch(
             ComputationGraph modelGraph,
@@ -861,12 +922,8 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// <see cref="ModelParamList"/> convenience overload with an RNG configuration and the optional
-        /// build/merge and compile/run compute contexts (see <see cref="MergeContext"/> /
-        /// <see cref="RuntimeContext"/>) and the progress sink, which follow the hyperparameter array as they
-        /// do on the named-set overload. Selected by supplying any of them — the same resolution as the
-        /// <see cref="NamedModelParam"/> array overload above, and the same need to name an argument
-        /// reached past <paramref name="rngConfig"/>.
+        /// <see cref="ModelParamList"/> named-sample overload with an explicit hyperparameter array, an RNG
+        /// configuration, the compute contexts and the progress sink.
         /// </summary>
         public static TrainingRig FromScratch(
             ComputationGraph modelGraph,
@@ -886,11 +943,26 @@ namespace Shorokoo
                 runtimeContext, progress, trainingBackend);
         }
 
+        /// <summary>The samples of a positional overload, bound to the model's inputs where they stand.</summary>
+        private static Func<InternalComputationGraph, IReadOnlyList<IData>> Positional(IData[] sampleInputs)
+        {
+            if (sampleInputs is null) throw new ArgumentNullException(nameof(sampleInputs));
+            return _ => sampleInputs;
+        }
+
+        /// <summary>The samples of a named overload, bound each to the model input of its name and so put
+        /// in the inputs' declaration order.</summary>
+        private static Func<InternalComputationGraph, IReadOnlyList<IData>> Named(NamedModelParam[] sampleInputs)
+        {
+            if (sampleInputs is null) throw new ArgumentNullException(nameof(sampleInputs));
+            return model => RepresentativeInputShapes.BindByName(model, new ModelParamList(sampleInputs));
+        }
+
         private static TrainingRig FromScratchCore(
             ComputationGraph modelGraph,
             ComputationGraph lossGraph,
             ComputationGraph optimizerGraph,
-            NamedModelParam[] sampleInputs,
+            Func<InternalComputationGraph, IReadOnlyList<IData>> sampleInputs,
             Hyperparameter[] hyperparameters,
             IReadOnlyList<string>? names,
             RngConfig? rngConfig,
@@ -991,7 +1063,7 @@ namespace Shorokoo
         /// </summary>
         private static TrainingRig BuildInitialRig(
             RigConstituents constituents,
-            NamedModelParam[] sampleInputs,
+            Func<InternalComputationGraph, IReadOnlyList<IData>> sampleInputs,
             ComputeContext mergeContext,
             ComputeContext runtimeContext,
             TrainingBackend trainingBackend,
@@ -999,11 +1071,6 @@ namespace Shorokoo
         {
             var c = constituents;
             ValidateConstituents(c);
-            if (sampleInputs.Length == 0)
-                throw new ArgumentException(
-                    "A training rig requires at least one sample input. Sample inputs " +
-                    "drive parameter shape resolution and training-graph shape inference.",
-                    nameof(sampleInputs));
 
             // Concretization is a build/merge-phase step, so it runs on the merge context. The caller's
             // progress sink is independent of that: one reporter is built from it here and threaded
@@ -1020,6 +1087,15 @@ namespace Shorokoo
             var model = RequireModelGraphKind(c.Model, "TrainingRig (model constituent)");
             RequireNoSequenceInput(model);
 
+            // Named samples bind to the model's inputs by name here, and from then on stand in the
+            // inputs' declaration order, as positional ones are given.
+            var samples = sampleInputs(model);
+            if (samples.Count == 0)
+                throw new ArgumentException(
+                    "A training rig requires at least one sample input. Sample inputs " +
+                    "drive parameter shape resolution and training-graph shape inference.",
+                    nameof(sampleInputs));
+
             // Single ToConcreteArchitecture pass — the ONE concretization for this rig and all its
             // future derivations. The resulting concrete arch is the shared substrate: the trainstep
             // build composes it with loss + autograd + optimizer; initialization reads its MODEL_PARAM
@@ -1027,8 +1103,7 @@ namespace Shorokoo
             // it. The pass also runs the QEE-backed liveness filter that prunes trainable params whose
             // reachability is killed by the sample input shape. Sample input VALUES matter only here
             // (concretization's QEE/ORT resolution fallbacks); the derivation path needs only shapes.
-            var concreteArch = model.ToConcreteArchitecture(
-                new ModelParamList(sampleInputs), ctx, debugRequests: null, reporter);
+            var concreteArch = model.ToConcreteArchitecture(samples, ctx, debugRequests: null, reporter);
 
             // Bind the RNG config at the shared concretization point: binding writes the
             // config's runtime identity into the RngSeed parameter, which — with the feeds'

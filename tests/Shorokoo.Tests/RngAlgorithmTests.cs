@@ -16,7 +16,7 @@ internal static class RngDrawRunners
         var g = ((ComputationGraph)typeof(TModule)
             .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var input = TensorData([rows, cols], Enumerable.Repeat(0f, (int)(rows * cols)).ToArray());
-        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
+        var concrete = g.ToConcreteArchitecture([input]).ToConcreteModel();
         return ComputeContext.Default.Execute(concrete, input)[0].ToTensorData();
     }
 
@@ -190,7 +190,7 @@ public class RngAlgorithmTests
         var g = ((ComputationGraph)typeof(RngSplitThenDraw)
             .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var input = TensorData([2L, 2L], 0f, 0f, 0f, 0f);
-        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
+        var concrete = g.ToConcreteArchitecture([input]).ToConcreteModel();
 
         var proto = FastOnnxModelBuilder.BuildOnnxModel(concrete);
 
@@ -223,7 +223,7 @@ public class RngAlgorithmTests
     public void TestAnImportedRngModelReExportsItsFunctionsTagged()
     {
         var g = (ComputationGraph)typeof(RngSplitThenDraw).GetProperty("ComputationGraph")!.GetValue(null)!;
-        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([2L, 2L], 0f, 0f, 0f, 0f)])).ToConcreteModel();
+        var concrete = g.ToConcreteArchitecture([TensorData([2L, 2L], 0f, 0f, 0f, 0f)]).ToConcreteModel();
         var proto = FastOnnxModelBuilder.BuildOnnxModel(concrete);
         using var bytes = new MemoryStream();
         ProtoBuf.Serializer.Serialize(bytes, proto);
@@ -250,7 +250,7 @@ public class RngAlgorithmSwitchTests
         var g = ((ComputationGraph)typeof(RtLoweredUniform)
             .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var input = TensorData([4L, 4L], Enumerable.Repeat(0f, 16).ToArray());
-        return g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel(cfg);
+        return g.ToConcreteArchitecture([input]).ToConcreteModel(cfg);
     }
 
     private static float[] RunFeed(InternalComputationGraph concrete)
@@ -309,7 +309,7 @@ public class RngAlgorithmSwitchTests
         var ig = ((ComputationGraph)typeof(SwitchInitLinear)
             .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var initInput = TensorData([1L, 3L], 0.1f, 0.2f, 0.3f);
-        var initArch = ig.ToConcreteArchitecture(ig.FromOrderedInputs([initInput]));
+        var initArch = ig.ToConcreteArchitecture([initInput]);
 
         float[] Weight(RngConfig cfg) =>
             initArch.InitializeTrainableParams(rngConfig: cfg).ModelParams[0]
@@ -325,7 +325,7 @@ public class RngAlgorithmSwitchTests
         // model that carries one — no-config init reads its algorithm.
         var g = ((ComputationGraph)typeof(RtLoweredUniform)
             .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([4L, 4L], new float[16])]));
+        var arch = g.ToConcreteArchitecture([TensorData([4L, 4L], new float[16])]);
         arch.ApplyRngConfig(Rounds20);
 
         const ulong unknownId = 9999;

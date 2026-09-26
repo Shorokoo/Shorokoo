@@ -106,8 +106,8 @@ public class Opset26ImportAttrTests
         try
         {
             var g = QeeQuantizationValueAuditCheck.ComputationGraph;
-            var authored = g.ToConcreteArchitecture(g.FromOrderedInputs(
-                [TensorData(DType.Float32, [2L, 2L], 1.25f, -0.5f, 0.6f, 3.1f)])).ToConcreteModel();
+            var authored = g.ToConcreteArchitecture(
+                [TensorData(DType.Float32, [2L, 2L], 1.25f, -0.5f, 0.6f, 3.1f)]).ToConcreteModel();
             var authoredPath = Path.Combine(dir, "authored.onnx");
             Persistence.ExportOnnx(authored, authoredPath);
             Assert.Equal(21L, ExportedDefaultOpset(authoredPath));

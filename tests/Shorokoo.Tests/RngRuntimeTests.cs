@@ -1148,7 +1148,7 @@ public class RngRuntimeTests
         var g = ((ComputationGraph)typeof(RngDenseThresholdTable)
             .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var input = TensorData([(long)bounds.Length], bounds);
-        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
+        var concrete = g.ToConcreteArchitecture([input]).ToConcreteModel();
         return [.. ComputeContext.Default.Execute(concrete, input)[0].ToTensorData()
             .As<uint64>().AccessMemory().ToArray()];
     }
@@ -1161,7 +1161,7 @@ public class RngRuntimeTests
         var g = ((ComputationGraph)typeof(RngDenseUniformOutput)
             .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var input = TensorData([(long)bounds.Length], bounds);
-        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
+        var concrete = g.ToConcreteArchitecture([input]).ToConcreteModel();
         return [.. ComputeContext.Default.Execute(concrete, input)[0].ToTensorData()
             .As<float32>().AccessMemory().ToArray().Select(BitConverter.SingleToUInt32Bits)];
     }
@@ -1190,7 +1190,7 @@ public class RngRuntimeTests
         var g = ((ComputationGraph)typeof(RngDenseUniformOutput)
             .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var seed = TensorData([(long)RngDenseUniformOutput.Ranges * 2], new float[RngDenseUniformOutput.Ranges * 2]);
-        var model = g.ToConcreteArchitecture(g.FromOrderedInputs([seed])).ToConcreteModel();
+        var model = g.ToConcreteArchitecture([seed]).ToConcreteModel();
         foreach (var ranges in DenseRangeGroups)
         {
             uint[] got = QeeDrawBits(model, ranges);
@@ -1218,7 +1218,7 @@ public class RngRuntimeTests
             .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var seed = TensorData([(long)RngDenseUniformOutput.Ranges * 2],
             new float[RngDenseUniformOutput.Ranges * 2]);
-        var model = g.ToConcreteArchitecture(g.FromOrderedInputs([seed])).ToConcreteModel();
+        var model = g.ToConcreteArchitecture([seed]).ToConcreteModel();
         uint[] ort = GraphDrawBits(ranges), qee = QeeDrawBits(model, ranges);
         for (int r = 0; r < ranges.Length; r++)
             for (int i = 0; i < RngDenseUniformOutput.Draws; i++)
@@ -1243,7 +1243,7 @@ public class RngRuntimeTests
             .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var seed = TensorData([(long)RngDenseUniformOutput.Ranges * 2],
             new float[RngDenseUniformOutput.Ranges * 2]);
-        var model = g.ToConcreteArchitecture(g.FromOrderedInputs([seed])).ToConcreteModel();
+        var model = g.ToConcreteArchitecture([seed]).ToConcreteModel();
         uint[] ort = GraphDrawBits(ranges), qee = QeeDrawBits(model, ranges);
         for (int r = 0; r < ranges.Length; r++)
             for (int i = 0; i < RngDenseUniformOutput.Draws; i++)
@@ -1441,7 +1441,7 @@ public class RngRuntimeTests
         var g = ((ComputationGraph)typeof(RtLoweredUniform)
             .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var input = TensorData([4L, 4L], Enumerable.Repeat(0f, 16).ToArray());
-        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
+        var concrete = g.ToConcreteArchitecture([input]).ToConcreteModel();
         Assert.NotNull(concrete.TryGetRngSeed());
         var defaultKey = RngTestOracle.RunKey(RngConfig.Default, [1]);
         var vals = ComputeContext.Default.Execute(concrete, input)[0]
@@ -1470,7 +1470,7 @@ public class RngRuntimeTests
         var bg = ((ComputationGraph)typeof(RtLoweredBits)
             .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var bitsInput = TensorData([4L, 4L], Enumerable.Repeat(0f, 16).ToArray());
-        var report = bg.ToConcreteArchitecture(bg.FromOrderedInputs([bitsInput])).GetRngStreamReport();
+        var report = bg.ToConcreteArchitecture([bitsInput]).GetRngStreamReport();
         var bitsStreams = report.Streams.Where(s => s.Kind == RngStreamKind.BitsFeed).ToList();
         Assert.NotEmpty(bitsStreams);
         Assert.Contains("bits feed", report.ToString());
@@ -1482,7 +1482,7 @@ public class RngRuntimeTests
         var g = ((ComputationGraph)typeof(RtLoweredUniform)
             .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var input = TensorData([4L, 4L], Enumerable.Repeat(0f, 16).ToArray());
-        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input]))
+        var concrete = g.ToConcreteArchitecture([input])
             .ToConcreteModel(new RngConfig { MasterSeed = 1 });
 
         float[] Run() => ComputeContext.Default.Execute(concrete, input.Shared())[0]

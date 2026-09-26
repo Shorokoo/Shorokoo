@@ -160,7 +160,7 @@ public class RigConstructionScalingTests
     private static InternalComputationGraph Concretize(ComputationGraph model)
     {
         var g = model.ToInternal();
-        return g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([1L], (float[])[1f])]));
+        return g.ToConcreteArchitecture([TensorData([1L], (float[])[1f])]);
     }
 
     private static TrainingRig BuildRig(ComputationGraph model) =>

@@ -29,7 +29,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// </summary>
     internal static class FastRejectOversizedConvTransposeOutputShape
     {
-        public static void Process(InternalComputationGraph graph, ModelParamList? sampleInputs)
+        public static void Process(InternalComputationGraph graph, IReadOnlyList<IData>? sampleInputs)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
@@ -48,7 +48,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         private static Dictionary<FastTensorKey, IRuntimeTensor>? ResolveShapes(
-            InternalComputationGraph graph, List<FastNode> nodes, ModelParamList? sampleInputs)
+            InternalComputationGraph graph, List<FastNode> nodes, IReadOnlyList<IData>? sampleInputs)
         {
             var keys = nodes.SelectMany(n => (FastTensorKey[])[n.Inputs[0]!.Value, n.Inputs[1]!.Value]).Distinct().ToList();
             var resolver = graph.Clone();

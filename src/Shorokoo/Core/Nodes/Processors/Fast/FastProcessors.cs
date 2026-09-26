@@ -36,7 +36,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// has none is left out, so the engine treats it as unknown. <c>null</c> when none is bound.
         /// </summary>
         internal static Dictionary<FastTensorKey, IRuntimeTensor>? SampleRuntimeInputs(
-            InternalComputationGraph graph, ModelParamList? inputHints, QuickExecutionEngine engine)
+            InternalComputationGraph graph, IReadOnlyList<IData>? inputHints, QuickExecutionEngine engine)
         {
             var bound = RepresentativeInputShapes.BindSamplesToLoweredInputs(graph, inputHints);
             var inputKeys = graph.Inputs;
@@ -3689,7 +3689,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         public static Unresolved Process(
             InternalComputationGraph graph,
             FastExtractIdentifierTemplates.IdentifierTemplateInfos identifierTemplatesInfo,
-            ModelParamList inputHints,
+            IReadOnlyList<IData> inputHints,
             ComputeContext? computeContext = null)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
@@ -3784,7 +3784,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // intermediate CG state to crash the testhost on big models.
             var candidateIds = candidateModelIdInfos.Select(x => x.SpecificModelId).ToImmutableArray();
             var liveModelIds = FastListAllSpecificModelIdsUsed.Process(
-                graph, inputHints ?? new ModelParamList(), candidateIds).ToHashSet();
+                graph, inputHints ?? [], candidateIds).ToHashSet();
             var liveModelIdInfos = candidateModelIdInfos
                 .Where(x => liveModelIds.Contains(x.SpecificModelId))
                 .ToImmutableArray();
@@ -3974,7 +3974,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// </summary>
         public static ImmutableArray<TrainableParamInfo> DiscoverTrainableParamInfos(
             InternalComputationGraph graph,
-            ModelParamList? inputHints = null)
+            IReadOnlyList<IData>? inputHints = null)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
@@ -5823,7 +5823,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// shared weight. The per-iteration rewrite that used to fix that up here has
         /// been removed, so the only sound answer is to leave the loop rolled.</para>
         ///
-        /// <para><see cref="InternalComputationGraphExtensions.ToConcreteArchitecture"/>
+        /// <para><c>ToConcreteArchitecture</c>
         /// never presents such a body: <c>FastConvertToIdRefModelParams</c>,
         /// <c>FastUnpackModelStruct</c> and <c>FastConvertModelParamIdRefToModelParam</c>
         /// all run before its first <see cref="FastSimplify"/>, each asserting its

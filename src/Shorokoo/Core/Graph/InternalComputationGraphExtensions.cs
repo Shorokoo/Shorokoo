@@ -22,11 +22,9 @@ using Shorokoo.Core.Nodes.Processors.Helpers;
 namespace Shorokoo.Graph
 {
     /// <summary>
-    /// Extension surface that re-exposes the high-level operations the deleted
-    /// <c>ComputationGraph</c> class used to provide (architecture lowering,
+    /// Extension surface for the high-level graph operations (architecture lowering,
     /// trainable-parameter naming, state-update queries, C# emission). Each method
-    /// drives the FastCG processor pipeline directly; the legacy CG wrapper is
-    /// never materialized.
+    /// drives the FastCG processor pipeline directly.
     /// </summary>
     public static class InternalComputationGraphExtensions
     {
@@ -51,17 +49,19 @@ namespace Shorokoo.Graph
         /// hard build errors, never silent fallbacks (see
         /// <c>FastPipelineUnsupportedException</c>).</para>
         ///
-        /// <para>RNG streams are <em>not</em> among the enumerated ids: since the 2026-08 key
-        /// rework a runtime feed's per-iteration key derives in-graph from the runtime iteration
-        /// index, so no stream set is enumerated and no key table is stored — see
+        /// <para>RNG streams are <em>not</em> among the enumerated ids: a runtime feed's
+        /// per-iteration key derives in-graph from the runtime iteration index, so no stream set
+        /// is enumerated and no key table is stored — see
         /// <see cref="Shorokoo.Core.Nodes.Processors.Fast.FastWireRngKeyDerivation"/>.</para>
         /// </summary>
         /// <param name="graph">The module graph to lower (e.g. <c>MyModel.ComputationGraph</c>).</param>
-        /// <param name="inputHints">Sample inputs (names + shapes/values), one for every input of the
-        /// graph — <c>[Hyper]</c> inputs included — used as shape hints and as QEE/ORT resolution
-        /// fallbacks during lowering, and recorded (shape only) on the architecture's inputs. A
-        /// missing one is refused with <see cref="ErrorCodes.FW056"/>, naming it. Build one with
-        /// <see cref="FromOrderedInputs"/>.</param>
+        /// <param name="inputHints">Sample values, one for every data input of the graph — <c>[Hyper]</c>
+        /// inputs included — in the graph's input declaration order, bound by position; a generic
+        /// module's type-placeholder slots take none. Used as shape hints and as QEE/ORT resolution
+        /// fallbacks during lowering, and recorded (shape only) on the architecture's inputs. Too
+        /// few, too many, or one whose rank contradicts its input's declared rank is refused with
+        /// <see cref="ErrorCodes.FW056"/>. The overload taking a <see cref="ModelParamList"/> binds
+        /// samples by name instead.</param>
         /// <param name="computeContext">Optional context used to resolve values while lowering.</param>
         /// <param name="debugRequests">Optional hook to dump the graph at each lowering stage.</param>
         /// <param name="progress">The reporter the pipeline names each stage to as it enters it, or
@@ -72,12 +72,14 @@ namespace Shorokoo.Graph
         /// <returns>A fully inlined, concrete architecture graph.</returns>
         internal static InternalComputationGraph ToConcreteArchitecture(
             this InternalComputationGraph graph,
-            ModelParamList inputHints,
+            IReadOnlyList<IData> inputHints,
             ComputeContext? computeContext = null,
             DebugRequests? debugRequests = null,
             BuildProgressReporter? progress = null)
         {
+            System.ArgumentNullException.ThrowIfNull(inputHints);
             void Stage(string stage) => progress?.Report(BuildPhase.Concretize, stage);
+            var samples = RepresentativeInputShapes.Unwrapped(inputHints);
 
             // A generic [Module] builds its graph with IGenericType placeholder DTypes and leading
             // GENERIC_TYPE_INPUT slots; every later stage expects concrete types, and the final
@@ -96,7 +98,7 @@ namespace Shorokoo.Graph
 
             // A sample for every input, checked before any work: the shapes recorded from them at
             // the end are what makes the architecture self-describing.
-            RepresentativeInputShapes.RequireSampleForEveryInput(graph, inputHints);
+            RepresentativeInputShapes.RequireSampleForEveryInput(graph, samples);
 
             Stage("Clone");
             var fastGraph = graph.Clone();
@@ -161,7 +163,7 @@ namespace Shorokoo.Graph
 
             Stage("ConvertModelParamIdRefToModelParam");
             var unresolvedParams = FastConvertModelParamIdRefToModelParam.Process(
-                fastGraph, identifierTemplatesInfo, inputHints, computeContext);
+                fastGraph, identifierTemplatesInfo, samples, computeContext);
             DebugPrintFast(fastGraph, debugRequests, GraphCreationPoint.AfterProcessTrainableParameters);
             // A param whose definition needs an input's value cannot be built from a sample that
             // gives none. That is the caller's to fix, so name the input — before the op check below
@@ -189,19 +191,19 @@ namespace Shorokoo.Graph
             // Lower attribute-tensorized variant ops (e.g. SHRK_CONV) to their standard ONNX
             // counterparts before autograd: the variant ops have no gradient rule, and the first
             // FastSimplify above has already constant-folded and unrolled loops, so the geometry
-            // inputs are resolvable here. inputHints supplies sample values for the QEE/ORT
+            // inputs are resolvable here. The samples supply sample values for the QEE/ORT
             // resolution fallbacks; the following FastSimplify folds the lowered ops. Geometry that
             // still varies per iteration after the unroll cannot become a static attribute and is
             // refused here rather than resolved to one iteration's value.
             Stage("LowerAttributeTensorOps");
-            FastLowerAttributeTensorOps.Process(fastGraph, inputHints, computeContext);
+            FastLowerAttributeTensorOps.Process(fastGraph, samples, computeContext);
             DebugPrintFast(fastGraph, debugRequests, GraphCreationPoint.AfterLowerAttributeTensorOps);
             FastGraphCycleDetector.AssertAcyclic(fastGraph, "After FastLowerAttributeTensorOps");
 
             // A ConvTranspose output_shape is checked against the input shape it will meet, which only
             // the sample inputs supply; ONNX Runtime would otherwise run a geometry ONNX forbids.
             Stage("RejectOversizedConvTransposeOutputShape");
-            FastRejectOversizedConvTransposeOutputShape.Process(fastGraph, inputHints);
+            FastRejectOversizedConvTransposeOutputShape.Process(fastGraph, samples);
 
             Stage("ExpandAutoGrad");
             FastProcessAutoGradProcessor.Process(fastGraph);
@@ -224,19 +226,40 @@ namespace Shorokoo.Graph
             // Record the shape of each input's sample (dims only, never its values) on the input
             // node, so the architecture — and every concrete model made from it — carries the
             // shape it was concretized at (see RepresentativeInputShapes).
-            RepresentativeInputShapes.Record(fastGraph, inputHints);
+            RepresentativeInputShapes.Record(fastGraph, samples);
 
             // Likewise the shape each output has at those samples — evaluated at their real values,
             // since an output's shape can hang on a value (a flag choosing a branch, the axes a
             // Squeeze drops) — so the architecture records what it produces as well as what it
             // takes (see RecordedOutputShapes).
             Stage("RecordOutputShapes");
-            RecordedOutputShapes.RecordAtSamples(fastGraph, inputHints, computeContext);
+            RecordedOutputShapes.RecordAtSamples(fastGraph, samples, computeContext);
 
             // No terminal report here: both callers have work left after this returns (the public
             // wrapper freezes the result, the rig build goes on to compose the trainstep), and a
             // "finished" report with work still to run is worse than no report at all.
             return fastGraph;
+        }
+
+
+        /// <summary>
+        /// Lowers a module graph to a concrete architecture as the positional overload does, at
+        /// samples bound <b>by name</b>: each sample to the graph input of that name, in any order;
+        /// a struct sample to its struct input's name. A data input no sample names, a sample naming
+        /// no input, a name given twice, or a sample whose rank contradicts its input's declared rank
+        /// is refused with <see cref="ErrorCodes.FW056"/>, naming each offender and listing the
+        /// graph's inputs. Once bound, the samples are in declaration order and lower positionally.
+        /// </summary>
+        internal static InternalComputationGraph ToConcreteArchitecture(
+            this InternalComputationGraph graph,
+            ModelParamList inputHints,
+            ComputeContext? computeContext = null,
+            DebugRequests? debugRequests = null,
+            BuildProgressReporter? progress = null)
+        {
+            System.ArgumentNullException.ThrowIfNull(inputHints);
+            return graph.ToConcreteArchitecture(
+                RepresentativeInputShapes.BindByName(graph, inputHints), computeContext, debugRequests, progress);
         }
 
         /// <summary>
@@ -324,7 +347,7 @@ namespace Shorokoo.Graph
         /// Binds the architecture's <b>default</b> trainable-parameter values (produced by each
         /// <c>[TrainableParamInitializer]</c>) into a runnable, weight-filled graph — equivalent to
         /// <c>graph.ToConcreteModel(graph.InitializeTrainableParams())</c>. Requires a concrete
-        /// architecture from <see cref="ToConcreteArchitecture"/>.
+        /// architecture from <see cref="ToConcreteArchitecture(InternalComputationGraph, IReadOnlyList{IData}, ComputeContext?, DebugRequests?, BuildProgressReporter?)"/>.
         /// </summary>
         /// <returns>A concrete model graph with default weights, ready to execute.</returns>
         internal static InternalComputationGraph ToConcreteModel(this InternalComputationGraph graph)
@@ -338,7 +361,7 @@ namespace Shorokoo.Graph
         /// <c>graph.ToConcreteModel(graph.InitializeTrainableParams(rngConfig: rngConfig))</c>.
         /// Each random initializer draws keyed noise on its parameter's own stream, so
         /// same-shape parameters get distinct values and initialization is reproducible for
-        /// a config. Requires a concrete architecture from <see cref="ToConcreteArchitecture"/>.
+        /// a config. Requires a concrete architecture from <see cref="ToConcreteArchitecture(InternalComputationGraph, IReadOnlyList{IData}, ComputeContext?, DebugRequests?, BuildProgressReporter?)"/>.
         /// </summary>
         internal static InternalComputationGraph ToConcreteModel(this InternalComputationGraph graph, RngConfig rngConfig)
         {
@@ -384,7 +407,7 @@ namespace Shorokoo.Graph
         /// value names to graph parameters with the given framework's naming convention (default:
         /// Shorokoo's own scheme). For weights exported from another framework, use the overload that
         /// takes an explicit <see cref="ModuleParamSetNamingScheme"/>. Requires a concrete architecture
-        /// from <see cref="ToConcreteArchitecture"/>; names that do not resolve are silently dropped,
+        /// from <see cref="ToConcreteArchitecture(InternalComputationGraph, IReadOnlyList{IData}, ComputeContext?, DebugRequests?, BuildProgressReporter?)"/>; names that do not resolve are silently dropped,
         /// but a parameter no value reaches is refused with <see cref="ErrorCodes.FW059"/>.
         /// </summary>
         /// <param name="graph">The concrete architecture to bind weights into.</param>
@@ -414,7 +437,7 @@ namespace Shorokoo.Graph
         /// Binds loaded trainable-parameter values into a concrete (weight-filled) graph using an
         /// explicit <paramref name="namingScheme"/> to remap value names onto graph parameter ids —
         /// the form to use for third-party (PyTorch/timm) checkpoints. Requires a concrete architecture
-        /// from <see cref="ToConcreteArchitecture"/>; names that do not resolve are silently dropped,
+        /// from <see cref="ToConcreteArchitecture(InternalComputationGraph, IReadOnlyList{IData}, ComputeContext?, DebugRequests?, BuildProgressReporter?)"/>; names that do not resolve are silently dropped,
         /// but a parameter no value reaches is refused with <see cref="ErrorCodes.FW059"/>.
         /// </summary>
         /// <param name="graph">The concrete architecture to bind weights into.</param>
@@ -461,7 +484,7 @@ namespace Shorokoo.Graph
         /// <summary>
         /// Returns metadata (ids and shapes) for every trainable parameter in a <b>concrete
         /// architecture</b> — the inventory used to build naming schemes and bind weights. Requires a
-        /// concrete architecture from <see cref="ToConcreteArchitecture"/> (throws otherwise, because
+        /// concrete architecture from <see cref="ToConcreteArchitecture(InternalComputationGraph, IReadOnlyList{IData}, ComputeContext?, DebugRequests?, BuildProgressReporter?)"/> (throws otherwise, because
         /// parameters nested inside un-inlined sub-functions would be missed).
         /// </summary>
         internal static ConcreteModelParamInfos GetConcreteModelParamInfos(this InternalComputationGraph graph)
@@ -483,7 +506,7 @@ namespace Shorokoo.Graph
         /// Runs each trainable parameter's initializer to produce its default values, named via the
         /// given scheme (default: Shorokoo's). This is what <see cref="ToConcreteModel(InternalComputationGraph)"/>
         /// binds when called with no values. Requires a concrete architecture from
-        /// <see cref="ToConcreteArchitecture"/>.
+        /// <see cref="ToConcreteArchitecture(InternalComputationGraph, IReadOnlyList{IData}, ComputeContext?, DebugRequests?, BuildProgressReporter?)"/>.
         /// </summary>
         /// <param name="graph">The concrete architecture whose initializers to run.</param>
         /// <param name="namingScheme">Optional scheme for the returned parameter names; defaults to Shorokoo's.</param>
@@ -590,7 +613,7 @@ namespace Shorokoo.Graph
         /// ModelId path, consumer kind, parameter name/shape where known, and (when
         /// <paramref name="rngConfig"/> is supplied) the resolved stream key. The report also
         /// emits the sparse <c>Rng.Pin</c> skeleton (see <see cref="RngStreamReport.EmitPinSkeleton"/>).
-        /// Requires a concrete architecture from <see cref="ToConcreteArchitecture"/>.
+        /// Requires a concrete architecture from <see cref="ToConcreteArchitecture(InternalComputationGraph, IReadOnlyList{IData}, ComputeContext?, DebugRequests?, BuildProgressReporter?)"/>.
         /// </summary>
         internal static RngStreamReport GetRngStreamReport(
             this InternalComputationGraph graph, RngConfig? rngConfig = null,
@@ -697,8 +720,8 @@ namespace Shorokoo.Graph
 
         /// <summary>
         /// Pairs the graph's input names (in declaration order) with the supplied values to produce a
-        /// <see cref="ModelParamList"/> of named inputs — the <c>inputHints</c> argument for
-        /// <see cref="ToConcreteArchitecture"/>, or the inputs for an <c>Execute</c> call.
+        /// <see cref="ModelParamList"/> of named inputs, for an API that binds by name
+        /// (<see cref="Specialize"/>, a <c>Run</c> call).
         /// </summary>
         /// <param name="graph">The graph whose data-input names to pair with the values.</param>
         /// <param name="inputValues">One value per data input, in declaration order. A generic
@@ -716,8 +739,8 @@ namespace Shorokoo.Graph
                 .Select(x => x.Second);
 
             // Fewer values than inputs is the deliberate partial form Specialize takes (hyperparams
-            // only). More is always a mistake, and Zip would swallow it: notably a caller still
-            // passing a value for a type placeholder, the shape this method used to expect.
+            // only). More is always a mistake, and Zip would swallow it: notably a caller passing a
+            // value for a type placeholder.
             var names = dataInputNames.ToList();
             if (inputValues.Length > names.Count)
                 throw new ModelException(ErrorCodes.FW041, "FromOrderedInputs",
@@ -812,7 +835,7 @@ namespace Shorokoo.Graph
         /// most commonly un-inlined <c>MODEL_INVOKE</c>/<c>FUNCTION_INVOKE</c> nodes) the
         /// parameters are nested inside sub-functions or not yet converted to <c>MODEL_PARAM</c>
         /// nodes and would be silently missed, so require a concrete architecture (produced by
-        /// <see cref="ToConcreteArchitecture"/>) instead of returning an incomplete set.
+        /// <see cref="ToConcreteArchitecture(InternalComputationGraph, IReadOnlyList{IData}, ComputeContext?, DebugRequests?, BuildProgressReporter?)"/>) instead of returning an incomplete set.
         /// </summary>
         private static void AssertConcreteArchitecture(InternalComputationGraph graph, string operation)
         {

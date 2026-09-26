@@ -695,11 +695,12 @@ namespace Shorokoo
         /// hyperparameter, or took a model as an argument)</summary>
         public const string FW055 = "FW055";
 
-        /// <summary>ToConcreteArchitecture was not given exactly one sample per input of the graph it
-        /// lowers (the message lists the inputs that have none, or states both counts when there are
-        /// more samples than inputs), a sample is named for another input than the one at its
-        /// position (the message lists each such sample and the input at its position), or a sample
-        /// has another rank than its input's type declares — a Scalar given a vector, say (the
+        /// <summary>The samples given to ToConcreteArchitecture or TrainingRig.FromScratch do not bind
+        /// one to each data input of the graph. Given positionally: fewer samples than inputs (the
+        /// message lists the inputs that have none) or more (it states both counts). Given by name: a
+        /// data input no sample names, a sample naming no input, or a name given to more than one
+        /// sample (the message names each offender and lists the graph's inputs). In either form, a
+        /// sample has another rank than its input's type declares — a Scalar given a vector, say (the
         /// message lists each such input and its sample's shape)</summary>
         public const string FW056 = "FW056";
 

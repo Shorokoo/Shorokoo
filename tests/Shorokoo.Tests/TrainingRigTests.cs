@@ -647,7 +647,7 @@ public class TrainingRigFromScratchCoverageTests
         // Six arguments reach only the array overload, so the omitted contexts are its own defaults.
         var listRig = TrainingRig.FromScratch(
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
-            ScalarMultiplyModel.ComputationGraph.FromOrderedInputs([TensorData([4L], new float[4])]),
+            [TensorData([4L], new float[4])],
             [0.05f], cfg);
         Assert.Equal(7UL, listRig.RngConfig.MasterSeed);
         Assert.Same(ComputeContext.Default, listRig.MergeContext);
@@ -733,12 +733,63 @@ public class TrainingRigRepresentativeInputCoverageTests
     [Fact]
     public void TestARigGivenMoreSamplesThanTheModelHasInputsIsRefused()
     {
-        var x = new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([2L], 1f, 2f));
+        var x = TensorData([2L], 1f, 2f);
         var ex = Assert.Throws<ModelException>(() => TrainingRig.FromScratch(
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
             [x, x], 0.01f));
         Assert.Equal(ErrorCodes.FW056, ex.ErrorCode);
         Assert.Contains("2 sample(s)", ex.Message);
+    }
+
+    private static TrainingRig BiasRig(IData[] samples)
+        => TrainingRig.FromScratch(NullableTrainableBiasLayer.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, samples, 0.1f);
+
+    private static TrainingRig BiasRig(params NamedModelParam[] samples)
+        => TrainingRig.FromScratch(NullableTrainableBiasLayer.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, samples, 0.1f);
+
+    private static TrainingRig ScaleRig(IData[] samples)
+        => TrainingRig.FromScratch(TensorTimesScalarLayer.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, samples, 0.1f);
+
+    private static TrainingRig ScaleRig(params NamedModelParam[] samples)
+        => TrainingRig.FromScratch(TensorTimesScalarLayer.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, samples, 0.1f);
+
+    private static NamedModelParam In(string name, IData value) => NamedModelParam.FromIData(name, ModelParamType.InputParam, value);
+
+    private static byte[] ArchBytes(TrainingRig rig) => CompressedFormatUtils.SaveFastGraphToBinary(rig.ConcreteArchConstituent, compressed: false);
+
+    private static string RigRefused(Func<TrainingRig> build)
+    {
+        var ex = Assert.Throws<ModelException>(build);
+        Assert.Equal(ErrorCodes.FW056, ex.ErrorCode);
+        return ex.Message;
+    }
+
+    [Fact]
+    public void TestARigsSamplesByNameInAnyOrderBuildTheArchitectureTheSamePositionalSamplesBuild()
+    {
+        var x = TensorData([3L], 1f, 2f, 3f);
+        var some = OptionalTensorData.Some(TensorData([3L], 0f, 0f, 0f));
+        var none = OptionalTensorData.None<float32>();
+        Assert.Equal(ArchBytes(BiasRig([x, some])), ArchBytes(BiasRig(In("bias", some), In("x", x))));
+        Assert.Equal(ArchBytes(BiasRig([x, none])), ArchBytes(BiasRig(In("bias", none), In("x", x))));
+        Assert.Equal(ArchBytes(BiasRig([x, none])), ArchBytes(TrainingRig.FromScratch(NullableTrainableBiasLayer.ComputationGraph,
+            L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, new ModelParamList([In("bias", none), In("x", x)]), 0.1f)));
+    }
+
+    [Fact]
+    public void TestARigsSamplesThatDoNotBindOneToEachInputAreRefusedPositionallyAndByName()
+    {
+        var x = TensorData([3L], 1f, 2f, 3f);
+        var one = TensorData(DType.Float32, [], 2f);
+        var none = OptionalTensorData.None<float32>();
+        Assert.Contains("no sample was given for input(s) 'bias'", RigRefused(() => BiasRig([x])));
+        Assert.Contains("3 sample(s)", RigRefused(() => BiasRig([x, none, x])));
+        Assert.Contains("'s' is declared with rank 0", RigRefused(() => ScaleRig([one, x])));
+        Assert.Contains("no sample was given for input(s) 'bias'", RigRefused(() => BiasRig(In("x", x))));
+        Assert.Contains("sample(s) 'y' name no input", RigRefused(() => BiasRig(In("x", x), In("bias", none), In("y", x))));
+        Assert.Contains("more than one sample is named 'x'", RigRefused(() => BiasRig(In("x", x), In("bias", none), In("x", x))));
+        Assert.Contains("the graph's inputs are 'x', 'bias'", RigRefused(() => BiasRig(In("bias", none))));
+        Assert.Contains("'s' is declared with rank 0", RigRefused(() => ScaleRig(In("s", x), In("x", one))));
     }
 
     private static long[]?[] OutputShapesOf(ComputationGraph graph)
@@ -1212,12 +1263,12 @@ public class TrainingRigCompositionCoverageTests
 
         var rig = TrainingRig.FromScratch(
             modelGraph, Losses.L2Loss, Optimizers.SGD,
-            modelGraph.FromOrderedInputs([exampleInput]),
+            [exampleInput],
             0.01f);
 
         var namedHyperRig = TrainingRig.FromScratch(
             modelGraph, Losses.L2Loss, Optimizers.SGD,
-            modelGraph.FromOrderedInputs([exampleInput]),
+            [exampleInput],
             new SGDOptimizerHyperparameters { LearningRate = 0.01f });
         Assert.NotEmpty(namedHyperRig.TrainableParamStructDef.Fields);
         Assert.Throws<ArgumentNullException>(() => TrainingRig.FromScratch(
@@ -1244,7 +1295,7 @@ public class TrainingRigCompositionCoverageTests
         Assert.Single(result.EpochLosses);
         Assert.True(float.IsFinite(result.EpochLosses[0]));
 
-        var arch = modelGraph.ToConcreteArchitecture(modelGraph.FromOrderedInputs([exampleInput]));
+        var arch = modelGraph.ToConcreteArchitecture([exampleInput]);
         var sampleInput = new TensorDataModelParam("input", ModelParamType.InputParam, exampleInput);
 
         var archRig = TrainingRig.FromScratch(
@@ -1271,7 +1322,7 @@ public class TrainingRigCompositionCoverageTests
     {
         var scalarMultiply = ScalarMultiplyModel.ComputationGraph;
         InternalComputationGraph ConcreteScalarMultiply() => scalarMultiply.ToConcreteArchitecture(
-            scalarMultiply.FromOrderedInputs([TensorData([4L], [1f, 2f, 3f, 4f])])).ToInternal();
+            [TensorData([4L], [1f, 2f, 3f, 4f])]).ToInternal();
 
         var trainingGraph = TrainingGraphBuilder.PrepareForTrainingAsFast(
             ConcreteScalarMultiply(), L2Loss.ComputationGraph.ToInternal());
@@ -1307,7 +1358,7 @@ public class TrainingRigCompositionCoverageTests
         Assert.Throws<System.InvalidOperationException>(() => moduleGraph.InitializeTrainableParams());
 
         var arch = moduleGraph.ToConcreteArchitecture(
-            moduleGraph.FromOrderedInputs([TensorData([4L], [1f, 2f, 3f, 4f])]));
+            [TensorData([4L], [1f, 2f, 3f, 4f])]);
         Assert.NotEmpty(arch.GetConcreteModelParamInfos().ParamInfos);
         Assert.NotEmpty(arch.InitializeTrainableParams().ModelParams);
     }
@@ -1317,7 +1368,7 @@ public class TrainingRigCompositionCoverageTests
     {
         var graph = ParamTooLargeToAllocateModel.ComputationGraph.ToInternal();
         var arch = graph.ToConcreteArchitecture(
-            graph.FromOrderedInputs([TensorData([1L, 4L], [1f, 2f, 3f, 4f])]));
+            [TensorData([1L, 4L], [1f, 2f, 3f, 4f])]);
 
         var ex = Assert.Throws<ComputeContextException>(() => arch.InitializeTrainableParams());
         Assert.Contains("Zeros", ex.Message);
@@ -1327,7 +1378,7 @@ public class TrainingRigCompositionCoverageTests
 
         var other = ParamSizeOverflowingModel.ComputationGraph.ToInternal();
         var otherArch = other.ToConcreteArchitecture(
-            other.FromOrderedInputs([TensorData([1L, 4L], [1f, 2f, 3f, 4f])]));
+            [TensorData([1L, 4L], [1f, 2f, 3f, 4f])]);
         Assert.IsNotType<ComputeContextException>(
             Record.Exception(() => otherArch.InitializeTrainableParams()));
 
@@ -1336,7 +1387,7 @@ public class TrainingRigCompositionCoverageTests
         // the larger only as context.
         var two = TwoParamsFirstTooLargeModel.ComputationGraph.ToInternal();
         var twoArch = two.ToConcreteArchitecture(
-            two.FromOrderedInputs([TensorData([1L, 4L], [1f, 2f, 3f, 4f])]));
+            [TensorData([1L, 4L], [1f, 2f, 3f, 4f])]);
         var twoEx = Assert.Throws<ComputeContextException>(() => twoArch.InitializeTrainableParams());
         Assert.Contains("[33554432, 33554432] = 4.00 PiB failed", twoEx.Message);
         Assert.Contains("[67108864, 33554432] = 8.00 PiB", twoEx.Message);
@@ -1856,7 +1907,7 @@ public class TrainingRigTrainingLoopCoverageTests
     private static string[] IfBodyOps(ComputationGraph modelGraph)
     {
         var f = modelGraph.ToConcreteArchitecture(
-            modelGraph.FromOrderedInputs([TensorData([2L], 1f, 2f)])).ToConcreteModel().ToInternal();
+            [TensorData([2L], 1f, 2f)]).ToConcreteModel().ToInternal();
         int open = f.Nodes.FindIndex(n => n.OpCode == OpCodes.IF_OPEN);
         int close = f.Nodes.FindIndex(n => n.OpCode == OpCodes.IF_CLOSE);
         return [.. f.Nodes.GetRange(open + 1, close - open - 1).Select(n => n.OpCode)];
@@ -2387,7 +2438,7 @@ public class TrainingRigTrainingLoopCoverageTests
         Assert.Equal(GraphKind.ConcreteModel, inference.Kind);
 
         var concrete = rig.ModelConstituent.ToConcreteArchitecture(
-            rig.ModelConstituent.FromOrderedInputs([sample[0].ToTensorData()]));
+            [sample[0].ToTensorData()]);
         var scheme = ModuleParamSetNamingScheme.FromModelIdFormats(concrete.GetShorokooIdNamingScheme(), "Shorokoo");
         var modelIds = concrete.GetConcreteModelParamInfos().ModelIds;
         foreach (var f in stepped.TrainableParams.Fields.Where(f => f.Value is TensorData))

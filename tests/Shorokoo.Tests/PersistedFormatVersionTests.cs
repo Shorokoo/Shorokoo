@@ -37,7 +37,7 @@ public class PersistedFormatVersionTests
         {
             var moduleGraph = ScalarMultiplyModel.ComputationGraph;
             var model = moduleGraph
-                .ToConcreteArchitecture(moduleGraph.FromOrderedInputs([TensorData([2], 1.0f, 2.0f)]))
+                .ToConcreteArchitecture([TensorData([2], 1.0f, 2.0f)])
                 .ToConcreteModel();
 
             var srkPath = Path.Combine(dir, "model.srk");

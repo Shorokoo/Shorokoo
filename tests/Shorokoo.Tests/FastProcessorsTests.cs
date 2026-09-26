@@ -130,7 +130,7 @@ public class FastProcessorsCoverageTests
         var g = ((ComputationGraph)typeof(AutoGradStructConvStridePadCheck)
             .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var x = TensorData([1L, 2L, 5L, 5L], new float[1 * 2 * 5 * 5]);
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([x]));
+        var arch = g.ToConcreteArchitecture([x]);
         Assert.DoesNotContain(arch.Nodes, n => n.OpCode == OpCodes.SEQUENCE_AT);
         Assert.DoesNotContain(arch.Nodes, n => n.OpCode == OpCodes.SEQUENCE_CONSTRUCT);
         Assert.Equal(2, arch.GetConcreteModelParamInfos().ParamInfos

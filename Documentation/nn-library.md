@@ -253,7 +253,7 @@ layers and the attention/transformer layers; `affine` on `BatchNorm`,
 layer body as `bit.IfElse(withTheParams, without)`, so both branches exist in
 the *source* —
 but the bit is a `[Hyper]`, fixed before the graph is concretized (baked by
-`Call`/`Model`, or taken from the value you hand `FromOrderedInputs`). Either way
+`Call`/`Model`, or taken from the sample you hand `ToConcreteArchitecture`). Either way
 the framework **prunes the unselected branch's trainable parameters**: with the
 bit off they are never created — no checkpoint field, no gradient, no optimizer
 state, no bytes in a saved model.
@@ -264,7 +264,7 @@ out of it — the toggle already does that.
 
 Two edges to know:
 
-- On the `Foo.ComputationGraph` + `FromOrderedInputs` route the bit is baked but
+- On the `Foo.ComputationGraph` + `ToConcreteArchitecture` route the bit is baked but
   **not removed** — like every `[Hyper]` there it stays a live input of the
   concrete graph and must be passed again at `Execute`. Pass the value you
   concretized with. With the bit **off** its later value is inert *for these
@@ -930,7 +930,7 @@ before calling. The four optional arguments:
   `[Hyper]`, so baking it to a constant — `Call`/`Model`, or
   [`Specialize`](inference.md#hardcoding-hypers-with-specialize) — folds the
   `IfElse` to one branch. Note it is *unlike* `useBias` in one way: neither branch
-  holds a trainable parameter, so on the `ComputationGraph` + `FromOrderedInputs`
+  holds a trainable parameter, so on the `ComputationGraph` + `ToConcreteArchitecture`
   route there is nothing to prune and the `IfElse` stays live, selecting at run
   time (see [An off toggle costs nothing](#gated-parameters)).
 
@@ -1701,8 +1701,7 @@ var rig = TrainingRig.FromScratch(
     TinyConvClassifier.ComputationGraph,
     CrossEntropyLoss.ComputationGraph,
     AdamOptimizer.ComputationGraph,
-    new NamedModelParam[] {
-        new TensorDataModelParam("input", ModelParamType.InputParam, inputData) },
+    [inputData],                                                  // the model's one input
     new AdamOptimizerHyperparameters { LearningRate = 0.01f });  // β/ε keep defaults
 
 static TensorDataStruct MakeBatch(string field, string structName, TensorData data) =>

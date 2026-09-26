@@ -50,8 +50,8 @@ public class CSharpModelBuilderCoverageTests
     public void TestScanCodegenScansTheCarryBeforeTheBodyUpdatesIt()
     {
         var g = ScanCarryBeforeUpdate.ComputationGraph.ToInternal();
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs(
-            [TensorData(DType.Float32, [], 10f), TensorData(DType.Int64, [], 3L)]));
+        var arch = g.ToConcreteArchitecture(
+            [TensorData(DType.Float32, [], 10f), TensorData(DType.Int64, [], 3L)]);
         string[] body = [.. new CSharpModelBuilder().BuildFullGraph(arch, "CovTest")
             .Split('\n').Select(x => x.Trim())];
 
@@ -235,7 +235,7 @@ public class CSharpModelBuilderCoverageTests
 
     private static byte[][] Run(InternalComputationGraph graph, TensorData[] inputs)
     {
-        var model = graph.ToConcreteArchitecture(graph.FromOrderedInputs([.. inputs])).ToConcreteModel();
+        var model = graph.ToConcreteArchitecture([.. inputs]).ToConcreteModel();
         return [.. Shorokoo.Runtime.ComputeContext.Default.Execute(model, [.. inputs.Select(t => t.Shared())])
             .Select(x => x.ToTensorData()).Select(t => t.DType == DType.Utf8
                 ? System.Text.Encoding.UTF8.GetBytes(string.Join("\0", [.. t.Shape.Dims.Select(d => $"{d}"), .. t.Data]))

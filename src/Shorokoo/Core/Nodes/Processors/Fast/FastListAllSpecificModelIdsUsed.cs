@@ -74,7 +74,7 @@ internal static partial class FastListAllSpecificModelIdsUsed
 
     public static ImmutableArray<ModelId> Process(
         InternalComputationGraph graph,
-        ModelParamList inputHints,
+        IReadOnlyList<IData> inputHints,
         ImmutableArray<ModelId> candidateModelIds)
     {
         if (candidateModelIds.IsEmpty)

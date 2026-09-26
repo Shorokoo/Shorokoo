@@ -39,7 +39,7 @@ public class QeeOpsCoverageTests
         var prop = typeof(TModule).GetProperty("ComputationGraph", BindingFlags.Public | BindingFlags.Static)
             ?? throw new InvalidOperationException($"{typeof(TModule).FullName} has no public static ComputationGraph property");
         var moduleGraph = ((ComputationGraph)prop.GetValue(null)!).ToInternal();
-        var concreteArch = moduleGraph.ToConcreteArchitecture(moduleGraph.FromOrderedInputs([.. runtimeInputs]));
+        var concreteArch = moduleGraph.ToConcreteArchitecture([.. runtimeInputs]);
         var concreteModel = concreteArch.ToConcreteModel();
         var qee = new QuickExecutionEngine();
         var store = runtimeInputs.Length == 0 ? qee.Run(concreteModel) : qee.Run(concreteModel, runtimeInputs);
@@ -140,7 +140,7 @@ public class QeeOpsCoverageTests
 
         var x = TensorData(DType.Float32, [2L], 1f, 3f);
         var g = QeeSoftsignLowered.ComputationGraph.ToInternal();
-        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x])).ToConcreteModel();
+        var concrete = g.ToConcreteArchitecture([x]).ToConcreteModel();
         var concurrent = new float[64][];
         Parallel.For(0, concurrent.Length, new ParallelOptions { MaxDegreeOfParallelism = 4 },
             i => concurrent[i] = [.. ((RuntimeTensor)new QuickExecutionEngine()
@@ -177,7 +177,7 @@ public class QeeOpsCoverageTests
 
         var x = TensorData(DType.Float32, [2L], 1f, 3f);
         var g = QeeSoftsignLowered.ComputationGraph.ToInternal();
-        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x])).ToConcreteModel();
+        var concrete = g.ToConcreteArchitecture([x]).ToConcreteModel();
         using (OpRegistry.Override(new ThrowingAbsStub()))
         {
             var failed = (RuntimeTensor)new QuickExecutionEngine().Run(concrete, x)[concrete.Outputs[0]];
@@ -275,7 +275,7 @@ public class QeeOpsCoverageTests
     {
         var x = TensorData(DType.Float32, [5L], 0f, 1f, -1f, 3f, -7f);
         var g = QeeSoftsignThenAbsLowered.ComputationGraph.ToInternal();
-        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x])).ToConcreteModel();
+        var concrete = g.ToConcreteArchitecture([x]).ToConcreteModel();
         long[][] inputDims = [[5L]];
 
         using var registered = OpLoweringRegistry.Override(
@@ -334,7 +334,7 @@ public class QeeOpsCoverageTests
         var x = TensorData(DType.Float32, [3L], 1f, 3f, 7f);
         var y = TensorData(DType.Float32, [3L], 1f, 1f, 1f);
         var g = QeeTwoSoftsignsLowered.ComputationGraph.ToInternal();
-        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x, y])).ToConcreteModel();
+        var concrete = g.ToConcreteArchitecture([x, y]).ToConcreteModel();
 
         var lowered = concrete.Clone();
         FastLowerRegisteredOps.Process(lowered, QuickExecutionEngine.LoweredOpCodes);
@@ -356,7 +356,7 @@ public class QeeOpsCoverageTests
         Assert.True(QeeAudit.Check<QeeSoftsignInLoopAuditCheck>(x));
 
         var g = QeeSoftsignInLoopAuditCheck.ComputationGraph.ToInternal();
-        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x])).ToConcreteModel();
+        var concrete = g.ToConcreteArchitecture([x]).ToConcreteModel();
         var lowered = concrete.Clone();
         FastLowerRegisteredOps.Process(lowered, QuickExecutionEngine.LoweredOpCodes);
 
@@ -375,7 +375,7 @@ public class QeeOpsCoverageTests
     {
         var x = TensorData(DType.Float32, [5L], 0f, 1f, -1f, 3f, -7f);
         var g = QeeSoftsignLowered.ComputationGraph.ToInternal();
-        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x])).ToConcreteModel();
+        var concrete = g.ToConcreteArchitecture([x]).ToConcreteModel();
         Assert.Equal(DType.Float32, new QuickExecutionEngine().Run(concrete, x)[concrete.Outputs[0]].DType);
 
         long[][] inputDims = [[5L]];
@@ -396,7 +396,7 @@ public class QeeOpsCoverageTests
         var zero = TensorData(DType.Float32, [3L], 0f, 5f, 7f);
         var three = TensorData(DType.Float32, [3L], 3f, 4f, 5f);
         var g = ZeroTripLoopWithScanOutput.ComputationGraph;
-        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([zero])).ToConcreteModel().ToInternal();
+        var concrete = g.ToConcreteArchitecture([zero]).ToConcreteModel().ToInternal();
 
         long ScanRows(TensorData x) => ((RuntimeTensor)new QuickExecutionEngine()
             .Run(concrete, x)[concrete.Outputs[0]]).Shape!.Dims[0];
@@ -421,7 +421,7 @@ public class QeeOpsCoverageTests
     private static RuntimeTensor IfOfUnknownFlag(TensorData x, bool sampleFlag)
     {
         var g = RankByFlagLayer.ComputationGraph;
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([x, TensorData(DType.Bool, [], sampleFlag)])).ToInternal();
+        var arch = g.ToConcreteArchitecture([x, TensorData(DType.Bool, [], sampleFlag)]).ToInternal();
         var initial = new Dictionary<Shorokoo.Core.Graph.FastTensorKey, IRuntimeTensor>
         {
             [arch.Inputs[0]] = new RuntimeTensor { DType = DType.Float32, Shape = x.Shape },
@@ -452,7 +452,7 @@ public class QeeOpsCoverageTests
     {
         var x = TensorData(DType.Float32, [3L], 3f, 4f, 5f);
         var g = ZeroTripLoopWithScanOutput.ComputationGraph;
-        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x])).ToConcreteModel().ToInternal();
+        var concrete = g.ToConcreteArchitecture([x]).ToConcreteModel().ToInternal();
         var engine = new QuickExecutionEngine();
 
         using (OpRegistry.Override(new ThrowingLoopCloseStub()))
@@ -470,7 +470,7 @@ public class QeeOpsCoverageTests
         var a = TensorData(DType.Float32, [], 1f);
         var b = TensorData(DType.Float32, [], 2f);
         var g = MixedTensorStructLoopRuntimeTripCount.ComputationGraph;
-        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x, a, b])).ToConcreteModel().ToInternal();
+        var concrete = g.ToConcreteArchitecture([x, a, b]).ToConcreteModel().ToInternal();
 
         using (OpRegistry.Override(new ThrowingLoopCloseStub()))
         {
@@ -623,7 +623,7 @@ public class QeeIntegerWidthTests
     {
         var g = ((ComputationGraph)typeof(TModule)
             .GetProperty("ComputationGraph", BindingFlags.Public | BindingFlags.Static)!.GetValue(null)!).ToInternal();
-        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
+        var concrete = g.ToConcreteArchitecture([input]).ToConcreteModel();
         return ComputeContext.Default.Execute(concrete, input.Shared())[0].ToTensorData();
     }
 
@@ -662,7 +662,7 @@ public class QeeIntegerWidthTests
     {
         var g = ((ComputationGraph)typeof(TModule)
             .GetProperty("ComputationGraph", BindingFlags.Public | BindingFlags.Static)!.GetValue(null)!).ToInternal();
-        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([])).ToConcreteModel();
+        var concrete = g.ToConcreteArchitecture([]).ToConcreteModel();
         var rt = new QuickExecutionEngine().Run(concrete)[concrete.Outputs[0]];
         Assert.Equal(dtype, rt.DType);
         if (rt is RuntimeTensor { IntData: { } d })
@@ -756,7 +756,7 @@ public class QeeIntegerWidthTests
     {
         var g = ((ComputationGraph)typeof(TModule)
             .GetProperty("ComputationGraph", BindingFlags.Public | BindingFlags.Static)!.GetValue(null)!).ToInternal();
-        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([.. inputs])).ToConcreteModel();
+        var concrete = g.ToConcreteArchitecture([.. inputs]).ToConcreteModel();
         var outData = ComputeContext.Default.Execute(concrete, inputs)[0].ToTensorData();
         return outData.DType switch
         {
@@ -771,7 +771,7 @@ public class QeeIntegerWidthTests
         var g = ((ComputationGraph)typeof(TModule)
             .GetProperty("ComputationGraph", BindingFlags.Public | BindingFlags.Static)!.GetValue(null)!).ToInternal();
         var x = TensorData([2L], 0f, 0f);
-        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x])).ToConcreteModel();
+        var concrete = g.ToConcreteArchitecture([x]).ToConcreteModel();
         foreach (var kv in new QuickExecutionEngine().Run(concrete))
             if (kv.Value.DType == dtype && kv.Value is RuntimeTensor { IntData: { Length: 1 } m })
                 return dtype == DType.UInt32 ? (uint)m[0] : (int)m[0];
@@ -838,7 +838,7 @@ public class QeeUInt64SignedOperatorTests
         var g = ((ComputationGraph)typeof(QeeUInt64SignedDivide)
             .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var input = TensorData([2L, 2L], 0f, 0f, 0f, 0f);
-        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
+        var concrete = g.ToConcreteArchitecture([input]).ToConcreteModel();
         var got = ComputeContext.Default.Execute(concrete, input)[0]
             .ToTensorData().As<uint64>().AccessMemory().ToArray();
 
@@ -856,7 +856,7 @@ public class QeeUInt64SignedOperatorTests
         var g = ((ComputationGraph)typeof(QeeUInt64SignedModulo)
             .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var input = TensorData([2L, 2L], 0f, 0f, 0f, 0f);
-        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
+        var concrete = g.ToConcreteArchitecture([input]).ToConcreteModel();
         var got = ComputeContext.Default.Execute(concrete, input)[0]
             .ToTensorData().As<uint64>().AccessMemory().ToArray();
 
@@ -876,7 +876,7 @@ public class QeeUInt64SignedOperatorTests
         var g = ((ComputationGraph)typeof(QeeUInt64SignedDivideMaxValue)
             .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var input = TensorData([2L, 2L], 0f, 0f, 0f, 0f);
-        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
+        var concrete = g.ToConcreteArchitecture([input]).ToConcreteModel();
         var got = ComputeContext.Default.Execute(concrete, input)[0]
             .ToTensorData().As<uint64>().AccessMemory().ToArray();
 

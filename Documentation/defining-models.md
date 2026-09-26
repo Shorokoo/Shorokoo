@@ -413,13 +413,16 @@ on it folds — including the `useBias` gates, which a plain concretization with
 no hypers to thread through `TrainStep`:
 
 ```csharp
-var sample = new TensorDataModelParam("patches", ModelParamType.InputParam,
-    TensorData([batch, numPatches, patchDim], /* … */));
+var sample = TensorData([batch, numPatches, patchDim], /* … */);
 
 var rig = TrainingRig.FromScratch(
-    tiny, Losses.CrossEntropy, Optimizers.AdamW, [sample],
+    tiny, Losses.CrossEntropy, Optimizers.AdamW, [sample],   // one sample per input, in order
     new AdamWOptimizerHyperparameters { LearningRate = 3e-4f });
 ```
+
+The samples bind by position. To bind them by name instead — each to the input it names, in any
+order — pass `NamedModelParam`s:
+`[new TensorDataModelParam("patches", ModelParamType.InputParam, sample)]`.
 
 Swapping `tiny` for `small` is the whole diff between training the two. (Each variant is
 still concretized and lowered separately, so this buys one source of truth, not a cheaper
@@ -524,8 +527,9 @@ an *absent* optional input — execute graphs that exercise the absent branch th
 `new QuickExecutionEngine().Execute(concreteModel, inputs…)`, which is optional-aware
 in pure managed code.
 
-A model with an optional input trains like any other: pass the sample input as an
-`OptionalTensorDataModelParam` to `TrainingRig.FromScratch`, and build each batch with
+A model with an optional input trains like any other: pass its sample to
+`TrainingRig.FromScratch` as an `OptionalTensorData` in the input's position (or, binding by
+name, as an `OptionalTensorDataModelParam` named for the input), and build each batch with
 `rig.InputDef.FromOrderedData(...)`, which takes an `OptionalTensorData` in that field's
 position. The sample's arrangement — present or absent — only sizes the rig's build-time
 shape inference; it is not baked into the training step, so a rig built either way accepts
@@ -661,7 +665,7 @@ var rig = TrainingRig.FromScratch(graph, Losses.L2Loss,
     Optimizers.SGD, sampleInputs, 0.01f);
 
 // 5. Export — concretize and save/export as usual (see onnx-and-weights.md).
-var concrete = graph.ToConcreteArchitecture(graph.FromOrderedInputs([sample]))
+var concrete = graph.ToConcreteArchitecture([sample])
                     .ToConcreteModel();
 var onnx = FastOnnxModelBuilder.BuildOnnxModel(concrete);
 ```

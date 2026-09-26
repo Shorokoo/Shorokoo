@@ -116,7 +116,7 @@ public class RngPinTests
         var g = ((ComputationGraph)typeof(TModule)
             .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var input = TensorData([1L, 4L], 0.1f, 0.2f, 0.3f, 0.4f);
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
+        var arch = g.ToConcreteArchitecture([input]);
 
         // The weight of the FIRST-id Linear ([1, 1] = sub-model 1's param 1) has shape [out, in].
         var firstWeight = arch.GetConcreteModelParamInfos().ParamInfos
@@ -131,7 +131,7 @@ public class RngPinTests
     {
         var g = ((ComputationGraph)typeof(TModule)
             .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
-        return g.ToConcreteArchitecture(g.FromOrderedInputs([.. inputs]));
+        return g.ToConcreteArchitecture([.. inputs]);
     }
 
     private static string AllMessages(Exception ex)

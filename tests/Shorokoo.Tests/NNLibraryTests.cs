@@ -979,7 +979,7 @@ public class NNLibraryOptimizerTrainingCoverageTests
 
         var g = AnalyticBindLinearModel.ComputationGraph;
         var x = TensorData([1L, 2L], 1f, 1f);
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([x]));
+        var arch = g.ToConcreteArchitecture([x]);
         var infos = arch.GetConcreteModelParamInfos().ParamInfos;
         Assert.Equal(2, infos.Length);
         var weights = new ModelParamList(

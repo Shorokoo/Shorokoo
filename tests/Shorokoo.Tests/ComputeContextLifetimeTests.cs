@@ -358,7 +358,7 @@ public class ComputeContextLifetimeCoverageTests
                 backendReads = DefaultBackend.CountInstanceReads(() =>
                 {
                     var concrete = module
-                        .ToConcreteArchitecture(module.FromOrderedInputs([sample]))
+                        .ToConcreteArchitecture([sample])
                         .ToConcreteModel();
                     Persistence.ExportOnnx(concrete, onnx);
                 }));

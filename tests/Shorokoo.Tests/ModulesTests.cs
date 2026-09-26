@@ -117,7 +117,7 @@ public class ModulesCoverageTests
     private static InternalComputationGraph ArchOf(ComputationGraph module)
     {
         var g = module.ToInternal();
-        return g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData(DType.Float32, [2L], 1f, 2f)]));
+        return g.ToConcreteArchitecture([TensorData(DType.Float32, [2L], 1f, 2f)]);
     }
 
     [Fact]
@@ -299,8 +299,8 @@ public class ModulesCoverageTests
     private static ComputationGraph NestedBigArch(bool outer, bool inner)
     {
         var g = Modules.NestedBigGatedParamLayer.ComputationGraph;
-        return g.ToConcreteArchitecture(g.FromOrderedInputs(
-            [TensorData([], outer), TensorData([], inner), TensorData([2L], 1f, 2f)]));
+        return g.ToConcreteArchitecture(
+            [TensorData([], outer), TensorData([], inner), TensorData([2L], 1f, 2f)]);
     }
 
     private static int IfCount(ComputationGraph arch)
@@ -353,8 +353,8 @@ public class ModulesCoverageTests
         Assert.Equal(1, reloaded.Nodes.Count(n => n.OpCode == OpCodes.EXPAND));
 
         var g = Modules.NestedRank0GatedParamLayer.ComputationGraph;
-        var r0 = g.ToConcreteArchitecture(g.FromOrderedInputs(
-            [TensorData([], false), TensorData([], true), x]));
+        var r0 = g.ToConcreteArchitecture(
+            [TensorData([], false), TensorData([], true), x]);
         Assert.Equal(0, ExpandCount(r0));
         Assert.Equal(0, r0.InitializeTrainableParams(rngConfig: RngConfig.Default).ModelParams.Length);
         var r0Out = new ComputeContext().Execute(r0.ToConcreteModel(RngConfig.Default),
@@ -365,7 +365,7 @@ public class ModulesCoverageTests
     private static bool Exclusivity(ComputationGraph g, TensorData[] hints, IData[] exec,
         int paramCount, int ifNodes, float[] slot0, float[] slot1)
     {
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([.. hints]));
+        var arch = g.ToConcreteArchitecture([.. hints]);
         var o = new ComputeContext().Execute(arch.ToConcreteModel(RngConfig.Default), exec);
         return arch.InitializeTrainableParams(rngConfig: RngConfig.Default).ModelParams.Length == paramCount
             && IfCount(arch) == ifNodes
@@ -402,8 +402,8 @@ public class ModulesCoverageTests
         var x = TensorData([2L], 1f, 2f);
         (int Params, int Ifs, float[] Out) Run(bool flag)
         {
-            var arch = g.ToConcreteArchitecture(g.FromOrderedInputs(
-                [TensorData([], false), TensorData([], flag), x]));
+            var arch = g.ToConcreteArchitecture(
+                [TensorData([], false), TensorData([], flag), x]);
             var o = new ComputeContext().Execute(arch.ToConcreteModel(RngConfig.Default),
                 [TensorData([], false), TensorData([], flag), x.Shared()]);
             return (arch.InitializeTrainableParams(rngConfig: RngConfig.Default).ModelParams.Length,
@@ -422,7 +422,7 @@ public class ModulesCoverageTests
     public void TestAGateWithAPrunedParamOnEachBranchFoldsUnderAnOpTheEngineLowers()
     {
         var g = Modules.ParamOnBothBranchesSoftsignLayer.ComputationGraph;
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([], false), TensorData([], true), TensorData([2L], 1f, 2f)]));
+        var arch = g.ToConcreteArchitecture([TensorData([], false), TensorData([], true), TensorData([2L], 1f, 2f)]);
         Assert.Empty(arch.InitializeTrainableParams(rngConfig: RngConfig.Default).ModelParams);
     }
 
@@ -445,7 +445,7 @@ public class ModulesCoverageTests
     public void TestTheLiveParamMaskExcludesAnUnusedCandidateOnAGraphTheEngineLowers()
     {
         var g = Modules.SoftsignOfParamLayer.ComputationGraph;
-        var hints = g.FromOrderedInputs([TensorData([2L], 1f, 2f)]);
+        IData[] hints = [TensorData([2L], 1f, 2f)];
         var live = g.ToConcreteArchitecture(hints).GetConcreteModelParamInfos().ModelIds.Single();
         var dead = new ModelId([.. live.Vals.SetItem(live.Vals.Length - 1, live.Vals[^1] + 1)]);
         Assert.Equal([live], FastListAllSpecificModelIdsUsed.Process(AtIdRefStage(g), hints, [live, dead]).ToArray());
@@ -460,7 +460,7 @@ public class ModulesCoverageTests
         var x = TensorData([2L], 1f, 2f);
         bool Case(long mode, int paramCount, int ifNodes, float[] expected)
         {
-            var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([], mode), x]));
+            var arch = g.ToConcreteArchitecture([TensorData([], mode), x]);
             var o = new ComputeContext().Execute(arch.ToConcreteModel(RngConfig.Default),
                 [TensorData([], mode), x.Shared()]);
             return arch.InitializeTrainableParams(rngConfig: RngConfig.Default).ModelParams.Length == paramCount
@@ -480,8 +480,8 @@ public class ModulesCoverageTests
         var x = TensorData([1L, 2L], 1f, 2f);
         bool Case(bool useBias, int paramCount, int ifNodes)
         {
-            var arch = g.ToConcreteArchitecture(g.FromOrderedInputs(
-                [TensorData([], 3L), TensorData([], useBias), x]));
+            var arch = g.ToConcreteArchitecture(
+                [TensorData([], 3L), TensorData([], useBias), x]);
             return arch.InitializeTrainableParams(rngConfig: RngConfig.Default).ModelParams.Length == paramCount
                 && IfCount(arch) == ifNodes
                 && arch.InputNames.Contains("useBias");
@@ -501,7 +501,7 @@ public class ModulesCoverageTests
         {
             var g = Modules.LoopGateHyperLayer.ComputationGraph;
             TensorData[] hints = [TensorData([], 3L), TensorData([], flag), x];
-            var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([.. hints]));
+            var arch = g.ToConcreteArchitecture([.. hints]);
             return Floats(new ComputeContext().Execute(arch.ToConcreteModel(RngConfig.Default), [hints[0], hints[1], x.Shared()])[0]);
         }
         Assert.Equal([4f, 5f], Run(flag: true));
@@ -518,7 +518,7 @@ public class ModulesCoverageTests
             OpCodes.LOOP_OPEN, OpCodes.IF_OPEN, OpCodes.IF_CLOSE, OpCodes.ADD, OpCodes.LOOP_CLOSE));
 
         var optional = Modules.LoopOptionalLayer.ComputationGraph;
-        var lowered = optional.ToConcreteArchitecture(optional.FromOrderedInputs([TensorData([], 3L), x, x]))
+        var lowered = optional.ToConcreteArchitecture([TensorData([], 3L), x, x])
                               .ToConcreteModel().ToInternal();
         IData[] absent = [TensorData([], 3L), x, OptionalTensorData.None(DType.Float32)];
         Assert.Equal([8f, 16f],
@@ -527,7 +527,7 @@ public class ModulesCoverageTests
 
     private static bool Ordered(ComputationGraph g, TensorData[] hints, bool scoped, params string[] ops)
     {
-        var lowered = g.ToConcreteArchitecture(g.FromOrderedInputs([.. hints])).ToInternal();
+        var lowered = g.ToConcreteArchitecture([.. hints]).ToInternal();
         if (scoped) lowered.ConfigureScopes();
         if (!lowered.IsLinearOrderValid()) return false;
         int at = 0;
@@ -568,8 +568,8 @@ public class ModulesCoverageTests
     public void TestSharedWorkStaysOutsideTheIfThatOneBranchReadsIt()
     {
         var g = Modules.SharedWorkAroundAnIfLayer.ComputationGraph;
-        var lowered = g.ToConcreteArchitecture(g.FromOrderedInputs(
-            [TensorData([2L], 1f, 2f), TensorData([], 2f)])).ToInternal();
+        var lowered = g.ToConcreteArchitecture(
+            [TensorData([2L], 1f, 2f), TensorData([], 2f)]).ToInternal();
         lowered.ConfigureScopes();
 
         int open = lowered.Nodes.FindIndex(n => n.OpCode == OpCodes.IF_OPEN);
@@ -586,7 +586,7 @@ public class ModulesCoverageTests
     {
         static void BodyKeeps(ComputationGraph g, params string[] ops)
         {
-            string[] lowered = [.. g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([], 3L)]))
+            string[] lowered = [.. g.ToConcreteArchitecture([TensorData([], 3L)])
                                      .ToInternal().Nodes.Select(n => n.OpCode)];
             foreach (var op in ops)
                 Assert.InRange(
@@ -606,7 +606,7 @@ public class ModulesCoverageTests
     public void TestUnrollingALoopGivesEachIterationItsOwnDraw()
     {
         var g = Modules.ConstantTripDrawScanLayer.ComputationGraph;
-        var lowered = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([], 1f)])).ToInternal();
+        var lowered = g.ToConcreteArchitecture([TensorData([], 1f)]).ToInternal();
         Assert.Equal(3, lowered.Nodes.Count(n => n.OpCode == OpCodes.RANDOM_UNIFORM));
     }
 
@@ -630,12 +630,12 @@ public class ModulesCoverageTests
         var inner = Modules.IfInLoopInIfLayer.ComputationGraph;
         var spec = inner.Specialize(inner.FromOrderedInputs([TensorData([], 3L)]));
         IData[] specRuntime = [x.Shared(), TensorData([], true)];
-        var specModel = spec.ToConcreteArchitecture(spec.FromOrderedInputs([x, TensorData([], true)]))
+        var specModel = spec.ToConcreteArchitecture([x, TensorData([], true)])
                             .ToConcreteModel(RngConfig.Default);
         Assert.Equal([10f, 20f], Floats(new ComputeContext().Execute(specModel, specRuntime)[0]));
 
         var outer = Modules.LoopInIfInLoopLayer.ComputationGraph;
-        var outerModel = outer.ToConcreteArchitecture(outer.FromOrderedInputs([.. runtime.Cast<TensorData>()]))
+        var outerModel = outer.ToConcreteArchitecture([.. runtime.Cast<TensorData>()])
                               .ToConcreteModel(RngConfig.Default);
         Assert.Equal([25f, 50f], Floats(new ComputeContext().Execute(outerModel, runtime)[0]));
     }
@@ -800,7 +800,7 @@ public class ModulesCoverageTests
         var numOut = TensorData(DType.Int64, [], 4L);
         var input = TensorDataWithSmallVals(DType.Float32, [4L, 4L]);
         var g = FCLayer.ComputationGraph;
-        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([numOut, input])).ToConcreteModel();
+        var concrete = g.ToConcreteArchitecture([numOut, input]).ToConcreteModel();
 
         var paramNodes = concrete.ToInternal().Nodes
             .Where(n => n.OpCode == InternalOpCodes.MODEL_PARAM_DATA).ToArray();
@@ -847,7 +847,7 @@ public class ModulesCoverageTests
         var numOut = TensorData(DType.Int64, [], 4L);
         var input = TensorDataWithSmallVals(DType.Float32, [4L, 4L]);
         var g = FCLayer.ComputationGraph;
-        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([numOut, input])).ToConcreteModel();
+        var concrete = g.ToConcreteArchitecture([numOut, input]).ToConcreteModel();
 
         var proto = Shorokoo.Core.Factory.FastOnnxModelBuilder.BuildOnnxModel(concrete);
 
@@ -905,7 +905,7 @@ public class ModulesCoverageTests
         var ys = TensorData([2L], 3f, 2f);
         var rankGraph = VectorMinMaxOthersBugPinCheck.ComputationGraph;
         var rankConcrete = rankGraph
-            .ToConcreteArchitecture(rankGraph.FromOrderedInputs([xs, ys])).ToConcreteModel();
+            .ToConcreteArchitecture([xs, ys]).ToConcreteModel();
         var rankProto = Shorokoo.Core.Factory.FastOnnxModelBuilder.BuildOnnxModel(rankConcrete);
 
         foreach (var name in (string[])["xs", "ys"])
@@ -1067,7 +1067,7 @@ public class ModulesCoverageTests
         Assert.Contains(reloaded.ToInternal().Nodes, n => n.OpCode == InternalOpCodes.MODEL_INVOKE);
 
         TensorData[] sampleInputs = [TensorDataWithSmallVals(DType.Float32, [5L])];
-        var concreteArch = reloaded.ToConcreteArchitecture(reloaded.FromOrderedInputs([.. sampleInputs]));
+        var concreteArch = reloaded.ToConcreteArchitecture([.. sampleInputs]);
 
         Assert.DoesNotContain(concreteArch.ToInternal().Nodes, n => n.OpCode == InternalOpCodes.MODEL_INVOKE);
         Assert.DoesNotContain(concreteArch.ToInternal().Nodes, n => n.OpCode == InternalOpCodes.FUNCTION_INVOKE);
@@ -1091,7 +1091,7 @@ public class ModulesCoverageTests
     private static ConcreteModelParamInfos VitParams(TensorData[] hypers)
     {
         var g = VitVariant(hypers);
-        return g.ToConcreteArchitecture(g.FromOrderedInputs([VitPatches])).GetConcreteModelParamInfos();
+        return g.ToConcreteArchitecture([VitPatches]).GetConcreteModelParamInfos();
     }
 
     private static int VitParamCount(TensorData[] hypers) => VitParams(hypers).ModelIds.Length;
@@ -1127,7 +1127,7 @@ public class ModulesCoverageTests
 
         var moduleGraph  = HypersLayer.ComputationGraph;
         TensorData[] allHints = [factor, bias, input];
-        var concreteArch = moduleGraph.ToConcreteArchitecture(moduleGraph.FromOrderedInputs([.. allHints]));
+        var concreteArch = moduleGraph.ToConcreteArchitecture([.. allHints]);
         var model        = concreteArch.ToConcreteModel();
         int originalInputCount = model.ToInternal().Inputs.Count;
 
@@ -1151,7 +1151,7 @@ public class ModulesCoverageTests
         Assert.Equal(["input"], specialized.InputNames);
 
         var concrete = specialized
-            .ToConcreteArchitecture(specialized.FromOrderedInputs([input]))
+            .ToConcreteArchitecture([input])
             .ToConcreteModel();
         Assert.Single(concrete.ToInternal().Inputs);
         Assert.Equal(expected,
@@ -1165,18 +1165,18 @@ public class ModulesCoverageTests
         Assert.Equal(["input"], fcSpecialized.InputNames);
 
         var fcConcrete = fcSpecialized
-            .ToConcreteArchitecture(fcSpecialized.FromOrderedInputs([fcInput]))
+            .ToConcreteArchitecture([fcInput])
             .ToConcreteModel();
         Assert.Single(fcConcrete.ToInternal().Inputs);
 
         var fcActual = ComputeContext.Default.Execute(fcConcrete, fcInput.Shared())[0].ToTensorData().AccessRawMemory().ToArray();
-        var fcRef = fcGraph.ToConcreteArchitecture(fcGraph.FromOrderedInputs([numOut, fcInput])).ToConcreteModel();
+        var fcRef = fcGraph.ToConcreteArchitecture([numOut, fcInput]).ToConcreteModel();
         var fcExpected = ComputeContext.Default.Execute(fcRef, numOut, fcInput)[0].ToTensorData().AccessRawMemory().ToArray();
         Assert.Equal(fcExpected, fcActual);
     }
 
     private static float[] ConcretizeAndRun(ComputationGraph g, params TensorData[] inputs) =>
-        RunFloats(g.ToConcreteArchitecture(g.FromOrderedInputs([.. inputs])).ToConcreteModel(), inputs);
+        RunFloats(g.ToConcreteArchitecture([.. inputs]).ToConcreteModel(), inputs);
 
     private static float[] RunFloats(ComputationGraph model, params TensorData[] inputs)
         => ComputeContext.Default.Execute(model, [.. inputs.Select(t => t.Shared())])[0].ToTensorData().As<float32>().AccessMemory<float>().ToArray();
@@ -1184,9 +1184,9 @@ public class ModulesCoverageTests
     private static void AssertBakedHypersMatchHintedHypers(
         ComputationGraph module, TensorData[] hypers, TensorData input)
     {
-        var hinted    = module.ToConcreteArchitecture(module.FromOrderedInputs([.. hypers, input]));
+        var hinted    = module.ToConcreteArchitecture([.. hypers, input]);
         var baked     = module.Specialize(module.FromOrderedInputs([.. hypers]));
-        var bakedArch = baked.ToConcreteArchitecture(baked.FromOrderedInputs([input]));
+        var bakedArch = baked.ToConcreteArchitecture([input]);
 
         ModelId[] hintedIds = [.. hinted.GetConcreteModelParamInfos().ModelIds];
         ModelId[] bakedIds  = [.. bakedArch.GetConcreteModelParamInfos().ModelIds];
@@ -1215,7 +1215,7 @@ public class ModulesCoverageTests
 
     private static string MissingSamples(ComputationGraph graph, params TensorData[] samples)
     {
-        var ex = Assert.Throws<ModelException>(() => graph.ToConcreteArchitecture(graph.FromOrderedInputs([.. samples])));
+        var ex = Assert.Throws<ModelException>(() => graph.ToConcreteArchitecture([.. samples]));
         Assert.Equal(ErrorCodes.FW056, ex.ErrorCode);
         return ex.Message;
     }
@@ -1233,8 +1233,7 @@ public class ModulesCoverageTests
 
     private static string ExtraSamples(ComputationGraph graph, params TensorData[] samples)
     {
-        var ex = Assert.Throws<ModelException>(() => graph.ToConcreteArchitecture(
-            new ModelParamList(samples.Select((t, i) => ((string)$"s{i}", t)))));
+        var ex = Assert.Throws<ModelException>(() => graph.ToConcreteArchitecture([.. samples]));
         Assert.Equal(ErrorCodes.FW056, ex.ErrorCode);
         return ex.Message;
     }
@@ -1266,7 +1265,7 @@ public class ModulesCoverageTests
         var g = FCLayer.ComputationGraph;
         var outFeatures = TensorData(DType.Int64, [], 4L);
         var input = TensorData(DType.Float32, [2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f);
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([outFeatures, input]));
+        var arch = g.ToConcreteArchitecture([outFeatures, input]);
         var hyper = new ModelParamList([("numOutFeatures", outFeatures)]);
         var specialized = g.Specialize(hyper);
         long[]?[] both = [[], [2L, 3L]];
@@ -1278,7 +1277,7 @@ public class ModulesCoverageTests
         Assert.Equal(both, RecordedShapes(SrkRoundTrip(arch.ToConcreteModel())));
         Assert.Equal(inputOnly, RecordedShapes(arch.Specialize(hyper)));
         Assert.Equal(inputOnly, RecordedShapes(arch.ToConcreteModel().Specialize(hyper)));
-        Assert.Equal(inputOnly, RecordedShapes(specialized.ToConcreteArchitecture(specialized.FromOrderedInputs([input]))));
+        Assert.Equal(inputOnly, RecordedShapes(specialized.ToConcreteArchitecture([input])));
     }
 
     private static string?[] PrefixInputNames(ComputationGraph graph)
@@ -1301,7 +1300,7 @@ public class ModulesCoverageTests
         var g = FCLayer.ComputationGraph;
         var outFeatures = TensorData(DType.Int64, [], 4L);
         var input = TensorData(DType.Float32, [2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f);
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([outFeatures, input]));
+        var arch = g.ToConcreteArchitecture([outFeatures, input]);
         var hyper = new ModelParamList([("numOutFeatures", outFeatures)]);
         string?[] both = ["numOutFeatures", "input"];
         string?[] inputOnly = ["input"];
@@ -1590,33 +1589,64 @@ public class ModulesCoverageTests
             PairSample.Of(1f, 2f), In("x", Image())).Kind);
     }
 
-    private static string Misnamed(ComputationGraph graph, params NamedModelParam[] samples)
+    private static string Refused(Func<ComputationGraph> concretize)
     {
-        var ex = Assert.Throws<ModelException>(() => Concretize(graph, samples));
+        var ex = Assert.Throws<ModelException>(concretize);
         Assert.Equal(ErrorCodes.FW056, ex.ErrorCode);
         return ex.Message;
     }
 
+    private static byte[] Bytes(ComputationGraph graph) => CompressedFormatUtils.SaveFastGraphToBinary(graph, compressed: false);
+
+    private static void BindsAlikePositionallyAndByName(ComputationGraph graph, IData[] positional, params NamedModelParam[] named)
+        => Assert.Equal(Bytes(graph.ToConcreteArchitecture(positional)), Bytes(Concretize(graph, named)));
+
     [Fact]
-    public void TestASampleNamedForAnotherInputThanTheOneAtItsPositionIsRefused()
+    public void TestSamplesByNameInAnyOrderLowerToTheArchitectureTheSamePositionalSamplesGive()
     {
         var x = TensorData([2L], 1f, 2f);
         var two = TensorData(DType.Int64, [], 2L);
-        Assert.Contains("'x'", Misnamed(SimplestLayer.ComputationGraph, In("x", x)));
-        Assert.Contains("'input'", Misnamed(SimplestLayer.ComputationGraph, In("x", x)));
-        Assert.Contains("'input'", Misnamed(FCLayer.ComputationGraph, In("input", two), In("numOutFeatures", x)));
-        Assert.Contains("'seq'", Misnamed(SeqCountShapedParamLayer.ComputationGraph, In("input", x), SeqIn("s", TensorData(DType.Float32, [], 1f))));
-        Assert.Equal(GraphKind.ConcreteArchitecture, Concretize(SimplestLayer.ComputationGraph, In("", x)).Kind);
+        var shaped = TensorData(DType.Float32, [2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f);
+        var pair = PairSample.Of(1f, 2f);
+        var absent = OptionalTensorData.None(DType.Float32);
+        var seq = TensorDataSequence.OfElements([TensorData(DType.Float32, [], 1f), TensorData(DType.Float32, [], 2f)], DType.Float32);
+        BindsAlikePositionallyAndByName(SimplestLayer.ComputationGraph, [x], In("input", x));
+        BindsAlikePositionallyAndByName(FCLayer.ComputationGraph, [two, x], In("input", x), In("numOutFeatures", two));
+        BindsAlikePositionallyAndByName(ConditionalTrainableParamInLoopLayer.ComputationGraph, [two, TensorData(DType.Int64, [], 3L), x],
+            In("input", x), In("threshold", TensorData(DType.Int64, [], 3L)), In("numIterations", two));
+        BindsAlikePositionallyAndByName(PairThenShapedParams, [((TensorStructModelParam)pair).StructData, shaped], In("input", shaped), pair);
+        BindsAlikePositionallyAndByName(OptionalThenConvTransposeLayer.ComputationGraph, [Image(), absent], AbsentIn("bias"), In("x", Image()));
+        BindsAlikePositionallyAndByName(SeqCountShapedParamLayer.ComputationGraph, [x, seq],
+            new TensorDataSequenceModelParam("seq", ModelParamType.InputParam, seq), In("input", x));
     }
 
     [Fact]
-    public void TestASampleWhoseRankContradictsItsInputsDeclaredRankIsRefused()
+    public void TestSamplesByNameThatMissAnInputNameNoInputOrRepeatANameAreRefusedListingTheInputs()
+    {
+        var x = TensorData([2L], 1f, 2f);
+        var two = TensorData(DType.Int64, [], 2L);
+        const string fcInputs = "the graph's inputs are 'numOutFeatures', 'input'";
+        Assert.Contains("no sample was given for input(s) 'numOutFeatures'", Refused(() => Concretize(FCLayer.ComputationGraph, In("input", x))));
+        Assert.Contains(fcInputs, Refused(() => Concretize(FCLayer.ComputationGraph, In("input", x))));
+        Assert.Contains("sample(s) 'size' name no input", Refused(() => Concretize(FCLayer.ComputationGraph, In("input", x), In("numOutFeatures", two), In("size", two))));
+        Assert.Contains(fcInputs, Refused(() => Concretize(FCLayer.ComputationGraph, In("size", two), In("input", x))));
+        Assert.Contains("more than one sample is named 'input'", Refused(() => Concretize(FCLayer.ComputationGraph, In("input", x), In("numOutFeatures", two), In("input", x))));
+        Assert.Contains("'pair'", Refused(() => Concretize(PairThenShapedParams, In("input", x))));
+        Assert.Contains("'bias'", Refused(() => Concretize(OptionalThenConvTransposeLayer.ComputationGraph, In("x", Image()), AbsentIn("b"))));
+    }
+
+    [Fact]
+    public void TestASampleWhoseRankContradictsItsInputsDeclaredRankIsRefusedPositionallyAndByName()
     {
         var x3 = TensorData([3L], 1f, 2f, 3f);
         var one = TensorData(DType.Float32, [], 2f);
-        Assert.Contains("'s'", Misnamed(TensorTimesScalarLayer.ComputationGraph, In("", one), In("", x3)));
-        Assert.Contains("'numOutFeatures'", Misnamed(FCLayer.ComputationGraph, In("", TensorData(DType.Int64, [1L], 2L)), In("", x3)));
-        Assert.Equal(GraphKind.ConcreteArchitecture, Concretize(TensorTimesScalarLayer.ComputationGraph, In("", x3), In("", one)).Kind);
+        var wide = TensorData(DType.Int64, [1L], 2L);
+        Assert.Contains("'s'", Refused(() => TensorTimesScalarLayer.ComputationGraph.ToConcreteArchitecture([one, x3])));
+        Assert.Contains("'s'", Refused(() => Concretize(TensorTimesScalarLayer.ComputationGraph, In("s", x3), In("x", one))));
+        Assert.Contains("'numOutFeatures'", Refused(() => FCLayer.ComputationGraph.ToConcreteArchitecture([wide, x3])));
+        Assert.Contains("'numOutFeatures'", Refused(() => Concretize(FCLayer.ComputationGraph, In("input", x3), In("numOutFeatures", wide))));
+        Assert.Equal(GraphKind.ConcreteArchitecture, TensorTimesScalarLayer.ComputationGraph.ToConcreteArchitecture([x3, one]).Kind);
+        Assert.Equal(GraphKind.ConcreteArchitecture, Concretize(TensorTimesScalarLayer.ComputationGraph, In("s", one), In("x", x3)).Kind);
     }
 
     private static void DetectedAsItsOwnKind(ComputationGraph graph)
@@ -1631,7 +1661,7 @@ public class ModulesCoverageTests
     {
         var x = TensorData([2L], 1f, 2f);
         var fc = FCLayer.ComputationGraph;
-        var fcArch = fc.ToConcreteArchitecture(fc.FromOrderedInputs([TensorData(DType.Int64, [], 2L), x]));
+        var fcArch = fc.ToConcreteArchitecture([TensorData(DType.Int64, [], 2L), x]);
         var fcBoth = new ModelParamList([("numOutFeatures", TensorData(DType.Int64, [], 2L)), ("input", x)]);
         var seqArch = SequenceInputArch(x);
         var inputOnly = new ModelParamList([("input", x)]);
@@ -1648,8 +1678,8 @@ public class ModulesCoverageTests
     public void TestAConcreteGraphWhoseInputRecordsNoShapeIsRefusedNamingIt()
     {
         var g = FCLayer.ComputationGraph;
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs(
-            [TensorData(DType.Int64, [], 4L), TensorData(DType.Float32, [1L, 2L], 1f, 2f)]));
+        var arch = g.ToConcreteArchitecture(
+            [TensorData(DType.Int64, [], 4L), TensorData(DType.Float32, [1L, 2L], 1f, 2f)]);
         foreach (var kind in (GraphKind[])[GraphKind.ConcreteArchitecture, GraphKind.ConcreteModel])
         {
             var stripped = (kind == GraphKind.ConcreteModel ? arch.ToConcreteModel() : arch).ToInternal();
@@ -1734,7 +1764,7 @@ public class ModulesCoverageTests
     {
         using var context = new ComputeContext { Diagnostics = new Shorokoo.Core.Backends.DiagnosticSettings { CollectRunStatistics = true } };
         var g = StringSplitLayer.ComputationGraph;
-        g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData(DType.Utf8, [2L], "a b", "c")]), context);
+        g.ToConcreteArchitecture([TensorData(DType.Utf8, [2L], "a b", "c")], context);
         Assert.NotEmpty(context.RunStats.RecentRuns);
     }
 
@@ -1817,7 +1847,7 @@ public class ModulesCoverageTests
     {
         var g = ZeroTripLoopWithScanOutput.ComputationGraph;
         var x = TensorData(DType.Float32, [3L], 0f, 5f, 7f);
-        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x])).ToConcreteModel().ToInternal();
+        var concrete = g.ToConcreteArchitecture([x]).ToConcreteModel().ToInternal();
         var scanned = Assert.IsType<RuntimeTensor>(
             new QuickExecutionEngine().Run(concrete, x)[concrete.Outputs[0]]);
         Assert.Equal(0L, scanned.Shape!.Dims[0]);
@@ -1839,7 +1869,7 @@ public class ModulesCoverageTests
 
         var g = AnalyticLoopAccumulateCheck.ComputationGraph;
         var x = TensorData(DType.Float32, [4L], 3f, 4f, 5f, 6f);
-        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x])).ToConcreteModel();
+        var concrete = g.ToConcreteArchitecture([x]).ToConcreteModel();
         var direct = ComputeContext.Default.Execute(concrete, x.Shared())[0].ToTensorData().AccessRawMemory().ToArray();
         var proto = Shorokoo.Core.Factory.FastOnnxModelBuilder.BuildOnnxModel(concrete);
         using var ms = new MemoryStream();
@@ -2063,7 +2093,7 @@ public class ModulesCoverageTests
     {
         var sample = TensorData([2L], 1.0f, 2.0f);
         var g = ScalarMultiplyModel.ComputationGraph;
-        var model = g.ToConcreteArchitecture(g.FromOrderedInputs([sample])).ToConcreteModel();
+        var model = g.ToConcreteArchitecture([sample]).ToConcreteModel();
         Assert.Equal([1.0f, 2.0f],
             ComputeContext.Default.Execute(model, sample.Shared())[0].ToTensorData().As<float32>().AccessMemory<float>().ToArray());
 
@@ -2072,7 +2102,7 @@ public class ModulesCoverageTests
         IData[] linear = [TensorData([], 4L), TensorData([], false),
             TensorData([4L, 4L], [.. Enumerable.Repeat(0.5f, 16)])];
         Assert.Equal(["outFeatures", "useBias", "x"], lg.InputNames);
-        var linearModel = lg.ToConcreteArchitecture(lg.FromOrderedInputs([.. linear.Cast<TensorData>()]))
+        var linearModel = lg.ToConcreteArchitecture([.. linear.Cast<TensorData>()])
             .ToConcreteModel();
         Assert.Equal(new Shape(4L, 4L), ComputeContext.Default.Execute(linearModel, linear)[0].ToTensorData().Shape);
 
@@ -2181,7 +2211,7 @@ public class ModulesCoverageTests
             new InternalComputationGraph([x], [(Tensor<float32>)fn.Call(x)[0] + viaModel]), GraphKind.Module);
 
         var input = TensorData([2L], 1f, 2f);
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
+        var arch = g.ToConcreteArchitecture([input]);
         var names = arch.GetConcreteModelParamInfos().ParamInfos
             .Select(i => i.ToShorokooIdString()).ToList();
         Assert.Equal(2, names.Count);
@@ -2202,7 +2232,7 @@ public class ModulesCoverageTests
             var acc = x;
             foreach (var _ in LoopAPI.Iterate(Scalar(3L))) acc = callOnce(acc);
             var g = ComputationGraph.FromInternal(new InternalComputationGraph([x], [acc]), GraphKind.Module);
-            var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([2L], 1f, 2f)]));
+            var arch = g.ToConcreteArchitecture([TensorData([2L], 1f, 2f)]);
             return arch.GetConcreteModelParamInfos().ModelIds.Distinct().Count();
         }
         static Model<Tensor<float32>, Tensor<float32>> NewModel() => ModuleFactory
@@ -2275,7 +2305,7 @@ public class ModulesCoverageTests
                 body += ModuleFactory.FromFunc<Tensor<float32>, Tensor<float32>>(
                     TimesOwnParamDecoy, "X" + nameof(ModulesCoverageTests)).SetHyperparams().Call(x);
             var g = ComputationGraph.FromInternal(new InternalComputationGraph([x], [body]), GraphKind.Module);
-            return [.. g.ToConcreteArchitecture(g.FromOrderedInputs([input]))
+            return [.. g.ToConcreteArchitecture([input])
                 .GetConcreteModelParamInfos().ParamInfos.Select(i => i.ToShorokooIdString())];
         }
 
@@ -2367,7 +2397,7 @@ public class ModulesCoverageTests
 
     private static int[][] FeedPathsOf(ComputationGraph g)
     {
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([2L], 1f, 2f)]));
+        var arch = g.ToConcreteArchitecture([TensorData([2L], 1f, 2f)]);
         return [.. arch.GetRngStreamReport().Streams
             .Where(s => s.Kind == RngStreamKind.UniformFeed)
             .Select(s => s.ModelIdPath.ToArray())
@@ -2397,7 +2427,7 @@ public class ModulesCoverageTests
         float[] DifferenceOf(ComputationGraph g)
         {
             var zero = TensorData([2L], 0f, 0f);
-            var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([zero, TensorData(DType.Int64, [], 0L)]));
+            var arch = g.ToConcreteArchitecture([zero, TensorData(DType.Int64, [], 0L)]);
             return RunFloats(arch.ToConcreteModel(RngConfig.Default), zero, TensorData(DType.Int64, [], 0L));
         }
 
@@ -2437,7 +2467,7 @@ public class ModulesCoverageTests
     {
         var g = DrawTwiceOneCallThroughHyperModel.ComputationGraph;
         var zero = TensorData([2L], 0f, 0f);
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([zero]));
+        var arch = g.ToConcreteArchitecture([zero]);
         Assert.All(RunFloats(arch.ToConcreteModel(RngConfig.Default), zero), v => Assert.NotEqual(0f, v));
     }
 
@@ -2467,7 +2497,7 @@ public class ModulesCoverageTests
         var x = InvokeInput("input");
         var g = ComputationGraph.FromInternal(
             new InternalComputationGraph([x], [.. outputs(x)]), GraphKind.Module);
-        return g.ToConcreteArchitecture(g.FromOrderedInputs([hint]));
+        return g.ToConcreteArchitecture([hint]);
     }
 
     [Fact]
@@ -2502,7 +2532,7 @@ public class ModulesCoverageTests
         var moduleGraph = ScalarMultiplyModel.ComputationGraph;
         Assert.Equal(GraphKind.Module, moduleGraph.Kind);
 
-        var arch = moduleGraph.ToConcreteArchitecture(moduleGraph.FromOrderedInputs([sample]));
+        var arch = moduleGraph.ToConcreteArchitecture([sample]);
         Assert.Equal(GraphKind.ConcreteArchitecture, arch.Kind);
 
         var model = arch.ToConcreteModel();
@@ -2510,7 +2540,7 @@ public class ModulesCoverageTests
         Assert.Equal(GraphKind.ConcreteModel, model.Specialize(new ModelParamList([])).Kind);
 
         var exArch = Assert.Throws<InvalidOperationException>(
-            () => arch.ToConcreteArchitecture(arch.FromOrderedInputs([sample])));
+            () => arch.ToConcreteArchitecture([sample]));
         Assert.Contains("'module'", exArch.Message);
         Assert.Contains("'concrete-architecture'", exArch.Message);
 
@@ -2565,7 +2595,7 @@ public class ModulesCoverageTests
             ModuleFactory.ComputationGraph((Func<Tensor<float32>, Tensor<float32>>)MachineryFreeBody)
                 .ToInternal());
         Assert.Equal(GraphKind.Module, detected.Kind);
-        var relowered = detected.ToConcreteArchitecture(detected.FromOrderedInputs([sample]));
+        var relowered = detected.ToConcreteArchitecture([sample]);
         Assert.Equal(GraphKind.ConcreteArchitecture, relowered.Kind);
     }
 
@@ -2619,7 +2649,7 @@ public class ModulesCoverageTests
     private static InternalComputationGraph TinyArch(ComputationGraph model)
     {
         var g = model.ToInternal();
-        return g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([2L, 8L], new float[16])]));
+        return g.ToConcreteArchitecture([TensorData([2L, 8L], new float[16])]);
     }
 
     private static int CheckpointedInvokes(ComputationGraph model)

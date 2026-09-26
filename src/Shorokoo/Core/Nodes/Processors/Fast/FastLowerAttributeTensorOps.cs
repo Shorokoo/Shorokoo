@@ -23,7 +23,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// <para>Per attribute-source subgraph, the resolution cascade is:</para>
     /// <list type="number">
     /// <item>Constant-fold: run <see cref="QuickExecutionEngine"/> on an input-free pruned clone.</item>
-    /// <item>QEE with the supplied <see cref="ModelParamList"/> sample inputs bound.</item>
+    /// <item>QEE with the supplied sample inputs bound.</item>
     /// <item>ONNX Runtime (<see cref="ComputeContext.Execute(InternalComputationGraph, IData[])"/>) with the samples bound.</item>
     /// </list>
     /// Because this pass runs after the <c>FastSimplify</c> that already constant-folds and unrolls
@@ -58,7 +58,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// this pass must not require a backend be deployed just to run.</param>
         public static void Process(
             InternalComputationGraph graph,
-            ModelParamList? sampleInputs = null,
+            IReadOnlyList<IData>? sampleInputs = null,
             ComputeContext? compute = null)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
@@ -67,7 +67,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
         private static void ProcessGraph(
             InternalComputationGraph graph,
-            ModelParamList? sampleInputs,
+            IReadOnlyList<IData>? sampleInputs,
             ComputeContext? compute,
             Dictionary<Function, Function> functionRemap)
         {
@@ -123,7 +123,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             FastNode node,
             AttributeTensorSpec spec,
             InternalComputationGraph graph,
-            ModelParamList? sampleInputs,
+            IReadOnlyList<IData>? sampleInputs,
             ComputeContext? compute,
             HashSet<FastTensorKey> perIteration)
         {
@@ -201,7 +201,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         private static TensorData[] ResolveKeys(
             InternalComputationGraph graph,
             List<FastTensorKey> keys,
-            ModelParamList? sampleInputs,
+            IReadOnlyList<IData>? sampleInputs,
             ComputeContext? compute,
             string opCodeForError)
         {
@@ -298,7 +298,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// evaluation can take, so the sample-based strategies are skipped and the caller relies on
         /// constant folding.
         /// </summary>
-        internal static IData[]? BindSamplesToTheInputsItReads(InternalComputationGraph resolver, ModelParamList sampleInputs)
+        internal static IData[]? BindSamplesToTheInputsItReads(InternalComputationGraph resolver, IReadOnlyList<IData> sampleInputs)
         {
             var bound = RepresentativeInputShapes.BindSamplesToLoweredInputs(resolver, sampleInputs);
             var inputs = resolver.Inputs;

@@ -115,7 +115,7 @@ public class ModelParamRefTests
 
     private static string[] ParamIdsOf(ComputationGraph g)
     {
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([2L], 1f, 2f)]));
+        var arch = g.ToConcreteArchitecture([TensorData([2L], 1f, 2f)]);
         string[] ids = [.. arch.GetConcreteModelParamInfos().ParamInfos.Select(x => x.ToShorokooIdString())];
         Assert.NotEmpty(ids);
         return ids;
@@ -137,7 +137,7 @@ public class ModelParamRefTests
     // test cannot quietly stop guarding when that list changes.
     private static string[] TrainingStructNamesOf(ComputationGraph g, string inputName)
     {
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([2L], 1f, 2f)]));
+        var arch = g.ToConcreteArchitecture([TensorData([2L], 1f, 2f)]);
         var training = TrainingGraphBuilder.PrepareForTrainingAsFast(
             arch.ToInternal(), SimpleSumSquaredLoss.ComputationGraph.ToInternal());
         var input = training.Inputs[training.InputNames.ToList().IndexOf(inputName)];

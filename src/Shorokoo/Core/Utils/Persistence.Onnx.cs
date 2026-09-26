@@ -117,7 +117,7 @@ namespace Shorokoo
         /// an unknown domain); a truncated or garbage file fails loudly naming the file.</para>
         ///
         /// <para>Like every concrete graph, the imported one records a representative shape on each
-        /// input (see <see cref="ComputationGraph.ToConcreteArchitecture"/>). A model Shorokoo
+        /// input (see <c>ToConcreteArchitecture</c>). A model Shorokoo
         /// exported carries the sample shape it was concretized at; for any other, each input's
         /// shape is read from the file — a fixed dimension (<c>dim_value</c>) as written, a
         /// symbolic one (<c>dim_param</c>) or an unset one as <c>1</c>. An input whose declared

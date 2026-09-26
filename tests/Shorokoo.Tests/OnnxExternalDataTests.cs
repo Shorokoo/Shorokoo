@@ -260,7 +260,7 @@ public class OnnxExternalDataTests
         var numOut = TensorData(DType.Int64, [], 4L);
         var input = TensorDataWithSmallVals(DType.Float32, [4L, 4L]);
         var g = FCLayer.ComputationGraph; // weights [4,4] (64 B) + bias [4] (16 B)
-        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([numOut, input])).ToConcreteModel();
+        var concrete = g.ToConcreteArchitecture([numOut, input]).ToConcreteModel();
         var proto = FastOnnxModelBuilder.BuildOnnxModel(concrete);
         var direct = ComputeContext.Default.Execute(concrete, numOut.Shared(), input.Shared())[0]
             .ToTensorData().AccessRawMemory().ToArray();
@@ -388,7 +388,7 @@ public class OnnxExternalDataTests
     {
         var moduleGraph = Shorokoo.Tests.Modules.ScalarMultiplyModel.ComputationGraph;
         var arch = moduleGraph.ToConcreteArchitecture(
-            moduleGraph.FromOrderedInputs([TensorData([2L], 1.0f, 2.0f)]));
+            [TensorData([2L], 1.0f, 2.0f)]);
         var path = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName() + ".onnx");
 
         // The concrete architecture is refused twice over: via its graph-kind metadata tag,

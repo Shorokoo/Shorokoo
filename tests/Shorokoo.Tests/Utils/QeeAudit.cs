@@ -99,7 +99,7 @@ namespace Shorokoo.Tests.Utils
                     FastChangeGenericTypeSpecialization.Process(moduleGraph, genericTypes);
             }
 
-            var concreteArch = moduleGraph.ToConcreteArchitecture(moduleGraph.FromOrderedInputs([.. allInputs]));
+            var concreteArch = moduleGraph.ToConcreteArchitecture([.. allInputs]);
             return concreteArch.ToConcreteModel(rngConfig ?? RngConfig.Default);
         }
 

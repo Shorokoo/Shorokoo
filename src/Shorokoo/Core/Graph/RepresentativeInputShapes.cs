@@ -35,88 +35,128 @@ namespace Shorokoo.Core.Graph
             => node.OpCode is InternalOpCodes.MODEL_TENSOR_INPUT or InternalOpCodes.MODEL_OPTIONAL_INPUT;
 
         /// <summary>
-        /// Refuses (<see cref="ErrorCodes.FW056"/>) a lowering of <paramref name="graph"/> whose
-        /// <paramref name="samples"/> leave any data input without a sample, listing every such
-        /// input, give more samples than it has data inputs, stating both counts, name a sample
-        /// for another input than the one at its position, listing every such sample, or give an
-        /// input whose type declares its rank (<see cref="OnnxOpAttributeNames.ShrkAttrRank"/>) a
-        /// sample of another rank, listing every such input. Samples bind
-        /// to the data inputs by position, as the lowering binds them; a generic module's
-        /// type-placeholder slots take none.
+        /// The samples of <paramref name="named"/> bound to <paramref name="graph"/>'s data inputs
+        /// by name — each to the input of that name, whatever its place in the list — and returned
+        /// in the inputs' declaration order, the order every later stage binds them in. A struct
+        /// sample binds by its struct input's name; a generic module's type-placeholder slots take
+        /// none. Refuses (<see cref="ErrorCodes.FW056"/>) a data input no sample names, a sample
+        /// naming no data input and a name given to more than one sample, naming each offender and
+        /// listing the graph's inputs.
         /// </summary>
-        internal static void RequireSampleForEveryInput(InternalComputationGraph graph, ModelParamList samples)
+        internal static IData[] BindByName(InternalComputationGraph graph, ModelParamList named)
         {
             var dataInputs = DataInputIndices(graph);
-            if (samples.ModelParams.Length > dataInputs.Count)
+            var inputNames = dataInputs.Select(i => NameOf(graph, i)).ToList();
+            var samples = named.ModelParams;
+            var known = inputNames.OfType<string>().ToHashSet(System.StringComparer.Ordinal);
+
+            var problems = new List<string>();
+            var duplicated = samples.GroupBy(p => p.ParamName ?? "", System.StringComparer.Ordinal)
+                .Where(g => g.Count() > 1).Select(g => g.Key).ToList();
+            if (duplicated.Count > 0)
+                problems.Add($"more than one sample is named {Quoted(duplicated)}");
+            var unknown = samples.Select(p => p.ParamName ?? "").Where(n => !known.Contains(n))
+                .Distinct(System.StringComparer.Ordinal).ToList();
+            if (unknown.Count > 0)
+                problems.Add($"sample(s) {Quoted(unknown)} name no input of the graph");
+            var given = samples.Select(p => p.ParamName ?? "").ToHashSet(System.StringComparer.Ordinal);
+            var missing = dataInputs.Where((_, k) => inputNames[k] is not { } name || !given.Contains(name))
+                .Select(i => NameOf(graph, i) ?? $"#{i}").ToList();
+            if (missing.Count > 0)
+                problems.Add($"no sample was given for input(s) {Quoted(missing)}, and every input of the " +
+                    "graph needs one, [Hyper] inputs included");
+            if (problems.Count > 0)
+                throw new ModelException(ErrorCodes.FW056, "ToConcreteArchitecture",
+                    $"{string.Join("; ", problems)}. Named samples bind each to the graph input of the same " +
+                    $"name, one per input, in any order; the graph's inputs are {Quoted(inputNames.Select((n, k) => n ?? $"#{dataInputs[k]}"))}.");
+
+            var byName = samples.ToDictionary(p => p.ParamName, System.StringComparer.Ordinal);
+            return [.. inputNames.Select(n => ValueOf(byName[n!]))];
+        }
+
+        /// <summary>The value a named sample carries: its tensor, optional, sequence or struct.</summary>
+        private static IData ValueOf(NamedModelParam sample) => sample switch
+        {
+            OptionalTensorDataModelParam optional => optional.ToOptionalTensorData(),
+            TensorStructModelParam structSample => structSample.StructData,
+            TensorDataSequenceModelParam sequence => sequence.ToTensorDataSequence(),
+            _ => sample.ToTensorData(),
+        };
+
+        /// <summary>
+        /// <paramref name="samples"/> as the lowering binds them: each value as it is, a
+        /// <see cref="SharedInput"/> standing for the value it wraps (a sample is read, never
+        /// consumed). A missing value is refused.
+        /// </summary>
+        internal static IData[] Unwrapped(IReadOnlyList<IData> samples)
+            => [.. samples.Select((s, k) => s switch
+            {
+                null => throw new System.ArgumentException($"sample #{k} is null; give a value for every input.",
+                    nameof(samples)),
+                SharedInput shared => shared.Value,
+                _ => s,
+            })];
+
+        /// <summary>
+        /// Refuses (<see cref="ErrorCodes.FW056"/>) a lowering of <paramref name="graph"/> whose
+        /// positional <paramref name="samples"/> leave any data input without a sample, listing
+        /// every such input, give more samples than it has data inputs, stating both counts, or give
+        /// an input whose type declares its rank (<see cref="OnnxOpAttributeNames.ShrkAttrRank"/>) a
+        /// sample of another rank, listing every such input. Samples bind to the data inputs by
+        /// position, one per input in declaration order, as the lowering binds them; a generic
+        /// module's type-placeholder slots take none.
+        /// </summary>
+        internal static void RequireSampleForEveryInput(InternalComputationGraph graph, IReadOnlyList<IData> samples)
+        {
+            var dataInputs = DataInputIndices(graph);
+            if (samples.Count > dataInputs.Count)
                 throw new ModelException(ErrorCodes.FW056, "ToConcreteArchitecture",
                     $"the graph has {dataInputs.Count} input(s) " +
                     $"({string.Join(", ", dataInputs.Select(i => $"'{NameOf(graph, i) ?? $"#{i}"}'"))}) but " +
-                    $"{samples.ModelParams.Length} sample(s) were given. Give exactly one sample per " +
+                    $"{samples.Count} sample(s) were given. Give exactly one sample per " +
                     "input, in declaration order; a generic module's type-placeholder slots take none.");
-            if (samples.ModelParams.Length < dataInputs.Count)
+            if (samples.Count < dataInputs.Count)
             {
-                var missing = dataInputs.Skip(samples.ModelParams.Length)
+                var missing = dataInputs.Skip(samples.Count)
                     .Select(i => $"'{NameOf(graph, i) ?? $"#{i}"}'");
                 throw new ModelException(ErrorCodes.FW056, "ToConcreteArchitecture",
                     $"no sample was given for input(s) {string.Join(", ", missing)}. Every input of the " +
                     "graph needs a sample, [Hyper] inputs included, one per input in declaration order: " +
                     "the lowering records each sample's shape on the concrete architecture, which is " +
-                    "what training and ONNX export read the input's shape from. Build the list with " +
-                    "graph.FromOrderedInputs([...]).");
+                    "what training and ONNX export read the input's shape from.");
             }
-
-            // Samples bind by position; a name is not consulted to bind one, so a sample named for
-            // another input is a sample in the wrong place, and binding it anyway would lower the
-            // graph at the wrong shapes. An unnamed sample binds where it stands.
-            var misnamed = dataInputs
-                .Select((inputIndex, k) => (Position: k, Sample: samples.ModelParams[k].ParamName, Input: NameOf(graph, inputIndex)))
-                .Where(x => !string.IsNullOrEmpty(x.Sample) && x.Input is not null && x.Sample != x.Input)
-                .Select(x => $"sample #{x.Position} is named '{x.Sample}' but input #{x.Position} is '{x.Input}'")
-                .ToList();
-            if (misnamed.Count > 0)
-                throw new ModelException(ErrorCodes.FW056, "ToConcreteArchitecture",
-                    $"{string.Join("; ", misnamed)}. Samples bind to the graph's inputs by position, one per " +
-                    "input in declaration order; name each after the input at its position, or build the " +
-                    "list with graph.FromOrderedInputs([...]).");
 
             // An input whose type fixes its rank (a Scalar, a Vector) cannot take a sample of another:
             // the lowering would record that sample's shape, and export would declare a rank the
-            // input's type contradicts. Most often it is two samples given in the wrong order.
+            // input's type contradicts. Given positionally, it is most often two samples swapped.
             var producers = graph.BuildProducerByOutputMap();
             var inputs = graph.Inputs;
             var misranked = dataInputs
-                .Select((inputIndex, k) => (Position: k, Input: inputIndex,
+                .Select((inputIndex, k) => (Input: inputIndex,
                     Declared: producers.TryGetValue(inputs[inputIndex], out var node) && CarriesShape(node)
                         ? node.Attributes.GetLongVal(OnnxOpAttributeNames.ShrkAttrRank) : null,
-                    Dims: SampleValueOf(samples.ModelParams[k]) is { } value ? ShapeOf(value) : null))
+                    Dims: ShapeOf(samples[k])))
                 .Where(x => x.Declared is long declared && x.Dims is { } dims && !IsMarker(dims) && dims.Length != declared)
-                .Select(x => $"input #{x.Position} '{NameOf(graph, x.Input) ?? $"#{x.Input}"}' is declared with " +
+                .Select(x => $"input '{NameOf(graph, x.Input) ?? $"#{x.Input}"}' is declared with " +
                     $"rank {x.Declared}, but its sample has shape [{string.Join(", ", x.Dims!)}]")
                 .ToList();
             if (misranked.Count > 0)
                 throw new ModelException(ErrorCodes.FW056, "ToConcreteArchitecture",
                     $"{string.Join("; ", misranked)}. Each sample must have the rank its input's type " +
-                    "declares; samples bind to the graph's inputs by position, one per input in " +
-                    "declaration order, so check that they are given in that order.");
+                    "declares; samples given positionally bind one per input in declaration order, so " +
+                    "check that they are given in that order.");
         }
 
-        private static bool IsMarker(long[] dims) => dims is [< 0];
+        private static string Quoted(IEnumerable<string> names) => string.Join(", ", names.Select(n => $"'{n}'"));
 
-        /// <summary>The value of a tensor or optional sample, or <c>null</c> for any other.</summary>
-        private static IData? SampleValueOf(NamedModelParam sample) => sample switch
-        {
-            OptionalTensorDataModelParam optional => optional.ToOptionalTensorData(),
-            TensorStructModelParam or TensorDataSequenceModelParam => null,
-            { Structure: DataStructure.Tensor } => sample.ToTensorData(),
-            _ => null,
-        };
+        private static bool IsMarker(long[] dims) => dims is [< 0];
 
         /// <summary>
         /// Records each input's sample shape on the input it is bound to
         /// (<see cref="BindSamplesToLoweredInputs"/>). An input without a sample, or whose sample
         /// has no single shape, is left as it is (<see cref="Verify"/> names the former).
         /// </summary>
-        internal static void Record(InternalComputationGraph graph, ModelParamList samples)
+        internal static void Record(InternalComputationGraph graph, IReadOnlyList<IData> samples)
         {
             var bound = BindSamplesToLoweredInputs(graph, samples);
             var producers = graph.BuildProducerByOutputMap();
@@ -151,18 +191,20 @@ namespace Shorokoo.Core.Graph
         /// binding every lowering stage uses, so the stages that evaluate the graph at the samples
         /// and the one that records their shapes cannot disagree about which sample is whose.
         ///
-        /// <para>Samples bind by position, as <see cref="RequireSampleForEveryInput"/> checks them: a
+        /// <para>Samples bind by position, one per data input in declaration order, as
+        /// <see cref="RequireSampleForEveryInput"/> checks them (a named list is put in that order by
+        /// <see cref="BindByName"/> first): a
         /// struct sample stands for its struct's fields, in declaration order, which is the order
         /// the unpacking gives them as inputs; a generic module's type-placeholder slots take none.
         /// Each value is the sample's own — a tensor, an optional, a sequence, or a field's value,
         /// whatever kind it is.</para>
         /// </summary>
-        internal static IData?[] BindSamplesToLoweredInputs(InternalComputationGraph graph, ModelParamList? samples)
+        internal static IData?[] BindSamplesToLoweredInputs(InternalComputationGraph graph, IReadOnlyList<IData>? samples)
         {
             var inputs = graph.Inputs;
             var bound = new IData?[inputs.Count];
             if (samples is null) return bound;
-            var values = samples.ModelParams.SelectMany(ValuesOf).ToList();
+            var values = samples.SelectMany(ValuesOf).ToList();
             var producers = graph.BuildProducerByOutputMap();
             int next = 0;
             for (int i = 0; i < inputs.Count && next < values.Count; i++)
@@ -174,13 +216,11 @@ namespace Shorokoo.Core.Graph
             return bound;
         }
 
-        private static IEnumerable<IData?> ValuesOf(NamedModelParam sample) => sample switch
+        private static IEnumerable<IData?> ValuesOf(IData sample) => sample switch
         {
-            TensorStructModelParam structSample => FieldValuesOf(structSample.Definition, structSample.StructData),
-            OptionalTensorDataModelParam optional => [optional.ToOptionalTensorData()],
-            TensorDataSequenceModelParam sequence => [sequence.ToTensorDataSequence()],
-            { Structure: DataStructure.Tensor } => [sample.ToTensorData()],
-            _ => [null],
+            SharedInput shared => ValuesOf(shared.Value),
+            TensorDataStruct structSample => FieldValuesOf(structSample.Definition, structSample),
+            _ => [sample],
         };
 
         /// <summary>

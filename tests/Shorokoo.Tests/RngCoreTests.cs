@@ -235,8 +235,8 @@ public class RngSeedTransportTests
     {
         var g = (ComputationGraph)typeof(RngRuntimeLoopFeed)
             .GetProperty("ComputationGraph")!.GetValue(null)!;
-        return g.ToConcreteArchitecture(g.FromOrderedInputs(
-            [TensorData([8L], new float[8]), TensorData(Array.Empty<long>(), 2L)]));
+        return g.ToConcreteArchitecture(
+            [TensorData([8L], new float[8]), TensorData(Array.Empty<long>(), 2L)]);
     }
 
     private static ComputationGraph LoopFeedModel(RngConfig cfg) => LoopFeedArch().ToConcreteModel(cfg);
@@ -390,7 +390,7 @@ public class RngSeedTransportTests
         var g = (ComputationGraph)typeof(RngInitTwoLinears)
             .GetProperty("ComputationGraph")!.GetValue(null)!;
         var sample = TensorData([4L, 4L], Enumerable.Repeat(1f, 16).ToArray());
-        var model = g.ToConcreteArchitecture(g.FromOrderedInputs([sample]))
+        var model = g.ToConcreteArchitecture([sample])
             .ToConcreteModel(new RngConfig { MasterSeed = 7 });
 
         Assert.Equal(0, RngSeedNodeCount(model));

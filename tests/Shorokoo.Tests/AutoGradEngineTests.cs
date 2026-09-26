@@ -73,12 +73,12 @@ public class AutoGradEngineTests
         var expected = TensorData(DType.Float32, [5L], 1f, 0.25f, 0.25f, 0.0625f, 0.015625f);
         var training = AutoGradSoftsignLoweredGradientCheck.ComputationGraph.ToInternal();
         var trained = training.ToConcreteArchitecture(
-            training.FromOrderedInputs([x, expected])).ToConcreteModel();
+            [x, expected]).ToConcreteModel();
         Assert.DoesNotContain(trained.Nodes, n => n.OpCode == SOFTSIGN);
         Assert.DoesNotContain(trained.Nodes, n => n.OpCode == InternalOpCodes.AUTO_GRAD);
 
         var inference = QeeSoftsignLowered.ComputationGraph.ToInternal();
-        var exported = inference.ToConcreteArchitecture(inference.FromOrderedInputs([x])).ToConcreteModel();
+        var exported = inference.ToConcreteArchitecture([x]).ToConcreteModel();
         FastProcessAutoGradProcessor.Process(exported);
         Assert.Equal(1, exported.Nodes.Count(n => n.OpCode == SOFTSIGN));
     }
@@ -91,7 +91,7 @@ public class AutoGradEngineTests
     {
         var x = TensorData(DType.Float32, [5L], 0f, 1f, -1f, 3f, -7f);
         var g = QeeSoftsignLowered.ComputationGraph.ToInternal();
-        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x])).ToConcreteModel();
+        var concrete = g.ToConcreteArchitecture([x]).ToConcreteModel();
 
         var offTheList = concrete.Clone();
         FastLowerRegisteredOps.Process(offTheList, ImmutableHashSet<string>.Empty);

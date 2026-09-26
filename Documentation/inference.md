@@ -160,7 +160,7 @@ using static Shorokoo.Globals;
 var input    = TensorData([4L], 1f, 2f, 3f, 4f);   // the actual input data
 var graph    = MyLayer.ComputationGraph;            // readonly ComputationGraph (kind: Module)
 var concrete = graph
-    .ToConcreteArchitecture(graph.FromOrderedInputs([input]))
+    .ToConcreteArchitecture([input])    // one sample per input, in declaration order
     .ToConcreteModel();
 
 var results = ComputeContext.Default.Execute(concrete, input);   // params IData[]
@@ -185,15 +185,35 @@ pipeline, applied in order:
 2. **`ToConcreteArchitecture(inputHints)`** — inlines every sub-module and
    function so trainable parameters become visible at the top level, and uses
    `inputHints` to resolve shape-dependent parameters. It needs **a sample for every
-   input** of the graph, `[Hyper]` inputs included, one per input in declaration order
-   (`graph.FromOrderedInputs([...])`), a sequence input included; a graph left
-   without one is refused with **`FW056`**, which names every input missing its
-   sample, and so are more samples than the graph has inputs, stating both counts.
-   Samples bind to the inputs **by position**: a sample may be unnamed, but one named
-   for another input than the one at its position is refused with `FW056` too, naming
-   both, and so is a sample of another rank than its input's type declares (a `Scalar`
-   given a vector, most often two samples swapped), naming the input and the sample's
-   shape. A struct input's sample stands for all its fields, and once lowered the
+   input** of the graph, `[Hyper]` inputs included, a sequence input included (a
+   generic module's type-placeholder slots take none). The samples come in either of
+   two forms:
+
+   - **Positional** — `ToConcreteArchitecture([hyper, input])`, an `IData[]` of bare
+     values (`TensorData`, `OptionalTensorData`, `TensorDataSequence`,
+     `TensorDataStruct`), one per input **in declaration order**, each bound to the
+     input at its position. Too few is refused with **`FW056`**, naming every input
+     missing its sample, and so are too many, stating both counts.
+   - **Named** — `ToConcreteArchitecture(new ModelParamList([...]))` of
+     `NamedModelParam`s (`TensorDataModelParam`, `OptionalTensorDataModelParam`,
+     `TensorDataSequenceModelParam`, `TensorStructModelParam`), each bound to the
+     input **of its name**, in any order. An input no sample names, a sample naming no
+     input, and a name given to two samples are each refused with `FW056`, the message
+     naming the offenders and listing the graph's inputs.
+
+   ```csharp
+   // Dense (below): Inline(Tensor<float32> x, [Hyper] Scalar<int64> outFeatures), graph inputs outFeatures, x
+   var arch  = graph.ToConcreteArchitecture([hyper, input]);                 // by position
+   var same  = graph.ToConcreteArchitecture(new ModelParamList([
+       new TensorDataModelParam("x", ModelParamType.InputParam, input),
+       new TensorDataModelParam("outFeatures", ModelParamType.InputParam, hyper)]));  // by name
+   ```
+
+   In either form a sample of another rank than its input's type declares (a `Scalar`
+   given a vector — given positionally, most often two samples swapped) is refused
+   with `FW056`, naming the input and the sample's shape. A struct input takes one
+   sample, a `TensorDataStruct`, bound by position or by the struct input's name; it
+   stands for all its fields, and once lowered the
    input is one input per field, named `<struct>.<field>`, of the field's own kind —
    a tensor, an optional or a sequence input — and a field that is itself a struct is
    its fields' inputs in turn, `<struct>.<field>.<subfield>`. The shape of each sample
@@ -264,8 +284,8 @@ refused with an error naming the violated requirement.
 A module's `ComputationGraph` lists its `[Hyper]` parameters as graph inputs
 **before** the tensor inputs — the framework keeps the graph's inputs ordered
 hyperparameters-first, independent of the inputs-first `Inline` source order — and
-they stay inputs in the concretized graph. So both `FromOrderedInputs` and `Execute`
-take the hyper values first, then the inputs:
+they stay inputs in the concretized graph. So both `ToConcreteArchitecture`'s
+positional samples and `Execute` take the hyper values first, then the inputs:
 
 ```csharp
 // [Module] Dense { Inline(Tensor<float32> x, [Hyper] Scalar<int64> outFeatures) ... }
@@ -274,14 +294,14 @@ var input = TensorData([2L, 4L], myFloats);
 
 var graph    = Dense.ComputationGraph;
 var concrete = graph
-    .ToConcreteArchitecture(graph.FromOrderedInputs([hyper, input]))  // hypers first
+    .ToConcreteArchitecture([hyper, input])  // hypers first
     .ToConcreteModel();
 
 // Hypers first. Shared, so that both can be passed again: a feed given as it is is consumed.
 var results = ComputeContext.Default.Execute(concrete, hyper.Shared(), input.Shared());
 ```
 
-The hyper value passed to `FromOrderedInputs` is what concretization bakes from.
+The hyper value passed to `ToConcreteArchitecture` is what concretization bakes from.
 A hyper that touches the trainable parameters — their shapes (like `outFeatures`),
 or which of them exist at all (a `[Hyper]` gating an `IfElse` branch that holds
 parameters) — is **parameter-space-determining**, and the value you pass here
@@ -389,7 +409,7 @@ var specialized = graph.Specialize(graph.FromOrderedInputs([hyper]));
 
 // 2. + 3. Concretize on the remaining (runtime) inputs only.
 var concrete = specialized
-    .ToConcreteArchitecture(specialized.FromOrderedInputs([input]))
+    .ToConcreteArchitecture([input])
     .ToConcreteModel();
 
 var results = ComputeContext.Default.Execute(concrete, input);   // no hyper needed

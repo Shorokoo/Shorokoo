@@ -82,7 +82,7 @@ public class QeeNormLinalgAuditTests
     private static int[] DequantizeInputs(ComputationGraph module, bool exported, TensorData[] inputs)
     {
         var g = module.ToInternal();
-        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([.. inputs])).ToConcreteModel();
+        var concrete = g.ToConcreteArchitecture([.. inputs]).ToConcreteModel();
         var model = exported
             ? FastOnnxModelBuilder.BuildOnnxModel(concrete)
             : FastOnnxModelBuilder.BuildInternalOnnxModel(concrete, prepForOnnx: true);

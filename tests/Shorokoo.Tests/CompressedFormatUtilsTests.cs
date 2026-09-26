@@ -189,7 +189,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
     {
         var moduleGraph = ScalarMultiplyModel.ComputationGraph;
         var arch = moduleGraph.ToConcreteArchitecture(
-            moduleGraph.FromOrderedInputs([TensorData([2], 1.0f, 2.0f)]));
+            [TensorData([2], 1.0f, 2.0f)]);
         var model = arch.ToConcreteModel();
         return (moduleGraph, arch, model);
     }
@@ -247,7 +247,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         var reloadedModule = CompressedFormatUtils.LoadFastGraphFromBinary(
             CompressedFormatUtils.SaveFastGraphToBinary(moduleGraph));
         var rearch = reloadedModule.ToConcreteArchitecture(
-            reloadedModule.FromOrderedInputs([TensorData([2], 1.0f, 2.0f)]));
+            [TensorData([2], 1.0f, 2.0f)]);
         Assert.Equal(GraphKind.ConcreteArchitecture, rearch.Kind);
         Assert.Equal(GraphKind.ConcreteArchitecture, SrkFileFormat.DetectStage(rearch.ToInternal()));
 
@@ -828,7 +828,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         Assert.Equal(GraphKind.Module, moduleGraph.Kind);
 
         var arch = moduleGraph.ToConcreteArchitecture(
-            moduleGraph.FromOrderedInputs([TensorData([2L], 1.0f, 2.0f)]));
+            [TensorData([2L], 1.0f, 2.0f)]);
         Assert.Equal(GraphKind.ConcreteArchitecture, arch.Kind);
         // No trainable params → op-scanning misclassifies this architecture.
         Assert.Equal(GraphKind.ConcreteModel, SrkFileFormat.DetectStage(arch.ToInternal()));
@@ -982,7 +982,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
             byte[] Run(ComputationGraph module)
             {
                 var model = module
-                    .ToConcreteArchitecture(module.FromOrderedInputs([.. inputs]))
+                    .ToConcreteArchitecture([.. inputs])
                     .ToConcreteModel(RngConfig.Default);
                 return ComputeContext.Default.Execute(model, [.. inputs.Select(t => t.Shared())])[0]
                     .ToTensorData().AccessRawMemory().ToArray();
@@ -1001,7 +1001,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         var numOut = TensorData(DType.Int64, [], 4L);
         var input = TensorDataWithSmallVals(DType.Float32, [4L, 4L]);
         var g = FCLayer.ComputationGraph;   // two trainable params: weights [4,4], bias [4]
-        var model = g.ToConcreteArchitecture(g.FromOrderedInputs([numOut, input])).ToConcreteModel();
+        var model = g.ToConcreteArchitecture([numOut, input]).ToConcreteModel();
         return (model, numOut, input);
     }
 
@@ -1234,7 +1234,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         var numOut = TensorData(DType.Int64, [], 32L);
         var input = TensorDataWithSmallVals(DType.Float32, [32L, 32L]);
         var g = FCLayer.ComputationGraph;
-        var model = g.ToConcreteArchitecture(g.FromOrderedInputs([numOut, input])).ToConcreteModel();
+        var model = g.ToConcreteArchitecture([numOut, input]).ToConcreteModel();
         foreach (var node in model.ToInternal().Nodes)
         {
             if (node.OpCode != InternalOpCodes.MODEL_PARAM_DATA) continue;
@@ -1648,7 +1648,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
     {
         var input = TensorDataWithSmallVals(DType.Float32, [1L]);
         var g = StaticAndInputShapedParamsLayer.ComputationGraph;
-        var model = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
+        var model = g.ToConcreteArchitecture([input]).ToConcreteModel();
 
         var ids = WeightDataByParam(model).Keys.ToArray();
         Assert.Equal(2, ids.Length);
@@ -2160,7 +2160,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         var numOut = TensorData(DType.Int64, [], 4L);
         var input = TensorDataWithSmallVals(DType.Float32, [4L, 4L]);
         var g = FCLayer.ComputationGraph;
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([numOut, input]));
+        var arch = g.ToConcreteArchitecture([numOut, input]);
         return (arch, arch.ToConcreteModel(), numOut, input);
     }
 
@@ -2261,7 +2261,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         var rngNumOut = TensorData(DType.Int64, [], 4L);
         var rngInput = TensorDataWithSmallVals(DType.Float32, [4L, 4L]);
         var rngG = RtFcWithRngFeed.ComputationGraph;
-        var rngArch = rngG.ToConcreteArchitecture(rngG.FromOrderedInputs([rngNumOut, rngInput]));
+        var rngArch = rngG.ToConcreteArchitecture([rngNumOut, rngInput]);
         var rngModel = rngArch.ToConcreteModel();
         var rngPath = P("rng_feed_exchange.safetensors");
         var rngDirect = ExecuteToBytes(rngModel, rngNumOut, rngInput);
@@ -2624,7 +2624,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
     {
         var x = TensorData(DType.Utf8, [2L], "a b", "c");
         var model = StringSplitLayer.ComputationGraph.ToConcreteArchitecture(
-            StringSplitLayer.ComputationGraph.FromOrderedInputs([x])).ToConcreteModel();
+            [x]).ToConcreteModel();
         var exported = P(Guid.NewGuid() + ".onnx");
         Persistence.ExportOnnx(model, exported);
 
@@ -2698,9 +2698,9 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
     {
         var x23 = TensorData(DType.Float32, [2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f);
         var fc = FCLayer.ComputationGraph;
-        var fcArch = fc.ToConcreteArchitecture(fc.FromOrderedInputs([TensorData(DType.Int64, [], 4L), x23]));
+        var fcArch = fc.ToConcreteArchitecture([TensorData(DType.Int64, [], 4L), x23]);
         var tuple = StructInATupleOutputLayer.ComputationGraph;
-        var tupleArch = tuple.ToConcreteArchitecture(tuple.FromOrderedInputs([TensorData(DType.Float32, [], 3f), TensorData([2L], 1f, 2f)]));
+        var tupleArch = tuple.ToConcreteArchitecture([TensorData(DType.Float32, [], 3f), TensorData([2L], 1f, 2f)]);
         foreach (var model in (ModelProto[])[SrkModelOf(fc), SrkModelOf(fcArch), SrkModelOf(tuple), SrkModelOf(tupleArch),
                      FastOnnxModelBuilder.BuildInternalOnnxModel(fcArch.ToInternal()), FastOnnxModelBuilder.BuildOnnxModel(fcArch.ToConcreteModel())])
             Assert.DoesNotContain(BoundaryNamesIn(model), name => TensorKey.TryParse(name, out _));
@@ -2721,7 +2721,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         var bias = OptionalPassThroughLayer.ComputationGraph.ToConcreteArchitecture(new ModelParamList([
             new OptionalTensorDataModelParam("bias", ModelParamType.InputParam, OptionalTensorData.Some(x3))])).ToConcreteModel();
         var tuple = StructInATupleOutputLayer.ComputationGraph;
-        var tupleModel = tuple.ToConcreteArchitecture(tuple.FromOrderedInputs([TensorData(DType.Float32, [], 3f), x3])).ToConcreteModel();
+        var tupleModel = tuple.ToConcreteArchitecture([TensorData(DType.Float32, [], 3f), x3]).ToConcreteModel();
         var g = new GraphProto { Name = "foreign" };
         g.Inputs.Add(OnnxFloatVec("x", 4));
         g.Outputs.Add(OnnxFloatVec("x", 4));

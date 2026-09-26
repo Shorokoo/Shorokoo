@@ -23,7 +23,7 @@ public class NullableParamTests
     private static byte[] RunWithOptionals(ComputationGraph graph, TensorData[] shapeHints, params IData[] runtimeInputs)
     {
         var concrete = graph
-            .ToConcreteArchitecture(graph.FromOrderedInputs([.. shapeHints]))
+            .ToConcreteArchitecture([.. shapeHints])
             .ToConcreteModel();
         var outputs = new QuickExecutionEngine().Execute(concrete.ToInternal(), runtimeInputs);
         return ((TensorData)outputs[0]).AccessRawMemory().ToArray();
@@ -186,7 +186,7 @@ public class NullableParamTests
     {
         var x = TensorData([3L], 1f, 2f, 3f);
         var concrete = NullableBiasLayer.ComputationGraph
-            .ToConcreteArchitecture(NullableBiasLayer.ComputationGraph.FromOrderedInputs([x, x]))
+            .ToConcreteArchitecture([x, x])
             .ToConcreteModel();
         var ex = Assert.Throws<InvalidTensorOperationException>(() =>
             ComputeContext.Default.Execute(concrete, x, OptionalTensorData.None(DType.Float32)));

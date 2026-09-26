@@ -554,7 +554,7 @@ internal static class SideBySideModel
         var input = TensorData([2L, 4L], xv);
         var module = SideBySideMlp.ComputationGraph;
         var model = module
-            .ToConcreteArchitecture(module.FromOrderedInputs([input]))
+            .ToConcreteArchitecture([input])
             .ToConcreteModel();
         return (model, input);
     }

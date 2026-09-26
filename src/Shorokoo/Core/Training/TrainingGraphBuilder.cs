@@ -37,7 +37,7 @@ public static class TrainingGraphBuilder
     /// <typeparam name="TOut">The model output / loss input type (e.g., Tensor&lt;float32&gt;)</typeparam>
     /// <typeparam name="TLoss">The loss output type (e.g., Scalar&lt;float32&gt;)</typeparam>
     /// <param name="modelGraph">The model's concrete architecture, from
-    /// <see cref="Shorokoo.Graph.InternalComputationGraphExtensions.ToConcreteArchitecture"/>; a raw
+    /// <c>ToConcreteArchitecture</c>; a raw
     /// module graph is refused (see <see cref="RequireConcreteArchitecture"/>)</param>
     /// <param name="lossFunction">A Func referencing a loss module's Inline method (2 inputs → 1 output)</param>
     /// <returns>A high-level <see cref="InternalComputationGraph"/> containing AutoGrad nodes, with inputs
@@ -63,7 +63,7 @@ public static class TrainingGraphBuilder
     ///
     /// <para>
     /// <paramref name="modelGraph"/> must already be a concrete architecture from
-    /// <see cref="Shorokoo.Graph.InternalComputationGraphExtensions.ToConcreteArchitecture"/> —
+    /// <c>ToConcreteArchitecture</c> —
     /// this is composition, not lowering, and anything else is refused (see
     /// <see cref="RequireConcreteArchitecture"/>). Trainable-param discovery then picks up exactly
     /// the live (post-liveness-filter) MODEL_PARAM nodes that lowering left.
@@ -494,7 +494,7 @@ public static class TrainingGraphBuilder
     /// Refuses anything but a concrete architecture. Training needs one: the parameter count and
     /// every parameter's shape and initial value have to be statically known, and they are known
     /// only from the MODEL_PARAM nodes
-    /// <see cref="Shorokoo.Graph.InternalComputationGraphExtensions.ToConcreteArchitecture"/>
+    /// <c>ToConcreteArchitecture</c>
     /// produces — the trainable-param struct this builder emits carries a rank per field, never a
     /// shape, so it cannot supply them and neither can anything downstream. TrainingRig reads those
     /// nodes for the initial values and pairs them against this builder's fields by position.

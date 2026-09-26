@@ -148,7 +148,7 @@ public class RngInitTests
     {
         var g = RngInitTwoLinears.ComputationGraph;
         var sample = TensorData([4L, 4L], Enumerable.Repeat(1f, 16).ToArray());
-        return g.ToConcreteArchitecture(g.FromOrderedInputs([sample]));
+        return g.ToConcreteArchitecture([sample]);
     }
 
     // Both Linear weights are [4,4] = 16 elements.
@@ -161,7 +161,7 @@ public class RngInitTests
     private static float[] Materialize(ComputationGraph g, RngConfig cfg)
     {
         var sample = TensorData([4L, 4L], Enumerable.Repeat(1f, 16).ToArray());
-        return g.ToConcreteArchitecture(g.FromOrderedInputs([sample]))
+        return g.ToConcreteArchitecture([sample])
             .InitializeTrainableParams(rngConfig: cfg).ModelParams
             .Select(p => p.ToTensorData().As<float32>().AccessMemory().ToArray())
             .Single(v => v.Length == 16);
@@ -171,7 +171,7 @@ public class RngInitTests
     {
         var g = RngBitsInitLayer.ComputationGraph;
         var sample = TensorData([4L, 4L], Enumerable.Repeat(1f, 16).ToArray());
-        return g.ToConcreteArchitecture(g.FromOrderedInputs([sample]))
+        return g.ToConcreteArchitecture([sample])
             .InitializeTrainableParams(rngConfig: cfg).ModelParams
             .Select(p => p.ToTensorData())
             .Where(td => td.DType == DType.UInt32)
@@ -301,7 +301,7 @@ public class RngInitFrozenDerivationTests
         // cross-backend — the draw is Threefry integer ops plus exact bit assembly.
         var g = RngInitTwoLinears.ComputationGraph;
         var sample = TensorData([4L, 4L], Enumerable.Repeat(1f, 16).ToArray());
-        var ws = g.ToConcreteArchitecture(g.FromOrderedInputs([sample]))
+        var ws = g.ToConcreteArchitecture([sample])
             .InitializeTrainableParams(rngConfig: cfg).ModelParams
             .Select(p => p.ToTensorData().As<float32>().AccessMemory().ToArray())
             .Where(v => v.Length == 16).ToArray();
@@ -313,7 +313,7 @@ public class RngInitFrozenDerivationTests
         // key and are separated only by their substreamIndex ordinal — this golden pins that
         // ordinal assignment, which the relational assertions above cannot see.
         var mg = BitsIntermediateTrainableLayer.ComputationGraph;
-        var w = mg.ToConcreteArchitecture(mg.FromOrderedInputs([sample]))
+        var w = mg.ToConcreteArchitecture([sample])
             .InitializeTrainableParams(rngConfig: cfg).ModelParams
             .Select(p => p.ToTensorData().As<float32>().AccessMemory().ToArray())
             .Single(v => v.Length == 16);
@@ -323,7 +323,7 @@ public class RngInitFrozenDerivationTests
         // none of them covers the table-driven normal path that nearly every shipping
         // initializer takes.
         var ng = RngInitNormalDistLayer.ComputationGraph;
-        var nw = ng.ToConcreteArchitecture(ng.FromOrderedInputs([sample]))
+        var nw = ng.ToConcreteArchitecture([sample])
             .InitializeTrainableParams(rngConfig: cfg).ModelParams
             .Select(p => p.ToTensorData().As<float32>().AccessMemory().ToArray())
             .Single(v => v.Length == 16);
@@ -334,7 +334,7 @@ public class RngInitFrozenDerivationTests
         // executed N times rides to be N samples rather than one (Shorokoo/Shorokoo#343).
         var lg = RngInitLoopDraw2Layer.ComputationGraph;
         var lsample = TensorData([2L, 2L], 1f, 1f, 1f, 1f);
-        var lw = lg.ToConcreteArchitecture(lg.FromOrderedInputs([lsample]))
+        var lw = lg.ToConcreteArchitecture([lsample])
             .InitializeTrainableParams(rngConfig: cfg).ModelParams
             .Select(p => p.ToTensorData().As<float32>().AccessMemory().ToArray())
             .Single(v => v.Length == 4);
@@ -389,7 +389,7 @@ public class RngInitFrozenDerivationTests
     private static (float[] vals, ulong key) UniformRangeParam(float low, float high)
     {
         var g = RngUniformRangeRuntimeBounds.ComputationGraph;
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([.. RangeInputs(low, high)]));
+        var arch = g.ToConcreteArchitecture([.. RangeInputs(low, high)]);
         var vals = arch.InitializeTrainableParams(rngConfig: RangeCfg).ModelParams
             .Select(p => p.ToTensorData())
             .Single(t => t.DType == DType.Float32 && t.Shape.Count == RngUniformRangeRuntimeBounds.N)
@@ -414,7 +414,7 @@ public class RngInitFrozenDerivationTests
     {
         var g = RngRuntimeFeedRuntimeBounds.ComputationGraph;
         var inputs = RangeInputs(low, high);
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([.. inputs]));
+        var arch = g.ToConcreteArchitecture([.. inputs]);
         var v = ComputeContext.Default.Execute(arch.ToConcreteModel(RangeCfg), [.. inputs.Cast<IData>()])[0]
             .ToTensorData().As<float32>().AccessMemory().ToArray();
         var path = arch.GetRngStreamReport().Streams
@@ -461,7 +461,7 @@ public class RngInitFrozenDerivationTests
     {
         var g = RngRuntimeFeedRuntimeNormal.ComputationGraph;
         var inputs = RangeInputs(mean, scale);
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([.. inputs]));
+        var arch = g.ToConcreteArchitecture([.. inputs]);
         return ComputeContext.Default.Execute(arch.ToConcreteModel(RangeCfg), [.. inputs.Cast<IData>()])[0]
             .ToTensorData().As<float32>().AccessMemory().ToArray();
     }
@@ -469,7 +469,7 @@ public class RngInitFrozenDerivationTests
     private static float[] NormalInit(float mean, float scale)
     {
         var g = RngNormalParamsInitLayer.ComputationGraph;
-        return g.ToConcreteArchitecture(g.FromOrderedInputs([.. RangeInputs(mean, scale)]))
+        return g.ToConcreteArchitecture([.. RangeInputs(mean, scale)])
             .InitializeTrainableParams(rngConfig: RangeCfg).ModelParams
             .Select(p => p.ToTensorData())
             .Single(t => t.DType == DType.Float32 && t.Shape.Count == RngUniformRangeRuntimeBounds.N)
@@ -513,7 +513,7 @@ public class RngInitFrozenDerivationTests
     public void TestRuntimeNormalFeedReparameterizesWithoutRebuild()
     {
         var g = RngRuntimeFeedRuntimeNormal.ComputationGraph;
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([.. RangeInputs(0f, 1f)]));
+        var arch = g.ToConcreteArchitecture([.. RangeInputs(0f, 1f)]);
         var model = arch.ToConcreteModel(RangeCfg);
         float[] Run(float mean, float scale) => ComputeContext.Default
             .Execute(model, [.. RangeInputs(mean, scale).Cast<IData>()])[0]
@@ -553,7 +553,7 @@ public class RngInitFrozenDerivationTests
     {
         TensorData[] inputs =
             [TensorData(DType.Float32, [], gain), TensorData(DType.Float32, [1L], 0f)];
-        return g.ToConcreteArchitecture(g.FromOrderedInputs([.. inputs]))
+        return g.ToConcreteArchitecture([.. inputs])
             .InitializeTrainableParams(rngConfig: RangeCfg).ModelParams
             .Select(p => p.ToTensorData())
             .Single(t => t.DType == DType.Float32 && t.Shape.Count == 16)
@@ -635,7 +635,7 @@ public class RngInitFailLoudTests
     {
         var g = RngInitTwoLinears.ComputationGraph;
         var sample = TensorData([4L, 4L], Enumerable.Repeat(1f, 16).ToArray());
-        return g.ToConcreteArchitecture(g.FromOrderedInputs([sample])).ToInternal();
+        return g.ToConcreteArchitecture([sample]).ToInternal();
     }
 
     [Fact]
@@ -645,7 +645,7 @@ public class RngInitFailLoudTests
         {
             var g = RngInitNestedDrawLayer.ComputationGraph;
             var sample = TensorData([2L, 2L], 1f, 1f, 1f, 1f);
-            var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([sample]));
+            var arch = g.ToConcreteArchitecture([sample]);
             return arch.InitializeTrainableParams(rngConfig: new RngConfig { MasterSeed = seed })
                 .ModelParams.Single().ToTensorData().As<float32>().AccessMemory().ToArray();
         }
@@ -724,7 +724,7 @@ public class RngInitFailLoudTests
             RngAttributeBoundsNormalInitLayer.ComputationGraph,  // normal family
             RngBitsInitLayer.ComputationGraph])                  // raw bits
         {
-            var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([sample]));
+            var arch = g.ToConcreteArchitecture([sample]);
             Unkeyed(() => ComputeContext.Default.Execute(arch, sample.Shared()));
             Assert.Null(Record.Exception(() => ComputeContext.Default.Execute(arch.ToConcreteModel(), sample.Shared())));
         }
@@ -765,7 +765,7 @@ public class RngNormalFrozenDerivationTests
     {
         var g = RngNormalBothCollections.ComputationGraph;
         var input = TensorData([4L, 4L], Enumerable.Repeat(0f, 16).ToArray());
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([input]));
+        var arch = g.ToConcreteArchitecture([input]);
         // Filter to the float32 weight before casting: the param list also carries the
         // framework-injected RngExecutionCounter, which is int64 state.
         var init = arch.InitializeTrainableParams(rngConfig: cfg).ModelParams
@@ -1026,7 +1026,7 @@ public class RngInitComposedInitializerTests
     private static Dictionary<string, float[]> Init(ComputationGraph g, ulong seed = 7)
     {
         var sample = TensorData([2L, 2L], 1f, 1f, 1f, 1f);
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([sample]));
+        var arch = g.ToConcreteArchitecture([sample]);
         return arch.InitializeTrainableParams(rngConfig: new RngConfig { MasterSeed = seed })
             .ModelParams
             .Where(p => p.Type == DType.Float32)

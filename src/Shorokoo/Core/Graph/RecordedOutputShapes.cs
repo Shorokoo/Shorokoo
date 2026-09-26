@@ -111,7 +111,7 @@ namespace Shorokoo.Core.Graph
         /// model may not.</para>
         /// </summary>
         internal static void RecordAtSamples(
-            InternalComputationGraph graph, ModelParamList samples, ComputeContext? computeContext)
+            InternalComputationGraph graph, IReadOnlyList<IData> samples, ComputeContext? computeContext)
         {
             foreach (var node in graph.OutputNodes) Clear(node);
             var store = EvaluateDefinite(graph,

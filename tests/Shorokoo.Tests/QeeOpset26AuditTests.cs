@@ -83,7 +83,7 @@ public class QeeOpset26AuditTests
             var past = TensorData(DType.Float32, [2L, 3L, 2L], 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f, 11f, 12f);
             var wide = TensorData(DType.Float32, [2L, 4L], 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f);
             var g = QeeTensorScatterValueAuditCheck.ComputationGraph;
-            var built = g.ToConcreteArchitecture(g.FromOrderedInputs([past, wide])).ToConcreteModel();
+            var built = g.ToConcreteArchitecture([past, wide]).ToConcreteModel();
             var concrete = built.ToInternal();
             var exported = FastOnnxModelBuilder.BuildInternalOnnxModel(
                 concrete, prepForOnnx: true, inputDims: [[2L, 3L, 2L], [2L, 4L]]);

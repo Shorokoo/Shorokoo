@@ -209,7 +209,7 @@ public class SideBySideBackendHardwareTests
         using var cuda = new ComputeContext(LoadCuda());
         var rig = TrainingRig.FromScratch(
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
-            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([4L], [1f, 2f, 3f, 4f]))],
+            [TensorData([4L], [1f, 2f, 3f, 4f])],
             new AdamWOptimizerHyperparameters { LearningRate = 0.1f },
             runtimeContext: cuda);
 

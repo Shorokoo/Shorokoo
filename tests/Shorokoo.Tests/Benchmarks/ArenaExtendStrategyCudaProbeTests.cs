@@ -164,10 +164,9 @@ public class ArenaExtendStrategyCudaProbeTests
 
         try
         {
-            NamedModelParam[] sample =
+            IData[] sample =
             [
-                new TensorDataModelParam("tokens", ModelParamType.InputParam,
-                    TensorData([Batch, Sequence], new long[Batch * Sequence])),
+                TensorData([Batch, Sequence], new long[Batch * Sequence]),
             ];
             var rig = TrainingRig.FromScratch(
                 model, ForwardingLoss.ComputationGraph,

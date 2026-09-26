@@ -250,8 +250,8 @@ public class MemoryPassBenchmarkTests
         var count = 1L;
         foreach (var d in shape) count *= d;
 
-        NamedModelParam[] sample =
-            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData(shape, new float[count]))];
+        IData[] sample =
+            [TensorData(shape, new float[count])];
         var rig = TrainingRig.FromScratch(
             model, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, sample, 0.01f);
 

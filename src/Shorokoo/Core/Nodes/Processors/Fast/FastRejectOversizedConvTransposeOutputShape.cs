@@ -29,7 +29,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// </summary>
     internal static class FastRejectOversizedConvTransposeOutputShape
     {
-        public static void Process(InternalComputationGraph graph, ModelParamList? sampleInputs)
+        public static void Process(InternalComputationGraph graph, IReadOnlyList<IData>? sampleInputs)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
@@ -48,19 +48,17 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         private static Dictionary<FastTensorKey, IRuntimeTensor>? ResolveShapes(
-            InternalComputationGraph graph, List<FastNode> nodes, ModelParamList? sampleInputs)
+            InternalComputationGraph graph, List<FastNode> nodes, IReadOnlyList<IData>? sampleInputs)
         {
             var keys = nodes.SelectMany(n => (FastTensorKey[])[n.Inputs[0]!.Value, n.Inputs[1]!.Value]).Distinct().ToList();
             var resolver = graph.Clone();
-            resolver.Outputs = keys;
-            resolver.OutputUniqueNames = [.. new string?[keys.Count]];
-            resolver.OutputRankOverrides = null;
+            resolver.SetOutputs(keys);
             FastProcessorHelper.RemoveUnreachableNodes(resolver);
 
-            TensorData[]? samples = null;
+            IData[]? samples = null;
             if (resolver.Inputs.Count > 0)
             {
-                samples = sampleInputs is null ? null : FastLowerAttributeTensorOps.OrderSamples(resolver, sampleInputs);
+                samples = sampleInputs is null ? null : FastLowerAttributeTensorOps.BindSamplesToTheInputsItReads(resolver, sampleInputs);
                 if (samples is null) return null;
             }
 

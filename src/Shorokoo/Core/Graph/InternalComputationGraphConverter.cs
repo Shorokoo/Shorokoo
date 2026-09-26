@@ -46,12 +46,10 @@ namespace Shorokoo.Graph
             IEnumerable<Node> topologicalOrderNodes,
             IEnumerable<Variable> inputs,
             IEnumerable<Variable> outputs,
-            int?[] outputRankOverrides,
+            int?[]? declaredOutputRanks,
             bool useSequentialIds,
             IReadOnlyDictionary<Variable, FastTensorKey>? externalInputKeys = null)
         {
-            fastGraph.OutputRankOverrides = outputRankOverrides;
-
             // When the source node sequence contains duplicate NodeKeys (which happens when
             // the same cached inner function is inlined multiple times), we must assign fresh
             // FastNodeKeys to the duplicates. We track the mapping from Variable objects
@@ -175,17 +173,20 @@ namespace Shorokoo.Graph
                 fastGraph.Nodes.Add(fastNode);
             }
 
+            // An input's name lives on its node. A stand-in the host keys externally has none here.
+            var nodeByKey = fastGraph.Nodes.ToDictionary(n => n.Key);
             foreach (var input in inputs)
-            {
-                FastTensorKey key = variableToKey.TryGetValue(input, out var mk) ? mk : FastTensorKey.FromCgKey(input.Key);
-                fastGraph.Inputs.Add(key);
-                fastGraph.InputUniqueNames.Add(input.UniqueName);
-            }
+                if (variableToKey.TryGetValue(input, out var key)
+                    && (externalInputKeys is null || !externalInputKeys.ContainsKey(input))
+                    && nodeByKey.TryGetValue(key.FastNodeKey, out var inputNode))
+                    InternalComputationGraph.SetInputName(inputNode, input.UniqueName);
+            // Each output is an output node closing the list, carrying its name and declared rank.
+            int o = 0;
             foreach (var output in outputs)
             {
                 FastTensorKey key = variableToKey.TryGetValue(output, out var mk) ? mk : FastTensorKey.FromCgKey(output.Key);
-                fastGraph.Outputs.Add(key);
-                fastGraph.OutputUniqueNames.Add(output.UniqueName);
+                fastGraph.AddOutput(key, output.UniqueName, declaredOutputRanks is not null && o < declaredOutputRanks.Length ? declaredOutputRanks[o] : null);
+                o++;
             }
         }
 
@@ -314,6 +315,9 @@ namespace Shorokoo.Graph
 
             foreach (var fastNode in fastGraph.Nodes)
             {
+                // An output node is the graph's boundary, not a value-producing op: the Variable
+                // view names the graph's outputs in its `outputs` list instead.
+                if (InternalOpCodes.IsGraphOutputOp(fastNode.OpCode)) continue;
                 var nodeDefResolver = Definitions.NodeDefinitions[fastNode.OpCode];
                 var attributes = fastNode.Attributes
                                   ?? OnnxCSharpAttributes.FromCSharpVals(new Dictionary<string, object?>(), nodeDefResolver.AttributeDefs);
@@ -458,13 +462,13 @@ namespace Shorokoo.Graph
             // Restore original UniqueNames so that human-readable graph-input/output names
             // survive FastCG processor passes (loop unrolling, simplify, etc. otherwise
             // replace them with TensorKey.ToString()-style strings).
-            ApplyOriginalNames(inputs, fastGraph.InputUniqueNames);
-            ApplyOriginalNames(outputs, fastGraph.OutputUniqueNames);
+            ApplyOriginalNames(inputs, fastGraph.InputNames);
+            ApplyOriginalNames(outputs, fastGraph.OutputNames);
 
             return (nodesInOrder.ToImmutableArray(), tensorsByKey, inputs, outputs);
         }
 
-        private static void ApplyOriginalNames(ImmutableArray<Variable> variables, List<string?> names)
+        private static void ApplyOriginalNames(ImmutableArray<Variable> variables, IReadOnlyList<string?> names)
         {
             for (int i = 0; i < variables.Length && i < names.Count; i++)
             {

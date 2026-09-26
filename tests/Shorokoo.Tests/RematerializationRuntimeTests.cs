@@ -35,7 +35,7 @@ public class RematerializationRuntimeTests
     {
         var values = new float[1024 * 32];
         for (var i = 0; i < values.Length; i++) values[i] = ((i * 37) % 101) * 0.01f - 0.5f;
-        NamedModelParam[] sample = [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([1024L, 32L], values))];
+        NamedModelParam[] sample = [new TensorDataModelParam("x", ModelParamType.InputParam, TensorData([1024L, 32L], values))];
         var rig = TrainingRig.FromScratch(Modules.CheckpointedNarrowMlpStack.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph, sample, 0.01f);
 
         var original = rig.PreOptimizationGraph.ToInternal().Nodes.Select(n => n.Key).ToHashSet();
@@ -80,7 +80,7 @@ public class RematerializationRuntimeTests
     {
         long[] shape = [2L, 32L, 128L];
         NamedModelParam[] sample =
-            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData(shape, new float[shape[0] * shape[1] * shape[2]]))];
+            [new TensorDataModelParam("x", ModelParamType.InputParam, TensorData(shape, new float[shape[0] * shape[1] * shape[2]]))];
         var rig = TrainingRig.FromScratch(MemoryPassEncoder1.ComputationGraph, L2Loss.ComputationGraph,
             SGDOptimizer.ComputationGraph, sample, 0.01f);
         var inputs = rig.OptimizationInputShapes;

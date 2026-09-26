@@ -255,6 +255,12 @@ namespace Shorokoo.Core.Factory.IR
                                 isTrainable: true,  // Tensor attributes are not state params
                                 tensor);
                             attribute.Type = AttributeProto.AttributeType.Tensor;
+                            // A literal of a generic body (Scalar<T>(2)) is typed by the type
+                            // parameter, which the proto's data_type cannot say: store it the way a
+                            // DType attribute does, or the reloaded literal no longer agrees with the
+                            // T-typed values it meets.
+                            if (tensor.DType.GenericTypeParamName is { } tensorParamName)
+                                attribute.RefAttrName = $"GenericParam:{tensorParamName}";
                             break;
                         case AttributeProto.AttributeType.Tensors:
                             throw new UnsupportedDTypeException(ErrorCodes.FW034, "Tensors", "type conversion", 

@@ -66,10 +66,14 @@ the type name; the generator rejects that with error `MSG003`.)
 
 An initializer may take inputs beyond the shape, and two of the shapes those take
 are worth knowing: an `Init(...)` call **inside** an initializer body is the called
-initializer's body evaluated as a value rather than a second parameter, so the
-shipped parameterized initializers compose; and an input typed `Tensor<T>` may be
+initializer's body evaluated as a value rather than a second parameter — only the
+top-level initializer defines one — so the shipped parameterized initializers compose,
+trainable and `[StateInitializer]` alike; and an input typed `Tensor<T>` may be
 **another trainable parameter**, which reaches the body as the value that parameter
-was initialized to. See *Writing your own* in
+was initialized to. What an initializer body may **not** do is create or reference a
+model: no `Foo.Model(...)`, no `Foo.Call(...)` of any `[Module]`, no `ModelSequence`,
+no `GetTrainableParam`, no model-typed input. It is refused with `FW055` when the
+graph using the initializer is built. See *Writing your own* in
 [nn-library.md](nn-library.md#initializers-shorokoomodulesinitializers).
 
 ## Hyperparameter baking
@@ -161,7 +165,8 @@ model need one class, not N. See
 3. Write `public static <OutputType> Inline(<input tensors...>, <[Hyper] hypers...>)`.
 4. Build the output from tensor ops, `NN.*` ops, sub-modules (`Other.Model(...).Call(...)`),
    and weights from a `[TrainableParamInitializer]` — whose own body may in turn call
-   another initializer or start from a parameter already built here.
+   another initializer or start from a parameter already built here, but may not create
+   or call a model (`FW055`).
 5. Ensure the project references the generator as an analyzer (see below).
 6. Build, then call `MyLayer.Call(...)` or use `MyLayer.ComputationGraph`.
 
@@ -408,13 +413,16 @@ on it folds — including the `useBias` gates, which a plain concretization with
 no hypers to thread through `TrainStep`:
 
 ```csharp
-var sample = new TensorDataModelParam("patches", ModelParamType.InputParam,
-    TensorData([batch, numPatches, patchDim], /* … */));
+var sample = TensorData([batch, numPatches, patchDim], /* … */);
 
 var rig = TrainingRig.FromScratch(
-    tiny, Losses.CrossEntropy, Optimizers.AdamW, [sample],
+    tiny, Losses.CrossEntropy, Optimizers.AdamW, [sample],   // one sample per input, in order
     new AdamWOptimizerHyperparameters { LearningRate = 3e-4f });
 ```
+
+The samples bind by position. To bind them by name instead — each to the input it names, in any
+order — pass `NamedModelParam`s:
+`[new TensorDataModelParam("patches", ModelParamType.InputParam, sample)]`.
 
 Swapping `tiny` for `small` is the whole diff between training the two. (Each variant is
 still concretized and lowered separately, so this buys one source of truth, not a cheaper
@@ -519,8 +527,9 @@ an *absent* optional input — execute graphs that exercise the absent branch th
 `new QuickExecutionEngine().Execute(concreteModel, inputs…)`, which is optional-aware
 in pure managed code.
 
-A model with an optional input trains like any other: pass the sample input as an
-`OptionalTensorDataModelParam` to `TrainingRig.FromScratch`, and build each batch with
+A model with an optional input trains like any other: pass its sample to
+`TrainingRig.FromScratch` as an `OptionalTensorData` in the input's position (or, binding by
+name, as an `OptionalTensorDataModelParam` named for the input), and build each batch with
 `rig.InputDef.FromOrderedData(...)`, which takes an `OptionalTensorData` in that field's
 position. The sample's arrangement — present or absent — only sizes the rig's build-time
 shape inference; it is not baked into the training step, so a rig built either way accepts
@@ -656,7 +665,7 @@ var rig = TrainingRig.FromScratch(graph, Losses.L2Loss,
     Optimizers.SGD, sampleInputs, 0.01f);
 
 // 5. Export — concretize and save/export as usual (see onnx-and-weights.md).
-var concrete = graph.ToConcreteArchitecture(graph.FromOrderedInputs([sample]))
+var concrete = graph.ToConcreteArchitecture([sample])
                     .ToConcreteModel();
 var onnx = FastOnnxModelBuilder.BuildOnnxModel(concrete);
 ```

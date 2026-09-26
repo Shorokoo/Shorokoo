@@ -336,6 +336,11 @@ namespace Shorokoo.Core
         {
             if (this.fields.TryGetValue(name, out var field))
                 return field;
+            // A struct this trace did not build — an input, or a field of one — holds no field
+            // values of its own; its definition says what it has, and a field of it is read off it
+            // in the graph, as an IStruct property of a struct input is.
+            if (this.structDef?.GetField(name) is { } def)
+                return InternalOp.TensorStructGetField(this, name, def.ElementType, def.Rank, def.Structure);
             throw new KeyNotFoundException($"Field '{name}' not found in TensorStruct. Available fields: {string.Join(", ", this.fields.Keys)}");
         }
 

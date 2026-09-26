@@ -1,0 +1,446 @@
+using System.Collections.Generic;
+using System.Linq;
+using Shorokoo.Core.Interpreter;
+using Shorokoo.Core.Nodes.NodeDefinitions;
+using Shorokoo.Graph;
+
+namespace Shorokoo.Core.Graph
+{
+    /// <summary>
+    /// The representative shape every input of a <see cref="GraphKind.ConcreteArchitecture"/> or
+    /// <see cref="GraphKind.ConcreteModel"/> graph carries: the dims of the sample the graph was
+    /// concretized at, recorded as <see cref="OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape"/>
+    /// on the input's <c>MODEL_TENSOR_INPUT</c> / <c>MODEL_OPTIONAL_INPUT</c> node. It makes a
+    /// concrete graph self-describing: training shape inference rebuilds its sample inputs from
+    /// it, and the exporter reads each input's rank off it where the input declares none.
+    ///
+    /// <para>Established where a graph becomes concrete — <c>ToConcreteArchitecture</c> records
+    /// the sample it was handed for each input, an ONNX import derives one from the file — and
+    /// verified wherever a concrete graph is frozen (<see cref="Verify"/>). The attribute rides on
+    /// the node, so it survives every copy, the <c>.srk</c> round trip and <c>Specialize</c>,
+    /// which only removes inputs.</para>
+    /// </summary>
+    internal static class RepresentativeInputShapes
+    {
+        /// <summary>
+        /// The single negative dim recorded for an optional input supplied ABSENT. A concretized
+        /// shape never holds one, so it cannot be confused with a real shape — and recording it
+        /// rather than recording nothing keeps a MISSING attribute meaning what it means on a
+        /// tensor input: a graph that breaks the invariant.
+        /// </summary>
+        internal static readonly long[] AbsentOptionalShape = [-1L];
+
+        /// <summary>Whether <paramref name="node"/> is an input node that carries the shape.</summary>
+        internal static bool CarriesShape(FastNode node)
+            => node.OpCode is InternalOpCodes.MODEL_TENSOR_INPUT or InternalOpCodes.MODEL_OPTIONAL_INPUT;
+
+        /// <summary>
+        /// The samples of <paramref name="named"/> bound to <paramref name="graph"/>'s data inputs
+        /// by name — each to the input of that name, whatever its place in the list — and returned
+        /// in the inputs' declaration order, the order every later stage binds them in. A struct
+        /// sample binds by its struct input's name; a generic module's type-placeholder slots take
+        /// none. Refuses (<see cref="ErrorCodes.FW056"/>) a data input no sample names, a sample
+        /// naming no data input and a name given to more than one sample, naming each offender and
+        /// listing the graph's inputs.
+        /// </summary>
+        internal static IData[] BindByName(InternalComputationGraph graph, ModelParamList named)
+        {
+            var dataInputs = DataInputIndices(graph);
+            var inputNames = dataInputs.Select(i => NameOf(graph, i)).ToList();
+            var samples = named.ModelParams;
+            var known = inputNames.OfType<string>().ToHashSet(System.StringComparer.Ordinal);
+
+            var problems = new List<string>();
+            var duplicated = samples.GroupBy(p => p.ParamName ?? "", System.StringComparer.Ordinal)
+                .Where(g => g.Count() > 1).Select(g => g.Key).ToList();
+            if (duplicated.Count > 0)
+                problems.Add($"more than one sample is named {Quoted(duplicated)}");
+            var unknown = samples.Select(p => p.ParamName ?? "").Where(n => !known.Contains(n))
+                .Distinct(System.StringComparer.Ordinal).ToList();
+            if (unknown.Count > 0)
+                problems.Add($"sample(s) {Quoted(unknown)} name no input of the graph");
+            var given = samples.Select(p => p.ParamName ?? "").ToHashSet(System.StringComparer.Ordinal);
+            var missing = dataInputs.Where((_, k) => inputNames[k] is not { } name || !given.Contains(name))
+                .Select(i => NameOf(graph, i) ?? $"#{i}").ToList();
+            if (missing.Count > 0)
+                problems.Add($"no sample was given for input(s) {Quoted(missing)}, and every input of the " +
+                    "graph needs one, [Hyper] inputs included");
+            if (problems.Count > 0)
+                throw new ModelException(ErrorCodes.FW056, "ToConcreteArchitecture",
+                    $"{string.Join("; ", problems)}. Named samples bind each to the graph input of the same " +
+                    $"name, one per input, in any order; the graph's inputs are {Quoted(inputNames.Select((n, k) => n ?? $"#{dataInputs[k]}"))}.");
+
+            var byName = samples.ToDictionary(p => p.ParamName, System.StringComparer.Ordinal);
+            return [.. inputNames.Select(n => ValueOf(byName[n!]))];
+        }
+
+        /// <summary>The value a named sample carries: its tensor, optional, sequence or struct.</summary>
+        private static IData ValueOf(NamedModelParam sample) => sample switch
+        {
+            OptionalTensorDataModelParam optional => optional.ToOptionalTensorData(),
+            TensorStructModelParam structSample => structSample.StructData,
+            TensorDataSequenceModelParam sequence => sequence.ToTensorDataSequence(),
+            _ => sample.ToTensorData(),
+        };
+
+        /// <summary>
+        /// <paramref name="samples"/> as the lowering binds them: each value as it is, a
+        /// <see cref="SharedInput"/> standing for the value it wraps (a sample is read, never
+        /// consumed). A missing value is refused.
+        /// </summary>
+        internal static IData[] Unwrapped(IReadOnlyList<IData> samples)
+            => [.. samples.Select((s, k) => s switch
+            {
+                null => throw new System.ArgumentException($"sample #{k} is null; give a value for every input.",
+                    nameof(samples)),
+                SharedInput shared => shared.Value,
+                _ => s,
+            })];
+
+        /// <summary>
+        /// Refuses (<see cref="ErrorCodes.FW056"/>) a lowering of <paramref name="graph"/> whose
+        /// positional <paramref name="samples"/> leave any data input without a sample, listing
+        /// every such input, give more samples than it has data inputs, stating both counts, or give
+        /// an input whose type declares its rank (<see cref="OnnxOpAttributeNames.ShrkAttrRank"/>) a
+        /// sample of another rank, listing every such input. Samples bind to the data inputs by
+        /// position, one per input in declaration order, as the lowering binds them; a generic
+        /// module's type-placeholder slots take none.
+        /// </summary>
+        internal static void RequireSampleForEveryInput(InternalComputationGraph graph, IReadOnlyList<IData> samples)
+        {
+            var dataInputs = DataInputIndices(graph);
+            if (samples.Count > dataInputs.Count)
+                throw new ModelException(ErrorCodes.FW056, "ToConcreteArchitecture",
+                    $"the graph has {dataInputs.Count} input(s) " +
+                    $"({string.Join(", ", dataInputs.Select(i => $"'{NameOf(graph, i) ?? $"#{i}"}'"))}) but " +
+                    $"{samples.Count} sample(s) were given. Give exactly one sample per " +
+                    "input, in declaration order; a generic module's type-placeholder slots take none.");
+            if (samples.Count < dataInputs.Count)
+            {
+                var missing = dataInputs.Skip(samples.Count)
+                    .Select(i => $"'{NameOf(graph, i) ?? $"#{i}"}'");
+                throw new ModelException(ErrorCodes.FW056, "ToConcreteArchitecture",
+                    $"no sample was given for input(s) {string.Join(", ", missing)}. Every input of the " +
+                    "graph needs a sample, [Hyper] inputs included, one per input in declaration order: " +
+                    "the lowering records each sample's shape on the concrete architecture, which is " +
+                    "what training and ONNX export read the input's shape from.");
+            }
+
+            // An input whose type fixes its rank (a Scalar, a Vector) cannot take a sample of another:
+            // the lowering would record that sample's shape, and export would declare a rank the
+            // input's type contradicts. Given positionally, it is most often two samples swapped.
+            var producers = graph.BuildProducerByOutputMap();
+            var inputs = graph.Inputs;
+            var misranked = dataInputs
+                .Select((inputIndex, k) => (Input: inputIndex,
+                    Declared: producers.TryGetValue(inputs[inputIndex], out var node) && CarriesShape(node)
+                        ? node.Attributes.GetLongVal(OnnxOpAttributeNames.ShrkAttrRank) : null,
+                    Dims: ShapeOf(samples[k])))
+                .Where(x => x.Declared is long declared && x.Dims is { } dims && !IsMarker(dims) && dims.Length != declared)
+                .Select(x => $"input '{NameOf(graph, x.Input) ?? $"#{x.Input}"}' is declared with " +
+                    $"rank {x.Declared}, but its sample has shape [{string.Join(", ", x.Dims!)}]")
+                .ToList();
+            if (misranked.Count > 0)
+                throw new ModelException(ErrorCodes.FW056, "ToConcreteArchitecture",
+                    $"{string.Join("; ", misranked)}. Each sample must have the rank its input's type " +
+                    "declares; samples given positionally bind one per input in declaration order, so " +
+                    "check that they are given in that order.");
+        }
+
+        private static string Quoted(IEnumerable<string> names) => string.Join(", ", names.Select(n => $"'{n}'"));
+
+        private static bool IsMarker(long[] dims) => dims is [< 0];
+
+        /// <summary>
+        /// Records each input's sample shape on the input it is bound to
+        /// (<see cref="BindSamplesToLoweredInputs"/>). An input without a sample, or whose sample
+        /// has no single shape, is left as it is (<see cref="Verify"/> names the former).
+        /// </summary>
+        internal static void Record(InternalComputationGraph graph, IReadOnlyList<IData> samples)
+        {
+            var bound = BindSamplesToLoweredInputs(graph, samples);
+            var producers = graph.BuildProducerByOutputMap();
+            var inputs = graph.Inputs;
+            for (int i = 0; i < inputs.Count; i++)
+            {
+                if (!producers.TryGetValue(inputs[i], out var node) || bound[i] is not { } value) continue;
+                if (CarriesShape(node) && ShapeOf(value) is { } dims) Set(node, dims);
+                else if (node.OpCode == InternalOpCodes.MODEL_SEQUENCE_INPUT && SharedElementShapeOf(value) is { } element)
+                    Set(node, element);
+            }
+        }
+
+        /// <summary>
+        /// The shape every element of a sequence sample shares, or <c>null</c> for an empty
+        /// sequence, one whose elements differ in shape, or a value that is no sequence. Recorded
+        /// on a sequence input — as an aid, not as the invariant a tensor input's shape is — so
+        /// shape inference over a concrete graph can stand the input in by elements of that shape.
+        /// </summary>
+        private static long[]? SharedElementShapeOf(IData value)
+        {
+            if (value is SharedInput shared) value = shared.Value;
+            if (value is not TensorDataSequence { Count: > 0 } sequence) return null;
+            var first = sequence[0].Shape.Dims;
+            return sequence.All(e => e.Shape.Dims.AsSpan().SequenceEqual(first)) ? first : null;
+        }
+
+        /// <summary>
+        /// The sample value bound to each input of <paramref name="graph"/> — a graph in lowering,
+        /// whose struct inputs <c>FastUnpackTensorStructs</c> may already have expanded into one
+        /// input per field — in input order, <c>null</c> where no sample reaches the input. The one
+        /// binding every lowering stage uses, so the stages that evaluate the graph at the samples
+        /// and the one that records their shapes cannot disagree about which sample is whose.
+        ///
+        /// <para>Samples bind by position, one per data input in declaration order, as
+        /// <see cref="RequireSampleForEveryInput"/> checks them (a named list is put in that order by
+        /// <see cref="BindByName"/> first): a
+        /// struct sample stands for its struct's fields, in declaration order, which is the order
+        /// the unpacking gives them as inputs; a generic module's type-placeholder slots take none.
+        /// Each value is the sample's own — a tensor, an optional, a sequence, or a field's value,
+        /// whatever kind it is.</para>
+        /// </summary>
+        internal static IData?[] BindSamplesToLoweredInputs(InternalComputationGraph graph, IReadOnlyList<IData>? samples)
+        {
+            var inputs = graph.Inputs;
+            var bound = new IData?[inputs.Count];
+            if (samples is null) return bound;
+            var values = samples.SelectMany(ValuesOf).ToList();
+            var producers = graph.BuildProducerByOutputMap();
+            int next = 0;
+            for (int i = 0; i < inputs.Count && next < values.Count; i++)
+            {
+                if (producers.TryGetValue(inputs[i], out var node) && node.OpCode == InternalOpCodes.GENERIC_TYPE_INPUT)
+                    continue;
+                bound[i] = values[next++];
+            }
+            return bound;
+        }
+
+        private static IEnumerable<IData?> ValuesOf(IData sample) => sample switch
+        {
+            SharedInput shared => ValuesOf(shared.Value),
+            TensorDataStruct structSample => FieldValuesOf(structSample.Definition, structSample),
+            _ => [sample],
+        };
+
+        /// <summary>
+        /// A struct sample's field values, one per input its lowering gives it: a field that is
+        /// itself a struct stands for its own fields, in turn, and a missing field is <c>null</c>
+        /// for each input it would have bound.
+        /// </summary>
+        private static IEnumerable<IData?> FieldValuesOf(TensorStructDef definition, TensorDataStruct? data)
+            => definition.Fields.SelectMany(field =>
+            {
+                IData? value = data is not null && data.Fields.TryGetValue(field.Name, out var v) ? v : null;
+                if (value is SharedInput shared) value = shared.Value;
+                return field.Structure == DataStructure.TensorStruct && field.ElementType.TensorStructDef is { } nested
+                    ? FieldValuesOf(nested, value as TensorDataStruct)
+                    : [value];
+            });
+
+        /// <summary>
+        /// The dims to record for one sample value, or <c>null</c> for a value with no single shape
+        /// (a sequence, a struct). An absent optional records <see cref="AbsentOptionalShape"/>, not
+        /// nothing: reading the shape off the value rather than converting it to a tensor is what
+        /// lets an absent optional through at all, as it has no tensor value (Shorokoo/Shorokoo#314).
+        /// </summary>
+        private static long[]? ShapeOf(IData value) => value switch
+        {
+            SharedInput shared => ShapeOf(shared.Value),
+            TensorData tensor => tensor.Shape.Dims,
+            OptionalTensorData { HasValue: true, Value: { } present } => present.Shape.Dims,
+            OptionalTensorData => AbsentOptionalShape,
+            _ => null,
+        };
+
+        /// <summary>Indices of <paramref name="graph"/>'s inputs that take a value: all but a
+        /// generic module's type placeholders.</summary>
+        private static List<int> DataInputIndices(InternalComputationGraph graph)
+        {
+            var producers = graph.BuildProducerByOutputMap();
+            var inputs = graph.Inputs;
+            return [.. Enumerable.Range(0, inputs.Count).Where(i =>
+                !(producers.TryGetValue(inputs[i], out var node)
+                  && node.OpCode == InternalOpCodes.GENERIC_TYPE_INPUT))];
+        }
+
+        /// <summary>
+        /// Records the shape of each of <paramref name="exemplars"/> — one per graph input, in
+        /// input order — on the input it stands for: a composed graph's inputs, whose exemplars its
+        /// builder already holds for shape inference.
+        /// </summary>
+        internal static void Record(InternalComputationGraph graph, IReadOnlyList<IRuntimeTensor> exemplars)
+        {
+            var producers = graph.BuildProducerByOutputMap();
+            var inputs = graph.Inputs;
+            for (int i = 0; i < inputs.Count && i < exemplars.Count; i++)
+            {
+                if (!producers.TryGetValue(inputs[i], out var node) || !CarriesShape(node)) continue;
+                var dims = exemplars[i] switch
+                {
+                    RuntimeOptionalTensor { HasValue: false } => AbsentOptionalShape,
+                    RuntimeOptionalTensor { ValueTensor.Shape: { } s } => s.Dims,
+                    RuntimeTensor { Shape: { } s } => s.Dims,
+                    _ => null,
+                };
+                if (dims is not null) Set(node, dims);
+            }
+        }
+
+        /// <summary>Records <paramref name="dims"/> on the input node <paramref name="node"/>.</summary>
+        internal static void Set(FastNode node, long[] dims)
+            => node.Attributes = node.Attributes.SetAttributes(
+                (OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape, (object?)dims));
+
+        /// <summary>The recorded shape of <paramref name="node"/>, or <c>null</c> when it has none.</summary>
+        internal static long[]? Get(FastNode node)
+            => node.Attributes.IsAttributeDefined(OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape)
+                ? node.Attributes.GetLongsVal(OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape)
+                : null;
+
+        /// <summary>
+        /// Holds a concrete graph to the invariant: every tensor or optional input carries a
+        /// representative shape. Throws <see cref="ErrorCodes.FW057"/> naming the first input that
+        /// does not; a <see cref="GraphKind.Module"/> graph is not checked.
+        /// </summary>
+        internal static void Verify(InternalComputationGraph graph, GraphKind kind)
+        {
+            if (kind is not (GraphKind.ConcreteArchitecture or GraphKind.ConcreteModel)) return;
+            if (FirstInputWithoutShape(graph) is not { } name) return;
+            throw new ModelException(ErrorCodes.FW057, $"input '{name}'",
+                $"this {Shorokoo.Core.Utils.SrkFileFormat.StageName(kind)} graph's input '{name}' carries " +
+                "no representative shape. Every input of a concrete graph records the shape of the " +
+                "sample it was concretized at: lower the module again with ToConcreteArchitecture, " +
+                "giving a sample for every input.");
+        }
+
+        /// <summary>
+        /// The name of the first tensor or optional input of <paramref name="graph"/> that carries
+        /// no representative shape, or <c>null</c> when every one does.
+        /// </summary>
+        internal static string? FirstInputWithoutShape(InternalComputationGraph graph)
+        {
+            var inputNodes = graph.InputNodes;
+            for (int i = 0; i < inputNodes.Count; i++)
+            {
+                var node = inputNodes[i];
+                if (!CarriesShape(node)) continue;
+                if (Get(node) is null) return InternalComputationGraph.InputNameOf(node) ?? node.FriendlyName ?? $"#{i}";
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Records a representative shape on each tensor or optional input of a graph read from
+        /// the ONNX <paramref name="graphProto"/>, and the shape its elements share on each sequence
+        /// input: the one in <paramref name="inputShapes"/> where
+        /// it names the input, else the one a Shorokoo export carried (already on the node), else
+        /// the shape the file declares, each symbolic (<c>dim_param</c>) or unset dimension taken
+        /// as <c>1</c>, as is a negative <c>dim_value</c> (a sequence's, its element's). An input the
+        /// file declares no shape for is left without one; the entry points that freeze the graph
+        /// refuse it, a sequence input excepted
+        /// (<see cref="ThrowIfImportLeftAnInputUnshaped"/>). A name in
+        /// <paramref name="inputShapes"/> that is no input, or a shape of another rank than the
+        /// file declares or contradicting a dimension it fixes, is refused.
+        /// </summary>
+        internal static void RecordFromOnnx(
+            InternalComputationGraph graph,
+            Factory.IR.GraphProto graphProto,
+            IReadOnlyDictionary<string, long[]>? inputShapes)
+        {
+            var protoByName = new Dictionary<string, Factory.IR.ValueInfoProto>(System.StringComparer.Ordinal);
+            foreach (var info in graphProto.Inputs) protoByName.TryAdd(info.Name, info);
+
+            var producers = graph.BuildProducerByOutputMap();
+            var inputNodes = graph.Inputs
+                .Select(k => producers.TryGetValue(k, out var n) ? n : null)
+                .OfType<FastNode>()
+                .Where(n => CarriesShape(n) || n.OpCode == InternalOpCodes.MODEL_SEQUENCE_INPUT)
+                .ToList();
+
+            if (inputShapes is not null)
+            {
+                var names = inputNodes.Select(n => n.FriendlyName).ToHashSet(System.StringComparer.Ordinal);
+                foreach (var (name, dims) in inputShapes)
+                {
+                    if (!names.Contains(name))
+                        throw new System.ArgumentException(
+                            $"inputShapes names '{name}', which is not an input of the model. Its inputs " +
+                            $"are {string.Join(", ", names.Select(x => $"'{x}'"))}.", nameof(inputShapes));
+                    if (dims is null || dims.Any(d => d < 0))
+                        throw new System.ArgumentException(
+                            $"the shape given for input '{name}' must be concrete dimensions, none negative.",
+                            nameof(inputShapes));
+                    if (protoByName.TryGetValue(name, out var proto) && DeclaredDimsOf(proto) is { } declared)
+                    {
+                        if (declared.Count != dims.Length)
+                            throw new System.ArgumentException(
+                                $"input '{name}' is declared with rank {declared.Count}, but the shape given " +
+                                $"for it has rank {dims.Length}.", nameof(inputShapes));
+                        var contradicted = Enumerable.Range(0, dims.Length)
+                            .Where(d => FixedSizeOf(declared[d]) is { } size && size != dims[d])
+                            .Select(d => $"dimension {d} is fixed at {declared[d].DimValue} but given as {dims[d]}")
+                            .ToList();
+                        if (contradicted.Count > 0)
+                            throw new System.ArgumentException(
+                                $"the shape given for input '{name}' contradicts the one the model declares: " +
+                                $"{string.Join("; ", contradicted)}.", nameof(inputShapes));
+                    }
+                }
+            }
+
+            foreach (var node in inputNodes)
+            {
+                var name = node.FriendlyName ?? "";
+                if (inputShapes is not null && inputShapes.TryGetValue(name, out var given))
+                    Set(node, given);
+                else if (Get(node) is null
+                         && protoByName.TryGetValue(name, out var proto) && DeclaredDimsOf(proto) is { } declared)
+                    Set(node, [.. declared.Select(d => FixedSizeOf(d) ?? 1L)]);
+            }
+        }
+
+        /// <summary>
+        /// The size a declared dimension fixes, or <c>null</c> for one it leaves open: a symbolic
+        /// (<c>dim_param</c>) or unset one, and a negative <c>dim_value</c>, which some writers use
+        /// for "unknown" and which no concrete shape can hold (and <c>-1</c> would read back as an
+        /// absent optional's marker).
+        /// </summary>
+        private static long? FixedSizeOf(Factory.IR.TensorShapeProto.Dimension dim)
+            => dim.ShouldSerializeDimValue() && dim.DimValue >= 0 ? dim.DimValue : null;
+
+        /// <summary>
+        /// Refuses (<see cref="ErrorCodes.FW058"/>) an imported graph with a tensor or optional
+        /// input left without a representative shape — one whose declared type in the file has no
+        /// shape, so no rank — naming every such input and the overload that supplies it.
+        /// </summary>
+        internal static void ThrowIfImportLeftAnInputUnshaped(InternalComputationGraph graph, string origin)
+        {
+            var unshaped = new List<string>();
+            var inputNodes = graph.InputNodes;
+            for (int i = 0; i < inputNodes.Count; i++)
+                if (inputNodes[i] is var node && CarriesShape(node) && Get(node) is null)
+                    unshaped.Add(node.FriendlyName ?? InternalComputationGraph.InputNameOf(node) ?? $"#{i}");
+            if (unshaped.Count == 0) return;
+            throw new ModelException(ErrorCodes.FW058, origin,
+                $"input(s) {string.Join(", ", unshaped.Select(n => $"'{n}'"))} declare no shape, so their " +
+                "rank is unknown and no representative shape can be derived for them — and every input " +
+                "of an imported model records one. Give each its shape with the overload that takes " +
+                "input shapes, e.g. Persistence.ImportOnnx(filePath, new Dictionary<string, long[]> " +
+                $"{{ [\"{unshaped[0]}\"] = [1, 3, 224, 224] }}) or " +
+                "OnnxModelImporter.FromOnnxModel(filePath, inputShapes).");
+        }
+
+        /// <summary>The dimensions a graph input's declared type gives, or <c>null</c> when it
+        /// declares no shape (unknown rank). An optional or sequence input's are its element's.</summary>
+        private static List<Factory.IR.TensorShapeProto.Dimension>? DeclaredDimsOf(Factory.IR.ValueInfoProto proto)
+        {
+            var type = proto.Type;
+            if ((type?.OptionalType?.ElemType ?? type?.SequenceType?.ElemType) is { } element) type = element;
+            return type?.TensorType?.Shape?.Dims;
+        }
+
+        private static string? NameOf(InternalComputationGraph graph, int i)
+            => graph.InputNames is var names && i < names.Count ? names[i] : null;
+    }
+}

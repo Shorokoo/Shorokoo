@@ -56,7 +56,7 @@ namespace Shorokoo.Core.Factory
         /// attributes; the structure (Tensor/Optional/Sequence/TensorStruct) is
         /// implied by the input op code.
         ///
-        /// <para>When <paramref name="emitRepresentativeMetadata"/> is set (vanilla ONNX export), the
+        /// <para>When <paramref name="emitRepresentativeMetadata"/> is set (every dialect that keeps inputs as graph inputs), the
         /// producing <c>MODEL_TENSOR_INPUT</c> node's representative-input attribute is encoded into this
         /// ValueInfoProto's own metadata — a graph input has no attribute bag, so this is where a
         /// vanilla-loadable graph carries it. The node and the ValueInfoProto being built for it are both
@@ -94,13 +94,22 @@ namespace Shorokoo.Core.Factory
                 name: key.ToString(),
                 type: dtype,
                 structure: structure,
-                targetFunctionName: null,
+                targetFunctionName: inputNode.TargetFunction is { } signature ? OnnxFunctionName.Encode(signature.DefaultName) : null,
                 inputTypeName: inputTypeName,
                 defaultValue: defaultValue);
+
+            // A generic type slot's constraints follow its parameter name in the denotation
+            // ("T:FloatLike"), which is where the reader looks for them.
+            if (inputNode.OpCode == InternalOpCodes.GENERIC_TYPE_INPUT
+                && dtype.GenericTypeParamName is { } paramName
+                && inputNode.Attributes.GetAttributeVals().GetValueOrDefault(OnnxOpAttributeNames.ShrkAttrGenericTypeConstraints)
+                    is string[] { Length: > 0 } constraints)
+                valueInfo.Type.Denotation = $"{paramName}:{string.Join(",", constraints)}";
 
             if (emitRepresentativeMetadata
                 && inputNode.OpCode is InternalOpCodes.MODEL_TENSOR_INPUT
                                     or InternalOpCodes.MODEL_OPTIONAL_INPUT
+                                    or InternalOpCodes.MODEL_SEQUENCE_INPUT
                 && RepresentativeInputMetadata.Encode(inputNode) is { } encoded)
             {
                 valueInfo.MetadataProps.Add(new StringStringEntryProto
@@ -237,8 +246,9 @@ namespace Shorokoo.Core.Factory
                     $"FastOnnxProtoFactory.ReadInputMetadata: input node {node.OpCode} (Key={node.Key}) has no {OnnxOpAttributeNames.AttrDtype} attribute.");
 
             int? rank = null;
-            // Only the tensor-shaped variants carry a rank attribute.
+            // Only the tensor-shaped variants carry a rank attribute — an optional's is its element's.
             if (node.OpCode == InternalOpCodes.MODEL_TENSOR_INPUT
+             || node.OpCode == InternalOpCodes.MODEL_OPTIONAL_INPUT
              || node.OpCode == InternalOpCodes.GENERIC_TYPE_INPUT)
             {
                 var rl = attrs.GetLongVal(OnnxOpAttributeNames.ShrkAttrRank);

@@ -565,7 +565,7 @@ internal static class NNLibraryTrainingFixtures
         long[] inShape, float[] input, long[] outShape, float[] target, int steps)
     {
         var rig = TrainingRig.FromScratch(modelGraph, L2Loss.ComputationGraph, optimizerGraph,
-            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData(inShape, input))],
+            [new TensorDataModelParam(modelGraph.InputNames[0]!, ModelParamType.InputParam, TensorData(inShape, input))],
             hypers);
         var ckpt = rig.CreateInitialCheckpoint();
         for (int i = 0; i < steps; i++)
@@ -689,7 +689,7 @@ public class NNLibraryOptimizerTrainingCoverageTests
     {
         var rig = TrainingRig.FromScratch(
             modelGraph, L2Loss.ComputationGraph, optimizerGraph,
-            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData(inShape, input))],
+            [new TensorDataModelParam(modelGraph.InputNames[0]!, ModelParamType.InputParam, TensorData(inShape, input))],
             hyperparams);
 
         var initial = rig.CreateInitialCheckpoint();
@@ -979,7 +979,7 @@ public class NNLibraryOptimizerTrainingCoverageTests
 
         var g = AnalyticBindLinearModel.ComputationGraph;
         var x = TensorData([1L, 2L], 1f, 1f);
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([x]));
+        var arch = g.ToConcreteArchitecture([x]);
         var infos = arch.GetConcreteModelParamInfos().ParamInfos;
         Assert.Equal(2, infos.Length);
         var weights = new ModelParamList(
@@ -1085,14 +1085,14 @@ public class NNLibraryLayerTrainingCoverageTests
         AssertTrainStepMovesParam(
             NNTripletEmbeddingRigModel.ComputationGraph, NNIdentityScalarLoss.ComputationGraph,
             AdamOptimizer.ComputationGraph,
-            [("x", [6L, 2L], [0.5f, 1.0f, -0.5f, -1.0f, 0.6f, 1.1f, -0.4f, -0.9f, 2.0f, -2.0f, 2.5f, 3.0f])],
+            [("apn", [6L, 2L], [0.5f, 1.0f, -0.5f, -1.0f, 0.6f, 1.1f, -0.4f, -0.9f, 2.0f, -2.0f, 2.5f, 3.0f])],
             [1L], 2, true, adam);
 
         // [2N, D] = [4, 2]: rows 0-1 are x1, rows 2-3 are x2.
         AssertTrainStepMovesParam(
             NNCosineEmbeddingRigModel.ComputationGraph, NNIdentityScalarLoss.ComputationGraph,
             AdamOptimizer.ComputationGraph,
-            [("x", [4L, 2L], [0.5f, 1.0f, -0.5f, -1.0f, 0.6f, 1.1f, -0.4f, -0.9f])],
+            [("pair", [4L, 2L], [0.5f, 1.0f, -0.5f, -1.0f, 0.6f, 1.1f, -0.4f, -0.9f])],
             [1L], 2, true, adam);
     }
 

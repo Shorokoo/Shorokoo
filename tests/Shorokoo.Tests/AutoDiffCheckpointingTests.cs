@@ -289,7 +289,7 @@ public class AutoDiffCheckpointingCoverageTests
     private static InternalComputationGraph InOrder(InternalComputationGraph graph, IEnumerable<int> order)
     {
         var copy = graph.Clone();
-        copy.Nodes = order.Select(i => graph.Nodes[i]).ToList();
+        copy.Nodes = [.. order.Select(i => graph.Nodes[i]), .. copy.OutputNodes];
         return copy;
     }
 
@@ -456,7 +456,7 @@ public class AutoDiffCheckpointingCoverageTests
         Assert.True(reordered.IsLinearOrderValid());
 
         var walk = OrtExecutionOrder.Compute(graph.Nodes);
-        Assert.Equal(graph.Nodes.Count, walk.Distinct().Count());
+        Assert.Equal(graph.BodyEnd, walk.Distinct().Count());
         Assert.True(InOrder(graph, walk).IsLinearOrderValid());
 
         var untouched = new MemoryAwareGraphOptimizer().OptimizeWithShapeInfo(graph, shapeInfo);
@@ -482,7 +482,7 @@ public class AutoDiffCheckpointingCoverageTests
     {
         var x = Pattern(inShape, 1f);
         var rig = TrainingRig.FromScratch(model, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
-            [new TensorDataModelParam("input", ModelParamType.InputParam, x)], 0.01f);
+            [new TensorDataModelParam(model.InputNames[0]!, ModelParamType.InputParam, x)], 0.01f);
         var input = new TensorDataStruct(rig.InputDef, new Dictionary<string, IData> { [rig.InputDef.Fields[0].Name] = x });
         var target = new TensorDataStruct(rig.TargetDef, new Dictionary<string, IData> { [rig.TargetDef.Fields[0].Name] = Pattern([inShape[0], 16L], 0.5f) });
         return (rig, input, target);
@@ -682,7 +682,7 @@ public class AutoDiffCheckpointingCoverageTests
     public void TestMemoryPassBenchmarkMeasuresTheRigsOwnModelCoverage()
     {
         var rig = TrainingRig.FromScratch(MemoryPassMlp.ComputationGraph, L2Loss.ComputationGraph, SGDOptimizer.ComputationGraph,
-            [new TensorDataModelParam("input", ModelParamType.InputParam, Pattern([64L, 256L], 1f))], 0.01f);
+            [new TensorDataModelParam("x", ModelParamType.InputParam, Pattern([64L, 256L], 1f))], 0.01f);
         var inputShapes = rig.OptimizationInputShapes;
         var model = ProtoBuf.Serializer.Deserialize<Shorokoo.Core.Factory.IR.ModelProto>(
             new MemoryStream(Benchmarks.MemoryPassBenchmarkTests.RigModelBytes(rig.TrainingStepPureGraph, inputShapes)));

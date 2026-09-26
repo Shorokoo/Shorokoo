@@ -80,8 +80,8 @@ namespace Shorokoo.Core.Utils
     /// The payload is an ONNX ModelProto (internal dialect allowed), optionally wrapped in
     /// exactly one Zstd layer as declared by the header — compression is detected from the
     /// header, never from the file extension (".zsrk" vs ".srk" is a human-readable hint
-    /// with no parsing significance). This is the only .srk layout: there is no legacy
-    /// read path, and a file that does not open with the container magic is not a .srk file.
+    /// with no parsing significance). A file that does not open with the container magic is
+    /// not a .srk file.
     ///
     /// Save/load entry points live on <see cref="CompressedFormatUtils"/>
     /// (<c>SaveFastGraphToFile</c> / <c>LoadFastGraphFromFile</c> and the binary variants);
@@ -133,7 +133,12 @@ namespace Shorokoo.Core.Utils
         /// absence <c>ToConcreteArchitecture</c> asserts on its output) present →
         /// <see cref="GraphKind.Module"/>; unmaterialized trainable parameters
         /// (<c>MODEL_PARAM</c> nodes) present → <see cref="GraphKind.ConcreteArchitecture"/>;
-        /// otherwise <see cref="GraphKind.ConcreteModel"/>. This is what the writer records
+        /// otherwise <see cref="GraphKind.ConcreteModel"/> — unless an input carries no
+        /// representative shape, which every concrete graph records on each input
+        /// (<see cref="Shorokoo.Core.Graph.RepresentativeInputShapes"/>), or an output no recorded
+        /// shape, making the graph a <see cref="GraphKind.Module"/>; and unless an output records
+        /// the unresolved marker (<see cref="Shorokoo.Core.Graph.RecordedOutputShapes.UnresolvedShape"/>),
+        /// which only a <see cref="GraphKind.ConcreteArchitecture"/> carries. This is what the writer records
         /// in the header, and the fallback classification used when a file's recorded stage is
         /// missing or is not one this build defines.
         /// </summary>
@@ -147,6 +152,30 @@ namespace Shorokoo.Core.Utils
                     return GraphKind.Module;
             }
 
+            // Every concrete graph records a representative shape on each of its inputs, and the
+            // shape it produces on each of its outputs; a graph missing one was never concretized.
+            if (Shorokoo.Core.Graph.RepresentativeInputShapes.FirstInputWithoutShape(graph) is not null
+                || Shorokoo.Core.Graph.RecordedOutputShapes.FirstOutputWithoutShape(graph) is not null)
+                return GraphKind.Module;
+
+            // An output whose shape the weights decide is left unsettled on an architecture alone:
+            // a graph carrying one is no concrete model, whatever parameters it has left.
+            var byOps = DetectStageByOps(graph);
+            return byOps == GraphKind.ConcreteModel
+                   && Shorokoo.Core.Graph.RecordedOutputShapes.FirstUnresolvedOutput(graph) is not null
+                ? GraphKind.ConcreteArchitecture
+                : byOps;
+        }
+
+        /// <summary>
+        /// <see cref="DetectStage(InternalComputationGraph)"/> from the ops alone, not the inputs'
+        /// representative shapes: what an importer stamps a foreign graph it is about to give those
+        /// shapes, and refuses where it cannot.
+        /// </summary>
+        internal static GraphKind DetectStageByOps(InternalComputationGraph graph)
+        {
+            if (graph.Nodes.Any(n => InternalOpCodes.IsModuleStageOp(n.OpCode)))
+                return GraphKind.Module;
             return graph.Nodes.Any(n => n.OpCode == InternalOpCodes.MODEL_PARAM)
                 ? GraphKind.ConcreteArchitecture
                 : GraphKind.ConcreteModel;
@@ -204,6 +233,17 @@ namespace Shorokoo.Core.Utils
                     initializedParams++;
             }
 
+            if (kind is GraphKind.ConcreteArchitecture or GraphKind.ConcreteModel
+                && moduleOps == 0
+                && Shorokoo.Core.Graph.RepresentativeInputShapes.FirstInputWithoutShape(graph) is { } unshaped)
+                return "every input of a concrete graph records the shape it was concretized at, " +
+                       $"but this graph's input '{unshaped}' carries none.";
+            if (kind is GraphKind.ConcreteArchitecture or GraphKind.ConcreteModel
+                && moduleOps == 0
+                && Shorokoo.Core.Graph.RecordedOutputShapes.FirstOutputWithoutShape(graph) is { } unrecorded)
+                return "every output of a concrete graph records the shape it has at the samples the graph " +
+                       $"was concretized at, but this graph's output '{unrecorded}' records none.";
+
             switch (kind)
             {
                 case GraphKind.Module:
@@ -228,6 +268,10 @@ namespace Shorokoo.Core.Utils
                     if (uninitializedParams > 0)
                         return "a concrete model must have all model parameters initialized, " +
                                $"but this graph carries {uninitializedParams} unmaterialized parameter(s).";
+                    if (Shorokoo.Core.Graph.RecordedOutputShapes.FirstUnresolvedOutput(graph) is { } unresolved)
+                        return "every output of a concrete model records a settled shape, but this graph's " +
+                               $"output {unresolved} records none, only the marker a concrete architecture " +
+                               "carries for a shape its weights decide.";
                     return null;
 
                 default:
@@ -486,8 +530,7 @@ namespace Shorokoo.Core.Utils
         /// Extracts the serialized ONNX model bytes from a .srk container. Validates the header
         /// and the payload SHA-256, then removes the header-declared compression layer;
         /// corruption and truncation fail loudly with a message naming <paramref name="origin"/>.
-        /// Data that does not open with the container magic is not a .srk file and throws — there
-        /// is no legacy read path.
+        /// Data that does not open with the container magic is not a .srk file and throws.
         /// </summary>
         /// <param name="data">Raw file/stream bytes.</param>
         /// <param name="origin">Name used in error messages, typically the file path.</param>

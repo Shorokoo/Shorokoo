@@ -90,7 +90,7 @@ public class TrainingMemoryStabilityTests
 
         var rig = TrainingRig.FromScratch(
             baseGraph, Losses.L2Loss, Optimizers.Adam,
-            baseGraph.FromOrderedInputs([exampleInput]),
+            [exampleInput],
             new AdamOptimizerHyperparameters { LearningRate = 1e-3f });
 
         var inputBatch = rig.InputDef.FromOrderedData(
@@ -172,7 +172,7 @@ public class TrainingMemoryStabilityTests
         var exampleInput = TensorData(WideInputShape, new float[4 * 1024]);
         var rig = TrainingRig.FromScratch(
             graph, Losses.L2Loss, Optimizers.Adam,
-            graph.FromOrderedInputs([exampleInput]),
+            [exampleInput],
             new AdamOptimizerHyperparameters { LearningRate = 1e-3f });
         return (rig,
             rig.InputDef.FromOrderedData(TensorData(WideInputShape, new float[4 * 1024])),

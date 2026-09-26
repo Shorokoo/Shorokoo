@@ -53,8 +53,8 @@ public class BuildWarningsGateTests
     /// most of it. The four platform packages are all listed rather than one standing
     /// for the rest: each compiles a manifest and a factory that only it has, and all
     /// four build on either operating system, since only their natives are
-    /// platform-bound. The PyTorch projects are listed the same way, host and logic included,
-    /// though each device package pulls both in.
+    /// platform-bound. The PyTorch and JAX projects are listed the same way, the shared Python
+    /// host and translator included, though each device package pulls them in.
     /// </summary>
     private static readonly string[] ProductProjects =
     [
@@ -64,7 +64,11 @@ public class BuildWarningsGateTests
         Path.Combine("src", "Backend", "OnnxRuntime", "Shorokoo.WinGPU", "Shorokoo.WinGPU.csproj"),
         Path.Combine("src", "Backend", "OnnxRuntime", "Shorokoo.LinuxCPU", "Shorokoo.LinuxCPU.csproj"),
         Path.Combine("src", "Backend", "OnnxRuntime", "Shorokoo.LinuxGPU", "Shorokoo.LinuxGPU.csproj"),
-        Path.Combine("src", "Backend", "PyTorch", "Shorokoo.PythonHost", "Shorokoo.PythonHost.csproj"),
+        Path.Combine("src", "Backend", "Python", "Shorokoo.PythonHost", "Shorokoo.PythonHost.csproj"),
+        Path.Combine("src", "Backend", "Python", "Shorokoo.PythonTranslation", "Shorokoo.PythonTranslation.csproj"),
+        Path.Combine("src", "Backend", "Jax", "Shorokoo.Jax", "Shorokoo.Jax.csproj"),
+        Path.Combine("src", "Backend", "Jax", "Shorokoo.Jax.Cpu", "Shorokoo.Jax.Cpu.csproj"),
+        Path.Combine("src", "Backend", "Jax", "Shorokoo.Jax.Cuda", "Shorokoo.Jax.Cuda.csproj"),
         Path.Combine("src", "Backend", "PyTorch", "Shorokoo.PyTorch", "Shorokoo.PyTorch.csproj"),
         Path.Combine("src", "Backend", "PyTorch", "Shorokoo.PyTorch.Cpu", "Shorokoo.PyTorch.Cpu.csproj"),
         Path.Combine("src", "Backend", "PyTorch", "Shorokoo.PyTorch.Cuda", "Shorokoo.PyTorch.Cuda.csproj"),

@@ -187,10 +187,10 @@ namespace Shorokoo.Core.Graph
 
             var splits = modelIdString.Split(',').Select(x => x.Trim()).ToArray();
 
-            if (splits.Any(x => !int.TryParse(x, out _)))
+            if (splits.Any(x => !int.TryParse(x, System.Globalization.NumberStyles.AllowLeadingSign, System.Globalization.CultureInfo.InvariantCulture, out _)))
                 throw new ArgumentException($"Invalid ModelId string format: {modelIdString}", nameof(modelIdString));
 
-            Vals = splits.Select(x => int.Parse(x)).ToImmutableArray();
+            Vals = splits.Select(x => int.Parse(x, System.Globalization.NumberStyles.AllowLeadingSign, System.Globalization.CultureInfo.InvariantCulture)).ToImmutableArray();
         }
 
         public bool IsInIterationModelId(ModelId iterationModelId, bool allowPartialIterationIndex)
@@ -307,7 +307,7 @@ namespace Shorokoo.Core.Graph
 
         public override string ToString()
         {
-            return string.Join(",", Vals);
+            return string.Join(",", Vals.Select(v => v.ToString(System.Globalization.CultureInfo.InvariantCulture)));
         }
 
         /// <summary>

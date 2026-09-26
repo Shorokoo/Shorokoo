@@ -21,10 +21,9 @@ namespace Shorokoo.Core.Nodes.Processors.Training;
 ///
 /// <para>
 /// Mutates <c>graph</c> in place: removes the original param-producer nodes,
-/// inserts the new input + per-field GETFIELD nodes at the front of <see cref="InternalComputationGraph.Nodes"/>,
-/// rewires every consumer (and graph output) that referenced an original param's
-/// <see cref="FastTensorKey"/> to the matching GETFIELD output, and adds the struct input to
-/// <see cref="InternalComputationGraph.Inputs"/>.
+/// makes the new struct input the graph's last input and puts its per-field GETFIELD nodes at
+/// the start of the body, and rewires every consumer (and graph output) that referenced an
+/// original param's <see cref="FastTensorKey"/> to the matching GETFIELD output.
 /// </para>
 /// </summary>
 internal static class FastReplaceTrainableParamsWithInputProcessor
@@ -104,23 +103,13 @@ internal static class FastReplaceTrainableParamsWithInputProcessor
             }
         }
 
-        // Rewire graph outputs in case any output is itself a former param key.
-        for (int i = 0; i < graph.Outputs.Count; i++)
-            if (remap.TryGetValue(graph.Outputs[i], out var newKey))
-                graph.Outputs[i] = newKey;
 
         graph.Nodes.RemoveAll(n => paramNodeKeys.Contains(n.Key));
 
-        // Insert the new input and GETFIELD nodes at the front. The struct input
-        // produces a graph input (no producer edges), and each GETFIELD only depends
-        // on the struct input, so they're topologically valid at the head of Nodes.
-        var prelude = new List<FastNode>(1 + fieldNodes.Count);
-        prelude.Add(structInputNode);
-        prelude.AddRange(fieldNodes);
-        graph.Nodes.InsertRange(0, prelude);
-
-        graph.Inputs.Add(structInputKey);
-        graph.InputUniqueNames.Add("trainable_params");
+        // The struct becomes the last input, and its GETFIELD nodes, which depend on nothing
+        // else, open the body.
+        graph.AddInput(structInputNode);
+        graph.InsertAtBodyStart(fieldNodes);
 
         return new ProcessResult(structDef, structInputKey, fieldKeys, paramInfos);
     }
@@ -134,6 +123,7 @@ internal static class FastReplaceTrainableParamsWithInputProcessor
             {
                 [OnnxOpAttributeNames.AttrDtype] = structDType,
                 [OnnxOpAttributeNames.ShrkAttrInputType] = (InputType?)null,
+                [OnnxOpAttributeNames.ShrkAttrInputName] = defaultName,
             },
             attrDefs);
 

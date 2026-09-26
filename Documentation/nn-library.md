@@ -124,12 +124,18 @@ of two places: the shape vector it takes as its **first** `Inline` parameter, or
 one — its `Scalar<T>` return type. A shape baked into the body of a no-argument `Inline` is
 neither, and is rejected by name when the model is lowered.
 
-The body is an ordinary graph body; two things it can reach for are worth spelling out.
+The body is an ordinary graph body of tensor operations, loops and `IfElse`; two things it can
+reach for are worth spelling out, and one thing it may not do. Everything here holds for a
+`[StateInitializer]` body exactly as for a `[TrainableParamInitializer]` one.
 
 **It can call the shipped initializers.** An `Init(...)` call inside an initializer body is that
 initializer's body evaluated as a value — not the definition of a second parameter, which an
-initializer has no room for. So the parameterized set composes, and the obvious way to say "one
-fixed distribution, reused for every parameter in the model" is to wrap one:
+initializer has no room for. The call is transparent: only the top-level initializer, the one the
+`[Module]` calls, defines a parameter, and the model's parameter inventory has one entry for it
+however deep the chain of calls below it goes. Either kind may call either kind — a trainable
+initializer a state one, and the other way round. So the parameterized set composes, and the
+obvious way to say "one fixed distribution, reused for every parameter in the model" is to wrap
+one:
 
 ```csharp
 [TrainableParamInitializer]
@@ -145,9 +151,7 @@ parameter *being created*. Each draw **site** in the body gets its own sub-strea
 parameter's stream, the body's own sites and a called initializer's alike, so no two sites repeat
 each other; and a site inside a `LoopAPI.Iterate` body folds each enclosing loop's iteration index
 into its key, so it draws a fresh sample on every trip rather than one sample re-used — the same
-rule a runtime draw in a loop follows. What is still refused is a draw inside a call the lowering
-cannot inline — in practice a `[Module]` that owns a parameter space of its own, so the draw
-belongs to a parameter there and carries no key here. The error names the called function.
+rule a runtime draw in a loop follows.
 
 **It can start from another parameter's value.** An initializer input typed `Tensor<T>` may be
 another trainable parameter, passed at the call site. It is not folded to a constant: the edge
@@ -179,6 +183,13 @@ initializer states its shape in its `Scalar<T>` return type and takes no shape i
 *its* first input may be a parameter like any other.) The initializers run in dependency order, so
 a chain — one parameter from another, from a third — works too.
 
+The value handed over may also be **computed from parameters** — `ProductOf.Init([vocab, d], emb * Scalar(2f), wv)`,
+or the output of a module called on one. Such a value has no constant to fold to either, so the
+computation is carried along and evaluated when the parameters are initialized, after the ones it
+reads. It has to be plain tensor arithmetic over parameters created outside any loop: a
+computation that runs through a loop or a branch, reads a parameter standing for a different one on
+each trip, or draws randomness is refused at concretization, naming the initializer.
+
 Two shapes are refused by name rather than guessed at. A source the model reads **nowhere else**:
 a parameter no forward path reads gets no gradient, so it cannot be trained, and the stages after
 concretization drop it — the concrete model would end up carrying fewer parameters than the
@@ -186,6 +197,17 @@ architecture and its checkpoints say it has. And a source created **inside a loo
 for a different parameter on every trip, so no single edge names it. For either, create the source
 outside the loop and use it in the model, or fold what it computes into the initializer that reads
 it so no parameter is created for it.
+
+**It may not create or reference a model.** An initializer computes one parameter's value and owns
+no parameter space, so nothing in its body may bring a model in: no `Foo.Model(...)`, no
+`Foo.Call(...)` of any `[Module]` — not even one without parameters, since calling a module creates
+a model of it — no `ModelSequence`, no `IModel.GetTrainableParam`, no read of a model's
+hyperparameter, and no model-typed input. Building such a body is refused with **FW055**, which
+names the initializer, when the graph of the module using it is built — and for an initializer
+called from another, when the called one's body is built, however deep it sits. Where the value
+you want comes out of a layer, compute it in the `[Module]` that declares the parameter and pass
+it to the initializer as a `Tensor<T>` input — computed from parameters as above, or from
+constants — or write the computation in the initializer itself from tensor operations.
 
 ## Layers (`Shorokoo.Modules.Layers`)
 
@@ -231,7 +253,7 @@ layers and the attention/transformer layers; `affine` on `BatchNorm`,
 layer body as `bit.IfElse(withTheParams, without)`, so both branches exist in
 the *source* —
 but the bit is a `[Hyper]`, fixed before the graph is concretized (baked by
-`Call`/`Model`, or taken from the value you hand `FromOrderedInputs`). Either way
+`Call`/`Model`, or taken from the sample you hand `ToConcreteArchitecture`). Either way
 the framework **prunes the unselected branch's trainable parameters**: with the
 bit off they are never created — no checkpoint field, no gradient, no optimizer
 state, no bytes in a saved model.
@@ -242,7 +264,7 @@ out of it — the toggle already does that.
 
 Two edges to know:
 
-- On the `Foo.ComputationGraph` + `FromOrderedInputs` route the bit is baked but
+- On the `Foo.ComputationGraph` + `ToConcreteArchitecture` route the bit is baked but
   **not removed** — like every `[Hyper]` there it stays a live input of the
   concrete graph and must be passed again at `Execute`. Pass the value you
   concretized with. With the bit **off** its later value is inert *for these
@@ -908,7 +930,7 @@ before calling. The four optional arguments:
   `[Hyper]`, so baking it to a constant — `Call`/`Model`, or
   [`Specialize`](inference.md#hardcoding-hypers-with-specialize) — folds the
   `IfElse` to one branch. Note it is *unlike* `useBias` in one way: neither branch
-  holds a trainable parameter, so on the `ComputationGraph` + `FromOrderedInputs`
+  holds a trainable parameter, so on the `ComputationGraph` + `ToConcreteArchitecture`
   route there is nothing to prune and the `IfElse` stays live, selecting at run
   time (see [An off toggle costs nothing](#gated-parameters)).
 
@@ -1679,8 +1701,7 @@ var rig = TrainingRig.FromScratch(
     TinyConvClassifier.ComputationGraph,
     CrossEntropyLoss.ComputationGraph,
     AdamOptimizer.ComputationGraph,
-    new NamedModelParam[] {
-        new TensorDataModelParam("input", ModelParamType.InputParam, inputData) },
+    [inputData],                                                  // the model's one input
     new AdamOptimizerHyperparameters { LearningRate = 0.01f });  // β/ε keep defaults
 
 static TensorDataStruct MakeBatch(string field, string structName, TensorData data) =>

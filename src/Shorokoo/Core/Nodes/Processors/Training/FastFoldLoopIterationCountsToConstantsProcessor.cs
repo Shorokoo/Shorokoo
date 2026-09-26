@@ -63,16 +63,12 @@ namespace Shorokoo.Core.Nodes.Processors.Training
                 return;
 
             // Clone the input graph as a resolver: keep all nodes, retarget outputs to the
-            // iter-count tensors, drop graph inputs (iter-count expressions must be
-            // self-contained constant computations), then sweep nodes that no longer feed
-            // any output.
+            // iter-count tensors, then sweep nodes that no longer feed any output — the inputs
+            // included, since none of these counts reads one (the check above), so the resolver
+            // is input-free.
             var resolverGraph = graph.Clone();
-            resolverGraph.Inputs = new List<FastTensorKey>();
-            resolverGraph.InputUniqueNames = new List<string?>();
-            resolverGraph.Outputs = new List<FastTensorKey>(iterCountKeys);
-            resolverGraph.OutputUniqueNames = new List<string?>(new string?[iterCountKeys.Count]);
-            resolverGraph.OutputRankOverrides = null;
-            FastProcessorHelper.RemoveUnreachableNodes(resolverGraph);
+            resolverGraph.SetOutputs(iterCountKeys);
+            FastProcessorHelper.RemoveUnreachableNodes(resolverGraph, keepUnreadInputs: false);
 
             var resolvedData = ResolveIterCountValues(resolverGraph, iterCountKeys, compute);
 
@@ -114,14 +110,10 @@ namespace Shorokoo.Core.Nodes.Processors.Training
                 }
             }
 
-            // Rewire graph outputs in case any output is itself a former iter-count tensor.
-            for (int i = 0; i < graph.Outputs.Count; i++)
-                if (remap.TryGetValue(graph.Outputs[i], out var newKey))
-                    graph.Outputs[i] = newKey;
 
             // CONSTANT has no inputs, so the new nodes are topologically valid at the
-            // front of the node list.
-            graph.Nodes.InsertRange(0, newConstantNodes);
+            // start of the body.
+            graph.InsertAtBodyStart(newConstantNodes);
 
             FastProcessorHelper.RemoveUnreachableNodes(graph);
         }
@@ -136,7 +128,6 @@ namespace Shorokoo.Core.Nodes.Processors.Training
             InternalComputationGraph graph,
             Dictionary<FastNodeKey, FastNode> nodesByKey)
         {
-            var graphInputs = new HashSet<FastTensorKey>(graph.Inputs);
             var seen = new HashSet<FastTensorKey>();
             var worklist = new Stack<FastTensorKey>();
             worklist.Push(key);
@@ -144,9 +135,8 @@ namespace Shorokoo.Core.Nodes.Processors.Training
             {
                 var current = worklist.Pop();
                 if (current.IsEmpty || !seen.Add(current)) continue;
-                if (graphInputs.Contains(current)) return true;
                 if (!nodesByKey.TryGetValue(current.FastNodeKey, out var producer)) continue;
-                if (Shorokoo.Core.Factory.FastOpsetResolver.IsModelInputOpCode(producer.OpCode)) return true;
+                if (Shorokoo.Core.Nodes.NodeDefinitions.InternalOpCodes.IsModelInputOp(producer.OpCode)) return true;
                 foreach (var (_, ins) in producer.FullInputs)
                     foreach (var ik in ins)
                         if (ik is FastTensorKey k) worklist.Push(k);

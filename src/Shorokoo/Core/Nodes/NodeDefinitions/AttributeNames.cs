@@ -253,17 +253,16 @@ public static class OnnxOpAttributeNames
     public const string ShrkAttrRank = "shrk_rank";
     public const string ShrkAttrShape = "shrk_shape";
     public const string ShrkAttrTensorData = "shrk_tensor_data";
-    /// <summary>Optional, on a MODEL_TENSOR_INPUT node only: the concrete input dimensions (an int64
-    /// list, empty for a scalar), recording the shape the model was concretized at — whatever the
-    /// input's size — so a concrete architecture is self-describing for training-graph shape inference
-    /// without carrying separate sample inputs (never an inline tensor payload, and never the user's
-    /// values). The shape-inference read path rebuilds a representative input from these dims plus the
-    /// node's dtype (<see cref="Shorokoo.TrainingRig.RepresentativeInputFor"/>) — shape and dtype, with
-    /// zeros only while they are small enough to be read. In the native
-    /// <c>.srk</c> dialect a MODEL_TENSOR_INPUT is serialized as a NodeProto, so this attribute
-    /// round-trips on disk (making the saved arch self-describing); the vanilla ONNX export/compile
-    /// path keeps the input as a graph input and carries the info in <c>metadata_props</c> instead
-    /// (see <c>Persistence.ExportOnnx</c>).</summary>
+    /// <summary>On a MODEL_TENSOR_INPUT or MODEL_OPTIONAL_INPUT node: the concrete dimensions of the
+    /// sample the graph was concretized at (an int64 list, empty for a scalar; a single <c>-1</c> for
+    /// an optional supplied absent) — never an inline tensor payload, and never the user's values.
+    /// Every input of a concrete-architecture or concrete-model graph carries it
+    /// (<see cref="Shorokoo.Core.Graph.RepresentativeInputShapes"/>): it is what training shape
+    /// inference rebuilds a representative input from, with the node's dtype
+    /// (<see cref="Shorokoo.TrainingRig.RepresentativeInputFor"/>), and what ONNX export reads an
+    /// input's rank from where the input declares none. In the native <c>.srk</c> dialect the input
+    /// node is serialized as a NodeProto, so the attribute round-trips on disk; the dialects that keep
+    /// the input as a graph input carry it in that input's <c>metadata_props</c> instead.</summary>
     public const string ShrkAttrRepresentativeInputShape = "shrk_representative_input_shape";
     public const string ShrkAttrStructure = "shrk_structure";
     public const string ShrkAttrDtype = "shrk_dtype";
@@ -275,6 +274,28 @@ public static class OnnxOpAttributeNames
     public const string ShrkAttrRngAlgorithm = "shrk_rng_algorithm";
     public const string ShrkAttrRelativeModelId = "shrk_relative_model_id";
     public const string ShrkAttrInputType = "shrk_input_type";
+
+    /// <summary>On a graph-input node (<see cref="InternalOpCodes.IsModelInputOp"/>): the input's
+    /// signature name. The graph keeps no input list of its own — its inputs are the input nodes that
+    /// open its node list — so this is where an input's name lives, and what the <c>.srk</c> dialect
+    /// carries it in.</summary>
+    public const string ShrkAttrInputName = "shrk_input_name";
+
+    /// <summary>On a graph-output node (<see cref="InternalOpCodes.GRAPH_OUTPUT"/>): the output's
+    /// signature name. The graph keeps no output list of its own — its outputs are the output nodes
+    /// that close its node list — so this is where an output's name lives.</summary>
+    public const string ShrkAttrOutputName = "shrk_output_name";
+
+    /// <summary>On a graph-output node: the rank the output's declared type fixes — a
+    /// <c>Scalar&lt;T&gt;</c> return is rank 0, a <c>Vector&lt;T&gt;</c> rank 1 — where it fixes
+    /// one. Only a module signature declares its outputs this way; absent everywhere else. Distinct
+    /// from <see cref="ShrkAttrRecordedOutputShape"/>, which a sample, not a type, decides.</summary>
+    public const string ShrkAttrDeclaredRank = "shrk_declared_rank";
+
+    /// <summary>On a graph-output node of a concrete graph: the dims the output has at the samples
+    /// the graph was concretized at (see <c>RecordedOutputShapes</c>). Every output of a concrete
+    /// graph records one.</summary>
+    public const string ShrkAttrRecordedOutputShape = "shrk_recorded_output_shape";
     public const string ShrkAttrHyperparamIndex = "shrk_hyperparam_index";
     public const string ShrkAttrGenericTypeConstraints = "shrk_generic_type_constraints";
     public const string ShrkAttrGenericTypeArgs = "shrk_generic_type_args";
@@ -338,16 +359,5 @@ public static class OnnxOpAttributeNames
     /// <summary>Model-level metadata prop carrying the graph's <c>GraphKind</c> (canonical
     /// stage name, e.g. "concrete-model") so a serialized graph reloads as the same kind.</summary>
     public const string ShrkMetaGraphKind = "shrk_graph_kind";
-
-    /// <summary>Model-level metadata prop carrying the graph's signature input names
-    /// (<c>InternalComputationGraph.InputUniqueNames</c>) as a positional JSON string array.
-    /// Written on internal-dialect exports, whose graph-I/O ValueInfos must keep the raw
-    /// <c>N{k}_T{s}</c> tensor ids (the loader parses node/tensor keys out of them), so the
-    /// human-readable signature names ride a side channel instead of a rename.</summary>
-    public const string ShrkMetaInputNames = "shrk_input_names";
-
-    /// <summary>Model-level metadata prop carrying the graph's signature output names
-    /// (<c>InternalComputationGraph.OutputUniqueNames</c>); see <see cref="ShrkMetaInputNames"/>.</summary>
-    public const string ShrkMetaOutputNames = "shrk_output_names";
 }
 

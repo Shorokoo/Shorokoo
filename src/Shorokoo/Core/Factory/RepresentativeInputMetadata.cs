@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using System.Linq;
 using Shorokoo.Core.Graph;
 using Shorokoo.Core.Nodes.NodeDefinitions;
@@ -25,8 +26,8 @@ namespace Shorokoo.Core.Factory
 
         /// <summary>
         /// Encodes the representative-input shape attribute currently set on <paramref name="node"/> (a
-        /// <c>MODEL_TENSOR_INPUT</c> or a <c>MODEL_OPTIONAL_INPUT</c>), or <c>null</c> when the
-        /// attribute is not set.
+        /// <c>MODEL_TENSOR_INPUT</c>, a <c>MODEL_OPTIONAL_INPUT</c>, or a <c>MODEL_SEQUENCE_INPUT</c>,
+        /// whose elements' shared shape it is), or <c>null</c> when the attribute is not set.
         /// </summary>
         public static string? Encode(FastNode node)
         {
@@ -36,7 +37,7 @@ namespace Shorokoo.Core.Factory
                 && attrs.GetLongsVal(OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape) is { } dims
                 && attrs.GetDTypeVal(OnnxOpAttributeNames.AttrDtype) is { } dtype)
             {
-                return $"shape|{dtype.ProtoTypeNum}|{DimsToString(dims)}";
+                return string.Create(CultureInfo.InvariantCulture, $"shape|{dtype.ProtoTypeNum}|{FormatDims(dims)}");
             }
 
             return null;
@@ -52,17 +53,29 @@ namespace Shorokoo.Core.Factory
             var parts = encoded.Split('|');
             if (parts.Length < 3 || parts[0] != "shape") return;
 
-            long[] dims;
-            try { dims = ParseDims(parts[2]); }
-            catch (FormatException) { return; }
+            if (TryParseDims(parts[2]) is not { } dims) return;
 
             node.Attributes = node.Attributes.SetAttributes(
                 (OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape, (object?)dims));
         }
 
-        private static string DimsToString(long[] dims) => string.Join(",", dims);
+        /// <summary>
+        /// <paramref name="dims"/> comma-separated, empty for a scalar — whatever the current
+        /// culture, whose minus sign need not be the ASCII one the negative markers are read back by.
+        /// </summary>
+        internal static string FormatDims(long[] dims)
+            => string.Join(",", dims.Select(d => d.ToString(CultureInfo.InvariantCulture)));
 
-        private static long[] ParseDims(string s)
-            => s.Length == 0 ? [] : s.Split(',').Select(long.Parse).ToArray();
+        /// <summary>The dims <see cref="FormatDims"/> wrote, or <c>null</c> where malformed.</summary>
+        internal static long[]? TryParseDims(string text)
+        {
+            if (text.Length == 0) return [];
+            var parts = text.Split(',');
+            var dims = new long[parts.Length];
+            for (int i = 0; i < parts.Length; i++)
+                if (!long.TryParse(parts[i], NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out dims[i]))
+                    return null;
+            return dims;
+        }
     }
 }

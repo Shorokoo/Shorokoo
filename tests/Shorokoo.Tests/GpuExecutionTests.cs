@@ -375,7 +375,7 @@ public class GpuExecutionTests
                 var sample = TensorData([2L, 8L], [.. Enumerable.Range(0, 16).Select(i => i / 16f)]);
                 var rig = TrainingRig.FromScratch(
                     Modules.PlainTinyMlpStack.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
-                    [new TensorDataModelParam("input", ModelParamType.InputParam, sample.CopyTo(ComputeContext.Host))],
+                    [sample.CopyTo(ComputeContext.Host)],
                     new AdamWOptimizerHyperparameters { LearningRate = 0.01f }, runtimeContext: context);
                 var input = rig.InputDef.FromOrderedData(sample);
                 var target = rig.TargetDef.FromOrderedData(TensorData([2L, 16L], [.. Enumerable.Range(0, 32).Select(i => i / 32f)]));
@@ -424,7 +424,7 @@ public class GpuExecutionTests
             var sample = TensorData([2L, 4096L], [.. Enumerable.Range(0, 8192).Select(i => (i % 13) / 13f)]);
             var rig = TrainingRig.FromScratch(
                 WideLinearModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
-                [new TensorDataModelParam("input", ModelParamType.InputParam, sample.CopyTo(ComputeContext.Host))],
+                [sample.CopyTo(ComputeContext.Host)],
                 new AdamWOptimizerHyperparameters { LearningRate = 0.001f }, runtimeContext: context);
             var input = rig.InputDef.FromOrderedData(sample);
             var target = rig.TargetDef.FromOrderedData(TensorData([2L, 4096L], new float[8192]));
@@ -707,7 +707,7 @@ public class GpuExecutionTests
 
     private static TrainingRig ScalarRig(ComputeContext? runtimeContext = null) => TrainingRig.FromScratch(
         ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
-        [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([4L], [1f, 2f, 3f, 4f]))],
+        [TensorData([4L], [1f, 2f, 3f, 4f])],
         new AdamWOptimizerHyperparameters { LearningRate = 0.1f }, runtimeContext: runtimeContext);
 
     private static float[] StepLoopWeights(TensorDataStruct input, TensorDataStruct target)

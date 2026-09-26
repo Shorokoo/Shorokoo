@@ -131,9 +131,14 @@ namespace Shorokoo.Core
         /// placeholders to preserve generic type information through the graph building process.
         /// <paramref name="invokeTarget"/> is the reflection-invoke receiver: null for static
         /// methods, or the delegate's bound target for compiler-generated lambda methods.
+        /// A non-null <paramref name="paramInitializerName"/> marks the body as that
+        /// <c>[TrainableParamInitializer]</c> / <c>[StateInitializer]</c>'s, which may compute
+        /// tensors and call other initializers but may not create or reference a model: every
+        /// node the body builds is checked as it is created, and the first that touches a model
+        /// throws <see cref="ErrorCodes.FW055"/> (see <c>Node</c>'s constructor).
         /// </summary>
         internal static InternalComputationGraph BuildInternalComputationGraphFromMethod(
-            MethodInfo methodInfo, object? invokeTarget = null, bool isParamInitializerBody = false)
+            MethodInfo methodInfo, object? invokeTarget = null, string? paramInitializerName = null)
         {
             if (methodInfo == null)
                 throw new ArgumentNullException(nameof(methodInfo));
@@ -153,7 +158,7 @@ namespace Shorokoo.Core
             // looper stack, the Rng.Pin recordings, the StateUpdate registrations — belongs to
             // this build alone and is restored on exit (a destructive clear here would wipe the
             // OUTER body's records), and no records leak between builds.
-            using var buildScope = GraphTrace.EnterModuleBuild(isParamInitializerBody);
+            using var buildScope = GraphTrace.EnterModuleBuild(paramInitializerName);
 
             // Extract generic parameter information before instantiation
             MethodInfo originalGenericMethod = methodInfo;
@@ -242,11 +247,10 @@ namespace Shorokoo.Core
 
             // Add input parameters after the generic type inputs. User Inline signatures
             // are written inputs-first / hyperparameters-last, but the framework keeps its
-            // graph input list ordered hyperparameters-first (every downstream consumer —
+            // graph inputs ordered hyperparameters-first (every downstream consumer —
             // module-call inlining, signatures, concretization — relies on that order). The
             // body was already invoked with fnInputs in declaration order above, so only the
-            // graph's input *list* is reordered here; the produced graph is identical to the
-            // legacy hyperparameters-first layout.
+            // order of the input nodes opening the graph follows this list.
             var fnInputVars = fnInputs.Select(x => x.ToVariable()).ToList();
             allInputs.AddRange(fnInputVars.Where(IsHyperparamInput));
             allInputs.AddRange(fnInputVars.Where(v => !IsHyperparamInput(v)));
@@ -297,9 +301,9 @@ namespace Shorokoo.Core
                     .Where(n => n is not null)
                     .Distinct()
                     .ToArray();
-                System.Diagnostics.Debug.Assert(tracedNodes.Length == fastGraph.Nodes.Count,
+                System.Diagnostics.Debug.Assert(tracedNodes.Length == fastGraph.Nodes.Count - fastGraph.OutputCount,
                     "GraphBuilder pin resolution: the rebuilt traced-node set must match the " +
-                    "constructor's lowering 1:1 — a mismatch means the duplicate-key guard is " +
+                    "constructor's lowering 1:1 (the output nodes it adds aside) — a mismatch means the duplicate-key guard is " +
                     "checking a different node set than the one the graph was built from.");
                 var duplicatedKeys = tracedNodes.GroupBy(n => n!.Key)
                     .Where(g => g.Count() > 1).Select(g => g.Key).ToHashSet();

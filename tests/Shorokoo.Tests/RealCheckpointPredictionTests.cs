@@ -27,14 +27,14 @@ public partial class RealCheckpointPredictionTests
 
     // ResNet18.ComputationGraph declares inputs in this order; the image is last.
     private static ComputationGraph BuildConcreteArchitecture(TensorData inputHint)
-        => ResNet18.ComputationGraph.ToConcreteArchitecture(ResNet18.ComputationGraph.FromOrderedInputs([
+        => ResNet18.ComputationGraph.ToConcreteArchitecture([
             TensorData(DType.Int64, [], 1000L),   // numClasses
             TensorData(DType.Float32, [], 0.9f),  // bnMomentum (unused at inference)
             TensorData(DType.Float32, [], 1e-5f), // bnEps
             TensorData(DType.Bool, [], true),     // includeTop
             TensorData(DType.Bool, [], false),    // applySoftmax (raw logits)
             inputHint,                            // inputs [1,3,224,224]
-        ]));
+        ]);
 
     /// <summary>
     /// The PyTorch→Shorokoo name map binds every Shorokoo ResNet18 parameter to a distinct tensor

@@ -212,19 +212,21 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
             {
                 fastGradGraph = new InternalComputationGraph(
                     standIns, gradHeads, externalInputKeys: freshInputBacking);
-                newNodes.AddRange(fastGradGraph.Nodes);
+                // Its body only: the output nodes name the gradient heads, read off below.
+                newNodes.AddRange(fastGradGraph.Nodes.Take(fastGradGraph.BodyEnd));
             }
 
             // Build per-param output mapping. Params with no gradient path get a
             // shape-matching zero via Sub(p, p), like the CG processor.
             var keyMappings = new Dictionary<FastTensorKey, FastTensorKey>();
+            var gradHeadKeys = fastGradGraph?.Outputs;
             int gradHeadIdx = 0;
             for (int i = 0; i < paramKeys.Length; i++)
             {
                 FastTensorKey gradKey;
                 if (gradByKey.ContainsKey(paramKeys[i]))
                 {
-                    gradKey = fastGradGraph!.Outputs[gradHeadIdx++];
+                    gradKey = gradHeadKeys![gradHeadIdx++];
                 }
                 else
                 {
@@ -572,7 +574,7 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
         }
 
         // ------------------------------------------------------------------------------------
-        // Rewire consumers of the AUTO_GRAD outputs (and graph.Outputs) to the new keys.
+        // Rewire consumers of the AUTO_GRAD outputs (the output nodes among them) to the new keys.
         // ------------------------------------------------------------------------------------
 
         private static void RewireConsumers(
@@ -591,12 +593,6 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
                             slots[i] = mapped;
                     }
                 }
-            }
-
-            for (int i = 0; i < graph.Outputs.Count; i++)
-            {
-                if (keyMappings.TryGetValue(graph.Outputs[i], out var mapped))
-                    graph.Outputs[i] = mapped;
             }
         }
 

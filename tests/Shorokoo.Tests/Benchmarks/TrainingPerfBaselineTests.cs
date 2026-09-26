@@ -114,14 +114,14 @@ public class TrainingPerfBaselineTests
             var ctx = new ComputeContext();
 
             var sw = Stopwatch.StartNew();
-            _ = baseGraph.ToConcreteArchitecture(baseGraph.FromOrderedInputs([exampleInput]), ctx);
+            _ = baseGraph.ToConcreteArchitecture([exampleInput], ctx);
             sw.Stop();
             concretizeMs = Math.Min(concretizeMs, sw.Elapsed.TotalMilliseconds);
 
             sw.Restart();
             var rig = TrainingRig.FromScratch(
                 baseGraph, Losses.L2Loss, Optimizers.Adam,
-                baseGraph.FromOrderedInputs([exampleInput]),
+                [exampleInput],
                 new AdamOptimizerHyperparameters { LearningRate = 1e-3f });
             sw.Stop();
             fromScratchMs = Math.Min(fromScratchMs, sw.Elapsed.TotalMilliseconds);
@@ -148,7 +148,7 @@ public class TrainingPerfBaselineTests
     {
         var rig = TrainingRig.FromScratch(
             baseGraph, Losses.L2Loss, Optimizers.Adam,
-            baseGraph.FromOrderedInputs([exampleInput]),
+            [exampleInput],
             new AdamOptimizerHyperparameters { LearningRate = 1e-3f });
 
         var inputBatch = rig.InputDef.FromOrderedData(TensorData(InputShape, (float[])[1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f]));

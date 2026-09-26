@@ -118,9 +118,9 @@ namespace Shorokoo.Core
         // The signature string is computed from the internal graph node; callers cross the module
         // boundary explicitly with IModuleParam.ToVariable() before reaching here.
         internal static string ToSignatureString(Variable variable)
-            => ToSignatureStringWithOverride(variable, variable.Rank);
+            => ToSignatureStringAtRank(variable, variable.Rank);
 
-        internal static string ToSignatureStringWithOverride(Variable variable, int? rank)
+        internal static string ToSignatureStringAtRank(Variable variable, int? rank)
         {
             // Model/module params are scalar nodes distinguished by their runtime DType (formerly the
             // generic ImmutableScalar<IModelVarType> / ImmutableScalar<IModuleVarType>).
@@ -156,16 +156,16 @@ namespace Shorokoo.Core
             var inputInputs = FlattenTuples(inputs).Select((x, i) => ModuleParamInputBasedOn(x, InputType.ReadyInput, $"h{i}").ToVariable()).ToArray();
             var outputInputs = FlattenTuples(outputs).Select((x, i) => ModuleParamInputBasedOn(x, InputType.ReadyInput, $"h{i}").ToVariable()).ToArray();
 
-            return CreateFunctionSignatureString(hyperparamInputs, inputInputs, outputInputs, null);
+            return CreateFunctionSignatureString(hyperparamInputs, inputInputs, outputInputs, [.. outputInputs.Select(x => x.Rank)]);
         }
 
-        internal static (string moduleSignature, string modelSignature) CreateFunctionSignatureString(Variable[] hyperparams, Variable[] inputs, Variable[] outputs, int?[]? outputOverrideRanks)
+        /// <summary>The module and model signature strings: each output is written at the rank
+        /// <paramref name="outputRanks"/> gives it.</summary>
+        internal static (string moduleSignature, string modelSignature) CreateFunctionSignatureString(Variable[] hyperparams, Variable[] inputs, Variable[] outputs, IReadOnlyList<int?> outputRanks)
         {
             var signatureHyperparamPart = string.Join(", ", hyperparams.Select(ToSignatureString));
             var signatureInputPart = string.Join(", ", inputs.Select(ToSignatureString));
-            var signatureOutputPart = outputOverrideRanks is null ?
-                    string.Join(", ", outputs.Select(ToSignatureString)) :
-                    string.Join(",", outputs.Zip(outputOverrideRanks).Select(x => ToSignatureStringWithOverride(x.First, x.Second)));
+            var signatureOutputPart = string.Join(", ", outputs.Zip(outputRanks).Select(x => ToSignatureStringAtRank(x.First, x.Second)));
 
             return ($"{signatureHyperparamPart} | {signatureInputPart} > {signatureOutputPart}",
                 $"{signatureInputPart} > {signatureOutputPart}");
@@ -213,13 +213,13 @@ namespace Shorokoo.Core
 
             var outputTypes = FlattenTuples(outputs).ToList();
             var outputVariables = outputTypes.Select((x) => InternalGlobals.DefaultVariable(x)).ToArray();
-            var rankOverrides = outputTypes.Select((x) =>
+            var declaredRanks = outputTypes.Select((x) =>
                                 x.IsAssignableTo(typeof(IVector)) ? 1 :
                                 x.IsAssignableTo(typeof(IScalar)) ? 0 :
                                 (int?)null).ToArray();
 
 
-            var graph = new InternalComputationGraph([.. hyperparamInputs, .. inputInputs], [..outputVariables], [..rankOverrides]);
+            var graph = new InternalComputationGraph([.. hyperparamInputs, .. inputInputs], [..outputVariables], [..declaredRanks]);
 
             return StoreCachedSignature(signature, graph);
         }
@@ -279,11 +279,12 @@ namespace Shorokoo.Core
                 : referenceMethod;
 
             // Use the factored GraphBuilder code to build the function body in its
-            // primary FastCG form. The Function ctor stores it directly; the legacy
-            // CG view is materialized lazily on demand.
+            // primary FastCG form. The Function ctor stores it directly; the Variable
+            // view is materialized lazily on demand.
+            var name = defaultName ?? FriendlyDeclaringTypeName(referenceMethod) ?? referenceMethod.Name;
             var fastGraph = GraphBuilder.BuildInternalComputationGraphFromMethod(
                 methodToBuild, invokeTarget,
-                isParamInitializerBody: isTrainableParamInitializer || isStateParamInitializer);
+                paramInitializerName: isTrainableParamInitializer || isStateParamInitializer ? name : null);
 
             var fnType = FunctionType.Module;
             if (isStateParamInitializer)
@@ -297,7 +298,6 @@ namespace Shorokoo.Core
                 fnType = FunctionType.TrainableParamInitializer;
             }
 
-            var name = defaultName ?? FriendlyDeclaringTypeName(referenceMethod) ?? referenceMethod.Name;
             var fn = new Function(fastGraph, fnType, name, name,
                 isStateParamInitializer ? stateOwnership : (StateOwnership?)null);
 
@@ -365,10 +365,14 @@ namespace Shorokoo.Core
         {
             RejectVariableParam(type);
 
+            // DoNotWrapExceptions: the constructor builds the input's node, which a parameter
+            // initializer's body refuses (FW055); that refusal must reach the author as itself.
             if (type.IsAssignableTo(typeof(IModel)))
-                return (IModel)type.GetConstructor([typeof(InputType)]).AssertNotNull().Invoke([inputType]);
+                return (IModel)type.GetConstructor([typeof(InputType)]).AssertNotNull()
+                    .Invoke(BindingFlags.DoNotWrapExceptions, null, [inputType], null);
             else if (type.IsAssignableTo(typeof(IModule)))
-                return (IModule)type.GetConstructor([typeof(InputType)]).AssertNotNull().Invoke([inputType]);
+                return (IModule)type.GetConstructor([typeof(InputType)]).AssertNotNull()
+                    .Invoke(BindingFlags.DoNotWrapExceptions, null, [inputType], null);
 
             // Check for ITensorStruct BEFORE extracting DType (TensorStruct<T> has IStruct as type arg, not a numeric type)
             if (type.IsAssignableTo(typeof(ITensorStruct)))
@@ -574,14 +578,20 @@ namespace Shorokoo.Core
                 return [InternalOp.TensorStructCreate(dtype, fieldValues)];
             }
 
+            // A collection's or a tuple's elements are formatted one by one, so a struct among them
+            // becomes its struct value as a struct returned alone does.
             if (retval is System.Collections.IEnumerable enumerable)
-                return enumerable.Cast<IModuleParam>().Select(x => x.ToVariable()).ToArray();
+                return [.. enumerable.Cast<object>().Select(FormatElement)];
 
             if (retval is ITuple tuple)
-                return tuple.Cast<IModuleParam>().Select(x => x.ToVariable()).ToArray();
+                return [.. Enumerable.Range(0, tuple.Length).Select(i => FormatElement(tuple[i]!))];
 
             throw new InvalidTensorOperationException(ErrorCodes.FW002, "Return Value Processing", $"return type {retval.GetType().Name}", "Unsupported return value type - expected Variable[], IModuleParam[], IModuleParam, or ITuple");
         }
+
+        /// <summary>One element of a returned collection or tuple, as the single value it is.</summary>
+        private static Variable FormatElement(object element)
+            => element is IModuleParam param ? param.ToVariable() : Format(element).Single();
 
         internal static T Reformat<T>(Variable[] vars)
         {

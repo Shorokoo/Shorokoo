@@ -311,8 +311,7 @@ namespace Shorokoo
         ///
         /// <para>The default answers the same as the no-argument form, which is right for a
         /// parameter with no contents of its own to place — a <see cref="TensorStructModelParam"/>
-        /// refuses either way — and keeps any parameter type written before backends could differ
-        /// working exactly as it did.</para>
+        /// refuses either way.</para>
         ///
         /// <para>The value returned is the parameter's own: read it, do not dispose it.</para>
         /// </summary>

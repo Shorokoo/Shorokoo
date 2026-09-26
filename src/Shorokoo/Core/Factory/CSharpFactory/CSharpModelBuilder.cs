@@ -147,9 +147,9 @@ namespace Shorokoo.Core.Factory.CSharpFactory
                     paramList += ", ";
 
                 if (targetFunction.Outputs.Length == 1)
-                    paramList += GetModuleAwareTypeDefString(targetFunction.Outputs[0], targetFunction.OutputRankOverrides[0]);
+                    paramList += GetModuleAwareTypeDefString(targetFunction.Outputs[0], targetFunction.OutputRanks[0]);
                 else
-                    paramList += $"({string.Join(", ", targetFunction.Outputs.Zip(targetFunction.OutputRankOverrides).Select(x => GetModuleAwareTypeDefString(x.First, x.Second)))})";
+                    paramList += $"({string.Join(", ", targetFunction.Outputs.Zip(targetFunction.OutputRanks).Select(x => GetModuleAwareTypeDefString(x.First, x.Second)))})";
 
                 return $"Model<{paramList}>";
             }
@@ -157,7 +157,7 @@ namespace Shorokoo.Core.Factory.CSharpFactory
             {
                 var hyperParamList = string.Join(", ", targetFunction.HyperparamInputs.Select(x => GetModuleAwareTypeDefString(x, x.Rank)));
                 var nonHyperParamList = string.Join(", ", targetFunction.NonHyperparamInputs.Select(x => GetModuleAwareTypeDefString(x, x.Rank)));
-                var outputsList = string.Join(", ", targetFunction.Outputs.Zip(targetFunction.OutputRankOverrides).Select(x => GetModuleAwareTypeDefString(x.First, x.Second)));
+                var outputsList = string.Join(", ", targetFunction.Outputs.Zip(targetFunction.OutputRanks).Select(x => GetModuleAwareTypeDefString(x.First, x.Second)));
 
                 if (targetFunction.HyperparamInputs.Length > 1)
                     hyperParamList = $"({hyperParamList})";
@@ -175,7 +175,7 @@ namespace Shorokoo.Core.Factory.CSharpFactory
             }
         }
 
-        public static string GetModuleAwareTypeDefString(Variable variable, int? rankOverride)
+        public static string GetModuleAwareTypeDefString(Variable variable, int? rank)
         {
             // Model/module params are scalar nodes distinguished by runtime DType (formerly the generic
             // Variable<IModelVarType> / Variable<IModuleVarType>).
@@ -184,7 +184,7 @@ namespace Shorokoo.Core.Factory.CSharpFactory
             else if(variable is Variable moduleVariable && moduleVariable.Type == DType.Module)
                 return GetModuleAwareTypeDefString(moduleVariable.ModuleFn.AssertNotNull(), asModel: false);
 
-            return GetTypeDefString(variable, rankOverride);
+            return GetTypeDefString(variable, rank);
         }
 
         public static string GetModuleAwareTypeDefString(Variable tensor)
@@ -674,17 +674,17 @@ public static class " + modelName + @"
             }
             else if (tensorDataAttribute.DType == DType.Float32)
             {
-                var paramList = tensorDataAttribute.Elements<float>().ToArray().Select(x => $"{x}f");
+                var paramList = tensorDataAttribute.Elements<float>().ToArray().Select(x => $"{Literal(x)}f");
                 dataParams = string.Join(", ", paramList);
             }
             else if (tensorDataAttribute.DType == DType.Float64)
             {
-                var paramList = tensorDataAttribute.Elements<double>().ToArray().Select(x => $"{x}d");
+                var paramList = tensorDataAttribute.Elements<double>().ToArray().Select(x => $"{Literal(x)}d");
                 dataParams = string.Join(", ", paramList);
             }
             else if (tensorDataAttribute.DType == DType.Int16)
             {
-                var paramList = tensorDataAttribute.Elements<short>().ToArray().Select(x => $"{x}").ToList();
+                var paramList = tensorDataAttribute.Elements<short>().ToArray().Select(x => Literal(x)).ToList();
                 var useCollectionExpression = (paramList.Count >= 4);
                 if (!useCollectionExpression)
                     paramList = paramList.Select(x => $"(short){x}").ToList();
@@ -695,17 +695,17 @@ public static class " + modelName + @"
             }
             else if (tensorDataAttribute.DType == DType.Int32)
             {
-                var paramList = tensorDataAttribute.Elements<int>().ToArray().Select(x => $"{x}");
+                var paramList = tensorDataAttribute.Elements<int>().ToArray().Select(x => Literal(x));
                 dataParams = string.Join(", ", paramList);
             }
             else if (tensorDataAttribute.DType == DType.Int64)
             {
-                var paramList = tensorDataAttribute.Elements<long>().ToArray().Select(x => $"{x}L");
+                var paramList = tensorDataAttribute.Elements<long>().ToArray().Select(x => $"{Literal(x)}L");
                 dataParams = string.Join(", ", paramList);
             }
             else if (tensorDataAttribute.DType == DType.UInt16)
             {
-                var paramList = tensorDataAttribute.Elements<ushort>().ToArray().Select(x => $"{x}").ToList();
+                var paramList = tensorDataAttribute.Elements<ushort>().ToArray().Select(x => Literal(x)).ToList();
                 var useCollectionExpression = (paramList.Count >= 4);
                 if (!useCollectionExpression)
                     paramList = paramList.Select(x => $"(ushort){x}").ToList();
@@ -716,7 +716,7 @@ public static class " + modelName + @"
             }
             else if (tensorDataAttribute.DType == DType.UInt32)
             {
-                var paramList = tensorDataAttribute.Elements<uint>().ToArray().Select(x => $"{x}").ToList();
+                var paramList = tensorDataAttribute.Elements<uint>().ToArray().Select(x => Literal(x)).ToList();
                 var useCollectionExpression = (paramList.Count >= 4);
                 if (!useCollectionExpression)
                     paramList = paramList.Select(x => $"(uint){x}").ToList();
@@ -727,7 +727,7 @@ public static class " + modelName + @"
             }
             else if (tensorDataAttribute.DType == DType.UInt64)
             {
-                var paramList = tensorDataAttribute.Elements<ulong>().ToArray().Select(x => $"{x}UL");
+                var paramList = tensorDataAttribute.Elements<ulong>().ToArray().Select(x => $"{Literal(x)}UL");
                 dataParams = string.Join(", ", paramList);
             }
             else if (tensorDataAttribute.DType == DType.Bool)
@@ -747,7 +747,7 @@ public static class " + modelName + @"
             else if (shape.Dims.Length == 1)
                 csharpExpression = dataParams == string.Empty ? $"EmptyVector<{dtype.ToIVarType().Name}>()" : $"Vector({dataParams})";
             else
-                csharpExpression = $"Tensor([{string.Join(", ", shape.Dims)}], {dataParams})";
+                csharpExpression = $"Tensor([{string.Join(", ", shape.Dims.Select(d => Literal(d)))}], {dataParams})";
 
             var outputTensor = node.Outputs[0]!;
             var outputTensorName = GetSanitizedVariableName(outputTensor);
@@ -1060,7 +1060,6 @@ public static class " + modelName + @"
             Debug.Assert(node.OpName == InternalOpCodes.TENSOR_STRUCT_CREATE);
 
             var structDType = node.Attributes.GetDTypeVal(OnnxOpAttributeNames.AttrDtype).AssertNotNull();
-            var structDef = structDType.TensorStructDef.AssertNotNull();
 
             // Positional field references in TensorStructDef order — TensorStructCreate takes an
             // ordered Variable[] (no field-name labels) and the inputs to the graph node are
@@ -1068,7 +1067,7 @@ public static class " + modelName + @"
             var fieldRefs = node.Inputs.Select(input => currentNames[input!]).ToList();
 
             var createExpression =
-                $"Shorokoo.Globals.TensorStructCreate<{StructTypeName(structDef)}>({string.Join(", ", fieldRefs)})";
+                $"Shorokoo.Globals.TensorStructCreate<{StructTypeName(structDType)}>({string.Join(", ", fieldRefs)})";
 
             var outputTensor = node.Outputs[0]!;
             var outputTensorName = GetSanitizedVariableName(outputTensor);
@@ -1185,9 +1184,8 @@ public static class " + modelName + @"
 
             if (node.OpName == OpCodes.SEQUENCE_EMPTY)
             {
-                var structDef = node.Attributes.GetDTypeVal(OnnxOpAttributeNames.AttrDtype)
-                    .AssertNotNull().TensorStructDef.AssertNotNull();
-                return $"OnnxOp.SequenceEmpty(Shorokoo.Globals.StructDType<{StructTypeName(structDef)}>())";
+                var structDType = node.Attributes.GetDTypeVal(OnnxOpAttributeNames.AttrDtype).AssertNotNull();
+                return $"OnnxOp.SequenceEmpty(Shorokoo.Globals.StructDType<{StructTypeName(structDType)}>())";
             }
 
             return null;
@@ -1207,19 +1205,22 @@ public static class " + modelName + @"
         
 
         /// <summary>
-        /// The struct's IStruct interface as it is written in C#. A struct built at runtime carries
-        /// no such type and there is nothing to emit, so codegen fails here rather than writing
-        /// source that does not compile.
+        /// The struct's IStruct interface as it is written in C#: the interface its structure was
+        /// seen declared by (<see cref="DType.StructDeclaringType"/>), whatever name the dtype was
+        /// first registered under — a hand-built definition's short name need not resolve — else
+        /// the registered name. A struct built at runtime carries no such type and there is nothing
+        /// to emit, so codegen fails here rather than writing source that does not compile.
         /// </summary>
-        private static string StructTypeName(TensorStructDef structDef)
+        private static string StructTypeName(DType structDType)
         {
-            if (structDef.TypeName is null)
+            var typeName = structDType.StructDeclaringType?.FullName ?? structDType.TensorStructDef.AssertNotNull().TypeName;
+            if (typeName is null)
                 throw new UnsupportedDTypeException(ErrorCodes.FW053, "TensorStruct", "code template",
                     "A TensorStruct with no IStruct type name has no code generator");
 
-            var name = CSharpTypeName(structDef.TypeName);
+            var name = CSharpTypeName(typeName);
             if (name.Contains('`'))
-                throw new UnsupportedDTypeException(ErrorCodes.FW053, structDef.TypeName, "code template",
+                throw new UnsupportedDTypeException(ErrorCodes.FW053, typeName, "code template",
                     "A TensorStruct whose IStruct type has no C# spelling has no code generator");
 
             return name;
@@ -1286,6 +1287,11 @@ public static class " + modelName + @"
 
             return $"DType.{name}";
         }
+
+        /// <summary>A number as a C# literal spells it, whatever the current culture's minus sign
+        /// and decimal separator.</summary>
+        private static string Literal<T>(T value) where T : IFormattable
+            => value.ToString(null, System.Globalization.CultureInfo.InvariantCulture);
 
         private static string EscapeString(string input)
         {
@@ -1443,9 +1449,9 @@ public static class " + modelName + @"
                     if (attributes.IsDefaultValue(attrName))
                         attrValue = "null";
                     else if (attrType is AttributeType.Long)
-                        attrValue = attributes.GetLongVal(attrName).ToString().AssertNotNull() + "L";
+                        attrValue = Literal(attributes.GetLongVal(attrName).AssertNotNull()) + "L";
                     else if (attrType is AttributeType.Float)
-                        attrValue = attributes.GetFloatVal(attrName).ToString().AssertNotNull() + "f";
+                        attrValue = Literal(attributes.GetFloatVal(attrName).AssertNotNull()) + "f";
                     else if (attrType is AttributeType.Bool)
                         attrValue = attributes.GetBoolVal(attrName).AssertNotNull() ? "true" : "false";
                     else if (attrType is AttributeType.String)
@@ -1479,9 +1485,9 @@ public static class " + modelName + @"
                         attrValue = listOf(enumsVal.Select(enumDef.ToCSharpFullName), enumDef.EnumType.Name);
                     }
                     else if (attrType is AttributeType.Longs)
-                        attrValue = listOf(attributes.GetLongsVal(attrName).AssertNotNull().Select(x => $"{x}L"), "long");
+                        attrValue = listOf(attributes.GetLongsVal(attrName).AssertNotNull().Select(x => $"{Literal(x)}L"), "long");
                     else if (attrType is AttributeType.Floats)
-                        attrValue = listOf(attributes.GetFloatsVal(attrName).AssertNotNull().Select(x => $"{x}f"), "float");
+                        attrValue = listOf(attributes.GetFloatsVal(attrName).AssertNotNull().Select(x => $"{Literal(x)}f"), "float");
                     else if (attrType is AttributeType.Bools)
                         attrValue = listOf(attributes.GetBoolsVal(attrName).AssertNotNull().Select(x => x ? "true" : "false"), "bool");
                     else if (attrType is AttributeType.Strings)
@@ -1584,7 +1590,7 @@ public static class " + modelName + @"
                 var fullPlaceholder = result[startIdx..(endIdx + 1)];
                 var keyword = result[(startIdx + placeholder.Length)..endIdx];
 
-                var attrValue = numOutputs.ToString().AssertNotNull() + "L";
+                var attrValue = Literal(numOutputs) + "L";
                 if (keyword.StartsWith("param"))
                     attrValue += ", ";
 

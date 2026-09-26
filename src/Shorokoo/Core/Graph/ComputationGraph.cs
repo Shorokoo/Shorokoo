@@ -55,11 +55,8 @@ namespace Shorokoo.Graph
         }
 
         private readonly ImmutableArray<FrozenNode> _nodes;
-        private readonly ImmutableArray<FastTensorKey> _inputs;
-        private readonly ImmutableArray<FastTensorKey> _outputs;
         private readonly ImmutableArray<string?> _inputNames;
         private readonly ImmutableArray<string?> _outputNames;
-        private readonly ImmutableArray<int?>? _outputRankOverrides;
 
         /// <summary>
         /// What this graph is — a <see cref="GraphKind.Module"/>, a
@@ -80,15 +77,26 @@ namespace Shorokoo.Graph
         internal ComputationGraph(InternalComputationGraph graph, GraphKind kind)
         {
             if (graph is null) throw new System.ArgumentNullException(nameof(graph));
+            // Every concrete graph passes here, so this is where the invariant that each of its
+            // inputs records the shape it was concretized at is held.
+            // The graph's inputs are the input nodes that open its node list; it keeps no other
+            // record of them, so a graph whose input nodes do not form that prefix has lost track
+            // of an input.
+            if (graph.FindMisplacedInput() is int misplaced)
+                throw new System.InvalidOperationException(
+                    $"ComputationGraph: input node #{misplaced} ({graph.Nodes[misplaced].OpCode}) follows a body node; " +
+                    "a graph's input nodes must form the prefix of its node list.");
+            // Likewise its outputs are the output nodes that close it.
+            if (graph.FindMisplacedOutput() is int stray)
+                throw new System.InvalidOperationException(
+                    $"ComputationGraph: output node #{stray} precedes a body node ({graph.Nodes[stray + 1].OpCode}); " +
+                    "a graph's output nodes must form the suffix of its node list.");
+            RepresentativeInputShapes.Verify(graph, kind);
+            RecordedOutputShapes.Verify(graph, kind);
             Kind = kind;
             _nodes = graph.Nodes.Select(Freeze).ToImmutableArray();
-            _inputs = [.. graph.Inputs];
-            _outputs = [.. graph.Outputs];
-            _inputNames = [.. graph.InputUniqueNames];
-            _outputNames = [.. graph.OutputUniqueNames];
-            _outputRankOverrides = graph.OutputRankOverrides is null
-                ? null
-                : [.. graph.OutputRankOverrides];
+            _inputNames = [.. graph.InputNames];
+            _outputNames = [.. graph.OutputNames];
         }
 
         /// <summary>Re-stamping constructor: shares the frozen (immutable) data.</summary>
@@ -96,11 +104,8 @@ namespace Shorokoo.Graph
         {
             Kind = kind;
             _nodes = source._nodes;
-            _inputs = source._inputs;
-            _outputs = source._outputs;
             _inputNames = source._inputNames;
             _outputNames = source._outputNames;
-            _outputRankOverrides = source._outputRankOverrides;
         }
 
         private static FrozenNode Freeze(FastNode node) => new()
@@ -145,13 +150,14 @@ namespace Shorokoo.Graph
         }
 
         /// <summary>
-        /// Original <c>UniqueName</c> of each graph input, in declaration order. A generic
-        /// <c>[Module]</c>'s type-placeholder slots are listed here but take no value, so this is
-        /// one entry longer than <c>FromOrderedInputs</c> accepts for such a graph.
+        /// The name of each graph input, in declaration order, read off the input nodes that open
+        /// the graph. A generic <c>[Module]</c>'s type-placeholder slots are listed here but take no
+        /// value, so this is one entry longer than <c>FromOrderedInputs</c> accepts for such a graph.
         /// </summary>
         public IReadOnlyList<string?> InputNames => _inputNames;
 
-        /// <summary>Original <c>UniqueName</c> of each graph output, in declaration order.</summary>
+        /// <summary>The name of each graph output, in declaration order, read off the output nodes
+        /// that close the graph.</summary>
         public IReadOnlyList<string?> OutputNames => _outputNames;
 
         /// <summary>
@@ -163,14 +169,7 @@ namespace Shorokoo.Graph
         /// </summary>
         public InternalComputationGraph ToInternal()
         {
-            var graph = new InternalComputationGraph
-            {
-                Inputs = [.. _inputs],
-                Outputs = [.. _outputs],
-                InputUniqueNames = [.. _inputNames],
-                OutputUniqueNames = [.. _outputNames],
-                OutputRankOverrides = _outputRankOverrides?.ToArray(),
-            };
+            var graph = new InternalComputationGraph();
             foreach (var node in _nodes)
                 graph.Nodes.Add(Thaw(node));
             System.Diagnostics.Debug.Assert(graph.IsLinearOrderValid(), "thawed.IsLinearOrderValid()");

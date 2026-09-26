@@ -107,7 +107,7 @@ public class RngTrainingTests
         {
             var sample = new NamedModelParam[]
             {
-                new TensorDataModelParam("input", ModelParamType.InputParam,
+                new TensorDataModelParam("x", ModelParamType.InputParam,
                     TensorData([1L, 3L], 0.1f, 0.2f, 0.3f)),
             };
             var rig = TrainingRig.FromScratch(

@@ -37,7 +37,7 @@ public static class TrainingGraphBuilder
     /// <typeparam name="TOut">The model output / loss input type (e.g., Tensor&lt;float32&gt;)</typeparam>
     /// <typeparam name="TLoss">The loss output type (e.g., Scalar&lt;float32&gt;)</typeparam>
     /// <param name="modelGraph">The model's concrete architecture, from
-    /// <see cref="Shorokoo.Graph.InternalComputationGraphExtensions.ToConcreteArchitecture"/>; a raw
+    /// <c>ToConcreteArchitecture</c>; a raw
     /// module graph is refused (see <see cref="RequireConcreteArchitecture"/>)</param>
     /// <param name="lossFunction">A Func referencing a loss module's Inline method (2 inputs → 1 output)</param>
     /// <returns>A high-level <see cref="InternalComputationGraph"/> containing AutoGrad nodes, with inputs
@@ -63,7 +63,7 @@ public static class TrainingGraphBuilder
     ///
     /// <para>
     /// <paramref name="modelGraph"/> must already be a concrete architecture from
-    /// <see cref="Shorokoo.Graph.InternalComputationGraphExtensions.ToConcreteArchitecture"/> —
+    /// <c>ToConcreteArchitecture</c> —
     /// this is composition, not lowering, and anything else is refused (see
     /// <see cref="RequireConcreteArchitecture"/>). Trainable-param discovery then picks up exactly
     /// the live (post-liveness-filter) MODEL_PARAM nodes that lowering left.
@@ -105,11 +105,12 @@ public static class TrainingGraphBuilder
         // Identify model's original inputs (everything except the new param struct input).
         var originalModelInputKeys = new List<FastTensorKey>();
         var originalModelInputNames = new List<string?>();
-        for (int i = 0; i < fastGraph.Inputs.Count; i++)
+        foreach (var inputNode in fastGraph.InputNodes)
         {
-            if (fastGraph.Inputs[i] == trainableParamStructInputKey) continue;
-            originalModelInputKeys.Add(fastGraph.Inputs[i]);
-            originalModelInputNames.Add(i < fastGraph.InputUniqueNames.Count ? fastGraph.InputUniqueNames[i] : null);
+            var key = InternalComputationGraph.InputKeyOf(inputNode);
+            if (key == trainableParamStructInputKey) continue;
+            originalModelInputKeys.Add(key);
+            originalModelInputNames.Add(InternalComputationGraph.InputNameOf(inputNode));
         }
 
         // The model's single output (prediction).
@@ -141,9 +142,9 @@ public static class TrainingGraphBuilder
                     nameof(modelGraph));
         }
 
-        // Track input-style nodes we add so we can move them to the front of
-        // fastGraph.Nodes at the end (in creation order). Each fastGraph.Nodes.Add
-        // for an INPUT or its GETFIELD also records into headNodesInOrder.
+        // Track the GETFIELD nodes we add so we can move them to the start of the body at the end
+        // (in creation order): they are appended at the tail for convenience, but every body node
+        // consumes them.
         var headNodesInOrder = new List<FastNode>();
 
         // Step 5: Build state struct + GETFIELDs in fastGraph (if any state).
@@ -156,8 +157,7 @@ public static class TrainingGraphBuilder
             stateStructDef = FastBuildTrainableParamStructDefProcessor.Process(stateParamInfos, "ModelState");
             var stateStructDType = DType.GetOrCreateForTensorStruct(stateStructDef);
             var stateStructNode = Nodes.Processors.Fast.FastInternalOp.TensorStructInput(stateStructDType, "model_state");
-            fastGraph.Nodes.Add(stateStructNode);
-            headNodesInOrder.Add(stateStructNode);
+            fastGraph.AddInput(stateStructNode);
             stateStructInputKey = new FastTensorKey(stateStructNode.Key, 0);
 
             for (int i = 0; i < stateParamInfos.Length; i++)
@@ -165,7 +165,7 @@ public static class TrainingGraphBuilder
                 var fieldDef = stateStructDef.Fields[i];
                 var getField = Nodes.Processors.Fast.FastInternalOp.TensorStructGetField(
                     stateStructInputKey.Value, fieldDef.Name, fieldDef.ElementType, fieldDef.Rank, fieldDef.Structure);
-                fastGraph.Nodes.Add(getField);
+                fastGraph.InsertAtBodyEnd(getField);
                 headNodesInOrder.Add(getField);
                 stateFieldKeys[i] = new FastTensorKey(getField.Key, 0);
             }
@@ -198,8 +198,7 @@ public static class TrainingGraphBuilder
         var modelInputStructDef = new TensorStructDef(modelInputFields, "ModelInputs");
         var modelInputStructDType = DType.GetOrCreateForTensorStruct(modelInputStructDef);
         var modelInputStructNode = Nodes.Processors.Fast.FastInternalOp.TensorStructInput(modelInputStructDType, "model_inputs");
-        fastGraph.Nodes.Add(modelInputStructNode);
-        headNodesInOrder.Add(modelInputStructNode);
+        fastGraph.AddInput(modelInputStructNode);
         var modelInputStructInputKey = new FastTensorKey(modelInputStructNode.Key, 0);
 
         var modelInputFieldKeys = new FastTensorKey[originalModelInputKeys.Count];
@@ -208,7 +207,7 @@ public static class TrainingGraphBuilder
             var fieldDef = modelInputStructDef.Fields[i];
             var getField = Nodes.Processors.Fast.FastInternalOp.TensorStructGetField(
                 modelInputStructInputKey, fieldDef.Name, fieldDef.ElementType, fieldDef.Rank, fieldDef.Structure);
-            fastGraph.Nodes.Add(getField);
+            fastGraph.InsertAtBodyEnd(getField);
             headNodesInOrder.Add(getField);
             modelInputFieldKeys[i] = new FastTensorKey(getField.Key, 0);
         }
@@ -237,8 +236,9 @@ public static class TrainingGraphBuilder
         var (lossTargetType, lossTargetRank, lossTargetName) = ResolveFastInputDef(lossGraph, 1);
         var targetInputNode = Nodes.Processors.Fast.FastInternalOp.RuntimeInput(
             lossTargetType, lossTargetRank, lossTargetName ?? "targets");
-        fastGraph.Nodes.Add(targetInputNode);
-        headNodesInOrder.Add(targetInputNode);
+        // The step's own name for it, whatever the loss called it.
+        InternalComputationGraph.SetInputName(targetInputNode, "targets");
+        fastGraph.AddInput(targetInputNode);
         var targetInputKey = new FastTensorKey(targetInputNode.Key, 0);
 
         // Step 9 (was step 8): replay the loss graph into fastGraph with [prediction, target]
@@ -250,7 +250,7 @@ public static class TrainingGraphBuilder
 
         // Step 10 (was step 9): emit AUTO_GRAD node.
         var autoGradNode = Nodes.Processors.Fast.FastInternalOp.AutoGrad(lossOutputKey, rebuiltParamFieldKeys);
-        fastGraph.Nodes.Add(autoGradNode);
+        fastGraph.InsertAtBodyEnd(autoGradNode);
         var gradientKeys = new FastTensorKey[rebuiltParamFieldKeys.Length];
         for (int i = 0; i < rebuiltParamFieldKeys.Length; i++)
             gradientKeys[i] = new FastTensorKey(autoGradNode.Key, i);
@@ -263,42 +263,29 @@ public static class TrainingGraphBuilder
         var stateOutputDType = DType.GetOrCreateForTensorStruct(stateStructDef);
         var updatedStateStructNode = Nodes.Processors.Fast.FastInternalOp.TensorStructCreate(
             stateOutputDType, stateUpdateOutputs);
-        fastGraph.Nodes.Add(updatedStateStructNode);
+        fastGraph.InsertAtBodyEnd(updatedStateStructNode);
         var updatedStateStructKey = new FastTensorKey(updatedStateStructNode.Key, 0);
 
         // Step 13 (was step 12): finalize fastGraph's inputs and outputs.
         // Desired input order: [model_inputs_struct, targets, param_struct, state_struct?]
         // After Step 7 fastGraph.Inputs is [model_inputs_struct, state_struct?, param_struct].
-        var finalInputs = new List<FastTensorKey> { modelInputStructInputKey, targetInputKey, rebuiltTrainableParamStructInput };
-        var finalNames = new List<string?> { "model_inputs", "targets", LookupInputName(fastGraph, rebuiltTrainableParamStructInput) };
+        List<FastTensorKey> finalInputs = [modelInputStructInputKey, targetInputKey, rebuiltTrainableParamStructInput];
         if (stateStructInputKey is FastTensorKey ssk)
-        {
             finalInputs.Add(ssk);
-            finalNames.Add("model_state");
-        }
-        fastGraph.Inputs = finalInputs;
-        fastGraph.InputUniqueNames = finalNames;
+        fastGraph.SetInputs(finalInputs);
 
         // Outputs: [loss, gradient_struct, state_struct].
-        fastGraph.Outputs = new List<FastTensorKey> { lossOutputKey, gradientStructKey, updatedStateStructKey };
-        fastGraph.OutputUniqueNames = new List<string?>(new string?[3]);
-        fastGraph.OutputRankOverrides = null;
+        fastGraph.SetOutputs([lossOutputKey, gradientStructKey, updatedStateStructKey]);
 
         Nodes.Processors.Fast.FastProcessorHelper.RemoveUnreachableNodes(fastGraph);
 
-        // Move the input-style nodes added by this builder (struct inputs +
-        // their GETFIELDs, runtime target input) to the front in the order they
-        // were created — they were appended at the tail for convenience but
-        // every body node consumes them, so they belong before the body in
-        // topological order. INPUT/GETFIELD nodes carry no scope of their own
-        // and the body is already nested by construction, so prepending these
+        // Move the GETFIELD nodes added by this builder to the start of the body in the order
+        // they were created — they were appended at the tail for convenience but every body node
+        // consumes them. They read only the inputs and carry no scope of their own, so this
         // doesn't break nesting and removes the need for a Kahn re-sort.
         var headKeys = new HashSet<FastNodeKey>(headNodesInOrder.Select(n => n.Key));
-        var rebuilt = new List<FastNode>(fastGraph.Nodes.Count);
-        rebuilt.AddRange(headNodesInOrder);
-        foreach (var n in fastGraph.Nodes)
-            if (!headKeys.Contains(n.Key)) rebuilt.Add(n);
-        fastGraph.Nodes = rebuilt;
+        fastGraph.Nodes.RemoveAll(n => headKeys.Contains(n.Key));
+        fastGraph.InsertAtBodyStart(headNodesInOrder);
         System.Diagnostics.Debug.Assert(fastGraph.TryValidateLinearOrder(out var orderError),
             "fastGraph.IsLinearOrderValid(): " + orderError);
 
@@ -351,7 +338,8 @@ public static class TrainingGraphBuilder
         var (lossTargetType, lossTargetRank, lossTargetName) = ResolveFastInputDef(lossGraph, 1);
         var targetInputNode = Nodes.Processors.Fast.FastInternalOp.RuntimeInput(
             lossTargetType, lossTargetRank, lossTargetName ?? "targets");
-        graph.Nodes.Add(targetInputNode);
+        InternalComputationGraph.SetInputName(targetInputNode, UniqueTargetName(graph, lossTargetName));
+        graph.AddInput(targetInputNode);
         var targetInputKey = new FastTensorKey(targetInputNode.Key, 0);
 
         var lossOutputKey = Nodes.Processors.Fast.FastReplay.ReplayInto(
@@ -360,25 +348,22 @@ public static class TrainingGraphBuilder
         var takesTarget = LossReadsTarget(lossGraph);
         if (takesTarget)
         {
-            graph.Inputs = [.. graph.Inputs, targetInputKey];
-            graph.InputUniqueNames = [.. graph.InputUniqueNames, UniqueTargetName(graph, lossTargetName)];
+            // A composed graph is as concrete as the model in it, so its new input records a shape
+            // too: the target the loss reads at the model's own representative inputs.
+            Shorokoo.Core.Graph.RepresentativeInputShapes.Set(
+                targetInputNode, TrainingRig.RepresentativeTargetShape(concreteModel, lossGraph));
         }
-        graph.Outputs = [lossOutputKey];
-        graph.OutputUniqueNames = [null];
-        graph.OutputRankOverrides = null;
+        graph.SetOutputs([lossOutputKey]);
 
         Nodes.Processors.Fast.FastProcessorHelper.RemoveUnreachableNodes(graph);
 
-        // The target input was appended at the tail for convenience; every node reading it is already
-        // behind it in the body, so move it ahead of the body as the training composition does with
-        // the input-style nodes it adds.
-        if (takesTarget)
-        {
-            var body = graph.Nodes.Where(n => n.Key != targetInputNode.Key).ToList();
-            var reordered = new List<FastNode>(graph.Nodes.Count) { targetInputNode };
-            reordered.AddRange(body);
-            graph.Nodes = reordered;
-        }
+        // A target nothing reads is no input of the evaluation graph.
+        if (!takesTarget)
+            graph.Nodes.Remove(targetInputNode);
+
+        // And its loss output records its shape at the representative inputs, as the model's own
+        // outputs did.
+        Shorokoo.Core.Graph.RecordedOutputShapes.RecordAtRepresentativeInputs(graph);
         System.Diagnostics.Debug.Assert(graph.TryValidateLinearOrder(out var orderError),
             "evaluation graph.IsLinearOrderValid(): " + orderError);
         return graph;
@@ -396,7 +381,7 @@ public static class TrainingGraphBuilder
     private static string UniqueTargetName(InternalComputationGraph graph, string? preferred)
     {
         var taken = new HashSet<string>(
-            graph.InputUniqueNames.Where(n => n is not null)!, StringComparer.Ordinal);
+            graph.InputNames.Where(n => n is not null)!, StringComparer.Ordinal);
         var name = preferred ?? "targets";
         for (var suffix = 2; taken.Contains(name); suffix++) name = $"{preferred ?? "targets"}_{suffix}";
         return name;
@@ -466,8 +451,9 @@ public static class TrainingGraphBuilder
     {
         var reached = ReachableFromOutputs(graph);
         var consumed = new HashSet<int>();
-        for (int i = 0; i < count && i < graph.Inputs.Count; i++)
-            if (reached.Contains(graph.Inputs[i])) consumed.Add(i);
+        var inputs = graph.Inputs;
+        for (int i = 0; i < count && i < inputs.Count; i++)
+            if (reached.Contains(inputs[i])) consumed.Add(i);
         return consumed;
     }
 
@@ -504,19 +490,11 @@ public static class TrainingGraphBuilder
         return map;
     }
 
-    private static string? LookupInputName(InternalComputationGraph graph, FastTensorKey inputKey)
-    {
-        for (int i = 0; i < graph.Inputs.Count; i++)
-            if (graph.Inputs[i] == inputKey)
-                return i < graph.InputUniqueNames.Count ? graph.InputUniqueNames[i] : null;
-        return null;
-    }
-
     /// <summary>
     /// Refuses anything but a concrete architecture. Training needs one: the parameter count and
     /// every parameter's shape and initial value have to be statically known, and they are known
     /// only from the MODEL_PARAM nodes
-    /// <see cref="Shorokoo.Graph.InternalComputationGraphExtensions.ToConcreteArchitecture"/>
+    /// <c>ToConcreteArchitecture</c>
     /// produces — the trainable-param struct this builder emits carries a rank per field, never a
     /// shape, so it cannot supply them and neither can anything downstream. TrainingRig reads those
     /// nodes for the initial values and pairs them against this builder's fields by position.
@@ -572,7 +550,7 @@ public static class TrainingGraphBuilder
             ?? throw new InvalidOperationException(
                 $"PrepareForTrainingAsFast: input #{index} producer {producer.OpCode} has no AttrDtype.");
         var rank = (int?)producer.Attributes.GetLongVal(OnnxOpAttributeNames.ShrkAttrRank);
-        string? name = index < graph.InputUniqueNames.Count ? graph.InputUniqueNames[index] : null;
+        string? name = index < graph.InputNames.Count ? graph.InputNames[index] : null;
         return (dtype, rank, name);
     }
 

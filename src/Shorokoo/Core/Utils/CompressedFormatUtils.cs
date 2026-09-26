@@ -179,11 +179,10 @@ namespace Shorokoo.Core.Utils
             // emitInputsAsNodes: the .srk on-disk dialect serializes every top-level model-input op as an
             // ordinary NodeProto (carrying its attributes — e.g. a MODEL_TENSOR_INPUT's representative-
             // input shape), not a graph-input ValueInfoProto, so a saved graph stays self-describing
-            // across the round-trip. representativeForm=Passthrough: the representative attributes are
-            // serialized on those nodes exactly as the in-memory build set them — no downgrade, no metadata.
+            // across the round-trip: the representative attributes are serialized on those nodes exactly
+            // as the in-memory build set them.
             var model = FastOnnxModelBuilder.BuildInternalOnnxModel(
-                graph, stage: resolvedStage, applyExecutionLowerings: false, emitInputsAsNodes: true,
-                representativeForm: RepresentativeInputForm.Passthrough);
+                graph, stage: resolvedStage, applyExecutionLowerings: false, emitInputsAsNodes: true);
             Serializer.Serialize(memoryStream, model);
             var onnxBytes = memoryStream.ToArray();
 

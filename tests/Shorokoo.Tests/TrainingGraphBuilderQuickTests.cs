@@ -29,7 +29,7 @@ public class TrainingGraphBuilderQuickTests
     private static InternalComputationGraph ConcreteSimplestLayer()
     {
         var g = SimplestLayer.ComputationGraph;
-        return g.ToConcreteArchitecture(g.FromOrderedInputs([TensorData([4L], 1f, 2f, 3f, 4f)])).ToInternal();
+        return g.ToConcreteArchitecture([TensorData([4L], 1f, 2f, 3f, 4f)]).ToInternal();
     }
 
     private static void AssertTrainingGraphStructure(InternalComputationGraph trainingGraph)

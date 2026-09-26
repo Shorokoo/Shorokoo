@@ -1,6 +1,7 @@
 using System.IO.Compression;
 using System.Text.Json.Nodes;
 using Shorokoo.Core.Factory;
+using Shorokoo.Core.Graph;
 using Shorokoo.Core.Factory.IR;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 using Shorokoo.Runtime;
@@ -141,8 +142,8 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
     [Fact]
     public void TestTheRawFormatWritersLeaveThePreviousFileIntactWhenACommitCrashes()
     {
-        var graphA = new InternalComputationGraph([InputTensor<float32>("in")],
-            [InputTensor<float32>("in") + Scalar(1.0f)]);
+        var inputA = InputTensor<float32>("in");
+        var graphA = new InternalComputationGraph([inputA], [inputA + Scalar(1.0f)]);
         var input = InputTensor<float32>("in");
         var graphB = new InternalComputationGraph([input], [input * Scalar(2.0f)]);
         var srcA = P("src-a.zsrk");
@@ -188,7 +189,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
     {
         var moduleGraph = ScalarMultiplyModel.ComputationGraph;
         var arch = moduleGraph.ToConcreteArchitecture(
-            moduleGraph.FromOrderedInputs([TensorData([2], 1.0f, 2.0f)]));
+            [TensorData([2], 1.0f, 2.0f)]);
         var model = arch.ToConcreteModel();
         return (moduleGraph, arch, model);
     }
@@ -246,7 +247,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         var reloadedModule = CompressedFormatUtils.LoadFastGraphFromBinary(
             CompressedFormatUtils.SaveFastGraphToBinary(moduleGraph));
         var rearch = reloadedModule.ToConcreteArchitecture(
-            reloadedModule.FromOrderedInputs([TensorData([2], 1.0f, 2.0f)]));
+            [TensorData([2], 1.0f, 2.0f)]);
         Assert.Equal(GraphKind.ConcreteArchitecture, rearch.Kind);
         Assert.Equal(GraphKind.ConcreteArchitecture, SrkFileFormat.DetectStage(rearch.ToInternal()));
 
@@ -827,7 +828,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         Assert.Equal(GraphKind.Module, moduleGraph.Kind);
 
         var arch = moduleGraph.ToConcreteArchitecture(
-            moduleGraph.FromOrderedInputs([TensorData([2L], 1.0f, 2.0f)]));
+            [TensorData([2L], 1.0f, 2.0f)]);
         Assert.Equal(GraphKind.ConcreteArchitecture, arch.Kind);
         // No trainable params → op-scanning misclassifies this architecture.
         Assert.Equal(GraphKind.ConcreteModel, SrkFileFormat.DetectStage(arch.ToInternal()));
@@ -838,16 +839,16 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         Assert.Equal(GraphKind.ConcreteArchitecture, reloaded.Kind);
         Assert.Equal(GraphKind.ConcreteModel, reloaded.ToConcreteModel().Kind);
 
-        (ComputationGraph Graph, GraphKind Kind)[] cases =
-            [(moduleGraph, GraphKind.Module), (arch, GraphKind.ConcreteArchitecture)];
-        foreach (var (graph, kind) in cases)
+        (ComputationGraph Graph, GraphKind Kind, GraphKind Detected)[] cases =
+            [(moduleGraph, GraphKind.Module, GraphKind.Module), (arch, GraphKind.ConcreteArchitecture, GraphKind.ConcreteModel)];
+        foreach (var (graph, kind, detected) in cases)
         {
             var proto = FastOnnxModelBuilder.BuildInternalOnnxModel(graph.ToInternal(), stage: graph.Kind);
             using var ms = new MemoryStream();
             ProtoBuf.Serializer.Serialize(ms, proto);
             var viaOnnx = OnnxModelImporter.FromOnnxModel(ms.ToArray());
             Assert.Equal(kind, viaOnnx.Kind);
-            Assert.Equal(GraphKind.ConcreteModel, SrkFileFormat.DetectStage(viaOnnx.ToInternal()));
+            Assert.Equal(detected, SrkFileFormat.DetectStage(viaOnnx.ToInternal()));
         }
 
         // Module machinery tagged concrete-model is structurally impossible: refused at import.
@@ -870,7 +871,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         var nodeLines = g.Nodes
             .Select(n => $"{n.OpCode}({string.Join(",", n.Inputs.Select(k => k is null ? "-" : "x"))})")
             .OrderBy(x => x, StringComparer.Ordinal);
-        return $"inputs=[{string.Join(",", g.InputUniqueNames)}] outputs=[{string.Join(",", g.OutputUniqueNames)}]\n"
+        return $"inputs=[{string.Join(",", g.InputNames)}] outputs=[{string.Join(",", g.OutputNames)}]\n"
              + string.Join("\n", nodeLines);
     }
 
@@ -981,7 +982,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
             byte[] Run(ComputationGraph module)
             {
                 var model = module
-                    .ToConcreteArchitecture(module.FromOrderedInputs([.. inputs]))
+                    .ToConcreteArchitecture([.. inputs])
                     .ToConcreteModel(RngConfig.Default);
                 return ComputeContext.Default.Execute(model, [.. inputs.Select(t => t.Shared())])[0]
                     .ToTensorData().AccessRawMemory().ToArray();
@@ -1000,7 +1001,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         var numOut = TensorData(DType.Int64, [], 4L);
         var input = TensorDataWithSmallVals(DType.Float32, [4L, 4L]);
         var g = FCLayer.ComputationGraph;   // two trainable params: weights [4,4], bias [4]
-        var model = g.ToConcreteArchitecture(g.FromOrderedInputs([numOut, input])).ToConcreteModel();
+        var model = g.ToConcreteArchitecture([numOut, input]).ToConcreteModel();
         return (model, numOut, input);
     }
 
@@ -1233,7 +1234,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         var numOut = TensorData(DType.Int64, [], 32L);
         var input = TensorDataWithSmallVals(DType.Float32, [32L, 32L]);
         var g = FCLayer.ComputationGraph;
-        var model = g.ToConcreteArchitecture(g.FromOrderedInputs([numOut, input])).ToConcreteModel();
+        var model = g.ToConcreteArchitecture([numOut, input]).ToConcreteModel();
         foreach (var node in model.ToInternal().Nodes)
         {
             if (node.OpCode != InternalOpCodes.MODEL_PARAM_DATA) continue;
@@ -1647,7 +1648,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
     {
         var input = TensorDataWithSmallVals(DType.Float32, [1L]);
         var g = StaticAndInputShapedParamsLayer.ComputationGraph;
-        var model = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
+        var model = g.ToConcreteArchitecture([input]).ToConcreteModel();
 
         var ids = WeightDataByParam(model).Keys.ToArray();
         Assert.Equal(2, ids.Length);
@@ -2159,7 +2160,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         var numOut = TensorData(DType.Int64, [], 4L);
         var input = TensorDataWithSmallVals(DType.Float32, [4L, 4L]);
         var g = FCLayer.ComputationGraph;
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([numOut, input]));
+        var arch = g.ToConcreteArchitecture([numOut, input]);
         return (arch, arch.ToConcreteModel(), numOut, input);
     }
 
@@ -2260,7 +2261,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         var rngNumOut = TensorData(DType.Int64, [], 4L);
         var rngInput = TensorDataWithSmallVals(DType.Float32, [4L, 4L]);
         var rngG = RtFcWithRngFeed.ComputationGraph;
-        var rngArch = rngG.ToConcreteArchitecture(rngG.FromOrderedInputs([rngNumOut, rngInput]));
+        var rngArch = rngG.ToConcreteArchitecture([rngNumOut, rngInput]);
         var rngModel = rngArch.ToConcreteModel();
         var rngPath = P("rng_feed_exchange.safetensors");
         var rngDirect = ExecuteToBytes(rngModel, rngNumOut, rngInput);
@@ -2473,8 +2474,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         var viaExporter = Path.Combine(exporterDir, "same.onnx");
         Persistence.ExportOnnx(model, viaFacade, externalData: new OnnxExternalDataOptions { SizeThreshold = 0 });
         OnnxModelExporter.SaveWithExternalData(
-            FastOnnxModelBuilder.BuildOnnxModel(model, OpSetVersion.OPS_21,
-                representativeForm: RepresentativeInputForm.VanillaMetadata),
+            FastOnnxModelBuilder.BuildOnnxModel(model, OpSetVersion.OPS_21),
             viaExporter, new OnnxExternalDataOptions { SizeThreshold = 0 });
         Assert.Equal(File.ReadAllBytes(viaExporter), File.ReadAllBytes(viaFacade));
         Assert.Equal(File.ReadAllBytes(viaExporter + ".data"), File.ReadAllBytes(viaFacade + ".data"));
@@ -2488,15 +2488,10 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
     }
 
     /// <summary>
-    /// Pin: <c>ExportOnnx</c> promises a standard vanilla <c>.onnx</c>, but leaves
-    /// <c>GraphProto.name</c> empty — a field the ONNX spec requires to be non-empty, so the
-    /// reference <c>onnx.checker</c> rejects every file the framework exports.
-    /// <c>FastOnnxModelBuilder.BuildOnnxModel</c> passes the empty string for the main graph;
-    /// every other caller of <c>BuildGraphProto</c> supplies a real name. Tracked as
-    /// Shorokoo/Shorokoo#281, open — naming the main graph flips this green with its body
-    /// unchanged.
+    /// <c>ExportOnnx</c> writes a non-empty <c>GraphProto.name</c>: the ONNX spec requires one,
+    /// and the reference <c>onnx.checker</c> rejects a file without it.
     /// </summary>
-    [Fact(Skip = "Shorokoo/Shorokoo#281: every exported .onnx leaves GraphProto.name empty, which the reference onnx.checker rejects")]
+    [Fact]
     public void TestExportedOnnxNamesItsGraph()
     {
         var (model, _, _) = BuildSkptModel();
@@ -2504,7 +2499,425 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         Persistence.ExportOnnx(model, path);
 
         using var fs = File.OpenRead(path);
-        Assert.NotEqual("", ProtoBuf.Serializer.Deserialize<ModelProto>(fs).Graph.Name);
+        Assert.Equal("main_graph", ProtoBuf.Serializer.Deserialize<ModelProto>(fs).Graph.Name);
+    }
+
+    [Fact]
+    public void TestExportedOnnxGivesEveryGraphInputAndOutputAShape()
+    {
+        var (model, _, _) = BuildSkptModel();
+        var path = P("io-shapes.onnx");
+        Persistence.ExportOnnx(model, path);
+
+        using var fs = File.OpenRead(path);
+        var graph = ProtoBuf.Serializer.Deserialize<ModelProto>(fs).Graph;
+        Assert.All(graph.Inputs.Concat(graph.Outputs), v => Assert.NotNull(v.Type.TensorType.Shape));
+
+        var four = TensorData(DType.Int64, [], 4L);
+        var two = TensorData(DType.Int64, [], 2L);
+        var x23 = TensorData(DType.Float32, [2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f);
+        var x3 = TensorData(DType.Float32, [3L], 1f, 2f, 3f);
+        Assert.Equal([0, 2, 2], ExportedIoRanks(FCLayer.ComputationGraph, four, x23));
+        Assert.Equal([0, 0, 2, 2], ExportedIoRanks(LoopLayer.ComputationGraph, four, two, x23));
+        Assert.Equal([0, 1, 0, 1], ExportedIoRanks(IfLoopBodyLayer.ComputationGraph, two, x3, TensorData(DType.Bool, [], true)));
+        Assert.Equal([1, 0, 1], ExportedIoRanks(SharedWorkAroundAnIfLayer.ComputationGraph, x3, TensorData(DType.Float32, [], 2f)));
+        Assert.Equal([1, 1, 1], ExportedIoRanks(SequenceElementAddLayer.ComputationGraph, NamedIn("x", x3),
+            new TensorDataSequenceModelParam("s", ModelParamType.InputParam, TensorDataSequence.OfElements([x3], DType.Float32))));
+        Assert.Equal([1, 1, 1], ExportedIoRanks(NullableBiasLayer.ComputationGraph, NamedIn("x", x3),
+            new OptionalTensorDataModelParam("bias", ModelParamType.InputParam, OptionalTensorData.Some(x3))));
+        Assert.Equal([1, -1, 1], ExportedIoRanks(NullableBiasLayer.ComputationGraph, NamedIn("x", x3),
+            new OptionalTensorDataModelParam("bias", ModelParamType.InputParam, OptionalTensorData.None(DType.Float32))));
+        Assert.Equal([2, 0, 2], ExportedIoRanks(RankByFlagLayer.ComputationGraph, x23, TensorData(DType.Bool, [], true)));
+        Assert.Equal([2, 0, 1], ExportedIoRanks(RankByFlagLayer.ComputationGraph, x23, TensorData(DType.Bool, [], false)));
+        Assert.Equal([2, 1, 1], ExportedIoRanks(SqueezeByAxesLayer.ComputationGraph,
+            TensorData(DType.Float32, [2L, 1L], 1f, 2f), TensorData(DType.Int64, [1L], 1L)));
+    }
+
+    private static NamedModelParam NamedIn(string name, TensorData t) => new TensorDataModelParam(name, ModelParamType.InputParam, t);
+
+    private static TypeProto.Tensor? TensorTypeOf(TypeProto type)
+        => type.TensorType ?? type.SequenceType?.ElemType?.TensorType ?? type.OptionalType?.ElemType?.TensorType;
+
+    private int[] ExportedIoRanks(ComputationGraph g, params TensorData[] samples)
+        => ExportedIoRanks(g, [.. g.FromOrderedInputs([.. samples]).ModelParams]);
+
+    private int[] ExportedIoRanks(ComputationGraph g, params NamedModelParam[] samples)
+    {
+        var path = P(Guid.NewGuid() + ".onnx");
+        Persistence.ExportOnnx(g.ToConcreteArchitecture(new ModelParamList(samples)).ToConcreteModel(), path);
+        using var fs = File.OpenRead(path);
+        var graph = ProtoBuf.Serializer.Deserialize<ModelProto>(fs).Graph;
+        return [.. graph.Inputs.Concat(graph.Outputs).Select(v => TensorTypeOf(v.Type)?.Shape?.Dims.Count ?? -1)];
+    }
+
+    private static TensorShapeProto.Dimension Fixed(long size) => new() { DimValue = size };
+
+    private static TensorShapeProto.Dimension Symbolic(string name) => new() { DimParam = name };
+
+    private static ValueInfoProto FloatInputX(params TensorShapeProto.Dimension[]? dims)
+    {
+        var tensor = new TypeProto.Tensor { ElemType = 1 };
+        if (dims is not null)
+        {
+            tensor.Shape = new TensorShapeProto();
+            tensor.Shape.Dims.AddRange(dims);
+        }
+        return new ValueInfoProto { Name = "x", Type = new TypeProto { TensorType = tensor } };
+    }
+
+    private string ForeignAddModelFile(ValueInfoProto x)
+    {
+        var model = BuildForeignAddModel("w", [10f, 20f, 30f, 40f]);
+        model.Graph.Inputs[0] = x;
+        return WriteOnnx(P(Guid.NewGuid() + ".onnx"), model);
+    }
+
+    private long[]? ImportedShapeOfX(ValueInfoProto x, Dictionary<string, long[]>? given = null)
+    {
+        var path = ForeignAddModelFile(x);
+        var g = (given is null ? Persistence.ImportOnnx(path) : Persistence.ImportOnnx(path, given)).ToInternal();
+        return RepresentativeInputShapes.Get(g.BuildProducerByOutputMap()[g.Inputs[0]]);
+    }
+
+    [Fact]
+    public void TestImportOnnxRecordsEachInputsDeclaredShapeTakingOneForASymbolicOrUnsetDim()
+    {
+        Assert.Equal([2L, 4L], ImportedShapeOfX(FloatInputX(Fixed(2), Fixed(4))));
+        Assert.Equal([1L, 4L], ImportedShapeOfX(FloatInputX(Symbolic("N"), Fixed(4))));
+        Assert.Equal([1L, 4L], ImportedShapeOfX(FloatInputX(new TensorShapeProto.Dimension(), Fixed(4))));
+        Assert.Equal([], ImportedShapeOfX(FloatInputX()));
+        Assert.Equal([3L, 4L], ImportedShapeOfX(FloatInputX(Symbolic("N"), Fixed(4)), new() { ["x"] = [3L, 4L] }));
+    }
+
+    private static ValueInfoProto Named(string name, ValueInfoProto value)
+    {
+        value.Name = name;
+        return value;
+    }
+
+    private long[]? ImportedShapeOfY(ValueInfoProto x, ValueInfoProto y, Dictionary<string, long[]>? given = null)
+    {
+        var model = BuildForeignAddModel("w", [10f, 20f, 30f, 40f]);
+        model.Graph.Inputs[0] = x;
+        model.Graph.Outputs[0] = Named("y", y);
+        var path = WriteOnnx(P(Guid.NewGuid() + ".onnx"), model);
+        var g = (given is null ? Persistence.ImportOnnx(path) : Persistence.ImportOnnx(path, given)).ToInternal();
+        return RecordedOutputShapes.Get(g.OutputNodes[0]);
+    }
+
+    [Fact]
+    public void TestImportOnnxRecordsEachOutputsDeclaredShapeElseItsShapeAtTheRecordedInputs()
+    {
+        Assert.Equal([4L], ImportedShapeOfY(FloatInputX(Fixed(4)), FloatInputX(Fixed(4))));
+        Assert.Equal([1L], ImportedShapeOfY(FloatInputX(Fixed(4)), FloatInputX(Symbolic("N"))));
+        Assert.Equal([1L], ImportedShapeOfY(FloatInputX(Fixed(4)), FloatInputX(Fixed(-1))));
+        Assert.Equal([], ImportedShapeOfY(FloatInputX(Fixed(4)), FloatInputX()));
+        Assert.Equal([4L], ImportedShapeOfY(FloatInputX(Fixed(4)), FloatInputX(null)));
+        Assert.Equal([1L, 4L], ImportedShapeOfY(FloatInputX(Symbolic("N"), Fixed(4)), FloatInputX(null)));
+        Assert.Equal([3L, 4L], ImportedShapeOfY(FloatInputX(Symbolic("N"), Fixed(4)), FloatInputX(null), new() { ["x"] = [3L, 4L] }));
+    }
+
+    private static long[]? OutputShapeOf(ComputationGraph graph) => RecordedOutputShapes.Get(graph.ToInternal().OutputNodes[0]);
+
+    [Fact]
+    public void TestAStringInputModelRecordsItsOutputShapeThroughConcretizationExportAndImport()
+    {
+        var x = TensorData(DType.Utf8, [2L], "a b", "c");
+        var model = StringSplitLayer.ComputationGraph.ToConcreteArchitecture(
+            [x]).ToConcreteModel();
+        var exported = P(Guid.NewGuid() + ".onnx");
+        Persistence.ExportOnnx(model, exported);
+
+        var g = new GraphProto { Name = "foreign" };
+        g.Inputs.Add(new ValueInfoProto { Name = "s", Type = new TypeProto { TensorType = new TypeProto.Tensor { ElemType = 8, Shape = new TensorShapeProto { Dims = { Fixed(3) } } } } });
+        var identity = new NodeProto { OpType = "Identity", Name = "id0" };
+        identity.Inputs.Add("s");
+        identity.Outputs.Add("y");
+        g.Nodes.Add(identity);
+        g.Outputs.Add(new ValueInfoProto { Name = "y", Type = new TypeProto { TensorType = new TypeProto.Tensor { ElemType = 8 } } });
+        var foreign = new ModelProto { IrVersion = 10, Graph = g };
+        foreign.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = 21 });
+
+        Assert.Equal([2L, 2L], OutputShapeOf(model));
+        Assert.Equal([2L, 2L], OutputShapeOf(Persistence.ImportOnnx(exported)));
+        Assert.Equal([2L, 2L], OutputShapeOf(CompressedFormatUtils.LoadFastGraphFromBinary(CompressedFormatUtils.SaveFastGraphToBinary(model, compressed: true))));
+        Assert.Equal([3L], OutputShapeOf(Persistence.ImportOnnx(WriteOnnx(P(Guid.NewGuid() + ".onnx"), foreign))));
+    }
+
+    private static T UnderCulture<T>(string name, Func<T> action)
+    {
+        var culture = System.Globalization.CultureInfo.CurrentCulture;
+        try
+        {
+            System.Globalization.CultureInfo.CurrentCulture = new System.Globalization.CultureInfo(name);
+            return action();
+        }
+        finally { System.Globalization.CultureInfo.CurrentCulture = culture; }
+    }
+
+    [Fact]
+    public void TestAnExportUnderACultureWithItsOwnMinusSignImportsBackWithItsNegativeMarkers()
+    {
+        var g = OptionalPassThroughLayer.ComputationGraph;
+        var model = g.ToConcreteArchitecture(new ModelParamList([
+            new OptionalTensorDataModelParam("bias", ModelParamType.InputParam, OptionalTensorData.None(DType.Float32))])).ToConcreteModel();
+        var path = UnderCulture("sv-SE", () => { var p = P(Guid.NewGuid() + ".onnx"); Persistence.ExportOnnx(model, p); return p; });
+        var imported = Persistence.ImportOnnx(path).ToInternal();
+        Assert.Equal([-1L], RecordedOutputShapes.Get(imported.OutputNodes[0]));
+        Assert.Equal([-1L], RepresentativeInputShapes.Get(imported.InputNodes[0]));
+        var importedUnderSv = UnderCulture("sv-SE", () => Persistence.ImportOnnx(path)).ToInternal();
+        Assert.Equal([-1L], RecordedOutputShapes.Get(importedUnderSv.OutputNodes[0]));
+    }
+
+    [Fact]
+    public void TestImportOnnxSkipsAMalformedDeclaredOutputRankAsItDoesAMalformedRecordedShape()
+    {
+        foreach (var value in (string[])["one", "99999999999", ""])
+        {
+            var model = BuildForeignAddModel("w", [10f, 20f, 30f, 40f]);
+            model.Graph.Outputs[0].MetadataProps.Add(new StringStringEntryProto { Key = OnnxOpAttributeNames.ShrkAttrDeclaredRank, Value = value });
+            model.Graph.Outputs[0].MetadataProps.Add(new StringStringEntryProto { Key = OnnxOpAttributeNames.ShrkAttrRecordedOutputShape, Value = value });
+            Assert.Equal([11f, 22f, 33f, 44f], RunFloatVecModel(Persistence.ImportOnnx(WriteOnnx(P(Guid.NewGuid() + ".onnx"), model)), 1f, 2f, 3f, 4f));
+        }
+    }
+
+    private static IEnumerable<string> BoundaryNamesIn(ModelProto model)
+    {
+        string[] keys = [OnnxOpAttributeNames.ShrkAttrInputName, OnnxOpAttributeNames.ShrkAttrOutputName];
+        IEnumerable<ValueInfoProto> infos = [.. model.Graph.Inputs, .. model.Graph.Outputs, .. model.Functions.SelectMany(f => f.ValueInfoes)];
+        IEnumerable<NodeProto> nodes = [.. model.Graph.Nodes, .. model.Functions.SelectMany(f => f.Nodes)];
+        return [.. infos.SelectMany(i => i.MetadataProps).Where(p => keys.Contains(p.Key)).Select(p => p.Value),
+            .. nodes.SelectMany(n => n.Attributes).Where(a => keys.Contains(a.Name) && a.S is not null).Select(a => System.Text.Encoding.UTF8.GetString(a.S))];
+    }
+
+    private static ModelProto SrkModelOf(ComputationGraph g)
+        => FastOnnxModelBuilder.BuildInternalOnnxModel(g.ToInternal(), stage: g.Kind, applyExecutionLowerings: false, emitInputsAsNodes: true);
+
+    [Fact]
+    public void TestNoSerializedInputOrOutputNameIsATensorKeyStandingInForAMissingName()
+    {
+        var x23 = TensorData(DType.Float32, [2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f);
+        var fc = FCLayer.ComputationGraph;
+        var fcArch = fc.ToConcreteArchitecture([TensorData(DType.Int64, [], 4L), x23]);
+        var tuple = StructInATupleOutputLayer.ComputationGraph;
+        var tupleArch = tuple.ToConcreteArchitecture([TensorData(DType.Float32, [], 3f), TensorData([2L], 1f, 2f)]);
+        foreach (var model in (ModelProto[])[SrkModelOf(fc), SrkModelOf(fcArch), SrkModelOf(tuple), SrkModelOf(tupleArch),
+                     FastOnnxModelBuilder.BuildInternalOnnxModel(fcArch.ToInternal()), FastOnnxModelBuilder.BuildOnnxModel(fcArch.ToConcreteModel())])
+            Assert.DoesNotContain(BoundaryNamesIn(model), name => TensorKey.TryParse(name, out _));
+        Assert.Equal([null, null, "x"], tupleArch.OutputNames);
+    }
+
+    private IReadOnlyList<string?> ReimportedOutputNames(ComputationGraph model)
+    {
+        var path = P(Guid.NewGuid() + ".onnx");
+        Persistence.ExportOnnx(model, path);
+        return Persistence.ImportOnnx(path).OutputNames;
+    }
+
+    [Fact]
+    public void TestAnExportedOutputNamedAsAnInputImportsBackUnderItsOwnName()
+    {
+        var x3 = TensorData(DType.Float32, [3L], 1f, 2f, 3f);
+        var bias = OptionalPassThroughLayer.ComputationGraph.ToConcreteArchitecture(new ModelParamList([
+            new OptionalTensorDataModelParam("bias", ModelParamType.InputParam, OptionalTensorData.Some(x3))])).ToConcreteModel();
+        var tuple = StructInATupleOutputLayer.ComputationGraph;
+        var tupleModel = tuple.ToConcreteArchitecture([TensorData(DType.Float32, [], 3f), x3]).ToConcreteModel();
+        var g = new GraphProto { Name = "foreign" };
+        g.Inputs.Add(OnnxFloatVec("x", 4));
+        g.Outputs.Add(OnnxFloatVec("x", 4));
+        var foreign = new ModelProto { IrVersion = 10, Graph = g };
+        foreign.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = 21 });
+        var imported = Persistence.ImportOnnx(WriteOnnx(P(Guid.NewGuid() + ".onnx"), foreign));
+
+        Assert.Equal(["bias"], ReimportedOutputNames(bias));
+        Assert.Equal("x", ReimportedOutputNames(tupleModel)[^1]);
+        Assert.Equal(["x"], imported.OutputNames);
+        Assert.Equal(["x"], ReimportedOutputNames(imported));
+    }
+
+    private static ValueInfoProto StringInput(string name, params TensorShapeProto.Dimension[]? dims)
+    {
+        var tensor = new TypeProto.Tensor { ElemType = 8 };
+        if (dims is not null)
+        {
+            tensor.Shape = new TensorShapeProto();
+            tensor.Shape.Dims.AddRange(dims);
+        }
+        return new ValueInfoProto { Name = name, Type = new TypeProto { TensorType = tensor } };
+    }
+
+    private sealed class RanklessStringOp(string opCode, int outputs) : Shorokoo.Core.Interpreter.QuickOp
+    {
+        public override string OpCode => opCode;
+        protected override Shorokoo.Core.Interpreter.RuntimeTensor[] Compute(
+            Shorokoo.Core.Interpreter.RuntimeTensor?[] inputs, OnnxCSharpAttributes attrs, int maxDataElements)
+            => [.. Enumerable.Range(0, outputs).Select(_ => new Shorokoo.Core.Interpreter.RuntimeTensor { DType = DType.Utf8 })];
+    }
+
+    private string ForeignStringModelFile(NodeProto node)
+    {
+        var g = new GraphProto { Name = "foreign" };
+        g.Inputs.Add(StringInput("s", Fixed(2)));
+        node.Inputs.Add("s");
+        g.Nodes.Add(node);
+        g.Outputs.Add(StringInput(node.Outputs[0], null));
+        var model = new ModelProto { IrVersion = 10, Graph = g };
+        model.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = 21 });
+        return WriteOnnx(P(Guid.NewGuid() + ".onnx"), model);
+    }
+
+    private static AttributeProto StringAttribute(string name, string value)
+        => new() { Name = name, Type = AttributeProto.AttributeType.String, S = System.Text.Encoding.UTF8.GetBytes(value) };
+
+    [Fact]
+    public void TestImportOnnxRecordsAnUnshapedOutputTheEngineCannotComputeFromARunElseRefusesItWithoutAdvisingInputShapes()
+    {
+        var split = new NodeProto { OpType = "StringSplit", Name = "split0", Outputs = { "y", "n" } };
+        split.Attributes.Add(StringAttribute("delimiter", " "));
+        var normalize = new NodeProto { OpType = "StringNormalizer", Name = "normalize0", Outputs = { "y" } };
+        normalize.Attributes.AddRange([StringAttribute("case_change_action", "LOWER"), StringAttribute("locale", "xx_XX")]);
+        var splitPath = ForeignStringModelFile(split);
+        var normalizePath = ForeignStringModelFile(normalize);
+
+        using (Shorokoo.Core.Interpreter.OpRegistry.Override(new RanklessStringOp(OpCodes.STRING_SPLIT, 2)))
+            Assert.Equal([2L, 0L], OutputShapeOf(Persistence.ImportOnnx(splitPath)));
+        using (Shorokoo.Core.Interpreter.OpRegistry.Override(new RanklessStringOp(OpCodes.STRING_NORMALIZER, 1)))
+        {
+            var ex = Assert.Throws<ModelException>(() => Persistence.ImportOnnx(normalizePath));
+            Assert.Equal(ErrorCodes.FW058, ex.ErrorCode);
+            Assert.Contains("'y'", ex.Message);
+            Assert.DoesNotContain("input shapes", ex.Message);
+        }
+    }
+
+    private string ForeignSequenceAtModelFile(params TensorShapeProto.Dimension[]? elementDims)
+    {
+        var g = new GraphProto { Name = "foreign" };
+        g.Inputs.Add(new ValueInfoProto { Name = "s", Type = new TypeProto { SequenceType = new TypeProto.Sequence { ElemType = FloatInputX(elementDims).Type } } });
+        g.Initializers.Add(new TensorProto { Name = "i", data_type = 7, Dims = [], RawData = BitConverter.GetBytes(0L) });
+        var at = new NodeProto { OpType = "SequenceAt", Name = "at0" };
+        at.Inputs.AddRange(["s", "i"]);
+        at.Outputs.Add("y");
+        g.Nodes.Add(at);
+        g.Outputs.Add(Named("y", FloatInputX(null)));
+        var model = new ModelProto { IrVersion = 10, Graph = g };
+        model.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = 21 });
+        return WriteOnnx(P(Guid.NewGuid() + ".onnx"), model);
+    }
+
+    private static long[]? InputShapeOf(ComputationGraph graph) => RepresentativeInputShapes.Get(graph.ToInternal().InputNodes[0]);
+
+    [Fact]
+    public void TestASequenceInputsElementShapeIsImportedGivenAndExportedAndReadBack()
+    {
+        var declared = ForeignSequenceAtModelFile(Fixed(3));
+        var open = ForeignSequenceAtModelFile(Symbolic("N"));
+        Assert.Equal([3L], InputShapeOf(Persistence.ImportOnnx(declared)));
+        Assert.Equal([3L], OutputShapeOf(Persistence.ImportOnnx(declared)));
+        Assert.Equal([5L], OutputShapeOf(Persistence.ImportOnnx(open, new Dictionary<string, long[]> { ["s"] = [5L] })));
+        Assert.Equal([5L], OutputShapeOf(OnnxModelImporter.FromOnnxModel(open, new Dictionary<string, long[]> { ["s"] = [5L] })));
+        Assert.Throws<ArgumentException>(() => Persistence.ImportOnnx(declared, new Dictionary<string, long[]> { ["s"] = [4L] }));
+
+        var x3 = TensorData(DType.Float32, [3L], 1f, 2f, 3f);
+        var g = SequenceElementAddLayer.ComputationGraph;
+        var model = g.ToConcreteArchitecture(new ModelParamList([NamedIn("x", x3),
+            new TensorDataSequenceModelParam("s", ModelParamType.InputParam, TensorDataSequence.OfElements([x3], DType.Float32))])).ToConcreteModel();
+        var path = P(Guid.NewGuid() + ".onnx");
+        Persistence.ExportOnnx(model, path);
+        Assert.Equal([3L], RepresentativeInputShapes.Get(Persistence.ImportOnnx(path).ToInternal().InputNodes[1]));
+    }
+
+    [Fact]
+    public void TestAForeignNodeWithItsTrailingOptionalOutputsOmittedReExports()
+    {
+        var model = BuildForeignAddModel("w", [10f, 20f, 30f, 40f]);
+        var unique = new NodeProto { OpType = "Unique", Name = "unique0" };
+        unique.Inputs.Add("y");
+        unique.Outputs.Add("u");
+        model.Graph.Nodes.Add(unique);
+        model.Graph.Outputs[0] = Named("u", FloatInputX(Symbolic("N")));
+        var imported = Persistence.ImportOnnx(WriteOnnx(P(Guid.NewGuid() + ".onnx"), model));
+        var path = P(Guid.NewGuid() + ".onnx");
+        Persistence.ExportOnnx(imported, path);
+        Assert.Equal([11f, 22f, 33f, 44f], RunFloatVecModel(Persistence.ImportOnnx(path), 1f, 2f, 3f, 4f));
+    }
+
+    [Fact]
+    public void TestImportOnnxRefusesAnOutputOfUnknownRankThatNoInputShapeSettlesNamingIt()
+    {
+        var g = new GraphProto { Name = "foreign" };
+        g.Inputs.Add(new ValueInfoProto
+        {
+            Name = "s",
+            Type = new TypeProto { SequenceType = new TypeProto.Sequence { ElemType = new TypeProto { TensorType = new TypeProto.Tensor { ElemType = 1 } } } },
+        });
+        g.Initializers.Add(new TensorProto { Name = "i", data_type = 7, Dims = [], RawData = BitConverter.GetBytes(0L) });
+        var at = new NodeProto { OpType = "SequenceAt", Name = "at0" };
+        at.Inputs.AddRange(["s", "i"]);
+        at.Outputs.Add("y");
+        g.Nodes.Add(at);
+        g.Outputs.Add(Named("y", FloatInputX(null)));
+        var model = new ModelProto { IrVersion = 10, Graph = g };
+        model.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = 21 });
+        var path = WriteOnnx(P(Guid.NewGuid() + ".onnx"), model);
+
+        var ex = Assert.Throws<ModelException>(() => Persistence.ImportOnnx(path));
+        Assert.Equal(ErrorCodes.FW058, ex.ErrorCode);
+        Assert.Contains("'y'", ex.Message);
+    }
+
+    [Fact]
+    public void TestImportOnnxTakesANegativeDimAsUnsetAndRefusesAGivenShapeContradictingAFixedDim()
+    {
+        Assert.Equal([1L, 4L], ImportedShapeOfX(FloatInputX(Fixed(-1), Fixed(4))));
+        Assert.Equal([3L, 4L], ImportedShapeOfX(FloatInputX(Fixed(-1), Fixed(4)), new() { ["x"] = [3L, 4L] }));
+        Assert.Throws<ArgumentException>(() => ImportedShapeOfX(FloatInputX(Fixed(2), Fixed(4)), new() { ["x"] = [3L, 4L] }));
+        Assert.Throws<ArgumentException>(() => ImportedShapeOfX(FloatInputX(Symbolic("N"), Fixed(4)), new() { ["x"] = [3L, 5L] }));
+    }
+
+    [Fact]
+    public void TestImportOnnxDoesNotTakeAnInitializerAlsoListedAsAGraphInputForAnInput()
+    {
+        foreach (var w in (ValueInfoProto[])[OnnxFloatVec("w", 4), FloatInputX(null)])
+        {
+            var model = BuildForeignAddModel("w", [10f, 20f, 30f, 40f]);
+            w.Name = "w";
+            model.Graph.Inputs.Add(w);
+            var path = WriteOnnx(P(Guid.NewGuid() + ".onnx"), model);
+            Assert.Equal(["x"], Persistence.ImportOnnx(path).InputNames);
+            Assert.Equal([11f, 22f, 33f, 44f], RunFloatVecModel(Persistence.ImportOnnx(path), 1f, 2f, 3f, 4f));
+        }
+    }
+
+    [Fact]
+    public void TestImportOnnxRefusesAKindTaggedFileWithAnUnshapedInputAsFW058()
+    {
+        var (model, _, _) = BuildSkptModel();
+        var exported = P(Guid.NewGuid() + ".onnx");
+        Persistence.ExportOnnx(model, exported);
+        ModelProto proto;
+        using (var fs = File.OpenRead(exported)) proto = ProtoBuf.Serializer.Deserialize<ModelProto>(fs);
+        var input = proto.Graph.Inputs[^1];
+        input.Type.TensorType.Shape = null!;
+        input.MetadataProps.RemoveAll(e => e.Key == RepresentativeInputMetadata.Key);
+        var path = WriteOnnx(P(Guid.NewGuid() + ".onnx"), proto);
+        Assert.Equal(ErrorCodes.FW058, Assert.Throws<ModelException>(() => Persistence.ImportOnnx(path)).ErrorCode);
+        Assert.Equal(ErrorCodes.FW058, Assert.Throws<ModelException>(() => OnnxModelImporter.FromOnnxModel(path)).ErrorCode);
+    }
+
+    [Fact]
+    public void TestImportOnnxRefusesAnInputOfUnknownRankUntilItsShapeIsGiven()
+    {
+        var path = ForeignAddModelFile(FloatInputX(null));
+        Dictionary<string, long[]> shapes = new() { ["x"] = [4L] };
+        Assert.Equal(ErrorCodes.FW058, Assert.Throws<ModelException>(() => Persistence.ImportOnnx(path)).ErrorCode);
+        Assert.Equal(ErrorCodes.FW058, Assert.Throws<ModelException>(() => OnnxModelImporter.FromOnnxModel(path)).ErrorCode);
+        Assert.Equal(ErrorCodes.FW058, Assert.Throws<ModelException>(() => Persistence.ImportOnnxToCheckpoint(path, P("unranked.skpt"))).ErrorCode);
+        Assert.Contains("'x'", Assert.Throws<ModelException>(() => Persistence.ImportOnnx(path)).Message);
+        Assert.Equal([11f, 22f, 33f, 44f], RunFloatVecModel(Persistence.ImportOnnx(path, shapes), 1f, 2f, 3f, 4f));
+        Assert.Equal([11f, 22f, 33f, 44f], RunFloatVecModel(OnnxModelImporter.FromOnnxModel(path, shapes), 1f, 2f, 3f, 4f));
+        Assert.Equal([11f, 22f, 33f, 44f], RunFloatVecModel(Persistence.ImportOnnxToCheckpoint(path, P("ranked.skpt"), shapes), 1f, 2f, 3f, 4f));
+        Assert.Throws<ArgumentException>(() => Persistence.ImportOnnx(path, new Dictionary<string, long[]> { ["y"] = [4L] }));
     }
 
     [Fact]

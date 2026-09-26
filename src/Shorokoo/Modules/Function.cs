@@ -92,7 +92,7 @@ namespace Shorokoo.Core
         public string ModelSignatureString => _signatures.Value.modelSignature;
         public string ModuleSignatureString => _signatures.Value.moduleSignature;
         private Lazy<(string moduleSignature, string modelSignature)> _signatures
-            => __signatures ??= new Lazy<(string, string)>(() => OriginalFastGraph.GetSignatureStrings());
+            => __signatures ??= new Lazy<(string, string)>(() => OriginalFastGraph.GetSignatureStrings(OutputRanks));
         private Lazy<(string moduleSignature, string modelSignature)>? __signatures;
 
         public FunctionType FunctionType { get; }
@@ -142,7 +142,14 @@ namespace Shorokoo.Core
         internal ImmutableArray<Variable> HyperparamInputs { get { EnsureConvertedSnapshot(); return _hyperparamInputs; } }
         internal ImmutableArray<Variable> NonHyperparamInputs { get { EnsureConvertedSnapshot(); return _nonHyperparamInputs; } }
         internal ImmutableArray<Variable> Outputs { get { EnsureConvertedSnapshot(); return _outputs; } }
-        internal ImmutableArray<int?> OutputRankOverrides { get { EnsureConvertedSnapshot(); return _outputRankOverrides; } }
+        /// <summary>
+        /// The effective rank of each output: the rank a call of this function gives it. A module
+        /// signature has no computation to take a rank from — its outputs are placeholders standing
+        /// for the C# return types — so each is the rank its output node declares, or null when it
+        /// declares none. Every other function's output has the rank its output node declares, or
+        /// else the rank its body computes.
+        /// </summary>
+        internal ImmutableArray<int?> OutputRanks { get { EnsureConvertedSnapshot(); return _outputRanks; } }
 
         /// <summary>
         /// Primary representation of the function body: the frozen (immutable)
@@ -172,7 +179,7 @@ namespace Shorokoo.Core
         private ImmutableArray<Variable> _hyperparamInputs;
         private ImmutableArray<Variable> _nonHyperparamInputs;
         private ImmutableArray<Variable> _outputs;
-        private ImmutableArray<int?> _outputRankOverrides;
+        private ImmutableArray<int?> _outputRanks;
 
         // Materializes the Variable snapshot directly from OriginalFastGraph via
         // BuildNodes. Shielded from any active outer trace by an isolated trace:
@@ -193,9 +200,9 @@ namespace Shorokoo.Core
                 .Where(x => x.InputType != Shorokoo.Core.Nodes.NodeDefinitions.InputType.Hyperparam)
                 .ToImmutableArray();
             _outputs = built.outputs;
-            _outputRankOverrides = body.OutputRankOverrides is null
-                ? built.outputs.Select(x => x.Rank).ToImmutableArray()
-                : body.OutputRankOverrides.ToImmutableArray();
+            _outputRanks = FunctionType == FunctionType.ModuleSignature
+                ? [.. body.OutputDeclaredRanks]
+                : [.. built.outputs.Zip(body.OutputDeclaredRanks, (output, declared) => declared ?? output.Rank)];
             _convertedSnapshotComputed = true;
         }
 
@@ -226,6 +233,19 @@ namespace Shorokoo.Core
         }
 
         /// <summary>
+        /// This function over another body — what a pass that rewrites function bodies builds in its
+        /// place — keeping everything else about it: its type, names, state ownership and RNG
+        /// tags (<see cref="RngAlgorithm"/>, <see cref="RngFunctionKind"/>), which a rebuild that
+        /// dropped would turn an RNG algorithm function into an ordinary, inlinable one.
+        /// </summary>
+        internal Function WithBody(InternalComputationGraph fastGraph)
+            => new(fastGraph, FunctionType, DefaultName, FriendlyName, StateOwnership)
+            {
+                RngAlgorithm = RngAlgorithm,
+                RngFunctionKind = RngFunctionKind,
+            };
+
+        /// <summary>
         /// Builds a <c>FUNCTION_INVOKE</c> of this function. Arguments are positional over the
         /// body's whole input list — for a module-typed function that is
         /// <c>[hyperparams..., runtime inputs...]</c>, so its hyperparameter values are passed
@@ -254,7 +274,7 @@ namespace Shorokoo.Core
             return InternalOp.FunctionInvoke(tensors,
                     this.Outputs.Select(x => x.Structure()).ToArray(),
                     this.Outputs.Select(x => x.DType).ToArray(),
-                    this.OutputRankOverrides.Select(x => x ?? -1).ToArray(),
+                    this.OutputRanks.Select(x => x ?? -1).ToArray(),
                     targetFn: this,
                     genericTypeArgs: null);
         }

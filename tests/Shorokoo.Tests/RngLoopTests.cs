@@ -131,7 +131,7 @@ public class RngLoopTests
             .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var x = TensorData([N], XVals);
         var stepsData = TensorData(Array.Empty<long>(), steps);
-        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([x, stepsData]))
+        var concrete = g.ToConcreteArchitecture([x, stepsData])
             .ToConcreteModel(cfg);
         var output = ComputeContext.Default.Execute(concrete, x, stepsData)[0]
             .ToTensorData().As<float32>().AccessMemory().ToArray();
@@ -164,7 +164,7 @@ public class RngLoopTests
         var g = ((ComputationGraph)typeof(RngRuntimeLoopFeed)
             .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var x = TensorData([N], XVals);
-        var partial = g.ToConcreteArchitecture(g.FromOrderedInputs([x, TensorData(Array.Empty<long>(), 3L)]))
+        var partial = g.ToConcreteArchitecture([x, TensorData(Array.Empty<long>(), 3L)])
             .ToConcreteModel(cfg);
         Assert.Equal(HostExpected(cfg, steps: 2),
             ComputeContext.Default.Execute(partial, x.Shared(), TensorData(Array.Empty<long>(), 2L))[0]
@@ -174,7 +174,7 @@ public class RngLoopTests
         // folds to the same per-iteration key the runtime loop splits at execution.
         var ug = ((ComputationGraph)typeof(RngUnrolledLoopFeed)
             .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
-        var unrolled = ug.ToConcreteArchitecture(ug.FromOrderedInputs([x])).ToConcreteModel(cfg);
+        var unrolled = ug.ToConcreteArchitecture([x]).ToConcreteModel(cfg);
         Assert.DoesNotContain(unrolled.Nodes, n => n.OpCode == OpCodes.LOOP_OPEN);
         var unrolledOutput = ComputeContext.Default.Execute(unrolled, x)[0]
             .ToTensorData().As<float32>().AccessMemory().ToArray();
@@ -228,7 +228,7 @@ public class RngLoopTests
             .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var x = TensorData([N], XVals);
         var zeroArch = g.ToConcreteArchitecture(
-            g.FromOrderedInputs([x, TensorData(Array.Empty<long>(), 0L)]));
+            [x, TensorData(Array.Empty<long>(), 0L)]);
 
         // Exactly one realized in-loop param, at the padded cell [1, 0, 1] (the other entry is
         // the injected RngExecutionCounter at the next free top slot).
@@ -257,7 +257,7 @@ public class RngLoopTests
         var rg = ((ComputationGraph)typeof(RngRuntimeLoopParamRecurrence)
             .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var stepsData = TensorData(Array.Empty<long>(), (long)steps);
-        var arch = rg.ToConcreteArchitecture(rg.FromOrderedInputs([x, stepsData]));
+        var arch = rg.ToConcreteArchitecture([x, stepsData]);
 
         // The realized in-loop params, ORDERED BY ITERATION SLOT, read straight from the init
         // draw — INDEPENDENTLY of the in-graph selection under test. An in-loop param takes a
@@ -300,7 +300,7 @@ public class RngLoopTests
         var x = TensorData([N], XVals);
         var steps = TensorData(Array.Empty<long>(), 2L);
         AssertFailsWithMessage(
-            () => g.ToConcreteArchitecture(g.FromOrderedInputs([x, steps])), "iteration slot");
+            () => g.ToConcreteArchitecture([x, steps]), "iteration slot");
 
         // An override that matches no stream of the graph must fail the bind loudly.
         var unmatched = new RngConfig { MasterSeed = 11 }.Override(RngCollection.Runtime, [9, 9, 9], 1UL);

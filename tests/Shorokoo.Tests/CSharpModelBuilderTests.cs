@@ -50,8 +50,8 @@ public class CSharpModelBuilderCoverageTests
     public void TestScanCodegenScansTheCarryBeforeTheBodyUpdatesIt()
     {
         var g = ScanCarryBeforeUpdate.ComputationGraph.ToInternal();
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs(
-            [TensorData(DType.Float32, [], 10f), TensorData(DType.Int64, [], 3L)]));
+        var arch = g.ToConcreteArchitecture(
+            [TensorData(DType.Float32, [], 10f), TensorData(DType.Int64, [], 3L)]);
         string[] body = [.. new CSharpModelBuilder().BuildFullGraph(arch, "CovTest")
             .Split('\n').Select(x => x.Trim())];
 
@@ -114,6 +114,32 @@ public class CSharpModelBuilderCoverageTests
         AssertRoundTrips(new InternalComputationGraph([], [Vector("a\"b", "c\\d\n", "", "é🦀\u0001").ToVariable()]), []);
         AssertRoundTrips(new InternalComputationGraph([], [Scalar("one").ToVariable()]), []);
         AssertRoundTrips(new InternalComputationGraph([], [Tensor([2L, 2L], "w", "x", "y", "z").ToVariable()]), []);
+    }
+
+    [Fact]
+    public void TestAStructFirstRegisteredUnderItsShortNameCodegensSourceThatCompiles()
+    {
+        DType.GetOrCreateForTensorStruct(new TensorStructDef(
+            [new TensorStructFieldDef("CovShortNamedFieldA", DataStructure.Tensor, 0, DType.Float32),
+             new TensorStructFieldDef("CovShortNamedFieldB", DataStructure.Tensor, 0, DType.Float32)],
+            nameof(CovShortNamedPair)));
+        var pair = TensorStruct<CovShortNamedPair>(Scalar(1f), Scalar(2f));
+        AssertCodegens(new InternalComputationGraph([], [pair.CovShortNamedFieldA + pair.CovShortNamedFieldB]));
+    }
+
+    [Fact]
+    public void TestNumericLiteralsCodegenInvariantlyWhateverTheCurrentCulture()
+    {
+        var culture = System.Globalization.CultureInfo.CurrentCulture;
+        try
+        {
+            System.Globalization.CultureInfo.CurrentCulture = new System.Globalization.CultureInfo("sv-SE");
+            AssertCodegens(BuildConstantBranchesGraph(), "1.5d");
+            AssertCodegens(new InternalComputationGraph([], [Scalar(-1.5f).ToVariable(), Vector(-7L, 8L).ToVariable(),
+                OnnxOp.Flatten(OnnxOp.LeakyRelu(Tensor([1L, 2L], 1f, 2f).ToVariable(), alpha: -0.25f), axis: -1)]),
+                "-1.5f", "-7L", "-0.25f", "-1L");
+        }
+        finally { System.Globalization.CultureInfo.CurrentCulture = culture; }
     }
 
     [Fact]
@@ -209,7 +235,7 @@ public class CSharpModelBuilderCoverageTests
 
     private static byte[][] Run(InternalComputationGraph graph, TensorData[] inputs)
     {
-        var model = graph.ToConcreteArchitecture(graph.FromOrderedInputs([.. inputs])).ToConcreteModel();
+        var model = graph.ToConcreteArchitecture([.. inputs]).ToConcreteModel();
         return [.. Shorokoo.Runtime.ComputeContext.Default.Execute(model, [.. inputs.Select(t => t.Shared())])
             .Select(x => x.ToTensorData()).Select(t => t.DType == DType.Utf8
                 ? System.Text.Encoding.UTF8.GetBytes(string.Join("\0", [.. t.Shape.Dims.Select(d => $"{d}"), .. t.Data]))
@@ -419,4 +445,10 @@ public interface CovGenericPair<T> : IStruct where T : IVarType
 {
     Scalar<T> CovGenericPairFieldA { get; }
     Scalar<T> CovGenericPairFieldB { get; }
+}
+
+public interface CovShortNamedPair : IStruct
+{
+    Scalar<float32> CovShortNamedFieldA { get; }
+    Scalar<float32> CovShortNamedFieldB { get; }
 }

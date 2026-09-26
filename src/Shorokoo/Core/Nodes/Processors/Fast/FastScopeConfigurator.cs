@@ -59,8 +59,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 graph, scopes, forwardReach, backwardReach, thenReach, elseReach, inAByStructure);
             var decision = DecidePlacement(graph, scopes, status);
 
+            var inputs = graph.Inputs;
             graph.Nodes = Reorder(graph, scopes, decision);
             graph.Nodes = ReorderIfBranches(graph, scopes, thenReach, elseReach);
+            graph.SetInputs(inputs);
+            graph.MoveOutputsToEnd();
             System.Diagnostics.Debug.Assert(graph.IsLinearOrderValid(), "graph.IsLinearOrderValid()");
         }
 

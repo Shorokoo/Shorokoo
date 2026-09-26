@@ -150,9 +150,8 @@ namespace Shorokoo.Core.Utils
 
         /// <summary>The serialized <see cref="Shorokoo.TrainingRig"/> constituents (issue #115, folding
         /// in #106): enough to rebuild the whole rig — <c>trainstep</c> and all — from the checkpoint
-        /// file alone, with no host-supplied source graphs. Present on every training <c>.skpt</c> this
-        /// build writes; absent (⇒ <c>null</c>) on a file written before #115, which resumes only by the
-        /// host rebuilding the rig from the same source graphs. Backs the
+        /// file alone, with no host-supplied source graphs. Present on every training <c>.skpt</c>;
+        /// absent (⇒ <c>null</c>) on a <c>.skpt</c> that holds no training rig. Backs the
         /// <see cref="Shorokoo.CheckpointComponents.TrainingRig"/> flag and the static
         /// <see cref="Shorokoo.TrainingRig.Load(string, Shorokoo.Runtime.ComputeContext?, Shorokoo.Runtime.ComputeContext?, System.IProgress{Shorokoo.Graph.BuildProgress}, Shorokoo.TrainingBackend?)"/>.</summary>
         [JsonPropertyName("rig")]

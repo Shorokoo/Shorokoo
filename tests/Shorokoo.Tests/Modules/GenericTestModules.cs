@@ -796,6 +796,72 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    public static class PairThenShapedParamsLayer
+    {
+        public static Tensor<float32> Inline(GenericPairStruct pair, Tensor<float32> input)
+        {
+            var scale = InitSimple.Init([Scalar(1L)]);
+            var weights = InitSimple.Init(input.ShapeTensor());
+            return input * weights * scale * (pair.First + pair.Second);
+        }
+    }
+
+    public interface SeqFieldStruct : IStruct
+    {
+        Tensor<float32> A { get; }
+        TensorSequence<float32> S { get; }
+    }
+
+    public interface NestedPairStruct : IStruct
+    {
+        Tensor<float32> A { get; }
+        TensorStruct<GenericPairStruct> P { get; }
+    }
+
+    public interface OptionalFieldStruct : IStruct
+    {
+        Tensor<float32> A { get; }
+        OptionalTensor<float32> B { get; }
+    }
+
+    public static class SeqFieldStructLayer
+    {
+        public static Tensor<float32> Inline(SeqFieldStruct s) => s.A + s.S[Scalar(0L)];
+    }
+
+    public static class NestedPairStructLayer
+    {
+        public static Tensor<float32> Inline(NestedPairStruct s)
+            => s.A * (s.P.GetField<Scalar<float32>>("First") + s.P.GetField<Scalar<float32>>("Second"));
+    }
+
+    public static class OptionalFieldStructLayer
+    {
+        public static Tensor<float32> Inline(OptionalFieldStruct s) => s.B.HasValue().IfElse(s.A + s.B.TensorValue(), s.A);
+    }
+
+    public static class PairThenConvTransposeLayer
+    {
+        public static Tensor<float32> Inline(GenericPairStruct pair, Tensor<float32> x)
+            => Convolution.ConvTranspose(x, 2L, kernelSize: [2L, 2L], stride: [2L, 2L], outputShape: [7L, 7L]) * pair.First;
+    }
+
+    /// <summary>A sample for <see cref="SimplePairSum"/>'s struct input.</summary>
+    public static class PairSample
+    {
+        public static NamedModelParam Of(float first, float second)
+            => new TensorStructModelParam("pair", ModelParamType.InputParam, new TensorDataStruct(
+                new TensorStructDef(
+                    [new TensorStructFieldDef("First", DataStructure.Tensor, 0, DType.Float32),
+                     new TensorStructFieldDef("Second", DataStructure.Tensor, 0, DType.Float32)],
+                    nameof(GenericPairStruct)),
+                new Dictionary<string, IData>
+                {
+                    ["First"] = TensorData(DType.Float32, [], first),
+                    ["Second"] = TensorData(DType.Float32, [], second),
+                }));
+    }
+
     #endregion
 
     #region TensorStruct in Control Flow (FastUnpackTensorStructs coverage)

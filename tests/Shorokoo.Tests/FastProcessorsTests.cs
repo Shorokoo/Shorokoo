@@ -90,7 +90,7 @@ public class FastProcessorsCoverageTests
         // a TensorDataStruct shape AdvancedTestGraph's flat TensorData[] API cannot model).
         var graph = SimplePairSum.ComputationGraph;
         Assert.Contains(graph.ToInternal().Nodes, n => n.OpCode == InternalOpCodes.MODEL_TENSORSTRUCT_INPUT);
-        var concreteArch = graph.ToConcreteArchitecture(new ModelParamList());
+        var concreteArch = graph.ToConcreteArchitecture(new ModelParamList([PairSample.Of(1f, 2f)]));
         Assert.DoesNotContain(concreteArch.ToInternal().Nodes, n => n.OpCode == InternalOpCodes.MODEL_TENSORSTRUCT_INPUT);
         Assert.DoesNotContain(concreteArch.ToInternal().Nodes, n => n.OpCode == InternalOpCodes.TENSOR_STRUCT_CREATE);
         Assert.DoesNotContain(concreteArch.ToInternal().Nodes, n => n.OpCode == InternalOpCodes.TENSOR_STRUCT_GETFIELD);
@@ -130,7 +130,7 @@ public class FastProcessorsCoverageTests
         var g = ((ComputationGraph)typeof(AutoGradStructConvStridePadCheck)
             .GetProperty("ComputationGraph")!.GetValue(null)!).ToInternal();
         var x = TensorData([1L, 2L, 5L, 5L], new float[1 * 2 * 5 * 5]);
-        var arch = g.ToConcreteArchitecture(g.FromOrderedInputs([x]));
+        var arch = g.ToConcreteArchitecture([x]);
         Assert.DoesNotContain(arch.Nodes, n => n.OpCode == OpCodes.SEQUENCE_AT);
         Assert.DoesNotContain(arch.Nodes, n => n.OpCode == OpCodes.SEQUENCE_CONSTRUCT);
         Assert.Equal(2, arch.GetConcreteModelParamInfos().ParamInfos

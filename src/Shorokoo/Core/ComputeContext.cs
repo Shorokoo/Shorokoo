@@ -1782,11 +1782,11 @@ namespace Shorokoo.Runtime
 
         private static string[] ResolveOriginalInputNames(InternalComputationGraph graph)
         {
-            var names = new string[graph.Inputs.Count];
-            for (int i = 0; i < graph.Inputs.Count; i++)
-                names[i] = graph.InputUniqueNames.Count > i && graph.InputUniqueNames[i] is string n
-                    ? n
-                    : graph.Inputs[i].ToString();
+            var inputNodes = graph.InputNodes;
+            var names = new string[inputNodes.Count];
+            for (int i = 0; i < inputNodes.Count; i++)
+                names[i] = InternalComputationGraph.InputNameOf(inputNodes[i])
+                    ?? InternalComputationGraph.InputKeyOf(inputNodes[i]).ToString();
             return names;
         }
 
@@ -1800,6 +1800,10 @@ namespace Shorokoo.Runtime
         /// </summary>
         public TensorData[] Eval(Variable[] outputs)
         {
+            // A context that cannot run says so before the expression is looked at: building the
+            // graph can itself refuse, and that would hide which of the two is wrong.
+            RefuseHostContext("run");
+            ObjectDisposedException.ThrowIf(_disposed, this);
             var graph = new InternalComputationGraph([], [.. outputs]);
             graph.RequireRunnableOps("ComputeContext.Eval");
             return this.Execute(graph).Select(x => x.ToTensorData()).ToArray();
@@ -1881,31 +1885,34 @@ namespace Shorokoo.Runtime
         {
             var expandedInputs = new List<IData>();
             foreach (var input in inputs)
+                Expand(input, expandedInputs);
+            return expandedInputs.ToArray();
+
+            // A struct field that is itself a struct expands in turn, as its lowering gives it one
+            // input per field of its own.
+            static void Expand(IData input, List<IData> into)
             {
                 var (value, sharing) = input is SharedInput shared
                     ? (shared.Value, (SharedInputMode?)shared.Mode)
                     : (input, null);
-                if (value is TensorDataStruct structData)
+                if (value is not TensorDataStruct structData)
                 {
-                    foreach (var field in structData.Definition.Fields)
-                    {
-                        if (!structData.Fields.TryGetValue(field.Name, out var fieldData))
-                        {
-                            throw new InvalidTensorOperationException(ErrorCodes.CR006, "Execute",
-                                $"field={field.Name}, struct={structData.Definition.TypeName ?? "anonymous"}",
-                                $"TensorDataStruct is missing data for field '{field.Name}'");
-                        }
-                        expandedInputs.Add(structData.FieldFeedMode(field.Name, sharing) is { } mode
-                            ? new SharedInput(fieldData, mode)
-                            : fieldData);
-                    }
+                    into.Add(input);
+                    return;
                 }
-                else
+                foreach (var field in structData.Definition.Fields)
                 {
-                    expandedInputs.Add(input);
+                    if (!structData.Fields.TryGetValue(field.Name, out var fieldData))
+                    {
+                        throw new InvalidTensorOperationException(ErrorCodes.CR006, "Execute",
+                            $"field={field.Name}, struct={structData.Definition.TypeName ?? "anonymous"}",
+                            $"TensorDataStruct is missing data for field '{field.Name}'");
+                    }
+                    Expand(structData.FieldFeedMode(field.Name, sharing) is { } mode
+                        ? new SharedInput(fieldData, mode)
+                        : fieldData, into);
                 }
             }
-            return expandedInputs.ToArray();
         }
 
         /// <summary>

@@ -131,10 +131,11 @@ public sealed class QuickExecutionEngine
     public IData[] Execute(InternalComputationGraph graph, params IData[] inputs)
     {
         var store = Run(graph, inputs);
-        var outputs = new IData[graph.Outputs.Count];
-        for (int i = 0; i < graph.Outputs.Count; i++)
+        var outputKeys = graph.Outputs;
+        var outputs = new IData[outputKeys.Count];
+        for (int i = 0; i < outputKeys.Count; i++)
         {
-            if (!store.TryGetValue(graph.Outputs[i], out var rt))
+            if (!store.TryGetValue(outputKeys[i], out var rt))
                 throw new InvalidTensorOperationException(ErrorCodes.CR006, "Execute", $"output #{i}",
                     "Graph output was not produced by execution");
             outputs[i] = TensorDataConverter.ToOutputData(rt)
@@ -206,9 +207,12 @@ public sealed class QuickExecutionEngine
         Dictionary<FastTensorKey, IRuntimeTensor> store,
         QuickRunState state)
     {
+        // An output node computes nothing: the value it names is already in the store.
+        if (InternalOpCodes.IsGraphOutputOp(node.OpCode)) return null;
+
         var outputKeys = node.Outputs;
 
-        if (IsFastModelInputOpCode(node.OpCode))
+        if (InternalOpCodes.IsModelInputOp(node.OpCode))
         {
             var outKey = outputKeys.FirstOrDefault(k => k is not null);
             if (outKey is not null && !store.ContainsKey(outKey.Value))
@@ -372,11 +376,4 @@ public sealed class QuickExecutionEngine
             store[k.Value] = new RuntimeTensor { DType = DType.Invalid };
         }
     }
-
-    private static bool IsFastModelInputOpCode(string opCode) =>
-        opCode == InternalOpCodes.MODEL_TENSOR_INPUT ||
-        opCode == InternalOpCodes.MODEL_OPTIONAL_INPUT ||
-        opCode == InternalOpCodes.MODEL_SEQUENCE_INPUT ||
-        opCode == InternalOpCodes.MODEL_TENSORSTRUCT_INPUT ||
-        opCode == InternalOpCodes.GENERIC_TYPE_INPUT;
 }

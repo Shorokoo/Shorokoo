@@ -28,7 +28,8 @@ namespace Shorokoo.Core.AutoDiffCheckpointing;
 /// Loop/If body before emission, so graphs with scopes are modelled at the granularity of
 /// this graph's own scopes.</para>
 ///
-/// <para>Nodes ORT never schedules as kernels — model inputs, parameter data, <c>Constant</c>
+/// <para>The output nodes are not emitted at all, so they are not in the order; <see cref="Realize"/>
+/// keeps them closing the list. Nodes ORT never schedules as kernels — model inputs, parameter data, <c>Constant</c>
 /// (folded to an initializer at load), and the Loop body's own inputs — are resident before
 /// the level they belong to runs, so they are placed at the start of that level. A scope
 /// (OPEN..CLOSE) is one ORT node (the Loop/If kernel, positioned at its CLOSE); its body is
@@ -66,6 +67,9 @@ internal static class OrtExecutionOrder
 
         var result = new List<int>(nodes.Count);
         EmitLevel(nodes, MatchScopes(nodes), 0, nodes.Count, rank, result);
+        // The output nodes ORT never sees keep closing the list.
+        for (int i = 0; i < nodes.Count; i++)
+            if (InternalOpCodes.IsGraphOutputOp(nodes[i].OpCode)) result.Add(i);
         return result.Select(i => nodes[i]).ToList();
     }
 
@@ -122,6 +126,8 @@ internal static class OrtExecutionOrder
         var members = new List<(int Idx, int Close)>();
         for (int i = lo; i < hi; i++)
         {
+            // An output node is the graph's boundary, never emitted, so never run.
+            if (InternalOpCodes.IsGraphOutputOp(nodes[i].OpCode)) continue;
             if (closeOf is not null && closeOf[i] >= 0) { members.Add((i, closeOf[i])); i = closeOf[i]; }
             else members.Add((i, -1));
         }

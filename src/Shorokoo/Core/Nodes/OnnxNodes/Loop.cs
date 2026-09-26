@@ -1385,7 +1385,7 @@ namespace Shorokoo
             // build was not shielded and is about to be recorded as that caller's loop body. The
             // symptom is remote from the cause (a pass-to-pass mismatch several passes later, on the
             // first call only), so say it here instead.
-            Debug.Assert(!Shorokoo.Core.Factory.FastOpsetResolver.IsModelInputOpCode(node.OpCode),
+            Debug.Assert(!Shorokoo.Core.Nodes.NodeDefinitions.InternalOpCodes.IsModelInputOp(node.OpCode),
                 "LoopAPI.ProcessNode: a module input marker reached an enclosing loop body — the " +
                 "function build that created it was not shielded by GraphTrace.EnterModuleBuild " +
                 "or EnterIsolated.");

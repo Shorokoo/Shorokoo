@@ -13,6 +13,7 @@ using Shorokoo.Core.Training;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 using Shorokoo.Core.Utils;
 using System;
+using System.Threading;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Diagnostics;
@@ -380,19 +381,12 @@ namespace Shorokoo.Core
 
         public ModelIdNamingScheme ModelIdToShorokooIdScheme { get; }
 
-        private Dictionary<string, ModelId>? dctReverseCache = null;
+        private readonly ReverseNameCache reverseCache = new();
 
         public SimplePatternNamingScheme(IEnumerable<SimplePatternScheme> patterns, ModelIdNamingScheme modelIdToShorokooIdScheme, string frameworkId) : base(frameworkId)
         {
             this.Patterns = patterns.ToImmutableArray();
             this.ModelIdToShorokooIdScheme = modelIdToShorokooIdScheme;
-        }
-
-        private void buildReverseCache(ImmutableArray<ModelId> candidates)
-        {
-            // WARNING: if there is an issue here, the root cause is most certainly somewhere 
-            // deep in the core of Shorokoo implementation from how the candidates were generated.
-            this.dctReverseCache = candidates.ToDictionary(x => this.ToName(x)!, x => x);
         }
 
         private string? toName(string shorokooId)
@@ -412,6 +406,9 @@ namespace Shorokoo.Core
             return toName(shorokooId);
         }
 
+        private string? tryToName(ModelId modelId)
+            => this.ModelIdToShorokooIdScheme.TryToName(modelId) is { } shorokooId ? toName(shorokooId) : null;
+
         public override string? ToName(ConcreteModelParamInfo shorokooParam)
         {
             return this.toName(shorokooParam.ToShorokooIdString());
@@ -426,36 +423,29 @@ namespace Shorokoo.Core
         public override string? ToName(string shorokooId) => this.toName(shorokooId);
 
         public override ModelId? ToModelId(string paramName, ImmutableArray<ModelId> candidates)
-        {
-            if (dctReverseCache is not null && dctReverseCache.TryGetValue(paramName, out var modelId))
-                return modelId;
-
-            buildReverseCache(candidates);
-
-            if (dctReverseCache.AssertNotNull().TryGetValue(paramName, out modelId))
-                return modelId;
-
-            return null;
-        }
+            => reverseCache.Resolve(paramName, candidates, tryToName);
     }
 
     public class ModelIdNamingScheme : ModuleParamSetNamingScheme
     {
         public ImmutableArray<ModelIdFormat> Patterns { get; }
 
-        private Dictionary<string, ModelId>? dctReverseCache = null;
+        private readonly ReverseNameCache reverseCache = new();
 
         public ModelIdNamingScheme(IEnumerable<ModelIdFormat> patterns, string frameworkId) : base(frameworkId)
         {
             this.Patterns = patterns.ToImmutableArray();
         }
 
-        private void buildReverseCache(ImmutableArray<ModelId> candidates)
-        {
-            this.dctReverseCache = candidates.ToDictionary(x => this.ToName(x), x => x);
-        }
-
         public override string ToName(ModelId modelId)
+            => TryToName(modelId)
+                ?? throw new InvalidOperationException($"No matching pattern for ModelId [{string.Join(",", modelId.Vals)}]");
+
+        /// <summary>
+        /// The name of the first format matching <paramref name="modelId"/>, or null when no
+        /// format covers it.
+        /// </summary>
+        public string? TryToName(ModelId modelId)
         {
             foreach (var pattern in Patterns)
             {
@@ -463,24 +453,61 @@ namespace Shorokoo.Core
                     return pattern.ToName(modelId);
             }
 
-            throw new InvalidOperationException($"No matching pattern for ModelId [{string.Join(",", modelId.Vals)}]");
+            return null;
         }
 
         public override string ToName(ConcreteModelParamInfo shorokooParam) 
             => ToName(shorokooParam.ModelId);
 
         public override ModelId? ToModelId(string paramName, ImmutableArray<ModelId> candidates)
+            => reverseCache.Resolve(paramName, candidates, TryToName);
+    }
+
+    /// <summary>
+    /// The name → ModelId table a naming scheme resolves names against, built from one candidate
+    /// set and rebuilt whenever a call passes a different one — one scheme may bind weights into
+    /// several graphs. A candidate the scheme gives no name is left out, so its name resolves to
+    /// null; two candidates sharing a name are refused, naming both.
+    /// </summary>
+    internal sealed class ReverseNameCache
+    {
+        // One immutable pair, published whole: a scheme may be shared across threads, and a table
+        // read separately from the candidates it was built from could be paired with another's.
+        private sealed record Snapshot(ImmutableArray<ModelId> Candidates, Dictionary<string, ModelId> Table);
+
+        private Snapshot? snapshot;
+
+        public ModelId? Resolve(string paramName, ImmutableArray<ModelId> candidates, Func<ModelId, string?> tryToName)
         {
-            if (dctReverseCache is not null && dctReverseCache.TryGetValue(paramName, out var modelId))
-                return modelId;
+            var current = Volatile.Read(ref snapshot);
+            if (current is null || !sameCandidates(candidates, current.Candidates))
+            {
+                current = new Snapshot(candidates, build(candidates, tryToName));
+                Volatile.Write(ref snapshot, current);
+            }
 
-            buildReverseCache(candidates);
+            return current.Table.TryGetValue(paramName, out var modelId) ? modelId : null;
+        }
 
-            if (dctReverseCache.AssertNotNull().TryGetValue(paramName, out modelId))
-                return modelId;
+        private static bool sameCandidates(ImmutableArray<ModelId> candidates, ImmutableArray<ModelId> cached)
+            => candidates == cached
+            || (!candidates.IsDefault && !cached.IsDefault && candidates.SequenceEqual(cached));
 
-            // Return null for unmatched param names - the caller filters these out
-            return null;
+        private static Dictionary<string, ModelId> build(ImmutableArray<ModelId> candidates, Func<ModelId, string?> tryToName)
+        {
+            var result = new Dictionary<string, ModelId>();
+            foreach (var candidate in candidates)
+            {
+                if (tryToName(candidate) is not { } name)
+                    continue;
+
+                if (!result.TryAdd(name, candidate) && result[name] != candidate)
+                    throw new InvalidOperationException(
+                        $"ModelIds [{string.Join(",", result[name].Vals)}] and [{string.Join(",", candidate.Vals)}] " +
+                        $"both map to the name '{name}'; a naming scheme must give each parameter a distinct name.");
+            }
+
+            return result;
         }
     }
 

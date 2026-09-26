@@ -1236,16 +1236,22 @@ public class ModuleSourceGenerator : IIncrementalGenerator
 
         // Combined static Call shortcut. Argument order is unchanged (hyperparameters first, then
         // inputs); omittable parameters in the trailing run get `= null` defaults. Hyperparameter
-        // names pass straight through to Model (which substitutes defaults); OptionalTensor inputs
-        // are wrapped before the model's Call.
+        // names pass straight through to Model (which substitutes defaults). A model with
+        // OptionalTensor inputs has the Tensor?-accepting Call above, which does the wrapping, so
+        // the inputs pass straight through to it: wrapped here, an OptionalTensor would bind to
+        // that same overload — C# prefers the derived class's — through the implicit unwrap to
+        // Tensor?, and an absent one would come back wrapped as present.
         var callArgs = hasHyperparams
             ? HyperparamNamesCommaSeparated()
             : string.Empty;
 
         if (hasInputs)
         {
+            var inputArgs = hasOptionalTensorInput
+                ? string.Join(", ", fullModule.InputParams.Select(p => p.Name))
+                : InputCallArg();
             sb.AppendLine($"        public static {OutputTypeString()} Call{callTypeParams}({combinedCallerSig}){callConstraints}")
-              .AppendLine($"            => Model{callTypeParams}({callArgs}).Call({InputCallArg()});");
+              .AppendLine($"            => Model{callTypeParams}({callArgs}).Call({inputArgs});");
         }
         else
         {

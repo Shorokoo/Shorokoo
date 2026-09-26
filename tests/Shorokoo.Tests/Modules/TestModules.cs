@@ -83,12 +83,12 @@ namespace Shorokoo.Tests.Modules
 
     // Returns a rank-pinned Vector<float32>. Constructing the auto-generated
     // Module<Tensor<float32>, Vector<float32>> goes through
-    // ModuleHelper.CreateFunctionSignature, which derives a per-output rank override
-    // from the compile-time output type — Vector<T> hits the IVector→1 branch and
-    // produces OutputRankOverrides = [1]. The C# codegen path on the generated
-    // Function relies on that override to emit `Vector<float32>` (rather than
+    // ModuleHelper.CreateFunctionSignature, which declares each output's rank on its
+    // output node from the compile-time output type — Vector<T> hits the IVector→1 branch
+    // and produces OutputRanks = [1]. The C# codegen path on the generated
+    // Function relies on that declared rank to emit `Vector<float32>` (rather than
     // `Tensor<float32>`) as the return type, so this is the natural circumstance
-    // that exercises rank-override propagation end-to-end.
+    // that exercises declared-rank propagation end-to-end.
     [Module]
     public partial class VectorReturnLayer
     {
@@ -324,6 +324,28 @@ namespace Shorokoo.Tests.Modules
             var inner = flag.IfElse(input + a, input - b);
             return outer.IfElse(inner, input * Scalar(9f));
         }
+    }
+
+    /// <summary><see cref="ParamOnBothBranchesLayer"/> under a Softsign, an op the
+    /// QuickExecutionEngine lowers before it walks a graph.</summary>
+    [Module]
+    public partial class ParamOnBothBranchesSoftsignLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input, [Hyper] Scalar<bit> outer, [Hyper] Scalar<bit> flag)
+        {
+            var a = InitSimple.Init(input.ShapeTensor());
+            var b = InitSimple.Init(input.ShapeTensor());
+            var inner = flag.IfElse(input + a, input - b);
+            return outer.IfElse(inner, input * Scalar(9f)).Softsign();
+        }
+    }
+
+    /// <summary>A parameter under a Softsign.</summary>
+    [Module]
+    public partial class SoftsignOfParamLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => (input * InitSimple.Init(input.ShapeTensor())).Softsign();
     }
 
     /// <summary>A rank-0 trainable param behind nested gates — the stand-in emitter's
@@ -1026,6 +1048,48 @@ namespace Shorokoo.Tests.Modules
     }
 
     [Module]
+    public partial class SeqCountShapedParamLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input, TensorSequence<float32> seq)
+        {
+            var scale = InitSimple.Init([Scalar(1L)]);
+            var weights = InitSimple.Init([seq.Count]);
+            return input * weights * scale;
+        }
+    }
+
+    [Module]
+    public partial class ValueShapedParamLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input, Vector<int64> sizes)
+        {
+            var weights = InitSimple.Init([sizes[0L]]);
+            return input * weights;
+        }
+    }
+
+    [Module]
+    public partial class SeqThenConvTransposeLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x, [Hyper] TensorSequence<float32> scales)
+            => Convolution.ConvTranspose(x, 2L, kernelSize: [2L, 2L], stride: [2L, 2L], outputShape: [7L, 7L]);
+    }
+
+    [Module]
+    public partial class OptionalThenConvTransposeLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x, OptionalTensor<float32> bias)
+            => Convolution.ConvTranspose(x, 2L, kernelSize: [2L, 2L], stride: [2L, 2L], outputShape: [7L, 7L]);
+    }
+
+    [Module]
+    public partial class SequenceElementAddLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x, TensorSequence<float32> s)
+            => x + s[Scalar(0L)];
+    }
+
+    [Module]
     public partial class SeqHypersSequenceCalled
     {
         public static Tensor<float32> Inline(Tensor<float32> inputs)
@@ -1277,7 +1341,34 @@ namespace Shorokoo.Tests.Modules
         public static Tensor<float32> Inline(Tensor<float32> v) => v * Scalar(2f);
     }
 
-    /// <summary>An initializer whose body calls a module that owns a trainable parameter.</summary>
+    /// <summary>Callee with a [Hyper].</summary>
+    [Module]
+    public partial class HyperDoublerSub
+    {
+        public static Tensor<float32> Inline(Tensor<float32> v, [Hyper] Scalar<float32> k) => v * k;
+    }
+
+    /// <summary>Calls a module that itself calls one, so the callee's own body keeps a sub-module call.</summary>
+    [Module]
+    public partial class CallerOfCallerOfPassThroughSub
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input) => CallerOfPassThroughSub.Call(input);
+    }
+
+    // ---- Initializers that create or reference a model: refused (FW055) when their body is built.
+
+    [TrainableParamInitializer]
+    public static partial class InitCallingAModule
+    {
+        public static Tensor<float32> Inline(Vector<int64> shape) => DoublerSub.Call(Globals.TensorFill(shape, 1.0f));
+    }
+
+    [Module]
+    public partial class UsesInitCallingAModule
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input) => input * InitCallingAModule.Init(Vector(2L));
+    }
+
     [TrainableParamInitializer]
     public static partial class InitCallingAParamOwningModule
     {
@@ -1285,7 +1376,6 @@ namespace Shorokoo.Tests.Modules
             => SimplestLayer.Call(Globals.TensorFill(shape, 1.0f));
     }
 
-    /// <summary>Drives InitCallingAParamOwningModule.</summary>
     [Module]
     public partial class UsesInitCallingAParamOwningModule
     {
@@ -1293,7 +1383,125 @@ namespace Shorokoo.Tests.Modules
             => input * InitCallingAParamOwningModule.Init(Vector(2L));
     }
 
-    /// <summary>An initializer whose body calls a module from inside a loop, distinct from the first-use-in-a-loop fixtures above.</summary>
+    [TrainableParamInitializer]
+    public static partial class InitCallingHyperModule
+    {
+        public static Tensor<float32> Inline(Vector<int64> shape)
+            => HyperDoublerSub.Call(Scalar(2f), Globals.TensorFill(shape, 1.0f));
+    }
+
+    [Module]
+    public partial class UsesInitCallingHyperModule
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input) => input * InitCallingHyperModule.Init(Vector(2L));
+    }
+
+    [TrainableParamInitializer]
+    public static partial class InitCreatingAModel
+    {
+        public static Tensor<float32> Inline(Vector<int64> shape)
+        {
+            SimplestLayer.Model();
+            return Globals.TensorFill(shape, 1.0f);
+        }
+    }
+
+    [Module]
+    public partial class UsesInitCreatingAModel
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input) => input * InitCreatingAModel.Init(Vector(2L));
+    }
+
+    [TrainableParamInitializer]
+    public static partial class InitCallingAModelFromASequence
+    {
+        public static Tensor<float32> Inline(Vector<int64> shape)
+        {
+            var seq = ModelSequence.Create(SimplestLayer.Model(), SimplestLayer.Model());
+            return seq[Scalar(0L)].Call(Globals.TensorFill(shape, 1.0f));
+        }
+    }
+
+    [Module]
+    public partial class UsesInitCallingAModelFromASequence
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => input * InitCallingAModelFromASequence.Init(Vector(2L));
+    }
+
+    [TrainableParamInitializer]
+    public static partial class InitReadingAModelsParam
+    {
+        public static Tensor<float32> Inline(Vector<int64> shape)
+            => SimplestLayer.Model().GetTrainableParam<float32>([1], rank: 1);
+    }
+
+    [Module]
+    public partial class UsesInitReadingAModelsParam
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input) => input * InitReadingAModelsParam.Init(Vector(2L));
+    }
+
+    /// <summary>Written without the generator, whose Init has no way to pass a model argument.</summary>
+    public static class InitTakingAModel
+    {
+        public static Tensor<float32> Inline(Vector<int64> shape, Model<Tensor<float32>, Tensor<float32>> m)
+            => Globals.TensorFill(shape, 1.0f);
+
+        public static Tensor<float32> Init(Vector<int64> shape, IModel m)
+            => Globals.CallTrainableParamInitializer<float32>(
+                (Func<Vector<int64>, Model<Tensor<float32>, Tensor<float32>>, Tensor<float32>>)Inline,
+                nameof(InitTakingAModel), isTrainable: true, shape, m.ModelVariable);
+    }
+
+    [Module]
+    public partial class UsesInitTakingAModel
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => input * InitTakingAModel.Init(Vector(2L), SimplestLayer.Model());
+    }
+
+    [StateInitializer(Ownership = StateOwnership.ModuleOwned)]
+    public static partial class StateInitCallingAModule
+    {
+        public static Tensor<float32> Inline(Vector<int64> shape) => DoublerSub.Call(Globals.TensorFill(shape, 1.0f));
+    }
+
+    [Module]
+    public partial class UsesStateInitCallingAModule
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input) => input * StateInitCallingAModule.Init(Vector(2L));
+    }
+
+    [StateInitializer(Ownership = StateOwnership.ModuleOwned)]
+    public static partial class StateInitCreatingAModel
+    {
+        public static Tensor<float32> Inline(Vector<int64> shape)
+        {
+            SimplestLayer.Model();
+            return Globals.TensorFill(shape, 1.0f);
+        }
+    }
+
+    [Module]
+    public partial class UsesStateInitCreatingAModel
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input) => input * StateInitCreatingAModel.Init(Vector(2L));
+    }
+
+    [TrainableParamInitializer]
+    public static partial class InitCallingAModelCreatingInitializer
+    {
+        public static Tensor<float32> Inline(Vector<int64> shape) => StateInitCreatingAModel.Init(shape);
+    }
+
+    [Module]
+    public partial class UsesInitCallingAModelCreatingInitializer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => input * InitCallingAModelCreatingInitializer.Init(Vector(2L));
+    }
+
     [TrainableParamInitializer]
     public static partial class InitCallingAModuleInALoop
     {
@@ -1305,72 +1513,40 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
-    /// <summary>Drives InitCallingAModuleInALoop.</summary>
-    [Module]
-    public partial class UsesInitCallingAModuleInALoop
+    [StateInitializer(Ownership = StateOwnership.ModuleOwned)]
+    public static partial class StateInitCallingAModuleCallingInitializer
     {
-        public static Tensor<float32> Inline(Tensor<float32> input)
-            => input * InitCallingAModuleInALoop.Init(Vector(2L));
+        public static Tensor<float32> Inline(Vector<int64> shape) => InitCallingAModuleInALoop.Init(shape);
     }
 
-    /// <summary>A module whose own parameter is initialized by an initializer that itself calls a
-    /// param-owning module: one more level of nesting than InitCallingAParamOwningModule.</summary>
     [Module]
-    public partial class LayerWithANestedParamOwningInit
+    public partial class UsesStateInitCallingAModuleCallingInitializer
     {
         public static Tensor<float32> Inline(Tensor<float32> input)
-            => input * InitCallingAParamOwningModule.Init(input.ShapeTensor());
+            => input * StateInitCallingAModuleCallingInitializer.Init(Vector(2L));
     }
 
-    /// <summary>An initializer whose body calls the module above.</summary>
+    // ---- Initializers calling initializers: the call is transparent, only the top-level one is a parameter.
+
+    /// <summary>Fills with 2, so a parameter initialized by it is told apart from an InitSimple one.</summary>
     [TrainableParamInitializer]
-    public static partial class InitCallingANestedParamOwningModule
+    public static partial class InitTwos
     {
-        public static Tensor<float32> Inline(Vector<int64> shape)
-            => LayerWithANestedParamOwningInit.Call(Globals.TensorFill(shape, 1.0f));
+        public static Tensor<float32> Inline(Vector<int64> shape) => Globals.TensorFill(shape, 2.0f);
     }
 
-    /// <summary>Drives InitCallingANestedParamOwningModule.</summary>
-    [Module]
-    public partial class UsesInitCallingANestedParamOwningModule
+    [StateInitializer(Ownership = StateOwnership.ModuleOwned)]
+    public static partial class StateInitTwos
     {
-        public static Tensor<float32> Inline(Tensor<float32> input)
-            => input * InitCallingANestedParamOwningModule.Init(Vector(2L));
+        public static Tensor<float32> Inline(Vector<int64> shape) => Globals.TensorFill(shape, 2.0f);
     }
 
-    /// <summary>An initializer whose body calls a param-owning module taken out of a
-    /// <c>ModelSequence</c> at a run-time position. Inlining reparents the callee's
-    /// <c>MODEL_PARAM_REF</c> onto the model variable, and the emitted body keeps the resulting
-    /// <c>MODEL_PARAM_MODEL_REF</c>.</summary>
-    [TrainableParamInitializer]
-    public static partial class InitCallingAParamOwningModuleFromASequence
-    {
-        public static Tensor<float32> Inline(Vector<int64> shape)
-        {
-            var seq = ModelSequence.Create(SimplestLayer.Model(), SimplestLayer.Model());
-            var x = Globals.TensorFill(shape, 1.0f);
-            foreach (var ctx in LoopAPI.Iterate(Scalar(2L))) x = seq[ctx.IterationIndex].Call(x);
-            return x;
-        }
-    }
-
-    /// <summary>Drives InitCallingAParamOwningModuleFromASequence.</summary>
-    [Module]
-    public partial class UsesInitCallingAParamOwningModuleFromASequence
-    {
-        public static Tensor<float32> Inline(Tensor<float32> input)
-            => input * InitCallingAParamOwningModuleFromASequence.Init(Vector(2L));
-    }
-
-    /// <summary>An initializer written as a call of another initializer's body — the shape a
-    /// wrapper over one of the shipped parameterized initializers takes.</summary>
     [TrainableParamInitializer]
     public static partial class InitCallingAnotherInitializer
     {
         public static Tensor<float32> Inline(Vector<int64> shape) => InitTwos.Init(shape);
     }
 
-    /// <summary>Drives InitCallingAnotherInitializer.</summary>
     [Module]
     public partial class UsesInitCallingAnotherInitializer
     {
@@ -1378,20 +1554,57 @@ namespace Shorokoo.Tests.Modules
             => input * InitCallingAnotherInitializer.Init(input.ShapeTensor());
     }
 
-    /// <summary>A STATE initializer written as a call of a trainable initializer's body: the same
-    /// rule, on the other half of the attribute pair.</summary>
     [StateInitializer(Ownership = StateOwnership.ModuleOwned)]
     public static partial class StateInitCallingAnotherInitializer
     {
         public static Tensor<float32> Inline(Vector<int64> shape) => InitTwos.Init(shape);
     }
 
-    /// <summary>Drives StateInitCallingAnotherInitializer.</summary>
     [Module]
     public partial class UsesStateInitCallingAnotherInitializer
     {
         public static Tensor<float32> Inline(Tensor<float32> input)
             => input * StateInitCallingAnotherInitializer.Init(input.ShapeTensor());
+    }
+
+    [StateInitializer(Ownership = StateOwnership.ModuleOwned)]
+    public static partial class StateInitCallingAStateInitializer
+    {
+        public static Tensor<float32> Inline(Vector<int64> shape) => StateInitTwos.Init(shape);
+    }
+
+    [Module]
+    public partial class UsesStateInitCallingAStateInitializer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => input * StateInitCallingAStateInitializer.Init(input.ShapeTensor());
+    }
+
+    [TrainableParamInitializer]
+    public static partial class InitCallingAStateInitializer
+    {
+        public static Tensor<float32> Inline(Vector<int64> shape) => StateInitTwos.Init(shape);
+    }
+
+    [Module]
+    public partial class UsesInitCallingAStateInitializer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => input * InitCallingAStateInitializer.Init(input.ShapeTensor());
+    }
+
+    [TrainableParamInitializer]
+    public static partial class InitCallingAnInitializerCallingAnother
+    {
+        public static Tensor<float32> Inline(Vector<int64> shape)
+            => StateInitCallingAnotherInitializer.Init(shape) * Scalar(1.5f);
+    }
+
+    [Module]
+    public partial class UsesInitCallingAnInitializerCallingAnother
+    {
+        public static Tensor<float32> Inline(Tensor<float32> input)
+            => input * InitCallingAnInitializerCallingAnother.Init(input.ShapeTensor());
     }
 
     /// <summary>An initializer handed another parameter's initialized value.</summary>
@@ -1413,132 +1626,42 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
-    /// <summary>An initializer whose body reads a parameter through IModel.GetTrainableParam — a
-    /// bare reference, which an emitted body resolves to the definition beside it.</summary>
-    [TrainableParamInitializer]
-    public static partial class InitWithBareParamRef
+    /// <summary>Drives InitDoublingAnotherParam with a value computed from a parameter: a parameter
+    /// at 1, and beside it the double of its double.</summary>
+    [Module]
+    public partial class UsesInitFromAComputedValue
     {
-        public static Tensor<float32> Inline(Vector<int64> shape)
+        public static Tensor<float32> Inline(Tensor<float32> input)
         {
-            var m = SimplestLayer.Model();
-            var seed = m.Call(Globals.TensorFill(shape, 1.0f));
-            return seed * m.GetTrainableParam<float32>([1], rank: 1);
+            var source = InitSimple.Init(input.ShapeTensor());
+            return input * source * InitDoublingAnotherParam.Init(input.ShapeTensor(), source * Scalar(2f));
         }
     }
 
-    /// <summary>Drives InitWithBareParamRef.</summary>
+    /// <summary>The same, the parameter read by nothing but the computation handed to the initializer.</summary>
     [Module]
-    public partial class UsesInitWithBareParamRef
-    {
-        public static Tensor<float32> Inline(Tensor<float32> input) => input * InitWithBareParamRef.Init(Vector(2L));
-    }
-
-    /// <summary>Fills with 2, so a parameter initialized by it is told apart from an InitSimple one.</summary>
-    [TrainableParamInitializer]
-    public static partial class InitTwos
-    {
-        public static Tensor<float32> Inline(Vector<int64> shape) => Globals.TensorFill(shape, 2.0f);
-    }
-
-    /// <summary>Two parameters at different values, so a reference to the second is told apart both
-    /// from the first and from a value fabricated out of the initializer a bare reference borrows
-    /// as metadata — which is always the first one the module reaches.</summary>
-    [Module]
-    public partial class TwoDistinctParamsLayer
+    public partial class UsesInitFromAComputedValueOnly
     {
         public static Tensor<float32> Inline(Tensor<float32> input)
-            => input * InitSimple.Init(input.ShapeTensor()) * InitTwos.Init(input.ShapeTensor());
-    }
-
-    /// <summary>A bare reference to the second of two differently-valued parameters.</summary>
-    [TrainableParamInitializer]
-    public static partial class InitWithBareParamRefToTheSecondParam
-    {
-        public static Tensor<float32> Inline(Vector<int64> shape)
         {
-            var m = TwoDistinctParamsLayer.Model();
-            var seed = m.Call(Globals.TensorFill(shape, 1.0f));
-            return seed * Scalar(0f) + m.GetTrainableParam<float32>([2], rank: 1);
+            var source = InitSimple.Init(input.ShapeTensor());
+            return input * InitDoublingAnotherParam.Init(input.ShapeTensor(), source * Scalar(2f));
         }
     }
 
-    /// <summary>Drives InitWithBareParamRefToTheSecondParam.</summary>
+    /// <summary>The same, the value computed by a module call.</summary>
     [Module]
-    public partial class UsesInitWithBareParamRefToTheSecondParam
+    public partial class UsesInitFromAModuleComputedValue
     {
         public static Tensor<float32> Inline(Tensor<float32> input)
-            => input * InitWithBareParamRefToTheSecondParam.Init(Vector(2L));
-    }
-
-    /// <summary>The bare reference is built before the call that defines the parameter, so the
-    /// definition lands after it in the body's node order. Tracked as Shorokoo/Shorokoo#320.</summary>
-    [TrainableParamInitializer]
-    public static partial class InitWithBareParamRefBeforeItsDefinition
-    {
-        public static Tensor<float32> Inline(Vector<int64> shape)
         {
-            var m = SimplestLayer.Model();
-            var p = m.GetTrainableParam<float32>([1], rank: 1);
-            var seed = m.Call(Globals.TensorFill(shape, 1.0f));
-            return seed * p;
+            var source = InitSimple.Init(input.ShapeTensor());
+            return input * source * InitDoublingAnotherParam.Init(input.ShapeTensor(), DoublerSub.Call(source));
         }
     }
 
-    /// <summary>Drives InitWithBareParamRefBeforeItsDefinition.</summary>
-    [Module]
-    public partial class UsesInitWithBareParamRefBeforeItsDefinition
-    {
-        public static Tensor<float32> Inline(Tensor<float32> input)
-            => input * InitWithBareParamRefBeforeItsDefinition.Init(Vector(2L));
-    }
-
-    /// <summary>The call that defines the parameter is inside a loop; the bare reference is outside
-    /// it, so the definition's value sits in a scope the reference is not in.
-    /// Tracked as Shorokoo/Shorokoo#320.</summary>
-    [TrainableParamInitializer]
-    public static partial class InitWithBareParamRefOutsideTheLoopDefiningIt
-    {
-        public static Tensor<float32> Inline(Vector<int64> shape)
-        {
-            var m = SimplestLayer.Model();
-            var x = Globals.TensorFill(shape, 1.0f);
-            foreach (var _ in LoopAPI.Iterate(Scalar(2L))) x = m.Call(x);
-            return x * m.GetTrainableParam<float32>([1], rank: 1);
-        }
-    }
-
-    /// <summary>Drives InitWithBareParamRefOutsideTheLoopDefiningIt.</summary>
-    [Module]
-    public partial class UsesInitWithBareParamRefOutsideTheLoopDefiningIt
-    {
-        public static Tensor<float32> Inline(Tensor<float32> input)
-            => input * InitWithBareParamRefOutsideTheLoopDefiningIt.Init(Vector(2L));
-    }
-
-    /// <summary>A bare reference against a model taken out of a ModelSequence, whose producing node
-    /// carries no identifier template — so the reference's own id is relative to nothing.
-    /// Tracked as Shorokoo/Shorokoo#320.</summary>
-    [TrainableParamInitializer]
-    public static partial class InitWithBareParamRefThroughASequence
-    {
-        public static Tensor<float32> Inline(Vector<int64> shape)
-        {
-            var m = ModelSequence.Create(SimplestLayer.Model(), SimplestLayer.Model())[Scalar(0L)];
-            var seed = m.Call(Globals.TensorFill(shape, 1.0f));
-            return seed * m.GetTrainableParam<float32>([1], rank: 1);
-        }
-    }
-
-    /// <summary>Drives InitWithBareParamRefThroughASequence.</summary>
-    [Module]
-    public partial class UsesInitWithBareParamRefThroughASequence
-    {
-        public static Tensor<float32> Inline(Tensor<float32> input)
-            => input * InitWithBareParamRefThroughASequence.Init(Vector(2L));
-    }
-
-    /// <summary>An initializer whose body loops without calling anything: its loop's subgraph inputs
-    /// still need types in the emitted body, with no flattening in the picture.</summary>
+    /// <summary>An initializer whose body loops: its loop's subgraph inputs still need types in the
+    /// emitted body.</summary>
     [TrainableParamInitializer]
     public static partial class InitLoopingWithoutACall
     {
@@ -1555,40 +1678,6 @@ namespace Shorokoo.Tests.Modules
     public partial class UsesInitLoopingWithoutACall
     {
         public static Tensor<float32> Inline(Tensor<float32> input) => input * InitLoopingWithoutACall.Init(Vector(2L));
-    }
-
-    /// <summary>Callee with a [Hyper], so inlining it into a body leaves a MODEL_HYPERPARAM read behind.</summary>
-    [Module]
-    public partial class HyperDoublerSub
-    {
-        public static Tensor<float32> Inline(Tensor<float32> v, [Hyper] Scalar<float32> k) => v * k;
-    }
-
-    /// <summary>An initializer whose body calls a hyperparameter-bearing module.</summary>
-    [TrainableParamInitializer]
-    public static partial class InitCallingHyperModule
-    {
-        public static Tensor<float32> Inline(Vector<int64> shape)
-            => HyperDoublerSub.Call(Scalar(2f), Globals.TensorFill(shape, 1.0f));
-    }
-
-    /// <summary>Drives InitCallingHyperModule through a module, for the flattened-export path.</summary>
-    [Module]
-    public partial class UsesInitCallingHyperModule
-    {
-        public static Tensor<float32> Inline(Tensor<float32> input) => input * InitCallingHyperModule.Init(Vector(2L));
-    }
-
-    [TrainableParamInitializer]
-    public static partial class InitCallingAModule
-    {
-        public static Tensor<float32> Inline(Vector<int64> shape) => DoublerSub.Call(Globals.TensorFill(shape, 1.0f));
-    }
-
-    [Module]
-    public partial class UsesInitCallingAModule
-    {
-        public static Tensor<float32> Inline(Tensor<float32> input) => input * InitCallingAModule.Init(Vector(2L));
     }
 
     /// <summary>One [Module] whose width, depth, head count, class count, bias use and head shape
@@ -1624,5 +1713,108 @@ namespace Shorokoo.Tests.Modules
                 pooled.MatMul(wHidden).Tanh().MatMul(wOut),
                 pooled.MatMul(wHead));
         }
+    }
+
+    /// <summary>An output whose rank its flag decides: the input as it is, or flattened.</summary>
+    [Module]
+    public partial class RankByFlagLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x, Scalar<bit> flag)
+            => flag.IfElse(x, (Tensor<float32>)OnnxOp.Reshape(x, Vector(-1L), false));
+    }
+
+    /// <summary>An output whose rank the values of its axes decide.</summary>
+    [Module]
+    public partial class SqueezeByAxesLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x, Vector<int64> axes)
+            => (Tensor<float32>)OnnxOp.Squeeze(x, axes);
+    }
+
+    /// <summary>A struct output.</summary>
+    [Module]
+    public partial class StructOutputLayer
+    {
+        public static GenericPairStruct Inline(Scalar<float32> a) => TensorStruct<GenericPairStruct>(a, a);
+    }
+
+    /// <summary>A struct output beside a tensor output.</summary>
+    [Module]
+    public partial class StructInATupleOutputLayer
+    {
+        public static (GenericPairStruct, Tensor<float32>) Inline(Scalar<float32> a, Tensor<float32> x)
+            => (TensorStruct<GenericPairStruct>(a, a), x);
+    }
+
+    /// <summary>A sequence of like elements and one of unlike elements.</summary>
+    [Module]
+    public partial class SequenceOutputsLayer
+    {
+        public static (TensorSequence<float32>, TensorSequence<float32>) Inline(Scalar<float32> a, Tensor<float32> x)
+            => (Globals.TensorSequence<float32>(x, x), Globals.TensorSequence<float32>(x, a));
+    }
+
+    /// <summary>A string input split on spaces: an op the QuickExecutionEngine does not compute.</summary>
+    [Module]
+    public partial class StringSplitLayer
+    {
+        public static Tensor<utf8> Inline(Tensor<utf8> x)
+        {
+            var (split, _) = OnnxOp.StringSplit(x, delimiter: " ");
+            return (Tensor<utf8>)split;
+        }
+    }
+
+    /// <summary>A string input dropping a stopword in the default locale, which not every
+    /// machine has: an op the QuickExecutionEngine gives a rank but no extent.</summary>
+    [Module]
+    public partial class StopwordNormalizerLayer
+    {
+        public static Tensor<utf8> Inline(Tensor<utf8> x) => NN.StringNormalizer(x, caseChangeAction: "LOWER", stopwords: ["a"]);
+    }
+
+    /// <summary>A string normalized in a locale no machine has, beside a weighted output.</summary>
+    [Module]
+    public partial class UnknownLocaleNormalizerBesideAWeightLayer
+    {
+        public static (Tensor<utf8>, Tensor<float32>) Inline(Tensor<utf8> s, Tensor<float32> y)
+            => (NN.StringNormalizer(s, caseChangeAction: "LOWER", locale: "xx_XX", stopwords: ["a"]),
+                y * InitSimple.Init(y.ShapeTensor()));
+    }
+
+    /// <summary>A tensor scaled by a scalar: an input of no declared rank beside one of rank 0.</summary>
+    [Module]
+    public partial class TensorTimesScalarLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x, Scalar<float32> s) => x * s;
+    }
+
+    /// <summary>An optional output: the optional input it is handed.</summary>
+    [Module]
+    public partial class OptionalPassThroughLayer
+    {
+        public static OptionalTensor<float32> Inline(OptionalTensor<float32> bias) => bias;
+    }
+
+    /// <summary>An output whose rank a parameter's value decides: the input as it is while the
+    /// parameter sums positive, else flattened.</summary>
+    [Module]
+    public partial class RankByParamLayer
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x)
+        {
+            var w = InitSimple.Init(x.ShapeTensor());
+            var sum = (Scalar<float32>)OnnxOp.ReduceSum(w, null, keepdims: false, noopWithEmptyAxes: null);
+            var positive = (Scalar<bit>)OnnxOp.Greater(sum, Scalar(0f));
+            return positive.IfElse(x, (Tensor<float32>)OnnxOp.Reshape(x, Vector(-1L), false));
+        }
+    }
+
+    /// <summary>An output whose dims a parameter's values decide.</summary>
+    [Module]
+    public partial class NonZeroOfParamLayer
+    {
+        public static Tensor<int64> Inline(Tensor<float32> x)
+            => (Tensor<int64>)OnnxOp.NonZero(InitSimple.Init([Scalar(3L)]) * x);
     }
 }

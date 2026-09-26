@@ -6,7 +6,7 @@ namespace Shorokoo.Tests;
 /// <summary>
 /// Direct coverage for <see cref="ModuleHelper"/> internals — the per-type branches in
 /// <c>Format</c>, <c>Reformat</c>, <c>DefaultVariable</c>,
-/// <c>ToSignatureStringWithOverride</c>, <c>InfosFromTouts</c> and the cache-hit replay
+/// <c>ToSignatureStringAtRank</c>, <c>InfosFromTouts</c> and the cache-hit replay
 /// of <c>CreateTargetFunction</c> / <c>CreateFunctionSignature</c> that the AutoTester
 /// roundtrip in <c>ModulesCoverageTests</c> does not reach.
 /// </summary>
@@ -43,16 +43,16 @@ public class ModuleHelperCoverageTests
     }
 
     [Fact]
-    public void TestToSignatureStringWithOverrideTensorOptionalSequenceStructModelAndModuleArms()
+    public void TestToSignatureStringAtRankTensorOptionalSequenceStructModelAndModuleArms()
     {
         Assert.Equal("float32#2",
-            ModuleHelper.ToSignatureStringWithOverride(InputTensor<float32>("t", rank: 2), 2));
+            ModuleHelper.ToSignatureStringAtRank(InputTensor<float32>("t", rank: 2), 2));
         Assert.Equal("float32",
-            ModuleHelper.ToSignatureStringWithOverride((Tensor<float32>)OnnxOp.Identity(Scalar(1.0f), rank: null), -1));
+            ModuleHelper.ToSignatureStringAtRank((Tensor<float32>)OnnxOp.Identity(Scalar(1.0f), rank: null), -1));
         Assert.Equal("float32?",
-            ModuleHelper.ToSignatureStringWithOverride(OptionalTensor<float32>(), -1));
+            ModuleHelper.ToSignatureStringAtRank(OptionalTensor<float32>(), -1));
         Assert.Contains("float32/seq",
-            ModuleHelper.ToSignatureStringWithOverride(OnnxOp.SequenceEmpty(DType.Float32), -1));
+            ModuleHelper.ToSignatureStringAtRank(OnnxOp.SequenceEmpty(DType.Float32), -1));
 
         TensorStructFieldDef[] structFields =
             [new TensorStructFieldDef("CovHelperA", DataStructure.Tensor, rank: 1, DType.Float32)];
@@ -60,11 +60,11 @@ public class ModuleHelperCoverageTests
             DType.GetOrCreateForTensorStruct(new TensorStructDef(structFields, "CovHelperStruct")),
             InputType.ModelInput, targetFunction: null, defaultName: "ts");
         Assert.Contains("struct:CovHelperStruct",
-            ModuleHelper.ToSignatureStringWithOverride(tensorStruct, null));
+            ModuleHelper.ToSignatureStringAtRank(tensorStruct, null));
 
-        Assert.StartsWith("[", ModuleHelper.ToSignatureStringWithOverride(
+        Assert.StartsWith("[", ModuleHelper.ToSignatureStringAtRank(
             ((IModuleParam)HypersLayer.Model(Scalar(1.0f), Scalar(0.0f))).ToVariable(), null));
-        Assert.StartsWith("[", ModuleHelper.ToSignatureStringWithOverride(
+        Assert.StartsWith("[", ModuleHelper.ToSignatureStringAtRank(
             ((IModuleParam)new HypersLayerModule()).ToVariable(), null));
         Assert.Throws<InvalidTensorOperationException>(
             () => ((IModuleParam)new NonVariableModuleParam()).ToVariable());

@@ -217,12 +217,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // already returned above having asked for nothing.
             var compute = computeContext ?? ComputeContext.Default;
 
-            // Mirror the legacy `RebuildGraph(newInputs: [], newOutputs: [...])` call: the
-            // initialization graph takes no input at all, and each parameter's initializer
-            // output becomes a graph output.
-            workGraph.Inputs = new List<FastTensorKey>();
-            workGraph.InputUniqueNames = new List<string?>();
-            workGraph.OutputRankOverrides = null;
+            // The initialization graph takes no input at all — each chunk below drops the inputs
+            // its initializer does not read, which is every one — and each parameter's
+            // initializer output becomes a graph output.
 
             var builder = ImmutableDictionary.CreateBuilder<ModelId, TensorData>();
             for (int i = 0; i < collectedOutputKeys.Count; i++)
@@ -299,9 +296,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             InternalComputationGraph workGraph, FastTensorKey outputKey)
         {
             var chunk = workGraph.Clone();
-            chunk.Outputs = new List<FastTensorKey> { outputKey };
-            chunk.OutputUniqueNames = new List<string?> { null };
-            FastProcessorHelper.RemoveUnreachableNodes(chunk);
+            chunk.SetOutputs([outputKey]);
+            FastProcessorHelper.RemoveUnreachableNodes(chunk, keepUnreadInputs: false);
             return chunk;
         }
 

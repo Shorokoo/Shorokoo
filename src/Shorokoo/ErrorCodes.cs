@@ -525,7 +525,7 @@ namespace Shorokoo
 
         #endregion
 
-        #region Framework Error Codes (FW001-FW054)
+        #region Framework Error Codes (FW001-FW059)
         
         /// <summary>Loop operation not implemented</summary>
         public const string FW001 = "FW001";
@@ -689,6 +689,38 @@ namespace Shorokoo
         /// <summary>An operator's attributes are invalid for the input shapes it is concretized against
         /// (e.g. a ConvTranspose output_shape that would need negative begin pads)</summary>
         public const string FW054 = "FW054";
+
+        /// <summary>A [TrainableParamInitializer] or [StateInitializer] body created or referenced a model
+        /// (called a module, created a model or a ModelSequence, read a model's parameter or
+        /// hyperparameter, or took a model as an argument)</summary>
+        public const string FW055 = "FW055";
+
+        /// <summary>The samples given to ToConcreteArchitecture or TrainingRig.FromScratch do not bind
+        /// one to each data input of the graph. Given positionally: fewer samples than inputs (the
+        /// message lists the inputs that have none) or more (it states both counts). Given by name: a
+        /// data input no sample names, a sample naming no input, or a name given to more than one
+        /// sample (the message names each offender and lists the graph's inputs). In either form, a
+        /// sample has another rank than its input's type declares — a Scalar given a vector, say (the
+        /// message lists each such input and its sample's shape)</summary>
+        public const string FW056 = "FW056";
+
+        /// <summary>An input of a concrete-architecture or concrete-model graph carries no
+        /// representative shape — the sample shape the graph was concretized at — or an output
+        /// records no shape — the shape it has at those samples — or an output of a concrete model
+        /// records a shape still unresolved, one its weights could not settle either (the message
+        /// names the output, and carries a failed run as the inner exception)</summary>
+        public const string FW057 = "FW057";
+
+        /// <summary>An imported ONNX model's graph input declares no shape, so no representative
+        /// shape can be derived for it (supply one with the ImportOnnx overload that takes input
+        /// shapes), or a graph output declares none and neither evaluating nor running the model
+        /// at its inputs' shapes gives one</summary>
+        public const string FW058 = "FW058";
+
+        /// <summary>Binding weights into a concrete architecture left a parameter without a value:
+        /// the values supplied do not include it, or the naming scheme binding them by name gives
+        /// none of them its name (the message names the parameter)</summary>
+        public const string FW059 = "FW059";
 
         #endregion
 

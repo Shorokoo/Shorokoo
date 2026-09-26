@@ -23,12 +23,20 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
             Op(MODEL_OPTIONAL_INPUT)
                 .Optional<AnyLike>("T")
                 .AttributeDType(AttrDtype, "T")
+                // Optional: the rank of the element, where known. ONNX export declares it from the
+                // representative shape below, as it does a tensor input's.
+                .AttributeLong(ShrkAttrRank, "R")
                 .AttributeEnum<InputType>(ShrkAttrInputType, ["Hyperparam", "ReadyInput", "ModelInput", "GenericType"], defaultValue: "ReadyInput")
-                // Optional, and read as presence: the dims of the element the model was
-                // concretized at when the optional was supplied present, and absent from the node
-                // altogether when it was supplied absent. That makes a concrete architecture with
-                // an optional input as self-describing for training shape inference as a tensor
-                // one, which is what a TrainingRig derived from a reloaded arch reads.
+                .AttributeString(ShrkAttrInputName)
+                // The signature function of a model- or module-typed input (the node's TargetFunction),
+                // named here when the .srk dialect writes the input as a NodeProto; likewise below.
+                .AttributeString(ShrkAttrFunctionName)
+                .AttributeString(ShrkAttrDomainName)
+                // On every input of a concrete graph: the dims of the element the model was
+                // concretized at when the optional was supplied present, and a single -1 when it
+                // was supplied absent. That makes a concrete architecture with an optional input as
+                // self-describing for training shape inference as a tensor one, which is what a
+                // TrainingRig derived from a reloaded arch reads.
                 .AttributeLongs(ShrkAttrRepresentativeInputShape)
                 .Output("modelInput", "T", rank: "R"),
 
@@ -38,15 +46,18 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .AttributeDType(AttrDtype, "T")
                 .AttributeLong(ShrkAttrRank, "R")
                 .AttributeEnum<InputType>(ShrkAttrInputType, ["Hyperparam", "ReadyInput", "ModelInput", "GenericType"], defaultValue: "ReadyInput")
+                .AttributeString(ShrkAttrInputName)
+                .AttributeString(ShrkAttrFunctionName)
+                .AttributeString(ShrkAttrDomainName)
                 // Optional: the [Hyper(defaultValue)] default for a defaulted hyperparameter input,
                 // as an invariant-culture literal. A string rather than a float because a hyperparameter
                 // is any supported scalar dtype (#125) and a float cannot hold every int64/float64 default.
                 .AttributeString(ShrkAttrDefaultValue)
-                // Optional: the dims the model was concretized at (with AttrDtype above, this makes a
-                // concrete architecture self-describing for training shape inference). In the native
-                // .srk dialect a MODEL_TENSOR_INPUT is emitted as a NodeProto, so the attribute
-                // round-trips on disk; the vanilla ONNX/compile path keeps the input as a graph input
-                // and carries the info in metadata_props instead.
+                // On every input of a concrete graph: the dims the model was concretized at (with
+                // AttrDtype above, this makes a concrete architecture self-describing for training
+                // shape inference). In the native .srk dialect a MODEL_TENSOR_INPUT is emitted as a
+                // NodeProto, so the attribute round-trips on disk; the dialects that keep the input
+                // as a graph input carry the info in metadata_props instead.
                 .AttributeLongs(ShrkAttrRepresentativeInputShape)
                 .Output("modelInput", "T", rank: "R"),
 
@@ -54,15 +65,32 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Sequence<AnyLike>("T")
                 .AttributeDType(AttrDtype, "T")
                 .AttributeEnum<InputType>(ShrkAttrInputType, ["Hyperparam", "ReadyInput", "ModelInput", "GenericType"], defaultValue: "ReadyInput")
+                .AttributeString(ShrkAttrInputName)
+                .AttributeString(ShrkAttrFunctionName)
+                .AttributeString(ShrkAttrDomainName)
+                // Optional: the dims every element of the sample the graph was concretized at
+                // shares, where they share one — a sequence has no single shape otherwise. ONNX
+                // export's shape inference represents the input by it.
+                .AttributeLongs(ShrkAttrRepresentativeInputShape)
                 .Output("modelInput", "T"),
 
             Op(GENERIC_TYPE_INPUT)
                 .Tensor<AnyLike>("T", tracksModuleFn: true)
                 .AttributeDType(AttrDtype, "T")
                 .AttributeEnum<InputType>(ShrkAttrInputType, ["Hyperparam", "ReadyInput", "ModelInput", "GenericType"], defaultValue: "GenericType")
+                .AttributeString(ShrkAttrInputName)
                 .AttributeLong(ShrkAttrRank, "R")
                 .AttributeStrings(ShrkAttrGenericTypeConstraints)
                 .Output("genericTypeInfo", "T", rank: "R"),
+
+            // GRAPH_OUTPUT: one of the graph's outputs, in the suffix of its node list. Reads the
+            // value it outputs and produces nothing.
+            Op(GRAPH_OUTPUT)
+                .Any<AnyLike>("T")
+                .AttributeString(ShrkAttrOutputName)
+                .AttributeLong(ShrkAttrDeclaredRank)
+                .AttributeLongs(ShrkAttrRecordedOutputShape)
+                .Input("value", "T"),
 
             Op(MODEL_PARAM_DATA)
                 .Tensor<AnyLike>("T")
@@ -251,6 +279,9 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .TensorStruct<IStruct>("T")
                 .AttributeDType(AttrDtype, "T")
                 .AttributeEnum<InputType>(ShrkAttrInputType, ["Hyperparam", "ReadyInput", "ModelInput", "GenericType"], defaultValue: "ReadyInput")
+                .AttributeString(ShrkAttrInputName)
+                .AttributeString(ShrkAttrFunctionName)
+                .AttributeString(ShrkAttrDomainName)
                 .Output("modelInput", "T"),
 
             // TENSOR_STRUCT_GETFIELD: Extracts a single field from a TensorStruct.

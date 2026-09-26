@@ -35,11 +35,19 @@ namespace Shorokoo.Graph
         /// <see cref="GraphKind.Module"/> graph; the result is stamped
         /// <see cref="GraphKind.ConcreteArchitecture"/>.
         ///
-        /// <para>See <see cref="InternalComputationGraphExtensions.ToConcreteArchitecture"/> for
+        /// <para>See <see cref="InternalComputationGraphExtensions.ToConcreteArchitecture(InternalComputationGraph, System.Collections.Generic.IReadOnlyList{IData}, ComputeContext?, DebugRequests?, BuildProgressReporter?)"/> for
         /// the concreteness contract (static ModelIds) the returned graph satisfies.</para>
         /// </summary>
-        /// <param name="inputHints">Sample inputs (names + shapes/values) used as shape hints and as
-        /// QEE/ORT resolution fallbacks during lowering; build one with <see cref="FromOrderedInputs"/>.</param>
+        /// <param name="inputHints">Sample values, one for every data input of the graph —
+        /// <c>[Hyper]</c> inputs included — in the graph's input declaration order, each bound to the
+        /// input at its position; a generic module's type-placeholder slots take none. A value is a
+        /// <see cref="TensorData"/>, an <see cref="OptionalTensorData"/>, a
+        /// <see cref="TensorDataSequence"/> or a <see cref="TensorDataStruct"/>, whichever its input
+        /// takes. Used as shape hints and as QEE/ORT resolution fallbacks during lowering. Each
+        /// sample's shape (never its values) is recorded on the architecture's input as the shape it
+        /// was concretized at, and rides on to every concrete model made from it. Too few samples,
+        /// too many, or one whose rank contradicts its input's declared rank is refused with
+        /// <see cref="ErrorCodes.FW056"/>.</param>
         /// <param name="computeContext">Optional context used to resolve values while lowering.</param>
         /// <param name="debugRequests">Optional hook to dump the graph at each lowering stage.</param>
         /// <param name="progress">Optional sink this lowering reports each stage to as it enters it, so
@@ -47,10 +55,47 @@ namespace Shorokoo.Graph
         /// this call and no other; <c>null</c> reports nothing and costs nothing.</param>
         /// <returns>A fully inlined, concrete architecture graph.</returns>
         public ComputationGraph ToConcreteArchitecture(
+            IData[] inputHints,
+            ComputeContext? computeContext = null,
+            DebugRequests? debugRequests = null,
+            IProgress<BuildProgress>? progress = null)
+        {
+            ArgumentNullException.ThrowIfNull(inputHints);
+            return Concretize((graph, reporter) => graph.ToConcreteArchitecture(
+                inputHints, computeContext, debugRequests, reporter), progress);
+        }
+
+        /// <summary>
+        /// Lowers a module graph to a <b>concrete architecture</b>, as
+        /// <see cref="ToConcreteArchitecture(IData[], ComputeContext?, DebugRequests?, IProgress{BuildProgress}?)"/>
+        /// does, at samples bound <b>by name</b>: each sample to the graph input of that name,
+        /// whatever its place in the list, and a struct sample to its struct input's name.
+        /// </summary>
+        /// <param name="inputHints">Named samples, one for every data input of the graph —
+        /// <c>[Hyper]</c> inputs included — in any order. A data input no sample names, a sample
+        /// naming no input, a name given to more than one sample, or a sample whose rank contradicts
+        /// its input's declared rank is refused with <see cref="ErrorCodes.FW056"/>, the message
+        /// naming each offender and listing the graph's inputs.</param>
+        /// <param name="computeContext">Optional context used to resolve values while lowering.</param>
+        /// <param name="debugRequests">Optional hook to dump the graph at each lowering stage.</param>
+        /// <param name="progress">Optional sink this lowering reports each stage to as it enters it.</param>
+        /// <returns>A fully inlined, concrete architecture graph.</returns>
+        public ComputationGraph ToConcreteArchitecture(
             ModelParamList inputHints,
             ComputeContext? computeContext = null,
             DebugRequests? debugRequests = null,
             IProgress<BuildProgress>? progress = null)
+        {
+            ArgumentNullException.ThrowIfNull(inputHints);
+            return Concretize((graph, reporter) => graph.ToConcreteArchitecture(
+                inputHints, computeContext, debugRequests, reporter), progress);
+        }
+
+        /// <summary>The one body of both <c>ToConcreteArchitecture</c> overloads: the kind check,
+        /// the thaw, <paramref name="lower"/>'s pipeline run, and the freeze.</summary>
+        private ComputationGraph Concretize(
+            Func<InternalComputationGraph, BuildProgressReporter?, InternalComputationGraph> lower,
+            IProgress<BuildProgress>? progress)
         {
             RequireKind(GraphKind.Module, nameof(ToConcreteArchitecture), LoweringOrderHint);
             var reporter = BuildProgressReporter.For(progress);
@@ -59,8 +104,7 @@ namespace Shorokoo.Graph
             // the graph, the freeze over its largest (inlined, autograd-expanded) form — so they are
             // named here rather than left as silence on either side of the pipeline's own stages.
             reporter?.Report(BuildPhase.Concretize, "Thaw");
-            var lowered = ToInternal().ToConcreteArchitecture(
-                inputHints, computeContext, debugRequests, reporter);
+            var lowered = lower(ToInternal(), reporter);
 
             reporter?.Report(BuildPhase.Concretize, "Freeze");
             var concrete = new ComputationGraph(lowered, GraphKind.ConcreteArchitecture);
@@ -88,7 +132,7 @@ namespace Shorokoo.Graph
         /// <summary>
         /// Binds the architecture's <b>default</b> trainable-parameter values (produced by each
         /// <c>[TrainableParamInitializer]</c>) into a runnable, weight-filled graph. Requires a
-        /// <see cref="GraphKind.ConcreteArchitecture"/> from <see cref="ToConcreteArchitecture"/>;
+        /// <see cref="GraphKind.ConcreteArchitecture"/> from <see cref="ToConcreteArchitecture(IData[], ComputeContext?, DebugRequests?, IProgress{BuildProgress}?)"/>;
         /// the result is stamped <see cref="GraphKind.ConcreteModel"/>.
         /// </summary>
         /// <returns>A concrete model graph with default weights, ready to execute.</returns>
@@ -117,7 +161,8 @@ namespace Shorokoo.Graph
         /// Shorokoo's own scheme). For weights exported from another framework, use the overload that
         /// takes an explicit <see cref="ModuleParamSetNamingScheme"/>. Requires a
         /// <see cref="GraphKind.ConcreteArchitecture"/>; names that do not resolve are silently
-        /// dropped. The result is stamped <see cref="GraphKind.ConcreteModel"/>.
+        /// dropped, but a parameter no value reaches is refused with <see cref="ErrorCodes.FW059"/>,
+        /// naming it. The result is stamped <see cref="GraphKind.ConcreteModel"/>.
         /// </summary>
         /// <param name="trainableParamValues">Values to bind (e.g. loaded from a SafeTensors file).</param>
         /// <param name="frameworkId">Naming convention of the value names; defaults to <c>FrameworkId.Shorokoo</c>.</param>
@@ -135,7 +180,8 @@ namespace Shorokoo.Graph
         /// explicit <paramref name="namingScheme"/> to remap value names onto graph parameter ids —
         /// the form to use for third-party (PyTorch/timm) checkpoints. Requires a
         /// <see cref="GraphKind.ConcreteArchitecture"/>; names that do not resolve are silently
-        /// dropped. The result is stamped <see cref="GraphKind.ConcreteModel"/>.
+        /// dropped, but a parameter no value reaches is refused with <see cref="ErrorCodes.FW059"/>,
+        /// naming it. The result is stamped <see cref="GraphKind.ConcreteModel"/>.
         /// </summary>
         /// <param name="trainableParamValues">Values to bind.</param>
         /// <param name="namingScheme">Maps each value's name to a graph ModelId.</param>
@@ -249,7 +295,7 @@ namespace Shorokoo.Graph
         /// Returns metadata (ids and shapes) for every trainable parameter in a <b>concrete
         /// architecture</b> — the inventory used to build naming schemes and bind weights.
         /// Requires a <see cref="GraphKind.ConcreteArchitecture"/> from
-        /// <see cref="ToConcreteArchitecture"/>.
+        /// <see cref="ToConcreteArchitecture(IData[], ComputeContext?, DebugRequests?, IProgress{BuildProgress}?)"/>.
         /// </summary>
         public ConcreteModelParamInfos GetConcreteModelParamInfos()
         {
@@ -307,8 +353,10 @@ namespace Shorokoo.Graph
 
         /// <summary>
         /// Pairs the graph's data inputs (in declaration order) with the supplied values to produce a
-        /// <see cref="ModelParamList"/> of named inputs — the <c>inputHints</c> argument for
-        /// <see cref="ToConcreteArchitecture"/>, or the inputs for an <c>Execute</c> call.
+        /// <see cref="ModelParamList"/> of named inputs: values held in declaration order, made into
+        /// the named list an API binding by name takes — <see cref="Specialize"/>, say, or a
+        /// <c>Run</c> call. <see cref="ToConcreteArchitecture(IData[], ComputeContext?, DebugRequests?, IProgress{BuildProgress}?)"/>
+        /// takes such values positionally as they are.
         /// <para>A generic <c>[Module]</c>'s leading type-placeholder slots are not data inputs and
         /// take no value here, so a generic module's graph expects one value per real input just
         /// like any other.</para>

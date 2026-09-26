@@ -20,7 +20,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// <para>
     /// Mirrors the CG-side <c>ExpandStructOutputs</c> helpers used by training-graph lowering.
     /// Mutates <c>graph</c> in place: appends new GETFIELD nodes to
-    /// <see cref="InternalComputationGraph.Nodes"/> and rebuilds <see cref="InternalComputationGraph.Outputs"/>.
+    /// the end of the body and replaces the struct's output node with one output node per field.
     /// </para>
     /// </summary>
     internal static class FastExpandStructOutputs
@@ -43,41 +43,47 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 }
             }
 
-            var newOutputs = new List<FastTensorKey>(graph.Outputs.Count);
+            var newOutputNodes = new List<FastNode>(graph.OutputCount);
             var newNodes = new List<FastNode>();
             bool changed = false;
 
-            foreach (var outKey in graph.Outputs)
+            foreach (var outputNode in graph.OutputNodes)
             {
+                var outKey = InternalComputationGraph.OutputKeyOf(outputNode);
                 if (!producerByOutput.TryGetValue(outKey, out var producer))
                 {
                     // No matching producer (unlikely in a well-formed graph); leave as is.
-                    newOutputs.Add(outKey);
+                    newOutputNodes.Add(outputNode);
                     continue;
                 }
 
                 var structDef = ReadStructDefIfAny(producer);
                 if (structDef is null)
                 {
-                    newOutputs.Add(outKey);
+                    newOutputNodes.Add(outputNode);
                     continue;
                 }
 
+                // The struct output gives way to one output per field, named after it as a struct
+                // input's fields are: <output>.<field>.
                 changed = true;
+                var structName = InternalComputationGraph.OutputNameOf(outputNode);
                 foreach (var fieldDef in structDef.Fields)
                 {
                     var getField = FastInternalOp.TensorStructGetField(
                         outKey, fieldDef.Name, fieldDef.ElementType, fieldDef.Rank, fieldDef.Structure);
                     newNodes.Add(getField);
-                    newOutputs.Add(new FastTensorKey(getField.Key, 0));
+                    newOutputNodes.Add(InternalComputationGraph.NewOutputNode(
+                        new FastTensorKey(getField.Key, 0),
+                        structName is null ? null : $"{structName}.{fieldDef.Name}"));
                 }
             }
 
             if (!changed) return;
 
-            graph.Nodes.AddRange(newNodes);
-            graph.Outputs.Clear();
-            foreach (var k in newOutputs) graph.Outputs.Add(k);
+            graph.InsertAtBodyEnd(newNodes);
+            graph.Nodes.RemoveRange(graph.BodyEnd, graph.OutputCount);
+            graph.Nodes.AddRange(newOutputNodes);
         }
 
         /// <summary>

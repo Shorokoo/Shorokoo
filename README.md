@@ -56,7 +56,7 @@ var model        = baseGraph.Specialize(baseGraph.FromOrderedInputs([TensorData(
 
 var rig = TrainingRig.FromScratch(
     model, Losses.L2Loss, Optimizers.Adam,
-    model.FromOrderedInputs([exampleInput]),
+    [exampleInput],
     new AdamOptimizerHyperparameters { LearningRate = 1e-3f });
 
 // Fit iterates all batches on every epoch, reading them rather than consuming them — supply as

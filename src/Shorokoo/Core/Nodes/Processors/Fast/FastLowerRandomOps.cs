@@ -192,8 +192,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var bodyFast = fn.OriginalFastGraph.Clone();
             ProcessGraph(bodyFast, functionRemap);
 
-            functionRemap[fn] = new Function(bodyFast, fn.FunctionType,
-                defaultName: fn.DefaultName, friendlyName: fn.FriendlyName, fn.StateOwnership);
+            functionRemap[fn] = fn.WithBody(bodyFast);
         }
 
         private static bool HasRandomOps(InternalComputationGraph graph) =>

@@ -90,7 +90,7 @@ namespace Shorokoo.Core.Factory.IR
                 if (prop.Key.StartsWith(ShrkMetaTensorStructDefPrefix))
                 {
                     var protoTypeNumStr = prop.Key.Substring(ShrkMetaTensorStructDefPrefix.Length);
-                    if (int.TryParse(protoTypeNumStr, out var protoTypeNum))
+                    if (int.TryParse(protoTypeNumStr, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var protoTypeNum))
                     {
                         try
                         {
@@ -204,21 +204,19 @@ namespace Shorokoo.Core.Factory.IR
 
             var infosByName = functionProto.ValueInfoes.ToDictionary(x => x.Name, x => x);
             var inputInfos = functionProto.Inputs.Select(name => infosByName[name]).ToList();
+            // The formal parameters become the body's input nodes, in parameter order, ahead of
+            // everything else: a Shorokoo graph's inputs are the prefix of its node list.
             foreach (var (info, key, fastNode) in CreateFastInputTensors(inputInfos, functionsMap, tensorStructDefs))
             {
                 fastGraph.Nodes.Add(fastNode);
                 tensorKeys[info.Name] = key;
-                fastGraph.Inputs.Add(key);
-                fastGraph.InputUniqueNames.Add(info.Name);
             }
 
             CreateFastNodes(fastGraph, EnumerateNodesInProtoOrder(functionProto.Nodes), tensorKeys, functionsMap, opset);
 
+            // The formal outputs become the body's output nodes, in output order, closing it.
             foreach (var outputName in functionProto.Outputs)
-            {
-                fastGraph.Outputs.Add(tensorKeys[outputName]);
-                fastGraph.OutputUniqueNames.Add(outputName);
-            }
+                AddOutputNode(fastGraph, tensorKeys[outputName], infosByName.GetValueOrDefault(outputName), outputName);
 
             // State-initializer ownership rides FunctionProto metadata; absent falls back to
             // the constructor default,
@@ -337,7 +335,12 @@ namespace Shorokoo.Core.Factory.IR
                 case AttributeProto.AttributeType.Strings:
                     return attribute.Strings.Select(Encoding.UTF8.GetString).ToArray();
                 case AttributeProto.AttributeType.Tensor:
-                    return CreateTensorData(attribute.T);
+                    var tensorAttribute = CreateTensorData(attribute.T);
+                    if (!string.IsNullOrEmpty(attribute.RefAttrName) &&
+                        attribute.RefAttrName.StartsWith("GenericParam:"))
+                        return tensorAttribute.WithDType(DType.CreateWithGenericParam(
+                            tensorAttribute.DType, attribute.RefAttrName.Substring("GenericParam:".Length)));
+                    return tensorAttribute;
                 case AttributeProto.AttributeType.Tensors:
                     return attribute.Tensors.Select(t => CreateTensorData(t)).ToArray();
                 case AttributeProto.AttributeType.Graph:
@@ -522,16 +525,18 @@ namespace Shorokoo.Core.Factory.IR
 
             var tensorKeys = new Dictionary<string, FastTensorKey>();
 
-            // Model inputs first. CG order: inputs precede initializers in the build, but
-            // the CG ComputationGraph constructor only marks IsModelInput nodes as inputs
-            // — the FastCG equivalent uses the explicit Inputs list, so we record them here
-            // and skip initializer producers from that list.
-            foreach (var (info, key, fastNode) in CreateFastInputTensors(graphProto.Inputs, functionsMap, tensorStructDefs))
+            // Model inputs first: a graph's inputs are the input nodes that open its node list,
+            // so the initializers and the body follow them.
+            // A graph input that names an initializer is that initializer's declaration, not a
+            // data input: files written for IR version < 4 had to list every initializer among
+            // the inputs. The initializer supplies its value; taken as an input as well it would
+            // demand a value of its own at every run.
+            var initializerNames = graphProto.Initializers.Select(i => i.Name).ToHashSet(StringComparer.Ordinal);
+            var dataInputs = graphProto.Inputs.Where(i => !initializerNames.Contains(i.Name)).ToList();
+            foreach (var (info, key, fastNode) in CreateFastInputTensors(dataInputs, functionsMap, tensorStructDefs))
             {
                 fastGraph.Nodes.Add(fastNode);
                 tensorKeys[info.Name] = key;
-                fastGraph.Inputs.Add(key);
-                fastGraph.InputUniqueNames.Add(info.Name);
             }
 
             // Initializers (MODEL_PARAM_DATA producers). These are reachable from the
@@ -548,28 +553,57 @@ namespace Shorokoo.Core.Factory.IR
             CreateFastNodes(fastGraph, EnumerateNodesInProtoOrder(graphProto.Nodes), tensorKeys, functionsMap, opset);
 
             // .srk dialect: the model-input ops were serialized as ordinary NodeProtos (materialized
-            // above by CreateFastNodes) rather than graph-input ValueInfoProtos, so rebuild the input
-            // list from those input-op nodes in serialized order. A node whose output key is already a
-            // graph input (the vanilla / execution path, which declared inputs via graphProto.Inputs)
-            // is skipped, so this is a no-op there.
-            var alreadyInputs = new HashSet<FastTensorKey>(fastGraph.Inputs);
-            foreach (var node in fastGraph.Nodes)
-            {
-                if (!FastOpsetResolver.IsModelInputOpCode(node.OpCode)) continue;
-                var key = node.Outputs.FirstOrDefault(k => k is not null && !k.Value.IsEmpty);
-                if (key is null || !alreadyInputs.Add(key.Value)) continue;
-                fastGraph.Inputs.Add(key.Value);
-                fastGraph.InputUniqueNames.Add(key.Value.ToString());
-            }
+            // above by CreateFastNodes, after the initializers) rather than graph-input
+            // ValueInfoProtos, each carrying its name as an attribute. Move them to the front, in
+            // serialized order, which is the input order. A no-op for the dialects that declare
+            // their inputs through graphProto.Inputs.
+            var inputNodes = fastGraph.Nodes.Where(n => InternalOpCodes.IsModelInputOp(n.OpCode)).ToList();
+            fastGraph.Nodes.RemoveAll(n => InternalOpCodes.IsModelInputOp(n.OpCode));
+            fastGraph.Nodes.InsertRange(0, inputNodes);
 
-            // Outputs (in proto declaration order).
-            foreach (var output in graphProto.Outputs)
-            {
-                fastGraph.Outputs.Add(tensorKeys[output.Name]);
-                fastGraph.OutputUniqueNames.Add(output.Name);
-            }
+            // Its output nodes, likewise, were serialized closing the node list, in output order;
+            // where they were (the .srk dialect), they are the outputs. The graph-output
+            // ValueInfos name the same values, as ONNX requires. The other dialects keep no
+            // output nodes, so each graph output becomes one, named by the signature name an
+            // internal-dialect ValueInfo carries in its metadata, else by its own name.
+            if (fastGraph.FindMisplacedOutput() is int stray)
+                throw new System.IO.InvalidDataException(
+                    $"ONNX import: output node '{fastGraph.Nodes[stray].FriendlyName}' precedes a body node; " +
+                    "a graph's output nodes must close its node list.");
+            if (fastGraph.OutputCount == 0)
+                foreach (var output in graphProto.Outputs)
+                    AddOutputNode(fastGraph, tensorKeys[output.Name], output, output.Name);
 
             return fastGraph;
+        }
+
+        /// <summary>
+        /// An input's or output's name: the one its ValueInfo's metadata gives, where a Shorokoo
+        /// dialect wrote it — empty for none — else, in a file that says nothing, the ValueInfo's
+        /// own name <paramref name="fallbackName"/>.
+        /// </summary>
+        private static string? NameFrom(string? metadata, string fallbackName)
+            => metadata is null ? fallbackName : metadata.Length == 0 ? null : metadata;
+
+        /// <summary>
+        /// Closes <paramref name="fastGraph"/> with an output node reading <paramref name="value"/>,
+        /// named, ranked and shaped as <paramref name="info"/>'s metadata says (the writer's
+        /// <c>CreateOutputInfos</c>), and named <paramref name="fallbackName"/> where it says nothing.
+        /// A malformed declared rank or recorded shape is skipped, as a malformed representative input
+        /// shape is.
+        /// </summary>
+        private static void AddOutputNode(InternalComputationGraph fastGraph, FastTensorKey value, ValueInfoProto? info, string fallbackName)
+        {
+            string? MetadataOf(string key) => info?.MetadataProps.FirstOrDefault(p => p.Key == key)?.Value;
+            int? declaredRank = MetadataOf(ShrkAttrDeclaredRank) is { } rank
+                && int.TryParse(rank, System.Globalization.NumberStyles.None,
+                    System.Globalization.CultureInfo.InvariantCulture, out var parsed)
+                ? parsed
+                : null;
+            fastGraph.AddOutput(value, NameFrom(MetadataOf(ShrkAttrOutputName), fallbackName), declaredRank);
+            if (MetadataOf(ShrkAttrRecordedOutputShape) is { } recorded
+                && RepresentativeInputMetadata.TryParseDims(recorded) is { } dims)
+                Shorokoo.Core.Graph.RecordedOutputShapes.Set(fastGraph.Nodes[^1], dims);
         }
 
         /// <summary>
@@ -781,9 +815,15 @@ namespace Shorokoo.Core.Factory.IR
                 // optional into an absent one on the way back (Shorokoo/Shorokoo#314).
                 if (fastNode.OpCode is InternalOpCodes.MODEL_TENSOR_INPUT
                                     or InternalOpCodes.MODEL_OPTIONAL_INPUT
+                                    or InternalOpCodes.MODEL_SEQUENCE_INPUT
                     && inputProto.MetadataProps.FirstOrDefault(p => p.Key == RepresentativeInputMetadata.Key)
                         is { } reprProp)
                     RepresentativeInputMetadata.Apply(fastNode, reprProp.Value);
+
+                // The input's name: the signature name an internal-dialect ValueInfo carries in its
+                // metadata (its own name is the raw tensor id), else the ValueInfo's name.
+                InternalComputationGraph.SetInputName(fastNode,
+                    NameFrom(inputProto.MetadataProps.FirstOrDefault(p => p.Key == ShrkAttrInputName)?.Value, inputProto.Name));
 
                 results.Add((inputProto, key, fastNode));
             }
@@ -1058,10 +1098,8 @@ namespace Shorokoo.Core.Factory.IR
         {
             var attrDefs = Definitions.NodeDefinitions[InternalOpCodes.FUNCTION_INVOKE].AttributeDefs;
             var fastFnGraph = function.OriginalFastGraph;
-            var fnOutputs = InternalComputationGraphConverter.BuildNodes(fastFnGraph).outputs;
-            var fnRankOverrides = fastFnGraph.OutputRankOverrides is null
-                ? fnOutputs.Select(x => (int?)x.Rank).ToImmutableArray()
-                : fastFnGraph.OutputRankOverrides.ToImmutableArray();
+            var fnOutputs = function.Outputs;
+            var fnOutputRanks = function.OutputRanks;
 
             var attrs = nodeProto.Attributes.Any(a => a.Name == ShrkAttrStructure)
                 ? ParseAttributes(nodeProto, Definitions.NodeDefinitions[InternalOpCodes.FUNCTION_INVOKE]).Item1
@@ -1070,7 +1108,7 @@ namespace Shorokoo.Core.Factory.IR
                     {
                         [ShrkAttrStructure] = fnOutputs.Select(x => x.Structure()).ToArray(),
                         [ShrkAttrDtype] = fnOutputs.Select(x => x.DType).ToArray(),
-                        [ShrkAttrRank] = fnRankOverrides.Select(x => (long)(x ?? -1)).ToArray(),
+                        [ShrkAttrRank] = fnOutputRanks.Select(x => (long)(x ?? -1)).ToArray(),
                         [ShrkAttrGenericTypeArgs] = (DType[]?)null,
                     },
                     attrDefs);
@@ -1195,7 +1233,7 @@ namespace Shorokoo.Core.Factory.IR
                 fullInputs[""] = inputKeys.ToList();
 
                 var outputKeys = AllocateAndRecordOutputs(nodeKey, nodeProto.Outputs, tensorKeys, baseIndex: 0);
-                fullOutputs[""] = outputKeys.Select(k => (FastTensorKey?)k).ToList();
+                fullOutputs[""] = PadOutputsWithNulls(outputKeys, nodeDef);
             }
 
             // Target function from attribute, if any.
@@ -1313,6 +1351,19 @@ namespace Shorokoo.Core.Factory.IR
             if (numNewTrailingNulls <= 0) return currentInputs;
             var padded = new FastTensorKey?[currentInputs.Length + numNewTrailingNulls];
             Array.Copy(currentInputs, padded, currentInputs.Length);
+            return padded;
+        }
+
+        /// <summary>
+        /// <paramref name="outputs"/>, followed by an absent output for each trailing optional one
+        /// the node omits — ONNX lets a node leave off its unused trailing outputs (a Unique asked
+        /// for its values alone, say) — so the node has every output its definition declares.
+        /// </summary>
+        private static List<FastTensorKey?> PadOutputsWithNulls(FastTensorKey[] outputs, NodeDefinition nodeDef)
+        {
+            var padded = outputs.Select(k => (FastTensorKey?)k).ToList();
+            var declared = nodeDef.OutputDefs.TakeWhile(x => x.VariadicCountDef is null).Count();
+            while (padded.Count < declared) padded.Add(null);
             return padded;
         }
 

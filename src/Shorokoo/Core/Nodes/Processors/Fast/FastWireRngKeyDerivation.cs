@@ -95,7 +95,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 FullInputs = new Dictionary<string, List<FastTensorKey?>>(),
                 FullOutputs = { [""] = new List<FastTensorKey?> { new FastTensorKey(nodeKey, 0) } },
             };
-            graph.Nodes.Insert(0, seedNode);
+            graph.InsertAtBodyStart(seedNode);
 
             Process(graph, Array.Empty<(int[] path, int keyOffset)>(), validateStructure: true);
         }

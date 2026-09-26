@@ -243,8 +243,9 @@ namespace Shorokoo
         ///
         /// <para>It is also <b>self-describing for shape inference</b>: each <c>MODEL_TENSOR_INPUT</c>
         /// node carries the shape the model was concretized at, as dims-only
-        /// <see cref="OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape"/> (see
-        /// <see cref="WriteRepresentativeInputs(InternalComputationGraph, long[][])"/>). The two
+        /// <see cref="OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape"/>, recorded by
+        /// <c>ToConcreteArchitecture</c> as on every concrete graph (see
+        /// <see cref="RepresentativeInputShapes"/>). The two
         /// training-graph shape-inference sites reconstruct their <c>sampleInputs[]</c> off that
         /// attribute plus the node's dtype (<see cref="ReadRepresentativeInputs"/>), so no separate
         /// sample-input field is stored on the rig. In the native <c>.srk</c> dialect a
@@ -716,7 +717,12 @@ namespace Shorokoo
         /// <param name="modelGraph">The model's InternalComputationGraph (typically a source-generated module's static graph property)</param>
         /// <param name="lossGraph">The loss function's computation graph (2 inputs: predictions, targets; 1 output: loss)</param>
         /// <param name="optimizerGraph">The optimizer's computation graph (inputs: hyperparams + param + grad; outputs: updated_param). Optimizer state is created inside the module body via optimizer-owned [StateInitializer] Init calls and updated via Globals.StateUpdate — never declared in the signature.</param>
-        /// <param name="sampleInputs">Sample model inputs (one per model graph input) used to resolve parameter shapes and seed shape inference. Only the shapes matter, not the values.</param>
+        /// <param name="sampleInputs">Sample model inputs, one per data input of the model graph in its
+        /// declaration order, each bound to the input at its position — a <see cref="TensorData"/>, or an
+        /// <see cref="OptionalTensorData"/> for an optional input. Used to resolve parameter shapes and seed
+        /// shape inference. Too few, too many, or one whose rank contradicts its input's declared rank is
+        /// refused with <see cref="ErrorCodes.FW056"/>. The overloads taking <see cref="NamedModelParam"/>s
+        /// or a <see cref="ModelParamList"/> bind samples by name instead.</param>
         /// <param name="hyperparameters">
         /// The optimizer's named hyperparameters — typically the source-generated set, e.g.
         /// <c>new AdamWOptimizerHyperparameters { LearningRate = Schedules.Cosine(3e-4f, total), WeightDecay = 1e-4f }</c>.
@@ -755,7 +761,7 @@ namespace Shorokoo
             ComputationGraph modelGraph,
             ComputationGraph lossGraph,
             ComputationGraph optimizerGraph,
-            NamedModelParam[] sampleInputs,
+            IData[] sampleInputs,
             IOptimizerHyperparameters hyperparameters,
             RngConfig? rngConfig = null,
             ComputeContext? mergeContext = null,
@@ -764,7 +770,7 @@ namespace Shorokoo
             TrainingBackend? trainingBackend = null)
         {
             if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
-            return FromScratchCore(modelGraph, lossGraph, optimizerGraph, sampleInputs,
+            return FromScratchCore(modelGraph, lossGraph, optimizerGraph, Positional(sampleInputs),
                 hyperparameters.InOptimizerOrder(), hyperparameters.HyperparameterNames, rngConfig,
                 mergeContext, runtimeContext, progress, trainingBackend);
         }
@@ -773,20 +779,21 @@ namespace Shorokoo
         /// Lower-level overload that takes the hyperparameter values positionally (in the optimizer's
         /// declared order) rather than as a named set. Each <see cref="Hyperparameter"/>'s kind still
         /// decides baked-vs-runtime; a bare <c>float</c> implicitly converts to a baked constant, so
-        /// <c>FromScratch(model, loss, opt, sample, 0.01f)</c> bakes a single learning rate. Generated
+        /// <c>FromScratch(model, loss, opt, [sample], 0.01f)</c> bakes a single learning rate. Generated
         /// graph fields fall back to <c>hyperparam_{i}</c> names since no names are supplied. A <c>params</c>
         /// array must come last, so this shape takes no <see cref="RngConfig"/>, compute context or
         /// progress sink; hand the values to the overload below as an array for those:
-        /// <c>FromScratch(model, loss, opt, sample, [0.01f], rngConfig)</c>, or
-        /// <c>…, [0.01f], progress: sink)</c>.
+        /// <c>FromScratch(model, loss, opt, [sample], [0.01f], rngConfig)</c>, or
+        /// <c>…, [0.01f], progress: sink)</c>. The samples bind by position, one per data input in
+        /// declaration order.
         /// </summary>
         public static TrainingRig FromScratch(
             ComputationGraph modelGraph,
             ComputationGraph lossGraph,
             ComputationGraph optimizerGraph,
-            NamedModelParam[] sampleInputs,
+            IData[] sampleInputs,
             params Hyperparameter[] hyperparameters)
-            => FromScratchCore(modelGraph, lossGraph, optimizerGraph, sampleInputs, hyperparameters,
+            => FromScratchCore(modelGraph, lossGraph, optimizerGraph, Positional(sampleInputs), hyperparameters,
                 names: null, rngConfig: null, mergeContext: null, runtimeContext: null, progress: null,
                 trainingBackend: null);
 
@@ -799,8 +806,68 @@ namespace Shorokoo
         /// (<see cref="RngConfig.Default"/> / <see cref="ComputeContext.Default"/>, and no progress sink).
         /// Supplying any of them selects this overload — an array alone still binds the <c>params</c>
         /// overload above, to the same effect. Name an argument you reach past
-        /// <paramref name="rngConfig"/> (<c>FromScratch(model, loss, opt, sample, [0.01f], progress: sink)</c>),
-        /// and pass an empty array for an optimizer that takes no hyperparameters at all.
+        /// <paramref name="rngConfig"/> (<c>FromScratch(model, loss, opt, [sample], [0.01f], progress: sink)</c>),
+        /// and pass an empty array for an optimizer that takes no hyperparameters at all. The samples
+        /// bind by position, one per data input in declaration order.
+        /// </summary>
+        public static TrainingRig FromScratch(
+            ComputationGraph modelGraph,
+            ComputationGraph lossGraph,
+            ComputationGraph optimizerGraph,
+            IData[] sampleInputs,
+            Hyperparameter[] hyperparameters,
+            RngConfig? rngConfig = null,
+            ComputeContext? mergeContext = null,
+            ComputeContext? runtimeContext = null,
+            IProgress<BuildProgress>? progress = null,
+            TrainingBackend? trainingBackend = null)
+            => FromScratchCore(modelGraph, lossGraph, optimizerGraph, Positional(sampleInputs), hyperparameters,
+                names: null, rngConfig: rngConfig, mergeContext: mergeContext,
+                runtimeContext: runtimeContext, progress: progress, trainingBackend: trainingBackend);
+
+        /// <summary>
+        /// Creates a TrainingRig from scratch as the positional-sample overload does, at samples bound
+        /// <b>by name</b>: each <see cref="NamedModelParam"/> to the model input of its
+        /// <see cref="NamedModelParam.ParamName"/>, in any order. A data input no sample names, a sample
+        /// naming no input, a name given twice, or a sample whose rank contradicts its input's declared
+        /// rank is refused with <see cref="ErrorCodes.FW056"/>, the message naming each offender and
+        /// listing the model's inputs.
+        /// </summary>
+        public static TrainingRig FromScratch(
+            ComputationGraph modelGraph,
+            ComputationGraph lossGraph,
+            ComputationGraph optimizerGraph,
+            NamedModelParam[] sampleInputs,
+            IOptimizerHyperparameters hyperparameters,
+            RngConfig? rngConfig = null,
+            ComputeContext? mergeContext = null,
+            ComputeContext? runtimeContext = null,
+            IProgress<BuildProgress>? progress = null,
+            TrainingBackend? trainingBackend = null)
+        {
+            if (hyperparameters is null) throw new ArgumentNullException(nameof(hyperparameters));
+            return FromScratchCore(modelGraph, lossGraph, optimizerGraph, Named(sampleInputs),
+                hyperparameters.InOptimizerOrder(), hyperparameters.HyperparameterNames, rngConfig,
+                mergeContext, runtimeContext, progress, trainingBackend);
+        }
+
+        /// <summary>
+        /// Named-sample overload with positional hyperparameter values; the samples bind by name, as on
+        /// the overload above, and the hyperparameters as on the positional-sample <c>params</c> overload.
+        /// </summary>
+        public static TrainingRig FromScratch(
+            ComputationGraph modelGraph,
+            ComputationGraph lossGraph,
+            ComputationGraph optimizerGraph,
+            NamedModelParam[] sampleInputs,
+            params Hyperparameter[] hyperparameters)
+            => FromScratchCore(modelGraph, lossGraph, optimizerGraph, Named(sampleInputs), hyperparameters,
+                names: null, rngConfig: null, mergeContext: null, runtimeContext: null, progress: null,
+                trainingBackend: null);
+
+        /// <summary>
+        /// Named-sample overload with an explicit hyperparameter array, an RNG configuration, the compute
+        /// contexts and the progress sink, resolved as on the positional-sample overload of the same shape.
         /// </summary>
         public static TrainingRig FromScratch(
             ComputationGraph modelGraph,
@@ -813,15 +880,13 @@ namespace Shorokoo
             ComputeContext? runtimeContext = null,
             IProgress<BuildProgress>? progress = null,
             TrainingBackend? trainingBackend = null)
-            => FromScratchCore(modelGraph, lossGraph, optimizerGraph, sampleInputs, hyperparameters,
+            => FromScratchCore(modelGraph, lossGraph, optimizerGraph, Named(sampleInputs), hyperparameters,
                 names: null, rngConfig: rngConfig, mergeContext: mergeContext,
                 runtimeContext: runtimeContext, progress: progress, trainingBackend: trainingBackend);
 
         /// <summary>
-        /// Convenience overload that accepts a <see cref="ModelParamList"/> for sample inputs,
-        /// as returned by <c>model.FromOrderedInputs([…])</c>, so you can write
-        /// <c>FromScratch(model, Losses.L2Loss, Optimizers.Adam, model.FromOrderedInputs([…]), hypers)</c>
-        /// without constructing <see cref="TensorDataModelParam"/> objects by hand.
+        /// Named-sample overload taking the samples as a <see cref="ModelParamList"/>; they bind by name,
+        /// as on the <see cref="NamedModelParam"/> array overloads.
         /// </summary>
         public static TrainingRig FromScratch(
             ComputationGraph modelGraph,
@@ -842,10 +907,7 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// Convenience overload that accepts a <see cref="ModelParamList"/> for sample inputs
-        /// with positional hyperparameter values. As on the <see cref="NamedModelParam"/> pair, an
-        /// <see cref="RngConfig"/>, a compute context or a progress sink means handing the values to the
-        /// overload below as an array instead.
+        /// <see cref="ModelParamList"/> named-sample overload with positional hyperparameter values.
         /// </summary>
         public static TrainingRig FromScratch(
             ComputationGraph modelGraph,
@@ -860,12 +922,8 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// <see cref="ModelParamList"/> convenience overload with an RNG configuration and the optional
-        /// build/merge and compile/run compute contexts (see <see cref="MergeContext"/> /
-        /// <see cref="RuntimeContext"/>) and the progress sink, which follow the hyperparameter array as they
-        /// do on the named-set overload. Selected by supplying any of them — the same resolution as the
-        /// <see cref="NamedModelParam"/> array overload above, and the same need to name an argument
-        /// reached past <paramref name="rngConfig"/>.
+        /// <see cref="ModelParamList"/> named-sample overload with an explicit hyperparameter array, an RNG
+        /// configuration, the compute contexts and the progress sink.
         /// </summary>
         public static TrainingRig FromScratch(
             ComputationGraph modelGraph,
@@ -885,11 +943,26 @@ namespace Shorokoo
                 runtimeContext, progress, trainingBackend);
         }
 
+        /// <summary>The samples of a positional overload, bound to the model's inputs where they stand.</summary>
+        private static Func<InternalComputationGraph, IReadOnlyList<IData>> Positional(IData[] sampleInputs)
+        {
+            if (sampleInputs is null) throw new ArgumentNullException(nameof(sampleInputs));
+            return _ => sampleInputs;
+        }
+
+        /// <summary>The samples of a named overload, bound each to the model input of its name and so put
+        /// in the inputs' declaration order.</summary>
+        private static Func<InternalComputationGraph, IReadOnlyList<IData>> Named(NamedModelParam[] sampleInputs)
+        {
+            if (sampleInputs is null) throw new ArgumentNullException(nameof(sampleInputs));
+            return model => RepresentativeInputShapes.BindByName(model, new ModelParamList(sampleInputs));
+        }
+
         private static TrainingRig FromScratchCore(
             ComputationGraph modelGraph,
             ComputationGraph lossGraph,
             ComputationGraph optimizerGraph,
-            NamedModelParam[] sampleInputs,
+            Func<InternalComputationGraph, IReadOnlyList<IData>> sampleInputs,
             Hyperparameter[] hyperparameters,
             IReadOnlyList<string>? names,
             RngConfig? rngConfig,
@@ -951,13 +1024,13 @@ namespace Shorokoo
         /// sequence.</exception>
         private static void RequireNoSequenceInput(InternalComputationGraph model)
         {
-            var producers = BuildProducerByOutputMap(model);
-            for (int i = 0; i < model.Inputs.Count; i++)
+            var inputNodes = model.InputNodes;
+            for (int i = 0; i < inputNodes.Count; i++)
             {
-                if (!producers.TryGetValue(model.Inputs[i], out var node)
-                    || node.OpCode != InternalOpCodes.MODEL_SEQUENCE_INPUT) continue;
-                var name = i < model.InputUniqueNames.Count && !string.IsNullOrEmpty(model.InputUniqueNames[i])
-                    ? $"'{model.InputUniqueNames[i]}' (#{i})"
+                var node = inputNodes[i];
+                if (node.OpCode != InternalOpCodes.MODEL_SEQUENCE_INPUT) continue;
+                var name = InternalComputationGraph.InputNameOf(node) is { Length: > 0 } inputName
+                    ? $"'{inputName}' (#{i})"
                     : $"#{i}";
                 throw new NotSupportedException(
                     $"A training rig feeds its model tensors and optional tensors, and the model's input {name} "
@@ -985,12 +1058,12 @@ namespace Shorokoo
         /// <see cref="DeriveFromConcreteArch"/> to compose and optimize the trainstep. The sample
         /// inputs are consumed here (parameter shape resolution, liveness pruning, concretization value
         /// fallbacks) and NOT stored: everything the derivation path later needs is captured on the
-        /// concrete arch itself (structure + RNG identity + the representative-input attributes written
-        /// onto its <c>MODEL_TENSOR_INPUT</c> nodes below).
+        /// concrete arch itself (structure + RNG identity + the representative-input attributes
+        /// <c>ToConcreteArchitecture</c> records on its input nodes).
         /// </summary>
         private static TrainingRig BuildInitialRig(
             RigConstituents constituents,
-            NamedModelParam[] sampleInputs,
+            Func<InternalComputationGraph, IReadOnlyList<IData>> sampleInputs,
             ComputeContext mergeContext,
             ComputeContext runtimeContext,
             TrainingBackend trainingBackend,
@@ -998,11 +1071,6 @@ namespace Shorokoo
         {
             var c = constituents;
             ValidateConstituents(c);
-            if (sampleInputs.Length == 0)
-                throw new ArgumentException(
-                    "A training rig requires at least one sample input. Sample inputs " +
-                    "drive parameter shape resolution and training-graph shape inference.",
-                    nameof(sampleInputs));
 
             // Concretization is a build/merge-phase step, so it runs on the merge context. The caller's
             // progress sink is independent of that: one reporter is built from it here and threaded
@@ -1019,6 +1087,15 @@ namespace Shorokoo
             var model = RequireModelGraphKind(c.Model, "TrainingRig (model constituent)");
             RequireNoSequenceInput(model);
 
+            // Named samples bind to the model's inputs by name here, and from then on stand in the
+            // inputs' declaration order, as positional ones are given.
+            var samples = sampleInputs(model);
+            if (samples.Count == 0)
+                throw new ArgumentException(
+                    "A training rig requires at least one sample input. Sample inputs " +
+                    "drive parameter shape resolution and training-graph shape inference.",
+                    nameof(sampleInputs));
+
             // Single ToConcreteArchitecture pass — the ONE concretization for this rig and all its
             // future derivations. The resulting concrete arch is the shared substrate: the trainstep
             // build composes it with loss + autograd + optimizer; initialization reads its MODEL_PARAM
@@ -1026,8 +1103,7 @@ namespace Shorokoo
             // it. The pass also runs the QEE-backed liveness filter that prunes trainable params whose
             // reachability is killed by the sample input shape. Sample input VALUES matter only here
             // (concretization's QEE/ORT resolution fallbacks); the derivation path needs only shapes.
-            var concreteArch = model.ToConcreteArchitecture(
-                new ModelParamList(sampleInputs), ctx, debugRequests: null, reporter);
+            var concreteArch = model.ToConcreteArchitecture(samples, ctx, debugRequests: null, reporter);
 
             // Bind the RNG config at the shared concretization point: binding writes the
             // config's runtime identity into the RngSeed parameter, which — with the feeds'
@@ -1037,13 +1113,6 @@ namespace Shorokoo
             // and a reachability sweep here, which is graph-sized work, not bookkeeping.
             Concretizing("BindRngConfig");
             concreteArch.ApplyRngConfig(c.RngConfig);
-
-            // Make the concrete arch self-describing: record the representative shape (dims only —
-            // never the user's values) on each model-input node, so every re-derivation's shape
-            // inference reconstructs its sampleInputs off the arch and no separate exemplar field
-            // is stored. Done once here; the attribute rides along on Clone() and survives re-seeding.
-            Concretizing("WriteRepresentativeInputs");
-            WriteRepresentativeInputs(concreteArch, sampleInputs);
 
             return DeriveFromConcreteArch(
                 c, concreteArch, mergeContext, runtimeContext, trainingBackend, reporter);
@@ -1117,111 +1186,59 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// Writes a representative shape onto each of the concrete arch's <c>MODEL_TENSOR_INPUT</c> nodes
-        /// (in graph-input order, one per <paramref name="sampleInputs"/>), making the arch self-describing
-        /// for training-graph shape inference. Never records the user's sample values. Only concretization
-        /// (already done) needed input values; from here on only shapes matter, so this records exactly
-        /// the shape.
-        /// </summary>
-        private static void WriteRepresentativeInputs(InternalComputationGraph concreteArch, NamedModelParam[] sampleInputs)
-            => WriteRepresentativeInputs(concreteArch, sampleInputs.Select(RepresentativeShapeOf).ToArray());
-
-        /// <summary>
-        /// The single negative dim recorded for an optional input the rig was built with ABSENT. A
-        /// concretized shape never holds one, so it cannot be confused with a real shape — and
-        /// recording it rather than recording nothing keeps a MISSING attribute meaning what it
-        /// means on a tensor input: an arch that was not built self-describing, which
-        /// <see cref="ReadRepresentativeInputs"/> refuses rather than reading as some default.
-        /// </summary>
-        private static readonly long[] AbsentOptionalShape = [-1L];
-
-        /// <summary>
-        /// The dims to record for one sample, or <c>null</c> when the sample's input node carries no
-        /// representative-shape attribute to record them on. An absent optional records
-        /// <see cref="AbsentOptionalShape"/>, not nothing. Reading the shape off the sample rather
-        /// than converting the sample to a tensor is what lets an absent optional through at all: it
-        /// has no tensor value, and asking for one threw before the shape was ever needed
-        /// (Shorokoo/Shorokoo#314).
-        /// </summary>
-        private static long[]? RepresentativeShapeOf(NamedModelParam sample) => sample switch
-        {
-            OptionalTensorDataModelParam optional =>
-                optional.Data is { HasValue: true, Value: { } value } ? value.Shape.Dims : AbsentOptionalShape,
-            { Structure: DataStructure.Tensor } => sample.ToTensorData().Shape.Dims,
-            _ => null,
-        };
-
-        /// <summary>
-        /// Dims-shaped counterpart of
-        /// <see cref="WriteRepresentativeInputs(InternalComputationGraph, NamedModelParam[])"/>:
-        /// records <see cref="OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape"/> — the dims,
-        /// whatever the input's size — on each input node that carries the attribute (the node's own
-        /// dtype attribute completes the pair), and records nothing for a <c>null</c> entry. An
-        /// optional input records <see cref="AbsentOptionalShape"/> when the optional was supplied
-        /// absent, which is how <see cref="ReadRepresentativeInputs"/> reads its presence back — a
-        /// value, so that a MISSING attribute stays the loud error it already is on a tensor input.
-        /// The concrete arch's input ops serialize as NodeProtos in the native <c>.srk</c>
-        /// dialect, so the attribute round-trips on disk verbatim and the saved arch is
-        /// self-describing — no separate manifest input-shape field is needed.
-        /// </summary>
-        private static void WriteRepresentativeInputs(InternalComputationGraph concreteArch, long[]?[] inputShapes)
-        {
-            if (concreteArch.Inputs.Count != inputShapes.Length)
-                throw new InvalidOperationException(
-                    $"Concrete arch has {concreteArch.Inputs.Count} input(s) but {inputShapes.Length} " +
-                    "input shape(s) were supplied; they must correspond one-to-one in declaration order.");
-            var producerByOutput = BuildProducerByOutputMap(concreteArch);
-            for (int i = 0; i < concreteArch.Inputs.Count; i++)
-            {
-                if (!producerByOutput.TryGetValue(concreteArch.Inputs[i], out var node))
-                    throw new InvalidOperationException(
-                        $"Concrete arch input {concreteArch.Inputs[i]} has no producing node.");
-                if (node.OpCode is not (InternalOpCodes.MODEL_TENSOR_INPUT or InternalOpCodes.MODEL_OPTIONAL_INPUT))
-                    continue;
-                if (inputShapes[i] is not { } dims) continue;
-                node.Attributes = node.Attributes.SetAttributes(
-                    (OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape, (object?)dims));
-            }
-        }
-
-        /// <summary>
         /// Reconstructs the <c>sampleInputs[]</c> array for shape inference off the concrete arch's
-        /// representative-input attributes (in graph-input order) — the derivation-path counterpart of
-        /// <see cref="WriteRepresentativeInputs(InternalComputationGraph, NamedModelParam[])"/>. Reads
+        /// representative-input attributes (in graph-input order), which every concrete graph carries
+        /// (<see cref="RepresentativeInputShapes"/>). Reads
         /// each node's <see cref="OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape"/> dims plus its
         /// dtype and describes each input via <see cref="RepresentativeInputFor"/> (real zeros while the
         /// values are small enough to be read, shape and dtype alone above that, so no large buffer is
-        /// materialized); a node without the attribute fails loud (the arch was not built
-        /// self-describing). Each description becomes the runtime tensor
+        /// materialized). Each description becomes the runtime tensor
         /// <see cref="ShapeInferenceInterpreter"/> is fed directly — a values-less one simply arrives
         /// with its data null, which is what a shape-driven pass wants anyway.
         /// </summary>
-        private static IRuntimeTensor[] ReadRepresentativeInputs(InternalComputationGraph concreteArch)
+        /// <param name="concreteArch">The concrete graph whose inputs to describe.</param>
+        /// <param name="representSequences">Whether a sequence input is described too, rather than
+        /// refused: as a sequence of elements of the shape its sample's elements shared, where one
+        /// was recorded, and of elements of unknown shape otherwise. For a pass that only infers
+        /// what it can (the output shapes a composed or imported graph records); training needs
+        /// every input exactly.</param>
+        internal static IRuntimeTensor[] ReadRepresentativeInputs(InternalComputationGraph concreteArch, bool representSequences = false)
         {
             var producerByOutput = BuildProducerByOutputMap(concreteArch);
-            var inputs = new IRuntimeTensor[concreteArch.Inputs.Count];
-            for (int i = 0; i < concreteArch.Inputs.Count; i++)
+            var archInputs = concreteArch.Inputs;
+            var inputs = new IRuntimeTensor[archInputs.Count];
+            for (int i = 0; i < archInputs.Count; i++)
             {
-                if (!producerByOutput.TryGetValue(concreteArch.Inputs[i], out var node)
+                if (representSequences
+                    && producerByOutput.TryGetValue(archInputs[i], out var sequenceNode)
+                    && sequenceNode.OpCode == InternalOpCodes.MODEL_SEQUENCE_INPUT)
+                {
+                    var elementType = sequenceNode.Attributes.GetDTypeVal(OnnxOpAttributeNames.AttrDtype) ?? DType.Invalid;
+                    inputs[i] = new RuntimeSequenceTensor
+                    {
+                        DType = elementType,
+                        TemplateTensor = RepresentativeInputShapes.Get(sequenceNode) is { } element
+                            ? RepresentativeRuntimeInputFor(new Shape(element), elementType)
+                            : new RuntimeTensor { DType = elementType },
+                    };
+                    continue;
+                }
+                if (!producerByOutput.TryGetValue(archInputs[i], out var node)
                     || node.OpCode is not (InternalOpCodes.MODEL_TENSOR_INPUT or InternalOpCodes.MODEL_OPTIONAL_INPUT))
                     throw new InvalidOperationException(
-                        $"Concrete arch input {concreteArch.Inputs[i]} is not a MODEL_TENSOR_INPUT or " +
+                        $"Concrete arch input {archInputs[i]} is not a MODEL_TENSOR_INPUT or " +
                         "MODEL_OPTIONAL_INPUT node; cannot read its representative input.");
 
                 var dtype = node.Attributes.GetDTypeVal(OnnxOpAttributeNames.AttrDtype)
                     ?? throw new InvalidOperationException(
                         "Concrete arch input node records a representative-input shape but no dtype; " +
                         "cannot re-materialize its representative input.");
-                var dims = node.Attributes.GetLongsVal(OnnxOpAttributeNames.ShrkAttrRepresentativeInputShape)
+                var dims = RepresentativeInputShapes.Get(node)
                     ?? throw new InvalidOperationException(
-                        "Concrete arch input node carries no representative-input shape attribute: the rig " +
-                        "was not built through BuildInitialRig (which records one on every model input), or " +
-                        "the arch was saved by an older Shorokoo that recorded small inputs as an inline " +
-                        "representative tensor instead of dims (there is no legacy read path; rebuild the " +
-                        "rig from its source graphs and re-save).");
+                        $"Concrete arch input {archInputs[i]} carries no representative-input shape.");
 
                 inputs[i] = node.OpCode == InternalOpCodes.MODEL_OPTIONAL_INPUT
-                    ? (dims.AsSpan().SequenceEqual(AbsentOptionalShape)
+                    ? (dims.AsSpan().SequenceEqual(RepresentativeInputShapes.AbsentOptionalShape)
                         ? new RuntimeOptionalTensor { DType = dtype, HasValue = false }
                         : new RuntimeOptionalTensor
                         {
@@ -1245,12 +1262,19 @@ namespace Shorokoo
         /// <para>The threshold decides only how faithful the description is, never whether it is legal:
         /// a values-elided attribute is readable as "shape and dtype, no values" at any threshold, so
         /// this one and the engines' read thresholds no longer have to agree.</para>
+        ///
+        /// <para>A string tensor has no zero bytes to be made of, so its payload is empty strings; any
+        /// other dtype without a fixed whole-byte width (a packed 4-bit or a complex type) is described
+        /// by shape and dtype alone, whatever its size.</para>
         /// </summary>
         internal static TensorAttribute RepresentativeInputFor(Shape shape, DType dtype)
         {
             if (shape.Count > Shorokoo.Core.AutoDiffCheckpointing.ShapeInferenceInterpreter.MaxSmallTensorElements)
                 return TensorAttribute.WithoutValues(shape, dtype);
-            var bytesPerElement = dtype.EncodingBitCount / 8;
+            if (dtype == DType.Utf8)
+                return TensorAttribute.OverStrings(shape, [.. Enumerable.Repeat("", checked((int)shape.Count))]);
+            if (RecordedOutputShapes.ByteWidthOf(dtype) is not int bytesPerElement)
+                return TensorAttribute.WithoutValues(shape, dtype);
             return TensorAttribute.OverBytes(shape, dtype, new byte[shape.Count * bytesPerElement]);
         }
 
@@ -1304,6 +1328,22 @@ namespace Shorokoo
         /// replace, which is the pair the whole composed graph was inferred with before, so it can
         /// choke on nothing the build did not already choke on.</para>
         /// </summary>
+        /// <summary>
+        /// The target shape <paramref name="lossGraph"/> reads alongside
+        /// <paramref name="concreteModel"/>'s prediction at the model's own representative inputs —
+        /// what a graph composing the two records as its target input's representative shape.
+        /// </summary>
+        internal static long[] RepresentativeTargetShape(
+            InternalComputationGraph concreteModel, InternalComputationGraph lossGraph)
+        {
+            var shapeInferencer = new ShapeInferenceInterpreter(ComputeContext.Default);
+            var prediction = shapeInferencer.Infer(concreteModel, ReadRepresentativeInputs(concreteModel))
+                    .GetTensorInfo(concreteModel.Outputs[0])
+                ?? throw new InvalidOperationException(
+                    "Shape inference of the concrete model failed to produce an output shape.");
+            return DeriveTargetExemplar(lossGraph, shapeInferencer, prediction.Shape, prediction.DType).Shape.Dims;
+        }
+
         private static (Shape Shape, DType DType) DeriveTargetExemplar(
             InternalComputationGraph lossGraph,
             ShapeInferenceInterpreter shapeInferencer,
@@ -1797,8 +1837,8 @@ namespace Shorokoo
                 var targetDtype = targetProducer.Attributes.GetDTypeVal(OnnxOpAttributeNames.AttrDtype)
                     ?? throw new InvalidOperationException("Loss graph target input has no AttrDtype.");
                 var targetRank = (int?)targetProducer.Attributes.GetLongVal(OnnxOpAttributeNames.ShrkAttrRank);
-                var targetFieldName = lossGraph.InputUniqueNames.Count > 1
-                    ? lossGraph.InputUniqueNames[1] ?? "targets"
+                var targetFieldName = lossGraph.InputNames.Count > 1
+                    ? lossGraph.InputNames[1] ?? "targets"
                     : "targets";
                 if (Shorokoo.Core.Training.TrainingGraphBuilder.LossReadsTarget(lossGraph))
                 {
@@ -1857,7 +1897,7 @@ namespace Shorokoo
                 var f = TrainableParamStructDef.Fields[i];
                 var node = Shorokoo.Core.Nodes.Processors.Fast.FastInternalOp.TensorStructGetField(
                     trainableParamStructInputKey, f.Name, f.ElementType, f.Rank, f.Structure);
-                fastTraining.Nodes.Add(node);
+                fastTraining.InsertAtBodyEnd(node);
                 headNodesInOrder.Add(node);
                 paramFieldKeys[i] = new FastTensorKey(node.Key, 0);
             }
@@ -1868,7 +1908,7 @@ namespace Shorokoo
                 var f = gradStructDef.Fields[i];
                 var node = Shorokoo.Core.Nodes.Processors.Fast.FastInternalOp.TensorStructGetField(
                     gradStructOutputKey, f.Name, f.ElementType, f.Rank, f.Structure);
-                fastTraining.Nodes.Add(node);
+                fastTraining.InsertAtBodyEnd(node);
                 gradFieldKeys[i] = new FastTensorKey(node.Key, 0);
             }
 
@@ -1966,7 +2006,7 @@ namespace Shorokoo
                 var hyperDType = DType.GetOrCreateForTensorStruct(HyperparameterStructDef);
                 var hyperInputNode = Shorokoo.Core.Nodes.Processors.Fast.FastInternalOp.TensorStructInput(
                     hyperDType, "hyperparams");
-                fastTraining.Nodes.Add(hyperInputNode);
+                fastTraining.AddInput(hyperInputNode);
                 headNodesInOrder.Add(hyperInputNode);
                 hyperparamsInputKey = new FastTensorKey(hyperInputNode.Key, 0);
 
@@ -1975,7 +2015,7 @@ namespace Shorokoo
                     var f = hyperFields[i];
                     var node = Shorokoo.Core.Nodes.Processors.Fast.FastInternalOp.TensorStructGetField(
                         hyperparamsInputKey.Value, f.Name, f.ElementType, f.Rank, f.Structure);
-                    fastTraining.Nodes.Add(node);
+                    fastTraining.InsertAtBodyEnd(node);
                     headNodesInOrder.Add(node);
                     hyperparamKeys[runtimeIndices[i]] = new FastTensorKey(node.Key, 0);
                     _initialHyperparamFields[f.Name] = SeedOf(runtimeIndices[i]);
@@ -2011,7 +2051,7 @@ namespace Shorokoo
                     if (!needed.Contains(cn)) continue;
                     var counterNode = Shorokoo.Core.Nodes.Processors.Fast.FastInternalOp.RuntimeInput(
                         DType.Int64, rank: 0, cn);
-                    fastTraining.Nodes.Add(counterNode);
+                    fastTraining.AddInput(counterNode);
                     headNodesInOrder.Add(counterNode);
                     var key = new FastTensorKey(counterNode.Key, 0);
                     counterKeyByName[cn] = key;
@@ -2045,7 +2085,7 @@ namespace Shorokoo
                 // keeps the literal.
                 var node = Shorokoo.Core.Nodes.Processors.Fast.FastInternalOp.Constant(
                     _hyperparamInitialCounterValues[h]!.CopyTo(ComputeContext.Host).MoveToAttribute());
-                fastTraining.Nodes.Add(node);
+                fastTraining.InsertAtBodyEnd(node);
                 headNodesInOrder.Add(node);
                 hyperparamKeys[h] = new FastTensorKey(node.Key, 0);
             }
@@ -2093,7 +2133,7 @@ namespace Shorokoo
                 var optStateDType = DType.GetOrCreateForTensorStruct(OptimizerStateDef);
                 var optStateInputNode = Shorokoo.Core.Nodes.Processors.Fast.FastInternalOp.TensorStructInput(
                     optStateDType, "optimizer_state");
-                fastTraining.Nodes.Add(optStateInputNode);
+                fastTraining.AddInput(optStateInputNode);
                 headNodesInOrder.Add(optStateInputNode);
                 optStateInputKey = new FastTensorKey(optStateInputNode.Key, 0);
 
@@ -2102,7 +2142,7 @@ namespace Shorokoo
                     var f = OptimizerStateDef.Fields[i];
                     var node = Shorokoo.Core.Nodes.Processors.Fast.FastInternalOp.TensorStructGetField(
                         optStateInputKey.Value, f.Name, f.ElementType, f.Rank, f.Structure);
-                    fastTraining.Nodes.Add(node);
+                    fastTraining.InsertAtBodyEnd(node);
                     headNodesInOrder.Add(node);
                     optStateFieldKeys[i] = new FastTensorKey(node.Key, 0);
                 }
@@ -2135,7 +2175,7 @@ namespace Shorokoo
             var paramDType = DType.GetOrCreateForTensorStruct(TrainableParamStructDef);
             var updatedParamStructNode = Shorokoo.Core.Nodes.Processors.Fast.FastInternalOp.TensorStructCreate(
                 paramDType, updatedParamKeys);
-            fastTraining.Nodes.Add(updatedParamStructNode);
+            fastTraining.InsertAtBodyEnd(updatedParamStructNode);
             var updatedParamStructKey = new FastTensorKey(updatedParamStructNode.Key, 0);
 
             // Pack updated optimizer state into struct (if non-empty).
@@ -2145,30 +2185,24 @@ namespace Shorokoo
                 var optStateDType = DType.GetOrCreateForTensorStruct(OptimizerStateDef);
                 var optStateOutputNode = Shorokoo.Core.Nodes.Processors.Fast.FastInternalOp.TensorStructCreate(
                     optStateDType, updatedOptStateFieldKeys);
-                fastTraining.Nodes.Add(optStateOutputNode);
+                fastTraining.InsertAtBodyEnd(optStateOutputNode);
                 updatedOptStateStructKey = new FastTensorKey(optStateOutputNode.Key, 0);
             }
 
             // Step 9: reorder fastTraining.Inputs and Outputs to the TrainStep convention.
             // Original order: [model_inputs_struct, targets, param_struct, state_struct?]
             // Target order:   [param_struct, state_struct?, optimizer_state_struct?, hyperparams_struct?, step_counter?, model_inputs_struct, targets]
+            // Every input's name rides on its node, so reordering the nodes reorders the names.
             var modelInputsStructKey = fastTraining.Inputs[0];
             var targetsKey = fastTraining.Inputs[1];
-            var modelInputsName = fastTraining.InputUniqueNames.Count > 0 ? fastTraining.InputUniqueNames[0] : null;
-            var targetsName = fastTraining.InputUniqueNames.Count > 1 ? fastTraining.InputUniqueNames[1] : null;
-            var paramStructName = fastTraining.InputUniqueNames.Count > 2 ? fastTraining.InputUniqueNames[2] : null;
-            var stateStructName = stateStructInputKey is not null && fastTraining.InputUniqueNames.Count > 3
-                ? fastTraining.InputUniqueNames[3] : null;
 
-            var newInputs = new List<FastTensorKey>();
-            var newInputNames = new List<string?>();
-            newInputs.Add(trainableParamStructInputKey); newInputNames.Add(paramStructName);
-            if (stateStructInputKey is FastTensorKey ssk) { newInputs.Add(ssk); newInputNames.Add(stateStructName); }
-            if (optStateInputKey is FastTensorKey osk) { newInputs.Add(osk); newInputNames.Add("optimizer_state"); }
-            if (hyperparamsInputKey is FastTensorKey hpk) { newInputs.Add(hpk); newInputNames.Add("hyperparams"); }
-            foreach (var (key, cn) in counterInputsInOrder) { newInputs.Add(key); newInputNames.Add(cn); }
-            newInputs.Add(modelInputsStructKey); newInputNames.Add(modelInputsName);
-            newInputs.Add(targetsKey); newInputNames.Add(targetsName);
+            var newInputs = new List<FastTensorKey> { trainableParamStructInputKey };
+            if (stateStructInputKey is FastTensorKey ssk) newInputs.Add(ssk);
+            if (optStateInputKey is FastTensorKey osk) newInputs.Add(osk);
+            if (hyperparamsInputKey is FastTensorKey hpk) newInputs.Add(hpk);
+            foreach (var (key, _) in counterInputsInOrder) newInputs.Add(key);
+            newInputs.Add(modelInputsStructKey);
+            newInputs.Add(targetsKey);
 
             // Original outputs: [loss, gradient_struct, state_struct]
             // Target outputs:   [updated_param_struct, state_struct, updated_optimizer_state?, loss]
@@ -2181,25 +2215,20 @@ namespace Shorokoo
             if (updatedOptStateStructKey is FastTensorKey uosk) newOutputs.Add(uosk);
             newOutputs.Add(lossOutputKey);
 
-            fastTraining.Inputs = newInputs;
-            fastTraining.InputUniqueNames = newInputNames;
-            fastTraining.Outputs = newOutputs;
-            fastTraining.OutputUniqueNames = new List<string?>(new string?[newOutputs.Count]);
-            fastTraining.OutputRankOverrides = null;
+            fastTraining.SetInputs(newInputs);
+            fastTraining.SetOutputs(newOutputs);
 
             Stage("PruneAndOrderTrainingStep");
             Shorokoo.Core.Nodes.Processors.Fast.FastProcessorHelper.RemoveUnreachableNodes(fastTraining);
 
             // Move tracked head nodes (param-field GETFIELDs, hyperparam CONSTANTs,
-            // optimizer-state INPUT and GETFIELDs) to the front in creation order.
-            // They have no body dependencies and the body is already nested by
-            // construction, so no Kahn re-sort is needed.
-            var headKeys = new HashSet<FastNodeKey>(headNodesInOrder.Select(n => n.Key));
-            var rebuiltTraining = new List<FastNode>(fastTraining.Nodes.Count);
-            rebuiltTraining.AddRange(headNodesInOrder);
-            foreach (var n in fastTraining.Nodes)
-                if (!headKeys.Contains(n.Key)) rebuiltTraining.Add(n);
-            fastTraining.Nodes = rebuiltTraining;
+            // optimizer-state GETFIELDs) to the start of the body in creation order; the
+            // inputs among them already lead the node list. They depend on nothing but the
+            // inputs and the body is already nested by construction, so no Kahn re-sort is needed.
+            var headBodyNodes = headNodesInOrder.Where(n => !InternalOpCodes.IsModelInputOp(n.OpCode)).ToList();
+            var headKeys = new HashSet<FastNodeKey>(headBodyNodes.Select(n => n.Key));
+            fastTraining.Nodes.RemoveAll(n => headKeys.Contains(n.Key));
+            fastTraining.InsertAtBodyStart(headBodyNodes);
             System.Diagnostics.Debug.Assert(fastTraining.IsLinearOrderValid(), "fastTraining.IsLinearOrderValid()");
 
             // Step 10: lower to an executable form. LowerGraph runs its Fast pipeline
@@ -2329,11 +2358,13 @@ namespace Shorokoo
 
             // Each input must be a named reserved counter (int64 scalar), with no duplicates.
             var producerByOutput = BuildProducerByOutputMap(g);
-            var counterNames = new string[g.Inputs.Count];
+            var gInputs = g.Inputs;
+            var gInputNames = g.InputNames;
+            var counterNames = new string[gInputs.Count];
             var seen = new HashSet<string>(StringComparer.Ordinal);
-            for (int i = 0; i < g.Inputs.Count; i++)
+            for (int i = 0; i < gInputs.Count; i++)
             {
-                var inName = i < g.InputUniqueNames.Count ? g.InputUniqueNames[i] : null;
+                var inName = gInputNames[i];
                 if (inName is null || Array.IndexOf(CounterInputNames, inName) < 0)
                     throw new ArgumentException(
                         $"Scheduler module for hyperparameter '{name}' has input '{inName ?? "(unnamed)"}', " +
@@ -2344,7 +2375,7 @@ namespace Shorokoo
                         $"Scheduler module for hyperparameter '{name}' takes the counter '{inName}' more than once.",
                         nameof(module));
 
-                var inProducer = producerByOutput[g.Inputs[i]];
+                var inProducer = producerByOutput[gInputs[i]];
                 var inDType = inProducer.Attributes.GetDTypeVal(OnnxOpAttributeNames.AttrDtype);
                 var inRank = (int?)inProducer.Attributes.GetLongVal(OnnxOpAttributeNames.ShrkAttrRank);
                 if (inDType != DType.Int64 || (inRank is int ir && ir != 0))
@@ -3966,11 +3997,10 @@ namespace Shorokoo
             {
                 if (!needed.Contains(cn)) continue;
                 var node = Shorokoo.Core.Nodes.Processors.Fast.FastInternalOp.RuntimeInput(DType.Int64, rank: 0, cn);
-                composed.Nodes.Add(node);
+                RepresentativeInputShapes.Set(node, []);
+                composed.AddInput(node);
                 var key = new FastTensorKey(node.Key, 0);
                 counterKeyByName[cn] = key;
-                composed.Inputs.Add(key);
-                composed.InputUniqueNames.Add(cn);
             }
 
             var scheduledNames = new List<string>(scheduledIndices.Count);
@@ -3979,11 +4009,12 @@ namespace Shorokoo
                 var built = builtByIndex[h];
                 var mapped = built.CounterNames.Select(c => counterKeyByName[c]).ToArray();
                 var replayed = Shorokoo.Core.Nodes.Processors.Fast.FastReplay.ReplayInto(composed, built.Graph, mapped);
-                composed.Outputs.Add(replayed[0]);
-                composed.OutputUniqueNames.Add(NameOf(h));
+                composed.AddOutput(replayed[0], NameOf(h));
                 scheduledNames.Add(NameOf(h));
             }
 
+            // Each output records its value's shape at the counters' representative zero.
+            RecordedOutputShapes.RecordAtRepresentativeInputs(composed);
             return (new ComputationGraph(composed, GraphKind.ConcreteModel), scheduledNames);
         }
 
@@ -3996,7 +4027,7 @@ namespace Shorokoo
         internal static ComputationGraph SplitSchedulerOutput(ComputationGraph composedScheduler, string outputName)
         {
             var composed = composedScheduler.ToInternal().Clone();
-            int oi = composed.OutputUniqueNames.IndexOf(outputName);
+            int oi = composed.OutputNames.ToList().IndexOf(outputName);
             if (oi < 0)
                 throw new System.IO.InvalidDataException(
                     $"The composed scheduler model has no output named '{outputName}'; the checkpoint's " +
@@ -4021,17 +4052,12 @@ namespace Shorokoo
                 }
             }
 
+            // The counter inputs it reads come along as nodes, still leading, names and all, and so
+            // does its output node, recorded shape and all.
             var g = new InternalComputationGraph();
             foreach (var n in composed.Nodes)
                 if (reachedNodes.Contains(n.Key)) g.Nodes.Add(n);
-            for (int i = 0; i < composed.Inputs.Count; i++)
-                if (reachedKeys.Contains(composed.Inputs[i]))
-                {
-                    g.Inputs.Add(composed.Inputs[i]);
-                    g.InputUniqueNames.Add(i < composed.InputUniqueNames.Count ? composed.InputUniqueNames[i] : null);
-                }
-            g.Outputs.Add(outKey);
-            g.OutputUniqueNames.Add(outputName);
+            g.Nodes.Add(composed.OutputNodes[oi]);
             return new ComputationGraph(g, GraphKind.ConcreteModel);
         }
 
@@ -4487,8 +4513,12 @@ namespace Shorokoo
             // rather than carrying a real zero buffer — the same threshold the model-input exemplars
             // use. These exemplars outlive the pass on the rig (OptimizationInputs), so a
             // multi-megabyte target would otherwise stay allocated for as long as the rig does.
-            while (idx < graph.Inputs.Count)
+            while (idx < allInputs.Length)
                 allInputs[idx++] = RepresentativeRuntimeInputFor(targetShape, targetDType);
+
+            // The step graph is a concrete graph like the model it trains, so its inputs record the
+            // shapes it is built at too — the exemplars just assembled for its shape inference.
+            RepresentativeInputShapes.Record(graph, allInputs);
 
             // The field's value where one is in hand, else its description as the engine reads it:
             // shape and dtype, and data only where the description carries any.
@@ -4511,6 +4541,10 @@ namespace Shorokoo
                 using (Shorokoo.Core.Interpreter.OpRegistry.Override(Shorokoo.Core.Interpreter.Ops.AutoGradShapeOp.Instance))
                     shapeInfo = shapeInferencer.Infer(graph, allInputs);
 
+            // And its outputs record the shapes they have at those exemplars, which the inference
+            // just gave: before the optimizer, whose rewritten graph carries the output nodes on.
+            RecordedOutputShapes.Record(graph, shapeInfo);
+
             // A parameter's shape is declared by its initializer and baked into the arch, and every
             // other part of the framework holds to it — binding a value of another shape into the
             // model is refused. The optimizer is the one place that could change it: its update is
@@ -4523,10 +4557,11 @@ namespace Shorokoo
             // just been inferred for the optimizer pass, so holding each to its parameter costs
             // nothing and fails here, at build, rather than after a step. A dimension inference
             // leaves symbolic (-1) constrains nothing.
-            for (int p = 0; p < TrainableParamStructDef.Fields.Length && p < graph.Outputs.Count; p++)
+            var stepOutputs = graph.Outputs;
+            for (int p = 0; p < TrainableParamStructDef.Fields.Length && p < stepOutputs.Count; p++)
             {
                 var field = TrainableParamStructDef.Fields[p];
-                if (shapeInfo.GetTensorInfo(graph.Outputs[p]) is not { } updatedInfo) continue;
+                if (shapeInfo.GetTensorInfo(stepOutputs[p]) is not { } updatedInfo) continue;
                 var updatedDims = updatedInfo.Shape.Dims;
                 var declaredDims = paramSlots[field.Name].Shape.Dims;
                 if (updatedDims.Contains(-1L) || updatedDims.SequenceEqual(declaredDims)) continue;

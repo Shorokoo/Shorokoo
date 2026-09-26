@@ -38,9 +38,22 @@ namespace Shorokoo.Core.Graph
         /// </summary>
         public readonly ImmutableArray<ModelId?> TrainableParamInputSourceIds { get; init; }
 
-        /// <summary>The parameters whose initialized values this one's initializer reads.</summary>
+        /// <summary>
+        /// Per initializer input, the computation that fills it from other parameters' values —
+        /// <c>source * 2</c>, or a module call on a parameter — or <c>null</c> where the input is a
+        /// folded constant or a parameter itself. Like a parameter source, it is evaluated at
+        /// materialization, after the parameters it reads. Empty (default) when no input is one.
+        /// </summary>
+        public readonly ImmutableArray<ParamInitComputation?> TrainableParamInputComputations { get; init; }
+
+        /// <summary>The parameters whose initialized values this one's initializer reads, directly
+        /// or through a computation.</summary>
         public IEnumerable<ModelId> SourceParamIds
-            => TrainableParamInputSourceIds.Where(x => x is not null).Select(x => x!.Value);
+            => TrainableParamInputSourceIds.Where(x => x is not null).Select(x => x!.Value)
+                .Concat(TrainableParamInputComputations.IsDefault
+                    ? []
+                    : TrainableParamInputComputations.Where(c => c is not null).SelectMany(c => c!.Sources.Values))
+                .Distinct();
 
         public readonly ModelId SpecificModelId { get; init; }
         public readonly Function TargetFn { get; init; }
@@ -57,9 +70,9 @@ namespace Shorokoo.Core.Graph
         {
             get
             {
-                var declaredRank = TargetFn.OutputRankOverrides.Length > 0
-                    ? TargetFn.OutputRankOverrides[0] : null;
-                if (declaredRank == 0) return Shape.Scalar;
+                var rank = TargetFn.OutputRanks.Length > 0
+                    ? TargetFn.OutputRanks[0] : null;
+                if (rank == 0) return Shape.Scalar;
                 if (TrainableParamInputParamValues.IsDefaultOrEmpty)
                     throw new InvalidOperationException(
                         $"Parameter initializer '{TargetFn.DefaultName}' takes no initializer input and "
@@ -77,6 +90,16 @@ namespace Shorokoo.Core.Graph
             }
         }
     }
+
+    /// <summary>
+    /// An initializer input computed from other parameters' values: the nodes computing it, in
+    /// order, reading only constants and the parameters in <see cref="Sources"/> (by the output key
+    /// that carries each), and the key of the value they compute.
+    /// </summary>
+    internal sealed record ParamInitComputation(
+        FastTensorKey Result,
+        ImmutableArray<FastNode> Nodes,
+        ImmutableDictionary<FastTensorKey, ModelId> Sources);
 
     /// <summary>
     /// Map of generalized model-id templates to <see cref="ModelParamIdentifierTemplate"/>s,

@@ -1,3 +1,4 @@
+using Shorokoo.Core.Nodes.NodeDefinitions;
 using System;
 using Shorokoo.Core.Graph;
 using System.Collections.Generic;
@@ -68,9 +69,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         {
             // Pass 1: assign fresh sequential keys and FriendlyNames; remember
             // the old → new key mapping for the rewrite pass.
+            // The output nodes are numbered last, after the phantoms below: they are the graph's
+            // boundary rather than ops, and nothing references them, so numbering them first would
+            // only shift every phantom's name.
             var oldToNew = new Dictionary<FastNodeKey, FastNodeKey>();
             foreach (var node in graph.Nodes)
             {
+                if (InternalOpCodes.IsGraphOutputOp(node.OpCode)) continue;
                 counter++;
                 var newKey = new FastNodeKey((UInt128)(uint)counter);
                 oldToNew[node.Key] = newKey;
@@ -79,7 +84,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             }
 
             // Pass 1b: scan every reference (FullInputs / FullOutputs slots,
-            // GraphOpenNodeKey, graph.Inputs, graph.Outputs) for FastNodeKeys
+            // GraphOpenNodeKey) for FastNodeKeys
             // that don't correspond to any node in graph.Nodes. These are
             // "phantom" producers — typically zombie nodes (e.g.
             // LOOP_INDEX_VARIABLE) whose Variable outputs survive in
@@ -101,8 +106,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     foreach (var k in slot)
                         if (k is FastTensorKey tk) referenced.Add(tk.FastNodeKey);
             }
-            foreach (var k in graph.Inputs) referenced.Add(k.FastNodeKey);
-            foreach (var k in graph.Outputs) referenced.Add(k.FastNodeKey);
 
             foreach (var key in referenced)
             {
@@ -110,6 +113,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 if (oldToNew.ContainsKey(key)) continue;
                 counter++;
                 oldToNew[key] = new FastNodeKey((UInt128)(uint)counter);
+            }
+
+            foreach (var node in graph.OutputNodes)
+            {
+                counter++;
+                node.Key = new FastNodeKey((UInt128)(uint)counter);
+                node.FriendlyName = $"N{counter}";
             }
 
             // Pass 2: walk every FastTensorKey/FastNodeKey reference in the graph
@@ -121,11 +131,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 RewriteSlots(node.FullInputs, oldToNew);
                 RewriteSlots(node.FullOutputs, oldToNew);
             }
-
-            for (int i = 0; i < graph.Inputs.Count; i++)
-                graph.Inputs[i] = RewriteTensorKey(graph.Inputs[i], oldToNew);
-            for (int i = 0; i < graph.Outputs.Count; i++)
-                graph.Outputs[i] = RewriteTensorKey(graph.Outputs[i], oldToNew);
 
             return oldToNew;
         }

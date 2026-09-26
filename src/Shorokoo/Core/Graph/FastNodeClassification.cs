@@ -58,11 +58,9 @@ namespace Shorokoo.Core.Graph
         /// <see cref="FunctionType.Function"/>), and how a module-typed call with a machinery-free
         /// body executes. Whether an invoke <em>can</em> run is a property of the callee's body, not
         /// of its <see cref="FunctionType"/>, and this scan deliberately does not descend into
-        /// bodies: a live initializer body legitimately carries dead <c>ShrkCreateModule</c>
-        /// metadata (see <c>FastInitKeyedDraws</c>), so recursing would refuse the very graphs
-        /// <c>ToConcreteModel</c> executes. An invoke of a body that does carry live machinery is
-        /// left to fail downstream — the conservative half of the trade, taken because the
-        /// alternative refuses graphs that run today.</para>
+        /// bodies. An initializer body carries no module machinery at all — one that would is
+        /// refused where it is traced (FW055) — and an invoke of any other body that
+        /// does carry live machinery is left to fail downstream.</para>
         ///
         /// <para>This is the executability question, and <see cref="IsModuleStageMachinery"/> the
         /// classification one: an initializer-typed invoke marks a graph as pre-lowering while

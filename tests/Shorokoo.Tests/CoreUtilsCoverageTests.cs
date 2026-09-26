@@ -785,7 +785,10 @@ public class CoreUtilsCoverageTests
         Assert.Equal(RunSettings.Default, new ComputeContext().RunSettings);
 
         var x = InputTensor<float32>("x", rank: 1);
-        var graph = new ComputationGraph(new InternalComputationGraph([x], [x + x]), GraphKind.ConcreteModel);
+        var inner = new InternalComputationGraph([x], [x + x]);
+        Shorokoo.Core.Graph.RepresentativeInputShapes.Set(inner.FindNode(inner.Inputs[0].FastNodeKey)!, [2L]);
+        Shorokoo.Core.Graph.RecordedOutputShapes.Set(inner.OutputNodes[0], [2L]);
+        var graph = new ComputationGraph(inner, GraphKind.ConcreteModel);
         var compiled = configured.Compile(graph);
         Assert.Equal(budget, compiled.DeviceMemory);
         Assert.Equal(shrinking, compiled.DefaultRunSettings);
@@ -2524,7 +2527,7 @@ public class CoreUtilsCoverageTests
             var model = ScalarMultiplyModel.ComputationGraph;
             var hints = new ModelParamList(
                 [new KeyValuePair<string, TensorData>(
-                    model.ToInternal().Inputs[0].ToString(), TensorData([4L], new float[4]))],
+                    model.InputNames[0]!, TensorData([4L], new float[4]))],
                 ModelParamType.InputParam);
 
             model.ToConcreteArchitecture(hints, new ComputeContext(),

@@ -193,7 +193,7 @@ public class CodegenFreeModuleTests
     private static byte[][] ExecuteConcretized(ComputationGraph moduleGraph, params TensorData[] inputs)
     {
         var concreteModel = moduleGraph
-            .ToConcreteArchitecture(moduleGraph.FromOrderedInputs([.. inputs]))
+            .ToConcreteArchitecture([.. inputs])
             .ToConcreteModel();
         return ComputeContext.Default.Execute(concreteModel, [.. inputs.Select(i => (IData)i.Shared())])
             .Select(x => x.ToTensorData().AccessRawMemory().ToArray())
@@ -212,7 +212,7 @@ public class CodegenFreeModuleTests
         Func<Tensor<float32>, Tensor<float32>> body, string? name, TensorData input)
     {
         var graph = ModuleFactory.ComputationGraph(body, name);
-        return graph.ToConcreteArchitecture(graph.FromOrderedInputs([input])).ToConcreteModel();
+        return graph.ToConcreteArchitecture([input]).ToConcreteModel();
     }
 
     private static float[] Floats(byte[] bytes) => MemoryMarshal.Cast<byte, float>(bytes).ToArray();
@@ -316,7 +316,7 @@ public class CodegenFreeModuleTests
         var simplestGraph = ModuleFactory.ComputationGraph(simplest);
         var sampleInput = TensorDataWithSmallVals(DType.Float32, [5L]);
         var concreteModel = simplestGraph
-            .ToConcreteArchitecture(simplestGraph.FromOrderedInputs([sampleInput]))
+            .ToConcreteArchitecture([sampleInput])
             .ToConcreteModel();
 
         var proto = FastOnnxModelBuilder.BuildOnnxModel(concreteModel);
@@ -431,7 +431,7 @@ public class CodegenFreeModuleTests
     {
         var input = TensorData([2L], 1f, 2f);
         var g = StatefulGainCalledTwiceModel.ComputationGraph;
-        var concrete = g.ToConcreteArchitecture(g.FromOrderedInputs([input])).ToConcreteModel();
+        var concrete = g.ToConcreteArchitecture([input]).ToConcreteModel();
 
         Assert.Equal(1, concrete.ToInternal().GetStateUpdateOutputCount());
         Assert.Equal(0f, StateValue(concrete));
@@ -458,7 +458,7 @@ public class CodegenFreeModuleTests
     {
         var input = TensorData([2L], 1f, 2f);
         var concrete = cg.ToConcreteArchitecture(
-            cg.FromOrderedInputs([input, TensorData(DType.Bool, [], true)])).ToConcreteModel();
+            [input, TensorData(DType.Bool, [], true)]).ToConcreteModel();
         var (outputs, updated) = ComputeContext.Default.ExecuteWithState(
             concrete, input.Shared(), TensorData(DType.Bool, [], cond));
         return [StateValue(updated), .. Floats(outputs[0].ToTensorData().AccessRawMemory().ToArray())];

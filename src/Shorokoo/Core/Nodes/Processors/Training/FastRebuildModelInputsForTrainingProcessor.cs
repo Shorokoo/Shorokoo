@@ -24,9 +24,8 @@ namespace Shorokoo.Core.Nodes.Processors.Training
     /// matching <c>TENSOR_STRUCT_GETFIELD</c> output of a <c>model_state</c> struct input;
     /// every <c>STATE_UPDATE_LINK</c> is unwrapped to its updated-state input (which is
     /// also collected as a new graph output); every <c>WITH_STATE_DEPS</c> is unwrapped to
-    /// its main input. The replaced nodes themselves are dropped from <c>graph.Nodes</c>,
-    /// the original input keys are dropped from <c>graph.Inputs</c>, and the new struct
-    /// inputs are appended.
+    /// its main input. The replaced nodes themselves — the original model inputs among them —
+    /// are dropped from <c>graph.Nodes</c>, and the new struct inputs lead the inputs.
     /// </summary>
     internal static class FastRebuildModelInputsForTrainingProcessor
     {
@@ -67,6 +66,13 @@ namespace Shorokoo.Core.Nodes.Processors.Training
                 throw new ArgumentException("originalModelInputNodeKeys and modelInputFieldKeys must have the same length.");
             if (stateParamNodeKeys.Length != stateFieldKeys.Length)
                 throw new ArgumentException("stateParamNodeKeys and stateFieldKeys must have the same length.");
+
+            // The inputs that stay: all but the original model inputs, which the struct replaces,
+            // and the new struct inputs, which lead.
+            var keptInputs = graph.Inputs
+                .Where(k => !originalModelInputNodeKeys.Contains(k.FastNodeKey)
+                         && k != modelInputStructInputKey && k != stateStructInputKey)
+                .ToList();
 
             var modelInputReplacementByNodeKey = new Dictionary<FastNodeKey, FastTensorKey>(originalModelInputNodeKeys.Length);
             for (int i = 0; i < originalModelInputNodeKeys.Length; i++)
@@ -156,8 +162,8 @@ namespace Shorokoo.Core.Nodes.Processors.Training
                 }
             }
 
-            // Rewire every input slot of every surviving node, replacing keys that match
-            // a remap entry with the chain's terminus.
+            // Rewire every input slot of every surviving node (the output nodes among them),
+            // replacing keys that match a remap entry with the chain's terminus.
             foreach (var node in graph.Nodes)
             {
                 if (nodesToRemove.Contains(node.Key)) continue;
@@ -172,81 +178,29 @@ namespace Shorokoo.Core.Nodes.Processors.Training
                 }
             }
 
-            // Rewire graph outputs.
-            for (int i = 0; i < graph.Outputs.Count; i++)
-            {
-                if (remap.ContainsKey(graph.Outputs[i]))
-                    graph.Outputs[i] = ResolveRemap(remap, graph.Outputs[i]);
-            }
-
             graph.Nodes.RemoveAll(n => nodesToRemove.Contains(n.Key));
 
-            // Move the struct input nodes and their per-field GETFIELD producers to the
-            // front of graph.Nodes. Without this, those nodes sit wherever the converter
-            // placed them (typically at the end, since the temp CG used to seed the Fast
-            // graph only references them via dangling outputs) — but their tensors are
-            // now consumed by every former model-input / state-param consumer, which
-            // would leave the node list out of topological order.
-            var preludeKeys = new HashSet<FastNodeKey> { modelInputStructInputKey.FastNodeKey };
-            foreach (var k in modelInputFieldKeys) preludeKeys.Add(k.FastNodeKey);
-            if (stateStructInputKey is FastTensorKey ssk)
-            {
-                preludeKeys.Add(ssk.FastNodeKey);
-                foreach (var k in stateFieldKeys) preludeKeys.Add(k.FastNodeKey);
-            }
-
-            var preludeNodes = new List<FastNode>(preludeKeys.Count);
-            var nonPreludeNodes = new List<FastNode>(graph.Nodes.Count - preludeKeys.Count);
-            foreach (var n in graph.Nodes)
-            {
-                if (preludeKeys.Contains(n.Key)) preludeNodes.Add(n);
-                else nonPreludeNodes.Add(n);
-            }
-
-            // Order the prelude as [struct input, ...GETFIELDs] for each struct, so each
-            // GETFIELD's struct-input dependency is satisfied.
-            var orderedPrelude = new List<FastNode>(preludeKeys.Count);
-            AppendInOrder(orderedPrelude, preludeNodes, modelInputStructInputKey.FastNodeKey, modelInputFieldKeys);
-            if (stateStructInputKey is FastTensorKey sskOrder)
-                AppendInOrder(orderedPrelude, preludeNodes, sskOrder.FastNodeKey, stateFieldKeys);
-
-            graph.Nodes.Clear();
-            graph.Nodes.AddRange(orderedPrelude);
-            graph.Nodes.AddRange(nonPreludeNodes);
-
-            // Replace graph inputs with the new struct inputs.
-            // Preserve InputUniqueNames for kept inputs — only the original model input
-            // keys are dropped; the trainable param struct input was added by the prior
-            // FastReplaceTrainableParamsWithInputProcessor pass and stays.
-            var keptInputs = new List<FastTensorKey>();
-            var keptInputNames = new List<string?>();
-            for (int i = 0; i < graph.Inputs.Count; i++)
-            {
-                if (modelInputReplacementByNodeKey.ContainsKey(graph.Inputs[i].FastNodeKey))
-                    continue;
-                keptInputs.Add(graph.Inputs[i]);
-                keptInputNames.Add(i < graph.InputUniqueNames.Count ? graph.InputUniqueNames[i] : null);
-            }
-
-            // Prepend the new struct inputs ahead of the kept (trainable param struct) input
-            // to mirror the CG-side rebuild's [model_inputs_struct, state_struct?, trainable_param_struct]
-            // ordering. The output names are looked up from the producing struct-input nodes.
-            var newInputs = new List<FastTensorKey> { modelInputStructInputKey };
-            var newNames = new List<string?> { LookupInputName(graph, modelInputStructInputKey) };
-            if (stateStructInputKey is FastTensorKey sk)
-            {
-                newInputs.Add(sk);
-                newNames.Add(LookupInputName(graph, sk));
-            }
+            // Settle the inputs: the new struct inputs ahead of the kept ones (the trainable param
+            // struct input the prior FastReplaceTrainableParamsWithInputProcessor pass added), to
+            // mirror the CG-side rebuild's [model_inputs_struct, state_struct?, trainable_param_struct]
+            // ordering. The original model inputs were removed above with the nodes they replace.
+            // The struct inputs were appended at the tail for convenience, and so were their
+            // per-field GETFIELDs — which every former model-input / state-param consumer now
+            // reads — so those move to the start of the body, each struct's in field order.
+            List<FastTensorKey> newInputs = [modelInputStructInputKey];
+            if (stateStructInputKey is FastTensorKey sk) newInputs.Add(sk);
             newInputs.AddRange(keptInputs);
-            newNames.AddRange(keptInputNames);
+            graph.SetInputs(newInputs);
 
-            graph.Inputs = newInputs;
-            graph.InputUniqueNames = newNames;
+            List<FastTensorKey> preludeKeys = [.. modelInputFieldKeys, .. stateFieldKeys];
+            var preludeNodeKeys = preludeKeys.Select(k => k.FastNodeKey).ToHashSet();
+            var byKey = graph.Nodes.Where(n => preludeNodeKeys.Contains(n.Key)).ToDictionary(n => n.Key);
+            graph.Nodes.RemoveAll(n => preludeNodeKeys.Contains(n.Key));
+            graph.InsertAtBodyStart(preludeKeys.Select(k => byKey[k.FastNodeKey]));
 
             // Append one state output per field — the value that field ends the forward holding.
             foreach (var su in currentByField)
-                graph.Outputs.Add(su);
+                graph.AddOutput(su);
 
             FastProcessorHelper.RemoveUnreachableNodes(graph);
 
@@ -259,20 +213,6 @@ namespace Shorokoo.Core.Nodes.Processors.Training
                 rebuiltParamFieldKeys,
                 rebuiltTrainableParamStructInput,
                 currentByField.ToImmutableArray());
-        }
-
-        private static void AppendInOrder(
-            List<FastNode> dest,
-            List<FastNode> source,
-            FastNodeKey structInputKey,
-            FastTensorKey[] fieldKeys)
-        {
-            foreach (var n in source)
-                if (n.Key == structInputKey) { dest.Add(n); break; }
-
-            foreach (var fk in fieldKeys)
-                foreach (var n in source)
-                    if (n.Key == fk.FastNodeKey) { dest.Add(n); break; }
         }
 
         private static FastTensorKey GetSingleOutputKey(FastNode node)
@@ -312,17 +252,6 @@ namespace Shorokoo.Core.Nodes.Processors.Training
             while (remap.TryGetValue(key, out var next))
                 key = next;
             return key;
-        }
-
-        private static string? LookupInputName(InternalComputationGraph graph, FastTensorKey inputKey)
-        {
-            for (int i = 0; i < graph.Nodes.Count; i++)
-            {
-                var node = graph.Nodes[i];
-                if (node.Key != inputKey.FastNodeKey) continue;
-                return node.FriendlyName;
-            }
-            return null;
         }
     }
 }

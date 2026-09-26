@@ -225,14 +225,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     initOutputs.Add(initNode.FullOutputs[""][0]!.Value);
                 }
 
-                stateInitGraph.Outputs = initOutputs;
-                stateInitGraph.OutputUniqueNames = initOutputs.Select(_ => (string?)null).ToList();
-                stateInitGraph.OutputRankOverrides = null;
+                stateInitGraph.SetOutputs(initOutputs);
                 FastProcessorHelper.RemoveUnreachableNodes(stateInitGraph);
             }
 
             // Pass 3: replace each state node in the main graph with a fresh runtime input
-            // appended after grad, in state (declaration) order.
+            // appended after the existing inputs, in state (declaration) order.
             var stateDTypes = new DType[stateNodes.Count];
             var stateRanks = new int?[stateNodes.Count];
             var remap = new Dictionary<FastTensorKey, FastTensorKey>(stateNodes.Count);
@@ -248,13 +246,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
                 var inputName = $"optimizer_state_{i}";
                 var inputNode = FastInternalOp.RuntimeInput(stateDTypes[i], stateRanks[i], inputName);
-                graph.Nodes.Insert(i, inputNode);
+                graph.AddInput(inputNode);
                 var inputKey = new FastTensorKey(inputNode.Key, 0);
 
                 remap[stateNode.FullOutputs[""][0]!.Value] = inputKey;
                 stateIndexByInputKey[inputKey] = i;
-                graph.Inputs.Add(inputKey);
-                graph.InputUniqueNames.Add(inputName);
             }
 
             graph.Nodes.RemoveAll(n => stateNodeKeys.Contains(n.Key));
@@ -306,8 +302,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             }
 
             var originalInputPositions = new Dictionary<FastTensorKey, int>();
+            var originalInputs = graph.Inputs;
             for (int i = 0; i < hyperparamCount + mandatoryParamAndGradInputs; i++)
-                originalInputPositions[graph.Inputs[i]] = i;
+                originalInputPositions[originalInputs[i]] = i;
 
             var updatedStateKeys = new FastTensorKey?[stateNodes.Count];
             foreach (var linkNode in stateUpdateLinkNodes)
@@ -358,36 +355,21 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             // Pass 5: unwrap WITH_STATE_DEPS from the primary outputs and append the updated-state
             // tensors as outputs in state order. The link / deps nodes become dead and are pruned.
-            var newOutputs = new List<FastTensorKey>(graph.Outputs.Count + stateNodes.Count);
-            foreach (var outKey in graph.Outputs)
+            // A primary output keeps its name; the state outputs have none.
+            var primaryOutputs = graph.Outputs;
+            for (int i = 0; i < primaryOutputs.Count; i++)
             {
+                var outKey = primaryOutputs[i];
                 if (producerByOutput.TryGetValue(outKey, out var producer)
                     && producer.OpCode == InternalOpCodes.WITH_STATE_DEPS
                     && producer.FullInputs.TryGetValue("", out var wsdSlots)
                     && wsdSlots.Count > 0
                     && wsdSlots[0] is FastTensorKey wsdMain
                     && !wsdMain.IsEmpty)
-                {
-                    newOutputs.Add(wsdMain);
-                }
-                else
-                {
-                    newOutputs.Add(outKey);
-                }
+                    graph.RetargetOutput(i, wsdMain);
             }
-
-            int primaryOutputCount = newOutputs.Count;
             foreach (var upd in updatedStateKeys)
-                newOutputs.Add(upd!.Value);
-
-            var newOutputNames = new List<string?>(newOutputs.Count);
-            for (int i = 0; i < newOutputs.Count; i++)
-                newOutputNames.Add(i < primaryOutputCount && i < graph.OutputUniqueNames.Count
-                    ? graph.OutputUniqueNames[i] : null);
-
-            graph.Outputs = newOutputs;
-            graph.OutputUniqueNames = newOutputNames;
-            graph.OutputRankOverrides = null;
+                graph.AddOutput(upd!.Value);
 
             FastProcessorHelper.RemoveUnreachableNodes(graph);
 
@@ -414,9 +396,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             var dtypes = new DType[hyperparamCount];
             var ranks = new int?[hyperparamCount];
+            var hyperInputs = graph.Inputs;
             for (int h = 0; h < hyperparamCount; h++)
             {
-                if (!producerByOutput.TryGetValue(graph.Inputs[h], out var producer))
+                if (!producerByOutput.TryGetValue(hyperInputs[h], out var producer))
                     throw new InvalidOperationException(
                         $"Optimizer graph hyperparameter input {h} has no producer node.");
                 if (producer.OpCode != InternalOpCodes.MODEL_TENSOR_INPUT)
@@ -453,14 +436,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     "values were bound.", nameof(boundInputs));
 
             var workGraph = stateInitGraph.Clone();
-            var nodesByKey = workGraph.Nodes.ToDictionary(n => n.Key);
             var constantAttrDefs = Definitions.NodeDefinitions[OpCodes.CONSTANT].AttributeDefs;
 
             // Bake each graph input as a constant in place (preserving the node's output key, so
-            // no consumer rewiring is needed), then run the now-closed graph.
-            for (int i = 0; i < workGraph.Inputs.Count; i++)
+            // no consumer rewiring is needed), then run the now-closed graph. Every input is baked,
+            // so the constants simply open the body.
+            var inputNodes = workGraph.InputNodes;
+            for (int i = 0; i < inputNodes.Count; i++)
             {
-                var inputNode = nodesByKey[workGraph.Inputs[i].FastNodeKey];
+                var inputNode = inputNodes[i];
                 inputNode.OpCode = OpCodes.CONSTANT;
                 inputNode.Attributes = OnnxCSharpAttributes.FromCSharpVals(
                     new Dictionary<string, object?>
@@ -473,9 +457,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 inputNode.FullInputs = new Dictionary<string, List<FastTensorKey?>>();
                 inputNode.FriendlyName = null;
             }
-
-            workGraph.Inputs = new List<FastTensorKey>();
-            workGraph.InputUniqueNames = new List<string?>();
 
             // Copied off their session, not returned as-is: this runs once per trainable
             // parameter and the rig retains every value it produces for its lifetime, which is

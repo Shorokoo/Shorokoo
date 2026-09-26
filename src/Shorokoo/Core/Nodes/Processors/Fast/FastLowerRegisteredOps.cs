@@ -154,11 +154,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var built = new InternalComputationGraph(presentStandIns, [.. outputs.Select(x => x!)]);
 
             var standInKeyBySlot = new FastTensorKey?[inputs.Length];
+            var builtInputs = built.Inputs;
             for (int i = 0, present = 0; i < standIns.Length; i++)
-                if (standIns[i] is not null) standInKeyBySlot[i] = built.Inputs[present++];
+                if (standIns[i] is not null) standInKeyBySlot[i] = builtInputs[present++];
 
-            var standInKeys = new HashSet<FastTensorKey>(built.Inputs);
-            List<FastNode> body = [.. built.Nodes.Where(n => !ProducesAny(n, standInKeys))];
+            // The stand-ins are the built graph's input prefix and its output nodes its suffix; the
+            // decomposition is what lies between.
+            List<FastNode> body = [.. built.Nodes.Take(built.BodyEnd).Skip(built.InputCount)];
             if (body.Count == 0) return null;
 
             foreach (var node in body)
@@ -175,9 +177,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             }
 
             var terminalOutputs = body[^1].Outputs;
+            var builtOutputs = built.Outputs;
             if (terminalOutputs.Count != declaredOutputs) return null;
             for (int i = 0; i < declaredOutputs; i++)
-                if (terminalOutputs[i] != built.Outputs[i]) return null;
+                if (terminalOutputs[i] != builtOutputs[i]) return null;
 
             return new LoweredPlan(body, standInKeyBySlot);
         }
@@ -191,14 +194,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
         private static bool IsLowerable(FastNode node, IReadOnlySet<string> opCodes)
             => opCodes.Contains(node.OpCode) && OpLoweringRegistry.TryGet(node.OpCode, out _);
-
-        private static bool ProducesAny(FastNode node, HashSet<FastTensorKey> keys)
-        {
-            foreach (var group in node.FullOutputs)
-                foreach (var key in group.Value)
-                    if (key is { } k && keys.Contains(k)) return true;
-            return false;
-        }
 
         /// <summary>
         /// Dtype and rank for every tensor in <paramref name="graph"/>, or nothing when the graph

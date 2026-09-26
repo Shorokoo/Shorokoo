@@ -11,6 +11,7 @@ using Shorokoo.Onnx;
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Linq;
 using System.Diagnostics;
 using System.Reflection;
 using System.Reflection.Metadata;
@@ -64,11 +65,16 @@ namespace Shorokoo
 
         /// <summary>
         /// Implicitly unwraps an optional to a nullable tensor (<c>Tensor&lt;T&gt;?</c>) by reading
-        /// its element. An absent handle (defaulted, <c>inner == null</c>) maps to <c>null</c>;
-        /// otherwise the element is taken via <see cref="TensorValue"/>.
+        /// its element. An absent handle — defaulted (<c>inner == null</c>), or built absent, an
+        /// <c>Optional</c> of no element — maps to <c>null</c>; otherwise the element is taken via
+        /// <see cref="TensorValue"/>. Reading an absent one's element instead would make a tensor
+        /// that the next wrap takes for present.
         /// </summary>
         public static implicit operator Tensor<T>?(OptionalTensor<T> optional)
-            => optional.inner is null ? default(Tensor<T>?) : optional.TensorValue();
+            => optional.inner is null || IsBuiltAbsent(optional.inner) ? default(Tensor<T>?) : optional.TensorValue();
+
+        private static bool IsBuiltAbsent(Variable optional)
+            => optional.OwningNode is { OpCode: OpCodes.OPTIONAL } node && node.Inputs.All(input => input is null);
 
         // ── User-facing API (the optional surface lives here, not on the immutable) ──
         public Variable Value() => OnnxOp.OptionalGetElement(Immutable);

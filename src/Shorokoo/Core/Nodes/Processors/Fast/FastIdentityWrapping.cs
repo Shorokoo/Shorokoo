@@ -100,17 +100,22 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var claimed = new HashSet<FastTensorKey>(graph.Inputs);
             var identityAttrDefs = Definitions.NodeDefinitions[OpCodes.IDENTITY].AttributeDefs;
 
-            for (int i = 0; i < graph.Outputs.Count; i++)
+            // The output nodes are read once and retargeted through directly, and the identities
+            // are inserted together: each output's own RetargetOutput and InsertAtBodyEnd would
+            // rescan the output suffix for every aliased output.
+            var outputNodes = graph.OutputNodes;
+            var identities = new List<FastNode>();
+            foreach (var outputNode in outputNodes)
             {
-                var output = graph.Outputs[i];
+                var output = InternalComputationGraph.OutputKeyOf(outputNode);
                 if (output.IsEmpty || claimed.Add(output)) continue;
 
                 var idKey = FastNodeKey.New();
                 var idOutputKey = new FastTensorKey(idKey, 0);
-                // Appended at the very end, where every scope is closed, so the linear order
+                // At the end of the body, where every scope is closed, so the linear order
                 // stays valid. The value being wrapped is a formal parameter (or an output
                 // already emitted), so it is in scope there.
-                graph.Nodes.Add(new FastNode
+                identities.Add(new FastNode
                 {
                     Key = idKey,
                     OpCode = OpCodes.IDENTITY,
@@ -127,9 +132,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         [""] = new List<FastTensorKey?> { idOutputKey },
                     },
                 });
-                graph.Outputs[i] = idOutputKey;
+                outputNode.FullInputs = new Dictionary<string, List<FastTensorKey?>> { [""] = [idOutputKey] };
                 claimed.Add(idOutputKey);
             }
+            if (identities.Count > 0) graph.InsertAtBodyEnd(identities);
         }
     }
 }

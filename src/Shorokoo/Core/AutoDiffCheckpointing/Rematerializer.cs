@@ -375,9 +375,11 @@ internal class Rematerializer
                 if (linear[i].IsOpenNode()) d++;
             }
 
+            // The output nodes run nothing, so the walk leaves them out; so does this.
             var details = eval.NodeDetails;
-            var walked = details.Count == linear.Count;
-            var nodes = walked ? details.Select(d => linear[d.NodeIndex]).ToList() : linear;
+            var bodyEnd = graph.BodyEnd;
+            var walked = details.Count == bodyEnd;
+            var nodes = walked ? details.Select(d => linear[d.NodeIndex]).ToList() : linear.Take(bodyEnd).ToList();
             var producerPos = new Dictionary<FastTensorKey, int>();
             var producer = new Dictionary<FastTensorKey, FastNode>();
             var lastUse = new Dictionary<FastTensorKey, int>();
@@ -807,6 +809,8 @@ internal class Rematerializer
         }
 
         copy.Nodes = newNodes;
+        copy.SetInputs(graph.Inputs);
+        copy.MoveOutputsToEnd();
         return (copy, newToOriginal);
     }
 

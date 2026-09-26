@@ -274,7 +274,7 @@ namespace Shorokoo.Tests.Utils
             Array.Copy(hyperparamInputs, 0, allInputs, 0, hyperparamInputs.Length);
             Array.Copy(runtimeInputs, 0, allInputs, hyperparamInputs.Length, runtimeInputs.Length);
 
-            var concreteArch = moduleGraph.ToConcreteArchitecture(moduleGraph.FromOrderedInputs([.. allInputs]));
+            var concreteArch = moduleGraph.ToConcreteArchitecture([.. allInputs]);
             // Deterministic per-parameter init (master seed 0) — same as real models. Closed-form
             // reference checks reference the layer's realized weights via IModel.GetTrainableParam
             // rather than re-running an initializer, so they no longer depend on tied init.
@@ -333,7 +333,7 @@ namespace Shorokoo.Tests.Utils
             Array.Copy(hyperparamInputs, 0, allInputs, 0, hyperparamInputs.Length);
             Array.Copy(runtimeInputs, 0, allInputs, hyperparamInputs.Length, runtimeInputs.Length);
 
-            var concreteArch = moduleGraph.ToConcreteArchitecture(moduleGraph.FromOrderedInputs([.. allInputs]));
+            var concreteArch = moduleGraph.ToConcreteArchitecture([.. allInputs]);
 
             // concreteArch roundtrip: at this stage trainable params still carry their
             // initializer-fn TargetFunction (the FastConvertModelParamIdRefToModelParam

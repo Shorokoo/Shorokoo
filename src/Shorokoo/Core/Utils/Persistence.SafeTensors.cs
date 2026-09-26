@@ -134,7 +134,7 @@ namespace Shorokoo
         /// <c>__metadata__</c> block is metadata, not a tensor, and is ignored.</para>
         /// </summary>
         /// <param name="concreteArchitecture">The architecture to bind onto (from
-        /// <see cref="ComputationGraph.ToConcreteArchitecture"/>).</param>
+        /// <c>ToConcreteArchitecture</c>).</param>
         /// <param name="filePath">Path of the .safetensors file to import.</param>
         /// <param name="namingScheme">Optional scheme mapping the architecture's parameters to
         /// the file's tensor names; null expects canonical Shorokoo names.</param>

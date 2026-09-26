@@ -166,6 +166,29 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>Omits the bias of the generated Call → absent, so it defaults to zeros: must equal x.</summary>
+    [Module]
+    public partial class NullableBiasAbsentCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+        {
+            var actual = NullableBiasLayer.Call(x);
+            return (actual - x).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar() < Scalar(1e-6f);
+        }
+    }
+
+    /// <summary>An absent optional handed through a sub-module comes back absent: the else branch.</summary>
+    [Module]
+    public partial class OptionalPassThroughAbsentCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+        {
+            var o = OptionalPassThroughLayer.Call(null);
+            var actual = o.HasValue().IfElse(o.TensorValue(), x * Scalar(3f));
+            return (actual - x * Scalar(3f)).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar() < Scalar(1e-6f);
+        }
+    }
+
     /// <summary>Passes a present bias through the Tensor?-accepting generated Call → must equal x + bias.</summary>
     [Module]
     public partial class NullableBiasPresentCheck

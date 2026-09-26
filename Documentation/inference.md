@@ -144,26 +144,10 @@ values go in the graph's input order, `[Hyper]` parameters first. The same refus
 comes from `ComputeContext.Execute`/`Run`/`Compile` when the graph handed to them is
 a module — so the mistake reads the same whichever way you make it.
 
-A graph whose module machinery sits inside a function body used to slip past this and
-fail later, with OnnxRuntime rejecting the model for an op it has no kernel for
-(`No Op registered for ShrkCreateModule`). Those bodies are now lowered on the way out,
-so an initializer that calls a module — or a call to a module-typed function — exports
-and runs like any other, including when the call sits inside a loop.
-
-A callee that owns a trainable parameter lowers too, with one thing worth knowing: a
-function body is not a model, and nothing will ever feed a weight into one, so a
-parameter such a callee owns is written as the value its own initializer computes
-rather than as a trainable weight of the model. An initializer that calls a layer
-therefore initializes from that layer's *initial* weights; the layer contributes no
-parameter of its own to the model it is called from. This holds however the callee
-was reached — a direct call, or a model taken out of a `ModelSequence`.
-
-Reading a parameter through `IModel.GetTrainableParam` from such a body is the one
-shape still left out, and it fails at session creation on an operand nothing
-produces ([#318](https://github.com/Shorokoo/Shorokoo/issues/318)). A bare reference
-like that names a parameter defined elsewhere instead of carrying its own
-initializer, and the emitted body has no way to match the two up; call the module
-and use its result instead.
+An initializer's function body never carries module machinery for this to miss: an
+initializer may not create or reference a model, and building one that does is refused
+with `FW055` (see *Writing your own* in
+[nn-library.md](nn-library.md#initializers-shorokoomodulesinitializers)).
 
 Concretize the module's `ComputationGraph` against the input first, then execute:
 
@@ -176,7 +160,7 @@ using static Shorokoo.Globals;
 var input    = TensorData([4L], 1f, 2f, 3f, 4f);   // the actual input data
 var graph    = MyLayer.ComputationGraph;            // readonly ComputationGraph (kind: Module)
 var concrete = graph
-    .ToConcreteArchitecture(graph.FromOrderedInputs([input]))
+    .ToConcreteArchitecture([input])    // one sample per input, in declaration order
     .ToConcreteModel();
 
 var results = ComputeContext.Default.Execute(concrete, input);   // params IData[]
@@ -200,7 +184,68 @@ pipeline, applied in order:
    stay live. Returns a copy; the original is untouched.
 2. **`ToConcreteArchitecture(inputHints)`** — inlines every sub-module and
    function so trainable parameters become visible at the top level, and uses
-   `inputHints` to resolve shape-dependent parameters.
+   `inputHints` to resolve shape-dependent parameters. It needs **a sample for every
+   input** of the graph, `[Hyper]` inputs included, a sequence input included (a
+   generic module's type-placeholder slots take none). The samples come in either of
+   two forms:
+
+   - **Positional** — `ToConcreteArchitecture([hyper, input])`, an `IData[]` of bare
+     values (`TensorData`, `OptionalTensorData`, `TensorDataSequence`,
+     `TensorDataStruct`), one per input **in declaration order**, each bound to the
+     input at its position. Too few is refused with **`FW056`**, naming every input
+     missing its sample, and so are too many, stating both counts.
+   - **Named** — `ToConcreteArchitecture(new ModelParamList([...]))` of
+     `NamedModelParam`s (`TensorDataModelParam`, `OptionalTensorDataModelParam`,
+     `TensorDataSequenceModelParam`, `TensorStructModelParam`), each bound to the
+     input **of its name**, in any order. An input no sample names, a sample naming no
+     input, and a name given to two samples are each refused with `FW056`, the message
+     naming the offenders and listing the graph's inputs.
+
+   ```csharp
+   // Dense (below): Inline(Tensor<float32> x, [Hyper] Scalar<int64> outFeatures), graph inputs outFeatures, x
+   var arch  = graph.ToConcreteArchitecture([hyper, input]);                 // by position
+   var same  = graph.ToConcreteArchitecture(new ModelParamList([
+       new TensorDataModelParam("x", ModelParamType.InputParam, input),
+       new TensorDataModelParam("outFeatures", ModelParamType.InputParam, hyper)]));  // by name
+   ```
+
+   In either form a sample of another rank than its input's type declares (a `Scalar`
+   given a vector — given positionally, most often two samples swapped) is refused
+   with `FW056`, naming the input and the sample's shape. A struct input takes one
+   sample, a `TensorDataStruct`, bound by position or by the struct input's name; it
+   stands for all its fields, and once lowered the
+   input is one input per field, named `<struct>.<field>`, of the field's own kind —
+   a tensor, an optional or a sequence input — and a field that is itself a struct is
+   its fields' inputs in turn, `<struct>.<field>.<subfield>`. The shape of each sample
+   (never its values) is recorded on the architecture's input as its **representative
+   shape** — the shape the model was concretized at. Every input of a concrete
+   architecture and of every concrete model made from it carries one: it survives
+   `ToConcreteModel`, `Specialize` and a `.srk`/`.skpt` round trip, a training rig
+   rebuilds its shape inference from it, and ONNX export reads an input's rank from it
+   where the signature states none (see
+   [onnx-and-weights.md](onnx-and-weights.md#graph-inputoutput-names-and-shapes)). A
+   concrete graph with an input that carries none — a hand-built one, say — is refused wherever it is frozen or loaded, with **`FW057`**
+   naming the input; lower it again from its module. Each **output** likewise records
+   the shape it has when the graph is evaluated at those samples — at their real
+   values, since a value can decide a shape (a flag choosing a branch, the axes a
+   `Squeeze` drops) — and keeps it through save and load; a struct output is one output
+   per field, named `<output>.<field>` as a struct input's fields are, an absent optional
+   output records that it was absent, and a sequence
+   output the shape its elements share. The shapes are computed by the
+   `QuickExecutionEngine`; an output it cannot compute (string values, for instance) is
+   taken from a run of the graph at the samples, on the compute context
+   `ToConcreteArchitecture` was given, when the graph has no parameter; where no run
+   is made, or the run fails (a locale the machine lacks, say), the output records the
+   rank the engine found, with each dimension it could not settle taken as `1`. The
+   parameters have no values yet at this step, so an output whose shape hangs on a
+   parameter's **values** is recorded as *unresolved* on the architecture;
+   `ToConcreteModel` records every output again with the weights it binds, and
+   `Specialize` with the values it bakes, so neither keeps a shape that no longer holds.
+   A concrete model has no unresolved output: one whose shape even its weights cannot
+   settle is refused by `ToConcreteModel` with `FW057`, naming the output and carrying
+   the failure as the inner exception. ONNX export reads an output's rank from it where
+   the signature states none, and a concrete graph with an output that records none is
+   refused with `FW057` naming the output.
 3. **`ToConcreteModel(...)`** — binds parameter values (loaded weights, or the
    initializer defaults when called with no argument) into the architecture.
 
@@ -239,8 +284,8 @@ refused with an error naming the violated requirement.
 A module's `ComputationGraph` lists its `[Hyper]` parameters as graph inputs
 **before** the tensor inputs — the framework keeps the graph's inputs ordered
 hyperparameters-first, independent of the inputs-first `Inline` source order — and
-they stay inputs in the concretized graph. So both `FromOrderedInputs` and `Execute`
-take the hyper values first, then the inputs:
+they stay inputs in the concretized graph. So both `ToConcreteArchitecture`'s
+positional samples and `Execute` take the hyper values first, then the inputs:
 
 ```csharp
 // [Module] Dense { Inline(Tensor<float32> x, [Hyper] Scalar<int64> outFeatures) ... }
@@ -249,14 +294,14 @@ var input = TensorData([2L, 4L], myFloats);
 
 var graph    = Dense.ComputationGraph;
 var concrete = graph
-    .ToConcreteArchitecture(graph.FromOrderedInputs([hyper, input]))  // hypers first
+    .ToConcreteArchitecture([hyper, input])  // hypers first
     .ToConcreteModel();
 
 // Hypers first. Shared, so that both can be passed again: a feed given as it is is consumed.
 var results = ComputeContext.Default.Execute(concrete, hyper.Shared(), input.Shared());
 ```
 
-The hyper value passed to `FromOrderedInputs` is what concretization bakes from.
+The hyper value passed to `ToConcreteArchitecture` is what concretization bakes from.
 A hyper that touches the trainable parameters — their shapes (like `outFeatures`),
 or which of them exist at all (a `[Hyper]` gating an `IfElse` branch that holds
 parameters) — is **parameter-space-determining**, and the value you pass here
@@ -364,7 +409,7 @@ var specialized = graph.Specialize(graph.FromOrderedInputs([hyper]));
 
 // 2. + 3. Concretize on the remaining (runtime) inputs only.
 var concrete = specialized
-    .ToConcreteArchitecture(specialized.FromOrderedInputs([input]))
+    .ToConcreteArchitecture([input])
     .ToConcreteModel();
 
 var results = ComputeContext.Default.Execute(concrete, input);   // no hyper needed

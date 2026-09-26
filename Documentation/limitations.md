@@ -575,7 +575,14 @@ interface rather than building its definition by hand.
 
 Import accepts standard-domain (`ai.onnx`) models from opset 7 through
 opset 26 — the range implemented by the bundled ONNX Runtime 1.26 (which pins
-ONNX 1.21). Export, however, stamps models at the **opset-21 baseline**,
+ONNX 1.21). An operand that an older opset gave as an attribute and a newer one
+takes as an input is rewritten at import as a `Constant` feeding that input:
+`axes` of `Squeeze`, `Unsqueeze` and `ReduceSum` (inputs since opset 13) and of
+the other reductions (since 18), and `split` of `Split` (since 13; a `Split`
+with no sizes gets `num_outputs`, required since 18). Other operands that moved
+the same way — `Slice`'s `starts`/`ends`/`axes` before opset 10, `Pad`'s `pads`
+and `Clip`'s `min`/`max` before 11, among others — are not rewritten yet, so a
+model that uses those forms fails when it is compiled. Export, however, stamps models at the **opset-21 baseline**,
 and the exporter auto-raises each model's opset stamp only as far as the
 graph actually requires.
 

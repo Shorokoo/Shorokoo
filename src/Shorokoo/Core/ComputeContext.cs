@@ -1727,9 +1727,7 @@ namespace Shorokoo.Runtime
             var model = buildModel();
             var outputAliases = MarkedAliases(model.Graph, aliasCandidates);
 
-            var memoryStream = new MemoryStream();
-            ProtoBuf.Serializer.Serialize(memoryStream, model);
-            var modelData = memoryStream.ToArray();
+            var modelData = SerializeExactly(model);
 
             var optimization = SessionOptimization(HasOptionalOps(model.Graph), trainingStep);
             // Settled here, not inside the session: CompiledGraph then reports the strategy this
@@ -1778,6 +1776,20 @@ namespace Shorokoo.Runtime
                 _compiled.AddOrUpdate(graph, OwnedMarker);
             }
             return graph;
+        }
+
+        /// <summary>
+        /// The model's bytes in one array of exactly their size. Serializing into a growing
+        /// <see cref="MemoryStream"/> and copying it out held about five times the model's size at
+        /// once — gigabytes for an imported model of a few hundred megabytes of weights.
+        /// </summary>
+        private static byte[] SerializeExactly(ModelProto model)
+        {
+            using var measured = ProtoBuf.Serializer.Measure(model);
+            var data = new byte[measured.Length];
+            using (var stream = new MemoryStream(data, writable: true))
+                measured.Serialize(stream);
+            return data;
         }
 
         private static string[] ResolveOriginalInputNames(InternalComputationGraph graph)

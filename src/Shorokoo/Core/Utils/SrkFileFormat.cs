@@ -80,8 +80,8 @@ namespace Shorokoo.Core.Utils
     /// The payload is an ONNX ModelProto (internal dialect allowed), optionally wrapped in
     /// exactly one Zstd layer as declared by the header — compression is detected from the
     /// header, never from the file extension (".zsrk" vs ".srk" is a human-readable hint
-    /// with no parsing significance). This is the only .srk layout: there is no legacy
-    /// read path, and a file that does not open with the container magic is not a .srk file.
+    /// with no parsing significance). A file that does not open with the container magic is
+    /// not a .srk file.
     ///
     /// Save/load entry points live on <see cref="CompressedFormatUtils"/>
     /// (<c>SaveFastGraphToFile</c> / <c>LoadFastGraphFromFile</c> and the binary variants);
@@ -530,8 +530,7 @@ namespace Shorokoo.Core.Utils
         /// Extracts the serialized ONNX model bytes from a .srk container. Validates the header
         /// and the payload SHA-256, then removes the header-declared compression layer;
         /// corruption and truncation fail loudly with a message naming <paramref name="origin"/>.
-        /// Data that does not open with the container magic is not a .srk file and throws — there
-        /// is no legacy read path.
+        /// Data that does not open with the container magic is not a .srk file and throws.
         /// </summary>
         /// <param name="data">Raw file/stream bytes.</param>
         /// <param name="origin">Name used in error messages, typically the file path.</param>

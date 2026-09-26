@@ -331,31 +331,14 @@ so. Header fields (add-only across minor revisions; unknown fields are ignored):
 - `producer` is informational; the payload dialect remains versioned by the embedded
   ONNX `ir_version`/opsets themselves.
 
-This is the only `.srk` layout: there is no legacy read path, and a file that does not
-open with the container magic is not a `.srk` file (loading it fails with a clear error).
+A file that does not open with the container magic is not a `.srk` file (loading it
+fails with a clear error).
 
 Unlike `BuildOnnxModel`, this format is Shorokoo's **internal dialect**: it
 accepts any graph — module-stage graphs with their internal ops included —
 keeps internal `N{k}_T{s}` tensor names, and is only loadable by Shorokoo
 (`LoadFastGraphFromFile` / `OnnxModelImporter`). Use it for Shorokoo-to-Shorokoo
 persistence; use `BuildOnnxModel` for anything meant to leave Shorokoo.
-
-**Pre-release caveat: a payload break can land inside version 1.** Add-only governs
-the container's header *fields*. While Shorokoo is pre-release, what the **payload**
-records can still change in a read-breaking way without a container version bump —
-and once has: a concrete architecture saved before model-input shapes became
-dims-only recorded a small input as an inline representative tensor, so the current
-reader finds no shape on that input. The blast radius is narrow: it bites only where
-a rig is rebuilt from a persisted architecture with no host-supplied sample inputs —
-i.e. `TrainingRig.Load` on an older training [`.skpt`](skpt-checkpoints.md), which
-fails loudly, naming the older-build cause. There is deliberately no legacy read
-path — rebuild the rig from its source graphs and re-save. Everything else still
-reads: `LoadFastGraphFromFile` loads such a graph as it always did,
-`Persistence.Load` loads a `.skpt` holding one as an inference model,
-`rig.LoadCheckpointFromSkpt` reads the manifest and the state tensors without
-touching the stored architecture, the flat safetensors format is unaffected, and so
-is feeding a standalone `.srk` architecture to `TrainingRig.FromScratch`, whose
-sample inputs record the representative shapes afresh.
 
 ## Load pretrained weights (SafeTensors)
 

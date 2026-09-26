@@ -204,8 +204,7 @@ pipeline, applied in order:
    rebuilds its shape inference from it, and ONNX export reads an input's rank from it
    where the signature states none (see
    [onnx-and-weights.md](onnx-and-weights.md#graph-inputoutput-names-and-shapes)). A
-   concrete graph with an input that carries none — hand-built, or saved before the
-   shapes were recorded — is refused wherever it is frozen or loaded, with **`FW057`**
+   concrete graph with an input that carries none — a hand-built one, say — is refused wherever it is frozen or loaded, with **`FW057`**
    naming the input; lower it again from its module. Each **output** likewise records
    the shape it has when the graph is evaluated at those samples — at their real
    values, since a value can decide a shape (a flag choosing a branch, the axes a

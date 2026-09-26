@@ -250,8 +250,7 @@ namespace Shorokoo.Core
             // graph inputs ordered hyperparameters-first (every downstream consumer —
             // module-call inlining, signatures, concretization — relies on that order). The
             // body was already invoked with fnInputs in declaration order above, so only the
-            // order of the input nodes opening the graph follows this list; the produced graph
-            // is identical to the legacy hyperparameters-first layout.
+            // order of the input nodes opening the graph follows this list.
             var fnInputVars = fnInputs.Select(x => x.ToVariable()).ToList();
             allInputs.AddRange(fnInputVars.Where(IsHyperparamInput));
             allInputs.AddRange(fnInputVars.Where(v => !IsHyperparamInput(v)));

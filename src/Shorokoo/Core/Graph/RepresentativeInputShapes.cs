@@ -271,8 +271,7 @@ namespace Shorokoo.Core.Graph
                 $"this {Shorokoo.Core.Utils.SrkFileFormat.StageName(kind)} graph's input '{name}' carries " +
                 "no representative shape. Every input of a concrete graph records the shape of the " +
                 "sample it was concretized at: lower the module again with ToConcreteArchitecture, " +
-                "giving a sample for every input. A graph saved without these shapes cannot be read; " +
-                "re-save it from its module.");
+                "giving a sample for every input.");
         }
 
         /// <summary>

@@ -279,8 +279,8 @@ namespace Shorokoo.Core
                 : referenceMethod;
 
             // Use the factored GraphBuilder code to build the function body in its
-            // primary FastCG form. The Function ctor stores it directly; the legacy
-            // CG view is materialized lazily on demand.
+            // primary FastCG form. The Function ctor stores it directly; the Variable
+            // view is materialized lazily on demand.
             var name = defaultName ?? FriendlyDeclaringTypeName(referenceMethod) ?? referenceMethod.Name;
             var fastGraph = GraphBuilder.BuildInternalComputationGraphFromMethod(
                 methodToBuild, invokeTarget,

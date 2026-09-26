@@ -498,8 +498,7 @@ namespace Shorokoo.Core.Graph
             throw new ModelException(ErrorCodes.FW057, $"output '{name}'",
                 $"this {Shorokoo.Core.Utils.SrkFileFormat.StageName(kind)} graph's output '{name}' records " +
                 "no shape. Every output of a concrete graph records the shape it has at the samples the " +
-                "graph was concretized at: lower the module again with ToConcreteArchitecture. A graph " +
-                "saved without these shapes cannot be read; re-save it from its module.");
+                "graph was concretized at: lower the module again with ToConcreteArchitecture.");
         }
 
         /// <summary>Whether every output of <paramref name="graph"/> records a shape, as every

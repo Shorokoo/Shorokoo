@@ -702,10 +702,7 @@ model.skpt
     // tensor mapping — the optimizer state's, above — while the arch, loss and scheduler
     // entries carry none), plus the non-graph part — the hyperparameter bindings and the
     // RNG config.
-    // Written by every training .skpt this version produces; absent (⇒ null) on a file
-    // written before rig constituents existed, which resumes only by the host rebuilding
-    // the rig from the same source graphs — as does a file whose stored architecture predates
-    // dims-only model-input shapes (see the pre-release caveat in the rules below).
+    // Written by every training .skpt.
     // Model-input shapes are not recorded here: the serialized architecture carries them itself.
     "rig": {
       "rigVersion": 1,                    // rig-block version
@@ -745,17 +742,9 @@ model.skpt
 Rules:
 
 - **Keys are add-only.** A reader ignores unknown keys; removing or re-typing a key is
-  a major-version event (a bump of `skptVersion`). `skptVersion` is `1` — the only version
-  that has existed — and a file declaring any other value is refused with a clear message
-  rather than half-read. There is no read path for another version and no compatibility
-  shim: every format below is version 1, and stays there until a breaking change earns a
-  bump.
-- **Pre-release caveat: a payload break can land inside version 1.** Add-only governs the
-  manifest's *keys*; while Shorokoo is pre-release, what an entry's **payload** records can
-  still change in a read-breaking way without a `skptVersion` bump — and once has, in the
-  stored architecture. The full caveat, its blast radius and the recovery live with the
-  container the break happened in: see
-  [the pre-release caveat](onnx-and-weights.md#the-srk-container).
+  a major-version event (a bump of `skptVersion`). `skptVersion` is `1`, and a file declaring
+  any other value is refused with a clear message rather than half-read. Every format below
+  is version 1.
 - **Integrity is checked on load.** Every entry the manifest references must exist and
   match its recorded `sha256`; a missing entry, a hash mismatch, or a tensor mapping
   that does not cover the model's parameters exactly fails loudly, naming the
@@ -780,8 +769,3 @@ Rules:
   resuming from one means rebuilding the rig from the same graphs, then loading the file
   with `rig.LoadCheckpoint`. Precompiled artifacts are still a future extension of the
   container.
-- Resuming from the file alone does not reach back across pre-release payload breaks: a
-  training `.skpt` whose architecture was written before model-input shapes became dims-only
-  is rejected by `TrainingRig.Load` and has to be rebuilt from its source graphs and re-saved
-  (see [the pre-release caveat](onnx-and-weights.md#the-srk-container)). Its state and its
-  inference model still load.

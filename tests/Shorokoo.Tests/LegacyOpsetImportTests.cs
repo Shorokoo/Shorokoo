@@ -16,11 +16,14 @@ public class LegacyOpsetImportTests
     private const int FloatElem = 1;
 
     private static float[] Run(long opset, string opType, long[] inputDims, long[] outputDims, params AttributeProto[] attributes)
+        => Run(opset, opType, "x", inputDims, outputDims, attributes);
+
+    private static float[] Run(long opset, string opType, string inputName, long[] inputDims, long[] outputDims, params AttributeProto[] attributes)
     {
         var graph = new GraphProto { Name = "legacy" };
-        graph.Inputs.Add(TensorInfo("x", FloatElem, inputDims));
+        graph.Inputs.Add(TensorInfo(inputName, FloatElem, inputDims));
         var node = new NodeProto { OpType = opType, Name = "n0" };
-        node.Inputs.Add("x");
+        node.Inputs.Add(inputName);
         node.Outputs.Add("y");
         if (opType == "Split")
             node.Outputs.Add("rest");
@@ -52,5 +55,6 @@ public class LegacyOpsetImportTests
         Assert.Equal([2f, 5f], Run(11, "ReduceMean", [2, 3], [2, 1], Ints("axes", -1)));
         Assert.Equal([3f, 6f], Run(17, "ReduceMax", [2, 3], [2, 1], Ints("axes", 1)));
         Assert.Equal([1f, 4f], Run(11, "Split", [2, 3], [2, 1], Int("axis", 1), Ints("split", 1, 2)));
+        Assert.Equal([1f, 2f, 3f], Run(11, "Unsqueeze", "y__axes", [3], [1, 3], Ints("axes", 0)));
     }
 }

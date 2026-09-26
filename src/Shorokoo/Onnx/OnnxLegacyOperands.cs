@@ -45,17 +45,58 @@ namespace Shorokoo.Onnx
         public static void Upgrade(ModelProto model)
         {
             long? modelOpset = StandardOpset(model.OpsetImports);
+            var names = new HashSet<string>(StringComparer.Ordinal);
+            if (model.Graph is { } g)
+                CollectNames(g, names);
+            foreach (var function in model.Functions)
+                CollectNodeNames(function.Nodes, names);
             if (model.Graph is { } graph && modelOpset is { } opset)
-                UpgradeNodes(graph.Nodes, opset);
+                UpgradeNodes(graph.Nodes, opset, names);
             foreach (var function in model.Functions)
                 if ((StandardOpset(function.OpsetImports) ?? modelOpset) is { } functionOpset)
-                    UpgradeNodes(function.Nodes, functionOpset);
+                    UpgradeNodes(function.Nodes, functionOpset, names);
         }
 
         private static long? StandardOpset(IEnumerable<OperatorSetIdProto> imports) =>
             imports.FirstOrDefault(i => string.IsNullOrEmpty(i.Domain) || i.Domain == "ai.onnx")?.Version;
 
-        private static void UpgradeNodes(List<NodeProto> nodes, long opset)
+        // Every tensor name the model uses anywhere (a subgraph may read its parent's), so a new
+        // constant never takes one.
+        private static void CollectNames(GraphProto graph, HashSet<string> names)
+        {
+            foreach (var input in graph.Inputs)
+                names.Add(input.Name);
+            foreach (var initializer in graph.Initializers)
+                names.Add(initializer.Name);
+            CollectNodeNames(graph.Nodes, names);
+        }
+
+        private static void CollectNodeNames(List<NodeProto> nodes, HashSet<string> names)
+        {
+            foreach (var node in nodes)
+            {
+                names.UnionWith(node.Outputs);
+                foreach (var attribute in node.Attributes)
+                {
+                    if (attribute.G is { } subgraph)
+                        CollectNames(subgraph, names);
+                    foreach (var g in attribute.Graphs)
+                        CollectNames(g, names);
+                }
+            }
+        }
+
+        // Named after the node's first output, with a counter where that name is taken, so an
+        // import stays deterministic.
+        private static string FreshName(string stem, HashSet<string> names)
+        {
+            string name = stem;
+            for (int n = 2; !names.Add(name); n++)
+                name = $"{stem}_{n}";
+            return name;
+        }
+
+        private static void UpgradeNodes(List<NodeProto> nodes, long opset, HashSet<string> names)
         {
             for (int i = 0; i < nodes.Count; i++)
             {
@@ -63,17 +104,16 @@ namespace Shorokoo.Onnx
                 foreach (var attribute in node.Attributes)
                 {
                     if (attribute.G is { } subgraph)
-                        UpgradeNodes(subgraph.Nodes, opset);
+                        UpgradeNodes(subgraph.Nodes, opset, names);
                     foreach (var g in attribute.Graphs)
-                        UpgradeNodes(g.Nodes, opset);
+                        UpgradeNodes(g.Nodes, opset, names);
                 }
                 if (!string.IsNullOrEmpty(node.Domain) && node.Domain != "ai.onnx" || !Moved.TryGetValue(node.OpType, out var moved))
                     continue;
 
                 if (opset < moved.InputSince && node.Attributes.FirstOrDefault(a => a.Name == moved.Attribute) is { } operand)
                 {
-                    // Named after the node's first output, unique in the graph, so an import stays deterministic.
-                    string name = $"{node.Outputs[0]}__{moved.Attribute}";
+                    string name = FreshName($"{node.Outputs[0]}__{moved.Attribute}", names);
                     // The operand is the node's second input; the first is always present.
                     while (node.Inputs.Count < 2)
                         node.Inputs.Add("");

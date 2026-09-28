@@ -165,7 +165,8 @@ Boolean/integer outputs are non-differentiable, hence N/A.
    keep the `Where` ([#423](https://github.com/Shorokoo/Shorokoo/issues/423)).
    Every selected value comes out exact, with one exception: ONNX Runtime's
    float32, float64 and float16 `Where` gives +0 where it selects −0 from `x`
-   (a −0 from `y` keeps its sign), and the float32 path of bfloat16 inherits it.
+   (a −0 from `y` keeps its sign), and the float32 path of bfloat16 inherits it
+   ([#439](https://github.com/Shorokoo/Shorokoo/issues/439)).
 3. The condition is non-differentiable; both branches get broadcast-aware
    gradients.
 

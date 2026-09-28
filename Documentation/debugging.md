@@ -171,7 +171,8 @@ from the input's shape and axes, is right for every input.
 Three ONNX Runtime faults have no workaround, and a model that meets one gets ONNX Runtime's result:
 
 - A float32, float64 or float16 `Where` gives +0 where it selects −0 from `x`; a −0 it selects from
-  `y` keeps its sign. A bfloat16 `Where`, selected through float32, does the same.
+  `y` keeps its sign. A bfloat16 `Where`, selected through float32, does the same
+  ([#439](https://github.com/Shorokoo/Shorokoo/issues/439)).
 
 - `MaxPool` without an `Indices` output gives a window of only −inf the type's lowest finite value
   instead of −inf ([#426](https://github.com/Shorokoo/Shorokoo/issues/426)).

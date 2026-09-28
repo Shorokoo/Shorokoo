@@ -33,8 +33,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// draw's ordinal within the initializer (a distinct sub-stream per draw SITE; every shipping
     /// initializer has exactly one, so ordinal 0 in practice), and its shape input and declared
     /// distribution bounds carry over — the initializer's downstream scaling math is unchanged.
-    /// <see cref="FastLowerRandomOps"/> later lowers the keyed node to a call of the named
-    /// algorithm's exported function, exactly as for a runtime feed.</para>
+    /// The keyed node is then lowered, here, to a call of the named algorithm's <b>chunked</b>
+    /// draw function (<see cref="Shorokoo.Core.Rng.RngAlgorithms.GetChunkedFunction"/>): the values a
+    /// runtime feed's whole-draw function produces, bit for bit, computed a bounded run of stream
+    /// positions at a time, so a parameter's draw works in memory bounded by the chunk rather than
+    /// by the parameter.</para>
     ///
     /// <para>The substitution runs on the initializer's <b>flattened</b> body
     /// (<see cref="Function.GetFastFlattenedGraph"/>), so a draw factored into a called
@@ -209,6 +212,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     {
                         [""] = new List<FastTensorKey?> { keyKey, substreamIndexKey, shapeInput }
                     };
+                    FastLowerRandomOps.LowerKeyedRngToFunctionCall(node, chunked: true);
                     newNodes.Add(node);
                     randomOrdinal++;
                     continue;
@@ -233,8 +237,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
                 // Rewrite the random node in place to the keyed draw (inputs
                 // [key, substreamIndex, shape, a, b]), preserving its output key so downstream
-                // consumers stay valid. FastLowerRandomOps lowers it to the algorithm's
-                // function call at ONNX prep.
+                // consumers stay valid, then lower it to the algorithm's chunked draw call.
                 var newOp = isUniform ? InternalOpCodes.SHRK_RNG_UNIFORM : InternalOpCodes.SHRK_RNG_NORMAL;
                 node.OpCode = newOp;
                 node.Attributes = OnnxCSharpAttributes.FromCSharpVals(
@@ -244,6 +247,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 {
                     [""] = new List<FastTensorKey?> { keyKey, substreamIndexKey, shapeInput, aKey, bKey }
                 };
+                FastLowerRandomOps.LowerKeyedRngToFunctionCall(node, chunked: true);
                 newNodes.Add(node);
                 randomOrdinal++;
             }

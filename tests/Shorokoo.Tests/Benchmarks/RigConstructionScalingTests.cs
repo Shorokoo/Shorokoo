@@ -63,9 +63,11 @@ internal static class RigScalingStack
 /// per-parameter session retains — each with a cause of its own, so one measurement cannot stand
 /// in for another.
 ///
-/// <para><b>Bytes per trainable element.</b> A backend that folds the whole input-less
+/// <para><b>Bytes per trainable element.</b> A backend folding the whole input-less
 /// initialization graph at session build costs ~4.4 KiB of host working set per parameter
-/// ELEMENT, ~1100x the 4 bytes the fp32 parameter occupies. Measured as the ADDITIONAL
+/// ELEMENT, ~1100x the 4 bytes the fp32 parameter occupies, and a draw computed over a whole
+/// parameter at once still costs ~400 B, its integer intermediates all live together; a draw
+/// computed a chunk of positions at a time costs the parameter itself. Measured as the ADDITIONAL
 /// peak the large table needs over the small one, so the fixed process floor cancels and what
 /// remains is the per-element law — machine-independent in a way a wall clock is not.</para>
 ///
@@ -98,13 +100,15 @@ internal static class RigScalingStack
 [Collection(SerialMeasurement.Name)]
 public class RigConstructionScalingTests
 {
-    /// <summary>Measured ~400 B/element over a 0.5% spread; the law this catches is ~4.4 KiB.</summary>
-    private const double MemoryBudgetBytesPerElement = 1536.0;
+    /// <summary>Measured ~21 B/element; a whole-parameter draw gives ~400, and a folded graph ~4.4 KiB.</summary>
+    private const double MemoryBudgetBytesPerElement = 128.0;
 
-    /// <summary>Measured 0.65-1.14 (linear); the quadratic law gives ~6.</summary>
+    /// <summary>Measured ~0.4 (shared sessions make the deeper stack cheaper per parameter); the
+    /// quadratic law gives ~6.</summary>
     private const double MaxPerParameterCostGrowth = 2.0;
 
-    /// <summary>Measured 10-46 MiB across a 12-parameter initialization; uncopied, 379-481 MiB.</summary>
+    /// <summary>Measured 2-6 MiB across a 12-parameter initialization — the 6.75 MiB of values,
+    /// less what the allocators hand back meanwhile; uncopied, 379-481 MiB.</summary>
     private const long RetainedBudgetBytes = 96L * 1024 * 1024;
 
     private const int TimingRuns = 3;
@@ -133,6 +137,9 @@ public class RigConstructionScalingTests
         BuildRig(RigScalingTableLarge.ComputationGraph);
         long peakGrowth = PeakWorkingSetBytes() - peakAfterSmallTable;
 
+        // Warmed first, so what the allocators take or hand back on a first run is not counted
+        // against the one measured.
+        large.InitializeTrainableParams();
         long before = LiveWorkingSetBytes();
         var values = large.InitializeTrainableParams();
         long retained = LiveWorkingSetBytes() - before;

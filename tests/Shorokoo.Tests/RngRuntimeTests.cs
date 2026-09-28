@@ -1501,6 +1501,21 @@ public class RngRuntimeTests
         Assert.Equal(underSeed1, Run());   // re-binding is exact, not approximate
     }
 
+    private static byte[] Drawn(Variable draw)
+        => ComputeContext.Default.Execute(new InternalComputationGraph([], [draw]))[0].ToTensorData().CopyRawMemory();
+
+    [Fact]
+    public void TestAChunkedDrawIsTheWholeDrawBitForBitAcrossChunkBoundaries()
+    {
+        const long n = 23, chunk = 5;
+        var (key, sub) = (Scalar(NormalKey), Scalar(5UL));
+        Assert.Equal(Drawn(RuntimeRng.Normal(Vector(3L, n), key, sub, Scalar(0f), Scalar(1f), Threefry2x32.Rounds13)), Drawn(RuntimeRng.NormalChunked(Vector(3L, n), key, sub, Scalar(0f), Scalar(1f), Threefry2x32.Rounds13, chunk)));
+        Assert.Equal(Drawn(RuntimeRng.Uniform(Vector(n), key, sub, Scalar(-1f), Scalar(3f))), Drawn(RuntimeRng.UniformChunked(Vector(n), key, sub, Scalar(-1f), Scalar(3f), chunkPositions: chunk)));
+        Assert.Equal(Drawn(RuntimeRng.BitsU8(Vector(8 * n + 5), key, sub)), Drawn(RuntimeRng.BitsU8Chunked(Vector(8 * n + 5), key, sub, chunkPositions: chunk)));
+        Assert.Equal(Drawn(RuntimeRng.BitsU64(Vector(n), key, sub)), Drawn(RuntimeRng.BitsU64Chunked(Vector(n), key, sub, chunkPositions: chunk)));
+        Assert.Empty(Drawn(RuntimeRng.NormalChunked(Vector(0L, 4L), key, sub, Scalar(0f), Scalar(1f), chunkPositions: chunk)));
+    }
+
     [Fact]
     public void TestSplitIndexAndDrawPositionUseTheWholeSixtyFourBitRange()
     {

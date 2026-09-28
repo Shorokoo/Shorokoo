@@ -340,15 +340,18 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// once per parameter with that parameter's key. A model whose layers repeat builds a
         /// handful of sessions however deep it is.</para>
         ///
-        /// <para>Neither costs memory, because of two things done per run. Each result is copied
-        /// off its session (<see cref="FastProcessorHelper.RehostOffSession"/>): a result keeps its
-        /// session's arena alive, so N retained results would otherwise hold N arenas, each sized to
-        /// a draw rather than to a parameter. And each run hands its arena's unused blocks back as
-        /// it ends (<see cref="RunSettings.ShrinkArenaAfterRun"/>): a session run a second time on
-        /// the same shapes lays its intermediates out in one block sized to the first run's peak,
-        /// which the arena still holding the first run's blocks cannot supply — measured on two
-        /// [20000, 384] normal draws, the second run took the process from 2.9 to 5.6 GB, and with
-        /// the shrink it stayed at 3.0, the figure one session per parameter peaks at.</para>
+        /// <para>Memory is bounded by three things. Each keyed draw is computed a chunk of stream
+        /// positions at a time (see <see cref="FastInitKeyedDraws"/>), so a run's working memory is
+        /// a chunk's — hundreds of integer passes over it — rather than hundreds of bytes per element
+        /// of the parameter. Each result is copied off its session
+        /// (<see cref="FastProcessorHelper.RehostOffSession"/>): a result keeps its session's arena
+        /// alive, so N retained results would otherwise hold N arenas. And each run hands its
+        /// arena's unused blocks back as it ends (<see cref="RunSettings.ShrinkArenaAfterRun"/>): a
+        /// session run a second time on the same shapes lays its intermediates out in one block
+        /// sized to the first run's peak, which an arena still holding the first run's blocks
+        /// cannot supply, so without the shrink a shared session's arena doubles. What stays is the
+        /// parameters' values themselves: a 57.9 M-element model peaks at 2.2 GB of working set
+        /// through its whole <c>FromScratch</c>.</para>
         ///
         /// <para>Sharing one function BODY across the parameters does not substitute for slicing:
         /// the backend inlines every call site, so the graph it builds is the same size either

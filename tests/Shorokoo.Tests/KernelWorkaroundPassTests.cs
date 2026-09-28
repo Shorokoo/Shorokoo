@@ -247,6 +247,17 @@ public class KernelWorkaroundPassTests
         Assert.True(AllTrueWithConcreteShapes(NoopReduceAxesFormsCheck.ComputationGraph, x));
     }
 
+    [Fact]
+    public void TestASamePoolStridedPastItsKernelPoolsAtItsStrideAndCropsOnlyWhereTheSpecDoes()
+    {
+        var x = InputTensor<float32>("x", rank: 4);
+        var g = Graph(x, OnnxOp.MaxPool(x, AutoPad.SameUpper, null, null, [1L, 1L], null, null, [2L, 2L]));
+        Assert.All(AllNodes(Session(g, KernelWorkaroundRegistry.OnnxRuntime)).Where(n => n.OpType == MAX_POOL),
+            n => Assert.Equal([2L, 2L], n.Attributes.Single(a => a.Name == "strides").Ints.ToArray()));
+        Assert.DoesNotContain(AllNodes(Optimized(FastOnnxModelBuilder.BuildInternalOnnxModel(g, prepForOnnx: true,
+            inputDims: [[1L, 1L, 5L, 7L]], workarounds: KernelWorkaroundRegistry.OnnxRuntime))), n => n.OpType == SLICE);
+    }
+
     private static InternalComputationGraph Graph(Variable input, Variable output) => new([input], [output]);
 
     private static bool AsWritten(InternalComputationGraph g)

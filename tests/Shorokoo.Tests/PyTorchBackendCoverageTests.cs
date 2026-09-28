@@ -302,6 +302,8 @@ public class PyTorchBackendCoverageTests
             12, -6, 4, -2, 10, 10, 14, 14, 4, 6, 12, 2, 22, 22, 18, 18, 12, -6, 4, -2, 10, 10, 14, 14, 1, 9, 3, 8, 25, 25, 24, 24,
             -10, 15, -6, -13, 6, -1, 10, 3, 10, 9, 6, 5, 26, 25, 22, 21));
         Assert.True(AutoTest.AdvancedTestGraph<PaddedMaxPoolIndicesPointAtTheirValues>([], [QeeAudit.F32([1L, 1L, 5L], 0f, 0f, 5f, 0f, 0f)], context: c));
+        Assert.True(Spec<NegativeSamePaddingMaxPoolIndicesValues>(c, QeeAudit.F32([1L, 2L, 5L, 6L], [.. Enumerable.Range(0, 60).Select(i => (float)(i * 7 % 11 - 5))]),
+            4, -1, 5, 4, 5, 0, -1, 5, 6, 10, 25, 28, 36, 40, 54, 58, 2, 1, 5, 4, 3, 2, -3, 5, 1, 4, 25, 28, 31, 34, 49, 58));
     }
 
     internal static void LowestValuedWindowMaxPoolIndexIsItsFirstInputPosition(ComputeContext c)

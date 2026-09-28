@@ -539,6 +539,22 @@ namespace Shorokoo.Tests.Modules
                 .Concat(2L, (Tensor<float32>)OnnxOp.MaxPool(x, AutoPad.SameUpper, false, null, [1L], null, 0L, [3L]));
     }
 
+    /// <summary>MaxPool values then indices, SAME_UPPER k [1,2] s [3,4] and SAME_LOWER k [2,1] s [3,3], whose
+    /// padding is negative along an axis, each flattened. Input x is [1,2,5,6].</summary>
+    [Module]
+    public partial class NegativeSamePaddingMaxPoolIndicesValues
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x)
+        {
+            Tensor<float32> Pooled(AutoPad same, long[] kernel, long[] strides)
+            {
+                var (y, indices) = OnnxOp.MaxPoolWithIndices(x, same, false, null, kernel, null, 0L, strides);
+                return ((Tensor<float32>)y).Reshape(Vector(-1L)).Concat(0L, ((Tensor<int64>)indices).Cast<float32>().Reshape(Vector(-1L)));
+            }
+            return Pooled(AutoPad.SameUpper, [1L, 2L], [3L, 4L]).Concat(0L, Pooled(AutoPad.SameLower, [2L, 1L], [3L, 3L]));
+        }
+    }
+
     /// <summary>ceil_mode pools whose pads reach the kernel: AveragePool count_include_pad 1 and
     /// LpPool p 2 (k 2, s 3, pads [0,4]), MaxPool (k 3, d 2, s 2, pads [3,1]), MaxPool (k 2, d 2,
     /// s 3, pads [2,2]), AveragePool count_include_pad 0 (k 3, s 2, pads [1,3]). Input x is [1,1,9].</summary>

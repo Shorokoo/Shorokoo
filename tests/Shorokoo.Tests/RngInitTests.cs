@@ -211,6 +211,18 @@ public class RngInitTests
         return backend.Sessions;
     }
 
+    private static float[][] InitValues(ComputationGraph model, bool sideBySide)
+    {
+        var arch = model.ToConcreteArchitecture([TensorData([1L, 4L], new float[4])]);
+        using var decided = Shorokoo.Core.Nodes.Processors.Fast.FastInitializeModelParams.DecideSideBySide(sideBySide);
+        return [.. arch.InitializeTrainableParams(rngConfig: new RngConfig { MasterSeed = 17 }).ModelParams
+            .Select(p => p.ToTensorData().As<float32>().AccessMemory().ToArray())];
+    }
+
+    [Fact]
+    public void TestParametersDrawnSideBySideAreTheValuesDrawnInTurn()
+        => Assert.Equal(InitValues(RngInitSameShapeStack8.ComputationGraph, sideBySide: false), InitValues(RngInitSameShapeStack8.ComputationGraph, sideBySide: true));
+
     [Fact]
     public void TestSameShapedParametersShareTheirInitializationSessions()
         => Assert.Equal(InitSessions(RngInitSameShapeStack2.ComputationGraph), InitSessions(RngInitSameShapeStack8.ComputationGraph));
@@ -281,6 +293,8 @@ public class RngInitTests
 internal sealed class SessionCountingBackend(IShorokooBackend inner) : IShorokooBackend
 {
     internal int Sessions;
+    internal int Disposed;
+    internal int Live => Sessions - Disposed;
 
     public BackendDescription Description => inner.Description;
     public MemorySpace MemorySpace => inner.MemorySpace;
@@ -294,7 +308,31 @@ internal sealed class SessionCountingBackend(IShorokooBackend inner) : IShorokoo
         ShorokooLogSeverity logSeverity, DeviceMemorySettings deviceMemory)
     {
         System.Threading.Interlocked.Increment(ref Sessions);
-        return inner.CreateSession(modelBytes, graphOptimization, logSeverity, deviceMemory);
+        return new CountedSession(inner.CreateSession(modelBytes, graphOptimization, logSeverity, deviceMemory), this);
+    }
+
+    private sealed class CountedSession(IShorokooSession inner, SessionCountingBackend owner) : IShorokooSession
+    {
+        public IReadOnlyList<string> InputNames => inner.InputNames;
+        public IReadOnlyList<string> OutputNames => inner.OutputNames;
+        public bool HasDeviceMemory => inner.HasDeviceMemory;
+
+        public IReadOnlyList<IShorokooTensorValue> Run(
+            IReadOnlyDictionary<string, IShorokooTensorValue> inputs, IReadOnlyList<string> outputNames,
+            RunSettings runSettings)
+            => inner.Run(inputs, outputNames, runSettings);
+
+        public IReadOnlyList<IShorokooTensorValue> RunRetainingOutputs(
+            IReadOnlyDictionary<string, IShorokooTensorValue> inputs,
+            IReadOnlyList<string> outputNames, IReadOnlySet<string> retainedOutputNames,
+            RunSettings runSettings)
+            => inner.RunRetainingOutputs(inputs, outputNames, retainedOutputNames, runSettings);
+
+        public void Dispose()
+        {
+            inner.Dispose();
+            System.Threading.Interlocked.Increment(ref owner.Disposed);
+        }
     }
 
     public IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged

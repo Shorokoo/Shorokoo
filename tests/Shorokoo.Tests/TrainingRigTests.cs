@@ -162,6 +162,15 @@ public partial class TwoParamsFirstTooLargeModel
 }
 
 [Module]
+public partial class ThreeParamsMiddleTooLargeModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+        => x * Zeros.Init([Scalar(4L)]).Reduce(ReduceKind.Mean, null, keepDims: false).Scalar()
+             * Zeros.Init([Scalar(1L << 25), Scalar(1L << 25)]).Reduce(ReduceKind.Mean, null, keepDims: false).Scalar()
+             * Zeros.Init([Scalar(4L)]).Reduce(ReduceKind.Mean, null, keepDims: false).Scalar();
+}
+
+[Module]
 public partial class ParamSizeOverflowingModel
 {
     public static Tensor<float32> Inline(Tensor<float32> x)
@@ -1537,6 +1546,22 @@ public class TrainingRigCompositionCoverageTests
         Assert.Contains("[33554432, 33554432] = 4.00 PiB failed", twoEx.Message);
         Assert.Contains("[67108864, 33554432] = 8.00 PiB", twoEx.Message);
         Assert.Contains("1 of 2", twoEx.Message);
+    }
+
+    [Fact]
+    public void TestAnAllocationFailureAmongRunsSideBySideNamesItsParameterAndLeavesNoSession()
+    {
+        var arch = ThreeParamsMiddleTooLargeModel.ComputationGraph.ToInternal().ToConcreteArchitecture(
+            [TensorData([1L, 4L], [1f, 2f, 3f, 4f])]);
+        var backend = new SessionCountingBackend(DefaultBackend.Instance);
+        using var ctx = new ComputeContext(backend);
+        using (Shorokoo.Core.Nodes.Processors.Fast.FastInitializeModelParams.DecideSideBySide(true))
+        {
+            var ex = Assert.Throws<ComputeContextException>(() => arch.InitializeTrainableParams(computeContext: ctx));
+            Assert.Contains("[33554432, 33554432] = 4.00 PiB failed", ex.Message);
+            Assert.Contains("1 of 3", ex.Message);
+        }
+        Assert.Equal(0, backend.Live);
     }
 
     [Fact]

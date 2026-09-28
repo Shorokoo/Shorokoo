@@ -270,10 +270,88 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 group.Members.Add((i, [.. chunk.Inputs.Select(k => keyByInput[k])]));
             }
 
-            // One group at a time, its session disposed before the next one's is built, so only one
-            // session's arena is ever alive; each result is copied off it as it is produced, and
-            // each run hands the arena's unused blocks back as it ends (see ChunkFor).
+            var elements = collectedInventory.Select(x => ElementCount(x.Shape)).ToArray();
+            var results = RunsSideBySide(compute, elements)
+                ? RunConcurrently(compute, groups, elements, collectedInventory)
+                : RunInTurn(compute, groups, collectedInventory);
+
             var builder = ImmutableDictionary.CreateBuilder<ModelId, TensorData>();
+            for (int i = 0; i < results.Length; i++)
+                builder[collectedModelIds[i]] = results[i];
+            return builder.ToImmutable();
+        }
+
+        /// <summary>
+        /// Whether the runs go side by side, each on a single-threaded session, rather than one
+        /// after another on sessions that spread each operator over every core. A keyed draw is
+        /// hundreds of integer passes, and a backend's thread pool spreads them poorly: measured on
+        /// four cores, four single-threaded runs side by side drew 2.2x what the same four drew one
+        /// after another multi-threaded. Side by side is only a gain while there is work to put
+        /// beside the largest run, so it is taken where no parameter holds more than half of the
+        /// elements — a lone large parameter drawn single-threaded would run slower than it does
+        /// alone on every core. On the CPU only: a card's session is its own parallelism, and there
+        /// the runs keep their order.
+        /// </summary>
+        private static bool RunsSideBySide(ComputeContext compute, long[] elements)
+        {
+            if (elements.Length < 2 || System.Environment.ProcessorCount < 2) return false;
+            if (compute.Backend.Device != ComputeDevice.Cpu) return false;
+            if (_sideBySide is { } decided) return decided;
+            if (elements.Any(e => e < 0)) return false;
+            double total = elements.Sum(e => (double)e);
+            return elements.Max() * 2.0 <= total;
+        }
+
+        [System.ThreadStatic] private static bool? _sideBySide;
+
+        /// <summary>
+        /// Decides <see cref="RunsSideBySide"/> for the initializations this thread starts until
+        /// the returned scope is disposed, where a CPU context has two or more parameters to run —
+        /// for a test to hold the two schedules against each other, and to drive the side-by-side
+        /// one over parameters its own rule would run in turn. Thread-scoped, like the other
+        /// fault-injection facilities, so tests running in parallel do not see each other's.
+        /// </summary>
+        internal static System.IDisposable DecideSideBySide(bool sideBySide)
+        {
+            var previous = _sideBySide;
+            _sideBySide = sideBySide;
+            return new SideBySideScope(previous);
+        }
+
+        private sealed class SideBySideScope(bool? previous) : System.IDisposable
+        {
+            public void Dispose() => _sideBySide = previous;
+        }
+
+        /// <summary>The elements of a shape, or -1 where it is not known; saturates rather than
+        /// wrapping.</summary>
+        private static long ElementCount(long[]? shape)
+        {
+            if (shape is null) return -1;
+            long n = 1;
+            foreach (var d in shape)
+            {
+                if (d < 0) return -1;
+                if (d != 0 && n > long.MaxValue / d) return long.MaxValue;
+                n *= d;
+            }
+            return n;
+        }
+
+        /// <summary>A run's own values, fed to its group's session.</summary>
+        private static IData[] KeyFeeds(ulong[] keys) => [.. keys.Select(k => (IData)Shorokoo.Globals.TensorData([], k))];
+
+        /// <summary>
+        /// Every parameter's initial value, one group at a time: a group's session is disposed
+        /// before the next one's is built, so only one session's arena is ever alive; each result
+        /// is copied off it as it is produced, and each run hands the arena's unused blocks back as
+        /// it ends (see ChunkFor).
+        /// </summary>
+        private static TensorData[] RunInTurn(
+            ComputeContext compute, List<InitGroup> groups,
+            List<(string? Template, ConcreteModelParamInfo? Info, ModelId Id, DType DType, long[]? Shape)> inventory)
+        {
+            var results = new TensorData[inventory.Count];
             foreach (var group in groups)
             {
                 int current = group.Members[0].Param;
@@ -287,30 +365,174 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     foreach (var (param, keys) in group.Members)
                     {
                         current = param;
-                        IData[] feeds = [.. keys.Select(k => (IData)Shorokoo.Globals.TensorData([], k))];
-                        builder[collectedModelIds[param]] =
-                            FastProcessorHelper.RehostOffSession(compiled.Execute(feeds, shrinking)[0].ToTensorData());
+                        results[param] = FastProcessorHelper.RehostOffSession(
+                            compiled.Execute(KeyFeeds(keys), shrinking)[0].ToTensorData());
                     }
                 }
                 catch (System.Exception ex) when (IsAllocationFailure(ex))
                 {
-                    // The backend reports an out-of-memory abort as a bare "bad allocation", with
-                    // no parameter, shape or size — nothing to separate "this parameter is too
-                    // large" from "this graph is malformed" (#208). Each run initializes one
-                    // parameter, and a group's session is built for parameters of one shape, so
-                    // the one being initialized — the group's first while its session is built —
-                    // IS the one that failed: name it, with the rest of the model as context; the
-                    // inner exception keeps the original diagnosis. Only allocation failures are
-                    // relabelled: everything else this call can raise (a missing backend package,
-                    // an unsupported op, a malformed graph) already says what it is, and keeping
-                    // its type keeps the catch clauses around this API working.
-                    throw new ComputeContextException(ErrorCodes.CR008, "FastInitializeModelParams",
-                        DescribeInventory(collectedInventory, failing: current) +
-                        " Underlying failure: " + ex.Message, ex);
+                    throw Labelled(ex, inventory, current);
                 }
             }
-            return builder.ToImmutable();
+            return results;
         }
+
+        /// <summary>
+        /// What one parameter's run is modelled to hold while it is in flight: its value a few times
+        /// over — the drawn tensor, what the initializer computes from it, the copy taken off the
+        /// session — and one chunk's working memory of the draw.
+        /// </summary>
+        private static long InFlightBytes(long elements)
+            => elements > (long.MaxValue - ChunkWorkingBytes) / InFlightBytesPerElement
+                ? long.MaxValue
+                : elements * InFlightBytesPerElement + ChunkWorkingBytes;
+
+        private const long InFlightBytesPerElement = 32;
+        private const long ChunkWorkingBytes = 64L << 20;
+
+        /// <summary>
+        /// Every parameter's initial value, the runs side by side (see <see cref="RunsSideBySide"/>).
+        ///
+        /// <para>Every group's session is built first, one after another on this thread, each with a
+        /// single intra-op thread; the runs then go to up to <see cref="System.Environment.ProcessorCount"/>
+        /// workers, taken in parameter order, a run starting only while the runs in flight are
+        /// modelled to hold no more than a quarter of the memory available to the process
+        /// (<see cref="InFlightBytes"/>) — or alone, whatever it holds. The values are the same bit
+        /// for bit whichever thread draws them, and each lands in its parameter's own slot.</para>
+        ///
+        /// <para>A failure stops new runs from starting, and those in flight finish. Runs start in
+        /// parameter order, so every parameter before a failed one has been run by then, and the
+        /// failure reported is the first parameter's in order that failed — the one a run in turn
+        /// would have reported, named as it would have been (CR008). Every session is disposed
+        /// however the runs end.</para>
+        /// </summary>
+        private static TensorData[] RunConcurrently(
+            ComputeContext compute, List<InitGroup> groups, long[] elements,
+            List<(string? Template, ConcreteModelParamInfo? Info, ModelId Id, DType DType, long[]? Shape)> inventory)
+        {
+            int count = inventory.Count;
+            var groupOf = new int[count];
+            var keysOf = new ulong[count][];
+            for (int g = 0; g < groups.Count; g++)
+                foreach (var (param, keys) in groups[g].Members)
+                    (groupOf[param], keysOf[param]) = (g, keys);
+
+            var costs = elements.Select(InFlightBytes).ToArray();
+            long budget = System.Math.Max(costs.Max(),
+                System.GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / 4);
+
+            var sessions = new CompiledGraph?[groups.Count];
+            try
+            {
+                for (int g = 0; g < groups.Count; g++)
+                {
+                    try
+                    {
+                        sessions[g] = compute.Compile(
+                            groups[g].Chunk, ShorokooGraphOptimization.DisableAll, intraOpThreads: 1);
+                    }
+                    catch (System.Exception ex) when (IsAllocationFailure(ex))
+                    {
+                        throw Labelled(ex, inventory, groups[g].Members[0].Param);
+                    }
+                }
+
+                var results = new TensorData[count];
+                var failures = new System.Exception?[count];
+                var gate = new object();
+                int next = 0;
+                long inFlight = 0;
+                bool stopped = false;
+
+                void Work()
+                {
+                    while (true)
+                    {
+                        int i;
+                        lock (gate)
+                        {
+                            while (true)
+                            {
+                                if (next == count || stopped) return;
+                                if (inFlight == 0 || inFlight <= budget - costs[next]) break;
+                                System.Threading.Monitor.Wait(gate);
+                            }
+                            i = next++;
+                            inFlight += costs[i];
+                        }
+                        try
+                        {
+                            var compiled = sessions[groupOf[i]]!;
+                            results[i] = FastProcessorHelper.RehostOffSession(compiled.Execute(
+                                KeyFeeds(keysOf[i]),
+                                compiled.DefaultRunSettings with { ShrinkArenaAfterRun = true })[0].ToTensorData());
+                        }
+                        catch (System.Exception ex)
+                        {
+                            failures[i] = ex;
+                            lock (gate) stopped = true;
+                        }
+                        finally
+                        {
+                            lock (gate)
+                            {
+                                inFlight -= costs[i];
+                                System.Threading.Monitor.PulseAll(gate);
+                            }
+                        }
+                    }
+                }
+
+                // Joined before the sessions go, however this thread leaves: a worker still running
+                // would be running a disposed session.
+                int workers = System.Math.Min(System.Environment.ProcessorCount, count);
+                var threads = new List<System.Threading.Thread>(workers - 1);
+                try
+                {
+                    for (int t = 1; t < workers; t++)
+                    {
+                        var thread = new System.Threading.Thread(Work) { IsBackground = true, Name = "Shorokoo initialization" };
+                        thread.Start();
+                        threads.Add(thread);
+                    }
+                    Work();
+                }
+                finally
+                {
+                    foreach (var thread in threads) thread.Join();
+                }
+
+                for (int i = 0; i < count; i++)
+                {
+                    if (failures[i] is not { } failure) continue;
+                    if (IsAllocationFailure(failure)) throw Labelled(failure, inventory, i);
+                    System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+                }
+                return results;
+            }
+            finally
+            {
+                foreach (var compiled in sessions) compiled?.Dispose();
+            }
+        }
+
+        /// <summary>
+        /// An allocation failure relabelled with the parameter it happened to. The backend reports
+        /// an out-of-memory abort as a bare "bad allocation", with no parameter, shape or size —
+        /// nothing to separate "this parameter is too large" from "this graph is malformed" (#208).
+        /// Each run initializes one parameter, and a group's session is built for parameters of one
+        /// shape, so the one being initialized — the group's first while its session is built — IS
+        /// the one that failed: name it, with the rest of the model as context; the inner exception
+        /// keeps the original diagnosis. Only allocation failures are relabelled: everything else
+        /// this can raise (a missing backend package, an unsupported op, a malformed graph) already
+        /// says what it is, and keeping its type keeps the catch clauses around this API working.
+        /// </summary>
+        private static ComputeContextException Labelled(
+            System.Exception failure,
+            List<(string? Template, ConcreteModelParamInfo? Info, ModelId Id, DType DType, long[]? Shape)> inventory,
+            int failing)
+            => new(ErrorCodes.CR008, "FastInitializeModelParams",
+                DescribeInventory(inventory, failing) + " Underlying failure: " + failure.Message, failure);
 
         /// <summary>
         /// The single-parameter slice of the rewritten initialization graph: a copy whose only
@@ -351,7 +573,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// sized to the first run's peak, which an arena still holding the first run's blocks
         /// cannot supply, so without the shrink a shared session's arena doubles. What stays is the
         /// parameters' values themselves: a 57.9 M-element model peaks at 2.2 GB of working set
-        /// through its whole <c>FromScratch</c>.</para>
+        /// through its whole <c>FromScratch</c> drawn in turn, and 2.8 GB drawn three side by side
+        /// (see <see cref="RunConcurrently"/>, which holds what is in flight at once to a quarter of
+        /// the memory available).</para>
         ///
         /// <para>Sharing one function BODY across the parameters does not substitute for slicing:
         /// the backend inlines every call site, so the graph it builds is the same size either

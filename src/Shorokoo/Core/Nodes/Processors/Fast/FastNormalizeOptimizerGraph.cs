@@ -424,7 +424,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// state order.
         ///
         /// <para>The graph is the same for every parameter, so it is compiled once per parameter
-        /// dtype and rank, and each parameter is a run of that session fed its own values, taken
+        /// dtype — its inputs carry no shape, so one session takes every rank — and each parameter is a run of that session fed its own values, taken
         /// from <paramref name="paramValue"/> one at a time: a session
         /// build per parameter would make rig construction cost a constant per parameter
         /// (Shorokoo/Shorokoo#404). The session runs unoptimized, as parameter initialization's
@@ -449,15 +449,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // One parameter's value in hand at a time, as the caller hands them over; the sessions,
             // whose arenas each run shrinks, are what stay.
             var results = new TensorData[paramCount][];
-            var sessions = new Dictionary<(DType, int), CompiledGraph>();
+            var sessions = new Dictionary<DType, CompiledGraph>();
             try
             {
                 for (int i = 0; i < paramCount; i++)
                 {
                     var paramData = paramValue(i);
-                    var kind = (paramData.DType, paramData.Shape.Dims.Length);
-                    if (!sessions.TryGetValue(kind, out var compiled))
-                        sessions[kind] = compiled = computeContext.Compile(
+                    if (!sessions.TryGetValue(paramData.DType, out var compiled))
+                        sessions[paramData.DType] = compiled = computeContext.Compile(
                             stateInitGraph, Core.Backends.ShorokooGraphOptimization.DisableAll);
                     var zeroGrad = TensorData.CreateFromRawBytes(
                         paramData.Shape, paramData.DType,

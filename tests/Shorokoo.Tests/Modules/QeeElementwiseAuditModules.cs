@@ -309,6 +309,18 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>Where between int8, int16, uint16, uint32, uint64 and bool tensors, through the
+    /// Vector API: each picks [1, 1] from [1, 0] and [0, 1]. Input c = [T, F].</summary>
+    [Module]
+    public partial class WhereOnEveryIntegerAndBoolTypeCheck
+    {
+        public static Tensor<bit> Inline(Vector<bit> c)
+            => OnnxOp.Concat([Picks<int8>(c), Picks<int16>(c), Picks<uint16>(c), Picks<uint32>(c), Picks<uint64>(c), Picks<bit>(c)], 0);
+
+        private static Vector<bit> Picks<T>(Vector<bit> c) where T : IVarType
+            => c.Where(Vector(1L, 0L).Cast<T>(), Vector(0L, 1L).Cast<T>()).Cast<int64>() == Vector(1L, 1L);
+    }
+
     /// <summary>Full reverse Slice (starts=-1, ends=INT_MIN, steps=-1): the spec clamps
     /// a negative-step exclusive `ends` to −1 so the slice runs backward THROUGH index 0
     /// ([1,2,3] → [3,2,1]). Pinned because the QEE Slice kernel used to clamp the

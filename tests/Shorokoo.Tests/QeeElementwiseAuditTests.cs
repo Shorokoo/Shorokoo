@@ -46,6 +46,10 @@ public class QeeElementwiseAuditTests
             Bits([4L], true, false, true, false)));
         Assert.True(QeeAudit.Check<QeeSliceReverseValueAuditCheck>(F32([3L], 1f, 2f, 3f)));
     }
+
+    [Fact]
+    public void TestWhereSelectsBetweenTensorsOfEveryIntegerTypeAndBool()
+        => Assert.True(AutoTest.AdvancedTestGraph<WhereOnEveryIntegerAndBoolTypeCheck>([], [Bits([2L], true, false)]));
 }
 
 /// <summary>

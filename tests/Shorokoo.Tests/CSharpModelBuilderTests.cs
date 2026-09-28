@@ -283,8 +283,7 @@ public class CSharpModelBuilderCoverageTests
     public void TestCodegenedSourceRebuildsAnIntegerOrBoolReduceMaxAndMinWithoutGuardingThemAgain()
     {
         TensorData[] x = [TensorData([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)];
-        AssertRebuildsUnchanged(EmptyIntegerReduceMaxMinValues.ComputationGraph.ToInternal(), x);
-        AssertRebuildsUnchanged(EmptyInt64ReduceMaxMinValues.ComputationGraph.ToInternal(), x);
+        AssertRebuildsUnchanged(EmptyIntegerReduceMaxMinCheck.ComputationGraph.ToInternal(), x);
     }
 
     [Fact]

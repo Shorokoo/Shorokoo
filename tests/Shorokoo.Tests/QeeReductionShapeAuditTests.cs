@@ -45,18 +45,46 @@ public class QeeReductionShapeAuditTests
     }
 
     [Fact]
-    public void TestInt64ReduceMaxAndMinOverAnEmptyAxisYieldTheTypeExtremes()
-        => Assert.True(AutoTest.AdvancedTestGraph<EmptyInt64ReduceMaxMinValues>([],
-            [F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)],
-            expected: [long.MinValue, long.MaxValue]));
+    public void TestIntegerAndBoolReduceMaxAndMinOverAnEmptyGroupYieldTheTypeExtremes()
+        => Assert.True(AutoTest.AdvancedTestGraph<EmptyIntegerReduceMaxMinCheck>([], [F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)]));
 
     [Fact]
-    public void TestIntegerAndBoolReduceMaxAndMinOverAnEmptyGroupYieldTheTypeExtremes()
-        => Assert.True(AutoTest.AdvancedTestGraph<EmptyIntegerReduceMaxMinValues>([],
-            [F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)],
-            expected: [int.MinValue, int.MaxValue, sbyte.MinValue, sbyte.MaxValue, byte.MinValue, byte.MaxValue, 0, 1,
-                long.MinValue, long.MaxValue, .. Enumerable.Repeat((double)long.MinValue, 6), .. Enumerable.Repeat((double)long.MaxValue, 6),
-                long.MinValue, long.MaxValue, 3, 6, 1, 4]));
+    public void TestAGenericReduceMaxAndMinSpecialisedToAnIntegerOrBoolYieldTheTypeExtremesOverAnEmptyGroup()
+    {
+        Assert.True(GenericMaxMin(DType.Int64, I64([1L, 0L]), long.MinValue, long.MaxValue));
+        Assert.True(GenericMaxMin(DType.Int64, I64([2L, 2L], 1L, 5L, 3L, 2L), 5L, 3L, 1L, 2L));
+        Assert.True(GenericMaxMin(DType.Int32, I32([1L, 0L]), int.MinValue, int.MaxValue));
+        Assert.True(GenericMaxMin(DType.Int8, I8([1L, 0L]), sbyte.MinValue, sbyte.MaxValue));
+        Assert.True(GenericMaxMin(DType.UInt8, U8([1L, 0L]), byte.MinValue, byte.MaxValue));
+        Assert.True(GenericMaxMin(DType.Bool, Bits([1L, 0L]), 0L, 1L));
+        Assert.True(GenericMaxMin(DType.Bool, Bits([2L, 2L], true, false, false, false), 1L, 0L, 0L, 0L));
+    }
+
+    [Fact]
+    public void TestAReduceMaxOrMinThatCannotMeetAnEmptyGroupBuildsThePlainOperator()
+    {
+        Tensor<float32> f = InputTensor<float32>("f", rank: 2);
+        Tensor<float16> h = InputTensor<float16>("h", rank: 2);
+        Tensor<int64> i = InputTensor<int64>("i", rank: 2);
+        Tensor<int64> c = Tensor([2L, 2L], 1L, 2L, 3L, 4L);
+        Tensor<bit> b = Tensor([2L], true, false);
+        Assert.True(IsPlain(f, f.Reduce(ReduceKind.Max, Vector(1L))));
+        Assert.True(IsPlain(f, f.Reduce(ReduceKind.Min)));
+        Assert.True(IsPlain(h, h.Reduce(ReduceKind.Max, Vector(-1L), keepDims: true)));
+        Assert.True(IsPlain(c, c.Reduce(ReduceKind.Min, Vector(1L))));
+        Assert.True(IsPlain(b, b.Reduce(ReduceKind.Max)));
+        Assert.True(IsPlain(i, NN.Reduce(ReduceKind.Max, i, null, true, true)));
+    }
+
+    [Fact]
+    public void TestAReductionOverANegativeAxisOfAnEmptyInputHasTheSpecShape()
+        => Assert.True(AutoTest.AdvancedTestGraph<EmptyReduceNegativeAxisShapes>([], [F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)],
+            expected: [3, 1, 0, 3, 1, 0]));
+
+    [Fact]
+    public void TestTheRawReductionOverANegativeAxisOfAnEmptyInputHasTheSpecShape()
+        => Assert.True(AutoTest.AdvancedTestGraph<EmptyRawReduceNegativeAxisShapes>([], [F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)],
+            expected: [3, 1, 0, 3, 1, 0]));
 
     // #409: ONNX Runtime ignores noop_with_empty_axes on an empty input and reduces every axis.
     [Fact(Skip = "#409: ONNX Runtime ignores noop_with_empty_axes on an empty input and reduces every axis")]
@@ -71,4 +99,11 @@ public class QeeReductionShapeAuditTests
         => Assert.True(AutoTest.AdvancedTestGraph<EmptyFloat16ReduceAllValues>([],
             [F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)],
             expected: [0, 0]));
+
+    private static bool GenericMaxMin(DType t, TensorData x, params long[] expected)
+        => AutoTest.AdvancedTestGraph<GenericReduceMaxMinCheck>([], [x, I64([expected.Length], expected)],
+            genericTypes: new() { ["T"] = t });
+
+    private static bool IsPlain<T>(Tensor<T> x, Tensor<T> reduced) where T : IVarType
+        => ((Variable)reduced).OwningNode is { OpCode: OpCodes.REDUCE_MAX or OpCodes.REDUCE_MIN } n && n.Inputs[0] == (Variable)x;
 }

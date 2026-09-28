@@ -219,6 +219,12 @@ public class PyTorchBackendCoverageTests
         Assert.True(AutoTest.AdvancedTestGraph<AutoGradIfRuntimeConditionFalseCheck>([], [QeeAudit.F32([], -1f), QeeAudit.F32([], 3f)], context: torch));
     }
 
+    // #410: the PyTorch backend's Pad passes an int64 constant value through a Python float.
+    [Fact(Skip = "#410: the PyTorch backend's Pad passes an int64 constant value through a Python float, overflowing or rounding it")]
+    public void TestAnInt64PadKeepsAConstantValueADoubleCannotHold()
+        => Assert.True(AutoTest.AdvancedTestGraph<PadInt64WithWideValuesCheck>([], [QeeAudit.I64([2L], 1L, 2L)],
+            context: new ComputeContext(Torch)));
+
     [Fact]
     public void TestBatchFirstRecurrentNetworksRunOnTorch()
     {

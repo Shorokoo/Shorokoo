@@ -44,11 +44,31 @@ public class QeeReductionShapeAuditTests
         Assert.True(QeeAudit.Check<QeeScatterGatherNdEdgeValueAuditCheck>(F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)));
     }
 
-    // ONNX Runtime yields 0 for an empty int64 ReduceMax/ReduceMin instead of the type's minimum/maximum:
-    // https://github.com/Shorokoo/Shorokoo/issues/382
-    [Fact(Skip = "Shorokoo/Shorokoo#382: ONNX Runtime yields 0 for an empty int64 ReduceMax/ReduceMin")]
+    [Fact]
     public void TestInt64ReduceMaxAndMinOverAnEmptyAxisYieldTheTypeExtremes()
         => Assert.True(AutoTest.AdvancedTestGraph<EmptyInt64ReduceMaxMinValues>([],
             [F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)],
             expected: [long.MinValue, long.MaxValue]));
+
+    [Fact]
+    public void TestIntegerAndBoolReduceMaxAndMinOverAnEmptyGroupYieldTheTypeExtremes()
+        => Assert.True(AutoTest.AdvancedTestGraph<EmptyIntegerReduceMaxMinValues>([],
+            [F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)],
+            expected: [int.MinValue, int.MaxValue, sbyte.MinValue, sbyte.MaxValue, byte.MinValue, byte.MaxValue, 0, 1,
+                long.MinValue, long.MaxValue, .. Enumerable.Repeat((double)long.MinValue, 6), .. Enumerable.Repeat((double)long.MaxValue, 6),
+                long.MinValue, long.MaxValue, 3, 6, 1, 4]));
+
+    // #409: ONNX Runtime ignores noop_with_empty_axes on an empty input and reduces every axis.
+    [Fact(Skip = "#409: ONNX Runtime ignores noop_with_empty_axes on an empty input and reduces every axis")]
+    public void TestANoopReductionPassesAnEmptyInputThrough()
+        => Assert.True(AutoTest.AdvancedTestGraph<EmptyNoopReduceShape>([],
+            [F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)],
+            expected: [2, 0]));
+
+    // #411: ONNX Runtime's float16 ReduceSumSquare and ReduceL1 crash the process on an empty input with no axes.
+    [Fact(Skip = "#411: ONNX Runtime's float16 ReduceSumSquare and ReduceL1 over an empty input with no axes crash the process")]
+    public void TestFloat16ReduceSumSquareAndL1OverAnEmptyInputGiveZero()
+        => Assert.True(AutoTest.AdvancedTestGraph<EmptyFloat16ReduceAllValues>([],
+            [F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)],
+            expected: [0, 0]));
 }

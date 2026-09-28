@@ -291,11 +291,11 @@ namespace Shorokoo
                 case ReduceKind.LogSumExp:
                     return OnnxOp.ReduceLogSumExp(tensor, axes, keepDims, noOp);
                 case ReduceKind.Max:
-                    return OnnxOp.ReduceMax(tensor, axes, keepDims, noOp);
+                    return ReduceExtreme(tensor, axes, keepDims, noOp, max: true);
                 case ReduceKind.Mean:
                     return OnnxOp.ReduceMean(tensor, axes, keepDims, noOp);
                 case ReduceKind.Min:
-                    return OnnxOp.ReduceMin(tensor, axes, keepDims, noOp);
+                    return ReduceExtreme(tensor, axes, keepDims, noOp, max: false);
                 case ReduceKind.Prod:
                     return OnnxOp.ReduceProd(tensor, axes, keepDims, noOp);
                 case ReduceKind.Sum:
@@ -303,9 +303,84 @@ namespace Shorokoo
                 case ReduceKind.SumSquare:
                     return OnnxOp.ReduceSumSquare(tensor, axes, keepDims, noOp);
                 default:
-                    throw new InvalidTensorOperationException(ErrorCodes.CR004, "Reduce", reduceKind.ToString(), 
+                    throw new InvalidTensorOperationException(ErrorCodes.CR004, "Reduce", reduceKind.ToString(),
                         $"Reduction type '{reduceKind}' is not yet implemented");
             }
+        }
+
+        /// <summary>
+        /// ReduceMax (<paramref name="max"/>) or ReduceMin, giving an empty group the spec's value
+        /// for an integer or boolean <typeparamref name="T"/>: the type's minimum for ReduceMax and
+        /// its maximum for ReduceMin (false and true for bool).
+        ///
+        /// <para>ONNX Runtime's CPU kernels give such a group 0 for every integer type and refuse a
+        /// boolean input outright; for a floating-point type they give -inf and +inf, as the spec
+        /// does, so a floating-point reduction is the plain operator. Only an empty input holds an
+        /// empty group, and in an empty input every group is empty unless there are none, so the
+        /// plain operator is right for every nonempty input. Where the input's shape is known when
+        /// the graph is built, that decides it; elsewhere an <c>If</c> on the input being empty
+        /// picks between the plain operator and the same operator over the identity expanded to
+        /// the input's shape grown by one along every reduced axis — the input padded with the
+        /// identity, which is all an empty input padded holds. No group of that is empty, and each
+        /// reduces to the identity.</para>
+        ///
+        /// <para>With no <paramref name="axes"/> and <paramref name="noOp"/> set nothing is reduced,
+        /// and a generic <typeparamref name="T"/> has no identity to write until it is resolved;
+        /// both are the plain operator.</para>
+        /// </summary>
+        private static Tensor<T> ReduceExtreme<T>(Tensor<T> tensor, Tensor<int64>? axes, bool? keepDims, bool? noOp, bool max)
+            where T : IVarType
+        {
+            Tensor<T> Plain(Tensor<T> data)
+                => max ? OnnxOp.ReduceMax(data, axes, keepDims, noOp) : OnnxOp.ReduceMin(data, axes, keepDims, noOp);
+
+            if (axes is null && noOp == true || ReductionIdentity<T>(max) is not { } identity)
+                return Plain(tensor);
+
+            Variable data = tensor;
+            bool? empty = data.TensorDims is { } dims && dims.All(d => d.Size is not null)
+                ? dims.Any(d => d.Size == 0)
+                : null;
+            if (empty == false)
+                return Plain(tensor);
+
+            var zero = Globals.Scalar(0L);
+            var one = Globals.Scalar(1L);
+            Variable shape = OnnxOp.Shape(data, null, null);
+            Variable reduced = axes is null
+                ? OnnxOp.Range(zero, OnnxOp.Size(shape), one)
+                : noOp == true
+                    ? axes.Value
+                    // An empty axes input reduces every axis.
+                    : OnnxOp.Concat([axes.Value, OnnxOp.Range(zero,
+                        OnnxOp.Mul(OnnxOp.Size(shape), OnnxOp.Cast(OnnxOp.Equal(OnnxOp.Size(axes.Value), zero), null, DType.Int64)),
+                        one)], 0);
+            Variable grown = OnnxOp.Add(shape, OnnxOp.ScatterElements(OnnxOp.Mul(shape, zero), reduced,
+                OnnxOp.Add(OnnxOp.Mul(reduced, zero), one), axis: 0));
+            var guarded = Plain(OnnxOp.Expand(identity(), grown));
+            if (empty == true)
+                return guarded;
+
+            Scalar<bit> isEmpty = OnnxOp.Equal(OnnxOp.Size(data), zero);
+            return isEmpty.IfElse(guarded, Plain(tensor));
+        }
+
+        /// <summary>The identity of ReduceMax (<paramref name="max"/>) or ReduceMin over
+        /// <typeparamref name="T"/>, as a builder of its constant, where <typeparamref name="T"/>
+        /// has no infinity to give it; null for every other type.</summary>
+        private static Func<Variable>? ReductionIdentity<T>(bool max) where T : IVarType
+        {
+            var t = typeof(T);
+            if (t == typeof(bit)) return () => Globals.Scalar(!max);
+            if (t == typeof(int8)) return () => Globals.Scalar(max ? sbyte.MinValue : sbyte.MaxValue);
+            if (t == typeof(int16)) return () => Globals.Scalar(max ? short.MinValue : short.MaxValue);
+            if (t == typeof(int32)) return () => Globals.Scalar(max ? int.MinValue : int.MaxValue);
+            if (t == typeof(int64)) return () => Globals.Scalar(max ? long.MinValue : long.MaxValue);
+            if (t == typeof(uint8)) return () => Globals.Scalar(max ? byte.MinValue : byte.MaxValue);
+            if (t == typeof(uint16)) return () => Globals.Scalar(max ? ushort.MinValue : ushort.MaxValue);
+            if (t == typeof(uint32)) return () => Globals.Scalar(max ? uint.MinValue : uint.MaxValue);
+            if (t == typeof(uint64)) return () => Globals.Scalar(max ? ulong.MinValue : ulong.MaxValue);
+            return null;
         }
 
         /// <summary>Resizes the tensor by per-axis scales or explicit output sizes (ONNX Resize).</summary>

@@ -213,9 +213,13 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
 4. Affects **values only**, and only when the reduction has groups to compute *and* a
    **reduced axis has extent 0**, which leaves each of those groups empty. `ReduceMax`,
    `ReduceMin`, `ReduceMean`, `ReduceLogSum` and `ReduceLogSumExp` propagate dtype and shape
-   but leave the value uncomputed there, because the empty-group result is the backend's
-   rather than the spec's: ONNX Runtime returns -inf, +inf, 0, -inf and -inf for `float32`,
-   but 0 for `int64` `ReduceMax`/`ReduceMin` rather than that type's extremes. `ReduceSum`,
+   but leave the value uncomputed there, because the empty-group result is not one identity
+   across dtypes: -inf, +inf, 0, -inf and -inf for `float32`, and the type's minimum and
+   maximum for an integer `ReduceMax`/`ReduceMin` (false and true for `bool`). ONNX Runtime's
+   own kernels return 0 for the integer ones, so `Reduce` (`Tensor`, `Vector`, `Scalar`, and
+   `NN.Reduce`) builds an integer or boolean `ReduceMax`/`ReduceMin` as an `If` on the input
+   being empty, whose empty side reduces the identity instead; a raw `OnnxOp.ReduceMax` /
+   `OnnxOp.ReduceMin`, or one in an imported ONNX model, is the plain operator. `ReduceSum`,
    `ReduceSumSquare`, `ReduceL1`, `ReduceL2` and `ReduceProd` do fold, to their identity
    (0, or 1 for `Prod`), which is the same in every dtype. A reduction with no groups at all
    — an empty **kept** axis — folds to the empty result for all ten. Every other input folds

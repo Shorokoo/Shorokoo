@@ -212,7 +212,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Output("reduced", "T1", "R")
                 .InputTestShapes("data", [[3,1,2],[1,2,2]])
                 .InputTestValues("axes", [TensorData([1], 1L), TensorData([1], 2L)])
-                .Code("NN.Reduce(ReduceKind.Max, {1:param}{2:param}{a:param}{b:param})")
+                .Code("Shorokoo.Core.Nodes.NodeDefinitions.OnnxOp.ReduceMax({1:param}{2:param}{a:param}{b:param}){o1:fromvar}")
 
                 .Constraint(AttrKeepdims, 0)
                 .Input("data", "T1", "R")
@@ -220,7 +220,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .InputTestShapes("data", [[3,1,2],[1,2,2]])
                 .InputTestValues("axes", [TensorData([1], 1L), TensorData([1], 2L)])
                 .Output("reduced", "T1", "R2")
-                .Code("NN.Reduce(ReduceKind.Max, {1:param}{2:param}{a:param}{b:param})"),
+                .Code("Shorokoo.Core.Nodes.NodeDefinitions.OnnxOp.ReduceMax({1:param}{2:param}{a:param}{b:param}){o1:fromvar}"),
 
             Op(REDUCE_MEAN)
                 .Tensor<SimpleNumLike2>("T1")
@@ -256,7 +256,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Output("reduced", "T1", "R")
                 .InputTestShapes("data", [[3,1,2],[1,2,2]])
                 .InputTestValues("axes", [TensorData([1], 1L), TensorData([1], 2L)])
-                .Code("NN.Reduce(ReduceKind.Min, {1:param}{2:param}{a:param}{b:param})")
+                .Code("Shorokoo.Core.Nodes.NodeDefinitions.OnnxOp.ReduceMin({1:param}{2:param}{a:param}{b:param}){o1:fromvar}")
 
                 .Constraint(AttrKeepdims, 0)
                 .Input("data", "T1", "R")
@@ -264,7 +264,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .InputTestShapes("data", [[3,1,2],[1,2,2]])
                 .InputTestValues("axes", [TensorData([1], 1L), TensorData([1], 2L)])
                 .Output("reduced", "T1", "R2")
-                .Code("NN.Reduce(ReduceKind.Min, {1:param}{2:param}{a:param}{b:param})"),
+                .Code("Shorokoo.Core.Nodes.NodeDefinitions.OnnxOp.ReduceMin({1:param}{2:param}{a:param}{b:param}){o1:fromvar}"),
 
             Op(REDUCE_PROD)
                 .Tensor<SimpleNumLike2>("T1")

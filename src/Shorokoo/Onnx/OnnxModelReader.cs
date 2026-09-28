@@ -161,7 +161,6 @@ namespace Shorokoo.Onnx
                 IReadOnlyDictionary<string, long[]>? inputShapes = null)
         {
             OnnxExternalData.LoadIntoModel(model, externalDataDirectory);
-            OnnxLegacyOperands.Upgrade(model);
             var taggedKind = Shorokoo.Core.Utils.SrkFileFormat.TryReadKindTag(model);
             var reader = new OnnxModelReader(model);
             var graph = reader.BuildInternalComputationGraph();

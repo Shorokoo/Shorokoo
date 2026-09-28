@@ -249,8 +249,18 @@ public class QeeImageRandomRnnAuditTests
             [F32([1L, 3L, 4L, 5L], [.. Enumerable.Range(0, 60).Select(i => (float)i)])]));
 
     [Fact]
+    public void TestResizeOverAxesTakesAnEmptyRoiOrScalesAsAbsent()
+        => Assert.True(AutoTest.AdvancedTestGraph<ResizeOverAxesWithEmptyOperandsCheck>([],
+            [F32([1L, 3L, 4L, 5L], [.. Enumerable.Range(0, 60).Select(i => (float)i)])]));
+
+    [Fact]
     public void TestResizePolicyOverAxesBetweenTransposesMatchesTheResizeOnTheInput()
         => Assert.True(AutoTest.AdvancedTestGraph<ResizePolicyOverAxesBetweenTransposesCheck>([],
+            [F32([1L, 3L, 4L, 5L], [.. Enumerable.Range(0, 60).Select(i => (float)i)])]));
+
+    [Fact]
+    public void TestResizePolicyOverNegativeAxesMatchesTheResizeOverTheAxesCountedFromTheFront()
+        => Assert.True(AutoTest.AdvancedTestGraph<ResizePolicyOverNegativeAxesCheck>([],
             [F32([1L, 3L, 4L, 5L], [.. Enumerable.Range(0, 60).Select(i => (float)i)])]));
 
     // #432: ONNX Runtime drops a Range returned beside the Gather it drives from the outputs at full optimization

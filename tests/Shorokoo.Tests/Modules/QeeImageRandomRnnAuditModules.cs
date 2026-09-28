@@ -1136,6 +1136,31 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>Resize over named axes whose roi or scales is present but empty, constant and computed, against the
+    /// same resize written over every axis. Input x is [1,3,4,5].</summary>
+    [Module]
+    public partial class ResizeOverAxesWithEmptyOperandsCheck
+    {
+        private static Tensor<float32> R(Tensor<float32> t, Variable? roi, Variable? scales, Variable? sizes, long[]? axes)
+            => (Tensor<float32>)OnnxOp.Resize(t, roi: roi, scales: scales, sizes: sizes, antialias: null, axes: axes,
+                coordinateTransformationMode: null, cubicCoeffA: null, excludeOutside: null, extrapolationValue: null,
+                keepAspectRatioPolicy: null, mode: ResizeMode.Linear, nearestMode: null);
+
+        public static Scalar<bit> Inline(Tensor<float32> x)
+        {
+            var x4 = x.Reshape(Vector(1L, 3L, 4L, 5L));
+            var computedEmpty = OnnxOp.Slice(OnnxOp.Cast(OnnxOp.Shape(x), null, DType.Float32), Vector(0L), Vector(0L));
+            var mismatch =
+                Apart(R(x, Vector(Array.Empty<float>()), Vector(2f, 2f), null, [2L, 3L]), R(x, null, Vector(1f, 1f, 2f, 2f), null, null)) +
+                Apart(R(x, null, Vector(Array.Empty<float>()), Vector(3L, 5L), [2L, 3L]), R(x, null, null, Vector(1L, 3L, 3L, 5L), null)) +
+                Apart(R(x, computedEmpty, Vector(2f, 2f), null, [2L, 3L]), R(x, null, Vector(1f, 1f, 2f, 2f), null, null)) +
+                Apart(R(x, computedEmpty, computedEmpty, Vector(3L, 5L), [-2L, -1L]), R(x, null, null, Vector(1L, 3L, 3L, 5L), null)) +
+                Apart(R(x4, computedEmpty, Vector(2f, 2f), null, [2L, 3L]), R(x, null, Vector(1f, 1f, 2f, 2f), null, null)) +
+                Apart(R(x4, Vector(Array.Empty<float>()), computedEmpty, Vector(3L, 5L), [-2L, -1L]), R(x, null, null, Vector(1L, 3L, 3L, 5L), null));
+            return mismatch < Scalar(1L);
+        }
+    }
+
     /// <summary>A not_larger policy over axes [1, 2] between the transposes of an NCHW-to-NHWC round trip, against
     /// the same resize on the input itself over axes [2, 3]. Input x is [1,3,4,5].</summary>
     [Module]
@@ -1149,6 +1174,25 @@ namespace Shorokoo.Tests.Modules
                 mode: ResizeMode.Linear, nearestMode: null);
             var mismatch = Apart((Tensor<float32>)OnnxOp.Transpose(R((Tensor<float32>)OnnxOp.Transpose(x, [0L, 2L, 3L, 1L]), [1L, 2L]), [0L, 3L, 1L, 2L]),
                 R(x, [2L, 3L]));
+            return mismatch < Scalar(1L);
+        }
+    }
+
+    /// <summary>A not_larger and a not_smaller policy over negative axes, against the same resizes over the axes
+    /// counted from the front. Input x is [1,3,4,5].</summary>
+    [Module]
+    public partial class ResizePolicyOverNegativeAxesCheck
+    {
+        private static Tensor<float32> R(Tensor<float32> t, long[] axes, Vector<int64> sizes, KeepAspectRatioPolicy policy)
+            => (Tensor<float32>)OnnxOp.Resize(t, roi: null, scales: null, sizes: sizes, antialias: null, axes: axes,
+                coordinateTransformationMode: null, cubicCoeffA: null, excludeOutside: null, extrapolationValue: null,
+                keepAspectRatioPolicy: policy, mode: ResizeMode.Linear, nearestMode: null);
+
+        public static Scalar<bit> Inline(Tensor<float32> x)
+        {
+            var mismatch =
+                Apart(R(x, [-2L, -1L], Vector(7L, 9L), KeepAspectRatioPolicy.not_larger), R(x, [2L, 3L], Vector(7L, 9L), KeepAspectRatioPolicy.not_larger)) +
+                Apart(R(x, [-1L, -2L], Vector(9L, 5L), KeepAspectRatioPolicy.not_smaller), R(x, [3L, 2L], Vector(9L, 5L), KeepAspectRatioPolicy.not_smaller));
             return mismatch < Scalar(1L);
         }
     }

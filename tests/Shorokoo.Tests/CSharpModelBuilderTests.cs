@@ -268,6 +268,26 @@ public class CSharpModelBuilderCoverageTests
     }
 
     [Fact]
+    public void TestBoolReduceMaxAndMinAndScatterElementsCodegenSourceThatCompiles()
+    {
+        Variable b = Tensor([2L, 2L], true, false, false, false);
+        AssertCodegens(new InternalComputationGraph([], [OnnxOp.ReduceMax(b, Vector(1L), false, null)]));
+        AssertCodegens(new InternalComputationGraph([], [OnnxOp.ReduceMin(b, Vector(1L), true, null)]));
+        AssertCodegens(new InternalComputationGraph([], [OnnxOp.ScatterElements(Tensor([2L, 2L], 1f, 2f, 3f, 4f),
+            Tensor([1L, 2L], 1L, 0L), Tensor([1L, 2L], 5f, 6f), axis: 0)]));
+        AssertCodegens(new InternalComputationGraph([], [OnnxOp.ScatterElements(Vector(1L, 2L, 3L), Vector(2L),
+            Vector(9L), axis: 0, reduction: ScatterNDReduction.Add)]));
+    }
+
+    [Fact]
+    public void TestCodegenedSourceRebuildsAnIntegerOrBoolReduceMaxAndMinWithoutGuardingThemAgain()
+    {
+        TensorData[] x = [TensorData([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)];
+        AssertRebuildsUnchanged(EmptyIntegerReduceMaxMinValues.ComputationGraph.ToInternal(), x);
+        AssertRebuildsUnchanged(EmptyInt64ReduceMaxMinValues.ComputationGraph.ToInternal(), x);
+    }
+
+    [Fact]
     public void TestLoopCodegenInlineInitRankMismatchAndHoisting()
     {
         AssertCodegens(BuildLoopInlineAndInitGraph(), "LoopAPI.Iterate(");

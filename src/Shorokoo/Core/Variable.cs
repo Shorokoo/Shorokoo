@@ -267,6 +267,7 @@ namespace Shorokoo.Core
         public Tensor<bfloat16> bfloat16() => (Tensor<bfloat16>)this;
         public Tensor<float32> float32() => (Tensor<float32>)this;
         public Tensor<float64> float64() => (Tensor<float64>)this;
+        public Tensor<bit> bit() => (Tensor<bit>)this;
 
         // ── Graph-value introspection (the members the IValue handle interface exposes user-side) ──
         public bool IsConnectingTensor => OwningNode.IsOpenNode && OwningNode.ConnectingTensor == this;

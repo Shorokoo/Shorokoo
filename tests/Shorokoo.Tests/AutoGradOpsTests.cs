@@ -409,6 +409,8 @@ public class AutoGradMatrixPoolingAndConvOpsCoverageTests
         RunSmall<AutoGradMatMulBatchTimesMatrixCheck>([2L, 3L, 4L]);
         RunSmall<AutoGradMatMulMatrixTimesMatrixCheck>([3L, 4L]);
         RunSmall<AutoGradMatMulVectorTimesMatrixCheck>([4L]);
+        RunSmall<AutoGradMatMulBatchTimesMatrixOfTwoColumnsCheck>([2L, 3L, 0L]);
+        RunSmall<AutoGradMatMulBatchTimesMatrixOfNoColumnsCheck>([2L, 3L, 4L]);
         Run<AutoGradReduceSumExplicitAxesKeepdimsTrueCheck>(2f);
         Run<AutoGradReduceSumExplicitAxesKeepdimsFalseCheck>(2f);
         Run<AutoGradReduceMeanExplicitAxesCheck>(2f);

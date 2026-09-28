@@ -2863,6 +2863,48 @@ namespace Shorokoo.Tests.Modules
     }
 
     /// <summary>
+    /// A static-rank batch <c>x</c> times a static-rank [K, n] matrix of ones, K being x's last dim,
+    /// under unit weights: both gradients must match the batched reference in shape and value, a
+    /// zero-sized K or n included.
+    /// </summary>
+    internal static class AutoGradMatMulBatchTimesMatrix
+    {
+        internal static Scalar<bit> Check(Tensor<float32> x, long n)
+        {
+            var a = (Tensor<float32>)OnnxOp.Identity(x, rank: 3);
+            var b = (Tensor<float32>)OnnxOp.Identity(OnnxOp.Expand(Scalar(1f),
+                OnnxOp.Concat([OnnxOp.Shape(x, start: -1), Vector(n)], axis: 0)), rank: 2);
+            var w = (Tensor<float32>)OnnxOp.Expand(Scalar(1f), OnnxOp.Concat([OnnxOp.Shape(x, end: -1), Vector(n)], axis: 0));
+            var loss = ((Tensor<float32>)OnnxOp.MatMul(a, b) * w).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            var grads = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad([(IValue)a, b], loss);
+            var expectedA = (Tensor<float32>)OnnxOp.MatMul(w, b.Transpose(1L, 0L));
+            var expectedB = ((Tensor<float32>)OnnxOp.MatMul(a.Transpose(0L, 2L, 1L), w))
+                .Reduce(ReduceKind.Sum, axes: Vector(0L), keepDims: false);
+            return Matches((Tensor<float32>)grads[0]!, expectedA) & Matches((Tensor<float32>)grads[1]!, expectedB);
+        }
+
+        private static Scalar<bit> Matches(Tensor<float32> actual, Tensor<float32> expected)
+        {
+            var shapeGap = ((Tensor<int64>)OnnxOp.Shape(actual) - (Tensor<int64>)OnnxOp.Shape(expected)).Abs()
+                .Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            var valueGap = (actual - expected).Abs().Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            return (shapeGap == Scalar(0L)) & (valueGap < Scalar(1e-4f));
+        }
+    }
+
+    [Module]
+    public partial class AutoGradMatMulBatchTimesMatrixOfTwoColumnsCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x) => AutoGradMatMulBatchTimesMatrix.Check(x, 2L);
+    }
+
+    [Module]
+    public partial class AutoGradMatMulBatchTimesMatrixOfNoColumnsCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x) => AutoGradMatMulBatchTimesMatrix.Check(x, 0L);
+    }
+
+    /// <summary>
     /// The 2-D companion of <see cref="AutoGradMatMulBatchTimesMatrixCheck"/>: a static-rank
     /// [3, 4] times a static-rank [4, 2] under weights 1..6.
     /// </summary>

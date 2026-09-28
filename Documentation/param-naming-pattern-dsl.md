@@ -171,6 +171,11 @@ format: "{p|bnParam}"  // p=0 → "running_mean"
 
 ## 5. Complete ResNet50 Example
 
+The model here creates every parameter with an inline `InitSimple.Init(...)` call, so each
+is left to its class name and numbered in creation order within its scope
+([Parameter names](defining-models.md#parameter-names)); a parameter captured in a local
+or given `.Named(...)` is matched by that name instead (`Conv2Dk77s22#0.w#0`).
+
 ### 5.1 Scheme Definition
 
 The patterns go into a `SimplePatternNamingScheme`, which also takes the

@@ -310,7 +310,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         public static void Process(
             InternalComputationGraph graph,
             IReadOnlyList<FastNodeKey>? pinnedNodeKeys = null,
-            IReadOnlyList<(int slot, FastNodeKey key)>? slotPinnedNodeKeys = null)
+            IReadOnlyList<(int slot, FastNodeKey key)>? slotPinnedNodeKeys = null,
+            IReadOnlyList<(FastNodeKey key, string name, bool inferred)>? namedNodeKeys = null)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
 
@@ -321,7 +322,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             var loopModelIds = new Dictionary<FastTensorKey, (ModelId loopModelId, IEnumerator<int> loopContentsModelIdPicker)>();
             var loopDedupeIdsMap = new Dictionary<FastTensorKey, int>();
-            var moduleNameDedupeIdMap = new Dictionary<string, int>();
+            // Same-named parts are numbered per SCOPE — the module body, or one loop body — so a
+            // parameter created in a loop never renumbers one outside it, nor the reverse.
+            var nameDedupeIdsByScope = new Dictionary<ImmutableArray<FastTensorKey>, Dictionary<string, int>>(ScopeSeqComparer.Instance);
 
             // All-or-nothing invariant: every module body graph gets ALL its local ModelIds
             // assigned right here at body build, so a graph arriving later (concretization,
@@ -438,6 +441,54 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     orderedTargets, ImmutableArray<FastTensorKey>.Empty, ScopeOf, positionalByScope, indexOf);
             }
 
+            // Names (ParamNames.Named, or the local a call was assigned to): each resolves to its
+            // id-bearing node. An explicit name overrides a local's; two explicit names for one
+            // node, or one explicit name for two nodes of a scope, fail the build — either would
+            // leave a parameter under a name its author did not give it.
+            var nameOf = new Dictionary<FastNode, (string name, bool inferred)>();
+            var explicitNamesByScope = new Dictionary<ImmutableArray<FastTensorKey>, HashSet<string>>(ScopeSeqComparer.Instance);
+            if (namedNodeKeys is { Count: > 0 })
+            {
+                foreach (var (nameKey, name, inferred) in namedNodeKeys)
+                {
+                    var node = ResolveNamedNode(nameKey, name);
+                    if (!nameOf.TryGetValue(node, out var prior) || (prior.inferred && !inferred))
+                        nameOf[node] = (name, inferred);
+                    else if (!prior.inferred && !inferred && prior.name != name)
+                        throw new InvalidOperationException(
+                            $"Named: one item is named both '{prior.name}' and '{name}'.");
+                }
+                foreach (var (node, (name, inferred)) in nameOf)
+                {
+                    if (inferred) continue;
+                    var scope = ScopeOf(node);
+                    if (!explicitNamesByScope.TryGetValue(scope, out var taken))
+                        explicitNamesByScope[scope] = taken = new HashSet<string>(StringComparer.Ordinal);
+                    if (!taken.Add(name))
+                        throw new InvalidOperationException(
+                            $"Named: '{name}' names two parameters or sub-models of " +
+                            (scope.IsEmpty ? "the module body" : $"a loop body {scope.Length} level(s) deep") +
+                            ". A name identifies one item of its scope; give each its own.");
+                }
+            }
+
+            FastNode ResolveNamedNode(FastNodeKey nameKey, string name)
+            {
+                var key = nameKey;
+                for (int hops = 0; hops < 16 && nodeByKey.TryGetValue(key, out var candidate); hops++)
+                {
+                    if (candidate.OpCode == InternalOpCodes.MODEL_PARAM_REF ||
+                        candidate.OpCode == InternalOpCodes.MODULE_SET_HYPERPARAMS)
+                        return candidate;
+                    if (candidate.OpCode == OpCodes.IDENTITY && candidate.Inputs[0] is { } up)
+                    { key = up.FastNodeKey; continue; }
+                    break;
+                }
+                throw new InvalidOperationException(
+                    $"Named(\"{name}\"): the named item is not a parameter or a sub-model — name the " +
+                    "result of an Init(...) or Model(...) call itself, before anything is computed from it.");
+            }
+
             // The top-level picker skips top-level sparse slots; each loop's sub-picker skips
             // that loop's sparse slots (created inside AllocateLoopModelIds from reservedByScope).
             var topLevelReserved = reservedByScope.TryGetValue(ImmutableArray<FastTensorKey>.Empty, out var tlr) ? tlr : null;
@@ -497,14 +548,21 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 // Get the module function from tensor info or node's target function.
                 var tensorInfo = tensorInfos[toIdentifyKey];
                 var modelFn = (tensorInfo.ModuleFn ?? fastNode.TargetFunction)!;
-                var moduleName = modelFn.DefaultName!;
+                var hasName = nameOf.TryGetValue(fastNode, out var given);
+                var moduleName = hasName ? given.name : modelFn.DefaultName!;
 
-                // Track module name dedupe IDs.
-                if (moduleNameDedupeIdMap.TryGetValue(moduleName, out var existing))
-                    moduleNameDedupeIdMap[moduleName] = existing + 1;
-                else
-                    moduleNameDedupeIdMap[moduleName] = 0;
-                var moduleNameDedupeId = moduleNameDedupeIdMap[moduleName];
+                // An explicit name is unique in its scope and takes #0; anything else is numbered
+                // in creation order among its scope's same-named parts, after an explicit #0.
+                int moduleNameDedupeId = 0;
+                if (!hasName || given.inferred)
+                {
+                    if (!nameDedupeIdsByScope.TryGetValue(loopIterationIndices, out var scopeIds))
+                        nameDedupeIdsByScope[loopIterationIndices] = scopeIds = new Dictionary<string, int>(StringComparer.Ordinal);
+                    moduleNameDedupeId = scopeIds.TryGetValue(moduleName, out var existing)
+                        ? existing + 1
+                        : explicitNamesByScope.TryGetValue(loopIterationIndices, out var ex) && ex.Contains(moduleName) ? 1 : 0;
+                    scopeIds[moduleName] = moduleNameDedupeId;
+                }
 
                 // Build identifier template.
                 ModelParamIdentifierTemplate? identifierTemplate = null;

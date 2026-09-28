@@ -420,7 +420,10 @@ public partial class Rank0ParamsInLoopModel
 public partial class Rank0GainNoRefModel
 {
     public static Tensor<float32> Inline(Tensor<float32> input)
-        => Rank0GainSubModel.Call(input);
+    {
+        var m = Rank0GainSubModel.Model();
+        return m.Call(input);
+    }
 }
 
 /// <summary><see cref="Rank0GainNoRefModel"/> plus a read-only reference to the sub-model's rank-0
@@ -450,7 +453,10 @@ public partial class Rank1GainSubModel
 public partial class Rank1GainNoRefModel
 {
     public static Tensor<float32> Inline(Tensor<float32> input)
-        => Rank1GainSubModel.Call(input);
+    {
+        var m = Rank1GainSubModel.Model();
+        return m.Call(input);
+    }
 }
 
 /// <summary><see cref="Rank1GainNoRefModel"/> plus a read-only reference to the sub-model's rank-1
@@ -471,7 +477,11 @@ public partial class Rank1GainWithRefModel
 public partial class MixedDepthGainNoRefModel
 {
     public static Tensor<float32> Inline(Tensor<float32> input)
-        => Rank1GainNoRefModel.Call(input) + Rank1GainSubModel.Call(input);
+    {
+        var deep = Rank1GainNoRefModel.Model();
+        var flat = Rank1GainSubModel.Model();
+        return deep.Call(input) + flat.Call(input);
+    }
 }
 
 /// <summary>
@@ -523,7 +533,10 @@ public partial class StatefulGainSubModel
 public partial class StatefulGainNoRefModel
 {
     public static Tensor<float32> Inline(Tensor<float32> input)
-        => StatefulGainSubModel.Call(input);
+    {
+        var m = StatefulGainSubModel.Model();
+        return m.Call(input);
+    }
 }
 
 /// <summary>One stateful model handle called twice — the two calls share its one weight and its
@@ -629,7 +642,10 @@ public partial class HyperModelHost
 public partial class HyperModelGainModel
 {
     public static Tensor<float32> Inline(Tensor<float32> input)
-        => HyperModelHost.Model(Rank1GainSubModel.Model()).Call(input);
+    {
+        var m = Rank1GainSubModel.Model();
+        return HyperModelHost.Model(m).Call(input);
+    }
 }
 
 /// <summary><see cref="Rank1GainSubModel"/> reached through a <c>[Hyper] Model&lt;&gt;</c> of a host
@@ -639,7 +655,8 @@ public partial class HyperModelGainFromSequenceModel
 {
     public static Tensor<float32> Inline(Tensor<float32> input)
     {
-        var seq = ModelSequence.Create(HyperModelHost.Model(Rank1GainSubModel.Model()));
+        var m = Rank1GainSubModel.Model();
+        var seq = ModelSequence.Create(HyperModelHost.Model(m));
         return seq[Scalar(0L)].Call(input);
     }
 }

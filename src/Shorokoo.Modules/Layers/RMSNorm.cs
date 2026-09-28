@@ -49,7 +49,7 @@ public partial class RMSNorm
         var xHat = x / (ms + epsilon).Sqrt();
 
         var paramShape = shape.Slice(start, rank);
-        var gain = Ones.Init(paramShape);
+        var gain = Ones.Init(paramShape).Named("weight");
 
         return affine.IfElse(xHat * gain, xHat);
     }

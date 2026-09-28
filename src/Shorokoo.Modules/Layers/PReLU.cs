@@ -31,7 +31,7 @@ public partial class PReLU
 {
     public static Tensor<float32> Inline(Tensor<float32> x)
     {
-        var alpha = PReLUAlphaInit.Init(Vector(1L)).Vec();
+        var alpha = PReLUAlphaInit.Init(Vector(1L)).Named("weight").Vec();
         return x.Relu() - alpha * (x * -1f).Relu();
     }
 }
@@ -57,7 +57,7 @@ public partial class PReLUChannelwise
         Scalar<int64> numChannels = shape[1];                 // C = axis 1, read in-graph
 
         // [C] trainable slope, all entries 0.25 at init (reuses PReLUAlphaInit).
-        var alpha = PReLUAlphaInit.Init([numChannels]).Vec();
+        var alpha = PReLUAlphaInit.Init([numChannels]).Named("weight").Vec();
 
         // Broadcast shape [1, C, 1, …, 1] sized to the runtime rank (the BatchNorm
         // idiom, inlined here to keep activations decoupled from the norm helpers):

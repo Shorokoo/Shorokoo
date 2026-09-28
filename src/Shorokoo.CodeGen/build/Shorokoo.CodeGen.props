@@ -1,0 +1,7 @@
+<Project>
+  <!-- The [Module] generator names a parameter after the local it is assigned to, through
+       interceptors in this namespace. -->
+  <PropertyGroup>
+    <InterceptorsNamespaces>$(InterceptorsNamespaces);Shorokoo.Generated.ParamNames</InterceptorsNamespaces>
+  </PropertyGroup>
+</Project>

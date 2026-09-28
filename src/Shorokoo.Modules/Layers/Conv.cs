@@ -36,9 +36,9 @@ public partial class Conv2d
         [Hyper] Scalar<bit> useBias)
     {
         Scalar<int64> inChannels = x.ShapeTensor()[1];
-        var w = KaimingUniform.Init([outChannels, inChannels / groups, kernelSize, kernelSize]);
+        var w = KaimingUniform.Init([outChannels, inChannels / groups, kernelSize, kernelSize]).Named("weight");
 
-        var bTrainable = Zeros.Init([outChannels]).Vec();
+        var bTrainable = Zeros.Init([outChannels]).Named("bias").Vec();
         var b = useBias.IfElse(bTrainable, VectorFill(outChannels, 0f));
 
         return NN.Conv(x, w, b, AutoPad.NotSet,
@@ -70,9 +70,9 @@ public partial class Conv1d
         [Hyper] Scalar<bit> useBias)
     {
         Scalar<int64> inChannels = x.ShapeTensor()[1];
-        var w = KaimingUniform.Init([outChannels, inChannels / groups, kernelSize]);
+        var w = KaimingUniform.Init([outChannels, inChannels / groups, kernelSize]).Named("weight");
 
-        var bTrainable = Zeros.Init([outChannels]).Vec();
+        var bTrainable = Zeros.Init([outChannels]).Named("bias").Vec();
         var b = useBias.IfElse(bTrainable, VectorFill(outChannels, 0f));
 
         return NN.Conv(x, w, b, AutoPad.NotSet,
@@ -105,9 +105,9 @@ public partial class ConvTranspose2d
         [Hyper] Scalar<bit> useBias)
     {
         Scalar<int64> inChannels = x.ShapeTensor()[1];
-        var w = KaimingUniform.Init([inChannels, outChannels, kernelSize, kernelSize]);
+        var w = KaimingUniform.Init([inChannels, outChannels, kernelSize, kernelSize]).Named("weight");
 
-        var bTrainable = Zeros.Init([outChannels]).Vec();
+        var bTrainable = Zeros.Init([outChannels]).Named("bias").Vec();
         var b = useBias.IfElse(bTrainable, VectorFill(outChannels, 0f));
 
         return NN.ConvTranspose(x, w, b, AutoPad.NotSet,

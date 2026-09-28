@@ -115,6 +115,19 @@ namespace Shorokoo.Core
         internal static RngPinRegistry Pins => RequireModuleBuild("Rng.Pin").Pins;
 
         /// <summary>
+        /// The parameter and sub-model names recorded by the current module build. Requires a
+        /// module build on the current thread, as <see cref="Pins"/> does: <paramref name="api"/>
+        /// names the caller in the error.
+        /// </summary>
+        internal static ParamNameRegistry ParamNames(string api) => RequireModuleBuild(api).ParamNames;
+
+        /// <summary>The current module build's name recordings, or null when no module build is
+        /// in progress — for names that apply where a build is running and are moot otherwise.</summary>
+        internal static ParamNameRegistry? ParamNamesIfBuilding => TraceContext.Current?.IsModuleBuild == true
+            ? TraceContext.Current.ParamNames
+            : null;
+
+        /// <summary>
         /// The calls of this module build whose callee updates state, so that the call has to
         /// survive even where its result is discarded (Shorokoo/Shorokoo#310). Recorded by the
         /// call itself and harvested alongside <see cref="StateUpdates"/>; null when no module
@@ -192,6 +205,9 @@ namespace Shorokoo.Core
 
         /// <summary>The Rng.Pin recordings of this trace.</summary>
         internal RngPinRegistry Pins { get; } = new RngPinRegistry();
+
+        /// <summary>The parameter and sub-model names recorded by this trace.</summary>
+        internal ParamNameRegistry ParamNames { get; } = new ParamNameRegistry();
 
         /// <summary>The stateful calls of this trace (see <see cref="GraphTrace.CallEffects"/>).</summary>
         internal List<Variable> CallEffects { get; } = new List<Variable>();

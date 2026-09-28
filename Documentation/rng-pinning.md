@@ -58,8 +58,11 @@ graph-side tool can substitute for it, because names exist only in source.
 - **To freeze a module's current streams before a refactor, list ALL of its random consumers
   in current creation order.** A partial positional pin re-keys the unlisted consumers (they
   move behind the pinned ones).
-- Pinning also stabilizes the pinned items' identifier names (`Linear#0` vs `Linear#1` follow
-  slot order), so checkpoint parameter names for pinned items are refactor-stable too.
+- A pin fixes streams, not names. An item assigned to a local by `var x = ...Init(...)` or
+  `var x = ...Model(...)` is already named after that local, whatever its slot
+  ([Parameter names](defining-models.md#parameter-names)). Items that share a name — left to
+  their class names (`Linear#0`, `Linear#1`), or locals of one name — are numbered in slot
+  order, so a pin that moves them renumbers them.
 - Same model object = same slot, and so the same parameters — but not the same stream: each
   call site of a model called more than once draws from its own, since a draw is an execution
   rather than a value the model holds. The pin addresses the slot, and each call's stream hangs

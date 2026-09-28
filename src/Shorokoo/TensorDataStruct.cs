@@ -27,8 +27,12 @@ namespace Shorokoo
         /// <c>.TryConsume()</c> it may have been given through. The mode a field was given stays with
         /// this struct: a struct built again from these values, with the public constructor, feeds
         /// every field as the struct is fed unless it is given its mode again.
+        ///
+        /// <para>Enumerates in the definition's field order — for a model's parameters, the order of
+        /// the model's graph — the same in every process. A key the definition does not declare
+        /// comes after the declared fields, in the order it was given.</para>
         /// </summary>
-        public ImmutableDictionary<string, IData> Fields { get; private set; }
+        public IReadOnlyDictionary<string, IData> Fields { get; private set; }
 
         /// <summary>The number of fields the definition declares — the same fields the indexer and the
         /// enumerator walk. A key in <see cref="Fields"/> beyond the definition is not a field of this
@@ -83,13 +87,17 @@ namespace Shorokoo
             Definition = definition ?? throw new ArgumentNullException(nameof(definition));
             ArgumentNullException.ThrowIfNull(fields);
             var values = ImmutableDictionary.CreateBuilder<string, IData>();
+            var given = new List<string>();
             foreach (var (name, value) in fields)
             {
                 // Unwrapped here, and nowhere else: everything that reads Fields sees the value.
                 if (value is SharedInput shared) modes = modes.SetItem(name, shared.Mode);
                 values.Add(name, value is SharedInput { Value: var held } ? held : value);
+                given.Add(name);
             }
-            Fields = values.ToImmutable();
+            var declared = definition.Fields.Select(f => f.Name).Where(values.ContainsKey).ToList();
+            var declaredSet = declared.ToHashSet(StringComparer.Ordinal);
+            Fields = new OrderedFields([.. declared, .. given.Where(n => !declaredSet.Contains(n))], values.ToImmutable());
             _fieldModes = modes;
 
             // Every definition field must be present, and present as the kind the definition declares.
@@ -115,6 +123,22 @@ namespace Shorokoo
                         $"Field '{fieldDef.Name}' is declared {fieldDef.Structure} by this struct's "
                         + $"definition, but the value given for it is a {actual}.", nameof(fields));
             }
+        }
+
+        /// <summary>Field values by name, enumerated in a fixed order rather than hash order.</summary>
+        private sealed class OrderedFields(ImmutableArray<string> order, ImmutableDictionary<string, IData> byName)
+            : IReadOnlyDictionary<string, IData>
+        {
+            public IData this[string key] => byName[key];
+            public IEnumerable<string> Keys => order;
+            public IEnumerable<IData> Values => order.Select(n => byName[n]);
+            public int Count => order.Length;
+            public bool ContainsKey(string key) => byName.ContainsKey(key);
+            public bool TryGetValue(string key, [System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)] out IData value)
+                => byName.TryGetValue(key, out value);
+            public IEnumerator<KeyValuePair<string, IData>> GetEnumerator()
+                => order.Select(n => new KeyValuePair<string, IData>(n, byName[n])).GetEnumerator();
+            IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
         }
 
         /// <summary>The structural kind of a value, as a definition declares kinds.</summary>

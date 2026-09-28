@@ -2151,8 +2151,8 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
     // canonical names or a naming scheme, plus the one-call .skpt landing.
     // ──────────────────────────────────────────────────────────────────────
 
-    private const string FcWeightsId = "TrainableParam#0.InitSimple#0";
-    private const string FcBiasId = "TrainableParam#0.InitSimple#1";
+    private const string FcWeightsId = "TrainableParam#0.weights#0";
+    private const string FcBiasId = "TrainableParam#0.InitSimple#0";
 
     private static (ComputationGraph Arch, ComputationGraph Model, TensorData NumOut, TensorData Input)
         BuildSafeTensorsExchangeModel()
@@ -2190,7 +2190,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         var torchPath = P("exchange_torch.safetensors");
         var originalWeights = CanonicalWeightBytes(model);
         var direct = ExecuteToBytes(model, numOut, input);
-        Assert.Equal([FcWeightsId, FcBiasId],
+        Assert.Equal([FcBiasId, FcWeightsId],
             originalWeights.Keys.OrderBy(k => k, StringComparer.Ordinal).ToArray());
 
         Persistence.ExportSafeTensors(model, canonicalPath);
@@ -2310,7 +2310,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
         // Two parameters onto one source name is ambiguous — refused before any tensor lookup.
         SimplePatternScheme[] colliding =
         [
-            new SimplePatternScheme("TrainableParam#0.InitSimple#{p}", "fc.same"),
+            new SimplePatternScheme("TrainableParam#0.{n}#0", "fc.same"),
         ];
         var collidingScheme = new SimplePatternNamingScheme(
             colliding, arch.GetShorokooIdNamingScheme(), ModuleParamSetNamingScheme.PyTorchFrameworkId);

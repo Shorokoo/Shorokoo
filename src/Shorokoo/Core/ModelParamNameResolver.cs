@@ -416,7 +416,7 @@ namespace Shorokoo.Core
 
         /// <summary>
         /// Translates a canonical Shorokoo parameter id string (e.g.
-        /// <c>TrainableParam#0.FCLayer#0.InitSimple#0</c>) to this scheme's name by matching the
+        /// <c>TrainableParam#0.fc#0.weight#0</c>) to this scheme's name by matching the
         /// patterns directly — the natural direction for this scheme, whose patterns are written
         /// against canonical id strings. Returns null when no pattern matches the id.
         /// </summary>

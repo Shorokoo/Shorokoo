@@ -38,9 +38,9 @@ public partial class Conv3d
         [Hyper] Scalar<bit> useBias)
     {
         Scalar<int64> inChannels = x.ShapeTensor()[1];
-        var w = KaimingUniform.Init([outChannels, inChannels / groups, kernelSize, kernelSize, kernelSize]);
+        var w = KaimingUniform.Init([outChannels, inChannels / groups, kernelSize, kernelSize, kernelSize]).Named("weight");
 
-        var bTrainable = Zeros.Init([outChannels]).Vec();
+        var bTrainable = Zeros.Init([outChannels]).Named("bias").Vec();
         var b = useBias.IfElse(bTrainable, VectorFill(outChannels, 0f));
 
         return NN.Conv(x, w, b, AutoPad.NotSet,

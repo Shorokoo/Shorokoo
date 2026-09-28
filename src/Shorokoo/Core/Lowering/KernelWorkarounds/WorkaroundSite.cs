@@ -24,6 +24,7 @@ internal sealed class WorkaroundSite
     private readonly IReadOnlyDictionary<FastTensorKey, FastNode> producers;
     private readonly IReadOnlySet<FastTensorKey> read;
     private readonly SortedDictionary<int, string> constantsRead = [];
+    private readonly bool shapesAreConcrete;
 
     private WorkaroundSite(
         FastNode node,
@@ -32,8 +33,10 @@ internal sealed class WorkaroundSite
         (DType DType, int? Rank)?[] inputs,
         (DType DType, int? Rank)?[] outputs,
         IReadOnlyDictionary<FastTensorKey, FastNode> producers,
-        IReadOnlySet<FastTensorKey> read)
+        IReadOnlySet<FastTensorKey> read,
+        bool shapesAreConcrete)
     {
+        this.shapesAreConcrete = shapesAreConcrete;
         this.node = node;
         this.inputKeys = inputKeys;
         this.outputKeys = outputKeys;
@@ -46,12 +49,14 @@ internal sealed class WorkaroundSite
     /// <summary>
     /// The site of <paramref name="node"/>, or null when the graph does not tell every present
     /// input's dtype, or some input is not a tensor: a call the pass leaves as it stands.
+    /// <paramref name="shapesAreConcrete"/> is <see cref="ShapesAreConcrete"/>.
     /// </summary>
     internal static WorkaroundSite? TryCreate(
         FastNode node,
         IReadOnlyDictionary<FastTensorKey, FastTensorInfo> tensorInfo,
         IReadOnlyDictionary<FastTensorKey, FastNode> producers,
-        IReadOnlySet<FastTensorKey> read)
+        IReadOnlySet<FastTensorKey> read,
+        bool shapesAreConcrete = false)
     {
         FastTensorKey?[] inputKeys = [.. node.Inputs.Select(k => k is { IsEmpty: false } ? k : null)];
         FastTensorKey?[] outputKeys = [.. node.Outputs.Select(k => k is { IsEmpty: false } ? k : null)];
@@ -71,8 +76,16 @@ internal sealed class WorkaroundSite
             if (outputKeys[i] is { } key && tensorInfo.TryGetValue(key, out var info))
                 outputs[i] = (info.DType, info.Rank);
 
-        return new WorkaroundSite(node, inputKeys, outputKeys, inputs, outputs, producers, read);
+        return new WorkaroundSite(node, inputKeys, outputKeys, inputs, outputs, producers, read, shapesAreConcrete);
     }
+
+    /// <summary>
+    /// Whether the model is built with every graph input's dimensions stated, so the backend knows
+    /// every shape the graph computes from them when it builds the session, and folds what is
+    /// computed from those shapes alone. A replacement that decides by shape can then leave the
+    /// decision to that fold. The same for every call of one build.
+    /// </summary>
+    public bool ShapesAreConcrete => shapesAreConcrete;
 
     /// <summary>The operator's op code.</summary>
     public string OpCode => node.OpCode;

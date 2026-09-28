@@ -253,7 +253,22 @@ public class PyTorchBackendCoverageTests
     }
 
     [Fact]
+    public void TestANoopReductionReducesEachElementAloneOnTorch()
+    {
+        NoopReductionsReduceEachElementAlone(new ComputeContext(Torch));
+        Assert.True(AutoTest.AdvancedTestGraph<NoopReduceOfEachElementCheck>([], [QeeAudit.F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)],
+            context: new ComputeContext(Torch)));
+    }
+
+    [Fact]
     public void TestWhereSelectsOnEveryIntegerTypeAndBoolOnTorch() => WhereSelectsOnEveryIntegerTypeAndBool(new ComputeContext(Torch));
+
+    internal static void NoopReductionsReduceEachElementAlone(ComputeContext c)
+    {
+        var x = QeeAudit.F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f);
+        Assert.True(AutoTest.AdvancedTestGraph<NoopReduceOfEachElementByShapeCheck>([], [x], context: c));
+        Assert.True(AutoTest.AdvancedTestGraph<ElementwiseNoopReduceOfAConstantCheck>([], [x], context: c));
+    }
 
     internal static void PoolsComputeTheSpecValues(ComputeContext c)
     {

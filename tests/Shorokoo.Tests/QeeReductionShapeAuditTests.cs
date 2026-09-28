@@ -90,6 +90,17 @@ public class QeeReductionShapeAuditTests
         => Assert.True(AutoTest.AdvancedTestGraph<NoopReduceAxesFormsCheck>([], [F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)]));
 
     [Fact]
+    public void TestAnElementwiseNoopReductionOfAConstantReducesEachElementAlone()
+        => Assert.True(AutoTest.AdvancedTestGraph<ElementwiseNoopReduceOfAConstantCheck>([], [F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)]));
+
+    [Fact]
+    public void TestANoopReductionReducesEachElementAlone()
+    {
+        Assert.True(AutoTest.AdvancedTestGraph<NoopReduceOfEachElementCheck>([], [F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)]));
+        Assert.True(AutoTest.AdvancedTestGraph<NoopReduceOfEachElementByShapeCheck>([], [F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)]));
+    }
+
+    [Fact]
     public void TestAReductionOverAxesNegativeByTheirValuesHasTheSpecShapeAndValues()
         => Assert.True(AutoTest.AdvancedTestGraph<EmptyReduceRuntimeNegativeAxisCheck>([], [F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)]));
 

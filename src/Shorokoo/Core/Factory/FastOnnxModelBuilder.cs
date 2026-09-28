@@ -237,6 +237,10 @@ namespace Shorokoo.Core.Factory
             // ----- 1. Clone so we never mutate the caller's graph.
             var prepFast = fastGraph.Clone();
 
+            // Every graph input stamped with its dimensions: the backend then knows every shape
+            // computed from them when it builds the session, which a kernel workaround may rely on.
+            bool shapesAreConcrete = inputDims is not null && inputDims.All(d => d is not null);
+
             // A model built for a session here gives every output memory of its own. ONNX Runtime
             // hands back an output that names a graph input, or repeats an earlier output, as the
             // very value it was fed or has already returned, so two tensors would name one buffer,
@@ -255,7 +259,7 @@ namespace Shorokoo.Core.Factory
 
             // ----- 2. Run the Fast pre-passes in place. Capture the rename map
             // so we can also remap the tensor-info lookup we'll build below.
-            var tensorInfoLookup = RunPrePassesAndBuildLookup(prepFast, prepForOnnx, applyExecutionLowerings, workarounds);
+            var tensorInfoLookup = RunPrePassesAndBuildLookup(prepFast, prepForOnnx, applyExecutionLowerings, workarounds, shapesAreConcrete);
 
             // Each output likewise takes its declared rank, else the rank it recorded at the samples,
             // so an exported file gives every output a shape too (Shorokoo/Shorokoo#387).
@@ -317,7 +321,7 @@ namespace Shorokoo.Core.Factory
             // a FunctionProto for each.
             var functions = CollectFunctionsPostOrder(prepFast);
             var functionProtos = functions
-                .Select(fn => BuildFunctionProto(fn, opset, prepForOnnx, applyExecutionLowerings, stripCheckpointStamp, flattenFunctionBodies, forSession, workarounds))
+                .Select(fn => BuildFunctionProto(fn, opset, prepForOnnx, applyExecutionLowerings, stripCheckpointStamp, flattenFunctionBodies, forSession, workarounds, shapesAreConcrete))
                 .ToArray();
 
             var model = (ModelProto)OnnxIRFactory.CreateModel(graphProto, functionProtos, opset);
@@ -1592,7 +1596,8 @@ namespace Shorokoo.Core.Factory
         /// pre-pass order. Mutates the graph in place.
         /// </summary>
         private static void RunPrePasses(
-            InternalComputationGraph graph, bool prepForOnnx, bool applyExecutionLowerings, KernelWorkaroundSet? workarounds)
+            InternalComputationGraph graph, bool prepForOnnx, bool applyExecutionLowerings, KernelWorkaroundSet? workarounds,
+            bool shapesAreConcrete)
         {
             FastLowerAttributeTensorOps.Process(graph);
             if (applyExecutionLowerings) FastLowerStateUpdateLinksForInference.Process(graph);
@@ -1621,7 +1626,7 @@ namespace Shorokoo.Core.Factory
             // the export lowerings sit before them. What it splices in, and what the later passes
             // add only for that, is numbered last, so every value the graph holds without it keeps
             // its name.
-            var splices = FastApplyKernelWorkarounds.Process(graph, workarounds);
+            var splices = FastApplyKernelWorkarounds.Process(graph, workarounds, shapesAreConcrete);
             FastAddIdentityForOuterScopeValues.Process(graph);
             if (prepForOnnx) FastPrepForOnnx.Process(graph);
             FastStripCallStacks.Process(graph);
@@ -1639,14 +1644,15 @@ namespace Shorokoo.Core.Factory
         /// then remapped through the rename map.
         /// </summary>
         private static Dictionary<FastTensorKey, FastTensorInfo> RunPrePassesAndBuildLookup(
-            InternalComputationGraph graph, bool prepForOnnx, bool applyExecutionLowerings, KernelWorkaroundSet? workarounds)
+            InternalComputationGraph graph, bool prepForOnnx, bool applyExecutionLowerings, KernelWorkaroundSet? workarounds,
+            bool shapesAreConcrete)
         {
             FastLowerAttributeTensorOps.Process(graph);
             if (applyExecutionLowerings) FastLowerStateUpdateLinksForInference.Process(graph);
             if (applyExecutionLowerings) FastLowerRandomOps.Process(graph);
             // Same position, and for the same reasons, as in RunPrePasses above.
             if (applyExecutionLowerings) LowerForExport(graph);
-            var splices = FastApplyKernelWorkarounds.Process(graph, workarounds);
+            var splices = FastApplyKernelWorkarounds.Process(graph, workarounds, shapesAreConcrete);
             FastAddIdentityForOuterScopeValues.Process(graph);
             if (prepForOnnx) FastPrepForOnnx.Process(graph);
             FastStripCallStacks.Process(graph);
@@ -1706,7 +1712,7 @@ namespace Shorokoo.Core.Factory
         private static FunctionProto BuildFunctionProto(
             Function function, OpSetVersion opset, bool prepForOnnx, bool applyExecutionLowerings,
             bool stripCheckpointStamp = true, bool flattenBody = true, bool forSession = false,
-            KernelWorkaroundSet? workarounds = null)
+            KernelWorkaroundSet? workarounds = null, bool shapesAreConcrete = false)
         {
             // Run the same pre-passes over the function's own body. That body has its own
             // ONNX-name namespace,
@@ -1736,9 +1742,9 @@ namespace Shorokoo.Core.Factory
             if (fnFast.Nodes.Any(n => n.OpCode == OpCodes.LOOP_CLOSE || n.OpCode == OpCodes.IF_CLOSE
                     || forSession && n.OpCode == OpCodes.DEQUANTIZE_LINEAR)
                 || FastApplyKernelWorkarounds.HasCandidate(fnFast, workarounds))
-                fnTensorInfoLookup = RunPrePassesAndBuildLookup(fnFast, prepForOnnx, applyExecutionLowerings, workarounds);
+                fnTensorInfoLookup = RunPrePassesAndBuildLookup(fnFast, prepForOnnx, applyExecutionLowerings, workarounds, shapesAreConcrete);
             else
-                RunPrePasses(fnFast, prepForOnnx, applyExecutionLowerings, workarounds);
+                RunPrePasses(fnFast, prepForOnnx, applyExecutionLowerings, workarounds, shapesAreConcrete);
             fnFast.ConfigureScopes();
 
             var fnGraphProto = BuildGraphProto(

@@ -2,7 +2,9 @@
 
 Axes arrive as an input from opset 13 (ReduceSum) or 18 (the others) and as an attribute before
 that; both are accepted and the input wins. An empty axes list reduces everything unless
-noop_with_empty_axes is set, in which case the input comes back unchanged. Every reduction keeps
+noop_with_empty_axes is set, in which case no axis is reduced: each element is reduced as a group of
+its own, which is the element itself for Sum, Mean, Max, Min and Prod, its square for SumSquare, its
+absolute value for L1 and L2, and so on. Every reduction keeps
 the input's element type, as ONNX does and torch's own integer sums do not.
 """
 
@@ -24,11 +26,11 @@ def _ordered_uint64(fn):
 
 
 def _dims(data, axes_input, axes, noop_with_empty_axes):
-    """The dimensions to reduce, or None for the identity."""
+    """The dimensions to reduce; none when noop_with_empty_axes is set and the axes are empty."""
     if axes_input is not None:
         axes = [int(a) for a in axes_input.reshape(-1).tolist()]
     if not axes:
-        return None if noop_with_empty_axes else list(range(data.dim()))
+        return [] if noop_with_empty_axes else list(range(data.dim()))
     rank = data.dim()
     return sorted({a % rank for a in axes}) if rank else []
 
@@ -43,16 +45,15 @@ def _reduce(fn, empty_value, data, axes_input, axes, keepdims, noop_with_empty_a
     if ordered and data.dtype == torch.uint64:
         fn = _ordered_uint64(fn)
     dims = _dims(data, axes_input, axes, noop_with_empty_axes)
-    if dims is None:
-        return data.clone()
+    work = data.to(torch.int64) if data.dtype in _NARROW_UNSIGNED else data
     if not dims:
-        # A scalar reduced over no axes: reducing a leading axis of one gives each reduction its
-        # own answer for a single element (the element, its square, its absolute value...).
-        return fn(data.unsqueeze(0), [0], False).to(data.dtype)
+        # No axis reduced: every element is a group of its own. Reducing a leading axis of one
+        # gives each reduction its own answer for a single element (the element, its square, its
+        # absolute value...).
+        return fn(work.unsqueeze(0), [0], False).to(data.dtype)
     if any(data.shape[d] == 0 for d in dims):
         value = empty_value(data.dtype) if callable(empty_value) else empty_value
         return _filled(data, dims, keepdims, value)
-    work = data.to(torch.int64) if data.dtype in _NARROW_UNSIGNED else data
     return fn(work, dims, bool(keepdims)).to(data.dtype)
 
 

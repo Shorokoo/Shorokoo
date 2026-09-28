@@ -275,7 +275,8 @@ namespace Shorokoo
 
         /// <summary>
         /// Applies the reduction selected by <paramref name="reduceKind"/> along the given axes
-        /// (dispatches to the corresponding ONNX Reduce* op); noOp makes empty axes a pass-through.
+        /// (dispatches to the corresponding ONNX Reduce* op); with noOp, empty axes reduce no axis, so each
+        /// element comes out as the reduction of itself alone (the element for Sum, its square for SumSquare...).
         /// </summary>
         public static Tensor<T> Reduce<T>(ReduceKind reduceKind, Tensor<T> tensor, Tensor<int64>? axes, bool? keepDims, bool? noOp)
             where T : IVarType

@@ -58,9 +58,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
         /// <summary>
         /// Applies <paramref name="set"/> to <paramref name="graph"/> in place, and returns what it
-        /// spliced in.
+        /// spliced in. <paramref name="shapesAreConcrete"/> is what every site reports as
+        /// <see cref="WorkaroundSite.ShapesAreConcrete"/>.
         /// </summary>
-        public static Splices Process(InternalComputationGraph graph, KernelWorkaroundSet? set)
+        public static Splices Process(InternalComputationGraph graph, KernelWorkaroundSet? set, bool shapesAreConcrete = false)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
             if (!HasCandidate(graph, set)) return Splices.None;
@@ -88,7 +89,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 foreach (var node in graph.Nodes)
                 {
                     if (!workaround.OpCodes.Contains(node.OpCode)
-                        || WorkaroundSite.TryCreate(node, tensorInfo, producers, read) is not { } site
+                        || WorkaroundSite.TryCreate(node, tensorInfo, producers, read, shapesAreConcrete) is not { } site
                         || !workaround.Applies(site))
                     {
                         newNodes.Add(node);

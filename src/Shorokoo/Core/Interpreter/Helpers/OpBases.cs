@@ -283,14 +283,12 @@ internal abstract class ReduceOpBase : QuickOp
         if (resultShape is null || !RuntimeTensorFactory.ShouldStoreData(resultShape, maxDataElements))
             return [rt];
 
-        // noop_with_empty_axes with no axes: the op is an identity — pass the data through
-        // unchanged (the reduce path below would wrongly fold everything into one element).
-        if ((axes is null || axes.Length == 0) && noopWithEmptyAxes)
-            return [rt with { FloatData = x.FloatData, IntData = x.IntData, BoolData = x.BoolData }];
-
+        // noop_with_empty_axes with no axes reduces no axis: every element is a group of its own,
+        // and comes out as this reduction of that one element — the element itself for Sum, Mean,
+        // Max, Min and Prod, its square for SumSquare, and so on.
         var inDims = x.Shape!.Dims;
         var normalizedAxesAll = (axes is null || axes.Length == 0)
-            ? Enumerable.Range(0, inDims.Length).Select(i => (long)i).ToArray()
+            ? noopWithEmptyAxes ? [] : Enumerable.Range(0, inDims.Length).Select(i => (long)i).ToArray()
             : axes.Select(a => a < 0 ? a + inDims.Length : a).ToArray();
         var axisSet = new HashSet<long>(normalizedAxesAll);
 

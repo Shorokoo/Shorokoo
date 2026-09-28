@@ -94,6 +94,9 @@ public class JaxBackendCoverageTests
     public void TestCropAndResizeAndCol2ImComputeTheSpecValuesOnJax() => CropAndResizeAndCol2ImComputeTheSpecValues(new ComputeContext(Jax));
 
     [Fact]
+    public void TestANoopReductionReducesEachElementAloneOnJax() => NoopReductionsReduceEachElementAlone(new ComputeContext(Jax));
+
+    [Fact]
     public void TestWhereSelectsOnEveryIntegerTypeAndBoolOnJax() => WhereSelectsOnEveryIntegerTypeAndBool(new ComputeContext(Jax));
 
     [Fact]

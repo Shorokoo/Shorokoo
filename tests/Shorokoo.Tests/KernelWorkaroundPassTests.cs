@@ -2,8 +2,11 @@ using System.Collections.Immutable;
 using Shorokoo.Core.Backends;
 using Shorokoo.Core.Factory;
 using Shorokoo.Core.Factory.IR;
+using Shorokoo.Core.Graph;
 using Shorokoo.Core.Lowering.KernelWorkarounds;
 using Shorokoo.Jax.Cpu;
+using Shorokoo.Modules.Losses;
+using Shorokoo.Modules.Optimizers;
 using Shorokoo.PyTorch.Cpu;
 using Shorokoo.Runtime;
 using static Shorokoo.Core.Nodes.NodeDefinitions.OpCodes;
@@ -106,7 +109,51 @@ public class KernelWorkaroundPassTests
         Assert.True(Plain((Variable)i.Reduce(ReduceKind.Min), REDUCE_MIN, i));
     }
 
+    [Fact]
+    public void TestATrainingStepRunsNoIfOfTheOnnxRuntimeWorkaroundsWithOrWithoutConcreteShapes()
+    {
+        var step = TrainingRig.FromScratch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
+            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([4L], [1f, 2f, 3f, 4f]))],
+            new AdamWOptimizerHyperparameters { LearningRate = 0.1f }).TrainingStepPureGraph.ToInternal();
+        List<long[]?> dims = [.. step.InputNodes.Select(RepresentativeInputShapes.Get)];
+        Assert.Equal(Ifs(Session(step, null)), Ifs(Session(step, KernelWorkaroundRegistry.OnnxRuntime)));
+        Assert.True(Ifs(FastOnnxModelBuilder.BuildInternalOnnxModel(step, prepForOnnx: true, inputDims: dims, workarounds: KernelWorkaroundRegistry.OnnxRuntime)) > 0);
+        Assert.Equal(0, Ifs(Optimized(FastOnnxModelBuilder.BuildInternalOnnxModel(step, prepForOnnx: true, inputDims: dims, workarounds: KernelWorkaroundRegistry.OnnxRuntime))));
+    }
+
+    [Fact]
+    public void TestANoopReductionComputesItsGroupsOnOnnxRuntimeWithConcreteShapes()
+    {
+        var x = TensorData(DType.Float32, [2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f);
+        Assert.True(AllTrueWithConcreteShapes(NoopReduceOfEachElementCheck.ComputationGraph, x));
+        Assert.True(AllTrueWithConcreteShapes(NoopReduceOfEachElementByShapeCheck.ComputationGraph, x));
+        Assert.True(AllTrueWithConcreteShapes(NoopReduceAxesFormsCheck.ComputationGraph, x));
+    }
+
     private static InternalComputationGraph Graph(Variable input, Variable output) => new([input], [output]);
+
+    private static int Ifs(ModelProto model) => AllNodes(model).Count(n => n.OpType == IF);
+
+    private static ModelProto Optimized(ModelProto model)
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"shrk_kw_{Guid.NewGuid():N}.onnx");
+        try
+        {
+            using (var options = new Microsoft.ML.OnnxRuntime.SessionOptions { OptimizedModelFilePath = path })
+            using (new Microsoft.ML.OnnxRuntime.InferenceSession(Bytes(model), options)) { }
+            using var file = File.OpenRead(path);
+            return ProtoBuf.Serializer.Deserialize<ModelProto>(file);
+        }
+        finally { File.Delete(path); }
+    }
+
+    private static bool AllTrueWithConcreteShapes(ComputationGraph module, TensorData x)
+    {
+        using var context = new ComputeContext();
+        using var compiled = context.Compile(Concrete(module, x), [x.Shape.Dims], trainingStep: false);
+        var bits = compiled.Execute(x.Shared())[0].ToTensorData().AccessRawMemory().ToArray();
+        return bits.Length > 0 && bits.All(b => b != 0);
+    }
 
     private static InternalComputationGraph Concrete(ComputationGraph module, TensorData x)
         => module.ToInternal().ToConcreteArchitecture([x]).ToConcreteModel();

@@ -183,6 +183,16 @@ Boolean/integer outputs are non-differentiable, hence N/A.
 | ReduceSum | ✅ [5] | ✅ | ✅ |
 | ReduceSumSquare | ✅ [5] | ✅ | ✅ |
 
+`noop_with_empty_axes` set with no axes, or an empty axes tensor, means no axis is
+reduced: each element is a group of its own, and the output, of the input's shape,
+holds the reduction of each one-element group. That is the element itself for
+`ReduceSum`, `ReduceMean`, `ReduceMax`, `ReduceMin` and `ReduceProd`; its absolute
+value for `ReduceL1` and `ReduceL2`; its square for `ReduceSumSquare`; its logarithm
+for `ReduceLogSum`; and `ReduceLogSumExp`'s log-sum-exp of the one element, which is
+the element when it is finite. This is the reading of the ONNX reference
+implementation and of the operators' function bodies, and every backend and QEE
+compute it; an empty input gives an empty output of its shape and type.
+
 1. Integer index output: non-differentiable.
 2. Ties share the gradient equally.
 3. The gradient uses prod/x and is NaN when an element is exactly 0.
@@ -199,9 +209,14 @@ Boolean/integer outputs are non-differentiable, hence N/A.
    the reduction as written. A call whose input is a nonempty `Constant` is left
    alone. The rewrites, in the order they apply:
    - `noop_with_empty_axes` set with no axes, or an empty axes tensor: ONNX Runtime
-     reduces every axis of an empty input where the spec passes it through. The
-     call becomes `Identity`, or, when the axes are not a constant, an `If` on
-     their element count ([#409](https://github.com/Shorokoo/Shorokoo/issues/409)).
+     reduces every axis of an empty input where the output is that empty input.
+     When the session's model states every input's dimensions, the call becomes an
+     `If` on the input and the axes being empty, which ONNX Runtime resolves when it
+     builds the session, keeping the plain call wherever the input is not empty.
+     Otherwise the call keeps one reduction of the same data and axes with
+     `keepdims` 0, the reduced axes put back by an `Unsqueeze`, and an empty input
+     with empty axes is viewed with a trailing axis of one that alone is reduced —
+     no branch and no copy ([#409](https://github.com/Shorokoo/Shorokoo/issues/409)).
    - Negative axes: ONNX Runtime returns an empty input unreduced. The axes are
      made non-negative — as a constant when they are constant and the input's rank
      is known, in the graph otherwise ([#422](https://github.com/Shorokoo/Shorokoo/issues/422)).

@@ -147,7 +147,7 @@ so the `Where`s the reduction and pool rewrites emit are covered by the last row
 
 | Operator | Scenario ONNX Runtime gets wrong | Rewrite | Issue |
 |---|---|---|---|
-| Every `Reduce*` | `noop_with_empty_axes` set with no axes or an empty axes tensor, on an empty input | `Identity`, or an `If` on the axes' element count when they are not constant | [#409](https://github.com/Shorokoo/Shorokoo/issues/409) |
+| Every `Reduce*` | `noop_with_empty_axes` set with no axes or an empty axes tensor, on an empty input | With every input's dimensions stated, an `If` on the input and axes being empty, which ONNX Runtime folds when it builds the session; otherwise the same reduction with `keepdims` 0 and the reduced axes put back by `Unsqueeze`, an empty input viewed with a trailing axis of one that alone is reduced | [#409](https://github.com/Shorokoo/Shorokoo/issues/409) |
 | Every `Reduce*` | Negative axes on an empty input | Axes made non-negative, as a constant or in the graph | [#422](https://github.com/Shorokoo/Shorokoo/issues/422) |
 | `ReduceSumSquare`, `ReduceL1`, `ReduceLogSum` | float16 with no axes input, on an empty input (the process crashes) | `If` on the element count; an empty input is reduced in float32 and cast back | [#411](https://github.com/Shorokoo/Shorokoo/issues/411) |
 | `ReduceMax`, `ReduceMin` | Integer or bool input with an empty group (0 for every integer type, a failure for bool) | `If` on the element count; the empty branch fills the output shape with the spec's identity | [#382](https://github.com/Shorokoo/Shorokoo/issues/382) |

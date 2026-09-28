@@ -468,19 +468,21 @@ namespace Shorokoo.Core.Nodes.AutoDiff
                 Tensor<int64> lead = OnnxOp.ReduceProd(beforeDims, Vector(0L), keepdims: true, noopWithEmptyAxes: false); // [L]
                 Tensor<int64> gatheredCount = OnnxOp.Shape(scatterIndices, start: 0, end: 1);                // [M_total]
 
-                // The trailing [-1] lets Reshape infer R, so the (possibly empty) after-axis
-                // dims never need their own product.
-                Tensor<int64> data3DShape = OnnxOp.Concat([lead, axisDim, Vector(-1L)], axis: 0);         // [L, K, -1]
-                Tensor<int64> grad3DShape = OnnxOp.Concat([lead, gatheredCount, Vector(-1L)], axis: 0);   // [L, M_total, -1]
+                // Every dim is stated, R as the product of the (possibly empty) after-axis dims,
+                // and allowzero keeps a zero-sized one: a -1 cannot be inferred beside a zero, and
+                // without allowzero a 0 would copy whatever dim sits at its position instead.
+                Tensor<int64> rest = OnnxOp.ReduceProd(OnnxOp.Shape(data, start: normalizedAxis + 1), keepdims: true); // [R]
+                Tensor<int64> data3DShape = OnnxOp.Concat([lead, axisDim, rest], axis: 0);         // [L, K, R]
+                Tensor<int64> grad3DShape = OnnxOp.Concat([lead, gatheredCount, rest], axis: 0);   // [L, M_total, R]
 
-                Tensor<T1> zeros3D = OnnxOp.Reshape(zeros, data3DShape, allowZero: false);   // (L, K, R)
-                Tensor<T1> grad3D = OnnxOp.Reshape(grad, grad3DShape, allowZero: false);     // (L, M_total, R)
+                Tensor<T1> zeros3D = OnnxOp.Reshape(zeros, data3DShape, allowZero: true);   // (L, K, R)
+                Tensor<T1> grad3D = OnnxOp.Reshape(grad, grad3DShape, allowZero: true);     // (L, M_total, R)
 
                 Tensor<T1> zeros3DKFront = zeros3D.Transpose(1L, 0L, 2L); // (K, L, R)
                 Tensor<T1> grad3DKFront = grad3D.Transpose(1L, 0L, 2L);   // (M_total, L, R)
                 Tensor<T1> scattered3D = OnnxOp.ScatterND(zeros3DKFront, scatterIndices, grad3DKFront, ScatterNDReduction.Add); // (K, L, R)
                 Tensor<T1> scattered3DRestored = scattered3D.Transpose(1L, 0L, 2L); // (L, K, R)
-                return [OnnxOp.Reshape(scattered3DRestored, dataShapeVec, allowZero: false), null];
+                return [OnnxOp.Reshape(scattered3DRestored, dataShapeVec, allowZero: true), null];
             }
 
             // perm: [axis, 0, 1, ..., axis-1, axis+1, ..., rank-1]
@@ -522,10 +524,11 @@ namespace Shorokoo.Core.Nodes.AutoDiff
 
             var gradT2 = grad.Transpose(gradPerm);
 
-            // Flatten the leading index dims of grad to [M_total, remaining_dims...]
+            // Flatten the leading index dims of grad to [M_total, remaining_dims...], every dim
+            // stated and a zero-sized one kept.
             Tensor<int64> tailShape2 = OnnxOp.Shape(zerosT, start: 1);
-            Tensor<int64> newShape2 = OnnxOp.Concat([Vector(-1L), tailShape2], axis: 0);
-            gradT2 = OnnxOp.Reshape(gradT2, newShape2, allowZero: false);
+            Tensor<int64> newShape2 = OnnxOp.Concat([OnnxOp.Shape(flatIndices), tailShape2], axis: 0);
+            gradT2 = OnnxOp.Reshape(gradT2, newShape2, allowZero: true);
 
             Tensor<T1> scattered2 = OnnxOp.ScatterND(zerosT, scatterIndices, gradT2, ScatterNDReduction.Add);
             return [scattered2.Transpose(inversePerm), null];

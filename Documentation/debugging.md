@@ -6,7 +6,8 @@ Two facilities watch the lowering pipeline. `DebugRequests` captures the **graph
 points, and you read it after the call returns; a progress sink reports the **stage name** as the
 pipeline enters it, while the call is still running, so you can tell whether a build is alive.
 Neither changes the graph the build produces, though a progress handler that throws aborts the
-build that called it.
+build that called it. What a backend's session runs can differ from that graph by the backend's
+own kernel workarounds, which apply after the pipeline ends ([below](#backend-kernel-workarounds)).
 
 When `ToConcreteArchitecture` doesn't produce the graph you expect, `DebugRequests` (namespace
 `Shorokoo.Graph`) saves snapshots of the graph at chosen points of the lowering pipeline as
@@ -118,3 +119,46 @@ training-step composition and initialization) under one clock. See
 [training.md](training.md#watching-a-long-build) for the full report shape (`BuildPhase`, `Stage`,
 `Elapsed`, `IsComplete`), the phase order, which calls report, and why to prefer
 `SynchronousBuildProgress` over `System.Progress<T>`.
+
+## Backend kernel workarounds
+
+A runtime's kernels sometimes compute an operator otherwise than the ONNX spec says — a wrong value
+in one corner, a missing element type, a crash on an empty input. For each such corner a backend can
+name a **kernel workaround**: a rewrite of the call into an equivalent one its kernels compute as the
+spec does. The workarounds a backend's sessions are built with form one ordered set, which the
+backend names through `IShorokooBackend.KernelWorkaroundSet` (the names are in
+`KernelWorkaroundSets`). The ONNX Runtime backend names `KernelWorkaroundSets.OnnxRuntime`; the
+[PyTorch](pytorch-backend.md) and [JAX](jax-backend.md) backends name none.
+
+The pass runs at one point only: when the model handed to a backend's session is built, after the
+lowering pipeline above has produced the graph. It runs on the session's own copy, over the main
+graph and every function, loop and branch body, and applies to a graph you built and an imported
+model alike. Nothing else sees it — the graph `ToConcreteArchitecture` returns, every `DebugRequests`
+snapshot, an ONNX export, generated C# and a saved `.srk` all keep each operator as written, so a
+model built on one backend carries nothing of another backend's workarounds. Each workaround fires
+only in the scenario its runtime gets wrong; every other call reaches the session unchanged.
+
+No debug point captures the session's model, since it is built after the pipeline ends. To tell
+whether a call of yours is rewritten, match it against the table below; the notes in
+[operator-support.md](operator-support.md) give each case in full.
+
+The ONNX Runtime set, in the order it applies — a later workaround sees what an earlier one built,
+so the `Where`s the reduction and pool rewrites emit are covered by the last row:
+
+| Operator | Scenario ONNX Runtime gets wrong | Rewrite | Issue |
+|---|---|---|---|
+| Every `Reduce*` | `noop_with_empty_axes` set with no axes or an empty axes tensor, on an empty input | `Identity`, or an `If` on the axes' element count when they are not constant | [#409](https://github.com/Shorokoo/Shorokoo/issues/409) |
+| Every `Reduce*` | Negative axes on an empty input | Axes made non-negative, as a constant or in the graph | [#422](https://github.com/Shorokoo/Shorokoo/issues/422) |
+| `ReduceSumSquare`, `ReduceL1`, `ReduceLogSum` | float16 with no axes input, on an empty input (the process crashes) | `If` on the element count; an empty input is reduced in float32 and cast back | [#411](https://github.com/Shorokoo/Shorokoo/issues/411) |
+| `ReduceMax`, `ReduceMin` | Integer or bool input with an empty group (0 for every integer type, a failure for bool) | `If` on the element count; the empty branch fills the output shape with the spec's identity | [#382](https://github.com/Shorokoo/Shorokoo/issues/382) |
+| `MaxPool` | `Indices` read over int8, uint8, float16, float32 or float64, with a window whose maximum is at or below the lowest finite value | int8/uint8 pooled as float32; a float pool's such windows taken from a second pool that finds their first maximum | [#420](https://github.com/Shorokoo/Shorokoo/issues/420) |
+| `AveragePool`, `LpPool`, `MaxPool` | `SAME_UPPER`/`SAME_LOWER` with a dilation above 1 or a stride above the kernel; explicit pads as large as the kernel | `Pad`, a pool with padding ONNX Runtime accepts, and `Slice` | [#379](https://github.com/Shorokoo/Shorokoo/issues/379), [#408](https://github.com/Shorokoo/Shorokoo/issues/408) |
+| `Col2Im` | One spatial axis | `Col2Im` over two axes, the second of extent 1, then `Squeeze` | [#381](https://github.com/Shorokoo/Shorokoo/issues/381) |
+| `Resize` | `tf_crop_and_resize` along an axis whose length the resize leaves unchanged | That axis resized to `2L−1` under the same `roi`, every second element kept | [#380](https://github.com/Shorokoo/Shorokoo/issues/380) |
+| `Resize` | Cubic rank-4 `tf_crop_and_resize` with scale 1 on axes 0 and 3 and not on axis 1 | The input regrouped as `[N·W, 1, C, H]`, resized over its last two axes, regrouped back | [#421](https://github.com/Shorokoo/Shorokoo/issues/421) |
+| `Resize` | An `axes` attribute naming a subset of the axes | Written out over every axis | [#429](https://github.com/Shorokoo/Shorokoo/issues/429) |
+| `Where` | int8, int16, uint16, uint32, uint64, bfloat16 or bool values (no kernel) | bool: `Or(And(c, x), And(Not(c), y))`; others: selected through int32, int64 or float32 and cast back | [#423](https://github.com/Shorokoo/Shorokoo/issues/423) |
+
+A call whose input is a nonempty `Constant` cannot hit the empty-input rows and is left alone. Where
+only the input's shape at run time decides whether a call is affected, the rewrite is an `If` that
+takes the plain call for every other input.

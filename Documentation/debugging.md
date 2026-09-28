@@ -169,13 +169,19 @@ depends on the data runs with the session. The other rewrites — `noop_with_emp
 dimensions, negative axes, and a bool `ReduceMax`/`ReduceMin` — have no branch: one graph, built
 from the input's shape and axes, is right for every input.
 
-Three ONNX Runtime faults have no workaround, and a model that meets one gets ONNX Runtime's result:
+Four more ONNX Runtime faults, besides the float `MaxPool` indices of the table's `MaxPool` row
+([#437](https://github.com/Shorokoo/Shorokoo/issues/437)), have no workaround. They are accepted as
+ONNX Runtime's behaviour, and a model that meets one gets ONNX Runtime's result:
 
 - A float32, float64 or float16 `Where` gives +0 where it selects −0 from `x`; a −0 it selects from
   `y` keeps its sign. A bfloat16 `Where`, selected through float32, does the same
   ([#439](https://github.com/Shorokoo/Shorokoo/issues/439)).
-
-- `MaxPool` without an `Indices` output gives a window of only −inf the type's lowest finite value
-  instead of −inf ([#426](https://github.com/Shorokoo/Shorokoo/issues/426)).
-- A model that returns a `Range` as an output beside a `Gather` the `Range` drives fails to load:
-  ONNX Runtime's full graph optimization drops the `Range` from the outputs ([#432](https://github.com/Shorokoo/Shorokoo/issues/432)).
+- A float32 or float64 `MaxPool` without an `Indices` output gives a window of only −inf the type's
+  lowest finite value instead of −inf; float16, pooled in float32, gives float32's lowest finite
+  value or −inf, depending on what reads the pool ([#426](https://github.com/Shorokoo/Shorokoo/issues/426)).
+- A model that returns a `Range` as an output beside a `Gather` the `Range` drives fails: ONNX
+  Runtime's graph optimization removes the `Range`, and reading the outputs throws
+  `UnsupportedDTypeException` (`OU002`) ([#432](https://github.com/Shorokoo/Shorokoo/issues/432)).
+- A float32 `LayerNormalization` takes the variance as `E[x²] − E[x]²`, so rows whose mean is large
+  next to their spread come out badly wrong or NaN; subtracting each row's mean before the call
+  avoids it ([#384](https://github.com/Shorokoo/Shorokoo/issues/384)).

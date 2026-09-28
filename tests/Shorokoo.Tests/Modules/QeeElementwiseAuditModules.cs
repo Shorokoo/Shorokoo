@@ -351,13 +351,26 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
-    /// <summary>The constant [-0, 1], equal to an iota but for the sign of its zero, scaled by
-    /// the input: 1 / the result is [-inf, 1]. Input c = [T, T].</summary>
+    /// <summary>Where selecting -0 from x, then from y, over float32, float64, float16 and
+    /// bfloat16, each read as the sign of 1 / the result: -1 for a -0, 1 for a +0. Input c = [T, F].</summary>
     [Module]
-    public partial class NegativeZeroInAnIotaConstantCheck
+    public partial class WhereOfNegativeZeroReciprocalSigns
     {
-        public static Tensor<bit> Inline(Vector<bit> c)
-            => (Tensor<float32>)OnnxOp.Reciprocal(Vector(-0f, 1f) * c.Cast<float32>()) == Vector(float.NegativeInfinity, 1f);
+        public static Tensor<float32> Inline(Vector<bit> c)
+            => (Tensor<float32>)OnnxOp.Concat([Signs<float32>(c), Signs<float64>(c), Signs<float16>(c), Signs<bfloat16>(c)], 0);
+
+        private static Tensor<float32> Signs<T>(Vector<bit> c) where T : IVarType
+            => (Tensor<float32>)OnnxOp.Sign(OnnxOp.Reciprocal(
+                ((Tensor<T>)OnnxOp.Where(c, Vector(-0f, 5f).Cast<T>(), Vector(2f, -0f).Cast<T>())).Cast<float32>()));
+    }
+
+    /// <summary>The constant [-0, 1], equal to an iota but for the sign of its zero, scaled by
+    /// the input, read as the sign of 1 / the result: -1 for a -0, 1 for a +0. Input c = [T, T].</summary>
+    [Module]
+    public partial class NegativeZeroInAnIotaConstantReciprocalSigns
+    {
+        public static Tensor<float32> Inline(Vector<bit> c)
+            => (Tensor<float32>)OnnxOp.Sign(OnnxOp.Reciprocal(Vector(-0f, 1f) * c.Cast<float32>()));
     }
 
     /// <summary>Where over uint64 values at and above 2^63. Input c = [T, F, T, F].</summary>

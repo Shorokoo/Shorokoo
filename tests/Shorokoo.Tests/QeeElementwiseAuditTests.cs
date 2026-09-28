@@ -55,10 +55,10 @@ public class QeeElementwiseAuditTests
         Assert.True(AutoTest.AdvancedTestGraph<WhereOnUInt64BeyondInt64Check>([], [Bits([4L], true, false, true, false)]));
     }
 
-    // #439: ONNX Runtime's float Where gives +0 where it selects -0 from x
-    [Fact(Skip = "#439: ONNX Runtime's float Where gives +0 where it selects -0 from x")]
-    public void TestWhereKeepsTheSignOfAZeroItSelects()
-        => Assert.True(AutoTest.AdvancedTestGraph<WhereKeepsTheSignOfZeroCheck>([], [Bits([2L], true, false)]));
+    [Fact]
+    public void TestOnnxRuntimeFloatWhereGivesPositiveZeroForANegativeZeroFromXAndKeepsOneFromY()
+        => Assert.True(AutoTest.AdvancedTestGraph<WhereOfNegativeZeroReciprocalSigns>([], [Bits([2L], true, false)],
+            expected: [1, -1, 1, -1, 1, -1, 1, -1]));
 }
 
 /// <summary>

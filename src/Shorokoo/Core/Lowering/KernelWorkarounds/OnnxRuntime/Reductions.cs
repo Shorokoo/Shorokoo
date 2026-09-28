@@ -29,5 +29,5 @@ internal static class Reductions
     /// <summary>Whether input slot 0 may be empty: it is not a <c>Constant</c>, or it is an empty
     /// one.</summary>
     public static bool InputMayBeEmpty(WorkaroundSite site)
-        => site.ConstantOf(0) is not { } constant || constant.Shape.Dims.Contains(0);
+        => site.ConstantShapeOf(0) is not { } shape || shape.Dims.Contains(0);
 }

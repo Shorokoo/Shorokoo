@@ -36,7 +36,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// rewire consumers. The decomposition's non-terminal nodes are inserted at the lowered node's
     /// own index, and the node itself is mutated into the terminal one — same
     /// <see cref="FastNode.Key"/>, same <see cref="FastNode.FullOutputs"/> — so every consumer,
-    /// and every key a caller looks the run's results up by, stays valid. Inserting at the node's
+    /// and every key a caller looks the run's results up by, stays valid. Everything else it takes
+    /// from the terminal, the open node, function and identifier template its operator comes with
+    /// included: a decomposition ending in an <c>If</c> makes the node the <c>IF_CLOSE</c> paired
+    /// with the spliced <c>IF_OPEN</c> (<see cref="FastSplice"/>). Inserting at the node's
     /// index rather than appending is what keeps a decomposition inside the loop or branch scope
     /// its operator sat in; nodes after the scope's close would never be re-executed by a
     /// loop-back.</para>

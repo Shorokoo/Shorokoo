@@ -26,6 +26,17 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// node's open-node key — is remapped to match, and every reference to a stand-in becomes the
     /// host node's own input. The body is inserted where the host stands, which keeps it inside
     /// the loop or branch scope the host sat in.</para>
+    ///
+    /// <para><b>In place.</b> Where the replacement's last node produces all its outputs, the host
+    /// becomes that node: it keeps its <see cref="FastNode.Key"/>, its outputs, its friendly name and
+    /// its stack trace, and takes everything else from the last node — operator, attributes, inputs,
+    /// and the open node, function and identifier template that operator comes with. A replacement
+    /// ending in an <c>If</c> so makes the host the <c>IF_CLOSE</c> paired with the <c>IF_OPEN</c>
+    /// spliced before it, and one ending in a function call makes the host that call.</para>
+    ///
+    /// <para><b>Types.</b> A plan built with its tensor info carries the dtype, structure and rank of
+    /// every value its body produces, and a splice given a lookup adds them, re-keyed, so a pass
+    /// that splices keeps its lookup current without rebuilding it.</para>
     /// </summary>
     internal static class FastSplice
     {
@@ -37,9 +48,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// <summary>
         /// A built replacement: its nodes in topological order, the tensor key standing in for
         /// each input slot of the host (null for an absent slot), and the key of each of the
-        /// replacement's outputs.
+        /// replacement's outputs; and, when it was built with them, the tensor info of every value
+        /// the body produces.
         /// </summary>
-        internal sealed record Plan(List<FastNode> Body, FastTensorKey?[] StandInKeyBySlot, FastTensorKey[] OutputKeys)
+        internal sealed record Plan(List<FastNode> Body, FastTensorKey?[] StandInKeyBySlot, FastTensorKey[] OutputKeys,
+            IReadOnlyDictionary<FastTensorKey, FastTensorInfo>? TensorInfo = null)
         {
             /// <summary>The last node of the body.</summary>
             public FastNode Terminal => Body[^1];
@@ -71,9 +84,10 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
         /// <summary>
         /// The plan of the replacement whose outputs are <paramref name="outputs"/>, built over
-        /// <paramref name="standIns"/>; null when it holds no node at all.
+        /// <paramref name="standIns"/>, with the tensor info of its body when
+        /// <paramref name="typed"/>; null when it holds no node at all.
         /// </summary>
-        public static Plan? Build(Variable?[] standIns, Variable[] outputs)
+        public static Plan? Build(Variable?[] standIns, Variable[] outputs, bool typed = false)
         {
             ImmutableArray<Variable> presentStandIns = [.. standIns.Where(x => x is not null).Select(x => x!)];
             var built = new InternalComputationGraph(presentStandIns, [.. outputs]);
@@ -85,7 +99,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             List<FastNode> body = [.. built.Nodes.Take(built.BodyEnd).Skip(built.InputCount)];
             if (body.Count == 0) return null;
-            return new Plan(body, standInKeyBySlot, [.. built.Outputs]);
+            if (!typed) return new Plan(body, standInKeyBySlot, [.. built.Outputs]);
+
+            var bodyKeys = body.Select(n => n.Key).ToHashSet();
+            var info = FastTensorInfoProcessor.BuildTensorInfoLookup(built)
+                .Where(p => bodyKeys.Contains(p.Key.FastNodeKey))
+                .ToDictionary(p => p.Key, p => p.Value);
+            return new Plan(body, standInKeyBySlot, [.. built.Outputs], info);
         }
 
         /// <summary>
@@ -93,11 +113,15 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// <paramref name="newNodes"/> and mutates <paramref name="host"/> into the terminal node,
         /// keeping the host's key and output keys. Requires
         /// <see cref="Plan.TerminalProducesOutputs"/>. Each minted key is added to
-        /// <paramref name="minted"/> when it is given.
+        /// <paramref name="minted"/>, and the tensor info of each value the body produces to
+        /// <paramref name="tensorInfo"/>, when it is given; the host's own outputs keep what
+        /// <paramref name="tensorInfo"/> already says of them.
         /// </summary>
-        public static void SpliceInPlace(FastNode host, Plan plan, List<FastNode> newNodes, ISet<FastNodeKey>? minted = null)
+        public static void SpliceInPlace(FastNode host, Plan plan, List<FastNode> newNodes, ISet<FastNodeKey>? minted = null,
+            IDictionary<FastTensorKey, FastTensorInfo>? tensorInfo = null)
         {
             var (tensorMap, nodeMap) = Maps(host, plan, host.Key, minted);
+            AddTensorInfo(plan, tensorMap, nodeMap, tensorInfo);
             for (int i = 0; i < plan.Body.Count - 1; i++)
                 newNodes.Add(Copy(plan.Body[i], tensorMap, nodeMap));
 
@@ -115,11 +139,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// Inserts the whole of <paramref name="plan"/>'s body for <paramref name="host"/> into
         /// <paramref name="newNodes"/>, re-keyed, leaving <paramref name="host"/> out of it, and
         /// returns the key each of the replacement's outputs carries in the graph. Each minted key
-        /// is added to <paramref name="minted"/> when it is given.
+        /// is added to <paramref name="minted"/>, and the tensor info of each value the body
+        /// produces to <paramref name="tensorInfo"/>, when it is given.
         /// </summary>
-        public static FastTensorKey[] SpliceBeside(FastNode host, Plan plan, List<FastNode> newNodes, ISet<FastNodeKey>? minted = null)
+        public static FastTensorKey[] SpliceBeside(FastNode host, Plan plan, List<FastNode> newNodes, ISet<FastNodeKey>? minted = null,
+            IDictionary<FastTensorKey, FastTensorInfo>? tensorInfo = null)
         {
             var (tensorMap, nodeMap) = Maps(host, plan, null, minted);
+            AddTensorInfo(plan, tensorMap, nodeMap, tensorInfo);
             foreach (var built in plan.Body)
                 newNodes.Add(Copy(built, tensorMap, nodeMap));
             return [.. plan.OutputKeys.Select(k => RemapKey(k, tensorMap, nodeMap))];
@@ -147,6 +174,25 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 minted?.Add(fresh);
             }
             return (tensorMap, nodeMap);
+        }
+
+        private static void AddTensorInfo(Plan plan, Dictionary<FastTensorKey, FastTensorKey> tensorMap,
+            Dictionary<FastNodeKey, FastNodeKey> nodeMap, IDictionary<FastTensorKey, FastTensorInfo>? tensorInfo)
+        {
+            if (tensorInfo is null || plan.TensorInfo is null) return;
+            foreach (var (key, info) in plan.TensorInfo)
+            {
+                var spliced = RemapKey(key, tensorMap, nodeMap);
+                tensorInfo.TryAdd(spliced, new FastTensorInfo
+                {
+                    Key = spliced,
+                    DType = info.DType,
+                    Structure = info.Structure,
+                    Rank = info.Rank,
+                    UniqueName = info.UniqueName,
+                    ModuleFn = info.ModuleFn,
+                });
+            }
         }
 
         private static FastNode Copy(

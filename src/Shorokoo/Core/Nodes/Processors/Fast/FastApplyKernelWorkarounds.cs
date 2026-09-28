@@ -41,21 +41,21 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// workarounds.</para>
     ///
     /// <para><b>Plans.</b> A replacement is built once per distinct shape of call — workaround,
-    /// input dtypes and ranks, attributes, outputs, and the constants it read — and reused for
-    /// the rest of the call; nothing outlives it.</para>
+    /// input dtypes and ranks, attributes, outputs, and what it read of constants: the shape of one
+    /// read through <see cref="WorkaroundSite.ConstantShapeOf"/>, the value of one read through
+    /// <see cref="WorkaroundSite.ConstantOf"/> — and reused for the rest of the call; nothing
+    /// outlives it.</para>
+    ///
+    /// <para><b>Types.</b> The tensor-info lookup the sites are read from is built once, when the
+    /// first walk finds a call it looks at, and kept current as the walks splice: each plan carries
+    /// the types of what it builds, and every splice adds them. The builder takes the lookup the
+    /// pass ends with (<see cref="Splices.TensorInfo"/>) rather than building its own.</para>
+    ///
+    /// <para><b>Failures.</b> A workaround that throws, or builds what cannot stand in for the call,
+    /// is a defect of the workaround; the build fails, naming the workaround and the call.</para>
     /// </summary>
     internal static class FastApplyKernelWorkarounds
     {
-        /// <summary>Whether <paramref name="graph"/> holds a call of an operator some workaround
-        /// of <paramref name="set"/> looks at.</summary>
-        public static bool HasCandidate(InternalComputationGraph graph, KernelWorkaroundSet? set)
-        {
-            if (set is null || set.IsEmpty) return false;
-            foreach (var node in graph.Nodes)
-                if (set.OpCodes.Contains(node.OpCode)) return true;
-            return false;
-        }
-
         /// <summary>
         /// Applies <paramref name="set"/> to <paramref name="graph"/> in place, and returns what it
         /// spliced in. <paramref name="shapesAreConcrete"/> is what every site reports as
@@ -64,14 +64,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         public static Splices Process(InternalComputationGraph graph, KernelWorkaroundSet? set, bool shapesAreConcrete = false)
         {
             if (graph is null) throw new ArgumentNullException(nameof(graph));
-            if (!HasCandidate(graph, set)) return Splices.None;
+            if (set is null || set.IsEmpty) return Splices.None;
             var minted = new HashSet<FastNodeKey>();
             var hosts = new HashSet<FastNodeKey>();
             var gaps = new Dictionary<FastNodeKey, int>();
             int leadingGap = 0;
 
             Dictionary<FastTensorKey, FastTensorInfo>? tensorInfo = null;
-            foreach (var workaround in set!.Workarounds)
+            foreach (var workaround in set.Workarounds)
             {
                 if (!graph.Nodes.Any(n => workaround.OpCodes.Contains(n.OpCode))) continue;
 
@@ -81,7 +81,6 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var plans = new Dictionary<string, List<CachedPlan>>(StringComparer.Ordinal);
                 var rewired = new Dictionary<FastTensorKey, FastTensorKey>();
                 var newNodes = new List<FastNode>(graph.Nodes.Count);
-                bool changed = false;
                 // The last node kept so far that is numbered in place, which a dropped call's
                 // number is left unused after.
                 FastNodeKey? numbered = null;
@@ -90,18 +89,17 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 {
                     if (!workaround.OpCodes.Contains(node.OpCode)
                         || WorkaroundSite.TryCreate(node, tensorInfo, producers, read, shapesAreConcrete) is not { } site
-                        || !workaround.Applies(site))
+                        || !Applies(workaround, site, node))
                     {
                         newNodes.Add(node);
                         if (!minted.Contains(node.Key) && !InternalOpCodes.IsGraphOutputOp(node.OpCode)) numbered = node.Key;
                         continue;
                     }
 
-                    var plan = PlanFor(workaround, site, plans);
-                    changed = true;
+                    var plan = PlanFor(workaround, site, node, plans);
                     if (plan.TerminalProducesOutputs)
                     {
-                        FastSplice.SpliceInPlace(node, plan.Splice, newNodes, minted);
+                        FastSplice.SpliceInPlace(node, plan.Splice, newNodes, minted, tensorInfo);
                         hosts.Add(node.Key);
                         if (!minted.Contains(node.Key)) numbered = node.Key;
                         continue;
@@ -113,10 +111,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         if (numbered is { } before) gaps[before] = gaps.GetValueOrDefault(before) + unused;
                         else leadingGap += unused;
                     }
-                    var outputs = FastSplice.SpliceBeside(node, plan.Splice, newNodes, minted);
+                    var outputs = FastSplice.SpliceBeside(node, plan.Splice, newNodes, minted, tensorInfo);
                     for (int i = 0; i < site.OutputKeys.Length; i++)
-                        if (plan.Slots[i] >= 0 && site.OutputKeys[i] is { } key)
-                            rewired[key] = outputs[plan.Slots[i]];
+                        if (site.OutputKeys[i] is { } key)
+                        {
+                            tensorInfo.Remove(key);
+                            if (plan.Slots[i] >= 0) rewired[key] = outputs[plan.Slots[i]];
+                        }
                 }
 
                 if (rewired.Count > 0)
@@ -127,15 +128,26 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                                     group[i] = to;
 
                 graph.Nodes = newNodes;
-                if (changed) tensorInfo = null;
 
                 Debug.Assert(graph.TryValidateLinearOrder(out var orderError),
                     "graph.IsLinearOrderValid(): " + orderError);
             }
-            return minted.Count == 0 && hosts.Count == 0
+            return tensorInfo is null
                 ? Splices.None
-                : new Splices(minted, hosts, [.. graph.Nodes.Select(n => n.Key)], gaps, leadingGap);
+                : new Splices(minted, hosts, [.. graph.Nodes.Select(n => n.Key)], gaps, leadingGap, tensorInfo);
         }
+
+        private static bool Applies(KernelWorkaround workaround, WorkaroundSite site, FastNode node)
+        {
+            try { return workaround.Applies(site); }
+            catch (Exception ex) { throw Failed(workaround, node, ex); }
+        }
+
+        /// <summary>The error a workaround that failed at <paramref name="node"/> fails the build
+        /// with.</summary>
+        private static InvalidOperationException Failed(KernelWorkaround workaround, FastNode node, Exception ex)
+            => new($"Kernel workaround '{workaround.Name}' failed on the '{node.OpCode}' call "
+                + $"'{node.FriendlyName ?? node.Key.ToString()}': {ex.Message}", ex);
 
         /// <summary>
         /// What one <see cref="Process"/> spliced into a graph: the nodes it minted, the nodes it
@@ -150,18 +162,44 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             private readonly HashSet<FastNodeKey> present;
             private readonly IReadOnlyDictionary<FastNodeKey, int> gaps;
             private readonly int leadingGap;
+            private readonly IReadOnlyDictionary<FastTensorKey, FastTensorInfo>? tensorInfo;
 
-            /// <summary>Nothing spliced.</summary>
-            public static Splices None { get; } = new([], [], [], new Dictionary<FastNodeKey, int>(), 0);
+            /// <summary>Nothing spliced, and no call looked at.</summary>
+            public static Splices None { get; } = new([], [], [], new Dictionary<FastNodeKey, int>(), 0, null);
 
             internal Splices(HashSet<FastNodeKey> minted, HashSet<FastNodeKey> hosts, HashSet<FastNodeKey> present,
-                IReadOnlyDictionary<FastNodeKey, int> gaps, int leadingGap)
+                IReadOnlyDictionary<FastNodeKey, int> gaps, int leadingGap, IReadOnlyDictionary<FastTensorKey, FastTensorInfo>? tensorInfo)
             {
                 this.minted = minted;
                 this.hosts = hosts;
                 this.present = present;
                 this.gaps = gaps;
                 this.leadingGap = leadingGap;
+                this.tensorInfo = tensorInfo;
+            }
+
+            /// <summary>
+            /// The tensor-info lookup of <paramref name="graph"/> as the later pre-passes leave it,
+            /// taken from the one the pass kept; null when the pass built none, or the later passes
+            /// added a value it cannot type. Those passes add only <c>Identity</c> nodes — around a
+            /// value an <c>If</c> or <c>Loop</c> body hands out, say — and an identity's output is
+            /// typed as its input.
+            /// </summary>
+            public Dictionary<FastTensorKey, FastTensorInfo>? TensorInfo(InternalComputationGraph graph)
+            {
+                if (tensorInfo is null) return null;
+                var info = new Dictionary<FastTensorKey, FastTensorInfo>(tensorInfo);
+                foreach (var node in graph.Nodes)
+                    foreach (var group in node.FullOutputs.Values)
+                        foreach (var output in group)
+                        {
+                            if (output is not { IsEmpty: false } key || info.ContainsKey(key)) continue;
+                            if (node.OpCode != OpCodes.IDENTITY || node.Inputs is not [{ } source, ..]
+                                || !info.TryGetValue(source, out var of))
+                                return null;
+                            info[key] = new FastTensorInfo { Key = key, DType = of.DType, Structure = of.Structure, Rank = of.Rank };
+                        }
+                return info;
             }
 
             /// <summary>
@@ -205,8 +243,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             }
         }
 
-        /// <summary>A built replacement, and the constants the site it was built for read.</summary>
-        private sealed record CachedPlan(IReadOnlyDictionary<int, string> ConstantsRead, WorkaroundPlan Plan);
+        /// <summary>A built replacement, and what the site it was built for read of constants.</summary>
+        private sealed record CachedPlan(IReadOnlyDictionary<int, WorkaroundSite.ConstantRead> ConstantsRead, WorkaroundPlan Plan);
 
         /// <summary>
         /// A splice plan and, for each output slot of the call, the index among the plan's outputs
@@ -220,21 +258,23 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         private static WorkaroundPlan PlanFor(
-            KernelWorkaround workaround, WorkaroundSite site, Dictionary<string, List<CachedPlan>> plans)
+            KernelWorkaround workaround, WorkaroundSite site, FastNode node, Dictionary<string, List<CachedPlan>> plans)
         {
             var key = FastSplice.TryBuildKey($"{workaround.Name}/{site.OpCode}", site.InputDescriptors, site.Attributes, site.OutputCount)
                 ?.Append('\u0002').Append(site.OutputFingerprint()).ToString();
 
             if (key is not null && plans.TryGetValue(key, out var candidates))
                 foreach (var candidate in candidates)
-                    if (candidate.ConstantsRead.All(read => site.FingerprintOf(read.Key) == read.Value))
+                    if (site.Reads(candidate.ConstantsRead))
                         return candidate.Plan;
 
-            var plan = Build(workaround, site);
+            WorkaroundPlan plan;
+            try { plan = Build(workaround, site); }
+            catch (Exception ex) { throw Failed(workaround, node, ex); }
             if (key is not null)
             {
                 if (!plans.TryGetValue(key, out candidates)) plans[key] = candidates = [];
-                candidates.Add(new CachedPlan(new Dictionary<int, string>(site.ConstantsRead), plan));
+                candidates.Add(new CachedPlan(new Dictionary<int, WorkaroundSite.ConstantRead>(site.ConstantsRead), plan));
             }
             return plan;
         }
@@ -244,9 +284,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             var standIns = FastSplice.StandIns(site.InputDescriptors);
             var outputs = workaround.Rewrite(site, standIns);
             if (outputs.Length != site.OutputCount)
-                throw new InvalidOperationException(
-                    $"Kernel workaround '{workaround.Name}' built {outputs.Length} output(s) for '{site.OpCode}', "
-                    + $"which has {site.OutputCount}.");
+                throw new InvalidOperationException($"It built {outputs.Length} output(s) for a call with {site.OutputCount}.");
 
             var slots = new int[outputs.Length];
             List<Variable> built = [];
@@ -255,8 +293,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 if (outputs[i] is not { } value)
                 {
                     if (site.IsOutputPresent(i))
-                        throw new InvalidOperationException(
-                            $"Kernel workaround '{workaround.Name}' built no value for output {i} of '{site.OpCode}'.");
+                        throw new InvalidOperationException($"It built no value for output {i}, which the call produces.");
                     slots[i] = -1;
                     continue;
                 }
@@ -269,14 +306,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             }
 
             if (built.Count == 0)
-                throw new InvalidOperationException(
-                    $"Kernel workaround '{workaround.Name}' built no value for '{site.OpCode}'.");
+                throw new InvalidOperationException("It built no value at all.");
 
-            var plan = new WorkaroundPlan(FastSplice.Build(standIns, [.. built])!, slots);
+            var plan = new WorkaroundPlan(FastSplice.Build(standIns, [.. built], typed: true)!, slots);
             if (plan.TerminalProducesOutputs || built.Count != 1) return plan;
 
             built[0] = OnnxOp.Identity(built[0], null);
-            return new WorkaroundPlan(FastSplice.Build(standIns, [.. built])!, slots);
+            return new WorkaroundPlan(FastSplice.Build(standIns, [.. built], typed: true)!, slots);
         }
 
         /// <summary>Every tensor key some node of <paramref name="graph"/> reads.</summary>

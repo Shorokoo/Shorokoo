@@ -1,14 +1,19 @@
 using System.Collections.Immutable;
+using System.Reflection;
 using Shorokoo.Core.Backends;
 using Shorokoo.Core.Factory;
 using Shorokoo.Core.Factory.IR;
 using Shorokoo.Core.Graph;
+using Shorokoo.Core.Interpreter;
+using Shorokoo.Core.Lowering;
 using Shorokoo.Core.Lowering.KernelWorkarounds;
+using Shorokoo.Core.Nodes.Processors.Fast;
 using Shorokoo.Jax.Cpu;
 using Shorokoo.Modules.Losses;
 using Shorokoo.Modules.Optimizers;
 using Shorokoo.PyTorch.Cpu;
 using Shorokoo.Runtime;
+using Shorokoo.Tests.Utils;
 using static Shorokoo.Core.Nodes.NodeDefinitions.OpCodes;
 using static Shorokoo.Tests.OnnxProtoBuilders;
 
@@ -22,6 +27,11 @@ public class KernelWorkaroundPassTests
     private static readonly KernelWorkaroundSet AbsSet = new("abs", [new AbsAsIf()]);
     private static readonly KernelWorkaroundSet TopKSet = new("topk", [new TopKThroughIdentities()]);
     private static readonly KernelWorkaroundSet UnarySet = new("unary", [new UnaryThroughIdentity()]);
+    private static readonly KernelWorkaroundSet NegThenSubSet = new("neg-sub", [new NegAsSubtraction(), new SubAsAddOfNeg()]);
+    private static readonly KernelWorkaroundSet NegAbsSet = new("neg-abs", [new NegAsSubtraction(), new AbsAsIf()]);
+    private static readonly KernelWorkaroundSet NegIfSet = new("neg-if", [new NegAsIf()]);
+    private static readonly KernelWorkaroundSet AddConstantSet = new("add-constant", [new AddOfConstantAsSubtraction()]);
+    private static readonly KernelWorkaroundSet AddShapeSet = new("add-shape", [new AddOfConstantReshapedToItsShape()]);
 
     [Fact]
     public void TestAGraphNoWorkaroundAppliesToBuildsTheSameModel()
@@ -65,6 +75,44 @@ public class KernelWorkaroundPassTests
         AssertRewritten(AbsSet, ADD, "If", true, Graph(x, OnnxOp.Add(OnnxOp.Abs(x), x)), two);
         AssertRewritten(TopKSet, ADD, IDENTITY, false, TopKGraph(), TensorData(DType.Float32, [4L], 3f, 1f, 4f, 2f));
         AssertRewritten(UnarySet, ADD, IDENTITY, false, Graph(x, OnnxOp.Add(OnnxOp.Neg(x), OnnxOp.Abs(x))), two);
+        AssertRewritten(NegThenSubSet, MUL, ADD, false, Graph(x, OnnxOp.Mul(OnnxOp.Neg(x), x)), two);
+        Assert.DoesNotContain(AllNodes(Session(Graph(x, OnnxOp.Mul(OnnxOp.Neg(x), x)), NegThenSubSet)), n => n.OpType == SUB);
+        AssertRewritten(TopKSet, "If", IDENTITY, false, TopKInIf(), TensorData(DType.Float32, [4L], 3f, 1f, 4f, 2f));
+        AssertRewritten(TopKSet, "Loop", IDENTITY, false, Concrete(KernelWorkaroundTopKInLoop.ComputationGraph, TensorData(DType.Float32, [4L], 3f, 2f, 4f, 2f)), TensorData(DType.Float32, [4L], 3f, 2f, 4f, 2f));
+    }
+
+    [Fact]
+    public void TestAPlanIsReusedOnlyForCallsWhoseConstantsItReadAgree()
+    {
+        var x = InputTensor<float32>("x", rank: 1);
+        var y = InputTensor<float32>("y", rank: 2);
+        var three = TensorData(DType.Float32, [3L], 1f, 2f, 3f);
+        AssertRewritten(AddConstantSet, MUL, SUB, true, Graph(x, OnnxOp.Mul(OnnxOp.Add(x, Scalar(1f)), OnnxOp.Add(x, Scalar(2f)))), three);
+        AssertRewritten(AddShapeSet, MUL, RESHAPE, false, Graph(y, OnnxOp.Mul(OnnxOp.Add(y, Constant([1L, 3L], 1f, 2f, 3f)), OnnxOp.Add(y, Constant([2L, 1L], 4f, 5f)))),
+            TensorData(DType.Float32, [2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f));
+    }
+
+    [Fact]
+    public void TestAFunctionBodyIsTypedWhenAWorkaroundSplicesAnIfIntoWhatAnExportLoweringBuilt()
+    {
+        using var lowering = OpLoweringRegistry.Override(new OpLowering(ABS, Method(nameof(AbsAsMaxOfNeg))));
+        using var listed = FastOnnxModelBuilder.OverrideExportLoweredOpCodes(ABS);
+        AssertRewritten(NegIfSet, "Functions", IF, false, Import(UnaryInAFunction("Abs")), TensorData(DType.Float32, [3L], 1f, -2f, 4f));
+    }
+
+    [Fact]
+    public void TestALoweringEndingInAnIfMakesItsHostTheIfClosePairedWithTheSplicedOpen()
+    {
+        var x = InputTensor<float32>("x", rank: 1);
+        var g = Graph(x, OnnxOp.Mul(OnnxOp.Abs(x), x));
+        var host = g.Nodes.Single(n => n.OpCode == ABS).Key;
+        using var lowering = OpLoweringRegistry.Override(new OpLowering(ABS, Method(nameof(AbsLoweredToAnIf))));
+        FastLowerRegisteredOps.Process(g, new HashSet<string>([ABS]));
+        var close = g.Nodes.Single(n => n.Key == host);
+        Assert.Equal(IF_CLOSE, close.OpCode);
+        Assert.Equal(g.Nodes.Single(n => n.OpCode == IF_OPEN).Key, close.GraphOpenNodeKey);
+        Assert.True(g.IsLinearOrderValid());
+        Assert.Equal<float>([-4f, 9f], ((RuntimeTensor)new QuickExecutionEngine().Run(g, TensorData(DType.Float32, [2L], -2f, 3f))[g.Outputs[0]]).FloatData!.Value);
     }
 
     [Fact]
@@ -75,6 +123,43 @@ public class KernelWorkaroundPassTests
         Assert.Empty(Untouched(g, NegSet).Except(Signatures(Session(g, NegSet))));
         Assert.Empty(Untouched(g, AbsSet).Except(Signatures(Session(g, AbsSet))));
         Assert.Empty(UntouchedValues(TopKGraph(), TopKSet).Except(Values(Session(TopKGraph(), TopKSet))));
+        Assert.Empty(UntouchedValues(TopKInIf(), TopKSet).Except(Values(Session(TopKInIf(), TopKSet))));
+        var loop = Concrete(KernelWorkaroundTopKInLoop.ComputationGraph, TensorData(DType.Float32, [4L], 3f, 2f, 4f, 2f));
+        Assert.Empty(UntouchedValues(loop, TopKSet).Except(Values(Session(loop, TopKSet))));
+    }
+
+    [Fact]
+    public void TestTheWorkaroundPassTypesWhatItSplicesWithoutRebuildingTheLookup()
+    {
+        var x = InputTensor<float32>("x", rank: 1);
+        Assert.Same(FastApplyKernelWorkarounds.Splices.None, Applied(Graph(x, OnnxOp.Mul(x, x)), NegAbsSet));
+        Assert.True(TypesAsARebuildWould(Graph(x, OnnxOp.Mul(OnnxOp.Neg(x), x)), NegThenSubSet));
+        Assert.True(TypesAsARebuildWould(Graph(x, OnnxOp.Add(OnnxOp.Neg(x), OnnxOp.Abs(x))), NegAbsSet));
+        Assert.True(TypesAsARebuildWould(TopKGraph(), TopKSet));
+        Assert.True(TypesAsARebuildWould(TopKInIf(), TopKSet));
+        Assert.True(TypesAsARebuildWould(TrainingStep(), KernelWorkaroundRegistry.OnnxRuntime));
+    }
+
+    [Fact]
+    public void TestAWorkaroundThatFailsNamesItselfAndTheCall()
+    {
+        var x = InputTensor<float32>("x", rank: 1);
+        var g = Graph(x, OnnxOp.Neg(x));
+        var call = g.Nodes.Single(n => n.OpCode == NEG);
+        var name = call.FriendlyName ?? call.Key.ToString();
+        foreach (var workaround in (KernelWorkaround[])[new Failing(FailingAt.Applies), new Failing(FailingAt.Rewrite), new Failing(FailingAt.OutputCount)])
+        {
+            var message = Assert.Throws<InvalidOperationException>(() => Session(g, new("failing", [workaround]))).Message;
+            Assert.Contains(workaround.Name, message);
+            Assert.Contains(name, message);
+        }
+    }
+
+    [Fact]
+    public void TestTheBackendAuditComparesTheOutputsOfACallAWorkaroundDropped()
+    {
+        var x = TensorData(DType.Float32, [4L], 3f, 1f, 4f, 2f);
+        Assert.Equal(["TopK"], QeeAuditOnBackend.Torch.ConvictedOperators(TopKGraph(), [x], SmallestFirst, TopKSet));
     }
 
     [Fact]
@@ -133,9 +218,7 @@ public class KernelWorkaroundPassTests
     [Fact]
     public void TestATrainingStepRunsNoIfOfTheOnnxRuntimeWorkaroundsWithOrWithoutConcreteShapes()
     {
-        var step = TrainingRig.FromScratch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
-            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([4L], [1f, 2f, 3f, 4f]))],
-            new AdamWOptimizerHyperparameters { LearningRate = 0.1f }).TrainingStepPureGraph.ToInternal();
+        var step = TrainingStep();
         List<long[]?> dims = [.. step.InputNodes.Select(RepresentativeInputShapes.Get)];
         Assert.Equal(Ifs(Session(step, null)), Ifs(Session(step, KernelWorkaroundRegistry.OnnxRuntime)));
         Assert.True(Ifs(FastOnnxModelBuilder.BuildInternalOnnxModel(step, prepForOnnx: true, inputDims: dims, workarounds: KernelWorkaroundRegistry.OnnxRuntime)) > 0);
@@ -168,6 +251,44 @@ public class KernelWorkaroundPassTests
 
     private static bool AsWritten(InternalComputationGraph g)
         => Bytes(Session(g, null)).SequenceEqual(Bytes(Session(g, KernelWorkaroundRegistry.OnnxRuntime)));
+
+    private static Variable Constant(long[] dims, params float[] values) => OnnxOp.Constant(TensorAttribute.Create(new Shape(dims), values));
+
+    private static MethodInfo Method(string name) => typeof(KernelWorkaroundPassTests).GetMethod(name, BindingFlags.NonPublic | BindingFlags.Static)!;
+
+    private static Variable?[] AbsAsMaxOfNeg<T>(Tensor<T> x) where T : IVarType => [OnnxOp.Max(x, OnnxOp.Neg(x))];
+
+    private static Variable?[] AbsLoweredToAnIf<T>(Tensor<T> x) where T : IVarType
+        => [Shorokoo.Core.Nodes.Ops.IfElse((Scalar<bit>)OnnxOp.Less(OnnxOp.ReduceMin(x, keepdims: false), OnnxOp.CastLike(Scalar(0f), x, null)),
+            OnnxOp.Mul(x, OnnxOp.Sign(x)), OnnxOp.Identity(x, null))];
+
+    private static FastApplyKernelWorkarounds.Splices Applied(InternalComputationGraph g, KernelWorkaroundSet set)
+        => FastApplyKernelWorkarounds.Process(g.Clone(), set);
+
+    private static bool TypesAsARebuildWould(InternalComputationGraph g, KernelWorkaroundSet set)
+    {
+        var applied = g.Clone();
+        var splices = FastApplyKernelWorkarounds.Process(applied, set);
+        FastAddIdentityForOuterScopeValues.Process(applied);
+        FastPrepForOnnx.Process(applied);
+        var shared = splices.TensorInfo(applied);
+        var rebuilt = FastTensorInfoProcessor.BuildTensorInfoLookup(applied);
+        return shared is not null && rebuilt.Count > 0 && rebuilt.All(p => shared.TryGetValue(p.Key, out var info)
+            && info.DType == p.Value.DType && info.Structure == p.Value.Structure && (info.Rank == p.Value.Rank || p.Value.Rank is null));
+    }
+
+    private static InternalComputationGraph TrainingStep()
+        => TrainingRig.FromScratch(ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph,
+            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([4L], [1f, 2f, 3f, 4f]))],
+            new AdamWOptimizerHyperparameters { LearningRate = 0.1f }).TrainingStepPureGraph.ToInternal();
+
+    private static ModelProto SmallestFirst(ModelProto model)
+    {
+        var topK = model.Graph.Nodes.Single(n => n.OpType == TOPK);
+        topK.Attributes.RemoveAll(a => a.Name == "largest");
+        topK.Attributes.Add(new AttributeProto { Name = "largest", Type = AttributeProto.AttributeType.Int, I = 0 });
+        return model;
+    }
 
     private static int Ifs(ModelProto model) => AllNodes(model).Count(n => n.OpType == IF);
 
@@ -202,6 +323,15 @@ public class KernelWorkaroundPassTests
         return new([x], [OnnxOp.Add(values, values), indices]);
     }
 
+    private static InternalComputationGraph TopKInIf()
+    {
+        var x = InputTensor<float32>("x", rank: 1);
+        var (largest, at) = OnnxOp.TopK(OnnxOp.Neg(x), Vector(2L));
+        var (smallest, _) = OnnxOp.TopK(OnnxOp.Abs(x), Vector(2L), largest: false);
+        return new([x], [Shorokoo.Core.Nodes.Ops.IfElse((Scalar<bit>)OnnxOp.Less(OnnxOp.ReduceMin(x, keepdims: false), Scalar(2f)),
+            OnnxOp.Add(largest, OnnxOp.CastLike(at, largest, null)), OnnxOp.Mul(smallest, smallest))]);
+    }
+
     private static ModelProto Session(InternalComputationGraph g, KernelWorkaroundSet? set)
         => FastOnnxModelBuilder.BuildInternalOnnxModel(g, prepForOnnx: true, workarounds: set);
 
@@ -222,8 +352,11 @@ public class KernelWorkaroundPassTests
             .Select(p => p.ToTensorData().AccessRawMemory().ToArray())];
 
     private static float[] Pooled(InternalComputationGraph g)
-        => System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(new ComputeContext()
+    {
+        using var context = new ComputeContext();
+        return System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(context
             .Execute(g, TensorData(DType.Float32, [1L, 1L, 5L], 1f, 2f, 3f, 4f, 5f).Shared())[0].ToTensorData().AccessRawMemory()).ToArray();
+    }
 
     private static byte[] Bytes(ModelProto model)
     {
@@ -245,10 +378,10 @@ public class KernelWorkaroundPassTests
     private static IEnumerable<string> Untouched(InternalComputationGraph g, KernelWorkaroundSet set)
         => Signatures(Session(g, null)).Where(s => !set.OpCodes.Any(op => s.StartsWith(op + "(", StringComparison.Ordinal)));
 
-    private static IEnumerable<string> Values(ModelProto model) => model.Graph.Nodes.SelectMany(n => n.Outputs);
+    private static IEnumerable<string> Values(ModelProto model) => AllNodes(model).SelectMany(n => n.Outputs);
 
     private static IEnumerable<string> UntouchedValues(InternalComputationGraph g, KernelWorkaroundSet set)
-        => Session(g, null).Graph.Nodes.Where(n => !set.OpCodes.Contains(n.OpType)).SelectMany(n => n.Outputs);
+        => AllNodes(Session(g, null)).Where(n => !set.OpCodes.Contains(n.OpType)).SelectMany(n => n.Outputs);
 
     private static bool Plain(Variable output, string opCode, Variable input)
         => output.OwningNode is { } node && node.OpCode == opCode && node.Inputs[0] == input;
@@ -275,20 +408,22 @@ public class KernelWorkaroundPassTests
         return WrapModel(graph);
     }
 
-    private static ModelProto NegInAFunction()
+    private static ModelProto NegInAFunction() => UnaryInAFunction("Neg");
+
+    private static ModelProto UnaryInAFunction(string op)
     {
-        var fn = new FunctionProto { Name = "NegFn", Domain = "Functions" };
+        var fn = new FunctionProto { Name = op + "Fn", Domain = "Functions" };
         fn.OpsetImports.Add(new OperatorSetIdProto { Domain = "", Version = 21 });
         fn.Inputs.Add("fn_x");
         fn.Outputs.Add("fn_y");
         fn.ValueInfoes.Add(TensorInfo("fn_x", 1, 3));
         fn.ValueInfoes.Add(TensorInfo("fn_y", 1, 3));
-        fn.Nodes.Add(Node("Neg", ["fn_x"], ["negated"]));
+        fn.Nodes.Add(Node(op, ["fn_x"], ["negated"]));
         fn.Nodes.Add(Node("Mul", ["negated", "fn_x"], ["fn_y"]));
 
         var graph = new GraphProto { Name = "neg_fn_graph" };
         graph.Inputs.Add(TensorInfo("x", 1, 3));
-        var call = Node("NegFn", ["x"], ["y"]);
+        var call = Node(op + "Fn", ["x"], ["y"]);
         call.Domain = "Functions";
         graph.Nodes.Add(call);
         graph.Outputs.Add(TensorInfo("y", 1, 3));
@@ -333,6 +468,63 @@ public class KernelWorkaroundPassTests
             => [OnnxOp.Identity(site.OpCode == NEG ? OnnxOp.Neg(inputs[0]!) : OnnxOp.Abs(inputs[0]!), null)];
     }
 
+    private sealed class SubAsAddOfNeg : KernelWorkaround
+    {
+        public override IReadOnlySet<string> OpCodes { get; } = new HashSet<string>([SUB]);
+
+        public override bool Applies(WorkaroundSite site) => true;
+
+        public override Variable?[] Rewrite(WorkaroundSite site, Variable?[] inputs) => [OnnxOp.Add(inputs[0]!, OnnxOp.Neg(inputs[1]!))];
+    }
+
+    private sealed class NegAsIf : KernelWorkaround
+    {
+        public override IReadOnlySet<string> OpCodes { get; } = new HashSet<string>([NEG]);
+
+        public override bool Applies(WorkaroundSite site) => true;
+
+        public override Variable?[] Rewrite(WorkaroundSite site, Variable?[] inputs)
+        {
+            var x = inputs[0]!;
+            return [Shorokoo.Core.Nodes.Ops.IfElse((Scalar<bit>)OnnxOp.Less(OnnxOp.ReduceMin(x, keepdims: false), OnnxOp.CastLike(Scalar(0f), x, null)),
+                OnnxOp.Sub(OnnxOp.CastLike(Scalar(0f), x, null), x), OnnxOp.Neg(x))];
+        }
+    }
+
+    private sealed class AddOfConstantAsSubtraction : KernelWorkaround
+    {
+        public override IReadOnlySet<string> OpCodes { get; } = new HashSet<string>([ADD]);
+
+        public override bool Applies(WorkaroundSite site) => site.ConstantOf(1) is { DType: var t } && t == DType.Float32;
+
+        public override Variable?[] Rewrite(WorkaroundSite site, Variable?[] inputs)
+            => [OnnxOp.Sub(inputs[0]!, Scalar(-site.ConstantOf(1)!.Elements<float>()[0]))];
+    }
+
+    private sealed class AddOfConstantReshapedToItsShape : KernelWorkaround
+    {
+        public override IReadOnlySet<string> OpCodes { get; } = new HashSet<string>([ADD]);
+
+        public override bool Applies(WorkaroundSite site) => site.ConstantShapeOf(1) is not null;
+
+        public override Variable?[] Rewrite(WorkaroundSite site, Variable?[] inputs)
+            => [OnnxOp.Add(inputs[0]!, OnnxOp.Reshape(inputs[1]!, Vector(site.ConstantShapeOf(1)!.Dims), false))];
+    }
+
+    private enum FailingAt { Applies, Rewrite, OutputCount }
+
+    private sealed class Failing(FailingAt at) : KernelWorkaround
+    {
+        public override IReadOnlySet<string> OpCodes { get; } = new HashSet<string>([NEG]);
+
+        public override string Name => $"Failing{at}";
+
+        public override bool Applies(WorkaroundSite site) => at != FailingAt.Applies ? true : throw new ArgumentException("applies");
+
+        public override Variable?[] Rewrite(WorkaroundSite site, Variable?[] inputs)
+            => at == FailingAt.Rewrite ? throw new ArgumentException("rewrite") : [inputs[0]!, inputs[0]!];
+    }
+
     private sealed class TopKThroughIdentities : KernelWorkaround
     {
         public override IReadOnlySet<string> OpCodes { get; } = new HashSet<string>([TOPK]);
@@ -357,6 +549,22 @@ public partial class KernelWorkaroundNegInLoop
         var trips = x.Reduce(ReduceKind.Min, keepDims: false).Scalar().Cast<int64>();
         foreach (var ctx in LoopAPI.Iterate(trips))
             a = (Tensor<float32>)OnnxOp.Neg(a) * Scalar(2f);
+        return a;
+    }
+}
+
+[Module]
+public partial class KernelWorkaroundTopKInLoop
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var a = x;
+        var trips = x.Reduce(ReduceKind.Min, keepDims: false).Scalar().Cast<int64>();
+        foreach (var ctx in LoopAPI.Iterate(trips))
+        {
+            var (values, indices) = OnnxOp.TopK(a, Vector(4L));
+            a = (Tensor<float32>)OnnxOp.Add(values, OnnxOp.CastLike(indices, values, null));
+        }
         return a;
     }
 }

@@ -259,7 +259,7 @@ namespace Shorokoo.Core.Factory
 
             // ----- 2. Run the Fast pre-passes in place. Capture the rename map
             // so we can also remap the tensor-info lookup we'll build below.
-            var tensorInfoLookup = RunPrePassesAndBuildLookup(prepFast, prepForOnnx, applyExecutionLowerings, workarounds, shapesAreConcrete);
+            var tensorInfoLookup = RunPrePasses(prepFast, prepForOnnx, applyExecutionLowerings, workarounds, shapesAreConcrete, static _ => true)!;
 
             // Each output likewise takes its declared rank, else the rank it recorded at the samples,
             // so an exported file gives every output a shape too (Shorokoo/Shorokoo#387).
@@ -1592,12 +1592,20 @@ namespace Shorokoo.Core.Factory
         }
 
         /// <summary>
-        /// Runs every Fast pre-pass on <paramref name="graph"/> in the canonical
-        /// pre-pass order. Mutates the graph in place.
+        /// Runs every Fast pre-pass on <paramref name="graph"/> in the canonical pre-pass order,
+        /// mutating it in place, and returns its tensor-info lookup keyed by the renamed
+        /// (post-<see cref="FastUseUniqueNames"/>) <see cref="FastTensorKey"/>s — or null when
+        /// <paramref name="needsLookup"/>, asked of the graph as the ONNX prep leaves it, says it
+        /// needs none.
+        ///
+        /// <para>The lookup is taken before the rename, so its keys still match the producer wiring
+        /// the Variable-level rebuild reads, and then remapped through the rename map. Where the
+        /// kernel-workaround pass built one it is that one, kept current by the pass and extended
+        /// over what the later passes add; else it is built here.</para>
         /// </summary>
-        private static void RunPrePasses(
+        private static Dictionary<FastTensorKey, FastTensorInfo>? RunPrePasses(
             InternalComputationGraph graph, bool prepForOnnx, bool applyExecutionLowerings, KernelWorkaroundSet? workarounds,
-            bool shapesAreConcrete)
+            bool shapesAreConcrete, Func<InternalComputationGraph, bool> needsLookup)
         {
             FastLowerAttributeTensorOps.Process(graph);
             if (applyExecutionLowerings) FastLowerStateUpdateLinksForInference.Process(graph);
@@ -1629,43 +1637,24 @@ namespace Shorokoo.Core.Factory
             var splices = FastApplyKernelWorkarounds.Process(graph, workarounds, shapesAreConcrete);
             FastAddIdentityForOuterScopeValues.Process(graph);
             if (prepForOnnx) FastPrepForOnnx.Process(graph);
+            // The lookup before the call-stack strip: the Variable-level rebuild it takes gives a
+            // node without a stack trace a freshly captured one, which costs several times the rest
+            // of the rebuild, and a stack trace types nothing.
+            var preRenameLookup = !needsLookup(graph) ? null
+                : splices.TensorInfo(graph) ?? FastTensorInfoProcessor.BuildTensorInfoLookup(graph);
             FastStripCallStacks.Process(graph);
             Debug.Assert(graph.IsLinearOrderValid(),
                 "FastOnnxModelBuilder.RunPrePasses: scope nesting must be valid by this point — " +
                 "every Fast pass that mutates node order preserves the linear-order invariant.");
-            FastUseUniqueNames.Process(graph, splices.Numbering(graph));
-        }
 
-        /// <summary>
-        /// Runs the Fast pre-passes, then builds a tensor-info lookup keyed by
-        /// the renamed (post-FastUseUniqueNames) <see cref="FastTensorKey"/>s.
-        /// The lookup is built before <see cref="FastUseUniqueNames"/> runs (so
-        /// the round-trip-via-CG conversion sees real producer chains) and
-        /// then remapped through the rename map.
-        /// </summary>
-        private static Dictionary<FastTensorKey, FastTensorInfo> RunPrePassesAndBuildLookup(
-            InternalComputationGraph graph, bool prepForOnnx, bool applyExecutionLowerings, KernelWorkaroundSet? workarounds,
-            bool shapesAreConcrete)
-        {
-            FastLowerAttributeTensorOps.Process(graph);
-            if (applyExecutionLowerings) FastLowerStateUpdateLinksForInference.Process(graph);
-            if (applyExecutionLowerings) FastLowerRandomOps.Process(graph);
-            // Same position, and for the same reasons, as in RunPrePasses above.
-            if (applyExecutionLowerings) LowerForExport(graph);
-            var splices = FastApplyKernelWorkarounds.Process(graph, workarounds, shapesAreConcrete);
-            FastAddIdentityForOuterScopeValues.Process(graph);
-            if (prepForOnnx) FastPrepForOnnx.Process(graph);
-            FastStripCallStacks.Process(graph);
-            Debug.Assert(graph.IsLinearOrderValid(),
-                "FastOnnxModelBuilder.RunPrePassesAndBuildLookup: scope nesting must be valid by this point — " +
-                "every Fast pass that mutates node order preserves the linear-order invariant.");
+            var numbering = splices.Numbering(graph);
+            if (preRenameLookup is null)
+            {
+                FastUseUniqueNames.Process(graph, numbering);
+                return null;
+            }
 
-            // Build the lookup before renaming so keys still match the
-            // post-converter producer wiring.
-            var preRenameLookup = FastTensorInfoProcessor.BuildTensorInfoLookup(graph);
-
-            // Rename, capturing the map so we can rewrite the lookup.
-            var oldToNew = FastUseUniqueNames.ProcessAndReturnMap(graph, splices.Numbering(graph));
+            var oldToNew = FastUseUniqueNames.ProcessAndReturnMap(graph, numbering);
 
             var renamed = new Dictionary<FastTensorKey, FastTensorInfo>(preRenameLookup.Count);
             foreach (var (oldKey, info) in preRenameLookup)
@@ -1730,21 +1719,15 @@ namespace Shorokoo.Core.Factory
             FastIdentityWrapping.WrapAliasedOutputs(fnFast);
             // A body carrying a Loop or an If needs a tensor-info lookup: it is what types that
             // subgraph's inputs, and without one they go out untyped and ORT refuses the model
-            // ("does not have type information") — for every dialect, not just a flattened body.
-            // Building it costs a round-trip conversion of the body, so a body with no subgraph in
-            // it — most of them, and every body on the training hot path — skips it and runs the
-            // pre-passes alone, as before. Asking before the pre-passes is safe: none of them
-            // introduces control flow (FastIdentityWrapping only wraps the close nodes it finds).
+            // ("does not have type information") — for every dialect, not just a flattened body. Building it costs a round-trip conversion of the body, so a body with
+            // no subgraph in it — most of them, and every body on the training hot path — skips it.
+            // Asked of the body as the pre-passes leave it, so an If a kernel workaround splices in
+            // — into what an export lowering built, say — is typed like one written in the body.
             // A session's body that dequantizes needs one too, for WriteDequantizeZeroPoints to know
-            // the input types. So does a body a kernel workaround may rewrite, since the rewrite may
-            // bring an If of its own.
-            Dictionary<FastTensorKey, FastTensorInfo>? fnTensorInfoLookup = null;
-            if (fnFast.Nodes.Any(n => n.OpCode == OpCodes.LOOP_CLOSE || n.OpCode == OpCodes.IF_CLOSE
-                    || forSession && n.OpCode == OpCodes.DEQUANTIZE_LINEAR)
-                || FastApplyKernelWorkarounds.HasCandidate(fnFast, workarounds))
-                fnTensorInfoLookup = RunPrePassesAndBuildLookup(fnFast, prepForOnnx, applyExecutionLowerings, workarounds, shapesAreConcrete);
-            else
-                RunPrePasses(fnFast, prepForOnnx, applyExecutionLowerings, workarounds, shapesAreConcrete);
+            // the input types.
+            var fnTensorInfoLookup = RunPrePasses(fnFast, prepForOnnx, applyExecutionLowerings, workarounds, shapesAreConcrete,
+                body => body.Nodes.Any(n => n.OpCode == OpCodes.LOOP_CLOSE || n.OpCode == OpCodes.IF_CLOSE
+                    || forSession && n.OpCode == OpCodes.DEQUANTIZE_LINEAR));
             fnFast.ConfigureScopes();
 
             var fnGraphProto = BuildGraphProto(

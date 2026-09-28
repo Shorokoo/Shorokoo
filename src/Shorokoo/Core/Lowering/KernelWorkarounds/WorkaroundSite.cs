@@ -11,8 +11,11 @@ namespace Shorokoo.Core.Lowering.KernelWorkarounds;
 /// operator, its attributes, the dtype and rank of each input and output slot, which slots are
 /// present, which outputs anything reads, and the value of an input a <c>Constant</c> produces.
 ///
-/// <para>Reading a constant through <see cref="ConstantOf"/> is recorded, so a replacement built
-/// from one call's constant is reused only for calls whose constant in that slot is the same.</para>
+/// <para>Reading a constant is recorded, so a replacement built from one call's constant is reused
+/// only for calls whose constant agrees in what was read: its value, through
+/// <see cref="ConstantOf"/>; only its shape, through <see cref="ConstantShapeOf"/>. A workaround
+/// that needs no more than the shape asks for no more, so calls whose constants differ only in
+/// value share one replacement.</para>
 /// </summary>
 internal sealed class WorkaroundSite
 {
@@ -23,7 +26,7 @@ internal sealed class WorkaroundSite
     private readonly (DType DType, int? Rank)?[] outputs;
     private readonly IReadOnlyDictionary<FastTensorKey, FastNode> producers;
     private readonly IReadOnlySet<FastTensorKey> read;
-    private readonly SortedDictionary<int, string> constantsRead = [];
+    private readonly SortedDictionary<int, ConstantRead> constantsRead = [];
     private readonly bool shapesAreConcrete;
 
     private WorkaroundSite(
@@ -129,8 +132,21 @@ internal sealed class WorkaroundSite
     public TensorAttribute? ConstantOf(int slot)
     {
         var value = PeekConstant(slot);
-        constantsRead[slot] = Fingerprint(value);
+        constantsRead[slot] = new ConstantRead(value, Values: true);
         return value;
+    }
+
+    /// <summary>
+    /// The shape of input slot <paramref name="slot"/> when a <c>Constant</c> produces it; null
+    /// for every other input. Its dtype is <see cref="DTypeOf"/>. The read is recorded for the plan
+    /// cache as a read of the shape alone.
+    /// </summary>
+    public Shape? ConstantShapeOf(int slot)
+    {
+        var value = PeekConstant(slot);
+        if (!constantsRead.TryGetValue(slot, out var earlier) || !earlier.Values)
+            constantsRead[slot] = new ConstantRead(value, Values: false);
+        return value?.Shape;
     }
 
     /// <summary>The descriptor of each input slot, null for an absent one.</summary>
@@ -139,12 +155,39 @@ internal sealed class WorkaroundSite
     /// <summary>The key of each output slot, null for an absent one.</summary>
     internal FastTensorKey?[] OutputKeys => outputKeys;
 
-    /// <summary>The input slots <see cref="ConstantOf"/> has read, with what it found.</summary>
-    internal IReadOnlyDictionary<int, string> ConstantsRead => constantsRead;
+    /// <summary>
+    /// What one site read of the constant in one slot: the constant (null for an input no
+    /// <c>Constant</c> produces), and whether its <paramref name="Values"/> were read or only its
+    /// shape.
+    /// </summary>
+    internal readonly record struct ConstantRead(TensorAttribute? Constant, bool Values);
 
-    /// <summary>What <see cref="ConstantOf"/> would find in <paramref name="slot"/>, as the
-    /// plan cache compares it, without recording the read.</summary>
-    internal string FingerprintOf(int slot) => Fingerprint(PeekConstant(slot));
+    /// <summary>The input slots whose constant has been read, with what was found.</summary>
+    internal IReadOnlyDictionary<int, ConstantRead> ConstantsRead => constantsRead;
+
+    /// <summary>
+    /// Whether this site's constants agree with <paramref name="reads"/>, another site's, in all
+    /// it read: in each slot, a constant or none; its dtype and shape; and, where the values were
+    /// read, every value. Nothing is recorded.
+    /// </summary>
+    internal bool Reads(IReadOnlyDictionary<int, ConstantRead> reads)
+    {
+        foreach (var (slot, read) in reads)
+        {
+            var mine = PeekConstant(slot);
+            if (mine is null || read.Constant is not { } theirs)
+            {
+                if (mine is not null || read.Constant is not null) return false;
+                continue;
+            }
+            if (mine.DType != theirs.DType || !mine.Shape.Equals(theirs.Shape)) return false;
+            if (!read.Values || ReferenceEquals(mine, theirs)) continue;
+            if (mine.DType == DType.Utf8 ? !mine.Values.SequenceEqual(theirs.Values, StringComparer.Ordinal)
+                : !mine.Bytes.SequenceEqual(theirs.Bytes))
+                return false;
+        }
+        return true;
+    }
 
     /// <summary>Everything besides constants that a replacement may depend on: the dtype and rank
     /// of each output and whether it is read.</summary>
@@ -167,12 +210,4 @@ internal sealed class WorkaroundSite
             : null;
     }
 
-    private static string Fingerprint(TensorAttribute? value)
-    {
-        if (value is null) return "~";
-        var head = $"{value.DType}[{string.Join(",", value.Shape.Dims)}]";
-        return value.DType == DType.Utf8
-            ? head + string.Join("\u0001", value.Values.Select(v => $"{v.Length}:{v}"))
-            : head + Convert.ToHexString(value.Bytes);
-    }
 }

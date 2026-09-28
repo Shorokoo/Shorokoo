@@ -1,6 +1,7 @@
 using Shorokoo.Core.Backends;
 using Shorokoo.Core.Factory;
 using Shorokoo.Core.Factory.IR;
+using Shorokoo.Core.Lowering.KernelWorkarounds;
 using Shorokoo.Jax;
 using Shorokoo.Jax.Cpu;
 using Shorokoo.PyTorch.Cpu;
@@ -44,8 +45,11 @@ namespace Shorokoo.Tests.Utils;
 /// module whose graph computes a shape from an input's values. A listed module that no longer
 /// refuses fails the audit as well.</para>
 ///
-/// <para>The model is built once, the way a session receives it, and that one model is run on both
-/// backends.</para>
+/// <para><b>Kernel workarounds.</b> Each runtime runs the model a session of its own receives: the
+/// ONNX Runtime reference is built with the ONNX Runtime kernel workarounds, the backend's model with
+/// the backend's own set. A workaround leaves the name of every value it does not touch as it is,
+/// and numbers what it splices in last, so the values compared, and the nodes blamed, are those of
+/// the model built with no workarounds at all.</para>
 ///
 /// <para><b>Known disagreements.</b> An operator a backend computes differently from ONNX Runtime in
 /// a module, for a reason recorded here, is listed under the module and the operator. The operators
@@ -89,12 +93,17 @@ internal sealed class QeeAuditOnBackend(
     public bool Agrees<TModule>(InternalComputationGraph model, TensorData[] inputs, Func<ModelProto, ModelProto>? alterOnBackend = null)
     {
         IData[] feeds = [.. inputs.Select(static t => (IData)t.Shared())];
-        var built = ExposeEveryValue(FastOnnxModelBuilder.BuildInternalOnnxModel(model, prepForOnnx: true));
-        var reference = Values(ComputeContext.Default.ExecuteModel(model, built, feeds));
+        var built = ExposeEveryValue(Build(model, KernelWorkaroundSet.Empty));
+        var compared = built.Graph.Outputs.Select(o => o.Name).ToHashSet();
+        var reference = Values(ComputeContext.Default.ExecuteModel(model,
+            ExposeEveryValue(Build(model, KernelWorkaroundRegistry.For(KernelWorkaroundSets.OnnxRuntime))), feeds));
+        reference = reference.Where(p => compared.Contains(p.Key)).ToDictionary();
         var known = new Dictionary<string, IData>(reference);
         foreach (var (input, value) in built.Graph.Inputs.Zip(inputs)) known.TryAdd(input.Name, value);
         foreach (var initializer in built.Graph.Initializers) known.TryAdd(initializer.Name, Initializer(initializer));
-        var onBackendModel = alterOnBackend is null ? built : alterOnBackend(ProtoBuf.Serializer.DeepClone(built));
+        var workarounds = KernelWorkaroundRegistry.For(_backend.Value.KernelWorkaroundSet);
+        var onBackendBuilt = workarounds.IsEmpty ? built : ExposeEveryValue(Build(model, workarounds));
+        var onBackendModel = alterOnBackend is null ? onBackendBuilt : alterOnBackend(ProtoBuf.Serializer.DeepClone(onBackendBuilt));
         using var context = new ComputeContext(_backend.Value);
         Dictionary<string, IData> onBackend;
         try
@@ -114,6 +123,10 @@ internal sealed class QeeAuditOnBackend(
         var convicted = Convicted(built.Graph.Nodes, reference, onBackend, Drawn(built.Graph.Nodes, functions, known));
         return convicted.SetEquals(knownDisagreements.Keys.Where(k => k.Module == typeof(TModule)).Select(k => k.Operator));
     }
+
+    /// <summary>The model a session is built from, with <paramref name="workarounds"/> applied.</summary>
+    private static ModelProto Build(InternalComputationGraph model, KernelWorkaroundSet workarounds)
+        => FastOnnxModelBuilder.BuildInternalOnnxModel(model, prepForOnnx: true, workarounds: workarounds);
 
     /// <summary>Whether <paramref name="graph"/> takes, returns or holds a string tensor, which JAX
     /// has no type for.</summary>

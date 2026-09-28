@@ -8,14 +8,13 @@ Related: [training.md](training.md) · [inference.md](inference.md) · [limitati
   `TrainingBackend.Shorokoo`, the default, is Shorokoo's own automatic differentiation.
   `TrainingBackend.Native` leaves the gradient to the **execution backend** of the rig's
   `RuntimeContext`, the backend that runs the step.
-- Only the gradient changes hands. The model, the loss, the optimizer, schedules, hyperparameters,
-  random draws (Dropout masks and the like), the step's inputs and outputs and the checkpoint layout
-  are Shorokoo's on either backend.
+- Only the gradient changes hands. The model, loss, optimizer, schedules, hyperparameters, random
+  draws, the step's inputs and outputs and the checkpoint layout are Shorokoo's on either backend.
 - The training backend is **runtime configuration, never written to a checkpoint**, like the
   two compute contexts. A checkpoint saved by a rig on one backend resumes on a rig on the other.
-- A step is handed to the execution backend in a **format**: `"onnx"` for `TrainingBackend.Shorokoo`,
-  `"onnx-autograd/1"` for `TrainingBackend.Native`. Every backend runs `"onnx"`. Only a backend that
-  computes gradients itself runs `"onnx-autograd/1"`; the ONNX Runtime backends do not.
+- A step is handed to the execution backend in a **format**: `"onnx"` for `TrainingBackend.Shorokoo`
+  (every backend runs it), `"onnx-autograd/1"` for `TrainingBackend.Native` (only backends that
+  compute gradients; not ONNX Runtime).
 - Asking for `TrainingBackend.Native` on a context whose backend does not accept its format is refused
   when the rig is built, with a `NotSupportedException`, not at the first step.
 
@@ -84,11 +83,10 @@ What the step does on torch:
 - The forward pass up to the loss runs with gradient recording on, each trainable parameter as a
   leaf; `torch.autograd.grad` takes the gradient there; the optimizer update runs with recording
   off, and everything the step returns is detached. No autograd graph outlives the step's run.
-- The optimizer, schedules, hyperparameters and random draws are Shorokoo's operators. A
-  Dropout mask is drawn by Shorokoo's counter-based generator on either backend, so the masks are
-  identical bit for bit, and a rig trained on torch follows the rig trained by Shorokoo step for
-  step (loss, parameters, model state and optimizer state) up to floating-point rounding, away
-  from the [non-smooth points](#what-differs-on-the-native-path).
+- The optimizer, schedules, hyperparameters and random draws are Shorokoo's operators, so
+  Dropout masks are identical bit for bit and a torch-trained rig follows a Shorokoo-trained one
+  step for step (loss, parameters, model and optimizer state) up to floating-point rounding,
+  away from [non-smooth points](#what-differs-on-the-native-path).
 - A checkpoint saved from a torch rig resumes on an ONNX Runtime rig, and the other way round.
 
 Limits of training on torch, besides those of [the native path](#what-differs-on-the-native-path):
@@ -122,13 +120,11 @@ var rig = TrainingRig.FromScratch(
 
 What the step does on JAX:
 
-- The forward pass up to the loss is written as a function of the trainable parameters, returning
-  the loss and every value the rest of the step reads; `jax.value_and_grad` differentiates it, and the
-  optimizer update reads its gradients. The step is traced whole and compiled by XLA as one program
-  per batch shape, fusing the forward pass, the backward pass JAX derives from it and the update.
-- As on torch, the optimizer, schedules, hyperparameters and random draws are Shorokoo's operators, so
-  a rig trained on JAX follows the rig trained by Shorokoo step for step up to floating-point rounding,
-  and a checkpoint moves freely between the two.
+- `jax.value_and_grad` differentiates the forward pass up to the loss as a function of the
+  trainable parameters, and the optimizer update reads its gradients. XLA compiles the whole step
+  as one program per batch shape.
+- As on torch, a JAX-trained rig follows a Shorokoo-trained one step for step up to
+  floating-point rounding, and checkpoints move freely between them.
 - The first step of each batch shape compiles its program, which the rig's compiled-step cache then
   keeps (`CompiledTrainStepShapeKeys`).
 
@@ -156,8 +152,7 @@ both.
 
 ## What an `onnx-autograd/1` step contains
 
-This section is for the author of a backend that accepts the format; a user choosing
-`TrainingBackend.Native` needs none of it.
+For authors of a backend that accepts the format.
 
 The step is the default step with its backward pass left out. The forward pass, the loss, the
 optimizer update, the scheduled hyperparameters and the random draws are all present as ordinary ONNX
@@ -193,10 +188,9 @@ A backend that wraps another must forward it, as it forwards every member with a
 
 ## What differs on the native path
 
-- **No memory-aware pass.** The default path rewrites the backward pass it builds
-  (rematerialization, activation checkpointing, scheduling) to lower peak memory. On the native path
-  there is no backward pass in the graph, so what the gradient keeps alive is up to the execution
-  backend. `[Module(Checkpoint = true)]` has no effect there.
+- **No memory-aware pass.** The default path's rematerialization, activation checkpointing and
+  scheduling do not apply; the execution backend decides what the gradient keeps alive.
+  `[Module(Checkpoint = true)]` has no effect.
 - **Ops without a Shorokoo gradient.** An operator Shorokoo cannot differentiate refuses a default
   rig at build; on the native path it trains if the execution backend differentiates it.
 - **Non-smooth points.** Where a function has no derivative (`Relu` at 0, ties in `Max`/`Min`, the

@@ -4,7 +4,7 @@ Related: [onnx-and-weights.md](onnx-and-weights.md) ·
 [param-naming-pattern-dsl.md](param-naming-pattern-dsl.md)
 
 Reference for the format strings accepted by `ModelIdFormat` /
-`ModelIdNamingScheme` — one of the two ways to map parameter names when
+`ModelIdNamingScheme`, one of the two ways to map parameter names when
 [binding third-party weights](onnx-and-weights.md#bind-loaded-weights-into-a-model-for-inference)
 (e.g. PyTorch/timm checkpoints) into a model with
 `ToConcreteModel(weights, namingScheme)`. The alternative, matching on
@@ -38,14 +38,11 @@ var scheme = new ModelIdFormat(
 | `\c` | `}` | Literal closing brace |
 | `\s` | `\` | Literal backslash |
 
-A literal `}` outside a placeholder passes through unchanged, so writing it as `\c` is
-optional. `ModelIdFormat.EscapeString`, which Shorokoo uses when it generates a scheme,
-emits `\c` for every `}`. Generated schemes are built from parameter path parts
-(`BatchNorm#1`, `Loop#0:3`), which normally hold no brace; a name that does, such as one
-adopted from an imported ONNX tensor, survives the round trip, since
-`ModelIdFormat.UnescapeString` decodes all three sequences. The
-[pattern DSL](param-naming-pattern-dsl.md) has its own, smaller escape set; the two are
-not interchangeable.
+A literal `}` outside a placeholder passes through unchanged, so `\c` is optional.
+`ModelIdFormat.EscapeString` (used for generated schemes) emits `\c` for every `}`, and
+`ModelIdFormat.UnescapeString` decodes all three sequences, so a name carrying a brace
+(e.g. adopted from an imported ONNX tensor) round-trips. The
+[pattern DSL](param-naming-pattern-dsl.md) has its own, smaller escape set.
 
 ## 3. Format String Syntax
 
@@ -60,8 +57,6 @@ not interchangeable.
 
 ### 3.2 Inline Maps
 
-Map index values to strings using comma-separated values:
-
 ```csharp
 format: "{6|weight,bias}"
 // Value at index 6 is 0 → "weight"
@@ -71,8 +66,6 @@ format: "{6|weight,bias}"
 Entries are 0-based, and a value outside the list throws `IndexOutOfRangeException`.
 
 ### 3.3 Named Maps
-
-Reference reusable maps for complex mappings:
 
 ```csharp
 format: "{5|moduleMap}.{6|paramMap}",
@@ -90,8 +83,6 @@ a value with no key throws `KeyNotFoundException`. The name must be declared in
 `maps`; anything else after the `|` is read as an inline map instead.
 
 ### 3.4 Range Matching with Maps
-
-Map numeric ranges to different outputs:
 
 **Syntax:** `{N|ranges|outputs}`
 
@@ -127,7 +118,7 @@ format: "{5|1,3::2,2::2|conv,bn,layer}"
 
 ### 3.5 Recursive Format Strings
 
-Embed placeholders within map outputs:
+Map outputs may contain placeholders:
 
 ```csharp
 format: "{5|1,3::2,2::2|conv,bn{5},new_{5|2::4,4::4|layer,fc}}"
@@ -147,7 +138,7 @@ An index expression is parsed as a number, so a placeholder names a position:
 
 ## 4. Match Patterns
 
-Filter which ModelIds a scheme applies to:
+`match` filters which ModelIds a format applies to:
 
 | Pattern | Matches | Description |
 |---------|---------|-------------|
@@ -167,34 +158,25 @@ matches every ModelId.
 ```csharp
 ModelIdFormat[] formats =
 [
-    // ════════════════════════════════════════════════════════════════
     // STEM: [1, 1, modType, paramIdx]
-    // ════════════════════════════════════════════════════════════════
     new ModelIdFormat(
         match: "[1, 1, *, *]",
         format: "{2|conv1,bn1}.{3|weight,running_mean,running_var,weight,bias}"
     ),
 
-    // ════════════════════════════════════════════════════════════════
     // LAYER 1: [1, 2, 1, loop, block, mod, param]
-    // ════════════════════════════════════════════════════════════════
     new ModelIdFormat(
         match: "[1, 2, 1, *, *, *, *]",
         format: "layer1.{3}.{5|conv,bn,conv,bn,conv,bn,downsample.0,downsample.1}{5|1,1,2,2,3,3,.,.}.{6|weight,running_mean,running_var,weight,bias}"
     ),
 
-    // ════════════════════════════════════════════════════════════════
-    // LAYERS 2-4: [1, layer, 1, loop, block, mod, param]
-    // layer index: 3→layer2, 4→layer3, 5→layer4
-    // ════════════════════════════════════════════════════════════════
+    // LAYERS 2-4: [1, layer, 1, loop, block, mod, param] — layer index: 3→layer2, 4→layer3, 5→layer4
     new ModelIdFormat(
         match: "[1, 3|4|5, 1, *, *, *, *]",
         format: "layer{1 - 1}.{3}.{5|conv,bn,conv,bn,conv,bn,downsample.0,downsample.1}{5|1,1,2,2,3,3,.,.}.{6|weight,running_mean,running_var,weight,bias}"
     ),
 
-    // ════════════════════════════════════════════════════════════════
     // FC: [1, 6, 1, param]
-    // ════════════════════════════════════════════════════════════════
     new ModelIdFormat(
         match: "[1, 6, 1, *]",
         format: "fc.{3|weight,bias}"
@@ -316,8 +298,7 @@ public class ModelIdFormat
 ```csharp
 public class ModelIdNamingScheme : ModuleParamSetNamingScheme
 {
-    // frameworkId is required: it records which framework's names this scheme speaks,
-    // e.g. ModuleParamSetNamingScheme.PyTorchFrameworkId.
+    // frameworkId (required): e.g. ModuleParamSetNamingScheme.PyTorchFrameworkId
     public ModelIdNamingScheme(IEnumerable<ModelIdFormat> patterns, string frameworkId);
 
     public ImmutableArray<ModelIdFormat> Patterns { get; }
@@ -329,19 +310,14 @@ public class ModelIdNamingScheme : ModuleParamSetNamingScheme
 }
 ```
 
-`ToModelId` is the reverse direction, used when binding weights: it names every
-candidate ModelId into a name → ModelId table, then looks the third-party name up in it,
-returning null when the name is not there. A candidate no format matches gets no entry,
-so a partial scheme resolves fewer names, and `ToConcreteModel` drops names that resolve
-to nothing. Every parameter of the graph must still receive a value: one the scheme
-leaves uncovered fails the bind with a `ModelException` (**`FW059`**) naming that
-parameter. Two candidates that map to the same name make `ToModelId` throw
-`InvalidOperationException` naming both ModelIds and the shared name. The table is
-rebuilt whenever a call passes a different candidate set, so one scheme can bind weights
-into several graphs.
-
-`Persistence.ImportSafeTensors` names every required parameter first and reports, by
-name, any the scheme does not cover.
+`ToModelId`, used when binding weights, names every candidate ModelId into a name →
+ModelId table and looks the third-party name up in it, returning null when absent. A
+candidate no format matches gets no entry, and `ToConcreteModel` drops names that resolve
+to nothing; but a parameter left uncovered fails the bind with a `ModelException`
+(**`FW059`**) naming it. Two candidates with the same name make `ToModelId` throw
+`InvalidOperationException` naming both. The table is rebuilt for each new candidate set,
+so one scheme can bind weights into several graphs. `Persistence.ImportSafeTensors`
+reports, by name, every required parameter the scheme does not cover before binding.
 
 The inherited `ToName(string shorokooId)` overload throws `NotSupportedException`: a
 scheme keyed on ModelIds cannot translate a canonical Shorokoo id string. Use a

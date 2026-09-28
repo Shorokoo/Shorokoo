@@ -4,14 +4,11 @@ Related: [onnx-and-weights.md](onnx-and-weights.md) ·
 [param-naming-format-dsl.md](param-naming-format-dsl.md)
 
 Reference for the patterns accepted by `SimplePatternScheme` /
-`SimplePatternNamingScheme` — one of the two ways to map parameter names when
+`SimplePatternNamingScheme`, one of the two ways to map parameter names when
 [binding third-party weights](onnx-and-weights.md#bind-loaded-weights-into-a-model-for-inference)
-(e.g. PyTorch/timm checkpoints) into a model with
-`ToConcreteModel(weights, namingScheme)`. The alternative, formatting
-ModelIds positionally, is the
-[ModelId format DSL](param-naming-format-dsl.md).
-
-The patterns convert Shorokoo IDs to third-party parameter names without regex.
+(e.g. PyTorch/timm checkpoints) with `ToConcreteModel(weights, namingScheme)`. Patterns
+convert Shorokoo IDs to third-party names without regex. The alternative, formatting
+ModelIds positionally, is the [ModelId format DSL](param-naming-format-dsl.md).
 
 ## 1. Semantic Elements
 
@@ -78,8 +75,6 @@ A closing brace `}` needs no escaping.
 
 ### 3.1 Literals
 
-Match text exactly as written:
-
 ```
 Pattern: "BatchNorm#0"
 Matches: "BatchNorm#0"
@@ -124,8 +119,6 @@ Result:  idx = "3", mod = "Conv2" (2 elements: "Conv" + "2")
 
 ### 3.4 Range Constraints
 
-Constrain numeric captures to specific values:
-
 | Syntax | Matches |
 |--------|---------|
 | `{n\|1:3}` | 1, 2, 3 (inclusive range) |
@@ -169,10 +162,10 @@ format: "{p|bnParam}"  // p=0 → "running_mean"
 
 ## 5. Complete ResNet50 Example
 
-This model creates every parameter with an inline `InitSimple.Init(...)` call, so each
-is named by its class and numbered in creation order within its scope
-([Parameter names](defining-models.md#parameter-names)); a parameter captured in a local
-or given `.Named(...)` is matched by that name instead (`Conv2Dk77s22#0.w#0`).
+Here every parameter comes from an inline `InitSimple.Init(...)` call, so each is named
+by its class and numbered in creation order within its scope
+([Parameter names](defining-models.md#parameter-names)); one captured in a local or given
+`.Named(...)` carries that name instead (`Conv2Dk77s22#0.w#0`).
 
 ### 5.1 Scheme Definition
 
@@ -187,9 +180,7 @@ public static SimplePatternNamingScheme CreateResNet50Scheme(ModelIdNamingScheme
 {
     SimplePatternScheme[] patterns =
     [
-        // ════════════════════════════════════════════════════════════════
         // STEM
-        // ════════════════════════════════════════════════════════════════
         new SimplePatternScheme(
             pattern: "ResNetStem#0.Conv2Dk77s22#0.InitSimple#0",
             format:  "conv1.weight"
@@ -200,9 +191,7 @@ public static SimplePatternNamingScheme CreateResNet50Scheme(ModelIdNamingScheme
             maps:    SharedMaps
         ),
 
-        // ════════════════════════════════════════════════════════════════
         // LAYER 1 - First block (with downsample)
-        // ════════════════════════════════════════════════════════════════
         new SimplePatternScheme(
             pattern: "BottleneckStackS11#0.Loop#0:0.BottleneckS11#0.Conv2Dk11s11#{c}.InitSimple#0",
             format:  "layer1.0.{c|layer1Conv}.weight",
@@ -218,9 +207,7 @@ public static SimplePatternNamingScheme CreateResNet50Scheme(ModelIdNamingScheme
             maps:    SharedMaps
         ),
 
-        // ════════════════════════════════════════════════════════════════
         // LAYER 1 - Remaining blocks (idx >= 1, no downsample)
-        // ════════════════════════════════════════════════════════════════
         new SimplePatternScheme(
             pattern: "BottleneckStackS11#0.Loop#0:{idx|1:}.BottleneckS11#0.Conv2Dk11s11#0.InitSimple#0",
             format:  "layer1.{idx}.conv1.weight"
@@ -239,10 +226,7 @@ public static SimplePatternNamingScheme CreateResNet50Scheme(ModelIdNamingScheme
             maps:    SharedMaps
         ),
 
-        // ════════════════════════════════════════════════════════════════
-        // LAYERS 2-4 - Generalized
-        // BottleneckStackS22#0 → layer2, #1 → layer3, #2 → layer4
-        // ════════════════════════════════════════════════════════════════
+        // LAYERS 2-4 - Generalized — BottleneckStackS22#0 → layer2, #1 → layer3, #2 → layer4
 
         // First block: BottleneckS22 with stride-2 and downsample
         new SimplePatternScheme(
@@ -286,9 +270,7 @@ public static SimplePatternNamingScheme CreateResNet50Scheme(ModelIdNamingScheme
             maps:    SharedMaps
         ),
 
-        // ════════════════════════════════════════════════════════════════
         // CLASSIFICATION HEAD
-        // ════════════════════════════════════════════════════════════════
         new SimplePatternScheme(
             pattern: "ClassificationHead#0.DenseBasic#0.InitSimple#{p}",
             format:  "fc.{p|fcParam}",
@@ -316,8 +298,7 @@ static readonly Dictionary<string, Dictionary<string, string>> SharedMaps = new(
 
 ### 5.3 Example Conversions
 
-What `CreateResNet50Scheme(...).ToName(shorokooId)` returns for a sample of the
-parameters:
+Sample results of `CreateResNet50Scheme(...).ToName(shorokooId)`:
 
 | Shorokoo ID | PyTorch Name |
 |-------------|--------------|
@@ -356,11 +337,9 @@ public class SimplePatternScheme
 }
 ```
 
-`TryMatch` is `Matches` plus the bindings: on a match it returns the capture table the
-format is evaluated against (`["idx"] = "3"`, `["mod"] = "Conv2"`, as in
-[§3.3](#33-captures)), so you can see what a pattern bound without writing a format.
-`ParseSemanticElements` is the [§1](#1-semantic-elements) parser; call it on an id to see
-the element list a pattern is matched against:
+`TryMatch` also returns the captures (`["idx"] = "3"`, `["mod"] = "Conv2"`, as in
+[§3.3](#33-captures)). `ParseSemanticElements` is the [§1](#1-semantic-elements) parser;
+call it on an id to see the elements a pattern is matched against:
 
 ```csharp
 foreach (var e in SimplePatternScheme.ParseSemanticElements("Loop#0:12"))
@@ -372,9 +351,8 @@ foreach (var e in SimplePatternScheme.ParseSemanticElements("Loop#0:12"))
 ```csharp
 public class SimplePatternNamingScheme : ModuleParamSetNamingScheme
 {
-    // modelIdToShorokooIdScheme is the model's own canonical-id scheme
-    // (arch.GetShorokooIdNamingScheme(), §5.1); frameworkId records which framework's
-    // names this scheme speaks, e.g. ModuleParamSetNamingScheme.PyTorchFrameworkId.
+    // modelIdToShorokooIdScheme: arch.GetShorokooIdNamingScheme() (§5.1)
+    // frameworkId: e.g. ModuleParamSetNamingScheme.PyTorchFrameworkId
     public SimplePatternNamingScheme(
         IEnumerable<SimplePatternScheme> patterns,
         ModelIdNamingScheme modelIdToShorokooIdScheme,
@@ -392,21 +370,19 @@ public class SimplePatternNamingScheme : ModuleParamSetNamingScheme
 }
 ```
 
-Every `ToName` overload tries the patterns in order and returns the first match's name,
-or `null` when none matches; they differ only in where the canonical id string comes
-from. `ToName(string)` takes it directly; weight **export** uses this one.
-`ToName(ModelId)` goes through `ModelIdToShorokooIdScheme` first;
-`ToName(ConcreteModelParamInfo)` reads the parameter's id string off the concrete model.
+Every `ToName` overload returns the first matching pattern's name, or `null`. They
+differ in where the canonical id string comes from: `ToName(string)` takes it directly
+(weight **export** uses this one); `ToName(ModelId)` goes through
+`ModelIdToShorokooIdScheme`; `ToName(ConcreteModelParamInfo)` reads it off the concrete
+model.
 
-`ToModelId` is the reverse direction, which
-`ToConcreteModel(weights, namingScheme)` uses to **import**: it names every candidate ModelId
-into a name → ModelId table, then looks the third-party name up in it, returning `null`
-for an unknown name. See [§7](#7-error-handling) for the one case that throws.
+`ToModelId`, the reverse direction used to **import**, names every candidate ModelId into
+a name → ModelId table and looks the third-party name up in it, returning `null` for an
+unknown name. See [§7](#7-error-handling) for the one case that throws.
 
 ## 7. Error Handling
 
-There is no DSL-specific exception type; failures are ordinary BCL exceptions,
-and the most common failure does not throw.
+Failures are ordinary BCL exceptions, except a missing match, which returns `null`.
 
 | Failure | Behaviour |
 |---------|-----------|
@@ -419,38 +395,31 @@ and the most common failure does not throw.
 | `ToModelId` is given two candidates the patterns give the same name | `InvalidOperationException` naming both ModelIds and the name |
 
 ```csharp
-// No pattern matches: null, not an exception.
-string? name = scheme.ToName(unknownId);   // null — nothing named this id
+string? name = scheme.ToName(unknownId);   // null
 
-// A lone pattern, on the other hand, insists on matching.
 try { var n = new SimplePatternScheme("A#0", "x").ToName("B#1"); }
 catch (InvalidOperationException) { /* "Shorokoo ID 'B#1' does not match pattern 'A#0'" */ }
 
-// Map miss — including a scheme constructed without its maps at all.
+// also thrown when the scheme was constructed without its maps
 try { var n = pattern.ToName(id); }
 catch (KeyNotFoundException) { /* "Key '9' not found in map 'bnParam'" */ }
 
-// The reverse direction names every candidate before it looks anything up, so two
-// candidates sharing a name throw even when looking up a third.
+// thrown even when looking up a third name
 try { var id2 = collidingScheme.ToModelId("layer1.0.conv1.weight", candidates); }
 catch (InvalidOperationException) { /* "ModelIds [...] and [...] both map to the name '...'" */ }
 ```
 
-`ToConcreteModel(weights, namingScheme)` goes through `ToModelId`, which is more
-forgiving than `ToName`. `ModelIdNamingScheme.ToName` throws `InvalidOperationException`
-for a ModelId no pattern covers; `ToModelId` names each candidate with `TryToName`
-instead, so a candidate the patterns leave unnamed gets no table entry, an unknown
-third-party name returns `null`, and `ToConcreteModel` drops it. The only refusal is the
-collision in the table above, since binding either candidate would be a guess. The table
-is rebuilt whenever a call passes a different candidate set, so one scheme can bind
-weights into several graphs.
+`ToConcreteModel(weights, namingScheme)` goes through `ToModelId`, which is forgiving:
+where `ModelIdNamingScheme.ToName` throws `InvalidOperationException` for an uncovered
+ModelId, `ToModelId` leaves an unnamed candidate out of its table, and `ToConcreteModel`
+drops a third-party name that resolves to nothing. Its only refusal is the collision
+above. The table is rebuilt for each new candidate set, so one scheme can bind weights
+into several graphs.
 
-Every parameter of the graph must still receive a value, so a parameter the patterns
-leave uncovered fails the bind with a `ModelException` (**`FW059`**) naming that
-parameter. To have the gap reported against the scheme before any value is bound, use
-`Persistence.ImportSafeTensors`: it names every parameter first and refuses with an
-`InvalidDataException` — "required model parameter '…' maps to no source tensor name
-under the naming scheme — add a rule covering it".
+A parameter the patterns leave uncovered still fails the bind, with a `ModelException`
+(**`FW059`**) naming it. `Persistence.ImportSafeTensors` reports the gap before binding:
+it refuses with an `InvalidDataException` — "required model parameter '…' maps to no
+source tensor name under the naming scheme — add a rule covering it".
 
 Export likewise refuses a scheme that leaves any weight unnamed (see
 [onnx-and-weights.md](onnx-and-weights.md#naming)).

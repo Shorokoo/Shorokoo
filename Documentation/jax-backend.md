@@ -18,9 +18,8 @@ what is JAX's own.
 ## Facts
 
 - Packages: `Shorokoo.Jax.Cpu` (**Linux x64 and Windows x64**) and `Shorokoo.Jax.Cuda` (**Linux x64**
-  only: JAX's CUDA plugin is built for no other system). Each brings `Shorokoo.Jax` (the backend),
-  `Shorokoo.PythonTranslation` (the translator it shares with PyTorch) and `Shorokoo.PythonHost`
-  (the embedded interpreter). Neither ships JAX itself: that lives in the Python environment.
+  only). Each brings `Shorokoo.Jax`, `Shorokoo.PythonTranslation` and `Shorokoo.PythonHost`; JAX
+  itself lives in the Python environment.
 - A JAX backend is **always named**: `new ComputeContext(new JaxCpuBackend())`. It is never a
   candidate for [auto-discovery](inference.md#auto-discovery).
 - The **Python environment** is resolved as for PyTorch: the backend's options, then
@@ -44,8 +43,7 @@ dotnet add package Shorokoo.Jax.Cpu        # or Shorokoo.Jax.Cuda
 ```
 
 Provisioning is shared with the PyTorch backend: install [uv](https://docs.astral.sh/uv/) and the
-first run downloads CPython 3.12 and the locked packages into the cache. The CPU environment is about 1.5 GB,
-the CUDA one about 7 GB; the NVIDIA libraries in it serve PyTorch and JAX alike.
+first run downloads the environment (about 1.5 GB for CPU, 7 GB for CUDA).
 
 An environment you provide must have `jax` and `numpy` installed (`jax[cuda13]` for the CUDA
 backend), besides what the [PyTorch page](pytorch-backend.md#how-it-is-resolved) asks of one:
@@ -66,9 +64,8 @@ var compiled = jax.Compile(model);
 var output = compiled.Execute(input);
 ```
 
-Everything that works on a `ComputeContext` works here: one-shot `Execute`, `Compile` and repeated
-runs, consumed and `.Shared()` feeds, `TensorData.To(context)`. Contexts on ONNX Runtime, PyTorch
-and JAX live side by side in one process; a tensor crosses between runtimes by copy.
+Everything that works on a `ComputeContext` works here. Contexts on ONNX Runtime, PyTorch and JAX
+live side by side in one process; a tensor crosses between runtimes by copy.
 
 As for PyTorch, constructing a backend does nothing; `Start()` resolves the environment, starts
 JAX up front, and returns the environment it runs in.
@@ -89,9 +86,8 @@ gets the CUDA environment; a CUDA backend on a machine with no fit driver, or on
 start *before* anything is provisioned (`PythonEnvironmentFailure.DeviceUnavailable` or
 `UnsupportedPlatform`).
 
-On CUDA, JAX takes the card's memory as it needs it, **not** 75 % of it up front (JAX's default),
-because the card is shared with the other backends in the process. The backend sets
-`XLA_PYTHON_CLIENT_PREALLOCATE=false` unless your program's environment sets it first.
+On CUDA, JAX takes the card's memory as needed, **not** 75 % up front: the backend sets
+`XLA_PYTHON_CLIENT_PREALLOCATE=false` unless your environment sets it first.
 
 ## Shapes
 
@@ -162,8 +158,7 @@ session binds no output aliases.
 | **`TraceNodePlacement`** | every node on `cpu` | every node on `cuda:N` |
 | **Log severity** | Python warnings a run raises are shown at `Warning` and below, not above | same |
 
-Floating-point products and convolutions are computed in full precision: XLA's default on a card
-may round `float32` operands to TensorFloat-32, which the backend does not ask for.
+Floating-point products and convolutions run in full `float32` precision, not TensorFloat-32.
 
 ## Limitations
 

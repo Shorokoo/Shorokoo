@@ -54,27 +54,17 @@ var init   = NormalDist.Init([Scalar(4L), Scalar(8L)], Scalar(0f), Scalar(0.02f)
 
 The construction: **the low 63 bits address a magnitude by inverting the half-normal CDF,
 and the top bit gives that magnitude a sign.** Each reachable `float32` magnitude owns the
-run of positions whose real values round to it (cells run away from zero, with boundaries
-at the midpoints between neighbouring floats), so a magnitude comes out with the normal mass
-of the interval it stands for, and the finest share the axis can express is one position in
-2⁶³. Both signs address the same axis, so `+a` and `-a` are one cell mirrored and the
-symmetry is exact.
-
-Most standard libraries instead transform uniform values through `√(−2·ln w)·cos(2πu)`.
-Addressing magnitudes directly gives two guarantees:
-
-- **The value is fixed by the bits alone.** No `Log`, `Sqrt`, `Cos` or `Sin` appears in the
-  decode, so no execution provider's transcendental accuracy can move a result (see
-  [below](#the-same-bits-everywhere)).
-- **Rounding is to nearest, and the symmetry is exact.** Both are properties of how the axis
-  is cut into cells, not of a formula's numerics.
+positions whose real values round to it, so it comes out with the normal mass of the
+interval it stands for; the finest share is one position in 2⁶³. Both signs address the
+same axis, so the symmetry is exact. No `Log`, `Sqrt`, `Cos` or `Sin` appears in the decode
+(unlike the common `√(−2·ln w)·cos(2πu)`), so the value is fixed by the bits alone (see
+[below](#the-same-bits-everywhere)).
 
 ## Mean and scale are applied afterwards
 
-`RandomNormal(shape, mean, scale)` — and `NormalDist`, and every initializer with a
-prescribed standard deviation — computes `z·scale + mean` from a standard draw `z` in
-ordinary `float32` arithmetic. Everything else on this page describes `z`; the affine step
-rounds as a `float32` multiply and add round. Two consequences:
+`RandomNormal(shape, mean, scale)`, `NormalDist` and every initializer with a prescribed
+standard deviation compute `z·scale + mean` from a standard draw `z` in ordinary `float32`
+arithmetic. The rest of this page describes `z`. Consequences:
 
 - The 8-sigma bound scales with it: a draw never leaves `mean ± 8·scale`.
 - With `mean = 0` the exact symmetry survives the scaling, since negating a `float32` product
@@ -94,48 +84,32 @@ span the *floor* and the top the *cap*.
 
 | Region | Magnitudes | What a draw returns there | Mass |
 |---|---|---|---|
-| lattice | below the floor, 2⁻³⁹ (1.818989e-12) | points of an even lattice whose step is the floor class's spacing — represented, but not individually addressable | 1.4513e-12, about 1 draw in 690 billion |
-| resolved | 2⁻³⁹ up to 8, the 42 weight classes between | individual `float32` values, each with the mass of the interval it stands for — except above 7.6008, where a float's cell is worth under one position; 577,209 of them get none, the lowest of them 7.6011825 | all the rest |
+| lattice | below the floor, 2⁻³⁹ (1.818989e-12) | points of an even lattice whose step is the floor class's spacing | 1.4513e-12, about 1 draw in 690 billion |
+| resolved | 2⁻³⁹ up to 8, the 42 weight classes between | individual `float32` values, each with its interval's mass; above 7.6008 a cell can be under one position, and 577,209 floats (lowest 7.6011825) are never drawn | all the rest |
 | cap | 8 and beyond | exactly `8.0f` | 1.244e-15, about 1 draw in 800 trillion |
 
 Counting values: **720,265,872** of the 4,278,190,080 finite `float32` values (**16.8%**)
 are individually reachable, a set closed under negation: 351,744,327 resolved magnitudes and
 8,388,607 lattice points on each sign, plus ±`8.0f` and both zeros.
 
-**Below the floor**, truncation spends resolution, not fairness. Across that region the
-normal density is constant to within 2⁻⁷⁸, so an evenly spaced lattice *is* the correct
-distribution, and the region carries exactly its due mass. A draw there returns a lattice
-point instead of the neighbouring float a full-resolution draw would have named; for any use
-that treats these values as numbers rather than bit patterns the two are interchangeable.
+**Below the floor** the normal density is constant to within 2⁻⁷⁸, so the even lattice is
+the correct distribution and the region gets its due mass; a draw returns a lattice point
+rather than an arbitrary float.
 
 ## Where the axis stops: no draw exceeds 8
 
-The resolved window ends at the start of weight class 130, which is the value 8. Every
-position at or past 8 sigma decodes to exactly `8.0f`, so that single float carries the whole
-tail beyond it: **1.244e-15** of the mass, about **one draw in 800 trillion**.
-
-This is a hard clip on the tail, at a magnitude you will not reach by accident. A standard
-draw never returns an infinity, a NaN, or any value outside `[−8, 8]`; a scaled draw never
-leaves `mean ± 8·scale`, so e.g. `KaimingNormal` on a fan-in of 1024 draws
-`N(0, √(2/1024))` and cannot produce a weight past 8·√(2/1024) ≈ 0.354. Initializing a
-billion parameters from normal draws gives about one chance in a million that any single
-element lands on the cap.
-
-It is observable in code that looks at the far tail: importance sampling weighted into it,
-extreme-value estimation, a test that asks how often `|z| > t` for large `t`. Past 8 there
-is a point mass on `8.0f` instead of a continuing tail, and every sigma level beyond 8
-reports the same count.
+Every position at or past 8 sigma decodes to exactly `8.0f`, which carries the whole tail:
+**1.244e-15** of the mass, about **one draw in 800 trillion**. A standard draw never
+returns an infinity, a NaN, or any value outside `[−8, 8]`; e.g. `KaimingNormal` on a fan-in
+of 1024 cannot produce a weight past 8·√(2/1024) ≈ 0.354. Only code that studies the far tail
+(importance sampling, extreme-value estimation, counting `|z| > t` for large `t`) sees the
+point mass on `8.0f`.
 
 ## The same bits everywhere
 
-The whole decode, from generator bits to the `float32` returned, is integer arithmetic. Any
-execution provider that implements the integer operations correctly returns the same values
-from the same key, bit for bit, and an exported ONNX model draws what Shorokoo drew. The same
-seed yields identical values under ONNX Runtime's CPU provider, under the
+The whole decode is integer arithmetic, so any execution provider that implements the
+integer operations correctly returns the same values from the same key, bit for bit:
+ONNX Runtime's CPU provider, the
 [Quick Execution Engine](limitations.md#quick-execution-engine-value-computation-is-bounded),
-and in an exported model.
-
-The transcendental construction, `√(−2·ln w)·cos(2πu)`, cannot guarantee this: ONNX
-specifies no accuracy for `Log`, `Sqrt`, `Cos` or `Sin`, so two conformant providers can
-return different normals from the same key. Evaluating that formula in float32 and in
-binary64 makes **66%** of its draws differ, the worst by **4.19e-2** relative.
+and an exported ONNX model. A transcendental construction could not guarantee this, since
+ONNX specifies no accuracy for `Log`, `Sqrt`, `Cos` or `Sin`.

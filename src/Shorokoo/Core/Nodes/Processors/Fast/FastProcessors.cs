@@ -5533,19 +5533,20 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// for the two that can turn a declined loop into a build error. Decline only where
     /// cloning would actually be wrong.
     /// <list type="bullet">
-    ///   <item>The <c>maxIter</c> producer is a <c>CONSTANT</c> with a non-negative
-    ///     int64 scalar value.</item>
+    ///   <item>The <c>maxIter</c> producer is a <c>CONSTANT</c> int64 scalar. A negative
+    ///     trip count runs the body zero times, exactly as a count of zero does.</item>
     ///   <item>A matching <c>LOOP_CLOSE</c> exists after the <c>LOOP_OPEN</c> (checked
     ///     by <see cref="Process"/> rather than the eligibility gate).</item>
     ///   <item>The loop-variable and scan-variable counts agree between the
     ///     <c>LOOP_OPEN</c> (<c>open.Inputs.Count - 2</c> loop vars) and the
     ///     <c>LOOP_CLOSE</c>.</item>
-    ///   <item>Scan variables, when present, need a non-zero trip count and a
-    ///     statically-true body break: the shape of a scan output under early
-    ///     termination, and the dtype of an empty one, are not expressible here.
+    ///   <item>Scan variables, when present, need a positive trip count and
+    ///     statically-true conditions (the body break and the initial one): the shape
+    ///     of a scan output under early termination, and the dtype of an empty one,
+    ///     are not expressible here.
     ///     A dynamic continue-condition on its own is fine — <see cref="UnrollOne"/>
     ///     emits an AND / WHERE chain that freezes the loop-var outputs at the
-    ///     iteration where the break first goes false.</item>
+    ///     iteration where either condition first goes false.</item>
     ///   <item>Every nested <c>LOOP_CLOSE</c> / <c>IF_CLOSE</c> in the body has its
     ///     matching open node in the body too. Nested control flow is otherwise
     ///     allowed: a cloned close node's <see cref="FastNode.GraphOpenNodeKey"/> is
@@ -5554,7 +5555,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     ///     (<c>MODEL_PARAM_REF</c>, <c>MODEL_PARAM_ID_REF</c>,
     ///     <c>MODEL_PARAM_MODEL_REF</c>, <c>MODULE_SET_HYPERPARAMS</c>) — see
     ///     <see cref="BodyHoldsUnresolvedParamMachinery"/>. Checked only when the
-    ///     trip count is non-zero, since a zero-trip unroll clones nothing.</item>
+    ///     trip count is positive, since a zero-trip unroll clones nothing.</item>
     ///   <item>Every output of every body node, and every output of the
     ///     <c>LOOP_OPEN</c>, is consumed only by body nodes or by the matching
     ///     <c>LOOP_CLOSE</c> — no external references into the body, and no
@@ -5631,13 +5632,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 {
                     var n = graph.Nodes[i];
                     if (n.OpCode != OpCodes.LOOP_OPEN) continue;
-                    var inputs = n.Inputs;
-                    if (inputs.Count == 0 || inputs[0] is not FastTensorKey maxIterKey || maxIterKey.IsEmpty)
-                        continue;
-                    if (!producerByOutput.TryGetValue(maxIterKey, out var maxIterProducer)) continue;
-                    if (maxIterProducer.OpCode != OpCodes.CONSTANT) continue;
-                    var v = ReadConstantLong(maxIterProducer);
-                    if (v is null || v.Value < 0) continue;
+                    var v = ConstantTripCount(n, producerByOutput);
+                    if (v is null) continue;
 
                     // Locate the matching CLOSE by scanning forward.
                     FastNode? candidateClose = null;
@@ -5713,23 +5709,17 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // (2b) Scan vars require an iteration to produce a concrete shape; a
             // zero-iteration loop with scan outputs would need a dtype-aware empty
             // tensor, which the native pass doesn't have without a TensorInfo
-            // round-trip. Disqualify and let the CG path handle that degenerate case.
-            long iterCountPreview = 0;
-            if (openInputs.Count > 0 && openInputs[0] is FastTensorKey miKey && !miKey.IsEmpty
-                && producerByOutput.TryGetValue(miKey, out var miProducer)
-                && miProducer.OpCode == OpCodes.CONSTANT
-                && ReadConstantLong(miProducer) is long mi) iterCountPreview = mi;
+            // round-trip. Disqualify it; the loop stays rolled.
+            long iterCountPreview = ConstantTripCount(openNode, producerByOutput) ?? 0;
             if (iterCountPreview == 0 && nScan > 0) return false;
 
-            // (2c) The "cond chain is dynamic" signal lives in CLOSE.Inputs[0] — the
-            // body's per-iteration continue-when output. OPEN.Inputs[1] is just the
-            // initial cond (usually a CONSTANT(true)) and doesn't tell us whether
-            // the body drives a dynamic break. Mixing scan vars with a dynamic
-            // body-break is not supported natively — the shape of a scan output
-            // under early termination is tricky to express statically. Anything
-            // with nScan > 0 needs a static-true body break; otherwise CG handles it.
-            bool bodyBreakIsStaticTrue = IsStaticTrue(closeNode.Inputs[0], producerByOutput);
-            if (nScan > 0 && !bodyBreakIsStaticTrue) return false;
+            // (2c) The loop can stop early through either condition: the body's
+            // per-iteration continue-when output (CLOSE.Inputs[0]) or the initial cond
+            // (OPEN.Inputs[1]), which an imported Loop may take from a graph input.
+            // Mixing scan vars with a dynamic condition is not supported natively — the
+            // shape of a scan output under early termination is tricky to express
+            // statically — so anything with nScan > 0 needs both to be static true.
+            if (nScan > 0 && !HasStaticTrueConditions(openNode, closeNode, producerByOutput)) return false;
 
             // (3) Body: collect nodes positionally between OPEN and CLOSE. Nested
             // LOOP / IF control flow is allowed: when cloning a nested close node
@@ -5861,6 +5851,37 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     || op == InternalOpCodes.MODULE_SET_HYPERPARAMS) return true;
             }
             return false;
+        }
+
+        /// <summary>
+        /// The number of times the loop opened by <paramref name="openNode"/> runs its body, when
+        /// that is known statically: its trip count as a CONSTANT, where a negative count runs it
+        /// zero times, and zero outright when its initial condition is a constant false. Null when
+        /// the trip count is not a CONSTANT.
+        /// </summary>
+        private static long? ConstantTripCount(FastNode openNode, Dictionary<FastTensorKey, FastNode> producerByOutput)
+        {
+            var inputs = openNode.Inputs;
+            if (inputs.Count == 0 || inputs[0] is not FastTensorKey maxIterKey || maxIterKey.IsEmpty) return null;
+            if (!producerByOutput.TryGetValue(maxIterKey, out var maxIterProducer)) return null;
+            if (maxIterProducer.OpCode != OpCodes.CONSTANT) return null;
+            if (ReadConstantLong(maxIterProducer) is not long tripCount) return null;
+            if (inputs.Count > 1 && ReadConstantBool(inputs[1], producerByOutput) == false) return 0;
+            return Math.Max(0L, tripCount);
+        }
+
+        private static bool HasStaticTrueConditions(
+            FastNode openNode, FastNode closeNode, Dictionary<FastTensorKey, FastNode> producerByOutput)
+            => IsStaticTrue(closeNode.Inputs[0], producerByOutput)
+               && (openNode.Inputs.Count < 2 || IsStaticTrue(openNode.Inputs[1], producerByOutput));
+
+        private static bool? ReadConstantBool(FastTensorKey? key, Dictionary<FastTensorKey, FastNode> producerByOutput)
+        {
+            if (key is not FastTensorKey k || k.IsEmpty) return null;
+            if (!producerByOutput.TryGetValue(k, out var prod) || prod.OpCode != OpCodes.CONSTANT) return null;
+            var tv = prod.Attributes.GetAttributeVal(OnnxOpAttributeNames.AttrValue);
+            if (tv is null || tv.DType != DType.Bool || tv.Shape.Dims.Length != 0) return null;
+            return tv.Elements<bool>()[0];
         }
 
         /// <summary>
@@ -6092,13 +6113,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             for (int k = 0; k < nScan; k++) scanIterationKeys.Add(new List<FastTensorKey?>(Math.Max((int)iterCount, 0)));
 
             // Cond-chain scaffolding (Stage E). If the body's per-iteration
-            // continue-when output (CLOSE.Inputs[0]) is a dynamic value (not a
-            // CONSTANT(true) / null), we need an AND+WHERE chain to "freeze" each
-            // loop-var output at the iteration where the body-break first goes
-            // false. OPEN.Inputs[1] is just the *initial* cond (usually a
-            // CONSTANT(true) placed by the DSL) and by itself doesn't imply a
-            // dynamic chain. The AND/WHERE emissions are skipped for static-true
-            // cases so the previous no-cond path stays a straight-line unroll.
+            // continue-when output (CLOSE.Inputs[0]) or the initial cond
+            // (OPEN.Inputs[1]) is a dynamic value (not a CONSTANT(true) / null), we
+            // need an AND+WHERE chain to "freeze" each loop-var output at the
+            // iteration where the condition first goes false; the chain is seeded
+            // from the initial cond, so a false one keeps the initializers. The
+            // AND/WHERE emissions are skipped when both are static true, so that
+            // path stays a straight-line unroll.
             //
             // We rebuild a one-shot producer lookup here because the caller's
             // (Process) producerByOutput lookup is out of scope and the set of
@@ -6112,7 +6133,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         if (output is FastTensorKey tk && !tk.IsEmpty)
                             producersLocal[tk] = producer;
             }
-            bool hasCondChain = !IsStaticTrue(closeNode.Inputs[0], producersLocal);
+            bool hasCondChain = !HasStaticTrueConditions(openNode, closeNode, producersLocal);
 
             // Per-loop-var "current final output" tensor key, tracked through the
             // WHERE chain. Seeded from the initializers so a fully-broken cond
@@ -6384,7 +6405,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     FastTensorKey? iterBodyCondKey = null;
                     var breakIn = closeNode.Inputs[0];
                     if (breakIn is FastTensorKey bk && !bk.IsEmpty)
-                        iterBodyCondKey = curBodyOutputMap.TryGetValue(bk, out var mappedBk) ? mappedBk : bk;
+                        iterBodyCondKey = curBodyOutputMap.TryGetValue(bk, out var mappedBk) ? mappedBk
+                            : curTensorMap.TryGetValue(bk, out var mappedTk) ? mappedTk
+                            : bk;
 
                     if (iterBodyCondKey is not null && allPrevCondKey is not null
                         && !iterBodyCondKey.Value.IsEmpty && !allPrevCondKey.Value.IsEmpty)
@@ -6592,9 +6615,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 if (op == InternalOpCodes.MODEL_PARAM
                     || op.EndsWith("#OPEN") || op.EndsWith("#CLOSE"))
                 {
-                    // For IF_OPEN, the condition input drives FoldConstantConditionBranches;
-                    // mark it as a required constant if foldable.
-                    if (op == OpCodes.IF_OPEN)
+                    // For IF_OPEN, the condition input drives FoldConstantConditionBranches, and
+                    // for LOOP_OPEN, the trip count drives FoldConstantIterationLoops, which only
+                    // unrolls a loop whose trip count is a CONSTANT node; mark either as a required
+                    // constant if foldable.
+                    if (op == OpCodes.IF_OPEN || op == OpCodes.LOOP_OPEN)
                     {
                         var inputs = node.Inputs;
                         if (inputs.Count > 0 && inputs[0] is FastTensorKey cond

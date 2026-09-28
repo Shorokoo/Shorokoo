@@ -2527,15 +2527,16 @@ namespace Shorokoo
             Stage("UnpackTensorStructs");
             Shorokoo.Core.Nodes.Processors.Fast.FastUnpackTensorStructs.Process(fast);
 
-            // Simplify before loop unrolling. Any loop whose iteration count is already a direct
-            // Constant node will be unrolled here via FastFoldConstantIterationLoops inside
+            // Simplify before loop unrolling. Any loop whose iteration count is a Constant, or folds
+            // to one from constants, is unrolled here via FastFoldConstantIterationLoops inside
             // FastSimplify.
             Stage("Simplify");
             Shorokoo.Core.Nodes.Processors.Fast.FastSimplify.Process(fast);
 
-            // Resolve any remaining LOOP_OPEN iteration counts that are computed from constants
-            // (e.g. Sub(Constant(2), Constant(1))) into literal Constant nodes. Autograd has no
-            // gradient implementation for Loop, so every loop reaching autograd must be flattened.
+            // Resolve any remaining LOOP_OPEN iteration counts that read no graph input — ones the
+            // constant folding above could not evaluate, which this pass hands to ONNX Runtime —
+            // into literal Constant nodes. Autograd has no gradient implementation for Loop, so
+            // every loop reaching autograd must be flattened.
             Stage("FoldLoopIterationCounts");
             FastFoldLoopIterationCountsToConstantsProcessor.Process(fast, mergeContext);
 

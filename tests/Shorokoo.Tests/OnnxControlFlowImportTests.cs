@@ -67,6 +67,28 @@ public class OnnxControlFlowImportTests
         Assert.Equal([1f, 2f, 3f, 4f], sFinal.FloatData!.Value.ToArray());
     }
 
+    static float[] Concretized(string tripCount, bool cond, bool? constantCondition = null)
+    {
+        var init = TensorData(DType.Float32, [4L], 1f, 2f, 3f, 4f);
+        var condData = TensorData(DType.Bool, [], cond);
+        var model = ComputationGraph.FromInternal(
+                Import(BuildDoublingWhileLoopModel(tripCount, constantCondition)), GraphKind.Module)
+            .ToConcreteArchitecture([condData, init]).ToConcreteModel(RngConfig.Default).ToInternal();
+        return new ComputeContext().Execute(model, condData.Shared(), init.Shared())[0]
+            .ToTensorData().As<float32>().AccessMemory().ToArray();
+    }
+
+    [Fact]
+    public void TestAConcretizedLoopWithAKnownTripCountHonoursItsInitialCondition()
+    {
+        Assert.Equal([1f, 2f, 3f, 4f], Concretized("constant", false));
+        Assert.Equal([1f, 2f, 3f, 4f], Concretized("computed", false));
+        Assert.Equal([8f, 16f, 24f, 32f], Concretized("constant", true));
+        Assert.Equal([8f, 16f, 24f, 32f], Concretized("computed", true));
+        Assert.Equal([1f, 2f, 3f, 4f], Concretized("computed", true, constantCondition: false));
+        Assert.Equal([8f, 16f, 24f, 32f], Concretized("computed", false, constantCondition: true));
+    }
+
     /// <summary>A graph that supplies no iteration count leaves the loop unbounded, so the
     /// engine bounds the walk itself and reports shape without data.</summary>
     [Fact]
@@ -85,8 +107,10 @@ public class OnnxControlFlowImportTests
         Assert.Null(unhinted.FloatData);
     }
 
-    /// <summary>while (cond) { s = s + s; } over a [4] state, with no trip-count limit.</summary>
-    private static ModelProto BuildDoublingWhileLoopModel()
+    /// <summary>while (cond) { s = s + s; } over a [4] state, with no trip-count limit unless
+    /// <paramref name="tripCount"/> gives one: 3 as a Constant, or as Add(1, 2). A
+    /// <paramref name="constantCondition"/> replaces the cond input.</summary>
+    private static ModelProto BuildDoublingWhileLoopModel(string tripCount = "", bool? constantCondition = null)
     {
         var body = new GraphProto { Name = "loop_body" };
         body.Inputs.Add(TensorInfo("iter", Int64Elem));
@@ -100,7 +124,18 @@ public class OnnxControlFlowImportTests
         var graph = new GraphProto { Name = "while_graph" };
         graph.Inputs.Add(TensorInfo("cond", BoolElem));
         graph.Inputs.Add(TensorInfo("init", FloatElem, 4));
-        graph.Nodes.Add(Node("Loop", "the_loop", ["", "cond", "init"], ["s_final"],
+        if (tripCount == "constant")
+            graph.Nodes.Add(ConstantNode("trips", Init("trips", Int64Elem, [], BitConverter.GetBytes(3L))));
+        if (tripCount == "computed")
+        {
+            graph.Nodes.Add(ConstantNode("one", Init("one", Int64Elem, [], BitConverter.GetBytes(1L))));
+            graph.Nodes.Add(ConstantNode("two", Init("two", Int64Elem, [], BitConverter.GetBytes(2L))));
+            graph.Nodes.Add(Node("Add", "trip_add", ["one", "two"], ["trips"]));
+        }
+        if (constantCondition is bool c)
+            graph.Nodes.Add(ConstantNode("fixed_cond", Init("fixed_cond", BoolElem, [], [c ? (byte)1 : (byte)0])));
+        graph.Nodes.Add(Node("Loop", "the_loop",
+            [tripCount == "" ? "" : "trips", constantCondition is null ? "cond" : "fixed_cond", "init"], ["s_final"],
             new AttributeProto { Name = "body", Type = AttributeProto.AttributeType.Graph, G = body }));
         graph.Outputs.Add(TensorInfo("s_final", FloatElem, 4));
         return WrapModel(graph);

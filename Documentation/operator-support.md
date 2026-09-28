@@ -365,12 +365,14 @@ shape and type.
      with dilation above 1 or stride above the kernel, and explicit pads as large
      as the kernel, are rebuilt as `Pad`, a pool ONNX Runtime computes as the spec
      does, and `Slice` ([#379](https://github.com/Shorokoo/Shorokoo/issues/379), [#408](https://github.com/Shorokoo/Shorokoo/issues/408)).
-   - **`MaxPool` indices** over int8, uint8, float16, float32 or float64: ONNX
-     Runtime gives a window whose maximum is at or below the type's lowest finite
-     value (for float16, a window of only −inf) a wrong index. When the `Indices`
-     output is read, an int8 or uint8 pool is computed over the input cast to
-     float32, and a floating-point pool takes those windows' value and index from
-     a second pool that finds their first maximum ([#420](https://github.com/Shorokoo/Shorokoo/issues/420)).
+   - **`MaxPool` indices** over int8 or uint8: ONNX Runtime gives a window holding
+     only the type's lowest value a wrong index. When the `Indices` output is
+     read, the pool is computed over the input cast to float32 and its values cast
+     back ([#420](https://github.com/Shorokoo/Shorokoo/issues/420)).
+   - Not rewritten: ONNX Runtime's float16, float32 and float64 `MaxPool` gives a
+     window whose maximum is at or below the type's lowest finite value (for
+     float16, a window of only −inf) a wrong index and value
+     ([#437](https://github.com/Shorokoo/Shorokoo/issues/437)).
    - Not rewritten: ONNX Runtime's `MaxPool` without an `Indices` output gives a
      window of only −inf the type's lowest finite value instead of −inf
      ([#426](https://github.com/Shorokoo/Shorokoo/issues/426)).

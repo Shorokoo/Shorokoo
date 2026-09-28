@@ -598,6 +598,25 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>Whether an int8 and a uint8 MaxPool whose indices are read give the values of the same pool
+    /// without them, over pads reaching the kernel (k 1, pads [1,1]) that leave whole windows in the padding.
+    /// Input x is [1,1,n].</summary>
+    [Module]
+    public partial class IndexedSmallIntegerMaxPoolMatchesThePlainPool
+    {
+        public static Tensor<bit> Inline(Tensor<float32> x)
+        {
+            Tensor<bit> Agree<T>(Tensor<T> v) where T : IVarType
+            {
+                var (y, indices) = OnnxOp.MaxPoolWithIndices(v, AutoPad.NotSet, false, null, [1L], [1L, 1L], 0L, null);
+                var plain = OnnxOp.MaxPool(v, AutoPad.NotSet, false, null, [1L], [1L, 1L], 0L, null);
+                return ((Tensor<bit>)OnnxOp.Equal(OnnxOp.Cast(y, null, DType.Int64), OnnxOp.Cast(plain, null, DType.Int64)))
+                    .Concat(2L, (Tensor<bit>)OnnxOp.GreaterOrEqual(indices, OnnxOp.Constant(-1000L)));
+            }
+            return Agree(x.Cast<int8>()).Concat(2L, Agree(x.Cast<uint8>()));
+        }
+    }
+
     /// <summary>Whether a uint8 MaxPool (k 2, d 2, pads [2,2] reaching the kernel) gives every window
     /// its value and the position of its first maximum. Input x is [0,0,5,0,0] as [1,1,5].</summary>
     [Module]

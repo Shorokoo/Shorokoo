@@ -65,15 +65,16 @@ public class TrainingMemoryStabilityTests
     private const int WarmupSteps = 1_000;
     private const int MeasuredSteps = 10_000;
 
-    // Budgets. Each step replaces the checkpoint's state but appends an entry to its
-    // training history, a few hundred bytes a step that the loop keeps on purpose. The loop
-    // clears the history every HistoryWindow steps, and at both measurements, so what is
-    // measured is everything else a step leaves behind: ~0 after a forced collection for a
-    // non-leaking loop. 16 MiB absorbs JIT / finalizer / fragmentation jitter while a real
-    // leak over 10k steps (even ~2 KiB/step) sails past it. The RSS ceiling is a loose
-    // pathological-leak backstop only.
+    // Budgets. Each step replaces the checkpoint's state and appends one entry to its training
+    // history, which the loop keeps: the history is the one thing a step is meant to leave behind.
+    // Its entries cost what Documentation/training.md states, roughly 200-300 bytes each for this
+    // rig, whose hyperparameters are all baked; HistoryEntryAllowanceBytes gives each measured step
+    // that with headroom, so an entry that kept anything more alive -- a tensor, the checkpoint --
+    // overruns it. Nothing else a non-leaking step leaves grows with the step count; 16 MiB
+    // absorbs JIT / finalizer / fragmentation jitter while a real leak over 10k steps (even
+    // ~2 KiB/step) sails past it. The RSS ceiling is a loose pathological-leak backstop only.
     private const long ManagedGrowthBudgetBytes = 16L * 1024 * 1024;
-    private const int HistoryWindow = 1_000;
+    private const long HistoryEntryAllowanceBytes = 512;
     private const long RssGrowthCeilingBytes = 512L * 1024 * 1024;
 
     // Geometry for the native-growth half below. One [1024, 1024] trainable parameter, so a
@@ -103,21 +104,13 @@ public class TrainingMemoryStabilityTests
 
         var ckpt = rig.CreateInitialCheckpoint();
         for (int i = 0; i < WarmupSteps; i++)
-        {
             ckpt = rig.TrainStep(ckpt, inputBatch.Shared(), targetBatch.Shared());
-            if ((i + 1) % HistoryWindow == 0) ckpt = ckpt.WithoutHistory();
-        }
-        ckpt = ckpt.WithoutHistory();
 
         long managedBefore = LiveManagedBytes();
         long rssBefore = WorkingSetBytes();
 
         for (int i = 0; i < MeasuredSteps; i++)
-        {
             ckpt = rig.TrainStep(ckpt, inputBatch.Shared(), targetBatch.Shared());
-            if ((i + 1) % HistoryWindow == 0) ckpt = ckpt.WithoutHistory();
-        }
-        ckpt = ckpt.WithoutHistory();
 
         long managedAfter = LiveManagedBytes();
         long rssAfter = WorkingSetBytes();
@@ -125,11 +118,11 @@ public class TrainingMemoryStabilityTests
         long managedGrowth = managedAfter - managedBefore;
         long rssGrowth = rssAfter - rssBefore;
 
-        // Keep the checkpoint reachable past the final measurement so the loop's
-        // last result can't be collected before we read the heap.
-        Assert.NotNull(ckpt);
+        // Keep the checkpoint, and its history, reachable past the final measurement so the
+        // loop's last result can't be collected before we read the heap.
+        Assert.Equal(WarmupSteps + MeasuredSteps, ckpt.History.Count);
 
-        Assert.True(managedGrowth <= ManagedGrowthBudgetBytes);
+        Assert.True(managedGrowth <= ManagedGrowthBudgetBytes + MeasuredSteps * HistoryEntryAllowanceBytes);
         Assert.True(rssGrowth <= RssGrowthCeilingBytes);
     }
 

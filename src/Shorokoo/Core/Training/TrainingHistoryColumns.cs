@@ -120,7 +120,9 @@ namespace Shorokoo
 
         /// <summary>
         /// The history <paramref name="columns"/> hold, validated strictly: <paramref name="origin"/>
-        /// names the file in what a malformed history is refused with.
+        /// names the file in what a malformed history is refused with. The entries hold their
+        /// hyperparameters in the order of the value columns in <paramref name="columns"/>, which
+        /// both readers pass in the order they were written.
         /// </summary>
         /// <exception cref="InvalidDataException">The columns do not form a history: one is missing,
         /// unknown, of the wrong dtype or rank, or of another length than the rest.</exception>

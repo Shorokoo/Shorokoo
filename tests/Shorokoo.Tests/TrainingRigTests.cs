@@ -1991,6 +1991,24 @@ public class TrainingRigScheduleCoverageTests
         AssertClose(0.5f - 0.01f * 3 - 0.1f * 1, Applied(epochRig.TrainStep(seed.WithCounters(step: 3, epoch: 1), input.Shared(), target.Shared())), 1e-6f);
     }
 
+    [Fact]
+    public void TestRuntimeHyperparametersFedInAStructWithFieldsNamedOtherwiseTrainAndAreReportedAsAppliedCoverage()
+    {
+        var (sample, input, target) = ScalarMultiplyBatches();
+        var rig = TrainingRig.FromScratch(
+            ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, SGDMomentumOptimizer.ComputationGraph,
+            sample, new SGDMomentumOptimizerHyperparameters { LearningRate = Hyperparameter.Runtime(), MomentumCoeff = 0.7f });
+        var renamed = new TensorStructDef([new TensorStructFieldDef("rate", DataStructure.Tensor, 0, DType.Float32)], "Renamed");
+
+        var byName = rig.TrainStep(rig.CreateInitialCheckpoint(), rig.MakeHyperparameters(0.3f), input.Shared(), target.Shared());
+        var byPlace = rig.TrainStep(rig.CreateInitialCheckpoint(), renamed.FromOrderedData(TensorData([], 0.3f)), input.Shared(), target.Shared());
+        AssertClose(byName, byPlace, 0f);
+        Assert.Equal(0.3f, Applied(byPlace));
+        using var run = rig.BeginResidentRun();
+        run.Step(renamed.FromOrderedData(TensorData([], 0.05f)), input.Shared(), target.Shared());
+        Assert.Equal(0.05f, run.AppliedHyperparameters!["learningRate"].ToSingle());
+    }
+
     private static TrainingHistoryEntry EntryOf(TrainingCheckpoint produced) => new()
     {
         Step = produced.Step - 1,
@@ -2133,12 +2151,58 @@ public class TrainingRigScheduleCoverageTests
     }
 
     [Fact]
+    public void TestAStepThatFailsReadingItsOutputsReleasesThemAndLosesOnlyStateItConsumedCoverage()
+    {
+        var (sample, input, target) = ScalarMultiplyBatches();
+        var rig = SgdRig(sample, Schedules.Linear(0.2f, 0f, 8));
+        List<TensorData> outputs = [];
+        void FailReading(Action step)
+        {
+            outputs.Clear();
+            TrainingRig.StepOutputFaultInjection = produced =>
+            {
+                outputs.AddRange(produced.Select(p => p.ToTensorData()));
+                throw new InvalidOperationException("injected");
+            };
+            try { Assert.Equal("injected", Assert.Throws<InvalidOperationException>(step).Message); }
+            finally { TrainingRig.StepOutputFaultInjection = null; }
+            Assert.NotEmpty(outputs);
+            Assert.All(outputs, o => Assert.True(o.IsDisposed));
+        }
+
+        var begun = rig.TrainStep(rig.CreateInitialCheckpoint(), input.Shared(), target.Shared());
+        FailReading(() => rig.TrainStep(begun.Shared(), input.Shared(), target.Shared()));
+        var reference = rig.TrainStep(begun.Shared(), input.Shared(), target.Shared());
+        AssertClose(rig.TrainStep(rig.TrainStep(begun.Shared(), input.Shared(), target.Shared()), input.Shared(), target.Shared()),
+            rig.TrainStep(reference, input.Shared(), target.Shared()), 0f);
+
+        using (var run = rig.BeginResidentRun(begun.Shared()))
+        {
+            var handed = run.StepToCheckpoint(input.Shared(), target.Shared());
+            FailReading(() => run.Step(input.Shared(), target.Shared()));
+            AssertClose(rig.TrainStep(handed.Shared(), input.Shared(), target.Shared()), run.StepToCheckpoint(input.Shared(), target.Shared()), 0f);
+            Assert.Equal([0L, 1L, 2L], run.History.Steps);
+        }
+
+        using (var run = rig.BeginResidentRun(begun.Shared()))
+        {
+            run.Step(input.Shared(), target.Shared());
+            FailReading(() => run.Step(input.Shared(), target.Shared()));
+            Assert.Contains("failed after it had consumed the run's state", Assert.Throws<InvalidOperationException>(() => run.Step(input.Shared(), target.Shared())).Message);
+            Assert.Throws<InvalidOperationException>(() => run.ClearHistory());
+        }
+    }
+
+    [Fact]
     public void TestAnAppliedValueAndAHistoryEntryPrintTheirContentsCoverage()
     {
         static AppliedHyperparameter Of(TensorData value) => AppliedHyperparameter.Of(value);
-        Assert.Equal<string>(["0.1", "0.1", "7", "9007199254740993", "True", "Float32[2]"], [
+        static AppliedHyperparameter Half16(DType dtype, ushort bits) => AppliedHyperparameter.FromRawBytes(dtype, [], BitConverter.GetBytes(bits));
+        Assert.Equal<string>(["0.1", "0.1", "7", "9007199254740993", "True", "Float32[2]", "0.1", "0.1", "-3.39E+38", "18446744073709551615"], [
             Of(TensorData([], 0.1f)).ToString(), Of(TensorData([], 0.1)).ToString(), Of(TensorData([], 7)).ToString(),
             Of(TensorData([], 9007199254740993L)).ToString(), Of(TensorData([], true)).ToString(), Of(TensorData([2L], [0.1f, 0.2f])).ToString(),
+            Half16(DType.Float16, BitConverter.HalfToUInt16Bits((Half)0.1f)).ToString(), Half16(DType.BFloat16, ((Shorokoo.Core.Backends.BFloat16)0.1f).Bits).ToString(),
+            Half16(DType.BFloat16, Shorokoo.Core.Backends.BFloat16.MinValue.Bits).ToString(), Of(TensorData([], ulong.MaxValue)).ToString(),
         ]);
         var entry = new TrainingHistoryEntry
         {
@@ -4614,6 +4678,14 @@ public class TrainingRigCheckpointCoverageTests
                     unsavable.WithHistory(Advised(unsavable.History, ex.Message)).Save(path);
                     Assert.Equal(unsavable.History.TakeLast(2), rig.LoadCheckpoint(path).History);
                 }
+
+            var float64 = AppliedHyperparameter.Of(TensorData([], 0.1));
+            TrainingHistoryEntry Pair(long step, AppliedHyperparameter rate, AppliedHyperparameter decay)
+                => trained.History[0] with { Step = step, AppliedHyperparameters = new Dictionary<string, AppliedHyperparameter> { ["learningRate"] = rate, ["weightDecay"] = decay } };
+            var newerSecond = trained.WithHistory(TrainingHistory.Of(
+                [Pair(0, float64, float64), Pair(1, scalar, float64), Pair(2, scalar, float64), Pair(3, scalar, scalar), Pair(4, scalar, scalar)]));
+            newerSecond.WithHistory(Advised(newerSecond.History, Assert.Throws<InvalidOperationException>(() => newerSecond.Save(path)).Message)).Save(path);
+            Assert.Equal(newerSecond.History.TakeLast(2), rig.LoadCheckpoint(path).History);
         }
         finally
         {
@@ -5752,12 +5824,14 @@ public class TrainingRigHyperparameterShapeCoverageTests
         var rig = VectorRig(new VectorRateOptimizerHyperparameters { PerElementRate = Hyperparameter.Runtime(4L) });
         var cp = rig.CreateInitialCheckpoint();
         TensorDataStruct Fed(params float[] rate) => rig.HyperparameterStructDef.FromOrderedData(Rate(rate));
-        Assert.All(
-        [
-            Record.Exception(() => rig.TrainStep(cp.Shared(), Fed(0.1f), input.Shared(), target.Shared())),
-            Record.Exception(() => { using var run = rig.BeginResidentRun(cp.Shared()); run.Step(Fed(0.1f), input.Shared(), target.Shared()); }),
-            Record.Exception(() => { using var run = rig.BeginResidentRun(cp.Shared()); run.StepToCheckpoint(Fed(0.1f), input.Shared(), target.Shared()); }),
-        ], e => Assert.IsType<ArgumentException>(e));
+        Assert.Throws<ArgumentException>(() => rig.TrainStep(cp, Fed(0.1f), input.Shared(), target.Shared()));
+        using (var run = rig.BeginResidentRun(cp.Shared()))
+        {
+            Assert.Throws<ArgumentException>(() => run.Step(Fed(0.1f), input.Shared(), target.Shared()));
+            Assert.Throws<ArgumentException>(() => run.StepToCheckpoint(Fed(0.1f), input.Shared(), target.Shared()));
+            run.Step(Fed(0.1f, 0.2f, 0.4f, 0.8f), input.Shared(), target.Shared());
+            Assert.Equal([0L], run.History.Steps);
+        }
         Assert.Equal([0L], rig.TrainStep(cp, Fed(0.1f, 0.2f, 0.4f, 0.8f), input.Shared(), target.Shared()).History.Steps);
     }
 

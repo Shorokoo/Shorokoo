@@ -174,7 +174,7 @@ namespace Shorokoo
             var modelMapping = GetDefaultMappingTensors(manifest, SkptFileFormat.DefaultModelKey);
             var optimizerMapping = GetDefaultMappingTensors(
                 manifest, training.Rig?.OptimizerModel ?? SkptFileFormat.OptimizerModelKey);
-            var tensorsByDataKey = new Dictionary<string, Dictionary<string, TensorData>>(StringComparer.Ordinal);
+            var tensorsByDataKey = new Dictionary<string, OrderedDictionary<string, TensorData>>(StringComparer.Ordinal);
 
             bool Want(CheckpointComponents c) => components is null || (components.Value & c) != 0;
 
@@ -271,7 +271,7 @@ namespace Shorokoo
         private static (TensorDataStruct Trainable, TensorDataStruct ModelState) ReconstructArchOwnedState(
             SkptContainer container, SkptManifest manifest, IReadOnlyDictionary<string, SkptTensorRef>? mapping,
             TensorStructDef trainableParamDef, TensorStructDef modelStateDef,
-            Dictionary<string, Dictionary<string, TensorData>> tensorsByDataKey, string filePath)
+            Dictionary<string, OrderedDictionary<string, TensorData>> tensorsByDataKey, string filePath)
         {
             if (mapping is null)
             {
@@ -332,7 +332,7 @@ namespace Shorokoo
         private static TensorDataStruct ReconstructOptimizerState(
             SkptContainer container, SkptManifest manifest, IReadOnlyDictionary<string, SkptTensorRef>? mapping,
             TensorStructDef def,
-            Dictionary<string, Dictionary<string, TensorData>> tensorsByDataKey, string filePath)
+            Dictionary<string, OrderedDictionary<string, TensorData>> tensorsByDataKey, string filePath)
         {
             if (mapping is null)
             {
@@ -392,7 +392,7 @@ namespace Shorokoo
             SkptContainer container, SkptManifest manifest,
             Dictionary<string, (string Id, SkptTensorRef Ref)> byField,
             TensorStructDef def, string role, string mismatchHint,
-            Dictionary<string, Dictionary<string, TensorData>> tensorsByDataKey, string filePath)
+            Dictionary<string, OrderedDictionary<string, TensorData>> tensorsByDataKey, string filePath)
         {
             var fields = new List<KeyValuePair<string, IData>>(def.Fields.Length);
             foreach (var fieldDef in def.Fields)

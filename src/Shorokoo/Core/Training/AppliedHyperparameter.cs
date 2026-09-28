@@ -161,18 +161,37 @@ namespace Shorokoo
             return hash.ToHashCode();
         }
 
-        /// <summary>The value — a scalar as its number, at its own precision, anything else as its
-        /// dtype and shape.</summary>
+        /// <summary>The value — a scalar as its number, anything else as its dtype and shape. A
+        /// floating-point scalar prints as the shortest decimal that reads back as the same value of
+        /// its own dtype: <c>0.1</c> for the float16 nearest 0.1, not the float32 that value widens
+        /// to. For bfloat16, "reads back" means parsed as a float32 and rounded to bfloat16 as a
+        /// float32 value is everywhere else.</summary>
         public override string ToString()
         {
             if (ElementCount != 1 || _dims.Length != 0) return $"{DType}[{string.Join(", ", _dims)}]";
             var culture = System.Globalization.CultureInfo.InvariantCulture;
             if (DType == DType.Bool) return (_bytes[0] != 0).ToString();
-            if (DType == DType.Float32 || DType == DType.Float16 || DType == DType.BFloat16)
-                return ToSingle().ToString(culture);
+            if (DType == DType.Float32) return ToSingle().ToString(culture);
+            if (DType == DType.Float16)
+                return BitConverter.UInt16BitsToHalf(MemoryMarshal.Read<ushort>(_bytes)).ToString(culture);
+            if (DType == DType.BFloat16) return ShortestBFloat16(MemoryMarshal.Read<ushort>(_bytes), culture);
             if (DType == DType.Int64) return MemoryMarshal.Read<long>(_bytes).ToString(culture);
             if (DType == DType.UInt64) return MemoryMarshal.Read<ulong>(_bytes).ToString(culture);
             return ToDouble().ToString(culture);
+        }
+
+        /// <summary>The fewest significant digits that parse back, through float32, to
+        /// <paramref name="bits"/>.</summary>
+        private static string ShortestBFloat16(ushort bits, IFormatProvider culture)
+        {
+            var value = (float)new BFloat16(bits);
+            if (float.IsFinite(value))
+                for (int digits = 1; digits < 9; digits++)
+                {
+                    var text = value.ToString("G" + digits, culture);
+                    if (((BFloat16)float.Parse(text, culture)).Bits == bits) return text;
+                }
+            return value.ToString(culture);
         }
     }
 }

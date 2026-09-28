@@ -437,7 +437,7 @@ namespace Shorokoo
             }
             var tensorRefs = mappingSet.Tensors ?? new Dictionary<string, SkptTensorRef>();
 
-            var tensorsByDataKey = new Dictionary<string, Dictionary<string, TensorData>>(StringComparer.Ordinal);
+            var tensorsByDataKey = new Dictionary<string, OrderedDictionary<string, TensorData>>(StringComparer.Ordinal);
             // One attribute per stored tensor, because one stored tensor can serve several
             // parameters: the saver is content-addressed, so two parameters whose values are
             // byte-identical are written once and both mapping entries name it. The bind below
@@ -510,9 +510,9 @@ namespace Shorokoo
         /// names what holds the reference, in what a malformed one is refused with: "the mapping for
         /// parameter 'w'", say.
         /// </summary>
-        private static Dictionary<string, TensorData> ResolveDataEntry(
+        private static OrderedDictionary<string, TensorData> ResolveDataEntry(
             SkptContainer container, SkptManifest manifest, SkptTensorRef tensorRef, string referrer,
-            Dictionary<string, Dictionary<string, TensorData>> tensorsByDataKey, string filePath)
+            Dictionary<string, OrderedDictionary<string, TensorData>> tensorsByDataKey, string filePath)
         {
             var dataKey = tensorRef.Data;
             if (string.IsNullOrEmpty(dataKey))
@@ -539,8 +539,11 @@ namespace Shorokoo
             VerifySha256(storedBytes, dataEntry.Sha256, dataEntry.Entry, filePath);
             var dataBytes = DecodeDataEntryPayload(storedBytes, dataEntry, dataKey, filePath);
 
-            var tensors = SafeTensorLoader.ParseSafeTensorBytes(dataBytes)
-                .ToDictionary(t => t.Name, t => t.Data, StringComparer.Ordinal);
+            // Ordered as the entry was written, which the parser reports and a plain Dictionary
+            // does not promise to keep: a reader that rebuilds a list from the entry -- the
+            // history's hyperparameter names -- gets them in the order they were saved.
+            var tensors = new OrderedDictionary<string, TensorData>(StringComparer.Ordinal);
+            foreach (var t in SafeTensorLoader.ParseSafeTensorBytes(dataBytes)) tensors.Add(t.Name, t.Data);
             tensorsByDataKey[dataKey] = tensors;
             return tensors;
         }

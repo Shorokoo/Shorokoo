@@ -129,6 +129,9 @@ namespace Shorokoo
         /// was handed out with.
         /// </summary>
         /// <exception cref="ArgumentNullException"><paramref name="history"/> is <c>null</c>.</exception>
+        /// <exception cref="ObjectDisposedException">The run has been disposed.</exception>
+        /// <exception cref="InvalidOperationException">A step of the run failed after it had consumed
+        /// the run's state, so there is no state left for the history to go with.</exception>
         public void ReplaceHistory(TrainingHistory history)
         {
             ArgumentNullException.ThrowIfNull(history);
@@ -141,6 +144,9 @@ namespace Shorokoo
         /// Empties the run's <see cref="History"/>; the next step starts it again. Otherwise as
         /// <see cref="ReplaceHistory"/>.
         /// </summary>
+        /// <exception cref="ObjectDisposedException">The run has been disposed.</exception>
+        /// <exception cref="InvalidOperationException">A step of the run failed after it had consumed
+        /// the run's state, so there is no state left for the history to go with.</exception>
         public void ClearHistory() => ReplaceHistory(TrainingHistory.Empty);
 
         /// <summary>Trains on one batch and returns its loss, leaving the updated state resident.</summary>

@@ -3087,6 +3087,16 @@ namespace Shorokoo
         internal static Action? StepFaultInjection;
 
         /// <summary>
+        /// Test hook: invoked with a step's outputs once it has executed, in the scope that reads
+        /// them into the new checkpoint and releases every one if that fails, so a test can fail a
+        /// step after it has consumed what it was fed and see what it leaves behind. Thread-scoped,
+        /// so a hook installed by one parallel test is invisible to every other thread; still reset
+        /// it in a <c>finally</c>.
+        /// </summary>
+        [ThreadStatic]
+        internal static Action<IReadOnlyList<NamedModelParam>>? StepOutputFaultInjection;
+
+        /// <summary>
         /// The tensor state a training step holds resident, by section — what the step path already
         /// knows and an allocation failure never said (Shorokoo/Shorokoo#330). Best-effort
         /// throughout: a field whose size is not derivable contributes an unknown size rather than
@@ -3165,8 +3175,9 @@ namespace Shorokoo
                     hyperStruct!, HyperparameterStructDef, nameof(hyperparams), "rig.MakeHyperparameters(...)");
                 // The step was built at each hyperparameter's shape, and a value of another one would
                 // broadcast rather than fail -- a [1] rate over a [4] one trains on, the wrong way.
+                // Read by place, as the step feeds it: RequireFits accepts fields named otherwise.
                 for (int i = 0; i < DynamicHyperparameterIndices.Count; i++)
-                    if (FedTensor(hyperStruct!.Fields[DynamicHyperparameterNames[i]]) is { } fed)
+                    if (FedTensor(FedHyperparameter(hyperStruct!, i)) is { } fed)
                         HyperparameterValues.AssertShape(
                             fed, HyperparameterShapes[DynamicHyperparameterIndices[i]], DynamicHyperparameterNames[i]);
             }
@@ -3196,7 +3207,7 @@ namespace Shorokoo
             if (hyperparameters is not null)
                 for (int i = 0; i < DynamicHyperparameterIndices.Count; i++)
                     applied[DynamicHyperparameterIndices[i]] = AppliedHyperparameter.Of(
-                        FedTensor(hyperparameters.Fields[DynamicHyperparameterNames[i]])!);
+                        FedTensor(FedHyperparameter(hyperparameters, i))!);
             var execInputs = new List<IData>(labels.Count);
             AddStruct(execInputs, checkpoint.TrainableParams, checkpoint.FeedMode);
             AddStruct(execInputs, checkpoint.ModelState, checkpoint.FeedMode);
@@ -3223,9 +3234,9 @@ namespace Shorokoo
                 {
                     // The leading outputs are state the next step feeds straight back; the loss and
                     // the scheduled hyperparameters' values after it are read on the host.
-                    // Sized from the session's own outputs, not from the field counts: the release
-                    // loop below already allows more outputs than state plus loss, and Execute refuses
-                    // a retention array of any other length -- so deriving it twice would fail the GPU
+                    // Sized from the session's own outputs, not from the field counts: the outputs
+                    // after the loss are the scheduled hyperparameters' values, and Execute refuses a
+                    // retention array of any other length -- so deriving it twice would fail the GPU
                     // path on a graph the CPU path runs fine.
                     var retain = new bool[compiled.OutputCount];
                     for (int i = 0; i < stateOutputCount; i++) retain[i] = true;
@@ -3317,6 +3328,7 @@ namespace Shorokoo
                         results[UpdatedParamFieldCount + UpdatedStateFieldCount + i].ToTensorData();
                 }
                 updatedOptimizerState = new TensorDataStruct(OptimizerStateDef, updatedOptStateFields);
+                StepOutputFaultInjection?.Invoke(results);
 
                 // The loss follows the state outputs. Read it through the rooted accessor, not a bare
                 // span; everything past the state outputs is released below: the state is the
@@ -3331,8 +3343,11 @@ namespace Shorokoo
             }
             catch
             {
+                // Every output goes, whichever of them fails to, and what propagates is the failure
+                // that brought the step here.
                 foreach (var result in results)
-                    if (result is TensorDataModelParam output) output.ToTensorData().Dispose();
+                    if (result is TensorDataModelParam output)
+                        try { output.ToTensorData().Dispose(); } catch { }
                 throw;
             }
             for (int i = stateOutputCount; i < results.Length; i++)
@@ -3444,6 +3459,12 @@ namespace Shorokoo
             if (_ignoredTargetPlaceholder is not null) labels.Add("the rig's stand-in for the target its loss ignores");
             return [.. labels];
         }
+
+        /// <summary>The value <paramref name="fed"/> holds for the <paramref name="i"/>-th runtime
+        /// hyperparameter: its <paramref name="i"/>-th field, whatever it is called, as the step
+        /// feeds it.</summary>
+        private static IData FedHyperparameter(TensorDataStruct fed, int i) =>
+            fed.Fields[fed.Definition.Fields[i].Name];
 
         /// <summary>Whether <paramref name="fed"/>'s fields are named, in order, as
         /// <paramref name="own"/>'s are — which they are by reference for every struct the rig

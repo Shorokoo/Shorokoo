@@ -167,7 +167,7 @@ namespace Shorokoo
         private IReadOnlyList<string>? _hyperparameterNames;
 
         private IReadOnlyList<T> Column<T>(ref IReadOnlyList<T>? cache, Func<TrainingHistoryEntry, T> select)
-            => LazyInitializer.EnsureInitialized(ref cache, () => _entries.Select(select).ToImmutableArray());
+            => cache ?? LazyInitializer.EnsureInitialized(ref cache, () => _entries.Select(select).ToImmutableArray());
 
         /// <summary>Every entry's <see cref="TrainingHistoryEntry.Step"/>, parallel to the entries.
         /// Read-only, built on first read and kept.</summary>
@@ -191,7 +191,7 @@ namespace Shorokoo
         /// some entries have. Read-only, built on first read and kept.
         /// </summary>
         public IReadOnlyList<string> HyperparameterNames
-            => LazyInitializer.EnsureInitialized(ref _hyperparameterNames, () =>
+            => _hyperparameterNames ?? LazyInitializer.EnsureInitialized(ref _hyperparameterNames, () =>
             {
                 var seen = new HashSet<string>(StringComparer.Ordinal);
                 var names = ImmutableArray.CreateBuilder<string>();

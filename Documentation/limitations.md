@@ -348,9 +348,9 @@ attributes applied. Separately, the training-step session is compiled for the
 shapes it is fed, which removes most shape arithmetic from the executed graph.
 
 The `Shorokoo.Core.AutoDiffCheckpointing` namespace is internal despite being
-public in the assembly; no API returns its types, so do not build on them. Other
-`Shorokoo.Core.*` namespaces carry documented public API;
-[orientation.md](orientation.md#public-core-namespaces) lists them.
+public in the assembly; no API returns its types, so do not build on them. Ten other
+`Shorokoo.Core.*` namespaces carry documented public API, listed in
+[orientation.md](orientation.md#public-core-namespaces); treat the rest as unsupported.
 
 ### Quick Execution Engine value computation is bounded
 
@@ -417,15 +417,22 @@ included, are unaffected. Declare the struct as an `IStruct` interface instead.
 
 ### ONNX opset range and export stamping
 
-Import reads every standard-domain (`ai.onnx`) node against its opset-21 definition,
-extended with the attributes opsets 22–26 add (the range of the bundled ONNX Runtime 1.26,
-which pins ONNX 1.21). It ignores the opset the model declares and converts nothing, so
-**models older than opset 21 are not supported**. Where an operator's signature changed
-after the model's opset, the node keeps its old form and ONNX Runtime refuses the compiled
-model. For example, `axes` is an attribute of `Squeeze`, `Unsqueeze` and `ReduceSum`, and
-`split` of `Split`, before opset 13, and `axes` of the other reductions before opset 18;
-such a model fails with `[ErrorCode:InvalidGraph] … has input size 1 not in range [min=2,
-max=2]`. Convert an older model to opset 21 before importing it, for example with
+Import reads every standard-domain (`ai.onnx`) node against its current definition (opset 21,
+or the operator's own opset for an operator introduced after 21, with the attributes opsets
+22–26 add; the range of the bundled ONNX Runtime 1.26, which pins ONNX 1.21). It does not
+check the opset the model declares and converts nothing, so **models older than opset 21 are
+not supported**, and import does not refuse them
+([#434](https://github.com/Shorokoo/Shorokoo/issues/434)). Where an operator's signature
+changed after the model's opset, one of two things happens:
+
+- ONNX Runtime refuses the compiled model. `Unsqueeze` with an `axes` attribute (before
+  opset 13) fails with `[ErrorCode:InvalidGraph] … has input size 1 not in range [min=2,
+  max=2]`.
+- The model runs with **wrong results**. `Squeeze` and `ReduceSum` (before opset 13) and the
+  other reductions (before opset 18) lose their `axes` attribute and act on every axis;
+  `Softmax`, `LogSoftmax` and `Hardmax` (before opset 13) take the opset-13 meaning of `axis`.
+
+Convert an older model to opset 21 before importing it, for example with
 `onnx.version_converter.convert_version(model, 21)` in Python.
 
 Export stamps models at the **opset-21 baseline**, raised only as far as the graph
@@ -446,7 +453,7 @@ versions, and ORT 1.26's CPU provider lacks some: it registers no opset-22 kerne
 for `GlobalLpPool` or `RandomNormalLike`, so a model stamped at opset ≥ 22 fails to
 load where the opset-21 model runs.
 
-Nothing is lost: opsets 22–26 only widen dtype lists (bfloat16, float4e2m1,
+Nothing is lost: the opset 22–26 respecifications of pre-existing operators only widen dtype lists (bfloat16, float4e2m1,
 float8e8m0, int2/uint2, all unsupported in Shorokoo; see below) and add three
 optional attributes Shorokoo imports and honors: `DequantizeLinear.output_dtype`
 (opset 23), `QuantizeLinear.precision` (23) and `Cast`/`CastLike.round_mode` (24,

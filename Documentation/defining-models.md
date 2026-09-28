@@ -422,9 +422,10 @@ and `proj#0.bias#0`; `BatchNorm` has `running_mean`, `running_var`, `weight`, `b
 `MultiHeadAttention` has `q_proj_weight` … `out_proj_bias`. The `Recurrent`,
 `Convolution` and `Embedding` helpers keep initializer class names.
 
-Reordering code or moving it into a helper method of the same class keeps names;
-moving it into a sub-module adds the sub-model's name (`w#0` → `block#0.w#0`).
-Creation-order numbers shift on reordering, so name parameters worth keeping. A
+Names from `.Named` and from a distinct local survive reordering and moving into a helper
+method of the same class; moving code into a sub-module adds the sub-model's name (`w#0` →
+`block#0.w#0`). Creation-order numbers (the class-name fallback, same-named locals) shift on
+reordering, so name parameters worth keeping. A
 checkpoint whose names do not match is refused on load, naming the missing parameter;
 bind it through a [naming scheme](onnx-and-weights.md#naming).
 
@@ -453,8 +454,8 @@ dotnet add package Shorokoo.LinuxCPU # plus one backend for your platform
 ```
 
 Local-based parameter names use C# interceptors in `Shorokoo.Generated.ParamNames`.
-The package and the repository's `Directory.Build.props` enable them; a project outside
-the tree adds:
+The NuGet package enables them. Building against the source tree, `Directory.Build.props`
+does it for projects inside the tree, and a project outside the tree adds:
 
 ```xml
 <PropertyGroup>

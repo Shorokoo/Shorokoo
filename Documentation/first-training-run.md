@@ -15,7 +15,7 @@ see [inference.md](inference.md).
 ```csharp
 using Shorokoo;                     // TrainingRig, TrainingCheckpoint, Persistence, RngConfig
 using Shorokoo.Core.Backends;       // DeviceMemory
-using Shorokoo.Graph;               // Specialize, FromOrderedInputs, ToTensorData
+using Shorokoo.Graph;               // ComputationGraph
 using Shorokoo.Modules;             // [Module], [Hyper]
 using Shorokoo.Modules.Layers;      // Linear
 using Shorokoo.Modules.Losses;      // CrossEntropyLoss
@@ -28,7 +28,8 @@ using static Shorokoo.Globals;      // TensorData(...), Scalar(...)
 
 A model is a `[Module]` class with a static `Inline` method. `[Hyper]` parameters make it a
 family of models; pick one member with `Specialize`. See
-[defining-models.md](defining-models.md).
+[defining-models.md](defining-models.md). In a top-level-statements `Program.cs`, the class
+goes after the statements (or in a file of its own).
 
 ```csharp
 [Module]
@@ -110,7 +111,8 @@ run.Dispose();
 Persistence.SaveTrainingCheckpointToSkpt(checkpoint, "run.skpt");
 ```
 
-The save is atomic. See [skpt-checkpoints.md](skpt-checkpoints.md#training-checkpoints).
+The save is atomic ([skpt-checkpoints.md](skpt-checkpoints.md#facts)). What the file holds is in
+[Training checkpoints](skpt-checkpoints.md#training-checkpoints).
 
 ## 5. Resume
 
@@ -153,14 +155,14 @@ var logits = ComputeContext.Default.Execute(inference, vx)[0].ToTensorData();   
 ## 7. Measure memory
 
 ```csharp
-if (DeviceMemory.Read() is { } card)   // null with no CUDA device
+if (DeviceMemory.Read() is { } card)   // null with no CUDA runtime
     Console.WriteLine($"device: {card.UsedBytes >> 20} of {card.TotalBytes >> 20} MiB used, all processes");
 using (var p = System.Diagnostics.Process.GetCurrentProcess())
     Console.WriteLine($"host working set {p.WorkingSet64 >> 20} MiB");
 ```
 
 `DeviceMemory.Read()` reports the whole card, every process included. The other readings, and
-what each covers, are in [inference.md](inference.md).
+what each covers, are in [Device memory](inference.md#device-memory-gpu-backends).
 
 The batch helper used above:
 
@@ -183,7 +185,9 @@ static (TensorData x, TensorData y) MakeBatch(long seed)
 
 None of these shows in a small first run. Each can end a long one.
 
-- **Checkpoint size.** A `.skpt` data entry holds under 2 GB of tensor data. See
+- **Checkpoint size.** A checkpoint over 2 GB (one `.skpt` data entry, or a flat safetensors
+  file) saves without error and cannot be loaded back
+  ([#48](https://github.com/Shorokoo/Shorokoo/issues/48)). See
   [skpt-checkpoints.md](skpt-checkpoints.md).
 - **Save cost.** What a save allocates and how long it takes grow with the checkpoint:
   [What a save costs](training.md#what-a-save-costs).
@@ -198,7 +202,7 @@ None of these shows in a small first run. Each can end a long one.
   [Seeding the run](training.md#seeding-the-run).
 - **Build cost.** Building a rig grows with the parameter count, and each new process pays it
   again: [What construction costs](training.md#what-construction-costs).
-- **Initializers that read other parameters.** An initializer can take another parameter's
-  value as input. See "Writing your own" under
-  [Initializers](nn-library.md#initializers-shorokoomodulesinitializers).
 - **Namespaces.** The `using` lines each type needs are in [orientation.md](orientation.md).
+
+To initialize one parameter from another's value, see "Writing your own" under
+[Initializers](nn-library.md#initializers-shorokoomodulesinitializers).

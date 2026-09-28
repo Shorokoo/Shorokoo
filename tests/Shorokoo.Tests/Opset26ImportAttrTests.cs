@@ -91,6 +91,44 @@ public class Opset26ImportAttrTests
                 .AccessMemory().ToArray());
     }
 
+    private static AttributeProto IntsAttr(string name, params long[] values)
+        => new AttributeProto { Name = name, Type = AttributeProto.AttributeType.Ints, Ints = values };
+
+    private static bool RefusedOrCorrectAtOpset11(string op, long[] inShape, long[] outShape, float[] expected,
+        params AttributeProto[] attributes)
+    {
+        var graph = new GraphProto { Name = op };
+        graph.Inputs.Add(TensorInfo("x", FloatElem, inShape));
+        var node = new NodeProto { OpType = op, Name = "n0" };
+        node.Inputs.Add("x");
+        node.Outputs.Add("y");
+        node.Attributes.AddRange(attributes);
+        graph.Nodes.Add(node);
+        graph.Outputs.Add(TensorInfo("y", FloatElem, outShape));
+        float[] data = [.. Enumerable.Range(1, (int)inShape.Aggregate(1L, (a, b) => a * b)).Select(i => (float)i)];
+        TensorData result;
+        try
+        {
+            result = ComputeContext.Default.Execute(Import(WrapModel(graph, 11)), [TensorData(inShape, data)])[0].ToTensorData();
+        }
+        catch (Exception)
+        {
+            return true;
+        }
+        return result.Shape.Dims.SequenceEqual(outShape) && result.CopyMemory<float>().SequenceEqual(expected);
+    }
+
+    // #434: import ignores the declared opset; an opset-11 Squeeze/Reduce* loses its axes attribute and runs over every axis.
+    [Fact(Skip = "#434: an opset-11 Squeeze/Reduce* runs over every axis instead of being refused")]
+    public void TestOpset11ModelIsRefusedOrRunsCorrectlyNeverSilentlyWrong()
+    {
+        Assert.True(RefusedOrCorrectAtOpset11("Unsqueeze", [3L], [1L, 3L], [1f, 2f, 3f], IntsAttr("axes", 0L)));
+        Assert.True(RefusedOrCorrectAtOpset11("Squeeze", [1L, 3L, 1L], [1L, 3L], [1f, 2f, 3f], IntsAttr("axes", 2L)));
+        Assert.True(RefusedOrCorrectAtOpset11("ReduceSum", [2L, 3L], [2L], [6f, 15f], IntsAttr("axes", 1L), IntAttr("keepdims", 0L)));
+        Assert.True(RefusedOrCorrectAtOpset11("ReduceMean", [2L, 3L], [2L], [2f, 5f], IntsAttr("axes", 1L), IntAttr("keepdims", 0L)));
+        Assert.True(RefusedOrCorrectAtOpset11("ReduceMax", [2L, 3L], [2L], [3f, 6f], IntsAttr("axes", 1L), IntAttr("keepdims", 0L)));
+    }
+
     private static long ExportedDefaultOpset(string path)
     {
         using var fs = File.OpenRead(path);

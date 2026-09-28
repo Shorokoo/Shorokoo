@@ -213,7 +213,7 @@ must be at least 1, or the factory throws.
 |---|---|
 | `Scale(float factor)` | `factor · f(s)` |
 | `Clamp(float min, float max)` | `clamp(f(s), min, max)`; throws if `min > max` |
-| `Shift(int steps)` | `f(s + steps)` — positive `steps` moves the schedule **earlier** |
+| `Shift(int steps)` | `f(s + steps)` — positive `steps` moves the schedule **earlier**, negative moves it later |
 | `PerEpoch(int stepsPerEpoch)` | `f(s / stepsPerEpoch)`, integer division; needs no epoch input; `stepsPerEpoch ≥ 1` |
 | `WithWarmup(int warmupSteps, float startFactor = 0f)` | with `peak = f(0)`: for `s < warmupSteps`, `peak · (startFactor + (1 - startFactor) · s / warmupSteps)`; then `f(s - warmupSteps)` (**re-based**). `warmupSteps == 0` returns the schedule unchanged |
 | `Then(int atStep, Schedule next)` | `f(s)` for `s < atStep`, then `next(s - atStep)` (**re-based**) |
@@ -333,7 +333,9 @@ public static TrainingRig FromScratch(
     IOptimizerHyperparameters hyperparameters, // named set, e.g. new AdamWOptimizerHyperparameters { ... }
     RngConfig? rngConfig = null,              // seeds the run — see "Seeding the run" below
     ComputeContext? mergeContext = null,      // build/merge-phase context (rig.MergeContext); null ⇒ Default
-    ComputeContext? runtimeContext = null);   // compile/run context (rig.RuntimeContext); null ⇒ Default
+    ComputeContext? runtimeContext = null,    // compile/run context (rig.RuntimeContext); null ⇒ Default
+    IProgress<BuildProgress>? progress = null, // see "Watching a long build"
+    TrainingBackend? trainingBackend = null);  // see training-backends.md; null ⇒ TrainingBackend.Shorokoo
 
 // Positional values (a float bakes, a Schedule schedules):
 //   FromScratch(model, loss, opt, sampleInputs, params Hyperparameter[] hyperparameters)
@@ -835,7 +837,8 @@ positionally and throws on a count mismatch; for many same-shaped fields,
   new process, rebuild the rig and a loader over the same data/seed and call
   `rig.Fit(loader, numEpochs, initialCheckpoint: loaded)`: `Fit` calls `RestoreAfter`, so training
   resumes at the next batch. A position-unknown checkpoint starts at `(0, 0)` via `RestoreFrom`.
-  `numEpochs` counts from the resume epoch (a mid-epoch checkpoint first finishes that epoch). For
+  `numEpochs` counts from the resume epoch (a mid-epoch checkpoint first finishes that epoch; one saved at an epoch's last batch begins
+  the next). For
   an external data pipeline, keep its position in the checkpoint's host user-data bag.
 
 ### The training history
@@ -901,9 +904,10 @@ hyperparameters — a few hundred MB for a million steps — and every save writ
 long runs.
 
 **Saving it.** History is the `CheckpointComponents.History` component, written whenever non-empty
-by `checkpoint.Save` and `.skpt` saves. To omit it, pass components without it
+by `checkpoint.Save` and `.skpt` saves. To omit it from a flat save, pass components without it
 (`ckpt.Save(path, CheckpointComponents.InferenceState | CheckpointComponents.OptimizerState |
-CheckpointComponents.Counters | CheckpointComponents.Loss)`) or save `ckpt.WithoutHistory()`. A file
+CheckpointComponents.Counters | CheckpointComponents.Loss)`); from a `.skpt` save, save
+`ckpt.WithoutHistory()`. A file
 without one loads with an empty history; a resumed run continues it. Entries may hold
 hyperparameters only some have (e.g. after `otherRig.AdoptCheckpoint(ckpt)`), but if entries give
 one hyperparameter different dtypes or shapes the save throws `InvalidOperationException` naming it

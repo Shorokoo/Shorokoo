@@ -74,8 +74,9 @@ bool prepForOnnx = false)` requires a `GraphKind.ConcreteModel` graph (else `FW0
 naming both kinds). It does not modify the graph. `OPS_21` is a baseline: the stamp
 rises only for post-21 attributes on imported (or `NodeBuilder`-built) nodes
 (`DequantizeLinear.output_dtype`, `QuantizeLinear.precision` → 23;
-`Cast`/`CastLike.round_mode` → 24). No post-21 operator is emitted: each either throws
-`NotImplementedException` or is lowered to opset-21 primitives, so a graph built through
+`Cast`/`CastLike.round_mode` → 24). No post-21 operator is emitted from an authored graph:
+each either throws `NotImplementedException` or is lowered to opset-21 primitives; an imported
+post-21 operator is kept and raises the stamp to its floor. A graph built through
 `Ops`/`OnnxOp` always exports at opset 21 (`.srk` keeps operators as authored and stamps
 accordingly). Models up to opset 26 run on the bundled ONNX Runtime 1.26. See
 [limitations.md](limitations.md) for the stamping policy and
@@ -124,9 +125,11 @@ ComputationGraph g2 = OnnxModelImporter.FromOnnxModel(byteArray);
 ComputationGraph g3 = OnnxModelImporter.FromOnnxModel(stream);
 ```
 
-Models must be opset 21 or later. Import converts nothing: an older model whose operators
-changed signature since its opset (for example `Unsqueeze` with an `axes` attribute, before
-opset 13) is refused by ONNX Runtime when compiled. Convert such a model to opset 21 first,
+Models must be opset 21 or later. Import neither checks the declared opset nor converts: an
+older model whose operators changed signature since its opset is either refused by ONNX Runtime
+when compiled (`Unsqueeze` with an `axes` attribute) or runs with wrong results (`Squeeze`,
+the reductions, `Softmax`; [#434](https://github.com/Shorokoo/Shorokoo/issues/434)). Convert
+such a model to opset 21 first,
 for example with `onnx.version_converter.convert_version(model, 21)` — see
 [limitations.md](limitations.md#onnx-opset-range-and-export-stamping).
 

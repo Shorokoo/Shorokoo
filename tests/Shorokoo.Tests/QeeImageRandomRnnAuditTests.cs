@@ -193,13 +193,19 @@ public class QeeImageRandomRnnAuditTests
         Assert.True(QeeAudit.OrtOnly<QeeLstmValueAuditCheck>(Wave(4, 2, 3), Wave(2, 20, 3), Wave(2, 20, 5), Wave(2, 40), Wave(2, 2, 5), Wave(2, 2, 5), Wave(2, 15), EmptySequence));
     }
 
-    // ONNX Runtime copies the input through when the output shape equals the input shape, ignoring the roi:
-    // https://github.com/Shorokoo/Shorokoo/issues/380
-    [Fact(Skip = "Shorokoo/Shorokoo#380: ONNX Runtime ignores the tf_crop_and_resize roi at an unchanged shape")]
+    [Fact]
     public void TestCropAndResizeAtScaleOneStillCropsToTheRoi()
         => Assert.True(AutoTest.AdvancedTestGraph<CropAndResizeAtScaleOneValues>([],
             [F32([1L, 1L, 1L, 5L], 0f, 1f, 2f, 3f, 4f)],
             expected: [2, 3, 4, -1, -1, 2, 3, 4, -1, -1]));
+
+    [Fact]
+    public void TestCropAndResizeVariantsCropToTheRoi()
+        => Assert.True(AutoTest.AdvancedTestGraph<CropAndResizeVariantsValues>([],
+            [F32([1L, 1L, 1L, 5L], 0f, 1f, 2f, 3f, 4f)],
+            expected: [2, 3, 4, -1, -1, 2, 3, 4, -1, -1, -1, 0, 1, 2, 3, 2, 2.8, 3.6, -1, -1, -1,
+                0, 5.5, 11, 16.5, 22, -1, -1, -1, -1, -1, 2, 3, 4, -1, -1,
+                0, 0, 1, 1, 2, 2, 3, 3, 4, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1]));
 
     [Fact]
     public void TestCol2ImOverOneSpatialAxisWithPadsAndStride()

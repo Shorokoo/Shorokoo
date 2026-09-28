@@ -1008,6 +1008,32 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>tf_crop_and_resize over axes, a keep_aspect_ratio_policy, a shifted roi, a changed shape, a roi
+    /// along an unscaled axis, cubic mode, and a roi along an unscaled axis beside a scaled one, each flattened.
+    /// Input x is [1,1,1,5].</summary>
+    [Module]
+    public partial class CropAndResizeVariantsValues
+    {
+        private static Tensor<float32> Crop(Tensor<float32> x, Vector<float32> roi, Vector<float32>? scales,
+            Vector<int64>? sizes, long[]? axes, KeepAspectRatioPolicy? policy, ResizeMode mode)
+            => ((Tensor<float32>)OnnxOp.Resize(x, roi: roi, scales: scales, sizes: sizes,
+                antialias: null, axes: axes, coordinateTransformationMode: CoordinateTransformationMode.Tf_crop_and_resize,
+                cubicCoeffA: null, excludeOutside: null, extrapolationValue: -1f,
+                keepAspectRatioPolicy: policy, mode: mode, nearestMode: null)).Reshape(Vector(-1L));
+
+        public static Tensor<float32> Inline(Tensor<float32> x)
+        {
+            var x2 = x.Concat(2L, x * Scalar(10f));
+            return Crop(x, Vector(0.5f, 1.5f), Vector(1f), null, [3L], null, ResizeMode.Linear).Concat(0L,
+                Crop(x, Vector(0f, 0f, 0f, 0.5f, 1f, 1f, 1f, 1.5f), null, Vector(1L, 1L, 1L, 5L), null, KeepAspectRatioPolicy.not_larger, ResizeMode.Nearest),
+                Crop(x, Vector(0f, 0f, 0f, -0.25f, 1f, 1f, 1f, 0.75f), Vector(1f, 1f, 1f, 1f), null, null, null, ResizeMode.Linear),
+                Crop(x, Vector(0f, 0f, 0f, 0.5f, 1f, 1f, 1f, 1.5f), Vector(1f, 1f, 1f, 1.2f), null, null, null, ResizeMode.Linear),
+                Crop(x2, Vector(0f, 0f, 0.5f, 0f, 1f, 1f, 1.5f, 1f), Vector(1f, 1f, 1f, 1f), null, null, null, ResizeMode.Linear),
+                Crop(x, Vector(0f, 0.5f, 1f, 1.5f), Vector(1f, 1f), null, [2L, 3L], null, ResizeMode.Cubic),
+                Crop(x2, Vector(0f, 0f, 0.5f, 0f, 1f, 1f, 1.5f, 1f), Vector(1f, 1f, 1f, 2f), null, null, null, ResizeMode.Nearest));
+        }
+    }
+
     /// <summary>1-D Col2Im with pads and a stride. Input cols is [1,3,4].</summary>
     [Module]
     public partial class Col2Im1DPaddedValues

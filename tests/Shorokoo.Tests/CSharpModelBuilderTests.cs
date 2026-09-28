@@ -116,6 +116,37 @@ public class CSharpModelBuilderCoverageTests
         AssertRoundTrips(new InternalComputationGraph([], [Tensor([2L, 2L], "w", "x", "y", "z").ToVariable()]), []);
     }
 
+    // #412: codegen writes a four-argument Slice that Vector lacks
+    [Fact(Skip = "#412: codegen writes a four-argument Slice that Vector lacks")]
+    public void TestASliceOfAVectorCodegensSourceThatCompiles()
+        => AssertCodegens(new InternalComputationGraph([], [OnnxOp.Slice(Vector(1f, 2f, 3f), Vector(0L), Vector(2L))]));
+
+    // #413: codegen writes an NN.Max whose type argument C# cannot infer from a Vector and a Scalar
+    [Fact(Skip = "#413: codegen writes an NN.Max whose type argument C# cannot infer from a Vector and a Scalar")]
+    public void TestAMaxOfAVectorAndAScalarCodegensSourceThatCompiles()
+        => AssertCodegens(new InternalComputationGraph([], [OnnxOp.Max(Vector(1f, 2f), Scalar(1.5f))]));
+
+    // #415: codegen writes a three-argument Split that Vector lacks
+    [Fact(Skip = "#415: codegen writes a three-argument Split that Vector lacks")]
+    public void TestASplitOfAVectorCodegensSourceThatCompiles()
+        => AssertCodegens(new InternalComputationGraph([], [.. OnnxOp.Split(Vector(1f, 2f, 3f, 4f), null, 0, 2, 2)]));
+
+    // #416: codegen names both Splits of one input the same local
+    [Fact(Skip = "#416: codegen names both Splits of one input the same local")]
+    public void TestTwoSplitsOfOneInputCodegenSourceThatCompiles()
+    {
+        Variable x = Tensor([2L, 2L], 1f, 2f, 3f, 4f);
+        AssertCodegens(new InternalComputationGraph([],
+            [.. OnnxOp.Split(x, null, 0, 2, 2), .. OnnxOp.Split(x, null, 1, 2, 2)]));
+    }
+
+    // #414: codegen writes an NN.Resize whose nullable Vector<T2>? roi C# cannot infer T2 from
+    [Fact(Skip = "#414: codegen writes an NN.Resize whose nullable Vector<T2>? roi C# cannot infer T2 from")]
+    public void TestAResizeWithARoiCodegensSourceThatCompiles()
+        => AssertCodegens(new InternalComputationGraph([], [OnnxOp.Resize(Tensor([1L, 1L, 1L, 2L], 1f, 2f),
+            Vector(0f, 0f, 0f, 0f, 1f, 1f, 1f, 1f), Vector(1f, 1f, 1f, 2f), null, null, null,
+            CoordinateTransformationMode.Asymmetric, null, null, null, null, ResizeMode.Nearest, null)]));
+
     [Fact]
     public void TestAStructFirstRegisteredUnderItsShortNameCodegensSourceThatCompiles()
     {
@@ -164,6 +195,14 @@ public class CSharpModelBuilderCoverageTests
         Assert.Equal(expected, OpCounts(once, ops));
         Assert.Equal(expected, OpCounts(twice, ops));
         Assert.Equal(Run(graph, cols), Run(twice, cols));
+    }
+
+    [Fact]
+    public void TestCodegenedSourceRebuildsACropAndResizeWithoutGuardingItAgain()
+    {
+        TensorData[] x = [TensorData([1L, 1L, 1L, 5L], 0f, 1f, 2f, 3f, 4f)];
+        AssertRebuildsUnchanged(CropAndResizeAtScaleOneValues.ComputationGraph.ToInternal(), x);
+        AssertRebuildsUnchanged(CropAndResizeVariantsValues.ComputationGraph.ToInternal(), x);
     }
 
     [Fact]
@@ -238,6 +277,14 @@ public class CSharpModelBuilderCoverageTests
     /// so this is the one place the emitted code for a graph that takes them runs at all.</summary>
     private static void AssertRoundTrips(InternalComputationGraph graph, TensorData[] inputs)
         => Assert.Equal(Run(graph, inputs), Run(Rebuild(graph), inputs));
+
+    private static void AssertRebuildsUnchanged(InternalComputationGraph graph, TensorData[] inputs)
+    {
+        var once = Rebuild(graph);
+        var twice = Rebuild(once);
+        Assert.Equal(once.Nodes.Count, twice.Nodes.Count);
+        Assert.Equal(Run(graph, inputs), Run(twice, inputs));
+    }
 
     private static InternalComputationGraph Rebuild(InternalComputationGraph graph)
     {

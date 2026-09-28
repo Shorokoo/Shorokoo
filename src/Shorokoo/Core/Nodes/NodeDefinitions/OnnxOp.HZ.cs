@@ -283,6 +283,18 @@ public static partial class OnnxOp
         float? cubicCoeffA, bool? excludeOutside,
         float? extrapolationValue, KeepAspectRatioPolicy? keepAspectRatioPolicy,
         ResizeMode? mode, NearestMode? nearestMode)
+        => coordinateTransformationMode == CoordinateTransformationMode.Tf_crop_and_resize && roi is not null
+            ? CropAndResize(x, roi, scales, sizes, antialias, axes, cubicCoeffA, excludeOutside,
+                extrapolationValue, keepAspectRatioPolicy, mode, nearestMode)
+            : ResizeNode(x, roi, scales, sizes, antialias, axes, coordinateTransformationMode, cubicCoeffA,
+                excludeOutside, extrapolationValue, keepAspectRatioPolicy, mode, nearestMode);
+
+    private static Variable ResizeNode(Variable x, Variable? roi, Variable? scales,
+        Variable? sizes, bool? antialias, long[]? axes,
+        CoordinateTransformationMode? coordinateTransformationMode,
+        float? cubicCoeffA, bool? excludeOutside,
+        float? extrapolationValue, KeepAspectRatioPolicy? keepAspectRatioPolicy,
+        ResizeMode? mode, NearestMode? nearestMode)
         => NodeBuilder.BuildNodeSingleOut(RESIZE, [x, roi, scales, sizes], [
             (AttrAntialias, antialias),
             (AttrAxes, axes),

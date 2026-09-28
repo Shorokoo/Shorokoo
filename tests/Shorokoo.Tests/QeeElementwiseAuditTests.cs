@@ -54,6 +54,10 @@ public class QeeElementwiseAuditTests
         Assert.True(AutoTest.AdvancedTestGraph<WhereBroadcastsOnEveryTypeWithoutAKernelCheck>([], [Bits([2L], true, false)]));
         Assert.True(AutoTest.AdvancedTestGraph<WhereOnUInt64BeyondInt64Check>([], [Bits([4L], true, false, true, false)]));
     }
+
+    [Fact]
+    public void TestWhereKeepsTheSignOfAZeroItSelects()
+        => Assert.True(AutoTest.AdvancedTestGraph<WhereKeepsTheSignOfZeroCheck>([], [Bits([2L], true, false)]));
 }
 
 /// <summary>

@@ -14,8 +14,9 @@ using static OpCodes;
 /// operands as <c>Where</c> does. Every other call selects through a type ONNX Runtime has a kernel
 /// for and casts the result back: int32 for int8, int16 and uint16; int64 for uint32 and uint64,
 /// whose casts to and from int64 keep every bit; float32 for bfloat16, which holds every bfloat16
-/// value (a NaN stays a NaN). The workaround comes last in the set, so it also covers a
-/// <c>Where</c> an earlier workaround emits.</para>
+/// value (a NaN stays a NaN). The float32 <c>Where</c> is ONNX Runtime's own, so a bfloat16 call
+/// shares its one inexact case: a -0 selected from x comes out +0. The workaround comes last in
+/// the set, so it also covers a <c>Where</c> an earlier workaround emits.</para>
 /// </summary>
 internal sealed class WhereTypesWorkaround : KernelWorkaround
 {

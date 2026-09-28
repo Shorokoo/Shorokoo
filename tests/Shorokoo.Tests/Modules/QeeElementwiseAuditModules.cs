@@ -336,6 +336,30 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>Where selecting -0 from x, then from y, over float32, float64, float16 and
+    /// bfloat16: both keep the sign, so 1 / the result is -inf. Input c = [T, F].</summary>
+    [Module]
+    public partial class WhereKeepsTheSignOfZeroCheck
+    {
+        public static Tensor<bit> Inline(Vector<bit> c)
+            => OnnxOp.Concat([NegativeZeros<float32>(c), NegativeZeros<float64>(c), NegativeZeros<float16>(c), NegativeZeros<bfloat16>(c)], 0);
+
+        private static Tensor<bit> NegativeZeros<T>(Vector<bit> c) where T : IVarType
+        {
+            var picked = ((Tensor<T>)OnnxOp.Where(c, Vector(-0f, 5f).Cast<T>(), Vector(2f, -0f).Cast<T>())).Cast<float32>();
+            return (Tensor<float32>)OnnxOp.Reciprocal(picked) == Vector(float.NegativeInfinity, float.NegativeInfinity);
+        }
+    }
+
+    /// <summary>The constant [-0, 1], equal to an iota but for the sign of its zero, scaled by
+    /// the input: 1 / the result is [-inf, 1]. Input c = [T, T].</summary>
+    [Module]
+    public partial class NegativeZeroInAnIotaConstantCheck
+    {
+        public static Tensor<bit> Inline(Vector<bit> c)
+            => (Tensor<float32>)OnnxOp.Reciprocal(Vector(-0f, 1f) * c.Cast<float32>()) == Vector(float.NegativeInfinity, 1f);
+    }
+
     /// <summary>Where over uint64 values at and above 2^63. Input c = [T, F, T, F].</summary>
     [Module]
     public partial class WhereOnUInt64BeyondInt64Check

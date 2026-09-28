@@ -338,7 +338,12 @@ public class PyTorchBackendCoverageTests
     }
 
     internal static void WhereSelectsOnEveryIntegerTypeAndBool(ComputeContext c)
-        => Assert.True(AutoTest.AdvancedTestGraph<WhereOnEveryIntegerAndBoolTypeCheck>([], [QeeAudit.Bits([2L], true, false)], context: c));
+    {
+        Assert.True(AutoTest.AdvancedTestGraph<WhereOnEveryIntegerAndBoolTypeCheck>([], [QeeAudit.Bits([2L], true, false)], context: c));
+        Assert.True(AutoTest.AdvancedTestGraph<WhereBroadcastsOnEveryTypeWithoutAKernelCheck>([], [QeeAudit.Bits([2L], true, false)], context: c));
+        Assert.True(AutoTest.AdvancedTestGraph<WhereOnUInt64BeyondInt64Check>([], [QeeAudit.Bits([4L], true, false, true, false)], context: c));
+        Assert.True(AutoTest.AdvancedTestGraph<WhereKeepsTheSignOfZeroCheck>([], [QeeAudit.Bits([2L], true, false)], context: c));
+    }
 
     private static bool Spec<TModule>(ComputeContext c, TensorData x, params double[] expected)
         => AutoTest.AdvancedTestGraph<TModule>([], [x], context: c, expected: expected);

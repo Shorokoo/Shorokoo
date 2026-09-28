@@ -100,6 +100,10 @@ public class JaxBackendCoverageTests
     public void TestWhereSelectsOnEveryIntegerTypeAndBoolOnJax() => WhereSelectsOnEveryIntegerTypeAndBool(new ComputeContext(Jax));
 
     [Fact]
+    public void TestANegativeZeroInAConstantEqualToAnIotaKeepsItsSignOnJax()
+        => Assert.True(AutoTest.AdvancedTestGraph<NegativeZeroInAnIotaConstantCheck>([], [QeeAudit.Bits([2L], true, true)], context: new ComputeContext(Jax)));
+
+    [Fact]
     public void TestAnAutoGradNodeIsJaxsGradientOfItsLoss()
     {
         float[] w = [0.5f, -1f, 2f], b = [0.1f, 0.2f, -0.3f], x = [1f, 2f, -0.5f], c = [0.3f, -0.2f, 0.1f];

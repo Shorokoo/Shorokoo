@@ -3966,6 +3966,15 @@ namespace Shorokoo.Tests.Modules
             => AutoGradGatherTable.Check(table, Vector(3L, -1L, 0L), Vector(1f, 2f, 3f), Vector(3f, 0f, 0f, 3f));
     }
 
+    /// <summary><see cref="AutoGradGatherVectorRowsCheck"/> with the table's rank stated.</summary>
+    [Module]
+    public partial class AutoGradGatherStaticRankVectorRowsCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> table)
+            => AutoGradGatherTable.Check((Tensor<float32>)OnnxOp.Identity(table, rank: 1),
+                Vector(3L, -1L, 0L), Vector(1f, 2f, 3f), Vector(3f, 0f, 0f, 3f));
+    }
+
     /// <summary>A [3, 0] table read at [2, 2] indices: its gradient is empty at the table's shape.</summary>
     [Module]
     public partial class AutoGradGatherZeroWidthTableMultiDimIndicesCheck

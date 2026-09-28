@@ -354,6 +354,7 @@ public class AutoGradIndexingOpsCoverageTests
         RunSmall<AutoGradGatherTableScalarIndexCheck>([4L, 2L]);
         RunSmall<AutoGradGatherTableNoIndicesCheck>([4L, 2L]);
         RunSmall<AutoGradGatherVectorRowsCheck>([4L]);
+        RunSmall<AutoGradGatherStaticRankVectorRowsCheck>([4L]);
         RunSmall<AutoGradGatherTableBlocksMultiDimIndicesCheck>([3L, 2L, 2L]);
         RunSmall<AutoGradGatherZeroWidthTableMultiDimIndicesCheck>([3L, 0L]);
     }

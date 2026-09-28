@@ -776,6 +776,7 @@ public class NNLibraryOptimizerTrainingCoverageTests
         Assert.Equal(13, StepOpsSized(64 * 4, table, [3L], AdamWOptimizer.ComputationGraph, 0.001f, 0.9f, 0.999f, 1e-8f, 0f));
         Assert.Equal(14, StepOpsSized(64 * 4, table, [3L], AdamWOptimizer.ComputationGraph,
             new AdamWOptimizerHyperparameters { WeightDecay = Hyperparameter.Runtime() }.InOptimizerOrder()));
+        Assert.Equal(4, StepOpsSized(64, NNGatheredBiasModel.ComputationGraph, [3L], SGDOptimizer.ComputationGraph, 0.1f));
     }
 
     [Fact]

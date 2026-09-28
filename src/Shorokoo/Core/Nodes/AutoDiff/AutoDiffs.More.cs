@@ -402,6 +402,12 @@ namespace Shorokoo.Core.Nodes.AutoDiff
                 Tensor<int64> newShape = OnnxOp.Concat([positionCount, tailShape], axis: 0);
                 grad = OnnxOp.Reshape(grad, newShape, allowZero: true);
 
+                // A rank-1 table — a per-token bias — has one element per row, so the slot map
+                // below would be as large as the table itself: it scatters straight into zeros.
+                if (data.Rank == 1)
+                    return [(Tensor<T1>)OnnxOp.ScatterND(
+                        OnnxOp.Expand(zero, data.DShape), scatterIndices, grad, ScatterNDReduction.Add), null];
+
                 // `data` is typically a table of which a step reads a few rows, so everything
                 // here but the last op is sized by the M index positions, not by the table.
                 // Each row read is given one slot: the number of one of the positions that read

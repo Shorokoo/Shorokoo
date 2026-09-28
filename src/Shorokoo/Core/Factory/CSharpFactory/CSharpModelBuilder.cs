@@ -943,7 +943,8 @@ public static class " + modelName + @"
         /// call, each with the plain <c>Resize</c> it came from, and every node that serves only
         /// them. Such an <c>If</c> is written back as that one <c>OnnxOp.Resize</c> call, which
         /// builds the same nodes again, so the source reproduces the graph instead of guarding the
-        /// call once more. An <c>If</c> whose body feeds anything else is written node by node.
+        /// call once more. A node the <c>If</c> reads that anything else also reads is written as
+        /// usual.
         /// </summary>
         private static (Dictionary<Node, Node> Guards, HashSet<Node> Bodies) FindCropAndResizes(
             IReadOnlyList<Node> nodes, IReadOnlyList<Variable?> graphOutputs, Dictionary<Variable, List<Node>> tensorChildNodes)
@@ -963,11 +964,12 @@ public static class " + modelName + @"
                         if (!sources.Contains(input) && body.Add(input.OwningNode))
                             pending.Push(input.OwningNode);
 
-                bool sealedOff = body.All(n => n.Outputs.Append(n.IsGraphOpenNode ? n.ConnectingTensor : null).NotNulls()
+                bool ServesOnlyTheIf(Node n) => n.Outputs.Append(n.IsGraphOpenNode ? n.ConnectingTensor : null).NotNulls()
                     .All(v => !graphOutputs.Contains(v)
-                        && (!tensorChildNodes.TryGetValue(v, out var readers) || readers.All(r => r == close || body.Contains(r)))));
-                if (!sealedOff)
-                    continue;
+                        && (!tensorChildNodes.TryGetValue(v, out var readers) || readers.All(r => r == close || body.Contains(r))));
+                List<Node> shared;
+                while ((shared = [.. body.Where(n => !ServesOnlyTheIf(n))]).Count > 0)
+                    body.ExceptWith(shared);
 
                 guards[close] = plain;
                 bodies.UnionWith(body);

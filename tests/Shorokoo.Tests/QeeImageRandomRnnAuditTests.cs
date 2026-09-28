@@ -208,6 +208,18 @@ public class QeeImageRandomRnnAuditTests
                 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1]));
 
     [Fact]
+    public void TestCropAndResizeAtAnUnchangedLengthReachesTheRoiEnd()
+        => Assert.True(AutoTest.AdvancedTestGraph<CropAndResizeToTheRoiEndValues>([],
+            [F32([1L, 1L, 1L, 4L], 1f, 2f, 3f, 4f)],
+            expected: [2.5, 3, 3.5, 4, 2, 3, 3, 4, 2.5, 3, 3.59375, 4, 1.66796875, 2.5, 3.33203125, 4]));
+
+    [Fact]
+    public void TestCubicCropAndResizeAlongChannelsExtrapolatesWhereTheRoiLeavesTheInput()
+        => Assert.True(AutoTest.AdvancedTestGraph<CubicCropAndResizeAlongChannelsValues>([],
+            [F32([1L, 3L, 1L, 2L], 0f, 1f, 2f, 3f, 4f, 5f)],
+            expected: [2, 3, 2.992, 3.992, 3.696, 4.696, -1, -1, -1, -1, -1, -1, 2, 3, 4, 5, -1, -1]));
+
+    [Fact]
     public void TestCol2ImOverOneSpatialAxisWithPadsAndStride()
         => Assert.True(AutoTest.AdvancedTestGraph<Col2Im1DPaddedValues>([],
             [F32([1L, 3L, 4L], [.. Enumerable.Range(0, 12).Select(i => (float)i)])],

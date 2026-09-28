@@ -1014,7 +1014,7 @@ namespace Shorokoo.Tests.Modules
     [Module]
     public partial class CropAndResizeVariantsValues
     {
-        private static Tensor<float32> Crop(Tensor<float32> x, Vector<float32> roi, Vector<float32>? scales,
+        internal static Tensor<float32> Crop(Tensor<float32> x, Vector<float32> roi, Vector<float32>? scales,
             Vector<int64>? sizes, long[]? axes, KeepAspectRatioPolicy? policy, ResizeMode mode)
             => ((Tensor<float32>)OnnxOp.Resize(x, roi: roi, scales: scales, sizes: sizes,
                 antialias: null, axes: axes, coordinateTransformationMode: CoordinateTransformationMode.Tf_crop_and_resize,
@@ -1031,6 +1031,31 @@ namespace Shorokoo.Tests.Modules
                 Crop(x2, Vector(0f, 0f, 0.5f, 0f, 1f, 1f, 1.5f, 1f), Vector(1f, 1f, 1f, 1f), null, null, null, ResizeMode.Linear),
                 Crop(x, Vector(0f, 0.5f, 1f, 1.5f), Vector(1f, 1f), null, [2L, 3L], null, ResizeMode.Cubic),
                 Crop(x2, Vector(0f, 0f, 0.5f, 0f, 1f, 1f, 1.5f, 1f), Vector(1f, 1f, 1f, 2f), null, null, null, ResizeMode.Nearest));
+        }
+    }
+
+    /// <summary>tf_crop_and_resize at an unchanged length under a roi ending at 1, in linear, nearest and cubic
+    /// mode, each flattened. Input x is [1,1,1,4].</summary>
+    [Module]
+    public partial class CropAndResizeToTheRoiEndValues
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x)
+            => CropAndResizeVariantsValues.Crop(x, Vector(0.5f, 1f), Vector(1f), null, [3L], null, ResizeMode.Linear).Concat(0L,
+                CropAndResizeVariantsValues.Crop(x, Vector(0f, 0f, 0f, 0.5f, 1f, 1f, 1f, 1f), null, Vector(1L, 1L, 1L, 4L), null, null, ResizeMode.Nearest),
+                CropAndResizeVariantsValues.Crop(x, Vector(0.5f, 1f), Vector(1f), null, [3L], null, ResizeMode.Cubic),
+                CropAndResizeVariantsValues.Crop(x, Vector(0.25f, 1f), null, Vector(4L), [3L], null, ResizeMode.Cubic));
+    }
+
+    /// <summary>Cubic tf_crop_and_resize under a roi along C of an NCHW input, with C doubled and with C
+    /// unchanged, each flattened. Input x is [1,3,1,2].</summary>
+    [Module]
+    public partial class CubicCropAndResizeAlongChannelsValues
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x)
+        {
+            var roi = Vector(0f, 0.5f, 0f, 0f, 1f, 1.5f, 1f, 1f);
+            return CropAndResizeVariantsValues.Crop(x, roi, null, Vector(1L, 6L, 1L, 2L), null, null, ResizeMode.Cubic).Concat(0L,
+                CropAndResizeVariantsValues.Crop(x, roi, Vector(1f, 1f, 1f, 1f), null, null, null, ResizeMode.Cubic));
         }
     }
 

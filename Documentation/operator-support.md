@@ -1,67 +1,62 @@
 # Operator support matrix
 
-Shorokoo supports the standard `ai.onnx` domain up to **opset 26** — the
-maximum implemented by the bundled ONNX Runtime 1.26. Exported models are
-stamped at the **opset-21 baseline**; the exporter then auto-raises each
-model's opset stamp only as far as the graph actually requires. In practice
-that raise is driven by post-21 **attributes** carried by an imported model:
-`DequantizeLinear.output_dtype` and `QuantizeLinear.precision` raise the stamp
-to 23, `Cast`/`CastLike.round_mode` to 24. No post-21 **operator** raises it,
-because none survives to emission — `RMSNormalization` and `Swish` lower inline
-to opset-21 primitives, so no such node is ever built; `TensorScatter` is built
-and run as itself but decomposed into opset-21 primitives as the file is
-written; and the remaining post-21 operators throw at authoring time (see the
-family notes below). A graph you build through `Ops`/`OnnxOp`/`NN` therefore
-always exports at opset 21 — the low-level `NodeBuilder` surface is the
-exception, since it can stamp any attribute a node definition declares, and a
-node built that way raises the stamp exactly as an imported one does. See
-[limitations.md](limitations.md) for why the baseline stays at 21. Every
-operator Shorokoo has a definition for is listed below — the full opset-21 set
-plus the post-21 additions, each at the opset the ONNX spec introduces it
-(`Attention`, `RMSNormalization`, `RotaryEmbedding` at opset 23; `Swish`,
-`TensorScatter` at opset 24; `BitCast`, `CumProd` at opset 26) — grouped by
-family and alphabetical within each family. Each of those spec versions is
-also the exporter's opset floor for the operator, as listed in
-[limitations.md](limitations.md), with one exception: `Attention` is floored at
-24, because ORT 1.26's CPU provider only registers its kernel at opset 24+.
-The three columns mean:
+Shorokoo supports the standard `ai.onnx` domain up to **opset 26**, the maximum
+implemented by the bundled ONNX Runtime 1.26. Exported models are stamped at the
+**opset-21 baseline**, and the exporter raises each model's stamp only as far as
+the graph requires. That raise comes from post-21 **attributes** carried by an
+imported model: `DequantizeLinear.output_dtype` and `QuantizeLinear.precision`
+raise the stamp to 23, `Cast`/`CastLike.round_mode` to 24. No post-21
+**operator** raises it, because none survives to emission: `RMSNormalization`
+and `Swish` lower inline to opset-21 primitives, so no such node is built;
+`TensorScatter` is built and run as itself but decomposed into opset-21
+primitives as the file is written; and the other post-21 operators throw at
+authoring time (see the family notes below). A graph built through
+`Ops`/`OnnxOp`/`NN` therefore always exports at opset 21. The exception is the
+low-level `NodeBuilder` surface: it can stamp any attribute a node definition
+declares, and a node built that way raises the stamp as an imported one does.
+See [limitations.md](limitations.md) for why the baseline stays at 21.
 
-- **Build & run** — the operator can be constructed in a Shorokoo graph
-  (definition covers the spec's inputs/outputs/attributes) and executes on the
-  ONNX Runtime backend. Footnotes flag spec-legal corners that are restricted
-  in-framework or by ONNX Runtime's CPU kernels; a ❌ here means the operator
-  cannot be built at all — either Shorokoo has no definition for it, or the
-  definition exists but the authoring entry point throws. The family's note
-  says which.
-- **QEE** — the Quick Execution Engine propagates output **dtype and shape**
-  for every supported operator, and concrete **values** for small tensors (see
-  [limitations.md](limitations.md) for the size bound). 🟡 here means values
-  are not (or only partially) computed; shape/dtype inference still works.
-- **Gradient** — reverse-mode autodiff. Unsupported attribute combinations on
+Every operator Shorokoo has a definition for is listed below: the full opset-21
+set plus the post-21 additions, each at the opset the ONNX spec introduces it
+(`Attention`, `RMSNormalization`, `RotaryEmbedding` at opset 23; `Swish`,
+`TensorScatter` at opset 24; `BitCast`, `CumProd` at opset 26), grouped by family
+and alphabetical within each family. Each spec version is also the exporter's
+opset floor for the operator, as listed in [limitations.md](limitations.md),
+except `Attention`, floored at 24 because ORT 1.26's CPU provider registers its
+kernel only at opset 24+. The columns:
+
+- **Build & run**: the operator can be constructed in a Shorokoo graph (the
+  definition covers the spec's inputs/outputs/attributes) and executes on the
+  ONNX Runtime backend. Footnotes flag spec-legal corners restricted in-framework
+  or by ONNX Runtime's CPU kernels. ❌ means the operator cannot be built at all:
+  either Shorokoo has no definition for it, or the authoring entry point throws;
+  the family's note says which.
+- **QEE**: the Quick Execution Engine propagates output **dtype and shape** for
+  every supported operator, and concrete **values** for small tensors (see
+  [limitations.md](limitations.md) for the size bound). 🟡 means values are not
+  (or only partially) computed; shape/dtype inference still works.
+- **Gradient**: reverse-mode autodiff. Unsupported attribute combinations on
   partially supported operators throw `AutoDiffNotSupportedException`.
 
 Symbols: ✅ full support · 🟡 partial (see the family's notes) · ❌ not
 supported (see notes) · N/A not applicable (non-differentiable output, leaf
 operator, or operator not available).
 
-A ✅ in the last two columns does not always mean the engine has an
-implementation of that operator written out for it. Some operators are instead
-registered as a **decomposition into simpler operators**, and an engine with no
-implementation of its own computes — or differentiates — the decomposition. The
-result is the same either way, which is why the table does not distinguish them.
+A ✅ in the last two columns may cover an operator registered as a
+**decomposition into simpler operators** instead of implemented directly; an
+engine with no implementation of its own computes, or differentiates, the
+decomposition. The result is the same, so the table does not distinguish them.
 
-Computing one costs your graph nothing: the decomposition is an internal detail
-of how the engine runs the node, carried out on a copy the run owns, so the
-model you built keeps its `Softsign`. **Differentiating one is the exception.**
-Autodiff expands the training graph in place, so the training graph it hands
-back carries the decomposition where the forward operator stood — differentiate
-a `Softsign` and the forward pass you train with is an `Abs`, an `Add` and a
-`Div`. The inference model you built is untouched.
+Computing a decomposition leaves your graph unchanged: the engine works on a copy
+the run owns, so the model you built keeps its `Softsign`. **Differentiating one
+does not.** Autodiff expands the training graph in place, so the training graph
+it returns carries the decomposition where the forward operator stood:
+differentiate a `Softsign` and the forward pass you train with is an `Abs`, an
+`Add` and a `Div`. The inference model you built is untouched.
 
-Whether the **exporter** decomposes it too is a separate question, answered by
-the first column's notes: `TensorScatter` is the only operator it decomposes
-today, because opset 21 has no node for it, and a `Softsign` is therefore still
-a `Softsign` in the ONNX written from an inference model.
+Whether the **exporter** decomposes an operator is given by the first column's
+notes: `TensorScatter` is the only one, because opset 21 has no node for it, so a
+`Softsign` is still a `Softsign` in the ONNX written from an inference model.
 
 ## Elementwise math & activations
 
@@ -126,14 +121,14 @@ a `Softsign` in the ONNX written from an inference model.
 | Tanh | ✅ | ✅ | ✅ |
 | ThresholdedRelu | ✅ | ✅ | ✅ |
 
-1. Cannot be constructed today: `OnnxOp.BitCast` and `OnnxOp.CumProd` throw
-   `NotImplementedException`, and neither has an `NN.*` wrapper. Neither has
-   an opset-21 equivalent — no opset-21 operator reinterprets bit patterns,
-   and a general cumulative product needs a `Scan` multiply body — and
-   Shorokoo emits a single opset-21 model, so there is nothing to lower them
-   to. The op definitions and QEE kernels are retained — that is what the
-   other two columns describe — and the entry points are re-enabled once a
-   runtime registers the operators at a usable opset.
+1. Cannot be constructed: `OnnxOp.BitCast` and `OnnxOp.CumProd` throw
+   `NotImplementedException`, and neither has an `NN.*` wrapper. Neither has an
+   opset-21 equivalent (no opset-21 operator reinterprets bit patterns, and a
+   general cumulative product needs a `Scan` multiply body), and Shorokoo emits
+   a single opset-21 model, so there is nothing to lower them to. The op
+   definitions and QEE kernels exist, which is what the other two columns
+   describe; the entry points are re-enabled once a runtime registers the
+   operators at a usable opset.
 2. QEE stores values in float32/int64 storage, so narrowing-integer wrap and
    float16/bfloat16 rounding are not modeled in QEE values (real rounding
    happens at execution); string/complex/int4 casts propagate dtype only.
@@ -155,10 +150,9 @@ a `Softsign` in the ONNX written from an inference model.
     (standard caveat; harmless when the exponent is a constant).
 14. Float tensors only; the spec also allows signed integers since opset 14.
 15. `Swish` lowers inline to `Mul`/`Sigmoid` (`y = x * sigmoid(alpha * x)`),
-    so the exported ONNX carries no `Swish` node and the model loads and runs
-    on any execution provider — ONNX Runtime 1.26 registers no `Swish` kernel,
-    and none is needed. The fused `Swish` op definition is retained for the
-    day a runtime does.
+    so the exported ONNX carries no `Swish` node and the model runs on any
+    execution provider; ONNX Runtime 1.26 registers no `Swish` kernel. The fused
+    `Swish` op definition is kept for when a runtime does.
 
 ## Comparisons & logic
 
@@ -211,26 +205,25 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
 2. Ties share the gradient equally.
 3. The gradient uses prod/x and is NaN when an element is exactly 0.
 4. Affects **values only**, and only when the reduction has groups to compute *and* a
-   **reduced axis has extent 0**, which leaves each of those groups empty. `ReduceMax`,
-   `ReduceMin`, `ReduceMean`, `ReduceLogSum` and `ReduceLogSumExp` propagate dtype and shape
-   but leave the value uncomputed there, because the empty-group result is not one identity
-   across dtypes: -inf, +inf, 0, -inf and -inf for `float32`, and the type's minimum and
-   maximum for an integer `ReduceMax`/`ReduceMin` (false and true for `bool`). ONNX Runtime's
-   own kernels return 0 for the integer ones and fail on an empty `bool` input, so `Reduce`
-   (`Tensor`, `Vector`, `Scalar`, and `NN.Reduce`) builds an integer or boolean
-   `ReduceMax`/`ReduceMin` as an `If` on the input's element count being 0: the other branch is
-   the plain operator, and the empty branch fills the plain operator's output shape with the
-   identity. A graph input's extents are not known when the graph is built, so every integer or
-   boolean `ReduceMax`/`ReduceMin` of one carries this `If`, however large the input turns out
-   to be. A floating-point input, a nonempty constant input, and a reduction with no axes and
-   `noOp` set are the plain operator. In a generic module whose element type is a type
-   parameter, the `If` also tests in the graph that the type is not floating point. A raw
-   `OnnxOp.ReduceMax` / `OnnxOp.ReduceMin`, or one in an imported ONNX model, is the plain
-   operator. `ReduceSum`,
-   `ReduceSumSquare`, `ReduceL1`, `ReduceL2` and `ReduceProd` do fold, to their identity
-   (0, or 1 for `Prod`), which is the same in every dtype. A reduction with no groups at all
-   — an empty **kept** axis — folds to the empty result for all ten. Every other input folds
-   normally, and the ONNX Runtime backend computes all ten.
+   **reduced axis has extent 0**, leaving each group empty. `ReduceMax`, `ReduceMin`,
+   `ReduceMean`, `ReduceLogSum` and `ReduceLogSumExp` propagate dtype and shape but leave the
+   value uncomputed there, because the empty-group result differs across dtypes: -inf, +inf,
+   0, -inf and -inf for `float32`, and the type's minimum and maximum for an integer
+   `ReduceMax`/`ReduceMin` (false and true for `bool`). ONNX Runtime's kernels return 0 for
+   the integer ones and fail on an empty `bool` input, so `Reduce` (`Tensor`, `Vector`,
+   `Scalar`, and `NN.Reduce`) builds an integer or boolean `ReduceMax`/`ReduceMin` as an `If`
+   on the input's element count being 0: one branch is the plain operator, and the empty
+   branch fills the plain operator's output shape with the identity. A graph input's extents
+   are unknown at build time, so every integer or boolean `ReduceMax`/`ReduceMin` of one
+   carries this `If`, however large the input. A floating-point input, a nonempty constant
+   input, and a reduction with no axes and `noOp` set get the plain operator. In a generic
+   module whose element type is a type parameter, the `If` also tests in the graph that the
+   type is not floating point. A raw `OnnxOp.ReduceMax` / `OnnxOp.ReduceMin`, or one in an
+   imported ONNX model, is the plain operator. `ReduceSum`, `ReduceSumSquare`, `ReduceL1`,
+   `ReduceL2` and `ReduceProd` fold to their identity (0, or 1 for `Prod`), which is the
+   same in every dtype. A reduction with no groups at all (an empty **kept** axis) folds to
+   the empty result for all ten. Every other input folds normally, and the ONNX Runtime
+   backend computes all ten.
 
 ## Shape & data movement
 
@@ -291,32 +284,31 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
     the faster path used when `steps` is absent retains an approximate
     clamping of negative starts/ends.
 14. Built and kept as itself, but opset 21 has no `TensorScatter` node, so the
-    exported ONNX carries its registered lowering instead: `update`
-    concatenated onto `past_cache` along the sequence axis, and one
-    `GatherElements` that takes each cache position from whichever half the
-    per-batch write window puts it in. The model still stamps at opset 21; a
-    saved architecture, which must reload as authored, keeps the operator.
-    The decomposition is checked element for element against ONNX Runtime's own
-    opset-24 `TensorScatter` kernel, over both modes, `write_indices` present
-    and absent, every legal `axis` at ranks 2 to 4, window lengths from 1 to
-    `max_sequence_length`, empty batches, windows and caches, and every element
-    type the operator accepts — bool and bfloat16 included, since the selection
-    is made on the gather's index rather than on the values. Outside that domain the spec's own preconditions
-    are taken as given rather than enforced, and what Shorokoo produces for one
-    is undefined: `sequence_length <= max_sequence_length`; in `linear` mode
-    `write_indices + sequence_length <= max_sequence_length`; each write index
-    non-negative, with one per batch. `axis` names the sequence dimension and so
-    cannot be 0, the batch one — the spec forbids it. `OnnxOp.TensorScatter`
-    refuses a literal 0, but the constraint is on the axis *after* it is
-    normalized against the rank, which is not known until the graph runs: a
-    rank-2 cache has to name axis 1 or −1, since the default −2 normalizes to 0.
-    Undefined here means quietly wrong, not an error: a runtime that has the
-    fused kernel rejects each of those inputs outright, while the decomposition
-    computes something — an over-long window returns garbage, a write index at
-    or past `max_sequence_length` drops that batch's write entirely, a negative
-    one shifts it, and a single-entry `write_indices` is broadcast over every
-    batch rather than refused. Check the preconditions yourself when the window
-    or the indices are computed rather than fixed.
+    exported ONNX carries its registered lowering: `update` concatenated onto
+    `past_cache` along the sequence axis, and one `GatherElements` that takes
+    each cache position from whichever half the per-batch write window puts it
+    in. The model still stamps at opset 21; a saved architecture, which must
+    reload as authored, keeps the operator. The decomposition is checked element
+    for element against ONNX Runtime's opset-24 `TensorScatter` kernel, over both
+    modes, `write_indices` present and absent, every legal `axis` at ranks 2 to
+    4, window lengths from 1 to `max_sequence_length`, empty batches, windows and
+    caches, and every element type the operator accepts (bool and bfloat16
+    included, since the selection is made on the gather's index, not the
+    values). The spec's preconditions are assumed, not enforced, and output for
+    inputs that violate them is undefined: `sequence_length <=
+    max_sequence_length`; in `linear` mode `write_indices + sequence_length <=
+    max_sequence_length`; each write index non-negative, with one per batch.
+    `axis` names the sequence dimension, so the spec forbids 0, the batch one.
+    `OnnxOp.TensorScatter` refuses a literal 0, but the constraint applies to the
+    axis *after* normalization against the rank, which is not known until the
+    graph runs: a rank-2 cache must name axis 1 or −1, since the default −2
+    normalizes to 0. Undefined means silently wrong: a runtime with the fused
+    kernel rejects each of those inputs, while the decomposition computes
+    something. An over-long window returns garbage, a write index at or past
+    `max_sequence_length` drops that batch's write entirely, a negative one
+    shifts it, and a single-entry `write_indices` is broadcast over every batch.
+    Check the preconditions yourself when the window or the indices are computed
+    rather than fixed.
 15. Values computed through that same lowering — the engine has no
     `TensorScatter` kernel of its own.
 16. Differentiated through that same lowering: `present_cache`'s gradient
@@ -391,22 +383,21 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
 2. Values in inference mode; training mode is shape/dtype only.
 3. Both inference and training modes (batch-stats backward); gradients flowing
    into the running-mean/running-var outputs throw.
-4. Inference mode is fully supported. TRAINING-mode Dropout is not supported:
-   ONNX Runtime's constant folding may evaluate a training-mode Dropout whose
-   data input is provably constant as the inference-mode identity (a silent
-   no-drop mask) at session load, and Shorokoo does not guard against it.
-   Shorokoo's own dropout layers do not emit the op — masks are built in-graph
-   from the keyed RNG feed (see rng-configuration.md) — so this only affects
-   hand-authored graphs. The gradient path (mask-based) throws if the forward
+4. Inference mode is fully supported. Training-mode Dropout is not: ONNX
+   Runtime's constant folding may evaluate a training-mode Dropout whose data
+   input is provably constant as the inference-mode identity (a silent no-drop
+   mask) at session load, and Shorokoo does not guard against it. Shorokoo's own
+   dropout layers do not emit the op (masks are built in-graph from the keyed RNG
+   feed, see rng-configuration.md), so this affects only hand-authored graphs. The gradient path (mask-based) throws if the forward
    mask is unavailable.
 5. Shape/dtype inference only; values are not computed.
 6. Gradients into the optional Mean/InvStdDev outputs are treated as zero.
 7. `RMSNormalization` lowers inline to opset-21 primitives
    (`y = x / sqrt(mean(x², suffix axes) + epsilon) * scale`, built from
    `ReduceMean`/`Sqrt`/`Div`/`Mul`), so the exported ONNX carries no
-   `RMSNormalization` node and the model loads and runs on any execution
-   provider. The fused `RMSNormalization` op definition and its QEE kernel are
-   retained for the day a runtime registers the operator at a usable opset.
+   `RMSNormalization` node and the model runs on any execution provider. The
+   fused `RMSNormalization` op definition and its QEE kernel are kept for when a
+   runtime registers the operator at a usable opset.
 
 ## MatMul & linear algebra
 
@@ -419,16 +410,15 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
 | MatMul | ✅ | ✅ | ✅ |
 | RotaryEmbedding | ❌ [1] | 🟡 [2] | ❌ [3] |
 
-1. Cannot be constructed today: `OnnxOp.Attention`, its KV-cache variant
-   `OnnxOp.AttentionWithKVCache`, and `OnnxOp.RotaryEmbedding` — and the
-   matching `NN.*` wrappers — throw `NotImplementedException`. None of them
-   has an opset-21 equivalent and Shorokoo emits a single opset-21
-   model, so a faithful lowering (the causal/GQA/softcap variants and the
-   KV-cache update for `Attention`; the position-id gather, interleaved vs
-   half-split layouts and partial rotary dim for `RotaryEmbedding`) is
-   deferred. The op definitions and QEE kernels are retained; the entry points
-   are re-enabled once a runtime registers the operators at a usable opset.
-   Meanwhile, build attention from primitives or use the NN library's
+1. Cannot be constructed: `OnnxOp.Attention`, its KV-cache variant
+   `OnnxOp.AttentionWithKVCache`, and `OnnxOp.RotaryEmbedding`, and the matching
+   `NN.*` wrappers, throw `NotImplementedException`. None has an opset-21
+   equivalent and Shorokoo emits a single opset-21 model, so a faithful lowering
+   (the causal/GQA/softcap variants and the KV-cache update for `Attention`; the
+   position-id gather, interleaved vs half-split layouts and partial rotary dim
+   for `RotaryEmbedding`) is deferred. The op definitions and QEE kernels exist;
+   the entry points are re-enabled once a runtime registers the operators at a
+   usable opset. Instead, build attention from primitives or use the NN library's
    `Attention.ScaledDotProductAttention` / `MultiHeadAttention` and its rotary
    helper `Attention.ApplyRoPE` — see [nn-library.md](nn-library.md).
 2. Shape/dtype inference only; values are not computed.

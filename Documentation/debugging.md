@@ -2,19 +2,19 @@
 
 Related: [inference.md](inference.md) · [onnx-and-weights.md](onnx-and-weights.md) · [training.md](training.md)
 
-Two facilities watch the same lowering pipeline from opposite ends. `DebugRequests` captures the
-**graph** at chosen points, as compilable C#, and you read it after the call returns; a progress sink
-reports the **stage name** as the pipeline enters it, while the call is still running — the one that
-answers "is this build alive?". Neither changes the graph the build produces
-(though a progress handler that throws aborts the build that called it).
+Two facilities watch the lowering pipeline. `DebugRequests` captures the **graph** at chosen
+points, and you read it after the call returns; a progress sink reports the **stage name** as the
+pipeline enters it, while the call is still running, so you can tell whether a build is alive.
+Neither changes the graph the build produces, though a progress handler that throws aborts the
+build that called it.
 
-When `ToConcreteArchitecture` doesn't produce the graph you expect, the
-`DebugRequests` class (namespace `Shorokoo.Graph`) saves snapshots of the
-graph at chosen points of the lowering pipeline, as compilable C# (the same
-`SaveToCSharp()` form used elsewhere), so you can diff stages and find where
-things go wrong. One graph shape cannot be written out — see
-[limitations.md](limitations.md#c-emission-of-a-runtime-built-tensorstruct). For inspecting *values* rather than graph structure, see the
-QuickExecutionEngine debugging engine in [inference.md](inference.md).
+When `ToConcreteArchitecture` doesn't produce the graph you expect, `DebugRequests` (namespace
+`Shorokoo.Graph`) saves snapshots of the graph at chosen points of the lowering pipeline as
+compilable C# (the `SaveToCSharp()` form), so you can diff stages. One graph shape cannot be
+written out; see
+[limitations.md](limitations.md#c-emission-of-a-runtime-built-tensorstruct). For inspecting
+*values* rather than graph structure, see the QuickExecutionEngine debugging engine in
+[inference.md](inference.md).
 
 ## Basic Usage
 
@@ -36,8 +36,8 @@ var concreteArchitecture = graph.ToConcreteArchitecture(inputHints, computeConte
 ## Available Debug Points
 
 Every `GraphCreationPoint` names a pass that runs, so every point you request writes its file. The
-points are listed here in the order the pipeline reaches them — they do not cover every stage, so to
-see that a stage with no point of its own has been reached, watch the build instead
+points are listed in pipeline order. They do not cover every stage; to see that a stage with no
+point of its own has been reached, watch the build
 ([below](#watching-a-build-while-it-runs-buildprogress)).
 
 - `AfterApplyIdentifierTemplates` — After local `ModelId`s are assigned. A graph built from modules
@@ -59,13 +59,13 @@ see that a stage with no point of its own has been reached, watch the build inst
 - `AfterExpandAutoGrad` — After autodiff expansion
 - `FinalGraph` — The final concrete architecture graph, as returned
 
-The names are historical, so they do not always match the stage names a progress sink reports:
+The point names do not always match the stage names a progress sink reports:
 `AfterFirstSimplify` follows the stage reported as `Simplify`, and `AfterProcessTrainableParameters`
 the one reported as `ConvertModelParamIdRefToModelParam`.
 
 ## Alternative Construction
 
-You can also construct with a dictionary:
+`DebugRequests` also takes a dictionary:
 
 ```csharp
 var debugDict = new Dictionary<GraphCreationPoint, string>
@@ -79,16 +79,15 @@ var debugRequests = new DebugRequests(debugDict);
 
 ## Notes
 
-- Debug files are saved as C# code using the existing `SaveToCSharp()` functionality
-- Directories are automatically created if they don't exist
-- Passing `null` for `debugRequests` parameter works normally (no debug output)
+- Debug files are C# written by `SaveToCSharp()`
+- Missing directories are created
+- Passing `null` for `debugRequests` produces no debug output
 
 ## Watching a build while it runs (`BuildProgress`)
 
-`DebugRequests` tells you what the graph looked like at a stage — but only once the call returns,
-which is no help when the question is whether a call that has been running for minutes is still
-making progress. For that, hand the call a progress sink: every stage is reported as the pipeline
-enters it, so the last report names the stage the build is in.
+`DebugRequests` shows the graph only once the call returns. To see whether a call that has been
+running for minutes is still making progress, hand it a progress sink: every stage is reported as
+the pipeline enters it, so the last report names the stage the build is in.
 
 ```csharp
 using Shorokoo.Graph;    // SynchronousBuildProgress
@@ -111,11 +110,11 @@ var concreteArchitecture = graph.ToConcreteArchitecture(
 [  46.0s] Concretize: Done
 ```
 
-(`…` marks stages elided here, not gaps in the output — every stage reports, and a lowering that
-finishes ends on a report whose `IsComplete` is true.)
+(`…` marks stages elided here; every stage reports, and a lowering that finishes ends on a report
+whose `IsComplete` is true.)
 
-The same sink passed to `TrainingRig.FromScratch` covers the whole rig build — concretization,
-training-step composition and initialization — under one clock. See
+The same sink passed to `TrainingRig.FromScratch` covers the whole rig build (concretization,
+training-step composition and initialization) under one clock. See
 [training.md](training.md#watching-a-long-build) for the full report shape (`BuildPhase`, `Stage`,
 `Elapsed`, `IsComplete`), the phase order, which calls report, and why to prefer
 `SynchronousBuildProgress` over `System.Progress<T>`.

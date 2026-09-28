@@ -7,10 +7,9 @@ model Shorokoo hands every backend (serialized ONNX) into Python that calls PyTo
 it in a CPython interpreter embedded in your .NET process. Two sub-backends exist: **CPU** and
 **CUDA**.
 
-It is an execution backend like the ONNX Runtime ones — the same `ComputeContext`, the same
-`TensorData`, the same compile-once-run-many workflow — with two differences you have to know
-about: it is **never picked for you** (you always name it), and it needs a **Python
-environment**, which it can provision itself the first time you use it.
+It uses the same `ComputeContext`, `TensorData` and compile-once-run-many workflow as the
+ONNX Runtime backends, with two differences: it is **never picked for you** (you always name
+it), and it needs a **Python environment**, which it can provision on first use.
 
 ## Facts
 
@@ -28,7 +27,7 @@ environment**, which it can provision itself the first time you use it.
   use. See [The Python environment](#the-python-environment).
 - **Unsupported models fail when the session is created**, never on the first run, with a
   `TorchUnsupportedModelException` naming the operator (or attribute) the backend cannot run.
-  Operator coverage is partial today; see [Limitations](#limitations).
+  Operator coverage is partial; see [Limitations](#limitations).
 - One process runs **one** Python interpreter over **one** environment, shared by every torch
   and [JAX](jax-backend.md) backend in it. The environments provisioned from the lock files hold
   PyTorch and JAX together, one per CUDA major version.
@@ -40,17 +39,17 @@ dotnet add package Shorokoo
 dotnet add package Shorokoo.PyTorch.Cpu      # or Shorokoo.PyTorch.Cuda
 ```
 
-If you want the backend to provision its own environment (the default), install **uv** and
-make sure it is on `PATH` — or point `SHOROKOO_UV` at it:
+For the backend to provision its own environment (the default), install **uv** on `PATH`,
+or point `SHOROKOO_UV` at it:
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-The first run that needs PyTorch then downloads CPython 3.12 and the locked packages into the
-cache. That needs the network and takes a while: the CPU environment is about 1.5 GB, the CUDA
-one about 7 GB (the NVIDIA libraries come with it). Both hold JAX as well, which the
-[JAX backend](jax-backend.md) uses. Every later run, in any process, reuses it.
+The first run that needs PyTorch downloads CPython 3.12 and the locked packages into the
+cache. This needs the network: the CPU environment is about 1.5 GB, the CUDA one about 7 GB
+(including the NVIDIA libraries). Both also hold JAX, for the
+[JAX backend](jax-backend.md). Every later run, in any process, reuses it.
 
 On a machine without network access, provision an environment elsewhere (or build one by
 hand, see below) and name it with `SHOROKOO_PYTHON_ENV`.
@@ -67,11 +66,10 @@ var output = compiled.Execute(input);
 ```
 
 Everything that works on a `ComputeContext` works here: one-shot `Execute`, `Compile` and
-repeated runs, consumed and `.Shared()` feeds, `TensorData.To(context)`. Contexts on ONNX
-Runtime and on PyTorch live side by side in one process; a tensor crosses between them by
-copy, since they are different runtimes.
+repeated runs, consumed and `.Shared()` feeds, `TensorData.To(context)`. ONNX Runtime and
+PyTorch contexts live side by side in one process; a tensor crosses between them by copy.
 
-Constructing a backend does nothing yet: the environment is resolved and PyTorch started the
+Constructing a backend does nothing: the environment is resolved and PyTorch started the
 first time a session or a tensor is needed. To fail at startup instead, call `Start()`, which
 returns the environment it runs in:
 
@@ -96,9 +94,9 @@ On CUDA, a tensor moved to the context (`TensorData.To(context)`) is on the card
 reads it there. A run hands its outputs back in host memory, except those a resident run asks
 to keep on the card, which stay there (`IsHostAccessible` is false) until copied home.
 
-**One environment per process.** The CUDA build of PyTorch also runs on the CPU, the CPU build
-cannot run on the card, and the process gets whichever environment the first torch backend
-started. If a program uses both, start the CUDA one first:
+**One environment per process.** The process gets whichever environment the first torch
+backend started. The CUDA build of PyTorch also runs on the CPU; the CPU build cannot run on
+the card. If a program uses both, start the CUDA one first:
 
 ```csharp
 var cuda = new TorchCudaBackend();
@@ -107,14 +105,14 @@ var cpu = new TorchCpuBackend();             // shares it
 ```
 
 A CUDA backend started in a process already running the CPU build fails with
-`PythonEnvironmentFailure.DeviceUnavailable`, saying so.
+`PythonEnvironmentFailure.DeviceUnavailable`.
 
 **No driver, no provisioning.** The CUDA package's manifest declares the driver it needs
 (`RequiresCudaDriver = "13.0"`), so `BackendPackage.Probe` answers
 `BackendRejection.MissingCudaDriver` on a machine with no NVIDIA driver, one too old for CUDA 13,
-or one that sees no device — saying which. Starting the backend on such a machine fails the same
-way, with `PythonEnvironmentFailure.DeviceUnavailable`, *before* anything is provisioned: it never
-downloads several gigabytes of CUDA libraries for a card that is not there.
+or one that sees no device, saying which. Starting the backend on such a machine fails with
+`PythonEnvironmentFailure.DeviceUnavailable` *before* anything is provisioned, so it never
+downloads the CUDA libraries for a card that is not there.
 
 ## The Python environment
 
@@ -129,15 +127,15 @@ downloads several gigabytes of CUDA libraries for a card that is not there.
    Windows), in a folder named after the lock and a hash of it — `cpu-b568d348aeca20e7`. If it
    is not there yet it is created with uv: `uv python install 3.12`, `uv venv`, then
    `uv pip install --require-hashes` of the lock, which records the hash of every file it may
-   install. Two processes starting at once build it once — the second
-   waits on a lock file beside it — and a build that was interrupted is started over rather
+   install. Two processes starting at once build it once (the second
+   waits on a lock file beside it), and an interrupted build is started over rather
    than used. uv runs without the `UV_` variables that could make it install something else or
    somewhere else (it keeps `UV_CACHE_DIR`, `UV_PYTHON_INSTALL_DIR`, `UV_NATIVE_TLS` and
    `UV_HTTP_TIMEOUT`, and the proxy and certificate variables), and each step is stopped if
    provisioning outlasts `PythonEnvironmentOptions.ProvisioningTimeout`.
    `PythonEnvironmentOptions.CacheDirectory` moves the cache;
    `PythonEnvironmentOptions.UvPath` or `SHOROKOO_UV` names the uv to use. An environment built
-   from an older lock stays in the cache until you delete its folder.
+   from a different lock stays in the cache until you delete its folder.
 
 An environment you provide must be a **CPython 3.12** virtual environment (a folder with a
 `pyvenv.cfg`) whose base interpreter has a shared library — `libpython3.12.so` on Linux,
@@ -177,8 +175,8 @@ whose message names what is missing:
 
 ## Training
 
-A `TrainingRig` trains on a torch context like on any other: pass it as the rig's `runtimeContext`.
-With `trainingBackend: TrainingBackend.Native` the gradient is computed by **torch autograd** rather
+A `TrainingRig` trains on a torch context passed as its `runtimeContext`. With
+`trainingBackend: TrainingBackend.Native` the gradient is computed by **torch autograd** rather
 than by Shorokoo:
 
 ```csharp
@@ -188,10 +186,10 @@ var rig = TrainingRig.FromScratch(model, loss, optimizer, sampleInputs, hyperpar
 ```
 
 Both torch backends accept both training formats (`AcceptsTrainingFormat` is true for
-`TrainingFormats.Onnx` and `TrainingFormats.OnnxAutoGrad`). Everything else about the rig — the
-optimizer, schedules, random draws, checkpoints, resident runs — is unchanged, and a torch-trained
-rig agrees with a Shorokoo-trained one step for step up to floating-point rounding. What the step
-does on torch, and its limits, are in [Training on PyTorch](training-backends.md#training-on-pytorch).
+`TrainingFormats.Onnx` and `TrainingFormats.OnnxAutoGrad`). The optimizer, schedules, random
+draws, checkpoints and resident runs are unchanged, and a torch-trained rig agrees with a
+Shorokoo-trained one step for step up to floating-point rounding. What the step does on torch,
+and its limits, are in [Training on PyTorch](training-backends.md#training-on-pytorch).
 
 ## Values
 
@@ -200,10 +198,10 @@ from bytes: `Complex64`, `Complex128` and the four 8-bit float kinds, besides th
 float, `Float16`, `BFloat16` and `Bool` types. `UInt4` and `Int4` are refused, as everywhere.
 String tensors work, and always stay on the host; sequences of tensors work.
 
-Every output a run hands back is memory of its own — never an input's or a weight's, even where
-the model returns one of those unchanged — so writing to an output never changes anything
-else. The one exception is an output written into an input the run *consumed* (see
-[output aliasing](#runs)), which nothing else holds any more.
+Every output a run hands back is memory of its own, never an input's or a weight's, even where
+the model returns one of those unchanged, so writing to an output changes nothing else. The
+exception is an output written into an input the run *consumed* (see
+[output aliasing](#runs)), which nothing else holds.
 
 ## Runs
 
@@ -220,33 +218,32 @@ What a run does with the settings every backend is handed, on each device:
 | **`TraceNodePlacement`** | every node on `cpu` | every node on `cuda:N` |
 | **Log severity** | Python warnings a run raises are shown at `Warning` and below, not above | same |
 
-**Output aliasing.** A compiled graph that pairs an output with an input it replaces — the
-training rig pairs each updated parameter with the parameter — has a run that *consumed* that
-input write the output into its memory, where the graph proves nothing reads the input
+**Output aliasing.** When a compiled graph pairs an output with an input it replaces (the
+training rig pairs each updated parameter with the parameter), a run that *consumed* that
+input writes the output into its memory, where the graph proves nothing reads the input
 afterwards. torch writes an `Add`, `Sub`, `Mul` or `Div` into memory it is handed (`out=`), so such
-an output costs no memory at all: the optimizer's `p - lr * g` is written over `p`. Other operators
+an output costs no memory: the optimizer's `p - lr * g` is written over `p`. Other operators
 cannot be told where to write, so on the CPU their pairs are not bound. On CUDA, an output the run
 fetches back is copied home into the consumed host tensor rather than into memory of its own. A
 write is also declined wherever something the rest of the run still reads could be the input's
 memory under another name: torch hands back views where ONNX Runtime copies (`Transpose`,
 `Expand`, `Slice`, a `Cast` to the same type), and those are checked when the run gets there.
 
-**Intermediate values.** A run lets go of each value the graph computes right after the last node
-that reads it — in the main graph, in a function's body and in a branch or loop body alike — as
-ONNX Runtime frees a buffer after its last use, so a run's peak is what is live at once, not the
-sum of everything the graph computes. In a training step whose gradient torch takes, what the
+**Intermediate values.** A run releases each value right after the last node that reads it, in
+the main graph, a function's body and a branch or loop body alike, as ONNX Runtime does, so a
+run's peak is what is live at once, not the sum of everything the graph computes. In a training step whose gradient torch takes, what the
 backward pass needs is kept by torch's autograd graph until the gradient is taken.
 
 **Device memory on CUDA.** torch has one caching allocator per device for the whole process,
-where ONNX Runtime gives each session an arena of its own, so the per-session settings map as
-far as they can and no further:
+where ONNX Runtime gives each session its own arena, so the per-session settings map only
+partly:
 
 - `LimitBytes` (which the budget of a context sets per session) caps a run at what torch's
   allocator holds on the device when it starts plus the limit, through torch's per-process memory
   fraction; the allocator's cached blocks are handed back first, so they cannot serve the run past
   the cap. A run that needs more fails with an `InvalidOperationException` naming the limit.
-  Because the cap is the process's, a capped run has its device to itself: other torch runs on that
-  device, capped or not, wait for it to finish rather than run under its cap.
+  Because the cap is process-wide, a capped run has its device to itself: other torch runs on that
+  device, capped or not, wait for it to finish.
 - `ArenaExtend` has no counterpart: torch's allocator grows its own way, configured process-wide by
   `PYTORCH_CUDA_ALLOC_CONF` before the backend starts.
 - `ReadArenaStatistics` reads `torch.cuda.memory_stats`: `InUseBytes`, `MaxInUseBytes`,
@@ -272,8 +269,7 @@ token. A single node that is one long kernel is not interrupted.
   convolution and pooling, normalization and the losses, `Einsum`/`Det`/`MatMulInteger`, the
   image and geometry operators (`Resize`, `GridSample`, `AffineGrid`, `RoiAlign`,
   `NonMaxSuppression`, `CenterCropPad`, `Col2Im`, `DepthToSpace`/`SpaceToDepth`, `ImageDecoder`,
-  …), the
-  recurrent networks (`RNN`, `GRU`, `LSTM` — `layout=1` included, which ONNX Runtime's CPU
+  …), the recurrent networks (`RNN`, `GRU`, `LSTM` — `layout=1` included, which ONNX Runtime's CPU
   kernels refuse), the signal operators (`DFT`, `STFT`, the windows, `MelWeightMatrix`), the
   quantization operators (`QuantizeLinear`, `DequantizeLinear`, `DynamicQuantizeLinear`,
   `QLinearMatMul`, `QLinearConv`), sequences and optionals (`SequenceMap` included), the string
@@ -281,8 +277,8 @@ token. A single node that is one long kernel is not interrupted.
   translated, as are functions that take attributes and Shorokoo's own random draws, which reach
   the backend as integer operators. `ImageDecoder`, which ONNX Runtime has no kernel for, decodes
   with Pillow every format the ONNX specification names (BMP, JPEG, JPEG 2000, TIFF, PNG, WebP and
-  the portable any-maps). A model using an operator the backend does not translate — one from a
-  domain other than ONNX's own, say — is refused when its session is created, naming it.
+  the portable any-maps). A model using an operator the backend does not translate, such as one
+  from a domain other than ONNX's own, is refused when its session is created, naming it.
 - **ONNX random draws differ from ONNX Runtime's.** `RandomNormal`, `RandomUniform`, their `Like`
   forms, `Bernoulli`, `Multinomial` and a training-mode `Dropout` draw from PyTorch's generator:
   the distribution, shape and element type are the operator's, and a node with a `seed` draws the

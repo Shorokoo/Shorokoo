@@ -11,11 +11,11 @@ Reference for the patterns accepted by `SimplePatternScheme` /
 ModelIds positionally, is the
 [ModelId format DSL](param-naming-format-dsl.md).
 
-A custom pattern language for converting Shorokoo IDs to third-party framework parameter names. Designed for simplicity—no regex required.
+The patterns convert Shorokoo IDs to third-party parameter names without regex.
 
 ## 1. Semantic Elements
 
-A Shorokoo ID is parsed into **semantic elements**—the fundamental units of matching. Each element is one of:
+A Shorokoo ID is parsed into **semantic elements**, the units of matching. Each element is one of:
 
 | Element Type | Description | Examples |
 |--------------|-------------|----------|
@@ -28,10 +28,9 @@ A Shorokoo ID is parsed into **semantic elements**—the fundamental units of ma
 **Parsing rules:**
 - Letters and digits form separate elements at boundaries
 - `.`, `#` and `:` are always individual elements
-- Numbers are treated as single elements regardless of digit count
-- Any other character is silently skipped: it yields no element, but it still
-  ends the run of letters or digits before it — `Conv-x` parses as `Conv`, `x`,
-  not as one word
+- A number is one element regardless of digit count
+- Any other character is skipped: it yields no element but ends the run of
+  letters or digits before it, so `Conv-x` parses as `Conv`, `x`
 
 **Example:**
 
@@ -53,7 +52,7 @@ Semantic elements:
   [11] "1"         (number)
 ```
 
-A loop index parses the same way, the `:` being an element of its own:
+A loop index's `:` is an element of its own:
 
 ```
 Input: "Loop#0:12"
@@ -73,7 +72,7 @@ Semantic elements:
 | `\o` | `{` | Literal opening brace |
 | `\s` | `\` | Literal backslash |
 
-Note: Closing brace `}` does not require escaping.
+A closing brace `}` needs no escaping.
 
 ## 3. Pattern Syntax
 
@@ -98,8 +97,7 @@ Matches: "Layer#0.weight", "Layer#123.weight", "Layer#0.Sub#1.weight"
 ```
 
 The matcher backtracks and takes the **shortest** run that lets the rest of the
-pattern match — so where a pattern holds two `{*}`, the first one takes as few
-elements as it can.
+pattern match, so with two `{*}` the first takes as few elements as it can.
 
 ### 3.3 Captures
 
@@ -171,18 +169,18 @@ format: "{p|bnParam}"  // p=0 → "running_mean"
 
 ## 5. Complete ResNet50 Example
 
-The model here creates every parameter with an inline `InitSimple.Init(...)` call, so each
-is left to its class name and numbered in creation order within its scope
+This model creates every parameter with an inline `InitSimple.Init(...)` call, so each
+is named by its class and numbered in creation order within its scope
 ([Parameter names](defining-models.md#parameter-names)); a parameter captured in a local
 or given `.Named(...)` is matched by that name instead (`Conv2Dk77s22#0.w#0`).
 
 ### 5.1 Scheme Definition
 
 The patterns go into a `SimplePatternNamingScheme`, which also takes the
-model's own canonical-id scheme (`arch.GetShorokooIdNamingScheme()`, from the
-concrete architecture) and a framework id. Every pattern whose format reaches
-for a map is handed the maps of [§5.2](#52-shared-maps) — a `SimplePatternScheme`
-looks only in its own maps, so one that omits them throws on `{p|bnParam}`.
+model's canonical-id scheme (`arch.GetShorokooIdNamingScheme()`, from the
+concrete architecture) and a framework id. Every pattern whose format uses a
+map is given the maps of [§5.2](#52-shared-maps): a `SimplePatternScheme`
+looks only in its own maps, so one without them throws on `{p|bnParam}`.
 
 ```csharp
 public static SimplePatternNamingScheme CreateResNet50Scheme(ModelIdNamingScheme shorokooIdScheme)
@@ -358,11 +356,11 @@ public class SimplePatternScheme
 }
 ```
 
-`TryMatch` is `Matches` plus the bindings: on a match it hands back the capture table the
-format string would be evaluated against (`["idx"] = "3"`, `["mod"] = "Conv2"`, as in
-[§3.3](#33-captures)), which is how to see what a pattern actually bound without writing a
-format for it. `ParseSemanticElements` is the [§1](#1-semantic-elements) parser itself — call
-it on an id to see the element list a pattern is matched against:
+`TryMatch` is `Matches` plus the bindings: on a match it returns the capture table the
+format is evaluated against (`["idx"] = "3"`, `["mod"] = "Conv2"`, as in
+[§3.3](#33-captures)), so you can see what a pattern bound without writing a format.
+`ParseSemanticElements` is the [§1](#1-semantic-elements) parser; call it on an id to see
+the element list a pattern is matched against:
 
 ```csharp
 foreach (var e in SimplePatternScheme.ParseSemanticElements("Loop#0:12"))
@@ -394,22 +392,21 @@ public class SimplePatternNamingScheme : ModuleParamSetNamingScheme
 }
 ```
 
-Every `ToName` overload does the same thing — try the patterns in order, return the first
-match's name, return `null` when none matches — and they differ only in where the canonical
-id string comes from. `ToName(string)` is handed one directly, which is the natural direction
-here and the one weight **export** needs. `ToName(ModelId)` gets there through
-`ModelIdToShorokooIdScheme` first; `ToName(ConcreteModelParamInfo)` reads the parameter's own
-id string off the concrete model.
+Every `ToName` overload tries the patterns in order and returns the first match's name,
+or `null` when none matches; they differ only in where the canonical id string comes
+from. `ToName(string)` takes it directly; weight **export** uses this one.
+`ToName(ModelId)` goes through `ModelIdToShorokooIdScheme` first;
+`ToName(ConcreteModelParamInfo)` reads the parameter's id string off the concrete model.
 
-`ToModelId` is the reverse direction, and the one
+`ToModelId` is the reverse direction, which
 `ToConcreteModel(weights, namingScheme)` uses to **import**: it names every candidate ModelId
 into a name → ModelId table, then looks the third-party name up in it, returning `null`
 for an unknown name. See [§7](#7-error-handling) for the one case that throws.
 
 ## 7. Error Handling
 
-There is no DSL-specific exception type; failures surface as the ordinary BCL
-ones — and the most common failure does not throw at all.
+There is no DSL-specific exception type; failures are ordinary BCL exceptions,
+and the most common failure does not throw.
 
 | Failure | Behaviour |
 |---------|-----------|
@@ -439,24 +436,21 @@ try { var id2 = collidingScheme.ToModelId("layer1.0.conv1.weight", candidates); 
 catch (InvalidOperationException) { /* "ModelIds [...] and [...] both map to the name '...'" */ }
 ```
 
-The entry point this page recommends — `ToConcreteModel(weights, namingScheme)` — goes
-through `ToModelId`, which is forgiving where `ToName` is not — `ModelIdNamingScheme.ToName`
-throws `InvalidOperationException` for a ModelId no pattern covers, while `ToModelId` names
-each candidate with `TryToName` instead: a candidate the patterns leave unnamed gets no
-entry in the table, an unknown third-party name gives `null` back, and
-`ToConcreteModel` drops it. The one refusal is a collision — two candidates the patterns
-give the same name — which throws `InvalidOperationException` naming both ModelIds and
-the name, since binding either would be a guess. The table is rebuilt whenever a call
-passes a different candidate set, so one scheme can bind weights into several graphs.
-Dropping a name never leaves a parameter empty: every parameter of the graph must still
-receive a value, so a parameter the patterns leave uncovered fails the bind with an
-`InvalidOperationException` naming that parameter. To have the hole reported against the
-scheme before any value is bound, use `Persistence.ImportSafeTensors`: it names every
-parameter first and refuses with an `InvalidDataException` — "required model parameter '…' maps to no source
-tensor name under the naming scheme — add a rule covering it" — which says *which*
-parameter is uncovered.
+`ToConcreteModel(weights, namingScheme)` goes through `ToModelId`, which is more
+forgiving than `ToName`. `ModelIdNamingScheme.ToName` throws `InvalidOperationException`
+for a ModelId no pattern covers; `ToModelId` names each candidate with `TryToName`
+instead, so a candidate the patterns leave unnamed gets no table entry, an unknown
+third-party name returns `null`, and `ToConcreteModel` drops it. The only refusal is the
+collision in the table above, since binding either candidate would be a guess. The table
+is rebuilt whenever a call passes a different candidate set, so one scheme can bind
+weights into several graphs.
 
-A `null` is not ignored downstream either: export refuses a scheme that leaves any
-weight unnamed, and import treats the parameter as one the scheme does not
-cover — which then fails as a required parameter with no source tensor (see
+Every parameter of the graph must still receive a value, so a parameter the patterns
+leave uncovered fails the bind with a `ModelException` (**`FW059`**) naming that
+parameter. To have the gap reported against the scheme before any value is bound, use
+`Persistence.ImportSafeTensors`: it names every parameter first and refuses with an
+`InvalidDataException` — "required model parameter '…' maps to no source tensor name
+under the naming scheme — add a rule covering it".
+
+Export likewise refuses a scheme that leaves any weight unnamed (see
 [onnx-and-weights.md](onnx-and-weights.md#naming)).

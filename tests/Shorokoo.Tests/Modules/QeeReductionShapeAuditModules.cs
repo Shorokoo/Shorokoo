@@ -779,6 +779,56 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>ReduceLogSumExp with noop_with_empty_axes set and no axes over +inf, -inf and a
+    /// finite element: each one-element group gives the element itself.
+    /// Input xf = [[1,2,3],[4,5,6]].</summary>
+    [Module]
+    public partial class NoopLogSumExpOfInfinitiesCheck
+    {
+        public static Tensor<bit> Inline(Tensor<float32> xf)
+        {
+            Tensor<float32> v = OnnxOp.Concat([Vector(float.PositiveInfinity, float.NegativeInfinity), xf.Reshape(Vector(-1L)).Slice(Vector(0L), Vector(1L))], 0);
+            return NN.Reduce(ReduceKind.LogSumExp, v, null, keepDims: true, noOp: true) == Vector(float.PositiveInfinity, float.NegativeInfinity, 1f);
+        }
+    }
+
+    /// <summary>ReduceLogSumExp over groups whose largest element is +inf or -inf: +inf and -inf.
+    /// Input xf = [[1,2,3],[4,5,6]].</summary>
+    [Module]
+    public partial class LogSumExpOfInfiniteGroupsCheck
+    {
+        public static Tensor<bit> Inline(Tensor<float32> xf)
+        {
+            var one = xf.Reshape(Vector(-1L)).Slice(Vector(0L), Vector(1L));
+            Tensor<float32> v = OnnxOp.Concat([Vector(float.PositiveInfinity), one, Vector(float.NegativeInfinity, float.NegativeInfinity)], 0);
+            return v.Reshape(Vector(2L, 2L)).Reduce(ReduceKind.LogSumExp, Vector(1L)) == Vector(float.PositiveInfinity, float.NegativeInfinity);
+        }
+    }
+
+    /// <summary>int64 ReduceL2 whose sum of squares lies beyond 2^24, where a float32 accumulator
+    /// rounds. Input xf = [[1,2,3],[4,5,6]].</summary>
+    [Module]
+    public partial class IntegerReduceL2BeyondFloat32Check
+    {
+        public static Tensor<bit> Inline(Tensor<float32> xf)
+        {
+            var one = xf.Reshape(Vector(-1L)).Slice(Vector(0L), Vector(1L)).Cast<int64>();
+            Tensor<int64> v = OnnxOp.Concat([one * Vector(16777217L), one * Vector(100000001L), one - one], 0);
+            return OnnxOp.Concat([v.Slice(Vector(0L), Vector(1L)).Reduce(ReduceKind.L2, keepDims: true) == Vector(16777217L),
+                v.Slice(Vector(1L), Vector(3L)).Reduce(ReduceKind.L2, keepDims: true) == Vector(100000001L),
+                Vector(16777217L, 0L).Reduce(ReduceKind.L2, keepDims: true) == Vector(16777217L)], 0);
+        }
+    }
+
+    /// <summary>An empty float32 constant of shape [2, 0] joined to the input along axis 1: the
+    /// input. Input xf = [[1,2,3],[4,5,6]].</summary>
+    [Module]
+    public partial class EmptyConstantOfRankTwoCheck
+    {
+        public static Tensor<bit> Inline(Tensor<float32> xf)
+            => (Tensor<float32>)OnnxOp.Concat([OnnxOp.Constant(TensorData(DType.Float32, [2L, 0L]).MoveToAttribute()), xf], 1) == xf;
+    }
+
     internal static class NoopReduceOfEachElement
     {
         internal static Tensor<bit> Checks(Tensor<float32> xf, Tensor<int64> noAxes, Tensor<float32> e)

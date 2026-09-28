@@ -104,6 +104,22 @@ public class QeeReductionShapeAuditTests
     public void TestAReductionOverAxesNegativeByTheirValuesHasTheSpecShapeAndValues()
         => Assert.True(AutoTest.AdvancedTestGraph<EmptyReduceRuntimeNegativeAxisCheck>([], [F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)]));
 
+    [Fact]
+    public void TestANoopLogSumExpGivesEachElementInfinitiesIncluded()
+        => Assert.True(AutoTest.AdvancedTestGraph<NoopLogSumExpOfInfinitiesCheck>([], [F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)]));
+
+    [Fact]
+    public void TestLogSumExpOfAGroupWhoseLargestElementIsInfiniteIsThatInfinity()
+        => Assert.True(AutoTest.AdvancedTestGraph<LogSumExpOfInfiniteGroupsCheck>([], [F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)]));
+
+    [Fact]
+    public void TestAnInt64ReduceL2IsExactBeyondFloat32()
+        => Assert.True(AutoTest.AdvancedTestGraph<IntegerReduceL2BeyondFloat32Check>([], [F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)]));
+
+    [Fact]
+    public void TestAnEmptyConstantOfRankTwoKeepsItsShape()
+        => Assert.True(AutoTest.AdvancedTestGraph<EmptyConstantOfRankTwoCheck>([], [F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)]));
+
     private static bool GenericMaxMin(DType t, TensorData x, params long[] expected)
         => AutoTest.AdvancedTestGraph<GenericReduceMaxMinCheck>([], [x, I64([expected.Length], expected)],
             genericTypes: new() { ["T"] = t });

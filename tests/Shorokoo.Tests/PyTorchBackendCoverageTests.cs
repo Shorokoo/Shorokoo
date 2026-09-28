@@ -268,6 +268,9 @@ public class PyTorchBackendCoverageTests
         var x = QeeAudit.F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f);
         Assert.True(AutoTest.AdvancedTestGraph<NoopReduceOfEachElementByShapeCheck>([], [x], context: c));
         Assert.True(AutoTest.AdvancedTestGraph<ElementwiseNoopReduceOfAConstantCheck>([], [x], context: c));
+        Assert.True(AutoTest.AdvancedTestGraph<NoopLogSumExpOfInfinitiesCheck>([], [x], context: c));
+        Assert.True(AutoTest.AdvancedTestGraph<LogSumExpOfInfiniteGroupsCheck>([], [x], context: c));
+        Assert.True(AutoTest.AdvancedTestGraph<IntegerReduceL2BeyondFloat32Check>([], [x], context: c));
     }
 
     internal static void PoolsComputeTheSpecValues(ComputeContext c)

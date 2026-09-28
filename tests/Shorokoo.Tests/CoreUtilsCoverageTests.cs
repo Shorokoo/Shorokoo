@@ -643,7 +643,8 @@ public class CoreUtilsCoverageTests
         Assert.Equal("gpu:0", OrtBackend.ArenaShrinkageRunConfig(0, shrinkArenaAfterRun: true));
         Assert.Equal("gpu:3", OrtBackend.ArenaShrinkageRunConfig(3, shrinkArenaAfterRun: true));
         Assert.Null(OrtBackend.ArenaShrinkageRunConfig(0, shrinkArenaAfterRun: false));
-        Assert.Null(OrtBackend.ArenaShrinkageRunConfig(null, shrinkArenaAfterRun: true));
+        Assert.Equal("cpu:0", OrtBackend.ArenaShrinkageRunConfig(null, shrinkArenaAfterRun: true));
+        Assert.Null(OrtBackend.ArenaShrinkageRunConfig(null, shrinkArenaAfterRun: false));
     }
 
     /// <summary>

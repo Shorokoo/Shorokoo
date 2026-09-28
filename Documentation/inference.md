@@ -907,7 +907,8 @@ Console.WriteLine(compiled.DeviceMemory.LimitBytes);               // the arena 
   already holds: size a context budget as what the step uses plus what the rig keeps on the
   card.
 - `ShrinkArenaAfterRun` costs a synchronizing allocation every step; outside a budget, use it
-  only when the card is shared. ORT rejects it where the device has no arena (e.g.
+  only when the card is shared. On the CPU backend it shrinks the host arena the run's
+  intermediates live in, and the next run takes those blocks from the host again. ORT rejects it where the device has no arena (e.g.
   `ORT_DISABLE_ARENA`), failing the run, so try it on a short run first.
 - `LimitBytes` is hard: exceeding work is refused or fails with ORT's `BFCArena ... Failed to
   allocate memory for requested buffer`, so a figure set too low fails work that would fit.

@@ -29,13 +29,14 @@ public sealed record RunSettings
     public static RunSettings Default { get; } = new();
 
     /// <summary>
-    /// Whether to hand the arena's unused blocks back to the device when this run finishes —
-    /// ORT's <c>memory.enable_memory_arena_shrinkage</c> run option. Off by default, since
-    /// the blocks then have to be re-allocated on the next run, which costs a synchronizing
+    /// Whether to hand the arena's unused blocks back when this run finishes — ORT's
+    /// <c>memory.enable_memory_arena_shrinkage</c> run option. Off by default, since the blocks
+    /// then have to be re-allocated on the next run, which on a card costs a synchronizing
     /// <c>cudaMalloc</c> per step. On, the arena stops being a ratchet: what the run did not
     /// need stays available to the rest of the machine.
     ///
-    /// <para>Only a session on a CUDA backend has such an arena; a CPU session ignores this.</para>
+    /// <para>The arena is the one the run's intermediates live in: the card's on a CUDA backend,
+    /// the host's on a CPU one.</para>
     /// </summary>
     public bool ShrinkArenaAfterRun { get; init; }
 

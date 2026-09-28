@@ -66,7 +66,7 @@ namespace Shorokoo
                     case Type t when t == typeof(float64):
                         return this.CopyMemory<double>().Cast<object>().ToArray();
                     default:
-                        return this.CopyMemory<byte>().Cast<object>().ToArray();
+                        return this.CopyRawMemory().Cast<object>().ToArray();
                 }
             }
         }
@@ -399,6 +399,7 @@ namespace Shorokoo
         /// <exception cref="InvalidCastException">V is not this tensor's element storage type.</exception>
         public Span<V> AccessModifiableMemory<V>() where V : unmanaged
         {
+            ThrowIfDisposed();
             CheckElementType<V>();
             return AccessModifiableElements<V>();
         }
@@ -468,6 +469,7 @@ namespace Shorokoo
         /// <exception cref="InvalidCastException">V is not this tensor's element storage type.</exception>
         public ReadOnlySpan<V> AccessMemory<V>() where V : unmanaged
         {
+            ThrowIfDisposed();
             CheckElementType<V>();
             return AccessElements<V>();
         }
@@ -732,16 +734,6 @@ namespace Shorokoo
             {
                 ThrowIfDisposed();
                 return backing;
-            }
-        }
-
-        /// <summary>The raw storage bytes boxed as objects, for debugging/diagnostics.</summary>
-        public override object[] Data
-        {
-            get
-            {
-                if (DType.IsSameElementTypeAs(DType.Utf8)) return [.. StringElements()];
-                return this.CopyMemory<byte>().Cast<object>().ToArray();
             }
         }
 

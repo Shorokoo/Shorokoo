@@ -267,9 +267,9 @@ does not rest on the stamp alone: it also checks the ops themselves before build
 a session. `Eval` takes output values rather than a `ComputationGraph`, so it has no
 `Kind` to read at all; it is that op check which refuses a module output handed to
 it.
-`ComputationGraph`s are **readonly**: operations that used to modify a graph in
-place return a new graph instead (e.g. `WithRngConfig`), so a graph's `Kind` can
-never be invalidated behind your back.
+`ComputationGraph`s are **readonly**: operations that change a graph return a new
+graph rather than modifying it in place (e.g. `WithRngConfig`), so a graph's `Kind`
+can never be invalidated behind your back.
 
 If a graph arrives with the wrong kind — a foreign import that op-scanning
 misjudged, say — re-stamp it with

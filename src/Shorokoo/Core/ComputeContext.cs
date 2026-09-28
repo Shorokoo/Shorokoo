@@ -2310,13 +2310,11 @@ namespace Shorokoo.Runtime
         /// The runtime value of <paramref name="data"/> as a value of
         /// <paramref name="backend"/>'s runtime, built there if it does not exist yet.
         ///
-        /// <para>This used to unwrap <see cref="IOnnxData"/> and throw at everything else, which
-        /// made it a hole rather than an entry point: a tensor literal is held as managed bytes
-        /// (<see cref="HostTensorData{T}"/>), a string literal as managed strings
-        /// (<see cref="HostStringTensorData"/>) and a copied sequence as the tensors it was
-        /// copied into, and none of the three carries a runtime value until something asks for one.
-        /// Asking each of them is what this does now; a value a runtime already made is still
-        /// handed straight over.</para>
+        /// <para>Every kind of data is asked for its value, not only <see cref="IOnnxData"/>: a
+        /// tensor literal is held as managed bytes (<see cref="HostTensorData{T}"/>), a string
+        /// literal as managed strings (<see cref="HostStringTensorData"/>) and a copied sequence as
+        /// the tensors it was copied into, and none of the three carries a runtime value until
+        /// something asks for one. A value a runtime already made is handed straight over.</para>
         ///
         /// <para>The value returned belongs to <paramref name="data"/>: read it, do not dispose
         /// it.</para>

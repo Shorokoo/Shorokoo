@@ -264,7 +264,8 @@ On a typed `TensorData<T>` — what `As<T>()` returns — the storage type follo
 not named again: `result.As<float32>().CopyMemory()` is a `float[]`, and `ValueAt(i)` a `float`.
 `AccessMemory<V>()` / `AccessMemory()` return a `ReadOnlySpan` over the storage instead of a
 copy; see "What a TensorData holds" below for why a span needs the tensor kept alive. A boxed
-`TensorData.Data` (`object[]`) also exists; prefer `CopyMemory<V>()`.
+`TensorData.Data` (`object[]`) also exists, for diagnostics: the storage bytes, each boxed
+(the strings themselves for a `utf8` tensor), not the element values.
 
 ## Two kinds of concrete tensor: `TensorData` and `TensorAttribute`
 

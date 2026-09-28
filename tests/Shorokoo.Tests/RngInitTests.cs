@@ -136,11 +136,6 @@ public partial class RngKaimingGainRuntimeGain
         => KaimingUniformGain.Init([Scalar(4L), Scalar(4L)], gain);
 }
 
-/// <summary>
-/// End-to-end coverage for per-parameter initialization RNG: same-shape parameters differ,
-/// initialization is reproducible for a config, the master seed re-randomizes everything, and
-/// Params overrides must match a real parameter.
-/// </summary>
 [Module]
 public partial class RngInitSameShapeStack2
 {
@@ -163,6 +158,11 @@ internal static class RngInitSameShapeStack
     }
 }
 
+/// <summary>
+/// End-to-end coverage for per-parameter initialization RNG: same-shape parameters differ,
+/// initialization is reproducible for a config, the master seed re-randomizes everything, and
+/// Params overrides must match a real parameter.
+/// </summary>
 [Trait("Domain", "Core")]
 [Trait("Purpose", "Coverage")]
 public class RngInitTests

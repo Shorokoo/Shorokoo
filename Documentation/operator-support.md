@@ -335,6 +335,14 @@ shape and type.
     removes the `Range` although it is an output, and reading the model's outputs
     throws `UnsupportedDTypeException` (`OU002`). Accepted as ONNX Runtime's
     behaviour ([#432](https://github.com/Shorokoo/Shorokoo/issues/432)).
+    An int64 `Range` counts its elements exactly on every backend, a span
+    `limit − start` beyond 2^53 or beyond int64 included. ONNX Runtime's kernel
+    computes the count in double precision, so on ONNX Runtime an int64 `Range`
+    is rewritten to count in uint64 and scale a `Range(0, count, 1)` by `delta`,
+    except one whose three inputs are `Constant`s spanning less than 2^53, which
+    the kernel counts exactly, and one whose `delta` is a `Constant` 1 or −1, whose
+    count is its span, so that a count the kernel gets wrong is one no tensor
+    holds ([#447](https://github.com/Shorokoo/Shorokoo/issues/447)).
 
 ## Convolution & pooling
 

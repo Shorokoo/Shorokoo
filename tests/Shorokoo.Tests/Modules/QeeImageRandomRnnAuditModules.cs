@@ -585,6 +585,32 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>An int64 Range of runtime start, limit and delta equals <c>expected</c>.</summary>
+    [Module]
+    public partial class Int64RangeCheck
+    {
+        public static Scalar<bit> Inline(Scalar<int64> start, Scalar<int64> limit, Scalar<int64> delta, Vector<int64> expected)
+            => Mismatches((Tensor<int64>)OnnxOp.Range(start, limit, delta), expected) < Scalar(1L);
+
+        internal static Scalar<int64> Mismatches(Tensor<int64> range, Vector<int64> expected)
+            => Differs((Tensor<int64>)OnnxOp.Shape(range), (Tensor<int64>)OnnxOp.Shape(expected))
+                + Differs((Tensor<int64>)OnnxOp.Concat([range, expected], 0), (Tensor<int64>)OnnxOp.Concat([expected, range], 0));
+
+        private static Scalar<int64> Differs(Tensor<int64> actual, Tensor<int64> expected)
+            => ((Tensor<bit>)OnnxOp.Not(actual == expected)).Cast<int64>().Reduce(ReduceKind.Sum).Scalar();
+    }
+
+    /// <summary>Int64 Ranges of constants, spanning beyond 2^53 and within it.</summary>
+    [Module]
+    public partial class Int64RangeOfConstantsCheck
+    {
+        public static Scalar<bit> Inline()
+            => Int64RangeCheck.Mismatches((Tensor<int64>)OnnxOp.Range(Scalar(0L), Scalar((1L << 62) + 1L), Scalar(1L << 61)), Vector(0L, 1L << 61, 1L << 62))
+                + Int64RangeCheck.Mismatches((Tensor<int64>)OnnxOp.Range(Scalar(long.MinValue), Scalar(long.MaxValue), Scalar(1L << 62)), Vector(long.MinValue, -(1L << 62), 0L, 1L << 62))
+                + Int64RangeCheck.Mismatches((Tensor<int64>)OnnxOp.Range(Scalar(0L), Scalar(-7L), Scalar(-2L)), Vector(0L, -2L, -4L, -6L))
+                < Scalar(1L);
+    }
+
     /// <summary>Range (count = max(ceil((limit-start)/delta), 0) — int, negative-delta,
     /// empty, and float variants, value-checked) and ConstantOfShape (the value attribute
     /// defines dtype + fill; int64 and bool fills here, float32-zero default covered by

@@ -17,7 +17,7 @@ internal static class KernelWorkaroundRegistry
     /// that rewrite reduces is never negative; the
     /// crop-and-resize roi before the cubic resize layout, and both before the resize axes, since
     /// the calls they build keep the call's <c>axes</c>; <c>Where</c> last, since earlier
-    /// rewrites build <c>Where</c>s of their own.
+    /// rewrites, the int64 <c>Range</c> count among them, build <c>Where</c>s of their own.
     /// </summary>
     public static KernelWorkaroundSet OnnxRuntime { get; } = new(KernelWorkaroundSets.OnnxRuntime,
     [
@@ -32,6 +32,7 @@ internal static class KernelWorkaroundRegistry
         new CropAndResizeRoiWorkaround(),
         new CubicResizeMiddleAxesWorkaround(),
         new ResizeAxesSubsetWorkaround(),
+        new Int64RangeCountWorkaround(),
         new WhereTypesWorkaround(),
     ]);
 

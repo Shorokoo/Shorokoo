@@ -22,11 +22,12 @@ internal sealed class RangeOp : QuickOp
 {
     public override string OpCode => OpCodes.RANGE;
 
-    /// <summary>Exact ceil(a / b) for integers (b != 0).</summary>
-    private static long CeilDiv(long a, long b)
+    /// <summary>Exact ceil(a / b) for integers (b != 0), in 128 bits, which hold the span of any
+    /// two int64s.</summary>
+    private static Int128 CeilDiv(Int128 a, Int128 b)
     {
         var q = a / b;
-        if (a % b != 0 && (a ^ b) >= 0) q++;
+        if (a % b != 0 && (a < 0) == (b < 0)) q++;
         return q;
     }
 
@@ -43,7 +44,7 @@ internal sealed class RangeOp : QuickOp
         if (start.IntData is { Length: > 0 } si && limit.IntData is { Length: > 0 } li && delta.IntData is { Length: > 0 } di)
         {
             var d = di[0] == 0 ? 1 : di[0];
-            var count = Math.Max(0, CeilDiv(li[0] - si[0], d));
+            var count = (long)Int128.Clamp(CeilDiv((Int128)li[0] - si[0], d), 0, long.MaxValue);
             var rt = RuntimeTensorFactory.Create(dtype, new Shape(new[] { count }));
             if (RuntimeTensorFactory.ShouldStoreData(rt.Shape, maxDataElements))
             {

@@ -110,6 +110,30 @@ public class QeeImageRandomRnnAuditTests
     }
 
     [Fact]
+    public void TestAnInt64RangeCountsItsElementsExactly()
+    {
+        Int64RangesCountTheirElementsExactly(ComputeContext.Default);
+        Assert.True(AutoTest.AdvancedTestGraph<Int64RangeOfConstantsCheck>([], []));
+    }
+
+    internal static void Int64RangesCountTheirElementsExactly(ComputeContext c)
+    {
+        Assert.True(Ranges(c, 0L, (1L << 62) + 1L, 1L << 61, 0L, 1L << 61, 1L << 62));
+        Assert.True(Ranges(c, 0L, -(1L << 62) - 1L, -(1L << 61), 0L, -(1L << 61), -(1L << 62)));
+        Assert.True(Ranges(c, long.MinValue, long.MaxValue, 1L << 62, long.MinValue, -(1L << 62), 0L, 1L << 62));
+        Assert.True(Ranges(c, long.MaxValue, long.MinValue, long.MinValue, long.MaxValue, -1L));
+        Assert.True(Ranges(c, 9007199254740993L, 9007199254740995L, 1L, 9007199254740993L, 9007199254740994L));
+        Assert.True(Ranges(c, 0L, 7L, 2L, 0L, 2L, 4L, 6L));
+        Assert.True(Ranges(c, 5L, 5L, 1L));
+        Assert.True(Ranges(c, 0L, 1L << 62, -1L));
+        Assert.True(Ranges(c, 1L << 62, long.MinValue, 1L << 61));
+    }
+
+    private static bool Ranges(ComputeContext c, long start, long limit, long delta, params long[] expected)
+        => AutoTest.AdvancedTestGraph<Int64RangeCheck>([],
+            [I64([], start), I64([], limit), I64([], delta), I64([expected.Length], expected)], context: c);
+
+    [Fact]
     public void TestQeeRandomGeneratorAndRecurrentShapeAudits()
     {
         Assert.True(QeeAudit.CheckWith<QeeRandomFamilyAuditCheck>(

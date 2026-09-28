@@ -143,7 +143,7 @@ whether a call of yours is rewritten, match it against the table below; the note
 [operator-support.md](operator-support.md) give each case in full.
 
 The ONNX Runtime set, in the order it applies — a later workaround sees what an earlier one built,
-so the `Where`s the reduction and pool rewrites emit are covered by the last row:
+so the `Where`s the reduction, pool and `Range` rewrites emit are covered by the last row:
 
 | Operator | Scenario ONNX Runtime gets wrong | Rewrite | Issue |
 |---|---|---|---|
@@ -158,6 +158,7 @@ so the `Where`s the reduction and pool rewrites emit are covered by the last row
 | `Resize` | `tf_crop_and_resize` along an axis whose length the resize leaves unchanged | That axis resized to `2L−1` under the same `roi`, every second element kept | [#380](https://github.com/Shorokoo/Shorokoo/issues/380) |
 | `Resize` | Cubic rank-4 `tf_crop_and_resize` with scale 1 on axes 0 and 3 and not on axis 1 | The input regrouped as `[N·W, 1, C, H]`, resized over its last two axes (a `not_larger`/`not_smaller` policy kept over the regrouped axes), regrouped back | [#421](https://github.com/Shorokoo/Shorokoo/issues/421) |
 | `Resize` | An `axes` attribute: the transpose optimizer misreads its per-axis operands, and the kernel refuses negative axes | Written out over every axis; a `not_larger`/`not_smaller` policy over a subset of the axes keeps its axes, counted from the front, behind an `OptionalGetElement(Optional(x))` the optimizer cannot move a `Transpose` through | [#429](https://github.com/Shorokoo/Shorokoo/issues/429) |
+| `Range` | int64 with `limit − start` beyond 2^53: the element count is computed in double precision and can drop elements | The count as an exact uint64 ceiling division (0 where `limit` does not lie beyond `start` in the direction of `delta`), then `Range(0, count, 1) · delta + start`; a call of three `Constant`s spanning less than 2^53, or with a `Constant` `delta` of ±1 (a miscounted count would be one no tensor holds), is left alone | [#447](https://github.com/Shorokoo/Shorokoo/issues/447) |
 | `Where` | int8, int16, uint16, uint32, uint64, bfloat16 or bool values (no kernel) | bool: `Or(And(c, x), And(Not(c), y))`; others: selected through int32, int64 or float32 and cast back | [#423](https://github.com/Shorokoo/Shorokoo/issues/423) |
 
 A call whose input is a scalar or a nonempty `Constant` cannot hit the empty-input rows and is left

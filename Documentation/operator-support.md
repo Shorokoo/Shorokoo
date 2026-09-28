@@ -336,7 +336,7 @@ shape and type.
 |---|---|---|---|
 | AveragePool | ✅ [9] | 🟡 [1] | 🟡 [2] |
 | Conv | ✅ | 🟡 [1] | 🟡 [3] |
-| ConvTranspose | ✅ | 🟡 [1] | 🟡 [4] |
+| ConvTranspose | ✅ [10] | 🟡 [1] | 🟡 [4] |
 | DeformConv | ✅ | 🟡 [1] | ❌ [5] |
 | GlobalAveragePool | ✅ | 🟡 [1] | ✅ |
 | GlobalLpPool | ✅ | 🟡 [1] | ✅ |
@@ -376,6 +376,12 @@ shape and type.
    - Not rewritten: ONNX Runtime's `MaxPool` without an `Indices` output gives a
      window of only −inf the type's lowest finite value instead of −inf
      ([#426](https://github.com/Shorokoo/Shorokoo/issues/426)).
+10. With `SAME_UPPER`/`SAME_LOWER` and a stride above the kernel's extent plus
+    `output_padding`, the output is `in · stride` long and reaches past the full
+    transposed convolution, where it holds the bias alone. ONNX Runtime gives the
+    full transposed convolution instead; its backend rewrites such a call when it
+    builds a session as the call without padding or bias, a `Pad` by the negated
+    padding, and the bias ([#444](https://github.com/Shorokoo/Shorokoo/issues/444)).
 
 ## Normalization & losses
 

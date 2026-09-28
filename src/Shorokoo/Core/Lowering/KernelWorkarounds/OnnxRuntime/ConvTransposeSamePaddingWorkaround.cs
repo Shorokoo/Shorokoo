@@ -11,7 +11,7 @@ using static OpCodes;
 /// <summary>
 /// A <c>ConvTranspose</c> with <c>SAME_UPPER</c> or <c>SAME_LOWER</c> padding whose stride exceeds
 /// the dilated kernel's extent plus the output padding along some axis, rewritten as the full
-/// transposed convolution cut or extended to the spec's output.
+/// transposed convolution cut or extended to the spec's output (Shorokoo/Shorokoo#444).
 ///
 /// <para>The spec makes such a call's output <c>in · stride</c> long along each spatial axis,
 /// padding <c>total = output_padding + (k - 1) · dilation + 1 - stride</c> in all, of which
@@ -108,7 +108,7 @@ internal sealed class ConvTransposeSamePaddingWorkaround : KernelWorkaround
     private static long[]? Kernel(WorkaroundSite site, int n)
     {
         if (site.Attributes.GetLongsVal(AttrKernelShape) is { } k && k.Length == n) return k;
-        if (site.ConstantOf(1) is { } w && w.Shape.Dims.Length == n + 2) return w.Shape.Dims[2..];
+        if (site.ConstantShapeOf(1) is { } w && w.Dims.Length == n + 2) return w.Dims[2..];
         return null;
     }
 }

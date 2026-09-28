@@ -165,9 +165,9 @@ internal sealed class CubicResizeMiddleAxesWorkaround : KernelWorkaround
     {
         if ((site.RankOf(0) ?? site.OutputRankOf(0)) is { } rank) return rank;
         if (site.Attributes.GetLongsVal(AttrAxes) is not null) return null;
-        if (site.ConstantOf(2) is { Shape.Dims: [> 0 and var scales] }) return (int)scales;
-        if (site.ConstantOf(3) is { Shape.Dims: [var sizes] }) return (int)sizes;
-        if (site.ConstantOf(1) is { Shape.Dims: [var roi] }) return (int)(roi / 2);
+        if (site.ConstantShapeOf(2) is { Dims: [> 0 and var scales] }) return (int)scales;
+        if (site.ConstantShapeOf(3) is { Dims: [var sizes] }) return (int)sizes;
+        if (site.ConstantShapeOf(1) is { Dims: [var roi] }) return (int)(roi / 2);
         return null;
     }
 

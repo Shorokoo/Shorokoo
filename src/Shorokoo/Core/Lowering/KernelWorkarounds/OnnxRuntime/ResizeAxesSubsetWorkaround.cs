@@ -46,8 +46,8 @@ internal sealed class ResizeAxesSubsetWorkaround : KernelWorkaround
     public override Variable?[] Rewrite(WorkaroundSite site, Variable?[] inputs)
     {
         var a = site.Attributes;
-        bool IsEmpty(int slot) => site.ConstantOf(slot) is { Shape.Dims: [0] };
-        bool IsFilled(int slot) => site.ConstantOf(slot) is { Shape.Dims: [> 0] };
+        bool IsEmpty(int slot) => site.ConstantShapeOf(slot) is { Dims: [0] };
+        bool IsFilled(int slot) => site.ConstantShapeOf(slot) is { Dims: [> 0] };
         var (x, roi, scales, sizes) = (inputs[0]!, IsEmpty(1) ? null : inputs[1],
             IsEmpty(2) || IsFilled(3) ? null : inputs[2], IsEmpty(3) || IsFilled(2) ? null : inputs[3]);
         var axes = a.GetLongsVal(AttrAxes)!;

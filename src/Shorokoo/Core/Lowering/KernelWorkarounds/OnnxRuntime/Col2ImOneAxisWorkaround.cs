@@ -29,7 +29,7 @@ internal sealed class Col2ImOneAxisWorkaround : KernelWorkaround
         var dilations = site.Attributes.GetLongsVal(AttrDilations);
         var pads = site.Attributes.GetLongsVal(AttrPads);
         var strides = site.Attributes.GetLongsVal(AttrStrides);
-        return (site.OutputRankOf(0) == 3 || site.ConstantOf(2) is { Shape.Dims: [1] }
+        return (site.OutputRankOf(0) == 3 || site.ConstantShapeOf(2) is { Dims: [1] }
                 || pads is { Length: 2 } || dilations is { Length: 1 } || strides is { Length: 1 })
             && pads is null or { Length: 2 } && dilations is null or { Length: 1 } && strides is null or { Length: 1 };
     }

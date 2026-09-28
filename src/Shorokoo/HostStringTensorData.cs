@@ -60,10 +60,8 @@ namespace Shorokoo
         /// checked against the shape.
         ///
         /// <para>Too few is an error; a surplus is not, and is trimmed. That is the same asymmetry
-        /// the numeric literals keep, and it used to be the backend's: <c>CreateStringTensor</c>
-        /// set an element per supplied value into a shape-sized tensor, so a surplus threw at the
-        /// construction site. Holding the array instead would let a tensor outrun its own dims and
-        /// only fail if some session ever materialized it -- which for a program that just
+        /// the numeric literals keep. Holding the whole array would let a tensor outrun its own
+        /// dims and only fail if some session ever materialized it -- which for a program that just
         /// describes a graph and exports it never happens.</para>
         /// </summary>
         /// <exception cref="ArgumentException"><paramref name="values"/> does not cover
@@ -83,10 +81,9 @@ namespace Shorokoo
         /// The elements as they were given, in row-major order. This is the one read of a string
         /// tensor that costs no backend.
         ///
-        /// <para>Exactly <see cref="TensorData.Shape"/>'s worth of them. The backend used to pad a
-        /// short literal with empty strings when it built the value, and that is no longer how a
-        /// short one ends: <see cref="From"/> refuses it, at the construction site, where the
-        /// mistake is.</para>
+        /// <para>Exactly <see cref="TensorData.Shape"/>'s worth of them: <see cref="From"/> refuses
+        /// a short literal at the construction site, where the mistake is, rather than padding it
+        /// with empty strings.</para>
         /// </summary>
         public IReadOnlyList<string> Strings
         {
@@ -121,14 +118,14 @@ namespace Shorokoo
         }
 
         /// <inheritdoc/>
-        public override Span<V> AccessModifiableMemory<V>()
+        private protected override Span<V> AccessModifiableElements<V>()
         {
             ThrowIfDisposed();
             throw NoFlatBuffer();
         }
 
         /// <inheritdoc/>
-        public override ReadOnlySpan<V> AccessMemory<V>()
+        private protected override ReadOnlySpan<V> AccessElements<V>()
         {
             ThrowIfDisposed();
             throw NoFlatBuffer();

@@ -90,7 +90,7 @@ var features = Conv(input, w, b, AutoPad.NotSet,
 TensorData result = OnnxEngine.Eval(features);
 
 // Read the numbers out (see core-types.md):
-float[] values = ((TensorData<float32>)result).CopyMemory<float>();
+float[] values = result.CopyMemory<float>();
 ```
 
 What `Eval` accepts is the trap here:
@@ -164,7 +164,7 @@ var concrete = graph
     .ToConcreteModel();
 
 var results = ComputeContext.Default.Execute(concrete, input);   // params IData[]
-float[] values = results[0].ToTensorData().As<float32>().CopyMemory<float>();
+float[] values = results[0].ToTensorData().CopyMemory<float>();
 ```
 
 When the graph comes from a saved `.srk`/`.zsrk` file, you can catch this mismatch
@@ -267,9 +267,9 @@ does not rest on the stamp alone: it also checks the ops themselves before build
 a session. `Eval` takes output values rather than a `ComputationGraph`, so it has no
 `Kind` to read at all; it is that op check which refuses a module output handed to
 it.
-`ComputationGraph`s are **readonly**: operations that used to modify a graph in
-place return a new graph instead (e.g. `WithRngConfig`), so a graph's `Kind` can
-never be invalidated behind your back.
+`ComputationGraph`s are **readonly**: operations that change a graph return a new
+graph rather than modifying it in place (e.g. `WithRngConfig`), so a graph's `Kind`
+can never be invalidated behind your back.
 
 If a graph arrives with the wrong kind — a foreign import that op-scanning
 misjudged, say — re-stamp it with
@@ -446,7 +446,7 @@ plus `Eval<T>(Tensor<T>)` returning a typed `TensorData<T>`),
 `TensorData` implements it, so pass `TensorData` values directly — as they are, to be consumed,
 or through `.Shared()` or `.TryConsume()`. `Execute`, `Run` and
 `CompiledGraph.Execute` return `NamedModelParam[]`; read each output with
-`namedModelParam.ToTensorData()` then `CopyMemory<T>()`, or `ValueAt<T>(i)` for one element. `ExecuteWithState` returns
+`namedModelParam.ToTensorData()` then `CopyMemory<V>()`, or `ValueAt<V>(i)` for one element, V being the elements' CLR storage type (`float` for `float32`). `ExecuteWithState` returns
 `(NamedModelParam[] regularOutputs, ComputationGraph updatedGraph)` — feed the updated
 graph to the next call. `Eval` is the exception: it returns `TensorData` (or
 `TensorData[]`) directly.

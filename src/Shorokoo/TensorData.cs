@@ -30,68 +30,6 @@ namespace Shorokoo
         {
         }
 
-        /// <summary>Exposes the underlying buffer as a writable span of V (V must match T's storage
-        /// type). The span points straight into the tensor's storage, so it is valid only while the
-        /// tensor is — see <see cref="TensorData.AccessRawMemory"/>.</summary>
-        public abstract Span<V> AccessModifiableMemory<V>() where V : unmanaged;
-
-        /// <summary>
-        /// Fills the buffer through <paramref name="write"/>, with the tensor kept alive for the
-        /// length of the call. This is <see cref="AccessModifiableMemory{V}"/> done safely, and it
-        /// is the write counterpart of <see cref="CopyMemory{V}"/>.
-        ///
-        /// <para>Taking the span is the tensor's last read, so a buffer filled through a bare
-        /// <c>AccessModifiableMemory</c> races the collection that frees what the span points at:
-        /// the tensor is unreachable from that call onwards, and on a backend-allocated buffer the
-        /// runtime value's finalizer hands the block back while the caller is still writing into
-        /// it (Shorokoo/Shorokoo#178). Scope is not reachability. Whatever fills a tensor should
-        /// fill it here.</para>
-        ///
-        /// <para>The tensor is held for the write as a run holds what it reads: a run that would
-        /// consume it, and a delete, are refused until the write is done, rather than taking the
-        /// memory from under it.</para>
-        /// </summary>
-        /// <exception cref="ArgumentNullException"><paramref name="write"/> is null.</exception>
-        /// <exception cref="ObjectDisposedException">The tensor is dead.</exception>
-        /// <exception cref="InvalidOperationException">The tensor is a copy a run made of another to
-        /// read it, which runs read again in that tensor's place.</exception>
-        public void WriteMemory<V>(SpanWriter<V> write) where V : unmanaged
-        {
-            ArgumentNullException.ThrowIfNull(write);
-            Reading(() =>
-            {
-                write(AccessModifiableMemory<V>());
-                // Again, now the write is done: a run that copied the contents while it was under way
-                // holds what was there partway, and that copy would be read by every later run as if
-                // it were what was written.
-                Written();
-                return 0;
-            }, OutsideARun.Writing);
-            GC.KeepAlive(this);
-        }
-
-        /// <summary>
-        /// The elements copied into an array of V the caller owns, valid however long the caller
-        /// keeps it. This is <see cref="AccessMemory{V}"/> plus the copy, done safely: taking a
-        /// span is the tensor's last read, so copying out of one by hand races the collection that
-        /// frees what it points at (Shorokoo/Shorokoo#178). Prefer this wherever the whole buffer
-        /// is being copied anyway.
-        /// </summary>
-        public V[] CopyMemory<V>() where V : unmanaged => Reading(() => AccessMemory<V>().ToArray());
-
-        /// <summary>
-        /// One element, read safely — the single-value counterpart of <see cref="CopyMemory{V}"/>,
-        /// for the very common case of a scalar or a leading element. Reading
-        /// <c>AccessMemory&lt;V&gt;()[i]</c> by hand indexes a span whose tensor the JIT may already
-        /// have retired (Shorokoo/Shorokoo#178).
-        /// </summary>
-        public V ValueAt<V>(int index) where V : unmanaged => Reading(() => AccessMemory<V>()[index]);
-
-        /// <summary>Exposes the underlying buffer as a read-only span of V (V must match T's storage
-        /// type). The span points straight into the tensor's storage, so it is valid only while the
-        /// tensor is — see <see cref="TensorData.AccessRawMemory"/>.</summary>
-        public abstract ReadOnlySpan<V> AccessMemory<V>() where V : unmanaged;
-
         /// <summary>The element values boxed as objects, for debugging/diagnostics.</summary>
         public object[] DebugData
         {
@@ -128,15 +66,16 @@ namespace Shorokoo
                     case Type t when t == typeof(float64):
                         return this.CopyMemory<double>().Cast<object>().ToArray();
                     default:
-                        return this.CopyMemory<byte>().Cast<object>().ToArray();
+                        return this.CopyRawMemory().Cast<object>().ToArray();
                 }
             }
         }
     }
 
     /// <summary>
-    /// Typed AccessMemory / AccessModifiableMemory shortcuts mapping each IVarType
-    /// to its storage primitive (e.g. <see cref="TensorData{T}"/> of bit to bool spans).
+    /// Typed AccessMemory / AccessModifiableMemory / CopyMemory / ValueAt shortcuts mapping each
+    /// IVarType to its storage primitive (e.g. <see cref="TensorData{T}"/> of bit to bool spans), so
+    /// a typed tensor's elements are read without naming their type a second time.
     /// </summary>
     public static class TensorDataExtensions
     {
@@ -191,10 +130,64 @@ namespace Shorokoo
         public static Span<float> AccessModifiableMemory(this TensorData<float32> data) => data.AccessModifiableMemory<float>();
         /// <summary>Writable span over the elements of a <c>float64</c> tensor as <c>double</c>.</summary>
         public static Span<double> AccessModifiableMemory(this TensorData<float64> data) => data.AccessModifiableMemory<double>();
+
+        /// <summary>The elements of a <c>bit</c> tensor copied into a <c>bool</c> array the caller owns.</summary>
+        public static bool[] CopyMemory(this TensorData<bit> data) => data.CopyMemory<bool>();
+        /// <summary>The elements of a <c>int8</c> tensor copied into a <c>sbyte</c> array the caller owns.</summary>
+        public static sbyte[] CopyMemory(this TensorData<int8> data) => data.CopyMemory<sbyte>();
+        /// <summary>The elements of a <c>int16</c> tensor copied into a <c>short</c> array the caller owns.</summary>
+        public static short[] CopyMemory(this TensorData<int16> data) => data.CopyMemory<short>();
+        /// <summary>The elements of a <c>int32</c> tensor copied into a <c>int</c> array the caller owns.</summary>
+        public static int[] CopyMemory(this TensorData<int32> data) => data.CopyMemory<int>();
+        /// <summary>The elements of a <c>int64</c> tensor copied into a <c>long</c> array the caller owns.</summary>
+        public static long[] CopyMemory(this TensorData<int64> data) => data.CopyMemory<long>();
+        /// <summary>The elements of a <c>uint8</c> tensor copied into a <c>byte</c> array the caller owns.</summary>
+        public static byte[] CopyMemory(this TensorData<uint8> data) => data.CopyMemory<byte>();
+        /// <summary>The elements of a <c>uint16</c> tensor copied into a <c>ushort</c> array the caller owns.</summary>
+        public static ushort[] CopyMemory(this TensorData<uint16> data) => data.CopyMemory<ushort>();
+        /// <summary>The elements of a <c>uint32</c> tensor copied into a <c>uint</c> array the caller owns.</summary>
+        public static uint[] CopyMemory(this TensorData<uint32> data) => data.CopyMemory<uint>();
+        /// <summary>The elements of a <c>uint64</c> tensor copied into a <c>ulong</c> array the caller owns.</summary>
+        public static ulong[] CopyMemory(this TensorData<uint64> data) => data.CopyMemory<ulong>();
+        /// <summary>The elements of a <c>float16</c> tensor copied into a <c>Float16</c> array the caller owns.</summary>
+        public static Float16[] CopyMemory(this TensorData<float16> data) => data.CopyMemory<Float16>();
+        /// <summary>The elements of a <c>bfloat16</c> tensor copied into a <c>BFloat16</c> array the caller owns.</summary>
+        public static BFloat16[] CopyMemory(this TensorData<bfloat16> data) => data.CopyMemory<BFloat16>();
+        /// <summary>The elements of a <c>float32</c> tensor copied into a <c>float</c> array the caller owns.</summary>
+        public static float[] CopyMemory(this TensorData<float32> data) => data.CopyMemory<float>();
+        /// <summary>The elements of a <c>float64</c> tensor copied into a <c>double</c> array the caller owns.</summary>
+        public static double[] CopyMemory(this TensorData<float64> data) => data.CopyMemory<double>();
+
+        /// <summary>One element of a <c>bit</c> tensor, as a <c>bool</c>.</summary>
+        public static bool ValueAt(this TensorData<bit> data, int index) => data.ValueAt<bool>(index);
+        /// <summary>One element of a <c>int8</c> tensor, as a <c>sbyte</c>.</summary>
+        public static sbyte ValueAt(this TensorData<int8> data, int index) => data.ValueAt<sbyte>(index);
+        /// <summary>One element of a <c>int16</c> tensor, as a <c>short</c>.</summary>
+        public static short ValueAt(this TensorData<int16> data, int index) => data.ValueAt<short>(index);
+        /// <summary>One element of a <c>int32</c> tensor, as a <c>int</c>.</summary>
+        public static int ValueAt(this TensorData<int32> data, int index) => data.ValueAt<int>(index);
+        /// <summary>One element of a <c>int64</c> tensor, as a <c>long</c>.</summary>
+        public static long ValueAt(this TensorData<int64> data, int index) => data.ValueAt<long>(index);
+        /// <summary>One element of a <c>uint8</c> tensor, as a <c>byte</c>.</summary>
+        public static byte ValueAt(this TensorData<uint8> data, int index) => data.ValueAt<byte>(index);
+        /// <summary>One element of a <c>uint16</c> tensor, as a <c>ushort</c>.</summary>
+        public static ushort ValueAt(this TensorData<uint16> data, int index) => data.ValueAt<ushort>(index);
+        /// <summary>One element of a <c>uint32</c> tensor, as a <c>uint</c>.</summary>
+        public static uint ValueAt(this TensorData<uint32> data, int index) => data.ValueAt<uint>(index);
+        /// <summary>One element of a <c>uint64</c> tensor, as a <c>ulong</c>.</summary>
+        public static ulong ValueAt(this TensorData<uint64> data, int index) => data.ValueAt<ulong>(index);
+        /// <summary>One element of a <c>float16</c> tensor, as a <c>Float16</c>.</summary>
+        public static Float16 ValueAt(this TensorData<float16> data, int index) => data.ValueAt<Float16>(index);
+        /// <summary>One element of a <c>bfloat16</c> tensor, as a <c>BFloat16</c>.</summary>
+        public static BFloat16 ValueAt(this TensorData<bfloat16> data, int index) => data.ValueAt<BFloat16>(index);
+        /// <summary>One element of a <c>float32</c> tensor, as a <c>float</c>.</summary>
+        public static float ValueAt(this TensorData<float32> data, int index) => data.ValueAt<float>(index);
+        /// <summary>One element of a <c>float64</c> tensor, as a <c>double</c>.</summary>
+        public static double ValueAt(this TensorData<float64> data, int index) => data.ValueAt<double>(index);
     }
 
     /// <summary>
-    /// Fills a tensor's buffer in place. Used by <see cref="TensorData{T}.WriteMemory{V}"/>, which
+    /// Fills a tensor's buffer in place. Used by <see cref="TensorData.WriteMemory{V}"/>, which
     /// keeps the tensor reachable for the length of the call — which a bare span does not.
     /// </summary>
     public delegate void SpanWriter<V>(Span<V> destination) where V : unmanaged;
@@ -398,6 +391,138 @@ namespace Shorokoo
         public byte[] CopyRawMemory() => Reading(() => AccessRawMemory().ToArray());
 
         /// <summary>
+        /// Exposes the elements as a writable span of V, V being this tensor's element storage type
+        /// — <c>float</c> for float32, <c>bool</c> for bit, <c>long</c> for int64. The span points
+        /// straight into the tensor's storage, so it is valid only while the tensor is — see
+        /// <see cref="AccessRawMemory"/>. <see cref="WriteMemory{V}"/> is the safe form.
+        /// </summary>
+        /// <exception cref="InvalidCastException">V is not this tensor's element storage type.</exception>
+        public Span<V> AccessModifiableMemory<V>() where V : unmanaged
+        {
+            ThrowIfDisposed();
+            CheckElementType<V>();
+            return AccessModifiableElements<V>();
+        }
+
+        /// <summary>
+        /// Fills the buffer through <paramref name="write"/>, with the tensor kept alive for the
+        /// length of the call. This is <see cref="AccessModifiableMemory{V}"/> done safely, and it
+        /// is the write counterpart of <see cref="CopyMemory{V}"/>.
+        ///
+        /// <para>Taking the span is the tensor's last read, so a buffer filled through a bare
+        /// <c>AccessModifiableMemory</c> races the collection that frees what the span points at:
+        /// the tensor is unreachable from that call onwards, and on a backend-allocated buffer the
+        /// runtime value's finalizer hands the block back while the caller is still writing into
+        /// it (Shorokoo/Shorokoo#178). Scope is not reachability. Whatever fills a tensor should
+        /// fill it here.</para>
+        ///
+        /// <para>The tensor is held for the write as a run holds what it reads: a run that would
+        /// consume it, and a delete, are refused until the write is done, rather than taking the
+        /// memory from under it.</para>
+        /// </summary>
+        /// <exception cref="ArgumentNullException"><paramref name="write"/> is null.</exception>
+        /// <exception cref="InvalidCastException">V is not this tensor's element storage type.</exception>
+        /// <exception cref="ObjectDisposedException">The tensor is dead.</exception>
+        /// <exception cref="InvalidOperationException">The tensor is a copy a run made of another to
+        /// read it, which runs read again in that tensor's place.</exception>
+        public void WriteMemory<V>(SpanWriter<V> write) where V : unmanaged
+        {
+            ArgumentNullException.ThrowIfNull(write);
+            Reading(() =>
+            {
+                write(AccessModifiableMemory<V>());
+                // Again, now the write is done: a run that copied the contents while it was under way
+                // holds what was there partway, and that copy would be read by every later run as if
+                // it were what was written.
+                Written();
+                return 0;
+            }, OutsideARun.Writing);
+            GC.KeepAlive(this);
+        }
+
+        /// <summary>
+        /// The elements copied into an array of V the caller owns, valid however long the caller
+        /// keeps it. V is this tensor's element storage type — <c>float</c> for float32 — and
+        /// <see cref="CopyRawMemory"/> is the same copy as bytes, for any dtype. This is
+        /// <see cref="AccessMemory{V}"/> plus the copy, done safely: taking a span is the tensor's
+        /// last read, so copying out of one by hand races the collection that frees what it points
+        /// at (Shorokoo/Shorokoo#178). Prefer this wherever the whole buffer is being copied anyway.
+        /// </summary>
+        /// <exception cref="InvalidCastException">V is not this tensor's element storage type.</exception>
+        public V[] CopyMemory<V>() where V : unmanaged => Reading(() => AccessMemory<V>().ToArray());
+
+        /// <summary>
+        /// One element, read safely — the single-value counterpart of <see cref="CopyMemory{V}"/>,
+        /// for the very common case of a scalar or a leading element. Reading
+        /// <c>AccessMemory&lt;V&gt;()[i]</c> by hand indexes a span whose tensor the JIT may already
+        /// have retired (Shorokoo/Shorokoo#178).
+        /// </summary>
+        /// <exception cref="InvalidCastException">V is not this tensor's element storage type.</exception>
+        public V ValueAt<V>(int index) where V : unmanaged => Reading(() => AccessMemory<V>()[index]);
+
+        /// <summary>
+        /// Exposes the elements as a read-only span of V, V being this tensor's element storage
+        /// type. The span points straight into the tensor's storage, so it is valid only while the
+        /// tensor is — see <see cref="AccessRawMemory"/>. <see cref="CopyMemory{V}"/> and
+        /// <see cref="ValueAt{V}"/> are the safe forms.
+        /// </summary>
+        /// <exception cref="InvalidCastException">V is not this tensor's element storage type.</exception>
+        public ReadOnlySpan<V> AccessMemory<V>() where V : unmanaged
+        {
+            ThrowIfDisposed();
+            CheckElementType<V>();
+            return AccessElements<V>();
+        }
+
+        /// <summary>The storage as a writable span of V, V already checked to be the element
+        /// storage type.</summary>
+        private protected abstract Span<V> AccessModifiableElements<V>() where V : unmanaged;
+
+        /// <summary>The storage as a read-only span of V, V already checked to be the element
+        /// storage type.</summary>
+        private protected abstract ReadOnlySpan<V> AccessElements<V>() where V : unmanaged;
+
+        /// <summary>
+        /// Throws unless V is the CLR type this tensor's elements are stored as: one per dtype, and
+        /// <c>byte</c> for the four-bit types, whose elements pack two to a byte. Every element read
+        /// goes through here, so a buffer is never reinterpreted as a type it does not hold. A string
+        /// tensor is let through, to be refused for having no flat buffer at all.
+        /// </summary>
+        private void CheckElementType<V>() where V : unmanaged
+        {
+            if (DType.IsSameElementTypeAs(DType.Utf8)) return;
+            var storage = StorageTypeOf(DType);
+            if (storage != typeof(V))
+                throw new InvalidCastException(storage is null
+                    ? $"This tensor's elements are {DType}, which have no element type to read them as; "
+                        + "CopyRawMemory() gives the bytes."
+                    : $"This tensor's elements are {DType}, stored as {storage.Name}; "
+                        + $"they cannot be read as {typeof(V).Name}.");
+        }
+
+        /// <summary>The CLR type <paramref name="dtype"/>'s elements are stored as, or null for one
+        /// without a single element type.</summary>
+        internal static Type? StorageTypeOf(DType dtype)
+        {
+            dtype = dtype.ToNonGenericType();
+            if (dtype.IsSameElementTypeAs(DType.Bool)) return typeof(bool);
+            if (dtype.IsSameElementTypeAs(DType.Int8)) return typeof(sbyte);
+            if (dtype.IsSameElementTypeAs(DType.Int16)) return typeof(short);
+            if (dtype.IsSameElementTypeAs(DType.Int32)) return typeof(int);
+            if (dtype.IsSameElementTypeAs(DType.Int64)) return typeof(long);
+            if (dtype.IsSameElementTypeAs(DType.UInt8)) return typeof(byte);
+            if (dtype.IsSameElementTypeAs(DType.UInt16)) return typeof(ushort);
+            if (dtype.IsSameElementTypeAs(DType.UInt32)) return typeof(uint);
+            if (dtype.IsSameElementTypeAs(DType.UInt64)) return typeof(ulong);
+            if (dtype.IsSameElementTypeAs(DType.Float16)) return typeof(Float16);
+            if (dtype.IsSameElementTypeAs(DType.BFloat16)) return typeof(BFloat16);
+            if (dtype.IsSameElementTypeAs(DType.Float32)) return typeof(float);
+            if (dtype.IsSameElementTypeAs(DType.Float64)) return typeof(double);
+            if (dtype.IsSameElementTypeAs(DType.Int4) || dtype.IsSameElementTypeAs(DType.UInt4)) return typeof(byte);
+            return null;
+        }
+
+        /// <summary>
         /// Whether this tensor's storage is host memory, so the <c>Access…Memory</c> accessors
         /// may be called. Like every path to the elements it throws once the tensor is dead, rather
         /// than answering about storage that is gone — ask <see cref="IsDisposed"/> first if a
@@ -416,7 +541,10 @@ namespace Shorokoo
         }
 
         /// <summary>Downcasts to the typed <see cref="TensorData{T}"/>; T must match the actual element type.</summary>
-        public TensorData<T> As<T>() where T : IVarType => (TensorData<T>)this;
+        /// <exception cref="InvalidCastException">T is not this tensor's element type.</exception>
+        public TensorData<T> As<T>() where T : IVarType => this as TensorData<T>
+            ?? throw new InvalidCastException(
+                $"This tensor's elements are {DType}; it is not a TensorData<{typeof(T).Name}>.");
 
         /// <summary>
         /// Creates TensorData backed by an existing backend-runtime tensor value, without saying
@@ -457,10 +585,10 @@ namespace Shorokoo
         /// host memory belonging to no backend, the same thing <see cref="NewHostTensor"/> makes.
         ///
         /// <para>Raw bytes are what a tensor read out of a model file, or zeroed for a gradient
-        /// buffer, already is; wrapping them describes data rather than running anything. This
-        /// went through <c>DefaultBackend.Instance</c> instead, so reading an <c>.onnx</c> file
-        /// resolved the process-wide backend and put a native allocation behind every initializer
-        /// in it. The value is built when a session is fed this tensor, in
+        /// buffer, already is; wrapping them describes data rather than running anything. Going
+        /// through <c>DefaultBackend.Instance</c> would make reading an <c>.onnx</c> file resolve
+        /// the process-wide backend and put a native allocation behind every initializer in it. The
+        /// value is built when a session is fed this tensor, in
         /// <see cref="ToTensorValue(IShorokooBackend)"/>, and not before.</para>
         ///
         /// <para>Exactly <paramref name="shape"/>'s worth of <paramref name="data"/> becomes the
@@ -609,16 +737,6 @@ namespace Shorokoo
             }
         }
 
-        /// <summary>The raw storage bytes boxed as objects, for debugging/diagnostics.</summary>
-        public override object[] Data
-        {
-            get
-            {
-                if (DType.IsSameElementTypeAs(DType.Utf8)) return [.. StringElements()];
-                return this.CopyMemory<byte>().Cast<object>().ToArray();
-            }
-        }
-
         /// <summary>
         /// Creates TensorData of the given shape around an existing runtime tensor value, without
         /// saying which backend made it; the dtype is derived from T. The tensor takes the value
@@ -733,7 +851,7 @@ namespace Shorokoo
         /// tensor, since the contents they were copied from are about to change: the next run makes
         /// a fresh one, and a run still reading an old copy finishes on it.
         /// </summary>
-        public override Span<V> AccessModifiableMemory<V>()
+        private protected override Span<V> AccessModifiableElements<V>()
         {
             var value = this.HostValue;
             Written();
@@ -741,13 +859,13 @@ namespace Shorokoo
         }
 
         /// <inheritdoc/>
-        public override ReadOnlySpan<V> AccessMemory<V>()
+        private protected override ReadOnlySpan<V> AccessElements<V>()
         {
             return this.HostValue.GetTensorDataAsSpan<V>();
         }
 
         /// <summary>A writable byte span over the storage, retiring the copies runs made of this
-        /// tensor as <see cref="AccessModifiableMemory{V}"/> does.</summary>
+        /// tensor as <see cref="TensorData.AccessModifiableMemory{V}"/> does.</summary>
         public override Span<byte> AccessModifiableRawMemory()
         {
             var value = this.HostValue;

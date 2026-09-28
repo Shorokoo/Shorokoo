@@ -401,20 +401,22 @@ namespace Shorokoo.Core.Nodes.AutoDiff
 
                 // `data` is typically a table of which a step reads a few rows, so everything
                 // here but the last op is sized by the M index positions, not by the table.
-                // Each row read is given one slot: the highest position that reads it (negative
-                // and non-negative spellings of a row share one, since ScatterND and Gather both
-                // resolve them). The rows no position reads keep -1, which Gather resolves to the
-                // last slot, M, which nothing is summed into. grad's rows are summed into their
-                // row's slot in position order, onto zero — exactly the sums a ScatterND-Add into
-                // a zeroed table makes — and one Gather by slot then writes the table-shaped
-                // gradient in a single pass, rather than zero-filling the table and scattering
-                // into a copy of it.
+                // Each row read is given one slot: the number of one of the positions that read
+                // it. Where several do, which one ScatterND keeps is unspecified and does not
+                // matter — every position then reads that row's one slot back — and a plain
+                // ScatterND is what every execution provider runs on int64 (CUDA reduces only
+                // float types). Negative and non-negative spellings of a row share its slot,
+                // since ScatterND and Gather both resolve them. The rows no position reads keep
+                // -1, which Gather resolves to the last slot, M, which nothing is summed into.
+                // grad's rows are summed into their row's slot in position order, onto zero —
+                // exactly the sums a ScatterND-Add into a zeroed table makes — and one Gather by
+                // slot then writes the table-shaped gradient in a single pass, rather than
+                // zero-filling the table and scattering into a copy of it.
                 Tensor<int64> positionCount = OnnxOp.Shape(flatIndices);                              // [M]
                 Tensor<int64> positions = OnnxOp.Range(
                     Scalar(0L), OnnxOp.Squeeze(positionCount, Vector(0L)), Scalar(1L));                 // [M]
                 Tensor<int64> unread = OnnxOp.Expand(Scalar(-1L), OnnxOp.Shape(data, start: 0, end: 1)); // [V]
-                Tensor<int64> slotOfRow = OnnxOp.ScatterND(
-                    unread, scatterIndices, positions, ScatterNDReduction.Max);                          // [V]
+                Tensor<int64> slotOfRow = OnnxOp.ScatterND(unread, scatterIndices, positions);            // [V]
                 Tensor<int64> slotOfPosition = OnnxOp.Gather(slotOfRow, flatIndices, axis: 0);           // [M]
                 Tensor<int64> slotsShape = OnnxOp.Concat([positionCount + Vector(1L), tailShape], axis: 0);
                 Tensor<T1> slots = OnnxOp.ScatterND(

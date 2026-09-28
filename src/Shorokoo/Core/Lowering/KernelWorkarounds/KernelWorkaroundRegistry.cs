@@ -27,6 +27,7 @@ internal static class KernelWorkaroundRegistry
         new IntegerEmptyReduceExtremeWorkaround(),
         new MaxPoolLowestValueIndexWorkaround(),
         new PoolPaddingWorkaround(),
+        new ConvTransposeSamePaddingWorkaround(),
         new Col2ImOneAxisWorkaround(),
         new CropAndResizeRoiWorkaround(),
         new CubicResizeMiddleAxesWorkaround(),

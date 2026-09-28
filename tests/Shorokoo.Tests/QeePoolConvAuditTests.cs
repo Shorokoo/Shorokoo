@@ -180,6 +180,16 @@ public class QeePoolConvAuditTests
         Assert.True(PlainMaxPool(DType.Float64, AsFloat64, [N, N, L, N], N, L, L));
     }
 
+    internal static readonly double[] ConvTransposeSameStridedPastTheKernel = [0.5, 1.5, 0.5, 0.5, 2.5, 0.5, 0.5, 3.5, 0.5,
+        0.5, 1.5, 0.5, 0.5, 2.5, 0.5, 0.5, 3.5, 0.5, 0.5, 0.5, 1.5, 0.5, 0.5, 0.5, 2.5, 0.5, 0.5, 0.5, 3.5, 0.5,
+        0.5, 1.5, 0.5, 0.5, 0.5, 2.5, 0.5, 0.5, 0.5, 3.5, 0.5, 0.5, 0.5, 1.5, 10.5, 0.5, 0.5, 2.5, 20.5, 0.5, 0.5, 3.5, 30.5, 0.5,
+        1.5, 10.5, 0.5, 0.5, 2.5, 20.5, 0.5, 0.5, 3.5, 30.5, 0.5, 0.5];
+
+    [Fact]
+    public void TestConvTransposeSameStridedPastTheKernelExtendsTheOutputAsTheSpecDoes()
+        => Assert.True(AutoTest.AdvancedTestGraph<ConvTransposeSameStridedPastTheKernelValues>([],
+            [F32([1L, 1L, 3L], 1f, 2f, 3f)], expected: ConvTransposeSameStridedPastTheKernel));
+
     [Fact]
     public void TestConvTransposeOutputShapeBeyondTheFullExtentIsRefused()
     {

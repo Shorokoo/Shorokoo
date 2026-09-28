@@ -676,6 +676,25 @@ namespace Shorokoo.Tests.Modules
                 OnnxOp.Cast(OnnxOp.Reshape(y, Vector(1L, 1L, -1L), false), null, DType.Float64));
     }
 
+    /// <summary>ConvTranspose SAME_UPPER then SAME_LOWER, bias 0.5, whose stride exceeds the kernel's extent plus the
+    /// output padding: w [1] with s 3 and s 4, then kernel_shape [2], w [1,10], s 4, output_padding 1, each flattened.
+    /// Input x is [1,1,3].</summary>
+    [Module]
+    public partial class ConvTransposeSameStridedPastTheKernelValues
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x)
+        {
+            var w1 = Vector(1f).Reshape(Vector(1L, 1L, 1L));
+            var w2 = Vector(1f, 10f).Reshape(Vector(1L, 1L, 2L));
+            Tensor<float32> T(AutoPad same, Tensor<float32> w, long[]? kernel, long stride, long[]? outputPadding)
+                => ((Tensor<float32>)OnnxOp.ConvTranspose(x, w, Vector(0.5f), same, null, 1L, kernel, outputPadding, null, null, [stride]))
+                    .Reshape(Vector(-1L));
+            return T(AutoPad.SameUpper, w1, null, 3L, null).Concat(0L, T(AutoPad.SameLower, w1, null, 3L, null))
+                .Concat(0L, T(AutoPad.SameUpper, w1, null, 4L, null)).Concat(0L, T(AutoPad.SameLower, w1, null, 4L, null))
+                .Concat(0L, T(AutoPad.SameUpper, w2, [2L], 4L, [1L])).Concat(0L, T(AutoPad.SameLower, w2, [2L], 4L, [1L]));
+        }
+    }
+
     /// <summary>ConvTranspose whose output_shape exceeds the full extent by a whole stride.
     /// x and w are [1,1,2,2], b is [1].</summary>
     [Module]

@@ -83,6 +83,10 @@ public class JaxBackendCoverageTests
     public void TestMaxPoolIndicesComputeTheSpecValuesOnJax() => MaxPoolIndicesComputeTheSpecValues(new ComputeContext(Jax));
 
     [Fact]
+    public void TestConvTransposeSameStridedPastTheKernelComputesTheSpecValuesOnJax()
+        => ConvTransposeSameStridedPastTheKernelComputesTheSpecValues(new ComputeContext(Jax));
+
+    [Fact]
     public void TestMaxPoolIndexOfALowestValuedWindowIsItsFirstInputPositionOnJax()
         => LowestValuedWindowMaxPoolIndexIsItsFirstInputPosition(new ComputeContext(Jax));
 

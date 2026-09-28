@@ -230,6 +230,10 @@ public class PyTorchBackendCoverageTests
     public void TestMaxPoolIndicesComputeTheSpecValuesOnTorch() => MaxPoolIndicesComputeTheSpecValues(new ComputeContext(Torch));
 
     [Fact]
+    public void TestConvTransposeSameStridedPastTheKernelComputesTheSpecValuesOnTorch()
+        => ConvTransposeSameStridedPastTheKernelComputesTheSpecValues(new ComputeContext(Torch));
+
+    [Fact]
     public void TestMaxPoolIndexOfALowestValuedWindowIsItsFirstInputPositionOnTorch()
         => LowestValuedWindowMaxPoolIndexIsItsFirstInputPosition(new ComputeContext(Torch));
 
@@ -305,6 +309,10 @@ public class PyTorchBackendCoverageTests
         Assert.True(Spec<NegativeSamePaddingMaxPoolIndicesValues>(c, QeeAudit.F32([1L, 2L, 5L, 6L], [.. Enumerable.Range(0, 60).Select(i => (float)(i * 7 % 11 - 5))]),
             4, -1, 5, 4, 5, 0, -1, 5, 6, 10, 25, 28, 36, 40, 54, 58, 2, 1, 5, 4, 3, 2, -3, 5, 1, 4, 25, 28, 31, 34, 49, 58));
     }
+
+    internal static void ConvTransposeSameStridedPastTheKernelComputesTheSpecValues(ComputeContext c)
+        => Assert.True(Spec<ConvTransposeSameStridedPastTheKernelValues>(c, QeeAudit.F32([1L, 1L, 3L], 1f, 2f, 3f),
+            QeePoolConvAuditTests.ConvTransposeSameStridedPastTheKernel));
 
     internal static void LowestValuedWindowMaxPoolIndexIsItsFirstInputPosition(ComputeContext c)
         => Assert.True(Spec<LowestValueWindowMaxPoolIndicesValues>(c, QeeAudit.F32([1L, 1L, 5L], 0f, 0f, 5f, 0f, 0f), 0, 2, 2, 3, 0, 2, 2, 3, 0, 1, 2, 1, 2, 3, 4));

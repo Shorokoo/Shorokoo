@@ -182,7 +182,9 @@ def conv_transpose(x, w, b=None, /, *, auto_pad="NOTSET", dilations=None, group=
     elif auto_pad in ("SAME_UPPER", "SAME_LOWER"):
         begins, ends = [], []
         for size, s, f, e in zip(sizes, strides, full, extra):
-            total = max(0, f + e - size * s)
+            # Negative when the stride exceeds the kernel's extent plus the output padding: the
+            # output then reaches past the full transposed convolution, split by floor halves.
+            total = f + e - size * s
             if auto_pad == "SAME_UPPER":
                 begins.append(total // 2)
                 ends.append(total - total // 2)

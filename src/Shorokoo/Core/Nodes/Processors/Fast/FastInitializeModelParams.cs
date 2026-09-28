@@ -601,11 +601,17 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         /// <summary>
-        /// Whether two slices of the initialization graph are the same graph up to the identity of
-        /// their tensors: node for node the same op, attributes, names, target function and wiring.
-        /// Such slices build the same backend model, so either one's session computes the other's
-        /// value from the other's inputs. Only a stream key differs between the slices of
-        /// same-shaped parameters, and a key is an input, not part of the graph.
+        /// Whether two slices of the initialization graph compute the same thing up to the identity
+        /// of their tensors: node for node the same op, attributes, target function and wiring. Such
+        /// slices build backend models that differ at most in names, so either one's session
+        /// computes the other's value from the other's inputs. Only a stream key differs between
+        /// the slices of same-shaped parameters, and a key is an input, not part of the graph.
+        ///
+        /// <para>What a node carries for a reader rather than for the computation is not compared:
+        /// its stack trace, friendly name and parameter-name template. They differ between
+        /// parameters declared on different source lines, or read back from a file, and at most
+        /// name things in the model the backend is handed; comparing them would give each such
+        /// parameter a session of its own for nothing.</para>
         ///
         /// <para>Conservative by construction: anything it cannot show equal — an attribute of a
         /// kind it does not know, a read of a tensor not yet produced — counts as different, which
@@ -621,8 +627,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             {
                 var x = a.Nodes[i];
                 var y = b.Nodes[i];
-                if (x.OpCode != y.OpCode || x.FriendlyName != y.FriendlyName || x.StackTrace != y.StackTrace ||
-                    x.IdentifierTemplate != y.IdentifierTemplate || !ReferenceEquals(x.TargetFunction, y.TargetFunction))
+                if (x.OpCode != y.OpCode || !ReferenceEquals(x.TargetFunction, y.TargetFunction))
                     return false;
                 if (x.GraphOpenNodeKey is { } openX
                         ? y.GraphOpenNodeKey is not { } openY || !nodes.TryGetValue(openX, out var mapped) || !mapped.Equals(openY)

@@ -174,6 +174,42 @@ public class CSharpModelBuilderCoverageTests
     }
 
     [Fact]
+    public void TestNonFiniteFloatingPointConstantsCodegenSourceThatRebuildsThem()
+    {
+        AssertRoundTrips(new InternalComputationGraph([], [Vector(float.NegativeInfinity, float.PositiveInfinity, float.NaN, 1.5f).ToVariable()]), []);
+        AssertRoundTrips(new InternalComputationGraph([], [Vector(double.NegativeInfinity, double.PositiveInfinity, double.NaN, 1.5).ToVariable()]), []);
+        AssertRoundTrips(new InternalComputationGraph([], [Scalar(float.NegativeInfinity).ToVariable()]), []);
+        AssertRoundTrips(new InternalComputationGraph([], [Scalar(double.NaN).ToVariable()]), []);
+        AssertRoundTrips(new InternalComputationGraph([], [OnnxOp.LeakyRelu(Tensor([1L, 2L], -1f, 2f).ToVariable(), alpha: float.PositiveInfinity)]), []);
+    }
+
+    [Fact]
+    public void TestMaxPoolsCodegenSourceThatRebuildsThem()
+    {
+        Variable x = Tensor([1L, 1L, 5L], 3f, -1f, 4f, 1f, -5f);
+        AssertRoundTrips(new InternalComputationGraph([], [OnnxOp.MaxPool(x, AutoPad.NotSet, true, [2L], [2L], [1L, 1L], 0L, [2L])]), []);
+        AssertRoundTrips(new InternalComputationGraph([], [OnnxOp.MaxPoolWithIndices(x, AutoPad.SameUpper, false, null, [3L], null, 0L, [2L]).indices]), []);
+        AssertRoundTrips(new InternalComputationGraph([], [OnnxOp.MaxPool(OnnxOp.Cast(x, null, DType.Int8), null, null, null, [2L], [1L, 0L], null, null)]), []);
+    }
+
+    [Fact]
+    public void TestAMinOfScalarsCodegensSourceThatCompiles()
+        => AssertCodegens(new InternalComputationGraph([], [OnnxOp.Min(Scalar(1f), Scalar(-2f), Scalar(3f))]));
+
+    [Fact]
+    public void TestAConstantPadWithItsDefaultModeCodegensSourceThatCompiles()
+        => AssertCodegens(new InternalComputationGraph([], [OnnxOp.Pad(Tensor([1L, 2L], 1f, 2f), Vector(0L, 1L, 0L, 2L), Scalar(-1f))]));
+
+    [Fact]
+    public void TestPoolsWhosePaddingReachesTheKernelRebuildFromTheirSource()
+    {
+        TensorData[] x = [TensorData([1L, 1L, 9L], [.. Enumerable.Range(-4, 9).Select(i => (float)i)])];
+        AssertRebuildsUnchanged(PadsReachingTheKernelPoolValues.ComputationGraph.ToInternal(), x);
+        AssertRebuildsUnchanged(SameWideDilationPoolValues.ComputationGraph.ToInternal(), x);
+        AssertRebuildsUnchanged(CeilModePadsReachingTheKernelPoolValues.ComputationGraph.ToInternal(), x);
+    }
+
+    [Fact]
     public void TestCodegenedSourceRebuildsTheGraphItCameFrom()
     {
         TensorData[] two = [TensorData([], 1f), TensorData([], 2f)];

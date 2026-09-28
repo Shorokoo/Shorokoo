@@ -100,8 +100,8 @@ namespace Shorokoo.Core.Factory.CSharpFactory
             if (dtype == DType.Int64 || dtype == DType.UInt64)
                 return Convert.ToInt64(value, invariant).ToString(invariant) + "L";
             if (dtype == DType.Float64)
-                return Convert.ToDouble(value, invariant).ToString("R", invariant) + "d";
-            return Convert.ToSingle(value, invariant).ToString("R", invariant) + "f";
+                return DoubleLiteral(Convert.ToDouble(value, invariant));
+            return FloatLiteral(Convert.ToSingle(value, invariant));
         }
 
         public static string GetTypeDefString(Variable Variable)
@@ -680,12 +680,12 @@ public static class " + modelName + @"
             }
             else if (tensorDataAttribute.DType == DType.Float32)
             {
-                var paramList = tensorDataAttribute.Elements<float>().ToArray().Select(x => $"{Literal(x)}f");
+                var paramList = tensorDataAttribute.Elements<float>().ToArray().Select(FloatLiteral);
                 dataParams = string.Join(", ", paramList);
             }
             else if (tensorDataAttribute.DType == DType.Float64)
             {
-                var paramList = tensorDataAttribute.Elements<double>().ToArray().Select(x => $"{Literal(x)}d");
+                var paramList = tensorDataAttribute.Elements<double>().ToArray().Select(DoubleLiteral);
                 dataParams = string.Join(", ", paramList);
             }
             else if (tensorDataAttribute.DType == DType.Int16)
@@ -1348,6 +1348,22 @@ public static class " + modelName + @"
         private static string Literal<T>(T value) where T : IFormattable
             => value.ToString(null, System.Globalization.CultureInfo.InvariantCulture);
 
+        /// <summary>A <see cref="float"/> as C# spells it: a suffixed literal, or the
+        /// <see cref="float"/> constant naming an infinity or NaN.</summary>
+        private static string FloatLiteral(float value)
+            => float.IsNaN(value) ? "float.NaN"
+                : float.IsPositiveInfinity(value) ? "float.PositiveInfinity"
+                : float.IsNegativeInfinity(value) ? "float.NegativeInfinity"
+                : Literal(value) + "f";
+
+        /// <summary>A <see cref="double"/> as C# spells it: a suffixed literal, or the
+        /// <see cref="double"/> constant naming an infinity or NaN.</summary>
+        private static string DoubleLiteral(double value)
+            => double.IsNaN(value) ? "double.NaN"
+                : double.IsPositiveInfinity(value) ? "double.PositiveInfinity"
+                : double.IsNegativeInfinity(value) ? "double.NegativeInfinity"
+                : Literal(value) + "d";
+
         private static string EscapeString(string input)
         {
             return input.Replace("\\", "\\\\")
@@ -1506,7 +1522,7 @@ public static class " + modelName + @"
                     else if (attrType is AttributeType.Long)
                         attrValue = Literal(attributes.GetLongVal(attrName).AssertNotNull()) + "L";
                     else if (attrType is AttributeType.Float)
-                        attrValue = Literal(attributes.GetFloatVal(attrName).AssertNotNull()) + "f";
+                        attrValue = FloatLiteral(attributes.GetFloatVal(attrName).AssertNotNull());
                     else if (attrType is AttributeType.Bool)
                         attrValue = attributes.GetBoolVal(attrName).AssertNotNull() ? "true" : "false";
                     else if (attrType is AttributeType.String)
@@ -1542,7 +1558,7 @@ public static class " + modelName + @"
                     else if (attrType is AttributeType.Longs)
                         attrValue = listOf(attributes.GetLongsVal(attrName).AssertNotNull().Select(x => $"{Literal(x)}L"), "long");
                     else if (attrType is AttributeType.Floats)
-                        attrValue = listOf(attributes.GetFloatsVal(attrName).AssertNotNull().Select(x => $"{Literal(x)}f"), "float");
+                        attrValue = listOf(attributes.GetFloatsVal(attrName).AssertNotNull().Select(FloatLiteral), "float");
                     else if (attrType is AttributeType.Bools)
                         attrValue = listOf(attributes.GetBoolsVal(attrName).AssertNotNull().Select(x => x ? "true" : "false"), "bool");
                     else if (attrType is AttributeType.Strings)

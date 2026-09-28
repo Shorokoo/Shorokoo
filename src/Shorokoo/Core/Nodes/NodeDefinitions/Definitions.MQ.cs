@@ -66,7 +66,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("X", "T", "R")  // X
                 .Output("Y", "T", rank: "R") // Y
                 .Output("Indices", "T2?", rank: "R2") // Indices (int64 per spec)
-                .Code("NN.MaxPoolWithIndices({{1:param}{c:param}{d:param}{e:param}{f:param}{g:param}{h:param}{b:param})")
+                .Code("(Shorokoo.Core.Nodes.NodeDefinitions.OnnxOp.MaxPoolWithIndices({1:param}{a:param}{b:param}{c:param}{d:param}{e:param}{f:param}{g:param}) switch { var (maxPoolY, maxPoolIndices) => (maxPoolY{o1:fromvar}, maxPoolIndices{o2:fromvar}) })")
 
                 .Constraint(InternalAttrHasOptionalOutputs, 0)
                 .AttributeTestValues(InternalAttrHasOptionalOutputs, [0L])
@@ -80,7 +80,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("X", "T", "R")  // X
                 .Output("Y", "T", rank: "R") // Y
                 .Output("Indices", "T2?", rank: "R2") // Indices (int64 per spec)
-                .Code("NN.MaxPool({{1:param}{c:param}{d:param}{e:param}{f:param}{g:param}{h:param}{b:param})"),
+                .Code("(Shorokoo.Core.Nodes.NodeDefinitions.OnnxOp.MaxPool({1:param}{a:param}{b:param}{c:param}{d:param}{e:param}{f:param}{g:param}){o1:fromvar}, 0)"),
 
             Op(MAX_UNPOOL)
                 .Tensor<FloatLike>("T")

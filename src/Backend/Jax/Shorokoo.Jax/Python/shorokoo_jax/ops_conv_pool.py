@@ -270,16 +270,11 @@ def max_pool(x, /, *, auto_pad="NOTSET", ceil_mode=0, dilations=None, kernel_sha
     if _outputs < 2 and all(d == 1 for d in dilations):
         return (_window_reduce(padded, _lowest(x.dtype), jax.lax.max, kernel, strides, dilations),)
     # JAX differentiates a windowed max only undilated; the kernel's taps stacked are, and name
-    # the first maximum as well.
+    # the first maximum as well. ONNX's indices count positions in the whole unpadded tensor,
+    # row-major, or with the spatial dims column-major for storage_order 1; a padded tap sits at
+    # position -1. It holds the lowest value, which an input tap may hold too, so the first
+    # maximum is the first input tap holding the window's maximum (or NaN).
     xp = _rt.xp(x)
-    taps = _taps(padded, kernel, strides, dilations, outs)
-    first = xp.argmax(_rt.detach(taps), axis=0)
-    y = xp.take_along_axis(taps, first[None], axis=0)[0]
-    if _outputs < 2:
-        return (y,)
-    # ONNX's indices count positions in the whole unpadded tensor, row-major, or with the spatial
-    # dims column-major for storage_order 1. A padded tap holds the lowest value, so it is a
-    # window's first maximum only before a tap that holds it too.
     sizes = list(x.shape[2:])
     strides_of = [0] * n
     scale = 1
@@ -291,9 +286,16 @@ def max_pool(x, /, *, auto_pad="NOTSET", ceil_mode=0, dilations=None, kernel_sha
         position = position + (np.arange(sizes[i], dtype=np.int64) * strides_of[i]).reshape(
             [-1 if j == i else 1 for j in range(n)])
     channel = np.arange(x.shape[0] * x.shape[1], dtype=np.int64).reshape(list(x.shape[:2]) + [1] * n)
-    position = _pad_spatial(position + channel * math.prod(sizes), begins, fits)
-    indices = xp.take_along_axis(_taps(position, kernel, strides, dilations, outs), first[None], axis=0)[0]
-    return y, indices
+    position = _taps(_pad_spatial(position + channel * math.prod(sizes), begins, fits, -1),
+                     kernel, strides, dilations, outs)
+    taps = _taps(padded, kernel, strides, dilations, outs)
+    values = _rt.detach(taps)
+    top = values.max(axis=0)
+    first = xp.argmax(((values == top) | xp.isnan(values)) & (position >= 0), axis=0)
+    y = xp.take_along_axis(taps, first[None], axis=0)[0]
+    if _outputs < 2:
+        return (y,)
+    return y, xp.take_along_axis(position, first[None], axis=0)[0]
 
 
 def average_pool(x, /, *, auto_pad="NOTSET", ceil_mode=0, count_include_pad=0, dilations=None,

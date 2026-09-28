@@ -402,9 +402,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         ///
         /// <para>A failure stops new runs from starting, and those in flight finish. Runs start in
         /// parameter order, so every parameter before a failed one has been run by then, and the
-        /// failure reported is the first parameter's in order that failed — the one a run in turn
-        /// would have reported, named as it would have been (CR008). Every session is disposed
-        /// however the runs end.</para>
+        /// failure reported is the first parameter's in order that failed, named as CR008. A run
+        /// in turn (<see cref="RunInTurn"/>) walks group by group instead, the groups in the order
+        /// of their first parameters; it reports the same parameter wherever a failure is the
+        /// slice's rather than the moment's — the parameters of one group run one graph at one
+        /// shape and fail alike, so the first group to fail is the one holding the first
+        /// parameter in order that fails. A failure that comes and goes with the moment, such as
+        /// memory another process takes, can name a different parameter under the two. Every
+        /// session is disposed however the runs end.</para>
         /// </summary>
         private static TensorData[] RunConcurrently(
             ComputeContext compute, List<InitGroup> groups, long[] elements,

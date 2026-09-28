@@ -1513,7 +1513,7 @@ public class TrainingRigCompositionCoverageTests
         Assert.IsNotType<ComputeContextException>(
             Record.Exception(() => otherArch.InitializeTrainableParams()));
 
-        // Each parameter initializes in its own session, so the failure names the one that
+        // Each parameter initializes in a run of its own, so the failure names the one that
         // actually failed — here the smaller of the two, which is initialized first — and lists
         // the larger only as context.
         var two = TwoParamsFirstTooLargeModel.ComputationGraph.ToInternal();

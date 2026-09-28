@@ -71,15 +71,16 @@ internal static class RigScalingStack
 ///
 /// <para><b>Cost per trainable parameter.</b> Initializing every parameter in one session makes
 /// construction quadratic in the parameter count, since the backend's session build is
-/// superlinear in graph size; initialization runs one session per parameter, which is linear.
-/// Measured as a RATIO of per-parameter cost at the two ends of the range, so no absolute time
-/// budget is needed and it holds on any machine: linear keeps it near 1, the quadratic law puts
+/// superlinear in graph size. Each parameter runs on a session built for its own slice of the
+/// initialization graph, shared by the parameters whose slices match, which is at most linear. Measured as
+/// a RATIO of per-parameter cost at the two ends of the range, so no absolute time budget is
+/// needed and it holds on any machine: linear keeps it near 1, the quadratic law puts
 /// it near 6. What a ratio cannot see is a uniform constant-factor slowdown, and between 2 and 12
 /// parameters it does not separate mild superlinearity (N^1.3 lands at 1.7) from linear either.
 /// It pins the shape that broke, not every way construction could get slower.</para>
 ///
-/// <para><b>Bytes retained.</b> One session per parameter is only affordable because each result
-/// is copied off its session; a retained result keeps its session's whole arena alive, and a
+/// <para><b>Bytes retained.</b> Running the parameters one at a time on their own sessions is only
+/// affordable because each result is copied off its session; a retained result keeps its session's whole arena alive, and a
 /// forced collection cannot reclaim it, since the values are genuinely referenced as the rig's
 /// initial weights. Measured around initialization alone, not around a whole
 /// <see cref="TrainingRig.FromScratch"/>: a rig legitimately retains 100-150 MiB of graphs and

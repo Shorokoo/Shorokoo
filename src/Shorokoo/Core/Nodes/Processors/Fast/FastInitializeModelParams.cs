@@ -9,6 +9,7 @@ using Shorokoo.Core.Nodes.AutoDiff;
 using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Modules;
 using Shorokoo.Core.Utils;
+using Shorokoo.Core.Backends;
 using Shorokoo.Onnx;
 using System.Collections.Generic;
 using System.Collections.Immutable;
@@ -23,11 +24,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// Walks <c>graph</c> for every <c>MODEL_PARAM</c> node, rewrites it
     /// to a <c>FUNCTION_INVOKE</c> of its initializer <see cref="Function"/> (preserving
     /// the original initializer-param inputs, the output <see cref="FastTensorKey"/>, and
-    /// the target function), then runs the resulting graph through
-    /// <see cref="ComputeContext.Run(InternalComputationGraph, NamedModelParam[])"/> — once per
-    /// parameter, over the slice of the graph feeding that one initializer's output (see
-    /// <see cref="ChunkFor"/>), each result copied off its session (see
-    /// <see cref="FastProcessorHelper.RehostOffSession"/>).
+    /// the target function, keyed to take the parameter's stream key as one input more), then
+    /// runs the resulting graph through
+    /// a session compiled for the slice of the graph feeding one initializer's output — one run
+    /// per parameter, one session per distinct slice (see <see cref="ChunkFor"/>) — each result
+    /// copied off its session (see <see cref="FastProcessorHelper.RehostOffSession"/>).
     /// The decoded results are returned as a
     /// <see cref="ModelId"/> → <see cref="TensorData"/> dictionary.
     /// </summary>
@@ -75,13 +76,14 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
             // Resolve every parameter's init key ONCE, up front, by executing one small graph of
             // split chains (RngKeyResolver) — the host still computes no RNG itself (#136). Each
-            // initializer then embeds its key as a literal, as it always did.
+            // parameter's initializer is then fed its resolved key as an input.
             //
             // The alternative — emitting each parameter's split chain inside its own initializer
             // body — is what a naive "move the fold in-graph" does, and it is materially worse:
-            // it multiplies THIS graph (which ORT must build and fold in one session) by the
-            // ModelId depth of every parameter, and it makes the shared chain's placement
-            // dependent on which control-flow scope the first draw happens to sit in.
+            // it multiplies the initialization graph by the ModelId depth of every parameter, it
+            // makes every parameter's slice a different graph (so no two share a session — see
+            // ChunkFor), and it makes the shared chain's placement dependent on which control-flow
+            // scope the first draw happens to sit in.
             // Only parameters whose initializer actually draws need a key; a constant-filled
             // initializer (zeros/ones bias, etc.) would otherwise pay for a key nothing reads.
             var initKeys = infoById is null
@@ -95,6 +97,13 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                             n.Attributes.GetIntsVal(OnnxOpAttributeNames.ShrkAttrLocalModelId).AssertNotNull()))
                         .Distinct(),
                     rngConfig!, computeContext);
+
+            // One keyed body per initializer, shared by every parameter that uses it: each call
+            // site passes its own parameter's stream key, through a graph input of its own, so
+            // same-shaped parameters slice to the same session (see ChunkFor).
+            var keyedByInitializer = new Dictionary<Function, Function?>(ReferenceEqualityComparer.Instance);
+            var keyInputNodes = new List<FastNode>();
+            var keyByInput = new Dictionary<FastTensorKey, ulong>();
 
             var collectedModelIds = new List<ModelId>();
             var collectedOutputKeys = new List<FastTensorKey>();
@@ -143,24 +152,32 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
                     if (node.TargetFunction is { } initFn)
                     {
-                        // Stream key = init master folded along the parameter's ModelId path —
-                        // the RNG key tree IS the ModelId tree — resolved above by executing the
-                        // derivation, so a param's init stream stays reconstructible offline from
-                        // its ModelId, plus the trip number of each enclosing loop for a draw
-                        // inside one: BuildKeyedDraws folds those onto this key in-graph, and
-                        // without them every trip of such a draw collapses to one sample (#343).
-                        // A non-drawing initializer has no key (none was resolved); BuildKeyedDraws
-                        // returns null for it anyway, so the value here is never consumed.
-                        var key = initKeys!.TryGetValue(modelId, out var k) ? k : default;
                         // Init draws under the configured algorithm's registry name (the key
                         // tree itself is algorithm-independent — the split is always the default
                         // algorithm), so a param's init values switch with the algorithm just
-                        // like runtime feeds.
-                        var injected = FastInitKeyedDraws.BuildKeyedDraws(
-                            initFn, key, info.ToShorokooIdString(),
-                            Core.Rng.RngAlgorithms.NameOf(rngConfig!.Algorithm));
-                        if (injected is not null)
-                            node.TargetFunction = injected;
+                        // like runtime feeds. The ordinal in the name keeps two initializers that
+                        // share a name apart.
+                        if (!keyedByInitializer.TryGetValue(initFn, out var keyed))
+                            keyedByInitializer[initFn] = keyed = FastInitKeyedDraws.BuildKeyedDraws(
+                                initFn, $"{initFn.DefaultName}__rng{keyedByInitializer.Count}",
+                                info.ToShorokooIdString(), Core.Rng.RngAlgorithms.NameOf(rngConfig!.Algorithm));
+                        if (keyed is not null)
+                        {
+                            // Stream key = init master folded along the parameter's ModelId path —
+                            // the RNG key tree IS the ModelId tree — resolved above by executing
+                            // the derivation, so a param's init stream stays reconstructible
+                            // offline from its ModelId, plus the trip number of each enclosing loop
+                            // for a draw inside one: the keyed body folds those onto this key
+                            // in-graph, and without them every trip of such a draw collapses to one
+                            // sample (#343). Only a drawing initializer is keyed, and every drawing
+                            // one had its key resolved above.
+                            var keyInput = FastInternalOp.RuntimeInput(DType.UInt64, rank: 0);
+                            var keyTensor = InternalComputationGraph.InputKeyOf(keyInput);
+                            keyInputNodes.Add(keyInput);
+                            keyByInput[keyTensor] = initKeys![modelId];
+                            node.TargetFunction = keyed;
+                            node.FullInputs[""] = [.. node.FullInputs.TryGetValue("", out var args) ? args : [], keyTensor];
+                        }
                     }
                 }
 
@@ -217,41 +234,78 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // already returned above having asked for nothing.
             var compute = computeContext ?? ComputeContext.Default;
 
-            // The initialization graph takes no input at all — each chunk below drops the inputs
-            // its initializer does not read, which is every one — and each parameter's
-            // initializer output becomes a graph output.
+            foreach (var keyInput in keyInputNodes)
+                workGraph.AddInput(keyInput);
 
-            var builder = ImmutableDictionary.CreateBuilder<ModelId, TensorData>();
+            // Each parameter's slice, grouped with the slices that are the same graph (see
+            // SameSlice): parameters whose slices match — same initializer, same shape — differ only
+            // in the stream keys they are fed, so they run on one session. Each chunk drops the
+            // inputs its initializer does not read, so a slice takes its own parameters' keys and
+            // nothing else, and its one output is its parameter's initial value.
+            var groups = new List<InitGroup>();
+            var groupsBySize = new Dictionary<int, List<InitGroup>>();
+            var seenIds = new HashSet<ModelId>();
             for (int i = 0; i < collectedOutputKeys.Count; i++)
             {
-                // Two parameters at one ModelId would silently collapse to one entry here — the
-                // caller indexes this dictionary by a per-parameter id and would hand two struct
-                // fields the same value. The whole-graph run this replaced threw on a repeated
-                // key (ImmutableDictionary rejects one), so keep failing rather than inherit a
-                // quieter contract along with the loop.
-                if (builder.ContainsKey(collectedModelIds[i]))
+                // Two parameters at one ModelId would silently collapse to one entry below — the
+                // caller indexes the result by a per-parameter id and would hand two struct fields
+                // the same value — so fail rather than return one of them.
+                if (!seenIds.Add(collectedModelIds[i]))
                     throw new System.InvalidOperationException(
                         "FastInitializeModelParams: two model parameters share ModelId " +
                         $"[{string.Join(", ", collectedModelIds[i].Vals)}]. Parameter ids must be " +
                         "unique within a concrete architecture.");
+
+                var chunk = ChunkFor(workGraph, collectedOutputKeys[i]);
+                if (!groupsBySize.TryGetValue(chunk.Nodes.Count, out var sameSize))
+                    groupsBySize[chunk.Nodes.Count] = sameSize = [];
+                var group = sameSize.FirstOrDefault(g => SameSlice(g.Chunk, chunk));
+                if (group is null)
+                {
+                    group = new InitGroup(chunk);
+                    sameSize.Add(group);
+                    groups.Add(group);
+                }
+                // In the slice's own input order, which SameSlice has matched to the group's.
+                group.Members.Add((i, [.. chunk.Inputs.Select(k => keyByInput[k])]));
+            }
+
+            // One group at a time, its session disposed before the next one's is built, so only one
+            // session's arena is ever alive; each result is copied off it as it is produced, and
+            // each run hands the arena's unused blocks back as it ends (see ChunkFor).
+            var builder = ImmutableDictionary.CreateBuilder<ModelId, TensorData>();
+            foreach (var group in groups)
+            {
+                int current = group.Members[0].Param;
                 try
                 {
-                    var chunk = ChunkFor(workGraph, collectedOutputKeys[i]);
-                    builder[collectedModelIds[i]] = FastProcessorHelper.RehostOffSession(compute.Run(chunk)[0].ToTensorData());
+                    // Unoptimized, as the one-shot run of an input-less graph is: the session runs
+                    // each draw once, so ORT's folding would buy nothing and cost the data's size
+                    // in memory (see ComputeContext.IsFullyConstant).
+                    using var compiled = compute.Compile(group.Chunk, ShorokooGraphOptimization.DisableAll);
+                    var shrinking = compiled.DefaultRunSettings with { ShrinkArenaAfterRun = true };
+                    foreach (var (param, keys) in group.Members)
+                    {
+                        current = param;
+                        IData[] feeds = [.. keys.Select(k => (IData)Shorokoo.Globals.TensorData([], k))];
+                        builder[collectedModelIds[param]] =
+                            FastProcessorHelper.RehostOffSession(compiled.Execute(feeds, shrinking)[0].ToTensorData());
+                    }
                 }
                 catch (System.Exception ex) when (IsAllocationFailure(ex))
                 {
                     // The backend reports an out-of-memory abort as a bare "bad allocation", with
                     // no parameter, shape or size — nothing to separate "this parameter is too
-                    // large" from "this graph is malformed" (#208). Because each parameter now
-                    // gets its own session, the one being initialized IS the one that failed, so
-                    // name it, with the rest of the model as context; the inner exception keeps
-                    // the original diagnosis. Only allocation failures are relabelled: everything
-                    // else this call can raise (a missing backend package, an unsupported op, a
-                    // malformed graph) already says what it is, and keeping its type keeps the
-                    // catch clauses around this API working.
+                    // large" from "this graph is malformed" (#208). Each run initializes one
+                    // parameter, and a group's session is built for parameters of one shape, so
+                    // the one being initialized — the group's first while its session is built —
+                    // IS the one that failed: name it, with the rest of the model as context; the
+                    // inner exception keeps the original diagnosis. Only allocation failures are
+                    // relabelled: everything else this call can raise (a missing backend package,
+                    // an unsupported op, a malformed graph) already says what it is, and keeping
+                    // its type keeps the catch clauses around this API working.
                     throw new ComputeContextException(ErrorCodes.CR008, "FastInitializeModelParams",
-                        DescribeInventory(collectedInventory, failing: i) +
+                        DescribeInventory(collectedInventory, failing: current) +
                         " Underlying failure: " + ex.Message, ex);
                 }
             }
@@ -262,35 +316,45 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// The single-parameter slice of the rewritten initialization graph: a copy whose only
         /// output is <paramref name="outputKey"/>, swept down to the nodes that actually feed it.
         ///
-        /// <para>Initialization runs ONE SESSION PER PARAMETER rather than one session for the
-        /// whole model. Slicing changes no value: each keyed draw hangs off its own stream key,
-        /// and the one way one parameter's initializer reads another's — being handed that
-        /// parameter (Shorokoo/Shorokoo#324) — leaves the source's whole initializer in the slice,
-        /// where it recomputes the same deterministic value. What slicing changes is the size of
-        /// the graph any one session has to build (a shared source is built once per dependent,
-        /// not once). That matters because the backend's session build is SUPERLINEAR in graph
-        /// size. Measured on
-        /// an N-layer stack of [384, 384] normal draws, with constant folding already off (see
-        /// <c>ComputeContext.IsFullyConstant</c>, the other half of this fix), building the
-        /// whole-model init graph cost 0.23 s at N=1, 0.88 s at N=2, 3.4 s at N=4, 13.4 s at N=8
-        /// and 32 s at N=12 — a clean 4x per doubling, session build alone. Left whole, a
-        /// GPT-sized model spends minutes of pure build before the first gradient
+        /// <para>Initialization runs one parameter per RUN, on a session built for that
+        /// parameter's slice rather than for the whole model. Slicing changes no value: each keyed
+        /// draw hangs off its own stream key, and the one way one parameter's initializer reads
+        /// another's — being handed that parameter (Shorokoo/Shorokoo#324) — leaves the source's
+        /// whole initializer in the slice, where it recomputes the same deterministic value. What
+        /// slicing changes is the size of the graph any one session has to build (a shared source
+        /// is built once per dependent, not once). That matters because the backend's session
+        /// build is SUPERLINEAR in graph size. Measured on an N-layer stack of [384, 384] normal
+        /// draws, with constant folding already off (see <c>ComputeContext.IsFullyConstant</c>),
+        /// building the whole-model init graph cost 0.23 s at N=1, 0.88 s at N=2, 3.4 s at N=4,
+        /// 13.4 s at N=8 and 32 s at N=12 — a clean 4x per doubling, session build alone. Left
+        /// whole, a GPT-sized model spends minutes of pure build before the first gradient
         /// (Shorokoo/Shorokoo#195).</para>
         ///
-        /// <para>Slicing does not pay for that speed in memory — but only because of
-        /// <see cref="FastProcessorHelper.RehostOffSession"/>. N sessions would otherwise hold N arenas at once, each sized to a
-        /// draw rather than to a parameter, for several hundred MiB more than the one-session
-        /// graph. With each result copied off its session as it is produced, the N=12 model above
-        /// peaks within noise of the one-session build (497 MiB against 492) while costing a
-        /// quarter of its wall clock — 8.6 s against 37.0, both whole-rig figures, where the
-        /// table above is session build alone.</para>
+        /// <para>A slice's session build is itself a near-constant cost — a few tenths of a second
+        /// on a CPU, whatever the parameter's size, since it is the keyed draw's lowering the
+        /// backend builds — so a session per parameter makes rig construction cost that much per
+        /// parameter (Shorokoo/Shorokoo#404). It is paid once per distinct slice instead: the
+        /// stream key is an input of the slice, not a literal in it (see
+        /// <see cref="FastInitKeyedDraws.BuildKeyedDraws"/>), so the slices of parameters with the
+        /// same initializer and shape are one graph (<see cref="SameSlice"/>), compiled once and run
+        /// once per parameter with that parameter's key. A model whose layers repeat builds a
+        /// handful of sessions however deep it is.</para>
+        ///
+        /// <para>Neither costs memory, because of two things done per run. Each result is copied
+        /// off its session (<see cref="FastProcessorHelper.RehostOffSession"/>): a result keeps its
+        /// session's arena alive, so N retained results would otherwise hold N arenas, each sized to
+        /// a draw rather than to a parameter. And each run hands its arena's unused blocks back as
+        /// it ends (<see cref="RunSettings.ShrinkArenaAfterRun"/>): a session run a second time on
+        /// the same shapes lays its intermediates out in one block sized to the first run's peak,
+        /// which the arena still holding the first run's blocks cannot supply — measured on two
+        /// [20000, 384] normal draws, the second run took the process from 2.9 to 5.6 GB, and with
+        /// the shrink it stayed at 3.0, the figure one session per parameter peaks at.</para>
         ///
         /// <para>Sharing one function BODY across the parameters does not substitute for slicing:
         /// the backend inlines every call site, so the graph it builds is the same size either
-        /// way (measured — it made no difference). What IS linear here is the backend session
-        /// builds, which is where the cost lives; cloning and sweeping the graph once per
-        /// parameter is itself quadratic in the parameter count, but it is host-side pointer work
-        /// against a session build measured in tenths of a second.</para>
+        /// way. Cloning and sweeping the graph once per parameter is quadratic in the parameter
+        /// count, but it is host-side pointer work against a session build measured in tenths of
+        /// a second.</para>
         /// </summary>
         private static InternalComputationGraph ChunkFor(
             InternalComputationGraph workGraph, FastTensorKey outputKey)
@@ -299,6 +363,119 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             chunk.SetOutputs([outputKey]);
             FastProcessorHelper.RemoveUnreachableNodes(chunk, keepUnreadInputs: false);
             return chunk;
+        }
+
+        /// <summary>The parameters whose slices are one graph: the first one's slice, to compile,
+        /// and each member's stream keys in its slice's input order.</summary>
+        private sealed class InitGroup(InternalComputationGraph chunk)
+        {
+            public InternalComputationGraph Chunk { get; } = chunk;
+            public List<(int Param, ulong[] Keys)> Members { get; } = [];
+        }
+
+        /// <summary>
+        /// Whether two slices of the initialization graph are the same graph up to the identity of
+        /// their tensors: node for node the same op, attributes, names, target function and wiring.
+        /// Such slices build the same backend model, so either one's session computes the other's
+        /// value from the other's inputs. Only a stream key differs between the slices of
+        /// same-shaped parameters, and a key is an input, not part of the graph.
+        ///
+        /// <para>Conservative by construction: anything it cannot show equal — an attribute of a
+        /// kind it does not know, a read of a tensor not yet produced — counts as different, which
+        /// costs a session and never a wrong value. A function is the same only when it is the same
+        /// object, which is what one keyed body per initializer gives every parameter using it.</para>
+        /// </summary>
+        private static bool SameSlice(InternalComputationGraph a, InternalComputationGraph b)
+        {
+            if (a.Nodes.Count != b.Nodes.Count) return false;
+            var tensors = new Dictionary<FastTensorKey, FastTensorKey>();
+            var nodes = new Dictionary<FastNodeKey, FastNodeKey>();
+            for (int i = 0; i < a.Nodes.Count; i++)
+            {
+                var x = a.Nodes[i];
+                var y = b.Nodes[i];
+                if (x.OpCode != y.OpCode || x.FriendlyName != y.FriendlyName || x.StackTrace != y.StackTrace ||
+                    x.IdentifierTemplate != y.IdentifierTemplate || !ReferenceEquals(x.TargetFunction, y.TargetFunction))
+                    return false;
+                if (x.GraphOpenNodeKey is { } openX
+                        ? y.GraphOpenNodeKey is not { } openY || !nodes.TryGetValue(openX, out var mapped) || !mapped.Equals(openY)
+                        : y.GraphOpenNodeKey is not null)
+                    return false;
+                if (!SameAttributes(x.Attributes.GetAttributeVals(), y.Attributes.GetAttributeVals()))
+                    return false;
+                if (x.FullInputs.Count != y.FullInputs.Count) return false;
+                foreach (var (group, keysX) in x.FullInputs)
+                {
+                    if (!y.FullInputs.TryGetValue(group, out var keysY) || keysX.Count != keysY.Count) return false;
+                    for (int k = 0; k < keysX.Count; k++)
+                        if (keysX[k] is { } kx
+                                ? keysY[k] is not { } ky || !tensors.TryGetValue(kx, out var mk) || !mk.Equals(ky)
+                                : keysY[k] is not null)
+                            return false;
+                }
+                if (x.FullOutputs.Count != y.FullOutputs.Count) return false;
+                foreach (var (group, keysX) in x.FullOutputs)
+                {
+                    if (!y.FullOutputs.TryGetValue(group, out var keysY) || keysX.Count != keysY.Count) return false;
+                    for (int k = 0; k < keysX.Count; k++)
+                    {
+                        if (keysX[k] is { } kx)
+                        {
+                            if (keysY[k] is not { } ky) return false;
+                            tensors[kx] = ky;
+                        }
+                        else if (keysY[k] is not null) return false;
+                    }
+                }
+                nodes[x.Key] = y.Key;
+            }
+            return true;
+        }
+
+        private static bool SameAttributes(
+            ImmutableDictionary<string, object?> a, ImmutableDictionary<string, object?> b)
+        {
+            if (a.Count != b.Count) return false;
+            foreach (var (name, value) in a)
+                if (!b.TryGetValue(name, out var other) || !SameValue(value, other))
+                    return false;
+            return true;
+        }
+
+        private static bool SameValue(object? a, object? b)
+        {
+            if (ReferenceEquals(a, b)) return true;
+            if (a is null || b is null || a.GetType() != b.GetType()) return false;
+            switch (a)
+            {
+                case float f:
+                    return System.BitConverter.SingleToInt32Bits(f) == System.BitConverter.SingleToInt32Bits((float)b);
+                case double d:
+                    return System.BitConverter.DoubleToInt64Bits(d) == System.BitConverter.DoubleToInt64Bits((double)b);
+                case string or long or int or bool or DType or System.Enum:
+                    return a.Equals(b);
+                case System.Array xs:
+                {
+                    var ys = (System.Array)b;
+                    if (xs.Length != ys.Length) return false;
+                    for (int i = 0; i < xs.Length; i++)
+                        if (!SameValue(xs.GetValue(i), ys.GetValue(i))) return false;
+                    return true;
+                }
+                case TensorAttribute x:
+                {
+                    var y = (TensorAttribute)b;
+                    if (!x.Shape.Equals(y.Shape) || !x.DType.Equals(y.DType) || !x.StorageDType.Equals(y.StorageDType) ||
+                        x.HasValues != y.HasValues)
+                        return false;
+                    if (!x.HasValues) return true;
+                    return x.DType == DType.Utf8
+                        ? x.Values.SequenceEqual(y.Values)
+                        : x.Bytes.SequenceEqual(y.Bytes);
+                }
+                default:
+                    return false;
+            }
         }
 
         /// <summary>

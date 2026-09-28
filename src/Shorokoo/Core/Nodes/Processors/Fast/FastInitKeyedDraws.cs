@@ -23,7 +23,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// ceiling and parallelizes on GPU).
     ///
     /// <para>The draw node is rewritten in place: its key input is the parameter's folded
-    /// init key as a uint64 scalar constant — split once per enclosing loop by that loop's
+    /// init key, a uint64 scalar the rewritten initializer takes as its LAST input, so one keyed
+    /// body serves every parameter that uses the initializer and each call site passes its own
+    /// parameter's key — split once per enclosing loop by that loop's
     /// runtime iteration index, so a draw inside a loop body is a fresh sample on every trip
     /// rather than one sample re-derived (Shorokoo/Shorokoo#343, the initialization-side twin of
     /// the runtime defect #289; the split is the same <c>SHRK_RNG_SPLIT</c> a runtime feed's
@@ -62,15 +64,24 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
         /// <summary>
         /// Returns a new initializer <see cref="Function"/> whose random draws are rewritten
-        /// to keyed in-graph draws on the parameter's own stream <paramref name="streamKey"/>
-        /// (resolved by the caller by EXECUTING the derivation — see
-        /// <c>FastInitializeModelParams.ResolveInitKeys</c>; the host folds nothing itself, #136)
-        /// under the named <paramref name="algorithm"/>, or <c>null</c> if it contains no
-        /// random ops (the caller then keeps the original). Draws nested in called
-        /// initializers are reached by flattening the body first.
+        /// to keyed in-graph draws under the named <paramref name="algorithm"/>, or <c>null</c> if
+        /// it contains no random ops (the caller then keeps the original). The keyed body takes
+        /// one input more than <paramref name="fn"/>, appended last: the uint64 scalar stream key
+        /// of the parameter being initialized, which the caller resolves by EXECUTING the
+        /// derivation (see <c>FastInitializeModelParams.ResolveInitKeys</c>; the host folds nothing
+        /// itself, #136) and passes at each call site. The key being an input rather than a
+        /// literal is what lets every parameter sharing an initializer share the one body, and
+        /// same-shaped parameters share one backend session. Draws nested in called initializers
+        /// are reached by flattening the body first.
         /// </summary>
+        /// <param name="fn">The initializer to rewrite.</param>
+        /// <param name="name">The keyed body's name, distinct from every other keyed body's: ONNX
+        /// function emission keys a body by its name, so two different bodies under one name would
+        /// collapse into one.</param>
+        /// <param name="streamName">The parameter a refusal names.</param>
+        /// <param name="algorithm">The RNG algorithm's registry name.</param>
         public static Function? BuildKeyedDraws(
-            Function fn, ulong streamKey, string streamName, string algorithm)
+            Function fn, string name, string streamName, string algorithm)
         {
             // Flatten so a draw factored into a called initializer becomes a top-level node the
             // substitution below can intercept. Shipping initializers contain no calls, so their
@@ -107,6 +118,12 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     "parameter), or move the draw (RandomUniform/RandomNormal/RandomBits) directly " +
                     "into the initializer's body.");
 
+            // The stream key, as the body's last input. Appended to the input prefix, so every
+            // input the body had keeps its position and each call site passes the key last.
+            var keyInput = FastInternalOp.RuntimeInput(DType.UInt64, rank: 0);
+            body.AddInput(keyInput);
+            var streamKey = InternalComputationGraph.InputKeyOf(keyInput);
+
             var newNodes = new List<FastNode>(body.Nodes.Count);
             int randomOrdinal = 0;
 
@@ -140,21 +157,20 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var shapeInput = node.Inputs[0]
                     ?? throw new InvalidOperationException("Random init node has null shape input.");
 
-                // The parameter's own stream key as a scalar constant, folded once per enclosing
-                // loop by that loop's iteration index, and a distinct sub-stream
-                // (substreamIndex = ordinal) per draw within one initializer. Every node is emitted
-                // per draw so it always sits in the draw's own control-flow scope — the splits in
-                // particular MUST stay inside the loop body, since they read its iteration index.
-                var keyKey = AppendConstant(
-                    Shorokoo.Globals.TensorData([], streamKey).MoveToAttribute(), newNodes);
+                // The parameter's own stream key, folded once per enclosing loop by that loop's
+                // iteration index, and a distinct sub-stream (substreamIndex = ordinal) per draw
+                // within one initializer. Every node is emitted per draw so it always sits in the
+                // draw's own control-flow scope — the splits in particular MUST stay inside the
+                // loop body, since they read its iteration index.
+                var keyKey = streamKey;
                 // The fold is FastWireRngKeyDerivation's own split, not a look-alike: a per-trip
                 // init key is the same bijection of the key tree a runtime feed's chain applies.
                 //
                 // The one asymmetry with that chain is overrides. A feed's chain selects an
                 // override at runtime, per iteration, because its iteration slots are ModelId path
                 // elements an override can address. A parameter's override is applied when
-                // streamKey is resolved on the host, so it is already baked into the constant
-                // these splits fold — which re-seeds every trip together and leaves no way to
+                // its key is resolved on the host, so it is already in the key these splits
+                // fold — which re-seeds every trip together and leaves no way to
                 // address one trip (see Documentation/rng-configuration.md).
                 //
                 // Splitting by the index is exactly the key a parameter at ModelId
@@ -250,15 +266,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // on its now-orphaned id-bearing draw (which this pass already keyed at top level).
             FastProcessorHelper.RemoveUnreachableNodes(body);
 
-            // Give the per-parameter initializer a unique name. The original name
-            // ("KaimingUniform", ...) is shared across every parameter using that
-            // initializer; leaving it unchanged makes ONNX function emission dedupe the
-            // distinct per-parameter bodies (with their distinct keys) down to one, so
-            // every same-initializer parameter would collapse to identical values.
-            string suffix = new string(streamName.Select(c => char.IsLetterOrDigit(c) ? c : '_').ToArray());
             return new Function(body, fn.FunctionType,
-                defaultName: fn.DefaultName + "__rng__" + suffix,
-                friendlyName: fn.FriendlyName + "__rng__" + suffix,
+                defaultName: name,
+                friendlyName: name,
                 fn.StateOwnership);
         }
 

@@ -92,7 +92,7 @@ var concrete       = result.FinalCheckpoint.ToInferenceModel();
 
 float[] prediction = ComputeContext.Default
     .Execute(concrete, inferenceInput)[0]
-    .ToTensorData<float32>().CopyMemory<float>();
+    .ToTensorData().CopyMemory<float>();
 ```
 
 In a later process, the file alone is enough — and which call you want depends on what you are doing with it. None of the first two builds a training rig:

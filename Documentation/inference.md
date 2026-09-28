@@ -90,7 +90,7 @@ var features = Conv(input, w, b, AutoPad.NotSet,
 TensorData result = OnnxEngine.Eval(features);
 
 // Read the numbers out (see core-types.md):
-float[] values = ((TensorData<float32>)result).CopyMemory<float>();
+float[] values = result.CopyMemory<float>();
 ```
 
 What `Eval` accepts is the trap here:
@@ -164,7 +164,7 @@ var concrete = graph
     .ToConcreteModel();
 
 var results = ComputeContext.Default.Execute(concrete, input);   // params IData[]
-float[] values = results[0].ToTensorData().As<float32>().CopyMemory<float>();
+float[] values = results[0].ToTensorData().CopyMemory<float>();
 ```
 
 When the graph comes from a saved `.srk`/`.zsrk` file, you can catch this mismatch
@@ -446,7 +446,7 @@ plus `Eval<T>(Tensor<T>)` returning a typed `TensorData<T>`),
 `TensorData` implements it, so pass `TensorData` values directly — as they are, to be consumed,
 or through `.Shared()` or `.TryConsume()`. `Execute`, `Run` and
 `CompiledGraph.Execute` return `NamedModelParam[]`; read each output with
-`namedModelParam.ToTensorData()` then `CopyMemory<T>()`, or `ValueAt<T>(i)` for one element. `ExecuteWithState` returns
+`namedModelParam.ToTensorData()` then `CopyMemory<V>()`, or `ValueAt<V>(i)` for one element, V being the elements' CLR storage type (`float` for `float32`). `ExecuteWithState` returns
 `(NamedModelParam[] regularOutputs, ComputationGraph updatedGraph)` — feed the updated
 graph to the next call. `Eval` is the exception: it returns `TensorData` (or
 `TensorData[]`) directly.

@@ -1200,7 +1200,7 @@ namespace Shorokoo.Runtime
         /// <see cref="Shape"/> is not a collection type, so a bare <c>[64L, 768L]</c> literal does
         /// not convert to it; pass <c>new Shape(...)</c> or a <c>long[]</c>.
         ///
-        /// <para>Fill it through <see cref="TensorData{T}.WriteMemory{V}"/> rather than by taking
+        /// <para>Fill it through <see cref="TensorData.WriteMemory{V}"/> rather than by taking
         /// a bare <c>AccessModifiableMemory</c> span. On a real backend the buffer is the
         /// runtime's, and the tensor is the only thing keeping it alive: taking the span is the
         /// tensor's last read, so a fill written as one expression has no reachable tensor for its

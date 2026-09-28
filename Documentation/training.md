@@ -1363,7 +1363,7 @@ every batch, since they feed the arrays again each epoch, and leave them all ali
    ```csharp
    foreach (var (name, value) in outcome.FinalCheckpoint.TrainableParams.Fields)
    {
-       var data = (TensorData)value;   // shape via data.Shape.Dims; values via data.As<float32>().AccessMemory()
+       var data = (TensorData)value;   // shape via data.Shape.Dims; values via data.CopyMemory<float>()
    }
    ```
 

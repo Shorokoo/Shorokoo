@@ -244,21 +244,27 @@ var activated = y.Relu();
 
 ## Reading concrete values out of a result
 
-Execution returns `TensorData` (see [inference.md](inference.md)). To read the numbers,
-cast to the typed `TensorData<T>` and call `AccessMemory()`, which returns a
-`ReadOnlySpan<primitive>`:
+Execution returns `TensorData` (see [inference.md](inference.md)), and a run's outputs and a
+checkpoint's parameters are `TensorData` too. Read the numbers straight off it, naming the CLR type
+the elements are stored as:
 
 ```csharp
 TensorData result = OnnxEngine.Eval(y);
-ReadOnlySpan<float> values = ((TensorData<float32>)result).AccessMemory();
-float first = values[0];
-GC.KeepAlive(result);   // see "What a TensorData holds" below — the span is a window, not a copy
+float[] values = result.CopyMemory<float>();   // the whole buffer, in an array you own
+float first    = result.ValueAt<float>(0);     // one element
 ```
 
-`AccessMemory()` maps each dtype marker to its CLR primitive: `float32`→`float`,
-`float64`→`double`, `int64`→`long`, `int32`→`int`, `bit`→`bool`, `float16`→`Float16`,
-`bfloat16`→`BFloat16`, etc. A boxed `TensorData.Data` (`object[]`) also exists; prefer
-`AccessMemory()`.
+Each dtype marker has one CLR storage type: `float32`→`float`, `float64`→`double`,
+`int64`→`long`, `int32`→`int`, `bit`→`bool`, `float16`→`Float16`, `bfloat16`→`BFloat16`, etc.
+Asking for any other type throws an `InvalidCastException` naming the tensor's dtype and its
+storage type; the buffer is never reinterpreted. `CopyRawMemory()` is the same copy as bytes, for
+any dtype.
+
+On a typed `TensorData<T>` — what `As<T>()` returns — the storage type follows from `T`, so it is
+not named again: `result.As<float32>().CopyMemory()` is a `float[]`, and `ValueAt(i)` a `float`.
+`AccessMemory<V>()` / `AccessMemory()` return a `ReadOnlySpan` over the storage instead of a
+copy; see "What a TensorData holds" below for why a span needs the tensor kept alive. A boxed
+`TensorData.Data` (`object[]`) also exists; prefer `CopyMemory<V>()`.
 
 ## Two kinds of concrete tensor: `TensorData` and `TensorAttribute`
 
@@ -366,7 +372,7 @@ A factory that takes a `TensorData` for you does **not** spend it. `Globals.Tens
 TensorData<T>)` copies, so the tensor you passed is still yours and may be passed again:
 
 ```csharp
-var fill = (TensorData<float32>)TensorData([1L], 0.5f);
+var fill = TensorData([1L], 0.5f).As<float32>();
 var a = TensorFill((Vector<int64>)[Scalar(2L)], fill);
 var b = TensorFill((Vector<int64>)[Scalar(3L)], fill);   // fine: fill is untouched
 ```
@@ -424,7 +430,7 @@ of thing that triggers a collection:
 
 ```csharp
 TensorData result = OnnxEngine.Eval(y);
-float[] values = ((TensorData<float32>)result).AccessMemory().ToArray();  // NOT safe
+float[] values = result.AccessMemory<float>().ToArray();  // NOT safe
 ```
 
 Keep the tensor alive across the read instead — with `GC.KeepAlive` after it, or by reading
@@ -432,8 +438,8 @@ through something that outlives the span (a field, a collection, a later use of 
 
 ```csharp
 TensorData result = OnnxEngine.Eval(y);
-float[] values = ((TensorData<float32>)result).AccessMemory().ToArray();
-GC.KeepAlive(result);                                                     // safe
+float[] values = result.AccessMemory<float>().ToArray();
+GC.KeepAlive(result);                                     // safe
 ```
 
 Or reach for the copying accessors, which do both for you — `CopyMemory<V>()` and

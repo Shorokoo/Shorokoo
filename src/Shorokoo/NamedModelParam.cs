@@ -43,7 +43,7 @@ namespace Shorokoo
             => data.ToTensorValue(backend);
 
         public override TensorData ToTensorData() => data;
-        public override TensorData<T> ToTensorData<T>() => (TensorData<T>)data;
+        public override TensorData<T> ToTensorData<T>() => data.As<T>();
 
         public override TensorDataSequence ToTensorDataSequence()
         {
@@ -141,7 +141,7 @@ namespace Shorokoo
             ?? throw new InvalidTensorOperationException(ErrorCodes.FW007, "ToTensorData", "OptionalTensorDataModelParam",
                 "The optional is absent; there is no tensor value to return. Check HasValue first.");
 
-        public override TensorData<T> ToTensorData<T>() => (TensorData<T>)ToTensorData();
+        public override TensorData<T> ToTensorData<T>() => ToTensorData().As<T>();
 
         public OptionalTensorData ToOptionalTensorData() => Data;
 

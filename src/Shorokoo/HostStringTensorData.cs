@@ -121,14 +121,14 @@ namespace Shorokoo
         }
 
         /// <inheritdoc/>
-        public override Span<V> AccessModifiableMemory<V>()
+        private protected override Span<V> AccessModifiableElements<V>()
         {
             ThrowIfDisposed();
             throw NoFlatBuffer();
         }
 
         /// <inheritdoc/>
-        public override ReadOnlySpan<V> AccessMemory<V>()
+        private protected override ReadOnlySpan<V> AccessElements<V>()
         {
             ThrowIfDisposed();
             throw NoFlatBuffer();

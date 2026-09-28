@@ -116,7 +116,7 @@ namespace Shorokoo
         /// value handed to a session is a bare pointer from then on and freeing one under a running
         /// read is the use-after-free the reader lock exists to stop (Shorokoo/Shorokoo#366).
         /// </summary>
-        public override Span<V> AccessModifiableMemory<V>()
+        private protected override Span<V> AccessModifiableElements<V>()
         {
             ThrowIfDisposed();
             var bytes = Bytes;
@@ -125,14 +125,14 @@ namespace Shorokoo
         }
 
         /// <inheritdoc/>
-        public override ReadOnlySpan<V> AccessMemory<V>()
+        private protected override ReadOnlySpan<V> AccessElements<V>()
         {
             ThrowIfDisposed();
             return MemoryMarshal.Cast<byte, V>(Bytes);
         }
 
         /// <summary>A writable byte span over the storage, retiring the copies runs made of it as
-        /// <see cref="AccessModifiableMemory{V}"/> does.</summary>
+        /// <see cref="TensorData.AccessModifiableMemory{V}"/> does.</summary>
         public override Span<byte> AccessModifiableRawMemory()
         {
             ThrowIfDisposed();

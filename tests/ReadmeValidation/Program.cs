@@ -57,7 +57,7 @@ var concrete       = result.FinalCheckpoint.ToInferenceModel();
 // consumed by the run it feeds.
 float[] prediction = ComputeContext.Default
     .Execute(concrete, inferenceInput.Shared())[0]
-    .ToTensorData<float32>().CopyMemory<float>();
+    .ToTensorData().CopyMemory<float>();
 
 Console.WriteLine($"Inference output ({prediction.Length} values): [{string.Join(", ", prediction)}]");
 if (prediction.Length != 32) throw new Exception($"Expected 32 output values, got {prediction.Length}");
@@ -70,13 +70,13 @@ var (reloadedRig, reloadedCheckpoint) = TrainingRig.Load(savePath);
 
 float[] reloadedPrediction = ComputeContext.Default
     .Execute(reloaded, inferenceInput)[0]
-    .ToTensorData<float32>().CopyMemory<float>();
+    .ToTensorData().CopyMemory<float>();
 if (!reloadedPrediction.SequenceEqual(prediction))
     throw new Exception("Reloaded model disagrees with the checkpoint's inference model.");
 
 var validationLoss = ComputeContext.Default
     .Execute(evaluation, TensorData([4L, 8L], batch1X), TensorData([4L, 8L], batch1Y))[0]
-    .ToTensorData<float32>().ValueAt<float>(0);
+    .ToTensorData().ValueAt<float>(0);
 Console.WriteLine($"Validation loss from the file alone: {validationLoss:F6}");
 if (!float.IsFinite(validationLoss)) throw new Exception("Validation loss is not finite!");
 

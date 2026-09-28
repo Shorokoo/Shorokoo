@@ -113,6 +113,30 @@ public class TensorDataApiCoverageTests
         Assert.Equal(2.5f, f32.ValueAt<float>(1));
     }
 
+    [Fact]
+    public void TestUntypedAndTypedTensorsReadTheirElementsTheSameWayOnHostAndRuntimeValues()
+    {
+        TensorData host = TensorData([2L], 1.5f, 2.5f);
+        TensorData runtime = OnnxEngine.Eval(Scalar(2f) * Scalar(21f));
+        float[] hostExpected = [1.5f, 2.5f];
+        float[] runtimeExpected = [42f];
+
+        Assert.Equal(2.5f, host.ValueAt<float>(1));
+        Assert.Equal(hostExpected, host.CopyMemory<float>());
+        Assert.Equal(42f, runtime.ValueAt<float>(0));
+        Assert.Equal(runtimeExpected, runtime.CopyMemory<float>());
+        Assert.Equal(2.5f, host.As<float32>().ValueAt(1));
+        Assert.Equal(runtimeExpected, runtime.As<float32>().CopyMemory());
+        Assert.Equal([true, false], TensorData([2L], true, false).As<bit>().CopyMemory());
+        Assert.Equal(7L, TensorData([1L], 7L).As<int64>().ValueAt(0));
+
+        Assert.Contains("Float32", Assert.Throws<InvalidCastException>(() => host.CopyMemory<double>()).Message);
+        Assert.Contains("Float32", Assert.Throws<InvalidCastException>(() => runtime.ValueAt<int>(0)).Message);
+        Assert.Contains("Float32", Assert.Throws<InvalidCastException>(() => host.As<int64>()).Message);
+        Assert.Contains("Float32", Assert.Throws<InvalidCastException>(
+            () => new TensorDataModelParam("x", ModelParamType.InputParam, host).ToTensorData<int64>()).Message);
+    }
+
     /// <summary>
     /// A raw-byte tensor is exactly its shape's worth of the buffer it was handed. The backend
     /// allocator enforced that by construction — it allocated to the shape and copied into what it

@@ -296,7 +296,7 @@ the scalar loss:
 
 ```csharp
 var eval = Persistence.LoadEvaluationModel("run.skpt");    // [model inputs…, targets] → loss
-var loss = ComputeContext.Default.Execute(eval, batch, targets)[0].ToTensorData<float32>().ValueAt<float>(0);
+var loss = ComputeContext.Default.Execute(eval, batch, targets)[0].ToTensorData().ValueAt<float>(0);
 ```
 
 Both halves are already in the file — the model as the `model` entry, the loss as the rig's loss

@@ -507,12 +507,14 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
                     continue;
                 }
                 var (slotDtype, slotRank) = ResolveSlotDtype(methodParams, i);
-                // Fall back to the host-graph tensor's actual Rank when the gradient method's
-                // parameter type (typically Tensor<T>) doesn't pin one down — preserves rank
-                // through the stand-in so rank-branching gradients see the real value.
-                if (slotRank is null && tensorInfo.TryGetValue(k, out var info))
-                    slotRank = info.Rank;
-                var fresh = InternalOp.RuntimeInput(slotDtype, rank: slotRank);
+                // Fall back to the host-graph tensor's actual dtype and Rank where the gradient
+                // method's parameter type (typically Tensor<T>) doesn't pin them down, so the
+                // stand-in is the tensor it stands for: a float64 operand stays float64 against the
+                // float64 gradient reaching it, and rank-branching gradients see the real rank.
+                tensorInfo.TryGetValue(k, out var info);
+                slotRank ??= info?.Rank;
+                var known = info is { Structure: DataStructure.Tensor, DType: var d } && d != DType.Invalid ? d : DType.Float32;
+                var fresh = InternalOp.RuntimeInput(slotDtype ?? known, rank: slotRank);
                 inputIValues[i] = fresh;
                 freshInputBacking[fresh] = k;
             }
@@ -661,14 +663,14 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
         /// Defaults to (<see cref="DType.Float32"/>, null) when the parameter is generic or
         /// untyped.
         /// </summary>
-        private static (DType Dtype, int? Rank) ResolveSlotDtype(ParameterInfo[]? methodParams, int slotIdx)
+        private static (DType? Dtype, int? Rank) ResolveSlotDtype(ParameterInfo[]? methodParams, int slotIdx)
         {
-            if (methodParams is null || slotIdx >= methodParams.Length) return (DType.Float32, null);
+            if (methodParams is null || slotIdx >= methodParams.Length) return (null, null);
 
             // A value-struct handle parameter may be declared nullable (`Tensor<T>?` == Nullable<Tensor<T>>);
             // unwrap it to recover the underlying handle type.
             var paramType = Nullable.GetUnderlyingType(methodParams[slotIdx].ParameterType) ?? methodParams[slotIdx].ParameterType;
-            if (paramType.ContainsGenericParameters) return (DType.Float32, null);
+            if (paramType.ContainsGenericParameters) return (null, null);
 
             if (paramType.IsGenericType)
             {
@@ -682,7 +684,7 @@ namespace Shorokoo.Core.Nodes.Processors.AutoGrad
                     return (dt, rank);
                 }
             }
-            return (DType.Float32, null);
+            return (null, null);
         }
     }
 }

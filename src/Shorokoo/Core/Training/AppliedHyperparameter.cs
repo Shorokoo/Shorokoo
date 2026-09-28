@@ -7,7 +7,9 @@ namespace Shorokoo
     /// <summary>
     /// The value one optimizer hyperparameter had in one training step — what the optimizer update of
     /// that step actually read — as an immutable host value. A checkpoint carries one per
-    /// hyperparameter in <see cref="TrainingCheckpoint.AppliedHyperparameters"/>.
+    /// hyperparameter in <see cref="TrainingCheckpoint.AppliedHyperparameters"/>, and every entry of a
+    /// <see cref="TrainingHistory"/> one per hyperparameter in
+    /// <see cref="TrainingHistoryEntry.Hyperparameters"/>.
     ///
     /// <para>The value is copied into managed memory when the step records it, so it belongs to no
     /// backend, needs no disposal and outlives every tensor the step used. It has the
@@ -46,6 +48,29 @@ namespace Shorokoo
                 if (!ReferenceEquals(host, value)) host.Dispose();
             }
         }
+
+        /// <summary>
+        /// A value over <paramref name="bytes"/>, which it takes as its own: the caller hands over a
+        /// buffer nothing else holds. The bytes must cover <paramref name="dims"/> at
+        /// <paramref name="dtype"/>'s whole-byte element size.
+        /// </summary>
+        internal static AppliedHyperparameter FromRawBytes(DType dtype, long[] dims, byte[] bytes)
+        {
+            long count = 1;
+            foreach (var d in dims) count *= d;
+            if (dtype.EncodingBitCount <= 0 || dtype.EncodingBitCount % 8 != 0
+                || bytes.LongLength != count * (dtype.EncodingBitCount / 8))
+                throw new ArgumentException(
+                    $"{bytes.Length} byte(s) do not hold a {dtype} value of shape [{string.Join(", ", dims)}].",
+                    nameof(bytes));
+            return new AppliedHyperparameter(dtype, dims, bytes);
+        }
+
+        /// <summary>The value's element bytes, row-major, for a writer to copy from.</summary>
+        internal ReadOnlySpan<byte> RawBytes => _bytes;
+
+        /// <summary>The value's dims, for a comparison that allocates nothing.</summary>
+        internal ReadOnlySpan<long> Dims => _dims;
 
         /// <summary>The value's element type: the hyperparameter's declared dtype.</summary>
         public DType DType { get; }

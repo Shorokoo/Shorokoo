@@ -608,17 +608,15 @@ namespace Shorokoo
         public static TensorData CreateFromRawBytes(Shape shape, DType dtype, byte[] data)
         {
             ArgumentNullException.ThrowIfNull(data);
-            // The refusal the backend used to give, kept where it can still be given eagerly: a
-            // string element is variable-length, so a flat byte buffer does not describe one and
-            // a HostTensorData<utf8> over these bytes would be a tensor of nothing.
+            // Refused eagerly: a string element is variable-length, so a flat byte buffer does not
+            // describe one and a HostTensorData<utf8> over these bytes would be a tensor of nothing.
             if (dtype == DType.Utf8)
                 throw new NotSupportedException(
                     "String tensors are variable-length and not byte-stride, so raw bytes cannot "
                     + "describe one. Build it from its elements with TensorData(dims, string[]).");
 
             // Throws for the element types with no whole-byte stride at all -- the sub-byte
-            // integers and the complex pairs -- which the byte-wise backend constructor refused
-            // just as flatly, and which the framework refuses in its own words here.
+            // integers and the complex pairs -- in the framework's own words.
             var bits = dtype.EncodingBitCount;
             // A shape carrying an unknown dimension reports a negative count, and so would the
             // slice length below; refuse it while it can still be said what is wrong.

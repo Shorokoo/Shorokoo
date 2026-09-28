@@ -220,8 +220,9 @@ Each value is an `AppliedHyperparameter`: an immutable host copy with `DType`, `
 `ElementCount`, `ToDouble()` / `ToSingle()` for a single-element value, `ToArray<T>()` (with `T` the
 dtype's storage type — `float`, `int`, `bool`, `double`, …) and `ToTensorData()` for a fresh tensor.
 A resident run exposes its last step's values as `run.AppliedHyperparameters`, since `Step` returns
-only the loss. The map is `null` on a checkpoint no step produced (an initial or loaded one), and it
-is not saved.
+only the loss. The map is immutable and ordered like `rig.HyperparameterNames`. It is `null` on a
+checkpoint no step produced (an initial or loaded one), and it is not saved on its own: every step's
+values are also in the checkpoint's [training history](#the-training-history), which is saved.
 
 > **Numeric note.** Because a schedule is evaluated in-graph rather than host-side, its live-training
 > value carries the schedule-lowering tolerance: on engines whose `Cos`/`Pow` differ from .NET `MathF`
@@ -430,7 +431,8 @@ public TrainingCheckpoint CreateInitialCheckpoint(TensorDataStruct hyperparamete
 // Schedule-driven: scheduled hyperparameters are computed in-graph from the checkpoint's
 // step (fed as the step counter), then the step advances. Requires no schedule-less runtime hypers.
 // Returns the post-step checkpoint directly, with its .Loss set to this step's loss and its
-// .AppliedHyperparameters to the value each hyperparameter had in this step. The rig
+// .AppliedHyperparameters to the value each hyperparameter had in this step, and this step's entry
+// appended to its .History. The rig
 // compiles its training-step graph internally (lazily, cached per fed shape), so a manual loop is just
 // `cp = rig.TrainStep(cp, in, out);` — no caller-side ComputeContext.Compile.
 // Each struct argument is a TensorDataStruct — consumed by the step — or one passed through
@@ -526,6 +528,9 @@ public sealed class ResidentTrainingRun : IDisposable
     // Each hyperparameter's value in the run's last step (host values: no download); see
     // TrainingCheckpoint.AppliedHyperparameters.
     public IReadOnlyDictionary<string, AppliedHyperparameter>? AppliedHyperparameters { get; }
+    // The history of the checkpoint the run began from plus one entry per step of the run, whether
+    // taken with Step or StepToCheckpoint (host values: no download); see "The training history".
+    public TrainingHistory History { get; }
 
     public void Dispose();             // releases state the run still holds; published checkpoints survive
 }
@@ -864,7 +869,7 @@ rig's collection at all. A `StepToCheckpoint` step hands
 state back to you instead, so that one is reclaimed like any other.
 
 Result types:
-- `TrainingCheckpoint` → `.TrainableParams`, `.ModelState`, `.OptimizerState`, `.Step` (global step, `long`; advances each `TrainStep`, so schedules resume from a saved checkpoint), and the host-owned run counters `.Epoch` / `.BatchIndex` (`long?`; the training loop advances them — the counter-agnostic `TrainStep` carries them through unchanged). They are `null` when the position is genuinely **unknown** — an initial checkpoint, or one trained without a data loader / explicit counters — rather than a misleading `0`; the loader-driven and explicit-counter paths set concrete values. A scheduled hyperparameter reading the epoch / batch counter sees `0` for a `null` value. `.Step` is always a concrete `long`; all counters are `int64` end to end. It also carries `.Rig` (the `TrainingRig?` that produced it — set on every rig-produced checkpoint, so `checkpoint.ToInferenceModel()` needs no re-supplied graph) and `.Loss` (`float?`; the loss of the `TrainStep` that produced it, `null` on an initial or bare checkpoint), and `.AppliedHyperparameters` (each hyperparameter's value in that step, keyed by name; `null` on an initial, bare or loaded checkpoint, and never saved — see [Hyperparameter kinds](#hyperparameter-kinds-hyperparameter)). All three are preserved through the counter derivations (`WithCounters`/`WithStep`/`WithEpoch`/`WithBatchIndex`) and through the state derivations (`WithTrainableParams`/`WithModelState`/`WithOptimizerState`), each of which returns a new checkpoint with one slot replaced and every other slot carried through unchanged — the receiver is never mutated. `TrainStep` returns this checkpoint directly — read the step's loss off `.Loss`. `.Loss` persists as its own `Loss` component, independent of `Counters` (dropping `Loss`, or an initial checkpoint, reloads with `.Loss == null` — never a sentinel `0`).
+- `TrainingCheckpoint` → `.TrainableParams`, `.ModelState`, `.OptimizerState`, `.Step` (global step, `long`; advances each `TrainStep`, so schedules resume from a saved checkpoint), and the host-owned run counters `.Epoch` / `.BatchIndex` (`long?`; the training loop advances them — the counter-agnostic `TrainStep` carries them through unchanged). They are `null` when the position is genuinely **unknown** — an initial checkpoint, or one trained without a data loader / explicit counters — rather than a misleading `0`; the loader-driven and explicit-counter paths set concrete values. A scheduled hyperparameter reading the epoch / batch counter sees `0` for a `null` value. `.Step` is always a concrete `long`; all counters are `int64` end to end. It also carries `.Rig` (the `TrainingRig?` that produced it — set on every rig-produced checkpoint, so `checkpoint.ToInferenceModel()` needs no re-supplied graph) and `.Loss` (`float?`; the loss of the `TrainStep` that produced it, `null` on an initial or bare checkpoint), and `.AppliedHyperparameters` (each hyperparameter's value in that step, keyed by name; `null` on an initial, bare or loaded checkpoint, and not saved on its own — see [Hyperparameter kinds](#hyperparameter-kinds-hyperparameter)), and `.History` (one entry per step that led to it — see [The training history](#the-training-history)). All of these are preserved through the counter derivations (`WithCounters`/`WithStep`/`WithEpoch`/`WithBatchIndex`) and through the state derivations (`WithTrainableParams`/`WithModelState`/`WithOptimizerState`), each of which returns a new checkpoint with one slot replaced and every other slot carried through unchanged — the receiver is never mutated. `TrainStep` returns this checkpoint directly — read the step's loss off `.Loss`. `.Loss` persists as its own `Loss` component, independent of `Counters` (dropping `Loss`, or an initial checkpoint, reloads with `.Loss == null` — never a sentinel `0`).
 - `TrainingResult` → `.FinalCheckpoint`, `.EpochLosses` (the per-epoch mean losses).
 
 **Constructing one directly.** You are normally *handed* a checkpoint — by `CreateInitialCheckpoint`,
@@ -1130,6 +1135,74 @@ stays the safer one, since it catches a swapped pair that `FromOrderedData` acce
   begins the next). This is Shorokoo owning **its own** loader's position; a host driving an external
   pipeline Shorokoo doesn't own still uses the checkpoint's host user-data bag instead.
 
+### The training history
+
+Every checkpoint carries `.History`, a `TrainingHistory`: the steps that led to it, oldest first,
+one `TrainingHistoryEntry` per successful training step. It is empty on a checkpoint no step produced
+(`CreateInitialCheckpoint()`, one you built yourself), and each step — `TrainStep`, a resident run's
+`Step` or `StepToCheckpoint`, and so `Fit` and `Train` — returns its input checkpoint's history with
+one entry appended. A step that fails records nothing.
+
+```csharp
+public sealed record TrainingHistoryEntry
+{
+    public long Step { get; }          // the counter the step ran at: the produced checkpoint's Step - 1
+    public long? Epoch { get; }        // the counters it ran at; null where unknown
+    public long? BatchIndex { get; }
+    public float Loss { get; }
+    // Each hyperparameter's value in the step: the same map as the produced checkpoint's
+    // .AppliedHyperparameters, keyed by rig.HyperparameterNames. Immutable.
+    public IReadOnlyDictionary<string, AppliedHyperparameter> Hyperparameters { get; }
+}
+
+public sealed class TrainingHistory : IReadOnlyList<TrainingHistoryEntry>
+{
+    public static TrainingHistory Empty { get; }
+    public TrainingHistory Since(long step);             // entries whose Step >= step
+    public TrainingHistory TakeLast(int count);          // the last count entries
+    // Columns, for plotting and logging — each a new list parallel to the entries:
+    public IReadOnlyList<long> Steps { get; }
+    public IReadOnlyList<float> Losses { get; }
+    public IReadOnlyList<long?> Epochs { get; }
+    public IReadOnlyList<long?> BatchIndices { get; }
+    public IReadOnlyList<string> HyperparameterNames { get; }       // every name any entry holds
+    public IReadOnlyList<AppliedHyperparameter?> Hyperparameter(string name);  // null where an entry lacks it
+}
+```
+
+```csharp
+var result = rig.Fit(loader, numEpochs: 3);
+var history = result.FinalCheckpoint.History;
+foreach (var (step, loss, lr) in history.Steps.Zip(history.Losses, history.Hyperparameter("learningRate")))
+    Console.WriteLine($"{step}\t{loss}\t{lr?.ToSingle()}");
+```
+
+The history is immutable, and appending shares every earlier entry, so it costs a step `O(log n)`
+and nothing is copied. Two runs branched from one checkpoint each extend the common history on their
+own, and the checkpoint they branched from keeps its own unchanged.
+
+`Step` is not a key. Training again from a checkpoint whose counter you set back
+(`ckpt.WithStep(10)`) appends a second entry for step 10 and keeps the first: entries are in the
+order they were run.
+
+**Trimming and clearing.** Every derivation (`WithCounters`, `WithStep`, `WithTrainableParams`, …,
+`Shared()`, `rig.AdoptCheckpoint`) carries the history through unchanged. `WithHistory` replaces
+it — keep a slice with `ckpt.WithHistory(ckpt.History.TakeLast(1000))` or
+`ckpt.WithHistory(ckpt.History.Since(5000))` — and `WithoutHistory()` clears it. A resident run's
+`run.History` is the history the run began from plus one entry per step it took.
+
+**Saving it.** The history is its own `CheckpointComponents.History` component. `checkpoint.Save`
+writes it whenever it is non-empty; pass components without it to leave it out
+(`ckpt.Save(path, CheckpointComponents.InferenceState | CheckpointComponents.OptimizerState |
+CheckpointComponents.Counters | CheckpointComponents.Loss)`). A `.skpt` save writes it whenever it is
+non-empty; save `ckpt.WithoutHistory()` to leave it out. An empty history writes nothing, and a file
+that holds none loads with an empty history. A resumed run continues the loaded history. A history
+continued under another rig (`otherRig.AdoptCheckpoint(ckpt)`) can hold hyperparameters only some
+entries have, which is saved as such; one whose entries give the same hyperparameter values of
+different dtypes or shapes cannot be saved, and the save throws an `InvalidOperationException`
+naming it — save a slice with `WithHistory(history.Since(…))`. The on-disk layout is under
+[Save and resume a checkpoint](#save-and-resume-a-checkpoint-across-process-restarts).
+
 ## Save and resume a checkpoint (across process restarts)
 
 A `TrainingCheckpoint` holds the full training state — trainable params, model
@@ -1154,6 +1227,16 @@ var more = rig.Fit(inputs, targets, numEpochs: 5, ckpt);  // continues where it 
   epoch/batch (a checkpoint trained without a loader / explicit counters) is absent on disk and
   reloads as `null`, never a sentinel `0`. A concrete
   `0` (e.g. a run resting at the start of an epoch) is written and reloads as `0`.
+- The [training history](#the-training-history), when non-empty, is the `history/` section:
+  one tensor per column, one row per entry — `history/step` (`int64[n]`), `history/loss`
+  (`float32[n]`), `history/epoch` and `history/batch_index` (`int64[n]`), each with a
+  presence column `history/epoch_present` / `history/batch_index_present` (`bool[n]`: a row
+  whose presence is `false` reloads as `null`), and for every hyperparameter name
+  `history/hyperparameter/<name>` (the value's dtype, shape `[n, …valueShape]`) with its
+  presence column `history/hyperparameter_present/<name>` (`bool[n]`). A load refuses a
+  malformed history — a missing or unknown column, a column of the wrong dtype or rank, or of
+  another length than the rest. A `.skpt` holds the same columns as its `data/history.safetensors`
+  entry.
 - **The save is atomic**, so overwriting one path every N steps is safe. `checkpoint.Save`
   (and `Persistence.SaveTrainingCheckpoint`, which delegates to it) stages the file under a
   `.tmp-` sibling name in the target's directory, flushes it to disk, then commits it with a
@@ -1212,13 +1295,13 @@ var more = rig.Fit(inputs, targets, numEpochs: 5, ckpt);  // continues where it 
   been checked against nothing: only a rig knows what parameters to expect, so hand it to
   `rig.AdoptCheckpoint(ckpt)` to have its fields and shapes validated against a model.
 - Both save and load take an optional `CheckpointComponents` flags value —
-  `InferenceState` (trainable params + model state), `OptimizerState`, `Counters`, `Loss`, and
-  `TrainingRig` — combined with `|`. On save, `null` writes every available component; on
+  `InferenceState` (trainable params + model state), `OptimizerState`, `Counters`, `Loss`,
+  `History` and `TrainingRig` — combined with `|`. On save, `null` writes every available component; on
   load, `null` reads everything present (a component absent from the file is filled from the
-  rig's initial values). `checkpoint.Save(path, CheckpointComponents.InferenceState)` writes
+  rig's initial values; an absent history is empty). `checkpoint.Save(path, CheckpointComponents.InferenceState)` writes
   weights only. `Loss` is its own component, independent of `Counters`; explicitly requesting
-  `Loss` on a checkpoint whose loss is `null` is a no-op (it writes nothing and does not throw —
-  a null loss is a legitimate value). The `TrainingRig` component — the rig's own constituent
+  `Loss` on a checkpoint whose loss is `null`, or `History` on one whose history is empty, is a
+  no-op (it writes nothing and does not throw — a null loss is a legitimate value). The `TrainingRig` component — the rig's own constituent
   model/loss/optimizer/scheduler graphs, its hyperparameter bindings and RNG config, enough to
   rebuild the whole rig from the file alone — is **never named explicitly**: every native `.skpt`
   carries it (`Persistence.SaveTrainingCheckpointToSkpt` always writes it) and the static

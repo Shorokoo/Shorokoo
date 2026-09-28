@@ -541,6 +541,13 @@ namespace Shorokoo
         /// for the others, whose value a step reports from what it computed or was fed.</summary>
         private AppliedHyperparameter?[] _bakedAppliedValues = [];
 
+        /// <summary>The names every step's applied-value map is keyed by, with their lookup index:
+        /// built once from <see cref="HyperparameterNames"/> and shared by every step's map.</summary>
+        private AppliedHyperparameterMap.Layout AppliedLayout
+            => _appliedLayout ??= AppliedHyperparameterMap.Layout.Of(HyperparameterNames);
+
+        private AppliedHyperparameterMap.Layout? _appliedLayout;
+
         /// <summary>
         /// Initial trainable parameter values — <b>empty</b> on a deferred build, which has none yet
         /// (Shorokoo/Shorokoo#327) and describes its fields through
@@ -1629,7 +1636,8 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// Returns a NEW checkpoint carrying <paramref name="checkpoint"/>'s values, counters and loss,
+        /// Returns a NEW checkpoint carrying <paramref name="checkpoint"/>'s values, counters, loss and
+        /// history,
         /// with its <see cref="TrainingCheckpoint.Rig"/> set to this rig, so
         /// <see cref="TrainingCheckpoint.ToInferenceModel()"/> and rig-based load/save work against it.
         /// Validates that the checkpoint fits this rig — trainable-param, model-state and
@@ -1677,6 +1685,7 @@ namespace Shorokoo
                 Rig = this,
                 Loss = checkpoint.Loss,
                 AppliedHyperparameters = checkpoint.AppliedHyperparameters,
+                History = checkpoint.History,
                 FeedMode = checkpoint.FeedMode,
             };
         }
@@ -2076,7 +2085,7 @@ namespace Shorokoo
                     var built = builtByIndex[h];
                     // Value route: the scheduler graph is the single truth, so its value at the
                     // initial counters — what optimizer state init needs — comes from evaluating that
-                    // very graph via QEE, not a hardcoded 0f (the old scheduler-module state-init hole).
+                    // very graph via QEE.
                     _hyperparamInitialCounterValues[h] = EvaluateSchedulerAtInitialCounters(built.Graph);
                     PinShape(h, _hyperparamInitialCounterValues[h]!.Shape);
                     // Map the scheduler's inputs (in its own input order) to the shared counter keys.
@@ -3296,12 +3305,13 @@ namespace Shorokoo
                     AppliedHyperparameter.Of(results[stateOutputCount + 1 + j].ToTensorData());
             for (int i = stateOutputCount; i < results.Length; i++)
                 results[i].ToTensorData().Dispose();
-            var appliedByName = new Dictionary<string, AppliedHyperparameter>(applied.Length, StringComparer.Ordinal);
-            for (int h = 0; h < applied.Length; h++) appliedByName[HyperparameterNames[h]] = applied[h]!;
+            // One immutable map, held both by the new checkpoint and by its history entry.
+            var appliedByName = new AppliedHyperparameterMap(
+                AppliedLayout, [.. applied.Select(value => value!)]);
 
             // Step is the graph-advanced counter (one training step per call). Epoch and batch
             // index are host-owned — the training loop advances them — so they carry through
-            // unchanged here.
+            // unchanged here. The history entry records the counters the step ran at.
             var newCheckpoint = new TrainingCheckpoint
             {
                 TrainableParams = updatedParams,
@@ -3312,7 +3322,15 @@ namespace Shorokoo
                 BatchIndex = checkpoint.BatchIndex,
                 Rig = this,
                 Loss = lossValue,
-                AppliedHyperparameters = new System.Collections.ObjectModel.ReadOnlyDictionary<string, AppliedHyperparameter>(appliedByName),
+                AppliedHyperparameters = appliedByName,
+                History = checkpoint.History.Append(new TrainingHistoryEntry
+                {
+                    Step = checkpoint.Step,
+                    Epoch = checkpoint.Epoch,
+                    BatchIndex = checkpoint.BatchIndex,
+                    Loss = lossValue,
+                    Hyperparameters = appliedByName,
+                }),
             };
 
             // Only state this step superseded and left alive: what it consumed is released already.
@@ -3737,7 +3755,7 @@ namespace Shorokoo
 
             var checkpoint = initialCheckpoint ?? CreateInitialCheckpoint();
 
-            // Resume: point the loader at the next batch to train. A checkpoint's epoch / batch now names
+            // Resume: point the loader at the next batch to train. A checkpoint's epoch / batch names
             // the batch that was USED, so a resuming run advances one past it via RestoreAfter (the loader
             // does the epoch rollover). A fresh checkpoint — or one whose epoch / batch is unknown (null),
             // e.g. trained without a loader — starts at (epoch 0, batch 0) via RestoreFrom.
@@ -4453,7 +4471,7 @@ namespace Shorokoo
             // Initial optimizer state: run the optimizer's state initializers once per trainable
             // parameter, binding the optimizer's hyperparameter inputs to their value at the initial
             // counters (the single value route — baked constant, or scheduler graph evaluated via
-            // QEE at build; no more hardcoded 0f for scheduler modules), the parameter's initial
+            // QEE at build), the parameter's initial
             // value, and a zero gradient. The state-init graph carries the [StateInitializer]
             // functions split out of the optimizer graph by FastNormalizeOptimizerGraph.
             _initialOptStateFields = new Dictionary<string, IData>();

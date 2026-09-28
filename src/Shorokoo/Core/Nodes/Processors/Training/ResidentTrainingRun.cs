@@ -109,6 +109,14 @@ namespace Shorokoo
         public IReadOnlyDictionary<string, AppliedHyperparameter>? AppliedHyperparameters
             => Current.AppliedHyperparameters;
 
+        /// <summary>
+        /// The steps that led to where the run sits, oldest first: the history of the checkpoint the
+        /// run began from, with one entry appended per step of the run — whether taken with
+        /// <c>Step</c> or <c>StepToCheckpoint</c>. Host values, so asking costs no download; see
+        /// <see cref="TrainingCheckpoint.History"/>.
+        /// </summary>
+        public TrainingHistory History => Current.History;
+
         /// <summary>Trains on one batch and returns its loss, leaving the updated state resident.</summary>
         /// <param name="trainingInput">Training input data: a <see cref="TensorDataStruct"/>,
         /// consumed by the step, or one passed through <c>.Shared()</c> or <c>.TryConsume()</c>.</param>

@@ -477,6 +477,14 @@ namespace Shorokoo.Core.Utils
         /// <summary>Archive path of the optimizer-state data entry.</summary>
         internal const string OptimizerStateEntryPath = "data/optimizer_state.safetensors";
 
+        /// <summary>Manifest data-registry key of the training-history entry: one safetensors tensor
+        /// per history column (see <see cref="Shorokoo.TrainingHistoryColumns"/>), present only when
+        /// the checkpoint's history is non-empty.</summary>
+        internal const string HistoryDataKey = "history";
+
+        /// <summary>Archive path of the training-history data entry.</summary>
+        internal const string HistoryEntryPath = "data/history.safetensors";
+
         /// <summary>
         /// Separator of the composite optimizer-state tensor identifier (issue #184). A single
         /// optimizer-state tensor's identity is a model parameter (arch-owned, named by its full

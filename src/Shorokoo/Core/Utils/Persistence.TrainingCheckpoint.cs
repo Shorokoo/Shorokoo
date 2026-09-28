@@ -38,6 +38,12 @@ namespace Shorokoo
         /// or rebuild the whole rig from the file alone with
         /// <see cref="TrainingRig.Load(string, ComputeContext?, ComputeContext?, IProgress{BuildProgress}, TrainingBackend?)"/>.
         ///
+        /// <para>A non-empty <see cref="TrainingCheckpoint.History"/> is saved too, as its own data
+        /// entry; to save none, save <c>checkpoint.WithoutHistory()</c>, or a slice of it with
+        /// <see cref="TrainingCheckpoint.WithHistory"/>. A history in which one hyperparameter has
+        /// values of different dtypes or shapes cannot be saved and throws an
+        /// <see cref="InvalidOperationException"/> naming it.</para>
+        ///
         /// <para>The write is atomic (staged to a temp file and committed by rename). For per-entry
         /// Zstd compression or provenance metadata, use the builder form
         /// <see cref="ForTrainingCheckpoint"/>.</para>
@@ -119,7 +125,8 @@ namespace Shorokoo
         /// when a rig is supplied (<see cref="CheckpointComponents.InferenceState"/> → rig initial
         /// params + model state, <see cref="CheckpointComponents.OptimizerState"/> → rig initial
         /// optimizer state, <see cref="CheckpointComponents.Counters"/> → 0,
-        /// <see cref="CheckpointComponents.Loss"/> → a <c>null</c> loss); without a rig, an
+        /// <see cref="CheckpointComponents.Loss"/> → a <c>null</c> loss,
+        /// <see cref="CheckpointComponents.History"/> → an empty history); without a rig, an
         /// absent-but-expected kind fails loud.</para>
         /// </summary>
         internal static TrainingCheckpoint LoadTrainingCheckpointFromSkpt(
@@ -178,6 +185,18 @@ namespace Shorokoo
             long? epoch = Want(CheckpointComponents.Counters) ? training.Epoch : null;
             long? batchIndex = Want(CheckpointComponents.Counters) ? training.BatchIndex : null;
             float? loss = Want(CheckpointComponents.Loss) ? training.Loss : null;
+            // The history is its own data entry, one tensor per column; a file without one holds an
+            // empty history.
+            var history = Want(CheckpointComponents.History)
+                          && manifest.Data is not null
+                          && manifest.Data.ContainsKey(SkptFileFormat.HistoryDataKey)
+                ? TrainingHistoryColumns.Read(
+                    ResolveDataEntry(container, manifest,
+                            new SkptTensorRef { Data = SkptFileFormat.HistoryDataKey }, "the training history",
+                            tensorsByDataKey, filePath)
+                        .Select(kv => (kv.Key, kv.Value)),
+                    filePath)
+                : TrainingHistory.Empty;
 
             TensorDataStruct trainable, modelState, optState;
 
@@ -223,6 +242,7 @@ namespace Shorokoo
                 Epoch = epoch,
                 BatchIndex = batchIndex,
                 Loss = loss,
+                History = history,
             };
         }
 
@@ -766,6 +786,17 @@ namespace Shorokoo
             if (_checkpoint.OptimizerState.Definition.Fields.Length > 0)
                 AddDataEntry(SkptFileFormat.OptimizerStateDataKey, SkptFileFormat.OptimizerStateEntryPath,
                     Persistence.SerializeTrainingKind(_checkpoint.OptimizerState, "optimizer state"));
+            // The history, one tensor per column, as its own data entry — only when it has entries.
+            if (_checkpoint.History.Count > 0)
+            {
+                var historyTensors = TrainingHistoryColumns.Write(_checkpoint.History)
+                    .Select(c => new SafeTensor(
+                        c.Name, c.Data, SafeTensorLoader.DTypeToSafeTensorDType(c.Data.DType), c.Data.Shape.Dims))
+                    .ToList();
+                using var historyBuffer = new MemoryStream();
+                SafeTensorLoader.SaveSafeTensorsToStream(historyBuffer, historyTensors);
+                AddDataEntry(SkptFileFormat.HistoryDataKey, SkptFileFormat.HistoryEntryPath, historyBuffer.ToArray());
+            }
 
             // Optimizer-state tensor mapping (issue #184): one entry per (trainable parameter ×
             // state slot) instance, keyed by the composite identifier — the parameter's full

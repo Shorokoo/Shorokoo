@@ -600,6 +600,25 @@ namespace Shorokoo.Tests.Modules
             => ((Tensor<bit>)OnnxOp.Not(actual == expected)).Cast<int64>().Reduce(ReduceKind.Sum).Scalar();
     }
 
+    /// <summary>Int64 Ranges of runtime start and limit, stepping by a constant 1 up to <c>limit</c>
+    /// and by a constant -1 back down to <c>start</c>.</summary>
+    [Module]
+    public partial class Int64UnitStepRangeCheck
+    {
+        public static Scalar<bit> Inline(Scalar<int64> start, Scalar<int64> limit, Vector<int64> up, Vector<int64> down)
+            => Int64RangeCheck.Mismatches((Tensor<int64>)OnnxOp.Range(start, limit, Scalar(1L)), up)
+                + Int64RangeCheck.Mismatches((Tensor<int64>)OnnxOp.Range(limit, start, Scalar(-1L)), down)
+                < Scalar(1L);
+    }
+
+    /// <summary>An int64 Range from a constant 2^62 to a runtime <c>limit</c> by a constant 1.</summary>
+    [Module]
+    public partial class Int64RangeFromAConstantStartCheck
+    {
+        public static Scalar<bit> Inline(Scalar<int64> limit, Vector<int64> expected)
+            => Int64RangeCheck.Mismatches((Tensor<int64>)OnnxOp.Range(Scalar(1L << 62), limit, Scalar(1L)), expected) < Scalar(1L);
+    }
+
     /// <summary>Int64 Ranges of constants, spanning beyond 2^53 and within it.</summary>
     [Module]
     public partial class Int64RangeOfConstantsCheck
@@ -608,6 +627,9 @@ namespace Shorokoo.Tests.Modules
             => Int64RangeCheck.Mismatches((Tensor<int64>)OnnxOp.Range(Scalar(0L), Scalar((1L << 62) + 1L), Scalar(1L << 61)), Vector(0L, 1L << 61, 1L << 62))
                 + Int64RangeCheck.Mismatches((Tensor<int64>)OnnxOp.Range(Scalar(long.MinValue), Scalar(long.MaxValue), Scalar(1L << 62)), Vector(long.MinValue, -(1L << 62), 0L, 1L << 62))
                 + Int64RangeCheck.Mismatches((Tensor<int64>)OnnxOp.Range(Scalar(0L), Scalar(-7L), Scalar(-2L)), Vector(0L, -2L, -4L, -6L))
+                + Int64RangeCheck.Mismatches((Tensor<int64>)OnnxOp.Range(Scalar(long.MaxValue - 2L), Scalar(long.MinValue + 2L), Scalar(1L)), EmptyVector<int64>())
+                + Int64RangeCheck.Mismatches((Tensor<int64>)OnnxOp.Range(Scalar(long.MaxValue), Scalar(long.MinValue), Scalar(1L)), EmptyVector<int64>())
+                + Int64RangeCheck.Mismatches((Tensor<int64>)OnnxOp.Range(Scalar(long.MinValue), Scalar(long.MaxValue), Scalar(-1L)), EmptyVector<int64>())
                 < Scalar(1L);
     }
 

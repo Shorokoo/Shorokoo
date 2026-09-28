@@ -127,7 +127,20 @@ public class QeeImageRandomRnnAuditTests
         Assert.True(Ranges(c, 5L, 5L, 1L));
         Assert.True(Ranges(c, 0L, 1L << 62, -1L));
         Assert.True(Ranges(c, 1L << 62, long.MinValue, 1L << 61));
+        Assert.True(UnitRanges(c, long.MaxValue - 2L, long.MinValue + 2L, [], []));
+        Assert.True(UnitRanges(c, long.MaxValue, long.MinValue, [], []));
+        Assert.True(UnitRanges(c, -3L, 2L, [-3L, -2L, -1L, 0L, 1L], [2L, 1L, 0L, -1L, -2L]));
+        Assert.True(FromAConstantStart(c, long.MinValue));
+        Assert.True(FromAConstantStart(c, (1L << 62) + 2L, 1L << 62, (1L << 62) + 1L));
+        Assert.ThrowsAny<Exception>(() => Ranges(c, long.MinValue, long.MaxValue, 1L));
     }
+
+    private static bool UnitRanges(ComputeContext c, long start, long limit, long[] up, long[] down)
+        => AutoTest.AdvancedTestGraph<Int64UnitStepRangeCheck>([],
+            [I64([], start), I64([], limit), I64([up.Length], up), I64([down.Length], down)], context: c);
+
+    private static bool FromAConstantStart(ComputeContext c, long limit, params long[] expected)
+        => AutoTest.AdvancedTestGraph<Int64RangeFromAConstantStartCheck>([], [I64([], limit), I64([expected.Length], expected)], context: c);
 
     private static bool Ranges(ComputeContext c, long start, long limit, long delta, params long[] expected)
         => AutoTest.AdvancedTestGraph<Int64RangeCheck>([],

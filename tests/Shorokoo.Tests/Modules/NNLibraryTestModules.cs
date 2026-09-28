@@ -2464,6 +2464,15 @@ public partial class NNGatheredTableModel
         => Normal.Init(Vector(64L, 4L)).Gather(tokens);
 }
 
+/// <summary><see cref="NNGatheredTableModel"/> projected by a <c>[4, 48]</c> weight: the shape of
+/// an embedding feeding a linear layer.</summary>
+[Module]
+public partial class NNGatheredTableProjectionModel
+{
+    public static Tensor<float32> Inline(Tensor<int64> tokens)
+        => Normal.Init(Vector(64L, 4L)).Gather(tokens).MatMul(Normal.Init(Vector(4L, 48L)));
+}
+
 /// <summary>Tiny conv net: Conv2d(2, k3, s1, p1) → ReLU → GlobalAvgPool → [N, 2] logits.</summary>
 [Module]
 public partial class NNTinyConvClassifier

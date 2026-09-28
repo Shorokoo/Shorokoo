@@ -3775,6 +3775,50 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>
+    /// Axis-0 Gather of table rows with repeats and negative spellings: rows 3, 3 (as -1), 0, 3
+    /// and 0 (as -4) of a [4, 2] table under weights 1..10, so dL/dtable sums each row's weights
+    /// and leaves the unread rows 1 and 2 at zero.
+    /// </summary>
+    [Module]
+    public partial class AutoGradGatherTableRowsCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> table)
+        {
+            var weights = (Tensor<float32>)OnnxOp.Reshape(
+                Vector(1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f), Vector(5L, 2L), allowZero: false);
+            var gathered = (Tensor<float32>)OnnxOp.Gather(table, Vector(3L, -1L, 0L, 3L, -4L), axis: 0);
+            var loss = (gathered * weights).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(table, loss);
+            var expected = (Tensor<float32>)OnnxOp.Reshape(
+                Vector(14f, 16f, 0f, 0f, 0f, 0f, 11f, 14f), Vector(4L, 2L), allowZero: false);
+            return (grad - expected).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar() < Scalar(1e-5f);
+        }
+    }
+
+    /// <summary>
+    /// Axis-0 Gather of a rank-3 [3, 2, 2] table at [2, 2] indices naming rows 2, 0, 2 and 2 (as
+    /// -1) under weights 1..16: row 2 sums three [2, 2] weight blocks, row 0 takes one, row 1
+    /// none.
+    /// </summary>
+    [Module]
+    public partial class AutoGradGatherTableBlocksMultiDimIndicesCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> table)
+        {
+            var weights = (Tensor<float32>)OnnxOp.Reshape(
+                Vector(1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f, 11f, 12f, 13f, 14f, 15f, 16f),
+                Vector(2L, 2L, 2L, 2L), allowZero: false);
+            var indices = (Tensor<int64>)OnnxOp.Reshape(Vector(2L, 0L, 2L, -1L), Vector(2L, 2L), allowZero: false);
+            var gathered = (Tensor<float32>)OnnxOp.Gather(table, indices, axis: 0);
+            var loss = (gathered * weights).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(table, loss);
+            var expected = (Tensor<float32>)OnnxOp.Reshape(
+                Vector(5f, 6f, 7f, 8f, 0f, 0f, 0f, 0f, 23f, 26f, 29f, 32f), Vector(3L, 2L, 2L), allowZero: false);
+            return (grad - expected).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar() < Scalar(1e-5f);
+        }
+    }
+
     [Module]
     public partial class AutoGradGatherNonZeroAxisOneDimIndicesCheck
     {
@@ -3792,8 +3836,8 @@ namespace Shorokoo.Tests.Modules
     /// <summary>
     /// Unknown-rank companion to <see cref="AutoGradGatherNonZeroAxisOneDimIndicesCheck"/>:
     /// no Identity rank stamp, so `data` has a null static Rank and the Gather gradient
-    /// takes its rank-agnostic collapse-to-3-D scatter (instead of a rank-length transpose
-    /// perm, which previously threw for a non-zero axis on null-rank data). Same result:
+    /// takes its rank-agnostic collapse-to-3-D scatter (a rank-length transpose perm needs a
+    /// static rank). Same result:
     /// gather column 1 of 3a²-free data → sum = 2a, dL/da = 2.
     /// </summary>
     [Module]
@@ -5236,8 +5280,7 @@ namespace Shorokoo.Tests.Modules
     }
 
     /// <summary>Same as Positive but with coordinateTransformationMode=Output_half_pixel
-    /// (previously spelled via the misleading positional CoordinateTransformationMode
-    /// .Half_pixel_symmetric — same "output_half_pixel" wire value). dL/da = 34.</summary>
+    /// (the "output_half_pixel" wire value). dL/da = 34.</summary>
     [Module]
     public partial class AutoGradRoiAlignOutputHalfPixelCheck
     {

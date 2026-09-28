@@ -377,13 +377,10 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         {
 
             // Gather(data, indices, axis=a): y = data[indices] along axis a
-            // Gradient w.r.t. data: scatter grad back to the original positions using ScatterND.
+            // Gradient w.r.t. data: grad's rows summed back into the positions they were read from,
+            // and zero everywhere else.
             var effectiveAxis = axis ?? 0;
-            var dataShape = data.DShape;
-
-            // Create zeros with same shape and type as data
             var zero = TypedConst(0.0f, data);
-            Tensor<T1> zeros = OnnxOp.Expand(zero, dataShape);
 
             // Flatten indices to 1D for ScatterND and add trailing index-depth dimension
             Tensor<int64> indicesInt = OnnxOp.Cast(indices, saturate: null, to: DType.Int64);
@@ -402,9 +399,33 @@ namespace Shorokoo.Core.Nodes.AutoDiff
                 Tensor<int64> newShape = OnnxOp.Concat([Vector(-1L), tailShape], axis: 0);
                 grad = OnnxOp.Reshape(grad, newShape, allowZero: false);
 
-                Tensor<T1> result = OnnxOp.ScatterND(zeros, scatterIndices, grad, ScatterNDReduction.Add);
+                // `data` is typically a table of which a step reads a few rows, so everything
+                // here but the last op is sized by the M index positions, not by the table.
+                // Each row read is given one slot: the highest position that reads it (negative
+                // and non-negative spellings of a row share one, since ScatterND and Gather both
+                // resolve them). The rows no position reads keep -1, which Gather resolves to the
+                // last slot, M, which nothing is summed into. grad's rows are summed into their
+                // row's slot in position order, onto zero — exactly the sums a ScatterND-Add into
+                // a zeroed table makes — and one Gather by slot then writes the table-shaped
+                // gradient in a single pass, rather than zero-filling the table and scattering
+                // into a copy of it.
+                Tensor<int64> positionCount = OnnxOp.Shape(flatIndices);                              // [M]
+                Tensor<int64> positions = OnnxOp.Range(
+                    Scalar(0L), OnnxOp.Squeeze(positionCount, Vector(0L)), Scalar(1L));                 // [M]
+                Tensor<int64> unread = OnnxOp.Expand(Scalar(-1L), OnnxOp.Shape(data, start: 0, end: 1)); // [V]
+                Tensor<int64> slotOfRow = OnnxOp.ScatterND(
+                    unread, scatterIndices, positions, ScatterNDReduction.Max);                          // [V]
+                Tensor<int64> slotOfPosition = OnnxOp.Gather(slotOfRow, flatIndices, axis: 0);           // [M]
+                Tensor<int64> slotsShape = OnnxOp.Concat([positionCount + Vector(1L), tailShape], axis: 0);
+                Tensor<T1> slots = OnnxOp.ScatterND(
+                    OnnxOp.Expand(zero, slotsShape), OnnxOp.Unsqueeze(slotOfPosition, Vector(-1L)),
+                    grad, ScatterNDReduction.Add);                                                        // [M + 1, ...]
+                Tensor<T1> result = OnnxOp.Gather(slots, slotOfRow, axis: 0);                            // [V, ...]
                 return [result, null];
             }
+
+            var dataShape = data.DShape;
+            Tensor<T1> zeros = OnnxOp.Expand(zero, dataShape);
 
             // Non-zero axis: ScatterND scatters along the LEADING dim, so move the target
             // axis to the front, scatter, then move it back.

@@ -348,6 +348,8 @@ public class AutoGradIndexingOpsCoverageTests
     public void TestAutoGradGatherNDWhereAndUniqueGradients()
     {
         Run<AutoGradGatherAxis0MultiDimIndicesCheck>(2f);
+        RunTensor<AutoGradGatherTableRowsCheck>([4L, 2L], 1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f);
+        RunSmall<AutoGradGatherTableBlocksMultiDimIndicesCheck>([3L, 2L, 2L]);
         Run<AutoGradGatherNonZeroAxisOneDimIndicesCheck>(3f);
         Run<AutoGradGatherNonZeroAxisOneDimIndicesUnknownRankCheck>(3f);
         Run<AutoGradGatherNonZeroAxisMultiDimIndicesCheck>(4f);

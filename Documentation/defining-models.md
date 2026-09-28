@@ -7,45 +7,32 @@ Related: [core-types.md](core-types.md) · [inference.md](inference.md) ·
 
 - A model/layer is a `partial class` marked `[Module]` containing a `static` method
   named `Inline`. The source generator reads `Inline` and generates `Model(...)`,
-  `Call(...)`, and `ComputationGraph` members.
+  `Call(...)`, and `ComputationGraph` members. `Inline` may return a single value or a
+  tuple.
 - Attributes (namespace `Shorokoo.Modules`):
   - `[Module]` — on the partial class. Generates the callable graph.
-  - `[Hyper]` — on scalar hyperparameter parameters (configured when the module is
-    built). All `[Hyper]` parameters must come **after** the input (tensor)
-    parameters in the `Inline` signature. An optional default — `[Hyper(0.9f)]` —
-    seeds the generated hyperparameter set (see *Generated surface*). For when a
-    hyperparameter's value is fixed vs supplied at runtime, see
-    [Hyperparameter baking](#hyperparameter-baking) below; for writing one module
-    that covers a whole family of architectures, see
-    [Workflow: one module, many variants](#workflow-one-module-many-variants).
+  - `[Hyper]` — on hyperparameter parameters, which must come **after** the input
+    (tensor) parameters. An optional default (`[Hyper(0.9f)]`) seeds the generated
+    hyperparameter set. See [Hyperparameter baking](#hyperparameter-baking).
   - `[TrainableParamInitializer]` — on a `static partial class` whose `Inline`
     produces a trainable weight tensor. Generates an `Init(...)` method.
-  - `[StateInitializer(Ownership = ...)]` — like `TrainableParamInitializer`, but for
-    non-trainable state. `Ownership` declares who updates the state:
-    `StateOwnership.ModuleOwned` (the default) for state the module's own forward
-    logic updates (e.g. BatchNorm running statistics);
-    `StateOwnership.OptimizerOwned` for optimizer state (e.g. Adam moments), which
-    the `TrainingRig` replicates per trainable parameter. State **must** be created
-    through a state initializer's `Init(...)`: `Globals.StateUpdate(state, newValue)`
-    throws `InvalidStateUpdateException` when its first argument is anything else —
-    a runtime input, a trainable parameter, or a computed tensor. `StateUpdate` is
-    also only valid inside a module body — it throws otherwise. Inside a
-    `LoopAPI.Iterate` loop body it registers the post-loop value of the updated
-    tensor — the value it holds once the loop finishes — which requires the updated
-    value to be a carried loop variable, and the body still registers exactly one
-    update however many trips it runs. A module body registers one update per
-    **call**: calling one model object twice applies both, in call order, with the
-    second call reading what the first wrote — including a call whose result the body
-    discards, which is how you call for the update alone. Across the arms of an
-    `IfElse` only the arm that runs updates the state, and calls within one arm
-    compose with each other and with any call made before the branch. A call the
-    branch does not choose between has to be made before the ones it does: the
-    parameter cannot carry the branch's answer before the branch produces it.
-- `Inline` may return a single value or a tuple (multiple outputs).
-- The class must be `partial` so the generator can extend it.
-- The generator is a convenience, not a requirement — see
-  [Without the source generator](#without-the-source-generator) for the
-  `ModuleFactory.FromFunc` path.
+  - `[StateInitializer(Ownership = ...)]` — the same for non-trainable state.
+    `StateOwnership.ModuleOwned` (default): the module's forward logic updates it (e.g.
+    BatchNorm running statistics). `StateOwnership.OptimizerOwned`: optimizer state
+    (e.g. Adam moments), replicated by the `TrainingRig` per trainable parameter.
+- `Globals.StateUpdate(state, newValue)` rules:
+  - Its first argument must come from a state initializer's `Init(...)`; anything else
+    (a runtime input, a trainable parameter, a computed tensor) throws
+    `InvalidStateUpdateException`. It throws outside a module body.
+  - Inside a `LoopAPI.Iterate` body it registers the post-loop value, which must be a
+    carried loop variable; the body registers one update however many trips it runs.
+  - Each **call** of a module registers its update: calling one model twice applies
+    both in order, the second reading what the first wrote (a call whose result is
+    discarded still updates).
+  - In an `IfElse`, only the arm that runs updates; calls within an arm compose with
+    each other and with calls before the branch. A call the branch does not choose
+    between must come before the ones it does.
+- The generator is optional; see [Without the source generator](#without-the-source-generator).
 
 ## Generated surface
 
@@ -55,108 +42,51 @@ For `[Module] class Foo` with `Inline(I x, [Hyper] H h) -> O`:
 |---|---|
 | `Foo.Model(h)` | Bind hyperparameters; returns a reusable `Model` you can `.Call(...)` many times. |
 | `Foo.Model(h).Call(x)` | Build the subgraph for input `x`. |
-| `Foo.Call(h, x)` | Shortcut for `Foo.Model(h).Call(x)`. The combined shortcut keeps hyperparameters first (then inputs); only the `Inline` source signature is inputs-first. |
+| `Foo.Call(h, x)` | Shortcut for `Foo.Model(h).Call(x)`. Hyperparameters come first here; only the `Inline` source signature is inputs-first. |
 | `Foo.ComputationGraph` | The readonly `ComputationGraph` (kind `Module`; used for export and training). |
-| `FooHyperparameters` | Generated **only when every `[Hyper]` is tensor-shaped** — `Scalar<T>`, `Vector<T>` or `Tensor<T>`, at any supported dtype (the optimizer-shaped case): a named, init-only set implementing `IOptimizerHyperparameters`, with defaults from `[Hyper(default)]`, each formatted at its declared dtype. Only a scalar can carry a default; a non-scalar hyperparameter's property is `required`. See [training.md](training.md). |
+| `FooHyperparameters` | Generated **only when every `[Hyper]` is tensor-shaped** (`Scalar<T>`, `Vector<T>` or `Tensor<T>`, any dtype): an init-only set implementing `IOptimizerHyperparameters`, with defaults from `[Hyper(default)]` at the declared dtype. Only a scalar can have a default; a non-scalar's property is `required`. See [training.md](training.md). |
 
 For `[TrainableParamInitializer] class ConstInit` with `Inline(Vector<int64> shape)`:
-`ConstInit.Init(shape)` returns the initialized trainable `Tensor<T>`. (The class
-must not itself be named `Init` — the generated `Init` member would collide with
-the type name; the generator rejects that with error `MSG003`.)
+`ConstInit.Init(shape)` returns the initialized trainable `Tensor<T>`. A class named
+`Init` is rejected with `MSG003`.
 
-An initializer may take inputs beyond the shape, and two of the shapes those take
-are worth knowing: an `Init(...)` call **inside** an initializer body is the called
-initializer's body evaluated as a value rather than a second parameter — only the
-top-level initializer defines one — so the shipped parameterized initializers compose,
-trainable and `[StateInitializer]` alike; and an input typed `Tensor<T>` may be
-**another trainable parameter**, which reaches the body as the value that parameter
-was initialized to. What an initializer body may **not** do is create or reference a
-model: no `Foo.Model(...)`, no `Foo.Call(...)` of any `[Module]`, no `ModelSequence`,
-no `GetTrainableParam`, no model-typed input. It is refused with `FW055` when the
-graph using the initializer is built. See *Writing your own* in
-[nn-library.md](nn-library.md#initializers-shorokoomodulesinitializers).
+An initializer may take inputs beyond the shape. An `Init(...)` call inside an
+initializer body evaluates the called initializer as a value, not a second parameter,
+so initializers compose. A `Tensor<T>` input may be **another trainable parameter**,
+arriving as its initial value. An initializer body may **not** create or reference a
+model (no `Foo.Model(...)`, `Foo.Call(...)`, `ModelSequence`, `GetTrainableParam`, or
+model-typed input): that fails with `FW055` when the graph is built. See *Writing your
+own* in [nn-library.md](nn-library.md#initializers-shorokoomodulesinitializers).
 
 ## Hyperparameter baking
 
-A concrete architecture has a **static parameter space**: which trainable
-parameters exist, and what shape each one has, is fixed once and for all by
-`ToConcreteArchitecture` — that is what makes it concrete, and it is what lets
-weights bind, optimizers allocate state, and checkpoints round-trip. So the
-dividing line between the two kinds of `[Hyper]` parameter is whether the hyper
-touches that parameter space:
+`ToConcreteArchitecture` fixes which trainable parameters exist and their shapes. A
+`[Hyper]` is one of two kinds:
 
-- **Parameter-space-determining** hyperparameters decide something about the
-  trainable parameters themselves. They are **baked** when the graph is
-  concretized (`ToConcreteArchitecture` — the step that prepares a model for
-  training, weight binding, or export), from the value you supply there. There
-  are two ways a hyper lands in this class, and the second is easy to miss:
-  - It feeds a parameter's **shape** (or how many there are) — e.g.
-    `outFeatures` in a dense layer, used as
-    `ConstInit.Init([outFeatures, inFeatures])`. The parameters get fixed shapes
-    from the value you supplied; a different value later does not resize them.
-  - It **gates a branch that contains parameters** — e.g. `useBias` in
-    `useBias.IfElse(y + b, y)`, where `b` is a trainable parameter. Which
-    parameters *exist* is part of the parameter space, so the unselected
-    branch's parameters are not created, and the `IfElse` that held them is
-    resolved and folded away with them. Concretizing this layer with
-    `useBias = false` yields an architecture with no bias parameter and no
-    branch — passing the bit at `Execute` no longer changes that result.
-    Concretizing with `useBias = true` prunes nothing, so nothing is folded and
-    the bit still selects at run time. Nor does a gate fold when it does not
-    *solely* own the parameters — a tuple `IfElse`, whose slots resolve together,
-    or one sharing them with a second gate: there the parameters still go, and
-    the branch that held them is left reading a zero stand-in. Note the scope
-    either way: only the
-    `IfElse` whose *pruned* parameters made it unreachable is folded, so the
-    same hyper stays live for any other `IfElse` it gates — see
-    [What concretization fixes](inference.md#what-concretization-fixes).
-- **Value-only** hyperparameters (scale factors, momentum coefficients, ε's) do
-  not touch any trainable parameter — neither its shape nor its existence. They
-  are not baked: in the concretized graph they are read live at every `Execute`
-  and may vary call to call, and in an optimizer they may be scheduled per-step
-  (see [training.md](training.md)).
+- **Parameter-space-determining**: it feeds a parameter's **shape** or count (e.g.
+  `outFeatures` in `ConstInit.Init([outFeatures, inFeatures])`), or **gates a branch
+  holding parameters** (e.g. `useBias` in `useBias.IfElse(y + b, y)`). It is **baked**
+  from the value supplied at concretization. The unselected branch's parameters are not
+  created, and the `IfElse` left holding them is folded away. With `useBias = false`
+  there is no bias and no branch; with `useBias = true` nothing is pruned and the bit
+  still selects at run time. A tuple `IfElse`, or a gate sharing its parameters with
+  another gate, does not fold: its pruned branch reads a zero stand-in. Other `IfElse`s
+  on the same hyper stay live. See
+  [What concretization fixes](inference.md#what-concretization-fixes).
+- **Value-only** (scale factors, momentum, ε): read at every `Execute`, may vary per
+  call, and may be scheduled per step in an optimizer (see [training.md](training.md)).
 
-On the `Foo.ComputationGraph` route both kinds stay **live inputs** of the
-concretized graph and must be supplied again at `Execute` (only
-[`Specialize`](inference.md#hardcoding-hypers-with-specialize) removes an input;
-via `Call`/`Model` the hyper is a constant and was never an input). For a
-value-only hyper you may supply anything; for a parameter-space-determining one,
-supply **the same value you concretized with**. Where it decided a parameter's
-*shape*, a different value later does not resize anything. Where it gated a
-parameter's *existence*, a different value either changes nothing (the branch
-folded away with the parameters it held), or silently runs the other branch —
-because nothing was pruned, or because the gate could not fold and that branch
-now reads a zero stand-in for parameters that were. None of those is what you
-meant. See
-[What concretization fixes](inference.md#what-concretization-fixes) for the full
-list of what a concrete architecture pins down.
+How a hyper is supplied depends on the route:
 
-How a hyper value gets supplied depends on the route:
-
-- `Foo.Call(Scalar(k), x)` / `Foo.Model(Scalar(k))` — the hyper is embedded as a
-  constant node in the built subgraph.
-- `Foo.ComputationGraph` + concretize — **every** hyper stays an input of the
-  concrete graph. The framework keeps the concrete graph's inputs ordered
-  hyperparameters-first (independent of the inputs-first `Inline` source order), so
-  `Execute` must be given the hyper values again — the hypers (in their `Inline`
-  relative order) first, then the inputs. The values passed at concretization time bake the
-  parameter space (parameter-space-determining hypers — shapes, count, and which
-  parameters exist at all) and serve as shape/type hints; value-only hypers are
-  read live at every `Execute`. Re-supply a baked hyper with the value it was
-  concretized with. See
-  [inference.md](inference.md#running-a-module-with-hyper-parameters) for the
-  recipe.
-- `Foo.ComputationGraph` + **`Specialize`** + concretize — to hardcode hypers
-  (either kind) instead of re-supplying them at every `Execute`, call
-  `Specialize` before `ToConcreteArchitecture`. It constant-folds the named hyper
-  values into the graph and removes them from the input list, so the concrete
-  model runs on the remaining inputs alone. See
+- `Foo.Call(Scalar(k), x)` / `Foo.Model(Scalar(k))` — a constant node in the subgraph.
+- `Foo.ComputationGraph` + concretize — **every** hyper stays an input. `Execute` takes
+  the hypers first (in `Inline` order), then the inputs. Re-supply a
+  parameter-space-determining hyper with **the value you concretized with**; any other
+  value either changes nothing or silently runs the other branch. See
+  [inference.md](inference.md#running-a-module-with-hyper-parameters).
+- `Foo.ComputationGraph` + **`Specialize`** + concretize — `Specialize` constant-folds
+  the named hypers and removes them from the inputs. See
   [inference.md](inference.md#hardcoding-hypers-with-specialize).
-
-Together these make a `[Module]` class a *family* of architectures rather than one:
-scale, depth and which parameters exist are all chosen by value, so N variants of a
-model need one class, not N. See
-[Workflow: one module, many variants](#workflow-one-module-many-variants).
 
 ## Workflow: add a new layer
 
@@ -164,49 +94,27 @@ model need one class, not N. See
 2. Declare `[Module] public partial class MyLayer`.
 3. Write `public static <OutputType> Inline(<input tensors...>, <[Hyper] hypers...>)`.
 4. Build the output from tensor ops, `NN.*` ops, sub-modules (`Other.Model(...).Call(...)`),
-   and weights from a `[TrainableParamInitializer]` — whose own body may in turn call
-   another initializer or start from a parameter already built here, but may not create
-   or call a model (`FW055`).
+   and weights from a `[TrainableParamInitializer]` (which may not create or call a
+   model: `FW055`).
 5. Ensure the project references the generator as an analyzer (see below).
 6. Build, then call `MyLayer.Call(...)` or use `MyLayer.ComputationGraph`.
 
 ## Control flow inside `Inline`
 
-- Conditional (data-dependent): `condition.IfElse(whenTrue, whenFalse)` where
-  `condition` is `Scalar<bit>`. Tuples are supported.
+- Conditional: `condition.IfElse(whenTrue, whenFalse)` where `condition` is
+  `Scalar<bit>`. Tuples are supported.
 
-  Both branches are *built*, but only the selected one *runs*. The branch
-  expressions are ordinary C# arguments, so they are traced before the `IfElse`
-  they belong to; Shorokoo then moves everything that serves one branch, and
-  nothing else, inside that branch — so it lowers into the `If` node's own
-  subgraph and executes only when the condition picks it. That covers whole
-  loops and nested `IfElse`s, not just single ops. Work that feeds *both*
-  branches, or that is read after the `IfElse` as well, stays outside and is
-  computed once, as it must be.
+  Both branches are *built*, but only the selected one *runs*: work serving only one
+  branch (including whole loops and nested `IfElse`s) executes only when that branch is
+  taken; work shared with the other branch or read afterwards is computed once. A
+  branch may therefore hold an operation invalid on the other path (e.g. unwrapping an
+  absent `OptionalTensor`; see [Optional tensor inputs](#optional-tensor-inputs)).
 
-  So a branch may hold an operation that would be invalid on the other path —
-  unwrapping an `OptionalTensor` that is absent there is the usual case (see
-  [Optional tensor inputs](#optional-tensor-inputs)) — and an expensive branch
-  costs nothing when it is not taken.
-
-  One exception, and it is about parameters rather than control flow: the
-  parameter space of a concrete architecture is static, so it cannot depend on a
-  value that only arrives at `Execute`. When a `[Hyper]` gates a branch holding
-  trainable parameters, `ToConcreteArchitecture` creates only the selected
-  branch's parameters — and when that leaves the *unselected* branch holding
-  parameters that no longer exist, it folds that `IfElse` away too, so the bit
-  no longer switches it at run time. Nothing else is folded: an `IfElse` whose
-  selected branch holds the parameters keeps both branches, and so do a paramless
-  one on the same hyper, a tuple `IfElse`, and one sharing its parameters with a
-  second gate. See
-  [Hyperparameter baking](#hyperparameter-baking).
-
-  A hyper folded to a **constant** before lowering — by `Foo.Call(Scalar(k), x)`,
-  or by [`Specialize`](inference.md#hardcoding-hypers-with-specialize) — is the
-  unconditional case: a constant condition folds *every* `IfElse` on it,
-  parameters or not. `Specialize` additionally drops the hyper from the graph's
-  input list; on the `Call`/`Model` route it was never an input of the enclosing
-  graph to begin with.
+  Hypers gating parameters fold as described in
+  [Hyperparameter baking](#hyperparameter-baking). A hyper that is a **constant** before
+  lowering (via `Foo.Call(Scalar(k), x)` or
+  [`Specialize`](inference.md#hardcoding-hypers-with-specialize)) folds *every*
+  `IfElse` on it.
 
   ```csharp
   // Apply bias only when useBias is true — both branches are built, one runs.
@@ -219,13 +127,10 @@ model need one class, not N. See
   ```
 
 - Loops: `foreach (var ctx in LoopAPI.Iterate(count)) { ...; ctx.IterationIndex; }`
-  where `count` is `Scalar<int64>`. **Prefer this to a plain C# `for` for any repetition
-  in a model body** — not only when the count is a graph value. A plain `for` runs at
-  trace time and leaves nothing of the repetition behind: each iteration's parameters
-  become independent parameters numbered in trace order, so their names say how many
-  same-named `Init(...)` calls preceded them and nothing about which iteration they belong
-  to. A `LoopAPI.Iterate` body carries the iteration index instead, and each iteration
-  names its own parameters ([Parameter names](#parameter-names)):
+  where `count` is `Scalar<int64>`. **Prefer this to a plain C# `for` for any
+  repetition**, even with a constant count. A plain `for` unrolls at trace time and
+  numbers parameters in trace order; `LoopAPI.Iterate` names each iteration's
+  parameters by iteration ([Parameter names](#parameter-names)):
 
   ```
   for (int i = 0; i < 3; i++)          foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
@@ -234,16 +139,10 @@ model need one class, not N. See
     TrainableParam#0.NormalDist#2        TrainableParam#0.Loop#0:2.NormalDist#0
   ```
 
-  Those names are the keys of every checkpoint the model writes and the ids a naming
-  scheme maps ([onnx-and-weights.md](onnx-and-weights.md#naming)), so the difference
-  outlives the graph: under a plain `for` a parameter's index says how many same-named
-  `Init(...)` calls preceded it and nothing about which iteration it belongs to, so adding or
-  removing one renumbers every parameter after it and silently re-points any name written
-  against them.
-
-  Fall back to a plain `for` only where `LoopAPI.Iterate` cannot express the stack — a
-  body that genuinely differs from iteration to iteration. A uniform stack of layers is
-  not that case.
+  These names key checkpoints and naming schemes
+  ([onnx-and-weights.md](onnx-and-weights.md#naming)); under a plain `for`, adding or
+  removing one `Init(...)` renumbers every later parameter. Use a plain `for` only when
+  the body differs between iterations.
 
   Simple — add `x` to itself `n` times:
   ```csharp
@@ -263,10 +162,9 @@ model need one class, not N. See
   return total;   // x·1 + x·2 + … + x·numSteps
   ```
 
-  `ctx.Scan(v)` records `v` once per iteration and stacks the recordings into a
-  single tensor with a new leading axis of length `count`, available after that loop.
-  Scan whatever the body reads at that point — the carry before the body updates it,
-  the carry after, the iteration index, a value from outside the loop:
+  `ctx.Scan(v)` stacks `v` from every iteration into one tensor with a new leading axis
+  of length `count`, available after the loop. `v` can be anything the body reads (a
+  carry before or after its update, the index, an outside value):
   ```csharp
   Variable? scanned = null;
   var acc = x;
@@ -278,13 +176,11 @@ model need one class, not N. See
   return (Tensor<float32>)scanned!;   // [x, x+1, …, x+n-1]
   ```
 
-  Nested loops scan on either context. An **enclosing** loop's `ctx.Scan`, called from
-  inside a nested body, records once per *enclosing* iteration — the value that body ends
-  the iteration with. What an inner loop's own scan cannot do is escape the enclosing loop;
-  see [limitations.md](limitations.md).
+  An **enclosing** loop's `ctx.Scan` called from a nested body records once per
+  enclosing iteration (the value at its end). An inner loop's own scan cannot escape
+  the enclosing loop; see [limitations.md](limitations.md).
 
-  A local may also carry what another carry held **one iteration ago**. The loop identifies
-  it and hands back the trailed carry's value from the start of the previous iteration:
+  A local may carry another carry's value from **one iteration ago**:
   ```csharp
   var acc = x, prev = x, sum = Scalar(0.0f);
   foreach (var ctx in LoopAPI.Iterate(trips))
@@ -294,28 +190,23 @@ model need one class, not N. See
       acc  = acc + Scalar(1.0f);
   }
   ```
-  Written bare like that, a lagged local works read inside the body or scanned, including
-  inside a nested loop when the lagged local is created in that loop's enclosing body.
-  Everything else — reading it after the loop, lagging a local the enclosing loop also
-  carries, trailing something the loop does not carry, chaining two lag steps, or an alias
-  seeded from outside the loop — is refused, naming the shape. Wrapping every such
-  assignment as `prev = LoopAPI.Carry(acc)` answers them, and a local the body only writes
-  needs `LoopAPI.Init` as well. See [limitations.md](limitations.md).
+  Written bare, a lagged local may be read or scanned inside the body (including a
+  nested loop, when created in that loop's enclosing body). Reading it after the loop,
+  lagging a local the enclosing loop also carries, trailing a non-carry, chaining two
+  lags, or an alias seeded outside the loop is refused, naming the shape; write
+  `prev = LoopAPI.Carry(acc)` instead, plus `LoopAPI.Init` for a local the body only
+  writes. See [limitations.md](limitations.md).
 
 ## Workflow: one module, many variants
 
-A `[Module]` class is not one architecture — it is a **family**. The `Inline` body is
-traced once and the graph is cached per method, but `[Hyper]` parameters are *symbolic
-graph inputs*, so that one cached graph already covers every configuration its hypers
-can take. A `Scalar<int64>` hyper sets a parameter's shape or a `LoopAPI.Iterate` trip
-count; a `Scalar<bit>` hyper picks between algorithms and decides which trainable
-parameters exist at all ([Hyperparameter baking](#hyperparameter-baking)). So "the same
-model at a different scale" is a **value**, not a second class: write the family once and
-pick a member by supplying hyper values.
+A `[Module]` class is a **family** of architectures. Its graph is traced once and
+cached, but `[Hyper]` parameters are symbolic inputs, so that graph covers every
+configuration: a `Scalar<int64>` hyper sets shapes or trip counts, a `Scalar<bit>`
+hyper picks algorithms and which parameters exist. A different scale is a value, not a
+new class.
 
-A ViT-shaped classifier, parameterised over its width, depth, head count, class count,
-and two structural choices — whether the transformer blocks carry biases, and whether the
-classifier head is a single projection or a hidden-layer MLP:
+A ViT-shaped classifier parameterised over width, depth, heads, classes, whether blocks
+carry biases, and whether the head is linear or an MLP:
 
 ```csharp
 using Shorokoo;
@@ -359,20 +250,15 @@ public partial class VisionTransformer
 }
 ```
 
-Every knob is a hyper, so nothing about a variant is written in source. Note in
-particular what a plain C# `for` could not have done: `numLayers` is a graph value
-driving `LoopAPI.Iterate`, so the *number* of blocks — and with it the number of
-trainable parameters — is chosen by value too.
+Because `numLayers` drives `LoopAPI.Iterate`, even the number of blocks (and so of
+parameters) is chosen by value.
 
 ### Picking a variant: `Specialize`
 
-(`using Shorokoo.Modules;` does not pull in its `.Layers` / `.Initializers` /
-`.Optimizers` children — `using` is not recursive — so the three snippets below assume the
-block above.)
+(The snippets below assume the `using` block above; `using` is not recursive.)
 
-`Specialize` constant-folds the hyper values into the graph **and removes them from the
-input list**, so what comes out is an ordinary single-input graph with nothing left to
-re-supply ([inference.md](inference.md#hardcoding-hypers-with-specialize)):
+`Specialize` constant-folds the hyper values **and removes them from the inputs**
+([inference.md](inference.md#hardcoding-hypers-with-specialize)):
 
 ```csharp
 var family = VisionTransformer.ComputationGraph;   // inputs: the 7 hypers, then patches
@@ -391,27 +277,18 @@ var small = Variant(family, 64, 8, 128, 4, 10, useBias: true,  useMlpHead: true)
 // tiny.InputNames == small.InputNames == ["patches"] — the hypers are gone.
 ```
 
-`FromOrderedInputs` pairs values with the *leading* input names, and a graph's hyper
-inputs come first (in `Inline` order) regardless of the inputs-first source signature —
-so passing just the hyper values names them correctly.
+`FromOrderedInputs` pairs values with the leading input names, and hyper inputs come
+first, so the hyper values alone name them correctly.
 
-The two graphs are different architectures, not two views of one. Concretized on the
-same patch input, `tiny` carries **23** trainable parameters and `small` **68**: the
-per-block count differs (`useBias = false` prunes the attention and FFN biases), the
-number of blocks differs (2 versus 4), the widths differ, and so does the head — `wHead`
-exists only when `useMlpHead = false`, `wHidden`/`wOut` only when it is true, and either
-way the `IfElse` that held the unselected pair is gone.
-
-Note that these values are **baked with `Specialize`**, not merely supplied as
-concretization hints, so each condition is a constant before lowering and *every* `IfElse`
-on it folds — including the `useBias` gates, which a plain concretization with
-`useBias = true` would have left live
-([Control flow inside `Inline`](#control-flow-inside-inline)).
+Concretized on the same input, `tiny` has **23** trainable parameters and `small`
+**68**: block count, widths, biases and head all differ. Since `Specialize` makes every
+condition a constant, *every* `IfElse` on it folds, including `useBias` gates that plain
+concretization with `useBias = true` would leave live.
 
 ### Training a variant
 
-`TrainingRig.FromScratch` takes the specialized graph directly, so a variant trains with
-no hypers to thread through `TrainStep`:
+`TrainingRig.FromScratch` takes the specialized graph directly, with no hypers to pass
+to `TrainStep`:
 
 ```csharp
 var sample = TensorData([batch, numPatches, patchDim], /* … */);
@@ -421,42 +298,29 @@ var rig = TrainingRig.FromScratch(
     new AdamWOptimizerHyperparameters { LearningRate = 3e-4f });
 ```
 
-The samples bind by position. To bind them by name instead — each to the input it names, in any
-order — pass `NamedModelParam`s:
+Samples bind by position; to bind by name pass `NamedModelParam`s:
 `[new TensorDataModelParam("patches", ModelParamType.InputParam, sample)]`.
 
-Swapping `tiny` for `small` is the whole diff between training the two. (Each variant is
-still concretized and lowered separately, so this buys one source of truth, not a cheaper
-build — see [What construction costs](training.md#what-construction-costs).)
+Swapping `tiny` for `small` is the whole diff. Each variant is still built separately
+(see [What construction costs](training.md#what-construction-costs)).
 
 ### What must still be a C# argument
 
-Hypers are graph values, which fixes the boundary:
-
-- **`Inline`'s return type cannot vary.** A hyper is a value *inside* the graph, and a
-  graph's output type is fixed when it is built, so a choice that changes the output's
-  *type* — a loss reduced to a `Scalar<float32>` versus kept per-element as a
-  `Tensor<float32>` — cannot be a hyper. Keep such a choice out of the model: `TrainingRig.FromScratch` takes the
-  loss as a **separate graph**, so the reduction is picked there
-  ([nn-library.md](nn-library.md#loss-configurable-knobs)), and the model module
-  stays one class.
-- **A `[Hyper]` is a graph value of a tensor element type — there is no enum hyper.** Where a knob is naturally an
-  enum, either encode it as a `Scalar<int64>` and compare in-graph
-  (`(mode > Scalar(3L)).IfElse(a, b)`), or make it a plain C# argument on a `static`
-  helper that is *not* a `[Module]` — the shape `Recurrent.RNN` and `EmbeddingBag.Bag`
-  take, since their knobs are topology-determining and baked at build time either way
+- **`Inline`'s return type cannot vary.** A choice that changes the output *type*
+  (e.g. a loss reduced to `Scalar<float32>` vs a per-element `Tensor<float32>`) cannot be
+  a hyper. `TrainingRig.FromScratch` takes the loss as a **separate graph**, so pick the
+  reduction there ([nn-library.md](nn-library.md#loss-configurable-knobs)).
+- **There is no enum hyper.** Encode the knob as a `Scalar<int64>` compared in-graph
+  (`(mode > Scalar(3L)).IfElse(a, b)`), or make it a plain C# argument of a `static`
+  non-`[Module]` helper, as `Recurrent.RNN` and `EmbeddingBag.Bag` do
   ([nn-library.md](nn-library.md#recurrent-layers)).
-- **Both `IfElse` branches are built, and they must agree in *type*** — they are the two
-  arguments of one call. Their *shapes* need not match: the selected branch's shape is the
-  result's, so gating a branch that adds a token to the sequence is fine, and on a gate
-  that is still live at run time the same compiled model returns whichever shape the bit
-  selects.
+- **Both `IfElse` branches must agree in *type*.** Shapes may differ: the result takes
+  the selected branch's shape, even at run time on a live gate.
 
 ## Omittable parameters (defaulted hypers & optional inputs)
 
-`Inline` parameters are always written as ordinary, **non-nullable** types. The source
-generator turns two kinds of parameter into **nullable, omittable** parameters on the
-generated `Model` / `Call` surface, so callers can leave them out:
+`Inline` parameters are always **non-nullable**. The generator makes two kinds
+**nullable and omittable** on `Model` / `Call`:
 
 | `Inline` parameter | Generated `Model`/`Call` parameter | When omitted / `null` |
 |---|---|---|
@@ -465,15 +329,10 @@ generated `Model` / `Call` surface, so callers can leave them out:
 | `[Hyper] Vector<float32> scales` | `Vector<float32> scales` | not omittable — only a scalar hyperparameter can carry a default |
 | `OptionalTensor<float32> bias` | `Tensor<float32>? bias = null` | an **absent** optional is passed |
 
-(C#'s "optional parameters last" rule still applies: only the trailing run of
-omittable parameters gets a `= null` default — a defaulted hyperparameter that sits
-before a required input stays nullable but must be supplied, where `null` still means
-"use the default".)
+Only the trailing run of omittable parameters gets `= null`; one before a required
+input must be passed, with `null` meaning "use the default".
 
 ### Defaulted hyperparameters
-
-A `[Hyper(default)]` scalar — e.g. an optimizer's learning rate, an epsilon — can be
-omitted entirely:
 
 ```csharp
 [Module]
@@ -487,16 +346,12 @@ var m1 = Scaled.Model();            // factor defaults to 2.0
 var m2 = Scaled.Model(Scalar(5f));  // factor = 5.0
 ```
 
-The default is recorded on the module's hyperparameter input, so it is preserved when the
-module is serialized — a round-trip through ONNX or C# emission keeps `[Hyper(2f)]`.
+The default survives serialization (ONNX or C# emission keeps `[Hyper(2f)]`).
 
 ### Optional tensor inputs
 
-Declare the parameter as an `OptionalTensor<T>` and branch on its presence with the
-optional API. Unwrapping is only valid on the present branch, and that is where it
-runs: Shorokoo puts each branch inside the `If` that selects it (see
-[Control flow](#control-flow-inside-inline)), so `TensorValue()` is never reached when the optional
-is absent.
+Declare an `OptionalTensor<T>` and branch on its presence. `TensorValue()` runs only
+on the present branch (see [Control flow](#control-flow-inside-inline)).
 
 ```csharp
 [Module]
@@ -514,119 +369,93 @@ var y0 = DenseWithOptionalBias.Call(x);          // bias omitted → zeros defau
 var y1 = DenseWithOptionalBias.Call(x, myBias);  // bias supplied
 ```
 
-The caller-facing parameter is `Tensor<float32>?`; an `OptionalTensor<T>` is also
-implicitly convertible to `Tensor<T>?`, so a present optional can be forwarded
-directly.
+An `OptionalTensor<T>` converts implicitly to `Tensor<T>?`, so a present optional can
+be forwarded.
 
 ### Supplying optional values at execution
 
-A `[Module]`'s `ComputationGraph` keeps an optional parameter as an `OptionalTensor`
-graph input. Feed it an **`OptionalTensorData`**: `OptionalTensorData.Some(tensor)`
-for a value, `OptionalTensorData.None(dtype)` for the absent (default) branch. ONNX
-Runtime accepts a plain tensor where a *present* optional is expected, but cannot take
-an *absent* optional input — execute graphs that exercise the absent branch through
-`new QuickExecutionEngine().Execute(concreteModel, inputs…)`, which is optional-aware
-in pure managed code.
+On `ComputationGraph` an optional is an `OptionalTensor` input; feed
+`OptionalTensorData.Some(tensor)` or `OptionalTensorData.None(dtype)`. ONNX Runtime
+accepts a plain tensor for a *present* optional but cannot take an *absent* one; run
+the absent branch with `new QuickExecutionEngine().Execute(concreteModel, inputs…)`.
 
-A model with an optional input trains like any other: pass its sample to
-`TrainingRig.FromScratch` as an `OptionalTensorData` in the input's position (or, binding by
-name, as an `OptionalTensorDataModelParam` named for the input), and build each batch with
-`rig.InputDef.FromOrderedData(...)`, which takes an `OptionalTensorData` in that field's
-position. The sample's arrangement — present or absent — only sizes the rig's build-time
-shape inference; it is not baked into the training step, so a rig built either way accepts
-the same batches.
-
-A training *step* runs on ONNX Runtime and carries the same limit as inference above: it
-can feed a present optional, not an absent one. **The absent branch is therefore not
-trainable today.** Supplying a tensor instead does not stand in for it — a tensor takes the
-*present* arm of the body's `IfElse`, so it trains the wrong arm wherever the two arms
-differ, silently. Train the present arrangement, and cover the absent branch on the
-inference path through `QuickExecutionEngine`.
+To train, pass the sample to `TrainingRig.FromScratch` as an `OptionalTensorData` (or an
+`OptionalTensorDataModelParam` by name) and build batches with
+`rig.InputDef.FromOrderedData(...)`. The sample's arrangement only sizes shape
+inference, so either arrangement accepts the same batches. Training runs on ONNX
+Runtime, so **the absent branch is not trainable**; passing a tensor instead silently
+trains the *present* arm. Cover the absent branch at inference through
+`QuickExecutionEngine`.
 
 ## Parameter names
 
-Every trainable parameter, state parameter and sub-model has a name, and a parameter's
-full name is the path of names from the model down to it:
+A parameter's full name is the path of names from the model down to it:
 
 ```
 TrainableParam#0.encoder#0.proj#0.weight#0
 TrainableParam#0.Loop#0:3.table#0
 ```
 
-The first part is the category; each following part names one sub-model, loop iteration or
-parameter within its scope — the module body, or one `LoopAPI.Iterate` body. These names
-are the keys of every checkpoint the model writes, the keys of
-`TrainableParams.Fields`, and what a naming scheme maps
-([onnx-and-weights.md](onnx-and-weights.md#naming)). A part's name comes from, most
-specific first:
+The first part is the category; each further part names a sub-model, loop iteration or
+parameter within its scope (the module body, or one `LoopAPI.Iterate` body). These names
+key every checkpoint, `TrainableParams.Fields`, and naming schemes
+([onnx-and-weights.md](onnx-and-weights.md#naming)). A part's name comes from, in order:
 
-1. **`.Named("...")`** on the result of the `Init(...)` or `Model(...)` call:
+1. **`.Named("...")`** on the `Init(...)` or `Model(...)` result (duplicates in one
+   scope fail the build):
    ```csharp
    var x = Normal02.Init([vocab, width]).Named("embedding").Gather(tokens);
    ```
-   A name given this way is unique in its scope: two items given the same name in one
-   scope fail the module build.
-2. **The local the call is assigned to**, when the whole initializer of a local declared
-   in a `[Module]` class is the call itself:
+2. **The local the call is assigned to**, when the call is the local's whole
+   initializer in a `[Module]` class (`var x = Normal02.Init(...).Gather(tokens)` does
+   not name it `x`). Same-named locals in one scope get `#0`, `#1` in creation order.
+   Requires the generator; see [Project wiring](#project-wiring-required-for-codegen).
    ```csharp
    var proj = Linear.Model(Scalar(128L), Scalar(true));   // proj#0
    var gain = Ones.Init([width]);                         // gain#0
    ```
-   `var x = Normal02.Init(...).Gather(tokens)` does not name the parameter `x` — `x` is not
-   the parameter. The generator supplies these names; see
-   [Project wiring](#project-wiring-required-for-codegen). Two locals of one name in one
-   scope (in two blocks, or in a plain C# `for`) are numbered `#0`, `#1` in creation order.
-3. **Otherwise the class name** of the initializer or module — `Normal02#0`, `Linear#1` —
-   numbered in creation order among the same-named parts of its scope.
+3. **Otherwise the class name** (`Normal02#0`, `Linear#1`), numbered in creation order
+   within its scope.
 
-The layers in `Shorokoo.Modules` give their parameters PyTorch-style names: a `Linear`
-held in `proj` contributes `proj#0.weight#0` and `proj#0.bias#0`, a `BatchNorm`
-`running_mean`, `running_var`, `weight` and `bias`, a `MultiHeadAttention`
-`q_proj_weight`, …, `out_proj_bias`. Parameters created by the helper functions (the
-`Recurrent`, `Convolution` and `Embedding` helpers) keep their initializers' class names.
+Built-in layers use PyTorch-style names: a `Linear` in `proj` gives `proj#0.weight#0`
+and `proj#0.bias#0`; `BatchNorm` has `running_mean`, `running_var`, `weight`, `bias`;
+`MultiHeadAttention` has `q_proj_weight` … `out_proj_bias`. The `Recurrent`,
+`Convolution` and `Embedding` helpers keep initializer class names.
 
-A name survives moving the code that creates it within its scope: reordering two `var`
-lines, or moving them into a helper method of the same `[Module]` class, leaves every name in
-place and every checkpoint loadable. Moving them into a sub-module does not — the sub-model's
-own name becomes part of the path (`w#0` becomes `block#0.w#0`). A creation-order number does not survive that, which is why a
-parameter worth keeping should be named. Renaming a local renames its parameter; a
-checkpoint holding the parameter under another name is refused on load, naming the parameter
-it is missing (bind it through a [naming scheme](onnx-and-weights.md#naming) to carry it
-across).
+Names from `.Named` and from a distinct local survive reordering and moving into a helper
+method of the same class; moving code into a sub-module adds the sub-model's name (`w#0` →
+`block#0.w#0`). Creation-order numbers (the class-name fallback, same-named locals) shift on
+reordering, so name parameters worth keeping. A
+checkpoint whose names do not match is refused on load, naming the missing parameter;
+bind it through a [naming scheme](onnx-and-weights.md#naming).
 
-`TrainableParams.Fields` (and every `TensorDataStruct.Fields`) enumerates in the order of
-the struct's definition — for a model's parameters, the order of the model's graph — the same
-in every process.
+`TrainableParams.Fields` (and every `TensorDataStruct.Fields`) enumerates in definition
+order (for model parameters, graph order), the same in every process.
 
 ## Project wiring (required for codegen)
 
-The source generator (`Shorokoo.CodeGen`) must be referenced from the consuming
-`.csproj` as a **Roslyn analyzer**, not as an ordinary assembly/project reference.
-If it isn't, no `Model` / `Call` / `ComputationGraph` (or `Init`) members are
-generated and the build fails with errors like
+`Shorokoo.CodeGen` must be referenced as a **Roslyn analyzer**. Otherwise no members
+are generated and the build fails with errors like
 `'MyLayer' does not contain a definition for 'Call'`.
 
-**Consuming the NuGet packages** (the normal case) — nothing to wire by hand.
-The `Shorokoo` meta package (or an explicit `Shorokoo.CodeGen` package
-reference) flows the generator as an analyzer automatically:
+**NuGet** (the normal case): the `Shorokoo` package (or `Shorokoo.CodeGen`) flows the
+analyzer automatically:
 
 ```bash
 dotnet add package Shorokoo          # generator flows transitively
 dotnet add package Shorokoo.LinuxCPU # plus one backend for your platform
 ```
 
-**Building against the source tree** (the generator project is in your solution) —
-add it as a `ProjectReference` marked as an analyzer:
+**Source tree**: reference the generator project as an analyzer:
 
 ```xml
 <ProjectReference Include="..\..\src\Shorokoo.CodeGen\Shorokoo.CodeGen.csproj"
                   OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
 ```
 
-Naming a parameter after its local ([Parameter names](#parameter-names)) uses C#
-interceptors in the namespace `Shorokoo.Generated.ParamNames`, which the project has to
-allow. The package does that for you; building against the source tree, the repository's
-`Directory.Build.props` does it for projects inside the tree, and a project outside it adds:
+Local-based parameter names use C# interceptors in `Shorokoo.Generated.ParamNames`.
+The NuGet package enables them. Building against the source tree, `Directory.Build.props`
+does it for projects inside the tree, and a project outside the tree adds:
 
 ```xml
 <PropertyGroup>
@@ -634,12 +463,8 @@ allow. The package does that for you; building against the source tree, the repo
 </PropertyGroup>
 ```
 
-Without it the build warns (`MSG006`) and parameters keep their class names.
-
-In both forms the generator runs at compile time only and is kept out of the
-runtime closure. If `Call`/`Model` come back "not defined" after a build, the
-generator was referenced as a plain `<Reference>`/`<ProjectReference>` instead
-of an analyzer.
+Without it the build warns (`MSG006`) and parameters keep their class names. The
+generator is compile-time only.
 
 ## Example
 
@@ -668,26 +493,21 @@ public partial class DenseBasic
     }
 }
 
-// Compose and call. Note: the `Inline` signature is inputs-first, but the combined
-// `Call` shortcut keeps hyperparameters first (then the input), so call sites are unchanged:
+// Call takes hyperparameters first, then the input:
 var logits = DenseBasic.Call(Scalar(10L), Scalar(true), features);
 ```
 
-`MoveToAttribute()` in `ConstInit` is the graph-literal conversion. `Tensor<T>.Fill`'s value is
-written into the graph's description rather than fed to a run, so it takes a
+`Tensor<T>.Fill` takes a
 [`TensorAttribute`](core-types.md#two-kinds-of-concrete-tensor-tensordata-and-tensorattribute)
-and not a `TensorData` — and the conversion **spends** the tensor it is called on, so build a
-fresh one per call rather than hoisting it to a field. Most initializer bodies never need the
-call at all: `TensorFill(shape, 1.0f)`, `VectorFill(…)` and the `RandomNormal` / `RandomUniform`
-families take a primitive and build their own literal.
+(a graph literal), hence `MoveToAttribute()`. The conversion **spends** its tensor, so
+build a fresh one per call. `TensorFill(shape, 1.0f)`, `VectorFill(…)` and the
+`RandomNormal` / `RandomUniform` families take a primitive and need no conversion.
 
 ## Without the source generator
 
-Shorokoo is fully usable without `Shorokoo.CodeGen`. The codegen-free entry point is
-`Shorokoo.Modules.ModuleFactory`: write the module body as a **static method** (or a
-**non-capturing `static` lambda**) with the same flattened parameter shape an `Inline`
-method would have, and the factory gives you everything the generator would have
-emitted.
+`Shorokoo.Modules.ModuleFactory` provides everything the generator emits. Write the
+body as a **static method** (or **non-capturing `static` lambda**) with an `Inline`
+method's flattened parameters.
 
 | Generated member | Codegen-free equivalent |
 |---|---|
@@ -704,36 +524,31 @@ using Shorokoo.Modules;
 using Shorokoo.Core.Factory;          // FastOnnxModelBuilder
 using static Shorokoo.Globals;
 
-// 1. Define — a plain static method, same shape as an Inline method.
-//    Trainable-param initializers, Globals.StateUpdate, LoopAPI.Iterate, and
-//    sub-module calls all work inside the body exactly as in [Module] classes.
+// 1. Define — initializers, StateUpdate, LoopAPI and sub-modules work as in [Module] classes.
 static Tensor<float32> InitOnes(Vector<int64> shape) => TensorFill(shape, 1.0f);
 
 static Tensor<float32> ScalarMultiply(Tensor<float32> input)
 {
-    // Codegen-free spelling of a [TrainableParamInitializer]'s Init(...):
+    // Codegen-free Init(...):
     var weight = (Tensor<float32>)CallTrainableParamInitializer(
         InitOnes, defaultName: "InitOnes", isTrainable: true, Vector(1L));
     return input * weight;
 }
 
-// 2. Call — module → model → call, like the generated Model()/Call() pair.
+// 2. Call.
 var module = ModuleFactory.FromFunc<Tensor<float32>, Tensor<float32>>(ScalarMultiply);
 var model  = module.SetHyperparams();          // generated: ScalarMultiply.Model()
 var y      = model.Call(x);                    // generated: ScalarMultiply.Call(x)
 
-// 3. The computation graph — equivalent to the generated ComputationGraph property
-//    (cached build; the readonly instance is handed out directly, no per-access clone).
+// 3. The computation graph (cached, readonly).
 var graph = ModuleFactory.ComputationGraph(
     (Func<Tensor<float32>, Tensor<float32>>)ScalarMultiply);
 
-// 4. Train — TrainingRig consumes graphs, so nothing changes (see training.md).
-//    Losses.* / Optimizers.* (namespace Shorokoo) are the same graphs as
-//    L2Loss.ComputationGraph / SGDOptimizer.ComputationGraph, without the extra usings.
+// 4. Train (see training.md). Losses.* / Optimizers.* live in namespace Shorokoo.
 var rig = TrainingRig.FromScratch(graph, Losses.L2Loss,
     Optimizers.SGD, sampleInputs, 0.01f);
 
-// 5. Export — concretize and save/export as usual (see onnx-and-weights.md).
+// 5. Export (see onnx-and-weights.md).
 var concrete = graph.ToConcreteArchitecture([sample])
                     .ToConcreteModel();
 var onnx = FastOnnxModelBuilder.BuildOnnxModel(concrete);
@@ -741,11 +556,9 @@ var onnx = FastOnnxModelBuilder.BuildOnnxModel(concrete);
 
 ### Hyperparameters
 
-Annotate the trailing parameters with `[Hyper]` — on the static method, or on an
-explicitly-typed lambda's parameters — and use the `FromFuncWithHypers` overloads
-(one runtime input, 1–3 hyperparameters). The graph builder reads the attribute off
-the delegate's parameters, so the annotations are required, and the factory rejects
-delegates whose annotations don't match the overload's hyper split:
+Mark the trailing parameters `[Hyper]` (on the method, or on an explicitly-typed
+lambda's parameters) and use `FromFuncWithHypers` (one runtime input, 1–3
+hyperparameters). The annotations are required and must match the overload's split:
 
 ```csharp
 static Tensor<float32> Scale(Tensor<float32> x, [Hyper] Scalar<float32> k) => x * k;
@@ -756,9 +569,8 @@ var y = m.SetHyperparams(Scalar(2f)).Call(x);
 
 ### Multiple inputs
 
-`FromFunc` has overloads for 2–4 runtime inputs; the body keeps flattened parameters
-and the module's input type becomes a tuple. Bind a `Model<T1, T2, TOut>` for a
-two-argument `Call`:
+`FromFunc` has overloads for 2–4 runtime inputs (the module's input type becomes a
+tuple). Bind a `Model<T1, T2, TOut>` for a two-argument `Call`:
 
 ```csharp
 static Tensor<float32> Add(Tensor<float32> a, Tensor<float32> b) => a + b;
@@ -768,9 +580,8 @@ var model = ModuleFactory.FromFunc<Tensor<float32>, Tensor<float32>, Tensor<floa
 var y = model.Call(a, b);
 ```
 
-For hyperparameters combined with *multiple* runtime inputs, construct the
-`Module<THypers, TInputs, TOutputs>` base directly with a wrapper lambda (this is
-exactly what the generator emits):
+For hyperparameters with *multiple* inputs, construct `Module<THypers, TInputs, TOutputs>`
+directly, as the generator does:
 
 ```csharp
 using Shorokoo.Core;   // Module<...> / CallbackModule<...> / GraphBuilder live here
@@ -782,50 +593,32 @@ new Module<Scalar<float32>, (Tensor<float32>, Tensor<float32>), Tensor<float32>>
 
 ### Constraints and ergonomics differences
 
-- **Static, non-capturing bodies only.** The body is invoked once to build the graph
-  and the result is cached per method, so a capturing lambda (or a delegate bound to
-  an object instance) is rejected. Pass varying values as `[Hyper]` parameters or
-  runtime inputs instead. Caching per method costs no generality: a `[Hyper]` is a
-  symbolic graph input, so the single cached graph still covers every configuration its
-  hypers can take — shapes, trip counts and which parameters exist included
-  ([Workflow: one module, many variants](#workflow-one-module-many-variants)).
-- **Flattened parameters.** Like `Inline` methods, bodies take one parameter per
-  tensor — tuple-typed parameters are rejected; use the multi-parameter overloads.
-- **No generated typed hyperparameter sets.** The `FooHyperparameters` classes
-  (named, defaulted `Hyperparameter` properties implementing `IOptimizerHyperparameters`)
-  are codegen-only. For optimizer-style scheduling, pass `Hyperparameter` /
-  `Schedules.*` values positionally to `TrainingRig.FromScratch(...)` (in the
-  optimizer's `[Hyper]` parameter order) — see [training.md](training.md).
-- **Naming.** The module name defaults to the body's declaring class; pass the
-  optional `name:` argument for lambdas or when you want the codegen-style class
-  name in exports.
-- Lower-level building blocks are public too if you need them:
-  `GraphBuilder.BuildComputationGraphFromDelegate(...)` (uncached graph build)
-  and the `Module<...>` / `CallbackModule<...>` constructors shown above.
+- **Static, non-capturing bodies only.** The graph is built once and cached per method,
+  so capturing lambdas and instance-bound delegates are rejected; pass varying values as
+  `[Hyper]`s or inputs.
+- **Flattened parameters.** Tuple-typed parameters are rejected; use the multi-input
+  overloads.
+- **No `FooHyperparameters` classes.** Pass `Hyperparameter` / `Schedules.*` values
+  positionally to `TrainingRig.FromScratch(...)` in the optimizer's `[Hyper]` order (see
+  [training.md](training.md)).
+- **Naming.** The module name defaults to the declaring class; pass `name:` to override.
+- Lower level: `GraphBuilder.BuildComputationGraphFromDelegate(...)` (uncached) and the
+  `Module<...>` / `CallbackModule<...>` constructors.
 
 ## Anti-patterns
 
-- Do not put `[Hyper]` parameters before input parameters; generation expects inputs
-  first and hyperparameters last.
-- Do not write nullable `Inline` parameters (`Tensor<T>?`); declare an
-  `OptionalTensor<T>` (or a `[Hyper(default)]` scalar) and let the generator expose the
-  omittable `Tensor<T>?` / nullable form to callers (see
+- `[Hyper]` parameters before inputs.
+- Nullable `Inline` parameters (`Tensor<T>?`); use `OptionalTensor<T>` or
+  `[Hyper(default)]` (see
   [Omittable parameters](#omittable-parameters-defaulted-hypers--optional-inputs)).
-- Do not name a `[TrainableParamInitializer]`/`[StateInitializer]` class `Init`;
-  the generated `Init(...)` member would collide with the type name (generator
-  error `MSG003`).
-- Do not forget `partial` on the class, or the `static` modifier on `Inline`.
-- Do not use a plain C# `for`/`if` on graph values (`Scalar<int64>`/`Scalar<bit>`) when
-  the count/condition is dynamic; use `LoopAPI.Iterate` / `.IfElse`.
-- Do not write one `[Module]` class per configuration of a model — a different width,
-  depth, or a toggled sub-layer is a `[Hyper]` value, not a new type
+- An initializer class named `Init` (`MSG003`).
+- Missing `partial` on the class or `static` on `Inline`.
+- A plain C# `for`/`if` on graph values; use `LoopAPI.Iterate` / `.IfElse`.
+- One class per configuration; use `[Hyper]` values
   ([Workflow: one module, many variants](#workflow-one-module-many-variants)).
-- Do not stack layers with a plain C# `for` even when the trip count is a constant: the
-  repetition is gone by the time the graph exists, and its parameters are left numbered
-  in trace order rather than by iteration
+- Stacking layers with a plain C# `for`, even with a constant count
   ([Control flow inside `Inline`](#control-flow-inside-inline)).
-- Do not switch threads inside a module body (`async`/`await`, `Parallel.For`, callbacks
-  run elsewhere): the body runs synchronously on a single thread, and calls like
-  `Globals.StateUpdate` or `Rng.Pin` made from another thread throw.
-- Do not reference the code generator as a normal project reference; it must be an
-  analyzer (`OutputItemType="Analyzer"`).
+- Switching threads in a module body (`async`/`await`, `Parallel.For`): the body runs on
+  one thread, and `Globals.StateUpdate` or `Rng.Pin` from another thread throws.
+- Referencing the generator as a normal project reference instead of an analyzer
+  (`OutputItemType="Analyzer"`).

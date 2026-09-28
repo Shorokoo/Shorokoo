@@ -4,18 +4,17 @@ Related: [onnx-and-weights.md](onnx-and-weights.md) ·
 [param-naming-pattern-dsl.md](param-naming-pattern-dsl.md)
 
 Reference for the format strings accepted by `ModelIdFormat` /
-`ModelIdNamingScheme` — one of the two ways to map parameter names when
+`ModelIdNamingScheme`, one of the two ways to map parameter names when
 [binding third-party weights](onnx-and-weights.md#bind-loaded-weights-into-a-model-for-inference)
 (e.g. PyTorch/timm checkpoints) into a model with
 `ToConcreteModel(weights, namingScheme)`. The alternative, matching on
 Shorokoo ID strings instead of ModelIds, is the
 [pattern DSL](param-naming-pattern-dsl.md).
 
-A simple domain-specific language for converting Shorokoo ModelIds to third-party framework parameter names.
-
 ## 1. Overview
 
-ModelIds are integer arrays that uniquely identify parameters in a Shorokoo model. This DSL provides format strings that reference array positions to construct parameter names.
+A ModelId is an integer array that uniquely identifies a parameter in a Shorokoo model.
+A format string builds a third-party parameter name from positions in that array.
 
 ```csharp
 // ModelId: [1, 2, 1, 0, 1, 1, 1]
@@ -39,16 +38,11 @@ var scheme = new ModelIdFormat(
 | `\c` | `}` | Literal closing brace |
 | `\s` | `\` | Literal backslash |
 
-Note: a literal `}` in text outside a placeholder is passed through unchanged, so
-writing it as `\c` is optional. `ModelIdFormat.EscapeString` — which Shorokoo uses when
-it generates a scheme for you — does emit `\c` for *every* `}`, but the only strings it
-is ever handed are parameter path parts (`BatchNorm#1`, `Loop#0:3`), whose names are
-ordinary identifiers. No `}` reaches it, so a generated format string in practice holds
-no `\c` at all. The escape earns its place on the rare name that does carry a brace —
-one adopted from an imported ONNX tensor, say — which then survives the round trip,
-`ModelIdFormat.UnescapeString` decoding all three sequences on the way back out. (The
-[pattern DSL](param-naming-pattern-dsl.md) has its own, smaller escape set; the two are
-not interchangeable.)
+A literal `}` outside a placeholder passes through unchanged, so `\c` is optional.
+`ModelIdFormat.EscapeString` (used for generated schemes) emits `\c` for every `}`, and
+`ModelIdFormat.UnescapeString` decodes all three sequences, so a name carrying a brace
+(e.g. adopted from an imported ONNX tensor) round-trips. The
+[pattern DSL](param-naming-pattern-dsl.md) has its own, smaller escape set.
 
 ## 3. Format String Syntax
 
@@ -63,8 +57,6 @@ not interchangeable.)
 
 ### 3.2 Inline Maps
 
-Map index values to strings using comma-separated values:
-
 ```csharp
 format: "{6|weight,bias}"
 // Value at index 6 is 0 → "weight"
@@ -74,8 +66,6 @@ format: "{6|weight,bias}"
 Entries are 0-based, and a value outside the list throws `IndexOutOfRangeException`.
 
 ### 3.3 Named Maps
-
-Reference reusable maps for complex mappings:
 
 ```csharp
 format: "{5|moduleMap}.{6|paramMap}",
@@ -88,21 +78,19 @@ maps: new()
 // ModelId [1, 2, 1, 0, 1, 1, 1] → "bn1.bias"
 ```
 
-A named map is keyed by value, not by position, so its keys need not be contiguous —
-but a value with no key throws `KeyNotFoundException`. The name must be declared in
+A named map is keyed by value, not by position, so its keys need not be contiguous;
+a value with no key throws `KeyNotFoundException`. The name must be declared in
 `maps`; anything else after the `|` is read as an inline map instead.
 
 ### 3.4 Range Matching with Maps
 
-Map numeric ranges to different outputs:
-
 **Syntax:** `{N|ranges|outputs}`
 
-`ranges` and `outputs` are both comma-separated lists, paired position by position:
-the first range that matches the value at index N selects the output beside it. The
-comma is the separator *between* entries — it is never an "or" inside one range. The
-two lists must be the same length (`FormatException` otherwise), and a value matching
-no range throws `KeyNotFoundException`.
+`ranges` and `outputs` are comma-separated lists, paired by position: the first range
+that matches the value at index N selects the output beside it. The comma separates
+entries; it is never an "or" inside one range. The two lists must be the same length
+(`FormatException` otherwise), and a value matching no range throws
+`KeyNotFoundException`.
 
 | Range Syntax | Matches |
 |--------------|---------|
@@ -130,7 +118,7 @@ format: "{5|1,3::2,2::2|conv,bn,layer}"
 
 ### 3.5 Recursive Format Strings
 
-Embed placeholders within map outputs:
+Map outputs may contain placeholders:
 
 ```csharp
 format: "{5|1,3::2,2::2|conv,bn{5},new_{5|2::4,4::4|layer,fc}}"
@@ -145,12 +133,12 @@ format: "{5|1,3::2,2::2|conv,bn{5},new_{5|2::4,4::4|layer,fc}}"
 // value at index 5 = 8 → "new_fc"      (4::4)
 ```
 
-An index expression is parsed as a number, so a placeholder must name a position —
+An index expression is parsed as a number, so a placeholder names a position:
 `{5|…}`, never `{idx|…}`.
 
 ## 4. Match Patterns
 
-Filter which ModelIds a scheme applies to:
+`match` filters which ModelIds a format applies to:
 
 | Pattern | Matches | Description |
 |---------|---------|-------------|
@@ -160,9 +148,8 @@ Filter which ModelIds a scheme applies to:
 | `-1` (in a position) | Any value | Same as `*` |
 | `*` | All ModelIds | Universal fallback |
 
-A bracketed pattern only matches a ModelId of exactly the same length; a pattern with
-too few or too many positions never matches. Omitting `match` entirely also matches
-every ModelId.
+A bracketed pattern matches only a ModelId of the same length. Omitting `match` also
+matches every ModelId.
 
 ## 5. Complete ResNet50 Example
 
@@ -171,34 +158,25 @@ every ModelId.
 ```csharp
 ModelIdFormat[] formats =
 [
-    // ════════════════════════════════════════════════════════════════
     // STEM: [1, 1, modType, paramIdx]
-    // ════════════════════════════════════════════════════════════════
     new ModelIdFormat(
         match: "[1, 1, *, *]",
         format: "{2|conv1,bn1}.{3|weight,running_mean,running_var,weight,bias}"
     ),
 
-    // ════════════════════════════════════════════════════════════════
     // LAYER 1: [1, 2, 1, loop, block, mod, param]
-    // ════════════════════════════════════════════════════════════════
     new ModelIdFormat(
         match: "[1, 2, 1, *, *, *, *]",
         format: "layer1.{3}.{5|conv,bn,conv,bn,conv,bn,downsample.0,downsample.1}{5|1,1,2,2,3,3,.,.}.{6|weight,running_mean,running_var,weight,bias}"
     ),
 
-    // ════════════════════════════════════════════════════════════════
-    // LAYERS 2-4: [1, layer, 1, loop, block, mod, param]
-    // layer index: 3→layer2, 4→layer3, 5→layer4
-    // ════════════════════════════════════════════════════════════════
+    // LAYERS 2-4: [1, layer, 1, loop, block, mod, param] — layer index: 3→layer2, 4→layer3, 5→layer4
     new ModelIdFormat(
         match: "[1, 3|4|5, 1, *, *, *, *]",
         format: "layer{1 - 1}.{3}.{5|conv,bn,conv,bn,conv,bn,downsample.0,downsample.1}{5|1,1,2,2,3,3,.,.}.{6|weight,running_mean,running_var,weight,bias}"
     ),
 
-    // ════════════════════════════════════════════════════════════════
     // FC: [1, 6, 1, param]
-    // ════════════════════════════════════════════════════════════════
     new ModelIdFormat(
         match: "[1, 6, 1, *]",
         format: "fc.{3|weight,bias}"
@@ -320,8 +298,7 @@ public class ModelIdFormat
 ```csharp
 public class ModelIdNamingScheme : ModuleParamSetNamingScheme
 {
-    // frameworkId is required: it records which framework's names this scheme speaks,
-    // e.g. ModuleParamSetNamingScheme.PyTorchFrameworkId.
+    // frameworkId (required): e.g. ModuleParamSetNamingScheme.PyTorchFrameworkId
     public ModelIdNamingScheme(IEnumerable<ModelIdFormat> patterns, string frameworkId);
 
     public ImmutableArray<ModelIdFormat> Patterns { get; }
@@ -333,31 +310,23 @@ public class ModelIdNamingScheme : ModuleParamSetNamingScheme
 }
 ```
 
-`ToModelId` is the reverse direction used when binding weights: it names every
-candidate ModelId into a name → ModelId table, then looks the third-party name up in it
-and returns null when the name is not there. A candidate no format matches gets no
-entry, so a partial scheme simply resolves fewer names — `ToConcreteModel` drops the
-names that resolve to nothing. Dropping a *name* never leaves a *parameter* empty,
-though: every parameter of the graph must still receive a value, and one the scheme
-leaves uncovered fails the bind with a `ModelException` (**`FW059`**) naming that
-parameter. Two candidates that map to the same name are a broken
-scheme rather than a partial one: `ToModelId` throws `InvalidOperationException`
-naming both ModelIds and the shared name. The table is rebuilt whenever a call passes a
-different candidate set, so one scheme can bind weights into several graphs.
+`ToModelId`, used when binding weights, names every candidate ModelId into a name →
+ModelId table and looks the third-party name up in it, returning null when absent. A
+candidate no format matches gets no entry, and `ToConcreteModel` drops names that resolve
+to nothing; but a parameter left uncovered fails the bind with a `ModelException`
+(**`FW059`**) naming it. Two candidates with the same name make `ToModelId` throw
+`InvalidOperationException` naming both. The table is rebuilt for each new candidate set,
+so one scheme can bind weights into several graphs. `Persistence.ImportSafeTensors`
+reports, by name, every required parameter the scheme does not cover before binding.
 
-`Persistence.ImportSafeTensors` goes further for the uncovered case: it names every
-required parameter first and reports any the scheme does not cover, by name.
-
-The inherited `ToName(string shorokooId)` overload throws
-`NotSupportedException` — a scheme keyed on ModelIds cannot translate a canonical
-Shorokoo id string; use a `SimplePatternNamingScheme`
-([pattern DSL](param-naming-pattern-dsl.md)) where that direction is needed, as weight
-export does.
+The inherited `ToName(string shorokooId)` overload throws `NotSupportedException`: a
+scheme keyed on ModelIds cannot translate a canonical Shorokoo id string. Use a
+`SimplePatternNamingScheme` ([pattern DSL](param-naming-pattern-dsl.md)) for that
+direction, as weight export does.
 
 ## 8. Error Handling
 
-The DSL throws standard BCL exception types; there are no DSL-specific exception
-classes.
+The DSL throws standard BCL exceptions; there are no DSL-specific exception classes.
 
 | Failure | Exception |
 |---------|-----------|

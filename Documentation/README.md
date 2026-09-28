@@ -10,6 +10,7 @@ Which document covers what. For an overview of Shorokoo and an end-to-end exampl
 
 ## 2. Train them
 
+- [first-training-run.md](first-training-run.md) — start here: one program that trains, checkpoints, resumes, evaluates and measures a model, and the limits a long run depends on.
 - [training.md](training.md) — compose model + loss + optimizer with `TrainingRig`, run the training loop, and save / resume checkpoints across process restarts.
 - [training-backends.md](training-backends.md) — who computes a training step's gradient: Shorokoo's own autodiff (`TrainingBackend.Shorokoo`, the default) or the execution backend (`TrainingBackend.Native`), the step formats a backend accepts, and what differs on the native path.
 - [nn-library.md](nn-library.md) — the `Shorokoo.Modules` package: ready-made initializers, layers (`Linear`, `Conv2d`, `BatchNorm2d`, …), losses, and optimizers to build and train with.

@@ -4,23 +4,21 @@ Related: [defining-models.md](defining-models.md) · [training.md](training.md) 
 
 ## Facts
 
-- `Shorokoo.Modules` is the baseline neural-network library: ready-made
-  initializers, layers, losses, and optimizers, all built from ordinary
-  Shorokoo `[Module]`s / `[TrainableParamInitializer]`s — nothing privileged.
+- `Shorokoo.Modules` is the baseline neural-network library: initializers, layers,
+  losses and optimizers, all built from ordinary `[Module]`s /
+  `[TrainableParamInitializer]`s.
 - Namespaces: `Shorokoo.Modules.Initializers`, `.Layers`, `.Losses`, `.Optimizers`.
-- Layers are `[Module]` classes: use them like any module —
-  `Linear.Call(hypers..., x)` inline, or `Linear.Model(hypers...).Call(x)` to fix
-  the hyperparameters once (see [defining-models.md](defining-models.md)).
-- Exceptions to the `[Module]` rule: pooling, the generalized convolution
-  helpers, and the recurrent layers are plain C#-argument static helpers
-  (`Pooling.MaxPool2d(x, 2)`, `Convolution.Conv(...)`, `Recurrent.RNN(x, 16)`),
-  and plain activations are tensor one-liners (`x.Relu()`) — none needs a module.
-- Attention is the only layer whose activations grow **quadratically** with
-  sequence length: [Sizing an attention run](#attention-memory) gives the
-  arithmetic to budget a batch size with, and `queryChunks` is its knob. Any
-  `[Module]` can be marked `[Module(Checkpoint = true)]` to recompute its
-  activations in the backward pass instead of keeping them — see
-  [Activation checkpointing](#activation-checkpointing).
+- Layers are `[Module]` classes: `Linear.Call(hypers..., x)` inline, or
+  `Linear.Model(hypers...).Call(x)` to fix the hyperparameters once (see
+  [defining-models.md](defining-models.md)).
+- Exceptions: pooling, the generalized convolution helpers and the recurrent layers
+  are plain C#-argument static helpers (`Pooling.MaxPool2d(x, 2)`,
+  `Convolution.Conv(...)`, `Recurrent.RNN(x, 16)`); plain activations are tensor
+  one-liners (`x.Relu()`).
+- Attention is the only layer whose activations grow **quadratically** with sequence
+  length — see [Sizing an attention run](#attention-memory). Any `[Module]` can be
+  marked `[Module(Checkpoint = true)]` to recompute its activations in the backward
+  pass — see [Activation checkpointing](#activation-checkpointing).
 
 ```bash
 dotnet add package Shorokoo.Modules
@@ -28,76 +26,57 @@ dotnet add package Shorokoo.Modules
 
 ## Initializers (`Shorokoo.Modules.Initializers`)
 
-All are `[TrainableParamInitializer]`s taking the parameter's shape first — call sites
-are one-liners like `Zeros.Init([outFeatures])` or
-`KaimingUniform.Init([outC, inC, k, k])`. The three `Scalar*` entries are the
-exception: they take **no shape** and create a rank-0 parameter (see
-[Trainable scalars](#trainable-scalars) below).
+All are `[TrainableParamInitializer]`s taking the parameter's shape first:
+`Zeros.Init([outFeatures])`, `KaimingUniform.Init([outC, inC, k, k])`. The `Scalar*`
+entries take **no shape** and create a rank-0 parameter ([Trainable scalars](#trainable-scalars)).
+Extra arguments are `Init` args after the shape, e.g. `UniformRange.Init([shape], Scalar(lo), Scalar(hi))`.
 
 | Initializer | Fills with | Notes |
 |---|---|---|
 | `Zeros` | 0.0 | biases, BatchNorm beta |
 | `Ones` | 1.0 | BatchNorm/LayerNorm gamma |
-| `Constant` | `value` (every element) | deterministic (no RNG); any rank; the parameterized generalization of `Zeros`/`Ones` (`Constant(0)`/`Constant(1)`); `value` is an `Init` arg (`Constant.Init([shape], Scalar(v))`), à la `RecurrentUniform`; PyTorch `constant_` / Keras `Constant` |
-| `ScalarZeros` | 0.0, rank 0 | no shape argument (`ScalarZeros.Init()`); a trainable **scalar**, not a `[1]`-shaped tensor; the trainable counterpart of `OptimizerScalarZeros` |
-| `ScalarOnes` | 1.0, rank 0 | no shape argument (`ScalarOnes.Init()`); the multiplicative identity, so a learned gain starts as a no-op; the trainable counterpart of `OptimizerScalarOnes` |
-| `ScalarConstant` | `value`, rank 0 | no shape argument; `value` is the only `Init` arg (`ScalarConstant.Init(Scalar(v))`); the rank-0 analogue of `Constant`, and the parameterized generalization of `ScalarZeros`/`ScalarOnes` |
-| `Uniform` | U(0, 1) | seeded; the fixed U(0, 1) default form (use `UniformRange` for a configurable range) |
-| `Normal` | N(0, 1) | seeded; PyTorch's `nn.Embedding` default; the fixed N(0, 1) default form (use `NormalDist` for configurable mean/std) |
-| `UniformRange` | U(low, high) | seeded; any rank; the parameterized generalization of `Uniform` (`Uniform` retained as the U(0, 1) default); `low`/`high` are `Init` args (`UniformRange.Init([shape], Scalar(lo), Scalar(hi))`) and reach the draw itself, so the range is exact at any width — no precision lost near zero, no overflow on a range wider than float32, and `high` is never returned ([uniform-draws.md](uniform-draws.md)); expects `low ≤ high`; PyTorch `uniform_(a, b)` / Keras `RandomUniform(minval, maxval)` |
-| `NormalDist` | N(mean, std) | seeded; any rank; the parameterized generalization of `Normal` (`Normal` retained as the N(0, 1) default); `mean`/`std` are `Init` args (`NormalDist.Init([shape], Scalar(m), Scalar(s))`), built as the affine transform of a standard draw; expects `std ≥ 0`; PyTorch `normal_(mean, std)` / Keras `RandomNormal(mean, stddev)` |
+| `Constant` | `value` | deterministic; any rank; `Constant.Init([shape], Scalar(v))`; PyTorch `constant_` |
+| `ScalarZeros` | 0.0, rank 0 | `ScalarZeros.Init()`; trainable counterpart of `OptimizerScalarZeros` |
+| `ScalarOnes` | 1.0, rank 0 | `ScalarOnes.Init()`; trainable counterpart of `OptimizerScalarOnes` |
+| `ScalarConstant` | `value`, rank 0 | `ScalarConstant.Init(Scalar(v))` |
+| `Uniform` | U(0, 1) | seeded |
+| `Normal` | N(0, 1) | seeded; PyTorch's `nn.Embedding` default |
+| `UniformRange` | U(low, high) | seeded; any rank; args `low`, `high` (expects `low ≤ high`); exact at any width, `high` never returned ([uniform-draws.md](uniform-draws.md)); PyTorch `uniform_(a, b)` |
+| `NormalDist` | N(mean, std) | seeded; any rank; args `mean`, `std` (expects `std ≥ 0`); PyTorch `normal_(mean, std)` |
 | `XavierUniform` | U(−a, a), a = √(6 / (fanIn + fanOut)) | gain 1; seeded; rank ≥ 2 |
 | `XavierNormal` | N(0, √(2 / (fanIn + fanOut))) | gain 1; seeded; rank ≥ 2 |
-| `KaimingUniform` | U(−b, b), b = √(6 / fanIn) | ReLU gain √2, fan-in mode; seeded; rank ≥ 2; the default weight init of `Linear` and the conv layers |
-| `KaimingNormal` | N(0, √(2 / fanIn)) | ReLU gain √2, fan-in mode; seeded; rank ≥ 2 |
-| `XavierUniformGain` | U(−a, a), a = gain·√(6 / (fanIn + fanOut)) | seeded; rank ≥ 2; configurable-gain generalization of `XavierUniform` (== it at `gain = 1`; `XavierUniform` retained as the gain-baked default); `gain` is an `Init` arg (`XavierUniformGain.Init([shape], Scalar(g))`); PyTorch `xavier_uniform_(t, gain)` (`gain` = the `calculate_gain` std multiplier — the caller computes it) |
-| `XavierNormalGain` | N(0, gain·√(2 / (fanIn + fanOut))) | seeded; rank ≥ 2; configurable-gain generalization of `XavierNormal` (== it at `gain = 1`; `XavierNormal` retained as the gain-baked default); `gain` is an `Init` arg; PyTorch `xavier_normal_(t, gain)` |
-| `KaimingUniformGain` | U(−b, b), b = gain·√(3 / fanIn) | seeded; rank ≥ 2; configurable-gain generalization of `KaimingUniform` (== it at `gain = √2`; `KaimingUniform` retained as the gain-baked default). **Base factor is the bare √(3 / fanIn), not √(6 / fanIn)** — the default bakes gain √2, so the user-supplied gain replaces it (no double-bake). `gain` is an `Init` arg; PyTorch `kaiming_uniform_` (gain via `calculate_gain`) |
-| `KaimingNormalGain` | N(0, gain·√(1 / fanIn)) | seeded; rank ≥ 2; configurable-gain generalization of `KaimingNormal` (== it at `gain = √2`; `KaimingNormal` retained as the gain-baked default). **Base factor is the bare √(1 / fanIn), not √(2 / fanIn)** — the default bakes gain √2, so the user-supplied gain replaces it (no double-bake). `gain` is an `Init` arg; PyTorch `kaiming_normal_` |
-| `TruncatedNormal` | N(0, 1) clamped to [−2, 2] | seeded; clamp approximation (in-graph rejection sampling isn't possible); Keras/JAX-style default |
-| `LeCunNormal` | N(0, √(1 / fanIn)) | seeded; rank ≥ 2; JAX/Flax `lecun_normal` (SELU / self-normalizing nets) |
-| `Orthogonal` | (semi-)orthogonal matrix (`QᵀQ ≈ I` / `QQᵀ ≈ I`) | seeded; rank ≥ 2; **Björck/Newton–Schulz approximation** (15 cubic iterations `Y ← 1.5·Y − 0.5·Y·(YᵀY)` from a seeded Gaussian — exact QR/SVD-orthogonal isn't expressible in Shorokoo's op set, cf. `TruncatedNormal`); gain 1; Saxe-2013 dynamical isometry (RNN recurrent matrices, deep stacks); PyTorch `orthogonal_` |
-| `RecurrentUniform` | U(−1/√H, 1/√H) | seeded; PyTorch's `nn.RNN`/`nn.LSTM`/`nn.GRU` default (`k = 1/hidden_size`); `H` is an `Init` arg (`RecurrentUniform.Init([shape], Scalar(hiddenSize))`), not read from the shape — a gated cell stacks its gates along axis 1, so that axis is `4H` for LSTM and `3H` for GRU while the bound stays `1/√H`; inits W, R and bias alike; used by the `Recurrent` layers |
+| `KaimingUniform` | U(−b, b), b = √(6 / fanIn) | ReLU gain √2, fan-in; seeded; rank ≥ 2; default weight init of `Linear` and the conv layers |
+| `KaimingNormal` | N(0, √(2 / fanIn)) | ReLU gain √2, fan-in; seeded; rank ≥ 2 |
+| `XavierUniformGain` | U(−a, a), a = gain·√(6 / (fanIn + fanOut)) | seeded; rank ≥ 2; arg `gain` (the `calculate_gain` multiplier, computed by you); = `XavierUniform` at gain 1 |
+| `XavierNormalGain` | N(0, gain·√(2 / (fanIn + fanOut))) | seeded; rank ≥ 2; arg `gain`; = `XavierNormal` at gain 1 |
+| `KaimingUniformGain` | U(−b, b), b = gain·√(3 / fanIn) | seeded; rank ≥ 2; arg `gain`; = `KaimingUniform` at gain √2. **Base factor is √(3 / fanIn), not √(6 / fanIn)** |
+| `KaimingNormalGain` | N(0, gain·√(1 / fanIn)) | seeded; rank ≥ 2; arg `gain`; = `KaimingNormal` at gain √2. **Base factor is √(1 / fanIn), not √(2 / fanIn)** |
+| `TruncatedNormal` | N(0, 1) clamped to [−2, 2] | seeded; clamp approximation, not rejection sampling |
+| `LeCunNormal` | N(0, √(1 / fanIn)) | seeded; rank ≥ 2; JAX/Flax `lecun_normal` |
+| `Orthogonal` | (semi-)orthogonal matrix | seeded; rank ≥ 2; gain 1; **approximate**: 15 Newton–Schulz iterations from a Gaussian, not exact QR; PyTorch `orthogonal_` |
+| `RecurrentUniform` | U(−1/√H, 1/√H) | seeded; PyTorch RNN/LSTM/GRU default; arg `H` (`Scalar(hiddenSize)`), not read from the shape, so gate-stacked `4H`/`3H` axes keep the `1/√H` bound; used by the `Recurrent` layers |
 
-- **Seeded determinism**: the random initializers are stream-keyed — each
-  parameter draws from its own stream, derived from the model's
-  [RNG configuration](rng-configuration.md) (the default identity, master seed 0,
-  when no config is given) and the parameter's place in the model. Every
-  materialization is deterministic and reproducible for a config, and two
-  parameters of the same shape initialized by the same class receive **distinct**
-  values. Bind a different master seed to re-roll everything coherently; no seed
-  ever appears in the model definition.
-- **The uniform initializers all share one draw.** `Uniform`, `UniformRange`,
-  `XavierUniform`, `KaimingUniform`, `RecurrentUniform`, `XavierUniformGain` and
-  `KaimingUniformGain` each hand their own bounds to the same U(low, high) draw — no
-  standard draw is scaled after the fact — so all of them fill a `float32` parameter from
-  the half-open `[low, high)` and inherit the guarantees in
-  [uniform-draws.md](uniform-draws.md).
-- **The normal initializers all share one draw.** `Normal`, `NormalDist`, `XavierNormal`,
-  `KaimingNormal`, `XavierNormalGain`, `KaimingNormalGain` and `LeCunNormal` all draw the same
-  standard N(0, 1). Unlike the uniform ones, none of them hands its standard deviation to the
-  draw: the std is applied afterwards, as an ordinary `float32` multiply in the graph
-  (`Normal` is the bare draw, and `NormalDist` adds its `mean` after the multiply). Scaling
-  carries the draw's bound with it — no drawn magnitude exceeds `8` — so none of them can
-  produce a weight past `8·std` (`mean ± 8·std` for `NormalDist`). The bit-exactness guarantee
-  in [normal-draws.md](normal-draws.md) covers the draw itself; the scaling is ordinary
-  `float32` arithmetic, and the fan-scaled initializers build their standard deviation in-graph
-  with `Sqrt`, whose accuracy ONNX does not specify, so their final values can differ in the
-  last ulp between providers. Two draw from it but do not inherit that bound:
-  `TruncatedNormal` clamps to `[−2, 2]`, which is tighter, and `Orthogonal` transforms its
-  Gaussian through Newton–Schulz iterations.
-- **Fan-in/fan-out** are computed in-graph from the shape vector:
-  `fanIn = prod(shape) / shape[0]`, `fanOut = prod(shape) / shape[1]` — the
-  PyTorch convention for Linear `[out, in]` and Conv `[outC, inC/g, k...]`
-  layouts. Hence the rank ≥ 2 requirement: use `Zeros`/`Ones`/`Uniform`/`Normal`
-  for biases.
+- **Seeded determinism**: each random initializer draws from its own stream, derived
+  from the model's [RNG configuration](rng-configuration.md) (master seed 0 by default)
+  and the parameter's place in the model. Materialization is reproducible for a config,
+  and two same-shaped parameters of the same class get **distinct** values. Bind a
+  different master seed to re-roll everything; no seed appears in the model definition.
+- **Uniform initializers** (`Uniform`, `UniformRange`, `XavierUniform`,
+  `KaimingUniform`, `RecurrentUniform`, `XavierUniformGain`, `KaimingUniformGain`) fill
+  from the half-open `[low, high)` with the guarantees in [uniform-draws.md](uniform-draws.md).
+- **Normal initializers** (`Normal`, `NormalDist`, the Xavier/Kaiming normals and
+  `LeCunNormal`) scale a standard N(0, 1) draw by the std in `float32`. No value exceeds
+  `8·std` (`mean ± 8·std` for `NormalDist`). [normal-draws.md](normal-draws.md)'s
+  bit-exactness covers the draw only; fan-scaled initializers can differ in the last ulp
+  between providers. `TruncatedNormal` and `Orthogonal` do not have the `8·std` bound.
+- **Fan-in/fan-out**: `fanIn = prod(shape) / shape[0]`, `fanOut = prod(shape) / shape[1]`
+  (PyTorch convention for `[out, in]` and `[outC, inC/g, k...]`). Hence rank ≥ 2: use
+  `Zeros`/`Ones`/`Uniform`/`Normal` for biases.
 
 <a id="trainable-scalars"></a>
 ### Trainable scalars (rank 0)
 
-A learned scalar — a per-layer temperature, a residual scale, a gated architecture's
-`gamma` — is a rank-0 parameter. `ScalarZeros` / `ScalarOnes` / `ScalarConstant` create
-one directly, taking no shape:
+A learned scalar — a temperature, a residual scale, a `gamma` — is a rank-0 parameter:
 
 ```csharp
 var gamma = ScalarOnes.Init();                        // seeded at 1: starts as a no-op
@@ -106,36 +85,20 @@ var temp  = ScalarConstant.Init(Scalar(0.125f));      // seeded at 1/√d
 return x * gamma + beta;                              // broadcasts against any shape
 ```
 
-All three are deterministic — a learned scalar's starting point is a choice, not a draw — and
-they mirror the `Zeros`/`Ones`/`Constant` trio of the shaped set:
-`ScalarZeros == ScalarConstant(0)`, `ScalarOnes == ScalarConstant(1)`. Fan-in/fan-out do not
-enter: neither is defined for a lone value.
+Do **not** use `Ones.Init([Scalar(1L)])` instead: it persists in the checkpoint as a
+`[1]`-shaped parameter. The `Scalar*` initializers persist as rank 0. The optimizer-state
+equivalents are `OptimizerScalarZeros` / `OptimizerScalarOnes`
+([Optimizers](#optimizers-shorokoomodulesoptimizers)).
 
-Do **not** reach for `Ones.Init([Scalar(1L)])` instead. It broadcasts the same way, but it
-is a length-1 rank-1 tensor, and it persists in the checkpoint as a `[1]`-shaped parameter
-where a scalar was meant. The `Scalar*` initializers persist as rank 0.
+**Writing your own.** An initializer states its parameter's shape either as its **first**
+`Inline` parameter (a shape vector) or, for rank 0, as its `Scalar<T>` return type. A
+shape baked into the body of a no-argument `Inline` is rejected by name when the model is
+lowered. The body is an ordinary graph body (tensor ops, loops, `IfElse`). The rules
+below apply to `[StateInitializer]` and `[TrainableParamInitializer]` alike.
 
-State has the same pair on the optimizer side — `OptimizerScalarZeros` /
-`OptimizerScalarOnes`, both rank 0 and both shape-argument-free (see
-[Optimizers](#optimizers-shorokoomodulesoptimizers)).
-
-**Writing your own.** An initializer states the shape of the parameter it creates in exactly one
-of two places: the shape vector it takes as its **first** `Inline` parameter, or — for a rank-0
-one — its `Scalar<T>` return type. A shape baked into the body of a no-argument `Inline` is
-neither, and is rejected by name when the model is lowered.
-
-The body is an ordinary graph body of tensor operations, loops and `IfElse`; two things it can
-reach for are worth spelling out, and one thing it may not do. Everything here holds for a
-`[StateInitializer]` body exactly as for a `[TrainableParamInitializer]` one.
-
-**It can call the shipped initializers.** An `Init(...)` call inside an initializer body is that
-initializer's body evaluated as a value — not the definition of a second parameter, which an
-initializer has no room for. The call is transparent: only the top-level initializer, the one the
-`[Module]` calls, defines a parameter, and the model's parameter inventory has one entry for it
-however deep the chain of calls below it goes. Either kind may call either kind — a trainable
-initializer a state one, and the other way round. So the parameterized set composes, and the
-obvious way to say "one fixed distribution, reused for every parameter in the model" is to wrap
-one:
+**It can call other initializers.** An `Init(...)` call inside an initializer body is
+evaluated as a value; only the top-level initializer defines a parameter. Either kind may
+call either kind:
 
 ```csharp
 [TrainableParamInitializer]
@@ -146,19 +109,12 @@ public static partial class NormalDist02
 }
 ```
 
-The wrapper draws what `NormalDist` draws — the same composition, value for value — keyed on the
-parameter *being created*. Each draw **site** in the body gets its own sub-stream of that
-parameter's stream, the body's own sites and a called initializer's alike, so no two sites repeat
-each other; and a site inside a `LoopAPI.Iterate` body folds each enclosing loop's iteration index
-into its key, so it draws a fresh sample on every trip rather than one sample re-used — the same
-rule a runtime draw in a loop follows.
+Draws are keyed on the parameter being created. Each draw site gets its own sub-stream,
+and a site inside a `LoopAPI.Iterate` body draws a fresh sample on every iteration.
 
-**It can start from another parameter's value.** An initializer input typed `Tensor<T>` may be
-another trainable parameter, passed at the call site. It is not folded to a constant: the edge
-survives to materialization, which runs the initializers in dependency order, so what arrives is
-the value the model actually starts from. Re-drawing the source inside the dependent's own body
-would not do — it draws from the dependent's stream, giving the right distribution but a different
-matrix.
+**It can start from another parameter's value.** A `Tensor<T>` input may be another
+trainable parameter. Initializers run in dependency order, so the input is the value the
+model starts from (re-drawing it inside the body would give a different matrix).
 
 ```csharp
 [TrainableParamInitializer]
@@ -177,115 +133,69 @@ var bank = ProductOf.Init([vocab, d], emb, wv);   // starts as emb · wv, for th
 return x.MatMul(emb).MatMul(wv) + x.MatMul(bank);   // every one of the three is read by the model
 ```
 
-The **shape** input is the one that must still fold to a constant at the call site: a parameter's
-shape is fixed when the architecture is concretized, before anything has a value. (A rank-0
-initializer states its shape in its `Scalar<T>` return type and takes no shape input at all, so
-*its* first input may be a parameter like any other.) The initializers run in dependency order, so
-a chain — one parameter from another, from a third — works too.
+- The **shape** input must fold to a constant at the call site. (A rank-0 initializer
+  has no shape input, so its first input may be a parameter.) Chains of dependencies work.
+- The value may be **computed from parameters** (`emb * Scalar(2f)`, or a module's output
+  on one), as plain tensor arithmetic over parameters created outside any loop. A
+  computation through a loop or branch, over a per-iteration parameter, or that draws
+  randomness is refused at concretization, naming the initializer.
+- A source the model reads **nowhere else**, or one created **inside a loop**, is refused
+  by name. Create the source outside the loop and use it in the model, or fold its
+  computation into the reading initializer.
 
-The value handed over may also be **computed from parameters** — `ProductOf.Init([vocab, d], emb * Scalar(2f), wv)`,
-or the output of a module called on one. Such a value has no constant to fold to either, so the
-computation is carried along and evaluated when the parameters are initialized, after the ones it
-reads. It has to be plain tensor arithmetic over parameters created outside any loop: a
-computation that runs through a loop or a branch, reads a parameter standing for a different one on
-each trip, or draws randomness is refused at concretization, naming the initializer.
-
-Two shapes are refused by name rather than guessed at. A source the model reads **nowhere else**:
-a parameter no forward path reads gets no gradient, so it cannot be trained, and the stages after
-concretization drop it — the concrete model would end up carrying fewer parameters than the
-architecture and its checkpoints say it has. And a source created **inside a loop**, which stands
-for a different parameter on every trip, so no single edge names it. For either, create the source
-outside the loop and use it in the model, or fold what it computes into the initializer that reads
-it so no parameter is created for it.
-
-**It may not create or reference a model.** An initializer computes one parameter's value and owns
-no parameter space, so nothing in its body may bring a model in: no `Foo.Model(...)`, no
-`Foo.Call(...)` of any `[Module]` — not even one without parameters, since calling a module creates
-a model of it — no `ModelSequence`, no `IModel.GetTrainableParam`, no read of a model's
-hyperparameter, and no model-typed input. Building such a body is refused with **FW055**, which
-names the initializer, when the graph of the module using it is built — and for an initializer
-called from another, when the called one's body is built, however deep it sits. Where the value
-you want comes out of a layer, compute it in the `[Module]` that declares the parameter and pass
-it to the initializer as a `Tensor<T>` input — computed from parameters as above, or from
-constants — or write the computation in the initializer itself from tensor operations.
+**It may not create or reference a model.** No `Foo.Model(...)`, no `Foo.Call(...)` of
+any `[Module]` (even a parameter-free one), no `ModelSequence`, no
+`IModel.GetTrainableParam`, no model hyperparameter read, no model-typed input. Such a
+body is refused with **FW055**, naming the initializer, when the using module's graph (or
+the calling initializer's body) is built. Compute layer outputs in the `[Module]` and pass
+them in as `Tensor<T>` inputs.
 
 ## Layers (`Shorokoo.Modules.Layers`)
 
-Layer hyperparameters are `[Hyper]` graph scalars; pass them as `Scalar(...)`
-values. Signatures below are the generated `Call` shapes — **hyperparameters
-first, tensor inputs last**. `Inline` takes the same parameters in the opposite
-grouping — **tensor inputs first, hyperparameters last** — because that is the
-order a `[Module]`'s `Inline` must declare them in; so the two are not
-interchangeable argument-for-argument:
+Layer hyperparameters are `[Hyper]` graph scalars; pass them as `Scalar(...)`.
+Signatures below are the generated `Call` shapes — **hyperparameters first, tensor
+inputs last**. `Inline` takes **tensor inputs first**, so
 `Linear.Call(outFeatures, useBias, x)` is `Linear.Inline(x, outFeatures, useBias)`.
 
-**That reordering is a `[Module]` thing only.** An entry spelled
-`Class.Method(...)` rather than `Class.Call(...)` is a **plain-C# static helper**,
-not a `[Module]`: it keeps the ordinary C# argument order shown at its entry
-(tensors first, knobs after, with genuinely optional parameters). The helper
-classes in the catalog below are `Pooling`, `Convolution`, `Recurrent`,
-`Attention`, `LRNHelper`, `GatedLinear`, `EmbeddingHelpers` and `EmbeddingBag`
-(`TripletMarginWithDistance`, under Losses, is one too).
+That reordering applies to `[Module]`s only. An entry spelled `Class.Method(...)` rather
+than `Class.Call(...)` is a **plain-C# static helper** with the argument order shown
+(tensors first, knobs after, optional parameters): `Pooling`, `Convolution`,
+`Recurrent`, `Attention`, `LRNHelper`, `GatedLinear`, `EmbeddingHelpers`,
+`EmbeddingBag`, and `TripletMarginWithDistance` under Losses.
 
 <a id="nullable-hypers"></a>
-**A declared `[Hyper]` default makes a *nullable* parameter, not an omittable
-one.** A hyperparameter written `[Hyper(<value>)]` in the layer body carries a
-declared default, and the generated `Call`/`Model` expose it as **nullable**
-(`Scalar<float32>?`) with `null` meaning "take the declared default". A plain
-`[Hyper]` carries none: it is non-nullable and always required. A nullable
-parameter additionally gets a `= null` C# default — becoming genuinely omittable
-— only inside the **trailing** run of the signature it appears in. In `Call` it
-never is, because the tensor inputs come last; so a layer's defaulted hypers are
-**nullable yet positionally required**, and you write `null` where you want the
-default: `LocalResponseNorm.Call(null, null, null, x)`. `Model(hypers…)` takes no
-tensors, so there a defaulted hyper *can* fall in the trailing run and be omitted
-outright — `LocalResponseNorm.Model()` works, while `BatchNorm.Model`'s
-`momentum`/`epsilon` still precede three plain bits and stay required. Each entry
-below names only which of its own
-parameters carry a declared default and what that default is; everything it does
-not name is a plain, required `[Hyper]`.
+**A declared `[Hyper]` default makes a *nullable* parameter, not an omittable one.** A
+`[Hyper(<value>)]` parameter is exposed on `Call`/`Model` as nullable
+(`Scalar<float32>?`); `null` means "use the default". A plain `[Hyper]` is non-nullable
+and required. A nullable parameter can be omitted only in the **trailing** run of its
+signature. In `Call` the tensors come last, so defaulted hypers are **nullable yet
+positionally required**: `LocalResponseNorm.Call(null, null, null, x)`. `Model(...)`
+takes no tensors, so `LocalResponseNorm.Model()` works — but `BatchNorm.Model`'s
+`momentum`/`epsilon` precede three plain bits and stay required. Entries below name only
+parameters with a declared default; the rest are required.
 
 <a id="gated-parameters"></a>
-**An off toggle costs nothing.** Several layers gate a block of trainable
-parameters behind a `[Hyper]` bit — `useBias` on `Linear`, `Bilinear`, the conv
-layers and the attention/transformer layers; `affine` on `BatchNorm`,
-`LayerNorm`, `RMSNorm`, `GroupNorm` and `InstanceNorm`. Each is written in the
-layer body as `bit.IfElse(withTheParams, without)`, so both branches exist in
-the *source* —
-but the bit is a `[Hyper]`, fixed before the graph is concretized (baked by
-`Call`/`Model`, or taken from the sample you hand `ToConcreteArchitecture`). Either way
-the framework **prunes the unselected branch's trainable parameters**: with the
-bit off they are never created — no checkpoint field, no gradient, no optimizer
-state, no bytes in a saved model.
-`Linear(useBias: false)` carries one parameter, not two;
-`GroupNorm(affine: false)` carries none of its own. So there is no reason to
-split a model into separate `[Module]` classes to keep an unused parameter block
-out of it — the toggle already does that.
+**An off toggle costs nothing.** `useBias` (on `Linear`, `Bilinear`, the conv and
+attention/transformer layers) and `affine` (on `BatchNorm`, `LayerNorm`, `RMSNorm`,
+`GroupNorm`, `InstanceNorm`) gate a block of trainable parameters with
+`bit.IfElse(withTheParams, without)`. The bit is fixed before concretization (by
+`Call`/`Model`, or from the sample given to `ToConcreteArchitecture`), and the unselected
+branch's parameters are **pruned**: no checkpoint field, gradient, optimizer state or
+saved bytes. `Linear(useBias: false)` has one parameter; `GroupNorm(affine: false)` has
+none. No need to split a model into separate classes to drop a parameter block.
 
-Two edges to know:
-
-- On the `Foo.ComputationGraph` + `ToConcreteArchitecture` route the bit is baked but
-  **not removed** — like every `[Hyper]` there it stays a live input of the
-  concrete graph and must be passed again at `Execute`. Pass the value you
-  concretized with. With the bit **off** its later value is inert *for these
-  layers* — each gates a single-output `IfElse` that solely owns its parameters,
-  so the gate went with them; a tuple or shared gate would not fold, and its
-  branch would read a zero stand-in instead. With the bit **on** nothing was
-  pruned, so the `IfElse` is still live and the opposite value silently takes the
-  other branch.
-  To drop the input entirely,
-  [`Specialize`](inference.md#hardcoding-hypers-with-specialize) the bit before
-  concretizing. Via `Linear.Call(outFeatures, useBias, x)` the bit is a constant
-  in the built subgraph and there is nothing to pass. See
+- On the `Foo.ComputationGraph` + `ToConcreteArchitecture` route the bit stays a live
+  input of the concrete graph and must be passed again at `Execute` — pass the value you
+  concretized with. With the bit **off**, its later value is inert for these layers (their
+  gate is pruned with the parameters); a tuple or shared gate would not fold and would
+  read a zero stand-in. With the bit **on**, the `IfElse` is live and the opposite value
+  silently takes the other branch. To drop the input,
+  [`Specialize`](inference.md#hardcoding-hypers-with-specialize) the bit first. Via
+  `Linear.Call(...)` the bit is a constant and there is nothing to pass. See
   [What concretization fixes](inference.md#what-concretization-fixes).
-- Pruning can leave a graph with no trainable parameters at all, and
-  `TrainingRig.FromScratch` then fails with *"No trainable parameters found in
-  the computation graph."* The scope of that check is the **whole model graph**,
-  not a layer: it fires when nothing anywhere in the graph is trainable, which
-  the toggles can cause for a model that *is* the gated layer, or whose every
-  parameter block is switched off. A **sub-module** pruned to none is not that case:
-  `RMSNorm(affine: false)` beneath a parent carrying its own parameters builds
-  normally, the parent's parameters present and the pruned gain absent.
+- If the **whole model graph** ends with no trainable parameters,
+  `TrainingRig.FromScratch` fails with *"No trainable parameters found in the
+  computation graph."* A **sub-module** pruned to none is fine.
 
 ### Linear
 
@@ -294,11 +204,8 @@ Two edges to know:
 Linear.Call(Scalar<int64> outFeatures, Scalar<bit> useBias, Tensor<float32> x)
 ```
 
-Weight `[outFeatures, inFeatures]` is `KaimingUniform`-initialized; bias
-`[outFeatures]` is zero-initialized. `useBias = false` drops the bias **term and
-its parameter** — the layer is then a single-parameter matmul, and nothing named
-`Zeros` shows up in the checkpoint (see
-[An off toggle costs nothing](#gated-parameters)).
+Weight `[outFeatures, inFeatures]` is `KaimingUniform`-initialized; bias `[outFeatures]`
+is zero-initialized. `useBias = false` removes the bias term and parameter.
 
 ### Bilinear
 
@@ -309,15 +216,11 @@ Bilinear.Call(Scalar<int64> in1Features, Scalar<int64> in2Features,
               Tensor<float32> x1, Tensor<float32> x2)
 ```
 
-A bilinear transformation — the second-order *interaction* sibling of `Linear`.
-Per output channel `k`, `y[..., k] = Σ_{i,j} x1[..., i]·A[k,i,j]·x2[..., j] (+ b[k])`.
-Weight `A` has shape `[outFeatures, in1Features, in2Features]`; bias `b` is
-`[outFeatures]`. Both `A` and `b` are initialized from `U(±1/√in1Features)`
-(PyTorch's bound, via `RecurrentUniform`) — note the bias is **not**
-zero-initialized, unlike `Linear`. The contraction is over each input's **last**
-axis; the two inputs must share their leading (batch) dims (`(*, in1)`, `(*, in2)`
-→ `(*, out)`), which are preserved. `useBias = false` omits the bias term and
-its parameter ([An off toggle costs nothing](#gated-parameters)).
+`y[..., k] = Σ_{i,j} x1[..., i]·A[k,i,j]·x2[..., j] (+ b[k])`. `A` is
+`[outFeatures, in1Features, in2Features]`, `b` is `[outFeatures]`; both are initialized
+from `U(±1/√in1Features)` (PyTorch's bound) — the bias is **not** zero-initialized. The
+contraction is over each input's last axis; leading (batch) dims must match and are
+preserved. `useBias = false` removes the bias.
 
 ### Conv2d / Conv1d — dynamic geometry
 
@@ -334,17 +237,12 @@ Conv1d.Call(outChannels, kernelSize, stride, padding, dilation, groups, useBias,
 Conv3d.Call(outChannels, kernelSize, stride, padding, dilation, groups, useBias, x)
 ```
 
-**Dynamic conv geometry**: all geometry (kernel size, stride, padding, dilation,
-groups) is hyperparameter-driven — the layers use the tensor-geometry `NN.Conv`
-overload, which takes geometry as int64 tensor inputs; the exported model
-contains a standard ONNX Conv. Weight
-`[outChannels, inChannels/groups, k(, k)]` is `KaimingUniform`-initialized;
-`inChannels` is read from the input's shape in-graph. `useBias = false` swaps the
-trainable zero bias `[outChannels]` for an all-zero constant, so no bias
-parameter is created ([An off toggle costs nothing](#gated-parameters)). These
-modules cover the **square-kernel / symmetric-pad** case; for per-axis geometry,
-`auto_pad`, or a non-zeros `padding_mode` use the generalized `Convolution`
-helper below.
+All geometry is hyperparameter-driven via the `NN.Conv` overload that takes geometry as
+int64 tensors; the exported model contains a standard ONNX Conv. Weight
+`[outChannels, inChannels/groups, k(, k)]` is `KaimingUniform`-initialized; `inChannels`
+is read from the input shape. `useBias = false` uses an all-zero constant bias (no
+parameter). These cover **square-kernel / symmetric-pad** only; for per-axis geometry,
+`auto_pad` or a non-zeros `padding_mode` use `Convolution` below.
 
 ### ConvTranspose2d — default geometry only
 
@@ -353,25 +251,16 @@ ConvTranspose2d.Call(Scalar<int64> outChannels, Scalar<int64> kernelSize,
                      Scalar<bit> useBias, Tensor<float32> x)
 ```
 
-`ConvTranspose2d`'s geometry attributes stay at the ONNX defaults — stride 1, no padding, dilation 1,
-group 1 — with the kernel shape inferred from the (dynamic) weight
-`[inChannels, outChannels, k, k]`. For other stride/padding combinations call
-`NN.ConvTranspose` directly with static attribute values.
+Stride 1, no padding, dilation 1, group 1; weight `[inChannels, outChannels, k, k]`. For
+other geometry use `NN.ConvTranspose` with static attributes, or `Convolution.ConvTranspose`.
 
 ### Convolution — generalized per-axis helpers
 
-The `[Module]` layers above (`Conv1d/2d/3d`, `ConvTranspose2d`) keep their
-square/cubic, hyperparameter-driven signature for the
-`Model(...)`/hyperparameter-baking ergonomics — they are the scalar-hyper
-convenience. For the **full ONNX attribute surface** (per-axis kernel/stride/
-padding/dilation, asymmetric padding, `auto_pad`, `groups`, `padding_mode`, and
-transposed-conv `output_padding`/`output_shape`) use the static `Convolution`
-helper class. Like `Pooling`, it is a static class of graph-building helpers with
-**plain C# array arguments** — not `[Module]`s. Convolution geometry is
-shape-determining (it sizes the weight) and is therefore baked at concretization
-regardless, so it gains nothing from being a `[Hyper]`; only the `inChannels`
-axis of the weight is read in-graph from `x.ShapeTensor()[1]`, so these helpers
-stay lazy in the input channel count exactly like the per-dim modules.
+The static `Convolution` class exposes the **full ONNX attribute surface** (per-axis
+kernel/stride/padding/dilation, asymmetric padding, `auto_pad`, `groups`,
+`padding_mode`, transposed-conv `output_padding`/`output_shape`) with plain C#
+arguments. Geometry is baked at build time; `inChannels` is still read in-graph from
+`x.ShapeTensor()[1]`.
 
 ```csharp
 // Forward conv — per-axis geometry (spatial rank = kernelSize.Length).
@@ -402,54 +291,32 @@ Convolution.ConvTranspose(x, outChannels, long[] kernelSize,
 // + scalar convenience overload and ConvTranspose1d/2d/3d rank aliases.
 ```
 
-- **Weight & init.** Forward conv weight is `[outChannels, inChannels/groups, k…]`
-  (fan-in `inC/groups·∏k`); transposed conv weight is
-  `[inChannels, outChannels/groups, k…]` (in/out axes swapped). Both are
-  `KaimingUniform`-initialized. `bias: true` makes a trainable zero-initialized
-  bias `[outChannels]`; `bias: false` uses an all-zero constant.
-- **`auto_pad`.** `AutoPad.SameUpper` matches TF/PyTorch `"same"` (extra pad on
-  the high side); `SameLower`, `Valid`, and `NotSet` (explicit pads) are also
-  available. `auto_pad` cannot be combined with an explicit `padding_mode` other
-  than `Zeros` (those compose a separate `Pad`) or with `Causal`.
-- **`groups`.** `1` is dense; `groups == inChannels` (with `outChannels` a
-  multiple of `inChannels`) is depthwise. Weight axis 1 is `inChannels/groups`.
-- **`padding_mode`.** `Zeros` uses the conv's own (differentiable) implicit
-  padding. `Reflect`/`Replicate`/`Circular` map to `PadMode.Reflect`/`Edge`/`Wrap`
-  and are realized by an explicit `Tensor.Pad` over the spatial axes followed by a
-  zero-pad conv. **Caveat:** the `Pad` step for these modes is
-  **non-differentiable** — reflect/edge/wrap have no autodiff and no QEE values,
-  so they **throw in autodiff**. These modes are **forward / inference-grade
-  only**; do not expect to train through the pad stage. `Causal` is **1-D only**
-  (rejected for higher spatial ranks): it left-pads `(k-1)*dilation` zeros on the
-  single spatial axis so `out[t]` never sees future input (WaveNet-style), and is
-  itself a constant (differentiable) zero-pad.
-- **ConvTranspose `output_padding` / `output_shape`.** `output_padding`
-  disambiguates the output size when `stride > 1` maps several input sizes to the
-  same output (it only changes the claimed shape; it is not literal output
-  zero-padding). PyTorch's `output_padding < max(stride, dilation)` guard is **not**
-  re-imposed here — ONNX Runtime validates the geometry. `output_shape` names the
-  target spatial size directly and, when given, overrides `output_padding`. It may
-  reach past the full extent `stride * (in - 1) + output_padding + (kernel - 1) * dilation + 1`
-  by one element, which zero-extends the end as in ONNX's own `output_shape` example
-  (none under `auto_pad: SameUpper`); any further and ONNX would need negative begin
-  pads, so concretizing the model refuses it with **FW054**, naming the output_shape
-  and the full extent. Raise `output_padding` instead to reach a larger size.
-  Transposed conv is **zeros-only** (no `padding_mode`): its "padding" is an
-  output-shape crop, not an input border.
+- **Weights.** Forward: `[outChannels, inChannels/groups, k…]`; transposed:
+  `[inChannels, outChannels/groups, k…]`. Both `KaimingUniform`. `bias: true` adds a
+  zero-initialized trainable `[outChannels]`; `bias: false` a zero constant.
+- **`auto_pad`.** `SameUpper` = TF/PyTorch `"same"`; also `SameLower`, `Valid`, `NotSet`.
+  Cannot be combined with a non-`Zeros` `padding_mode` or with `Causal`.
+- **`groups`.** `groups == inChannels` (with `outChannels` a multiple) is depthwise.
+- **`padding_mode`.** `Zeros` is the conv's own padding. `Reflect`/`Replicate`/`Circular`
+  add an explicit `Pad` that is **non-differentiable** (throws in autodiff) — forward /
+  inference only. `Causal` is **1-D only**: it left-pads `(k-1)*dilation` zeros so
+  `out[t]` never sees future input, and is differentiable.
+- **ConvTranspose `output_padding` / `output_shape`.** `output_padding` picks the output
+  size when `stride > 1` is ambiguous; PyTorch's `output_padding < max(stride, dilation)`
+  guard is not imposed (ONNX Runtime validates). `output_shape` sets the spatial size
+  directly and overrides `output_padding`. It may exceed the full extent
+  `stride * (in - 1) + output_padding + (kernel - 1) * dilation + 1` by at most one
+  element (zero-extending the end; not under `auto_pad: SameUpper`); beyond that,
+  concretization fails with **FW054**, naming the output_shape and the full extent — raise
+  `output_padding` instead. Transposed conv has no `padding_mode`.
 
 <a id="recurrent-layers"></a>
 ### Recurrent layers — `Recurrent.RNN` / `Recurrent.LSTM` / `Recurrent.GRU`
 
-The vanilla (Elman) recurrent layer is the static helper `Recurrent.RNN`, in the
-`Recurrent` class alongside `Recurrent.LSTM` and `Recurrent.GRU` (both below). Like `Convolution` and
-`Pooling`, `Recurrent` is a **static class of plain-C#-argument graph-building
-helpers, not a `[Module]`** — every knob (`hiddenSize`, `nonlinearity`,
-`direction`, `numLayers`, `batchFirst`, `bias`) is shape- or topology-determining
-and is baked at build time regardless, and the `nonlinearity`/`direction` enums
-cannot be expressed as the scalar-only `[Hyper]` type. The owned weights are still
-created via the shared `RecurrentUniform` initializer's `Init` (which emits
-trainable-parameter nodes into the composed graph exactly as `Convolution.Conv`
-owns its weight), so the trainable configuration trains end-to-end.
+`Recurrent` is a static class of plain-C#-argument helpers, not a `[Module]`: every
+knob is shape- or topology-determining and baked at build time. Weights are
+`RecurrentUniform`-initialized trainable parameters (`U(−1/√H, 1/√H)`, PyTorch's bound),
+and the layers train end-to-end within the limits below.
 
 ```csharp
 // h_t = act(W·x_t + R·h_{t-1} + b); returns the full output sequence y and the
@@ -464,54 +331,29 @@ owns its weight), so the trainable configuration trains end-to-end.
     bool bias       = true);
 ```
 
-- **Input / output layout.** `x` is `[L, N, inputSize]` (sequence-first) by
-  default, or `[N, L, inputSize]` when `batchFirst: true`. `inputSize` is read
-  in-graph from the last axis, so the layer is lazy in input size (like
-  `Convolution.Conv`'s `inChannels`). `y` is the **full output sequence** (every
-  step's hidden state) in PyTorch layout `[L, N, D·H]` (or `[N, L, D·H]` when
-  `batchFirst`), where `D = 2` for `Bidirectional`, else `1`. For "last output
-  only" (Keras `return_sequences=False`), slice `y[-1]` or read `hN`.
-- **Return contract.** `hN` is the final hidden state per direction and layer,
-  shaped `[D·numLayers, N, H]` — batch-second regardless of `batchFirst`, matching
-  PyTorch. (The `(y, hN)` tuple covers both Keras `return_sequences` and
-  `return_state` modes, more flexibly than booleans.)
-- **Weights & init.** Per layer, with `D = direction == Bidirectional ? 2 : 1`:
-  `W [D, H, in]` (input→hidden), `R [D, H, H]` (hidden→hidden), and `bias [D, H]`,
-  all `RecurrentUniform`-initialized (PyTorch's `U(−1/√H, 1/√H)`). The single gate
-  means there is no PyTorch↔ONNX gate-reorder.
-- **`bias`.** A single owned bias `[D, H]` is fed to the op as
-  `B = concat(bias, zeros)` on axis 1 (so the ONNX input-bias `Wb` carries it and
-  the recurrent-bias `Rb` is 0 — the two ONNX/PyTorch biases collapse into one, as
-  Keras/Flax do; a ported PyTorch RNN folds `b_ih + b_hh` into this). `bias: false`
-  passes no bias to the op.
-- **`numLayers` stacking.** Builds `numLayers` RNN ops in sequence, feeding each
-  layer's output sequence (reshaped `[L, D, N, H] → [L, N, D·H]`) as the next
-  layer's input, and concatenating each layer's final state on the leading axis to
-  form the `[D·numLayers, N, H]` `hN`. Inter-layer dropout (PyTorch
-  `num_layers > 1`) is **not** baked in — compose the `Dropout` module between
-  stacked `Recurrent.RNN` calls if wanted.
-- **`batchFirst`.** Realized by transposing `[N, L, …] → [L, N, …]` in-graph
-  before the stack and transposing `y` back after; the op **always** runs at
-  `layout=0` (ORT-CPU rejects `layout=1` and autodiff only supports `layout=0`).
-  `hN` stays `[D·numLayers, N, H]`.
-- **Initial state.** The baseline ships a zeroed `h_0` (an omitted op input; ONNX
-  zero-fills) — no caller-supplied `initial_h` and no stateful carry-across-calls.
-- **Autodiff caveat.** Only **single-direction (forward or reverse), tanh,
-  `layout=0`** RNNs are **trainable**. `RnnNonlinearity.Relu` and
-  `RnnDirection.Bidirectional` **build and run for forward inference but throw
-  AD003 in back-propagation through time** — treat them as **inference-grade**.
-  (Forward and reverse tanh are the trainable corner; relu and bidirectional are
-  not.)
-- **No QEE values.** RNN has no QEE step values, so closed-form / value checks run
-  on the **ORT backend**, not the QEE value path.
+Common to RNN, LSTM and GRU (`D = 2` for `Bidirectional`, else `1`):
+
+- **Layout.** `x` is `[L, N, inputSize]`, or `[N, L, inputSize]` with `batchFirst`;
+  `inputSize` is read in-graph. `y` is every step's hidden state, `[L, N, D·H]` (or
+  `[N, L, D·H]`). `hN` (and LSTM's `cN`) is `[D·numLayers, N, H]`, batch-second
+  regardless of `batchFirst`, as in PyTorch. For the last output only, slice `y[-1]` or
+  read `hN`.
+- **Weights.** Per layer `W [D, G·H, in]`, `R [D, G·H, H]`, one owned bias `[D, G·H]`,
+  with `G` = 1 (RNN), 4 (LSTM), 3 (GRU); the init bound stays `1/√H`, not `1/√(G·H)`.
+- **`bias`.** The single owned bias is ONNX's input bias `Wb`; the recurrent bias `Rb` is
+  0. A ported PyTorch RNN or LSTM sums `b_ih + b_hh` into it; for GRU see *Gate order* below.
+  `bias: false` passes no bias.
+- **`numLayers`.** Layers are stacked, each consuming the previous `y`; no inter-layer
+  dropout — put `Dropout` between separate calls if needed.
+- **Initial state** is zero; no caller-supplied initial state, no carry across calls.
+- **Trainable** only single-direction (forward or reverse), default activations.
+  `RnnDirection.Bidirectional` and `RnnNonlinearity.Relu` build and run forward
+  (inference / ONNX export) but **throw AD003 in back-propagation through time**.
+- No QEE step values; value checks run on the ORT backend.
 
 #### `Recurrent.LSTM`
 
-The Long Short-Term Memory layer is the static helper `Recurrent.LSTM`, sharing the
-RNN infrastructure (the same weight-ownership over the ONNX `[num_dir, …]` layout,
-the shared `RecurrentUniform` init, the `RnnDirection` enum, and the
-`numLayers`/`batchFirst`/`bias`/zeroed-state patterns). The gate recurrence is
-fixed (sigmoid gates, tanh cell — there is **no `nonlinearity` knob**):
+Fixed recurrence (sigmoid gates, tanh cell; no `nonlinearity` knob):
 
 ```
 i = σ(W_i·x + R_i·h + b_i)     o = σ(W_o·x + R_o·h + b_o)
@@ -531,57 +373,16 @@ C_t = f ⊙ C_{t-1} + i ⊙ c̃      H_t = o ⊙ tanh(C_t)
     bool bias       = true);
 ```
 
-- **Return contract.** Returns the **three-tuple** `(y, hN, cN)`: `y` is the full
-  output sequence in PyTorch layout `[L, N, D·H]` (or `[N, L, D·H]` when
-  `batchFirst`); `hN` is the final hidden state and `cN` the final **cell** state,
-  each `[D·numLayers, N, H]` (batch-second regardless of `batchFirst`, matching
-  PyTorch). Slice `y[-1]` or read `hN` for "last output only"; ignore `hN`/`cN` for
-  "sequence only" — the tuple covers Keras `return_sequences`/`return_state`.
-- **Weights & init.** Per layer, with `D = direction == Bidirectional ? 2 : 1`:
-  `W [D, 4H, in]` (input→hidden), `R [D, 4H, H]` (hidden→hidden), and a single owned
-  bias `[D, 4H]`, all `RecurrentUniform`-initialized with the explicit hidden size
-  so the bound is PyTorch's `U(−1/√H, 1/√H)` — **not** `1/√(4H)`.
-- **Gate order (port note).** The four gate blocks are packed in the **ONNX-native
-  `i, o, f, c` order** — the only layout the underlying op understands — with **no**
-  reorder shim. Because the init is uniform across gates, the gate order is
-  **unobservable at initialization** (permuting the gate blocks of a uniform-random
-  tensor yields a statistically identical tensor), so there is no correctness or
-  training-dynamics difference for a from-scratch model. The reorder matters only
-  when importing pretrained PyTorch weights (out of scope): PyTorch `nn.LSTM` packs
-  `i, f, g(=c), o`, so on import permute the `4H` rows `i,f,g,o → i,o,f,g`, and split
-  + sum PyTorch's two `4H` biases (`b_ih`, `b_hh`) into the single `4H` owned bias.
-- **`bias`.** A single owned bias `[D, 4H]` is fed to the op as
-  `B = concat(bias, zeros)` on axis 1 (`[D, 8H]`, so the ONNX input-bias `Wb`
-  carries it and the recurrent-bias `Rb` is 0 — the two ONNX/PyTorch biases collapse
-  into one). `bias: false` passes no bias to the op.
-- **`numLayers` / `batchFirst`.** Identical to `Recurrent.RNN`: each layer's output
-  sequence (reshaped `[L, D, N, H] → [L, N, D·H]`) feeds the next layer's input, and
-  each layer's final `hN`/`cN` are concatenated on the leading axis; `batchFirst` is
-  realized by an in-graph transpose around a `layout=0` op (`hN`/`cN` stay
-  `[D·numLayers, N, H]`).
-- **Initial state.** `h_0` **and** `c_0` default to zero (omitted op inputs; ONNX
-  zero-fills). Peephole `P` is null. No caller-supplied initial state or stateful
-  carry-across-calls.
-- **Autodiff caveat.** Single-direction (forward or reverse), `layout=0`,
-  default-activation LSTM is **trainable** end-to-end through the
-  `TrainingRig`. `RnnDirection.Bidirectional` **builds and
-  runs for forward inference / ONNX export but throws AD003 in back-propagation
-  through time** — treat it as **inference-grade**. Peephole, `input_forget`,
-  `clip`, custom activations and
-  variable-length `sequence_lens` are reachable at the core op but all throw AD003
-  in BPTT, so they are **not exposed** by the layer.
-- **No QEE values.** Like RNN, LSTM has no QEE step values — closed-form / value
-  checks run on the **ORT backend**.
+- Returns `(y, hN, cN)`; `cN` is the final cell state.
+- **Gate order (porting).** Gates are packed ONNX-style `i, o, f, c`. PyTorch packs
+  `i, f, g, o`: when importing PyTorch weights, permute the `4H` rows
+  `i,f,g,o → i,o,f,g` and sum `b_ih + b_hh`. Irrelevant for from-scratch training.
+- Peephole, `input_forget`, `clip`, custom activations and `sequence_lens` are not
+  exposed (they throw AD003 in BPTT).
 
 #### `Recurrent.GRU`
 
-The Gated Recurrent Unit layer is the static helper `Recurrent.GRU`, sharing the
-RNN/LSTM infrastructure (the same weight-ownership over the ONNX `[num_dir, …]`
-layout, the shared `RecurrentUniform` init, the `RnnDirection` enum, and the
-`numLayers`/`batchFirst`/`bias`/zeroed-state patterns). It has **two** gates instead
-of the LSTM's three and **no separate cell state** — a single hidden vector carries
-memory. The gate recurrence is fixed (sigmoid gates, tanh candidate — there is **no
-`nonlinearity` knob**):
+Two gates, no cell state; fixed recurrence (sigmoid gates, tanh candidate):
 
 ```
 z = σ(W_z·x + R_z·h + b_z)          # update gate
@@ -603,66 +404,21 @@ H_t = (1 − z) ⊙ ĥ + z ⊙ H_{t-1}     # blend candidate with previous hidde
     bool linearBeforeReset  = true);              // reset-after (PyTorch / cuDNN); see below
 ```
 
-- **Return contract.** Returns the **two-tuple** `(y, hN)` — the strict subset of
-  LSTM's `(y, hN, cN)` with no cell state. `y` is the full output sequence in PyTorch
-  layout `[L, N, D·H]` (or `[N, L, D·H]` when `batchFirst`); `hN` is the final hidden
-  state `[D·numLayers, N, H]` (batch-second regardless of `batchFirst`, matching
-  PyTorch). Slice `y[-1]` or read `hN` for "last output only"; ignore `hN` for
-  "sequence only" — the tuple covers Keras `return_sequences`/`return_state`.
-- **`linearBeforeReset` (the reset-before-vs-after knob).** Selects how the reset gate
-  enters the candidate. The default **`true`** applies the reset **after** the
-  recurrent matmul — `ĥ = tanh(W_h·x + r ⊙ (R_h·h + Rb_h) + Wb_h)` — matching **PyTorch
-  `nn.GRU`, Keras `reset_after=True`, Flax, and cuDNN** numerically (the de-facto
-  standard, and what a porting user expects). `linearBeforeReset: false` applies the
-  reset **before** the matmul — `ĥ = tanh(W_h·x + (r ⊙ h)·R_hᵀ + Rb_h + Wb_h)` — the
-  original Cho-et-al. v1 form and the ONNX op's **own** default (the outlier). The two
-  forms are numerically distinct with the same weights; **both are trainable** (autodiff
-  supports either).
-- **Weights & init.** Per layer, with `D = direction == Bidirectional ? 2 : 1`:
-  `W [D, 3H, in]` (input→hidden), `R [D, 3H, H]` (hidden→hidden), and a single owned
-  bias `[D, 3H]`, all `RecurrentUniform`-initialized with the explicit hidden size so
-  the bound is PyTorch's `U(−1/√H, 1/√H)` — **not** `1/√(3H)`.
-- **Gate order (port note).** The three gate blocks are packed in the **ONNX-native
-  `z, r, h` order** — the only layout the underlying op understands — with **no**
-  reorder shim. Because the init is uniform across gates, the gate order is
-  **unobservable at initialization** (permuting the gate blocks of a uniform-random
-  tensor yields a statistically identical tensor), so there is no correctness or
-  training-dynamics difference for a from-scratch model. The reorder matters only when
-  importing pretrained PyTorch weights (out of scope): PyTorch `nn.GRU` packs
-  `r, z, n(=h)` (Keras `r, z`), so on import swap the first two `3H` gate blocks
-  (`r,z,n → z,r,h`; the candidate block stays last), and map PyTorch's two `3H` biases
-  (`b_ih`, `b_hh`) onto `Wb`/`Rb` — exact for the default reset-after
-  (`linearBeforeReset: true`) form.
-- **`bias`.** A single owned bias `[D, 3H]` is fed to the op as
-  `B = concat(bias, zeros)` on axis 1 (`[D, 6H]`, so the ONNX input-bias `Wb` carries
-  it and the recurrent-bias `Rb` is 0 — the two ONNX/PyTorch biases collapse into one).
-  With `linearBeforeReset: true` (the default) the single `Wb` bias is numerically
-  equivalent to PyTorch's `b_ih + b_hh` sum. `bias: false` passes no bias to the op.
-- **`numLayers` / `batchFirst`.** Identical to `Recurrent.RNN`/`Recurrent.LSTM`: each
-  layer's output sequence (reshaped `[L, D, N, H] → [L, N, D·H]`) feeds the next layer's
-  input, and each layer's final `hN` is concatenated on the leading axis; `batchFirst`
-  is realized by an in-graph transpose around a `layout=0` op (`hN` stays
-  `[D·numLayers, N, H]`).
-- **Initial state.** `h_0` defaults to zero (an omitted op input; ONNX zero-fills);
-  there is no cell state. No caller-supplied initial state or stateful
-  carry-across-calls.
-- **Autodiff caveat.** Single-direction (forward or reverse), `layout=0`,
-  default-activation GRU is **trainable** end-to-end through the `TrainingRig`,
-  and **both `linearBeforeReset` forms are
-  differentiable**. `RnnDirection.Bidirectional` **builds and runs for forward inference
-  / ONNX export but throws AD003 in back-propagation through time** — treat it as
-  **inference-grade**. `clip`, custom activations and
-  variable-length `sequence_lens` are reachable at the core op but all throw AD003 in
-  BPTT, so they are **not exposed** by the layer.
-- **No QEE values.** Like RNN/LSTM, GRU has no QEE step values — closed-form / value
-  checks run on the **ORT backend**.
+- **`linearBeforeReset`.** `true` (default) applies the reset **after** the recurrent
+  matmul — `ĥ = tanh(W_h·x + r ⊙ (R_h·h + Rb_h) + Wb_h)` — matching PyTorch `nn.GRU`,
+  Keras `reset_after=True`, Flax and cuDNN. `false` applies it before —
+  `ĥ = tanh(W_h·x + (r ⊙ h)·R_hᵀ + Rb_h + Wb_h)` — the ONNX default. The forms give
+  different results; **both are trainable**.
+- **Gate order (porting).** Packed ONNX-style `z, r, h`. PyTorch packs `r, z, n`: swap
+  the first two `3H` blocks and sum `b_ih + b_hh` into `Wb` for the `z` and `r` blocks. In the
+  reset-after form PyTorch's candidate bias `b_hn` sits inside `r ⊙ (…)`, where `Rb` is fixed
+  at 0, so it has no slot: a ported GRU is exact only where `b_hn = 0`.
+- `clip`, custom activations and `sequence_lens` are not exposed (AD003 in BPTT).
 
 #### Recurrent cells (single-step) — `Recurrent.RNNCell` / `LSTMCell` / `GRUCell`
 
-Single-step siblings of the layers: each computes **one** timestep of the recurrence,
-taking the previous hidden state(s) in and returning the new one(s), so a user can
-hand-unroll a custom loop (scheduled sampling, attention-augmented decoders, beam
-search) that the whole-sequence layer cannot express.
+One timestep each, for hand-unrolled loops (scheduled sampling, custom decoders, beam
+search):
 
 ```csharp
 // h' = act(W·x + R·h + b). Mirrors PyTorch nn.RNNCell.
@@ -681,15 +437,9 @@ Tensor<float32> Recurrent.GRUCell(
     bool bias = true, bool linearBeforeReset = true);                         // -> h'
 ```
 
-Each is implemented as the matching ONNX op run at **sequence-length 1** (the previous
-state is passed as the op's `initial_h`/`initial_c`; the `num_dir` axis is stripped so
-state is a clean `[N, H]`), so the gate math, the `RecurrentUniform` init
-(`U(−1/√H, 1/√H)`), the gate packing and the bias collapse are **identical** to the
-layers — a cell is definitionally one step of the layer. The initial state is a
-**required** tensor input (seed step 0 with an explicit zero tensor — the user owns the
-loop). The default (tanh) `RNNCell`, `LSTMCell`, and both `linearBeforeReset` forms of
-`GRUCell` are fully **trainable**; `RNNCell` with `RnnNonlinearity.Relu` is
-inference-only (BPTT throws AD003), the same limit as `Recurrent.RNN(Relu)`.
+State is `[N, H]`. Gate math, init, packing and bias match the layers. The previous state
+is a **required** input (pass a zero tensor at step 0). All are trainable except
+`RNNCell` with `RnnNonlinearity.Relu` (AD003 in BPTT).
 
 ### BatchNorm (+ BatchNorm1d / 2d / 3d aliases)
 
@@ -700,48 +450,24 @@ BatchNorm.Call(Scalar<float32>? momentum, Scalar<float32>? epsilon,
                Scalar<bit> trackRunningStats, Tensor<float32> x)
 ```
 
-One rank-generic module covers PyTorch's per-dim `BatchNorm1d/2d/3d` contracts:
-**ranks 2–5** are supported — `[N, C]`, `[N, C, L]`, `[N, C, H, W]`,
-`[N, C, D, H, W]`. The reduction set `{0} ∪ {2..rank-1}` (batch + spatial,
-skipping the channel axis) and the per-channel broadcast shape `[1, C, 1, …, 1]`
-are derived from the input's runtime rank in-graph (the same `Range`-from-rank
-idiom as `LayerNorm`), so the `[N, C, L]` rank-3 form is supported.
+Supports **ranks 2–5** (`[N, C]` to `[N, C, D, H, W]`), rank inferred at runtime.
 
-- `training = true`: normalizes with **batch** statistics (biased variance) and
-  EMA-updates the running stats via `Globals.StateUpdate` (ONNX/Keras momentum
-  convention: `running = running * momentum + batch * (1 - momentum)`).
-- `training = false`: normalizes with the **running** statistics when
-  `trackRunningStats = true`, or with the eval **batch** statistics when
-  `trackRunningStats = false` (PyTorch `track_running_stats=False` semantics).
-  The state update is gated to a no-op, so eval passes always leave the running
-  stats untouched regardless of `trackRunningStats`.
-- `affine = true`: applies `y = gamma * x̂ + beta`; `affine = false`: returns the
-  normalized `x̂` directly. gamma (`Ones`) and beta (`Zeros`) are trainable params
-  **only when `affine = true`** — with `affine = false` they are not created at
-  all, so the trainable-param struct follows the bit (see
-  [An off toggle costs nothing](#gated-parameters)). The running stats are
-  unaffected either way: they are model state, not trainable params.
-- The running mean/variance are module-owned state which `TrainingRig` threads as
-  **model state** (`checkpoint.ModelState`), not trainable params.
-- **Defaults**: only `momentum` (`0.9`) and `epsilon` (`1e-5`) carry a declared
-  default ([nullable, positionally required](#nullable-hypers)). `training`,
-  `affine` and `trackRunningStats` are plain `[Hyper]` bits — `affine`/
-  `trackRunningStats` are conceptually defaulted **on** at call sites (PyTorch's
-  `affine=True` / `track_running_stats=True`) and `training` is the mode switch,
-  but all three are always written out. So
-  `BatchNorm.Call(null, null, training, Scalar(true), Scalar(true), x)` is the
-  all-defaults call.
-- **Port note**: Shorokoo `momentum` follows the ONNX/Keras sense (it weights the
-  *retained* running stat), so to port a PyTorch `BatchNorm(momentum = p)` use
-  Shorokoo `momentum = 1 − p` (the default `0.9` ≡ PyTorch `0.1`). The running
-  variance EMA uses the **biased** estimator (ONNX/Keras/Flax), a minor numeric
-  divergence from PyTorch's Bessel-corrected `running_var`.
-- **Run eval passes through the rig**: the plain inference executor does run a
-  graph carrying `StateUpdate` links, but state does not persist across a one-shot
-  execution — every run sees the running stats as the initializer left them, and
-  the update is dropped. So an eval-mode BatchNorm executed that way normalizes
-  with the initial statistics rather than the trained ones. Use a `TrainingRig`,
-  or `ComputeContext.ExecuteWithState`, whenever the running stats matter.
+- `training = true`: normalizes with **batch** statistics (biased variance) and updates
+  the running stats: `running = running * momentum + batch * (1 - momentum)`.
+- `training = false`: uses the **running** stats when `trackRunningStats = true`, else
+  the batch stats. Eval never changes the running stats.
+- `affine = true`: `y = gamma * x̂ + beta` (`Ones`/`Zeros`); `false`: no gamma/beta
+  parameters.
+- The running mean/variance are **model state** (`checkpoint.ModelState`), not
+  trainable params.
+- **Defaults**: `momentum` `0.9`, `epsilon` `1e-5` ([nullable, positionally
+  required](#nullable-hypers)). `training`, `affine`, `trackRunningStats` are required.
+  All-defaults call: `BatchNorm.Call(null, null, training, Scalar(true), Scalar(true), x)`.
+- **Porting**: `momentum` weights the *retained* stat, so PyTorch `momentum = p` is
+  Shorokoo `1 − p` (default `0.9` ≡ PyTorch `0.1`). Running variance uses the biased
+  estimator (PyTorch uses Bessel's correction).
+- **Run eval passes through the rig** (or `ComputeContext.ExecuteWithState`): the plain
+  inference executor does not persist state, so every run sees the initial running stats.
 
 ```csharp
 // Thin aliases over BatchNorm, preserving the 4-arg (momentum, epsilon,
@@ -751,12 +477,8 @@ BatchNorm2d.Call(momentum, epsilon, training, x)  // [N, C, H, W]   (NCHW)
 BatchNorm3d.Call(momentum, epsilon, training, x)  // [N, C, D, H, W] (NCDHW)
 ```
 
-The `1d/2d/3d` aliases are named entry points that forward to the generic
-`BatchNorm` with `affine` and `trackRunningStats` defaulted on (rank is still
-inferred at runtime). Use the generic `BatchNorm` for the full toggle surface.
-Their own `momentum`/`epsilon` are plain `[Hyper]`s — the generic's `0.9`/`1e-5`
-defaults are **not** inherited — so all three alias arguments are
-[non-nullable and required](#nullable-hypers).
+The aliases' `momentum`/`epsilon` have **no** declared defaults, so all their arguments
+are [required](#nullable-hypers).
 
 ### LayerNorm / RMSNorm / GroupNorm / InstanceNorm
 
@@ -776,66 +498,21 @@ InstanceNorm2d.Call(Scalar<float32> epsilon, x)  // [N, C, H, W]    (NCHW)
 InstanceNorm3d.Call(Scalar<float32> epsilon, x)  // [N, C, D, H, W] (NCDHW)
 ```
 
-Built in-graph from elementwise/reduce ops (the ONNX normalization ops take
-epsilon/numGroups as static attributes, which would forbid `[Hyper]` values).
-The affine parameters, where `affine = true` creates them, are
-`Ones`/`Zeros`-initialized: LayerNorm's gamma/beta are shaped like the
-normalized trailing dims, GroupNorm/InstanceNorm's are per-channel (broadcast
-`[1, C, 1, …, 1]`, sized to the runtime rank).
-`RMSNorm` (`y = x / √(mean(x²) + ε) · gain`) skips the mean-subtraction and the
-bias, keeping only a gain — the normalization used by most modern LLMs.
-
-**All four expose the same `affine` toggle** (an `IfElse` gate, like `Linear`'s
-`useBias`): the affine parameters are trainable params **only when
-`affine = true`** — with `affine = false` they are not created, so the layer
-contributes no parameters of its own (see
-[An off toggle costs nothing](#gated-parameters)). For `LayerNorm` /
-`GroupNorm` / `InstanceNorm` that gates gamma **and** beta; for `RMSNorm`, which
-has no bias, it gates the gain alone:
-
-```csharp
-RMSNorm.Call(Scalar(1L), Scalar(false), Scalar(1e-5f), x)   // x / √(mean(x²) + ε), no gain
-```
-
-That gain-free form is what nanochat and modded-nanoGPT use; the production LM
-families — Llama, Mistral, Qwen, Gemma — all keep the gain. Match your reference
-rather than assuming either way.
-
-Reaching for it does **not** risk the *"No trainable parameters found in the
-computation graph."* build failure. That check is on the whole model graph, so a
-layer left with none of its own is fine: `RMSNorm(affine: false)` — or
-`GroupNorm(affine: false)` — at every normalization site of a transformer builds
-as long as some trainable parameter of the model still reaches its output, which
-any model with a projection in it does. Only a model that is *nothing but* gain-free
-normalization hits it. See [An off toggle costs nothing](#gated-parameters).
-
-`GroupNorm` and `InstanceNorm` are the same computation differing only in the
-number of channel-groups (Wu & He 2018): `GroupNorm(numGroups = 1)` recovers
-LayerNorm-over-CHW and `GroupNorm(numGroups = C)` recovers `InstanceNorm`. Both
-reduce over each per-(sample, group/channel) region's channels and **every**
-spatial axis using the **biased** variance.
-
-- **No declared defaults here**: unlike `BatchNorm`, none of these four declares
-  a `[Hyper(<value>)]` default — `normalizedDims`, `numGroups`, `affine` and
-  `epsilon` are all plain `[Hyper]`s, hence
-  [non-nullable and always passed explicitly](#nullable-hypers).
-  `epsilon` in particular has no `1e-5` fallback to omit into; spell
-  it out (`LayerNorm.Call(Scalar(1L), Scalar(true), Scalar(1e-5f), x)`). The
-  `InstanceNorm` `1d/2d/3d` aliases are the same: their `epsilon` is required
-  too — only `affine` is supplied for you.
-- **`LayerNorm` / `RMSNorm` / `GroupNorm`**: `affine` is conceptually defaulted
-  **on** at call sites (PyTorch's `elementwise_affine=True` / Keras/Flax
-  `affine=True`). For `GroupNorm`, `C` must be divisible by `numGroups`, else the
-  `[N, G, -1]` reshape fails at concretization.
-- **`InstanceNorm`**: `affine` defaults **off** in the `1d/2d/3d` aliases,
-  matching PyTorch's `affine=False` InstanceNorm default — the *opposite* of
-  GroupNorm's on default — because the canonical (style-transfer) use case
-  normalizes without a learnable affine. Pass `affine = true` to the generic
-  `InstanceNorm` to opt in. The `1d/2d/3d` aliases take the 2-arg `(epsilon, x)`
-  call shape. InstanceNorm carries **no** running-stats / momentum machinery —
-  its statistics are per-instance and identical at train and eval time, so it
-  runs on the plain inference pipeline; for batch/running-stat normalization use
-  `BatchNorm`.
+- Affine parameters are `Ones`/`Zeros`-initialized: LayerNorm's shaped like the
+  normalized dims, GroupNorm/InstanceNorm's per channel. `RMSNorm`
+  (`y = x / √(mean(x²) + ε) · gain`) has a gain and no bias.
+- **`affine = false`** removes gamma and beta (for `RMSNorm`, the gain):
+  `RMSNorm.Call(Scalar(1L), Scalar(false), Scalar(1e-5f), x)` is gain-free RMSNorm (as in
+  nanochat and modded-nanoGPT; Llama, Mistral, Qwen and Gemma keep the gain). A model
+  with gain-free norms everywhere still trains as long as some other parameter exists.
+- `GroupNorm(numGroups = 1)` is LayerNorm over CHW; `GroupNorm(numGroups = C)` is
+  `InstanceNorm`. Both use the biased variance. `C` must be divisible by `numGroups`, else
+  concretization fails.
+- **No declared defaults**: every argument, including `epsilon`, is
+  [required](#nullable-hypers) — e.g. `LayerNorm.Call(Scalar(1L), Scalar(true), Scalar(1e-5f), x)`.
+- `InstanceNorm1d/2d/3d` take `(epsilon, x)` with `affine` off (PyTorch's default);
+  use the generic `InstanceNorm` for `affine = true`. InstanceNorm has no running stats
+  and behaves the same in training and eval.
 
 ### LocalResponseNorm
 
@@ -844,25 +521,13 @@ LocalResponseNorm.Call(Scalar<float32>? alpha, Scalar<float32>? beta, Scalar<flo
 LRNHelper.Lrn(x, long size = 5, float alpha = 1e-4f, float beta = 0.75f, float k = 1.0f)    // arbitrary size
 ```
 
-Cross-channel ("brightness") normalization (Krizhevsky et al. 2012, AlexNet):
-`b_c = a_c · (k + (α/size)·Σ_{c'∈window(c)} a_{c'}²)^(−β)` over `[N, C, *spatial]`
-(channel = axis 1), same output shape. The module exposes `alpha`/`beta`/`k` as
-hyperparameters (`k` = PyTorch's additive constant / ONNX `bias`) and **bakes the
-window width `size = 5`** (the ONNX/PyTorch default) because `size` is a compile-time
-ONNX attribute; for a different width use the static helper `LRNHelper.Lrn`.
-**Note:** LRN is largely **superseded by BatchNorm** — provided for AlexNet-era
-parity / legacy-model loading, not as a recommended default. Porting from
-TensorFlow (`tf.nn.lrn`, half-width `depth_radius`, bare `α`, different defaults)
-needs conversion.
-
-- **Defaults**: all three hyperparameters carry a declared default —
-  `alpha` (`1e-4`), `beta` (`0.75`), `k` (`1`) — matching
-  `nn.LocalResponseNorm(5)` exactly, so
-  [`LocalResponseNorm.Call(null, null, null, x)`](#nullable-hypers) is the
-  all-defaults call (and `LocalResponseNorm.Model()` the all-defaults model). The
-  `LRNHelper.Lrn` helper is not a `[Module]`, so its `size`/`alpha`/`beta`/`k`
-  are ordinary C# optional parameters and really are omittable: `LRNHelper.Lrn(x)`
-  is the same all-defaults call there.
+AlexNet cross-channel normalization:
+`b_c = a_c · (k + (α/size)·Σ_{c'∈window(c)} a_{c'}²)^(−β)` over `[N, C, *spatial]`. The
+module fixes `size = 5`; use `LRNHelper.Lrn` for another size. Defaults `alpha` `1e-4`,
+`beta` `0.75`, `k` `1` (PyTorch `nn.LocalResponseNorm(5)`):
+[`LocalResponseNorm.Call(null, null, null, x)`](#nullable-hypers),
+`LocalResponseNorm.Model()` or `LRNHelper.Lrn(x)`. TensorFlow's `tf.nn.lrn` uses a
+half-width `depth_radius`, a bare `α` and other defaults, so ported values need conversion.
 
 ### Attention / Transformer
 
@@ -901,105 +566,49 @@ TransformerDecoderLayer.Call(Scalar<int64> embedDim, Scalar<int64> numHeads,
                              Scalar<int64> ffnDim, Scalar<bit> useBias, tgt, memory)
 ```
 
-`Attention.ScaledDotProductAttention` computes `softmax(QKᵀ·scale + mask)·V` and
-returns `[N, H, Lq, d]` (`d` from `value`). `query`/`key`/`value` must be
-**rank-4** — the last-two-dims transpose is a static perm `[0, 1, 3, 2]`, so an
-arbitrary-rank input is not accepted; `MultiHeadAttention` reshapes to that layout
-before calling. The four optional arguments:
+`ScaledDotProductAttention` computes `softmax(QKᵀ·scale + mask)·V`, returning
+`[N, H, Lq, d]`. Inputs must be **rank-4**.
 
-- **`causal`** is a plain C# `bool` decided when you build the graph (not a
-  `Scalar<bit>`): `true` adds `CausalMask(Lq, Lk)` to the scores before the softmax, so
-  position *i* attends only to *j ≤ i*. `Lq`/`Lk` come from the query's and key's own
-  axis -2, in-graph.
-- **`scale`** is `float?`, **not** `float`. Left `null` (the default) the scale is
-  `1/sqrt(d)` with `d` the **last query dim, read in-graph** — so it follows a dynamic
-  head dim. Passing a value bakes that number in as a constant multiplier instead, for
-  the models whose scaling deviates from `1/sqrt(d)`. It multiplies **Q**, not the
-  scores: `Q` is `[N, H, Lq, d]` and the scores are `[N, H, Lq, Lk]`, so scaling the
-  smaller operand is the same product and keeps one score-sized tensor out of the
-  forward pass (and its gradient `Mul` out of the backward pass).
-- **`queryChunks`** is a plain C# `int` (default `1` = the dense path) that splits the
-  query axis into that many blocks. It is the one memory lever attention offers —
-  [Sizing an attention run](#attention-memory).
-- **`additiveMask`** is an optional pre-built additive mask, broadcastable to the
-  `[…, Lq, Lk]` scores and added **on top of** the causal one (padding masks, custom
-  attention patterns). Use it when the mask is itself a graph tensor rather than a
-  C# decision — which is how `MultiHeadAttention` reaches this argument: its own
-  `causal` is a graph `Scalar<bit>` and C# cannot branch on a graph value, so the
-  mask is selected with an `IfElse` instead of an `if`. That bit is still a
-  `[Hyper]`, so baking it to a constant — `Call`/`Model`, or
-  [`Specialize`](inference.md#hardcoding-hypers-with-specialize) — folds the
-  `IfElse` to one branch. Note it is *unlike* `useBias` in one way: neither branch
-  holds a trainable parameter, so on the `ComputationGraph` + `ToConcreteArchitecture`
-  route there is nothing to prune and the `IfElse` stays live, selecting at run
-  time (see [An off toggle costs nothing](#gated-parameters)).
+- **`causal`** is a C# `bool` fixed at build time; `true` adds `CausalMask(Lq, Lk)`, so
+  position *i* attends only to *j ≤ i*.
+- **`scale`**: `null` means `1/sqrt(d)` with `d` read in-graph (follows a dynamic head
+  dim); a value is baked in. It is applied to **Q**, not the scores.
+- **`queryChunks`**: see [Sizing an attention run](#attention-memory).
+- **`additiveMask`**: an optional mask broadcastable to `[…, Lq, Lk]`, added on top of the
+  causal one (padding masks, custom patterns, or a mask chosen by a graph bit).
 
-`Attention.CausalMask(lq, lk)` is that mask on its own — a `[Lq, Lk]` `float32` tensor,
-`0` where the key position is on or before the query position (`col ≤ row`) and `-1e9`
-above the diagonal. Both lengths are graph scalars (`Scalar<int64>`, e.g.
-`query.DimTensor(-2)`), so the mask sizes itself from the actual sequence lengths. It is
-built from `Range` + comparison + `Where` on two `[1]` constants that `Where`
-broadcasts — no `Trilu`, no gradient, and one `[Lq, Lk]` tensor rather than three.
-Reach for it when you assemble attention yourself, or when the mask has to be gated on
-a graph bit: `causal.IfElse(Attention.CausalMask(lq, lk), TensorFill([lq, lk], 0f))`,
-then hand the result to `additiveMask`.
+`CausalMask(lq, lk)` is a `[Lq, Lk]` `float32` tensor: `0` where `col ≤ row`, `-1e9`
+above. Lengths are graph scalars (e.g. `query.DimTensor(-2)`); the mask has no gradient.
+To gate it on a graph bit:
+`causal.IfElse(Attention.CausalMask(lq, lk), TensorFill([lq, lk], 0f))`, passed as
+`additiveMask`. `queryOffset` makes rows `[offset, offset + Lq)` — for a query slice,
+e.g. a decoding step at position `t` against `t + 1` keys.
 
-The optional third argument `queryOffset` shifts the query rows to **absolute**
-positions — rows run `[offset, offset + Lq)` instead of `[0, Lq)`. That is what makes a
-causal mask correct when the queries are a *slice* of the sequence rather than all of
-it: a `queryChunks` block (which passes it for you), or a decoding step whose single
-query row sits at position `t` against a key history of length `t + 1`.
+All attention layers train end-to-end.
 
-All built from autodiff-supported primitives (MatMul / Softmax / Transpose /
-Where), so they train end-to-end.
-`MultiHeadAttention` owns four `XavierUniform` projections (q/k/v/out) with four
-optional zero biases — `useBias = false` drops all four parameters, leaving the
-layer with just the four projections
-([An off toggle costs nothing](#gated-parameters)); the causal mask is a constant
-gated by the `[Hyper]` `causal` bit — an `IfElse` rather than a C# `if`, since C#
-cannot branch on a graph value, and folded away once that bit is baked to a
-constant by `Call`/`Model` or `Specialize`.
-`TransformerEncoderLayer` composes
-`LayerNorm` + `MultiHeadAttention` and a GELU FFN (the FFN uses explicit
-token-wise MatMuls, since `Linear` would flatten the sequence into the feature
-axis on a `[N, L, E]` input). No PyTorch backwards-compat surface
-(`need_weights`/`kdim`/`batch_first`/…) — Shorokoo is explicit and batch-first.
-
-`Attention.ApplyRoPE` adds **rotary positional embedding** (RoPE; Su et al. 2021):
-a parameter-free rotation that encodes *relative* position inside the attention
-dot-product. It rotates each per-head query/key vector (a `[N, H, L, d]` tensor
-with **`d` even**) by `m·θ_i`, where `m` is the token's sequence position and
-`θ_i = theta^{-2i/d}` (`theta` default `10000`, the value HF calls `rope_theta`), using the
-GPT-NeoX / HuggingFace **half-split** layout and rotate-half trick:
-`RoPE(x) = x·cos(mθ) + rotateHalf(x)·sin(mθ)`, with
-`rotateHalf(x) = concat(-x[…, d/2:], x[…, :d/2])`. The cos/sin tables are built
-in-graph from the input's own `L` (axis -2) and `d` (axis -1) and broadcast over
-the leading `[N, H]`. Apply it to **Q and K only** (never V), *before*
-`ScaledDotProductAttention`; the output keeps the same `[N, H, L, d]` shape and,
-being an orthogonal rotation, preserves each vector's norm exactly.
-
-`TransformerDecoderLayer` is the pre-LN **cross-attention decoder block** (the
-three-sublayer decoder from "Attention Is All You Need"). It mirrors
-`TransformerEncoderLayer`'s residual/LN/FFN structure, inserting a cross-attention
-sublayer: `h = tgt + MHA_self(LN(tgt), causal: true)` (masked self-attention),
-`h2 = h + MHA_cross(LN(h), memory, memory)` (encoder–decoder attention: query =
-`LN(h)`, key = value = the **raw** encoder `memory`, non-causal), then
-`out = h2 + FFN(LN(h2))` (the same GELU FFN as the encoder layer). It takes two
-inputs — `tgt [N, Lt, embedDim]` and `memory [N, Lm, embedDim]` — and because the
-query length `Lt` and key/value length `Lm` may differ, it exercises
-`MultiHeadAttention`'s distinct-k/v (separate kdim/vdim) cross-attention path. The
-self-attention is hard-coded causal; `memory` is fed unnormalized (expected to be
-the already-LayerNorm'd encoder-stack output, matching PyTorch).
+- `MultiHeadAttention` has four `XavierUniform` projections (q/k/v/out) and four
+  optional zero biases (`useBias`). Its `causal` is a graph bit; baking it (`Call`/`Model`
+  or [`Specialize`](inference.md#hardcoding-hypers-with-specialize)) folds the mask
+  choice. On the `ComputationGraph` + `ToConcreteArchitecture` route it is not pruned
+  (it holds no parameters) and stays a live run-time switch.
+- `TransformerEncoderLayer`: `LayerNorm` + `MultiHeadAttention` + a GELU FFN applied
+  token-wise. Layouts are batch-first; there is no `need_weights`/`kdim`/`batch_first`.
+- `TransformerDecoderLayer` (pre-LN, "Attention Is All You Need"):
+  `h = tgt + MHA_self(LN(tgt), causal: true)`,
+  `h2 = h + MHA_cross(LN(h), memory, memory)` (non-causal), `out = h2 + FFN(LN(h2))`.
+  `Lt` and `Lm` may differ. `memory` is not normalized (pass the already-normalized
+  encoder output, as in PyTorch).
+- `ApplyRoPE` (Su et al. 2021) rotates each query/key vector by `m·θ_i`,
+  `θ_i = theta^{-2i/d}` (`theta` = HF's `rope_theta`, default `10000`), in the GPT-NeoX /
+  HuggingFace **half-split** layout: `RoPE(x) = x·cos(mθ) + rotateHalf(x)·sin(mθ)`,
+  `rotateHalf(x) = concat(-x[…, d/2:], x[…, :d/2])`. `d` must be even. Apply to **Q and K
+  only**, before `ScaledDotProductAttention`; norms are preserved.
 
 <a id="attention-memory"></a>
 #### Sizing an attention run
 
-Attention is the one layer whose activations are **quadratic in sequence length**, so it
-is the one you have to budget for by hand. Everything below is arithmetic you can do
-before you run anything.
-
-The unit is one **score block** — the `[N, H, Lq, Lk]` tensor `QKᵀ` and everything the
-same shape downstream of it:
+Attention activations are **quadratic in sequence length**. The unit is one **score
+block**, the `[N, H, Lq, Lk]` tensor `QKᵀ`:
 
 ```
 score block = N · H · Lq · Lk · 4 bytes          (float32)
@@ -1013,38 +622,12 @@ score block = N · H · Lq · Lk · 4 bytes          (float32)
 | 32 | 6 | 1 024 | 768 MiB |
 | 32 | 6 | 2 048 | 3 GiB |
 
-Note what is *not* in that formula: `d` (the head dim) does not appear — it is contracted
-away by `QKᵀ` — and neither does the number of parameters. Doubling the sequence length
-quadruples the block; doubling the batch or the head count only doubles it. The additive
-mask is a separate, much smaller `[Lq, Lk] · 4 bytes` (4 MiB at `L = 1024`), shared by
-every batch element and head — but built **per call site**, not deduplicated across them,
-and split into `c` pieces of `[Lq/c, Lk]` under `queryChunks`.
+The head dim `d` does not appear. Doubling the sequence quadruples the block; doubling
+batch or heads doubles it. The additive mask adds `[Lq, Lk] · 4 bytes` per call site.
 
-**What a training step actually holds.** Every figure below is **measured**: the resident
-high-water mark of one training step on the CPU backend (`VmHWM` with ONNX Runtime's arena
-off, so every activation is a real allocation), for a step whose attention has all three
-projections trainable, with a causal mask, at `N = 2`, `H = 4`, `L = 256` — a 2 MiB score
-block, read the way the framework's own memory benchmark reads it, after the training rig's
-memory pass has run (see [limitations.md](limitations.md#gradient-activation-checkpointing)).
-
-The score block is not the only term. The peak also holds q/k/v and their gradients, each
-`N · H · L · d · 4` bytes — call that a **q block**. It is `d/L` times a score block, so it is
-negligible at long sequences and very much not at short ones:
-
-| attention calls | `d` | peak | in score blocks |
-|---|---|---|---|
-| 1 | 32 | 6.9 MiB | 3.4 |
-| 1 | 64 | 8.6 MiB | 4.3 |
-| 1 | 128 | 11.8 MiB | 5.9 |
-| 2 | 32 | 11.9 MiB | 6.0 |
-| 2 | 64 | 14.4 MiB | 7.2 |
-
-and it scales the way the formula says: doubling the batch (`N = 4`, a 4 MiB block) gives
-14.2 MiB, doubling the sequence (`L = 512`, an 8 MiB block) gives 26.3 MiB. Read these to about
-±0.3 MiB: each is the largest of five readings of a resident high-water mark, and the allocator
-moves about that much between recordings.
-
-A rule that fits every one of those from above, so it over-budgets rather than under-:
+A training step also holds q/k/v and their gradients (a **q block** each,
+`N · H · L · d · 4` bytes), which dominate at short sequences. A rule of thumb that
+over-estimates the training-step peak:
 
 ```
 peak  ≈  A · (3 · score block  +  6.5 · q block)
@@ -1054,61 +637,26 @@ peak  ≈  A · (3 · score block  +  6.5 · q block)
   A           = number of ScaledDotProductAttention calls
 ```
 
-A 6-layer encoder at batch 32, 6 heads, `L = 1024`, `d = 64` is `A = 6`, a 768 MiB score
-block and a 48 MiB q block — so ≈ 6 × (2.25 + 0.30) GiB ≈ **15 GiB in attention activations
-alone**, before parameters, gradients, optimizer state and every other layer. Drop the
-`q block` term and you would budget 13.5 GiB and be wrong by a tenth.
+Example: 6 layers, batch 32, 6 heads, `L = 1024`, `d = 64` ≈ 6 × (2.25 + 0.30) GiB ≈
+**15 GiB of attention activations**, before parameters, gradients, optimizer state and
+other layers. On GPU, allocations below a few hundred MiB are hidden inside ONNX
+Runtime's up-front arena reservation.
 
-Two caveats on checking this against a real run. The measurements are CPU-side; on a GPU
-the same tensors are allocated, but below a few hundred MiB you will not see any of it in a
-GPU reading, because the ONNX Runtime arena reserves a fixed few hundred MiB up front and
-the blocks fit inside it. And the API that produces the figures is internal and unsupported.
+**`queryChunks: c`** splits the query axis into `c` blocks, runs each against the whole
+key/value and concatenates. It is exact (outputs, gradients and causal masking match
+the dense path to rounding). It shrinks score-sized tensors by `c` at the cost of `c`
+MatMul/Softmax launches and a larger graph. It helps most at long sequences and small
+head dims, little at short sequences; measure peak and step time. Keep `c` small.
 
-**The lever: `queryChunks`.** Passing `queryChunks: c` splits the query axis into `c` blocks,
-runs attention on each against the whole key/value, and concatenates. It is exact — the output
-matches the dense path to floating-point rounding, gradients and causal masking included (each
-chunk gets a `queryOffset` causal mask, so it still masks absolute positions).
+- `Lq` stays dynamic; chunk `i` covers rows `[Lq·i/c, Lq·(i+1)/c)`. Uneven division is
+  fine; `c > Lq` gives empty chunks.
+- An `additiveMask`'s query axis (axis -2) must be `Lq` or `1`; any other height is
+  rejected. A query-broadcasting mask goes to every chunk; an `Lq`-tall one is sliced.
+- Only `Attention.ScaledDotProductAttention` takes it — not `MultiHeadAttention` or the
+  transformer layers, since a chunk count must be a C# build-time constant.
 
-**Measure it before you rely on it, and expect to pay compute for it.** It shrinks the
-score-sized tensors by `c`, and what it saves depends on how much of the peak they are;
-what it costs is `c` MatMul and Softmax launches instead of one. On the model above at `c = 4`,
-with peak measured as above and compute as the pass's own model of the step, which unlike a
-kernel-time reading is reproducible:
-
-| `d` | `L` | dense | chunked | peak | modelled compute |
-|---|---|---|---|---|---|
-| 32 | 256 | 6.9 MiB | 5.0 MiB | **28% better** | +41% |
-| 64 | 256 | 8.6 MiB | 7.1 MiB | **18% better** | +37% |
-| 32 | 512 | 26.3 MiB | 16.5 MiB | **37% better** | +22% |
-
-So it is worth trying when a run is close to fitting, and it pays best where the score
-block dominates — long sequences, small head dims — which is exactly where you need it;
-at short sequences the retained q blocks are most of the peak and chunking cannot touch
-them. Check both numbers afterwards: the compute cost is launch overhead, so it is worst on
-small steps and shrinks as the sequence grows.
-
-An `additiveMask` is handled per chunk. Its query axis (axis -2, once right-aligned to the
-scores' rank) must be `Lq` or `1` — the same rule the dense path enforces, and any other
-height is rejected rather than silently narrowed or broadcast. One that already broadcasts
-over queries — rank < 2, or a size-1 axis -2, as in an `[N, 1, 1, Lk]` padding mask — goes to
-every chunk whole; one that is `Lq` rows tall is sliced to each chunk's rows.
-
-`queryChunks` is a build-time C# `int`, fixed when the graph is built — `Lq` itself stays
-dynamic, and chunk `i` covers rows `[Lq·i/c, Lq·(i+1)/c)`, so an `Lq` that does not divide
-evenly just gives chunks differing by one row (and a `c` larger than `Lq` gives empty chunks —
-still correct, just wasted launches). Keep `c` small: `c` chunks mean `c` MatMul and Softmax
-launches instead of one, and the graph grows accordingly — the built (pre-optimization)
-one-attention training step goes from 505 to 1 308 nodes at `c = 4`.
-
-It reaches only the `Attention.ScaledDotProductAttention` helper, not `MultiHeadAttention`,
-`TransformerEncoderLayer` or `TransformerDecoderLayer`: a `[Module]`'s parameters are all
-graph values, fixed at concretization — after the module body has run — and a chunk count has
-to be a C# constant at build time. So the lever is available only to hand-assembled attention
-today; a module variant with a chunk count baked in is possible, and is not written.
-
-**The other levers,** in the order they cost you least: shorten the sequence (quadratic),
-shrink the batch (linear), cut heads (linear). And a block can be marked for recomputation
-in the backward pass — see [Activation checkpointing](#activation-checkpointing) next.
+Other levers, cheapest first: shorter sequences (quadratic), smaller batch (linear),
+fewer heads (linear), and [activation checkpointing](#activation-checkpointing).
 
 <a id="activation-checkpointing"></a>
 #### Activation checkpointing: `[Module(Checkpoint = true)]`
@@ -1125,37 +673,17 @@ public partial class MlpBlock
 }
 ```
 
-This is the lever PyTorch calls `torch.utils.checkpoint`: every call of a checkpointed module
-is a **segment** whose forward activations are dropped after the forward pass and recomputed
-from the segment's inputs when the backward pass needs them. What is kept across the gap is
-the segment's boundary — its inputs and its outputs — and what is recomputed is everything
-produced inside the body, once per segment, shared by every gradient that reads it. The
-step's numbers do not change (the recomputation is the same ops on the same inputs; a
-checkpointed stack and its plain twin follow the same loss trajectory), the module's
-parameters, state and checkpoints are unaffected, and nothing about the hint reaches an
-exported ONNX model. It composes: a checkpointed module inside a checkpointed module is one
-segment, the outer one.
+The equivalent of PyTorch's `torch.utils.checkpoint`: each call of a checkpointed module
+is a **segment** whose internal activations are dropped after the forward pass and
+recomputed from its inputs during the backward pass. Results are unchanged; parameters,
+state, checkpoints and ONNX export are unaffected. Nested checkpointed modules form one
+segment (the outer).
 
-The training rig honours the hint **unconditionally** — before, and independently of, the
-compute-versus-memory objective its memory-aware pass otherwise applies, and even on a step
-so small that the pass would not run at all. That is the point of it: the automatic pass only
-takes a recomputation that pays under its own objective, and refuses one that buys memory
-with a large compute increase; the attribute is how you say you want that trade anyway.
-
-Measure before relying on it, because it is not always a win over the automatic pass. That
-pass already recomputes what pays under its objective, and it is free to choose finer-grained
-recomputations than a whole segment; the hint buys its memory with less compute, and it is
-the only lever on a step the pass would not touch. On a three-block MLP of width 32 behind a
-linear head, at a batch the pass leaves alone, the checkpointed twin's modelled peak is 40%
-below the plain one's, for some 14% more modelled compute, with an identical loss trajectory. At a batch large enough for the pass to act, the
-automatic pass and the hint land within a few percent of each other on that model, and on a
-wide MLP or a two-layer transformer encoder the hint came out slightly worse than the
-automatic pass on both counts. The hint is for a segment whose activations are what the peak
-is made of and that the pass would otherwise leave alone, and for buying the memory at a
-known compute price. Those are the pass's **modelled** figures; before relying on the hint
-for a step that must fit, measure the step — see
-[limitations.md](limitations.md#gradient-activation-checkpointing) for what the model does
-and does not capture.
+The rig applies the hint **unconditionally**, even where its automatic memory-aware pass
+would not recompute (small steps, or a trade of much more compute for memory). It is not
+always better than the automatic pass, which can recompute at finer grain; use it for a
+segment that dominates peak memory, and measure the step before relying on it (see
+[limitations.md](limitations.md#gradient-activation-checkpointing)).
 
 ### PReLU / GLU
 
@@ -1166,19 +694,9 @@ GatedLinear.GLU(x, axis: -1)        // splits x in two halves [a, b] along axis 
 GLU.Call(x)                         // param-free module form of GatedLinear.GLU with axis fixed at -1
 ```
 
-`PReLU` carries one shared trainable slope (PyTorch `num_parameters=1`).
-`PReLUChannelwise` is the per-channel variant (PyTorch `num_parameters=C`): it owns
-a separate trainable slope for each channel — a `[C]` slope vector read from the
-input's channel axis (axis 1) in-graph and broadcast as `[1, C, 1, …, 1]` over the
-batch/spatial dims. It is rank-generic (`[N, C]`, `[N, C, L]`, `[N, C, H, W]`, …;
-input rank ≥ 2, channels on axis 1) and its slopes init to `0.25` just like the
-shared `PReLU` — so a fresh `PReLUChannelwise` equals a fresh `PReLU` numerically
-until training pulls the per-channel slopes apart. (Per He et al. 2015, the PReLU
-slope should not be weight-decayed; Shorokoo's optimizers apply decay uniformly, so
-this is a usage caveat, not enforced.) `GLU` is a param-free static helper (like
-`Pooling`) and requires an even size along `axis`. The `GLU` **module** (`GLU.Call(x)`)
-is a thin param-free wrapper over `GatedLinear.GLU` with the split axis fixed at `-1`
-(PyTorch `nn.GLU(dim=-1)`); use the static helper for an arbitrary split axis.
+`PReLUChannelwise` (PyTorch `num_parameters=C`) takes `C` from axis 1; input rank ≥ 2.
+Shorokoo's optimizers apply weight decay uniformly, including to PReLU slopes (He et al.
+2015 recommend none). `GatedLinear.GLU` requires an even size along `axis`.
 
 ### Dropout
 
@@ -1186,12 +704,10 @@ is a thin param-free wrapper over `GatedLinear.GLU` with the split axis fixed at
 Dropout.Call(Scalar<float32> ratio, Scalar<bit> training, Tensor<float32> x)
 ```
 
-Training mode zeroes each element with probability `ratio` and scales survivors
-by `1/(1-ratio)`; eval mode is the identity. The mask is drawn from the layer's
-own stream under the model's [RNG configuration](rng-configuration.md) —
-deterministic and reproducible for a config (the default identity when none is
-given), varying per training step via the generator's execution counter;
-gradients flow through the forward mask automatically.
+Training zeroes each element with probability `ratio` and scales survivors by
+`1/(1-ratio)`; eval is the identity. The mask comes from the layer's own stream under the
+model's [RNG configuration](rng-configuration.md): reproducible for a config, different
+on each training step.
 
 ### SpatialDropout
 
@@ -1202,15 +718,8 @@ Dropout2d.Call(Scalar<float32> ratio, Scalar<bit> training, Tensor<float32> x)  
 Dropout3d.Call(Scalar<float32> ratio, Scalar<bit> training, Tensor<float32> x)  // [N, C, D, H, W]
 ```
 
-Channel-wise (spatial) dropout over `[N, C, D1..Dn]` (channel = axis 1): one
-Bernoulli draw per `(sample, channel)` drops or rescales the **entire** feature
-map at once (vs `Dropout`'s per-element mask), so whole channels are zeroed or
-scaled by `1/(1-ratio)` together — the regularization for strongly-correlated
-conv feature maps (Tompson et al. 2015). Eval mode is the identity; the mask is
-drawn from the layer's own stream under the model's RNG configuration (see
-`Dropout`). The rank is read in-graph, so `SpatialDropout` is rank-generic; the
-`Dropout1d/2d/3d` aliases (PyTorch names) are thin forwarders naming the per-rank
-forms. On rank-2 `[N, C]` it degenerates to elementwise `Dropout`.
+Drops or rescales whole channels: one draw per `(sample, channel)` over
+`[N, C, D1..Dn]`. Rank-generic; on `[N, C]` it equals `Dropout`. Eval is the identity.
 
 ### AlphaDropout / FeatureAlphaDropout
 
@@ -1219,18 +728,10 @@ AlphaDropout.Call(Scalar<float32> ratio, Scalar<bit> training, Tensor<float32> x
 FeatureAlphaDropout.Call(Scalar<float32> ratio, Scalar<bit> training, Tensor<float32> x)  // channel-wise [N,C,...]
 ```
 
-SELU-paired dropout for self-normalizing networks (Klambauer et al. 2017). Instead
-of zeroing dropped units, it sets them to SELU's negative saturation `α' = −λα ≈
-−1.7581`, then affine-renormalizes the tensor by `out = a·x' + b` with
-`a = (q + α'²·q·p)^(−1/2)`, `b = −a·p·α'` (`q = 1−ratio`), which preserves the mean
-and variance **in expectation** over the mask — the self-normalizing property plain
-`Dropout` (which zeros, shifting the moments) destroys. `FeatureAlphaDropout` is the
-channel-wise twin: one Bernoulli draw per `(sample, channel)` drops a whole feature
-map to `α'` (reusing the `[N, C, 1, …, 1]` mask shape), rank-generic over 1-D/2-D/3-D.
-Both take `(ratio, training)` like `Dropout`; eval mode (`training = false`) is the
-**exact** identity (gated explicitly, since the affine isn't the identity); the mask
-is drawn from the layer's own stream under the model's RNG configuration (see
-`Dropout`).
+SELU-paired dropout (Klambauer et al. 2017): dropped units are set to
+`α' = −λα ≈ −1.7581`, then `out = a·x' + b` with `a = (q + α'²·q·p)^(−1/2)`,
+`b = −a·p·α'` (`q = 1−ratio`), preserving mean and variance in expectation.
+`FeatureAlphaDropout` drops whole channels. Eval is the exact identity.
 
 ### Embedding
 
@@ -1241,44 +742,19 @@ Embedding.Call(Scalar<int64> numEmbeddings, Scalar<int64> embeddingDim,
                Scalar<float32> normType, Tensor<int64> indices)
 ```
 
-Gather over a trainable `[numEmbeddings, embeddingDim]` table, `Normal`-initialized
-(N(0,1), PyTorch's `nn.Embedding` default).
+A trainable `[numEmbeddings, embeddingDim]` table, `Normal`-initialized. All five
+arguments are [required](#nullable-hypers); knobs-off call:
+`Embedding.Call(V, D, Scalar(-1L), Scalar(0f), Scalar(2f), indices)`.
 
-**Knobs (all `[Hyper]` scalars; pass the sentinel to disable):**
-- **`paddingIdx`** (sentinel `-1` = off): output rows whose index equals `paddingIdx`
-  are masked to the zero vector, so they also receive no training gradient.
-- **`maxNorm`** (sentinel `0f` = off) / **`normType`** (default `2f`, the *p* of the
-  p-norm): gathered output rows whose `normType`-norm exceeds `maxNorm` are scaled
-  down to `maxNorm` (shrink-only; under-cap rows untouched). `normType` is inert
-  unless `maxNorm` is set.
-- **No declared defaults here**: unlike `BatchNorm`/`LocalResponseNorm`, none of
-  the five declares a `[Hyper(<value>)]` default, so all are
-  [non-nullable and always passed explicitly](#nullable-hypers). The sentinels
-  and the `2f` `normType` are call-site conventions you write out, not values
-  you can omit —
-  `Embedding.Call(V, D, Scalar(-1L), Scalar(0f), Scalar(2f), indices)` is the
-  knobs-off call (with `maxNorm` off, `normType` is inert).
-
-**Two divergences from PyTorch** (SSA graphs cannot mutate a weight
-mid-forward): (1) `maxNorm` is *functional* — Shorokoo clamps the gathered **output**
-rows and never mutates the stored weight (PyTorch renormalizes the weight in place, so
-across training the stored weights diverge; per-forward/inference outputs match for
-binding rows). (2) `paddingIdx` masks the **output** rather than zeroing the stored row
-+ freezing its gradient imperatively; the mask routes zero gradient to pad positions,
-so under the standard "pad id is reserved" convention the training effect matches (and
-is more robust — the output is zero by construction).
-
-**Choosing the initializer.** `[Module] Embedding` is hardcoded to `Normal` (PyTorch
-parity). For a different initializer use the static helper
-`EmbeddingHelpers.Embed(indices, numEmbeddings, embeddingDim, embeddingInit, paddingIdx,
-maxNorm, normType)` — e.g. `EmbeddingHelpers.Embed(idx, V, D, s => XavierUniform.Init(s))`.
-The init selector is a compile-time type (not a runtime `[Hyper]`), so it lives on a
-plain-C#-argument static helper (the `Recurrent`/`Convolution`/`Pooling` precedent);
-`Embed` defaults to `Normal`, strictly generalizing the module.
-
-**Not exposed.** `scale_grad_by_freq` and `sparse` are
-gradient-only knobs with no forward expression and no Shorokoo IR support (absent from
-Keras and Flax too).
+- **`paddingIdx`** (`-1` = off): rows for that index are output as zero and get no
+  gradient. The stored row is not zeroed (PyTorch zeroes it).
+- **`maxNorm`** (`0f` = off) / **`normType`** (usually `2f`): output rows whose
+  `normType`-norm exceeds `maxNorm` are scaled down to it. The stored weight is never
+  modified (PyTorch renormalizes it in place, so stored weights diverge in training).
+- `scale_grad_by_freq` and `sparse` are not supported.
+- For another initializer use `EmbeddingHelpers.Embed(indices, numEmbeddings,
+  embeddingDim, embeddingInit, paddingIdx, maxNorm, normType)`, e.g.
+  `EmbeddingHelpers.Embed(idx, V, D, s => XavierUniform.Init(s))` (default `Normal`).
 
 #### EmbeddingBag
 
@@ -1288,47 +764,34 @@ EmbeddingBag.Bag(Tensor<int64> indices, long numEmbeddings, long embeddingDim,
                  long paddingIdx = -1)   // BagMode { Sum, Mean, Max }
 ```
 
-Looks up a trainable `[V, D]` table (`Normal` by default) for a **2-D batch of
-fixed-length bags** `indices [B, L]` and reduces each bag over axis 1 by `mode`,
-returning `[B, D]` — i.e. `Embedding(indices).Reduce(mode, axis=1)`. A plain-argument
-`static` helper (not a `[Module]`) because `mode` is a build-time structural choice
-(the `Recurrent`/`Pooling` precedent); the owned table still trains end-to-end.
+Looks up `indices [B, L]` in a trainable `[V, D]` table and reduces each bag over axis 1,
+returning `[B, D]`.
 
-**Scope / divergences:** 2-D fixed-length input only — PyTorch's 1-D `input + offsets`
-ragged form, `include_last_offset`, and `per_sample_weights` are not supported (the
-ragged segment-reduce needs a SegmentSum-style op ONNX/Shorokoo lacks; rectangularize
-to `[B, L]` with `paddingIdx` instead). The `[B, L, D]` intermediate is materialized (no
-fused gather-reduce kernel) — the result matches PyTorch, the memory profile does not.
-`paddingIdx` zeroes pad rows before the reduce: exact for `Sum`, approximate for `Mean`
-(divides by full `L`, not the non-pad count), and unfaithful for `Max` with negative
-embeddings (use it with `Max` only for non-negative embeddings).
+- **2-D fixed-length input only**: PyTorch's `offsets` ragged form,
+  `include_last_offset` and `per_sample_weights` are unsupported; pad to `[B, L]` with
+  `paddingIdx`.
+- The `[B, L, D]` intermediate is materialized (more memory than PyTorch).
+- `paddingIdx` zeroes pad rows before reducing: exact for `Sum`, approximate for `Mean`
+  (divides by `L`), wrong for `Max` unless embeddings are non-negative.
 
 ### Activations
 
-Only activations with a hyperparameter get modules:
+Only activations with a hyperparameter have modules:
 
 ```csharp
 LeakyReLU.Call(Scalar<float32> alpha, x)  // x for x > 0, alpha * x otherwise
 ELU.Call(Scalar<float32> alpha, x)        // x for x > 0, alpha * (exp(x) - 1) otherwise
 ```
 
-(The ONNX LeakyRelu/Elu ops take alpha as a static attribute, so these build the
-formula in-graph to allow a true `[Hyper]` alpha.)
-
-Plain activations are tensor one-liners and need no modules: `x.Relu()`,
-`x.Gelu()`, `x.Sigmoid()`, `x.Tanh()`, `x.Softmax(axis)`, `x.LogSoftmax(axis)`, …
+Plain activations are tensor methods: `x.Relu()`, `x.Gelu()`, `x.Sigmoid()`,
+`x.Tanh()`, `x.Softmax(axis)`, `x.LogSoftmax(axis)`, …
 
 ### Pooling — plain C# helpers
 
-ONNX pooling geometry exists only as static node attributes (no tensorized
-variant), so `Pooling` is a static class of graph-building helpers with plain
-C# arguments — not `[Module]`s, and the geometry is not hyperparameter-driven.
-Like `Convolution`, the windowed pools come in three shapes: a **per-axis**
-general form (geometry as `long[]`, spatial rank inferred from
-`kernelSize.Length`), a **scalar-square** convenience overload (one scalar per
-knob, rank from `x.Rank() - 2`), and per-rank `*1d/2d/3d` aliases that assert the
-rank. Unlike `Convolution`, the helpers stay generic in the float element type
-(pooling owns no parameters).
+`Pooling` is a static class with plain C# arguments; geometry is not
+hyperparameter-driven. Windowed pools come as a **per-axis** form (`long[]` geometry,
+rank from `kernelSize.Length`), a **scalar-square** overload (rank from `x.Rank() - 2`),
+and `*1d/2d/3d` aliases. They are generic in the float element type.
 
 ```csharp
 // Max pooling — per-axis, scalar-square, and per-rank forms.
@@ -1359,95 +822,68 @@ Pooling.MaxUnpool1d / MaxUnpool2d / MaxUnpool3d (...);
 Pooling.Flatten(x, startAxis: 1);  // [N, d1, d2, ...] -> [N, d1*d2*...]
 ```
 
-**Both the scalar `MaxPool2d(x, long kernelSize, …)` / `AvgPool2d(x, long
-kernelSize, …)` signatures and the per-axis `long[]` aliases exist** (C# overload
-resolution distinguishes `long` from `long[]`), so `Pooling.MaxPool2d(x, 2)` and
-`Pooling.MaxPool2d(x, [2L, 2L])` both work.
-
-**Defaults & conventions.** `stride` defaults to `kernelSize` (PyTorch/Keras);
-per-axis `stride`/`padding`/`dilation` accept length 1 (broadcast to every axis)
-or length spatialRank, and `padding` may also be length `2*spatialRank`
-(ONNX `[begin₁…beginₙ, end₁…endₙ]`, allowing asymmetric pads). `LpPool`'s norm
-order `p` defaults to **2** (L2) and is an **integer** — ONNX has no fractional
-norm, so PyTorch's float `norm_type` is not expressible. `AvgPool`'s
-`countIncludePad` defaults to **false** (divide by the count of real cells),
-**diverging from PyTorch's `count_include_pad=True`**; pass
-`countIncludePad: true` for the PyTorch denominator.
-
-**Inference-grade backward caveats.** The pools expose their full forward
-attribute surface, but some gradients are restricted:
-
-- `AvgPool` with `ceilMode: true` **throws in the backward pass** — forward /
-  inference only.
-- `LpPool`'s gradient **ignores** `ceilMode`, `dilation`, and `autoPad` — these
-  are forward-correct but give an incorrect gradient if trained with non-default
-  values.
-- `MaxPool` is exact for every attribute (ties route the gradient to the first
-  max); `MaxUnpool` and the global pools are fully differentiable.
-
-**Out of scope.** Adaptive pooling (`AdaptiveAvg/MaxPool*`) beyond the
-`output_size == 1` case — which **is** `GlobalAvgPool2d`/`GlobalMaxPool2d`/
-`GlobalLpPool` — has no general ONNX operator, and fractional (stochastic-window)
-max pooling has no core op; both are unsupported.
+- `Pooling.MaxPool2d(x, 2)` and `Pooling.MaxPool2d(x, [2L, 2L])` both work.
+- `stride` defaults to `kernelSize`. Per-axis `stride`/`padding`/`dilation` take length 1
+  or spatialRank; `padding` may also be `2*spatialRank` (asymmetric).
+- `LpPool`'s `p` is an **integer**, default 2.
+- `AvgPool`'s `countIncludePad` defaults to **false**, **unlike PyTorch**; pass `true`
+  for PyTorch's denominator.
+- **Gradients:** `AvgPool` with `ceilMode: true` **throws in the backward pass**.
+  `LpPool`'s gradient **ignores** `ceilMode`, `dilation` and `autoPad` (wrong if trained
+  with non-defaults). `MaxPool` (ties → first max), `MaxUnpool` and the global pools are
+  exact.
+- **Unsupported:** adaptive pooling other than `output_size == 1` (use the global pools),
+  and fractional max pooling.
 
 ## Losses (`Shorokoo.Modules.Losses`)
 
-Sixteen losses: the **fourteen** two-input ones tabulated here, plus the two
-**three-input** metric-learning losses —
+Sixteen losses: the **fourteen** two-input ones below, plus the **three-input**
 [`TripletMarginLoss`](#tripletmarginloss-metric--embedding-learning) and
-[`CosineEmbeddingLoss`](#cosineembeddingloss-metric-learning) — at the end of this
-section.
+[`CosineEmbeddingLoss`](#cosineembeddingloss-metric-learning).
 
-For the fourteen, the 2-input `Inline(predictions, targets)` form returns a
-`Scalar<float32>` **mean** loss and is the rig-safe default. `predictions`/`targets`
-are `Tensor<float32>` unless noted. (The three-input pair takes its own tensors —
-anchor/positive/negative, or `x1`/`x2`/`y` — so it does **not** satisfy the rig's
-2-input loss contract; see those entries.) Most losses also expose **configurable
-knobs** (reduction, class weights, `ignore_index`, label smoothing, `pos_weight`,
-`beta`) through extra methods — see
-[Configurable knobs](#loss-configurable-knobs) below.
+For the fourteen, `Inline(predictions, targets)` returns a `Scalar<float32>` **mean**
+loss and is the rig-safe form. Inputs are `Tensor<float32>` unless noted. Extra knobs
+are on `Reduced` / `PerElement` — see [Configurable knobs](#loss-configurable-knobs).
 
 | Module | Formula (per element, then mean) | Input contract |
 |---|---|---|
-| `L2Loss` | `(p − t)²` | predictions, targets (MSE; reduces over axis 0 — use rank-1/flattened predictions) |
+| `L2Loss` | `(p − t)²` | predictions, targets of any rank (MSE over all elements) |
 | `L1Loss` | `\|p − t\|` | predictions, targets (MAE) |
 | `HuberLoss` | `0.5·e²` if `\|e\| ≤ δ`, else `δ·(\|e\| − 0.5·δ)` | `(predictions, targets, delta hyper)` — see note below |
 | `SmoothL1Loss` | Huber with `δ = 1` | predictions, targets |
-| `CrossEntropyLoss` | softmax cross-entropy over logits | predictions `[N, C]` logits; targets `[N]` `Tensor<int64>` class indices |
-| `NLLLoss` | `−log p[target]` | predictions `[N, C]` log-probs (e.g. `x.LogSoftmax(1)`); targets `[N]` `Tensor<int64>` |
-| `BCELoss` | `−(t·ln p + (1−t)·ln(1−p))` | predictions are probabilities in (0, 1), clamped to `[1e-7, 1−1e-7]` |
-| `BCEWithLogitsLoss` | `max(x, 0) − x·t + ln(1 + e^−\|x\|)` | predictions are raw logits (stable sigmoid+BCE) |
-| `KLDivLoss` | `(1/N)·Σ p·(log p − log q)` (batchmean) | predictions are **log**-probs (log q), targets are probs (p); `p·log p = 0` at `p = 0` |
-| `LogCoshLoss` | `log(cosh(p − t))` (stable `\|d\| + softplus(−2·\|d\|) − log 2`) | predictions, targets (hyperparameter-free Huber: ≈ `d²/2` small, ≈ `\|d\| − log 2` large; overflow-free) |
-| `PoissonNLLLoss` | `exp(p) − t·p` (`logInput=true`); else `p − t·log(p + eps)` | predictions are the **log-rate** `log λ` (default) or rate `λ` (`logInput=false`); targets are `Tensor<float32>` counts |
-| `HingeLoss` | `max(0, 1 − t·p) = relu(1 − t·p)` | predictions are raw scores; **targets MUST be `±1`** (`+1`/`−1`), **not** auto-converted from `0/1` — map `0/1` upstream with `2·t − 1` |
-| `SquaredHingeLoss` | `max(0, 1 − t·p)²` | as `HingeLoss` (**`±1` targets**); penalises margin violations quadratically (smooth at the boundary) |
-| `BinaryFocalLoss` | `α_t · (1 − p_t)^γ · ce` (`ce` = stable BCE-with-logits; `p_t = p·t + (1−p)·(1−t)`, `p = σ(x)`) | predictions are raw **logits**; targets are binary `{0, 1}`. `α`/`γ` baked C# floats (defaults `0.25`/`2`, torchvision parity); `α = −1` disables α-weighting |
+| `CrossEntropyLoss` | softmax cross-entropy over logits | predictions `[N, C]` or `[N, C, d1, …]` logits; targets `[N]` or `[N, d1, …]` `Tensor<int64>` class indices. The class axis is axis 1 — see [Sequence logits](#cross-entropy-sequence-logits) |
+| `NLLLoss` | `−log p[target]` | predictions `[N, C]` or `[N, C, d1, …]` log-probs (e.g. `x.LogSoftmax(1)`); targets `[N]` or `[N, d1, …]` `Tensor<int64>`. The class axis is axis 1, as for [`CrossEntropyLoss`](#cross-entropy-sequence-logits) |
+| `BCELoss` | `−(t·ln p + (1−t)·ln(1−p))` | predictions are probabilities, clamped to `[1e-7, 1−1e-7]` |
+| `BCEWithLogitsLoss` | `max(x, 0) − x·t + ln(1 + e^−\|x\|)` | predictions are raw logits |
+| `KLDivLoss` | `(1/N)·Σ p·(log p − log q)` (batchmean) | predictions are **log**-probs, targets are probs; `p·log p = 0` at `p = 0` |
+| `LogCoshLoss` | `log(cosh(p − t))`, computed overflow-free | predictions, targets (≈ `d²/2` small, ≈ `\|d\| − log 2` large) |
+| `PoissonNLLLoss` | `exp(p) − t·p` (`logInput=true`); else `p − t·log(p + eps)` | predictions are `log λ` (default) or `λ`; targets are float counts |
+| `HingeLoss` | `max(0, 1 − t·p)` | raw scores; **targets MUST be `±1`** (map `0/1` with `2·t − 1`) |
+| `SquaredHingeLoss` | `max(0, 1 − t·p)²` | as `HingeLoss` (**`±1` targets**) |
+| `BinaryFocalLoss` | `α_t · (1 − p_t)^γ · ce` (`p = σ(x)`) | raw **logits**; targets `{0, 1}`; `α`/`γ` default `0.25`/`2`; `α = −1` disables α-weighting |
 
-**HuberLoss vs SmoothL1Loss and the rig**: `HuberLoss`'s `delta` hyperparameter
-makes its `ComputationGraph` a 3-input graph, but `TrainingRig`'s loss contract
-is exactly `(predictions, targets)` — so `HuberLoss.ComputationGraph` cannot be
-handed to a rig directly. Use `SmoothL1Loss` (delta = 1, 2-input) there, or
-compose `HuberLoss.Inline(predictions, targets, Scalar(d))` inside your own
-2-input loss module.
+<a id="cross-entropy-sequence-logits"></a>
+**Sequence logits (`CrossEntropyLoss`)**: the class axis must be axis 1. A language model's
+`[B, L, V]` logits against `[B, L]` targets are not accepted: the rig builds, and the first step
+fails inside ONNX Runtime with `[ShapeInferenceError] Incompatible dimensions`. Transpose the
+logits to `[B, V, L]` (`logits.Transpose([0L, 2L, 1L])`), or flatten logits to `[B·L, V]` and
+targets to `[B·L]`.
+
+**HuberLoss and the rig**: `delta` makes `HuberLoss.ComputationGraph` a 3-input graph, but
+the rig's loss contract is exactly `(predictions, targets)`. Use `SmoothL1Loss`, or call
+`HuberLoss.Inline(predictions, targets, Scalar(d))` in your own 2-input loss module.
 
 <a id="loss-configurable-knobs"></a>
 ### Configurable knobs (`Reduced` / `PerElement`)
 
-The knobs PyTorch exposes on these losses are surfaced as **build-time C#
-arguments** (baked into the graph, not `[Hyper]`s) on two extra methods, leaving
-the rig-safe `Inline(predictions, targets)` untouched:
+Knobs are **build-time C# arguments** on two extra methods:
 
-- **`Reduced(…, LossReduction reduction = Mean)`** — returns a `Scalar<float32>`
-  for `Mean`/`Sum` reduction.
-- **`PerElement(…)`** — returns the per-element `Tensor<float32>` (the
-  `reduction = None` form; C# can't overload on return type, hence a separate
-  method). For `CrossEntropyLoss`/`NLLLoss` the per-element tensor is **zero at
-  `ignore_index` positions** (PyTorch/ONNX semantics).
+- **`Reduced(…, LossReduction reduction = Mean)`** returns a `Scalar<float32>`
+  (`Mean`/`Sum`; `None` throws).
+- **`PerElement(…)`** returns the unreduced `Tensor<float32>`. For
+  `CrossEntropyLoss`/`NLLLoss` it is zero at `ignore_index` positions.
 
-`LossReduction` (in `Shorokoo.Modules.Losses`) is `None | Mean | Sum`, mapping to
-the ONNX op's `"none"/"mean"/"sum"` (CE/NLL) or `ReduceKind.Mean/.Sum` (the
-regression/BCE losses). `Reduced(..., reduction: None)` throws — use `PerElement`.
+`LossReduction` (`Shorokoo.Modules.Losses`) is `None | Mean | Sum`.
 
 | Loss | `Reduced` / `PerElement` extra knobs |
 |---|---|
@@ -1460,45 +896,22 @@ regression/BCE losses). `Reduced(..., reduction: None)` throws — use `PerEleme
 | `BinaryFocalLoss` | `float alpha = 0.25` (`−1` disables α-weighting), `float gamma = 2.0`, `reduction` |
 | `L1Loss` / `L2Loss` / `LogCoshLoss` / `HingeLoss` / `SquaredHingeLoss` | `reduction` |
 
-**`label_smoothing` (CE only)** blends the hard target with the uniform
-distribution: `loss = (1−α)·NLL + α·(−(1/K)·Σ_k log p_k)`. It is built in-graph
-from `LogSoftmax + NegativeLogLikelihoodLoss` primitives (ONNX SoftmaxCrossEntropyLoss
-has no such attribute), threading `weight`/`ignoreIndex` through **both** terms;
-`α = 0` short-circuits to the exact single-op fast path. Because it adds no graph
-input and stays scalar, `labelSmoothing` (like `ignoreIndex` and a `Mean`/`Sum`
-`reduction`) is **rig-safe** on a wrapper module (see below).
-
-**SmoothL1 ↔ Huber bridge**: `SmoothL1(e; β) = HuberLoss(δ = β) / β`. So
-`SmoothL1Loss.Reduced(beta, p, t)` equals `HuberLoss(delta = beta)` divided by
-`beta`; at `β = 1` it reproduces `SmoothL1Loss.Inline` exactly. `HuberLoss`'s
-`delta` stays a **live `[Hyper]`** (schedulable); SmoothL1's `beta` is a **baked
-C# float**. If you need a *live* transition point, use `HuberLoss`'s `[Hyper]
-delta` and divide by `delta` yourself.
-
-**LogCosh stability**: `LogCoshLoss` computes the algebraically-identical but
-overflow-free `log(cosh(d)) = |d| + softplus(−2·|d|) − log 2` (the naive
-`log((e^d + e^−d)/2)` overflows for `|d| ≳ 89` in float32). It is
-hyperparameter-free — the L2→L1 crossover (≈ `d²/2` small, ≈ `|d| − log 2` large)
-is built into the function shape, so there is no `δ`/`β` to tune.
-
-**PoissonNLL `logInput`/`full`**: `Inline` hardcodes PyTorch's stable
-`logInput=true` form `exp(p) − t·p` (the prediction is `log λ`). The Keras
-`Poisson` form `p − t·log(p + ε)` is reachable via `Reduced(p, t, logInput: false,
-eps: 1e-7f)` (keep `p > 0`; `eps` only guards exact `p = 0`). `full=true` adds
-Stirling's approximation of the dropped `log(t!)` constant
-(`t·log t − t + 0.5·log(2π·t)` for `t > 1`, else 0), matching PyTorch; it is
-computed with a clamped `max(t, 1)` inside the logs so the `Where`-discarded lane
-stays finite (no `0·log 0` NaN at `t = 0`).
+- **`labelSmoothing`** (CE): `loss = (1−α)·NLL + α·(−(1/K)·Σ_k log p_k)`, with
+  `weight`/`ignoreIndex` applied to both terms.
+- **SmoothL1 ↔ Huber**: `SmoothL1(e; β) = HuberLoss(δ = β) / β`. Huber's `delta` is a
+  live, schedulable `[Hyper]`; SmoothL1's `beta` is baked.
+- **PoissonNLL**: the Keras `Poisson` form is
+  `Reduced(p, t, logInput: false, eps: 1e-7f)` (keep `p > 0`). `full=true` adds
+  Stirling's term `t·log t − t + 0.5·log(2π·t)` for `t > 1` (else 0), as PyTorch does,
+  NaN-free at `t = 0`.
 
 #### Which knobs reach the rig
 
-The rig hands the loss graph exactly **two tensor inputs** and wants a
-**`Scalar<float32>`** out. So:
+The rig gives the loss graph exactly **two tensor inputs** and expects a
+**`Scalar<float32>`**.
 
-- **Rig-safe** (no extra input, stays scalar): `reduction = Mean`/`Sum`,
-  `ignoreIndex`, `labelSmoothing` — but only via a **wrapper module** (the
-  generated `ComputationGraph` always uses the bare `Inline`). Author a tiny
-  2-input `[Module]` whose `Inline` calls `Reduced(...)` with the knobs baked:
+- **Rig-safe**: `reduction = Mean`/`Sum`, `ignoreIndex`, `labelSmoothing` — through a
+  **wrapper module**, since the generated `ComputationGraph` uses the bare `Inline`:
 
   ```csharp
   [Module]
@@ -1511,11 +924,8 @@ The rig hands the loss graph exactly **two tensor inputs** and wants a
   // ...then hand CeIgnorePad.ComputationGraph to the rig.
   ```
 
-- **Direct-only** (`weight`/`posWeight` add a 3rd tensor input; `None` returns a
-  tensor): reachable on `Reduced`/`PerElement`, but the **default rig path can't
-  bind the extra input**. To train with a class `weight`/`posWeight`, **bake it
-  as a graph constant** inside a 2-input wrapper module (the same recipe as the
-  HuberLoss `delta` note):
+- **`weight` / `posWeight`** add a third tensor input the rig cannot bind; bake them as
+  a graph constant in a wrapper module:
 
   ```csharp
   [Module]
@@ -1528,63 +938,43 @@ The rig hands the loss graph exactly **two tensor inputs** and wants a
   // ...then hand WeightedCe.ComputationGraph to the rig.
   ```
 
-  Because the weight tensor is a graph **constant** (not a fed input), the wrapper
-  is back to two inputs and satisfies the rig contract. There is no `WithWeight`
-  factory — the wrapper module is the supported recipe.
-
-**Or move the loss into the model.** `Inline`, `Reduced` and `PerElement` are plain static graph
-builders — nothing about them is rig-specific — so every one of them may be called from **any**
-`[Module]` body, including your *model's*. A model whose `Inline` ends in, say,
-`CrossEntropyLoss.PerElement(logits, labels, ignoreIndex: 0L)` and then weights and reduces that
-tensor itself has a `Scalar<float32>` output, takes its labels / mask / weights as ordinary model
-inputs, and trains against a **pass-through** loss module that forwards its predictions input and
-ignores its targets. That lifts every restriction above — extra tensor inputs and unreduced forms are
-all reachable — at the price of a model whose output is a loss rather than a prediction. See
-[training.md → A loss graph may ignore its `targets`](training.md#loss-ignoring-targets) for the
-pattern; the rig sees that the loss never reads its target and derives no target slot, so such a
-model trains on its inputs alone.
+**Or move the loss into the model.** `Inline`, `Reduced` and `PerElement` can be called
+from any `[Module]` body. A model that ends in, say,
+`CrossEntropyLoss.PerElement(logits, labels, ignoreIndex: 0L)`, weights and reduces it,
+and takes labels/masks/weights as ordinary inputs, trains against a pass-through loss
+that ignores its targets — lifting every restriction above. See
+[training.md → A loss graph may ignore its `targets`](training.md#loss-ignoring-targets).
 
 ### TripletMarginLoss (metric / embedding learning)
 
-For an anchor `a`, positive `p`, and negative `n`, `L = max(0, d(a,p) − d(a,n) + margin)`
-with p-norm distance `d(x,y) = (Σ|x−y|^p + eps)^(1/p)` over the last axis. Knobs: `margin`
-(default 1), `p` (2 ⇒ Euclidean), `eps` (1e-6), and `swap` (Balntas anchor-swap — replaces
-`d(a,n)` with `min(d(a,n), d(p,n))`). `Inline` mean-reduces to a scalar; `Reduced(…,
-LossReduction)` does mean|sum; `PerElement` returns the unreduced `[N]` vector.
+`L = max(0, d(a,p) − d(a,n) + margin)` with `d(x,y) = (Σ|x−y|^p + eps)^(1/p)` over the
+last axis. Knobs: `margin` (default 1), `p` (default 2), `eps` (default 1e-6), `swap`
+(anchor swap: `d(a,n)` becomes `min(d(a,n), d(p,n))`). `Inline` returns the mean;
+`Reduced`/`PerElement` as above (`PerElement` gives `[N]`).
 
-**This is a 3-input loss** — call it `TripletMarginLoss.Call(margin, p, eps, swap, a, p, n)`
-(like `MultiHeadAttention`'s q/k/v), **not** a drop-in 2-input `(pred, target)` rig loss. To
-rig-train it, make the triplet loss the **tail of your model** (the model emits the three
-embeddings and returns the scalar loss). `TripletMarginWithDistance` is the same objective with
-a caller-supplied distance `Func<Tensor<float32>, Tensor<float32>, Tensor<float32>>` (e.g.
-cosine) replacing the built-in p-norm (static helper; `.Reduced`/`.PerElement`).
+It is a 3-input loss — `TripletMarginLoss.Call(margin, p, eps, swap, anchor, positive, negative)` —
+not a rig loss: to train with the rig, compute it at the **end of your model**.
+`TripletMarginWithDistance` (static helper, with `Reduced`/`PerElement`) takes a custom distance
+`Func<Tensor<float32>, Tensor<float32>, Tensor<float32>>` instead of the p-norm.
 
 ### CosineEmbeddingLoss (metric learning)
 
-Cosine-space contrastive loss over two embedding batches `x1`, `x2` (`[N, D]`) and
-per-sample labels `y ∈ {+1, −1}`: `L_i = 1 − cos(x1_i, x2_i)` for `y=+1` (pull similar
-pairs together), `L_i = max(0, cos(x1_i, x2_i) − margin)` for `y=−1` (push dissimilar
-pairs apart). `cos` is over the last axis with PyTorch's denominator floor
-`max(‖x1‖·‖x2‖, eps)`. Knobs: `margin` (default 0, affects only the `y=−1` arm) and
-`eps` (default 1e-8), both `[Hyper] Scalar<float32>`. Labels must be `±1` (map `2t−1`
-upstream, as with `HingeLoss`). Like `TripletMarginLoss` this is a 3-input loss —
-`CosineEmbeddingLoss.Call(margin, eps, x1, x2, y)`, with the `Inline`/`Reduced`/
-`PerElement` reduction triad. `CosineEmbeddingLoss.CosineSimilarity(x1, x2, eps)` is the
-reusable per-row cosine-similarity primitive (PyTorch `nn.CosineSimilarity`).
+Over `x1`, `x2` (`[N, D]`) and labels `y ∈ {+1, −1}`: `L_i = 1 − cos(x1_i, x2_i)` for
+`y=+1`, `max(0, cos(x1_i, x2_i) − margin)` for `y=−1`. `cos` is over the last axis with
+denominator floor `max(‖x1‖·‖x2‖, eps)`. Knobs `margin` (default 0) and `eps` (default
+1e-8). Labels must be `±1`. A 3-input loss —
+`CosineEmbeddingLoss.Call(margin, eps, x1, x2, y)` — with `Inline`/`Reduced`/`PerElement`.
+`CosineEmbeddingLoss.CosineSimilarity(x1, x2, eps)` is the per-row cosine similarity.
 
 ## Optimizers (`Shorokoo.Modules.Optimizers`)
 
-Each operates on one parameter at a time (`(hypers..., currentParam, grad) ->
-updatedParam`); the rig applies it per-field across the trainable parameter
-struct. State tensors never appear in the signature: each is created inside the
-optimizer body by an optimizer-owned state initializer — `OptimizerStateZeros` at
-the parameter's shape (so param-shaped state starts zero-filled), `OptimizerScalarZeros`
-for a rank-0 scalar seeded at 0 (e.g. Adam's and AdamW's `step`), or `OptimizerScalarOnes` for a
-rank-0 scalar seeded at 1 (e.g. NAdam's running momentum product, which needs the
-multiplicative identity) — and updated via `Globals.StateUpdate`. Each optimizer gets a generated named hyperparameter set
-(`<Name>Hyperparameters`, e.g. `AdamOptimizerHyperparameters`) — see
-[training.md](training.md) for schedules, the `Hyperparameter` kinds, and the
-custom-optimizer authoring contract.
+Each updates one parameter at a time (`(hypers..., currentParam, grad) -> updatedParam`);
+the rig applies it to every trainable parameter. State is created inside the optimizer by
+`OptimizerStateZeros` (param-shaped, zero), `OptimizerScalarZeros` (rank 0, seeded 0,
+e.g. Adam's `step`) or `OptimizerScalarOnes` (rank 0, seeded 1, e.g. NAdam's momentum
+product), and updated via `Globals.StateUpdate`. Each optimizer has a generated
+hyperparameter set (`<Name>Hyperparameters`, e.g. `AdamOptimizerHyperparameters`); see
+[training.md](training.md) for schedules and custom optimizers.
 
 | Module | Update rule | Hyper defaults | State per param |
 |---|---|---|---|
@@ -1594,77 +984,35 @@ custom-optimizer authoring contract.
 | `AdamWOptimizer` | **Bias-corrected** Adam step + decoupled decay `p *= 1 − lr·wd` | `lr 0.001, β1 0.9, β2 0.999, ε 1e-8, wd 1e-4` | m, v, step |
 | `RMSpropOptimizer` | `sq = α·sq + (1−α)·g²; buf = μ·buf + g/(√sq + ε); p −= lr·buf` | `lr 0.01, α 0.99, ε 1e-8, μ 0` | squareAvg, momentumBuffer |
 | `AdagradOptimizer` | `acc += g²; p −= lr·g/(√acc + ε)` | `lr 0.01, ε 1e-10` | accumulator |
-| `AdamaxOptimizer` | Adam with the ∞-norm: `m` EMA; `u = max(β2·u, \|g\|+ε)`; `p −= (lr/(1−β1ᵗ))·m/u` (no bias-correction on `u`) | `lr 0.002, β1 0.9, β2 0.999, ε 1e-8` | m, u, step |
-| `NAdamOptimizer` | Nesterov-Adam: `μ_t` schedule + running product `∏μ`; `m̂` blends `μ_{t+1}·m` & `(1−μ_t)·g`, bias-corrected `v`: `p −= lr·m̂/(√v̂ + ε)` | `lr 0.002, β1 0.9, β2 0.999, ε 1e-8, ψ 0.004` | m, v, step, muProduct |
-| `RAdamOptimizer` | Rectified Adam: bias-corrected `m̂`; if `ρ_t > 5` rectified adaptive `p −= lr·m̂·r_t·l_t`, else un-adapted `p −= lr·m̂` (runtime `Where`) | `lr 0.001, β1 0.9, β2 0.999, ε 1e-8` | m, v, step |
-| `AdadeltaOptimizer` | `sq = ρ·sq + (1−ρ)·g²; Δx = √(accΔ+ε)/√(sq+ε)·g; accΔ = ρ·accΔ + (1−ρ)·Δx²; p −= lr·Δx` (ε **inside** the √s; `lr` is a step multiplier) | `lr 1.0, ρ 0.9, ε 1e-6` | squareAvg, accDelta |
-| `LionOptimizer` | Sign-momentum + decoupled decay: `u = sign(β1·m + (1−β1)·g); p −= lr·(u + wd·p); m = β2·m + (1−β2)·g` (note: `m` decayed by **β2**, β1 only in the sign blend) | `lr 1e-4, β1 0.9, β2 0.99, wd 0` | m |
-| `AdafactorOptimizer` | **Non-factored** Adafactor: `β̂2ₜ = 1 − tᵗᵃᵘ; ρ = min(lr, 1/√t); α = max(ε₂, RMS(p))·ρ; V = β̂2ₜ·V + (1−β̂2ₜ)·(g²+ε₁); U = g/max(√V, ε₁); Û = U/max(1, RMS(U)/d); p = p·(1−lr·wd) − α·Û` (full param-shaped `V`, **no** row/col factoring) | `lr 0.01, τ −0.8, ε₁ 1e-30, ε₂ 1e-3, d 1.0, wd 0` | v, step |
-| `LambOptimizer` | LAMB (You et al. 2019): bias-corrected Adam direction scaled by LARS's **per-tensor trust ratio** — `r = m̂/(√v̂ + ε); u = r + wd·p; trust = (‖p‖>0 ∧ ‖u‖>0) ? ‖p‖/‖u‖ : 1; p −= lr·trust·u` (ε **outside** the √; decoupled `wd` **inside** the trust numerator; ‖·‖ = `√Σx²` over the whole tensor; φ = identity). Per-tensor = layer-wise (Shorokoo runs the optimizer per parameter tensor). | `lr 1e-3, β1 0.9, β2 0.999, ε 1e-6` (LAMB, not 1e-8), `wd 0.01` | m, v, step |
+| `AdamaxOptimizer` | `m` EMA; `u = max(β2·u, \|g\|+ε)`; `p −= (lr/(1−β1ᵗ))·m/u` | `lr 0.002, β1 0.9, β2 0.999, ε 1e-8` | m, u, step |
+| `NAdamOptimizer` | Nesterov-Adam: `μ_t = β1·(1 − ½·0.96^(t·ψ))`, running product `∏μ`; `m̂` blends `μ_{t+1}·m` & `(1−μ_t)·g`; `p −= lr·m̂/(√v̂ + ε)` | `lr 0.002, β1 0.9, β2 0.999, ε 1e-8, ψ 0.004` | m, v, step, muProduct |
+| `RAdamOptimizer` | Rectified Adam: if `ρ_t > 5` `p −= lr·m̂·r_t·l_t`, else `p −= lr·m̂` | `lr 0.001, β1 0.9, β2 0.999, ε 1e-8` | m, v, step |
+| `AdadeltaOptimizer` | `sq = ρ·sq + (1−ρ)·g²; Δx = √(accΔ+ε)/√(sq+ε)·g; accΔ = ρ·accΔ + (1−ρ)·Δx²; p −= lr·Δx` | `lr 1.0, ρ 0.9, ε 1e-6` | squareAvg, accDelta |
+| `LionOptimizer` | `u = sign(β1·m + (1−β1)·g); p −= lr·(u + wd·p); m = β2·m + (1−β2)·g` | `lr 1e-4, β1 0.9, β2 0.99, wd 0` | m |
+| `AdafactorOptimizer` | **Non-factored**: `β̂2ₜ = 1 − tᵗᵃᵘ; ρ = min(lr, 1/√t); α = max(ε₂, RMS(p))·ρ; V = β̂2ₜ·V + (1−β̂2ₜ)·(g²+ε₁); U = g/max(√V, ε₁); Û = U/max(1, RMS(U)/d); p = p·(1−lr·wd) − α·Û` | `lr 0.01, τ −0.8, ε₁ 1e-30, ε₂ 1e-3, d 1.0, wd 0` | v, step |
+| `LambOptimizer` | `r = m̂/(√v̂ + ε); u = r + wd·p; trust = (‖p‖>0 ∧ ‖u‖>0) ? ‖p‖/‖u‖ : 1; p −= lr·trust·u` (norms over the whole tensor) | `lr 1e-3, β1 0.9, β2 0.999, ε 1e-6, wd 0.01` | m, v, step |
 
-- **Bias correction — Adam and AdamW**: both apply the textbook
-  `m̂ = m/(1−β1^t)`, `v̂ = v/(1−β2^t)` correction, carrying the timestep `t` as a
-  third state field — a **scalar** (one float per parameter, created by
-  `OptimizerScalarZeros`) that broadcasts against `m̂`/`v̂`, not a param-shaped copy.
-  So Adam's first step is ≈ `lr` whatever the gradient magnitude, and at `wd = 0`
-  `AdamWOptimizer` is `AdamOptimizer` step for step.
-- `RMSpropOptimizer` with the default `momentum = 0` reduces to plain RMSprop;
-  it always carries both state tensors.
-- `AdamaxOptimizer` swaps Adam's L2 second moment for an exponentially-weighted
-  infinity norm `u` (a running max) and keeps bias correction on `m` only — the
-  running max is unbiased from step 1, so `u` needs none. `ε` is placed **inside**
-  the max (PyTorch: `u = max(β2·u, |g|+ε)`).
-- `NAdamOptimizer` adds Nesterov look-ahead to Adam via Dozat's time-varying
-  momentum schedule `μ_t = β1·(1 − ½·0.96^(t·ψ))` and a **running product** `∏μ_i`.
-  That product is a second **scalar** state (`muProduct`) alongside the timestep,
-  seeded at **1.0** by `OptimizerScalarOnes` (the multiplicative identity — seeding
-  at 0 would pin the product at 0 forever). Weight decay (coupled and decoupled) is
-  out of scope, matching PyTorch's defaults.
-- `RAdamOptimizer` rectifies Adam's adaptive step by `r_t` and, while the adaptive
-  variance is not yet tractable (`ρ_t ≤ 5`, the first ~4–5 steps at `β2 = 0.999`),
-  falls back to an un-adapted bias-corrected momentum step. The `ρ_t > 5` test is a
-  runtime `Scalar<bit>` (it depends on the scalar `step` state), realized as a
-  straight-line scalar `Where` selecting between the two param updates — not an `If`
-  subgraph. The `m`/`v`/`step` updates are identical in both arms, so each is
-  registered once, outside the selection.
-- `AdadeltaOptimizer` needs no hand-set learning rate: the ratio of two
-  exponentially-decaying accumulators (`√(E[Δx²]) / √(E[g²])`) self-scales the step
-  and corrects its units. Two load-bearing details (both matching the paper and
-  PyTorch): `ε` is **inside** both square roots (unlike Adagrad/RMSprop/Adam, which
-  add `ε` after the √), and `Δx` reads the **previous** step's `accDelta` before that
-  accumulator is updated from `Δx`. The leading `lr` is a step **multiplier** (default
-  `1.0` ≡ the paper's lr-free method), not the primary learning rate.
-- `LionOptimizer` (EvoLved Sign Momentum) takes the **sign** of a β1-blend of momentum and
-  gradient, so every coordinate moves by exactly ±`lr` — the step magnitude is decoupled from
-  the gradient scale. It stores **only** the momentum buffer `m` (no second moment, no
-  timestep), so its optimizer-state footprint is **half** the param-shaped state of Adam/AdamW,
-  with no scalar at all. **Swapped beta roles
-  (the easy bug):** the stored `m` is decayed by **β2** (`m = β2·m + (1−β2)·g`), while **β1**
-  appears *only* inside the sign blend that forms the update direction — the opposite of Adam's
-  convention. Weight decay is decoupled (AdamW-style). **Usage:** because the sign step has unit
-  magnitude, a good Lion `lr` is typically **3–10× smaller** than AdamW's and its `wd` **3–10×
-  larger** (effective decay ≈ `lr·wd`); the default `wd = 0` matches the reference, so opt into
-  the Lion-appropriate decay deliberately. There is no `ε` (the update has no division).
-- `AdafactorOptimizer` is the **non-factored** Adafactor: it keeps the algorithm's three
-  rank-agnostic ideas — relative step `ρ = min(lr, 1/√t)`, parameter scaling
-  `α = max(ε₂, RMS(p))·ρ`, and RMS update clipping `Û = U/max(1, RMS(U)/d)` — over a
-  time-increasing second-moment decay `β̂2ₜ = 1 − t^τ`. `RMS(·)` reduces over **all** elements
-  to a scalar, so the whole step is rank-agnostic. **Important divergence:** the real Adafactor
-  stores only row (`[r]`) + column (`[c]`) accumulators and reconstructs the second moment as
-  their rank-1 outer product — its **sublinear-memory** trick, the reason it exists. That
-  factoring is **not implemented** (and is not expressible in Shorokoo's single rank-agnostic
-  per-parameter optimizer graph: the factored/unfactored choice is a runtime rank branch whose
-  arms would thread out differently-shaped state, which ONNX `If` cannot return). So this
-  optimizer's state is a **full param-shaped** second moment `v` plus a scalar `step` — the
-  **same footprint as Adam**. It reproduces Adafactor's *update dynamics* but **not** its memory
-  advantage; a user reaching for Adafactor specifically to save memory gets Adam-sized state.
-  `learningRate` (default `0.01`) is the **cap** on `ρ`, not a fixed step.
+- **Adam / AdamW** bias-correct with a scalar `step` per parameter; the first step is
+  ≈ `lr`. At `wd = 0`, AdamW equals Adam.
+- **RMSprop** with `momentum = 0` is plain RMSprop (both state tensors still exist).
+- **Adamax** puts `ε` inside the max and bias-corrects only `m`.
+- **NAdam** has no weight decay.
+- **RAdam** uses the un-adapted step while `ρ_t ≤ 5` (the first ~4–5 steps at
+  `β2 = 0.999`).
+- **Adadelta**: `ε` is inside both square roots; `lr` is a multiplier (default `1.0`, the
+  paper's lr-free method).
+- **Lion**: `m` decays with **β2**; β1 is used only in the sign blend. Every coordinate
+  moves by ±`lr`. Its state is half of Adam's. Use an `lr` 3–10× smaller and a `wd` 3–10×
+  larger than for AdamW; the default `wd = 0` must be set yourself.
+- **Adafactor** does **not** factor the second moment into row/column accumulators, so it
+  uses **as much memory as Adam** (full param-shaped `v` plus `step`); it keeps
+  Adafactor's update rule. `learningRate` caps `ρ`.
+- **LAMB** trust ratio is per parameter tensor (= per layer); `ε` default `1e-6`.
 
 ## End-to-end: tiny conv net + CrossEntropyLoss + Adam
 
-A complete classifier built from library layers and trained with `TrainingRig`
-(adapted from the library's coverage tests). Layer hypers are fixed via
-`Model(...)` so the model graph is inputs-only, as the rig requires:
+A classifier trained with `TrainingRig`. Layer hypers are fixed via `Model(...)` so the
+model graph is inputs-only, as the rig requires:
 
 ```csharp
 using Shorokoo;
@@ -1722,21 +1070,17 @@ for (int i = 0; i < 15; i++)
 }
 ```
 
-(Equivalently, batch the data as `TensorDataStruct[]` and call
-`rig.Fit(inputs, targets, numEpochs)` — see
-[training.md](training.md).)
+(Or batch the data as `TensorDataStruct[]` and call `rig.Fit(inputs, targets, numEpochs)`
+— see [training.md](training.md).)
 
 ## Anti-patterns
 
-- Do not hand `HuberLoss.ComputationGraph` to `TrainingRig` (3-input graph);
-  use `SmoothL1Loss` or wrap it in a 2-input module.
-- Do not run a BatchNorm-containing graph through the plain inference executor
-  when the running stats matter: it executes, but on a one-shot run the stats
-  stay as the initializer left them and the update is dropped.
-- Do not expect different stride/padding from `ConvTranspose2d`'s hypers — its
-  geometry is fixed at the ONNX defaults; use `NN.ConvTranspose` for the rest.
-- Do not use `XavierUniform`/`KaimingUniform` (etc.) for rank-1 biases; they
-  require rank ≥ 2 shapes.
-- Do not restructure a model to dodge the parameters of a switched-off
-  `useBias`/`affine`; the unselected branch's params are pruned, never carried
-  ([An off toggle costs nothing](#gated-parameters)).
+- Do not hand `HuberLoss.ComputationGraph` to `TrainingRig` (3-input graph); use
+  `SmoothL1Loss` or a 2-input wrapper.
+- Do not evaluate BatchNorm with the plain inference executor when the running stats
+  matter; they stay at their initial values.
+- Do not expect stride/padding from `ConvTranspose2d`; use `NN.ConvTranspose`.
+- Do not use `XavierUniform`/`KaimingUniform` (etc.) for rank-1 biases; they require
+  rank ≥ 2.
+- Do not restructure a model to avoid the parameters of a switched-off
+  `useBias`/`affine`; they are pruned ([An off toggle costs nothing](#gated-parameters)).

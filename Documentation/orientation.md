@@ -6,18 +6,23 @@ Related: [core-types.md](core-types.md) · [defining-models.md](defining-models.
 
 - Language/runtime: C#, .NET 10 (`net10.0`).
 - Main library namespace: `Shorokoo` (plus sub-namespaces such as `Shorokoo.Modules`,
-  `Shorokoo.Modules.Losses`/`.Optimizers`, and `Shorokoo.Graph`).
+  `Shorokoo.Modules.Losses`/`.Optimizers`, `Shorokoo.Graph`, and `Shorokoo.Runtime`).
 - Models are pure C# graphs — there is no Python. Pretrained weights are loaded from
   `.safetensors`.
 
-## Standard usings for model code
+## Standard usings
 
 ```csharp
-using Shorokoo;                 // Tensor<T>, Scalar<T>, Vector<T>, LoopAPI, attributes
+using Shorokoo;                 // Tensor<T>, Scalar<T>, Vector<T>, LoopAPI, attributes, TrainingRig
 using Shorokoo.Modules;         // [Module], [Hyper], [TrainableParamInitializer]
+using Shorokoo.Runtime;         // ComputeContext, CompiledGraph
 using static Shorokoo.Globals;  // Scalar(...), Vector(...), TensorData(...), TensorFill(...)
 using static Shorokoo.NN;       // Conv, MaxPool, GlobalAveragePool, LayerNormalization, ...
 ```
+
+`Shorokoo.Runtime` holds `ComputeContext`, which every compile and run goes through
+(`ComputeContext.Default.Compile(...)`, `.Execute(...)`, and the context arguments of
+`TrainingRig.Load`).
 
 Other usings are introduced by the page that needs them (for example
 `Shorokoo.Onnx` for weight loading, `Shorokoo.Graph` for binding weights).

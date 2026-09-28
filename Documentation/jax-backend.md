@@ -4,26 +4,25 @@ Related: [pytorch-backend.md](pytorch-backend.md) · [inference.md](inference.md
 
 Shorokoo can run a model on **JAX** instead of ONNX Runtime. The backend translates the model
 Shorokoo hands every backend (serialized ONNX) into Python that calls `jax.numpy` and `jax.lax`,
-and **XLA compiles it** — once per signature of input shapes and element types — into one program
+and **XLA compiles it**, once per signature of input shapes and element types, into one program
 for the device. Two sub-backends exist: **CPU** and **CUDA** (Linux).
 
 It is also a **training backend**: a rig whose runtime context runs on JAX can leave its gradient to
-JAX (`TrainingBackend.Native`), and XLA then compiles the whole training step — forward pass,
-backward pass and optimizer update — as one program. See [Training](#training).
+JAX (`TrainingBackend.Native`), and XLA then compiles the whole training step (forward pass,
+backward pass and optimizer update) as one program. See [Training](#training).
 
-It shares everything but the operators with the [PyTorch backend](pytorch-backend.md): the same
-translation, the same embedded CPython, the same Python environment. Read that page for the
-environment; this one says what is JAX's own.
+It shares the translation, the embedded CPython and the Python environment with the
+[PyTorch backend](pytorch-backend.md); read that page for the environment. This page covers
+what is JAX's own.
 
 ## Facts
 
 - Packages: `Shorokoo.Jax.Cpu` (**Linux x64 and Windows x64**) and `Shorokoo.Jax.Cuda` (**Linux x64**
-  only: JAX's CUDA plugin is built for no other system). Each brings `Shorokoo.Jax` (the backend),
-  `Shorokoo.PythonTranslation` (the translator it shares with PyTorch) and `Shorokoo.PythonHost`
-  (the embedded interpreter). Neither ships JAX itself: that lives in the Python environment.
+  only). Each brings `Shorokoo.Jax`, `Shorokoo.PythonTranslation` and `Shorokoo.PythonHost`; JAX
+  itself lives in the Python environment.
 - A JAX backend is **always named**: `new ComputeContext(new JaxCpuBackend())`. It is never a
   candidate for [auto-discovery](inference.md#auto-discovery).
-- The **Python environment** is resolved exactly as for PyTorch — the backend's options, then
+- The **Python environment** is resolved as for PyTorch: the backend's options, then
   `SHOROKOO_PYTHON_ENV`, then one provisioned with uv into your user cache
   ([details](pytorch-backend.md#the-python-environment)). The provisioned environments hold PyTorch
   **and** JAX, one per CUDA major version: the CPU one serves both CPU backends, the CUDA 13 one both
@@ -32,9 +31,9 @@ environment; this one says what is JAX's own.
   element types compiles it (XLA); later runs with that signature reuse the program. Where the
   model's inputs have fixed shapes, it is compiled when its session is created.
 - **Unsupported models fail when the session is created**, with a `JaxUnsupportedModelException`
-  naming the operator where one is at fault: what JAX cannot hold (strings, sequences, operators whose output shape their
-  input's values decide), and — where the inputs' shapes are fixed — a shape, count or axis the graph
-  computes from an input's values. See [Shapes](#shapes) and [Limitations](#limitations).
+  naming the operator where one is at fault: what JAX cannot hold (strings, sequences, operators
+  whose output shape their input's values decide), and, where the inputs' shapes are fixed, a shape,
+  count or axis the graph computes from an input's values. See [Shapes](#shapes) and [Limitations](#limitations).
 
 ## Installing
 
@@ -43,9 +42,8 @@ dotnet add package Shorokoo
 dotnet add package Shorokoo.Jax.Cpu        # or Shorokoo.Jax.Cuda
 ```
 
-Provisioning is the PyTorch backend's: install [uv](https://docs.astral.sh/uv/) and the first run
-downloads CPython 3.12 and the locked packages into the cache. The CPU environment is about 1.5 GB,
-the CUDA one about 7 GB; the NVIDIA libraries in it serve PyTorch and JAX alike.
+Provisioning is shared with the PyTorch backend: install [uv](https://docs.astral.sh/uv/) and the
+first run downloads the environment (about 1.5 GB for CPU, 7 GB for CUDA).
 
 An environment you provide must have `jax` and `numpy` installed (`jax[cuda13]` for the CUDA
 backend), besides what the [PyTorch page](pytorch-backend.md#how-it-is-resolved) asks of one:
@@ -66,12 +64,11 @@ var compiled = jax.Compile(model);
 var output = compiled.Execute(input);
 ```
 
-Everything that works on a `ComputeContext` works here: one-shot `Execute`, `Compile` and repeated
-runs, consumed and `.Shared()` feeds, `TensorData.To(context)`. Contexts on ONNX Runtime, PyTorch
-and JAX live side by side in one process; a tensor crosses between runtimes by copy.
+Everything that works on a `ComputeContext` works here. Contexts on ONNX Runtime, PyTorch and JAX
+live side by side in one process; a tensor crosses between runtimes by copy.
 
-As for PyTorch, constructing a backend does nothing yet; `Start()` resolves the environment and
-starts JAX up front, and returns the environment it runs in.
+As for PyTorch, constructing a backend does nothing; `Start()` resolves the environment, starts
+JAX up front, and returns the environment it runs in.
 
 ### CPU and CUDA
 
@@ -89,20 +86,19 @@ gets the CUDA environment; a CUDA backend on a machine with no fit driver, or on
 start *before* anything is provisioned (`PythonEnvironmentFailure.DeviceUnavailable` or
 `UnsupportedPlatform`).
 
-On CUDA, JAX takes the card's memory as it needs it, **not** 75 % of it up front as JAX does by
-default, because the card is shared with the other backends in the process. The backend sets
-`XLA_PYTHON_CLIENT_PREALLOCATE=false` unless your program's environment sets it first.
+On CUDA, JAX takes the card's memory as needed, **not** 75 % up front: the backend sets
+`XLA_PYTHON_CLIENT_PREALLOCATE=false` unless your environment sets it first.
 
 ## Shapes
 
 XLA compiles a program for fixed shapes. While JAX traces the model for a signature of input shapes,
-every value computed from shapes and constants alone is known — `Shape`, `Size`, and arithmetic,
-`Gather`, `Concat`, `Slice`, `Cast` … of those — so a shape the graph computes from its inputs'
+every value computed from shapes and constants alone is known (`Shape`, `Size`, and arithmetic,
+`Gather`, `Concat`, `Slice`, `Cast` … of those), so a shape the graph computes from its inputs'
 *shapes* reaches `Reshape`, `Expand`, `Tile`, `ConstantOfShape`, `Range`, `Slice`, `Pad`, `TopK`
-and the rest as a number, as it must. What cannot compile is a shape, count or axis computed from an
-input's **values**: such a model is refused with a `JaxUnsupportedModelException`
-(`Reason = UnsupportedUsage`) naming the operator that needed the number — when the session is
-created where the inputs' shapes are fixed, else by the run that first compiles it.
+and the rest as a number. A shape, count or axis computed from an input's **values** cannot
+compile: such a model is refused with a `JaxUnsupportedModelException`
+(`Reason = UnsupportedUsage`) naming the operator that needed the number, when the session is
+created if the inputs' shapes are fixed, else by the run that first compiles it.
 
 Control flow follows the same rule:
 
@@ -112,10 +108,10 @@ Control flow follows the same rule:
 - A `Loop` whose trip count and conditions are known is unrolled (up to 64 iterations; beyond, it is
   compiled once as an XLA loop, its body seeing its iteration number as a value). One whose count is
   known but whose condition is an input's value runs its whole count as an XLA loop that stops
-  changing its values once the condition turns false — and stays differentiable. One whose trip
+  changing its values once the condition turns false, and stays differentiable. One whose trip
   count is itself an input's value, or that has none, compiles as an XLA while loop, which JAX cannot
   differentiate: a training step with one between its parameters and its loss is refused, naming
-  `Loop`. Either kind runs without scan outputs, whose length would then depend on the values; one
+  `Loop`. Either kind runs without scan outputs, whose length would depend on the values; one
   with scan outputs is refused, naming `Loop`.
 - A random draw inside a loop compiled as an XLA loop draws afresh every iteration.
 
@@ -133,10 +129,8 @@ var rig = TrainingRig.FromScratch(model, loss, optimizer, sampleInputs, hyperpar
     runtimeContext: jax, trainingBackend: TrainingBackend.Native);
 ```
 
-The step's forward pass is written as a function of the trainable parameters, `jax.value_and_grad`
-differentiates it, and the optimizer update reads the gradients — all in one traced function, so XLA
-compiles the forward pass, the backward pass it derives and the update as **one program**, fusing
-across them. What that means for the rig is in
+`jax.value_and_grad` differentiates the forward pass, and XLA compiles it, the backward pass and
+the optimizer update as **one program**. Details and limits are in
 [Training on JAX](training-backends.md#training-on-jax).
 
 ## Values
@@ -148,8 +142,8 @@ refused, as everywhere. JAX has **no string tensors and no sequences**: `CreateS
 `CreateSequence` throw `NotSupportedException`, and a model with a string input or output, a string
 constant or a sequence or optional operator is refused.
 
-Every output a run hands back is memory of its own. A JAX array is never written in place, so no run
-writes an output into an input it consumed: a session binds no output aliases.
+Every output a run hands back is memory of its own. A JAX array is never written in place, so a
+session binds no output aliases.
 
 ## Runs
 
@@ -164,15 +158,15 @@ writes an output into an input it consumed: a session binds no output aliases.
 | **`TraceNodePlacement`** | every node on `cpu` | every node on `cuda:N` |
 | **Log severity** | Python warnings a run raises are shown at `Warning` and below, not above | same |
 
-Floating-point products and convolutions are computed in full precision: XLA's default on a card
-may round `float32` operands to TensorFloat-32, which the backend does not ask for.
+Floating-point products and convolutions run in the operands' full precision; `float32`
+operands are never rounded to TensorFloat-32.
 
 ## Limitations
 
 - **Operators.** Every operator the PyTorch backend translates, except those JAX cannot hold: the
   string operators (`TfIdfVectorizer` included), sequences and optionals (`SequenceMap`, `Optional`,
-  …), and the operators whose output shape their input's values decide — `NonZero`, `Unique`,
-  `Compress`, `NonMaxSuppression`, `ImageDecoder`. Each is refused when the session is created,
+  …), and the operators whose output shape their input's values decide (`NonZero`, `Unique`,
+  `Compress`, `NonMaxSuppression`, `ImageDecoder`). Each is refused when the session is created,
   naming it (`Reason = UnknownOperator`).
 - **Shapes from values** are refused, as [Shapes](#shapes) describes.
 - **ONNX random draws differ from ONNX Runtime's.** `RandomNormal`, `RandomUniform`, their `Like`

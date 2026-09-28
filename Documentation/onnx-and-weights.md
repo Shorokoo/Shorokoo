@@ -4,27 +4,21 @@ Related: [inference.md](inference.md) · [core-types.md](core-types.md) · [skpt
 
 ## Facts
 
-- A model is a `ComputationGraph` (from `MyModule.ComputationGraph` or one of the
-  lowering steps). Every graph carries a reliable `Kind` (`GraphKind.Module` /
-  `ConcreteArchitecture` / `ConcreteModel`) stamped where it was produced. It can be
-  converted to an ONNX `ModelProto`, or saved in Shorokoo's own `.srk`/`.zsrk` format.
-- `Persistence.ExportOnnx(graph, path)` is the one call from a concrete model to a
-  self-contained `.onnx`; there is no `graph.ToOnnxFile(path)` instance method. Drop to
-  `FastOnnxModelBuilder.BuildOnnxModel` + `OnnxModelExporter` when you need the
-  `ModelProto` in between — to set the builder's options, or to write a proto you built
-  or imported yourself.
-- Models larger than protobuf's 2 GB message ceiling are handled with the standard
-  ONNX **external data** mechanism: pass `externalData:` to `ExportOnnx` (or call
-  `OnnxModelExporter.SaveWithExternalData` at the proto level) on export, and
-  transparent side-file loading on import.
-- Pretrained weights are loaded from `.safetensors` (and compressed `.zsafetensor`).
-- Every save API is **atomic** (staged beside the target and committed by rename), so an
-  interrupted write never damages the file already at that path and you never need a
-  stage-and-rename of your own around one: the `Persistence.*` facade, the flat
-  training-checkpoint save `checkpoint.Save` (`TrainingCheckpoint.Save`, which
-  `Persistence.SaveTrainingCheckpoint` delegates to), and the raw layers below them —
-  `OnnxModelExporter`, `SafeTensorLoader.SaveSafeTensors`, `CompressedFormatUtils`. The
-  target's directory must already exist.
+- A model is a `ComputationGraph` whose `Kind` is `GraphKind.Module`,
+  `ConcreteArchitecture` or `ConcreteModel`. It can be exported to ONNX or saved as
+  `.srk`/`.zsrk`.
+- `Persistence.ExportOnnx(graph, path)` writes a concrete model to `.onnx` in one call.
+  Use `FastOnnxModelBuilder.BuildOnnxModel` + `OnnxModelExporter` when you need the
+  `ModelProto` in between.
+- Models over protobuf's 2 GB limit use ONNX **external data** (`externalData:` on
+  export; side files load transparently on import).
+- Pretrained weights load from `.safetensors` (and compressed `.zsafetensor`).
+- Every save API is **atomic** (staged beside the target, committed by rename), so an
+  interrupted write never damages the existing file: the `Persistence.*` facade,
+  `checkpoint.Save` (`TrainingCheckpoint.Save`, used by
+  `Persistence.SaveTrainingCheckpoint`), `OnnxModelExporter`,
+  `SafeTensorLoader.SaveSafeTensors` and `CompressedFormatUtils`. The target's directory
+  must already exist.
 
 ## Export to ONNX
 
@@ -38,161 +32,88 @@ using var stream = File.Create("model.onnx");
 ProtoBuf.Serializer.Serialize(stream, model);   // ProtoBuf = protobuf-net (a transitive dependency)
 ```
 
-`ModelProto` is the protobuf type in `Shorokoo.Core.Factory.IR`; it is serialized with
-protobuf-net's `ProtoBuf.Serializer` (the `ProtoBuf` namespace ships via protobuf-net,
-which the library already depends on). `OnnxModelExporter.Save(model, path)`
-(namespace `Shorokoo.Onnx`) does the same serialization, plus a clear error — instead
-of a protobuf failure — when the model's tensor data exceeds the 2 GB protobuf message
-ceiling, pointing at the external-data option below. Both stage the model beside the
-target and commit it by rename, so an export interrupted by a crash, a kill or a full disk
-leaves whatever was at that path untouched; the target's directory must already exist, and
-a crash can leave a `.tmp-`-prefixed sibling behind (the next successful save of the same
-target sweeps it). Serializing the `ModelProto` yourself, as in the snippet above, gets
-none of that. [`Persistence.ExportOnnx`](#onnx-model-exchange-exportonnx--importonnx) is
-the one-call wrapper over the same serialization.
+Serializing the proto yourself, as above, is not atomic. `OnnxModelExporter.Save(model,
+path)` (namespace `Shorokoo.Onnx`) writes it atomically and gives a clear error when
+tensor data exceeds protobuf's 2 GB limit. A crash can leave a `.tmp-` sibling, which
+the next successful save of that target removes.
+[`Persistence.ExportOnnx`](#onnx-model-exchange-exportonnx--importonnx) wraps both steps.
 
 ### Large models: external data
 
-Protobuf caps any single message at 2 GB, so a self-contained `.onnx` cannot hold
-weights approaching that size. The standard ONNX answer is **external data**:
-initializer bytes live in a side file next to the model, and each externalized
-`TensorProto` carries `data_location = EXTERNAL` plus `location`/`offset`/`length`
-entries. Shorokoo supports it on both paths:
+External data puts initializer bytes in a side file; each externalized `TensorProto`
+carries `data_location = EXTERNAL` and `location`/`offset`/`length`:
 
 ```csharp
 using Shorokoo.Onnx;   // OnnxExternalDataOptions, OnnxModelExporter
 
-// From a concrete model: opt in by passing options. Initializers of at least
-// SizeThreshold bytes go to "model.onnx.data"; smaller ones stay inline. Omit
+// Initializers of at least SizeThreshold bytes go to "model.onnx.data"; omit
 // externalData (the default) for the self-contained form.
 Persistence.ExportOnnx(graph, "model.onnx", externalData: new OnnxExternalDataOptions());
 Persistence.ExportOnnx(graph, "model.onnx",
     externalData: new OnnxExternalDataOptions { SizeThreshold = 1024, Alignment = 4096 });
 
-// The same thing one layer down, when you already hold a ModelProto. The
-// .onnx + .onnx.data pair is deterministic (byte-identical across runs for the
-// same ModelProto written to the same file name).
+// From a ModelProto; deterministic for the same proto and file name.
 OnnxModelExporter.SaveWithExternalData(model, "model.onnx");
 ```
 
-`SaveWithExternalData` applies to **concrete models only**: it externalizes the
-top-level graph initializers, which is complete exactly when every weight lives
-there. A model that still contains module-stage machinery or unmaterialized
-parameters is refused up front (`XD008`) with the actual vs required kind named.
-
-- Tensor data is written in initializer order, each tensor aligned to `Alignment`
-  bytes (default 4096) for mmap-friendly access.
-- Self-contained (all-inline) export remains the default and is unchanged; with no
-  initializer at or above the threshold, `SaveWithExternalData` writes no side file
-  (removing a stale one from a previous save of the same path) and its output is
-  identical to `Save`.
-- The side file's name is recorded in every externalized tensor's `location` entry, so
-  two exports of one model to different file names differ in those bytes — determinism is
-  per target name.
-- The exported pair is standard ONNX — stock onnxruntime loads it directly.
-- The passed `ModelProto` is left unmodified.
-- Both files are staged beside their targets and committed by rename, side file first, so
-  a failed or interrupted export leaves the previously saved `.onnx` and its side file
-  exactly as they were. Two files means two renames: only a hard crash between them can
-  leave the pair mismatched — every in-process failure rolls the whole pair back.
+- **Concrete models only**; anything else is refused with `XD008`, naming the actual
+  and required kind.
+- Tensors are written in initializer order, aligned to `Alignment` bytes (default
+  4096).
+- With nothing at or above the threshold, no side file is written (a stale one is
+  removed) and the output equals `Save`'s.
+- The side file's name is recorded in each `location`, so output is deterministic per
+  target name.
+- The pair is standard ONNX; stock onnxruntime loads it. The passed `ModelProto` is not
+  modified.
+- The side file is committed first, then the `.onnx`; any in-process failure rolls both
+  back, and only a hard crash between the two renames can leave them mismatched.
 
 `BuildOnnxModel(ComputationGraph graph, OpSetVersion opset = OPS_21,
-bool prepForOnnx = false)` requires a
-`GraphKind.ConcreteModel` graph — anything else fails fast with `FW045` naming the
-actual and required kinds (only a concrete model can satisfy the vanilla-ONNX
-guarantee). It clones the graph (no mutation), lowers it for ONNX, and emits
-nodes, subgraphs, and functions.
-The default `OPS_21` is the export **baseline**: the exporter scans the graph
-(function bodies included) and raises the model's `opset_import` only as far as
-it actually requires. In practice that raise is driven by post-21 **attributes**
-carried by an imported model — `DequantizeLinear.output_dtype` and
-`QuantizeLinear.precision` raise the stamp to 23, `Cast`/`CastLike.round_mode`
-to 24. No post-21 **operator** raises it, because none survives to emission:
-`Attention`, `AttentionWithKVCache`, `RotaryEmbedding`, `BitCast` and
-`CumProd` throw `NotImplementedException` at their `OnnxOp` entry points,
-`Swish` and `RMSNormalization` lower inline to opset-21 primitives, and
-`TensorScatter` — built and kept as itself — is decomposed into opset-21
-primitives by this pre-pass, so no post-21 operator node is ever emitted from
-an authored graph (the exporter's per-operator floors are kept as the restore
-point for when a runtime registers the remaining operators at a usable opset,
-and stay live for the `.srk` format below, which keeps every operator as
-authored and so stamps a saved `TensorScatter` at 24). A graph built through
-`Ops`/`OnnxOp` therefore always exports at opset 21 — the low-level
-`NodeBuilder` surface is the exception, since it can stamp one of those
-attributes directly, and a node built that way raises the stamp exactly as an
-imported one does. Models up to opset 26 execute on the bundled ONNX Runtime
-1.26 — see [limitations.md](limitations.md) for the stamping policy and
-[operator-support.md](operator-support.md) for the per-operator picture.
+bool prepForOnnx = false)` requires a `GraphKind.ConcreteModel` graph (else `FW045`,
+naming both kinds). It does not modify the graph. `OPS_21` is a baseline: the stamp
+rises only for post-21 attributes on imported (or `NodeBuilder`-built) nodes
+(`DequantizeLinear.output_dtype`, `QuantizeLinear.precision` → 23;
+`Cast`/`CastLike.round_mode` → 24). No post-21 operator is emitted from an authored graph:
+each either throws `NotImplementedException` or is lowered to opset-21 primitives; an imported
+post-21 operator is kept and raises the stamp to its floor. A graph built through
+`Ops`/`OnnxOp` always exports at opset 21 (`.srk` keeps operators as authored and stamps
+accordingly). Models up to opset 26 run on the bundled ONNX Runtime 1.26. See
+[limitations.md](limitations.md) for the stamping policy and
+[operator-support.md](operator-support.md) per operator.
 
-Every exported input also carries its **representative shape** — the dims of the
-sample the model was concretized at, which every input of a concrete graph records
-(see [inference.md](inference.md#the-lowering-pipeline)) — in that input's own
-graph-input `ValueInfoProto` metadata (key `shrk_repr_input`), which the importers
-re-attach, so an exported model imports back as the concrete graph it was. It is
-always dims-only (no values). An `OptionalTensor` input records one too — its
-element's dims when the model was concretized with the optional present, and a
-single `-1` when it was concretized absent, which is how the arrangement survives a
-round trip. It is plain metadata: the `ValueInfoProto`'s own dims stay symbolic, so
-no external consumer sees a frozen batch dimension.
+Each exported input stores its **representative shape** (the dims it was concretized
+at; see [inference.md](inference.md#the-lowering-pipeline)) in `ValueInfoProto` metadata
+key `shrk_repr_input`, so the model re-imports as the same concrete graph. An absent
+`OptionalTensor` records `-1`. The `ValueInfoProto` dims themselves stay symbolic.
 
 ### The vanilla dialect is a guarantee
 
-`BuildOnnxModel` only ever writes **vanilla ONNX**: every node is a standard
-ONNX op or a call to a `FunctionProto` emitted into the same file, so the model
-loads in any stock ONNX runtime with no Shorokoo involvement. It therefore
-requires a **concrete model** (from `ToConcreteArchitecture` →
-`ToConcreteModel`). Exporting a module-stage graph — one still carrying
-Shorokoo's internal orchestration ops (`ShrkCreateModule`, `ShrkModelInvoke`,
-…) — throws at export time with the offending ops named, instead of writing a
-file that only fails later when a third-party runtime rejects the custom ops.
-Module-stage graphs are persisted with the `.srk`/`.zsrk` format below, which
-uses Shorokoo's internal dialect and is re-imported by Shorokoo only.
-
-The guarantee reaches inside a function body too. An initializer body that calls
-another initializer is written out with that call inlined, and only the `FunctionProto`s
-the emitted model still reaches are written, so a called initializer leaves no dead
-function behind in the file. (An initializer body cannot hold module machinery to begin
-with: one that creates or references a model is refused with `FW055` when it is built.)
-The `.srk` format makes the opposite trade and keeps each body as authored, so a
-graph reloaded from it still shows the calls each body makes — a module's sub-modules,
-an initializer's nested initializers — rather than a copy of the callee inlined into
-every caller, and keeps every function those bodies name.
+`BuildOnnxModel` writes only **vanilla ONNX** (standard ops and `FunctionProto`s in the
+same file), loadable by any ONNX runtime. A module-stage graph, still carrying internal
+ops (`ShrkCreateModule`, `ShrkModelInvoke`, …), throws at export naming them; persist
+it as `.srk`/`.zsrk` instead. Nested initializer calls are inlined and unreachable
+functions are dropped. `.srk` keeps each body as authored, including its calls.
 
 ### Graph input/output names and shapes
 
-Exported graph inputs and outputs are named from the model's signature — the
-names by which the graph's inputs are addressed in Shorokoo (e.g. `[Hyper]` /
-input parameter names), deduplicated deterministically (`x`, `x_2`, …).
-Unnamed slots fall back to `input_{i}` / `output_{i}`. An output renamed this way —
-one passing an input of the same name straight through, say — keeps its own name in
-its `ValueInfoProto` metadata, and `ImportOnnx` gives it back. Every input and output
-`ValueInfoProto` carries its dtype and a **shape** — the reference
-`onnx.checker` requires at least a rank on each of the main graph's inputs and
-outputs, and an exported model passes it. The rank is the declared one where the
-signature states it (`Scalar<T>`, `Vector<T>`, …); otherwise it is the rank observed at
-the samples the model was concretized at — a rank-agnostic `Tensor<T>` input takes the
-rank of its representative shape, and a rank-agnostic output the rank of the shape it
-recorded when the graph was evaluated at those samples' real values. An output whose
-rank varies with its inputs — an `IfElse` choosing between a matrix and its flattened
-copy, a `Squeeze` whose axes are an input — is therefore exported at the rank it had at
-the samples, exactly as an input is. The dims themselves stay **symbolic** — named
-`{name}_dim{i}` — so the file accepts any size of that rank; a rank-0 value is
-stamped as a true scalar. Tools like Netron or `InferenceSession.InputMetadata`
-therefore see the model's logical signature directly, and `OnnxModelImporter`
-round-trips the names.
+- Inputs and outputs are named from the model's signature, deduplicated as `x`, `x_2`, …;
+  unnamed slots become `input_{i}` / `output_{i}`. A renamed output's own name is kept in
+  metadata and restored by `ImportOnnx`.
+- Each carries its dtype and rank (so `onnx.checker` passes): the declared rank
+  (`Scalar<T>`, `Vector<T>`, …), otherwise the rank observed at the concretization
+  samples, even for an output whose rank varies with its inputs.
+- Dims are **symbolic** (`{name}_dim{i}`), so any size of that rank is accepted; rank-0
+  values are true scalars.
 
 ### Parameters in the exported graph
 
-A concrete model's parameters — trainable weights and state params (e.g.
-BatchNorm running stats) alike — are emitted as `graph.initializer`
-`TensorProto`s, following ONNX convention; they are never baked into
-`Constant` op-nodes. Each initializer carries two Shorokoo metadata props:
-`IsTrainable` (`"true"`/`"false"`) and `IdentifierTemplate` (the parameter's
-name). Initializer *tensor names* are internal ids (`N{k}_T{s}`), so match
-parameters by the `IdentifierTemplate` metadata, not by tensor name.
-Re-importing an exported model rebuilds the parameters with their
-trainability and names intact, so a loaded model remains trainable and its
-weights can be re-bound by name with `ToConcreteModel`.
+Parameters (trainable weights and state such as BatchNorm running stats) are
+`graph.initializer` `TensorProto`s, never `Constant` nodes, with metadata props
+`IsTrainable` (`"true"`/`"false"`) and `IdentifierTemplate` (the parameter's name).
+Tensor names are internal (`N{k}_T{s}`), so match by `IdentifierTemplate`. Re-import
+restores names and trainability, so the model stays trainable and re-bindable with
+`ToConcreteModel`.
 
 ## Import from ONNX
 
@@ -204,25 +125,22 @@ ComputationGraph g2 = OnnxModelImporter.FromOnnxModel(byteArray);
 ComputationGraph g3 = OnnxModelImporter.FromOnnxModel(stream);
 ```
 
-Models written by Shorokoo carry a graph-kind metadata tag (`shrk_graph_kind` in
-the model's metadata props), so an imported graph's `Kind` is the kind it was
-saved with. Foreign models have no tag and are classified by op-scanning. A tag
-that is structurally impossible for the model's content (a hand-edited or
-corrupt file) fails the import loudly.
+Models must be opset 21 or later; an older model's behaviour is undefined. Import neither
+checks the declared opset nor converts, so such a model may be refused by ONNX Runtime when
+compiled (`Unsqueeze` with an `axes` attribute) or run with wrong results (`Squeeze`, the
+reductions, `Softmax`). Convert it to opset 21 first,
+for example with `onnx.version_converter.convert_version(model, 21)` — see
+[limitations.md](limitations.md#onnx-opset-range-and-export-stamping).
 
-Every input of an imported concrete model records a **representative shape**, as
-every input of a concrete graph does. A model Shorokoo exported carries the one it
-was concretized at. For a foreign model it is read from the input's declared
-shape: each fixed dimension (`dim_value`) as written, and each **symbolic**
-(`dim_param`) or unset dimension — or one written with a negative `dim_value`, which
-some tools use for "unknown" — as **`1`**, so an input declared `[N, 3, 224, 224]`
-records `[1, 3, 224, 224]`. A sequence input records the shape its elements are
-declared with, by the same rules (and none where they declare none). An input declared
-with no shape at all has no rank to go on, and the import refuses it with **`FW058`**,
-naming it. Give such an input its
-shape — or override any derived one — with the overload that takes input shapes,
-keyed by ONNX graph input name — for a sequence input, the shape of its elements
-(see below for outputs):
+Shorokoo-written models carry a `shrk_graph_kind` metadata prop that sets the imported
+`Kind`; foreign models are classified by op-scanning. A tag impossible for the content
+fails the import.
+
+Each input records a **representative shape**: the stored one for a Shorokoo export;
+otherwise the declared shape with every symbolic, unset or negative dimension as `1`
+(`[N, 3, 224, 224]` → `[1, 3, 224, 224]`). A sequence input records its elements'
+shape. An input with no declared shape fails with **`FW058`**; give it one (or override
+any) by ONNX input name (for a sequence, its element shape):
 
 ```csharp
 var shapes = new Dictionary<string, long[]> { ["input"] = [1, 3, 224, 224] };
@@ -230,42 +148,29 @@ ComputationGraph g = OnnxModelImporter.FromOnnxModel("model.onnx", shapes);
 // also: FromOnnxModel(byteArray, shapes, externalDataDirectory), FromOnnxModel(stream, shapes, ...)
 ```
 
-A shape given for an input the file shapes must be of the rank the file declares and
-agree with each dimension it fixes; a shape that contradicts it, and a key that names
-no input, are refused with an `ArgumentException`.
+A given shape must match the declared rank and fixed dims; a mismatch or an unknown key
+throws `ArgumentException`.
 
-Every output of an imported concrete model records a shape too, as every output of a
-concrete graph does. A model Shorokoo exported carries the one it was concretized at;
-for a foreign model it is read from the output's declared shape by the same rules as an
-input's (a symbolic, unset or negative dimension taken as `1`). An output declared with
-no shape is evaluated at the inputs' recorded shapes — where an op cannot be evaluated
-without running it (some string ops), the model is run once at zeros of those shapes —
-and one that leaves without a shape is refused with **`FW058`**, naming it.
+Outputs record shapes by the same rules. An output with no declared shape is evaluated
+at the input shapes (running the model once at zeros if an op, e.g. some string ops,
+requires it); one still unshaped fails with **`FW058`**.
 
-A node calling one of the model's own functions with a different number of inputs
-than that function's body declares is refused on import for the same reason: the
-call cannot be lowered against its body, and accepting it would produce a graph
-whose spliced inputs go nowhere.
+A call to a model function with the wrong number of inputs is refused on import.
 
-Models using ONNX external data (the standard layout for large third-party models)
-load transparently from a **file path** — `location` keys resolve against the model
-file's directory, honoring `offset`/`length` slicing. When importing from bytes or a
-stream, pass the directory the side files live in:
+External data loads transparently from a **file path** (`location` resolves against the
+model's directory, honoring `offset`/`length`). From bytes or a stream, pass the
+directory:
 
 ```csharp
 ComputationGraph g = OnnxModelImporter.FromOnnxModel(
     byteArray, externalDataDirectory: "/path/to/model/dir");
 ```
 
-External-data loading fails loudly (naming the tensor and the file) rather than
-zero-filling: a missing side file, a `location` escaping the model's directory, an
-out-of-range `offset`/`length`, a `length` contradicting the tensor's shape/dtype,
-or an external-data model imported from a stream/bytes without
-`externalDataDirectory` all throw a `ModelException`.
+A missing side file, a `location` escaping the model's directory, an out-of-range
+`offset`/`length`, a `length` contradicting shape/dtype, or a missing
+`externalDataDirectory` throws `ModelException`, naming the tensor and file.
 
 ## Save/load Shorokoo graph format (`.srk` / `.zsrk`)
-
-With `CompressedFormatUtils`:
 
 ```csharp
 using Shorokoo.Core.Utils;   // CompressedFormatUtils, SrkFileFormat
@@ -275,29 +180,21 @@ ComputationGraph g = CompressedFormatUtils.LoadFastGraphFromFile("model.zsrk");
 byte[] bytes = CompressedFormatUtils.SaveFastGraphToBinary(graph, compressed: true);
 ```
 
-`.zsrk` = Zstandard-compressed; `.srk` = uncompressed. The extension is auto-selected
-from the `compressed` flag, but it is only a hint for humans: **how a file parses is
-decided by its content, never by its extension** — a renamed file loads identically.
+`.zsrk` is Zstandard-compressed, `.srk` uncompressed. The extension follows the
+`compressed` flag, but **content, never the extension, decides how a file parses**.
 
-`SaveFastGraphToFile` builds the whole container in memory, then stages it beside the
-target and commits it by rename, so neither a serialization failure nor a crash or a full
-disk part-way through the write damages the file already at that path. (It is the one
-saver that creates the target's directory for you.) For a concrete model, persisting it as
-a [`.skpt`](skpt-checkpoints.md) with
-`Persistence.From(model).WithModel().WithWeights().Save(path)` is the richer container; a
-module-stage graph has only the `.srk` path.
+`SaveFastGraphToFile` is atomic and, alone among savers, creates the target directory.
+For a concrete model, a [`.skpt`](skpt-checkpoints.md) is the richer container; a
+module-stage graph can only be saved as `.srk`.
 
 ### The `.srk` container
-
-Every file written today is a self-describing, versioned container:
 
 ```
 magic "SRK\x01" | u16 headerLen (little-endian) | JSON header | payload
 ```
 
-The payload is the graph serialized as an ONNX `ModelProto` (Shorokoo's internal
-dialect allowed), wrapped in **exactly one** compression layer when the header says
-so. Header fields (fields a reader does not interpret are ignored):
+The payload is the graph as an ONNX `ModelProto` (internal dialect allowed), with **at
+most one** compression layer. Header (unknown fields are ignored):
 
 ```jsonc
 {
@@ -309,12 +206,9 @@ so. Header fields (fields a reader does not interpret are ignored):
 }
 ```
 
-- `stage` records the graph's `GraphKind` (see
-  [inference.md](inference.md#the-lowering-pipeline)). The writer records the
-  graph's **stamped** kind (`graph.Kind`), and the loader stamps the loaded
-  graph's `Kind` from the header (falling back to op-scan classification for
-  foreign data), so loaders can refuse a mismatched file up front, before anything
-  downstream has to. Pass the optional `requiredStage` argument to enforce it:
+- `stage` is the graph's `GraphKind` (see
+  [inference.md](inference.md#the-lowering-pipeline)); the loader restores `Kind` from it
+  (op-scanning foreign data). Enforce it with `requiredStage`:
 
   ```csharp
   // Throws a clear stage-mismatch error if model.zsrk holds a module-stage graph:
@@ -322,27 +216,18 @@ so. Header fields (fields a reader does not interpret are ignored):
       "model.zsrk", requiredStage: GraphKind.ConcreteModel);
   ```
 
-- `payloadSha256` makes corruption and truncation fail loudly, with an error naming
-  the file and the failure.
-- `SrkFileFormat.TryReadHeaderFromFile(path)` reads the header (`SrkHeader`) without
-  loading the graph — useful to identify a file cheaply; it returns `null` for data
-  that is not a `.srk` container. For a format-agnostic version of the same idea, see
+- `payloadSha256` makes corruption and truncation fail loudly, naming the file.
+- `SrkFileFormat.TryReadHeaderFromFile(path)` returns the `SrkHeader` without loading the
+  graph, or `null` for non-`.srk` data. See also
   [`Persistence.Inspect`](#identify-and-summarize-a-file-persistenceinspect).
-- `producer` is informational; the payload dialect remains versioned by the embedded
-  ONNX `ir_version`/opsets themselves.
+- `producer` is informational.
 
-A file that does not open with the container magic is not a `.srk` file (loading it
-fails with a clear error).
-
-Unlike `BuildOnnxModel`, this format is Shorokoo's **internal dialect**: it
-accepts any graph — module-stage graphs with their internal ops included —
-keeps internal `N{k}_T{s}` tensor names, and is only loadable by Shorokoo
-(`LoadFastGraphFromFile` / `OnnxModelImporter`). Use it for Shorokoo-to-Shorokoo
-persistence; use `BuildOnnxModel` for anything meant to leave Shorokoo.
+A file without the magic fails to load with a clear error. `.srk` accepts any graph,
+keeps internal tensor names, and is readable only by Shorokoo
+(`LoadFastGraphFromFile` / `OnnxModelImporter`); use `BuildOnnxModel` for anything
+leaving Shorokoo.
 
 ## Load pretrained weights (SafeTensors)
-
-With `SafeTensorLoader`:
 
 ```csharp
 ModelParamList weights = SafeTensorLoader.LoadModelParamSet("weights.safetensors");
@@ -351,12 +236,8 @@ TensorData single = SafeTensorLoader.LoadSingleTensor("bias.safetensors");
 List<SafeTensor> all = SafeTensorLoader.LoadSafeTensors("weights.safetensors");
 ```
 
-A truncated file (interrupted download or copy, disk full) is refused up front with an
-error naming truncation, the file, and the declared vs. actual byte counts: the declared
-header length and every tensor's `data_offsets` range are validated against the actual
-file length before any tensor is materialized. Training checkpoints
-(`TrainingRig.LoadCheckpoint`) share this loader, so a truncated checkpoint fails the
-same way, naming the checkpoint path.
+A truncated file is refused before any tensor is read, with an error naming the file and
+declared vs actual byte counts. `TrainingRig.LoadCheckpoint` uses the same loader.
 
 Save:
 
@@ -364,24 +245,18 @@ Save:
 SafeTensorLoader.SaveSafeTensors("out.safetensors", listOfSafeTensors);
 ```
 
-`SaveSafeTensors` stages the file beside the target and commits it by rename, so a crash
-mid-save leaves the previous file exactly as it was; the target's directory must already
-exist. To write a concrete model's weights, prefer
-[`Persistence.ExportSafeTensors`](#weight-exchange-with-naming-schemes-exportsafetensors--importsafetensors)
-below: same plain safetensors output, and it does the name matching for you.
+For a concrete model's weights prefer
+[`Persistence.ExportSafeTensors`](#weight-exchange-with-naming-schemes-exportsafetensors--importsafetensors),
+which also matches names.
 
-Compressed (`.zsafetensor`) variants live in `CompressedFormatUtils`:
+Compressed `.zsafetensor` variants are in `CompressedFormatUtils`:
 `SaveCompressedSafeTensors`, `LoadCompressedSafeTensors`,
-`SaveCompressedModelParamSet`, `LoadCompressedModelParamSet`. The two save calls compress
-into memory and then stage and commit like the rest; `Persistence.ExportSafeTensors`
-writes the uncompressed form.
+`SaveCompressedModelParamSet`, `LoadCompressedModelParamSet`.
 
 ## Weight exchange with naming schemes (`ExportSafeTensors` / `ImportSafeTensors`)
 
-`SafeTensorLoader` above is the raw tensor-file layer: it moves tensors, knows
-nothing about models, and leaves name matching to you. The **model-level
-boundary** lives on `Persistence` (namespace `Shorokoo`, the same class as the
-[.skpt save/load](skpt-checkpoints.md) entry points):
+`SafeTensorLoader` only moves tensors. The model-level API is on `Persistence`
+(namespace `Shorokoo`; see also [.skpt save/load](skpt-checkpoints.md)):
 
 ```csharp
 using Shorokoo;        // Persistence
@@ -395,44 +270,33 @@ Persistence.ExportSafeTensors(model, "weights.safetensors", scheme);   // PyTorc
 ComputationGraph m1 = Persistence.ImportSafeTensors(arch, "weights.safetensors");
 ComputationGraph m2 = Persistence.ImportSafeTensors(arch, "foreign.safetensors", scheme);
 
-// One-call native landing: foreign safetensors → .skpt checkpoint (+ the bound model).
+// Foreign safetensors → .skpt checkpoint (+ the bound model).
 ComputationGraph m3 = Persistence.ImportSafeTensorsToCheckpoint(
     arch, "foreign.safetensors", "model.skpt", scheme);
 ```
 
-- `ExportSafeTensors` requires a **concrete model** (`GraphKind.ConcreteModel`)
-  and writes every weight parameter to a single plain safetensors file (the RNG
-  identity parameter is model definition, not a weight, and is not exported).
-  The write is atomic; the output loads in any safetensors implementation.
-- `ImportSafeTensors` requires a **concrete architecture** (the unbound stage
-  weights bind into) and returns the bound concrete model. The binding is the
-  standard `ToConcreteModel(weights, scheme)` path — what import adds is
-  **strictness**. Where `ToConcreteModel` silently drops names that do not
-  resolve, import fails loudly, naming the offending tensor, on:
-  - a source tensor that maps to no parameter (a training-checkpoint file is
-    recognized by its marker and redirected to `TrainingRig.LoadCheckpoint`);
-  - a required parameter with no source tensor (or one the scheme fails to name);
-  - two source tensors mapping to one parameter (an ambiguous scheme);
-  - a dtype or shape mismatch after mapping.
+- `ExportSafeTensors` takes a **concrete model** and writes every weight (not the RNG
+  identity parameter) to one plain safetensors file.
+- `ImportSafeTensors` takes a **concrete architecture** and binds like
+  `ToConcreteModel(weights, scheme)`, but fails loudly, naming the tensor, on:
+  - a tensor mapping to no parameter (a training-checkpoint file is detected and
+    redirected to `TrainingRig.LoadCheckpoint`);
+  - a parameter with no tensor, or one the scheme cannot name;
+  - two tensors mapping to one parameter;
+  - a dtype or shape mismatch.
 
-  All validation runs before any binding, so a failed import never yields a
-  partially bound model. Truncated/corrupt files are refused by the loader's
-  declared-vs-actual size checks, naming the file. A safetensors `__metadata__`
-  block is ignored (it is metadata, not a tensor).
-- `ImportSafeTensorsToCheckpoint` performs the same import and lands the result
-  as a native `.skpt` via the standard
-  `Persistence.From(model).WithModel().WithWeights().Save(...)` writer (atomic;
-  nothing is written when the import fails).
+  Validation precedes binding, so no partial model results. `__metadata__` is ignored.
+- `ImportSafeTensorsToCheckpoint` does the same, then saves a `.skpt`; nothing is
+  written if the import fails.
 
 ### Naming
 
-With **no scheme**, tensors carry the parameters' **canonical Shorokoo ids**
-(e.g. `TrainableParam#0.fc#0.weight#0` for the weight of a `Linear` held in a local `fc`;
-see [Parameter names](defining-models.md#parameter-names)) — export and import are exact
-mirrors, so `ExportSafeTensors(model, path)` → `ImportSafeTensors(arch, path)`
-reproduces the model bit-identically.
+With **no scheme**, tensors use **canonical Shorokoo ids** (e.g.
+`TrainableParam#0.fc#0.weight#0`; see
+[Parameter names](defining-models.md#parameter-names)), and export → import is
+bit-identical.
 
-With a **scheme**, the mapping is applied at the boundary in both directions:
+A **scheme** maps names in both directions:
 
 ```csharp
 SimplePatternScheme[] patterns =
@@ -447,23 +311,14 @@ Persistence.ExportSafeTensors(model, "torch.safetensors", scheme);  // writes fc
 var bound = Persistence.ImportSafeTensors(arch, "torch.safetensors", scheme);
 ```
 
-Both DSLs work for **import**: the
-[pattern DSL](param-naming-pattern-dsl.md) (`SimplePatternNamingScheme`) and the
-[ModelId format DSL](param-naming-format-dsl.md) (`ModelIdNamingScheme`).
-**Export with a scheme** needs the canonical-id → name direction, which only the
-pattern DSL provides (its patterns are written against canonical id strings —
-`ModuleParamSetNamingScheme.ToName(string)`); a plain `ModelIdNamingScheme` maps
-ModelIds, which a bound model no longer carries, and is refused with
-`NotSupportedException`. Export also refuses — naming the parameters — a scheme
-that leaves any weight unnamed or maps two weights to one tensor name, so
-weights are never silently dropped or overwritten.
+Import accepts both the [pattern DSL](param-naming-pattern-dsl.md)
+(`SimplePatternNamingScheme`) and the [ModelId format DSL](param-naming-format-dsl.md)
+(`ModelIdNamingScheme`). Export needs the pattern DSL
+(`ModuleParamSetNamingScheme.ToName(string)`); a `ModelIdNamingScheme` throws
+`NotSupportedException`. Export also refuses, naming the parameters, a scheme that
+leaves a weight unnamed or maps two weights to one name.
 
 ## ONNX model exchange (`ExportOnnx` / `ImportOnnx`)
-
-The ONNX mirror of the safetensors boundary: `ExportOnnx` writes a concrete model
-to a standard, externally-loadable `.onnx`, and `ImportOnnx` turns a foreign
-vanilla `.onnx` back into a native, runnable `ComputationGraph` (and, in one call,
-a native `.skpt`).
 
 ```csharp
 // Export: concrete model → standard vanilla .onnx (loads in any ONNX runtime).
@@ -481,69 +336,45 @@ var shapes = new Dictionary<string, long[]> { ["input"] = [1, 3, 224, 224] };
 ComputationGraph gShaped = Persistence.ImportOnnx("foreign.onnx", shapes);
 ComputationGraph gBoth = Persistence.ImportOnnx("foreign.onnx", scheme, shapes);
 
-// One-call native landing: foreign .onnx → .skpt checkpoint (+ the imported model).
+// Foreign .onnx → .skpt checkpoint (+ the imported model).
 ComputationGraph landed = Persistence.ImportOnnxToCheckpoint("foreign.onnx", "model.skpt");
 ComputationGraph landedShaped = Persistence.ImportOnnxToCheckpoint("foreign.onnx", "model.skpt", shapes);
 ```
 
-- `ExportOnnx` requires a **concrete model** (`GraphKind.ConcreteModel`) and writes
-  **vanilla ONNX** — every node a standard op or emitted function call — so the file
-  loads in any conforming runtime. A graph carrying Shorokoo-internal ops is refused,
-  naming them. The write is atomic. Self-contained by default — a model over protobuf's
-  2 GB ceiling is refused with `XD007`; pass `externalData` to write the
-  [external-data pair](#large-models-external-data) instead, which lifts the ceiling and
-  is still standard ONNX. (It is the `Persistence`-facade wrapper over
-  [`FastOnnxModelBuilder.BuildOnnxModel`](#export-to-onnx) plus `OnnxModelExporter`; use
-  those directly when you need the `ModelProto` in between.)
-- `ImportOnnx` builds the graph through the existing ONNX reader, so it composes with
-  ONNX **external data** (a `.data` side file resolves against the model file's
-  directory, exactly as [`OnnxModelImporter`](#import-from-onnx)). At the boundary each
-  foreign initializer — which vanilla ONNX carries as a plain constant — is **promoted
-  to a canonical Shorokoo parameter** so the model can be named, checkpointed and
-  reloaded natively: its identifier becomes `[k]:TrainableParam#0.name#0`, where `name`
-  is the ONNX initializer name by default, or the scheme's translation of it when a
-  `namingScheme` is given. A Shorokoo-produced `.onnx` already carries canonical
-  identifiers, which are kept as-is. Each input records a representative shape, derived
-  from the file as [`OnnxModelImporter`](#import-from-onnx) derives it — a symbolic or
-  unset dimension taken as `1` — and an input the file declares no shape for is refused
-  with `FW058` unless the overload taking `inputShapes` gives it one. Every import entry
-  point has that overload: `ImportOnnx(path, inputShapes)`,
+- `ExportOnnx` takes a **concrete model** and writes [vanilla ONNX](#the-vanilla-dialect-is-a-guarantee);
+  internal ops are refused, naming them. A self-contained model over 2 GB is refused with
+  `XD007`; pass `externalData` for the [external-data pair](#large-models-external-data).
+  It wraps [`FastOnnxModelBuilder.BuildOnnxModel`](#export-to-onnx) plus
+  `OnnxModelExporter`.
+- `ImportOnnx` reads like [`OnnxModelImporter`](#import-from-onnx) (external data and
+  shape rules included). Each foreign initializer becomes a canonical parameter
+  `[k]:TrainableParam#0.name#0`, where `name` is the initializer name or the scheme's
+  translation; a Shorokoo-produced `.onnx` keeps its identifiers. Every entry point has
+  an `inputShapes` overload: `ImportOnnx(path, inputShapes)`,
   `ImportOnnx(path, namingScheme, inputShapes)`, and the same two for
   `ImportOnnxToCheckpoint`.
-- `ImportOnnxToCheckpoint` performs the same import and lands the result straight in a
-  native `.skpt` via the container writer (see [.skpt](skpt-checkpoints.md)); the write
-  is atomic, so a failed import leaves any existing checkpoint untouched.
+- `ImportOnnxToCheckpoint` saves the result as a `.skpt` (see
+  [.skpt](skpt-checkpoints.md)); a failed import leaves any existing checkpoint untouched.
 
-Importing vanilla ONNX is **lossy by design**: the vanilla dialect drops a concrete
-model's module structure and hyper defaults, so `ExportOnnx` → `ImportOnnx` reproduces
-the model's **inference values**, not its structure (the outputs match on any input).
-For a structural round-trip, use the native `.skpt` container (`Persistence.From` /
-`Persistence.Load`).
+Vanilla ONNX drops module structure and hyper defaults, so export → import reproduces
+**outputs**, not structure. For a structural round-trip use `.skpt`
+(`Persistence.From` / `Persistence.Load`).
 
-`ImportOnnx` **fails loudly**, naming the op and the file, on a construct the reader
-cannot ingest (an op outside the vanilla ONNX dialect Shorokoo reads, or a node in an
-unknown domain); a truncated or garbage file fails loudly naming the file. Two
-initializers that resolve to one canonical name are refused, naming both, so no weight
-can silently overwrite another. (A Shorokoo **internal-dialect** `.onnx` — the payload
-inside `.srk` — is not a vanilla model; load it with `Persistence.Load` /
-`CompressedFormatUtils`, not `ImportOnnx`.)
+`ImportOnnx` fails loudly, naming op and file, on an op outside the vanilla dialect or
+an unknown domain, and naming the file on a truncated or garbage file. Two initializers
+resolving to one name are refused, naming both. An internal-dialect `.onnx` (a `.srk`
+payload) loads with `Persistence.Load` / `CompressedFormatUtils`, not `ImportOnnx`.
 
-The `namingScheme` is the same `ModuleParamSetNamingScheme` surface `ImportSafeTensors`
-takes; for `ImportOnnx` it translates each foreign initializer **name string** to the
-canonical Shorokoo name used as the parameter identifier, so the
-[pattern DSL](param-naming-pattern-dsl.md) (`SimplePatternNamingScheme`, whose patterns
-match name strings) is the tool here — a plain
-[`ModelIdNamingScheme`](param-naming-format-dsl.md) maps ModelIds, which a freshly
-imported ONNX graph does not carry, so it leaves the ONNX names unchanged.
+For `ImportOnnx` the `namingScheme` maps initializer **name strings**, so use the
+[pattern DSL](param-naming-pattern-dsl.md) (`SimplePatternNamingScheme`); a
+[`ModelIdNamingScheme`](param-naming-format-dsl.md) leaves the names unchanged.
 
 ## Identify and summarize a file (`Persistence.Inspect`)
 
-`Persistence.Inspect(path)` (namespace `Shorokoo`) answers "what is this file?"
-**without loading it**: it identifies any Shorokoo-produced artifact and
-summarizes its contents from headers/prefixes only, so inspecting a multi-GB
-file is fast and cheap. A **directory** path is inspected too — as the `.skpt`
-[directory form](skpt-checkpoints.md#the-directory-form), with
-`result.FileSizeBytes` reporting the total bytes of the directory's files.
+`Persistence.Inspect(path)` (namespace `Shorokoo`) identifies a Shorokoo artifact from
+headers alone, so multi-GB files inspect fast. A directory is inspected as a `.skpt`
+[directory form](skpt-checkpoints.md#the-directory-form); `result.FileSizeBytes` is then
+the total of its files.
 
 ```csharp
 ArtifactInspection result = Persistence.Inspect("run.safetensors");
@@ -559,60 +390,35 @@ switch (result.Kind)
 }
 ```
 
-Recognized formats and what is reported:
-
 | `Kind` | Recognized by | Reported |
 |---|---|---|
-| `SrkGraph` | `.srk` container magic (a file that opens with it but has no readable container header and parses as SafeTensors is reported as `SafeTensors`) | the header — format version, lifecycle stage, compression, payload SHA-256, producer (`result.Srk.Header`, an `SrkHeader`) |
-| `SafeTensors` | 8-byte header-length prefix + valid JSON header | tensor listing (name, dtype, shape, byte size), total payload size, `__metadata__` (`result.SafeTensors`) |
-| `TrainingCheckpoint` | the `__shorokoo_checkpoint__` marker tensor in a SafeTensors header | checkpoint format version, the run counters (global step, epoch, batch index), and the per-section (`trainable` / `model_state` / `opt_state`, plus `history` when the file holds a [training history](training.md#the-training-history)) tensor listing (`result.TrainingCheckpoint`); `result.SafeTensors` is populated too |
-| `CompressedSafeTensors` | Zstd frame magic whose decompressed content starts with a valid SafeTensors length prefix + JSON header (`.zsafetensor`, written by `CompressedFormatUtils.SaveCompressedSafeTensors`) | the same details as `SafeTensors` (`result.SafeTensors`), read by stream-decompressing only the prefix and header — the tensor payload is never decompressed; sizes describe the decompressed content |
-| `SkptCheckpoint` | a zip archive — or a **directory** (the `.skpt` directory form) — with a root `config.json` manifest declaring format `"skpt"` (see [skpt-checkpoints.md](skpt-checkpoints.md)) | whole-archive metadata (`.skpt` version, created time, producer), the model registry (per model: entry path, format, stage, graph hash), the data registry (per entry: storage format, compression, declared size, recorded sha256 — reported **unverified**), and the mapping-set names (`result.Skpt`) |
-| `NotRecognized` | anything else — including a zip without a readable `skpt` manifest, and a directory with no root `config.json`, one whose `config.json` is too large to be a manifest, or one whose manifest declares another format | a structured result — **content problems never throw**; a missing file and I/O errors (permissions, disk) do |
+| `SrkGraph` | `.srk` magic (a file with the magic but no readable header that parses as SafeTensors is `SafeTensors`) | the header: version, stage, compression, payload SHA-256, producer (`result.Srk.Header`, an `SrkHeader`) |
+| `SafeTensors` | 8-byte length prefix + valid JSON header | tensors (name, dtype, shape, bytes), payload size, `__metadata__` (`result.SafeTensors`) |
+| `TrainingCheckpoint` | the `__shorokoo_checkpoint__` marker tensor | format version, run counters (step, epoch, batch index), tensors per section (`trainable` / `model_state` / `opt_state`, plus `history` for a [training history](training.md#the-training-history)) (`result.TrainingCheckpoint`); `result.SafeTensors` too |
+| `CompressedSafeTensors` | Zstd frame decompressing to a SafeTensors prefix + header (`.zsafetensor`, from `CompressedFormatUtils.SaveCompressedSafeTensors`) | as `SafeTensors`, decompressing only the header; sizes are decompressed |
+| `SkptCheckpoint` | a zip or **directory** with a root `config.json` declaring `"skpt"` (see [skpt-checkpoints.md](skpt-checkpoints.md)) | version, created time, producer, model registry (entry, format, stage, hash), data registry (format, compression, size, sha256 **unverified**), mapping-set names (`result.Skpt`) |
+| `NotRecognized` | anything else, including a zip without a readable `skpt` manifest, or a directory whose `config.json` is missing, too large, or of another format | a structured result: **content problems never throw**; a missing file and I/O errors do |
 
-- Reads are bounded to headers and prefixes; tensor payload bytes are never
-  materialized. The one exception is a checkpoint's 16-byte marker (an `int64[2]`
-  holding the format version and the global step) plus the presence-gated epoch and
-  batch-index scalars beside it, 8 bytes each. The presence-gated loss scalar (a
-  `float32`, 4 bytes) is *not* read — `Inspect` reports the run counters only, as the
-  table above lists. For a `.skpt`, only the zip central directory, the `config.json`
-  entry and (when present) the small `data/user-data.json` entry are read — and for the
-  **directory form**, the directory's files are enumerated, its file listing playing the
-  central directory's role, with the root `config.json` and `data/user-data.json` read
-  the same way. The recorded
-  per-entry sha256s are reported as written, never checked (a full
-  `Persistence.Load` verifies them).
-  Because the payload is untouched, `Inspect` also succeeds on a file whose
-  payload is corrupt — it reports the header while a full load would fail the
-  SHA-256 check.
-- `result.Observations` lists cheap sanity findings visible from the header
-  alone, e.g. declared tensor extents pointing past the end of the file
-  (truncation), trailing bytes beyond the declared data, an unreadable /
-  future-version container header, or — for a `.skpt` — a manifest entry with
-  no matching archive entry (and vice versa), a compressed entry where STORED is
-  expected, unknown manifest keys, and empty registries. On the **directory form**
-  specifically, the scan also flags a manifest entry path that escapes the checkpoint
-  root (reported, never thrown — `Inspect` never resolves it, and a load refuses it).
-  Through the compression layer of a `.zsafetensor` only header-internal checks apply — a
-  compressed file's size has no fixed relation to the decompressed extents, so
-  truncation of the tensor payload is not detectable from the header.
-- A `.zsafetensor` that contains the `__shorokoo_checkpoint__` marker (a
-  training checkpoint saved compressed) reports `CompressedSafeTensors`, not
-  `TrainingCheckpoint`: the marker's version/counter payload sits inside the
-  compressed tensor data, beyond `Inspect`'s bounded header-only reads. An
-  observation notes the marker and suggests decompressing to inspect fully.
-- `.onnx` files are out of scope (standard ONNX tooling covers them). A bare
-  serialized ONNX model is not a `.srk` container (which carries the `SRK`
-  magic), so such a file is `NotRecognized`.
-- There is no console I/O in the library — `ToString()` on the result (and on
-  each listed tensor) formats the summary; printing is up to you.
+- No tensor payload is read, except a checkpoint's 16-byte marker (`int64[2]`: version,
+  step) and the optional 8-byte epoch and batch-index scalars; the loss is not read.
+  For a `.skpt`, only the zip central directory (or directory listing), `config.json`
+  and `data/user-data.json` are read. Sha256s are never verified, so a corrupt payload
+  still inspects.
+- `result.Observations` lists header-level findings: extents past end of file,
+  trailing bytes, an unreadable or future-version header, and for `.skpt` manifest /
+  archive mismatches, unexpected compression, unknown keys, empty registries, and (in
+  the directory form) entry paths escaping the root. For a `.zsafetensor`, payload
+  truncation is not detectable.
+- A compressed training checkpoint reports `CompressedSafeTensors`; an observation notes
+  the marker and suggests decompressing.
+- `.onnx` files are `NotRecognized`; use ONNX tooling.
+- `ToString()` on the result and each tensor formats the summary; the library prints
+  nothing.
 
 ## Bind loaded weights into a model (for inference)
 
-Loading a file gives you a `ModelParamList`; it does not yet change any model. A
-model's `ComputationGraph` starts with weights from its `[TrainableParamInitializer]`s.
-To run with loaded weights, bind them into a concrete graph with `ToConcreteModel`
-(extension methods in namespace `Shorokoo.Graph`), then execute that graph:
+Loaded weights (`ModelParamList`) change no model until you bind them into a concrete
+graph with `ToConcreteModel` (namespace `Shorokoo.Graph`):
 
 ```csharp
 using Shorokoo;
@@ -621,9 +427,8 @@ using static Shorokoo.Globals;
 
 ModelParamList weights = SafeTensorLoader.LoadModelParamSet("weights.safetensors");
 
-// Lower the module graph to a concrete architecture first. This inlines sub-modules so the
-// trainable parameters are visible at the top level; pass sample inputs as shape hints, one per
-// input in declaration order (or a ModelParamList of NamedModelParams, to bind each by its name).
+// Lower to a concrete architecture; sample inputs are shape hints, one per input in order
+// (or a ModelParamList of NamedModelParams to bind by name).
 var input = TensorData([1L, 3L, 224L, 224L], myPixelFloatArray);
 ComputationGraph arch = MyModel.ComputationGraph.ToConcreteArchitecture([input]);
 // arch.Kind == GraphKind.ConcreteArchitecture
@@ -631,50 +436,41 @@ ComputationGraph arch = MyModel.ComputationGraph.ToConcreteArchitecture([input])
 // Bind by parameter name into a concrete (weight-filled) graph:
 ComputationGraph concrete = arch.ToConcreteModel(weights);  // concrete.Kind == GraphKind.ConcreteModel
 
-// Run it. Execute takes IData[] inputs (TensorData implements IData) and returns
-// NamedModelParam[]; read each output via ToTensorData().CopyMemory<float>().
+// Execute takes IData[] and returns NamedModelParam[].
 var outputs = new ComputeContext().Execute(concrete, input);
 float[] values = outputs[0].ToTensorData().CopyMemory<float>();
 ```
 
 Notes:
-- The full lowering pipeline is **`Specialize` → `ToConcreteArchitecture` →
-  `ToConcreteModel`**. The optional first step, `Specialize`, bakes a partial set
-  of named inputs (typically `[Hyper]`s) into constants and drops them from the
-  input list; skip it when the model has no inputs to hardcode. See
+- The pipeline is **`Specialize` → `ToConcreteArchitecture` → `ToConcreteModel`**;
+  `Specialize` (optional) bakes named inputs into constants. See
   [inference.md](inference.md#the-lowering-pipeline).
-- `ToConcreteModel`, `InitializeTrainableParams`, and `GetConcreteModelParamInfos` require a
-  graph whose `Kind` is `GraphKind.ConcreteArchitecture` (from `ToConcreteArchitecture`) and check
-  it first. Called on a raw `MyModel.ComputationGraph` (kind `Module`), they fail fast naming the
-  actual and required kinds — the trainable parameters would still be nested inside sub-functions.
-- `ToConcreteModel()` with no argument fills defaults (equivalent to
-  `arch.ToConcreteModel(arch.InitializeTrainableParams())`).
-- Binding is **by name**. The default uses Shorokoo's naming scheme; weights exported
-  from PyTorch/timm usually need name remapping (use the `ToConcreteModel(weights,
-  namingScheme)` overload) before they bind. Unmatched names are silently dropped.
-  Two DSLs build the remapping scheme: the
-  [ModelId format DSL](param-naming-format-dsl.md) (`ModelIdNamingScheme`) and the
+- `ToConcreteModel`, `InitializeTrainableParams` and `GetConcreteModelParamInfos`
+  require `GraphKind.ConcreteArchitecture`; on a `Module` graph they fail fast naming
+  both kinds.
+- `ToConcreteModel()` with no argument equals
+  `arch.ToConcreteModel(arch.InitializeTrainableParams())`.
+- Binding is **by name**, and unmatched names are silently dropped. PyTorch/timm
+  weights usually need a scheme (`ToConcreteModel(weights, namingScheme)`), built with
+  the [ModelId format DSL](param-naming-format-dsl.md) (`ModelIdNamingScheme`) or the
   [pattern DSL](param-naming-pattern-dsl.md) (`SimplePatternNamingScheme`).
-- Prefer `Persistence.ImportSafeTensors` (above) when the file is supposed to cover the
-  model exactly: it runs the same binding but fails loudly on unmatched or mismatched
-  tensors instead of silently dropping them.
+- `Persistence.ImportSafeTensors` binds the same way but fails on unmatched or
+  mismatched tensors.
 
 A `SafeTensor` exposes `.Name`, `.Data` (`TensorData`), `.DataType` (e.g. `"F32"`,
-`"I64"`), `.Shape`, and `.Metadata`. Use `SafeTensorLoader.DTypeToSafeTensorDType` to
-map a `DType` to a SafeTensor dtype string.
+`"I64"`), `.Shape` and `.Metadata`; `SafeTensorLoader.DTypeToSafeTensorDType` maps a
+`DType` to its dtype string.
 
 ## Notes / known limitations
 
-- Parameter names from external frameworks (PyTorch/timm) may need remapping to match
-  this framework's trainable-parameter names before they bind.
+- PyTorch/timm parameter names may need remapping before they bind (see above).
 
 ## Anti-patterns
 
-- Do not expect a one-call graph-to-file helper; build the `ModelProto` first, then
-  save it (`OnnxModelExporter.Save` / `SaveWithExternalData`, or serialize it
-  yourself).
-- Do not stage-and-rename around a save call: every save API already does it. Serializing
-  a `ModelProto` yourself with `ProtoBuf.Serializer` is the one write that does not — it
-  truncates the target before the first byte lands.
-- Do not save into a directory that does not exist yet: a staged write needs it (the temp
-  copy lives there, so the commit rename cannot cross filesystems). Create it first.
+- Handing `OnnxModelExporter.Save` a graph: it takes a `ModelProto`. Use
+  `Persistence.ExportOnnx(graph, path)`.
+- Wrapping a save in your own stage-and-rename: every save API already does it.
+  Serializing a `ModelProto` yourself with `ProtoBuf.Serializer` is the exception; it
+  truncates the target first.
+- Saving into a directory that does not exist yet (the staged temp file lives there).
+  Create it first.

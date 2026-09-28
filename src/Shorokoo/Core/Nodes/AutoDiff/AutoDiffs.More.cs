@@ -394,10 +394,13 @@ namespace Shorokoo.Core.Nodes.AutoDiff
                 // above). For 1D indices the reshape is a no-op; for multi-dim indices it
                 // correctly collapses the leading index dims. Using an unconditional reshape
                 // also avoids depending on indices.Rank being statically known — Reshape-built
-                // indices commonly have a null Rank even though their actual rank is > 1.
+                // indices commonly have a null Rank even though their actual rank is > 1. Every
+                // dim is stated and allowzero keeps a zero-sized one, so a zero-width table's
+                // gradient stays [M_total, 0] rather than copying one of grad's own dims.
+                Tensor<int64> positionCount = OnnxOp.Shape(flatIndices);                              // [M]
                 Tensor<int64> tailShape = OnnxOp.Shape(data, start: 1);
-                Tensor<int64> newShape = OnnxOp.Concat([Vector(-1L), tailShape], axis: 0);
-                grad = OnnxOp.Reshape(grad, newShape, allowZero: false);
+                Tensor<int64> newShape = OnnxOp.Concat([positionCount, tailShape], axis: 0);
+                grad = OnnxOp.Reshape(grad, newShape, allowZero: true);
 
                 // `data` is typically a table of which a step reads a few rows, so everything
                 // here but the last op is sized by the M index positions, not by the table.
@@ -412,7 +415,6 @@ namespace Shorokoo.Core.Nodes.AutoDiff
                 // exactly the sums a ScatterND-Add into a zeroed table makes — and one Gather by
                 // slot then writes the table-shaped gradient in a single pass, rather than
                 // zero-filling the table and scattering into a copy of it.
-                Tensor<int64> positionCount = OnnxOp.Shape(flatIndices);                              // [M]
                 Tensor<int64> positions = OnnxOp.Range(
                     Scalar(0L), OnnxOp.Squeeze(positionCount, Vector(0L)), Scalar(1L));                 // [M]
                 Tensor<int64> unread = OnnxOp.Expand(Scalar(-1L), OnnxOp.Shape(data, start: 0, end: 1)); // [V]

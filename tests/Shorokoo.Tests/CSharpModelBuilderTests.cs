@@ -152,6 +152,21 @@ public class CSharpModelBuilderCoverageTests
     }
 
     [Fact]
+    public void TestOneAxisPaddedCol2ImRebuildsWithoutGrowing()
+    {
+        TensorData[] cols = [TensorData([1L, 3L, 4L], [.. Enumerable.Range(0, 12).Select(i => (float)i)])];
+        string[] ops = [OpCodes.COL2IM, OpCodes.CONCAT, OpCodes.SQUEEZE];
+        var graph = Col2Im1DPaddedValues.ComputationGraph.ToInternal();
+        var once = Rebuild(graph);
+        var twice = Rebuild(once);
+        int[] expected = [1, 2, 1];
+        Assert.Equal(expected, OpCounts(graph, ops));
+        Assert.Equal(expected, OpCounts(once, ops));
+        Assert.Equal(expected, OpCounts(twice, ops));
+        Assert.Equal(Run(graph, cols), Run(twice, cols));
+    }
+
+    [Fact]
     public void TestLoopCodegenInlineInitRankMismatchAndHoisting()
     {
         AssertCodegens(BuildLoopInlineAndInitGraph(), "LoopAPI.Iterate(");
@@ -222,16 +237,20 @@ public class CSharpModelBuilderCoverageTests
     /// <summary><see cref="AutoTest"/> executes generated source only for a graph with no inputs,
     /// so this is the one place the emitted code for a graph that takes them runs at all.</summary>
     private static void AssertRoundTrips(InternalComputationGraph graph, TensorData[] inputs)
+        => Assert.Equal(Run(graph, inputs), Run(Rebuild(graph), inputs));
+
+    private static InternalComputationGraph Rebuild(InternalComputationGraph graph)
     {
         var method = new CSharpModelBuilder().BuildMethod(graph, "CovTest");
         var graphInputs = InternalComputationGraphConverter.BuildNodes(graph).inputs;
         object?[] args = [.. method.GetParameters().Zip(graphInputs).Select(x =>
             x.First.ParameterType.GetMethod("op_Implicit", [typeof(Variable)])!.Invoke(null, [x.Second]))];
-        var rebuilt = new InternalComputationGraph(
+        return new InternalComputationGraph(
             graphInputs, [((IValue)method.Invoke(null, args)!).ToVariable()]);
-
-        Assert.Equal(Run(graph, inputs), Run(rebuilt, inputs));
     }
+
+    private static int[] OpCounts(InternalComputationGraph graph, params string[] opCodes)
+        => [.. opCodes.Select(op => graph.Nodes.Count(n => n.OpCode == op))];
 
     private static byte[][] Run(InternalComputationGraph graph, TensorData[] inputs)
     {

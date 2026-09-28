@@ -121,10 +121,33 @@ public static partial class OnnxOp
     public static Variable Clip(Variable input, Variable min, Variable max)
         => NodeBuilder.BuildNodeSingleOut(CLIP, [input, min, max], []);
 
+    /// <summary>
+    /// ONNX <c>Col2Im</c>. A call over one spatial axis with non-zero pads is built as the same
+    /// <c>Col2Im</c> over two axes, the second of extent 1, followed by a <c>Squeeze</c> of that
+    /// axis: ONNX Runtime's kernel computes the one-axis padded form wrongly, and differently from
+    /// run to run, and computes the two-axis form as the spec does. The two are equal element for
+    /// element — a unit block along a unit axis with no pads and unit stride and dilation covers
+    /// exactly one position, so the column layout <c>[N, C·K, L]</c> reads the same either way.
+    /// Every other call is the plain operator.
+    /// </summary>
     public static Variable Col2Im(Variable input, Variable imageShape, Variable blockShape,
         long[] dilations, long[] pads, long[] strides)
-        => NodeBuilder.BuildNodeSingleOut(COL2IM, [input, imageShape, blockShape], 
-            [(AttrDilations, dilations), (AttrPads, pads), (AttrStrides, strides)]);
+    {
+        bool paddedOneAxis = pads is { Length: 2 } && pads.Any(p => p != 0)
+            && dilations is null or { Length: 1 } && strides is null or { Length: 1 };
+        if (!paddedOneAxis)
+            return NodeBuilder.BuildNodeSingleOut(COL2IM, [input, imageShape, blockShape],
+                [(AttrDilations, dilations), (AttrPads, pads), (AttrStrides, strides)]);
+
+        var unit = Globals.Vector(1L);
+        long[] liftedDilations = [dilations?[0] ?? 1L, 1L];
+        long[] liftedPads = [pads![0], 0L, pads[1], 0L];
+        long[] liftedStrides = [strides?[0] ?? 1L, 1L];
+        var lifted = NodeBuilder.BuildNodeSingleOut(COL2IM,
+            [input, Concat([imageShape, unit], 0), Concat([blockShape, unit], 0)],
+            [(AttrDilations, liftedDilations), (AttrPads, liftedPads), (AttrStrides, liftedStrides)]);
+        return Squeeze(lifted, Globals.Vector(-1L));
+    }
 
     public static Variable Compress(Variable input, Variable condition, long? axis)
         => NodeBuilder.BuildNodeSingleOut(COMPRESS, [input, condition], [(AttrAxis, axis)]);

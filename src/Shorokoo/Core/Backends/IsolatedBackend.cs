@@ -404,6 +404,18 @@ public static class IsolatedBackend
             => _inner.CreateSession(
                 modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases);
 
+        public IShorokooSession CreateSession(
+            ReadOnlyMemory<byte> modelBytes,
+            ShorokooGraphOptimization graphOptimization,
+            ShorokooLogSeverity logSeverity,
+            DeviceMemorySettings deviceMemory,
+            DiagnosticSettings diagnostics,
+            IReadOnlyList<OutputAlias> outputAliases,
+            int intraOpThreads)
+            => _inner.CreateSession(
+                modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases,
+                intraOpThreads);
+
         public bool AcceptsTrainingFormat(string format) => _inner.AcceptsTrainingFormat(format);
 
         public string? KernelWorkaroundSet => _inner.KernelWorkaroundSet;

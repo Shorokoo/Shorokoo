@@ -1724,13 +1724,18 @@ namespace Shorokoo.Runtime
         /// gets rather than the one a kept session does: parameter initialization and
         /// optimizer-state seeding (see <see cref="IsFullyConstant"/>).
         /// </summary>
-        internal CompiledGraph Compile(InternalComputationGraph graph, ShorokooGraphOptimization optimization)
+        /// <param name="graph">The graph to compile.</param>
+        /// <param name="optimization">The profile the session is built with.</param>
+        /// <param name="intraOpThreads">The threads one run of the session may spread an operator
+        /// over: 1 for a session run side by side with others, 0 for the backend's default.</param>
+        internal CompiledGraph Compile(
+            InternalComputationGraph graph, ShorokooGraphOptimization optimization, int intraOpThreads = 0)
         {
             graph.RequireRunnableOps("ComputeContext.Compile");
             return CompileFromModel(
                 () => FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true),
                 ResolveOriginalInputNames(graph), trainingStep: false, reusedAcrossShapes: false,
-                description: null, profile: optimization);
+                description: null, profile: optimization, intraOpThreads: intraOpThreads);
         }
 
         private CompiledGraph CompileFromModel(
@@ -1740,7 +1745,8 @@ namespace Shorokoo.Runtime
             bool reusedAcrossShapes,
             string? description,
             IReadOnlyList<(int Output, int Input)>? aliasCandidates = null,
-            ShorokooGraphOptimization? profile = null)
+            ShorokooGraphOptimization? profile = null,
+            int intraOpThreads = 0)
         {
             RefuseHostContext("compile");
             var model = buildModel();
@@ -1773,7 +1779,7 @@ namespace Shorokoo.Runtime
                     deviceMemory = deviceMemory with { LimitBytes = arena };
                     kept = modelData;
                 }
-                session = BuildSession(backend, modelData, optimization, deviceMemory, outputAliases);
+                session = BuildSession(backend, modelData, optimization, deviceMemory, outputAliases, intraOpThreads);
             }
             finally
             {
@@ -2140,10 +2146,11 @@ namespace Shorokoo.Runtime
         /// memory.</summary>
         internal IShorokooSession BuildSession(
             IShorokooBackend backend, byte[] modelData, ShorokooGraphOptimization optimization,
-            DeviceMemorySettings deviceMemory, IReadOnlyList<OutputAlias>? outputAliases = null)
+            DeviceMemorySettings deviceMemory, IReadOnlyList<OutputAlias>? outputAliases = null,
+            int intraOpThreads = 0)
             => backend.CreateSession(
                 modelData, optimization, ShorokooLogSeverity.Fatal, deviceMemory, Diagnostics,
-                outputAliases ?? []);
+                outputAliases ?? [], intraOpThreads);
 
         /// <summary>
         /// Whether the model takes no runtime input, so every node's value is already
@@ -2187,7 +2194,7 @@ namespace Shorokoo.Runtime
         /// model still gets its constant key chain folded, as
         /// <c>Documentation/rng-configuration.md</c> says it does. Parameter initialization and
         /// optimizer-state seeding are the kept sessions that ask for the same profile explicitly
-        /// (<see cref="Compile(InternalComputationGraph, ShorokooGraphOptimization)"/>): each takes
+        /// (<see cref="Compile(InternalComputationGraph, ShorokooGraphOptimization, int)"/>): each takes
         /// inputs — a parameter's stream key, or its value — so this predicate does not see it, but
         /// each run still computes its values once, for which the reasons above hold
         /// unchanged.</para>

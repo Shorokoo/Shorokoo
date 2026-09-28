@@ -38,7 +38,7 @@ public class QeeImageRandomRnnAuditTests
     {
         var x8 = F32Wave([1L, 1L, 8L, 8L]);
         Assert.True(QeeAudit.Check<QeeResizeShapeAuditCheck>(x8));
-        Assert.True(QeeAudit.QeeOnly<QeeResizeNegativeAxesAuditCheck>(x8));
+        Assert.True(QeeAudit.Check<QeeResizeNegativeAxesAuditCheck>(x8));
         Assert.True(QeeAudit.Check<QeeUpsampleAffineGridSampleAuditCheck>(F32Wave([1L, 2L, 4L, 4L])));
         Assert.True(QeeAudit.Check<QeeAffineGridSample5DAuditCheck>(F32Wave([1L, 1L, 3L, 4L, 4L])));
         Assert.True(QeeAudit.Check<QeeRoiAlignShapeAuditCheck>(
@@ -232,6 +232,13 @@ public class QeeImageRandomRnnAuditTests
                 -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1]));
 
     [Fact]
+    public void TestCubicAntialiasedCropAndResizeKeepsThePolicyScale()
+        => Assert.True(AutoTest.AdvancedTestGraph<CubicAntialiasedCropAndResizePolicyValues>([],
+            [F32([1L, 4L, 6L, 2L], [.. Enumerable.Range(0, 48).Select(i => (float)(i % 7))])],
+            expected: [-1, -1, -1, -1, -1, -1, -1, -1, 3.6422229, 4.6427097, 1.1374716, 2.3953724, 3.9555788, 3.4888892, 3.9883382, 1.1786468,
+                -1, -1, -1, -1, -1, -1, -1, -1]));
+
+    [Fact]
     public void TestResizeOverAxesBetweenTransposesMatchesTheResizeOverEveryAxis()
         => Assert.True(AutoTest.AdvancedTestGraph<ResizeOverAxesBetweenTransposesCheck>([],
             [F32([1L, 3L, 4L, 5L], [.. Enumerable.Range(0, 60).Select(i => (float)i)])]));
@@ -245,6 +252,11 @@ public class QeeImageRandomRnnAuditTests
     public void TestResizePolicyOverAxesBetweenTransposesMatchesTheResizeOnTheInput()
         => Assert.True(AutoTest.AdvancedTestGraph<ResizePolicyOverAxesBetweenTransposesCheck>([],
             [F32([1L, 3L, 4L, 5L], [.. Enumerable.Range(0, 60).Select(i => (float)i)])]));
+
+    [Fact]
+    public void TestRangeReturnedBesideTheGatherItDrivesIsReturned()
+        => Assert.True(AutoTest.AdvancedTestGraph<RangeReturnedBesideTheGatherItDrivesValues>([],
+            [F32([3L, 2L], 0f, 1f, 2f, 3f, 4f, 5f)], expected: [0, 1, 2, 0, 1, 2, 3, 4, 5]));
 
     [Fact]
     public void TestCol2ImOverOneSpatialAxisWithPadsAndStride()

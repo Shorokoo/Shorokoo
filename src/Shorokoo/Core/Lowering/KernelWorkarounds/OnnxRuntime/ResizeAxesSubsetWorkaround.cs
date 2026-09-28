@@ -23,9 +23,13 @@ using static OpCodes;
 /// and every other axis takes scale 1, its own extent as size, and the roi <c>[0, 1]</c>, which
 /// leave it as it is in every mode. A constant operand of an input whose rank the graph tells is
 /// written out as a constant; otherwise the operand is placed with <c>ScatterElements</c> over a
-/// vector as long as the input's rank. A <c>not_larger</c> or <c>not_smaller</c> policy takes its
-/// common scale over the named axes alone, which no call over every axis reproduces, so such a
-/// call is rewritten only when it names every axis, and then only reordered.</para>
+/// vector as long as the input's rank.</para>
+///
+/// <para>A <c>not_larger</c> or <c>not_smaller</c> policy takes its common scale over the named
+/// axes alone, which no call over every axis reproduces. A call that names every axis is
+/// reordered; one that names some keeps its axes and reads its input through
+/// <c>OptionalGetElement(Optional(x))</c>, the same tensor, which the transpose optimizer cannot
+/// move a <c>Transpose</c> through and constant folding leaves in place.</para>
 /// </summary>
 internal sealed class ResizeAxesSubsetWorkaround : KernelWorkaround
 {
@@ -35,8 +39,7 @@ internal sealed class ResizeAxesSubsetWorkaround : KernelWorkaround
     {
         var a = site.Attributes;
         if (a.GetLongsVal(AttrAxes) is not { } axes) return false;
-        if (a.GetEnumVal<KeepAspectRatioPolicy>(AttrKeepAspectRatioPolicy) is null or KeepAspectRatioPolicy.stretch) return true;
-        return Rank(site) is { } rank && Normalized(axes, rank).Distinct().Count() == rank;
+        return true;
     }
 
     public override Variable?[] Rewrite(WorkaroundSite site, Variable?[] inputs)
@@ -45,6 +48,15 @@ internal sealed class ResizeAxesSubsetWorkaround : KernelWorkaround
         var (x, roi, scales, sizes) = (inputs[0]!, inputs[1], inputs[2], inputs[3]);
         var axes = a.GetLongsVal(AttrAxes)!;
         var rank = Rank(site);
+        var policy = a.GetEnumVal<KeepAspectRatioPolicy>(AttrKeepAspectRatioPolicy);
+
+        if (policy is not (null or KeepAspectRatioPolicy.stretch)
+            && !(rank is { } known && Normalized(axes, known).Distinct().Count() == known))
+            return [Resize(OptionalGetElement(Optional(x, DataStructure.Tensor, site.DTypeOf(0))),
+                roi, scales, sizes, a.GetBoolVal(AttrAntialias), rank is { } r ? Normalized(axes, r) : axes,
+                a.GetEnumVal<CoordinateTransformationMode>(AttrCoordinateTransformationMode), a.GetFloatVal(AttrCubicCoeffA),
+                a.GetBoolVal(AttrExcludeOutside), a.GetFloatVal(AttrExtrapolationValue), policy,
+                a.GetEnumVal<ResizeMode>(AttrMode), a.GetEnumVal<NearestMode>(AttrNearestMode))];
 
         Variable? Spread(int slot, Variable? operand, Func<Variable> filler, Func<Variable, Variable> scattered)
         {
@@ -65,7 +77,7 @@ internal sealed class ResizeAxesSubsetWorkaround : KernelWorkaround
         return [Resize(x, fullRoi, fullScales, fullSizes, a.GetBoolVal(AttrAntialias), null,
             a.GetEnumVal<CoordinateTransformationMode>(AttrCoordinateTransformationMode), a.GetFloatVal(AttrCubicCoeffA),
             a.GetBoolVal(AttrExcludeOutside), a.GetFloatVal(AttrExtrapolationValue),
-            a.GetEnumVal<KeepAspectRatioPolicy>(AttrKeepAspectRatioPolicy), a.GetEnumVal<ResizeMode>(AttrMode),
+            policy, a.GetEnumVal<ResizeMode>(AttrMode),
             a.GetEnumVal<NearestMode>(AttrNearestMode))];
     }
 

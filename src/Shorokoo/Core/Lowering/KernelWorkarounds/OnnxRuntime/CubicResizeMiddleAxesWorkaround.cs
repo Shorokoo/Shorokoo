@@ -27,8 +27,10 @@ using static OpCodes;
 /// and a <c>Reshape</c>, whose outer two axes stay at scale 1, so the resize takes the route along
 /// the last two axes; the result is reshaped and transposed back. On that route axes 0 and 3 are
 /// read straight across, which is what the call's scales of 1 give them, so the regrouped call
-/// carries the roi and the scale or length of axes 1 and 2 only, each along its new position, and
-/// the lengths a policy settles on are written out as sizes. The regrouping keeps ONNX Runtime's
+/// carries the roi and the scale or length of axes 1 and 2 only, each along its new position. A
+/// <c>not_larger</c> or <c>not_smaller</c> policy is kept, over the new positions of the axes it
+/// names; one that names axis 0 or 3 scales it with axis 1, so its call never takes the
+/// channels-last route and is left as it stands. The regrouping keeps ONNX Runtime's
 /// own graph optimizations from folding the transposes back into the call, which a transpose
 /// pair around the resize alone does not.</para>
 ///
@@ -56,6 +58,9 @@ internal sealed class CubicResizeMiddleAxesWorkaround : KernelWorkaround
             return false;
         var axes = Axes(a.GetLongsVal(AttrAxes));
         if (!axes.Contains(1) || IsIdentityRoi(site.ConstantOf(1))) return false;
+        if (a.GetEnumVal<KeepAspectRatioPolicy>(AttrKeepAspectRatioPolicy) is not (null or KeepAspectRatioPolicy.stretch)
+            && (axes.Contains(0) || axes.Contains(3)))
+            return false;
         if (ConstantScales(site) is not { } scales) return true;
         if (scales.Length != axes.Length) return false;
         float ScaleOf(long axis) => Array.IndexOf(axes, axis) is var k and >= 0 ? scales[k] : 1f;
@@ -76,7 +81,7 @@ internal sealed class CubicResizeMiddleAxesWorkaround : KernelWorkaround
         var nearestMode = a.GetEnumVal<NearestMode>(AttrNearestMode);
         var dims = Shape(x);
 
-        var regrouped = Regrouped(x, roi, sizes is null ? scales : null, sizes is null ? null : Lengths(dims, sizes, policy, writtenAxes),
+        var regrouped = Regrouped(x, roi, sizes is null ? scales : null, sizes, policy,
             axes, antialias, cubicCoeffA, excludeOutside, extrapolationValue, nearestMode);
         var rank = KnownRank(site);
         if (rank == 4 && ConstantScales(site) is not null)
@@ -96,12 +101,24 @@ internal sealed class CubicResizeMiddleAxesWorkaround : KernelWorkaround
     /// <summary>
     /// The resize of axes 1 and 2 of <paramref name="x"/> over the last two axes of
     /// <c>[N·W, 1, C, H]</c>, with the roi of each and either its scale from
-    /// <paramref name="scales"/> or its length from <paramref name="lengths"/> (one per resized
-    /// axis), and axes 0 and 3 read straight across.
+    /// <paramref name="scales"/> or its length from <paramref name="sizes"/> (one per resized
+    /// axis), and axes 0 and 3 read straight across. Under a <c>not_larger</c> or
+    /// <c>not_smaller</c> <paramref name="policy"/> the call keeps its operands and names the new
+    /// positions of its axes, all of them 1 or 2.
     /// </summary>
-    private static Variable Regrouped(Variable x, Variable roi, Variable? scales, Variable? lengths, long[] axes,
-        bool? antialias, float? cubicCoeffA, bool? excludeOutside, float? extrapolationValue, NearestMode? nearestMode)
+    private static Variable Regrouped(Variable x, Variable roi, Variable? scales, Variable? sizes, KeepAspectRatioPolicy? policy,
+        long[] axes, bool? antialias, float? cubicCoeffA, bool? excludeOutside, float? extrapolationValue, NearestMode? nearestMode)
     {
+        var moved = Transpose(x, ToChannelsSecond);
+        var folded = Reshape(moved, Concat([Globals.Vector(-1L, 1L), Shape(moved, start: 2)], axis: 0), allowZero: false);
+        Variable Unfolded(Variable resized)
+            => Transpose(Reshape(resized, Concat([Shape(moved, end: 2), Shape(resized, start: 2)], axis: 0), allowZero: false), ToChannelsLast);
+
+        if (policy is not (null or KeepAspectRatioPolicy.stretch))
+            return Unfolded(Resize(folded, roi, null, sizes, antialias, [.. axes.Select(axis => axis + 1)],
+                CoordinateTransformationMode.Tf_crop_and_resize, cubicCoeffA, excludeOutside, extrapolationValue, policy,
+                ResizeMode.Cubic, nearestMode));
+
         long n = axes.Length;
         long? channels = Array.IndexOf(axes, 1L) is var c and >= 0 ? c : null;
         long? height = Array.IndexOf(axes, 2L) is var h and >= 0 ? h : null;
@@ -112,27 +129,12 @@ internal sealed class CubicResizeMiddleAxesWorkaround : KernelWorkaround
         var scalesOf = scales is null ? null
             : Gather(Concat([scales, Globals.Vector(1f)], axis: 0), Globals.Vector(n, n, channels ?? n, height ?? n), axis: 0);
 
-        var moved = Transpose(x, ToChannelsSecond);
-        var folded = Reshape(moved, Concat([Globals.Vector(-1L, 1L), Shape(moved, start: 2)], axis: 0), allowZero: false);
-        var sizesOf = lengths is null ? null
-            : Concat([Shape(folded, end: 2), Gather(Concat([lengths, Shape(x)], axis: 0),
+        var sizesOf = sizes is null ? null
+            : Concat([Shape(folded, end: 2), Gather(Concat([sizes, Shape(x)], axis: 0),
                 Globals.Vector(channels ?? n + 1, height ?? n + 2), axis: 0)], axis: 0);
 
-        var resized = Resize(folded, roiOf, scalesOf, sizesOf, antialias, null, CoordinateTransformationMode.Tf_crop_and_resize,
-            cubicCoeffA, excludeOutside, extrapolationValue, null, ResizeMode.Cubic, nearestMode);
-        var unfolded = Reshape(resized, Concat([Shape(moved, end: 2), Shape(resized, start: 2)], axis: 0), allowZero: false);
-        return Transpose(unfolded, ToChannelsLast);
-    }
-
-    /// <summary>The output length of each resized axis: <paramref name="sizes"/> as written, or
-    /// under a <c>not_larger</c> or <c>not_smaller</c> policy <c>round(s·L)</c> for its common
-    /// scale <c>s</c>.</summary>
-    private static Variable Lengths(Variable dims, Variable sizes, KeepAspectRatioPolicy? policy, long[]? writtenAxes)
-    {
-        if (policy is null or KeepAspectRatioPolicy.stretch) return sizes;
-        var covered = Cast(writtenAxes is null ? dims : Gather(dims, Globals.Vector(writtenAxes), axis: 0), null, DType.Float32);
-        var common = CommonScale(Div(Cast(sizes, null, DType.Float32), covered), policy.Value);
-        return Cast(Floor(Add(Mul(common, covered), Globals.Scalar(0.5f))), null, DType.Int64);
+        return Unfolded(Resize(folded, roiOf, scalesOf, sizesOf, antialias, null, CoordinateTransformationMode.Tf_crop_and_resize,
+            cubicCoeffA, excludeOutside, extrapolationValue, null, ResizeMode.Cubic, nearestMode));
     }
 
     private static Variable CommonScale(Variable ratios, KeepAspectRatioPolicy policy)

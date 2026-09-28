@@ -258,10 +258,7 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
-    /// <summary>Resize with NEGATIVE axes (spec opset 18+: counted from the back) — QEE-only:
-    /// ONNX Runtime 1.25.1's Resize kernel rejects negative axes ("Scale value should be
-    /// greater than 0"), so this module is driven through QeeAudit strict-QEE without ORT.
-    /// Input x is expected as [1,1,8,8].</summary>
+    /// <summary>Resize with negative axes, counted from the back. Input x is [1,1,8,8].</summary>
     [Module]
     public partial class QeeResizeNegativeAxesAuditCheck
     {
@@ -1072,6 +1069,18 @@ namespace Shorokoo.Tests.Modules
                 CropAndResizeVariantsValues.Crop(x, Vector(0.5f, 0f, 1.5f, 1f), null, Vector(6L, 5L), [1L, 2L], KeepAspectRatioPolicy.not_larger, ResizeMode.Cubic));
     }
 
+    /// <summary>Antialiased cubic tf_crop_and_resize downscaling C and H under a not_larger policy over axes
+    /// [1, 2], with a roi leaving the input along C. Input x is [1,4,6,2].</summary>
+    [Module]
+    public partial class CubicAntialiasedCropAndResizePolicyValues
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x)
+            => ((Tensor<float32>)OnnxOp.Resize(x, roi: Vector(-0.2f, 0.05f, 1.1f, 0.95f), scales: null, sizes: Vector(3L, 4L),
+                antialias: true, axes: [1L, 2L], coordinateTransformationMode: CoordinateTransformationMode.Tf_crop_and_resize,
+                cubicCoeffA: null, excludeOutside: null, extrapolationValue: -1f,
+                keepAspectRatioPolicy: KeepAspectRatioPolicy.not_larger, mode: ResizeMode.Cubic, nearestMode: null)).Reshape(Vector(-1L));
+    }
+
     /// <summary>Linear Resize over axes [2, 3] and over axes [1, 2] of an input transposed into place and back,
     /// against the same resizes written over every axis. Input x is [1,3,4,5].</summary>
     [Module]
@@ -1141,6 +1150,18 @@ namespace Shorokoo.Tests.Modules
             var mismatch = Apart((Tensor<float32>)OnnxOp.Transpose(R((Tensor<float32>)OnnxOp.Transpose(x, [0L, 2L, 3L, 1L]), [1L, 2L]), [0L, 3L, 1L, 2L]),
                 R(x, [2L, 3L]));
             return mismatch < Scalar(1L);
+        }
+    }
+
+    /// <summary>The indices Range(0, N) of the leading axis returned beside the Gather along that axis they
+    /// drive. Input x is [3,2].</summary>
+    [Module]
+    public partial class RangeReturnedBesideTheGatherItDrivesValues
+    {
+        public static (Tensor<int64>, Tensor<float32>) Inline(Tensor<float32> x)
+        {
+            var indices = (Tensor<int64>)OnnxOp.Range(Scalar(0L), OnnxOp.Gather(OnnxOp.Shape(x), Scalar(0L), axis: 0), Scalar(1L));
+            return (indices, (Tensor<float32>)OnnxOp.Gather(x, indices, axis: 0));
         }
     }
 

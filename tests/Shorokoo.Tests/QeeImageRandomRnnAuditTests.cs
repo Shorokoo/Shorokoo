@@ -213,7 +213,8 @@ public class QeeImageRandomRnnAuditTests
             [F32([1L, 1L, 1L, 4L], 1f, 2f, 3f, 4f)],
             expected: [2.5, 3, 3.5, 4, 2, 3, 3, 4, 2.5, 3, 3.59375, 4, 1.66796875, 2.5, 3.33203125, 4]));
 
-    [Fact]
+    // #421: ONNX Runtime's cubic Resize scaled on the middle axes of a 4-D input extrapolates at the wrong elements
+    [Fact(Skip = "#421: ONNX Runtime's cubic Resize scaled on the middle axes of a 4-D input extrapolates at the wrong elements")]
     public void TestCubicCropAndResizeAlongChannelsExtrapolatesWhereTheRoiLeavesTheInput()
         => Assert.True(AutoTest.AdvancedTestGraph<CubicCropAndResizeAlongChannelsValues>([],
             [F32([1L, 3L, 1L, 2L], 0f, 1f, 2f, 3f, 4f, 5f)],

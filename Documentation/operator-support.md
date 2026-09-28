@@ -335,18 +335,21 @@ shape and type.
     removes the `Range` although it is an output, and reading the model's outputs
     throws `UnsupportedDTypeException` (`OU002`). Accepted as ONNX Runtime's
     behaviour ([#432](https://github.com/Shorokoo/Shorokoo/issues/432)).
-    An int64 `Range` counts its elements exactly on every backend, a span `limit −
-    start` beyond 2^53 or beyond int64 included. ONNX Runtime's kernel takes `limit
-    − start` in int64, which wraps beyond int64, and computes the count in double
-    precision, so on ONNX Runtime an int64 `Range` is rewritten to count in uint64
-    and scale a `Range(0, count, 1)` by `delta`, refusing a count no tensor holds.
-    Two forms are left as written. One whose three inputs are `Constant`s spanning
-    less than 2^53 the kernel counts exactly. One whose `delta` is a `Constant` 1 or
-    −1 and whose `start` is a `Constant` of magnitude below 2^62, such as `Range(0,
-    n, 1)`, the kernel counts exactly for a span below 2^53; for a larger span,
-    whose count is 0 or one no tensor holds, it refuses the call or gives no
-    elements, and never a wrong element
-    ([#447](https://github.com/Shorokoo/Shorokoo/issues/447)).
+    An int64 or int32 `Range` counts its elements exactly on every backend, a span
+    `limit − start` beyond 2^53 or beyond its type included. ONNX Runtime's kernel
+    takes `limit − start` in the input type, which wraps beyond it, and computes the
+    count in double precision, so on ONNX Runtime an int64 `Range` is rewritten to
+    count in uint64 and scale a `Range(0, count, 1)` by `delta`, refusing a count no
+    tensor holds, and an int32 `Range` is rewritten the same way on its inputs cast
+    to int64, its elements cast back. Two forms are left as written. One whose three
+    inputs are `Constant`s spanning less than 2^53 for int64, or within int32 for
+    int32, the kernel counts exactly. One whose `delta` is a `Constant` 1 or −1 and
+    whose `start` is a `Constant` 0 for int32, or of magnitude below 2^62 for int64,
+    such as `Range(0, n, 1)`: the kernel counts an int32 one exactly, and an int64
+    one exactly for a span below 2^53; for a larger int64 span, whose count is 0 or
+    one no tensor holds, it refuses the call or gives no elements, and never a wrong
+    element ([#447](https://github.com/Shorokoo/Shorokoo/issues/447),
+    [#450](https://github.com/Shorokoo/Shorokoo/issues/450)).
 
 ## Convolution & pooling
 

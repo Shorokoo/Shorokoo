@@ -32,33 +32,42 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// </para>
     ///
     /// <para>
-    /// A caller may name nodes to number last (<c>numberLast</c>): the nodes a pass spliced in,
-    /// so that every other node keeps the number, and every value the name, it has in the graph
-    /// built without them.
+    /// A caller may say how to number a graph a pass spliced nodes into (<see cref="Numbering"/>):
+    /// the spliced nodes last, and the number of each node the pass dropped left unused where it
+    /// stood, so that every other node keeps the number, and every value the name, it has in the
+    /// graph built without them.
     /// </para>
     /// </summary>
     internal static class FastUseUniqueNames
     {
         /// <summary>
+        /// How to number a graph a pass spliced nodes into: <paramref name="Last"/> after every other
+        /// node, and, left unused, <paramref name="LeadingGap"/> numbers before the first node and
+        /// <paramref name="GapsAfter"/>[k] numbers after the node keyed k.
+        /// </summary>
+        internal sealed record Numbering(
+            IReadOnlySet<FastNodeKey> Last, IReadOnlyDictionary<FastNodeKey, int> GapsAfter, int LeadingGap);
+
+        /// <summary>
         /// Rewrite the graph using a fresh per-graph counter starting at 1.
         /// </summary>
-        public static void Process(InternalComputationGraph graph, IReadOnlySet<FastNodeKey>? numberLast = null)
+        public static void Process(InternalComputationGraph graph, Numbering? numbering = null)
         {
             int counter = 0;
-            ProcessWithCounterAndReturnMap(graph, ref counter, numberLast);
+            ProcessWithCounterAndReturnMap(graph, ref counter, numbering);
         }
 
         /// <summary>
-        /// Same as <see cref="Process(InternalComputationGraph, IReadOnlySet{FastNodeKey})"/> but returns the
+        /// Same as <see cref="Process(InternalComputationGraph, Numbering)"/> but returns the
         /// <c>oldKey → newKey</c> map. Useful when the caller has additional
         /// data structures (e.g. tensor info lookups) keyed by old keys that
         /// also need rewriting.
         /// </summary>
         public static Dictionary<FastNodeKey, FastNodeKey> ProcessAndReturnMap(
-            InternalComputationGraph graph, IReadOnlySet<FastNodeKey>? numberLast = null)
+            InternalComputationGraph graph, Numbering? numbering = null)
         {
             int counter = 0;
-            return ProcessWithCounterAndReturnMap(graph, ref counter, numberLast);
+            return ProcessWithCounterAndReturnMap(graph, ref counter, numbering);
         }
 
         /// <summary>
@@ -73,7 +82,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         public static Dictionary<FastNodeKey, FastNodeKey> ProcessWithCounterAndReturnMap(
-            InternalComputationGraph graph, ref int counter, IReadOnlySet<FastNodeKey>? numberLast = null)
+            InternalComputationGraph graph, ref int counter, Numbering? numbering = null)
         {
             // Pass 1: assign fresh sequential keys and FriendlyNames; remember
             // the old → new key mapping for the rewrite pass.
@@ -82,19 +91,22 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             // only shift every phantom's name.
             var oldToNew = new Dictionary<FastNodeKey, FastNodeKey>();
             List<FastNode> last = [];
+            counter += numbering?.LeadingGap ?? 0;
             foreach (var node in graph.Nodes)
             {
                 if (InternalOpCodes.IsGraphOutputOp(node.OpCode)) continue;
-                if (numberLast is not null && numberLast.Contains(node.Key))
+                if (numbering is not null && numbering.Last.Contains(node.Key))
                 {
                     last.Add(node);
                     continue;
                 }
+                var oldKey = node.Key;
                 counter++;
                 var newKey = new FastNodeKey((UInt128)(uint)counter);
                 oldToNew[node.Key] = newKey;
                 node.Key = newKey;
                 node.FriendlyName = $"N{counter}";
+                if (numbering is not null && numbering.GapsAfter.TryGetValue(oldKey, out var gap)) counter += gap;
             }
 
             // Pass 1b: scan every reference (FullInputs / FullOutputs slots,

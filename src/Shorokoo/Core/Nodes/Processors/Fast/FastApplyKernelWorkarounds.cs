@@ -34,10 +34,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
     /// call, the call is dropped, and every reference to one of its outputs is rewired to the
     /// replacement's.</para>
     ///
-    /// <para><b>Names.</b> What the pass did is returned as <see cref="Splices"/>, which names the
-    /// nodes <see cref="FastUseUniqueNames"/> numbers last: the spliced nodes, and the nodes the
-    /// later pre-passes add only for them. Every other value then keeps the name it has in the
-    /// model built without the workarounds.</para>
+    /// <para><b>Names.</b> What the pass did is returned as <see cref="Splices"/>, which says how
+    /// <see cref="FastUseUniqueNames"/> numbers the graph: the spliced nodes, and the nodes the
+    /// later pre-passes add only for them, last; and, where a call was dropped, the number it had
+    /// left unused. Every other value then keeps the name it has in the model built without the
+    /// workarounds.</para>
     ///
     /// <para><b>Plans.</b> A replacement is built once per distinct shape of call — workaround,
     /// input dtypes and ranks, attributes, outputs, and the constants it read — and reused for
@@ -65,6 +66,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             if (!HasCandidate(graph, set)) return Splices.None;
             var minted = new HashSet<FastNodeKey>();
             var hosts = new HashSet<FastNodeKey>();
+            var gaps = new Dictionary<FastNodeKey, int>();
+            int leadingGap = 0;
 
             Dictionary<FastTensorKey, FastTensorInfo>? tensorInfo = null;
             foreach (var workaround in set!.Workarounds)
@@ -78,6 +81,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 var rewired = new Dictionary<FastTensorKey, FastTensorKey>();
                 var newNodes = new List<FastNode>(graph.Nodes.Count);
                 bool changed = false;
+                // The last node kept so far that is numbered in place, which a dropped call's
+                // number is left unused after.
+                FastNodeKey? numbered = null;
 
                 foreach (var node in graph.Nodes)
                 {
@@ -86,6 +92,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                         || !workaround.Applies(site))
                     {
                         newNodes.Add(node);
+                        if (!minted.Contains(node.Key) && !InternalOpCodes.IsGraphOutputOp(node.OpCode)) numbered = node.Key;
                         continue;
                     }
 
@@ -95,9 +102,16 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                     {
                         FastSplice.SpliceInPlace(node, plan.Splice, newNodes, minted);
                         hosts.Add(node.Key);
+                        if (!minted.Contains(node.Key)) numbered = node.Key;
                         continue;
                     }
 
+                    if (!minted.Contains(node.Key))
+                    {
+                        var unused = 1 + (gaps.Remove(node.Key, out var own) ? own : 0);
+                        if (numbered is { } before) gaps[before] = gaps.GetValueOrDefault(before) + unused;
+                        else leadingGap += unused;
+                    }
                     var outputs = FastSplice.SpliceBeside(node, plan.Splice, newNodes, minted);
                     for (int i = 0; i < site.OutputKeys.Length; i++)
                         if (plan.Slots[i] >= 0 && site.OutputKeys[i] is { } key)
@@ -119,38 +133,46 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             }
             return minted.Count == 0 && hosts.Count == 0
                 ? Splices.None
-                : new Splices(minted, hosts, [.. graph.Nodes.Select(n => n.Key)]);
+                : new Splices(minted, hosts, [.. graph.Nodes.Select(n => n.Key)], gaps, leadingGap);
         }
 
         /// <summary>
         /// What one <see cref="Process"/> spliced into a graph: the nodes it minted, the nodes it
-        /// turned into a replacement's last node, and every node the graph held once it was done.
+        /// turned into a replacement's last node, every node the graph held once it was done, and
+        /// the numbers of the calls it dropped — how many after each node numbered in place, and
+        /// how many before the first.
         /// </summary>
         internal sealed class Splices
         {
             private readonly HashSet<FastNodeKey> minted;
             private readonly HashSet<FastNodeKey> hosts;
             private readonly HashSet<FastNodeKey> present;
+            private readonly IReadOnlyDictionary<FastNodeKey, int> gaps;
+            private readonly int leadingGap;
 
             /// <summary>Nothing spliced.</summary>
-            public static Splices None { get; } = new([], [], []);
+            public static Splices None { get; } = new([], [], [], new Dictionary<FastNodeKey, int>(), 0);
 
-            internal Splices(HashSet<FastNodeKey> minted, HashSet<FastNodeKey> hosts, HashSet<FastNodeKey> present)
+            internal Splices(HashSet<FastNodeKey> minted, HashSet<FastNodeKey> hosts, HashSet<FastNodeKey> present,
+                IReadOnlyDictionary<FastNodeKey, int> gaps, int leadingGap)
             {
                 this.minted = minted;
                 this.hosts = hosts;
                 this.present = present;
+                this.gaps = gaps;
+                this.leadingGap = leadingGap;
             }
 
             /// <summary>
-            /// The nodes of <paramref name="graph"/>, as the later pre-passes leave it, that
-            /// <see cref="FastUseUniqueNames"/> numbers last: every minted node still in it, and
-            /// every node added since the workarounds whose output only a node of the replacement
-            /// reads, however many such nodes lie in between — the identities that carry an
-            /// outer-scope value into a spliced branch, say, or wrap a value leaving one. Null when
-            /// nothing was spliced.
+            /// How <see cref="FastUseUniqueNames"/> numbers <paramref name="graph"/>, as the later
+            /// pre-passes leave it; null when nothing was spliced. Numbered last: every minted node
+            /// still in it, and every node added since the workarounds whose output only a node of
+            /// the replacement reads, however many such nodes lie in between — the identities that
+            /// carry an outer-scope value into a spliced branch, say, or wrap a value leaving one.
+            /// Left unused: the number of each call a replacement spliced beside it took the place
+            /// of, where the call stood.
             /// </summary>
-            public IReadOnlySet<FastNodeKey>? NumberLast(InternalComputationGraph graph)
+            public FastUseUniqueNames.Numbering? Numbering(InternalComputationGraph graph)
             {
                 if (minted.Count == 0 && hosts.Count == 0) return null;
 
@@ -178,7 +200,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                             grew = true;
                         }
                 }
-                return last;
+                return new(last, gaps, leadingGap);
             }
         }
 

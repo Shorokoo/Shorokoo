@@ -50,6 +50,7 @@ public class KernelWorkaroundPassTests
         var g = Graph(x, OnnxOp.Add(OnnxOp.Mul(OnnxOp.Neg(x), x), OnnxOp.Neg(OnnxOp.Abs(x))));
         Assert.Empty(Untouched(g, NegSet).Except(Signatures(Session(g, NegSet))));
         Assert.Empty(Untouched(g, AbsSet).Except(Signatures(Session(g, AbsSet))));
+        Assert.Empty(UntouchedValues(TopKGraph(), TopKSet).Except(Values(Session(TopKGraph(), TopKSet))));
     }
 
     [Fact]
@@ -159,6 +160,11 @@ public class KernelWorkaroundPassTests
 
     private static IEnumerable<string> Untouched(InternalComputationGraph g, KernelWorkaroundSet set)
         => Signatures(Session(g, null)).Where(s => !set.OpCodes.Any(op => s.StartsWith(op + "(", StringComparison.Ordinal)));
+
+    private static IEnumerable<string> Values(ModelProto model) => model.Graph.Nodes.SelectMany(n => n.Outputs);
+
+    private static IEnumerable<string> UntouchedValues(InternalComputationGraph g, KernelWorkaroundSet set)
+        => Session(g, null).Graph.Nodes.Where(n => !set.OpCodes.Contains(n.OpType)).SelectMany(n => n.Outputs);
 
     private static bool Plain(Variable output, string opCode, Variable input)
         => output.OwningNode is { } node && node.OpCode == opCode && node.Inputs[0] == input;

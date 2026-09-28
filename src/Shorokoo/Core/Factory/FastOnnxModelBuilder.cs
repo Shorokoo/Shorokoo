@@ -1628,7 +1628,7 @@ namespace Shorokoo.Core.Factory
             Debug.Assert(graph.IsLinearOrderValid(),
                 "FastOnnxModelBuilder.RunPrePasses: scope nesting must be valid by this point — " +
                 "every Fast pass that mutates node order preserves the linear-order invariant.");
-            FastUseUniqueNames.Process(graph, splices.NumberLast(graph));
+            FastUseUniqueNames.Process(graph, splices.Numbering(graph));
         }
 
         /// <summary>
@@ -1659,7 +1659,7 @@ namespace Shorokoo.Core.Factory
             var preRenameLookup = FastTensorInfoProcessor.BuildTensorInfoLookup(graph);
 
             // Rename, capturing the map so we can rewrite the lookup.
-            var oldToNew = FastUseUniqueNames.ProcessAndReturnMap(graph, splices.NumberLast(graph));
+            var oldToNew = FastUseUniqueNames.ProcessAndReturnMap(graph, splices.Numbering(graph));
 
             var renamed = new Dictionary<FastTensorKey, FastTensorInfo>(preRenameLookup.Count);
             foreach (var (oldKey, info) in preRenameLookup)

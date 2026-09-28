@@ -1561,6 +1561,7 @@ public class TrainingRigCompositionCoverageTests
             Assert.Contains("[33554432, 33554432] = 4.00 PiB failed", ex.Message);
             Assert.Contains("1 of 3", ex.Message);
         }
+        Assert.Equal(2, backend.SingleThreaded);
         Assert.Equal(0, backend.Live);
     }
 

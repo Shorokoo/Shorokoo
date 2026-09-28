@@ -222,17 +222,26 @@ public class RngInitTests
         return backend.Sessions;
     }
 
-    private static float[][] InitValues(ComputationGraph model, bool sideBySide)
+    private static (float[][] Values, int SingleThreaded) InitValues(ComputationGraph model, bool sideBySide)
     {
         var arch = model.ToConcreteArchitecture([TensorData([1L, 4L], new float[4])]);
+        var backend = new SessionCountingBackend(DefaultBackend.Instance);
+        using var ctx = new ComputeContext(backend);
         using var decided = Shorokoo.Core.Nodes.Processors.Fast.FastInitializeModelParams.DecideSideBySide(sideBySide);
-        return [.. arch.InitializeTrainableParams(rngConfig: new RngConfig { MasterSeed = 17 }).ModelParams
+        float[][] values = [.. arch.InitializeTrainableParams(computeContext: ctx, rngConfig: new RngConfig { MasterSeed = 17 }).ModelParams
             .Select(p => p.ToTensorData().As<float32>().AccessMemory().ToArray())];
+        return (values, backend.SingleThreaded);
     }
 
     [Fact]
     public void TestParametersDrawnSideBySideAreTheValuesDrawnInTurn()
-        => Assert.Equal(InitValues(RngInitSameShapeStack8.ComputationGraph, sideBySide: false), InitValues(RngInitSameShapeStack8.ComputationGraph, sideBySide: true));
+    {
+        var (inTurn, inTurnSingleThreaded) = InitValues(RngInitSameShapeStack8.ComputationGraph, sideBySide: false);
+        var (sideBySide, sideBySideSingleThreaded) = InitValues(RngInitSameShapeStack8.ComputationGraph, sideBySide: true);
+        Assert.Equal(inTurn, sideBySide);
+        Assert.Equal(0, inTurnSingleThreaded);
+        Assert.Equal(1, sideBySideSingleThreaded);
+    }
 
     private static int InitSessionsWithDebugInfo(ComputationGraph model)
     {
@@ -320,6 +329,7 @@ public class RngInitTests
 internal sealed class SessionCountingBackend(IShorokooBackend inner) : IShorokooBackend
 {
     internal int Sessions;
+    internal int SingleThreaded;
     internal int Disposed;
     internal int Live => Sessions - Disposed;
 
@@ -336,6 +346,17 @@ internal sealed class SessionCountingBackend(IShorokooBackend inner) : IShorokoo
     {
         System.Threading.Interlocked.Increment(ref Sessions);
         return new CountedSession(inner.CreateSession(modelBytes, graphOptimization, logSeverity, deviceMemory), this);
+    }
+
+    public IShorokooSession CreateSession(
+        ReadOnlyMemory<byte> modelBytes, ShorokooGraphOptimization graphOptimization,
+        ShorokooLogSeverity logSeverity, DeviceMemorySettings deviceMemory, DiagnosticSettings diagnostics,
+        IReadOnlyList<OutputAlias> outputAliases, int intraOpThreads)
+    {
+        System.Threading.Interlocked.Increment(ref Sessions);
+        if (intraOpThreads == 1) System.Threading.Interlocked.Increment(ref SingleThreaded);
+        return new CountedSession(inner.CreateSession(
+            modelBytes, graphOptimization, logSeverity, deviceMemory, diagnostics, outputAliases, intraOpThreads), this);
     }
 
     private sealed class CountedSession(IShorokooSession inner, SessionCountingBackend owner) : IShorokooSession

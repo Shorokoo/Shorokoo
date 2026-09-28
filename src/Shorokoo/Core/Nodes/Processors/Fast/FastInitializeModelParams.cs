@@ -294,9 +294,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         /// </summary>
         private static bool RunsSideBySide(ComputeContext compute, long[] elements)
         {
-            if (elements.Length < 2 || System.Environment.ProcessorCount < 2) return false;
-            if (compute.Backend.Device != ComputeDevice.Cpu) return false;
+            if (elements.Length < 2 || compute.Backend.Device != ComputeDevice.Cpu) return false;
             if (_sideBySide is { } decided) return decided;
+            if (System.Environment.ProcessorCount < 2) return false;
             if (elements.Any(e => e < 0)) return false;
             double total = elements.Sum(e => (double)e);
             return elements.Max() * 2.0 <= total;
@@ -306,7 +306,8 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 
         /// <summary>
         /// Decides <see cref="RunsSideBySide"/> for the initializations this thread starts until
-        /// the returned scope is disposed, where a CPU context has two or more parameters to run —
+        /// the returned scope is disposed, where a CPU context has two or more parameters to run,
+        /// whatever the core count —
         /// for a test to hold the two schedules against each other, and to drive the side-by-side
         /// one over parameters its own rule would run in turn. Thread-scoped, like the other
         /// fault-injection facilities, so tests running in parallel do not see each other's.

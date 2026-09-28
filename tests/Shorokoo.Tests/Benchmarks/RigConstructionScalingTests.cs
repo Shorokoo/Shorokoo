@@ -41,6 +41,22 @@ public partial class RigScalingStack12
     public static Tensor<float32> Inline(Tensor<float32> x) => RigScalingStack.Chain(x, 12);
 }
 
+/// <summary>12 trainable tables of 12 different shapes, <c>[4096 + i, 384]</c>: twelve slices,
+/// so twelve initialization sessions, which is what gives the retention arm twelve arenas to pin
+/// when a result is left on its session.</summary>
+[Module]
+public partial class RigScalingDistinct12
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var acc = x;
+        for (long i = 0; i < 12; i++)
+            acc *= NormalDist.Init(Vector(4096L + i, 384L), Scalar(0f), Scalar(0.02f))
+                     .Reduce(ReduceKind.Mean, null, keepDims: false).Scalar();
+        return acc;
+    }
+}
+
 internal static class RigScalingStack
 {
     internal static Tensor<float32> Chain(Tensor<float32> x, int layers)
@@ -89,7 +105,11 @@ internal static class RigScalingStack
 /// <see cref="TrainingRig.FromScratch"/>: a rig legitimately retains 100-150 MiB of graphs and
 /// state, which is both larger and noisier than the signal. And measured outside the managed
 /// heap, where an arena lives and a copied value does not: the heap's own commit and decommit
-/// around a collection moves tens of MiB either way. Optimizer-state seeding is the other
+/// around a collection moves tens of MiB either way. Measured over twelve tables of twelve shapes,
+/// so twelve sessions: sessions are shared by same-shaped parameters, and a result left on a
+/// session pins that session's arena, so it is the number of sessions, and the size of what they
+/// computed, that a regression here multiplies. A healthy reading is near zero, so a known native
+/// block is read too, to show the instrument sees one. Optimizer-state seeding is the other
 /// per-parameter run loop that keeps its outputs, and it takes the same copy — but its graph
 /// is a fill rather than a draw, so the arena it would pin is small enough to sit inside that
 /// noise, and no memory gate discriminates it. It is not pinned here.</para>
@@ -103,16 +123,19 @@ internal static class RigScalingStack
 [Collection(SerialMeasurement.Name)]
 public class RigConstructionScalingTests
 {
-    /// <summary>Measured 3-4 B/element; a whole-parameter draw gives ~400, and a folded graph ~4.4 KiB.</summary>
+    /// <summary>Measured 14-18 B/element; a whole-parameter draw gives ~400, and a folded graph ~4.4 KiB.</summary>
     private const double MemoryBudgetBytesPerElement = 128.0;
 
     /// <summary>Measured 0.2-0.4 (shared sessions, drawn side by side, make the deeper stack
     /// cheaper per parameter); the quadratic law gives ~6.</summary>
     private const double MaxPerParameterCostGrowth = 2.0;
 
-    /// <summary>Measured 16-23 MiB of native memory across a 12-parameter initialization; with the
-    /// results left on their session, 131 MiB.</summary>
-    private const long RetainedBudgetBytes = 96L * 1024 * 1024;
+    /// <summary>Measured 3-23 MiB of native memory across a 12-session initialization; with the
+    /// results left on their sessions, 211-216 MiB, over three times the budget.</summary>
+    private const long RetainedBudgetBytes = 64L * 1024 * 1024;
+
+    /// <summary>The native memory the retention instrument is shown, to prove it reads one.</summary>
+    private const int ControlBytes = 64 * 1024 * 1024;
 
     private const int TimingRuns = 3;
     private const int StackParams = 12;
@@ -147,10 +170,12 @@ public class RigConstructionScalingTests
 
         // Warmed first, so what the allocators take or hand back on a first run is not counted
         // against the one measured.
-        large.InitializeTrainableParams();
+        var distinct = Concretize(RigScalingDistinct12.ComputationGraph);
+        distinct.InitializeTrainableParams();
         long before = LiveNativeBytes();
-        var values = large.InitializeTrainableParams();
+        var values = distinct.InitializeTrainableParams();
         long retained = LiveNativeBytes() - before;
+        long controlSeen = NativeBytesSeenOf(ControlBytes);
 
         double smallSeconds = BestInitSeconds(small);
         double largeSeconds = BestInitSeconds(large);
@@ -161,10 +186,13 @@ public class RigConstructionScalingTests
         // thing that would make a retention regression invisible.
         Assert.Equal(StackParams, values.ModelParams.Length);
 
-        // Both memory arms are differences that a saturated or reused peak can flatten to zero.
-        // Fail on a measurement that established nothing rather than divide by it and pass.
+        // Both memory arms are differences that a saturated or reused peak can flatten to zero,
+        // and a healthy retention reads near zero by design. Fail on a measurement that
+        // established nothing — a flat peak, or an instrument blind to a known native block —
+        // rather than divide by it and pass.
         Assert.True(peakAfterSmallTable > peakBeforeTables);
         Assert.True(peakGrowth > 0);
+        Assert.True(controlSeen >= ControlBytes * 3L / 4);
 
         Assert.True(peakGrowth / (double)(LargeTableElements - SmallTableElements)
                     <= MemoryBudgetBytesPerElement);
@@ -204,6 +232,27 @@ public class RigConstructionScalingTests
     /// session's arena here. The managed heap is left out because its own commit and decommit —
     /// tens of MiB either way around a collection — swamp the signal.
     /// </summary>
+    /// <summary>
+    /// What <see cref="LiveNativeBytes"/> reads of <paramref name="bytes"/> taken outside the
+    /// managed heap and touched: the positive control for the retention arm, whose healthy reading
+    /// is near zero and so cannot show by itself that the instrument sees anything.
+    /// </summary>
+    private static long NativeBytesSeenOf(int bytes)
+    {
+        long before = LiveNativeBytes();
+        var block = System.Runtime.InteropServices.Marshal.AllocHGlobal(bytes);
+        try
+        {
+            for (int offset = 0; offset < bytes; offset += 4096)
+                System.Runtime.InteropServices.Marshal.WriteByte(block, offset, 1);
+            return LiveNativeBytes() - before;
+        }
+        finally
+        {
+            System.Runtime.InteropServices.Marshal.FreeHGlobal(block);
+        }
+    }
+
     private static long LiveNativeBytes()
     {
         GC.Collect();

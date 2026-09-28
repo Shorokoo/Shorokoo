@@ -3,6 +3,8 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Linq;
+using System.Text;
+using System.Threading;
 
 namespace Shorokoo
 {
@@ -11,15 +13,19 @@ namespace Shorokoo
     /// hyperparameter had in it. One entry of a <see cref="TrainingHistory"/>.
     ///
     /// <para>Two entries are equal when their counters and loss are, and their
-    /// <see cref="Hyperparameters"/> hold the same names with equal values — so an entry read back
-    /// from a saved checkpoint equals the one that was saved.</para>
+    /// <see cref="AppliedHyperparameters"/> hold the same names with equal values — so an entry read
+    /// back from a saved checkpoint equals the one that was saved.</para>
+    ///
+    /// <para>Every property is <c>init</c>, so an entry can be built, or rewritten with
+    /// <c>with</c>, to assemble a history with <see cref="TrainingHistory.Of"/> — merging two runs'
+    /// histories, say, or relabelling their steps.</para>
     /// </summary>
     public sealed record TrainingHistoryEntry
     {
         private static readonly AppliedHyperparameterMap NoHyperparameters =
             AppliedHyperparameterMap.Of(new Dictionary<string, AppliedHyperparameter>());
 
-        private readonly IReadOnlyDictionary<string, AppliedHyperparameter> _hyperparameters = NoHyperparameters;
+        private readonly IReadOnlyDictionary<string, AppliedHyperparameter> _appliedHyperparameters = NoHyperparameters;
 
         /// <summary>
         /// The global step counter the step <b>ran at</b> — the value its schedules saw — which is
@@ -40,16 +46,17 @@ namespace Shorokoo
         public float Loss { get; init; }
 
         /// <summary>
-        /// The value every optimizer hyperparameter had in the step, keyed by the producing rig's
-        /// <see cref="TrainingRig.HyperparameterNames"/> — the same map as the produced checkpoint's
-        /// <see cref="TrainingCheckpoint.AppliedHyperparameters"/>. Immutable: a map given here is
-        /// kept as it is where it is already immutable, and copied otherwise.
+        /// The value every optimizer hyperparameter had in the step, keyed by the names of the rig
+        /// that ran it (its <see cref="TrainingRig.HyperparameterNames"/>) — the same map as the
+        /// produced checkpoint's <see cref="TrainingCheckpoint.AppliedHyperparameters"/>. Immutable:
+        /// a map given here is kept as it is where it is already immutable, and copied otherwise, in
+        /// its enumeration order.
         /// </summary>
-        public IReadOnlyDictionary<string, AppliedHyperparameter> Hyperparameters
+        public IReadOnlyDictionary<string, AppliedHyperparameter> AppliedHyperparameters
         {
-            get => _hyperparameters;
-            init => _hyperparameters = AppliedHyperparameterMap.Of(
-                value ?? throw new ArgumentNullException(nameof(Hyperparameters)));
+            get => _appliedHyperparameters;
+            init => _appliedHyperparameters = AppliedHyperparameterMap.Of(
+                value ?? throw new ArgumentNullException(nameof(AppliedHyperparameters)));
         }
 
         /// <inheritdoc />
@@ -59,10 +66,25 @@ namespace Shorokoo
                && Epoch == other.Epoch
                && BatchIndex == other.BatchIndex
                && Loss.Equals(other.Loss)
-               && AppliedHyperparameterMap.ValueEquals(_hyperparameters, other._hyperparameters);
+               && AppliedHyperparameterMap.ValueEquals(_appliedHyperparameters, other._appliedHyperparameters);
 
         /// <inheritdoc />
-        public override int GetHashCode() => HashCode.Combine(Step, Epoch, BatchIndex, Loss, _hyperparameters.Count);
+        public override int GetHashCode() => HashCode.Combine(Step, Epoch, BatchIndex, Loss, _appliedHyperparameters.Count);
+
+        private bool PrintMembers(StringBuilder builder)
+        {
+            var culture = System.Globalization.CultureInfo.InvariantCulture;
+            builder.Append(culture, $"Step = {Step}, Epoch = {Epoch}, BatchIndex = {BatchIndex}, Loss = ");
+            builder.Append(Loss.ToString(culture)).Append(", AppliedHyperparameters = {");
+            var first = true;
+            foreach (var (name, value) in _appliedHyperparameters)
+            {
+                builder.Append(first ? " " : ", ").Append(name).Append(" = ").Append(value);
+                first = false;
+            }
+            builder.Append(first ? "}" : " }");
+            return true;
+        }
     }
 
     /// <summary>
@@ -80,7 +102,11 @@ namespace Shorokoo
     ///
     /// <para>To keep only part of it, derive a checkpoint with
     /// <see cref="TrainingCheckpoint.WithHistory"/> over a slice (<see cref="Since"/>,
-    /// <see cref="TakeLast"/>); <see cref="TrainingCheckpoint.WithoutHistory"/> clears it.</para>
+    /// <see cref="TakeLast"/>) or over entries assembled with <see cref="Of"/>;
+    /// <see cref="TrainingCheckpoint.WithoutHistory"/> clears it, and a
+    /// <see cref="ResidentTrainingRun"/> does the same with
+    /// <see cref="ResidentTrainingRun.ReplaceHistory"/> and
+    /// <see cref="ResidentTrainingRun.ClearHistory"/>.</para>
     /// </summary>
     public sealed class TrainingHistory : IReadOnlyList<TrainingHistoryEntry>
     {
@@ -91,9 +117,20 @@ namespace Shorokoo
         /// <summary>The history with no entries: that of a checkpoint no step produced.</summary>
         public static TrainingHistory Empty { get; } = new(ImmutableList<TrainingHistoryEntry>.Empty);
 
-        /// <summary>A history over <paramref name="entries"/>, in that order.</summary>
-        internal static TrainingHistory Of(IEnumerable<TrainingHistoryEntry> entries)
-            => new(ImmutableList.CreateRange(entries));
+        /// <summary>
+        /// A history over <paramref name="entries"/>, in that order — for one assembled by hand, such
+        /// as two runs' histories merged, or entries rewritten with <c>with</c>.
+        /// </summary>
+        /// <exception cref="ArgumentNullException"><paramref name="entries"/>, or one of them, is
+        /// <c>null</c>.</exception>
+        public static TrainingHistory Of(IEnumerable<TrainingHistoryEntry> entries)
+        {
+            ArgumentNullException.ThrowIfNull(entries);
+            var list = ImmutableList.CreateRange(entries);
+            foreach (var entry in list)
+                if (entry is null) throw new ArgumentNullException(nameof(entries), "A training history entry is null.");
+            return list.IsEmpty ? Empty : new TrainingHistory(list);
+        }
 
         /// <summary>This history with <paramref name="entry"/> after its last entry.</summary>
         internal TrainingHistory Append(TrainingHistoryEntry entry)
@@ -123,44 +160,55 @@ namespace Shorokoo
                 : new TrainingHistory(_entries.GetRange(_entries.Count - count, count));
         }
 
-        /// <summary>Every entry's <see cref="TrainingHistoryEntry.Step"/>, in a new list.</summary>
-        public IReadOnlyList<long> Steps => [.. _entries.Select(e => e.Step)];
+        private IReadOnlyList<long>? _steps;
+        private IReadOnlyList<float>? _losses;
+        private IReadOnlyList<long?>? _epochs;
+        private IReadOnlyList<long?>? _batchIndices;
+        private IReadOnlyList<string>? _hyperparameterNames;
 
-        /// <summary>Every entry's <see cref="TrainingHistoryEntry.Loss"/>, in a new list.</summary>
-        public IReadOnlyList<float> Losses => [.. _entries.Select(e => e.Loss)];
+        private IReadOnlyList<T> Column<T>(ref IReadOnlyList<T>? cache, Func<TrainingHistoryEntry, T> select)
+            => LazyInitializer.EnsureInitialized(ref cache, () => _entries.Select(select).ToImmutableArray());
 
-        /// <summary>Every entry's <see cref="TrainingHistoryEntry.Epoch"/>, in a new list.</summary>
-        public IReadOnlyList<long?> Epochs => [.. _entries.Select(e => e.Epoch)];
+        /// <summary>Every entry's <see cref="TrainingHistoryEntry.Step"/>, parallel to the entries.
+        /// Read-only, built on first read and kept.</summary>
+        public IReadOnlyList<long> Steps => Column(ref _steps, e => e.Step);
 
-        /// <summary>Every entry's <see cref="TrainingHistoryEntry.BatchIndex"/>, in a new list.</summary>
-        public IReadOnlyList<long?> BatchIndices => [.. _entries.Select(e => e.BatchIndex)];
+        /// <summary>Every entry's <see cref="TrainingHistoryEntry.Loss"/>, parallel to the entries.
+        /// Read-only, built on first read and kept.</summary>
+        public IReadOnlyList<float> Losses => Column(ref _losses, e => e.Loss);
+
+        /// <summary>Every entry's <see cref="TrainingHistoryEntry.Epoch"/>, parallel to the entries.
+        /// Read-only, built on first read and kept.</summary>
+        public IReadOnlyList<long?> Epochs => Column(ref _epochs, e => e.Epoch);
+
+        /// <summary>Every entry's <see cref="TrainingHistoryEntry.BatchIndex"/>, parallel to the
+        /// entries. Read-only, built on first read and kept.</summary>
+        public IReadOnlyList<long?> BatchIndices => Column(ref _batchIndices, e => e.BatchIndex);
 
         /// <summary>
         /// Every hyperparameter name any entry holds, in the order they first appear. Entries of one
         /// rig all hold the same names; a history continued under another rig can hold names only
-        /// some entries have.
+        /// some entries have. Read-only, built on first read and kept.
         /// </summary>
         public IReadOnlyList<string> HyperparameterNames
-        {
-            get
+            => LazyInitializer.EnsureInitialized(ref _hyperparameterNames, () =>
             {
                 var seen = new HashSet<string>(StringComparer.Ordinal);
-                var names = new List<string>();
+                var names = ImmutableArray.CreateBuilder<string>();
                 foreach (var entry in _entries)
-                    foreach (var name in entry.Hyperparameters.Keys)
+                    foreach (var name in entry.AppliedHyperparameters.Keys)
                         if (seen.Add(name)) names.Add(name);
-                return names.AsReadOnly();
-            }
-        }
+                return names.ToImmutable();
+            });
 
         /// <summary>
         /// The value hyperparameter <paramref name="name"/> had in each entry, in a new list parallel
         /// to the entries: <c>null</c> for an entry that holds no such hyperparameter.
         /// </summary>
-        public IReadOnlyList<AppliedHyperparameter?> Hyperparameter(string name)
+        public IReadOnlyList<AppliedHyperparameter?> AppliedValues(string name)
         {
             ArgumentNullException.ThrowIfNull(name);
-            return [.. _entries.Select(e => e.Hyperparameters.TryGetValue(name, out var v) ? v : null)];
+            return [.. _entries.Select(e => e.AppliedHyperparameters.TryGetValue(name, out var v) ? v : null)];
         }
 
         /// <inheritdoc />

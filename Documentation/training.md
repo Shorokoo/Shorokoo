@@ -205,8 +205,8 @@ host-materialized value that can disagree with the in-graph one. Host preview (`
 by a single interpreter that mirrors the graph lowering.
 
 **Reading back the applied value.** Every checkpoint a step returns carries
-`.AppliedHyperparameters`: each hyperparameter's value in that step, keyed by
-`rig.HyperparameterNames` — a scheduled one's value as the step computed it in-graph (the very tensor
+`.AppliedHyperparameters`: each hyperparameter's value in that step, keyed by the
+`HyperparameterNames` of the rig that ran it — a scheduled one's value as the step computed it in-graph (the very tensor
 the optimizer update read), a baked one's constant, a runtime one's value as fed. The step that
 produced a checkpoint ran at counter `Step - 1`, so for a built-in schedule the reported value is
 `schedule.At(ckpt.Step - 1)`, up to the numeric note below:
@@ -220,7 +220,11 @@ Each value is an `AppliedHyperparameter`: an immutable host copy with `DType`, `
 `ElementCount`, `ToDouble()` / `ToSingle()` for a single-element value, `ToArray<T>()` (with `T` the
 dtype's storage type — `float`, `int`, `bool`, `double`, …) and `ToTensorData()` for a fresh tensor.
 A resident run exposes its last step's values as `run.AppliedHyperparameters`, since `Step` returns
-only the loss. The map is immutable and ordered like `rig.HyperparameterNames`. It is `null` on a
+only the loss. The map is immutable, and a step's map is in `rig.HyperparameterNames` order; a
+checkpoint adopted by another rig (`otherRig.AdoptCheckpoint(ckpt)`) keeps the map, and so the
+names, of the rig whose step produced it. Every value is copied to the host as the step runs — a
+scheduled one read back with the loss, a runtime one copied from what was fed, which for a value
+you keep on a device is a download each step — so reading the map costs nothing further. It is `null` on a
 checkpoint no step produced (an initial or loaded one), and it is not saved on its own: every step's
 values are also in the checkpoint's [training history](#the-training-history), which is saved.
 
@@ -525,12 +529,17 @@ public sealed class ResidentTrainingRun : IDisposable
     public TrainingCheckpoint StepToCheckpoint(DataBatch batch);
 
     public long CurrentStep { get; }   // the Step the run's last checkpoint carries; next is +1
-    // Each hyperparameter's value in the run's last step (host values: no download); see
-    // TrainingCheckpoint.AppliedHyperparameters.
+    // Each hyperparameter's value in the run's last step, recorded on the host as the step ran
+    // (reading it is no download); see TrainingCheckpoint.AppliedHyperparameters.
     public IReadOnlyDictionary<string, AppliedHyperparameter>? AppliedHyperparameters { get; }
     // The history of the checkpoint the run began from plus one entry per step of the run, whether
     // taken with Step or StepToCheckpoint (host values: no download); see "The training history".
     public TrainingHistory History { get; }
+    // Replace or empty that history, e.g. run.ReplaceHistory(run.History.TakeLast(1000)); later
+    // steps append to what is left. The state the run trains from, and every checkpoint it has
+    // handed out, are untouched.
+    public void ReplaceHistory(TrainingHistory history);
+    public void ClearHistory();
 
     public void Dispose();             // releases state the run still holds; published checkpoints survive
 }
@@ -1146,35 +1155,45 @@ one entry appended. A step that fails records nothing.
 ```csharp
 public sealed record TrainingHistoryEntry
 {
-    public long Step { get; }          // the counter the step ran at: the produced checkpoint's Step - 1
-    public long? Epoch { get; }        // the counters it ran at; null where unknown
-    public long? BatchIndex { get; }
-    public float Loss { get; }
+    public long Step { get; init; }          // the counter the step ran at: the produced checkpoint's Step - 1
+    public long? Epoch { get; init; }        // the counters it ran at; null where unknown
+    public long? BatchIndex { get; init; }
+    public float Loss { get; init; }
     // Each hyperparameter's value in the step: the same map as the produced checkpoint's
-    // .AppliedHyperparameters, keyed by rig.HyperparameterNames. Immutable.
-    public IReadOnlyDictionary<string, AppliedHyperparameter> Hyperparameters { get; }
+    // .AppliedHyperparameters, keyed by the names of the rig that ran it. Immutable.
+    public IReadOnlyDictionary<string, AppliedHyperparameter> AppliedHyperparameters { get; init; }
 }
 
 public sealed class TrainingHistory : IReadOnlyList<TrainingHistoryEntry>
 {
     public static TrainingHistory Empty { get; }
+    public static TrainingHistory Of(IEnumerable<TrainingHistoryEntry> entries);  // in that order
     public TrainingHistory Since(long step);             // entries whose Step >= step
     public TrainingHistory TakeLast(int count);          // the last count entries
-    // Columns, for plotting and logging — each a new list parallel to the entries:
+    // Columns, for plotting and logging — each read-only and parallel to the entries, built on
+    // first read and kept:
     public IReadOnlyList<long> Steps { get; }
     public IReadOnlyList<float> Losses { get; }
     public IReadOnlyList<long?> Epochs { get; }
     public IReadOnlyList<long?> BatchIndices { get; }
-    public IReadOnlyList<string> HyperparameterNames { get; }       // every name any entry holds
-    public IReadOnlyList<AppliedHyperparameter?> Hyperparameter(string name);  // null where an entry lacks it
+    public IReadOnlyList<string> HyperparameterNames { get; }       // every name any entry holds, by first appearance
+    public IReadOnlyList<AppliedHyperparameter?> AppliedValues(string name);  // null where an entry lacks it
 }
 ```
 
 ```csharp
 var result = rig.Fit(loader, numEpochs: 3);
 var history = result.FinalCheckpoint.History;
-foreach (var (step, loss, lr) in history.Steps.Zip(history.Losses, history.Hyperparameter("learningRate")))
+foreach (var (step, loss, lr) in history.Steps.Zip(history.Losses, history.AppliedValues("learningRate")))
     Console.WriteLine($"{step}\t{loss}\t{lr?.ToSingle()}");
+```
+
+Entries are records whose properties are all `init`, so you can build a history yourself with
+`TrainingHistory.Of` — merging two runs' histories, or rewriting entries with `with`:
+
+```csharp
+var merged = TrainingHistory.Of(first.History.Concat(second.History.Select(e => e with { Step = e.Step + offset })));
+var ckpt = second.WithHistory(merged);
 ```
 
 The history is immutable, and appending shares every earlier entry, so it costs a step `O(log n)`
@@ -1189,7 +1208,14 @@ order they were run.
 `Shared()`, `rig.AdoptCheckpoint`) carries the history through unchanged. `WithHistory` replaces
 it — keep a slice with `ckpt.WithHistory(ckpt.History.TakeLast(1000))` or
 `ckpt.WithHistory(ckpt.History.Since(5000))` — and `WithoutHistory()` clears it. A resident run's
-`run.History` is the history the run began from plus one entry per step it took.
+`run.History` is the history the run began from plus one entry per step it took; trim it mid-run with
+`run.ReplaceHistory(run.History.TakeLast(1000))`, or empty it with `run.ClearHistory()`.
+
+**What it costs.** An entry takes roughly 200–300 bytes of managed memory, more with each scheduled
+or runtime hyperparameter and with non-scalar ones, so a million-step run holds a few hundred MB of
+history. Saving writes the whole history each time, `O(n)` in its length. For a long run, keep it
+bounded — `TakeLast` on the checkpoint or the resident run as above, `Since` to keep the steps from
+some counter on, or `WithoutHistory()` / `ClearHistory()` after logging it elsewhere.
 
 **Saving it.** The history is its own `CheckpointComponents.History` component. `checkpoint.Save`
 writes it whenever it is non-empty; pass components without it to leave it out
@@ -1200,7 +1226,8 @@ that holds none loads with an empty history. A resumed run continues the loaded 
 continued under another rig (`otherRig.AdoptCheckpoint(ckpt)`) can hold hyperparameters only some
 entries have, which is saved as such; one whose entries give the same hyperparameter values of
 different dtypes or shapes cannot be saved, and the save throws an `InvalidOperationException`
-naming it — save a slice with `WithHistory(history.Since(…))`. The on-disk layout is under
+naming it and the number of trailing entries that can be saved — save that slice with
+`ckpt.WithHistory(ckpt.History.TakeLast(…))`. The on-disk layout is under
 [Save and resume a checkpoint](#save-and-resume-a-checkpoint-across-process-restarts).
 
 ## Save and resume a checkpoint (across process restarts)

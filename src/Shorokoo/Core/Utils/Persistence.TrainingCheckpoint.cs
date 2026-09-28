@@ -402,7 +402,7 @@ namespace Shorokoo
                         $"'{filePath}': the checkpoint maps no tensor for {role} '{fieldDef.Name}'. " +
                         mismatchHint);
                 var tensors = ResolveDataEntry(
-                    container, manifest, mapped.Ref, mapped.Id, tensorsByDataKey, filePath);
+                    container, manifest, mapped.Ref, $"the mapping for parameter '{mapped.Id}'", tensorsByDataKey, filePath);
                 if (string.IsNullOrEmpty(mapped.Ref.Tensor)
                     || !tensors.TryGetValue(mapped.Ref.Tensor, out var td))
                     throw new InvalidDataException(

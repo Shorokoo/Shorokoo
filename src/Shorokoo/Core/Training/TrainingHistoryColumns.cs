@@ -59,6 +59,37 @@ namespace Shorokoo
                 if (e.BatchIndex is long batch) { batches[i] = batch; batchPresent[i] = 1; }
             }
 
+            // Every hyperparameter is checked before anything is refused, so the advice names the
+            // newest conflict of all of them: keeping the entries after it saves in one go. Entries
+            // are counted rather than addressed by step, since a history's steps need not ascend.
+            var byName = new List<(string Name, IReadOnlyList<AppliedHyperparameter?> Values, AppliedHyperparameter Reference)>();
+            (string Name, int At, int Last)? newestConflict = null;
+            foreach (var name in history.HyperparameterNames)
+            {
+                var values = history.AppliedValues(name);
+                int last = n - 1;
+                while (values[last] is null) last--;
+                var reference = values[last]!;
+                byName.Add((name, values, reference));
+                for (int i = last - 1; i >= 0; i--)
+                {
+                    if (values[i] is not { } v || SameLayout(v, reference)) continue;
+                    if (newestConflict is not { } c || i > c.At) newestConflict = (name, i, last);
+                    break;
+                }
+            }
+            if (newestConflict is { } conflict)
+            {
+                var (name, at, last) = conflict;
+                throw new InvalidOperationException(
+                    $"The training history cannot be saved: hyperparameter '{name}' is " +
+                    $"{Describe(history[at].AppliedHyperparameters[name])} in entry {at} (step {history[at].Step}) " +
+                    $"but {Describe(history[last].AppliedHyperparameters[name])} in entry {last} (step {history[last].Step}), " +
+                    "and a saved history holds one dtype and shape per hyperparameter. Save the entries " +
+                    $"after it with checkpoint.WithHistory(checkpoint.History.TakeLast({n - 1 - at})), or " +
+                    "none with checkpoint.WithoutHistory().");
+            }
+
             var columns = new List<(string, TensorData)>
             {
                 (StepColumn, Globals.TensorData([n], steps)),
@@ -69,24 +100,8 @@ namespace Shorokoo
                 (BatchIndexPresentColumn, BoolColumn(batchPresent)),
             };
 
-            foreach (var name in history.HyperparameterNames)
+            foreach (var (name, values, reference) in byName)
             {
-                var values = history.Hyperparameter(name);
-                int last = n - 1;
-                while (values[last] is null) last--;
-                var reference = values[last]!;
-                for (int i = last - 1; i >= 0; i--)
-                {
-                    if (values[i] is not { } v || SameLayout(v, reference)) continue;
-                    throw new InvalidOperationException(
-                        $"The training history cannot be saved: hyperparameter '{name}' is " +
-                        $"{Describe(v)} at step {history[i].Step} but {Describe(reference)} at step " +
-                        $"{history[last].Step}, and a saved history holds one dtype and shape per " +
-                        "hyperparameter. Save a history in which it has one of them, e.g. " +
-                        $"checkpoint.WithHistory(checkpoint.History.Since({history[i + 1].Step})), or " +
-                        "none with checkpoint.WithoutHistory().");
-                }
-
                 int rowBytes = reference.RawBytes.Length;
                 var bytes = new byte[(long)rowBytes * n];
                 var present = new byte[n];
@@ -179,7 +194,7 @@ namespace Shorokoo
                     Loss = losses[i],
                     Epoch = epochPresent[i] ? epochs[i] : null,
                     BatchIndex = batchPresent[i] ? batches[i] : null,
-                    Hyperparameters = new AppliedHyperparameterMap(layout, values.ToImmutable()),
+                    AppliedHyperparameters = new AppliedHyperparameterMap(layout, values.ToImmutable()),
                 });
             }
             return TrainingHistory.Of(entries);

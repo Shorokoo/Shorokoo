@@ -134,7 +134,8 @@ namespace Shorokoo
 
         /// <summary>
         /// The value every optimizer hyperparameter had in the training step that produced this
-        /// checkpoint, keyed by <see cref="TrainingRig.HyperparameterNames"/> — or <c>null</c> on a
+        /// checkpoint, keyed by the <see cref="TrainingRig.HyperparameterNames"/> of the rig that ran
+        /// that step — which a checkpoint adopted by another rig keeps — or <c>null</c> on a
         /// checkpoint no step produced (an initial, bare or loaded one).
         ///
         /// <para>These are the values the step's optimizer update actually read: a scheduled
@@ -151,8 +152,9 @@ namespace Shorokoo
         /// write it, and a load reads back <c>null</c>. The step's entry in <see cref="History"/>
         /// holds this same map, and that is saved.</para>
         ///
-        /// <para>Immutable, and in the order of <see cref="TrainingRig.HyperparameterNames"/>. A map
-        /// set here is kept as it is where it is already immutable, and copied otherwise.</para>
+        /// <para>Immutable. A step's map is in its rig's <see cref="TrainingRig.HyperparameterNames"/>
+        /// order; a map set here is kept as it is where it is already immutable, and copied, in its
+        /// enumeration order, otherwise.</para>
         /// </summary>
         public IReadOnlyDictionary<string, AppliedHyperparameter>? AppliedHyperparameters
         {

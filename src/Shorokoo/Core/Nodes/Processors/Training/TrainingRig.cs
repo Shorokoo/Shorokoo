@@ -45,7 +45,11 @@ namespace Shorokoo
     /// state). All state flows through inputs and outputs as TensorStructs:
     /// 
     /// Inputs:  trainable_params, model_state, optimizer_state, [hyperparams], [step], training_inputs, training_targets
-    /// Outputs: updated_trainable_params, updated_model_state, updated_optimizer_state, loss
+    /// Outputs: updated_trainable_params, updated_model_state, updated_optimizer_state, loss, [scheduled_hyperparams]
+    ///
+    /// The trailing outputs are the value each scheduled hyperparameter had in the step, one per
+    /// scheduled hyperparameter in optimizer order: the very tensors the optimizer update read, which
+    /// the step reports as <see cref="TrainingCheckpoint.AppliedHyperparameters"/>.
     ///
     /// Optimizer hyperparameters are baked in as constants by default. A scheduled hyperparameter
     /// (a built-in <see cref="Schedule"/> or a scheduler module) is instead computed in-graph from the
@@ -542,11 +546,8 @@ namespace Shorokoo
         private AppliedHyperparameter?[] _bakedAppliedValues = [];
 
         /// <summary>The names every step's applied-value map is keyed by, with their lookup index:
-        /// built once from <see cref="HyperparameterNames"/> and shared by every step's map.</summary>
-        private AppliedHyperparameterMap.Layout AppliedLayout
-            => _appliedLayout ??= AppliedHyperparameterMap.Layout.Of(HyperparameterNames);
-
-        private AppliedHyperparameterMap.Layout? _appliedLayout;
+        /// built with <see cref="HyperparameterNames"/> and shared by every step's map.</summary>
+        private AppliedHyperparameterMap.Layout _appliedLayout = AppliedHyperparameterMap.Layout.Of([]);
 
         /// <summary>
         /// Initial trainable parameter values — <b>empty</b> on a deferred build, which has none yet
@@ -2124,6 +2125,7 @@ namespace Shorokoo
             for (int h = 0; h < numHyperparams; h++)
                 if (hyperparameters[h].Kind == HyperparameterKind.Baked)
                     _bakedAppliedValues[h] = AppliedHyperparameter.Of(_hyperparamInitialCounterValues[h]!);
+            _appliedLayout = AppliedHyperparameterMap.Layout.Of(HyperparameterNames);
 
             // Build optimizer state struct definition. Element type comes from each state's
             // initializer; the rank falls back to the parameter's rank when the initializer's
@@ -2271,13 +2273,22 @@ namespace Shorokoo
             UpdatedStateFieldCount = ModelStateDef.Fields.Length;
             UpdatedOptimizerStateFieldCount = OptimizerStateDef.Fields.Length;
 
-            var expectedOutputs = UpdatedParamFieldCount + UpdatedStateFieldCount
+            RequireStepOutputLayout(_trainingStepWorkGraph.Outputs.Count, "lowered");
+        }
+
+        /// <summary>
+        /// Fails the build when a training-step graph does not have the outputs <see cref="RunStep"/>
+        /// reads by position: the updated state fields, the loss, and one per scheduled
+        /// hyperparameter. Checked on the lowered graph and again on the graph that is compiled.
+        /// </summary>
+        private void RequireStepOutputLayout(int outputCount, string which)
+        {
+            var expected = UpdatedParamFieldCount + UpdatedStateFieldCount
                 + UpdatedOptimizerStateFieldCount + 1 + _scheduledHyperparameterOutputs.Length;
-            if (_trainingStepWorkGraph.Outputs.Count != expectedOutputs)
+            if (outputCount != expected)
                 throw new InvalidOperationException(
-                    $"The lowered training step has {_trainingStepWorkGraph.Outputs.Count} outputs where its " +
-                    $"layout calls for {expectedOutputs}: the updated state fields, the loss and one per " +
-                    "scheduled hyperparameter.");
+                    $"The {which} training step has {outputCount} outputs where its layout calls for " +
+                    $"{expected}: the updated state fields, the loss and one per scheduled hyperparameter.");
         }
 
         /// <summary>
@@ -3149,8 +3160,16 @@ namespace Shorokoo
             // taken what it was fed as it is, the checkpoint among it.
             RequireBatchFits(inputStruct, targetStruct, nameof(trainingInput), nameof(trainingOutput));
             if (HyperparameterStructDef.Fields.Length > 0)
+            {
                 TrainingFeeds.RequireFits(
                     hyperStruct!, HyperparameterStructDef, nameof(hyperparams), "rig.MakeHyperparameters(...)");
+                // The step was built at each hyperparameter's shape, and a value of another one would
+                // broadcast rather than fail -- a [1] rate over a [4] one trains on, the wrong way.
+                for (int i = 0; i < DynamicHyperparameterIndices.Count; i++)
+                    if (FedTensor(hyperStruct!.Fields[DynamicHyperparameterNames[i]]) is { } fed)
+                        HyperparameterValues.AssertShape(
+                            fed, HyperparameterShapes[DynamicHyperparameterIndices[i]], DynamicHyperparameterNames[i]);
+            }
 
             // Execute the training step graph.
             // Graph inputs (after lowering): [param_fields..., state_fields..., opt_state_fields..., hyperparam_fields..., counter_inputs..., model_input_fields..., target_fields...]
@@ -3268,46 +3287,60 @@ namespace Shorokoo
             }
 
             // Graph outputs (after lowering): [updated_param_field_0, ..., updated_state_field_0, ..., updated_opt_state_field_0, ..., loss, scheduled_hyper_0, ...]
-            // Repack updated param fields into a TensorDataStruct
-            var updatedParamFields = new Dictionary<string, IData>();
-            for (int i = 0; i < UpdatedParamFieldCount; i++)
+            // Until the new checkpoint holds them nothing owns the outputs, so a failure reading
+            // them releases every one rather than leaving them to a finalizer.
+            TensorDataStruct updatedParams, updatedModelState, updatedOptimizerState;
+            float lossValue;
+            try
             {
-                updatedParamFields[TrainableParamStructDef.Fields[i].Name] = results[i].ToTensorData();
-            }
-            var updatedParams = new TensorDataStruct(TrainableParamStructDef, updatedParamFields);
+                // Repack updated param fields into a TensorDataStruct
+                var updatedParamFields = new Dictionary<string, IData>();
+                for (int i = 0; i < UpdatedParamFieldCount; i++)
+                {
+                    updatedParamFields[TrainableParamStructDef.Fields[i].Name] = results[i].ToTensorData();
+                }
+                updatedParams = new TensorDataStruct(TrainableParamStructDef, updatedParamFields);
 
-            // Repack updated state fields into a TensorDataStruct
-            var updatedStateFields = new Dictionary<string, IData>();
-            for (int i = 0; i < UpdatedStateFieldCount; i++)
+                // Repack updated state fields into a TensorDataStruct
+                var updatedStateFields = new Dictionary<string, IData>();
+                for (int i = 0; i < UpdatedStateFieldCount; i++)
+                {
+                    updatedStateFields[ModelStateDef.Fields[i].Name] = results[UpdatedParamFieldCount + i].ToTensorData();
+                }
+                updatedModelState = new TensorDataStruct(ModelStateDef, updatedStateFields);
+
+                // Repack updated optimizer state fields into a TensorDataStruct
+                var updatedOptStateFields = new Dictionary<string, IData>();
+                for (int i = 0; i < UpdatedOptimizerStateFieldCount; i++)
+                {
+                    updatedOptStateFields[OptimizerStateDef.Fields[i].Name] =
+                        results[UpdatedParamFieldCount + UpdatedStateFieldCount + i].ToTensorData();
+                }
+                updatedOptimizerState = new TensorDataStruct(OptimizerStateDef, updatedOptStateFields);
+
+                // The loss follows the state outputs. Read it through the rooted accessor, not a bare
+                // span; everything past the state outputs is released below: the state is the
+                // resident run's to own or the checkpoint's to carry, the rest is a step's worth of
+                // outputs nobody keeps.
+                var lossTensor = results[stateOutputCount].ToTensorData<float32>();
+                lossValue = lossTensor.ValueAt<float>(0);
+                // Graph outputs after the loss: one per scheduled hyperparameter, the value this step applied.
+                for (int j = 0; j < _scheduledHyperparameterOutputs.Length; j++)
+                    applied[_scheduledHyperparameterOutputs[j]] =
+                        AppliedHyperparameter.Of(results[stateOutputCount + 1 + j].ToTensorData());
+            }
+            catch
             {
-                updatedStateFields[ModelStateDef.Fields[i].Name] = results[UpdatedParamFieldCount + i].ToTensorData();
+                foreach (var result in results)
+                    if (result is TensorDataModelParam output) output.ToTensorData().Dispose();
+                throw;
             }
-            var updatedModelState = new TensorDataStruct(ModelStateDef, updatedStateFields);
-
-            // Repack updated optimizer state fields into a TensorDataStruct
-            var updatedOptStateFields = new Dictionary<string, IData>();
-            for (int i = 0; i < UpdatedOptimizerStateFieldCount; i++)
-            {
-                updatedOptStateFields[OptimizerStateDef.Fields[i].Name] =
-                    results[UpdatedParamFieldCount + UpdatedStateFieldCount + i].ToTensorData();
-            }
-            var updatedOptimizerState = new TensorDataStruct(OptimizerStateDef, updatedOptStateFields);
-
-            // Loss is the last output
-            // Read the loss through the rooted accessor, not a bare span, and release everything
-            // past the state outputs here: the state is the resident run's to own or the
-            // checkpoint's to carry, the rest is a step's worth of outputs nobody keeps.
-            var lossTensor = results[stateOutputCount].ToTensorData<float32>();
-            var lossValue = lossTensor.ValueAt<float>(0);
-            // Graph outputs after the loss: one per scheduled hyperparameter, the value this step applied.
-            for (int j = 0; j < _scheduledHyperparameterOutputs.Length; j++)
-                applied[_scheduledHyperparameterOutputs[j]] =
-                    AppliedHyperparameter.Of(results[stateOutputCount + 1 + j].ToTensorData());
             for (int i = stateOutputCount; i < results.Length; i++)
                 results[i].ToTensorData().Dispose();
-            // One immutable map, held both by the new checkpoint and by its history entry.
+            // One immutable map, held both by the new checkpoint and by its history entry. Every slot
+            // is filled by now -- baked, runtime, then scheduled -- and the array is this step's alone.
             var appliedByName = new AppliedHyperparameterMap(
-                AppliedLayout, [.. applied.Select(value => value!)]);
+                _appliedLayout, System.Runtime.InteropServices.ImmutableCollectionsMarshal.AsImmutableArray<AppliedHyperparameter>(applied!));
 
             // Step is the graph-advanced counter (one training step per call). Epoch and batch
             // index are host-owned — the training loop advances them — so they carry through
@@ -3329,7 +3362,7 @@ namespace Shorokoo
                     Epoch = checkpoint.Epoch,
                     BatchIndex = checkpoint.BatchIndex,
                     Loss = lossValue,
-                    Hyperparameters = appliedByName,
+                    AppliedHyperparameters = appliedByName,
                 }),
             };
 
@@ -4667,6 +4700,7 @@ namespace Shorokoo
             // compiles through the wrappers, which copy). Two full walks of the lowered
             // training graph, so named rather than left inside the optimizer's report.
             Stage("FreezeTrainingStepGraph");
+            RequireStepOutputLayout(optResult.OptimizedGraph.Outputs.Count, "optimized");
             PreOptimizationGraph = new ComputationGraph(graph, GraphKind.ConcreteModel);
             TrainingStepPureGraph = new ComputationGraph(optResult.OptimizedGraph, GraphKind.ConcreteModel);
             _trainingStepWorkGraph = null;

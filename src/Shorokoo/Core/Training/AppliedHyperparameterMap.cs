@@ -9,9 +9,12 @@ namespace Shorokoo
 {
     /// <summary>
     /// The immutable map behind <see cref="TrainingCheckpoint.AppliedHyperparameters"/> and
-    /// <see cref="TrainingHistoryEntry.Hyperparameters"/>: one value per hyperparameter name, enumerated
-    /// in the order the names were given (a rig's <see cref="TrainingRig.HyperparameterNames"/>). It
-    /// has no mutating surface and nothing it exposes can be cast back to a mutable collection.
+    /// <see cref="TrainingHistoryEntry.AppliedHyperparameters"/>: one value per hyperparameter name,
+    /// enumerated in the order the names were given — a step's map in its rig's
+    /// <see cref="TrainingRig.HyperparameterNames"/> order, a copy of another dictionary in that one's
+    /// enumeration order, and a map read back from a saved history in the order the history first
+    /// holds each name (<see cref="TrainingHistory.HyperparameterNames"/>). It has no mutating surface
+    /// and nothing it exposes can be cast back to a mutable collection.
     ///
     /// <para>The names and their lookup index are a <see cref="Layout"/>, built once and shared by
     /// every map over the same names — every step a rig runs uses the rig's one layout — so a step's

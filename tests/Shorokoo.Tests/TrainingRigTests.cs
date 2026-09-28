@@ -531,7 +531,7 @@ internal static class TrainingRigHelpers
                 AssertClose(expected, actual, tol);
                 Assert.Equal(expected.AppliedHyperparameters!.Keys, actual.AppliedHyperparameters!.Keys);
                 foreach (var (name, value) in expected.AppliedHyperparameters)
-                    AssertClose(value.ToSingle(), actual.AppliedHyperparameters[name].ToSingle(), tol);
+                    AssertClose(value, actual.AppliedHyperparameters[name], tol);
             }
             return null;
         }
@@ -576,6 +576,21 @@ internal static class TrainingRigHelpers
 
     internal static void AssertClose(float expected, float actual, float tol)
         => Assert.True(MathF.Abs(expected - actual) <= tol * MathF.Max(1f, MathF.Abs(expected)));
+
+    internal static void AssertClose(AppliedHyperparameter expected, AppliedHyperparameter actual, float tol)
+    {
+        Assert.Equal(expected.DType, actual.DType);
+        Assert.Equal(expected.Shape.Dims, actual.Shape.Dims);
+        foreach (var (x, y) in Elements(expected).Zip(Elements(actual))) AssertClose((float)x, (float)y, tol);
+    }
+
+    internal static double[] Elements(AppliedHyperparameter value)
+    {
+        var bytes = value.RawBytes.ToArray();
+        int size = bytes.Length / (int)value.ElementCount;
+        return [.. Enumerable.Range(0, (int)value.ElementCount).Select(i =>
+            AppliedHyperparameter.FromRawBytes(value.DType, [], bytes[(i * size)..((i + 1) * size)]).ToDouble())];
+    }
 
     internal static void AssertClose(TensorDataStruct expected, TensorDataStruct actual, float tol)
     {
@@ -1905,12 +1920,13 @@ public class TrainingRigScheduleCoverageTests
         var fit = rig.Fit([input, input, input], [target, target, target], numEpochs: 1, rig.CreateInitialCheckpoint());
         AssertClose(expected[2], Applied(fit.FinalCheckpoint), 1e-7f);
 
+        var decay = Schedules.Linear(0.2f, 0f, 8);
         var adam = TrainingRig.FromScratch(
             ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph, sample,
-            new AdamWOptimizerHyperparameters { LearningRate = warmup, WeightDecay = warmup, Beta1 = 0.8f });
+            new AdamWOptimizerHyperparameters { LearningRate = warmup, WeightDecay = decay, Beta1 = 0.8f });
         var adamCkpt = adam.TrainStep(adam.TrainStep(adam.CreateInitialCheckpoint(), input.Shared(), target.Shared()),
             input.Shared(), target.Shared());
-        float[] adamExpected = [expected[1], 0.8f, 0.999f, 1e-8f, expected[1]];
+        float[] adamExpected = [expected[1], 0.8f, 0.999f, 1e-8f, decay.At(1)];
         foreach (var (value, name) in adamExpected.Zip(adam.HyperparameterNames)) AssertClose(value, Applied(adamCkpt, name), 1e-7f);
     }
 
@@ -1981,7 +1997,7 @@ public class TrainingRigScheduleCoverageTests
         Epoch = produced.Epoch,
         BatchIndex = produced.BatchIndex,
         Loss = produced.Loss!.Value,
-        Hyperparameters = produced.AppliedHyperparameters!,
+        AppliedHyperparameters = produced.AppliedHyperparameters!,
     };
 
     [Fact]
@@ -2001,10 +2017,10 @@ public class TrainingRigScheduleCoverageTests
         Assert.Equal<long?>([null, null, null, 4L], ckpt.History.Epochs);
         Assert.Equal<long?>([null, null, null, 7L], ckpt.History.BatchIndices);
         Assert.Equal(produced.Select(p => p.Loss!.Value), ckpt.History.Losses);
-        foreach (var (step, value) in ckpt.History.Steps.Zip(ckpt.History.Hyperparameter("learningRate"))) AssertClose(warmup.At(step), value!.ToSingle(), 1e-7f);
+        foreach (var (step, value) in ckpt.History.Steps.Zip(ckpt.History.AppliedValues("learningRate"))) AssertClose(warmup.At(step), value!.ToSingle(), 1e-7f);
         Assert.Equal(["learningRate"], ckpt.History.HyperparameterNames);
-        Assert.All(ckpt.History.Hyperparameter("momentum"), v => Assert.Null(v));
-        Assert.Same(ckpt.AppliedHyperparameters, ckpt.History[^1].Hyperparameters);
+        Assert.All(ckpt.History.AppliedValues("momentum"), v => Assert.Null(v));
+        Assert.Same(ckpt.AppliedHyperparameters, ckpt.History[^1].AppliedHyperparameters);
         Assert.False(ckpt.AppliedHyperparameters is IDictionary<string, AppliedHyperparameter>);
 
         using (var run = rig.BeginResidentRun(ckpt.Shared()))
@@ -2018,7 +2034,7 @@ public class TrainingRigScheduleCoverageTests
             Assert.Equal([0L, 1L, 2L, 3L, 4L, 5L, 6L], run.History.Steps);
             Assert.Equal(losses, run.History.Losses.Skip(4));
             Assert.Equal(ckpt.History, run.History.Take(4));
-            Assert.Same(run.AppliedHyperparameters, run.History[^1].Hyperparameters);
+            Assert.Same(run.AppliedHyperparameters, run.History[^1].AppliedHyperparameters);
         }
 
         var fit = rig.Fit([input, input, input], [target, target, target], numEpochs: 1, rig.CreateInitialCheckpoint());
@@ -2051,7 +2067,7 @@ public class TrainingRigScheduleCoverageTests
 
         var rerun = Step(b.WithStep(1));
         Assert.Equal([0L, 1L, 2L, 1L], rerun.History.Steps);
-        Assert.Equal(rerun.History[1].Hyperparameters, rerun.History[3].Hyperparameters);
+        Assert.Equal(rerun.History[1].AppliedHyperparameters, rerun.History[3].AppliedHyperparameters);
         Assert.Equal([1L, 2L, 1L], rerun.History.Since(1).Steps);
         Assert.Equal([2L, 1L], rerun.History.TakeLast(2).Steps);
         Assert.Same(rerun.History, rerun.History.TakeLast(9));
@@ -2071,6 +2087,66 @@ public class TrainingRigScheduleCoverageTests
             rerun.WithOptimizerState(rerun.OptimizerState), rerun.Shared(), rerun.TryConsume(), rig.AdoptCheckpoint(rerun),
         ];
         Assert.All(derived, d => Assert.Same(rerun.History, d.History));
+
+        Assert.Same(rerun.History.Steps, rerun.History.Steps);
+        Assert.Same(rerun.History.Losses, rerun.History.Losses);
+        Assert.Same(rerun.History.HyperparameterNames, rerun.History.HyperparameterNames);
+        Assert.Throws<NotSupportedException>(() => ((IList<long>)rerun.History.Steps)[0] = 9);
+        Assert.Equal([0L, 1L, 11L, 12L], TrainingHistory.Of([.. a.History, .. b.History.Skip(1).Select(e => e with { Step = e.Step + 10 })]).Steps);
+        Assert.Same(TrainingHistory.Empty, TrainingHistory.Of([]));
+        Assert.Throws<ArgumentNullException>(() => TrainingHistory.Of([a.History[0], null!]));
+    }
+
+    [Fact]
+    public void TestAResidentRunTrimsAndClearsItsHistoryAndTrainsOnUnchangedCoverage()
+    {
+        var (sample, input, target) = ScalarMultiplyBatches();
+        var rig = SgdRig(sample, Schedules.Linear(0.2f, 0f, 8));
+        var begun = rig.TrainStep(rig.CreateInitialCheckpoint(), input.Shared(), target.Shared());
+        var reference = begun;
+        for (int s = 0; s < 4; s++) reference = rig.TrainStep(reference.Shared(), input.Shared(), target.Shared());
+
+        TrainingCheckpoint handed, last;
+        var run = rig.BeginResidentRun(begun.Shared());
+        using (run)
+        {
+            run.ClearHistory();
+            run.Step(input.Shared(), target.Shared());
+            Assert.Equal([1L], run.History.Steps);
+            handed = run.StepToCheckpoint(input.Shared(), target.Shared());
+            run.ReplaceHistory(run.History.TakeLast(1));
+            run.Step(input.Shared(), target.Shared());
+            Assert.Equal([2L, 3L], run.History.Steps);
+            run.ClearHistory();
+            Assert.Empty(run.History);
+            Assert.Throws<ArgumentNullException>(() => run.ReplaceHistory(null!));
+            last = run.StepToCheckpoint(input.Shared(), target.Shared());
+        }
+        Assert.Throws<ObjectDisposedException>(() => run.ClearHistory());
+        Assert.Equal([0L], begun.History.Steps);
+        Assert.Equal([1L, 2L], handed.History.Steps);
+        Assert.Equal([4L], last.History.Steps);
+        AssertClose(reference, last, 0f);
+        Assert.Equal(reference.Loss, last.Loss);
+        Assert.Equal([0L, 1L], rig.TrainStep(begun, input.Shared(), target.Shared()).History.Steps);
+        Assert.Equal([1L, 2L, 3L], rig.TrainStep(handed, input.Shared(), target.Shared()).History.Steps);
+    }
+
+    [Fact]
+    public void TestAnAppliedValueAndAHistoryEntryPrintTheirContentsCoverage()
+    {
+        static AppliedHyperparameter Of(TensorData value) => AppliedHyperparameter.Of(value);
+        Assert.Equal<string>(["0.1", "0.1", "7", "9007199254740993", "True", "Float32[2]"], [
+            Of(TensorData([], 0.1f)).ToString(), Of(TensorData([], 0.1)).ToString(), Of(TensorData([], 7)).ToString(),
+            Of(TensorData([], 9007199254740993L)).ToString(), Of(TensorData([], true)).ToString(), Of(TensorData([2L], [0.1f, 0.2f])).ToString(),
+        ]);
+        var entry = new TrainingHistoryEntry
+        {
+            Step = 3, Epoch = 1, Loss = 0.5f,
+            AppliedHyperparameters = new Dictionary<string, AppliedHyperparameter> { ["learningRate"] = Of(TensorData([], 0.1f)), ["descend"] = Of(TensorData([], false)) },
+        };
+        Assert.Equal("TrainingHistoryEntry { Step = 3, Epoch = 1, BatchIndex = , Loss = 0.5, AppliedHyperparameters = { learningRate = 0.1, descend = False } }", entry.ToString());
+        Assert.Equal("TrainingHistoryEntry { Step = 0, Epoch = , BatchIndex = , Loss = 0, AppliedHyperparameters = {} }", new TrainingHistoryEntry().ToString());
     }
 
     private static float FreshOptStateValue(TrainingRig rig, TrainingCheckpoint ckpt)
@@ -4458,8 +4534,10 @@ public class TrainingRigCheckpointCoverageTests
             trained.Save(path);
             Assert.Equal(trained.History, rig.LoadCheckpoint(path).History);
             Assert.Empty(rig.LoadCheckpoint(path, NoHistory).History);
+            Assert.All(rig.LoadCheckpoint(path).History, e => Assert.Equal(rig.HyperparameterNames, e.AppliedHyperparameters.Keys));
             Persistence.SaveTrainingCheckpointToSkpt(trained, skpt);
             Assert.Equal(trained.History, rig.LoadCheckpointFromSkpt(skpt).History);
+            Assert.All(rig.LoadCheckpointFromSkpt(skpt).History, e => Assert.Equal(rig.HyperparameterNames, e.AppliedHyperparameters.Keys));
             Assert.Empty(rig.LoadCheckpointFromSkpt(skpt, NoHistory).History);
             Assert.Empty(Persistence.Inspect(skpt).Observations);
 
@@ -4498,7 +4576,7 @@ public class TrainingRigCheckpointCoverageTests
         try
         {
             trained.Save(path);
-            Assert.Equal<bool>([false, true, true, true, true, true, true, true, true, true], [
+            Assert.Equal<bool>([false, true, true, true, true, true, true, true, true, true, true, true, true], [
                 Refused(ts => ts),
                 Refused(Replace("history/loss", TensorData([3L], [1f, 2f, 3f]))),
                 Refused(Replace("history/step", TensorData([2L], [0f, 1f]))),
@@ -4509,21 +4587,33 @@ public class TrainingRigCheckpointCoverageTests
                 Refused(ts => ts.Where(t => t.Name != "history/hyperparameter_present/learningRate")),
                 Refused(ts => ts.Where(t => t.Name != "history/hyperparameter/learningRate")),
                 Refused(ts => ts.Append(Column("history/note", TensorData([2L], [1f, 2f])))),
+                Refused(Replace("history/hyperparameter_present/learningRate", TensorData([3L], [true, true, true]))),
+                Refused(Replace("history/epoch", TensorData([3L], [0L, 0L, 0L]))),
+                Refused(Replace("history/batch_index", TensorData([1L], [0L]))),
             ]);
 
             TrainingHistoryEntry Entry(long step, AppliedHyperparameter rate)
-                => trained.History[0] with { Step = step, Hyperparameters = new Dictionary<string, AppliedHyperparameter> { ["learningRate"] = rate } };
+                => trained.History[0] with { Step = step, AppliedHyperparameters = new Dictionary<string, AppliedHyperparameter> { ["learningRate"] = rate } };
             var scalar = AppliedHyperparameter.Of(TensorData([], 0.1f));
-            foreach (var odd in (AppliedHyperparameter[])[AppliedHyperparameter.Of(TensorData([], 0.1)), AppliedHyperparameter.Of(TensorData([2L], [0.1f, 0.2f]))])
+            static TrainingHistory Advised(TrainingHistory history, string message)
             {
-                var unsavable = trained.WithHistory(TrainingHistory.Of([Entry(0, odd), Entry(1, scalar), Entry(2, scalar)]));
-                var ex = Assert.Throws<InvalidOperationException>(() => unsavable.Save(path));
-                Assert.Contains("'learningRate'", ex.Message);
-                Assert.Contains("History.Since(1)", ex.Message);
-                Assert.Throws<InvalidOperationException>(() => Persistence.SaveTrainingCheckpointToSkpt(unsavable, skpt));
-                unsavable.WithHistory(unsavable.History.Since(1)).Save(path);
-                Assert.Equal(unsavable.History.Since(1), rig.LoadCheckpoint(path).History);
+                var advice = System.Text.RegularExpressions.Regex.Match(message, @"History\.(Since|TakeLast)\((\d+)\)").Groups;
+                return advice[1].Value == "Since" ? history.Since(long.Parse(advice[2].Value)) : history.TakeLast(int.Parse(advice[2].Value));
             }
+            foreach (var odd in (AppliedHyperparameter[])[AppliedHyperparameter.Of(TensorData([], 0.1)), AppliedHyperparameter.Of(TensorData([2L], [0.1f, 0.2f]))])
+                foreach (var entries in (TrainingHistoryEntry[][])[
+                    [Entry(0, odd), Entry(1, scalar), Entry(2, scalar)],
+                    [Entry(0, odd), Entry(1, odd), Entry(2, odd), Entry(3, odd), Entry(0, scalar), Entry(1, scalar)]])
+                {
+                    var unsavable = trained.WithHistory(TrainingHistory.Of(entries));
+                    var saved = File.ReadAllBytes(path);
+                    var ex = Assert.Throws<InvalidOperationException>(() => unsavable.Save(path));
+                    Assert.Equal(saved, File.ReadAllBytes(path));
+                    Assert.Contains("'learningRate'", ex.Message);
+                    Assert.Throws<InvalidOperationException>(() => Persistence.SaveTrainingCheckpointToSkpt(unsavable, skpt));
+                    unsavable.WithHistory(Advised(unsavable.History, ex.Message)).Save(path);
+                    Assert.Equal(unsavable.History.TakeLast(2), rig.LoadCheckpoint(path).History);
+                }
         }
         finally
         {
@@ -4570,6 +4660,59 @@ public class TrainingRigSkptCheckpointCoverageTests
             }
         using var outStream = File.Create(path);
         SkptFileFormat.WriteStoredZip(outStream, entries, DateTime.UtcNow);
+    }
+
+    private static void RewriteSkptHistory(string path, Func<List<SafeTensor>, IEnumerable<SafeTensor>> edit)
+    {
+        byte[] edited = [];
+        var entries = new List<SkptFileFormat.ZipEntrySpec>();
+        using (var zip = System.IO.Compression.ZipFile.OpenRead(path))
+            foreach (var e in zip.Entries)
+            {
+                using var s = e.Open();
+                using var buf = new MemoryStream();
+                s.CopyTo(buf);
+                var data = buf.ToArray();
+                if (e.FullName == SkptFileFormat.HistoryEntryPath)
+                {
+                    using var rewritten = new MemoryStream();
+                    SafeTensorLoader.SaveSafeTensorsToStream(rewritten, [.. edit(SafeTensorLoader.ParseSafeTensorBytes(data))]);
+                    data = edited = rewritten.ToArray();
+                }
+                entries.Add(new SkptFileFormat.ZipEntrySpec(e.FullName, data, Align: false));
+            }
+        using (var outStream = File.Create(path))
+            SkptFileFormat.WriteStoredZip(outStream, entries, DateTime.UtcNow);
+        RewriteSkptManifest(path, n => n["data"]![SkptFileFormat.HistoryDataKey]!["sha256"] = SkptFileFormat.Sha256Hex(edited));
+    }
+
+    [Fact]
+    public void TestAMalformedHistoryInASkptFileIsRefusedCoverage()
+    {
+        var (rig, trained, _, _) = BuildTrainedAdamWRig(steps: 2);
+        var path = TempPath("skpt_history") + ".skpt";
+        static SafeTensor Column(string name, TensorData data)
+            => new(name, data, SafeTensorLoader.DTypeToSafeTensorDType(data.DType), data.Shape.Dims);
+        bool Refused(Func<List<SafeTensor>, IEnumerable<SafeTensor>> edit)
+        {
+            Persistence.SaveTrainingCheckpointToSkpt(trained, path);
+            RewriteSkptHistory(path, edit);
+            return Record.Exception(() => rig.LoadCheckpointFromSkpt(path)) is InvalidDataException
+                && Record.Exception(() => TrainingRig.Load(path)) is InvalidDataException;
+        }
+        try
+        {
+            Assert.Equal<bool>([false, true, true, true], [
+                Refused(ts => ts),
+                Refused(ts => ts.Append(Column("note", TensorData([2L], [1f, 2f])))),
+                Refused(ts => ts.Select(t => t.Name == "hyperparameter_present/learningRate" ? Column(t.Name, TensorData([1L], [true])) : t)),
+                Refused(ts => ts.Where(t => t.Name != "step")),
+            ]);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
     }
 
     [Fact]
@@ -5539,8 +5682,8 @@ public class TrainingRigHyperparameterDTypeCoverageTests
 
         var loaded = CheckpointsSavedAndLoaded(ckpt, rebuild: true);
         Assert.All(loaded, c => Assert.Equal(ckpt.History, c.History));
-        Assert.Null(loaded[1].History.Hyperparameter("descend")[1]);
-        Assert.Equal(DType.Bool, loaded[1].History.Hyperparameter("descend")[2]!.DType);
+        Assert.Null(loaded[1].History.AppliedValues("descend")[1]);
+        Assert.Equal(DType.Bool, loaded[1].History.AppliedValues("descend")[2]!.DType);
         foreach (var resumed in (TrainingCheckpoint[])[loaded[0], loaded[1], loaded[3]])
         {
             var next = mixed.TrainStep(resumed, input.Shared(), target.Shared());
@@ -5603,6 +5746,22 @@ public class TrainingRigHyperparameterShapeCoverageTests
     }
 
     [Fact]
+    public void TestARuntimeHyperparameterFedAtAnotherShapeThanTheRigWasBuiltAtIsRefusedCoverage()
+    {
+        var (_, input, target) = ScalarMultiplyBatches();
+        var rig = VectorRig(new VectorRateOptimizerHyperparameters { PerElementRate = Hyperparameter.Runtime(4L) });
+        var cp = rig.CreateInitialCheckpoint();
+        TensorDataStruct Fed(params float[] rate) => rig.HyperparameterStructDef.FromOrderedData(Rate(rate));
+        Assert.All(
+        [
+            Record.Exception(() => rig.TrainStep(cp.Shared(), Fed(0.1f), input.Shared(), target.Shared())),
+            Record.Exception(() => { using var run = rig.BeginResidentRun(cp.Shared()); run.Step(Fed(0.1f), input.Shared(), target.Shared()); }),
+            Record.Exception(() => { using var run = rig.BeginResidentRun(cp.Shared()); run.StepToCheckpoint(Fed(0.1f), input.Shared(), target.Shared()); }),
+        ], e => Assert.IsType<ArgumentException>(e));
+        Assert.Equal([0L], rig.TrainStep(cp, Fed(0.1f, 0.2f, 0.4f, 0.8f), input.Shared(), target.Shared()).History.Steps);
+    }
+
+    [Fact]
     public void TestAHistoryOfANonScalarHyperparameterRoundTripsThroughBothFormatsCoverage()
     {
         var (_, input, target) = ScalarMultiplyBatches();
@@ -5613,7 +5772,7 @@ public class TrainingRigHyperparameterShapeCoverageTests
 
         var loaded = CheckpointsSavedAndLoaded(ckpt);
         Assert.All(loaded, c => Assert.Equal(ckpt.History, c.History));
-        Assert.Equal((long[])[4L], loaded[1].History[1].Hyperparameters["perElementRate"].Shape.Dims);
+        Assert.Equal((long[])[4L], loaded[1].History[1].AppliedHyperparameters["perElementRate"].Shape.Dims);
         Assert.Equal([0L, 1L, 2L], rig.TrainStep(loaded[1], input.Shared(), target.Shared()).History.Steps);
     }
 

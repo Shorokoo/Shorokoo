@@ -9,7 +9,7 @@ namespace Shorokoo
     /// that step actually read — as an immutable host value. A checkpoint carries one per
     /// hyperparameter in <see cref="TrainingCheckpoint.AppliedHyperparameters"/>, and every entry of a
     /// <see cref="TrainingHistory"/> one per hyperparameter in
-    /// <see cref="TrainingHistoryEntry.Hyperparameters"/>.
+    /// <see cref="TrainingHistoryEntry.AppliedHyperparameters"/>.
     ///
     /// <para>The value is copied into managed memory when the step records it, so it belongs to no
     /// backend, needs no disposal and outlives every tensor the step used. It has the
@@ -21,6 +21,8 @@ namespace Shorokoo
     /// </summary>
     public sealed class AppliedHyperparameter : IEquatable<AppliedHyperparameter>
     {
+        // The element bytes as the host lays them out, read and written with MemoryMarshal: little-
+        // endian, like every platform .NET runs on and like the safetensors files they are saved to.
         private readonly byte[] _bytes;
         private readonly long[] _dims;
 
@@ -159,12 +161,18 @@ namespace Shorokoo
             return hash.ToHashCode();
         }
 
-        /// <summary>The value — a scalar as its number, anything else as its dtype and shape.</summary>
+        /// <summary>The value — a scalar as its number, at its own precision, anything else as its
+        /// dtype and shape.</summary>
         public override string ToString()
-            => ElementCount == 1 && _dims.Length == 0
-                ? DType == DType.Bool
-                    ? (_bytes[0] != 0).ToString()
-                    : ToDouble().ToString(System.Globalization.CultureInfo.InvariantCulture)
-                : $"{DType}[{string.Join(", ", _dims)}]";
+        {
+            if (ElementCount != 1 || _dims.Length != 0) return $"{DType}[{string.Join(", ", _dims)}]";
+            var culture = System.Globalization.CultureInfo.InvariantCulture;
+            if (DType == DType.Bool) return (_bytes[0] != 0).ToString();
+            if (DType == DType.Float32 || DType == DType.Float16 || DType == DType.BFloat16)
+                return ToSingle().ToString(culture);
+            if (DType == DType.Int64) return MemoryMarshal.Read<long>(_bytes).ToString(culture);
+            if (DType == DType.UInt64) return MemoryMarshal.Read<ulong>(_bytes).ToString(culture);
+            return ToDouble().ToString(culture);
+        }
     }
 }

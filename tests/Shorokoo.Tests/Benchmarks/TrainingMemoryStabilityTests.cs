@@ -65,12 +65,15 @@ public class TrainingMemoryStabilityTests
     private const int WarmupSteps = 1_000;
     private const int MeasuredSteps = 10_000;
 
-    // Budgets. The managed delta of a non-leaking loop is ~0 after a forced
-    // collection (the checkpoint is replaced, not accumulated); 16 MiB absorbs
-    // JIT / finalizer / fragmentation jitter while a real leak over 10k steps
-    // (even ~2 KiB/step) sails past it. The RSS ceiling is a loose
+    // Budgets. Each step replaces the checkpoint's state but appends an entry to its
+    // training history, a few hundred bytes a step that the loop keeps on purpose. The loop
+    // clears the history every HistoryWindow steps, and at both measurements, so what is
+    // measured is everything else a step leaves behind: ~0 after a forced collection for a
+    // non-leaking loop. 16 MiB absorbs JIT / finalizer / fragmentation jitter while a real
+    // leak over 10k steps (even ~2 KiB/step) sails past it. The RSS ceiling is a loose
     // pathological-leak backstop only.
     private const long ManagedGrowthBudgetBytes = 16L * 1024 * 1024;
+    private const int HistoryWindow = 1_000;
     private const long RssGrowthCeilingBytes = 512L * 1024 * 1024;
 
     // Geometry for the native-growth half below. One [1024, 1024] trainable parameter, so a
@@ -100,13 +103,21 @@ public class TrainingMemoryStabilityTests
 
         var ckpt = rig.CreateInitialCheckpoint();
         for (int i = 0; i < WarmupSteps; i++)
+        {
             ckpt = rig.TrainStep(ckpt, inputBatch.Shared(), targetBatch.Shared());
+            if ((i + 1) % HistoryWindow == 0) ckpt = ckpt.WithoutHistory();
+        }
+        ckpt = ckpt.WithoutHistory();
 
         long managedBefore = LiveManagedBytes();
         long rssBefore = WorkingSetBytes();
 
         for (int i = 0; i < MeasuredSteps; i++)
+        {
             ckpt = rig.TrainStep(ckpt, inputBatch.Shared(), targetBatch.Shared());
+            if ((i + 1) % HistoryWindow == 0) ckpt = ckpt.WithoutHistory();
+        }
+        ckpt = ckpt.WithoutHistory();
 
         long managedAfter = LiveManagedBytes();
         long rssAfter = WorkingSetBytes();

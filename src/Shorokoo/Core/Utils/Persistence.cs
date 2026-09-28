@@ -465,7 +465,8 @@ namespace Shorokoo
                         "belong to this model?");
                 unboundRefs.Remove(paramId);
 
-                var tensors = ResolveDataEntry(container, manifest, tensorRef, paramId, tensorsByDataKey, filePath);
+                var tensors = ResolveDataEntry(
+                    container, manifest, tensorRef, $"the mapping for parameter '{paramId}'", tensorsByDataKey, filePath);
                 if (string.IsNullOrEmpty(tensorRef.Tensor) || !tensors.TryGetValue(tensorRef.Tensor, out var loaded))
                     throw new InvalidDataException(
                         $"'{filePath}': parameter '{paramId}' maps to tensor '{tensorRef.Tensor}' in data " +
@@ -506,22 +507,24 @@ namespace Shorokoo
 
         /// <summary>
         /// Returns the parsed tensors of the data entry a tensor reference points at, reading
-        /// and SHA-256-verifying each data entry at most once per load.
+        /// and SHA-256-verifying each data entry at most once per load. <paramref name="referrer"/>
+        /// names what holds the reference, in what a malformed one is refused with: "the mapping for
+        /// parameter 'w'", say.
         /// </summary>
         private static Dictionary<string, TensorData> ResolveDataEntry(
-            SkptContainer container, SkptManifest manifest, SkptTensorRef tensorRef, string paramId,
+            SkptContainer container, SkptManifest manifest, SkptTensorRef tensorRef, string referrer,
             Dictionary<string, Dictionary<string, TensorData>> tensorsByDataKey, string filePath)
         {
             var dataKey = tensorRef.Data;
             if (string.IsNullOrEmpty(dataKey))
                 throw new InvalidDataException(
-                    $"'{filePath}': the mapping for parameter '{paramId}' names no data entry.");
+                    $"'{filePath}': {referrer} names no data entry.");
             if (tensorsByDataKey.TryGetValue(dataKey, out var cached))
                 return cached;
 
             if (manifest.Data is null || !manifest.Data.TryGetValue(dataKey, out var dataEntry) || dataEntry is null)
                 throw new InvalidDataException(
-                    $"'{filePath}': the mapping for parameter '{paramId}' references data entry " +
+                    $"'{filePath}': {referrer} references data entry " +
                     $"'{dataKey}', which the manifest's data registry does not declare.");
             if (string.IsNullOrEmpty(dataEntry.Entry))
                 throw new InvalidDataException(

@@ -44,14 +44,68 @@ public class ModulesCodeGeneratorLocalNameTests
         }
         """;
 
-    private static (string[] Names, string[] GeneratorDiagnostics, string[] Errors) Generate(bool interceptorsEnabled)
+    private const string CoreNamespaceSource = """
+        using Shorokoo;
+        namespace Core;
+
+        public interface Pair : IStruct
+        {
+            Scalar<float32> First { get; }
+            Scalar<float32> Second { get; }
+        }
+
+        [Module]
+        public partial class Swap
+        {
+            public static TensorStruct<Pair> Inline(TensorStruct<Pair> p) => p;
+        }
+
+        [Module]
+        public partial class Wrap
+        {
+            public static TensorStruct<Pair> Inline(TensorStruct<Pair> p, [Hyper] Model<TensorStruct<Pair>, TensorStruct<Pair>> inner)
+                => inner.Call(p);
+        }
+
+        [Module]
+        public partial class Outer
+        {
+            public static TensorStruct<Pair> Inline(TensorStruct<Pair> p)
+            {
+                var swap = Swap.Model();
+                var wrap = Wrap.Model(swap);
+                return wrap.Call(p);
+            }
+        }
+        """;
+
+    private const string SpelledSource = """
+        using Shorokoo;
+        using Shorokoo.Modules.Initializers;
+        using static Shorokoo.Globals;
+        namespace N;
+
+        [Module]
+        public partial class Spelled
+        {
+            public static Tensor<float32> Inline(Tensor<float32> x)
+            {
+                var @class = Ones.Init([Scalar(2L)]);
+                var paren = (Ones.Init([Scalar(2L)]));
+                return x * @class * paren;
+            }
+        }
+        """;
+
+    private static (string Names, string GeneratorDiagnostics, string Errors) Generate(
+        string source, string? interceptorsNamespaces = LocalParamNameGenerator.InterceptorNamespace)
     {
         _ = typeof(Shorokoo.Modules.Layers.Linear);
         var options = CSharpParseOptions.Default.WithLanguageVersion(LanguageVersion.Preview);
-        if (interceptorsEnabled)
-            options = options.WithFeatures([new("InterceptorsNamespaces", LocalParamNameGenerator.InterceptorNamespace)]);
+        if (interceptorsNamespaces is not null)
+            options = options.WithFeatures([new("InterceptorsNamespaces", interceptorsNamespaces)]);
         var compilation = CSharpCompilation.Create("LocalNames",
-            [CSharpSyntaxTree.ParseText(Source, options)],
+            [CSharpSyntaxTree.ParseText(source, options)],
             AppDomain.CurrentDomain.GetAssemblies()
                 .Where(a => !a.IsDynamic && a.Location != "")
                 .Select(a => MetadataReference.CreateFromFile(a.Location)),
@@ -62,22 +116,18 @@ public class ModulesCodeGeneratorLocalNameTests
             .RunGeneratorsAndUpdateCompilation(compilation, out var updated, out var diagnostics);
         var generated = updated.SyntaxTrees.FirstOrDefault(t => t.FilePath.EndsWith("ShorokooLocalParamNames.g.cs"));
         return (
-            generated is null ? [] : [.. Regex.Matches(generated.ToString(), "NamedByLocal\\(.*, \"(\\w+)\"\\)").Select(m => m.Groups[1].Value)],
-            [.. diagnostics.Where(d => d.Id.StartsWith("MSG")).Select(d => d.Id)],
-            [.. updated.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error).Select(d => d.ToString())]);
+            generated is null ? "" : string.Join(" ", Regex.Matches(generated.ToString(), "NamedByLocal\\(.*, \"(\\w+)\"\\)").Select(m => m.Groups[1].Value)),
+            string.Join(" ", diagnostics.Where(d => d.Id.StartsWith("MSG")).Select(d => d.Id)),
+            string.Join("\n", updated.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error)));
     }
 
     [Fact]
     public void TestALocalAssignedAnInitOrModelCallNamesItThroughAnInterceptor()
     {
-        var (names, generatorDiagnostics, errors) = Generate(interceptorsEnabled: true);
-        Assert.Equal(["gain", "proj", "inner"], names);
-        Assert.Empty(generatorDiagnostics.Where(id => id == "MSG006"));
-        Assert.Empty(errors);
-
-        (names, generatorDiagnostics, errors) = Generate(interceptorsEnabled: false);
-        Assert.Empty(names);
-        Assert.Contains("MSG006", generatorDiagnostics);
-        Assert.Empty(errors);
+        Assert.Equal(("gain proj inner", "", ""), Generate(Source));
+        Assert.Equal(("gain proj inner", "", ""), Generate(Source, "Shorokoo.Generated"));
+        Assert.Equal(("swap wrap", "", ""), Generate(CoreNamespaceSource));
+        Assert.Equal(("class paren", "", ""), Generate(SpelledSource));
+        Assert.Equal(("", "MSG006", ""), Generate(Source, interceptorsNamespaces: null));
     }
 }

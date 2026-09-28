@@ -247,6 +247,46 @@ public partial class DuplicateParamNameModel
              * NormalDist.Init(Vector(1L), Scalar(0f), Scalar(1f)).Named("w").Scalar();
 }
 
+/// <summary>Names that meet: a local and an explicit name alike, an explicit name over a local's,
+/// two locals of one name, and a sub-model named like a loop part.</summary>
+[Module]
+public partial class ParamNameEdgesModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var w = NormalDist.Init(Vector(1L), Scalar(0f), Scalar(1f));
+        var v = NormalDist.Init(Vector(1L), Scalar(0f), Scalar(1f)).Named("w");
+        var renamed = NormalDist.Init(Vector(1L), Scalar(0f), Scalar(1f));
+        renamed.Named("gain");
+        var y = x * w.Scalar() * v.Scalar() * renamed.Scalar();
+        {
+            var s = NormalDist.Init(Vector(1L), Scalar(0f), Scalar(1f));
+            y = y * s.Scalar();
+        }
+        {
+            var s = NormalDist.Init(Vector(1L), Scalar(0f), Scalar(1f));
+            y = y * s.Scalar();
+        }
+        return y + ParamOrderAModel.Model().Named("Loop").Call(x);
+    }
+}
+
+/// <summary>A name given to a value computed from a parameter rather than to the parameter.</summary>
+[Module]
+public partial class NonParamNameModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+        => x * (NormalDist.Init(Vector(1L), Scalar(0f), Scalar(1f)) * Scalar(2f)).Named("w").Scalar();
+}
+
+/// <summary>A name padded with whitespace.</summary>
+[Module]
+public partial class PaddedNameModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+        => x * NormalDist.Init(Vector(1L), Scalar(0f), Scalar(1f)).Named(" w").Scalar();
+}
+
 /// <summary>A library layer captured in a local.</summary>
 [Module]
 public partial class NamedLinearModel
@@ -3071,6 +3111,18 @@ public class TrainingRigCheckpointCoverageTests
             "TrainableParam#0.tail#0.offset#0",
         ], NamesOf(ParamNamingModel.ComputationGraph));
         Assert.Throws<InvalidOperationException>(() => DuplicateParamNameModel.ComputationGraph);
+        Assert.Equal(
+        [
+            "TrainableParam#0.w#1",
+            "TrainableParam#0.w#0",
+            "TrainableParam#0.gain#0",
+            "TrainableParam#0.s#0",
+            "TrainableParam#0.s#1",
+            "TrainableParam#0.Loop#0.scale#0",
+            "TrainableParam#0.Loop#0.offset#0",
+        ], NamesOf(ParamNameEdgesModel.ComputationGraph));
+        Assert.Throws<InvalidOperationException>(() => NonParamNameModel.ComputationGraph);
+        Assert.Throws<ArgumentException>(() => PaddedNameModel.ComputationGraph);
     }
 
     [Fact]

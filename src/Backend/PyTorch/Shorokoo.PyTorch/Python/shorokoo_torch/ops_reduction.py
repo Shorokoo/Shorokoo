@@ -57,10 +57,14 @@ def _reduce(fn, empty_value, data, axes_input, axes, keepdims, noop_with_empty_a
 
 
 def _lowest(dtype):
+    if dtype == torch.bool:
+        return False
     return -math.inf if dtype.is_floating_point else torch.iinfo(dtype).min
 
 
 def _highest(dtype):
+    if dtype == torch.bool:
+        return True
     return math.inf if dtype.is_floating_point else torch.iinfo(dtype).max
 
 

@@ -408,6 +408,14 @@ public class AutoGradMatrixPoolingAndConvOpsCoverageTests
     }
 
     [Fact]
+    public void TestAutoGradBatchedMatMulWithNoRowsGradients()
+    {
+        Run<AutoGradMatMulKnownRankNoRowsCheck>(2f);
+        Run<AutoGradMatMulUnknownRankNoRowsCheck>(2f);
+        Run<AutoGradMatMulUnknownRankRank4NoRowsCheck>(2f);
+    }
+
+    [Fact]
     public void TestAutoGradMatrixAndRoiAlignGradients()
     {
         Run<AutoGradEinsumMatmulBasicCheck>(3.0f);
@@ -421,9 +429,6 @@ public class AutoGradMatrixPoolingAndConvOpsCoverageTests
         Run<AutoGradGemmTransBCheck>(2f);
         Run<AutoGradMatMulKnownRankCheck>(2f);
         Run<AutoGradMatMulUnknownRankBatchedCheck>(2f);
-        Run<AutoGradMatMulKnownRankNoRowsCheck>(2f);
-        Run<AutoGradMatMulUnknownRankNoRowsCheck>(2f);
-        Run<AutoGradMatMulUnknownRankRank4NoRowsCheck>(2f);
         RunSmall<AutoGradMatMulBatchTimesMatrixCheck>([2L, 3L, 4L]);
         RunSmall<AutoGradMatMulMatrixTimesMatrixCheck>([3L, 4L]);
         RunSmall<AutoGradMatMulVectorTimesMatrixCheck>([4L]);

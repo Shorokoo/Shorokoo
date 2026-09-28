@@ -148,6 +148,17 @@ public partial class RngInitSameShapeStack8
     public static Tensor<float32> Inline(Tensor<float32> x) => RngInitSameShapeStack.Chain(x, 8);
 }
 
+[Module]
+public partial class RngInitSameShapeOnSeparateLines
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var wq = NormalDist.Init(Vector(4L, 4L), Scalar(0f), Scalar(0.02f));
+        var wk = NormalDist.Init(Vector(4L, 4L), Scalar(0f), Scalar(0.02f));
+        return x.MatMul(wq).MatMul(wk);
+    }
+}
+
 internal static class RngInitSameShapeStack
 {
     internal static Tensor<float32> Chain(Tensor<float32> x, int layers)
@@ -223,9 +234,25 @@ public class RngInitTests
     public void TestParametersDrawnSideBySideAreTheValuesDrawnInTurn()
         => Assert.Equal(InitValues(RngInitSameShapeStack8.ComputationGraph, sideBySide: false), InitValues(RngInitSameShapeStack8.ComputationGraph, sideBySide: true));
 
+    private static int InitSessionsWithDebugInfo(ComputationGraph model)
+    {
+        var arch = model.ToConcreteArchitecture([TensorData([1L, 4L], new float[4])]).ToInternal();
+        var line = 0;
+        foreach (var node in arch.Nodes.Where(n => !InternalOpCodes.IsModelInputOp(n.OpCode)))
+            (node.StackTrace, node.FriendlyName) = ($"at Model.Inline() in Model.cs:line {++line}", $"node{line}");
+        var backend = new SessionCountingBackend(DefaultBackend.Instance);
+        using var ctx = new ComputeContext(backend);
+        arch.InitializeTrainableParams(computeContext: ctx);
+        return backend.Sessions;
+    }
+
     [Fact]
     public void TestSameShapedParametersShareTheirInitializationSessions()
-        => Assert.Equal(InitSessions(RngInitSameShapeStack2.ComputationGraph), InitSessions(RngInitSameShapeStack8.ComputationGraph));
+    {
+        Assert.Equal(InitSessions(RngInitSameShapeStack2.ComputationGraph), InitSessions(RngInitSameShapeStack8.ComputationGraph));
+        Assert.Equal(InitSessions(RngInitSameShapeStack2.ComputationGraph), InitSessions(RngInitSameShapeOnSeparateLines.ComputationGraph));
+        Assert.Equal(InitSessions(RngInitSameShapeStack2.ComputationGraph), InitSessionsWithDebugInfo(RngInitSameShapeOnSeparateLines.ComputationGraph));
+    }
 
     [Fact]
     public void TestSameShapeParamsDifferAndInitIsReproducibleMasterSeededAndInKaimingBound()

@@ -452,6 +452,77 @@ namespace Shorokoo.Tests.Modules
                 .Concat(2L, (Tensor<float32>)OnnxOp.AveragePool(x, AutoPad.SameLower, false, false, [2L], [3L], null, [2L]));
     }
 
+    /// <summary>SAME-padded dilated pools over an odd length: MaxPool (SAME_UPPER, stride 2),
+    /// AveragePool (SAME_LOWER, count_include_pad = 1, stride 2) and MaxPool (SAME_LOWER, stride 1).
+    /// Input x is [1,1,9].</summary>
+    [Module]
+    public partial class SameDilatedPoolOddLengthValues
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x)
+            => ((Tensor<float32>)OnnxOp.MaxPool(x, AutoPad.SameUpper, false, [2L], [3L], null, 0L, [2L]))
+                .Concat(2L, (Tensor<float32>)OnnxOp.AveragePool(x, AutoPad.SameLower, false, true, [2L], [3L], null, [2L]))
+                .Concat(2L, (Tensor<float32>)OnnxOp.MaxPool(x, AutoPad.SameLower, false, [2L], [3L], null, 0L, [1L]));
+    }
+
+    /// <summary>SAME_LOWER MaxPool with dilations [2,2], kernel [3,2], strides [2,2]: values then
+    /// indices. Input x is [1,1,5,6].</summary>
+    [Module]
+    public partial class SameDilatedMaxPoolWithIndicesValues
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x)
+        {
+            var (y, indices) = OnnxOp.MaxPoolWithIndices(x, AutoPad.SameLower, false, [2L, 2L], [3L, 2L], null, 0L, [2L, 2L]);
+            return ((Tensor<float32>)y).Concat(1L, ((Tensor<int64>)indices).Cast<float32>());
+        }
+    }
+
+    /// <summary>Kernel 2, dilation 3, explicit pads [2,1] as large as the kernel: MaxPool,
+    /// AveragePool (count_include_pad 0, then 1), LpPool (p = 2); then a ceil_mode MaxPool
+    /// (kernel 2, stride 3) whose end pad of 2 reaches its kernel. Input x is [1,1,9].</summary>
+    [Module]
+    public partial class PadsReachingTheKernelPoolValues
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x)
+            => ((Tensor<float32>)OnnxOp.MaxPool(x, AutoPad.NotSet, false, [3L], [2L], [2L, 1L], 0L, [1L]))
+                .Concat(2L, (Tensor<float32>)OnnxOp.AveragePool(x, AutoPad.NotSet, false, false, [3L], [2L], [2L, 1L], [1L]))
+                .Concat(2L, (Tensor<float32>)OnnxOp.AveragePool(x, AutoPad.NotSet, false, true, [3L], [2L], [2L, 1L], [1L]))
+                .Concat(2L, (Tensor<float32>)OnnxOp.LpPool(x, AutoPad.NotSet, false, [3L], [2L], 2L, [2L, 1L], [1L]))
+                .Concat(2L, (Tensor<float32>)OnnxOp.MaxPool(x, AutoPad.NotSet, true, [1L], [2L], [0L, 2L], 0L, [3L]));
+    }
+
+    /// <summary>SAME pools whose dilation needs padding as large as the kernel: MaxPool
+    /// (SAME_UPPER, k 2, d 3, stride 2), AveragePool (SAME_LOWER, count_include_pad 0, k 2, d 3),
+    /// AveragePool (SAME_UPPER, count_include_pad 1, k 3, d 3, stride 2), LpPool (SAME_LOWER,
+    /// p = 2, k 2, d 4, stride 2). Input x is [1,1,9].</summary>
+    [Module]
+    public partial class SameWideDilationPoolValues
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x)
+            => ((Tensor<float32>)OnnxOp.MaxPool(x, AutoPad.SameUpper, false, [3L], [2L], null, 0L, [2L]))
+                .Concat(2L, (Tensor<float32>)OnnxOp.AveragePool(x, AutoPad.SameLower, false, false, [3L], [2L], null, [1L]))
+                .Concat(2L, (Tensor<float32>)OnnxOp.AveragePool(x, AutoPad.SameUpper, false, true, [3L], [3L], null, [2L]))
+                .Concat(2L, (Tensor<float32>)OnnxOp.LpPool(x, AutoPad.SameLower, false, [4L], [2L], 2L, null, [2L]));
+    }
+
+    /// <summary>MaxPool with indices, kernel [2,2], strides [2,2], whose padding reaches the
+    /// kernel: explicit pads [2,0,1,2] with dilations [3,2], storage_order 0 then 1, and SAME_LOWER
+    /// with dilations [3,3]. Each call's values then indices, flattened. Input x is [1,2,4,4].</summary>
+    [Module]
+    public partial class PadsReachingTheKernelMaxPoolWithIndicesValues
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x)
+        {
+            var (y0, i0) = OnnxOp.MaxPoolWithIndices(x, AutoPad.NotSet, false, [3L, 2L], [2L, 2L], [2L, 0L, 1L, 2L], 0L, [2L, 2L]);
+            var (y1, i1) = OnnxOp.MaxPoolWithIndices(x, AutoPad.NotSet, false, [3L, 2L], [2L, 2L], [2L, 0L, 1L, 2L], 1L, [2L, 2L]);
+            var (y2, i2) = OnnxOp.MaxPoolWithIndices(x, AutoPad.SameLower, false, [3L, 3L], [2L, 2L], null, 0L, [2L, 2L]);
+            var flat = OnnxOp.Constant([-1L]);
+            return (Tensor<float32>)OnnxOp.Concat([
+                OnnxOp.Reshape(y0, flat, false), OnnxOp.Reshape(((Tensor<int64>)i0).Cast<float32>(), flat, false),
+                OnnxOp.Reshape(y1, flat, false), OnnxOp.Reshape(((Tensor<int64>)i1).Cast<float32>(), flat, false),
+                OnnxOp.Reshape(y2, flat, false), OnnxOp.Reshape(((Tensor<int64>)i2).Cast<float32>(), flat, false)], 0L);
+        }
+    }
+
     /// <summary>ConvTranspose whose output_shape exceeds the full extent by a whole stride.
     /// x and w are [1,1,2,2], b is [1].</summary>
     [Module]

@@ -49,7 +49,11 @@ public static partial class OnnxOp
 
     public static Variable AveragePool(Variable x, AutoPad? autoPad, bool? ceilMode, bool? countIncludePad, 
         long[]? dilations, long[] kernelShape, long[]? pads, long[]? strides)
-        => NodeBuilder.BuildNodeSingleOut(AVERAGE_POOL, [x], [
+        => NeedsWrittenPadding(autoPad, dilations, kernelShape, pads)
+            ? PaddedPool(x, countIncludePad == true ? PoolKind.AverageIncludingPad : PoolKind.AverageExcludingPad,
+                autoPad, ceilMode, dilations, kernelShape, pads, strides, null,
+                (input, p, s, ceil, includePad) => [AveragePool(input, null, ceil, includePad, dilations, kernelShape, p, s)])[0]
+            : NodeBuilder.BuildNodeSingleOut(AVERAGE_POOL, [x], [
             (AttrAutoPad, autoPad), 
             (AttrCeilMode, ceilMode), 
             (AttrCountIncludePad, countIncludePad),

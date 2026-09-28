@@ -52,9 +52,7 @@ public class QeePoolConvAuditTests
             F32Wave([2L, 2L, 9L]), F32Wave([1L, 4L, 7L, 6L]), F32Wave([1L, 2L, 5L, 4L, 4L]), F32Wave([1024L])));
     }
 
-    // ONNX Runtime pads SAME_UPPER/SAME_LOWER pools for the undilated kernel and emits too few, shifted windows:
-    // https://github.com/Shorokoo/Shorokoo/issues/379
-    [Fact(Skip = "Shorokoo/Shorokoo#379: ONNX Runtime pads dilated SAME pools for the undilated kernel")]
+    [Fact]
     public void TestSameAutoPadWithDilationsPadsForTheDilatedKernel()
     {
         var x = F32([1L, 1L, 10L], [.. Enumerable.Range(0, 10).Select(i => (float)i)]);
@@ -64,6 +62,25 @@ public class QeePoolConvAuditTests
             expected: [3.1622777, 5.9160798, 9.1104336, 12.4498996, 11.4017543, 2, 4.4721360, 7.4833148, 10.7703296, 10]));
         Assert.True(AutoTest.AdvancedTestGraph<SameDilatedAveragePoolValues>([], [x],
             expected: [2, 3, 5, 7, 8, 1, 2, 4, 6, 7]));
+        Assert.True(AutoTest.AdvancedTestGraph<SameDilatedPoolOddLengthValues>([], [F32([1L, 1L, 9L], [.. Enumerable.Range(0, 9).Select(i => (float)i)])],
+            expected: [2, 4, 6, 8, 8, 2 / 3.0, 2, 4, 6, 14 / 3.0, 2, 3, 4, 5, 6, 7, 8, 7, 8]));
+        Assert.True(AutoTest.AdvancedTestGraph<SameDilatedMaxPoolWithIndicesValues>([], [F32([1L, 1L, 5L, 6L], [.. Enumerable.Range(0, 30).Select(i => (float)(i * 7 % 30))])],
+            expected: [7, 21, 29, 25, 25, 29, 25, 25, 29, 1, 3, 17, 25, 25, 17, 25, 25, 17]));
+    }
+
+    [Fact]
+    public void TestPaddingAsLargeAsTheKernelIsPooled()
+    {
+        var x = F32([1L, 1L, 9L], [.. Enumerable.Range(-4, 9).Select(i => (float)i)]);
+        Assert.True(AutoTest.AdvancedTestGraph<PadsReachingTheKernelPoolValues>([], [x],
+            expected: [-3, -2, -1, 0, 1, 2, 3, 4, 2, -3, -2, -2.5, -1.5, -0.5, 0.5, 1.5, 2.5, 2, -1.5, -1, -2.5, -1.5, -0.5, 0.5, 1.5, 2.5, 1,
+                3, 2, 4.1231056, 3, 2.236068, 2.236068, 3, 4.1231056, 2, -3, 0, 3]));
+        Assert.True(AutoTest.AdvancedTestGraph<SameWideDilationPoolValues>([], [x],
+            expected: [-2, 0, 2, 4, 3, -3, -2, -2.5, -1.5, -0.5, 0.5, 1.5, 2.5, 2, -5 / 3.0, -1 / 3.0, 0, 1 / 3.0, 5 / 3.0, 2, 4, 2.8284271, 4, 2]));
+        Assert.True(AutoTest.AdvancedTestGraph<PadsReachingTheKernelMaxPoolWithIndicesValues>([],
+            [F32([1L, 2L, 4L, 4L], [.. Enumerable.Range(0, 32).Select(i => (float)(i * 7 % 32 - 16))])],
+            expected: [12, -6, 4, -2, 10, 10, 14, 14, 4, 6, 12, 2, 22, 22, 18, 18, 12, -6, 4, -2, 10, 10, 14, 14, 1, 9, 3, 8, 25, 25, 24, 24,
+                -10, 15, -6, -13, 6, -1, 10, 3, 10, 9, 6, 5, 26, 25, 22, 21]));
     }
 
     [Fact]

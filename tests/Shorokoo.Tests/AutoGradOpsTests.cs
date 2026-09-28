@@ -421,6 +421,7 @@ public class AutoGradMatrixPoolingAndConvOpsCoverageTests
         Run<AutoGradGemmTransBCheck>(2f);
         Run<AutoGradMatMulKnownRankCheck>(2f);
         Run<AutoGradMatMulUnknownRankBatchedCheck>(2f);
+        Run<AutoGradMatMulKnownRankNoRowsCheck>(2f);
         Run<AutoGradMatMulUnknownRankNoRowsCheck>(2f);
         Run<AutoGradMatMulUnknownRankRank4NoRowsCheck>(2f);
         RunSmall<AutoGradMatMulBatchTimesMatrixCheck>([2L, 3L, 4L]);

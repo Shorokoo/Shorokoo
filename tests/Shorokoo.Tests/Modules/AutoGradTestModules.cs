@@ -2966,6 +2966,23 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
+    /// <summary>
+    /// A static-rank batched MatMul with no rows, [2, 0, 3] times [2, 3, 2]: the product is
+    /// empty, so dL/da = 0 through the static-perm last-two-dims transposes.
+    /// </summary>
+    [Module]
+    public partial class AutoGradMatMulKnownRankNoRowsCheck
+    {
+        public static Scalar<bit> Inline(Scalar<float32> a)
+        {
+            var A = (Tensor<float32>)OnnxOp.Identity(OnnxOp.Expand(a, Vector(2L, 0L, 3L)), rank: 3);
+            var B = (Tensor<float32>)OnnxOp.Identity(OnnxOp.Expand(a, Vector(2L, 3L, 2L)), rank: 3);
+            var loss = ((Tensor<float32>)OnnxOp.MatMul(A, B)).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(a, loss);
+            return grad.Abs() < Scalar(1e-5f);
+        }
+    }
+
     [Module]
     public partial class AutoGradMatMulUnknownRankNoRowsCheck
     {

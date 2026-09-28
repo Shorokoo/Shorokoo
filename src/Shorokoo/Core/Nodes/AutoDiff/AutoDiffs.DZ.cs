@@ -155,25 +155,28 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             where T1 : IVarType
             where T2 : IVarType
         {
-            // Gradient of ReduceMean: broadcast grad / N back to original shape
+            // Gradient of ReduceMean: broadcast grad / N back to original shape, N the size of
+            // each group. noop_with_empty_axes with no axes, or an empty axes tensor, makes every
+            // element a group of its own (N = 1); without it an empty axes tensor reduces every
+            // element (N = the element count).
             var expandedGrad = ExpandGradToOriginalShape(grad, data, axes, keepdims);
+            bool noOp = noopWithEmptyAxes == true;
+            if (!axes.HasValue && noOp) return [expandedGrad, null];
 
-            // Count the number of elements that were reduced
-            Tensor<T1> reducedCountTyped;
-            if (!axes.HasValue)
+            Tensor<int64> fullShape = OnnxOp.Shape(data);
+            Tensor<int64> total = OnnxOp.ReduceProd(fullShape, keepdims: false);
+            Tensor<int64> reducedCount = total;
+            if (axes.HasValue)
             {
-                // All axes reduced — N is the total number of elements = product of all dims
-                Tensor<int64> fullShape = OnnxOp.Shape(data);
-                Tensor<int64> totalSize = OnnxOp.ReduceProd(fullShape, keepdims: false);
-                reducedCountTyped = OnnxOp.Cast(totalSize, saturate: null, to: data.Type);
+                Tensor<int64> gatheredDims = OnnxOp.Gather(fullShape, axes, axis: 0);
+                reducedCount = OnnxOp.ReduceProd(gatheredDims, keepdims: false);
+                if (!noOp)
+                {
+                    Tensor<int64> axisCount = OnnxOp.ReduceProd(OnnxOp.Shape(axes), keepdims: false);
+                    reducedCount = OnnxOp.Where(OnnxOp.Equal(axisCount, Scalar(0L)), total, reducedCount);
+                }
             }
-            else
-            {
-                Tensor<int64> reducedShape = OnnxOp.Shape(data);
-                Tensor<int64> gatheredDims = OnnxOp.Gather(reducedShape, axes, axis: 0);
-                Tensor<int64> reducedCount = OnnxOp.ReduceProd(gatheredDims, keepdims: false);
-                reducedCountTyped = OnnxOp.Cast(reducedCount, saturate: null, to: data.Type);
-            }
+            Tensor<T1> reducedCountTyped = OnnxOp.Cast(reducedCount, saturate: null, to: data.Type);
 
             return [expandedGrad / reducedCountTyped, null];
         }
@@ -313,6 +316,12 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             // with Where(x==0, 0, ...), which would silently produce a WRONG (zero) gradient
             // in the single-zero case. Keep inputs away from exact zeros when training
             // through ReduceProd.
+            //
+            // A one-element group has no other elements: its gradient is 1, zero included. That is
+            // every group under noop_with_empty_axes with no axes, or with an empty axes tensor.
+            if (noopWithEmptyAxes == true && !axes.HasValue)
+                return [ExpandGradToOriginalShape(grad, data, axes, keepdims), null];
+
             var originalShape = data.DShape;
 
             // Compute product along axes
@@ -321,7 +330,10 @@ namespace Shorokoo.Core.Nodes.AutoDiff
 
             // Gradient: prod / x_i * grad (broadcast prod to match data shape)
             Tensor<T1> expandedProd = OnnxOp.Expand(prod, originalShape);
-            return [expandedGrad * expandedProd / data, null];
+            Tensor<T1> product = expandedGrad * expandedProd / data;
+            if (noopWithEmptyAxes == true && axes is { } given)
+                product = OnnxOp.Where(OnnxOp.Equal(OnnxOp.ReduceProd(OnnxOp.Shape(given), keepdims: false), Scalar(0L)), expandedGrad, product);
+            return [product, null];
         }
 
         // ===== ReduceSumSquare =====
@@ -339,22 +351,19 @@ namespace Shorokoo.Core.Nodes.AutoDiff
 
         // ===== ReduceLogSumExp =====
 
-        [AutoDiff(REDUCE_LOG_SUM_EXP)]
-        public static Variable?[] ReduceLogSumExp<T1, T2>(Tensor<T1> data, Tensor<T2>? axes, Tensor<T1> grad, bool? keepdims, bool? noopWithEmptyAxes) 
+        [AutoDiff(REDUCE_LOG_SUM_EXP, UsesOutputs = true)]
+        public static Variable?[] ReduceLogSumExp<T1, T2>(Tensor<T1> data, Tensor<T2>? axes, Tensor<T1> output, Tensor<T1> grad, bool? keepdims, bool? noopWithEmptyAxes) 
             where T1 : IVarType
             where T2 : IVarType
         {
             // ReduceLogSumExp(x) = log(sum(exp(x)))
-            // d/dx_i = exp(x_i) / sum(exp(x_j)) = softmax(x)_i
-            var originalShape = data.DShape;
-
-            // Compute softmax-like term: exp(x_i) / sum(exp(x_j)) along the reduction axes
-            var expData = data.Exp();
-            Tensor<T1> sumExp = OnnxOp.ReduceSum(expData, axes, keepdims: true, noopWithEmptyAxes: noopWithEmptyAxes);
-            var softmaxLike = expData / OnnxOp.Expand(sumExp, originalShape);
+            // d/dx_i = exp(x_i) / sum(exp(x_j)) = softmax(x)_i = exp(x_i - lse), with lse the
+            // forward output: every exponent is at most 0, so nothing overflows.
+            var expandedLse = ExpandGradToOriginalShape(output, data, axes, keepdims);
+            var softmax = (data - expandedLse).Exp();
 
             var expandedGrad = ExpandGradToOriginalShape(grad, data, axes, keepdims);
-            return [softmaxLike * expandedGrad, null];
+            return [softmax * expandedGrad, null];
         }
 
         // ===== ReduceL1 =====

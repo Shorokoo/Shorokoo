@@ -149,6 +149,10 @@ public class AutoGradElementwiseOpsCoverageTests
     }
 
     [Fact]
+    public void TestAutoGradReductionGradientsAtTheirEdges()
+        => RunTensor<AutoGradReductionEdgeGradientsCheck>([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f);
+
+    [Fact]
     public void TestAutoGradVariadicAndDropoutGradients()
     {
         Run<AutoGradDropoutInferenceCheck>(2f);

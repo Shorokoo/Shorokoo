@@ -47,10 +47,13 @@ public class QeeElementwiseAuditTests
         Assert.True(QeeAudit.Check<QeeSliceReverseValueAuditCheck>(F32([3L], 1f, 2f, 3f)));
     }
 
-    // #423: ONNX Runtime has no Where kernel for int8, int16, uint16, uint32, uint64 or bool.
-    [Fact(Skip = "#423: ONNX Runtime has no Where kernel for int8, int16, uint16, uint32, uint64 or bool")]
+    [Fact]
     public void TestWhereSelectsBetweenTensorsOfEveryIntegerTypeAndBool()
-        => Assert.True(AutoTest.AdvancedTestGraph<WhereOnEveryIntegerAndBoolTypeCheck>([], [Bits([2L], true, false)]));
+    {
+        Assert.True(AutoTest.AdvancedTestGraph<WhereOnEveryIntegerAndBoolTypeCheck>([], [Bits([2L], true, false)]));
+        Assert.True(AutoTest.AdvancedTestGraph<WhereBroadcastsOnEveryTypeWithoutAKernelCheck>([], [Bits([2L], true, false)]));
+        Assert.True(AutoTest.AdvancedTestGraph<WhereOnUInt64BeyondInt64Check>([], [Bits([4L], true, false, true, false)]));
+    }
 }
 
 /// <summary>

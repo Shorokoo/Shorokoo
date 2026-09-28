@@ -321,6 +321,30 @@ namespace Shorokoo.Tests.Modules
             => c.Where(Vector(1L, 0L).Cast<T>(), Vector(0L, 1L).Cast<T>()).Cast<int64>() == Vector(1L, 1L);
     }
 
+    /// <summary>Where broadcasting a [2, 1] condition, a [3] x and a scalar y over every type ONNX
+    /// Runtime has no Where kernel for: [[T], [F]], [1, 0, 1], 1 → [[1, 0, 1], [1, 1, 1]]. Input c = [T, F].</summary>
+    [Module]
+    public partial class WhereBroadcastsOnEveryTypeWithoutAKernelCheck
+    {
+        public static Tensor<bit> Inline(Vector<bit> c)
+            => OnnxOp.Concat([Picks<int8>(c), Picks<int16>(c), Picks<uint16>(c), Picks<uint32>(c), Picks<uint64>(c), Picks<bfloat16>(c), Picks<bit>(c)], 0);
+
+        private static Tensor<bit> Picks<T>(Vector<bit> c) where T : IVarType
+        {
+            var picked = (Tensor<T>)OnnxOp.Where(OnnxOp.Unsqueeze(c, Vector(1L)), Vector(1L, 0L, 1L).Cast<T>(), Scalar(1L).Cast<T>());
+            return OnnxOp.Reshape(OnnxOp.Equal(picked.Cast<int64>(), OnnxOp.Reshape(Vector(1L, 0L, 1L, 1L, 1L, 1L), Vector(2L, 3L), false)), Vector(-1L), false);
+        }
+    }
+
+    /// <summary>Where over uint64 values at and above 2^63. Input c = [T, F, T, F].</summary>
+    [Module]
+    public partial class WhereOnUInt64BeyondInt64Check
+    {
+        public static Vector<bit> Inline(Vector<bit> c)
+            => c.Where(Vector(ulong.MaxValue, 1UL << 63, 1UL, (1UL << 63) + 5UL), Vector(0UL, (1UL << 63) - 1UL, 1UL << 63, 18446744073709551557UL))
+                .Cast<int64>() == Vector(-1L, long.MaxValue, 1L, -59L);
+    }
+
     /// <summary>Full reverse Slice (starts=-1, ends=INT_MIN, steps=-1): the spec clamps
     /// a negative-step exclusive `ends` to −1 so the slice runs backward THROUGH index 0
     /// ([1,2,3] → [3,2,1]). Pinned because the QEE Slice kernel used to clamp the

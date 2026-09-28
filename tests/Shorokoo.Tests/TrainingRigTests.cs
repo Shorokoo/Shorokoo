@@ -227,13 +227,24 @@ public partial class ParamNamingModel
         var inner = ParamOrderAModel.Model();
         var y = inner.Call(x) * gain.Scalar();
         y = y * NormalDist.Init(Vector(1L), Scalar(0f), Scalar(1f)).Scalar();
+        y = y + NormalDist.Init(Vector(1L), Scalar(0f), Scalar(1f)).Named("bias").Scalar();
         foreach (var layer in LoopAPI.Iterate(Scalar(2L)))
         {
             var step = NormalDist.Init(Vector(1L), Scalar(0f), Scalar(1f));
             y = y + step.Scalar() * NormalDist.Init(Vector(1L), Scalar(0f), Scalar(1f)).Scalar();
         }
-        return y * NormalDist.Init(Vector(1L), Scalar(0f), Scalar(1f)).Scalar();
+        return y * NormalDist.Init(Vector(1L), Scalar(0f), Scalar(1f)).Scalar()
+            + ParamOrderAModel.Model().Named("tail").Call(x);
     }
+}
+
+/// <summary>Two parameters given one name.</summary>
+[Module]
+public partial class DuplicateParamNameModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+        => x * NormalDist.Init(Vector(1L), Scalar(0f), Scalar(1f)).Named("w").Scalar()
+             * NormalDist.Init(Vector(1L), Scalar(0f), Scalar(1f)).Named("w").Scalar();
 }
 
 /// <summary>A library layer captured in a local.</summary>
@@ -3050,12 +3061,16 @@ public class TrainingRigCheckpointCoverageTests
             "TrainableParam#0.inner#0.scale#0",
             "TrainableParam#0.inner#0.offset#0",
             "TrainableParam#0.NormalDist#0",
+            "TrainableParam#0.bias#0",
             "TrainableParam#0.Loop#0:0.step#0",
-            "TrainableParam#0.Loop#0:0.NormalDist#0",
             "TrainableParam#0.Loop#0:1.step#0",
+            "TrainableParam#0.Loop#0:0.NormalDist#0",
             "TrainableParam#0.Loop#0:1.NormalDist#0",
             "TrainableParam#0.NormalDist#1",
+            "TrainableParam#0.tail#0.scale#0",
+            "TrainableParam#0.tail#0.offset#0",
         ], NamesOf(ParamNamingModel.ComputationGraph));
+        Assert.Throws<InvalidOperationException>(() => DuplicateParamNameModel.ComputationGraph);
     }
 
     [Fact]
@@ -5218,7 +5233,7 @@ public class TrainingRigHyperparameterShapeCoverageTests
                 PerElementRate = Hyperparameter.Baked(Rate(0.1f, 0.2f, 0.4f, 0.8f)),
                 Gain = Hyperparameter.Runtime(),
             })).Message;
-        Assert.Contains("InitScalarWeight#0", refusal);
+        Assert.Contains("TrainableParam#0.weight#0", refusal);
         Assert.Contains("at that parameter's own shape", refusal);
     }
 

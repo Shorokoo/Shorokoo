@@ -190,7 +190,7 @@ public class RngPinTests
         Assert.Equal(2, inits.Count);
         Assert.Equal([1, 1], inits[0].ModelIdPath);
         Assert.Equal([2, 1], inits[1].ModelIdPath);
-        Assert.All(inits, s => Assert.Contains("Linear", s.Name));
+        Assert.All(inits, s => Assert.Contains(".weight#0", s.Name));
         Assert.All(inits, s => Assert.NotNull(s.Shape));
         Assert.NotEqual(inits[0].Key, inits[1].Key);
         // The reported keys are resolved by EXECUTING each stream's in-graph derivation (#136),
@@ -274,7 +274,7 @@ public class RngPinTests
         var bothSkeleton = bothReport.EmitPinSkeleton();
         Assert.Contains("// in the scope at ModelId path [1, -1] — a loop body, a module reached from one, or a model a ModelSequence position picks at run time:", bothSkeleton);
         Assert.Contains("([1], /*", bothSkeleton);
-        Assert.Contains("InitSimple", bothSkeleton);
+        Assert.Contains("TrainableParam#0.Loop#0:0.w#0", bothSkeleton);
         Assert.Contains("([2], /* uniform feed */ ?)", bothSkeleton);
         Assert.DoesNotContain("// at the end of Inline:", bothSkeleton);
         Assert.DoesNotContain("RngExecutionCounter", bothSkeleton);

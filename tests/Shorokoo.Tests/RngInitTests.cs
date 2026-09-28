@@ -1035,8 +1035,8 @@ public class RngInitComposedInitializerTests
 
     private static float[] Single(ComputationGraph g, ulong seed = 7) => Init(g, seed).Values.Single();
 
-    private static float[] Named(Dictionary<string, float[]> ps, string initializer, int index = 0)
-        => ps.Single(p => p.Key.EndsWith($".{initializer}#{index}", StringComparison.Ordinal)).Value;
+    private static float[] Named(Dictionary<string, float[]> ps, string name, int index = 0)
+        => ps.Single(p => p.Key.EndsWith($".{name}#{index}", StringComparison.Ordinal)).Value;
 
     [Fact]
     public void TestANestedInitCallIsTheCalledInitializersBodyKeyedOnTheParameterBeingCreated()
@@ -1055,16 +1055,16 @@ public class RngInitComposedInitializerTests
     public void TestAParameterInitializedFromAnotherReadsTheValueTheModelStartsFrom()
     {
         var chain = Init(RngInitParamFromParamChain.ComputationGraph);
-        var src = Named(chain, "NormalDist");
-        Assert.Equal([.. src.Select(v => v * 2f)], Named(chain, "RngInitDoubleOfParam", 0));
-        Assert.Equal([.. src.Select(v => v * 4f)], Named(chain, "RngInitDoubleOfParam", 1));
+        var src = Named(chain, "src");
+        Assert.Equal([.. src.Select(v => v * 2f)], Named(chain, "twice"));
+        Assert.Equal([.. src.Select(v => v * 4f)], Named(chain, "fourTimes"));
     }
 
     [Fact]
     public void TestARankZeroInitializerTakesAParameterAsItsFirstInput()
     {
         var ps = Init(RngInitScalarParamFromParam.ComputationGraph);
-        Assert.Equal([1f], Named(ps, "ScalarOnes"));
+        Assert.Equal([1f], Named(ps, "src"));
         Assert.Equal([2f], Named(ps, "RngInitScalarDoubleOfParam"));
     }
 
@@ -1084,13 +1084,13 @@ public class RngInitComposedInitializerTests
     public void TestABankInitializesToTheProductOfTheTwoParametersItNames()
     {
         var ps = Init(RngInitBankFromEmbedding.ComputationGraph);
-        var (emb, wv) = (Named(ps, "NormalDist", 0), Named(ps, "NormalDist", 1));
+        var (emb, wv) = (Named(ps, "emb"), Named(ps, "wv"));
         float[] expected =
         [
             emb[0] * wv[0] + emb[1] * wv[2], emb[0] * wv[1] + emb[1] * wv[3],
             emb[2] * wv[0] + emb[3] * wv[2], emb[2] * wv[1] + emb[3] * wv[3],
         ];
-        var bank = Named(ps, "RngInitProductOfParams");
+        var bank = Named(ps, "bank");
         for (int i = 0; i < 4; i++) Assert.Equal(expected[i], bank[i], 1e-7f);
         Assert.False(bank.SequenceEqual(emb));
     }

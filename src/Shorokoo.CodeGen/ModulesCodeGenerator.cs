@@ -484,11 +484,11 @@ public class ModuleSourceGenerator : IIncrementalGenerator
         => fe.Expression is InvocationExpressionSyntax inv && IsIterateInvocation(inv);
 
     // V2: Partial class with [Module] attribute (both static and non-static)
-    private static bool IsPotentialModuleClass(SyntaxNode node)
+    internal static bool IsPotentialModuleClass(SyntaxNode node)
         => node is ClassDeclarationSyntax classDecl &&
            classDecl.Modifiers.Any(SyntaxKind.PartialKeyword);
 
-    private static ModuleClassInfo? GetModuleClassInfo(GeneratorSyntaxContext context)
+    internal static ModuleClassInfo? GetModuleClassInfo(GeneratorSyntaxContext context)
     {
         var classDeclaration = (ClassDeclarationSyntax)context.Node;
         var semanticModel = context.SemanticModel;
@@ -936,6 +936,26 @@ public class ModuleSourceGenerator : IIncrementalGenerator
     /// <summary>True for a <c>[Hyper(default)] Scalar&lt;T&gt;</c> parameter, at any dtype.</summary>
     private static bool ParamIsDefaultedScalarHyper(ParamData p)
         => p.Kind == ParamKind.Hyperparam && p.DefaultLiteral is not null && p.ScalarElementType is not null;
+
+    /// <summary>
+    /// The signature of the <c>Init</c> or <c>Model</c> method this generator writes for a class —
+    /// its return type and parameter types — or null for one it writes generically or not at all.
+    /// Another generator cannot see this one's output, so this is how it learns those signatures.
+    /// </summary>
+    internal static (string returnType, string[] parameterTypes)? GeneratedSignature(ModuleClassInfo info, string methodName)
+    {
+        if (!string.IsNullOrEmpty(info.TypeParameterList)) return null;
+        var fullModule = info.FullModules.FirstOrDefault(m => m.Kind != ModuleKind.Ignore);
+        if (fullModule is null) return null;
+        if (methodName == "Init")
+            return info.IsNewStyleInitializer && fullModule.Kind == ModuleKind.TrainableParamInitializer
+                ? (fullModule.ReturnParams[0].TypeDeclaration, fullModule.InputParams.Select(p => p.TypeDeclaration).ToArray())
+                : null;
+        if (methodName == "Model" && !info.IsStaticClass)
+            return ($"global::{(info.Namespace is null ? "" : info.Namespace + ".")}{info.ClassName}Model",
+                fullModule.Hyperparams.Select(CallerFacingType).ToArray());
+        return null;
+    }
 
     /// <summary>True when the parameter is exposed as a nullable, omittable caller-facing parameter.</summary>
     private static bool ParamIsOmittable(ParamData p) => ParamIsOptionalTensor(p) || ParamIsDefaultedScalarHyper(p);

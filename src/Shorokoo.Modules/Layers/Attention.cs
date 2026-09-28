@@ -279,14 +279,14 @@ public partial class MultiHeadAttention
         var lq = query.DimTensor(1);
         var lk = key.DimTensor(1);
 
-        var wq = XavierUniform.Init([embedDim, embedDim]);
-        var wk = XavierUniform.Init([embedDim, embedDim]);
-        var wv = XavierUniform.Init([embedDim, embedDim]);
-        var wo = XavierUniform.Init([embedDim, embedDim]);
-        var bq = Zeros.Init([embedDim]).Vec();
-        var bk = Zeros.Init([embedDim]).Vec();
-        var bv = Zeros.Init([embedDim]).Vec();
-        var bo = Zeros.Init([embedDim]).Vec();
+        var wq = XavierUniform.Init([embedDim, embedDim]).Named("q_proj_weight");
+        var wk = XavierUniform.Init([embedDim, embedDim]).Named("k_proj_weight");
+        var wv = XavierUniform.Init([embedDim, embedDim]).Named("v_proj_weight");
+        var wo = XavierUniform.Init([embedDim, embedDim]).Named("out_proj_weight");
+        var bq = Zeros.Init([embedDim]).Named("q_proj_bias").Vec();
+        var bk = Zeros.Init([embedDim]).Named("k_proj_bias").Vec();
+        var bv = Zeros.Init([embedDim]).Named("v_proj_bias").Vec();
+        var bo = Zeros.Init([embedDim]).Named("out_proj_bias").Vec();
 
         var q = useBias.IfElse(query.MatMul(wq.Transpose(1L, 0L)) + bq, query.MatMul(wq.Transpose(1L, 0L)));
         var k = useBias.IfElse(key.MatMul(wk.Transpose(1L, 0L)) + bk, key.MatMul(wk.Transpose(1L, 0L)));
@@ -340,10 +340,10 @@ public partial class TransformerEncoderLayer
 
         var ffIn = LayerNorm.Call(1L, true, Scalar(1e-5f), h);
 
-        var w1 = XavierUniform.Init([embedDim, ffnDim]);
-        var w2 = XavierUniform.Init([ffnDim, embedDim]);
-        var b1 = Zeros.Init([ffnDim]).Vec();
-        var b2 = Zeros.Init([embedDim]).Vec();
+        var w1 = XavierUniform.Init([embedDim, ffnDim]).Named("linear1_weight");
+        var w2 = XavierUniform.Init([ffnDim, embedDim]).Named("linear2_weight");
+        var b1 = Zeros.Init([ffnDim]).Named("linear1_bias").Vec();
+        var b2 = Zeros.Init([embedDim]).Named("linear2_bias").Vec();
 
         var hidden = useBias.IfElse(ffIn.MatMul(w1) + b1, ffIn.MatMul(w1)).Gelu();
         var ff = useBias.IfElse(hidden.MatMul(w2) + b2, hidden.MatMul(w2));
@@ -398,10 +398,10 @@ public partial class TransformerDecoderLayer
         // Sublayer 3: position-wise GELU FFN, pre-LN (mirrors TransformerEncoderLayer).
         var ffIn = LayerNorm.Call(1L, true, Scalar(1e-5f), h2);
 
-        var w1 = XavierUniform.Init([embedDim, ffnDim]);
-        var w2 = XavierUniform.Init([ffnDim, embedDim]);
-        var b1 = Zeros.Init([ffnDim]).Vec();
-        var b2 = Zeros.Init([embedDim]).Vec();
+        var w1 = XavierUniform.Init([embedDim, ffnDim]).Named("linear1_weight");
+        var w2 = XavierUniform.Init([ffnDim, embedDim]).Named("linear2_weight");
+        var b1 = Zeros.Init([ffnDim]).Named("linear1_bias").Vec();
+        var b2 = Zeros.Init([embedDim]).Named("linear2_bias").Vec();
 
         var hidden = useBias.IfElse(ffIn.MatMul(w1) + b1, ffIn.MatMul(w1)).Gelu();
         var ff = useBias.IfElse(hidden.MatMul(w2) + b2, hidden.MatMul(w2));

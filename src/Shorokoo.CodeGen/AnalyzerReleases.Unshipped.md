@@ -10,3 +10,4 @@ MSG002 | SourceGeneration | Warning | Invalid module method format
 MSG003 | SourceGeneration | Error | Initializer class must not be named 'Init'
 MSG004 | SourceGeneration | Info | RNG streams of this module can be pinned
 MSG005 | SourceGeneration | Warning | Unsupported loop variable assignment
+MSG006 | SourceGeneration | Warning | Parameters cannot be named after their locals

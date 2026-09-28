@@ -223,9 +223,9 @@ model need one class, not N. See
   in a model body** — not only when the count is a graph value. A plain `for` runs at
   trace time and leaves nothing of the repetition behind: each iteration's parameters
   become independent parameters numbered in trace order, so their names say how many
-  `Init(...)` calls preceded them and nothing about which iteration they belong to. A
-  `LoopAPI.Iterate` body carries the iteration index instead, and each iteration numbers
-  its own parameters from `#0`:
+  same-named `Init(...)` calls preceded them and nothing about which iteration they belong
+  to. A `LoopAPI.Iterate` body carries the iteration index instead, and each iteration
+  names its own parameters ([Parameter names](#parameter-names)):
 
   ```
   for (int i = 0; i < 3; i++)          foreach (var ctx in LoopAPI.Iterate(Scalar(3L)))
@@ -236,9 +236,10 @@ model need one class, not N. See
 
   Those names are the keys of every checkpoint the model writes and the ids a naming
   scheme maps ([onnx-and-weights.md](onnx-and-weights.md#naming)), so the difference
-  outlives the graph: under a plain `for` a parameter's index says how many `Init(...)` calls
-  preceded it and nothing about which iteration it belongs to, so adding or removing one
-  renumbers every parameter after it and silently re-points any name written against them.
+  outlives the graph: under a plain `for` a parameter's index says how many same-named
+  `Init(...)` calls preceded it and nothing about which iteration it belongs to, so adding or
+  removing one renumbers every parameter after it and silently re-points any name written
+  against them.
 
   Fall back to a plain `for` only where `LoopAPI.Iterate` cannot express the stack — a
   body that genuinely differs from iteration to iteration. A uniform stack of layers is
@@ -542,6 +543,58 @@ trainable today.** Supplying a tensor instead does not stand in for it — a ten
 differ, silently. Train the present arrangement, and cover the absent branch on the
 inference path through `QuickExecutionEngine`.
 
+## Parameter names
+
+Every trainable parameter, state parameter and sub-model has a name, and a parameter's
+full name is the path of names from the model down to it:
+
+```
+TrainableParam#0.encoder#0.proj#0.weight#0
+TrainableParam#0.Loop#0:3.table#0
+```
+
+The first part is the category; each following part names one sub-model, loop iteration or
+parameter within its scope — the module body, or one `LoopAPI.Iterate` body. These names
+are the keys of every checkpoint the model writes, the keys of
+`TrainableParams.Fields`, and what a naming scheme maps
+([onnx-and-weights.md](onnx-and-weights.md#naming)). A part's name comes from, most
+specific first:
+
+1. **`.Named("...")`** on the result of the `Init(...)` or `Model(...)` call:
+   ```csharp
+   var x = Normal02.Init([vocab, width]).Named("embedding").Gather(tokens);
+   ```
+   A name given this way is unique in its scope: two items given the same name in one
+   scope fail the module build.
+2. **The local the call is assigned to**, when the whole initializer of a local declared
+   in a `[Module]` class is the call itself:
+   ```csharp
+   var proj = Linear.Model(Scalar(128L), Scalar(true));   // proj#0
+   var gain = Ones.Init([width]);                         // gain#0
+   ```
+   `var x = Normal02.Init(...).Gather(tokens)` does not name the parameter `x` — `x` is not
+   the parameter. The generator supplies these names; see
+   [Project wiring](#project-wiring-required-for-codegen). Two locals of one name in one
+   scope (in two blocks, or in a plain C# `for`) are numbered `#0`, `#1` in creation order.
+3. **Otherwise the class name** of the initializer or module — `Normal02#0`, `Linear#1` —
+   numbered in creation order among the same-named parts of its scope.
+
+The layers in `Shorokoo.Modules` name their own parameters as PyTorch does: a `Linear`
+held in `proj` contributes `proj#0.weight#0` and `proj#0.bias#0`, a `BatchNorm`
+`running_mean`, `running_var`, `weight` and `bias`.
+
+A name survives moving the code that creates it: reordering two `var` lines, or pulling
+part of a body out into a sub-module that keeps its locals, leaves every name in place and
+every checkpoint loadable. A creation-order number does not survive that, which is why a
+parameter worth keeping should be named. Renaming a local renames its parameter; a
+checkpoint holding the parameter under another name is refused on load, naming the parameter
+it is missing (bind it through a [naming scheme](onnx-and-weights.md#naming) to carry it
+across).
+
+`TrainableParams.Fields` (and every `TensorDataStruct.Fields`) enumerates in the order of
+the struct's definition — for a model's parameters, the order of the model's graph — the same
+in every process.
+
 ## Project wiring (required for codegen)
 
 The source generator (`Shorokoo.CodeGen`) must be referenced from the consuming
@@ -566,6 +619,19 @@ add it as a `ProjectReference` marked as an analyzer:
 <ProjectReference Include="..\..\src\Shorokoo.CodeGen\Shorokoo.CodeGen.csproj"
                   OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
 ```
+
+Naming a parameter after its local ([Parameter names](#parameter-names)) uses C#
+interceptors in the namespace `Shorokoo.Generated.ParamNames`, which the project has to
+allow. The package does that for you; building against the source tree, the repository's
+`Directory.Build.props` does it for projects inside the tree, and a project outside it adds:
+
+```xml
+<PropertyGroup>
+  <InterceptorsNamespaces>$(InterceptorsNamespaces);Shorokoo.Generated.ParamNames</InterceptorsNamespaces>
+</PropertyGroup>
+```
+
+Without it the build warns (`MSG006`) and parameters keep their class names.
 
 In both forms the generator runs at compile time only and is kept out of the
 runtime closure. If `Call`/`Model` come back "not defined" after a build, the

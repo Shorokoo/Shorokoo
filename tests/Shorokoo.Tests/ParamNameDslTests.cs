@@ -117,11 +117,11 @@ public class ParamNameDslCoverageTests
         SimplePatternScheme[] patterns =
         [
             new SimplePatternScheme(
-                pattern: "TrainableParam#0.LoopLayer#0.InitSimple#{p}",
+                pattern: "TrainableParam#0.LoopLayer#0.weights#{p}",
                 format:  "outer.{p|kindMap}",
                 maps:    maps),
             new SimplePatternScheme(
-                pattern: "TrainableParam#0.LoopLayer#0.Loop#0:{idx}.InitSimple#{p}",
+                pattern: "TrainableParam#0.LoopLayer#0.Loop#0:{idx}.weights2#{p}",
                 format:  "blocks.{idx + 1}.{p|kindMap}",
                 maps:    maps),
         ];
@@ -149,7 +149,7 @@ public class ParamNameDslCoverageTests
         var shorokooIds = infos.ParamInfos.Select(p => shorokooIdScheme.ToName(p)).ToArray();
 
         var lowerScheme = new SimplePatternScheme(
-            pattern: "TrainableParam#0.{Mod}#0.InitSimple#{p}",
+            pattern: "TrainableParam#0.{Mod}#0.weights#{p}",
             format:  "{Mod|lower}.init{p - 0}");
         Assert.Equal("looplayer.init0", lowerScheme.ToName(shorokooIds[0]));
 
@@ -157,22 +157,22 @@ public class ParamNameDslCoverageTests
         foreach (var rangeExpr in acceptingRanges)
         {
             var ranged = new SimplePatternScheme(
-                pattern: "TrainableParam#0.LoopLayer#0.Loop#0:{idx|" + rangeExpr + "}.InitSimple#1",
+                pattern: "TrainableParam#0.LoopLayer#0.Loop#0:{idx|" + rangeExpr + "}.weights2#0",
                 format:  "ok.{idx}");
             Assert.True(ranged.Matches(shorokooIds[3]));
             Assert.Equal("ok.2", ranged.ToName(shorokooIds[3]));
         }
 
         var rejecting = new SimplePatternScheme(
-            pattern: "TrainableParam#0.LoopLayer#0.Loop#0:{idx|5:9}.InitSimple#1",
+            pattern: "TrainableParam#0.LoopLayer#0.Loop#0:{idx|5:9}.weights2#0",
             format:  "rejected");
         Assert.False(rejecting.Matches(shorokooIds[3]));
 
         var wildcard = new SimplePatternScheme(
-            pattern: "TrainableParam#0.{*}.InitSimple#{p}",
+            pattern: "TrainableParam#0.{*}.weights2#{p}",
             format:  "wild.{p}");
         Assert.True(wildcard.Matches(shorokooIds[1]));
-        Assert.Equal("wild.1", wildcard.ToName(shorokooIds[1]));
+        Assert.Equal("wild.0", wildcard.ToName(shorokooIds[1]));
     }
 
     [Fact]
@@ -181,7 +181,7 @@ public class ParamNameDslCoverageTests
         var (infos, shorokooIdScheme) = LoopLayerParams.Value;
         var candidates = infos.ParamInfos.Select(p => p.ModelId).ToImmutableArray();
         var scheme = new SimplePatternNamingScheme(
-            [new SimplePatternScheme("TrainableParam#0.LoopLayer#0.InitSimple#{p}", "outer.weight")],
+            [new SimplePatternScheme("TrainableParam#0.LoopLayer#0.weights#{p}", "outer.weight")],
             shorokooIdScheme, ModuleParamSetNamingScheme.PyTorchFrameworkId);
 
         Assert.Equal(infos.ParamInfos[0].ModelId, scheme.ToModelId("outer.weight", candidates));
@@ -210,7 +210,7 @@ public class ParamNameDslCoverageTests
             new ModelIdFormat(match: "[1, 1]", format: "outer.weight"),
             new ModelIdFormat(match: "[1, 2, *, 1]", format: "block.weight"));
         var patternScheme = new SimplePatternNamingScheme(
-            [new SimplePatternScheme("TrainableParam#0.LoopLayer#0.Loop#0:{idx}.InitSimple#{p}", "block.weight")],
+            [new SimplePatternScheme("TrainableParam#0.LoopLayer#0.Loop#0:{idx}.weights2#{p}", "block.weight")],
             shorokooIdScheme, ModuleParamSetNamingScheme.PyTorchFrameworkId);
 
         Assert.True(NamesTheCollision(() => modelIdScheme.ToModelId("outer.weight", candidates), first, second, "block.weight"));
@@ -228,8 +228,8 @@ public class ParamNameDslCoverageTests
             new ModelIdFormat(match: "[1, 2, *, 1]", format: "block{2}.weight"));
         var patternScheme = new SimplePatternNamingScheme(
             [
-                new SimplePatternScheme("TrainableParam#0.LoopLayer#0.InitSimple#{p}", "outer.weight"),
-                new SimplePatternScheme("TrainableParam#0.LoopLayer#0.Loop#0:{idx}.InitSimple#{p}", "block{idx}.weight"),
+                new SimplePatternScheme("TrainableParam#0.LoopLayer#0.weights#{p}", "outer.weight"),
+                new SimplePatternScheme("TrainableParam#0.LoopLayer#0.Loop#0:{idx}.weights2#{p}", "block{idx}.weight"),
             ],
             shorokooIdScheme, ModuleParamSetNamingScheme.PyTorchFrameworkId);
 

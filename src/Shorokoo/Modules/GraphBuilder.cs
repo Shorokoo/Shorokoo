@@ -199,6 +199,7 @@ namespace Shorokoo.Core
             // registrations, which from inside a finally would replace the real failure.
             var stateUpdates = GraphTrace.StateUpdates.Take();
             var rngPins = GraphTrace.Pins.Take();
+            var paramNames = GraphTrace.ParamNames("a module body").Take();
 
             // The body's own updates, plus the calls it made to models that update state. A call
             // whose result the body discards reaches the graph through nothing else, so without
@@ -269,6 +270,7 @@ namespace Shorokoo.Core
             // slots in pin order, sparse pins take exactly their named slots (see
             // Shorokoo.Rng.Pin).
             bool hasPins = rngPins.positional.Length > 0 || rngPins.sparse.Length > 0;
+            bool hasNames = paramNames.Length > 0;
             var fastGraph = new InternalComputationGraph(
                 [.. allInputs],
                 [.. fnOutputs]);
@@ -288,7 +290,8 @@ namespace Shorokoo.Core
 
             List<Shorokoo.Core.Graph.FastNodeKey>? pinnedKeys = null;
             List<(int slot, Shorokoo.Core.Graph.FastNodeKey key)>? slotPinnedKeys = null;
-            if (hasPins)
+            List<(Shorokoo.Core.Graph.FastNodeKey key, string name, bool inferred)>? namedKeys = null;
+            if (hasPins || hasNames)
             {
                 // Rebuild the reachable-node set the constructor lowered (same visitor,
                 // same de-duplication) — used only to detect the ambiguous duplicated-key
@@ -312,31 +315,56 @@ namespace Shorokoo.Core
                 // author believes is active is exactly the silent re-keying Rng.Pin
                 // exists to prevent.
                 Shorokoo.Core.Graph.FastNodeKey ResolvePin(object pin, string form)
+                    => ResolveItem(pin, $"Rng.Pin ({form})", "pinned", "pass model objects (X.Model(...)), " +
+                        "initializer result tensors, or Globals.Random* feed tensors.", "pin");
+
+                static Variable? ItemVariable(object item) => item switch
                 {
-                    Variable pinVar = pin switch
-                    {
-                        IModel model => model.ModelVariable,
-                        IValue value => value.ToVariable(),
-                        _ => throw new ArgumentException(
-                            $"Rng.Pin ({form}): unsupported item type '{pin?.GetType().Name ?? "null"}' — " +
-                            "pass model objects (X.Model(...)), initializer result tensors, or " +
-                            "Globals.Random* feed tensors."),
-                    };
-                    var srcKey = pinVar.OwningNode.Key;
+                    IModel model => model.ModelVariable,
+                    IValue value => value.ToVariable(),
+                    _ => null,
+                };
+
+                // A name resolves exactly as a pin does, and fails the build on the same grounds:
+                // a name the author believes is applied, and is not, silently renames nothing.
+                Shorokoo.Core.Graph.FastNodeKey ResolveItem(object item, string api, string verb, string accepted, string noun)
+                {
+                    Variable itemVar = ItemVariable(item) ?? throw new ArgumentException(
+                        $"{api}: unsupported item type '{item?.GetType().Name ?? "null"}' — {accepted}");
+                    var srcKey = itemVar.OwningNode.Key;
                     if (duplicatedKeys.Contains(srcKey))
                         throw new InvalidOperationException(
-                            $"Rng.Pin ({form}): the pinned item's node occurs more than once in " +
+                            $"{api}: the {verb} item's node occurs more than once in " +
                             $"module '{methodInfo.DeclaringType?.Name}''s traced graph (a cached " +
-                            "function inlined multiple times), so the pin cannot be resolved " +
+                            $"function inlined multiple times), so the {noun} cannot be resolved " +
                             "unambiguously and the module build fails instead.");
-                    var pinKey = Shorokoo.Core.Graph.FastNodeKey.FromCgKey(srcKey);
-                    if (fastGraph.FindNode(pinKey) is null)
+                    var itemKey = Shorokoo.Core.Graph.FastNodeKey.FromCgKey(srcKey);
+                    if (fastGraph.FindNode(itemKey) is null)
                         throw new InvalidOperationException(
-                            $"Rng.Pin ({form}): pinned item of type '{pin.GetType().Name}' does not " +
+                            $"{api}: {verb} item of type '{item.GetType().Name}' does not " +
                             $"resolve to a node of module '{methodInfo.DeclaringType?.Name}''s graph " +
                             "— it was created outside this Inline body (or on another thread). The " +
-                            "pin would be silently inactive, so the module build fails instead.");
-                    return pinKey;
+                            $"{noun} would be silently inactive, so the module build fails instead.");
+                    return itemKey;
+                }
+
+                if (hasNames)
+                {
+                    namedKeys = new List<(Shorokoo.Core.Graph.FastNodeKey, string, bool)>();
+                    foreach (var (item, name, inferred) in paramNames)
+                    {
+                        // A parameter or sub-model the outputs never reach is not part of the
+                        // module, so there is nothing to name. A local's name is also supplied
+                        // for every call assigned to one, so an ambiguous node is skipped too
+                        // rather than refused.
+                        if (ItemVariable(item) is { OwningNode.Key: var k } &&
+                            ((inferred && duplicatedKeys.Contains(k)) ||
+                             fastGraph.FindNode(Shorokoo.Core.Graph.FastNodeKey.FromCgKey(k)) is null))
+                            continue;
+                        namedKeys.Add((ResolveItem(item, $"Named(\"{name}\")", "named",
+                            "name model objects (X.Model(...)) or initializer result tensors (X.Init(...)).", "name"),
+                            name, inferred));
+                    }
                 }
 
                 if (rngPins.positional.Length > 0)
@@ -354,7 +382,7 @@ namespace Shorokoo.Core
             }
 
             Shorokoo.Core.Nodes.Processors.Fast.FastApplyIdentifierTemplates.Process(
-                fastGraph, pinnedKeys, slotPinnedKeys);
+                fastGraph, pinnedKeys, slotPinnedKeys, namedKeys);
             return fastGraph;
         }
 

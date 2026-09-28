@@ -427,7 +427,8 @@ ComputationGraph m3 = Persistence.ImportSafeTensorsToCheckpoint(
 ### Naming
 
 With **no scheme**, tensors carry the parameters' **canonical Shorokoo ids**
-(e.g. `TrainableParam#0.FCLayer#0.InitSimple#0`) — export and import are exact
+(e.g. `TrainableParam#0.fc#0.weight#0` for the weight of a `Linear` held in a local `fc`;
+see [Parameter names](defining-models.md#parameter-names)) — export and import are exact
 mirrors, so `ExportSafeTensors(model, path)` → `ImportSafeTensors(arch, path)`
 reproduces the model bit-identically.
 
@@ -436,8 +437,8 @@ With a **scheme**, the mapping is applied at the boundary in both directions:
 ```csharp
 SimplePatternScheme[] patterns =
 [
-    new SimplePatternScheme("TrainableParam#0.FCLayer#0.InitSimple#0", "fc.weight"),
-    new SimplePatternScheme("TrainableParam#0.FCLayer#0.InitSimple#1", "fc.bias"),
+    new SimplePatternScheme("TrainableParam#0.fc#0.weight#0", "fc.weight"),
+    new SimplePatternScheme("TrainableParam#0.fc#0.bias#0", "fc.bias"),
 ];
 var scheme = new SimplePatternNamingScheme(
     patterns, arch.GetShorokooIdNamingScheme(), ModuleParamSetNamingScheme.PyTorchFrameworkId);

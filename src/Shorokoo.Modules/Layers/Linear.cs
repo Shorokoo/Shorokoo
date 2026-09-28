@@ -32,10 +32,10 @@ public partial class Linear
         var inFeatures = x.TShape[1..^0].Reduce(ReduceKind.Prod).Scalar();
         var xFlat = x.Reshape([batchSize, inFeatures]);
 
-        var w = KaimingUniform.Init([outFeatures, inFeatures]);
+        var w = KaimingUniform.Init([outFeatures, inFeatures]).Named("weight");
         var y = xFlat.MatMul(w.Transpose(1L, 0L));
 
-        var b = Zeros.Init([outFeatures]).Vec();
+        var b = Zeros.Init([outFeatures]).Named("bias").Vec();
         return useBias.IfElse(y + b, y);
     }
 }

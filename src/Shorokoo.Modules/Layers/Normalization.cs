@@ -74,10 +74,10 @@ public partial class BatchNorm
         Scalar<int64> rank = shape.ShapeTensor()[0];
         Scalar<int64> numChannels = shape[1];
 
-        var runningMean = BatchNormRunningMeanInit.Init([numChannels]).Vec();
-        var runningVar = BatchNormRunningVarInit.Init([numChannels]).Vec();
-        var weight = Ones.Init([numChannels]).Vec();
-        var bias = Zeros.Init([numChannels]).Vec();
+        var runningMean = BatchNormRunningMeanInit.Init([numChannels]).Named("running_mean").Vec();
+        var runningVar = BatchNormRunningVarInit.Init([numChannels]).Named("running_var").Vec();
+        var weight = Ones.Init([numChannels]).Named("weight").Vec();
+        var bias = Zeros.Init([numChannels]).Named("bias").Vec();
 
         var one = Scalar(1L);
 
@@ -308,8 +308,8 @@ public partial class GroupNorm
 
         // Per-channel gamma/beta broadcast as [1, C, 1, …, 1] sized to runtime rank.
         var affineShape = FeatureNormShapes.ChannelBroadcast(c, rank);
-        var weight = Ones.Init([c]).Vec().Reshape(affineShape);
-        var bias = Zeros.Init([c]).Vec().Reshape(affineShape);
+        var weight = Ones.Init([c]).Named("weight").Vec().Reshape(affineShape);
+        var bias = Zeros.Init([c]).Named("bias").Vec().Reshape(affineShape);
         return affine.IfElse(xHat * weight + bias, xHat);
     }
 }
@@ -367,8 +367,8 @@ public partial class InstanceNorm
 
         // Per-channel gamma/beta broadcast as [1, C, 1, …, 1] sized to runtime rank.
         var affineShape = FeatureNormShapes.ChannelBroadcast(numChannels, rank);
-        var weight = Ones.Init([numChannels]).Vec().Reshape(affineShape);
-        var bias = Zeros.Init([numChannels]).Vec().Reshape(affineShape);
+        var weight = Ones.Init([numChannels]).Named("weight").Vec().Reshape(affineShape);
+        var bias = Zeros.Init([numChannels]).Named("bias").Vec().Reshape(affineShape);
         return affine.IfElse(xHat * weight + bias, xHat);
     }
 }

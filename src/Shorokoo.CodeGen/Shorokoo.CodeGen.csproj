@@ -22,7 +22,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.8.0" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.13.0" PrivateAssets="all" />
   </ItemGroup>
 
   <ItemGroup>
@@ -37,6 +37,9 @@
 
   <ItemGroup>
     <None Include="$(OutputPath)\$(AssemblyName).dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+    <!-- Enables the interceptors that name parameters after their locals, in every project the
+         generator reaches, directly or through the 'Shorokoo' meta-package. -->
+    <None Include="build\Shorokoo.CodeGen.props" Pack="true" PackagePath="build;buildTransitive" />
   </ItemGroup>
 
 </Project>

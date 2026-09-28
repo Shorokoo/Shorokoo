@@ -27,4 +27,11 @@
     <DebugType>portable</DebugType>
   </PropertyGroup>
 
+  <!-- The [Module] generator names a parameter after the local it is assigned to, through
+       interceptors in this namespace; a project consuming the generator as a package gets the
+       same setting from its build props. -->
+  <PropertyGroup>
+    <InterceptorsNamespaces>$(InterceptorsNamespaces);Shorokoo.Generated.ParamNames</InterceptorsNamespaces>
+  </PropertyGroup>
+
 </Project>

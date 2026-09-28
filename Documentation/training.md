@@ -1172,9 +1172,12 @@ var more = rig.Fit(inputs, targets, numEpochs: 5, ckpt);  // continues where it 
   silently; unchecked it would broadcast, and the model would run and answer in the wrong shape.
   What is **not** checked is where a value came from: nothing records or compares the model that
   produced a checkpoint, so weights of the right shape deliberately still load into a model that
-  computes something else. The limit of that is worth knowing — two parameters of the same shape
-  whose roles were swapped agree on every property checked here, and load into each other's places
-  without complaint ([#322](https://github.com/Shorokoo/Shorokoo/issues/322)).
+  computes something else. Values are matched to parameters by name, so a parameter named by its
+  local or by `.Named(...)` keeps its value however the code creating it moves
+  ([Parameter names](defining-models.md#parameter-names)). The limit is the parameters left to
+  their class names: those are numbered in creation order, and two of the same shape whose
+  creation order was swapped agree on every property checked here, and load into each other's
+  places without complaint.
 - Because `.Step` is restored, learning-rate **schedules resume from the right
   step** — not from step 0.
 - `rig.LoadCheckpoint(path)` delegates to `TrainingCheckpoint.Load(path, rig)` (and
@@ -1302,7 +1305,7 @@ These are in namespace `Shorokoo` (covered by `using Shorokoo;`), except `Schedu
 | `TensorDataModelParam` | Concrete `NamedModelParam` wrapping one `TensorData`. | `new TensorDataModelParam(name, ModelParamType.InputParam, tensorData)` |
 | `ModelParamType` (enum) | Tags a param's role. | `Undefined`, `HyperParam`, `TrainableParam`, `InputParam`, `OutputParam` |
 | `ModelParamList` | A set of named params (e.g. loaded weights). | `new ModelParamList(IEnumerable<(string name, TensorData data)>)` |
-| `TensorDataStruct` | A struct-shaped bundle of named `TensorData` fields; the form `Train`/`TrainStep` expect for inputs/targets. | Build: `new TensorDataStruct(structDef, fields)` where `structDef` is a `TensorStructDef` (namespace `Shorokoo.Core`) and `fields` are `KeyValuePair<string, IData>` — one per definition field, each of the kind that field declares (a value contradicting its definition throws), as it is or through `.Shared()` / `.TryConsume()` to be fed that way rather than as the struct is (a struct fed `.Shared()` has every field read). Read: `.Fields` (an `ImmutableDictionary<string, IData>` of name → value), `.Count`, or the `[int]` indexer. |
+| `TensorDataStruct` | A struct-shaped bundle of named `TensorData` fields; the form `Train`/`TrainStep` expect for inputs/targets. | Build: `new TensorDataStruct(structDef, fields)` where `structDef` is a `TensorStructDef` (namespace `Shorokoo.Core`) and `fields` are `KeyValuePair<string, IData>` — one per definition field, each of the kind that field declares (a value contradicting its definition throws), as it is or through `.Shared()` / `.TryConsume()` to be fed that way rather than as the struct is (a struct fed `.Shared()` has every field read). Read: `.Fields` (an `IReadOnlyDictionary<string, IData>` of name → value, enumerated in the definition's field order), `.Count`, or the `[int]` indexer. |
 | `SharedInput` | A value to be **read** by the run it feeds rather than consumed (`Mode` `Shared`), or consumed only if nothing else is reading it (`TryConsume`). | `x.Shared()` / `x.TryConsume()` on a `TensorData`, `TensorDataStruct`, `TensorDataSequence` or `OptionalTensorData`. A checkpoint's own `.Shared()` / `.TryConsume()` return a checkpoint, carrying the mode as its `FeedMode`, and a `NamedModelParam`'s a copy of the parameter with its `FeedMode` set. A struct's field may be given as one when the struct is built. |
 | `SaveReport` | What a checkpoint save cost: `BytesWritten`, the disjoint `Write` / `Flush` / `Commit` phases, their sum `Elapsed`, and `BytesPerSecond`. | Returned by every checkpoint save — see [What a save costs](#what-a-save-costs). |
 | `Schedule` (namespace `Shorokoo.Core.Training`) | A `step → value` hyperparameter schedule; assign one to a `Hyperparameter` property to make it [`Scheduled`](#hyperparameter-kinds-hyperparameter). | A `Schedules.…` factory, then the combinators on the result (`WithWarmup`, `Then`, `Scale`, `Clamp`, `Shift`, `PerEpoch`). Preview with `.At(step)`. |

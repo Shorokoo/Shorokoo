@@ -83,13 +83,13 @@ public static class TorchvisionResNet18NamingScheme
 
         // ── Stem ───────────────────────────────────────────────────────────────
         patterns.Add(new SimplePatternScheme(
-            "TrainableParam#0.ResNetStem#0.Conv2Dk77s22#0.ResNetInitWeight#0", "conv1.weight"));
+            "TrainableParam#0.ResNetStem#0.Conv2Dk77s22#0.w#0", "conv1.weight"));
         AddStemBn();
 
         // ── Layer 1: BasicStackS11#0, two BasicBlockS11 in a loop (no downsample) ──
         const string l1Ctx = "TrainableParam#0.BasicStackS11#0.Loop#0:{idx}.BasicBlockS11#0";
         patterns.Add(new SimplePatternScheme(
-            $"{l1Ctx}.Conv2Dk33s11#{{c}}.ResNetInitWeight#0",
+            $"{l1Ctx}.Conv2Dk33s11#{{c}}.w#0",
             "layer1.{idx}.{c|conv}.weight",
             new() { ["conv"] = ConvBasic }));
         AddBn(l1Ctx, "layer1.{idx}", "b", BnBasic);
@@ -98,24 +98,24 @@ public static class TorchvisionResNet18NamingScheme
         // First block: BasicBlockS22#0 (stride-2, with downsample shortcut).
         const string l22b0 = "TrainableParam#0.BasicStackS22#{L}.BasicBlockS22#0";
         patterns.Add(new SimplePatternScheme(
-            $"{l22b0}.Conv2Dk33s22#0.ResNetInitWeight#0", "layer{L + 2}.0.conv1.weight"));
+            $"{l22b0}.Conv2Dk33s22#0.w#0", "layer{L + 2}.0.conv1.weight"));
         patterns.Add(new SimplePatternScheme(
-            $"{l22b0}.Conv2Dk33s11#0.ResNetInitWeight#0", "layer{L + 2}.0.conv2.weight"));
+            $"{l22b0}.Conv2Dk33s11#0.w#0", "layer{L + 2}.0.conv2.weight"));
         patterns.Add(new SimplePatternScheme(
-            $"{l22b0}.Conv2Dk11s22#0.ResNetInitWeight#0", "layer{L + 2}.0.downsample.0.weight"));
+            $"{l22b0}.Conv2Dk11s22#0.w#0", "layer{L + 2}.0.downsample.0.weight"));
         AddBn(l22b0, "layer{L + 2}.0", "b", BnWithDownsample);
 
         // Remaining block(s): BasicBlockS11 in a loop; loop idx 0 → torchvision block 1.
         const string l22loop = "TrainableParam#0.BasicStackS22#{L}.Loop#0:{idx}.BasicBlockS11#0";
         patterns.Add(new SimplePatternScheme(
-            $"{l22loop}.Conv2Dk33s11#{{c}}.ResNetInitWeight#0",
+            $"{l22loop}.Conv2Dk33s11#{{c}}.w#0",
             "layer{L + 2}.{idx + 1}.{c|conv}.weight",
             new() { ["conv"] = ConvBasic }));
         AddBn(l22loop, "layer{L + 2}.{idx + 1}", "b", BnBasic);
 
         // ── Classification head ──────────────────────────────────────────────────
         patterns.Add(new SimplePatternScheme(
-            "TrainableParam#0.ClassificationHead#0.DenseBasic#0.ResNetInitWeight#0", "fc.weight"));
+            "TrainableParam#0.ClassificationHead#0.DenseBasic#0.w#0", "fc.weight"));
         patterns.Add(new SimplePatternScheme(
             "TrainableParam#0.ClassificationHead#0.DenseBasic#0.ResNetInitZeros#0", "fc.bias"));
 

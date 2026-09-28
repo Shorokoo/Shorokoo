@@ -260,7 +260,7 @@ namespace Shorokoo
             where T : IVarType
             => Reduce(reduceKind, tensor, (Tensor<int64>?)axes, keepDims, null);
 
-        // Vector/Scalar input overloads: the value-struct handles no longer inherit from Tensor<T>,
+        // Vector/Scalar input overloads: the value-struct handles do not inherit from Tensor<T>,
         // so generic inference does not flow a Vector<T>/Scalar<T> argument into the Tensor<T>
         // parameter. These let emitted code (and callers) reduce a rank-1/rank-0 handle directly.
         /// <summary>Reduce a rank-1 <see cref="Vector{T}"/> (forwards to the tensor overload).</summary>
@@ -308,78 +308,82 @@ namespace Shorokoo
             }
         }
 
+        /// <summary>The value of a <c>Constant</c> node's output; null for every other value.</summary>
+        private static TensorAttribute? ConstantValue(Variable value)
+            => value.OwningNode is { OpName: OpCodes.CONSTANT } node && !node.Attributes.IsDefaultValue(OnnxOpAttributeNames.AttrValue)
+                ? node.Attributes.GetAttributeVal(OnnxOpAttributeNames.AttrValue)
+                : null;
+
         /// <summary>
         /// ReduceMax (<paramref name="max"/>) or ReduceMin, giving an empty group the spec's value
-        /// for an integer or boolean <typeparamref name="T"/>: the type's minimum for ReduceMax and
-        /// its maximum for ReduceMin (false and true for bool).
+        /// for an integer or boolean input: the type's minimum for ReduceMax and its maximum for
+        /// ReduceMin (false and true for bool).
         ///
-        /// <para>ONNX Runtime's CPU kernels give such a group 0 for every integer type and refuse a
-        /// boolean input outright; for a floating-point type they give -inf and +inf, as the spec
-        /// does, so a floating-point reduction is the plain operator. Only an empty input holds an
-        /// empty group, and in an empty input every group is empty unless there are none, so the
-        /// plain operator is right for every nonempty input. Where the input's shape is known when
-        /// the graph is built, that decides it; elsewhere an <c>If</c> on the input being empty
-        /// picks between the plain operator and the same operator over the identity expanded to
-        /// the input's shape grown by one along every reduced axis — the input padded with the
-        /// identity, which is all an empty input padded holds. No group of that is empty, and each
-        /// reduces to the identity.</para>
+        /// <para>ONNX Runtime's CPU kernels give such a group 0 for every integer type and throw on
+        /// an empty boolean input; for a floating-point type they give -inf and +inf, as the spec
+        /// does. Only an empty input holds an empty group, so the plain operator is right for every
+        /// nonempty input. The plain operator is built for a floating-point input, for a
+        /// <c>Constant</c> that is not empty, and when nothing is reduced (no
+        /// <paramref name="axes"/> with <paramref name="noOp"/> set). A graph input carries its rank
+        /// but not its extents when the graph is built, so every other integer or boolean reduction is
+        /// an <c>If</c> on the input's element count being 0: the other side is the plain operator,
+        /// and the empty side expands the identity to the shape the plain operator gives the input
+        /// — the input cast to uint8 for bool, since the plain operator throws on the empty boolean
+        /// input itself.</para>
         ///
-        /// <para>With no <paramref name="axes"/> and <paramref name="noOp"/> set nothing is reduced,
-        /// and a generic <typeparamref name="T"/> has no identity to write until it is resolved;
-        /// both are the plain operator.</para>
+        /// <para>An input whose type is a generic parameter is that same <c>If</c>, taken when the
+        /// input is empty and the type is not floating point, which the graph tests by casting 0.5
+        /// to it; the identity is the least (greatest) of a handful of int64 values cast to the
+        /// type, among which is every integer type's minimum (maximum).</para>
         /// </summary>
         private static Tensor<T> ReduceExtreme<T>(Tensor<T> tensor, Tensor<int64>? axes, bool? keepDims, bool? noOp, bool max)
             where T : IVarType
         {
-            Tensor<T> Plain(Tensor<T> data)
+            Variable Plain(Variable data)
                 => max ? OnnxOp.ReduceMax(data, axes, keepDims, noOp) : OnnxOp.ReduceMin(data, axes, keepDims, noOp);
 
-            if (axes is null && noOp == true || ReductionIdentity<T>(max) is not { } identity)
-                return Plain(tensor);
+            Variable input = tensor;
+            var dtype = input.Type;
+            if (axes is null && noOp == true
+                || !dtype.IsGenericType && dtype.Is<FloatLike>()
+                || ConstantValue(input) is { } constant && !constant.Shape.Dims.Contains(0))
+                return Plain(input);
 
-            Variable data = tensor;
-            bool? empty = data.TensorDims is { } dims && dims.All(d => d.Size is not null)
-                ? dims.Any(d => d.Size == 0)
-                : null;
-            if (empty == false)
-                return Plain(tensor);
+            Scalar<bit> isEmpty = OnnxOp.Equal(OnnxOp.Size(input), Globals.Scalar(0L));
+            if (dtype.IsGenericType)
+            {
+                Scalar<bit> floating = OnnxOp.Equal(OnnxOp.Cast(OnnxOp.CastLike(Globals.Scalar(0.5f), input, null), null, DType.Float32),
+                    Globals.Scalar(0.5f));
+                Variable candidates = OnnxOp.CastLike(max
+                    ? Globals.Vector(0L, sbyte.MinValue, short.MinValue, int.MinValue, long.MinValue)
+                    : Globals.Vector(-1L, sbyte.MaxValue, short.MaxValue, int.MaxValue, long.MaxValue), input, null);
+                return Guarded(OnnxOp.And(isEmpty, OnnxOp.Not(floating)),
+                    max ? OnnxOp.ReduceMin(candidates, null, false, null) : OnnxOp.ReduceMax(candidates, null, false, null),
+                    OnnxOp.Cast(input, null, DType.UInt8));
+            }
+            if (dtype.IsSameElementTypeAs(DType.Bool))
+                return Guarded(isEmpty, Globals.Scalar(!max), OnnxOp.Cast(input, null, DType.UInt8));
+            if (ReductionIdentity(dtype, max) is { } identity)
+                return Guarded(isEmpty, identity, input);
+            return Plain(input);
 
-            var zero = Globals.Scalar(0L);
-            var one = Globals.Scalar(1L);
-            Variable shape = OnnxOp.Shape(data, null, null);
-            Variable reduced = axes is null
-                ? OnnxOp.Range(zero, OnnxOp.Size(shape), one)
-                : noOp == true
-                    ? axes.Value
-                    // An empty axes input reduces every axis.
-                    : OnnxOp.Concat([axes.Value, OnnxOp.Range(zero,
-                        OnnxOp.Mul(OnnxOp.Size(shape), OnnxOp.Cast(OnnxOp.Equal(OnnxOp.Size(axes.Value), zero), null, DType.Int64)),
-                        one)], 0);
-            Variable grown = OnnxOp.Add(shape, OnnxOp.ScatterElements(OnnxOp.Mul(shape, zero), reduced,
-                OnnxOp.Add(OnnxOp.Mul(reduced, zero), one), axis: 0));
-            var guarded = Plain(OnnxOp.Expand(identity(), grown));
-            if (empty == true)
-                return guarded;
-
-            Scalar<bit> isEmpty = OnnxOp.Equal(OnnxOp.Size(data), zero);
-            return isEmpty.IfElse(guarded, Plain(tensor));
+            // The plain operator on the empty side gives the output's shape, over an input it runs on.
+            Tensor<T> Guarded(Scalar<bit> empty, Variable identity, Variable shaped)
+                => empty.IfElse((Tensor<T>)OnnxOp.Expand(identity, OnnxOp.Shape(Plain(shaped), null, null)), (Tensor<T>)Plain(input));
         }
 
-        /// <summary>The identity of ReduceMax (<paramref name="max"/>) or ReduceMin over
-        /// <typeparamref name="T"/>, as a builder of its constant, where <typeparamref name="T"/>
-        /// has no infinity to give it; null for every other type.</summary>
-        private static Func<Variable>? ReductionIdentity<T>(bool max) where T : IVarType
+        /// <summary>The identity of ReduceMax (<paramref name="max"/>) or ReduceMin over the integer
+        /// type <paramref name="dtype"/>, as a constant; null for every other type.</summary>
+        private static Variable? ReductionIdentity(DType dtype, bool max)
         {
-            var t = typeof(T);
-            if (t == typeof(bit)) return () => Globals.Scalar(!max);
-            if (t == typeof(int8)) return () => Globals.Scalar(max ? sbyte.MinValue : sbyte.MaxValue);
-            if (t == typeof(int16)) return () => Globals.Scalar(max ? short.MinValue : short.MaxValue);
-            if (t == typeof(int32)) return () => Globals.Scalar(max ? int.MinValue : int.MaxValue);
-            if (t == typeof(int64)) return () => Globals.Scalar(max ? long.MinValue : long.MaxValue);
-            if (t == typeof(uint8)) return () => Globals.Scalar(max ? byte.MinValue : byte.MaxValue);
-            if (t == typeof(uint16)) return () => Globals.Scalar(max ? ushort.MinValue : ushort.MaxValue);
-            if (t == typeof(uint32)) return () => Globals.Scalar(max ? uint.MinValue : uint.MaxValue);
-            if (t == typeof(uint64)) return () => Globals.Scalar(max ? ulong.MinValue : ulong.MaxValue);
+            if (dtype.IsSameElementTypeAs(DType.Int8)) return Globals.Scalar(max ? sbyte.MinValue : sbyte.MaxValue);
+            if (dtype.IsSameElementTypeAs(DType.Int16)) return Globals.Scalar(max ? short.MinValue : short.MaxValue);
+            if (dtype.IsSameElementTypeAs(DType.Int32)) return Globals.Scalar(max ? int.MinValue : int.MaxValue);
+            if (dtype.IsSameElementTypeAs(DType.Int64)) return Globals.Scalar(max ? long.MinValue : long.MaxValue);
+            if (dtype.IsSameElementTypeAs(DType.UInt8)) return Globals.Scalar(max ? byte.MinValue : byte.MaxValue);
+            if (dtype.IsSameElementTypeAs(DType.UInt16)) return Globals.Scalar(max ? ushort.MinValue : ushort.MaxValue);
+            if (dtype.IsSameElementTypeAs(DType.UInt32)) return Globals.Scalar(max ? uint.MinValue : uint.MaxValue);
+            if (dtype.IsSameElementTypeAs(DType.UInt64)) return Globals.Scalar(max ? ulong.MinValue : ulong.MaxValue);
             return null;
         }
 

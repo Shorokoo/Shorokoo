@@ -40,10 +40,9 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Output("output", "T", 1)
                 .Code("VectorRange({1:param}{2:param}{3:param})"),
 
-            // The dtype-bound token of the four Random* defs used to be a FIXED float32
-            // type-def, so a non-float32 dtype attribute produced a float32-typed variable
-            // while serializing dtype=<other> on the wire. The token is now FloatLike (the
-            // spec range), with an explicit float32 default branch when dtype is absent.
+            // The dtype-bound token of the four Random* defs is FloatLike (the spec range), so the
+            // variable's type follows the dtype attribute, with an explicit float32 default branch
+            // when dtype is absent.
             Op(RANDOM_NORMAL)
                 .Tensor<FloatLike>("T1")
                 .Tensor<float32>("T2")
@@ -398,7 +397,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("roi", "T2?", 1)               // roi: [2 * rank(X)] or [2 * len(axes)]
                 .Input("scales", "T3?", 1)               // scales: [rank(X)] or [len(axes)]
                 .Input("sizes", "T4?", 1)               // sizes: [rank(X)] or [len(axes)]
-                .Output("Y", "T1", "R")             // Y: same rank as X (used to be an unconstrained "R2")
+                .Output("Y", "T1", "R")             // Y: same rank as X
                 .AttributeTestValues(AttrAntialias, [1L])
                 .AttributeTestValues(AttrAxes, (long[]?[])[null])
                 .AttributeTestValues(AttrCoordinateTransformationMode, ["half_pixel_symmetric"])

@@ -216,10 +216,17 @@ All boolean/integer outputs are non-differentiable, hence N/A gradients.
    but leave the value uncomputed there, because the empty-group result is not one identity
    across dtypes: -inf, +inf, 0, -inf and -inf for `float32`, and the type's minimum and
    maximum for an integer `ReduceMax`/`ReduceMin` (false and true for `bool`). ONNX Runtime's
-   own kernels return 0 for the integer ones, so `Reduce` (`Tensor`, `Vector`, `Scalar`, and
-   `NN.Reduce`) builds an integer or boolean `ReduceMax`/`ReduceMin` as an `If` on the input
-   being empty, whose empty side reduces the identity instead; a raw `OnnxOp.ReduceMax` /
-   `OnnxOp.ReduceMin`, or one in an imported ONNX model, is the plain operator. `ReduceSum`,
+   own kernels return 0 for the integer ones and fail on an empty `bool` input, so `Reduce`
+   (`Tensor`, `Vector`, `Scalar`, and `NN.Reduce`) builds an integer or boolean
+   `ReduceMax`/`ReduceMin` as an `If` on the input's element count being 0: the other branch is
+   the plain operator, and the empty branch fills the plain operator's output shape with the
+   identity. A graph input's extents are not known when the graph is built, so every integer or
+   boolean `ReduceMax`/`ReduceMin` of one carries this `If`, however large the input turns out
+   to be. A floating-point input, a nonempty constant input, and a reduction with no axes and
+   `noOp` set are the plain operator. In a generic module whose element type is a type
+   parameter, the `If` also tests in the graph that the type is not floating point. A raw
+   `OnnxOp.ReduceMax` / `OnnxOp.ReduceMin`, or one in an imported ONNX model, is the plain
+   operator. `ReduceSum`,
    `ReduceSumSquare`, `ReduceL1`, `ReduceL2` and `ReduceProd` do fold, to their identity
    (0, or 1 for `Prod`), which is the same in every dtype. A reduction with no groups at all
    — an empty **kept** axis — folds to the empty result for all ten. Every other input folds

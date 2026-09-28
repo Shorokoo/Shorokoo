@@ -195,12 +195,11 @@ internal abstract class ReduceOpBase : QuickOp
     /// is what the backend returns.
     ///
     /// <para>Max, Min, Mean, LogSum and LogSumExp decline, because their empty-group value is not
-    /// one identity across dtypes, or not an identity at all. Measured against the ONNX Runtime
-    /// this framework ships (<c>QeeReductionShapeAuditTests</c> pins these): float32 gives -inf,
-    /// +inf, 0, -inf, -inf, and an integer Max and Min built through <c>NN.Reduce</c> give the
-    /// dtype's minimum and maximum, which ONNX Runtime's own kernels do not (<c>NN.Reduce</c>
-    /// writes them out itself). Folding any of that would bake one backend's behaviour into a
-    /// build-time constant, so QEE propagates dtype and shape and leaves the value alone.</para>
+    /// one identity across dtypes, or not an identity at all: -inf, +inf, 0, -inf and -inf for
+    /// float32, and the dtype's minimum and maximum for an integer Max and Min
+    /// (<c>QeeReductionShapeAuditTests</c> holds the backend to these). Folding any of that would
+    /// bake a dtype's value into a build-time constant, so QEE propagates dtype and shape and
+    /// leaves the value alone.</para>
     ///
     /// <para>Defaults to <c>false</c> so an accumulator folds an empty group only once it has said
     /// it can: declining costs a constant, guessing costs correctness. Note a reduction with no

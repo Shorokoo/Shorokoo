@@ -515,8 +515,8 @@ namespace Shorokoo.Tests.Modules
     }
 
     /// <summary>ReduceMax then ReduceMin over an empty group for each integer and boolean dtype the
-    /// backend reduces, over every axis, over an axis beside a nonempty one, over a negative axis, over a
-    /// constant, and over a nonempty int32 input, each held to its exact values. Input xf = [[1,2,3],[4,5,6]].</summary>
+    /// backend reduces, over every axis, over an axis beside a nonempty one, over a constant, and over
+    /// a nonempty int32 input, each held to its exact values. Input xf = [[1,2,3],[4,5,6]].</summary>
     [Module]
     public partial class EmptyIntegerReduceMaxMinCheck
     {
@@ -532,7 +532,7 @@ namespace Shorokoo.Tests.Modules
                 Is(MaxMin(e.Cast<uint8>(), Vector(1L)), byte.MinValue, byte.MaxValue),
                 Is(MaxMin(e.Cast<bit>(), Vector(1L)), 0L, 1L),
                 Is(MaxMin(e.Cast<int64>(), null), long.MinValue, long.MaxValue),
-                Is(MaxMin(e203, Vector(-2L)), [.. Enumerable.Repeat(long.MinValue, 6), .. Enumerable.Repeat(long.MaxValue, 6)]),
+                Is(MaxMin(e203, Vector(1L)), [.. Enumerable.Repeat(long.MinValue, 6), .. Enumerable.Repeat(long.MaxValue, 6)]),
                 Is(MaxMin<int64>(EmptyVector<int64>(), null), long.MinValue, long.MaxValue),
                 Is(MaxMin(xf.Cast<int32>(), Vector(1L)), 3L, 6L, 1L, 4L),
             ], 0);

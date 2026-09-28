@@ -289,8 +289,8 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Output("output", "T", "R2")
                 .Output("log_prob", "T?", "R")
 
-                // reduction explicitly "mean"/"sum" must resolve to the scalar-loss
-                // variant (it used to fall through to the "none" variant's R2 rank).
+                // reduction explicitly "mean"/"sum" resolves to the scalar-loss variant, not
+                // to the "none" variant's R2 rank.
                 .Constraint(AttrReduction, "mean")
                 .Input("scores", "T", "R")
                 .Input("labels", "Tind", "R2")

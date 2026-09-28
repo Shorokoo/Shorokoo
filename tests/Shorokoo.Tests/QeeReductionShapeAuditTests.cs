@@ -78,13 +78,12 @@ public class QeeReductionShapeAuditTests
 
     [Fact]
     public void TestAReductionOverANegativeAxisOfAnEmptyInputHasTheSpecShape()
-        => Assert.True(AutoTest.AdvancedTestGraph<EmptyReduceNegativeAxisShapes>([], [F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)],
+    {
+        Assert.True(AutoTest.AdvancedTestGraph<EmptyReduceNegativeAxisShapes>([], [F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)],
             expected: [3, 1, 0, 3, 1, 0]));
-
-    [Fact]
-    public void TestTheRawReductionOverANegativeAxisOfAnEmptyInputHasTheSpecShape()
-        => Assert.True(AutoTest.AdvancedTestGraph<EmptyRawReduceNegativeAxisShapes>([], [F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)],
+        Assert.True(AutoTest.AdvancedTestGraph<EmptyRawReduceNegativeAxisShapes>([], [F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)],
             expected: [3, 1, 0, 3, 1, 0]));
+    }
 
     // #409: ONNX Runtime ignores noop_with_empty_axes on an empty input and reduces every axis.
     [Fact(Skip = "#409: ONNX Runtime ignores noop_with_empty_axes on an empty input and reduces every axis")]

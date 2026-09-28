@@ -2589,7 +2589,7 @@ public class TrainingRigTrainingLoopCoverageTests
         var rankOnly = FastOnnxModelBuilder.BuildInternalOnnxModel(graph, prepForOnnx: true);
 
         Assert.Equal(dims, concrete.Graph.Inputs.Select(vi => vi.Type.TensorType.Shape.Dims.Select(d => d.DimValue).ToArray()));
-        Assert.All(rankOnly.Graph.Inputs, vi => Assert.Null(vi.Type.TensorType.Shape));
+        Assert.All(rankOnly.Graph.Inputs, vi => Assert.DoesNotContain(vi.Type.TensorType.Shape?.Dims ?? [], d => d.ShouldSerializeDimValue()));
         Assert.Equal(0, OrtOptimizedNodeCount(concrete, "Shape"));
         Assert.NotEqual(0, OrtOptimizedNodeCount(rankOnly, "Shape"));
 

@@ -211,6 +211,25 @@ namespace Shorokoo.Core.Nodes.AutoDiff
         [AutoDiff(MATMUL)]
         public static Variable?[] MatMul<T>(Tensor<T> a, Tensor<T> b, Tensor<T> grad) where T : IVarType
         {
+            // A matrix b — a weight, typically — broadcasts against nothing but a's batch dims, so
+            // neither gradient needs the reverse-broadcast reduction, whatever a's rank: grad·bᵀ is
+            // a's shape already (a 1-D a included, which MatMul promotes and demotes alike), and
+            // aᵀ·grad sums over a's batch dims when they are folded into its rows, inside the one
+            // MatMul. Each transpose is then a plain 2-D Transpose straight into a MatMul, which a
+            // backend can fold into the MatMul itself rather than copying the weight.
+            if (b.Rank == 2)
+            {
+                Tensor<T> aGradDirect = OnnxOp.MatMul(grad, b.Transpose(1L, 0L));
+                if (a.Rank == 2)
+                    return [aGradDirect, (Tensor<T>)OnnxOp.MatMul(a.Transpose(1L, 0L), grad)];
+
+                Tensor<T> aRows = OnnxOp.Reshape(
+                    a, OnnxOp.Concat([Vector(-1L), OnnxOp.Shape(b, start: 0, end: 1)], axis: 0), allowZero: false); // [B·M, K]
+                Tensor<T> gradRows = OnnxOp.Reshape(
+                    grad, OnnxOp.Concat([Vector(-1L), OnnxOp.Shape(b, start: 1)], axis: 0), allowZero: false);       // [B·M, N]
+                return [aGradDirect, (Tensor<T>)OnnxOp.MatMul(aRows.Transpose(1L, 0L), gradRows)];
+            }
+
             // For 2D: d(A@B)/dA = grad @ B^T, d(A@B)/dB = A^T @ grad
             // For batched matmul, transpose the last two dims
             var bTransposed = TransposeLastTwoDims(b);

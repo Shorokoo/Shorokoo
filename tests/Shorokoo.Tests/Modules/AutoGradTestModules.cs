@@ -2837,6 +2837,77 @@ namespace Shorokoo.Tests.Modules
     }
 
     /// <summary>
+    /// A static-rank [2, 3, 4] batch times a static-rank [4, 2] matrix under weights 1..12: dL/db
+    /// sums aᵀ·w over the batch, dL/da is w·bᵀ, both checked against a reference built from
+    /// batched ops.
+    /// </summary>
+    [Module]
+    public partial class AutoGradMatMulBatchTimesMatrixCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+        {
+            var a = (Tensor<float32>)OnnxOp.Identity(x, rank: 3);
+            var b = (Tensor<float32>)OnnxOp.Identity(OnnxOp.Reshape(
+                Vector(0.5f, -1f, 2f, 1.5f, -0.25f, 3f, 1f, -2f), Vector(4L, 2L), allowZero: false), rank: 2);
+            var w = (Tensor<float32>)OnnxOp.Reshape(
+                Vector(1f, 2f, 3f, 4f, 5f, 6f, 7f, 8f, 9f, 10f, 11f, 12f), Vector(2L, 3L, 2L), allowZero: false);
+            var loss = ((Tensor<float32>)OnnxOp.MatMul(a, b) * w).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            var grads = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad([(IValue)a, b], loss);
+            var expectedA = (Tensor<float32>)OnnxOp.MatMul(w, b.Transpose(1L, 0L));
+            var expectedB = ((Tensor<float32>)OnnxOp.MatMul(a.Transpose(0L, 2L, 1L), w))
+                .Reduce(ReduceKind.Sum, axes: Vector(0L), keepDims: false);
+            var errA = ((Tensor<float32>)grads[0]! - expectedA).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
+            var errB = ((Tensor<float32>)grads[1]! - expectedB).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
+            return (errA < Scalar(1e-4f)) & (errB < Scalar(1e-4f));
+        }
+    }
+
+    /// <summary>
+    /// The 2-D companion of <see cref="AutoGradMatMulBatchTimesMatrixCheck"/>: a static-rank
+    /// [3, 4] times a static-rank [4, 2] under weights 1..6.
+    /// </summary>
+    [Module]
+    public partial class AutoGradMatMulMatrixTimesMatrixCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+        {
+            var a = (Tensor<float32>)OnnxOp.Identity(x, rank: 2);
+            var b = (Tensor<float32>)OnnxOp.Identity(OnnxOp.Reshape(
+                Vector(0.5f, -1f, 2f, 1.5f, -0.25f, 3f, 1f, -2f), Vector(4L, 2L), allowZero: false), rank: 2);
+            var w = (Tensor<float32>)OnnxOp.Reshape(Vector(1f, 2f, 3f, 4f, 5f, 6f), Vector(3L, 2L), allowZero: false);
+            var loss = ((Tensor<float32>)OnnxOp.MatMul(a, b) * w).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            var grads = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad([(IValue)a, b], loss);
+            var expectedA = (Tensor<float32>)OnnxOp.MatMul(w, b.Transpose(1L, 0L));
+            var expectedB = (Tensor<float32>)OnnxOp.MatMul(a.Transpose(1L, 0L), w);
+            var errA = ((Tensor<float32>)grads[0]! - expectedA).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
+            var errB = ((Tensor<float32>)grads[1]! - expectedB).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
+            return (errA < Scalar(1e-4f)) & (errB < Scalar(1e-4f));
+        }
+    }
+
+    /// <summary>
+    /// An unknown-rank [4] vector times a static-rank [4, 2] matrix under weights [3, -2]: dL/da is
+    /// b·w and dL/db the outer product a·wᵀ.
+    /// </summary>
+    [Module]
+    public partial class AutoGradMatMulVectorTimesMatrixCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> a)
+        {
+            var b = (Tensor<float32>)OnnxOp.Identity(OnnxOp.Reshape(
+                Vector(0.5f, -1f, 2f, 1.5f, -0.25f, 3f, 1f, -2f), Vector(4L, 2L), allowZero: false), rank: 2);
+            var w = Vector(3f, -2f);
+            var loss = ((Tensor<float32>)OnnxOp.MatMul(a, b) * w).Reduce(ReduceKind.Sum, keepDims: false).Scalar();
+            var grads = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad([(IValue)a, b], loss);
+            var expectedA = (Tensor<float32>)OnnxOp.MatMul(b, w);
+            var expectedB = (Tensor<float32>)OnnxOp.Unsqueeze(a, Vector(1L)) * (Tensor<float32>)OnnxOp.Unsqueeze(w, Vector(0L));
+            var errA = ((Tensor<float32>)grads[0]! - expectedA).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
+            var errB = ((Tensor<float32>)grads[1]! - expectedB).Abs().Reduce(ReduceKind.Max, keepDims: false).Scalar();
+            return (errA < Scalar(1e-4f)) & (errB < Scalar(1e-4f));
+        }
+    }
+
+    /// <summary>
     /// Unknown-rank batched MatMul: no Identity rank stamp, so the operands' Rank is
     /// null and the MatMul gradient takes the rank-agnostic last-two-dims transpose
     /// fallback (collapse leading dims → swap → restore) instead of the static perm.

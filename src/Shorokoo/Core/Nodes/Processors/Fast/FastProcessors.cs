@@ -4219,7 +4219,9 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
             {
                 var modelId = paramInfo.SpecificModelId;
                 var dtype = paramInfo.TargetFn.Outputs[0].DType;
-                var rank = paramInfo.TargetFn.OutputRanks[0];
+                // The shape is a required constant by now, so its length states the rank an
+                // initializer's return type may leave open (a Tensor<T> built from its shape input).
+                var rank = paramInfo.TargetFn.OutputRanks[0] ?? paramInfo.Shape.Dims.Length;
                 var idTemplateString = idTemplateInfos.GetSpecificIdentifierTemplate(modelId).ToString();
 
                 var initializerParamKeys = new List<FastTensorKey?>();

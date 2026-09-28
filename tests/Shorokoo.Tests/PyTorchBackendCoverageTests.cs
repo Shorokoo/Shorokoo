@@ -373,6 +373,9 @@ public class PyTorchBackendCoverageTests
     [Fact]
     public void TestAnInt64RangeCountsItsElementsExactlyOnTorch() => Assert.True(Int64RangeCountsItsElementsExactly(new ComputeContext(Torch)));
 
+    [Fact]
+    public void TestAnInt64RangeCountsItsElementsExactlyOnOnnxRuntime() => Assert.True(Int64RangeCountsItsElementsExactly(ComputeContext.Default));
+
     internal static void ConstantPadsFillWithTheirValueExactly(IShorokooBackend backend)
     {
         Assert.True(PadsWith(backend, ShorokooTensorElementType.Int64, Raw(long.MaxValue)));

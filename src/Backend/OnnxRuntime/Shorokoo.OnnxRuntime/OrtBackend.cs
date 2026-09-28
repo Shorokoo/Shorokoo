@@ -346,6 +346,7 @@ public abstract class OrtBackend : IShorokooBackend
         using var options = new SessionOptions();
         Configure(options, graphOptimization, logSeverity);
         if (intraOpThreads > 0) options.IntraOpNumThreads = intraOpThreads;
+        if (diagnostics.DeterministicCompute) UseDeterministicCompute(options);
         // Named before anything can throw, and made inside the try, by the call that points the
         // options into it: a setter there throwing after the folder was made would otherwise leave
         // it with no name for the catch to delete it by. The folder the graph is written into is
@@ -491,6 +492,52 @@ public abstract class OrtBackend : IShorokooBackend
         options.ProfileOutputPathPrefix = Path.Combine(directory, "profile");
         options.EnableProfiling = true;
     }
+
+    /// <summary>
+    /// Has the session <paramref name="options"/> build run the deterministic kernel wherever an
+    /// operator has one (<see cref="DiagnosticSettings.DeterministicCompute"/>).
+    ///
+    /// <para>ONNX Runtime's C API has the switch, <c>SetDeterministicCompute</c>, and its managed
+    /// surface does not wrap it, so it is called through the managed runtime's own table of that
+    /// API: the table belongs to the ONNX Runtime assembly this backend is bound to, and so to the
+    /// native runtime the options were made by. A backend that <see cref="IsolatedBackend"/> loads
+    /// beside another reaches its own runtime's table the same way, where calling the entry point
+    /// by name could reach the other's.</para>
+    /// </summary>
+    /// <exception cref="NotSupportedException">The ONNX Runtime assembly this backend is bound to
+    /// holds no such table, or no such entry in it.</exception>
+    /// <exception cref="InvalidOperationException">The runtime refused the setting.</exception>
+    private static unsafe void UseDeterministicCompute(SessionOptions options)
+    {
+        var api = NativeApi.Value;
+        var status = ((delegate* unmanaged<IntPtr, byte, IntPtr>)api.SetDeterministicCompute)(
+            options.DangerousGetHandle(), 1);
+        // The handle was the options' last read, and ORT takes it as a bare IntPtr (see NewSession).
+        GC.KeepAlive(options);
+        if (status == IntPtr.Zero) return;
+        var message = Marshal.PtrToStringUTF8(
+            ((delegate* unmanaged<IntPtr, IntPtr>)api.GetErrorMessage)(status));
+        ((delegate* unmanaged<IntPtr, void>)api.ReleaseStatus)(status);
+        throw new InvalidOperationException($"ONNX Runtime refused deterministic compute: {message}");
+    }
+
+    /// <summary>The entries of ONNX Runtime's C API <see cref="UseDeterministicCompute"/> calls.</summary>
+    private readonly record struct DeterministicComputeApi(
+        IntPtr SetDeterministicCompute, IntPtr GetErrorMessage, IntPtr ReleaseStatus);
+
+    private static readonly Lazy<DeterministicComputeApi> NativeApi = new(() =>
+    {
+        const System.Reflection.BindingFlags Any = System.Reflection.BindingFlags.Public
+            | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static
+            | System.Reflection.BindingFlags.Instance;
+        var assembly = typeof(SessionOptions).Assembly;
+        var table = assembly.GetType("Microsoft.ML.OnnxRuntime.NativeMethods")?.GetField("api_", Any)?.GetValue(null);
+        IntPtr Entry(string name) => table?.GetType().GetField(name, Any)?.GetValue(table) is IntPtr p && p != IntPtr.Zero
+            ? p
+            : throw new NotSupportedException(
+                $"Deterministic compute needs ONNX Runtime's {name}, which {assembly.GetName()} does not expose.");
+        return new(Entry("SetDeterministicCompute"), Entry("GetErrorMessage"), Entry("ReleaseStatus"));
+    });
 
     private static void DeleteDirectory(string? directory)
     {

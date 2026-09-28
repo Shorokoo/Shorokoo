@@ -20,6 +20,15 @@ public partial class WideLinearModel
     public static Tensor<float32> Inline(Tensor<float32> x) => Linear.Model(Scalar(4096L), Scalar(true)).Call(x);
 }
 
+/// <summary>One pre-LayerNorm transformer encoder layer, 64 wide with four heads: its gradients
+/// reduce over every row of the batch, which is where the card's kernels add up in whatever order
+/// its threads finish.</summary>
+[Module]
+public partial class AttentionLayerModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x) => TransformerEncoderLayer.Call(64L, 4L, 256L, true, x);
+}
+
 /// <summary>
 /// What the CUDA execution provider actually does, run rather than read: a graph on the card, the
 /// device-memory budget and the shrinking arena a resident training loop needs, and the memory
@@ -51,6 +60,31 @@ public class GpuExecutionTests
 
         var result = AddTwoScalars(new ComputeContext(), 2.0f, 3.0f);
         Assert.Equal(5.0f, result);
+    }
+
+    /// <summary>
+    /// Two resident runs of an attention layer from one seed and one batch, on contexts that ask for
+    /// deterministic compute, compute bit for bit the same losses and weights — as they do not, from
+    /// the first steps on, without it.
+    /// </summary>
+    [CudaFact]
+    public void CudaProvider_TwoRunsFromOneSeedAreBitIdenticalUnderDeterministicCompute()
+    {
+        var x = TensorData([4L, 256L, 64L], [.. Enumerable.Range(0, 4 * 256 * 64).Select(i => MathF.Sin(0.37f * i))]);
+        var y = TensorData([4L, 256L, 64L], [.. Enumerable.Range(0, 4 * 256 * 64).Select(i => MathF.Cos(0.11f * i))]);
+        float[] Train()
+        {
+            var rig = TrainingRig.FromScratch(
+                AttentionLayerModel.ComputationGraph, L2Loss.ComputationGraph, AdamWOptimizer.ComputationGraph, [x],
+                new AdamWOptimizerHyperparameters { LearningRate = 1e-3f },
+                runtimeContext: new ComputeContext { Diagnostics = new DiagnosticSettings { DeterministicCompute = true } },
+                rngConfig: new RngConfig { MasterSeed = 7 });
+            using var run = rig.BeginResidentRun();
+            float[] losses = [.. Enumerable.Range(0, 5).Select(_ => run.Step(rig.InputDef.FromOrderedData(x).Shared(), rig.TargetDef.FromOrderedData(y).Shared()))];
+            return [.. losses, .. Weights(run.StepToCheckpoint(rig.InputDef.FromOrderedData(x).Shared(), rig.TargetDef.FromOrderedData(y).Shared()))];
+        }
+
+        Assert.Equal(Train().Select(BitConverter.SingleToInt32Bits), Train().Select(BitConverter.SingleToInt32Bits));
     }
 
     /// <summary>

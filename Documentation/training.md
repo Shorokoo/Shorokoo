@@ -750,10 +750,26 @@ default. Dropout masks vary per step; the RNG position is saved in the checkpoin
 continues exactly.
 
 On the CPU backends, two runs from one seed with the same data are bit-identical at every
-step, including across a save and resume, so the CPU backend is the way to verify that a
-resume is exact. The GPU backends are not bit-reproducible: two GPU runs from one seed can
-differ in the last digits of the loss from early steps, with or without a resume in between. There is no deterministic GPU mode
-([#405](https://github.com/Shorokoo/Shorokoo/issues/405)). Pass `new RngConfig { MasterSeed = … }` to re-roll all
+step, including across a save and resume. On a GPU they are not by default: the card's kernels
+add up partial results in whatever order its threads finish, so two runs from one seed can differ
+in the last digits of the loss from early steps, with or without a resume in between. To
+reproduce a GPU run bit for bit — to verify that a resume on the card is exact, say — train on a
+context that asks for deterministic compute, and load the checkpoint onto one too:
+
+```csharp
+static ComputeContext Deterministic() =>
+    new() { Diagnostics = new DiagnosticSettings { DeterministicCompute = true } };
+
+var rig = TrainingRig.FromScratch(model, loss, optimizer, sampleInputs, hyperparameters,
+    runtimeContext: Deterministic());
+// ...
+var (resumedRig, resumed) = TrainingRig.Load("run.skpt", runtimeContext: Deterministic());
+```
+
+ONNX Runtime then runs the deterministic CUDA kernel of every operator that has one, which can
+cost the card some speed; where an operator has none, it says so in its log at warning severity.
+The setting changes nothing on the CPU backends, which are reproducible either way, and the
+PyTorch and JAX backends do not apply it. Pass `new RngConfig { MasterSeed = … }` to re-roll all
 streams coherently, or `RngConfig.NonDeterministic()` for per-run variation.
 
 ### When a training step runs out of memory

@@ -198,8 +198,8 @@ None of these shows in a small first run. Each can end a long one.
 - **Device-memory readings.** They cover the whole card or one arena, never this process
   alone: [limitations.md](limitations.md#device-memory-readings-are-the-devices-and-device-0s).
 - **Reproducibility.** A fixed seed reproduces a run bit for bit on the CPU backend, including
-  across a save and resume. The GPU backends do not reproduce bit for bit:
-  [Seeding the run](training.md#seeding-the-run).
+  across a save and resume. On a GPU it does so only on a context that asks for deterministic
+  compute: [Seeding the run](training.md#seeding-the-run).
 - **Build cost.** Building a rig grows with the parameter count, and each new process pays it
   again: [What construction costs](training.md#what-construction-costs).
 - **Namespaces.** The `using` lines each type needs are in [orientation.md](orientation.md).

@@ -156,6 +156,7 @@ session binds no output aliases.
 | **`RunSettings.ShrinkArenaAfterRun`** | ignored | ignored |
 | **Arena statistics** | none | JAX's allocator on the device (`Device.memory_stats`) |
 | **`TraceNodePlacement`** | every node on `cpu` | every node on `cuda:N` |
+| **`DeterministicCompute`** | not applied | not applied: XLA's kernels run as they otherwise would |
 | **Log severity** | Python warnings a run raises are shown at `Warning` and below, not above | same |
 
 Floating-point products and convolutions run in the operands' full precision; `float32`

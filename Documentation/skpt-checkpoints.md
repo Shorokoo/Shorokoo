@@ -191,8 +191,8 @@ What the file carries:
   ride on the architecture. Every training `.skpt` carries these.
 
 Round-trip is exact: state is bit-identical, counters are preserved, and a resumed
-`TrainStep` continues the pre-save trajectory (bit for bit on the CPU backends; see
-[Seeding the run](training.md#seeding-the-run) for the GPU). Loading fails loudly, naming the
+`TrainStep` continues the pre-save trajectory (bit for bit on the CPU backends, and on a GPU
+under deterministic compute; see [Seeding the run](training.md#seeding-the-run)). Loading fails loudly, naming the
 tensor, on a mapped state tensor the rig does not declare, a declared one the file does
 not map, a tampered entry (sha256), or an element type or dimension mismatch with the
 rig's parameters (see [training.md](training.md)).

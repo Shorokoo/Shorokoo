@@ -625,4 +625,91 @@ namespace Shorokoo.Tests.Modules
                 e.Reduce(ReduceKind.L1).Cast<float32>().Reshape(Vector(1L))], 0);
         }
     }
+
+    /// <summary>Reductions with noop_with_empty_axes set over an input empty by its values: axes
+    /// absent, constant empty and empty by their values pass the input through, axes [1] by their
+    /// values reduce, and a nonempty input passes through unchanged. Input xf = [[1,2,3],[4,5,6]].</summary>
+    [Module]
+    public partial class NoopReduceAxesFormsCheck
+    {
+        public static Tensor<bit> Inline(Tensor<float32> xf)
+        {
+            var flat = xf.Reshape(Vector(-1L));
+            var one = flat.Slice(Vector(0L), Vector(1L)).Cast<int64>();
+            var none = flat.Slice(Vector(0L), (one - Vector(1L)).Vec());
+            var e = none.Reshape(Vector(2L, -1L));
+            var noAxes = none.Cast<int64>();
+            return OnnxOp.Concat(
+            [
+                Is(Noop(ReduceKind.Sum, e, EmptyVector<int64>()).TShape, 2L, 0L),
+                Is(Noop(ReduceKind.Max, e, noAxes).TShape, 2L, 0L),
+                Is(Noop(ReduceKind.Mean, e, null).TShape, 2L, 0L),
+                Is(Noop(ReduceKind.Sum, e.Reshape(Vector(2L, 0L, 1L)), one).TShape, 2L, 1L, 1L),
+                Is(Noop(ReduceKind.Sum, xf, one).Cast<int64>().Reshape(Vector(-1L)), 6L, 15L),
+                Is(Noop(ReduceKind.Prod, xf, noAxes).Cast<int64>().Reshape(Vector(-1L)), 1L, 2L, 3L, 4L, 5L, 6L),
+                Is(Noop(ReduceKind.L1, xf, null).Cast<int64>().Reshape(Vector(-1L)), 1L, 2L, 3L, 4L, 5L, 6L),
+            ], 0);
+        }
+
+        private static Tensor<float32> Noop(ReduceKind kind, Tensor<float32> x, Tensor<int64>? axes)
+            => NN.Reduce(kind, x, axes, keepDims: true, noOp: true);
+
+        private static Tensor<bit> Is(Tensor<int64> actual, params long[] expected)
+            => OnnxOp.Concat([actual.TShape == Vector((long)expected.Length), actual == Vector(expected)], 0);
+    }
+
+    /// <summary>Reductions over axes negative by their values, of an input empty by its values and
+    /// of a nonempty one. Input xf = [[1,2,3],[4,5,6]].</summary>
+    [Module]
+    public partial class EmptyReduceRuntimeNegativeAxisCheck
+    {
+        public static Tensor<bit> Inline(Tensor<float32> xf)
+        {
+            var flat = xf.Reshape(Vector(-1L));
+            var one = flat.Slice(Vector(0L), Vector(1L)).Cast<int64>();
+            var e = flat.Slice(Vector(0L), (one - Vector(1L)).Vec()).Reshape(Vector(3L, -1L));
+            var last = one - Vector(2L);
+            var first = one - Vector(3L);
+            return OnnxOp.Concat(
+            [
+                Is(NN.Reduce(ReduceKind.Sum, e, last, true, null).TShape, 3L, 1L),
+                Is(NN.Reduce(ReduceKind.Max, e, first, true, null).TShape, 1L, 0L),
+                Is(NN.Reduce(ReduceKind.L2, e, OnnxOp.Concat([first, last], 0), true, null).TShape, 1L, 1L),
+                Is(NN.Reduce(ReduceKind.Sum, xf, last, true, null).Cast<int64>().Reshape(Vector(-1L)), 6L, 15L),
+                Is(NN.Reduce(ReduceKind.Min, xf, first, true, null).Cast<int64>().Reshape(Vector(-1L)), 1L, 2L, 3L),
+            ], 0);
+        }
+
+        private static Tensor<bit> Is(Tensor<int64> actual, params long[] expected)
+            => OnnxOp.Concat([actual.TShape == Vector((long)expected.Length), actual == Vector(expected)], 0);
+    }
+
+    /// <summary>float16 ReduceSumSquare, ReduceL1 and ReduceLogSum with no axes input over inputs
+    /// empty by their values, of rank 1 and 2, with and without keepdims, over an empty constant,
+    /// and over a nonempty input. Input xf = [[1,2,3],[4,5,6]].</summary>
+    [Module]
+    public partial class EmptyFloat16ReduceNoAxesCheck
+    {
+        public static Tensor<bit> Inline(Tensor<float32> xf)
+        {
+            var flat = xf.Reshape(Vector(-1L));
+            var none = flat.Slice(Vector(0L), (flat.Slice(Vector(0L), Vector(1L)).Cast<int64>() - Vector(1L)).Vec()).Cast<float16>();
+            var e = none.Reshape(Vector(0L, 3L));
+            var x = xf.Cast<float16>();
+            return OnnxOp.Concat(
+            [
+                Is(e.Reduce(ReduceKind.SumSquare, keepDims: true), [1L, 1L], 0f),
+                Is(none.Reduce(ReduceKind.L1), [], 0f),
+                Is(e.Reduce(ReduceKind.LogSum), [], float.NegativeInfinity),
+                Is(none.Reduce(ReduceKind.LogSum, keepDims: true), [1L], float.NegativeInfinity),
+                Is(EmptyVector<float16>().Reduce(ReduceKind.SumSquare), [], 0f),
+                Is(x.Reduce(ReduceKind.SumSquare), [], 91f),
+                Is(x.Reduce(ReduceKind.L1, keepDims: true), [1L, 1L], 21f),
+                Is(flat.Slice(Vector(0L), Vector(1L)).Cast<float16>().Reduce(ReduceKind.LogSum), [], 0f),
+            ], 0);
+        }
+
+        private static Tensor<bit> Is(Tensor<float16> actual, long[] shape, float expected)
+            => OnnxOp.Concat([actual.TShape == Vector(shape), actual.Cast<float32>().Reshape(Vector(-1L)) == Vector(expected)], 0);
+    }
 }

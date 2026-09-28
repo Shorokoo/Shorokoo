@@ -60,8 +60,7 @@ public class QeeReductionShapeAuditTests
         Assert.True(GenericMaxMin(DType.Bool, Bits([2L, 2L], true, false, false, false), 1L, 0L, 0L, 0L));
     }
 
-    // #422: ONNX Runtime returns an empty input unreduced when a Reduce axis is negative.
-    [Fact(Skip = "#422: ONNX Runtime returns an empty input unreduced when a Reduce axis is negative")]
+    [Fact]
     public void TestAReductionOverANegativeAxisOfAnEmptyInputHasTheSpecShape()
     {
         Assert.True(AutoTest.AdvancedTestGraph<EmptyReduceNegativeAxisShapes>([], [F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)],
@@ -70,19 +69,29 @@ public class QeeReductionShapeAuditTests
             expected: [3, 1, 0, 3, 1, 0]));
     }
 
-    // #409: ONNX Runtime ignores noop_with_empty_axes on an empty input and reduces every axis.
-    [Fact(Skip = "#409: ONNX Runtime ignores noop_with_empty_axes on an empty input and reduces every axis")]
+    [Fact]
     public void TestANoopReductionPassesAnEmptyInputThrough()
         => Assert.True(AutoTest.AdvancedTestGraph<EmptyNoopReduceShape>([],
             [F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)],
             expected: [2, 0]));
 
-    // #411: ONNX Runtime's float16 ReduceSumSquare and ReduceL1 crash the process on an empty input with no axes.
-    [Fact(Skip = "#411: ONNX Runtime's float16 ReduceSumSquare and ReduceL1 over an empty input with no axes crash the process")]
+    [Fact]
     public void TestFloat16ReduceSumSquareAndL1OverAnEmptyInputGiveZero()
         => Assert.True(AutoTest.AdvancedTestGraph<EmptyFloat16ReduceAllValues>([],
             [F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)],
             expected: [0, 0]));
+
+    [Fact]
+    public void TestFloat16ReduceSumSquareL1AndLogSumWithoutAxesMatchTheSpecOverEmptyAndNonemptyInputs()
+        => Assert.True(AutoTest.AdvancedTestGraph<EmptyFloat16ReduceNoAxesCheck>([], [F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)]));
+
+    [Fact]
+    public void TestANoopReductionPassesAnEmptyInputThroughForEveryFormOfEmptyAxes()
+        => Assert.True(AutoTest.AdvancedTestGraph<NoopReduceAxesFormsCheck>([], [F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)]));
+
+    [Fact]
+    public void TestAReductionOverAxesNegativeByTheirValuesHasTheSpecShapeAndValues()
+        => Assert.True(AutoTest.AdvancedTestGraph<EmptyReduceRuntimeNegativeAxisCheck>([], [F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)]));
 
     private static bool GenericMaxMin(DType t, TensorData x, params long[] expected)
         => AutoTest.AdvancedTestGraph<GenericReduceMaxMinCheck>([], [x, I64([expected.Length], expected)],

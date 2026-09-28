@@ -7,6 +7,7 @@ using Shorokoo.Core.Interpreter;
 using Shorokoo.Core.Factory.IR;
 using Shorokoo.Core.Nodes.Processors.Helpers;
 using Shorokoo.Modules.Initializers;
+using Shorokoo.Modules.Layers;
 using Shorokoo.Runtime;
 using Shorokoo.Modules.Losses;
 using Shorokoo.Modules.Optimizers;
@@ -201,6 +202,48 @@ public partial class ParamOrderAModel
         var scale = NormalDist.Init(Vector(1L), Scalar(0f), Scalar(1f));
         var offset = NormalDist.Init(Vector(1L), Scalar(0f), Scalar(1f));
         return x * scale.Scalar() + offset.Scalar();
+    }
+}
+
+/// <summary><see cref="ParamOrderAModel"/> with its two initializer calls swapped.</summary>
+[Module]
+public partial class ParamOrderBModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var offset = NormalDist.Init(Vector(1L), Scalar(0f), Scalar(1f));
+        var scale = NormalDist.Init(Vector(1L), Scalar(0f), Scalar(1f));
+        return x * scale.Scalar() + offset.Scalar();
+    }
+}
+
+/// <summary>Parameters and sub-models captured in locals, left inline, inside and after a loop.</summary>
+[Module]
+public partial class ParamNamingModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var gain = NormalDist.Init(Vector(1L), Scalar(0f), Scalar(1f));
+        var inner = ParamOrderAModel.Model();
+        var y = inner.Call(x) * gain.Scalar();
+        y = y * NormalDist.Init(Vector(1L), Scalar(0f), Scalar(1f)).Scalar();
+        foreach (var layer in LoopAPI.Iterate(Scalar(2L)))
+        {
+            var step = NormalDist.Init(Vector(1L), Scalar(0f), Scalar(1f));
+            y = y + step.Scalar() * NormalDist.Init(Vector(1L), Scalar(0f), Scalar(1f)).Scalar();
+        }
+        return y * NormalDist.Init(Vector(1L), Scalar(0f), Scalar(1f)).Scalar();
+    }
+}
+
+/// <summary>A library layer captured in a local.</summary>
+[Module]
+public partial class NamedLinearModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> x)
+    {
+        var proj = Linear.Model(Scalar(4L), Scalar(true));
+        return proj.Call(x);
     }
 }
 
@@ -2990,6 +3033,59 @@ public class TrainingRigTrainingLoopCoverageTests
 [Trait("Purpose", "Coverage")]
 public class TrainingRigCheckpointCoverageTests
 {
+    private static TrainingCheckpoint InitialOf(ComputationGraph model) => ShapeRig(model).CreateInitialCheckpoint();
+
+    private static string[] NamesOf(ComputationGraph model) =>
+        [.. InitialOf(model).TrainableParams.Definition.Fields.Select(f => f.Name)];
+
+    [Fact]
+    public void TestParametersAreNamedByTheirLocalsAndOtherwiseCountedPerScope()
+    {
+        Assert.Equal(["TrainableParam#0.scale#0", "TrainableParam#0.offset#0"], NamesOf(ParamOrderAModel.ComputationGraph));
+        Assert.Equal(["TrainableParam#0.offset#0", "TrainableParam#0.scale#0"], NamesOf(ParamOrderBModel.ComputationGraph));
+        Assert.Equal(["TrainableParam#0.proj#0.weight#0", "TrainableParam#0.proj#0.bias#0"], NamesOf(NamedLinearModel.ComputationGraph));
+        Assert.Equal(
+        [
+            "TrainableParam#0.gain#0",
+            "TrainableParam#0.inner#0.scale#0",
+            "TrainableParam#0.inner#0.offset#0",
+            "TrainableParam#0.NormalDist#0",
+            "TrainableParam#0.Loop#0:0.step#0",
+            "TrainableParam#0.Loop#0:0.NormalDist#0",
+            "TrainableParam#0.Loop#0:1.step#0",
+            "TrainableParam#0.Loop#0:1.NormalDist#0",
+            "TrainableParam#0.NormalDist#1",
+        ], NamesOf(ParamNamingModel.ComputationGraph));
+    }
+
+    [Fact]
+    public void TestTrainableParamFieldsEnumerateInDefinitionOrder()
+    {
+        var trainable = InitialOf(ParamNamingModel.ComputationGraph).TrainableParams;
+        Assert.Equal(trainable.Definition.Fields.Select(f => f.Name), trainable.Fields.Keys);
+        Assert.Equal(trainable.Definition.Fields.Select(f => f.Name), trainable.Fields.Select(f => f.Key));
+    }
+
+    [Fact]
+    public void TestACheckpointFollowsItsParametersByNameAcrossAReorder()
+    {
+        var path = TempPath("param_reorder") + ".safetensors";
+        try
+        {
+            var a = InitialOf(ParamOrderAModel.ComputationGraph);
+            a.Save(path);
+            var b = ShapeRig(ParamOrderBModel.ComputationGraph).LoadCheckpoint(path);
+            foreach (var name in (string[])["TrainableParam#0.scale#0", "TrainableParam#0.offset#0"])
+                Assert.Equal(
+                    ((TensorData<float32>)a.TrainableParams.Fields[name]).AccessMemory().ToArray(),
+                    ((TensorData<float32>)b.TrainableParams.Fields[name]).AccessMemory().ToArray());
+            Assert.NotEqual(
+                ((TensorData<float32>)a.TrainableParams.Fields["TrainableParam#0.scale#0"]).AccessMemory().ToArray(),
+                ((TensorData<float32>)a.TrainableParams.Fields["TrainableParam#0.offset#0"]).AccessMemory().ToArray());
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
     private static TrainingRig AdamRig() => TrainingRig.FromScratch(
         ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, AdamOptimizer.ComputationGraph,
         [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([4L], [1f, 2f, 3f, 4f]))],

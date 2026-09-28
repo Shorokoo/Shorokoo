@@ -810,6 +810,28 @@ Other failures keep their type and message. If the host runs out while the **gar
 needs memory, the runtime fails fast (`Fatal error. 0xE0004743`) with no exception to wrap; use the
 last CR009 report as the lead.
 
+### Reading a training process's memory
+
+A process's private bytes (its commit charge) are more than what it holds:
+
+- **The .NET heap keeps what it collected.** Building a rig, loading a checkpoint and saving one
+  each allocate the training state or a large share of it for a moment, and after a collection the
+  runtime keeps that memory committed for reuse rather than returning it. A forced
+  `GC.Collect()` leaves it committed; `GC.Collect(2, GCCollectionMode.Aggressive, blocking: true,
+  compacting: true)` returns it. So compare `GC.GetTotalMemory(false)` (what is live) with
+  `GC.GetGCMemoryInfo().TotalCommittedBytes` (what the heap holds) before reading the rest of the
+  commit as native. Under a container's or a Job Object's memory limit the runtime caps its heap
+  below the limit (at 75% of it by default) and collects harder as it nears the cap.
+- **On Windows, a card's memory is commit too.** Under WDDM every allocation on the card is backed
+  by system commit, so a GPU process's private bytes include its arenas on the card, which keep the
+  most they have held (see above).
+
+What a rig itself holds is the model's state once over at most. A rig built from scratch keeps its
+initial values — parameters, model state and optimizer state — for `CreateInitialCheckpoint`. A
+rig from `TrainingRig.Load` keeps none: it computes them the first time something asks, since the
+checkpoint it loads replaces them. A resident run holds the state on its device; each checkpoint it
+hands out is a host copy of the whole state, held for as long as you hold the checkpoint.
+
 ## Feeding data: the data loader
 
 The array overloads of `Fit`/`Train` take pre-batched `TensorDataStruct[]` and leave the epoch /

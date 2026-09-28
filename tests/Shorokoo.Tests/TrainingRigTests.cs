@@ -5479,6 +5479,30 @@ public class TrainingRigSkptCheckpointCoverageTests
     }
 
     [Fact]
+    public void TestLoadBuildsTheRigWithoutRunningASessionWhereAFreshBuildRunsItsInitializersCoverage()
+    {
+        static ComputeContext Counting() => new() { Diagnostics = new DiagnosticSettings { CollectRunStatistics = true } };
+        var (_, ckpt, _, _) = BuildTrainedAdamWRig(steps: 1);
+        var path = TempPath("skpt_no_runs") + ".skpt";
+        try
+        {
+            Persistence.SaveTrainingCheckpointToSkpt(ckpt, path);
+            using var loading = Counting();
+            var (_, loaded) = TrainingRig.Load(path, mergeContext: loading);
+            Assert.Equal(1, loaded.Step);
+            Assert.Equal(0L, loading.RunStats.RunCount);
+
+            using var building = Counting();
+            _ = TrainingRig.FromScratch(
+                ScalarMultiplyModel.ComputationGraph, L2Loss.ComputationGraph,
+                AdamWOptimizer.ComputationGraph, ScalarMultiplyBatches().sample,
+                new AdamWOptimizerHyperparameters { LearningRate = 0.1f }, mergeContext: building);
+            Assert.True(building.RunStats.RunCount > 0);
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
+    [Fact]
     public void TestADeferredRigHandsTheSameInitialValuesToEveryConcurrentCallerCoverage()
     {
         const int width = 2048;

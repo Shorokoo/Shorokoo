@@ -62,15 +62,27 @@ namespace Shorokoo.Core.Utils
         public abstract void Dispose();
     }
 
-    /// <summary>The zip shape: the whole file is read into memory and entries come out of the
-    /// BCL <see cref="ZipArchive"/> (an implementation independent of the .skpt writer, which
-    /// doubles as a standardness check).</summary>
+    /// <summary>
+    /// The zip shape: entries come out of the BCL <see cref="ZipArchive"/> (an implementation
+    /// independent of the .skpt writer, which doubles as a standardness check), read from the file
+    /// as each is asked for.
+    ///
+    /// <para>Each entry is read once, into an array of its own size, and nothing else is held: a
+    /// checkpoint's state entries are most of the file, so holding the whole file — or an entry in
+    /// a growable buffer and again in the copy taken off it — made a resume allocate the state
+    /// several times over on its way in. That memory is the .NET heap's, which keeps it committed
+    /// after the arrays are collected, so a resumed process went on holding it.</para>
+    ///
+    /// <para>The file is opened for reading and shared for reading and deleting, so a checkpoint
+    /// being read can still be replaced under its name — as saving a newer one to the same path
+    /// does.</para>
+    /// </summary>
     internal sealed class SkptZipContainer : SkptContainer
     {
-        private readonly MemoryStream _stream;
+        private readonly FileStream _stream;
         private readonly ZipArchive _archive;
 
-        private SkptZipContainer(string path, MemoryStream stream, ZipArchive archive)
+        private SkptZipContainer(string path, FileStream stream, ZipArchive archive)
             : base(path)
         {
             _stream = stream;
@@ -79,7 +91,7 @@ namespace Shorokoo.Core.Utils
 
         internal static SkptZipContainer OpenFile(string filePath)
         {
-            var stream = new MemoryStream(File.ReadAllBytes(filePath), writable: false);
+            var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
             try
             {
                 return new SkptZipContainer(
@@ -90,6 +102,12 @@ namespace Shorokoo.Core.Utils
                 stream.Dispose();
                 throw new InvalidDataException(
                     $"'{filePath}' is not a .skpt checkpoint — it does not open as a zip archive. ({e.Message})", e);
+            }
+            catch
+            {
+                // The file is open, and nothing else holds it to close it.
+                stream.Dispose();
+                throw;
             }
         }
 
@@ -105,10 +123,19 @@ namespace Shorokoo.Core.Utils
                 throw new InvalidDataException(
                     $"'{CheckpointPath}': entry '{entry.FullName}' declares an uncompressed size of {entry.Length} " +
                     "bytes, which exceeds the maximum this .skpt version reads.");
+            var bytes = GC.AllocateUninitializedArray<byte>((int)entry.Length);
             using var entryStream = entry.Open();
-            using var buffer = new MemoryStream((int)entry.Length);
-            entryStream.CopyTo(buffer);
-            return buffer.ToArray();
+            try
+            {
+                entryStream.ReadExactly(bytes);
+            }
+            catch (EndOfStreamException e)
+            {
+                throw new InvalidDataException(
+                    $"'{CheckpointPath}': entry '{entry.FullName}' ends before the {entry.Length} bytes " +
+                    "the archive declares for it; the checkpoint is truncated or corrupt.", e);
+            }
+            return bytes;
         }
 
         private protected override string MissingEntryWhere => "the archive contains no such entry";

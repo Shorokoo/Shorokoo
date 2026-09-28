@@ -598,22 +598,47 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
-    /// <summary>Whether every index of a uint8 MaxPool (k 2, d 2, pads [2,2] reaching the kernel)
-    /// is either -1 or the position of its window's value. Input x is [1,1,5].</summary>
+    /// <summary>Whether a uint8 MaxPool (k 2, d 2, pads [2,2] reaching the kernel) gives every window
+    /// its value and the position of its first maximum. Input x is [0,0,5,0,0] as [1,1,5].</summary>
     [Module]
     public partial class PaddedMaxPoolIndicesPointAtTheirValues
     {
         public static Scalar<bit> Inline(Tensor<float32> x)
         {
-            var u8 = x.Cast<uint8>();
-            var (y, indices) = OnnxOp.MaxPoolWithIndices(u8, AutoPad.NotSet, false, [2L], [2L], [2L, 2L], 0L, null);
-            var flat = OnnxOp.Reshape(indices, Vector(-1L), false);
-            var pointed = OnnxOp.GatherElements(OnnxOp.Reshape(u8, Vector(-1L), false), OnnxOp.Clip(flat, Scalar(0L), Scalar(4L)), 0L);
-            var hits = OnnxOp.And(OnnxOp.And(OnnxOp.GreaterOrEqual(flat, Scalar(0L)), OnnxOp.Less(flat, Scalar(5L))),
-                OnnxOp.Equal(pointed, OnnxOp.Reshape(y, Vector(-1L), false)));
-            var valid = (Tensor<bit>)OnnxOp.Or(OnnxOp.Equal(flat, Scalar(-1L)), hits);
+            var (y, indices) = OnnxOp.MaxPoolWithIndices(x.Cast<uint8>(), AutoPad.NotSet, false, [2L], [2L], [2L, 2L], 0L, null);
+            var values = OnnxOp.Equal(OnnxOp.Reshape(((Tensor<uint8>)y).Cast<int64>(), Vector(-1L), false), Vector(0L, 0L, 5L, 0L, 5L, 0L, 0L));
+            var positions = OnnxOp.Equal(OnnxOp.Reshape(indices, Vector(-1L), false), Vector(0L, 1L, 2L, 1L, 2L, 3L, 4L));
+            var valid = (Tensor<bit>)OnnxOp.And(values, positions);
             return valid.Cast<int32>().Reduce(ReduceKind.Min, keepDims: false).Scalar() > Scalar(0);
         }
+    }
+
+    /// <summary>MaxPool values and indices over x [1,2,2,3] holding windows whose maximum is at or
+    /// below the element type's lowest finite value, against y and indices: k [2,2] with
+    /// storage_order 0 and 1, then k [1,2], d [1,2] and pads [0,2,0,2] reaching the kernel, their
+    /// outputs flattened and concatenated.</summary>
+    [Module]
+    public partial class LowestValueWindowMaxPoolCheck
+    {
+        public static Tensor<bit> Inline<T>(Tensor<T> x, Tensor<T> y, Tensor<int64> indices) where T : IVarType
+        {
+            var (y0, i0) = OnnxOp.MaxPoolWithIndices(x, AutoPad.NotSet, false, null, [2L, 2L], null, 0L, null);
+            var (y1, i1) = OnnxOp.MaxPoolWithIndices(x, AutoPad.NotSet, false, null, [2L, 2L], null, 1L, null);
+            var (y2, i2) = OnnxOp.MaxPoolWithIndices(x, AutoPad.NotSet, false, [1L, 2L], [1L, 2L], [0L, 2L, 0L, 2L], 0L, null);
+            Variable Flat(Variable v) => OnnxOp.Cast(OnnxOp.Reshape(v, Vector(-1L), false), null, DType.Float64);
+            var values = OnnxOp.Concat([Flat(y0), Flat(y1), Flat(y2)], 0L);
+            var positions = OnnxOp.Concat([Flat(i0), Flat(i1), Flat(i2)], 0L);
+            return (Tensor<bit>)OnnxOp.Concat([OnnxOp.Equal(values, Flat(y)), OnnxOp.Equal(positions, Flat(indices))], 0L);
+        }
+    }
+
+    /// <summary>The values of a MaxPool without indices, k 2, over x [1,1,n], against y.</summary>
+    [Module]
+    public partial class MaxPoolValuesCheck
+    {
+        public static Tensor<bit> Inline<T>(Tensor<T> x, Tensor<T> y) where T : IVarType
+            => (Tensor<bit>)OnnxOp.Equal(OnnxOp.Cast(OnnxOp.MaxPool(x, AutoPad.NotSet, false, null, [2L], null, null, null), null, DType.Float64),
+                OnnxOp.Cast(OnnxOp.Reshape(y, Vector(1L, 1L, -1L), false), null, DType.Float64));
     }
 
     /// <summary>ConvTranspose whose output_shape exceeds the full extent by a whole stride.

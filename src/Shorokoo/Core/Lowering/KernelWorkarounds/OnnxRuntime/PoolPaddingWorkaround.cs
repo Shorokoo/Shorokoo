@@ -125,7 +125,7 @@ internal sealed class PoolPaddingWorkaround : KernelWorkaround
     /// ones alike, counting padding, and divides the one by the other — the window's sum over the
     /// number of input elements in it. The pool's windows are the spec's, so its outputs are too,
     /// save two: MaxPool's indices, which count positions in the padded input and are carried
-    /// back to the input's, in the pool's <c>storage_order</c>, an index of -1 staying -1; and,
+    /// back to the input's, in the pool's <c>storage_order</c>; and,
     /// with <c>ceil_mode</c>, the output's length: the spec's is
     /// <c>ceil((in + pads - (k - 1) * d - 1) / stride) + 1</c>, less one when that last window
     /// starts at or past <c>in + start pad</c>, and the pool, whose written padding moves where
@@ -214,9 +214,7 @@ internal sealed class PoolPaddingWorkaround : KernelWorkaround
     /// <paramref name="x"/>, which it extends by <paramref name="before"/> at the start of each
     /// spatial axis: the leading batch-and-channel block is kept, and the spatial position is
     /// split into its coordinates, shifted, and recombined over <paramref name="x"/>'s extents —
-    /// the last axis varying fastest for <c>storage_order</c> 0, the first for 1. An index of -1,
-    /// which ONNX Runtime gives a window whose every value is the element type's lowest, stays
-    /// -1.</summary>
+    /// the last axis varying fastest for <c>storage_order</c> 0, the first for 1.</summary>
     private static Variable UnpaddedIndices(Variable indices, Variable x, Variable padded, long[] before, long storageOrder)
     {
         int n = before.Length;
@@ -239,7 +237,7 @@ internal sealed class PoolPaddingWorkaround : KernelWorkaround
         Variable position = Constant(0L);
         foreach (var axis in order.Reverse())
             position = Add(Mul(position, Extent(shape, axis)), coordinates[axis]);
-        return Where(Less(indices, Constant(0L)), indices, Add(Mul(block, area), position));
+        return Add(Mul(block, area), position);
     }
 
     private static Variable SpatialAxes(int n) => Constant([.. Enumerable.Range(2, n).Select(a => (long)a)]);

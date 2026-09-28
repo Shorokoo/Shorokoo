@@ -7,49 +7,40 @@ Related: [defining-models.md](defining-models.md) · [inference.md](inference.md
 - Three graph-value shapes, all generic over a dtype marker `T : IVarType`:
   - `Scalar<T>` — rank 0.
   - `Vector<T>` — rank 1 (also used for dynamic shapes, e.g. `Vector<int64>`).
-  - `Tensor<T>` — rank N. `Scalar<T>`, `Vector<T>`, and `Tensor<T>` are distinct
-    value-struct handles, all implementing the common `IValue` interface.
+  - `Tensor<T>` — rank N. All three are distinct value-struct handles implementing
+    `IValue`.
 - `IValue` — the base interface for any graph value *handle* (`Tensor<T>`,
   `Scalar<T>`, `Vector<T>`, and the sequence / optional / struct handles).
-  User code holds `IValue` handles; the framework wires them into the
-  computation graph.
-- `Variable` — the graph-side node a handle points at, and the argument type of the
+- `Variable` — the graph node a handle points at, and the argument type of the
   execution entry points. It is *not* an `IValue`; see
   [`Variable` and `IValue`](#variable-and-ivalue).
-- Dtype marker types (used as the generic argument): `bit` (boolean), `int8`,
-  `int16`, `int32`, `int64`, `uint8`, `uint16`, `uint32`, `uint64`, `float16`,
-  `bfloat16`, `float32`, `float64`. Example: `Tensor<float32>`, `Scalar<int64>`,
-  `Scalar<bit>`.
+- Dtype markers (the generic argument): `bit` (boolean), `int8`, `int16`, `int32`,
+  `int64`, `uint8`, `uint16`, `uint32`, `uint64`, `float16`, `bfloat16`, `float32`,
+  `float64`. Example: `Tensor<float32>`, `Scalar<int64>`, `Scalar<bit>`.
 - `DType` is the runtime dtype descriptor (`DType.Float32`, `DType.Int64`,
-  `DType.Bool`, …). Use marker types in signatures and `DType` with
-  runtime/untyped APIs.
-- A graph value is symbolic. To get numbers, evaluate it; see
-  [inference.md](inference.md).
-- `TensorData` / `TensorData<T>` hold concrete (materialized) values, not graph nodes:
-  what you feed a run, and what a run returns.
-- `TensorAttribute` holds concrete values written into a graph's own *description*: a
-  `Constant`'s value, a `ConstantOfShape`'s fill, a trainable parameter's weights. It is
-  immutable, belongs to no compute context and is not disposable.
-  `TensorData.MoveToAttribute()` and `TensorAttribute.CopyToTensorData()` convert between the
-  two, and the first **spends** its source; see
+  `DType.Bool`, …), used by runtime/untyped APIs.
+- A graph value is symbolic; evaluate it to get numbers ([inference.md](inference.md)).
+- `TensorData` / `TensorData<T>` hold concrete values: what you feed a run, and what
+  it returns.
+- `TensorAttribute` holds concrete values written into a graph's *description*
+  (constants, fills, parameter weights). `TensorData.MoveToAttribute()` (which
+  **spends** its source) and `TensorAttribute.CopyToTensorData()` convert; see
   [Two kinds of concrete tensor](#two-kinds-of-concrete-tensor-tensordata-and-tensorattribute).
-- `OptionalTensorData` is the concrete value of an `OptionalTensor` input:
-  `OptionalTensorData.Some(tensor)` for a present value, `OptionalTensorData.None(dtype)`
-  for an absent one. Both are `IData`, so they feed execution like any other input (see
+- `OptionalTensorData` is the value of an `OptionalTensor` input:
+  `OptionalTensorData.Some(tensor)` or `OptionalTensorData.None(dtype)`. Both are
+  `IData` and feed execution like any input (see
   [defining-models.md](defining-models.md#omittable-parameters-defaulted-hypers--optional-inputs)).
 
 ## `Variable` and `IValue`
 
-`Variable` (namespace `Shorokoo.Core`) is the graph value itself: the non-generic node
-every handle points at, carrying the runtime dtype and rank instead of a C# type
-parameter. The execution entry points take it: `OnnxEngine.Eval(Variable)` and its
-multi-output overloads, and the same `Eval` forms on `ComputeContext`.
+`Variable` (namespace `Shorokoo.Core`) is the non-generic graph node every handle
+points at, carrying the dtype and rank at runtime. `OnnxEngine.Eval(Variable)`, its
+multi-output overloads and the `Eval` forms on `ComputeContext` take it.
 
-You rarely name the type, because `Tensor<T>`, `Scalar<T>` and `Vector<T>` (and the
-sequence / optional / struct handles) each declare an **implicit** conversion to
-`Variable`, so an op result goes straight in. But `Variable` does **not** implement
-`IValue`, and the conversions live on the concrete handle types, not on the interface, so
-a handle held as `IValue` needs an explicit `ToVariable()`:
+`Tensor<T>`, `Scalar<T>`, `Vector<T>` and the sequence / optional / struct handles
+convert **implicitly** to `Variable`, so an op result goes straight in. The
+conversions are on the concrete types, not on `IValue`, so a handle held as `IValue`
+needs `ToVariable()`:
 
 ```csharp
 var y = x.Relu();                                  // Tensor<float32>
@@ -59,10 +50,9 @@ IValue handle = y;
 TensorData r2 = OnnxEngine.Eval(handle.ToVariable());   // Eval(handle) would not compile
 ```
 
-`Variable.ToValue()` goes the other way, returning the natural handle for the value:
-`Scalar<T>` at rank 0, `Vector<T>` at rank 1, `Tensor<T>` otherwise (and
-`OptionalTensor<T>` / `TensorSequence<T>` / `TensorStruct<T>` for the other structural
-kinds).
+`Variable.ToValue()` returns the natural handle: `Scalar<T>` at rank 0, `Vector<T>`
+at rank 1, `Tensor<T>` otherwise (or `OptionalTensor<T>` / `TensorSequence<T>` /
+`TensorStruct<T>`).
 
 ## Factory helpers (`using static Shorokoo.Globals;`)
 
@@ -76,40 +66,31 @@ kinds).
 | `Tensor([2L,3L], v0, v1, ...)` | `Tensor<T>` | From dims + flat values. |
 | `TensorData([1L,3L,2L,2L], myFloats)` | `TensorData<float32>` | Materialized data from dims + a flat `float[]`. |
 | `TensorFill(shape, 0f)` | `Tensor<T>` | Constant-filled tensor. |
-| `Tensor<float32>.Fill(shape, TensorData(...).MoveToAttribute())` | `Tensor<float32>` | Static fill on the type. The fill value is written into the graph, so it is a [`TensorAttribute`](#two-kinds-of-concrete-tensor-tensordata-and-tensorattribute); `MoveToAttribute()` spends the `TensorData` it is taken from. |
-| `RandomUniform(shape, low = 0f, high = 1f)` | `Tensor<float32>` | Random feed over the half-open `[low, high)`; all but `shape` are optional. Keyed by the model's [RNG identity](rng-configuration.md); no per-site seed. What the draw returns: [uniform-draws.md](uniform-draws.md). |
-| `RandomUniform(shape, Scalar<float32> low, Scalar<float32> high)` | `Tensor<float32>` | Same feed over a range computed **in-graph** (both bounds required). The bounds reach the draw itself, so the range is exact at any width; a graph-scalar range needs a keyed (concrete, id-bearing) model. |
-| `RandomNormal(shape, mean = 0f, scale = 1f)` | `Tensor<float32>` | Random feed over N(`mean`, `scale`); all but `shape` are optional. Keyed by the model's [RNG identity](rng-configuration.md); no per-site seed. What the draw returns: [normal-draws.md](normal-draws.md). |
-| `RandomNormal(shape, Scalar<float32> mean, Scalar<float32> scale)` | `Tensor<float32>` | Same feed over a distribution computed **in-graph** (both required). The parameters reach the draw itself, so one built model can be re-parameterized per run; a graph-scalar distribution needs a keyed (concrete, id-bearing) model. |
+| `Tensor<float32>.Fill(shape, TensorData(...).MoveToAttribute())` | `Tensor<float32>` | The fill value is a [`TensorAttribute`](#two-kinds-of-concrete-tensor-tensordata-and-tensorattribute); `MoveToAttribute()` spends the `TensorData`. |
+| `RandomUniform(shape, low = 0f, high = 1f)` | `Tensor<float32>` | Random feed over `[low, high)`. Keyed by the model's [RNG identity](rng-configuration.md); no per-site seed. See [uniform-draws.md](uniform-draws.md). |
+| `RandomUniform(shape, Scalar<float32> low, Scalar<float32> high)` | `Tensor<float32>` | Range computed **in-graph** (both bounds required), exact at any width; needs a keyed (concrete, id-bearing) model. |
+| `RandomNormal(shape, mean = 0f, scale = 1f)` | `Tensor<float32>` | Random feed over N(`mean`, `scale`). Keyed by the model's [RNG identity](rng-configuration.md); no per-site seed. See [normal-draws.md](normal-draws.md). |
+| `RandomNormal(shape, Scalar<float32> mean, Scalar<float32> scale)` | `Tensor<float32>` | Parameters computed **in-graph** (both required), so they can change per run; needs a keyed (concrete, id-bearing) model. |
 
-**Implicit primitive → `Scalar<T>` conversion.** Wherever a `Scalar<T>` is expected, a bare
-primitive converts to one, so the `Scalar(...)` wrapper is usually optional, e.g.
-`Scalar<int64> n = 32;` or `myScalar.Clip(0f, 6f)`. The element type comes from the
-**target**, not the literal: `Scalar<float32> x = 5;` builds a `float32` scalar. Use the
-explicit `Scalar(...)` / `Scalar<T>(...)` helpers when there is no `Scalar<T>` target to
-infer from, e.g. `var x = Scalar(1L);`, since `var x = 1L;` is a plain `long`.
+**Implicit primitive → `Scalar<T>` conversion.** Where a `Scalar<T>` is expected, a
+bare primitive converts, e.g. `Scalar<int64> n = 32;` or `myScalar.Clip(0f, 6f)`. The
+element type comes from the **target**: `Scalar<float32> x = 5;` is `float32`. With
+no target (`var x = 1L;` is a `long`), use `Scalar(1L)` or `Scalar<T>(...)`.
 
-**`PrimitiveParam`** (namespace `Shorokoo.Core`) carries that convention into method
-signatures. It is a one-value box with an implicit conversion *from* every supported C#
-primitive (`bool`, the integer types, `float`, `double`, `Float16`, `BFloat16`) and *on to*
-`Scalar<T>` / `Tensor<T>`, so a parameter of that type accepts a literal of any of them and
-converts it to the receiver's element type. You never construct one; it appears in
-signatures such as `Tensor<T>.Clip(PrimitiveParam min, PrimitiveParam max)` and the mixed
-operand operators (`Tensor<T> + PrimitiveParam`). `Tensor<T>` has that `Clip` overload *and*
-`Clip(Scalar<T>, Scalar<T>)`, while `Scalar<T>` and `Vector<T>` have only the latter. What
-you can write is the same, since the primitive → `Scalar<T>` conversion covers literals:
-`x.Clip(0f, 6f)` compiles on all three. Use the `Scalar<T>` form when a bound is computed
-in-graph.
+**`PrimitiveParam`** (namespace `Shorokoo.Core`) appears in signatures such as
+`Tensor<T>.Clip(PrimitiveParam min, PrimitiveParam max)` and
+`Tensor<T> + PrimitiveParam`. It converts implicitly from `bool`, the integer types,
+`float`, `double`, `Float16` and `BFloat16`, to the receiver's element type; you
+never construct one. `x.Clip(0f, 6f)` compiles on all three shapes; use
+`Clip(Scalar<T>, Scalar<T>)` when a bound is computed in-graph.
 
-First-argument convention for `Tensor(...)` / `TensorData(...)`: the first argument is
-the **shape (dims)**. Pass a collection literal (`[1]`, `[1L,3L,224L,224L]`) for the
-`long[]` overload, or a bare `long` (e.g. `1`) for the 1-D convenience overload. The
-remaining arguments are the flat element values (`params T[]`), so you can pass an
-existing array: `TensorData([1L,3L,224L,224L], myPixelArray)`. A **rank-0** (scalar) value
-takes the empty dims literal: `TensorData([], 0.01f)`, one element and no dimensions. That
-is the shape a scalar graph input wants, e.g. the value passed to
-[`Specialize`](inference.md#hardcoding-hypers-with-specialize) for a scalar `[Hyper]`.
-`TensorData([1], 0.01f)` is different: rank 1 with a single element.
+`Tensor(...)` / `TensorData(...)` take the **shape** first: a collection literal
+(`[1]`, `[1L,3L,224L,224L]`) for the `long[]` overload, or a bare `long` for the 1-D
+overload. The rest are the flat values (`params T[]`), so an existing array works:
+`TensorData([1L,3L,224L,224L], myPixelArray)`. A **rank-0** value takes empty dims,
+`TensorData([], 0.01f)`, as a scalar graph input needs (e.g. for
+[`Specialize`](inference.md#hardcoding-hypers-with-specialize) of a scalar
+`[Hyper]`). `TensorData([1], 0.01f)` is rank 1.
 
 ## Operators and fluent methods on `Tensor<T>`
 
@@ -118,8 +99,8 @@ is the shape a scalar graph input wants, e.g. the value passed to
 - Shape ops: `.Reshape(shape, keepAxes)` (see below), `.Transpose(dims...)`, `.Squeeze(axes)`,
   `.Unsqueeze(axis)`, `.Expand(shape)`, `.Flatten(axis)`, `.Concat(axis, others...)`,
   `.Slice(start, end, axes, steps)`, `.Pad(mode, pads, val)`, `.Tile(repeats)`.
-- Indexing: `.Gather(indices, axis)` and `.GatherND(indices, batchDims)`, both defaulting to
-  ONNX's 0, so `table.Gather(tokens)` gathers rows.
+- Indexing: `.Gather(indices, axis)` and `.GatherND(indices, batchDims)`, both
+  defaulting to 0, so `table.Gather(tokens)` gathers rows.
 - Math/activations: `.Relu()`, `.Sigmoid()`, `.Tanh()`, `.Softmax(axis)`, `.Gelu()`,
   `.Sqrt()`, `.Exp()`, `.Ln()`, `.Abs()`, trig (`.Sin()`, `.Cos()`, …).
 - Linear algebra: `.MatMul(other)`.
@@ -131,9 +112,8 @@ is the shape a scalar graph input wants, e.g. the value passed to
 
 ### Mixing shapes in one operator
 
-The arithmetic and comparison operators are declared for every pairing of the three value
-shapes plus a bare primitive literal, so `Tensor<T> + Scalar<T>`, `Scalar<T> * Vector<T>`
-and `Vector<T> - 1f` all exist. The result takes the wider of the two operand shapes:
+Arithmetic and comparison operators exist for every pairing of the three shapes and
+a bare literal. The result takes the wider shape:
 
 | left ⊕ right | `Tensor<T>` | `Vector<T>` | `Scalar<T>` | literal |
 |---|---|---|---|---|
@@ -142,67 +122,56 @@ and `Vector<T> - 1f` all exist. The result takes the wider of the two operand sh
 | **`Scalar<T>`** | `Tensor<T>` | `Vector<T>` | `Scalar<T>` | `Scalar<T>` |
 | **literal** | `Tensor<T>` | `Vector<T>` | `Scalar<T>` | — |
 
-Comparisons follow the same table with the element type replaced by `bit`: `Tensor<T> >
-Scalar<T>` gives `Tensor<bit>`, `Scalar<T> <= Vector<T>` gives `Vector<bit>`. Both operands
-must share one `T`; there is no mixed-dtype form (see [Anti-patterns](#anti-patterns)).
+Comparisons follow the same table with element type `bit` (`Scalar<T> <= Vector<T>`
+gives `Vector<bit>`). Both operands must share one `T` (see
+[Anti-patterns](#anti-patterns)).
 
-The shift operators are the exception: C# draws shift candidates from the **left**
-operand's type alone, so the left operand cannot be a bare literal and the right operand
-must be no wider than the left. `Tensor<T> << Vector<T>` and `Vector<T> << 1L` exist;
-`Vector<T> << Tensor<T>` and `1L << Tensor<T>` do not.
+Shift operators are the exception: the left operand cannot be a literal, and the
+right must be no wider than the left. `Tensor<T> << Vector<T>` and
+`Vector<T> << 1L` exist; `Vector<T> << Tensor<T>` and `1L << Tensor<T>` do not.
 
 ### Reductions and `keepDims`
 
-`x.Reduce(kind, axes, keepDims)` **drops** the reduced dimensions by default, as in PyTorch
-and NumPy: `x.Reduce(ReduceKind.Mean).Scalar()` reduces over every axis to a rank-0
-scalar, and `x.Reduce(ReduceKind.Sum, Vector(1L))` turns `[N, C]` into `[N]`. Pass
-`keepDims: true` to keep them as length-1 axes (`[N, 1]`), which you need when the result
-must broadcast back against the input.
+`x.Reduce(kind, axes, keepDims)` **drops** reduced dimensions by default, as in
+PyTorch and NumPy: `x.Reduce(ReduceKind.Mean).Scalar()` gives a rank-0 scalar, and
+`x.Reduce(ReduceKind.Sum, Vector(1L))` turns `[N, C]` into `[N]`. Pass
+`keepDims: true` to keep them as length-1 axes (`[N, 1]`).
 
-ONNX defaults the other way: its `keepdims` attribute is `1`, so a `Reduce*` node with the
-attribute omitted keeps the reduced dimensions. The fluent `.Reduce` follows the eager
-frameworks, as `Reshape` does below, and always emits the attribute. (The lower-level
-`NN.Reduce` takes a `bool?` with no default, where `null` omits the attribute and so keeps
-ONNX's reading.)
+ONNX defaults the other way (`keepdims=1`); the fluent `.Reduce` always emits the
+attribute. `NN.Reduce` takes a `bool?` with no default, where `null` omits it and
+so keeps ONNX's default.
 
-A reduction whose result is broadcast back against its own input needs an explicit
-`keepDims: true`. Without it the shapes usually stop matching and you get an error, but
-where the remaining dimensions happen to agree (`[N, C]` with `N == C`, common in attention
-and square hidden dims) it broadcasts along the wrong axis and silently computes the wrong
-numbers.
+A result broadcast back against its input needs `keepDims: true`. Without it the
+shapes usually mismatch and throw, but when the remaining dimensions happen to agree
+(`[N, C]` with `N == C`) it silently broadcasts along the wrong axis.
 
 ### `Reshape` and copying dimensions from the input
 
-`x.Reshape(newShape)` follows PyTorch, TensorFlow and NumPy: at most one `-1` entry means
-"infer this dimension from the element count," and a `0` entry is a **literal zero-sized
-dimension**. Raw ONNX `Reshape` (with its default `allowzero=0`) differs: there a `0` means
-"copy the dimension at this position from the input tensor," a convention inherited from
-Caffe.
+`x.Reshape(newShape)` follows PyTorch and NumPy: one `-1` entry is inferred from the
+element count, and `0` is a **literal zero-sized dimension**. (Raw ONNX `Reshape`
+with its default `allowzero=0` reads `0` as "copy the input's dimension".)
 
-Shorokoo exposes copy-dim through the explicit `keepAxes` parameter: list the **output
-positions** whose dimensions are copied from the input, and omit those entries from
-`newShape`. The batch-preserving flatten of `x : [N, C, H, W]` (ONNX
-`Reshape(x, [0, -1])`) is:
+To copy dimensions from the input, list their **output positions** in `keepAxes`
+and omit them from `newShape`. The batch-preserving flatten of
+`x : [N, C, H, W]` (ONNX `Reshape(x, [0, -1])`) is:
 
 ```csharp
 x.Reshape([Scalar(-1L)], keepAxes: [0])   // → [N, C·H·W]; N need not be known at build time
 ```
 
-`keepAxes: [0, 1]` with `newShape = [-1]` yields `[N, C, H·W]`, and so on. ONNX Runtime
-resolves the kept dimensions at run time, so they work when the input's dimensions are
-unknown at build time (no `.DimTensor(...)` plumbing needed).
+`keepAxes: [0, 1]` with `newShape = [-1]` gives `[N, C, H·W]`. Kept dimensions are
+resolved at run time, so they work when the input's dimensions are unknown at build
+time.
 
-Lowering: `Reshape` always emits an ONNX `Reshape` node. Without `keepAxes` the node
-carries `allowzero=1`, matching the PyTorch reading of `0`; with `keepAxes` it carries
-`allowzero=0` and a shape input with `0` at each kept position. ONNX rejects combining
-`-1` with a literal `0` under `allowzero=1`, so a zero-sized dimension and an inferred
-dimension cannot appear in the same plain `Reshape` call, but `-1` combines freely with
-`keepAxes`.
+`Reshape` emits an ONNX `Reshape` with `allowzero=1`, or with `keepAxes`,
+`allowzero=0` and `0` at each kept position. ONNX rejects `-1` together with a
+literal `0` under `allowzero=1`, so a plain `Reshape` cannot mix a zero-sized and an
+inferred dimension; `-1` combines freely with `keepAxes`.
 
 ## Higher-level ops (`using static Shorokoo.NN;`)
 
-`NN` holds ops that don't read as instance methods. Signatures for common ones (the
-`NN` class has the full list):
+`NN` holds ops that don't read as instance methods. Common signatures (the `NN`
+class has the full list):
 
 ```csharp
 Tensor<T> Conv<T>(Tensor<T> x, Tensor<T> w, Vector<T> b, AutoPad autoPad,
@@ -217,9 +186,8 @@ Tensor<T> GroupNormalization<T>(Tensor<T> x, Tensor<T> scale, Tensor<T> bias,
                                 float epsilon = 1e-05f);
 ```
 
-`numGroups`/`epsilon` here are plain C# `long`/`float` op attributes, not
-`Scalar<...>`. Enums used by these ops: `AutoPad`, `PadMode`, `ReduceKind`,
-`RoundMode`.
+`numGroups`/`epsilon` are plain C# op attributes, not `Scalar<...>`. Enums: `AutoPad`,
+`PadMode`, `ReduceKind`, `RoundMode`.
 
 ## Example
 
@@ -240,9 +208,8 @@ var activated = y.Relu();
 
 ## Reading concrete values out of a result
 
-Execution returns `TensorData` (see [inference.md](inference.md)), and so do a run's
-outputs and a checkpoint's parameters. Read the numbers off it, naming the CLR type the
-elements are stored as:
+Execution, run outputs and checkpoint parameters are `TensorData` (see
+[inference.md](inference.md)). Read values by naming the CLR storage type:
 
 ```csharp
 TensorData result = OnnxEngine.Eval(y);
@@ -250,51 +217,42 @@ float[] values = result.CopyMemory<float>();   // the whole buffer, in an array 
 float first    = result.ValueAt<float>(0);     // one element
 ```
 
-Each dtype marker has one CLR storage type: `float32`→`float`, `float64`→`double`,
-`int64`→`long`, `int32`→`int`, `bit`→`bool`, `float16`→`Float16`, `bfloat16`→`BFloat16`, etc.
-Any other type throws an `InvalidCastException` naming the tensor's dtype and its storage
-type; the buffer is never reinterpreted. `CopyRawMemory()` is the same copy as bytes, for
-any dtype.
+Storage types: `float32`→`float`, `float64`→`double`, `int64`→`long`, `int32`→`int`,
+`bit`→`bool`, `float16`→`Float16`, `bfloat16`→`BFloat16`, etc. Any other type throws
+`InvalidCastException` naming the dtype and its storage type. `CopyRawMemory()`
+copies the bytes, for any dtype.
 
-On a typed `TensorData<T>` (what `As<T>()` returns) the storage type follows from `T`:
-`result.As<float32>().CopyMemory()` is a `float[]`, and `ValueAt(i)` a `float`.
-`AccessMemory<V>()` / `AccessMemory()` return a `ReadOnlySpan` over the storage instead of
-a copy; see "What a TensorData holds" below for why a span needs the tensor kept alive. A
-boxed `TensorData.Data` (`object[]`) exists for diagnostics: the storage bytes, each boxed
-(the strings themselves for a `utf8` tensor), not the element values.
+On a typed `TensorData<T>` (from `As<T>()`) the type is implied:
+`result.As<float32>().CopyMemory()` is a `float[]`, `ValueAt(i)` a `float`.
+`AccessMemory<V>()` / `AccessMemory()` return a `ReadOnlySpan` instead of a copy (see
+below for keeping the tensor alive). `TensorData.Data` (`object[]`) is for
+diagnostics: each storage byte boxed (the strings for a `utf8` tensor), not the
+element values.
 
 ## Two kinds of concrete tensor: `TensorData` and `TensorAttribute`
-
-Concrete numbers reach Shorokoo in two roles, each with its own type.
 
 | | `TensorData` | `TensorAttribute` |
 |---|---|---|
 | What it is | a **run's** data: an input you feed, an output you read, training state | a **graph's** data: a literal written into the description itself |
-| Where the bytes are | in the memory one backend allocated: the host, or a particular card | nowhere in particular: a shape, a dtype and the elements |
-| Lifetime | its own memory, released through that backend when deleted or collected; `IDisposable` | none: immutable, shared, not disposable |
+| Where the bytes are | memory one backend allocated: the host or a particular card | nowhere in particular: a shape, a dtype and the elements |
+| Lifetime | released through its backend when deleted or collected; `IDisposable` | none: immutable, shared, not disposable |
 | Where you meet it | `Eval`, `Execute`, `Run`, `TrainStep`, a checkpoint's tensors | `Constant`, `ConstantOfShape`, a trainable parameter's initial value |
 
-A graph description must mean the same thing everywhere, including after export to
-`.onnx` and reload on a machine with a different card. A `TensorData` is memory one backend
-allocated and has a lifetime, so it cannot be part of a description.
+A graph description must be portable and permanent, so tensor-valued operator
+attributes take a `TensorAttribute`:
 
-The slots that take a tensor-valued *operator attribute* therefore take a
-`TensorAttribute`:
+- `OnnxOp.Constant(value)`;
+- `OnnxOp.ConstantOfShape(shape, value)`, and `Tensor<T>.Fill(shape, value)` built on
+  it;
+- `Globals.TrainableTensor(value, name)`, also where checkpoint weights land when
+  bound into a model.
 
-- `OnnxOp.Constant(value)`: a graph constant;
-- `OnnxOp.ConstantOfShape(shape, value)`, and `Tensor<T>.Fill(shape, value)` on top of it:
-  the fill value;
-- `Globals.TrainableTensor(value, name)`: a trainable parameter's value, which is also where
-  a checkpoint's weights land when they are bound into a model.
-
-Everything else that takes concrete numbers (feeding a run, reading a result, a training
-batch, a `TrainingCheckpoint`'s state) takes and returns `TensorData`.
+Everything else uses `TensorData`.
 
 ### Building one
 
-Usually you never name the type. `Scalar(1L)`, `Vector(1L, 2L)`, `Tensor([2L, 2L], …)`,
-`TensorFill(shape, 0f)` and `VectorFill(64L, 0f)` build their literal and return a graph
-value. You name it when you already hold the numbers:
+The literal factories build attributes for you. Build one yourself when you already
+hold the numbers:
 
 ```csharp
 using System.Runtime.InteropServices;   // MemoryMarshal, for the second form
@@ -309,14 +267,12 @@ TensorAttribute fill = TensorAttribute.Create(
 Variable w = Globals.TrainableTensor(weights, "conv1.weight");
 ```
 
-`Shape` is a class, not a collection type, so the shape argument is `new Shape(…)` or a
-`long[]`; a bare `[1L]` collection literal does not convert to it.
+`Shape` is a class: pass `new Shape(…)` or a `long[]`, not a bare `[1L]` literal.
 
-An attribute exposes `Shape`, `DType`, `HasValues`, `Bytes` (or `Values` for `DType.Utf8`),
-`Elements<V>()` and `CopyToTensorData()`, and nothing else: no `Dispose`, no
-`AllocatingBackend`, no `Space`. `HasValues` is false in one case only: a model definition
-saved *without* its weights, whose parameter slots keep dtype and shape but no elements
-until a checkpoint is bound onto them. Reading the elements of one throws, and says so.
+An attribute exposes only `Shape`, `DType`, `HasValues`, `Bytes` (or `Values` for
+`DType.Utf8`), `Elements<V>()` and `CopyToTensorData()`. `HasValues` is false only for
+parameter slots of a model saved *without* its weights, until a checkpoint is bound;
+reading their elements throws.
 
 ### The two conversions, and which one spends its source
 
@@ -325,20 +281,12 @@ until a checkpoint is bound onto them. Reading the elements of one throws, and s
 | `TensorData.MoveToAttribute()` | nothing, where the tensor holds its own array; a copy otherwise | **the tensor ends**: it is dead, and reading it throws `ObjectDisposedException` saying it was moved into an attribute |
 | `TensorAttribute.CopyToTensorData()` | a copy, always | both usable; the attribute is unchanged, and the copy is in the framework's own host memory |
 
-Binding a checkpoint's weights into a graph is the hot direction (a 165 M-parameter model
-is some 660 MB), so it moves, and the source is gone. The other direction copies because an
-attribute is immutable and shared by every graph that captured it; a writable tensor over
-the same bytes would let you edit a description.
+A tensor built from a C# array, including a checkpoint tensor parsed for binding,
+moves without a copy. A runtime-owned buffer (possibly on a card) or a string tensor
+is copied; the source memory is released either way.
 
-The move takes the tensor's own array where it has one (a tensor built from a C# array,
-which nothing else can write once the tensor is dead). It copies where there is no array
-to hand over: the elements are a runtime's own buffer, read back through the backend that
-made it when that buffer is on a card, or a string tensor's variable-length elements. The
-source memory is released either way. A checkpoint's tensor, parsed for the bind, has its
-own array, so binding weights takes the no-copy path.
-
-`MoveToAttribute()` takes any live tensor, a run's output included, and refuses only one a
-run is still reading. To build a literal from a result and keep the result, move a copy:
+`MoveToAttribute()` accepts any live tensor, a run output included, but refuses one a
+run is still reading. To keep a result and also make a literal of it, move a copy:
 
 ```csharp
 TensorData result = compiled.Execute(input)[0].ToTensorData();
@@ -347,23 +295,18 @@ Variable literal = Globals.Tensor(result.CopyTo(ComputeContext.Host).MoveToAttri
 
 ### Passing a `TensorData` as an attribute
 
-The slots listed above take a `TensorAttribute`; give them a `TensorData` by moving it with
-`.MoveToAttribute()` at the call site:
+Move it with `.MoveToAttribute()` at the call site:
 
 ```csharp
 Tensor<float32>.Fill(shape, Globals.TensorData(1, 1.0f).MoveToAttribute());
 Globals.TrainableTensor(myWeights.MoveToAttribute(), "w");     // myWeights is spent
 ```
 
-One trap follows from the move:
+The move spends the tensor, so to reuse a literal, convert once and pass the
+(shareable) `TensorAttribute` to each site.
 
-- **A literal you want to reuse must be built twice, or converted once.** `MoveToAttribute()`
-  spends its tensor, so one `TensorData` cannot serve two call sites. Convert once and pass
-  the `TensorAttribute` to both (an attribute is immutable, so shareable), or build a fresh
-  `TensorData` per site.
-
-A factory that takes a `TensorData` does **not** spend it. `Globals.TensorFill<T>(shape,
-TensorData<T>)` copies, so the tensor you passed stays yours and may be passed again:
+Factories that take a `TensorData` do **not** spend it. `Globals.TensorFill<T>(shape,
+TensorData<T>)` copies, so you can pass the same tensor again:
 
 ```csharp
 var fill = TensorData([1L], 0.5f).As<float32>();
@@ -371,60 +314,46 @@ var a = TensorFill((Vector<int64>)[Scalar(2L)], fill);
 var b = TensorFill((Vector<int64>)[Scalar(3L)], fill);   // fine: fill is untouched
 ```
 
-A fill value is one element, so the copy costs nothing. Only a call named for it spends a
-tensor; a factory never spends an argument.
-
 ## What a `TensorData` holds, and when its values go away
 
-A `TensorData` **is** its memory: one object per allocation, released through the backend
-that made it. No second tensor names the same bytes, so deleting a tensor (`Delete()` and
-`Dispose()` are the same call) releases them. The full model (how a tensor ends, what a run
-holds while it runs, and the calls that delete) is in
-[A tensor's lifetime](inference.md#a-tensors-lifetime-locks-and-deletion). While reading a
-result:
+A `TensorData` **is** its memory: one object per allocation, never shared with
+another tensor. `Delete()` (the same as `Dispose()`) releases it. The full lifetime
+model is in [A tensor's lifetime](inference.md#a-tensors-lifetime-locks-and-deletion).
+In short:
 
-- **Deleting is optional.** A tensor you drop is reclaimed like any other object, and the
-  framework never hands you a tensor you must delete. Delete when you want the memory back
-  at a known moment, e.g. in a long loop producing large tensors.
-- **`Delete()` waits for nobody and interrupts nobody.** It throws while a run is reading the
-  tensor instead of freeing memory under it; `TryDelete()` declines instead, and
-  `DeleteAsync(...)` asks the run to stop. Deleting a dead tensor does nothing.
-- **A dead tensor stops reading.** `AccessMemory()`, `AccessRawMemory()`, `.Data` and
-  `.DebugData` throw `ObjectDisposedException` instead of reading freed memory, and the
-  message says how the tensor died. `.Shape`, `.DType`, `.ToString()` and `.IsDisposed` keep
-  working.
+- **Deleting is optional.** A dropped tensor is reclaimed like any object. Delete
+  to free memory at a known moment, e.g. in a long loop producing large tensors.
+- **`Delete()` never waits or interrupts.** It throws while a run is reading the
+  tensor; `TryDelete()` declines instead, and `DeleteAsync(...)` asks the run to
+  stop. Deleting a dead tensor does nothing.
+- **A dead tensor stops reading.** `AccessMemory()`, `AccessRawMemory()`, `.Data`
+  and `.DebugData` throw `ObjectDisposedException`, saying how it died. `.Shape`,
+  `.DType`, `.ToString()` and `.IsDisposed` keep working.
 
-Operations that build one tensor from another copy, or return the tensor itself, and leave
-the source as it was, unless they say otherwise. Two do, and each **ends** the tensor:
-`MoveToAttribute()` ([above](#the-two-conversions-and-which-one-spends-its-source)), and
-feeding it to a run as it is, which the run consumes when it starts; pass it `.Shared()` to
-have the run only read it ([inference.md](inference.md#feeding-a-run-consumed-shared-or-tried)).
-`TensorDataSequence.Create(...)` copies the tensors you pass it, and disposing the sequence
-releases only its own copies.
+Operations leave their source untouched unless stated. Two **end** it:
+`MoveToAttribute()` ([above](#the-two-conversions-and-which-one-spends-its-source))
+and feeding it to a run as it is, which consumes it; feed `.Shared()` to have the run
+only read it ([inference.md](inference.md#feeding-a-run-consumed-shared-or-tried)).
+`TensorDataSequence.Create(...)` copies its tensors, and disposing the sequence
+releases only its copies.
 
-`To(context)`, where the context can read the tensor as it stands, and `ToHost()`, where
-the host already can, return the very tensor you called them on. Feeding the result to a
-run as it is consumes the original, and deleting it (a `using` over it included) deletes
-the original. `CopyTo` always gives an independent tensor; see
-[Moving data between contexts](inference.md#moving-data-between-contexts).
+`To(context)`, when the context can read the tensor in place, and `ToHost()`, when it
+is already on the host, return the same tensor, so consuming or deleting the result
+(including via `using`) affects the original. `CopyTo` always returns an independent
+tensor; see [Moving data between contexts](inference.md#moving-data-between-contexts).
 
-**A span is a window, not a copy.** `AccessMemory()` and `AccessRawMemory()` point into the
-tensor's memory, and nothing ties the span's lifetime to the tensor's. A span outlives the
-bytes it points at if the tensor is deleted, or becomes unreachable while you are still
-reading.
-
-Being *in scope* is not being *reachable*: the runtime retires a local at its last read,
-and taking the span **is** the tensor's last read. So copying out of the span is not safe
-by itself: the copy happens after the tensor is collectable, and allocating the array can
-trigger a collection:
+**A span is a window, not a copy.** `AccessMemory()` and `AccessRawMemory()` point
+into the tensor's memory, and the span does not keep the tensor alive. If the tensor
+is deleted, or becomes unreachable while you read, the span points at freed memory.
+Taking the span can be the tensor's last use, after which it is collectable even
+while still in scope, so this is **not** safe:
 
 ```csharp
 TensorData result = OnnxEngine.Eval(y);
 float[] values = result.AccessMemory<float>().ToArray();  // NOT safe
 ```
 
-Keep the tensor alive across the read, with `GC.KeepAlive` after it or by reading through
-something that outlives the span (a field, a collection, a later use of the tensor):
+Keep the tensor alive across the read, with `GC.KeepAlive` or a later use:
 
 ```csharp
 TensorData result = OnnxEngine.Eval(y);
@@ -432,23 +361,19 @@ float[] values = result.AccessMemory<float>().ToArray();
 GC.KeepAlive(result);                                     // safe
 ```
 
-Or use the copying accessors, which keep the tensor alive across the read:
-`CopyMemory<V>()` and `CopyRawMemory()` return an array the caller owns, and
-`ValueAt<V>(int)` reads one element. When you are copying the whole buffer anyway, they are
-shorter and safer.
+Or use `CopyMemory<V>()`, `CopyRawMemory()` or `ValueAt<V>(int)`, which keep the
+tensor alive for you.
 
 ### A tensor whose values are not on the host
 
-A tensor on a card is in the execution provider's own memory, where a host read would
-dereference a device address. That is one a run left there (an output kept with
-`CompiledGraph.Execute(inputs, retainOnDevice)`, or the state of a
-[resident training run](training.md#keeping-training-state-on-the-device)), or one put there
-by `To`, `CopyTo` or `AllocateUninitialized` on a device context. `IsHostResident` says
-which it is, and the accessors throw `InvalidOperationException` instead of reading it,
-naming `ToHost()`, which copies the tensor into host memory, and, for a resident run's
-state, `StepToCheckpoint`, which brings that state home. A tensor built from a C# array is
-host-resident, and so is a run output nobody asked to keep on the card, which ONNX Runtime
-fetches to the host.
+A tensor in device memory cannot be read from the host. That includes an output
+kept with `CompiledGraph.Execute(inputs, retainOnDevice)`, the state of a
+[resident training run](training.md#keeping-training-state-on-the-device), and
+anything placed by `To`, `CopyTo` or `AllocateUninitialized` on a device context.
+`IsHostResident` tells you which; the accessors throw `InvalidOperationException`,
+pointing to `ToHost()` (copy to host) or, for resident training state,
+`StepToCheckpoint`. Tensors built from C# arrays, and run outputs not kept on the
+device, are host-resident.
 
 ## Anti-patterns
 

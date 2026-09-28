@@ -406,6 +406,8 @@ public static class IsolatedBackend
 
         public bool AcceptsTrainingFormat(string format) => _inner.AcceptsTrainingFormat(format);
 
+        public string? KernelWorkaroundSet => _inner.KernelWorkaroundSet;
+
         public IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged
             => _inner.CreateTensor(data, shape);
 

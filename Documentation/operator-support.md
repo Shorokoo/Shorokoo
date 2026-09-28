@@ -37,6 +37,15 @@ operator (a `Softsign` becomes `Abs`, `Add` and `Div`), while your inference mod
 is untouched. The exporter decomposes only `TensorScatter`; a `Softsign` exports
 as a `Softsign`.
 
+A ✅ in the first column also covers a few corners where ONNX Runtime's kernels
+compute otherwise than the spec. The ONNX Runtime backend rewrites each such call,
+when it builds a session, into an equivalent one its kernels compute as the spec
+does — for a graph you built and an imported model alike. Only the session's model
+is rewritten: your graph, an ONNX export, generated C# and `.srk` keep the operator
+as written. The family notes name the corners;
+[debugging.md](debugging.md#backend-kernel-workarounds) lists them all, in the
+order they apply.
+
 ## Elementwise math & activations
 
 | Op | Build & run | QEE | Gradient |
@@ -142,14 +151,22 @@ as a `Softsign`.
 | LessOrEqual | ✅ | ✅ | N/A |
 | Not | ✅ | ✅ | N/A |
 | Or | ✅ | ✅ | N/A |
-| Where | 🟡 [2] | ✅ | ✅ [3] |
+| Where | ✅ [2] | ✅ | ✅ [3] |
 | Xor | ✅ | ✅ | N/A |
 
 Boolean/integer outputs are non-differentiable, hence N/A.
 
 1. Unsigned integer tensors only; the spec also allows signed integers.
-2. ONNX Runtime's CPU provider has no bool-element `Where`; selecting between bool
-   branches works in QEE only.
+2. ONNX Runtime has no `Where` kernel over int8, int16, uint16, uint32, uint64,
+   bfloat16 or bool values. Its backend rewrites such a call when it builds a
+   session: a bool one as `Or(And(c, x), And(Not(c), y))`, every other one as a
+   `Where` over int32 (for int8, int16, uint16), int64 (for uint32, uint64) or
+   float32 (for bfloat16) with the result cast back. The graph and its export
+   keep the `Where` ([#423](https://github.com/Shorokoo/Shorokoo/issues/423)).
+   Every selected value comes out exact, with one exception: ONNX Runtime's
+   float32, float64 and float16 `Where` gives +0 where it selects −0 from `x`
+   (a −0 from `y` keeps its sign), and the float32 path of bfloat16 inherits it
+   ([#439](https://github.com/Shorokoo/Shorokoo/issues/439)).
 3. The condition is non-differentiable; both branches get broadcast-aware
    gradients.
 
@@ -159,34 +176,73 @@ Boolean/integer outputs are non-differentiable, hence N/A.
 |---|---|---|---|
 | ArgMax | ✅ | ✅ | N/A [1] |
 | ArgMin | ✅ | ✅ | N/A [1] |
-| ReduceL1 | ✅ | ✅ | ✅ |
-| ReduceL2 | ✅ | ✅ | ✅ |
-| ReduceLogSum | ✅ | 🟡 [4] | ✅ |
-| ReduceLogSumExp | ✅ | 🟡 [4] | ✅ |
-| ReduceMax | ✅ | 🟡 [4] | ✅ [2] |
-| ReduceMean | ✅ | 🟡 [4] | ✅ |
-| ReduceMin | ✅ | 🟡 [4] | ✅ [2] |
-| ReduceProd | ✅ | ✅ | ✅ [3] |
-| ReduceSum | ✅ | ✅ | ✅ |
-| ReduceSumSquare | ✅ | ✅ | ✅ |
+| ReduceL1 | ✅ [5] | ✅ | ✅ |
+| ReduceL2 | ✅ [5] | ✅ | ✅ |
+| ReduceLogSum | ✅ [5] | 🟡 [4] | ✅ |
+| ReduceLogSumExp | ✅ [5] | 🟡 [4] | ✅ |
+| ReduceMax | ✅ [5] | 🟡 [4] | ✅ [2] |
+| ReduceMean | ✅ [5] | 🟡 [4] | ✅ |
+| ReduceMin | ✅ [5] | 🟡 [4] | ✅ [2] |
+| ReduceProd | ✅ [5] | ✅ | ✅ [3] |
+| ReduceSum | ✅ [5] | ✅ | ✅ |
+| ReduceSumSquare | ✅ [5] | ✅ | ✅ |
+
+`noop_with_empty_axes` set with no axes, or an empty axes tensor, means no axis is
+reduced: each element is a group of its own, and the output, of the input's shape,
+holds the reduction of each one-element group. That is the element itself for
+`ReduceSum`, `ReduceMean`, `ReduceMax`, `ReduceMin`, `ReduceProd` and
+`ReduceLogSumExp`, ±inf included; its absolute value for `ReduceL1` and `ReduceL2`;
+its square for `ReduceSumSquare`; and its logarithm for `ReduceLogSum`. This is the
+reading of the ONNX reference implementation and of the operators' function bodies,
+and every backend and QEE compute it; an empty input gives an empty output of its
+shape and type.
 
 1. Integer index output: non-differentiable.
 2. Ties share the gradient equally.
-3. The gradient uses prod/x and is NaN when an element is exactly 0.
+3. The gradient uses prod/x and is NaN when an element of a group of two or more
+   is exactly 0; a one-element group's gradient is 1.
 4. Only when a **reduced axis has extent 0** (so each group is empty): QEE leaves
    the value uncomputed, because the empty-group result depends on dtype (-inf,
    +inf, 0, -inf, -inf for `float32`; the type's minimum/maximum for an integer
-   `ReduceMax`/`ReduceMin`; false/true for `bool`). ONNX Runtime returns 0 for the
-   integer cases and fails on empty `bool`, so `Reduce` (`Tensor`, `Vector`,
-   `Scalar`, `NN.Reduce`) builds an integer or boolean `ReduceMax`/`ReduceMin` as
-   an `If` on the input being empty, filling the output with the identity in that
-   case. Every such reduction of a graph input carries this `If`. Floating-point
-   inputs, nonempty constant inputs, a reduction with no axes and `noOp` set, and
-   raw `OnnxOp.ReduceMax` / `OnnxOp.ReduceMin` or imported nodes get the plain
-   operator; in a generic module the `If` also tests that the element type is not
-   floating point. `ReduceSum`, `ReduceSumSquare`, `ReduceL1`, `ReduceL2` and
-   `ReduceProd` fold to their identity (0, or 1 for `Prod`); an empty **kept**
-   axis folds to the empty result for all ten.
+   `ReduceMax`/`ReduceMin`; false/true for `bool`). Note 5 says how the ONNX
+   Runtime backend computes these. `ReduceSum`, `ReduceSumSquare`, `ReduceL1`,
+   `ReduceL2` and `ReduceProd` fold to their identity (0, or 1 for `Prod`); an
+   empty **kept** axis folds to the empty result for all ten.
+5. ONNX Runtime's reduction kernels depart from the spec over an **empty input**,
+   and its backend rewrites the affected calls when it builds a session, for built
+   and imported graphs alike; the graph, its export, generated C# and `.srk` keep
+   the reduction as written. A call whose input is a scalar or a nonempty
+   `Constant` is left alone. The rewrites, in the order they apply:
+   - Negative axes: ONNX Runtime ignores a negative axis of an empty input,
+     reducing only the non-negative ones. The axes are made non-negative — as a
+     constant when they are constant and the input's rank is known, in the graph
+     otherwise ([#422](https://github.com/Shorokoo/Shorokoo/issues/422)).
+   - `noop_with_empty_axes` set with no axes, or an empty axes tensor: ONNX Runtime
+     reduces every axis of an empty input where the output is that empty input.
+     When the session's model states every input's dimensions, the call becomes an
+     `If` on the input and the axes being empty, each counted as the product of its
+     shape, keeping the plain call wherever the input is not empty. ONNX Runtime
+     folds the `If` away when it builds the session wherever those shapes follow
+     from the stated dimensions; where a shape depends on the data, the `If` runs
+     with the session. Otherwise the call keeps one reduction of the same data and
+     axes with `keepdims` 0, the reduced axes put back by an `Unsqueeze`, and an
+     empty input with empty axes is viewed with a trailing axis of one that alone
+     is reduced — no branch and no copy ([#409](https://github.com/Shorokoo/Shorokoo/issues/409)).
+   - A float16 `ReduceSumSquare`, `ReduceL1` or `ReduceLogSum` with no axes input:
+     ONNX Runtime's kernel crashes the process on an empty input. The call becomes
+     an `If` on the input's element count, the product of its shape, that reduces
+     an empty input in float32 and casts the result back; ONNX Runtime folds it as
+     above ([#411](https://github.com/Shorokoo/Shorokoo/issues/411)).
+   - An integer or boolean `ReduceMax`/`ReduceMin`: ONNX Runtime gives an empty
+     group 0 for every integer type, and throws when a reduced axis of a `bool`
+     input has extent 0. A `bool` call becomes a uint8 `ReduceMax` of the input
+     cast back — over the negated input, negated back, for `ReduceMin` — whose
+     empty group gives 0, that is false: exact for every input, with no branch. An
+     integer call becomes an `If` on the input's element count being 0, folded as
+     above: the other branch is the plain operator, and the empty branch fills its
+     output shape with the identity from note 4. An unsigned `ReduceMax`, whose
+     identity is 0, and a reduction with no axes and `noop_with_empty_axes` set are
+     left alone ([#382](https://github.com/Shorokoo/Shorokoo/issues/382)).
 
 ## Shape & data movement
 
@@ -207,7 +263,7 @@ Boolean/integer outputs are non-differentiable, hence N/A.
 | NonZero | 🟡 [6] | ✅ [7] | N/A [2] |
 | OneHot | ✅ | ✅ | N/A [8] |
 | Pad | ✅ | ✅ | 🟡 [9] |
-| Range | ✅ | ✅ | N/A [2] |
+| Range | 🟡 [19] | ✅ | N/A [2] |
 | Reshape | ✅ | ✅ | ✅ |
 | ReverseSequence | 🟡 [10] | ✅ | ✅ |
 | Scatter | ❌ [11] | N/A | N/A |
@@ -269,6 +325,10 @@ Boolean/integer outputs are non-differentiable, hence N/A.
     `k` wired but unknown, the shape is rank-only with bounds.
 18. The flatten form computes all four outputs for small tensors (both `sorted`
     modes); the `axis` form is shape-only, with a data-dependent unique count.
+19. A model that returns a `Range` as an output beside a `Gather` the `Range`
+    drives fails on ONNX Runtime: its full graph optimization drops the `Range`
+    from the outputs, and the session fails to load. Not worked around
+    ([#432](https://github.com/Shorokoo/Shorokoo/issues/432)).
 
 ## Convolution & pooling
 
@@ -276,7 +336,7 @@ Boolean/integer outputs are non-differentiable, hence N/A.
 |---|---|---|---|
 | AveragePool | ✅ [9] | 🟡 [1] | 🟡 [2] |
 | Conv | ✅ | 🟡 [1] | 🟡 [3] |
-| ConvTranspose | ✅ | 🟡 [1] | 🟡 [4] |
+| ConvTranspose | ✅ [10] | 🟡 [1] | 🟡 [4] |
 | DeformConv | ✅ | 🟡 [1] | ❌ [5] |
 | GlobalAveragePool | ✅ | 🟡 [1] | ✅ |
 | GlobalLpPool | ✅ | 🟡 [1] | ✅ |
@@ -298,10 +358,30 @@ Boolean/integer outputs are non-differentiable, hence N/A.
    maximum.
 7. Recompute-and-mask approximation; `rois` gets no gradient.
 8. Shape from the `output_shape` input when known; values not computed.
-9. Where ONNX Runtime departs from the spec (`SAME_UPPER`/`SAME_LOWER` with
-   dilation above 1 or stride above the kernel, or explicit pads as large as the
-   kernel), `OnnxOp.AveragePool`, `OnnxOp.LpPool` and `OnnxOp.MaxPool` build the
-   pool as `Pad`, pool, `Slice`; an imported node is the plain operator.
+9. Where ONNX Runtime's pooling kernels depart from the spec, its backend rewrites
+   the call when it builds a session, for built and imported graphs alike; the
+   graph, its export, generated C# and `.srk` keep the pool as written.
+   - **Padding** (`AveragePool`, `LpPool`, `MaxPool`): `SAME_UPPER`/`SAME_LOWER`
+     with dilation above 1 or stride above the kernel, and explicit pads as large
+     as the kernel, are rebuilt as `Pad`, a pool ONNX Runtime computes as the spec
+     does, and `Slice` ([#379](https://github.com/Shorokoo/Shorokoo/issues/379), [#408](https://github.com/Shorokoo/Shorokoo/issues/408)).
+   - **`MaxPool` indices** over int8 or uint8: ONNX Runtime gives a window holding
+     only the type's lowest value a wrong index. When the `Indices` output is
+     read, the pool is computed over the input cast to float32 and its values cast
+     back ([#420](https://github.com/Shorokoo/Shorokoo/issues/420)).
+   - Not rewritten: ONNX Runtime's float16, float32 and float64 `MaxPool` gives a
+     window whose maximum is at or below the type's lowest finite value (for
+     float16, a window of only −inf) a wrong index and value
+     ([#437](https://github.com/Shorokoo/Shorokoo/issues/437)).
+   - Not rewritten: ONNX Runtime's `MaxPool` without an `Indices` output gives a
+     window of only −inf the type's lowest finite value instead of −inf
+     ([#426](https://github.com/Shorokoo/Shorokoo/issues/426)).
+10. With `SAME_UPPER`/`SAME_LOWER` and a stride above the kernel's extent plus
+    `output_padding`, the output is `in · stride` long and reaches past the full
+    transposed convolution, where it holds the bias alone. ONNX Runtime gives the
+    full transposed convolution instead; its backend rewrites such a call when it
+    builds a session as the call without padding or bias, a `Pad` by the negated
+    padding, and the bias ([#444](https://github.com/Shorokoo/Shorokoo/issues/444)).
 
 ## Normalization & losses
 
@@ -407,7 +487,7 @@ Boolean/integer outputs are non-differentiable, hence N/A.
 | GridSample | ✅ | 🟡 [1] | 🟡 [4] |
 | ImageDecoder | 🟡 [13] | 🟡 [5] | N/A |
 | NonMaxSuppression | ✅ | 🟡 [6] | N/A (index output) |
-| Resize | 🟡 [7] [15] | 🟡 [8] | 🟡 [9] |
+| Resize | ✅ [7] [15] | 🟡 [8] | 🟡 [9] |
 | RoiAlign | ✅ | 🟡 [1] | 🟡 [10] |
 | Upsample | ✅ [11] | 🟡 [1] | 🟡 [12] |
 
@@ -419,8 +499,9 @@ Boolean/integer outputs are non-differentiable, hence N/A.
 5. Shape/dtype only; output is rank-3 uint8.
 6. Exact `[0, 3]` when `max_output_boxes_per_class` is absent or 0, otherwise rank
    plus an upper bound.
-7. ONNX Runtime's CPU kernel rejects negative `axes` entries (spec-legal since
-   opset 18); QEE handles them.
+7. Negative `axes` entries (spec-legal since opset 18) run on every backend and in
+   QEE. ONNX Runtime's kernel refuses them, so on that backend the `axes` rewrite
+   in note 15 counts them from the front.
 8. Full shape inference (scales/sizes, `axes`, `keep_aspect_ratio_policy`, all
    modes); values not computed.
 9. Nearest mode with the asymmetric coordinate transform only; others throw.
@@ -432,12 +513,39 @@ Boolean/integer outputs are non-differentiable, hence N/A.
     model. It runs on the [PyTorch backend](pytorch-backend.md); the
     [JAX backend](jax-backend.md) refuses it (its output shape depends on the
     decoded bytes).
-14. `OnnxOp.Col2Im` over one spatial axis is built as a two-axis `Col2Im` (second
-    extent 1) plus `Squeeze`, since ONNX Runtime computes the one-axis form
-    wrongly; an imported node is the plain operator.
-15. `OnnxOp.Resize` with `tf_crop_and_resize` crops to the `roi` of an axis whose
-    length is unchanged, which ONNX Runtime does not; an imported node is the
-    plain operator.
+14. ONNX Runtime computes `Col2Im` over one spatial axis wrongly. Its backend
+    rewrites such a call when it builds a session, for built and imported graphs
+    alike, as a two-axis `Col2Im` (second extent 1) plus `Squeeze`; the graph, its
+    export, generated C# and `.srk` keep the one-axis `Col2Im`
+    ([#381](https://github.com/Shorokoo/Shorokoo/issues/381)).
+15. ONNX Runtime's Resize kernel departs from the spec in the cases below, and its
+    backend rewrites the call when it builds a session, for built and imported
+    graphs alike; the graph, its export, generated C# and `.srk` keep the `Resize`
+    as written.
+    - `tf_crop_and_resize` along an axis whose length is unchanged: ONNX Runtime
+      ignores that axis's `roi`. The axis is resized to `2L−1` under the same
+      `roi` and every second element kept, which gives the spec's coordinates
+      exactly ([#380](https://github.com/Shorokoo/Shorokoo/issues/380)).
+    - A cubic rank-4 `tf_crop_and_resize` whose scales for axes 0 and 3 are 1 and
+      for axis 1 is not: ONNX Runtime's channels-last route places out-of-roi
+      `extrapolation_value`s at the wrong elements. The input is regrouped so the
+      resize runs over its last two axes, and the result regrouped back. A
+      `keep_aspect_ratio_policy` of `not_larger` or `not_smaller` is kept, over
+      the regrouped positions of the axes it names; one that names axis 0 or 3
+      never takes the channels-last route and is left as it stands
+      ([#421](https://github.com/Shorokoo/Shorokoo/issues/421)).
+    - A `Resize` with an `axes` attribute: ONNX Runtime's transpose optimizer
+      moves a `Transpose` through it as though its `roi`, `scales` and `sizes`
+      held one entry per input axis, so the session fails, or reorders them
+      wrongly when the named axes are all of them out of order; its kernel also
+      refuses negative axes. The call is written out over every axis, each axis
+      it does not name taking scale 1, its own extent as size and the `roi`
+      `[0, 1]`. A `not_larger` or `not_smaller` policy over a subset of the axes
+      takes its common scale over those axes alone, which no call over every axis
+      reproduces, so such a call keeps its axes, counted from the front, and reads
+      its input through `OptionalGetElement(Optional(x))` — the same tensor,
+      which the transpose optimizer cannot move a `Transpose` through
+      ([#429](https://github.com/Shorokoo/Shorokoo/issues/429)).
 
 ## Random
 

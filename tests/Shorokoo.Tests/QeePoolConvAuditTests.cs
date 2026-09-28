@@ -1,3 +1,4 @@
+using Shorokoo.Core.Backends;
 using Shorokoo.Core.Interpreter;
 using static Shorokoo.Tests.Utils.QeeAudit;
 
@@ -102,17 +103,92 @@ public class QeePoolConvAuditTests
             [F32([1L, 1L, 8L], 5f, -3f, 8f, 1f, -7f, 2f, 6f, -4f)],
             expected: [1, 2, 8, 6, 2.5, 1, 1, 4, 3, 7, 4, 8, 6, -3, -7, -4]));
 
-    // #420: ONNX Runtime's MaxPool gives index -1 to a window whose every value is the element type's lowest
-    [Fact(Skip = "#420: ONNX Runtime's MaxPool gives index -1 to a window whose every value is the element type's lowest")]
+    [Fact]
+    public void TestNegativeSamePaddingMaxPoolIndicesPointIntoTheInput()
+        => Assert.True(AutoTest.AdvancedTestGraph<NegativeSamePaddingMaxPoolIndicesValues>([],
+            [F32([1L, 2L, 5L, 6L], [.. Enumerable.Range(0, 60).Select(i => (float)(i * 7 % 11 - 5))])],
+            expected: [4, -1, 5, 4, 5, 0, -1, 5, 6, 10, 25, 28, 36, 40, 54, 58, 2, 1, 5, 4, 3, 2, -3, 5, 1, 4, 25, 28, 31, 34, 49, 58]));
+
+    [Fact]
     public void TestMaxPoolIndexOfALowestValuedWindowIsItsFirstPosition()
         => Assert.True(AutoTest.AdvancedTestGraph<LowestValueWindowMaxPoolIndicesValues>([],
             [F32([1L, 1L, 5L], 0f, 0f, 5f, 0f, 0f)],
             expected: [0, 2, 2, 3, 0, 2, 2, 3, 0, 1, 2, 1, 2, 3, 4]));
 
     [Fact]
-    public void TestPaddedMaxPoolIndicesAreUnsetOrPointAtTheirValue()
+    public void TestPaddedMaxPoolIndicesPointAtTheFirstMaximumOfTheirWindow()
         => Assert.True(AutoTest.AdvancedTestGraph<PaddedMaxPoolIndicesPointAtTheirValues>([],
             [F32([1L, 1L, 5L], 0f, 0f, 5f, 0f, 0f)]));
+
+    [Fact]
+    public void TestIndexedSmallIntegerMaxPoolGivesThePlainPoolsValuesOverWholePaddingWindows()
+        => Assert.True(AutoTest.AdvancedTestGraph<IndexedSmallIntegerMaxPoolMatchesThePlainPool>([],
+            [F32([1L, 1L, 4L], 3f, 0f, 7f, 1f)]));
+
+    private const double N = double.NegativeInfinity;
+    private const double L = double.MinValue;
+    private static readonly double[] FloatWindows = [N, N, 1, N, N, N, L, N, N, N, L, L];
+    private static readonly double[] FloatWindowMaxima = [N, 1, L, L, N, 1, L, L, N, N, 1, N, 1, N, N, N, N, N, L, N, L, N, N, N, L, L, L, L];
+    private static readonly long[] FloatWindowPositions = [0, 2, 6, 10, 0, 4, 6, 9, 0, 1, 2, 1, 2, 3, 4, 3, 4, 5, 6, 7, 6, 7, 8, 9, 10, 11, 10, 11];
+    private static readonly double[] IntegerWindows = [L, L, 1, L, L, L, L, L, L, L, L, L];
+    private static readonly double[] IntegerWindowMaxima = [L, 1, L, L, L, 1, L, L, L, L, 1, L, 1, L, L, L, L, L, L, L, L, L, L, L, L, L, L, L];
+    private static readonly long[] IntegerWindowPositions = [0, 2, 6, 7, 0, 4, 6, 8, 0, 1, 2, 1, 2, 3, 4, 3, 4, 5, 6, 7, 6, 7, 8, 9, 10, 9, 10, 11];
+
+    private static object AsFloat16(double v) => v == L ? Float16.MinValue : (Float16)(float)v;
+    private static object AsFloat32(double v) => v == L ? float.MinValue : (float)v;
+    private static object AsFloat64(double v) => v;
+    private static object AsInt8(double v) => v == L ? sbyte.MinValue : (sbyte)v;
+    private static object AsUInt8(double v) => v == L ? byte.MinValue : (byte)v;
+
+    private static TensorData Typed(DType t, Func<double, object> of, long[] dims, double[] vals)
+        => Globals.TensorData(t, dims, [.. vals.Select(of)]);
+
+    private static bool LowestWindows(DType t, Func<double, object> of, double[] x, double[] y, long[] indices)
+        => AutoTest.AdvancedTestGraph<LowestValueWindowMaxPoolCheck>([],
+            [Typed(t, of, [1L, 2L, 2L, 3L], x), Typed(t, of, [y.Length], y), I64([indices.Length], indices)],
+            genericTypes: new() { ["T"] = t });
+
+    private static bool PlainMaxPool(DType t, Func<double, object> of, double[] x, params double[] y)
+        => AutoTest.AdvancedTestGraph<MaxPoolValuesCheck>([], [Typed(t, of, [1L, 1L, x.Length], x), Typed(t, of, [y.Length], y)],
+            genericTypes: new() { ["T"] = t });
+
+    [Fact]
+    public void TestSmallIntegerMaxPoolWindowsAtTheLowestValueTakeTheirFirstMaximum()
+    {
+        Assert.True(LowestWindows(DType.Int8, AsInt8, IntegerWindows, IntegerWindowMaxima, IntegerWindowPositions));
+        Assert.True(LowestWindows(DType.UInt8, AsUInt8, IntegerWindows, IntegerWindowMaxima, IntegerWindowPositions));
+    }
+
+    // #437: ONNX Runtime's float MaxPool gives a window at or below the lowest finite value a wrong index and value
+    [Fact(Skip = "#437: ONNX Runtime's float MaxPool gives a window at or below the lowest finite value a wrong index and value")]
+    public void TestFloatMaxPoolWindowsAtOrBelowTheLowestFiniteValueTakeTheirFirstMaximum()
+    {
+        Assert.True(LowestWindows(DType.Float16, AsFloat16, FloatWindows, FloatWindowMaxima, FloatWindowPositions));
+        Assert.True(LowestWindows(DType.Float32, AsFloat32, FloatWindows, FloatWindowMaxima, FloatWindowPositions));
+        Assert.True(LowestWindows(DType.Float64, AsFloat64, FloatWindows, FloatWindowMaxima, FloatWindowPositions));
+        Assert.True(AutoTest.AdvancedTestGraph<NegativeInfinityWindowMaxPoolIndicesValues>([],
+            [F32([1L, 1L, 5L], float.NegativeInfinity, float.NegativeInfinity, 5f, float.NegativeInfinity, float.NegativeInfinity)],
+            expected: [0, 0, 2, 2, 3, 4]));
+    }
+
+    // #426: ONNX Runtime's MaxPool gives a window of only -inf the lowest finite value instead of -inf
+    [Fact(Skip = "#426: ONNX Runtime's MaxPool gives a window of only -inf the lowest finite value instead of -inf")]
+    public void TestMaxPoolWithoutIndicesGivesANegativeInfinityWindowNegativeInfinity()
+    {
+        Assert.True(PlainMaxPool(DType.Float16, AsFloat16, [N, N, L, N], N, L, L));
+        Assert.True(PlainMaxPool(DType.Float32, AsFloat32, [N, N, L, N], N, L, L));
+        Assert.True(PlainMaxPool(DType.Float64, AsFloat64, [N, N, L, N], N, L, L));
+    }
+
+    internal static readonly double[] ConvTransposeSameStridedPastTheKernel = [0.5, 1.5, 0.5, 0.5, 2.5, 0.5, 0.5, 3.5, 0.5,
+        0.5, 1.5, 0.5, 0.5, 2.5, 0.5, 0.5, 3.5, 0.5, 0.5, 0.5, 1.5, 0.5, 0.5, 0.5, 2.5, 0.5, 0.5, 0.5, 3.5, 0.5,
+        0.5, 1.5, 0.5, 0.5, 0.5, 2.5, 0.5, 0.5, 0.5, 3.5, 0.5, 0.5, 0.5, 1.5, 10.5, 0.5, 0.5, 2.5, 20.5, 0.5, 0.5, 3.5, 30.5, 0.5,
+        1.5, 10.5, 0.5, 0.5, 2.5, 20.5, 0.5, 0.5, 3.5, 30.5, 0.5, 0.5];
+
+    [Fact]
+    public void TestConvTransposeSameStridedPastTheKernelExtendsTheOutputAsTheSpecDoes()
+        => Assert.True(AutoTest.AdvancedTestGraph<ConvTransposeSameStridedPastTheKernelValues>([],
+            [F32([1L, 1L, 3L], 1f, 2f, 3f)], expected: ConvTransposeSameStridedPastTheKernel));
 
     [Fact]
     public void TestConvTransposeOutputShapeBeyondTheFullExtentIsRefused()

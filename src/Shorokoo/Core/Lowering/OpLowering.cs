@@ -20,11 +20,11 @@ internal sealed class OpLoweringAttribute : Attribute
 /// How one operator is computed out of simpler ones — written once in <see cref="OpLowerings"/>,
 /// run by every domain that cannot take the operator as it stands.
 ///
-/// <para><b>Why.</b> An operator that is merely a composition of simpler operators used to be
-/// written up to three times over: as the authoring-layer decomposition that keeps the exported
-/// ONNX at the opset the framework emits, as a QuickExecutionEngine kernel, and as a gradient
-/// rule. Nothing was shared, so the three could drift. A registered lowering is that
-/// decomposition stated once, in plain Shorokoo code.</para>
+/// <para><b>Why.</b> An operator that is merely a composition of simpler operators is needed in up
+/// to three places: as the decomposition that keeps the exported ONNX at the opset the framework
+/// emits, as what the QuickExecutionEngine computes, and as what the autodiff pass differentiates.
+/// Written separately, the three could drift. A registered lowering is that decomposition stated
+/// once, in plain Shorokoo code, and all three read it.</para>
 ///
 /// <para><b>Three domains ask for it, each from its own list.</b> A lowering is registered here
 /// once; which operators get decomposed is decided per domain, by an explicit list of op codes

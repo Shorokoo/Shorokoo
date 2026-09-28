@@ -500,6 +500,62 @@ namespace Shorokoo.Tests.Modules
     }
 
     [Module]
+    public partial class AutoGradAvgPoolIncludingPadSameUpperStrideAboveKernel
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => PoolGradientCheck.Holds(x, v => OnnxOp.AveragePool(v, AutoPad.SameUpper, false, true, null, [2L], null, [3L]));
+    }
+
+    [Module]
+    public partial class AutoGradAvgPoolExcludingPadSameUpperStrideAboveKernel
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => PoolGradientCheck.Holds(x, v => OnnxOp.AveragePool(v, AutoPad.SameUpper, false, false, null, [2L], null, [3L]));
+    }
+
+    [Module]
+    public partial class AutoGradAvgPoolIncludingPadSameLowerStrideAboveKernel
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => PoolGradientCheck.Holds(x, v => OnnxOp.AveragePool(v, AutoPad.SameLower, false, true, null, [2L], null, [5L]));
+    }
+
+    [Module]
+    public partial class AutoGradAvgPoolExcludingPadSameLowerStrideAboveKernel
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => PoolGradientCheck.Holds(x, v => OnnxOp.AveragePool(v, AutoPad.SameLower, false, false, null, [2L], null, [5L]));
+    }
+
+    [Module]
+    public partial class AutoGradLpPoolSameUpperStrideAboveKernel
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => PoolGradientCheck.Holds(x, v => OnnxOp.LpPool(v, AutoPad.SameUpper, false, null, [2L], 2L, null, [3L]));
+    }
+
+    [Module]
+    public partial class AutoGradLpPoolSameLowerStrideAboveKernel
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => PoolGradientCheck.Holds(x, v => OnnxOp.LpPool(v, AutoPad.SameLower, false, null, [2L], 2L, null, [5L]));
+    }
+
+    [Module]
+    public partial class AutoGradMaxPoolSameUpperStrideAboveKernel
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => PoolGradientCheck.Holds(x, v => OnnxOp.MaxPool(v, AutoPad.SameUpper, false, null, [2L], null, 0L, [3L]));
+    }
+
+    [Module]
+    public partial class AutoGradMaxPoolSameLowerStrideAboveKernel
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+            => PoolGradientCheck.Holds(x, v => OnnxOp.MaxPool(v, AutoPad.SameLower, false, null, [2L], null, 0L, [5L]));
+    }
+
+    [Module]
     public partial class AutoGradLpPoolCeilMode
     {
         public static Scalar<bit> Inline(Tensor<float32> x)
@@ -1685,6 +1741,39 @@ namespace Shorokoo.Tests.Modules
             var grad = Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(a, f(a));
             return AutoGradCheckHelpers.ScalarDirectionalDerivCheck(a, grad, f);
         }
+    }
+
+    /// <summary>Gradients of reductions at their edges, each held to its exact value: Mean and
+    /// Prod reducing each element alone under noop_with_empty_axes (1, also at a zero element),
+    /// Mean over every element through an empty axes tensor (1/6), and LogSumExp over elements
+    /// whose exp overflows float32 (the softmax of each group; 1 for each element alone).
+    /// Input x = [[1,2,3],[4,5,6]].</summary>
+    [Module]
+    public partial class AutoGradReductionEdgeGradientsCheck
+    {
+        public static Tensor<bit> Inline(Tensor<float32> x)
+        {
+            var flat = x.Reshape(Vector(-1L));
+            var noAxes = flat.Slice(Vector(0L), (flat.Slice(Vector(0L), Vector(1L)).Cast<int64>() - Vector(1L)).Vec()).Cast<int64>();
+            var big = Scalar(100f);
+            return OnnxOp.Concat(
+            [
+                Near(Grad(x, z => NN.Reduce(ReduceKind.Mean, z, null, keepDims: true, noOp: true)), Scalar(1f)),
+                Near(Grad(x, z => NN.Reduce(ReduceKind.Mean, z, noAxes, keepDims: false, noOp: true)), Scalar(1f)),
+                Near(Grad(x, z => (Tensor<float32>)OnnxOp.ReduceMean(z, noAxes, false, false)), Scalar(1f / 6f)),
+                Near(Grad(x, z => (Tensor<float32>)OnnxOp.ReduceMean(z, EmptyVector<int64>(), true, false)), Scalar(1f / 6f)),
+                Near(Grad(x, z => NN.Reduce(ReduceKind.Prod, z - Scalar(1f), null, keepDims: true, noOp: true)), Scalar(1f)),
+                Near(Grad(x, z => NN.Reduce(ReduceKind.Prod, z - Scalar(1f), noAxes, keepDims: true, noOp: true)), Scalar(1f)),
+                Near(Grad(x, z => NN.Reduce(ReduceKind.LogSumExp, z + big, Vector(1L), keepDims: false)), (Tensor<float32>)OnnxOp.Softmax(x, 1L)),
+                Near(Grad(x, z => NN.Reduce(ReduceKind.LogSumExp, z + big, null, keepDims: true, noOp: true)), Scalar(1f)),
+            ], 0);
+        }
+
+        private static Tensor<float32> Grad(Tensor<float32> x, Func<Tensor<float32>, Tensor<float32>> f)
+            => (Tensor<float32>)Shorokoo.Core.Nodes.AutoDiff.Ops.AutoGrad(x, f(x).Reduce(ReduceKind.Sum, keepDims: false).Scalar());
+
+        private static Tensor<bit> Near(Tensor<float32> actual, Tensor<float32> expected)
+            => ((Tensor<float32>)OnnxOp.Abs(actual - expected) <= Scalar(1e-5f)).Reshape(Vector(-1L));
     }
 
     /// <summary>loss = L1(expand(a, [2])) = 2·|a|. For positive a, dL/da = 2.</summary>

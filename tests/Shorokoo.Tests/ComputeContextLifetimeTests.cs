@@ -863,6 +863,8 @@ public class ComputeContextLifetimeCoverageTests
         Assert.False(Proves(GraphOf("a b c", "O Z", Op("Sub", "a b", "O"), Op("If", "c", "Z", body: GraphOf("", "t", Op("Identity", "a", "t"))))));
         Assert.False(Proves(Initializing("a", GraphOf("a b", "O", Op("Sub", "a b", "O")))));
         Assert.False(Proves(GraphOf("a b c", "O", Op("If", "c", "O", body: GraphOf("", "t", Op("Identity", "b", "t"))))));
+        Assert.True(Proves(GraphOf("a b c", "O", Op("Neg", "a", "n"), Op("If", "c", "g", body: GraphOf("", "t", Op("Identity", "n", "t"))), Op("Sub", "b g", "O"))));
+        Assert.False(Proves(GraphOf("a b c", "O", Op("Neg", "a", "n"), Op("If", "c", "g", body: GraphOf("", "t", Op("Shape", "n", "t"))), Op("Sub", "b g", "O"))));
         Assert.True(Proves(GraphOf("a:float[4] b", "O:float[4]", Op("Neg", "b", "O"))));
         Assert.False(Proves(GraphOf("a:float[4] b", "O:double[4]", Op("Cast", "b", "O"))));
         Assert.False(Proves(GraphOf("a:float[4] b", "O:float[2,2]", Op("Neg", "b", "O"))));

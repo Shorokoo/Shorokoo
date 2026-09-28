@@ -1,6 +1,7 @@
 using Shorokoo.Core.Backends;
 using Shorokoo.Core.Factory;
 using Shorokoo.Core.Factory.IR;
+using Shorokoo.Core.Lowering.KernelWorkarounds;
 using Shorokoo.Jax;
 using Shorokoo.Jax.Cpu;
 using Shorokoo.PyTorch.Cpu;
@@ -44,8 +45,13 @@ namespace Shorokoo.Tests.Utils;
 /// module whose graph computes a shape from an input's values. A listed module that no longer
 /// refuses fails the audit as well.</para>
 ///
-/// <para>The model is built once, the way a session receives it, and that one model is run on both
-/// backends.</para>
+/// <para><b>Kernel workarounds.</b> Each runtime runs the model a session of its own receives: the
+/// ONNX Runtime reference is built with the ONNX Runtime kernel workarounds, the backend's model with
+/// the backend's own set. A workaround leaves the name of every value it does not touch as it is,
+/// and numbers what it splices in last, so the values compared, and the nodes blamed, are those of
+/// the model built with no workarounds at all. A call a workaround drops has its outputs compared
+/// all the same, as the values that replace them: a node that reads one reads its replacement in
+/// the rewritten model, which says which value that is.</para>
 ///
 /// <para><b>Known disagreements.</b> An operator a backend computes differently from ONNX Runtime in
 /// a module, for a reason recorded here, is listed under the module and the operator. The operators
@@ -88,31 +94,98 @@ internal sealed class QeeAuditOnBackend(
 
     public bool Agrees<TModule>(InternalComputationGraph model, TensorData[] inputs, Func<ModelProto, ModelProto>? alterOnBackend = null)
     {
+        var run = Run(model, inputs, alterOnBackend, KernelWorkaroundRegistry.For(KernelWorkaroundSets.OnnxRuntime));
+        if (run.Failure is { } ex)
+            return Refused(ex) is { } refused
+                && (JaxDialect.RefusedOperators.ContainsKey(refused.Operator ?? "") && refused.Reason == JaxUnsupportedReason.UnknownOperator
+                    || knownRefusals?.GetValueOrDefault(typeof(TModule)) == refused.Operator && refused.Reason == JaxUnsupportedReason.UnsupportedUsage
+                    || refused is { Reason: JaxUnsupportedReason.UnsupportedModel, Operator: null } && HoldsStrings(run.Built.Graph)
+                       && refused.Message.Contains("element type String", StringComparison.Ordinal));
+        if (knownRefusals?.ContainsKey(typeof(TModule)) == true) return false;
+        return run.Convicted!.SetEquals(knownDisagreements.Keys.Where(k => k.Module == typeof(TModule)).Select(k => k.Operator));
+    }
+
+    /// <summary>The operators convicted when <paramref name="model"/> runs on the backend against an
+    /// ONNX Runtime reference built with <paramref name="referenceWorkarounds"/>.</summary>
+    internal HashSet<string> ConvictedOperators(InternalComputationGraph model, TensorData[] inputs,
+        Func<ModelProto, ModelProto>? alterOnBackend, KernelWorkaroundSet referenceWorkarounds)
+    {
+        var run = Run(model, inputs, alterOnBackend, referenceWorkarounds);
+        return run.Failure is { } ex ? throw ex : run.Convicted!;
+    }
+
+    private sealed record Outcome(ModelProto Built, HashSet<string>? Convicted, Exception? Failure);
+
+    private Outcome Run(InternalComputationGraph model, TensorData[] inputs, Func<ModelProto, ModelProto>? alterOnBackend,
+        KernelWorkaroundSet referenceWorkarounds)
+    {
         IData[] feeds = [.. inputs.Select(static t => (IData)t.Shared())];
-        var built = ExposeEveryValue(FastOnnxModelBuilder.BuildInternalOnnxModel(model, prepForOnnx: true));
-        var reference = Values(ComputeContext.Default.ExecuteModel(model, built, feeds));
+        var built = Build(model, KernelWorkaroundSet.Empty);
+        int declared = built.Graph.Outputs.Count;
+        ExposeEveryValue(built);
+        var compared = built.Graph.Outputs.Select(o => o.Name).ToHashSet();
+        var referenceModel = ExposeEveryValue(Build(model, referenceWorkarounds));
+        var reference = ByNeutralName(Values(ComputeContext.Default.ExecuteModel(model, referenceModel, feeds)), built, declared, referenceModel);
+        reference = reference.Where(p => compared.Contains(p.Key)).ToDictionary();
         var known = new Dictionary<string, IData>(reference);
         foreach (var (input, value) in built.Graph.Inputs.Zip(inputs)) known.TryAdd(input.Name, value);
         foreach (var initializer in built.Graph.Initializers) known.TryAdd(initializer.Name, Initializer(initializer));
-        var onBackendModel = alterOnBackend is null ? built : alterOnBackend(ProtoBuf.Serializer.DeepClone(built));
+        var workarounds = KernelWorkaroundRegistry.For(_backend.Value.KernelWorkaroundSet);
+        var onBackendBuilt = workarounds.IsEmpty ? built : ExposeEveryValue(Build(model, workarounds));
+        var onBackendModel = alterOnBackend is null ? onBackendBuilt : alterOnBackend(ProtoBuf.Serializer.DeepClone(onBackendBuilt));
         using var context = new ComputeContext(_backend.Value);
         Dictionary<string, IData> onBackend;
         try
         {
-            onBackend = Values(context.ExecuteModel(model, onBackendModel, feeds));
+            onBackend = ByNeutralName(Values(context.ExecuteModel(model, onBackendModel, feeds)), built, declared, onBackendBuilt);
         }
         catch (Exception ex)
         {
-            return Refused(ex) is { } refused
-                && (JaxDialect.RefusedOperators.ContainsKey(refused.Operator ?? "") && refused.Reason == JaxUnsupportedReason.UnknownOperator
-                    || knownRefusals?.GetValueOrDefault(typeof(TModule)) == refused.Operator && refused.Reason == JaxUnsupportedReason.UnsupportedUsage
-                    || refused is { Reason: JaxUnsupportedReason.UnsupportedModel, Operator: null } && HoldsStrings(built.Graph)
-                       && refused.Message.Contains("element type String", StringComparison.Ordinal));
+            return new(built, null, ex);
         }
-        if (knownRefusals?.ContainsKey(typeof(TModule)) == true) return false;
         var functions = built.Functions.ToDictionary(f => f.Domain + ":" + f.Name);
-        var convicted = Convicted(built.Graph.Nodes, reference, onBackend, Drawn(built.Graph.Nodes, functions, known));
-        return convicted.SetEquals(knownDisagreements.Keys.Where(k => k.Module == typeof(TModule)).Select(k => k.Operator));
+        return new(built, Convicted(built.Graph.Nodes, reference, onBackend, Drawn(built.Graph.Nodes, functions, known)), null);
+    }
+
+    /// <summary>The model a session is built from, with <paramref name="workarounds"/> applied.</summary>
+    private static ModelProto Build(InternalComputationGraph model, KernelWorkaroundSet workarounds)
+        => FastOnnxModelBuilder.BuildInternalOnnxModel(model, prepForOnnx: true, workarounds: workarounds);
+
+    /// <summary>
+    /// <paramref name="values"/>, computed by <paramref name="rewritten"/>, keyed by the names of
+    /// <paramref name="neutral"/>, the model built with no workarounds, whose first
+    /// <paramref name="declared"/> outputs are the graph's own: each value under its own name, and
+    /// the value that replaces an output of a call a workaround dropped under that output's name as
+    /// well. The replacement is what the dropped output's readers read in its place — a node keeping
+    /// its operator and its output's name, or a graph output at the same position — when they all
+    /// read the same value, and that value is one the workaround spliced in.
+    /// </summary>
+    private static Dictionary<string, IData> ByNeutralName(
+        Dictionary<string, IData> values, ModelProto neutral, int declared, ModelProto rewritten)
+    {
+        if (ReferenceEquals(neutral, rewritten)) return values;
+        var neutralNames = neutral.Graph.Nodes.SelectMany(n => n.Outputs).Concat(neutral.Graph.Inputs.Select(i => i.Name)).ToHashSet();
+        var rewrittenNames = rewritten.Graph.Nodes.SelectMany(n => n.Outputs).Concat(rewritten.Graph.Inputs.Select(i => i.Name)).ToHashSet();
+        var readers = rewritten.Graph.Nodes.Where(n => n.Outputs is [{ Length: > 0 }, ..]).ToDictionary(n => n.Outputs[0]);
+        var replacements = new Dictionary<string, HashSet<string>>();
+        void Offer(string dropped, string by)
+        {
+            if (dropped.Length == 0 || rewrittenNames.Contains(dropped)) return;
+            if (!replacements.TryGetValue(dropped, out var by_)) replacements[dropped] = by_ = [];
+            by_.Add(by);
+        }
+        foreach (var node in neutral.Graph.Nodes)
+            if (node.Outputs is [{ Length: > 0 } first, ..] && readers.TryGetValue(first, out var reader)
+                && reader.OpType == node.OpType && reader.Inputs.Count == node.Inputs.Count)
+                for (int i = 0; i < node.Inputs.Count; i++) Offer(node.Inputs[i], reader.Inputs[i]);
+        for (int i = 0; i < declared; i++) Offer(neutral.Graph.Outputs[i].Name, rewritten.Graph.Outputs[i].Name);
+
+        var byName = new Dictionary<string, IData>(values);
+        foreach (var (dropped, by) in replacements)
+            if (by.Count == 1 && by.Single() is var replacement && !neutralNames.Contains(replacement)
+                && values.TryGetValue(replacement, out var value))
+                byName.TryAdd(dropped, value);
+        return byName;
     }
 
     /// <summary>Whether <paramref name="graph"/> takes, returns or holds a string tensor, which JAX

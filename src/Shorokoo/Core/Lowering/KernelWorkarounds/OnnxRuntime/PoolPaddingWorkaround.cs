@@ -1,9 +1,66 @@
+using Shorokoo.Core.Nodes;
+using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Core.Nodes.OnnxNodes;
 
-namespace Shorokoo.Core.Nodes.NodeDefinitions;
+namespace Shorokoo.Core.Lowering.KernelWorkarounds.OnnxRuntime;
 
-public static partial class OnnxOp
+using static OnnxOp;
+using static OnnxOpAttributeNames;
+using static OpCodes;
+
+/// <summary>
+/// A pool whose padding ONNX Runtime's pooling kernels do not pool as the spec does
+/// (Shorokoo/Shorokoo#379, Shorokoo/Shorokoo#408), rewritten as pools they do compute as the spec
+/// does, with the padding written out (<see cref="NeedsWrittenPadding"/>,
+/// <see cref="PaddedPool"/>).
+/// </summary>
+internal sealed class PoolPaddingWorkaround : KernelWorkaround
 {
+    public override IReadOnlySet<string> OpCodes { get; } =
+        new HashSet<string>([AVERAGE_POOL, LP_POOL, MAX_POOL], StringComparer.Ordinal);
+
+    public override bool Applies(WorkaroundSite site)
+    {
+        var a = site.Attributes;
+        return NeedsWrittenPadding(a.GetEnumVal<AutoPad>(AttrAutoPad), a.GetLongsVal(AttrDilations),
+            a.GetLongsVal(AttrKernelShape), a.GetLongsVal(AttrPads), a.GetLongsVal(AttrStrides));
+    }
+
+    public override Variable?[] Rewrite(WorkaroundSite site, Variable?[] inputs)
+    {
+        var a = site.Attributes;
+        var x = inputs[0]!;
+        var autoPad = a.GetEnumVal<AutoPad>(AttrAutoPad);
+        var ceilMode = a.GetBoolVal(AttrCeilMode);
+        var dilations = a.GetLongsVal(AttrDilations);
+        var kernelShape = a.GetLongsVal(AttrKernelShape)!;
+        var pads = a.GetLongsVal(AttrPads);
+        var strides = a.GetLongsVal(AttrStrides);
+
+        switch (site.OpCode)
+        {
+            case AVERAGE_POOL:
+                return PaddedPool(x, site.ShapesAreConcrete, a.GetBoolVal(AttrCountIncludePad) == true ? PoolKind.AverageIncludingPad : PoolKind.AverageExcludingPad,
+                    autoPad, ceilMode, dilations, kernelShape, pads, strides, null,
+                    (input, same, p, s, ceil, includePad) => [AveragePool(input, same, ceil, includePad, dilations, kernelShape, p, s)]);
+            case LP_POOL:
+                var norm = a.GetLongVal(AttrP);
+                return PaddedPool(x, site.ShapesAreConcrete, PoolKind.Lp, autoPad, ceilMode, dilations, kernelShape, pads, strides, null,
+                    (input, same, explicitPads, s, ceil, _) => [LpPool(input, same, ceil, dilations, kernelShape, norm, explicitPads, s)]);
+            default:
+                var storageOrder = a.GetLongVal(AttrStorageOrder);
+                if (!site.IsOutputPresent(1))
+                    return PaddedPool(x, site.ShapesAreConcrete, PoolKind.Max, autoPad, ceilMode, dilations, kernelShape, pads, strides, storageOrder,
+                        (input, same, p, s, ceil, _) => [MaxPool(input, same, ceil, dilations, kernelShape, p, storageOrder, s)]);
+                return PaddedPool(x, site.ShapesAreConcrete, PoolKind.Max, autoPad, ceilMode, dilations, kernelShape, pads, strides, storageOrder,
+                    (input, same, p, s, ceil, _) =>
+                    {
+                        var (y, indices) = MaxPoolWithIndices(input, same, ceil, dilations, kernelShape, p, storageOrder, s);
+                        return [y, indices];
+                    });
+        }
+    }
+
     /// <summary>What a pool computes over its window, which decides how its padding may be
     /// written out as data.</summary>
     private enum PoolKind
@@ -18,19 +75,18 @@ public static partial class OnnxOp
         AverageExcludingPad,
     }
 
-    /// <summary>Builds the plain pool over <c>Input</c> with explicit <c>Pads</c>, <c>Strides</c>,
-    /// <c>CeilMode</c>, and, for an AveragePool, <c>IncludePad</c> in place of its own
-    /// <c>count_include_pad</c>.</summary>
-    private delegate Variable[] PlainPool(Variable input, long[] pads, long[] strides, bool ceilMode, bool includePad);
+    /// <summary>Builds the plain pool over <c>Input</c> with the <c>Same</c> auto_pad or, when that is
+    /// null, explicit <c>Pads</c>; <c>Strides</c>, <c>CeilMode</c>, and, for an AveragePool,
+    /// <c>IncludePad</c> in place of its own <c>count_include_pad</c>.</summary>
+    private delegate Variable[] PlainPool(Variable input, AutoPad? same, long[]? pads, long[] strides, bool ceilMode, bool includePad);
 
     /// <summary>
     /// Whether a pool's padding is one ONNX Runtime's pooling kernels do not pool as the spec does,
-    /// so the builder writes it out itself (<see cref="PaddedPool"/>): <c>SAME_UPPER</c> or
-    /// <c>SAME_LOWER</c> with a dilation above 1, which ONNX Runtime pads for the undilated kernel;
-    /// <c>SAME_UPPER</c> or <c>SAME_LOWER</c> with a stride above the kernel along some axis,
-    /// whose padding is negative for some input lengths and which ONNX Runtime then splits
-    /// between the ends otherwise than the spec does; or explicit pads as large as the kernel
-    /// along some axis, which it refuses.
+    /// so it is written out (<see cref="PaddedPool"/>): <c>SAME_UPPER</c> or <c>SAME_LOWER</c> with
+    /// a dilation above 1, which ONNX Runtime pads for the undilated kernel; <c>SAME_UPPER</c> or
+    /// <c>SAME_LOWER</c> with a stride above the kernel along some axis, whose padding is negative
+    /// for some input lengths and which ONNX Runtime then splits between the ends otherwise than
+    /// the spec does; or explicit pads as large as the kernel along some axis, which it refuses.
     /// </summary>
     private static bool NeedsWrittenPadding(AutoPad? autoPad, long[]? dilations, long[]? kernelShape, long[]? pads, long[]? strides)
         => kernelShape is { Length: > 0 } kernel && (autoPad switch
@@ -53,8 +109,15 @@ public static partial class OnnxOp
     /// <c>floor(total / 2)</c> of it at the start for <c>SAME_UPPER</c> and <c>ceil(total / 2)</c>
     /// for <c>SAME_LOWER</c>, the rest at the end. With a stride above the kernel's extent the
     /// total can be negative, and a negative start padding starts the first window past the
-    /// input's first element. With every stride 1 the total is <c>(k - 1) * d</c> whatever the
-    /// input's length, and the pool takes it as explicit pads.
+    /// input's first element.
+    /// Undilated, ONNX Runtime splits a total of at least 0 as the spec does and pads a negative one
+    /// with nothing, so the input is cropped by the negative part of each end's padding with a
+    /// <c>Slice</c> computed from its shape, and the cropped input, whose total is then 0 or the
+    /// input's own, pooled as the call stands. When the session knows every shape, an <c>If</c>
+    /// on the crop being empty, which ONNX Runtime folds, leaves the call as it stands wherever it
+    /// already computes the spec's result.
+    /// Dilated, ONNX Runtime pads for the undilated kernel. With every stride 1 the total is
+    /// <c>(k - 1) * d</c> whatever the input's length, and the pool takes it as explicit pads.
     /// Otherwise it depends on a length the input's shape may leave open until it runs, so the
     /// pool is built at stride 1 with the most padding any length asks for, <c>(k - 1) * d</c>:
     /// each window the spec takes is one of that pool's outputs, and a <c>Slice</c> computed from
@@ -69,7 +132,7 @@ public static partial class OnnxOp
     /// ones alike, counting padding, and divides the one by the other — the window's sum over the
     /// number of input elements in it. The pool's windows are the spec's, so its outputs are too,
     /// save two: MaxPool's indices, which count positions in the padded input and are carried
-    /// back to the input's, in the pool's <c>storage_order</c>, an index of -1 staying -1; and,
+    /// back to the input's, in the pool's <c>storage_order</c>; and,
     /// with <c>ceil_mode</c>, the output's length: the spec's is
     /// <c>ceil((in + pads - (k - 1) * d - 1) / stride) + 1</c>, less one when that last window
     /// starts at or past <c>in + start pad</c>, and the pool, whose written padding moves where
@@ -79,7 +142,7 @@ public static partial class OnnxOp
     /// <c>-inf</c>, <c>-128</c> and <c>0</c> cast to it, which is <c>-inf</c> for a floating type,
     /// -128 for int8 and 0 for uint8 — the types MaxPool takes.</para>
     /// </summary>
-    private static Variable[] PaddedPool(Variable x, PoolKind kind, AutoPad? autoPad, bool? ceilMode,
+    private static Variable[] PaddedPool(Variable x, bool shapesAreConcrete, PoolKind kind, AutoPad? autoPad, bool? ceilMode,
         long[]? dilations, long[] kernelShape, long[]? pads, long[]? strides, long? storageOrder, PlainPool pool)
     {
         int n = kernelShape.Length;
@@ -90,25 +153,39 @@ public static partial class OnnxOp
             return ExplicitlyPaddedPool(x, kind, kernelShape, dilation, pads!, stride, ceilMode ?? false, storageOrder ?? 0L, pool);
 
         bool upper = autoPad == AutoPad.SameUpper;
-        long[] reach = [.. Enumerable.Range(0, n).Select(a => (kernelShape[a] - 1) * dilation[a])];
-        long[] head = [.. reach.Select(r => upper ? r / 2 : (r + 1) / 2)];
-        long[] tail = [.. Enumerable.Range(0, n).Select(a => reach[a] - head[a])];
-
-        var pooled = ExplicitlyPaddedPool(x, kind, kernelShape, dilation, [.. head, .. tail], ones, false, storageOrder ?? 0L, pool);
-        if (stride.All(s => s == 1)) return pooled;
-
         var one = Constant(ones);
         var steps = Constant(stride);
         var length = Shape(x, start: 2L);
+        long[] reach = [.. Enumerable.Range(0, n).Select(a => (kernelShape[a] - 1) * dilation[a])];
         var total = Sub(Constant(reach), Mod(Sub(length, one), steps));
         // floor(total / 2) or ceil(total / 2) of a total at least 1 - stride, as a truncating
         // division of the total raised by twice the stride.
         var raised = Add(total, Constant([.. stride.Select(s => upper ? 2 * s : 2 * s + 1)]));
         var needed = Sub(Div(raised, Constant([.. Enumerable.Repeat(2L, n)])), steps);
+        var axes = SpatialAxes(n);
+
+        if (dilation.All(d => d == 1))
+        {
+            var none = Constant(new long[n]);
+            var cropStart = Max(Neg(needed), none);
+            var cropEnd = Max(Sub(needed, total), none);
+            var cropped = Slice(x, cropStart, Sub(length, cropEnd), axes);
+            var same = pool(cropped, autoPad, null, stride, ceilMode ?? false, kind == PoolKind.AverageIncludingPad);
+            if (same.Length > 1)
+                same[1] = UnpaddedIndices(same[1], x, cropped, Neg(cropStart), n, storageOrder ?? 0L);
+            if (!shapesAreConcrete) return same;
+            var plain = pool(x, autoPad, null, stride, ceilMode ?? false, kind == PoolKind.AverageIncludingPad);
+            return IfClose(same, plain, IfOpen(Greater(ReduceMax(Add(cropStart, cropEnd), keepdims: false), Constant(0L))));
+        }
+
+        long[] head = [.. reach.Select(r => upper ? r / 2 : (r + 1) / 2)];
+        long[] tail = [.. Enumerable.Range(0, n).Select(a => reach[a] - head[a])];
+        var pooled = ExplicitlyPaddedPool(x, kind, kernelShape, dilation, [.. head, .. tail], ones, false, storageOrder ?? 0L, pool);
+        if (stride.All(s => s == 1)) return pooled;
+
         var starts = Sub(Constant(head), needed);
         var count = Div(Add(length, Constant([.. stride.Select(s => s - 1)])), steps);
         var ends = Add(starts, Add(Mul(Sub(count, one), steps), one));
-        var axes = SpatialAxes(n);
         return [.. pooled.Select(p => Slice(p, starts, ends, axes, steps))];
     }
 
@@ -118,16 +195,16 @@ public static partial class OnnxOp
         int n = kernelShape.Length;
         long[] written = [.. Enumerable.Range(0, 2 * n).Select(i => Math.Max(0L, pads[i] - (kernelShape[i % n] - 1)))];
         if (written.All(w => w == 0))
-            return pool(x, pads, strides, ceilMode, kind == PoolKind.AverageIncludingPad);
+            return pool(x, null, pads, strides, ceilMode, kind == PoolKind.AverageIncludingPad);
         long[] kept = [.. Enumerable.Range(0, 2 * n).Select(i => pads[i] - written[i])];
         var padding = Constant([0L, 0L, .. written[..n], 0L, 0L, .. written[n..]]);
 
         Variable[] pooled;
         if (kind == PoolKind.AverageExcludingPad)
         {
-            var sums = pool(Pad(x, padding, CastLike(Globals.Scalar(0f), x, null)), kept, strides, ceilMode, true)[0];
+            var sums = pool(Pad(x, padding, CastLike(Globals.Scalar(0f), x, null)), null, kept, strides, ceilMode, true)[0];
             var mask = Expand(CastLike(Globals.Scalar(1f), x, null), Concat([Constant([1L, 1L]), Shape(x, start: 2L)], 0L));
-            var counts = pool(Pad(mask, padding, CastLike(Globals.Scalar(0f), x, null)), kept, strides, ceilMode, true)[0];
+            var counts = pool(Pad(mask, padding, CastLike(Globals.Scalar(0f), x, null)), null, kept, strides, ceilMode, true)[0];
             pooled = [Div(sums, counts)];
         }
         else
@@ -137,9 +214,9 @@ public static partial class OnnxOp
                     CastLike(Globals.Scalar(-128f), x, null), CastLike(Globals.Scalar(0f), x, null))
                 : CastLike(Globals.Scalar(0f), x, null);
             var padded = Pad(x, padding, value);
-            pooled = pool(padded, kept, strides, ceilMode, kind == PoolKind.AverageIncludingPad);
+            pooled = pool(padded, null, kept, strides, ceilMode, kind == PoolKind.AverageIncludingPad);
             if (pooled.Length > 1)
-                pooled[1] = UnpaddedIndices(pooled[1], x, padded, written[..n], storageOrder);
+                pooled[1] = UnpaddedIndices(pooled[1], x, padded, Constant(written[..n]), n, storageOrder);
         }
 
         if (!ceilMode || written[n..].All(w => w == 0)) return pooled;
@@ -155,15 +232,14 @@ public static partial class OnnxOp
     }
 
     /// <summary>Carries MaxPool indices counted in <paramref name="padded"/> back to
-    /// <paramref name="x"/>, which it extends by <paramref name="before"/> at the start of each
-    /// spatial axis: the leading batch-and-channel block is kept, and the spatial position is
-    /// split into its coordinates, shifted, and recombined over <paramref name="x"/>'s extents —
-    /// the last axis varying fastest for <c>storage_order</c> 0, the first for 1. An index of -1,
-    /// which ONNX Runtime gives a window whose every value is the element type's lowest, stays
-    /// -1.</summary>
-    private static Variable UnpaddedIndices(Variable indices, Variable x, Variable padded, long[] before, long storageOrder)
+    /// <paramref name="x"/>, whose position <c>i</c> along each of the <paramref name="n"/> spatial
+    /// axes is <paramref name="padded"/>'s <c>i + before</c> (<paramref name="before"/> one entry
+    /// per axis, negative where the start is cropped): the leading batch-and-channel block is kept,
+    /// and the spatial position is split into its coordinates, shifted, and recombined over
+    /// <paramref name="x"/>'s extents — the last axis varying fastest for <c>storage_order</c> 0,
+    /// the first for 1.</summary>
+    private static Variable UnpaddedIndices(Variable indices, Variable x, Variable padded, Variable before, int n, long storageOrder)
     {
-        int n = before.Length;
         var paddedShape = Shape(padded);
         var shape = Shape(x);
         Variable Extent(Variable s, int axis) => Gather(s, Constant((long)(axis + 2)), 0L);
@@ -177,13 +253,13 @@ public static partial class OnnxOp
         foreach (var axis in order)
         {
             var extent = Extent(paddedShape, axis);
-            coordinates[axis] = Sub(Mod(rest, extent), Constant(before[axis]));
+            coordinates[axis] = Sub(Mod(rest, extent), Gather(before, Constant((long)axis), 0L));
             rest = Div(rest, extent);
         }
         Variable position = Constant(0L);
         foreach (var axis in order.Reverse())
             position = Add(Mul(position, Extent(shape, axis)), coordinates[axis]);
-        return Where(Less(indices, Constant(0L)), indices, Add(Mul(block, area), position));
+        return Add(Mul(block, area), position);
     }
 
     private static Variable SpatialAxes(int n) => Constant([.. Enumerable.Range(2, n).Select(a => (long)a)]);

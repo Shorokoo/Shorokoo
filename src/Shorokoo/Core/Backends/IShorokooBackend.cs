@@ -154,6 +154,15 @@ public interface IShorokooBackend
     // the default would say "no" for a backend that says "yes".
     bool AcceptsTrainingFormat(string format) => format == TrainingFormats.Onnx;
 
+    // The kernel workarounds this backend's sessions are built with: one of KernelWorkaroundSets,
+    // or null for none. The set names rewrites of operator calls this backend's kernels compute
+    // otherwise than the ONNX spec says, each into an equivalent call they compute as the spec
+    // does. They are applied to the model built for this backend's sessions only; the graph, an
+    // exported file, generated C# and .srk keep every operator as written.
+    //
+    // A decorator forwards this, as it forwards every member with a default body.
+    string? KernelWorkaroundSet => null;
+
     IShorokooTensorValue CreateTensor<T>(T[] data, long[] shape) where T : unmanaged;
 
     IShorokooTensorValue CreateTensorFromRawBytes(

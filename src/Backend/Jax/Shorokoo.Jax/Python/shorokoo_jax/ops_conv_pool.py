@@ -21,14 +21,18 @@ _NARROW_FLOATS = (np.dtype(np.float16), _rt.jax_dtype(16))
 
 # ---- geometry --------------------------------------------------------------------------------
 
-def _pads(sizes, kernel, strides, dilations, pads, auto_pad):
-    """(begins, ends): the explicit pads, or those auto_pad resolves to."""
+def _pads(sizes, kernel, strides, dilations, pads, auto_pad, negative=False):
+    """(begins, ends): the explicit pads, or those auto_pad resolves to. A SAME padding
+    the windows overshoot is zero, or with `negative` stays negative and crops the input, as the
+    pooling operators' formula has it."""
     n = len(sizes)
     if auto_pad in ("SAME_UPPER", "SAME_LOWER"):
         begins, ends = [], []
         for size, k, s, d in zip(sizes, kernel, strides, dilations):
             out = -(-size // s)
-            total = max(0, (out - 1) * s + (k - 1) * d + 1 - size)
+            total = (out - 1) * s + (k - 1) * d + 1 - size
+            if not negative:
+                total = max(0, total)
             small = total // 2
             if auto_pad == "SAME_UPPER":
                 begins.append(small)
@@ -66,7 +70,7 @@ def _windows(x, kernel_shape, strides, dilations, pads, auto_pad, ceil_mode):
     kernel = list(kernel_shape)
     strides = list(strides) if strides else [1] * n
     dilations = list(dilations) if dilations else [1] * n
-    begins, ends = _pads(sizes, kernel, strides, dilations, pads, auto_pad)
+    begins, ends = _pads(sizes, kernel, strides, dilations, pads, auto_pad, negative=True)
     outs = [_pool_out(*g, ceil_mode) for g in zip(sizes, kernel, strides, dilations, begins, ends)]
     fits = [(o - 1) * s + (k - 1) * d + 1 - b - size
             for o, s, k, d, b, size in zip(outs, strides, kernel, dilations, begins, sizes)]
@@ -178,7 +182,9 @@ def conv_transpose(x, w, b=None, /, *, auto_pad="NOTSET", dilations=None, group=
     elif auto_pad in ("SAME_UPPER", "SAME_LOWER"):
         begins, ends = [], []
         for size, s, f, e in zip(sizes, strides, full, extra):
-            total = max(0, f + e - size * s)
+            # Negative when the stride exceeds the kernel's extent plus the output padding: the
+            # output then reaches past the full transposed convolution, split by floor halves.
+            total = f + e - size * s
             if auto_pad == "SAME_UPPER":
                 begins.append(total // 2)
                 ends.append(total - total // 2)
@@ -270,16 +276,11 @@ def max_pool(x, /, *, auto_pad="NOTSET", ceil_mode=0, dilations=None, kernel_sha
     if _outputs < 2 and all(d == 1 for d in dilations):
         return (_window_reduce(padded, _lowest(x.dtype), jax.lax.max, kernel, strides, dilations),)
     # JAX differentiates a windowed max only undilated; the kernel's taps stacked are, and name
-    # the first maximum as well.
+    # the first maximum as well. ONNX's indices count positions in the whole unpadded tensor,
+    # row-major, or with the spatial dims column-major for storage_order 1; a padded tap sits at
+    # position -1. It holds the lowest value, which an input tap may hold too, so the first
+    # maximum is the first input tap holding the window's maximum (or NaN).
     xp = _rt.xp(x)
-    taps = _taps(padded, kernel, strides, dilations, outs)
-    first = xp.argmax(_rt.detach(taps), axis=0)
-    y = xp.take_along_axis(taps, first[None], axis=0)[0]
-    if _outputs < 2:
-        return (y,)
-    # ONNX's indices count positions in the whole unpadded tensor, row-major, or with the spatial
-    # dims column-major for storage_order 1. A padded tap holds the lowest value, so it is a
-    # window's first maximum only before a tap that holds it too.
     sizes = list(x.shape[2:])
     strides_of = [0] * n
     scale = 1
@@ -291,9 +292,16 @@ def max_pool(x, /, *, auto_pad="NOTSET", ceil_mode=0, dilations=None, kernel_sha
         position = position + (np.arange(sizes[i], dtype=np.int64) * strides_of[i]).reshape(
             [-1 if j == i else 1 for j in range(n)])
     channel = np.arange(x.shape[0] * x.shape[1], dtype=np.int64).reshape(list(x.shape[:2]) + [1] * n)
-    position = _pad_spatial(position + channel * math.prod(sizes), begins, fits)
-    indices = xp.take_along_axis(_taps(position, kernel, strides, dilations, outs), first[None], axis=0)[0]
-    return y, indices
+    position = _taps(_pad_spatial(position + channel * math.prod(sizes), begins, fits, -1),
+                     kernel, strides, dilations, outs)
+    taps = _taps(padded, kernel, strides, dilations, outs)
+    values = _rt.detach(taps)
+    top = values.max(axis=0)
+    first = xp.argmax(((values == top) | xp.isnan(values)) & (position >= 0), axis=0)
+    y = xp.take_along_axis(taps, first[None], axis=0)[0]
+    if _outputs < 2:
+        return (y,)
+    return y, xp.take_along_axis(position, first[None], axis=0)[0]
 
 
 def average_pool(x, /, *, auto_pad="NOTSET", ceil_mode=0, count_include_pad=0, dilations=None,

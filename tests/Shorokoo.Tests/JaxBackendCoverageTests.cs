@@ -74,8 +74,39 @@ public class JaxBackendCoverageTests
 
     [Fact]
     public void TestIntegerAndBoolReduceMaxAndMinOverAnEmptyGroupYieldTheTypeExtremesOnJax()
-        => Assert.True(AutoTest.AdvancedTestGraph<EmptyIntegerReduceMaxMinCheck>([], [QeeAudit.F32([2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f)],
-            context: new ComputeContext(Jax)));
+        => EmptyIntegerReduceMaxAndMinYieldTheTypeExtremes(new ComputeContext(Jax));
+
+    [Fact]
+    public void TestPoolsComputeTheSpecValuesOnJax() => PoolsComputeTheSpecValues(new ComputeContext(Jax));
+
+    [Fact]
+    public void TestMaxPoolIndicesComputeTheSpecValuesOnJax() => MaxPoolIndicesComputeTheSpecValues(new ComputeContext(Jax));
+
+    [Fact]
+    public void TestConvTransposeSameStridedPastTheKernelComputesTheSpecValuesOnJax()
+        => ConvTransposeSameStridedPastTheKernelComputesTheSpecValues(new ComputeContext(Jax));
+
+    [Fact]
+    public void TestMaxPoolIndexOfALowestValuedWindowIsItsFirstInputPositionOnJax()
+        => LowestValuedWindowMaxPoolIndexIsItsFirstInputPosition(new ComputeContext(Jax));
+
+    [Fact]
+    public void TestMaxPoolIndexOfANegativeInfinityWindowIsItsFirstInputPositionOnJax()
+        => NegativeInfinityWindowMaxPoolIndexIsItsFirstInputPosition(new ComputeContext(Jax));
+
+    [Fact]
+    public void TestCropAndResizeAndCol2ImComputeTheSpecValuesOnJax() => CropAndResizeAndCol2ImComputeTheSpecValues(new ComputeContext(Jax));
+
+    [Fact]
+    public void TestANoopReductionReducesEachElementAloneOnJax() => NoopReductionsReduceEachElementAlone(new ComputeContext(Jax));
+
+    [Fact]
+    public void TestWhereSelectsOnEveryIntegerTypeAndBoolOnJax() => WhereSelectsOnEveryIntegerTypeAndBool(new ComputeContext(Jax));
+
+    // #441: XLA replaces a constant equal to an iota with the iota, losing the sign of a -0
+    [Fact(Skip = "#441: XLA replaces a constant equal to an iota with the iota, losing the sign of a -0")]
+    public void TestANegativeZeroInAConstantEqualToAnIotaKeepsItsSignOnJax()
+        => Assert.True(AutoTest.AdvancedTestGraph<NegativeZeroInAnIotaConstantCheck>([], [QeeAudit.Bits([2L], true, true)], context: new ComputeContext(Jax)));
 
     [Fact]
     public void TestAnAutoGradNodeIsJaxsGradientOfItsLoss()

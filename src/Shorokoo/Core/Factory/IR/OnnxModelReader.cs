@@ -430,6 +430,8 @@ namespace Shorokoo.Core.Factory.IR
                 rawDataBytes = OnnxUtils.ConvertToByteArray(tensorProto.Int64Datas);
             else if (tensorProto.Uint64Datas != null && tensorProto.Uint64Datas.Length > 0)
                 rawDataBytes = OnnxUtils.ConvertToByteArray(tensorProto.Uint64Datas);
+            else if (shape.Count == 0) // A tensor with no element holds no data, whatever its shape.
+                rawDataBytes = [];
             else if (shape == 1 || shape == 0) // If there's no data and we infer that the shape is a scalar, we'll assume 0.
                 rawDataBytes = OnnxUtils.GetRawBytesZero(type);
             else

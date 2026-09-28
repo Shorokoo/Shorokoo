@@ -2,8 +2,9 @@
 
 Axes arrive as an input from opset 13 (ReduceSum) or 18 (the others) and as an attribute before
 that; both are accepted and the input wins, and an input must be concrete (`runtime.ints`). An empty
-axes list reduces everything unless noop_with_empty_axes is set, in which case the input comes back
-unchanged. Every reduction keeps the input's element type, as ONNX does and numpy's own integer sums
+axes list reduces everything unless noop_with_empty_axes is set, in which case no axis is reduced:
+each element is reduced as a group of its own, which is the element itself for Sum, Mean, Max, Min
+and Prod, its square for SumSquare, its absolute value for L1 and L2, and so on. Every reduction keeps the input's element type, as ONNX does and numpy's own integer sums
 do not. A 16-bit float is reduced in float32, as the other backends accumulate it.
 """
 
@@ -20,11 +21,11 @@ _HALF = (np.dtype(np.float16), np.dtype(jnp.bfloat16))
 
 
 def _dims(operator, data, axes_input, axes, noop_with_empty_axes):
-    """The dimensions to reduce, or None for the identity."""
+    """The dimensions to reduce; none when noop_with_empty_axes is set and the axes are empty."""
     if axes_input is not None:
         axes = _rt.ints(axes_input, operator, "its axes")
     if not axes:
-        return None if noop_with_empty_axes else list(range(data.ndim))
+        return [] if noop_with_empty_axes else list(range(data.ndim))
     rank = data.ndim
     return sorted({a % rank for a in axes}) if rank else []
 
@@ -38,17 +39,16 @@ def _filled(xp, data, dims, keepdims, value):
 def _reduce(operator, fn, empty_value, data, axes_input, axes, keepdims, noop_with_empty_axes):
     """`fn(xp, x, dims, keep)` over the dimensions the node names, cast back to data's type."""
     dims = _dims(operator, data, axes_input, axes, noop_with_empty_axes)
-    if dims is None:
-        return data
     xp = _rt.xp(data)
+    work = data.astype(np.float32) if np.dtype(data.dtype) in _HALF else data
     if not dims:
-        # A scalar reduced over no axes: reducing a leading axis of one gives each reduction its
-        # own answer for a single element (the element, its square, its absolute value...).
-        return fn(xp, data.reshape(1), (0,), False).astype(data.dtype)
+        # No axis reduced: every element is a group of its own. Reducing a leading axis of one
+        # gives each reduction its own answer for a single element (the element, its square, its
+        # absolute value...).
+        return fn(xp, work.reshape((1,) + tuple(work.shape)), (0,), False).astype(data.dtype)
     if any(data.shape[d] == 0 for d in dims):
         value = empty_value(data.dtype) if callable(empty_value) else empty_value
         return _filled(xp, data, dims, keepdims, value)
-    work = data.astype(np.float32) if np.dtype(data.dtype) in _HALF else data
     return fn(xp, work, tuple(dims), bool(keepdims)).astype(data.dtype)
 
 

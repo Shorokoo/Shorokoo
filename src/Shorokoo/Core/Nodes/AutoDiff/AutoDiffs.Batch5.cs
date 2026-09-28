@@ -584,45 +584,26 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             // === SAME mode: resolve auto_pad to dynamic explicit pads ===
             // ONNX AvgPool with SAME_UPPER/SAME_LOWER chooses pads at runtime so the
             // output spatial dims equal ceil(input / stride). For each spatial dim:
-            //   pad_total = max(0, (output - 1) * stride + (kernel - 1) * dilation + 1 - input)
-            //   SAME_UPPER: pad_begin = pad_total / 2,  pad_end = pad_total - pad_begin
-            //   SAME_LOWER: pad_begin = (pad_total + 1) / 2, pad_end = pad_total - pad_begin
-            // We can't pass these to Col2Im's static `pads` attribute, so instead we
-            // inflate Col2Im's dynamic `image_shape` input to absorb them and Slice the
-            // result down to x's spatial shape at the end.
-            Variable[]? padBeginVars = null;
+            //   pad_total = (output - 1) * stride + (kernel - 1) * dilation + 1 - input
+            //   SAME_UPPER: pad_begin = floor(pad_total / 2)
+            //   SAME_LOWER: pad_begin = ceil(pad_total / 2)
+            // pad_total is negative for some lengths when the stride exceeds the kernel's
+            // extent, and a negative pad_begin starts the first window past the input's first
+            // element. We can't pass these to Col2Im's static `pads` attribute, so instead the
+            // fold runs over every window's extent (or the input from pad_begin on, if longer)
+            // and the input's positions are taken out of it at the end.
+            Variable? padBegin = null;
             Variable? paddedImageShape = null;
+            Variable? inLength = null;
             if (isSameMode)
             {
-                var xShapeSame = OnnxOp.Shape(x);
-                var gradShapeSame = OnnxOp.Shape(grad);
-                padBeginVars = new Variable[nDims];
-                var imageShapeParts = new Variable[nDims];
-
-                for (int d = 0; d < nDims; d++)
-                {
-                    var idx = Globals.Scalar(2L + d);
-                    Tensor<int64> outDim = OnnxOp.Gather(gradShapeSame, idx, axis: 0);
-                    Tensor<int64> inDim = OnnxOp.Gather(xShapeSame, idx, axis: 0);
-                    var padTotalCandidate = (outDim - Globals.Scalar(1L)) * Globals.Scalar(strides[d])
-                                          + Globals.Scalar((kernelShape[d] - 1) * dilations[d])
-                                          + Globals.Scalar(1L) - inDim;
-                    Tensor<int64> padTotal = OnnxOp.Max(
-                        (Variable)Globals.Scalar(0L),
-                        padTotalCandidate);
-
-                    Tensor<int64> padBegin = sameLower
-                        ? (padTotal + Globals.Scalar(1L)) / Globals.Scalar(2L)
-                        : padTotal / Globals.Scalar(2L);
-                    // Store the Immutable* graph value so later reads can downcast it.
-                    padBeginVars[d] = (Variable)padBegin;
-
-                    imageShapeParts[d] = OnnxOp.Reshape(
-                        inDim + padTotal,
-                        Globals.Vector(1L),
-                        allowZero: false);
-                }
-                paddedImageShape = OnnxOp.Concat(imageShapeParts, axis: 0);
+                inLength = OnnxOp.Shape(x, start: 2L);
+                var covered = OnnxOp.Add(
+                    OnnxOp.Mul(OnnxOp.Sub(OnnxOp.Shape(grad, start: 2L), Globals.Vector([.. Enumerable.Repeat(1L, nDims)])),
+                        Globals.Vector(strides)),
+                    Globals.Vector([.. Enumerable.Range(0, nDims).Select(d => (kernelShape[d] - 1) * dilations[d] + 1)]));
+                padBegin = SameStartPadding(OnnxOp.Sub(covered, inLength), strides, sameLower);
+                paddedImageShape = OnnxOp.Max(covered, OnnxOp.Add(padBegin, inLength));
             }
 
             // === Step 1: scale grad by per-window divisor.
@@ -703,29 +684,9 @@ namespace Shorokoo.Core.Nodes.AutoDiff
             }
             var folded = OnnxOp.Col2Im(col, imageShape, blockShape, dilations, col2imPads, strides);
 
-            // === Step 4: for SAME mode, slice off the padding edges ===
+            // === Step 4: for SAME mode, take the input's positions out of the padded fold ===
             if (!isSameMode) return [folded];
-
-            // Build dynamic starts/ends. starts[d] = pad_begin[d];
-            // ends[d] = pad_begin[d] + x_size[d] = padded_size[d] - pad_end[d]. We use
-            // (padded - pad_end) because the latter is a plain Sub we already have. But
-            // start + x_size is simpler — compute that.
-            var xShapeFinal = OnnxOp.Shape(x);
-            var startsParts = new Variable[nDims];
-            var endsParts = new Variable[nDims];
-            var axesArray = new long[nDims];
-            for (int d = 0; d < nDims; d++)
-            {
-                Tensor<int64> xSizeD = OnnxOp.Gather(xShapeFinal, Globals.Scalar(2L + d), axis: 0);
-                Tensor<int64> pb = (Variable)padBeginVars![d];
-                startsParts[d] = OnnxOp.Reshape(pb, Globals.Vector(1L), allowZero: false);
-                endsParts[d] = OnnxOp.Reshape(pb + xSizeD, Globals.Vector(1L), allowZero: false);
-                axesArray[d] = 2L + d;
-            }
-            var startsVec = OnnxOp.Concat(startsParts, axis: 0);
-            var endsVec = OnnxOp.Concat(endsParts, axis: 0);
-            var gradX = OnnxOp.Slice(folded, startsVec, endsVec, Globals.Vector(axesArray), null);
-            return [gradX];
+            return [UnpaddedFold(folded, padBegin!, inLength!, nDims, SameMayCrop(kernelShape, dilations, strides))];
         }
 
         // ===== MaxPool (variadic registration) =====

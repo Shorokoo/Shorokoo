@@ -6308,6 +6308,8 @@ public class TrainingRigTrainingBackendCoverageTests
         public bool AcceptsTrainingFormat(string format)
             => format is TrainingFormats.Onnx or TrainingFormats.OnnxAutoGrad;
 
+        public string? KernelWorkaroundSet => inner.KernelWorkaroundSet;
+
         public BackendDescription Description => inner.Description;
         public MemorySpace MemorySpace => inner.MemorySpace;
         public object RuntimeIdentity => inner.RuntimeIdentity;

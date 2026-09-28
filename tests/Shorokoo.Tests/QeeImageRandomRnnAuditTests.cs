@@ -38,7 +38,7 @@ public class QeeImageRandomRnnAuditTests
     {
         var x8 = F32Wave([1L, 1L, 8L, 8L]);
         Assert.True(QeeAudit.Check<QeeResizeShapeAuditCheck>(x8));
-        Assert.True(QeeAudit.QeeOnly<QeeResizeNegativeAxesAuditCheck>(x8));
+        Assert.True(QeeAudit.Check<QeeResizeNegativeAxesAuditCheck>(x8));
         Assert.True(QeeAudit.Check<QeeUpsampleAffineGridSampleAuditCheck>(F32Wave([1L, 2L, 4L, 4L])));
         Assert.True(QeeAudit.Check<QeeAffineGridSample5DAuditCheck>(F32Wave([1L, 1L, 3L, 4L, 4L])));
         Assert.True(QeeAudit.Check<QeeRoiAlignShapeAuditCheck>(
@@ -213,12 +213,61 @@ public class QeeImageRandomRnnAuditTests
             [F32([1L, 1L, 1L, 4L], 1f, 2f, 3f, 4f)],
             expected: [2.5, 3, 3.5, 4, 2, 3, 3, 4, 2.5, 3, 3.59375, 4, 1.66796875, 2.5, 3.33203125, 4]));
 
-    // #421: ONNX Runtime's cubic Resize scaled on the middle axes of a 4-D input extrapolates at the wrong elements
-    [Fact(Skip = "#421: ONNX Runtime's cubic Resize scaled on the middle axes of a 4-D input extrapolates at the wrong elements")]
+    [Fact]
     public void TestCubicCropAndResizeAlongChannelsExtrapolatesWhereTheRoiLeavesTheInput()
         => Assert.True(AutoTest.AdvancedTestGraph<CubicCropAndResizeAlongChannelsValues>([],
             [F32([1L, 3L, 1L, 2L], 0f, 1f, 2f, 3f, 4f, 5f)],
             expected: [2, 3, 2.992, 3.992, 3.696, 4.696, -1, -1, -1, -1, -1, -1, 2, 3, 4, 5, -1, -1]));
+
+    [Fact]
+    public void TestCubicCropAndResizeScaledOnTheMiddleAxesExtrapolatesWhereTheRoiLeavesTheInput()
+        => Assert.True(AutoTest.AdvancedTestGraph<CubicCropAndResizeChannelsLastValues>([],
+            [F32([1L, 3L, 2L, 2L], [.. Enumerable.Range(0, 12).Select(i => (float)i)])],
+            expected: [-1, -1, 4.7207031, 5.7207031, 6, 7, -1, -1, 6.7047029, 7.7047033, 7.984, 8.984, -1, -1, 8.1127014, 9.1127024,
+                9.392, 10.392, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+                4, 5, 6, 7, 5.984, 6.984, 7.984, 8.984, 7.392, 8.392, 9.392, 10.392, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+                1.625, 2.625, 3.625, 4.625, 6.375, 7.375, 8.375, 9.375, -1, -1, -1, -1,
+                4, 5, 4.6296296, 5.6296296, 5.3703742, 6.3703752, 6, 7, 5.984, 6.984, 6.6136298, 7.6136298, 7.3543763, 8.3543777,
+                7.984, 8.984, 7.392, 8.392, 8.0216284, 9.0216293, 8.7623768, 9.7623787, 9.392, 10.392,
+                -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1]));
+
+    [Fact]
+    public void TestCubicAntialiasedCropAndResizeKeepsThePolicyScale()
+        => Assert.True(AutoTest.AdvancedTestGraph<CubicAntialiasedCropAndResizePolicyValues>([],
+            [F32([1L, 4L, 6L, 2L], [.. Enumerable.Range(0, 48).Select(i => (float)(i % 7))])],
+            expected: [-1, -1, -1, -1, -1, -1, -1, -1, 3.6422229, 4.6427097, 1.1374716, 2.3953724, 3.9555788, 3.4888892, 3.9883382, 1.1786468,
+                -1, -1, -1, -1, -1, -1, -1, -1]));
+
+    [Fact]
+    public void TestResizeOverAxesBetweenTransposesMatchesTheResizeOverEveryAxis()
+        => Assert.True(AutoTest.AdvancedTestGraph<ResizeOverAxesBetweenTransposesCheck>([],
+            [F32([1L, 3L, 4L, 5L], [.. Enumerable.Range(0, 60).Select(i => (float)i)])]));
+
+    [Fact]
+    public void TestResizeOverAxesMatchesTheResizeOverEveryAxisInEveryModeAndOperand()
+        => Assert.True(AutoTest.AdvancedTestGraph<ResizeOverAxesCheck>([],
+            [F32([1L, 3L, 4L, 5L], [.. Enumerable.Range(0, 60).Select(i => (float)i)])]));
+
+    [Fact]
+    public void TestResizeOverAxesTakesAnEmptyRoiOrScalesAsAbsent()
+        => Assert.True(AutoTest.AdvancedTestGraph<ResizeOverAxesWithEmptyOperandsCheck>([],
+            [F32([1L, 3L, 4L, 5L], [.. Enumerable.Range(0, 60).Select(i => (float)i)])]));
+
+    [Fact]
+    public void TestResizePolicyOverAxesBetweenTransposesMatchesTheResizeOnTheInput()
+        => Assert.True(AutoTest.AdvancedTestGraph<ResizePolicyOverAxesBetweenTransposesCheck>([],
+            [F32([1L, 3L, 4L, 5L], [.. Enumerable.Range(0, 60).Select(i => (float)i)])]));
+
+    [Fact]
+    public void TestResizePolicyOverNegativeAxesMatchesTheResizeOverTheAxesCountedFromTheFront()
+        => Assert.True(AutoTest.AdvancedTestGraph<ResizePolicyOverNegativeAxesCheck>([],
+            [F32([1L, 3L, 4L, 5L], [.. Enumerable.Range(0, 60).Select(i => (float)i)])]));
+
+    // #432: ONNX Runtime drops a Range returned beside the Gather it drives from the outputs at full optimization
+    [Fact(Skip = "#432: ONNX Runtime drops a Range returned beside the Gather it drives from the outputs at full optimization")]
+    public void TestRangeReturnedBesideTheGatherItDrivesIsReturned()
+        => Assert.True(AutoTest.AdvancedTestGraph<RangeReturnedBesideTheGatherItDrivesValues>([],
+            [F32([3L, 2L], 0f, 1f, 2f, 3f, 4f, 5f)], expected: [0, 1, 2, 0, 1, 2, 3, 4, 5]));
 
     [Fact]
     public void TestCol2ImOverOneSpatialAxisWithPadsAndStride()

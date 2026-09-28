@@ -38,9 +38,11 @@ public readonly record struct OutputAlias(string Output, string Input);
 /// runtime may hand back in the memory of one of the node's inputs: that of an <c>Identity</c>,
 /// <c>Reshape</c>, <c>Squeeze</c>, <c>Unsqueeze</c>, <c>Flatten</c> and a few others over their first
 /// input, and the running mean and variance of a <c>BatchNormalization</c> over the mean and
-/// variance it was given. Ancestry counts only the edges a runtime cannot fold away: an edge into
-/// the standard <c>Shape</c> or <c>Size</c> — which read no memory and are no readers — orders
-/// nothing once the shape is known when the session is built, so it does not count.</item>
+/// variance it was given. Ancestry follows a node's inputs and the outer values its subgraphs
+/// read, which a runtime has computed before it runs the node, and counts only the edges a runtime
+/// cannot fold away: an edge into the standard <c>Shape</c> or <c>Size</c> — which read no memory
+/// and are no readers — orders nothing once the shape is known when the session is built, so it
+/// does not count.</item>
 /// <item><c>P</c> itself reads <c>I</c> only as the first operand of a two-input <c>Add</c>,
 /// <c>Sub</c>, <c>Mul</c> or <c>Div</c>, which reads each element before writing the same element
 /// of its output — the in-place form ONNX Runtime uses for these operators itself. With <c>O</c>
@@ -145,6 +147,9 @@ public static class OutputAliasProof
         private readonly Dictionary<string, int> _outputs = new(StringComparer.Ordinal);
         private readonly Dictionary<string, TypeProto> _types = new(StringComparer.Ordinal);
 
+        // Per node, the outer values its subgraphs read other than through a shape.
+        private readonly Dictionary<int, HashSet<string>> _captured = [];
+
         // A stamp per node for the ancestry walks, so each walk marks what it visited without
         // clearing an array first.
         private readonly int[] _visited;
@@ -176,6 +181,16 @@ public static class OutputAliasProof
                 {
                     if (attribute.G is { } subgraph) ReferencedFrom(subgraph, _referencedBySubgraphs);
                     foreach (var each in attribute.Graphs) ReferencedFrom(each, _referencedBySubgraphs);
+                }
+                if (HoldsSubgraph(node))
+                {
+                    var captured = new HashSet<string>(StringComparer.Ordinal);
+                    foreach (var attribute in node.Attributes)
+                    {
+                        if (attribute.G is { } subgraph) ReferencedFrom(subgraph, captured, orderingOnly: true);
+                        foreach (var each in attribute.Graphs) ReferencedFrom(each, captured, orderingOnly: true);
+                    }
+                    _captured[n] = captured;
                 }
             }
         }
@@ -230,7 +245,7 @@ public static class OutputAliasProof
         /// Whether every one of <paramref name="readers"/> is an ancestor of node
         /// <paramref name="writer"/>, walking back from it along the edges that order execution
         /// whatever a runtime folds: explicit inputs, except those of a node that reads only a
-        /// shape.
+        /// shape, and the outer values a node's subgraphs read other than through a shape.
         /// </summary>
         private bool AllAncestorsOf(int writer, HashSet<int> readers)
         {
@@ -243,7 +258,8 @@ public static class OutputAliasProof
             {
                 var node = _nodes[n];
                 if (ReadsOnlyAShape(node)) continue;
-                foreach (var input in node.Inputs)
+                var captured = _captured.TryGetValue(n, out var names) ? names : [];
+                foreach (var input in node.Inputs.Concat(captured))
                 {
                     if (input.Length == 0 || !_producer.TryGetValue(input, out var producer)) continue;
                     if (_visited[producer] == stamp) continue;
@@ -297,8 +313,9 @@ public static class OutputAliasProof
         }
 
         /// <summary>Adds to <paramref name="found"/> every name <paramref name="subgraph"/> — and any
-        /// subgraph inside it — reads from outside itself.</summary>
-        private static void ReferencedFrom(GraphProto subgraph, HashSet<string> found)
+        /// subgraph inside it — reads from outside itself; with <paramref name="orderingOnly"/>,
+        /// only those it reads other than through the standard <c>Shape</c> or <c>Size</c>.</summary>
+        private static void ReferencedFrom(GraphProto subgraph, HashSet<string> found, bool orderingOnly = false)
         {
             var defined = new HashSet<string>(StringComparer.Ordinal);
             foreach (var input in subgraph.Inputs) defined.Add(input.Name);
@@ -309,11 +326,12 @@ public static class OutputAliasProof
             var inner = new HashSet<string>(subgraph.Outputs.Select(o => o.Name), StringComparer.Ordinal);
             foreach (var node in subgraph.Nodes)
             {
-                foreach (var input in node.Inputs) inner.Add(input);
+                if (!orderingOnly || !ReadsOnlyAShape(node))
+                    foreach (var input in node.Inputs) inner.Add(input);
                 foreach (var attribute in node.Attributes)
                 {
-                    if (attribute.G is { } nested) ReferencedFrom(nested, inner);
-                    foreach (var each in attribute.Graphs) ReferencedFrom(each, inner);
+                    if (attribute.G is { } nested) ReferencedFrom(nested, inner, orderingOnly);
+                    foreach (var each in attribute.Graphs) ReferencedFrom(each, inner, orderingOnly);
                 }
             }
             foreach (var name in inner)

@@ -346,6 +346,8 @@ public class SideBySideBackendCoverageTests
 
         public bool AcceptsTrainingFormat(string format) => inner.AcceptsTrainingFormat(format);
 
+        public string? KernelWorkaroundSet => inner.KernelWorkaroundSet;
+
         public void Release(IShorokooTensorValue value)
         {
             Released.Add(value);

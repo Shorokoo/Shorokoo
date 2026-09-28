@@ -258,10 +258,7 @@ namespace Shorokoo.Tests.Modules
         }
     }
 
-    /// <summary>Resize with NEGATIVE axes (spec opset 18+: counted from the back) — QEE-only:
-    /// ONNX Runtime 1.25.1's Resize kernel rejects negative axes ("Scale value should be
-    /// greater than 0"), so this module is driven through QeeAudit strict-QEE without ORT.
-    /// Input x is expected as [1,1,8,8].</summary>
+    /// <summary>Resize with negative axes, counted from the back. Input x is [1,1,8,8].</summary>
     [Module]
     public partial class QeeResizeNegativeAxesAuditCheck
     {
@@ -1056,6 +1053,159 @@ namespace Shorokoo.Tests.Modules
             var roi = Vector(0f, 0.5f, 0f, 0f, 1f, 1.5f, 1f, 1f);
             return CropAndResizeVariantsValues.Crop(x, roi, null, Vector(1L, 6L, 1L, 2L), null, null, ResizeMode.Cubic).Concat(0L,
                 CropAndResizeVariantsValues.Crop(x, roi, Vector(1f, 1f, 1f, 1f), null, null, null, ResizeMode.Cubic));
+        }
+    }
+
+    /// <summary>Cubic tf_crop_and_resize with axes 0 and 3 at scale 1 and axis 1 scaled: an NHWC input scaled
+    /// along H and W, C doubled over axes [1], C at its length under a roi, and a not_larger policy over axes
+    /// [1, 2], each flattened. Input x is [1,3,2,2].</summary>
+    [Module]
+    public partial class CubicCropAndResizeChannelsLastValues
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x)
+            => CropAndResizeVariantsValues.Crop(x, Vector(0f, 0.5f, -0.25f, 0f, 1f, 1.5f, 1f, 1f), Vector(1f, 2f, 1.5f, 1f), null, null, null, ResizeMode.Cubic).Concat(0L,
+                CropAndResizeVariantsValues.Crop(x, Vector(0.5f, 1.5f), Vector(2f), null, [1L], null, ResizeMode.Cubic),
+                CropAndResizeVariantsValues.Crop(x, Vector(0f, 0.25f, 0f, 0f, 1f, 1.25f, 1f, 1f), null, Vector(1L, 3L, 2L, 2L), null, null, ResizeMode.Cubic),
+                CropAndResizeVariantsValues.Crop(x, Vector(0.5f, 0f, 1.5f, 1f), null, Vector(6L, 5L), [1L, 2L], KeepAspectRatioPolicy.not_larger, ResizeMode.Cubic));
+    }
+
+    /// <summary>Antialiased cubic tf_crop_and_resize downscaling C and H under a not_larger policy over axes
+    /// [1, 2], with a roi leaving the input along C. Input x is [1,4,6,2].</summary>
+    [Module]
+    public partial class CubicAntialiasedCropAndResizePolicyValues
+    {
+        public static Tensor<float32> Inline(Tensor<float32> x)
+            => ((Tensor<float32>)OnnxOp.Resize(x, roi: Vector(-0.2f, 0.05f, 1.1f, 0.95f), scales: null, sizes: Vector(3L, 4L),
+                antialias: true, axes: [1L, 2L], coordinateTransformationMode: CoordinateTransformationMode.Tf_crop_and_resize,
+                cubicCoeffA: null, excludeOutside: null, extrapolationValue: -1f,
+                keepAspectRatioPolicy: KeepAspectRatioPolicy.not_larger, mode: ResizeMode.Cubic, nearestMode: null)).Reshape(Vector(-1L));
+    }
+
+    /// <summary>Linear Resize over axes [2, 3] and over axes [1, 2] of an input transposed into place and back,
+    /// against the same resizes written over every axis. Input x is [1,3,4,5].</summary>
+    [Module]
+    public partial class ResizeOverAxesBetweenTransposesCheck
+    {
+        private static Tensor<float32> Around(Tensor<float32> x, long[] perm, long[] back, Vector<float32> scales, long[]? axes)
+            => (Tensor<float32>)OnnxOp.Transpose(OnnxOp.Resize(OnnxOp.Transpose(x, perm), roi: null, scales: scales, sizes: null,
+                antialias: null, axes: axes, coordinateTransformationMode: null, cubicCoeffA: null, excludeOutside: null,
+                extrapolationValue: null, keepAspectRatioPolicy: null, mode: ResizeMode.Linear, nearestMode: null), back);
+
+        public static Scalar<bit> Inline(Tensor<float32> x)
+        {
+            var mismatch =
+                Apart(Around(x, [0L, 3L, 1L, 2L], [0L, 2L, 3L, 1L], Vector(2f, 2f), [2L, 3L]),
+                    Around(x, [0L, 3L, 1L, 2L], [0L, 2L, 3L, 1L], Vector(1f, 1f, 2f, 2f), null)) +
+                Apart(Around(x, [0L, 2L, 3L, 1L], [0L, 3L, 1L, 2L], Vector(2f, 2f), [1L, 2L]),
+                    Around(x, [0L, 2L, 3L, 1L], [0L, 3L, 1L, 2L], Vector(1f, 2f, 2f, 1f), null));
+            return mismatch < Scalar(1L);
+        }
+    }
+
+    /// <summary>Resize over named axes against the same resize written over every axis, between the transposes
+    /// of an NCHW-to-NHWC round trip and on the input itself: linear, nearest over sizes, cubic over negative
+    /// axes, a nearest not_larger policy over every axis out of order, a crop over axes, and axes out of order.
+    /// Input x is [1,3,4,5].</summary>
+    [Module]
+    public partial class ResizeOverAxesCheck
+    {
+        private static Tensor<float32> R(Tensor<float32> t, ResizeMode mode, Vector<float32>? scales, Vector<int64>? sizes, long[]? axes,
+            KeepAspectRatioPolicy? policy = null, Vector<float32>? roi = null)
+            => (Tensor<float32>)OnnxOp.Resize(t, roi: roi, scales: scales, sizes: sizes, antialias: null, axes: axes,
+                coordinateTransformationMode: roi is null ? null : CoordinateTransformationMode.Tf_crop_and_resize, cubicCoeffA: null,
+                excludeOutside: null, extrapolationValue: null, keepAspectRatioPolicy: policy, mode: mode, nearestMode: null);
+
+        private static Scalar<int64> Around(Tensor<float32> x, Func<Tensor<float32>, Tensor<float32>> named, Func<Tensor<float32>, Tensor<float32>> full)
+            => Apart((Tensor<float32>)OnnxOp.Transpose(named((Tensor<float32>)OnnxOp.Transpose(x, [0L, 2L, 3L, 1L])), [0L, 3L, 1L, 2L]),
+                (Tensor<float32>)OnnxOp.Transpose(full((Tensor<float32>)OnnxOp.Transpose(x, [0L, 2L, 3L, 1L])), [0L, 3L, 1L, 2L]));
+
+        public static Scalar<bit> Inline(Tensor<float32> x)
+        {
+            var mismatch =
+                Around(x, t => R(t, ResizeMode.Linear, Vector(2f, 1.5f), null, [1L, 2L]), t => R(t, ResizeMode.Linear, Vector(1f, 2f, 1.5f, 1f), null, null)) +
+                Around(x, t => R(t, ResizeMode.Nearest, null, Vector(7L, 9L), [1L, 2L]), t => R(t, ResizeMode.Nearest, null, Vector(1L, 7L, 9L, 3L), null)) +
+                Around(x, t => R(t, ResizeMode.Cubic, Vector(2f, 2f), null, [-3L, -2L]), t => R(t, ResizeMode.Cubic, Vector(1f, 2f, 2f, 1f), null, null)) +
+                Around(x, t => R(t, ResizeMode.Nearest, null, Vector(2L, 12L, 10L, 6L), [0L, 2L, 1L, 3L], KeepAspectRatioPolicy.not_larger),
+                    t => R(t, ResizeMode.Nearest, null, Vector(2L, 10L, 12L, 6L), null, KeepAspectRatioPolicy.not_larger)) +
+                Around(x, t => R(t, ResizeMode.Linear, Vector(2f, 2f), null, [1L, 2L], roi: Vector(0.1f, -0.2f, 0.9f, 1.2f)),
+                    t => R(t, ResizeMode.Linear, Vector(1f, 2f, 2f, 1f), null, null, roi: Vector(0f, 0.1f, -0.2f, 0f, 1f, 0.9f, 1.2f, 1f))) +
+                Around(x, t => R(t, ResizeMode.Linear, Vector(1f, 1f, 3f, 2f), null, [0L, 3L, 2L, 1L]), t => R(t, ResizeMode.Linear, Vector(1f, 2f, 3f, 1f), null, null)) +
+                Apart(R(x, ResizeMode.Linear, null, Vector(8L, 7L), [2L, 3L]), R(x, ResizeMode.Linear, null, Vector(1L, 3L, 8L, 7L), null)) +
+                Apart(R(x, ResizeMode.Cubic, Vector(1.5f), null, [-1L]), R(x, ResizeMode.Cubic, Vector(1f, 1f, 1f, 1.5f), null, null));
+            return mismatch < Scalar(1L);
+        }
+    }
+
+    /// <summary>Resize over named axes whose roi or scales is present but empty, constant and computed, against the
+    /// same resize written over every axis. Input x is [1,3,4,5].</summary>
+    [Module]
+    public partial class ResizeOverAxesWithEmptyOperandsCheck
+    {
+        private static Tensor<float32> R(Tensor<float32> t, Variable? roi, Variable? scales, Variable? sizes, long[]? axes)
+            => (Tensor<float32>)OnnxOp.Resize(t, roi: roi, scales: scales, sizes: sizes, antialias: null, axes: axes,
+                coordinateTransformationMode: null, cubicCoeffA: null, excludeOutside: null, extrapolationValue: null,
+                keepAspectRatioPolicy: null, mode: ResizeMode.Linear, nearestMode: null);
+
+        public static Scalar<bit> Inline(Tensor<float32> x)
+        {
+            var x4 = x.Reshape(Vector(1L, 3L, 4L, 5L));
+            var computedEmpty = OnnxOp.Slice(OnnxOp.Cast(OnnxOp.Shape(x), null, DType.Float32), Vector(0L), Vector(0L));
+            var mismatch =
+                Apart(R(x, Vector(Array.Empty<float>()), Vector(2f, 2f), null, [2L, 3L]), R(x, null, Vector(1f, 1f, 2f, 2f), null, null)) +
+                Apart(R(x, null, Vector(Array.Empty<float>()), Vector(3L, 5L), [2L, 3L]), R(x, null, null, Vector(1L, 3L, 3L, 5L), null)) +
+                Apart(R(x, computedEmpty, Vector(2f, 2f), null, [2L, 3L]), R(x, null, Vector(1f, 1f, 2f, 2f), null, null)) +
+                Apart(R(x, computedEmpty, computedEmpty, Vector(3L, 5L), [-2L, -1L]), R(x, null, null, Vector(1L, 3L, 3L, 5L), null)) +
+                Apart(R(x4, computedEmpty, Vector(2f, 2f), null, [2L, 3L]), R(x, null, Vector(1f, 1f, 2f, 2f), null, null)) +
+                Apart(R(x4, Vector(Array.Empty<float>()), computedEmpty, Vector(3L, 5L), [-2L, -1L]), R(x, null, null, Vector(1L, 3L, 3L, 5L), null));
+            return mismatch < Scalar(1L);
+        }
+    }
+
+    /// <summary>A not_larger policy over axes [1, 2] between the transposes of an NCHW-to-NHWC round trip, against
+    /// the same resize on the input itself over axes [2, 3]. Input x is [1,3,4,5].</summary>
+    [Module]
+    public partial class ResizePolicyOverAxesBetweenTransposesCheck
+    {
+        public static Scalar<bit> Inline(Tensor<float32> x)
+        {
+            Tensor<float32> R(Tensor<float32> t, long[] axes) => (Tensor<float32>)OnnxOp.Resize(t, roi: null, scales: null,
+                sizes: Vector(7L, 9L), antialias: null, axes: axes, coordinateTransformationMode: null, cubicCoeffA: null,
+                excludeOutside: null, extrapolationValue: null, keepAspectRatioPolicy: KeepAspectRatioPolicy.not_larger,
+                mode: ResizeMode.Linear, nearestMode: null);
+            var mismatch = Apart((Tensor<float32>)OnnxOp.Transpose(R((Tensor<float32>)OnnxOp.Transpose(x, [0L, 2L, 3L, 1L]), [1L, 2L]), [0L, 3L, 1L, 2L]),
+                R(x, [2L, 3L]));
+            return mismatch < Scalar(1L);
+        }
+    }
+
+    /// <summary>A not_larger and a not_smaller policy over negative axes, against the same resizes over the axes
+    /// counted from the front. Input x is [1,3,4,5].</summary>
+    [Module]
+    public partial class ResizePolicyOverNegativeAxesCheck
+    {
+        private static Tensor<float32> R(Tensor<float32> t, long[] axes, Vector<int64> sizes, KeepAspectRatioPolicy policy)
+            => (Tensor<float32>)OnnxOp.Resize(t, roi: null, scales: null, sizes: sizes, antialias: null, axes: axes,
+                coordinateTransformationMode: null, cubicCoeffA: null, excludeOutside: null, extrapolationValue: null,
+                keepAspectRatioPolicy: policy, mode: ResizeMode.Linear, nearestMode: null);
+
+        public static Scalar<bit> Inline(Tensor<float32> x)
+        {
+            var mismatch =
+                Apart(R(x, [-2L, -1L], Vector(7L, 9L), KeepAspectRatioPolicy.not_larger), R(x, [2L, 3L], Vector(7L, 9L), KeepAspectRatioPolicy.not_larger)) +
+                Apart(R(x, [-1L, -2L], Vector(9L, 5L), KeepAspectRatioPolicy.not_smaller), R(x, [3L, 2L], Vector(9L, 5L), KeepAspectRatioPolicy.not_smaller));
+            return mismatch < Scalar(1L);
+        }
+    }
+
+    /// <summary>The indices Range(0, N) of the leading axis returned beside the Gather along that axis they
+    /// drive. Input x is [3,2].</summary>
+    [Module]
+    public partial class RangeReturnedBesideTheGatherItDrivesValues
+    {
+        public static (Tensor<int64>, Tensor<float32>) Inline(Tensor<float32> x)
+        {
+            var indices = (Tensor<int64>)OnnxOp.Range(Scalar(0L), OnnxOp.Gather(OnnxOp.Shape(x), Scalar(0L), axis: 0), Scalar(1L));
+            return (indices, (Tensor<float32>)OnnxOp.Gather(x, indices, axis: 0));
         }
     }
 

@@ -85,7 +85,7 @@ internal static class RigScalingStack
 /// initial weights. Measured around initialization alone, not around a whole
 /// <see cref="TrainingRig.FromScratch"/>: a rig legitimately retains 100-150 MiB of graphs and
 /// state, which is both larger and noisier than the signal. Optimizer-state seeding is the other
-/// per-parameter session loop that keeps its outputs, and it takes the same copy — but its graph
+/// per-parameter run loop that keeps its outputs, and it takes the same copy — but its graph
 /// is a fill rather than a draw, so the arena it would pin is small enough to sit inside that
 /// noise, and no memory gate discriminates it. It is not pinned here.</para>
 ///

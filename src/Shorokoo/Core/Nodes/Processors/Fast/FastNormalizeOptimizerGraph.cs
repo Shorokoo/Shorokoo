@@ -418,51 +418,65 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
         }
 
         /// <summary>
-        /// Executes a <see cref="NormalizedOptimizerGraphInfo.StateInitGraph"/> with the given
-        /// input bindings (one <see cref="TensorData"/> per graph input, in input order:
-        /// hyperparameter seed values, then the parameter's initial value, then a zero gradient)
-        /// and returns the initial state values in state order. Mirrors
-        /// <see cref="FastInitializeModelParams"/>: inputs are baked as constants and the
-        /// initializer FUNCTION_INVOKEs run through <see cref="ComputeContext.Run(InternalComputationGraph, NamedModelParam[])"/>.
+        /// Executes a <see cref="NormalizedOptimizerGraphInfo.StateInitGraph"/> once per trainable
+        /// parameter — binding the hyperparameter seed values, then that parameter's initial value,
+        /// then a zero gradient of its shape — and returns each parameter's initial state values in
+        /// state order.
+        ///
+        /// <para>The graph is the same for every parameter, so it is compiled once per parameter
+        /// dtype and rank, and each parameter is a run of that session fed its own values, taken
+        /// from <paramref name="paramValue"/> one at a time: a session
+        /// build per parameter would make rig construction cost a constant per parameter
+        /// (Shorokoo/Shorokoo#404). The session runs unoptimized, as parameter initialization's
+        /// does, since each run computes its values once; each run hands its arena's unused blocks
+        /// back as it ends, and each result is copied off the session — the rig retains every value
+        /// this produces for its lifetime, the shape that makes a session-backed result cost its
+        /// session's whole arena (see <see cref="FastProcessorHelper.RehostOffSession"/>).</para>
         /// </summary>
-        internal static TensorData[] RunStateInitGraph(
+        internal static TensorData[][] RunStateInitGraph(
             InternalComputationGraph stateInitGraph,
             ComputeContext computeContext,
-            TensorData[] boundInputs)
+            TensorData[] hyperSeeds,
+            int paramCount,
+            Func<int, TensorData> paramValue)
         {
-            if (stateInitGraph.Inputs.Count != boundInputs.Length)
+            if (stateInitGraph.Inputs.Count != hyperSeeds.Length + 2)
                 throw new ArgumentException(
-                    $"State-init graph expects {stateInitGraph.Inputs.Count} inputs but {boundInputs.Length} " +
-                    "values were bound.", nameof(boundInputs));
+                    $"State-init graph expects {stateInitGraph.Inputs.Count} inputs but " +
+                    $"{hyperSeeds.Length + 2} values are bound (the hyperparameters, the parameter and " +
+                    "its gradient).", nameof(hyperSeeds));
 
-            var workGraph = stateInitGraph.Clone();
-            var constantAttrDefs = Definitions.NodeDefinitions[OpCodes.CONSTANT].AttributeDefs;
-
-            // Bake each graph input as a constant in place (preserving the node's output key, so
-            // no consumer rewiring is needed), then run the now-closed graph. Every input is baked,
-            // so the constants simply open the body.
-            var inputNodes = workGraph.InputNodes;
-            for (int i = 0; i < inputNodes.Count; i++)
+            // One parameter's value in hand at a time, as the caller hands them over; the sessions,
+            // whose arenas each run shrinks, are what stay.
+            var results = new TensorData[paramCount][];
+            var sessions = new Dictionary<(DType, int), CompiledGraph>();
+            try
             {
-                var inputNode = inputNodes[i];
-                inputNode.OpCode = OpCodes.CONSTANT;
-                inputNode.Attributes = OnnxCSharpAttributes.FromCSharpVals(
-                    new Dictionary<string, object?>
-                    {
-                        // The caller's values, which it keeps and reuses for the next parameter.
-                        [OnnxOpAttributeNames.AttrValue] =
-                            boundInputs[i].CopyTo(Shorokoo.Runtime.ComputeContext.Host).MoveToAttribute(),
-                    },
-                    constantAttrDefs);
-                inputNode.FullInputs = new Dictionary<string, List<FastTensorKey?>>();
-                inputNode.FriendlyName = null;
+                for (int i = 0; i < paramCount; i++)
+                {
+                    var paramData = paramValue(i);
+                    var kind = (paramData.DType, paramData.Shape.Dims.Length);
+                    if (!sessions.TryGetValue(kind, out var compiled))
+                        sessions[kind] = compiled = computeContext.Compile(
+                            stateInitGraph, Core.Backends.ShorokooGraphOptimization.DisableAll);
+                    var zeroGrad = TensorData.CreateFromRawBytes(
+                        paramData.Shape, paramData.DType,
+                        new byte[paramData.Shape.Count * (paramData.DType.EncodingBitCount / 8)]);
+                    // Every value goes in as a copy the run consumes: they are the caller's — the
+                    // rig's own initial values and hyperparameters, which are never fed, so none of
+                    // them ever holds a copy of itself in a runtime's memory.
+                    IData[] feeds = [.. hyperSeeds.Select(CopyOf), CopyOf(paramData), zeroGrad];
+                    results[i] = [.. compiled.Execute(feeds, compiled.DefaultRunSettings with { ShrinkArenaAfterRun = true })
+                        .Select(r => FastProcessorHelper.RehostOffSession(r.ToTensorData()))];
+                }
             }
+            finally
+            {
+                foreach (var compiled in sessions.Values) compiled.Dispose();
+            }
+            return results;
 
-            // Copied off their session, not returned as-is: this runs once per trainable
-            // parameter and the rig retains every value it produces for its lifetime, which is
-            // the shape that makes a session-backed result cost its session's whole arena.
-            var results = computeContext.Run(workGraph);
-            return [.. results.Select(r => FastProcessorHelper.RehostOffSession(r.ToTensorData()))];
+            static IData CopyOf(TensorData t) => TensorData.CreateFromRawBytes(t.Shape, t.DType, t.CopyRawMemory());
         }
     }
 }

@@ -4009,19 +4009,14 @@ namespace Shorokoo
                 ?? throw new InvalidOperationException("Optimizer state fields exist but no state-init graph was produced.");
             var statesPerParam = OptimizerStateDef.Fields.Length / TrainableParamStructDef.Fields.Length;
 
-            for (var paramIdx = 0; paramIdx < TrainableParamStructDef.Fields.Length; paramIdx++)
-            {
-                var paramData = paramValueFor(TrainableParamStructDef.Fields[paramIdx].Name);
-                var bytesPerElement = paramData.DType.EncodingBitCount / 8;
-                var zeroGrad = TensorData.CreateFromRawBytes(
-                    paramData.Shape, paramData.DType, new byte[paramData.Shape.Count * bytesPerElement]);
+            var paramCount = TrainableParamStructDef.Fields.Length;
+            var stateValues = Shorokoo.Core.Nodes.Processors.Fast.FastNormalizeOptimizerGraph
+                .RunStateInitGraph(stateInitGraph, ctx, hyperSeeds, paramCount,
+                    i => paramValueFor(TrainableParamStructDef.Fields[i].Name));
 
-                var stateValues = Shorokoo.Core.Nodes.Processors.Fast.FastNormalizeOptimizerGraph
-                    .RunStateInitGraph(stateInitGraph, ctx, [.. hyperSeeds, paramData, zeroGrad]);
-
+            for (var paramIdx = 0; paramIdx < paramCount; paramIdx++)
                 for (var s = 0; s < statesPerParam; s++)
-                    fields[OptimizerStateDef.Fields[paramIdx * statesPerParam + s].Name] = stateValues[s];
-            }
+                    fields[OptimizerStateDef.Fields[paramIdx * statesPerParam + s].Name] = stateValues[paramIdx][s];
             return fields;
         }
 

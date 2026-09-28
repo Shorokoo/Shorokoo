@@ -1721,8 +1721,8 @@ namespace Shorokoo.Runtime
         /// Compiles <paramref name="graph"/> into a session built with
         /// <paramref name="optimization"/> — for a caller that runs one graph many times, each run
         /// computing something once as a one-shot run would, and so wants the profile a one-shot run
-        /// gets rather than the one a kept session does: parameter initialization (see
-        /// <see cref="IsFullyConstant"/>).
+        /// gets rather than the one a kept session does: parameter initialization and
+        /// optimizer-state seeding (see <see cref="IsFullyConstant"/>).
         /// </summary>
         internal CompiledGraph Compile(InternalComputationGraph graph, ShorokooGraphOptimization optimization)
         {
@@ -2177,9 +2177,7 @@ namespace Shorokoo.Runtime
         /// level, since they are identical either way.</para>
         ///
         /// <para>The predicate is a property of the GRAPH, not of the caller, so it catches
-        /// every input-less one-shot: the RNG key resolver, optimizer-state seeding (which
-        /// bakes its inputs to constants and then clears them, so it is always input-less), and
-        /// <c>Eval</c>, which builds a zero-input graph unconditionally — so every eager
+        /// every input-less one-shot: the RNG key resolver and <c>Eval</c>, which builds a zero-input graph unconditionally — so every eager
         /// evaluation takes this path. That breadth is intended: each is a constant computed
         /// once and discarded, and the paragraph above applies to each unchanged.</para>
         ///
@@ -2187,11 +2185,11 @@ namespace Shorokoo.Runtime
         /// <see cref="CompileFromModel"/> session is kept and re-run, so there optimization is
         /// amortized and stays on — which is why a keyed feed inside a training-step or exported
         /// model still gets its constant key chain folded, as
-        /// <c>Documentation/rng-configuration.md</c> says it does. Parameter initialization is the
-        /// one kept session that asks for the same profile explicitly
-        /// (<see cref="Compile(InternalComputationGraph, ShorokooGraphOptimization)"/>): its
-        /// session takes the parameter's stream key as its one input, so this predicate does not
-        /// see it, but each run still computes one draw once, for which the reasons above hold
+        /// <c>Documentation/rng-configuration.md</c> says it does. Parameter initialization and
+        /// optimizer-state seeding are the kept sessions that ask for the same profile explicitly
+        /// (<see cref="Compile(InternalComputationGraph, ShorokooGraphOptimization)"/>): each takes
+        /// inputs — a parameter's stream key, or its value — so this predicate does not see it, but
+        /// each run still computes its values once, for which the reasons above hold
         /// unchanged.</para>
         /// </summary>
         private static bool IsFullyConstant(GraphProto graph) => graph.Inputs.Count == 0;

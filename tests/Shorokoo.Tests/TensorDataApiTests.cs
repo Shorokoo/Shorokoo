@@ -103,14 +103,24 @@ public class TensorDataApiCoverageTests
     }
 
     [Fact]
-    public void TestHostTensorRefusesAnElementTypeOtherThanItsStorageType()
+    public void TestEveryElementAccessRefusesATypeOtherThanItsStorageType()
     {
         var f32 = TensorData([2L], 1.5f, 2.5f).As<float32>();
-        Assert.ThrowsAny<Exception>(() => f32.CopyMemory<double>());
-        Assert.ThrowsAny<Exception>(() => f32.CopyMemory<int>());
-        Assert.ThrowsAny<Exception>(() => f32.ValueAt<int>(0));
-        Assert.ThrowsAny<Exception>(() => f32.WriteMemory<long>(_ => { }));
+        Assert.Throws<InvalidCastException>(() => f32.CopyMemory<double>());
+        Assert.Throws<InvalidCastException>(() => f32.CopyMemory<int>());
+        Assert.Throws<InvalidCastException>(() => f32.ValueAt<int>(0));
+        Assert.Throws<InvalidCastException>(() => f32.WriteMemory<long>(_ => { }));
+        Assert.Throws<InvalidCastException>(() => f32.AccessModifiableMemory<int>());
         Assert.Equal(2.5f, f32.ValueAt<float>(1));
+
+        var runtime = OnnxEngine.Eval(Scalar(2f) * Scalar(21f));
+        Assert.Throws<InvalidCastException>(() => runtime.AccessModifiableMemory<int>());
+        Assert.Throws<InvalidCastException>(() => runtime.WriteMemory<double>(_ => { }));
+        Assert.Equal(42f, runtime.ValueAt<float>(0));
+
+        var dead = TensorData([1L], 1f);
+        dead.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => dead.AccessMemory<int>());
     }
 
     [Fact]
@@ -125,6 +135,7 @@ public class TensorDataApiCoverageTests
         Assert.Equal(hostExpected, host.CopyMemory<float>());
         Assert.Equal(42f, runtime.ValueAt<float>(0));
         Assert.Equal(runtimeExpected, runtime.CopyMemory<float>());
+        Assert.Equal(4, runtime.Data.Length);
         Assert.Equal(2.5f, host.As<float32>().ValueAt(1));
         Assert.Equal(runtimeExpected, runtime.As<float32>().CopyMemory());
         Assert.Equal([true, false], TensorData([2L], true, false).As<bit>().CopyMemory());

@@ -19,8 +19,13 @@ using static OpCodes;
 /// moves each output coordinate and one that lands outside the input takes
 /// <c>extrapolation_value</c>. The input's shape may not be known when the model is built, so the
 /// choice is made when it runs: an <c>If</c> takes the plain node unless some axis keeps its
-/// length under a roi that moves it, and the sequence below otherwise. A constant roi of
-/// <c>[0, 1]</c> along every axis moves nothing, and its call is left as it stands.</para>
+/// length under a roi that moves it, and the sequence below otherwise. The constants the call
+/// reads decide it when the model is built where they can: a constant roi of <c>[0, 1]</c> along
+/// every axis moves nothing, nor does any axis keep its length under a constant scale below 1 or
+/// at least 1.5, and such a call is left as it stands; a constant scale of exactly 1 under a
+/// constant roi that moves its axis keeps that axis's length whenever it is longer than 1, and the
+/// sequence, which leaves every other axis as the plain call does, is taken without the
+/// <c>If</c>.</para>
 ///
 /// <para>Each such axis is resized to <c>2L−1</c> elements under the same roi, and every second
 /// element is kept. <c>tf_crop_and_resize</c> maps output coordinate <c>x</c> of an axis of input
@@ -46,32 +51,49 @@ internal sealed class CropAndResizeRoiWorkaround : KernelWorkaround
                 == CoordinateTransformationMode.Tf_crop_and_resize
             && site.IsPresent(1)
             && (site.IsPresent(2) || site.IsPresent(3))
-            && !IsIdentityRoi(site.ConstantOf(1));
+            && Growth(site) != AxisGrowth.Never;
 
     public override Variable?[] Rewrite(WorkaroundSite site, Variable?[] inputs)
     {
         var a = site.Attributes;
-        return [CropAndResize(inputs[0]!, inputs[1]!, inputs[2], inputs[3],
+        return [CropAndResize(Growth(site) == AxisGrowth.Unknown, inputs[0]!, inputs[1]!, inputs[2], inputs[3],
             a.GetBoolVal(AttrAntialias), a.GetLongsVal(AttrAxes), a.GetFloatVal(AttrCubicCoeffA),
             a.GetBoolVal(AttrExcludeOutside), a.GetFloatVal(AttrExtrapolationValue),
             a.GetEnumVal<KeepAspectRatioPolicy>(AttrKeepAspectRatioPolicy),
             a.GetEnumVal<ResizeMode>(AttrMode), a.GetEnumVal<NearestMode>(AttrNearestMode))];
     }
 
-    /// <summary>Whether <paramref name="roi"/> is a constant starting every axis at 0 and ending
-    /// it at 1.</summary>
-    private static bool IsIdentityRoi(TensorAttribute? roi)
+
+    /// <summary>Which axes of a call keep their length under a roi that moves them, as far as the
+    /// constants it reads tell when the model is built.</summary>
+    private enum AxisGrowth
     {
-        if (roi is null) return false;
-        double[] values;
-        if (roi.DType == DType.Float32) values = [.. roi.Elements<float>().ToArray().Select(v => (double)v)];
-        else if (roi.DType == DType.Float64) values = roi.Elements<double>().ToArray();
-        else return false;
-        int half = values.Length / 2;
-        return values.Length % 2 == 0 && values.Take(half).All(v => v == 0) && values.Skip(half).All(v => v == 1);
+        /// <summary>None, whatever the input's shape: every axis under the roi <c>[0, 1]</c> or
+        /// under a constant scale below 1 or at least 1.5, where <c>floor(L·scale)</c> differs
+        /// from every length <c>L</c> above 1.</summary>
+        Never,
+        /// <summary>Some axis whenever it is longer than 1: a constant scale of exactly 1 under a
+        /// constant roi that moves it.</summary>
+        WhenLonger,
+        /// <summary>Only the input's shape tells.</summary>
+        Unknown,
     }
 
-    private static Variable CropAndResize(Variable x, Variable roi, Variable? scales,
+    private static AxisGrowth Growth(WorkaroundSite site)
+    {
+        var roi = ResizeRois.Values(site.ConstantOf(1));
+        if (roi is not null && ResizeRois.IsIdentity(site.ConstantOf(1))) return AxisGrowth.Never;
+        if (site.IsPresent(3) || site.ConstantOf(2) is not { } constant || constant.DType != DType.Float32)
+            return AxisGrowth.Unknown;
+        float[] scales = constant.Elements<float>().ToArray();
+        if (roi is not null && roi.Length != 2 * scales.Length) return AxisGrowth.Unknown;
+        bool Moves(int i) => roi is null || roi[i] != 0 || roi[i + scales.Length] != 1;
+        int[] mayGrow = [.. Enumerable.Range(0, scales.Length).Where(i => Moves(i) && scales[i] >= 1f && scales[i] < 1.5f)];
+        if (mayGrow.Length == 0) return AxisGrowth.Never;
+        return roi is not null && mayGrow.Any(i => scales[i] == 1f) ? AxisGrowth.WhenLonger : AxisGrowth.Unknown;
+    }
+
+    private static Variable CropAndResize(bool choose, Variable x, Variable roi, Variable? scales,
         Variable? sizes, bool? antialias, long[]? axes,
         float? cubicCoeffA, bool? excludeOutside,
         float? extrapolationValue, KeepAspectRatioPolicy? keepAspectRatioPolicy,
@@ -118,6 +140,6 @@ internal sealed class CropAndResizeRoiWorkaround : KernelWorkaround
         var cropped = Slice(grown, Mul(outDims, Globals.Scalar(0L)), grownDims,
             axes is null ? Range(Globals.Scalar(0L), Size(dims), Globals.Scalar(1L)) : Globals.Vector(axes), Add(twice, Globals.Scalar(1L)));
 
-        return Ops.IfElse((Scalar<bit>)anyGrows, cropped, plain);
+        return choose ? Ops.IfElse((Scalar<bit>)anyGrows, cropped, plain) : cropped;
     }
 }

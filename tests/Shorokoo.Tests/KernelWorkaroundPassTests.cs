@@ -258,6 +258,40 @@ public class KernelWorkaroundPassTests
             inputDims: [[1L, 1L, 5L, 7L]], workarounds: KernelWorkaroundRegistry.OnnxRuntime))), n => n.OpType == SLICE);
     }
 
+    [Fact]
+    public void TestACropAndResizeItsConstantsDecideTakesNoIf()
+    {
+        var y = InputTensor<float32>("y", rank: 4);
+        Variable Crop(Vector<float32> scales, ResizeMode mode) => OnnxOp.Resize(y, Vector(0f, 0f, 0.1f, 0.2f, 1f, 1f, 0.9f, 0.8f), scales,
+            null, null, null, CoordinateTransformationMode.Tf_crop_and_resize, null, null, -1f, null, mode, null);
+        Assert.Equal(0, Ifs(Session(Graph(y, Crop(Vector(1f, 1f, 2f, 0.5f), ResizeMode.Linear)), KernelWorkaroundRegistry.OnnxRuntime)));
+        Assert.Equal(0, Ifs(Session(Graph(y, Crop(Vector(1f, 1f, 1f, 2f), ResizeMode.Linear)), KernelWorkaroundRegistry.OnnxRuntime)));
+    }
+
+    [Fact]
+    public void TestACubicCropAndResizeRegroupsItsInputWithinItsIf()
+    {
+        var y = InputTensor<float32>("y", rank: 4);
+        var cubic = Session(Graph(y, OnnxOp.Resize(y, Vector(0f, 0.1f, 0f, 0f, 1f, 0.9f, 1f, 1f),
+            OnnxOp.Add(Vector(1f, 2f, 1f, 1f), OnnxOp.Mul(OnnxOp.Cast(OnnxOp.Shape(y), null, DType.Float32), Scalar(0f))),
+            null, null, null, CoordinateTransformationMode.Tf_crop_and_resize, null, null, -1f, null, ResizeMode.Cubic, null)),
+            KernelWorkaroundRegistry.OnnxRuntime);
+        Assert.DoesNotContain(cubic.Graph.Nodes, n => n.OpType == TRANSPOSE);
+        Assert.Contains(AllNodes(cubic), n => n.OpType == TRANSPOSE);
+    }
+
+    [Fact]
+    public void TestACubicCropAndResizeOfAnUnrankedInputRunsAtRankTwo()
+    {
+        var x = InputTensor<float32>("x");
+        var zeros = OnnxOp.Mul(OnnxOp.Cast(OnnxOp.Shape(x), null, DType.Float32), Scalar(0f));
+        var roi = OnnxOp.Add(Vector(0.1f, 0.2f, 0.9f, 0.8f), OnnxOp.Concat([zeros, zeros], 0L));
+        var g = Graph(x, OnnxOp.Resize(x, roi, OnnxOp.Add(Vector(1.5f, 1.5f), zeros), null, null, null,
+            CoordinateTransformationMode.Tf_crop_and_resize, null, null, -1f, null, ResizeMode.Cubic, null));
+        var data = TensorData(DType.Float32, [4L, 5L], [.. Enumerable.Range(0, 20).Select(i => (float)(i % 7))]);
+        Assert.Equal(Run(g, Session(g, null), [data]), Run(g, Session(g, KernelWorkaroundRegistry.OnnxRuntime), [data]));
+    }
+
     private static InternalComputationGraph Graph(Variable input, Variable output) => new([input], [output]);
 
     private static bool AsWritten(InternalComputationGraph g)

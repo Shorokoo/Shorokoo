@@ -35,7 +35,9 @@ using static OpCodes;
 /// pair around the resize alone does not.</para>
 ///
 /// <para>A constant scales input decides the route when the model is built; otherwise an
-/// <c>If</c> chooses between the plain call and the sequence when it runs. A constant roi of
+/// <c>If</c> chooses between the plain call and the sequence when it runs, the sequence built
+/// within its branch, and its test holding only for an input of rank 4 when the graph does not
+/// tell the rank. A constant roi of
 /// <c>[0, 1]</c> along every axis carries no coordinate outside the input, and its call is left as
 /// it stands.</para>
 /// </summary>
@@ -57,7 +59,7 @@ internal sealed class CubicResizeMiddleAxesWorkaround : KernelWorkaround
             || KnownRank(site) is { } rank && rank != 4)
             return false;
         var axes = Axes(a.GetLongsVal(AttrAxes));
-        if (!axes.Contains(1) || IsIdentityRoi(site.ConstantOf(1))) return false;
+        if (!axes.Contains(1) || ResizeRois.IsIdentity(site.ConstantOf(1))) return false;
         if (a.GetEnumVal<KeepAspectRatioPolicy>(AttrKeepAspectRatioPolicy) is not (null or KeepAspectRatioPolicy.stretch)
             && (axes.Contains(0) || axes.Contains(3)))
             return false;
@@ -79,23 +81,34 @@ internal sealed class CubicResizeMiddleAxesWorkaround : KernelWorkaround
         float? extrapolationValue = a.GetFloatVal(AttrExtrapolationValue);
         var policy = a.GetEnumVal<KeepAspectRatioPolicy>(AttrKeepAspectRatioPolicy);
         var nearestMode = a.GetEnumVal<NearestMode>(AttrNearestMode);
-        var dims = Shape(x);
-
-        var regrouped = Regrouped(x, roi, sizes is null ? scales : null, sizes, policy,
+        Variable Regroup() => Regrouped(x, roi, sizes is null ? scales : null, sizes, policy,
             axes, antialias, cubicCoeffA, excludeOutside, extrapolationValue, nearestMode);
         var rank = KnownRank(site);
         if (rank == 4 && ConstantScales(site) is not null)
-            return [regrouped];
+            return [Regroup()];
 
-        var plain = Resize(x, roi, scales, sizes, antialias, writtenAxes, CoordinateTransformationMode.Tf_crop_and_resize,
-            cubicCoeffA, excludeOutside, extrapolationValue, policy, ResizeMode.Cubic, nearestMode);
-        var channelsLast = Not(IsUnscaled(dims, scales, sizes, policy, writtenAxes, axes, 1)!);
+        // An input whose rank the graph does not tell has its extents, and a call over every axis
+        // its scales or sizes, read as four entries, padded with ones and cut at four, at the axes
+        // counted from the front for rank 4, so the test reads within them whatever the rank; it
+        // holds only for rank 4.
+        Variable? FourOf(Variable? operand, Variable ones) => operand is null ? null
+            : Slice(Concat([operand, ones], axis: 0), Globals.Vector(0L), Globals.Vector(4L));
+        bool padded = rank is null;
+        var dims = padded ? FourOf(Shape(x), Globals.Vector(1L, 1L, 1L, 1L))! : Shape(x);
+        var readAxes = padded ? axes : writtenAxes;
+        var readScales = padded && writtenAxes is null ? FourOf(scales, Globals.Vector(1f, 1f, 1f, 1f)) : scales;
+        var readSizes = padded && writtenAxes is null ? FourOf(sizes, Globals.Vector(1L, 1L, 1L, 1L)) : sizes;
+        var channelsLast = Not(IsUnscaled(dims, readScales, readSizes, policy, readAxes, axes, 1)!);
         foreach (var axis in (long[])[0, 3])
-            if (IsUnscaled(dims, scales, sizes, policy, writtenAxes, axes, axis) is { } unscaled)
+            if (IsUnscaled(dims, readScales, readSizes, policy, readAxes, axes, axis) is { } unscaled)
                 channelsLast = And(unscaled, channelsLast);
         if (rank is null)
-            channelsLast = And(Equal(Size(dims), Globals.Scalar(4L)), channelsLast);
-        return [Ops.IfElse((Scalar<bit>)channelsLast, regrouped, plain)];
+            channelsLast = And(Equal(Size(Shape(x)), Globals.Scalar(4L)), channelsLast);
+        var open = IfOpen(channelsLast);
+        var regrouped = Regroup();
+        var plain = Resize(x, roi, scales, sizes, antialias, writtenAxes, CoordinateTransformationMode.Tf_crop_and_resize,
+            cubicCoeffA, excludeOutside, extrapolationValue, policy, ResizeMode.Cubic, nearestMode);
+        return [IfClose([regrouped], [plain], open)[0]];
     }
 
     /// <summary>
@@ -179,16 +192,4 @@ internal sealed class CubicResizeMiddleAxesWorkaround : KernelWorkaround
         return Equal(CommonScale(Div(Cast(sizes, null, DType.Float32), covered), policy.Value), Globals.Scalar(1f));
     }
 
-    /// <summary>Whether <paramref name="roi"/> is a constant starting every axis at 0 and ending
-    /// it at 1.</summary>
-    private static bool IsIdentityRoi(TensorAttribute? roi)
-    {
-        if (roi is null) return false;
-        double[] values;
-        if (roi.DType == DType.Float32) values = [.. roi.Elements<float>().ToArray().Select(v => (double)v)];
-        else if (roi.DType == DType.Float64) values = roi.Elements<double>().ToArray();
-        else return false;
-        int half = values.Length / 2;
-        return values.Length % 2 == 0 && values.Take(half).All(v => v == 0) && values.Skip(half).All(v => v == 1);
-    }
 }

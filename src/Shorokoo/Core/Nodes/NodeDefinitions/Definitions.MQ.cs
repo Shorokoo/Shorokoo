@@ -40,7 +40,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("x", ["T", "V"], "R")
                 .Output("y", "T", rankBroadcast: "R")
                 .VariadicInputTestShapes([[[3,1,2],[1,2,2]],[[2,3],[2,1,3],[2,2,3]],[[1,2,3,4], [3,2,3,1], [3,1,1,1], []]])
-                .Code("NN.Max({#:param})"),
+                .Code("Shorokoo.Core.Nodes.NodeDefinitions.OnnxOp.Max({#:param}){o1:fromvar}"),
 
             Op(MAX_POOL)
                 .Tensor<FloatLike>("T")
@@ -117,7 +117,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .Input("x", ["T", "V"], "R")
                 .Output("y", "T", rankBroadcast: "R")
                 .VariadicInputTestShapes([[[3,1,2],[1,2,2]],[[2,3],[2,1,3],[2,2,3]],[[1,2,3,4], [3,2,3,1], [3,1,1,1], []]])
-                .Code("NN.Min({#:param})"),
+                .Code("Shorokoo.Core.Nodes.NodeDefinitions.OnnxOp.Min({#:param}){o1:fromvar}"),
 
             Op(MEAN)
                 .Tensor<FloatLike>("T")
@@ -238,7 +238,7 @@ namespace Shorokoo.Core.Nodes.NodeDefinitions
                 .InputTestShapes("data", [[1,2,3],[3],[3,4,1]])
                 .InputTestValues("pads", [TensorData([2], 2L, 3L), TensorData([2], 0L, 5L), TensorData([4], 0L, 1L, 2L, 3L)])
                 .InputTestValues("axes", [TensorData([1], 1L), TensorData([1], 0L), TensorData([2], 0L, 2L)])
-                .Code("{1:this}.Pad({a:param}{2:param}{3:param}{4:param})"),             
+                .Code("Shorokoo.Core.Nodes.NodeDefinitions.OnnxOp.Pad({1:param}{2:param}{3:param}{4:param}{a:param}){o1:fromvar}"),             
             
             Op(POW)
                 .Tensor<FloatLike>("T1")

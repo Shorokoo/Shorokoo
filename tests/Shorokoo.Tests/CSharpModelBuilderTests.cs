@@ -121,8 +121,7 @@ public class CSharpModelBuilderCoverageTests
     public void TestASliceOfAVectorCodegensSourceThatCompiles()
         => AssertCodegens(new InternalComputationGraph([], [OnnxOp.Slice(Vector(1f, 2f, 3f), Vector(0L), Vector(2L))]));
 
-    // #413: codegen writes an NN.Max whose type argument C# cannot infer from a Vector and a Scalar
-    [Fact(Skip = "#413: codegen writes an NN.Max whose type argument C# cannot infer from a Vector and a Scalar")]
+    [Fact]
     public void TestAMaxOfAVectorAndAScalarCodegensSourceThatCompiles()
         => AssertCodegens(new InternalComputationGraph([], [OnnxOp.Max(Vector(1f, 2f), Scalar(1.5f))]));
 

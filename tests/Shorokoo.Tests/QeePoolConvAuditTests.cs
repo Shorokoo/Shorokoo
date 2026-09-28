@@ -102,7 +102,8 @@ public class QeePoolConvAuditTests
             [F32([1L, 1L, 8L], 5f, -3f, 8f, 1f, -7f, 2f, 6f, -4f)],
             expected: [1, 2, 8, 6, 2.5, 1, 1, 4, 3, 7, 4, 8, 6, -3, -7, -4]));
 
-    [Fact]
+    // #420: ONNX Runtime's MaxPool gives index -1 to a window whose every value is the element type's lowest
+    [Fact(Skip = "#420: ONNX Runtime's MaxPool gives index -1 to a window whose every value is the element type's lowest")]
     public void TestMaxPoolIndexOfALowestValuedWindowIsItsFirstPosition()
         => Assert.True(AutoTest.AdvancedTestGraph<LowestValueWindowMaxPoolIndicesValues>([],
             [F32([1L, 1L, 5L], 0f, 0f, 5f, 0f, 0f)],

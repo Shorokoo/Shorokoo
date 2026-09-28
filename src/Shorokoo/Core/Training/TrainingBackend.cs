@@ -68,8 +68,8 @@ namespace Shorokoo
         /// of <see cref="TrainingFormats"/>.</summary>
         public string Format { get; }
 
-        /// <summary>Whether Shorokoo lowers the step's gradient itself, which is the default path
-        /// exactly as it has always been.</summary>
+        /// <summary>Whether Shorokoo lowers the step's gradient itself, which is the default
+        /// path.</summary>
         internal bool LowersAutoGrad => Format == TrainingFormats.Onnx;
 
         private TrainingBackend(string name, string format)

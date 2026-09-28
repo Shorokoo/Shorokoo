@@ -38,6 +38,12 @@ namespace Shorokoo
         /// or rebuild the whole rig from the file alone with
         /// <see cref="TrainingRig.Load(string, ComputeContext?, ComputeContext?, IProgress{BuildProgress}, TrainingBackend?)"/>.
         ///
+        /// <para>A non-empty <see cref="TrainingCheckpoint.History"/> is saved too, as its own data
+        /// entry; to save none, save <c>checkpoint.WithoutHistory()</c>, or a slice of it with
+        /// <see cref="TrainingCheckpoint.WithHistory"/>. A history in which one hyperparameter has
+        /// values of different dtypes or shapes cannot be saved and throws an
+        /// <see cref="InvalidOperationException"/> naming it.</para>
+        ///
         /// <para>The write is atomic (staged to a temp file and committed by rename). For per-entry
         /// Zstd compression or provenance metadata, use the builder form
         /// <see cref="ForTrainingCheckpoint"/>.</para>
@@ -119,7 +125,8 @@ namespace Shorokoo
         /// when a rig is supplied (<see cref="CheckpointComponents.InferenceState"/> → rig initial
         /// params + model state, <see cref="CheckpointComponents.OptimizerState"/> → rig initial
         /// optimizer state, <see cref="CheckpointComponents.Counters"/> → 0,
-        /// <see cref="CheckpointComponents.Loss"/> → a <c>null</c> loss); without a rig, an
+        /// <see cref="CheckpointComponents.Loss"/> → a <c>null</c> loss,
+        /// <see cref="CheckpointComponents.History"/> → an empty history); without a rig, an
         /// absent-but-expected kind fails loud.</para>
         /// </summary>
         internal static TrainingCheckpoint LoadTrainingCheckpointFromSkpt(
@@ -167,7 +174,7 @@ namespace Shorokoo
             var modelMapping = GetDefaultMappingTensors(manifest, SkptFileFormat.DefaultModelKey);
             var optimizerMapping = GetDefaultMappingTensors(
                 manifest, training.Rig?.OptimizerModel ?? SkptFileFormat.OptimizerModelKey);
-            var tensorsByDataKey = new Dictionary<string, Dictionary<string, TensorData>>(StringComparer.Ordinal);
+            var tensorsByDataKey = new Dictionary<string, OrderedDictionary<string, TensorData>>(StringComparer.Ordinal);
 
             bool Want(CheckpointComponents c) => components is null || (components.Value & c) != 0;
 
@@ -178,6 +185,18 @@ namespace Shorokoo
             long? epoch = Want(CheckpointComponents.Counters) ? training.Epoch : null;
             long? batchIndex = Want(CheckpointComponents.Counters) ? training.BatchIndex : null;
             float? loss = Want(CheckpointComponents.Loss) ? training.Loss : null;
+            // The history is its own data entry, one tensor per column; a file without one holds an
+            // empty history.
+            var history = Want(CheckpointComponents.History)
+                          && manifest.Data is not null
+                          && manifest.Data.ContainsKey(SkptFileFormat.HistoryDataKey)
+                ? TrainingHistoryColumns.Read(
+                    ResolveDataEntry(container, manifest,
+                            new SkptTensorRef { Data = SkptFileFormat.HistoryDataKey }, "the training history",
+                            tensorsByDataKey, filePath)
+                        .Select(kv => (kv.Key, kv.Value)),
+                    filePath)
+                : TrainingHistory.Empty;
 
             TensorDataStruct trainable, modelState, optState;
 
@@ -223,6 +242,7 @@ namespace Shorokoo
                 Epoch = epoch,
                 BatchIndex = batchIndex,
                 Loss = loss,
+                History = history,
             };
         }
 
@@ -251,7 +271,7 @@ namespace Shorokoo
         private static (TensorDataStruct Trainable, TensorDataStruct ModelState) ReconstructArchOwnedState(
             SkptContainer container, SkptManifest manifest, IReadOnlyDictionary<string, SkptTensorRef>? mapping,
             TensorStructDef trainableParamDef, TensorStructDef modelStateDef,
-            Dictionary<string, Dictionary<string, TensorData>> tensorsByDataKey, string filePath)
+            Dictionary<string, OrderedDictionary<string, TensorData>> tensorsByDataKey, string filePath)
         {
             if (mapping is null)
             {
@@ -312,7 +332,7 @@ namespace Shorokoo
         private static TensorDataStruct ReconstructOptimizerState(
             SkptContainer container, SkptManifest manifest, IReadOnlyDictionary<string, SkptTensorRef>? mapping,
             TensorStructDef def,
-            Dictionary<string, Dictionary<string, TensorData>> tensorsByDataKey, string filePath)
+            Dictionary<string, OrderedDictionary<string, TensorData>> tensorsByDataKey, string filePath)
         {
             if (mapping is null)
             {
@@ -372,7 +392,7 @@ namespace Shorokoo
             SkptContainer container, SkptManifest manifest,
             Dictionary<string, (string Id, SkptTensorRef Ref)> byField,
             TensorStructDef def, string role, string mismatchHint,
-            Dictionary<string, Dictionary<string, TensorData>> tensorsByDataKey, string filePath)
+            Dictionary<string, OrderedDictionary<string, TensorData>> tensorsByDataKey, string filePath)
         {
             var fields = new List<KeyValuePair<string, IData>>(def.Fields.Length);
             foreach (var fieldDef in def.Fields)
@@ -382,7 +402,7 @@ namespace Shorokoo
                         $"'{filePath}': the checkpoint maps no tensor for {role} '{fieldDef.Name}'. " +
                         mismatchHint);
                 var tensors = ResolveDataEntry(
-                    container, manifest, mapped.Ref, mapped.Id, tensorsByDataKey, filePath);
+                    container, manifest, mapped.Ref, $"the mapping for parameter '{mapped.Id}'", tensorsByDataKey, filePath);
                 if (string.IsNullOrEmpty(mapped.Ref.Tensor)
                     || !tensors.TryGetValue(mapped.Ref.Tensor, out var td))
                     throw new InvalidDataException(
@@ -766,6 +786,17 @@ namespace Shorokoo
             if (_checkpoint.OptimizerState.Definition.Fields.Length > 0)
                 AddDataEntry(SkptFileFormat.OptimizerStateDataKey, SkptFileFormat.OptimizerStateEntryPath,
                     Persistence.SerializeTrainingKind(_checkpoint.OptimizerState, "optimizer state"));
+            // The history, one tensor per column, as its own data entry — only when it has entries.
+            if (_checkpoint.History.Count > 0)
+            {
+                var historyTensors = TrainingHistoryColumns.Write(_checkpoint.History)
+                    .Select(c => new SafeTensor(
+                        c.Name, c.Data, SafeTensorLoader.DTypeToSafeTensorDType(c.Data.DType), c.Data.Shape.Dims))
+                    .ToList();
+                using var historyBuffer = new MemoryStream();
+                SafeTensorLoader.SaveSafeTensorsToStream(historyBuffer, historyTensors);
+                AddDataEntry(SkptFileFormat.HistoryDataKey, SkptFileFormat.HistoryEntryPath, historyBuffer.ToArray());
+            }
 
             // Optimizer-state tensor mapping (issue #184): one entry per (trainable parameter ×
             // state slot) instance, keyed by the composite identifier — the parameter's full
@@ -858,14 +889,14 @@ namespace Shorokoo
                     Rig = rigInfo,
                     Step = _checkpoint.Step,
                     // Epoch / batch index are host-owned run counters that may be genuinely unknown
-                    // (null — no loader / no explicit counter). Nullable and add-only: a null value is
+                    // (null — no loader / no explicit counter). Nullable: a null value is
                     // omitted by the manifest serializer (WhenWritingNull) and reads back null, never a
                     // sentinel 0.0 — the same presence-gated treatment as the loss below.
                     Epoch = _checkpoint.Epoch,
                     BatchIndex = _checkpoint.BatchIndex,
                     // Loss is a host-owned run-progress scalar, its own savable component (independent
                     // of the counters). The .skpt builder writes every available component, so the loss
-                    // is written iff the checkpoint carries one. Nullable and add-only: null (an
+                    // is written iff the checkpoint carries one. Nullable: null (an
                     // initial/bare checkpoint) is omitted by the manifest serializer (WhenWritingNull),
                     // so it reads back as null — never a sentinel 0.0. A dropped Loss component on LOAD
                     // (or a null value) reads back null.

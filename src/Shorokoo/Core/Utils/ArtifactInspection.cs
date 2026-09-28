@@ -142,7 +142,8 @@ namespace Shorokoo
         public long? BatchIndex { get; }
 
         /// <summary>Per-section tensor listing, keyed "trainable" / "model_state" / "opt_state"
-        /// (always all three, possibly empty); tensor names have the section prefix stripped.</summary>
+        /// (always all three, possibly empty), plus "history" — the training history's columns —
+        /// where the file holds one; tensor names have the section prefix stripped.</summary>
         public IReadOnlyDictionary<string, IReadOnlyList<InspectedTensorInfo>> Sections { get; }
 
         internal TrainingCheckpointArtifactInfo(
@@ -1068,8 +1069,8 @@ namespace Shorokoo
                 observations.Add("the manifest declares no tensor mapping sets.");
 
             if (unknownKeys.Count > 0)
-                observations.Add("the manifest carries unknown key(s) — tolerated, keys are " +
-                    "add-only across minor revisions: " + string.Join(", ", unknownKeys.Take(8)) +
+                observations.Add("the manifest carries key(s) the reader does not interpret, which " +
+                    "it ignores: " + string.Join(", ", unknownKeys.Take(8)) +
                     (unknownKeys.Count > 8 ? $", … and {unknownKeys.Count - 8} more." : "."));
 
             int storedViolations = 0, unreferenced = 0;
@@ -1416,7 +1417,7 @@ namespace Shorokoo
             // its payload bytes. The marker is a fixed 16 bytes: int64[2] = [version, step].
             // Epoch and batch index are kept in their own presence-gated int64 scalars, read
             // separately below — the marker never grows, so any other marker length is malformed (the
-            // same strict shape the Load path enforces; there are no released files of any older shape).
+            // same strict shape the Load path enforces).
             const int MarkerBytes = 16;
             int markerIndex = tensors.FindIndex(t => t.Name == TrainingCheckpoint.CheckpointMarkerName);
             if (markerIndex < 0)
@@ -1469,6 +1470,10 @@ namespace Shorokoo
                 TrainingCheckpoint.ModelStateSection,
                 TrainingCheckpoint.OptimizerStateSection,
             ];
+            // The history section is listed where the file holds one: it is a component a
+            // checkpoint carries only once it has been trained.
+            if (tensors.Any(t => t.Name.StartsWith(TrainingCheckpoint.HistorySection + "/", StringComparison.Ordinal)))
+                sectionNames = [.. sectionNames, TrainingCheckpoint.HistorySection];
             var sections = new Dictionary<string, IReadOnlyList<InspectedTensorInfo>>();
             foreach (var section in sectionNames)
             {

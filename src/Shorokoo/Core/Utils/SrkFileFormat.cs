@@ -31,11 +31,8 @@ namespace Shorokoo.Core.Utils
     }
 
     /// <summary>
-    /// The JSON header of a .srk container. Fields are add-only across minor
-    /// revisions of the format; removing or re-typing a field is a major-version
-    /// event (a bump of the magic's version byte and <see cref="SrkVersion"/>).
-    /// Unknown fields written by newer minor revisions are preserved in
-    /// <see cref="AdditionalFields"/> and ignored.
+    /// The JSON header of a .srk container. Fields the reader does not interpret
+    /// are preserved in <see cref="AdditionalFields"/> and ignored.
     /// </summary>
     public sealed class SrkHeader
     {
@@ -63,7 +60,7 @@ namespace Shorokoo.Core.Utils
         [JsonPropertyName("producer")]
         public SrkProducerInfo? Producer { get; set; }
 
-        /// <summary>Round-trips header fields added by newer minor revisions of the format.</summary>
+        /// <summary>Round-trips header fields this reader does not interpret, unchanged.</summary>
         [JsonExtensionData]
         public Dictionary<string, JsonElement>? AdditionalFields { get; set; }
 

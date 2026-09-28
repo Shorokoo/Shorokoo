@@ -98,6 +98,57 @@ namespace Shorokoo
         /// </summary>
         public long CurrentStep => Current.Step;
 
+        /// <summary>
+        /// The value every optimizer hyperparameter had in the run's last step, keyed by the names of
+        /// the rig that ran it (<see cref="TrainingRig.HyperparameterNames"/>); that step ran at
+        /// counter <see cref="CurrentStep"/> <c>- 1</c>. Before the run's first step, the values of
+        /// the checkpoint it began from: <c>null</c> where no step produced that one.
+        ///
+        /// <para>Host values each step records as it runs — a scheduled value read back with the
+        /// step's loss, a runtime one copied from what the step was fed, which for a value resident
+        /// on a device is a download the step makes — so asking costs nothing further; see
+        /// <see cref="TrainingCheckpoint.AppliedHyperparameters"/>.</para>
+        /// </summary>
+        public IReadOnlyDictionary<string, AppliedHyperparameter>? AppliedHyperparameters
+            => Current.AppliedHyperparameters;
+
+        /// <summary>
+        /// The steps that led to where the run sits, oldest first: the history of the checkpoint the
+        /// run began from, with one entry appended per step of the run — whether taken with
+        /// <c>Step</c> or <c>StepToCheckpoint</c> — as trimmed by <see cref="ReplaceHistory"/> and
+        /// <see cref="ClearHistory"/>. Host values, so asking costs no download; see
+        /// <see cref="TrainingCheckpoint.History"/>.
+        /// </summary>
+        public TrainingHistory History => Current.History;
+
+        /// <summary>
+        /// Replaces the run's <see cref="History"/>, from which later steps go on appending —
+        /// typically by a slice of it: <c>run.ReplaceHistory(run.History.TakeLast(1000))</c> keeps a
+        /// long run's history, and the memory it takes, bounded. The state the run trains from is
+        /// untouched, and so is every checkpoint the run has handed out, which keeps the history it
+        /// was handed out with.
+        /// </summary>
+        /// <exception cref="ArgumentNullException"><paramref name="history"/> is <c>null</c>.</exception>
+        /// <exception cref="ObjectDisposedException">The run has been disposed.</exception>
+        /// <exception cref="InvalidOperationException">A step of the run failed after it had consumed
+        /// the run's state, so there is no state left for the history to go with.</exception>
+        public void ReplaceHistory(TrainingHistory history)
+        {
+            ArgumentNullException.ThrowIfNull(history);
+            // A checkpoint over the very same tensors, fed the same way: which of them the run owns,
+            // and what a failed step would lose, is unchanged.
+            _current = Current.WithHistory(history);
+        }
+
+        /// <summary>
+        /// Empties the run's <see cref="History"/>; the next step starts it again. Otherwise as
+        /// <see cref="ReplaceHistory"/>.
+        /// </summary>
+        /// <exception cref="ObjectDisposedException">The run has been disposed.</exception>
+        /// <exception cref="InvalidOperationException">A step of the run failed after it had consumed
+        /// the run's state, so there is no state left for the history to go with.</exception>
+        public void ClearHistory() => ReplaceHistory(TrainingHistory.Empty);
+
         /// <summary>Trains on one batch and returns its loss, leaving the updated state resident.</summary>
         /// <param name="trainingInput">Training input data: a <see cref="TensorDataStruct"/>,
         /// consumed by the step, or one passed through <c>.Shared()</c> or <c>.TryConsume()</c>.</param>

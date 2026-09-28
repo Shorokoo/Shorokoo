@@ -38,8 +38,12 @@ namespace Shorokoo
         /// (a nullable value — <c>null</c> on an initial/bare checkpoint contributes nothing to a
         /// save). Independent of <see cref="Counters"/>.</summary>
         Loss = 1 << 4,
+        /// <summary>The run's <see cref="TrainingCheckpoint.History"/>: one entry per step, with its
+        /// counters, loss and applied hyperparameter values. An empty history contributes nothing to a
+        /// save, and a file that holds none loads with an empty one.</summary>
+        History = 1 << 5,
         /// <summary>Every component.</summary>
-        All = TrainingRig | InferenceState | OptimizerState | Counters | Loss,
+        All = TrainingRig | InferenceState | OptimizerState | Counters | Loss | History,
     }
 
     /// <summary>
@@ -120,13 +124,67 @@ namespace Shorokoo
         /// <summary>
         /// The loss computed for the training step that produced this checkpoint, or <c>null</c> on an
         /// initial or bare checkpoint that no step produced. Set by
-        /// <see cref="TrainingRig.TrainStep(TrainingCheckpoint, IData, IData)"/>
-        /// (which now returns the post-step checkpoint directly) to that step's loss. Carried
+        /// <see cref="TrainingRig.TrainStep(TrainingCheckpoint, IData, IData)"/>, which returns the
+        /// post-step checkpoint, to that step's loss. Carried
         /// unchanged through the counter derivations, and persisted as its own
         /// <see cref="CheckpointComponents.Loss"/> component, independent of the counters (absent, or a
         /// null loss, ⇒ reads back <c>null</c>).
         /// </summary>
         public float? Loss { get; init; }
+
+        /// <summary>
+        /// The value every optimizer hyperparameter had in the training step that produced this
+        /// checkpoint, keyed by the <see cref="TrainingRig.HyperparameterNames"/> of the rig that ran
+        /// that step — which a checkpoint adopted by another rig keeps — or <c>null</c> on a
+        /// checkpoint no step produced (an initial, bare or loaded one).
+        ///
+        /// <para>These are the values the step's optimizer update actually read: a scheduled
+        /// hyperparameter's value as the training step computed it in-graph, a baked one's constant, and
+        /// a runtime one's value as the caller fed it. The step that produced this checkpoint ran at
+        /// counter <see cref="Step"/> <c>- 1</c>, so for a built-in schedule the value is
+        /// <c>schedule.At(Step - 1)</c>; a scheduler reading <c>epoch</c> or <c>batchIndex</c> saw
+        /// this checkpoint's <see cref="Epoch"/> and <see cref="BatchIndex"/> (<c>0</c> where
+        /// <c>null</c>), which the step carries through.</para>
+        ///
+        /// <para>Set by every training step, carried unchanged through the derivations, like
+        /// <see cref="Loss"/> — so after <see cref="WithCounters"/> it still describes the step that
+        /// produced the checkpoint, not the new counters — and held in memory only: a save does not
+        /// write it, and a load reads back <c>null</c>. The step's entry in <see cref="History"/>
+        /// holds this same map, and that is saved.</para>
+        ///
+        /// <para>Immutable. A step's map is in its rig's <see cref="TrainingRig.HyperparameterNames"/>
+        /// order; a map set here is kept as it is where it is already immutable, and copied, in its
+        /// enumeration order, otherwise.</para>
+        /// </summary>
+        public IReadOnlyDictionary<string, AppliedHyperparameter>? AppliedHyperparameters
+        {
+            get => _appliedHyperparameters;
+            init => _appliedHyperparameters = value is null ? null : AppliedHyperparameterMap.Of(value);
+        }
+
+        private readonly IReadOnlyDictionary<string, AppliedHyperparameter>? _appliedHyperparameters;
+
+        /// <summary>
+        /// The steps that led to this checkpoint, oldest first: one entry per successful training
+        /// step, with the counters it ran at, its loss and the hyperparameter values it applied.
+        /// Empty on a checkpoint no step produced (<see cref="TrainingRig.CreateInitialCheckpoint()"/>,
+        /// a bare one). Each step returns its input checkpoint's history with its own entry appended —
+        /// a step that fails records nothing — and every derivation carries it through unchanged,
+        /// <see cref="WithStep"/> included: training again from a step already in the history appends
+        /// a second entry for it rather than truncating.
+        ///
+        /// <para>Replace it with <see cref="WithHistory"/> (keep a slice:
+        /// <c>cp.WithHistory(cp.History.TakeLast(1000))</c>) or clear it with
+        /// <see cref="WithoutHistory"/>. Saved as the <see cref="CheckpointComponents.History"/>
+        /// component whenever it is non-empty.</para>
+        /// </summary>
+        public TrainingHistory History
+        {
+            get => _history;
+            init => _history = value ?? throw new ArgumentNullException(nameof(History));
+        }
+
+        private readonly TrainingHistory _history = TrainingHistory.Empty;
 
         /// <summary>
         /// What a training step fed this checkpoint does with its state — the tensors of
@@ -214,6 +272,8 @@ namespace Shorokoo
             long? batchIndex = null,
             TrainingRig? rig = null,
             float? loss = null,
+            IReadOnlyDictionary<string, AppliedHyperparameter>? appliedHyperparameters = null,
+            TrainingHistory? history = null,
             SharedInputMode? feedMode = null)
             => new()
             {
@@ -225,11 +285,14 @@ namespace Shorokoo
                 BatchIndex = batchIndex ?? BatchIndex,
                 Rig = rig ?? Rig,
                 Loss = loss ?? Loss,
+                AppliedHyperparameters = appliedHyperparameters ?? AppliedHyperparameters,
+                History = history ?? History,
                 FeedMode = feedMode ?? FeedMode,
             };
 
         /// <summary>A new checkpoint with <see cref="TrainableParams"/> replaced; every other slot —
-        /// model state, optimizer state, counters, rig, loss and <see cref="FeedMode"/> — carries
+        /// model state, optimizer state, counters, rig, loss, applied hyperparameters, history and
+        /// <see cref="FeedMode"/> — carries
         /// through unchanged.</summary>
         public TrainingCheckpoint WithTrainableParams(TensorDataStruct trainableParams)
             => Derive(trainableParams: trainableParams
@@ -273,6 +336,16 @@ namespace Shorokoo
 
         /// <summary>A new checkpoint with <see cref="BatchIndex"/> set (step/epoch carried through).</summary>
         public TrainingCheckpoint WithBatchIndex(long batchIndex) => WithCounters(batchIndex: batchIndex);
+
+        /// <summary>A new checkpoint with <see cref="History"/> replaced — typically by a slice of
+        /// this one's (<see cref="TrainingHistory.Since"/>, <see cref="TrainingHistory.TakeLast"/>);
+        /// every other slot carries through.</summary>
+        public TrainingCheckpoint WithHistory(TrainingHistory history)
+            => Derive(history: history ?? throw new ArgumentNullException(nameof(history)));
+
+        /// <summary>A new checkpoint with an empty <see cref="History"/>; every other slot carries
+        /// through.</summary>
+        public TrainingCheckpoint WithoutHistory() => Derive(history: TrainingHistory.Empty);
 
         // ---- Inference: bind trained weights into a concrete model for execution ----
 
@@ -323,6 +396,9 @@ namespace Shorokoo
         // '/'-free-name discipline as the loss/marker, so they can't be mistaken for section fields.
         internal const string CheckpointEpochName = "__shorokoo_epoch__";
         internal const string CheckpointBatchName = "__shorokoo_batch__";
+        // The history (its own savable component) is a namespaced section like the state sections:
+        // one tensor per column, "history/<column>", laid out by TrainingHistoryColumns.
+        internal const string HistorySection = "history";
         // The one and only checkpoint format: the int64[2] marker carries [version, step], always
         // present; everything host-owned and optional (loss, epoch, batch) rides beside it as its
         // own presence-gated scalar rather than being packed into the marker, so an absent value
@@ -347,10 +423,16 @@ namespace Shorokoo
         /// <b>available</b> component: <see cref="CheckpointComponents.InferenceState"/> (trainable
         /// params + model state) and <see cref="CheckpointComponents.Counters"/> always,
         /// <see cref="CheckpointComponents.OptimizerState"/> when this checkpoint carries any, and
-        /// <see cref="CheckpointComponents.Loss"/> when it carries a (non-null) loss. Explicitly
+        /// <see cref="CheckpointComponents.Loss"/> when it carries a (non-null) loss, and
+        /// <see cref="CheckpointComponents.History"/> when its <see cref="History"/> is non-empty —
+        /// pass components without it to save no history. Explicitly
         /// requesting <see cref="CheckpointComponents.Loss"/> on a checkpoint whose loss is
-        /// <c>null</c> is a no-op — it writes nothing, and does not throw (a null loss is a
-        /// legitimate value). The
+        /// <c>null</c>, or <see cref="CheckpointComponents.History"/> on one whose history is empty,
+        /// is a no-op — it writes nothing, and does not throw (a null loss is a
+        /// legitimate value). A history in which one hyperparameter has values of different dtypes
+        /// or shapes — one continued under another rig — cannot be saved and throws an
+        /// <see cref="InvalidOperationException"/> naming it; save a slice of it with
+        /// <see cref="WithHistory"/>. The
         /// <see cref="CheckpointComponents.TrainingRig"/> component is never written by this flat
         /// format and throws when requested explicitly: <see cref="InvalidOperationException"/> when
         /// this checkpoint has no <see cref="Rig"/> attached, and otherwise
@@ -420,6 +502,7 @@ namespace Shorokoo
             var comps = CheckpointComponents.InferenceState | CheckpointComponents.Counters;
             if (OptimizerState.Definition.Fields.Length > 0) comps |= CheckpointComponents.OptimizerState;
             if (Loss.HasValue) comps |= CheckpointComponents.Loss;
+            if (History.Count > 0) comps |= CheckpointComponents.History;
             return comps;
         }
 
@@ -476,6 +559,14 @@ namespace Shorokoo
                     CheckpointLossName, lossTensor,
                     SafeTensorLoader.DTypeToSafeTensorDType(lossTensor.DType), lossTensor.Shape.Dims));
             }
+
+            // The history is its own component, written as the "history/" section only when it has
+            // entries: an empty history writes nothing and reads back empty.
+            if ((comps & CheckpointComponents.History) != 0 && History.Count > 0)
+                foreach (var (name, column) in TrainingHistoryColumns.Write(History))
+                    tensors.Add(new SafeTensor(
+                        $"{HistorySection}/{name}", column,
+                        SafeTensorLoader.DTypeToSafeTensorDType(column.DType), column.Shape.Dims));
             return tensors;
         }
 
@@ -685,6 +776,8 @@ namespace Shorokoo
                 ? lossData.As<float32>().ValueAt<float>(0)
                 : (float?)null;
 
+            var history = Want(CheckpointComponents.History) ? ReadHistorySection(tensors, filePath) : TrainingHistory.Empty;
+
             TensorDataStruct trainable, modelState, optState;
 
             if (Want(CheckpointComponents.InferenceState)
@@ -727,7 +820,20 @@ namespace Shorokoo
                 Epoch = epoch,
                 BatchIndex = batchIndex,
                 Loss = loss,
+                History = history,
             };
+        }
+
+        /// <summary>The history the file's <c>history/</c> section holds — empty where it holds
+        /// none — validated strictly (see <see cref="TrainingHistoryColumns.Read"/>).</summary>
+        private static TrainingHistory ReadHistorySection(IEnumerable<SafeTensor> tensors, string filePath)
+        {
+            var prefix = HistorySection + "/";
+            var columns = tensors
+                .Where(t => t.Name.StartsWith(prefix, StringComparison.Ordinal))
+                .Select(t => (t.Name.Substring(prefix.Length), t.Data))
+                .ToList();
+            return columns.Count == 0 ? TrainingHistory.Empty : TrainingHistoryColumns.Read(columns, filePath);
         }
 
         /// <summary>Reconstructs one section's struct def from the file itself: every tensor

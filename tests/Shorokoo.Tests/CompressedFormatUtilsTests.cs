@@ -1288,7 +1288,7 @@ public class CompressedFormatUtilsCoverageTests : IDisposable
             return (e.Key, copy);
         }).ToList(), "SHA-256", SkptFileFormat.WeightsEntryPath);
 
-        // Unknown keys at every level are ignored: the manifest's keys are add-only.
+        // Keys the reader does not interpret are ignored at every level.
         var config = JsonNode.Parse(entries[SkptFileFormat.ConfigEntryName])!;
         config["futureTopLevelKey"] = "ignored";
         config["models"]!["model"]!["futureModelKey"] = 42;

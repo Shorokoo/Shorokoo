@@ -98,8 +98,7 @@ namespace Shorokoo
         /// name fails loudly, listing the sets the file declares. A manifest referencing a
         /// missing entry, an entry failing its SHA-256 check, a manifest/stored compression
         /// mismatch, or a weight that does not match its parameter likewise fails loudly naming
-        /// the entry; unknown manifest keys are ignored (the format's keys are add-only across
-        /// minor revisions).
+        /// the entry; manifest keys the reader does not interpret are ignored.
         /// </summary>
         public static ComputationGraph Load(string filePath, string set)
         {
@@ -438,7 +437,7 @@ namespace Shorokoo
             }
             var tensorRefs = mappingSet.Tensors ?? new Dictionary<string, SkptTensorRef>();
 
-            var tensorsByDataKey = new Dictionary<string, Dictionary<string, TensorData>>(StringComparer.Ordinal);
+            var tensorsByDataKey = new Dictionary<string, OrderedDictionary<string, TensorData>>(StringComparer.Ordinal);
             // One attribute per stored tensor, because one stored tensor can serve several
             // parameters: the saver is content-addressed, so two parameters whose values are
             // byte-identical are written once and both mapping entries name it. The bind below
@@ -465,7 +464,8 @@ namespace Shorokoo
                         "belong to this model?");
                 unboundRefs.Remove(paramId);
 
-                var tensors = ResolveDataEntry(container, manifest, tensorRef, paramId, tensorsByDataKey, filePath);
+                var tensors = ResolveDataEntry(
+                    container, manifest, tensorRef, $"the mapping for parameter '{paramId}'", tensorsByDataKey, filePath);
                 if (string.IsNullOrEmpty(tensorRef.Tensor) || !tensors.TryGetValue(tensorRef.Tensor, out var loaded))
                     throw new InvalidDataException(
                         $"'{filePath}': parameter '{paramId}' maps to tensor '{tensorRef.Tensor}' in data " +
@@ -506,22 +506,24 @@ namespace Shorokoo
 
         /// <summary>
         /// Returns the parsed tensors of the data entry a tensor reference points at, reading
-        /// and SHA-256-verifying each data entry at most once per load.
+        /// and SHA-256-verifying each data entry at most once per load. <paramref name="referrer"/>
+        /// names what holds the reference, in what a malformed one is refused with: "the mapping for
+        /// parameter 'w'", say.
         /// </summary>
-        private static Dictionary<string, TensorData> ResolveDataEntry(
-            SkptContainer container, SkptManifest manifest, SkptTensorRef tensorRef, string paramId,
-            Dictionary<string, Dictionary<string, TensorData>> tensorsByDataKey, string filePath)
+        private static OrderedDictionary<string, TensorData> ResolveDataEntry(
+            SkptContainer container, SkptManifest manifest, SkptTensorRef tensorRef, string referrer,
+            Dictionary<string, OrderedDictionary<string, TensorData>> tensorsByDataKey, string filePath)
         {
             var dataKey = tensorRef.Data;
             if (string.IsNullOrEmpty(dataKey))
                 throw new InvalidDataException(
-                    $"'{filePath}': the mapping for parameter '{paramId}' names no data entry.");
+                    $"'{filePath}': {referrer} names no data entry.");
             if (tensorsByDataKey.TryGetValue(dataKey, out var cached))
                 return cached;
 
             if (manifest.Data is null || !manifest.Data.TryGetValue(dataKey, out var dataEntry) || dataEntry is null)
                 throw new InvalidDataException(
-                    $"'{filePath}': the mapping for parameter '{paramId}' references data entry " +
+                    $"'{filePath}': {referrer} references data entry " +
                     $"'{dataKey}', which the manifest's data registry does not declare.");
             if (string.IsNullOrEmpty(dataEntry.Entry))
                 throw new InvalidDataException(
@@ -537,8 +539,11 @@ namespace Shorokoo
             VerifySha256(storedBytes, dataEntry.Sha256, dataEntry.Entry, filePath);
             var dataBytes = DecodeDataEntryPayload(storedBytes, dataEntry, dataKey, filePath);
 
-            var tensors = SafeTensorLoader.ParseSafeTensorBytes(dataBytes)
-                .ToDictionary(t => t.Name, t => t.Data, StringComparer.Ordinal);
+            // Ordered as the entry was written, which the parser reports and a plain Dictionary
+            // does not promise to keep: a reader that rebuilds a list from the entry -- the
+            // history's hyperparameter names -- gets them in the order they were saved.
+            var tensors = new OrderedDictionary<string, TensorData>(StringComparer.Ordinal);
+            foreach (var t in SafeTensorLoader.ParseSafeTensorBytes(dataBytes)) tensors.Add(t.Name, t.Data);
             tensorsByDataKey[dataKey] = tensors;
             return tensors;
         }

@@ -49,8 +49,8 @@ Related: [onnx-and-weights.md](onnx-and-weights.md) · [training.md](training.md
   (e.g. an `ema` set alongside `default`), selected at load time — see
   [Named weight sets](#named-weight-sets-default--ema).
 - A `.skpt` can also persist a **training checkpoint** — the trainable weights, model
-  state, optimizer state, the run counters (global step, epoch, batch index) and the step's
-  loss of a training run — with every state tensor addressed individually through the manifest's
+  state, optimizer state, the run counters (global step, epoch, batch index), the step's
+  loss and the run's training history — with every state tensor addressed individually through the manifest's
   tensor mappings, alongside the concrete inference model, so a run
   resumes across process restarts and the same file also loads as an inference model. Every
   training `.skpt` also carries the **rig's constituents** — the concrete architecture, the loss
@@ -180,7 +180,8 @@ Guarantees specific to the directory form:
 ## Training checkpoints
 
 A training run's state — the trainable weights, model state, optimizer state, the run
-counters (global step, epoch, batch index) and the step's loss — persists into a `.skpt`
+counters (global step, epoch, batch index), the step's loss and the
+[training history](training.md#the-training-history) — persists into a `.skpt`
 too, so training resumes across process restarts
 in the native container (inspectable manifest, per-entry Zstd, atomic write, provenance
 metadata), sharing one on-disk format with inference checkpoints.
@@ -258,6 +259,15 @@ What the file carries:
   epoch/batch position is genuinely unknown omits them and reloads them as `null`, and so does
   one no training step produced a loss for (an initial or bare checkpoint) — never a
   sentinel `0`.
+- **The training history**, when the checkpoint's is non-empty — one entry per step, with the
+  counters it ran at, its loss and each hyperparameter's value — as the
+  `data/history.safetensors` entry (data-registry key `history`), one tensor per column:
+  `step` (`int64[n]`), `loss` (`float32[n]`), `epoch` and `batch_index` (`int64[n]`) with
+  their presence columns `epoch_present` and `batch_index_present` (`bool[n]`; a row whose
+  presence is `false` reads back `null`), and per hyperparameter `hyperparameter/<name>` (its
+  dtype, shape `[n, …valueShape]`) with `hyperparameter_present/<name>` (`bool[n]`). A file
+  without the entry loads with an empty history, and so does a load whose components leave
+  out `CheckpointComponents.History`. To save none, save `checkpoint.WithoutHistory()`.
 - **The rig's constituents** — the concrete architecture, the loss graph, the optimizer graph
   and, when any hyperparameter is scheduled, one composed scheduler model — as ordinary `models/`
   entries (`models/model-arch.srk`, `models/loss.srk`, `models/optimizer.srk`,
@@ -583,7 +593,8 @@ model.skpt
   in its place stand the per-kind state entries (`data/trainable.safetensors`, and, when
   non-empty, `data/model_state.safetensors` and `data/optimizer_state.safetensors`), which
   the inference model's own `default` mapping points into — so the trainable bytes live
-  once and serve both roles. It adds a `training` block to the manifest (the run counters —
+  once and serve both roles — and, when the run's history is non-empty,
+  `data/history.safetensors`, which no mapping references. It adds a `training` block to the manifest (the run counters —
   step, epoch, batch index — and the step's loss); every state tensor is wired individually
   through `tensorMappings`, never routed by entry. It also adds the rig's constituents as
   further `models/` entries — `models/model-arch.srk`,
@@ -671,6 +682,10 @@ model.skpt
       "sha256": "9af0c1…"
     },
 
+    // Training checkpoint only, when its history is non-empty: the training history, one
+    // tensor per column, never referenced by a tensor mapping.
+    //   "history": { "entry": "data/history.safetensors", "format": "safetensors", … },
+
     // Optional host user-data bag (issue #101): format "json", never referenced by a
     // tensor mapping, so load ignores it. Present only when you attach one.
     "userData": {
@@ -741,8 +756,7 @@ model.skpt
 
 Rules:
 
-- **Keys are add-only.** A reader ignores unknown keys; removing or re-typing a key is
-  a major-version event (a bump of `skptVersion`). `skptVersion` is `1`, and a file declaring
+- **Keys a reader does not interpret are ignored.** `skptVersion` is `1`, and a file declaring
   any other value is refused with a clear message rather than half-read. Every format below
   is version 1.
 - **Integrity is checked on load.** Every entry the manifest references must exist and

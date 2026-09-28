@@ -45,7 +45,11 @@ namespace Shorokoo
     /// state). All state flows through inputs and outputs as TensorStructs:
     /// 
     /// Inputs:  trainable_params, model_state, optimizer_state, [hyperparams], [step], training_inputs, training_targets
-    /// Outputs: updated_trainable_params, updated_model_state, updated_optimizer_state, loss
+    /// Outputs: updated_trainable_params, updated_model_state, updated_optimizer_state, loss, [scheduled_hyperparams]
+    ///
+    /// The trailing outputs are the value each scheduled hyperparameter had in the step, one per
+    /// scheduled hyperparameter in optimizer order: the very tensors the optimizer update read, which
+    /// the step reports as <see cref="TrainingCheckpoint.AppliedHyperparameters"/>.
     ///
     /// Optimizer hyperparameters are baked in as constants by default. A scheduled hyperparameter
     /// (a built-in <see cref="Schedule"/> or a scheduler module) is instead computed in-graph from the
@@ -529,6 +533,21 @@ namespace Shorokoo
 
         /// <summary>Number of optimizer state fields in graph outputs. Internal output-layout machinery.</summary>
         internal int UpdatedOptimizerStateFieldCount { get; private set; }
+
+        /// <summary>
+        /// The scheduled hyperparameters whose applied value the training step returns, as optimizer
+        /// indices in output order: the step's outputs after the loss are, one each, the very tensors
+        /// the optimizer update read for these hyperparameters. Internal output-layout machinery.
+        /// </summary>
+        private int[] _scheduledHyperparameterOutputs = [];
+
+        /// <summary>Each baked hyperparameter's value as a step applies it, by optimizer index; null
+        /// for the others, whose value a step reports from what it computed or was fed.</summary>
+        private AppliedHyperparameter?[] _bakedAppliedValues = [];
+
+        /// <summary>The names every step's applied-value map is keyed by, with their lookup index:
+        /// built with <see cref="HyperparameterNames"/> and shared by every step's map.</summary>
+        private AppliedHyperparameterMap.Layout _appliedLayout = AppliedHyperparameterMap.Layout.Of([]);
 
         /// <summary>
         /// Initial trainable parameter values — <b>empty</b> on a deferred build, which has none yet
@@ -1618,7 +1637,8 @@ namespace Shorokoo
         }
 
         /// <summary>
-        /// Returns a NEW checkpoint carrying <paramref name="checkpoint"/>'s values, counters and loss,
+        /// Returns a NEW checkpoint carrying <paramref name="checkpoint"/>'s values, counters, loss and
+        /// history,
         /// with its <see cref="TrainingCheckpoint.Rig"/> set to this rig, so
         /// <see cref="TrainingCheckpoint.ToInferenceModel()"/> and rig-based load/save work against it.
         /// Validates that the checkpoint fits this rig — trainable-param, model-state and
@@ -1665,6 +1685,8 @@ namespace Shorokoo
                 BatchIndex = checkpoint.BatchIndex,
                 Rig = this,
                 Loss = checkpoint.Loss,
+                AppliedHyperparameters = checkpoint.AppliedHyperparameters,
+                History = checkpoint.History,
                 FeedMode = checkpoint.FeedMode,
             };
         }
@@ -2064,7 +2086,7 @@ namespace Shorokoo
                     var built = builtByIndex[h];
                     // Value route: the scheduler graph is the single truth, so its value at the
                     // initial counters — what optimizer state init needs — comes from evaluating that
-                    // very graph via QEE, not a hardcoded 0f (the old scheduler-module state-init hole).
+                    // very graph via QEE.
                     _hyperparamInitialCounterValues[h] = EvaluateSchedulerAtInitialCounters(built.Graph);
                     PinShape(h, _hyperparamInitialCounterValues[h]!.Shape);
                     // Map the scheduler's inputs (in its own input order) to the shared counter keys.
@@ -2099,6 +2121,11 @@ namespace Shorokoo
                 if (hyperparameters[h].Kind == HyperparameterKind.Baked)
                     normalizedHypers[h] = Hyperparameter.Baked(_hyperparamInitialCounterValues[h]!);
             _constituents = _constituents with { Hyperparameters = normalizedHypers };
+            _bakedAppliedValues = new AppliedHyperparameter?[numHyperparams];
+            for (int h = 0; h < numHyperparams; h++)
+                if (hyperparameters[h].Kind == HyperparameterKind.Baked)
+                    _bakedAppliedValues[h] = AppliedHyperparameter.Of(_hyperparamInitialCounterValues[h]!);
+            _appliedLayout = AppliedHyperparameterMap.Layout.Of(HyperparameterNames);
 
             // Build optimizer state struct definition. Element type comes from each state's
             // initializer; the rank falls back to the parameter's rank when the initializer's
@@ -2205,7 +2232,10 @@ namespace Shorokoo
             newInputs.Add(targetsKey);
 
             // Original outputs: [loss, gradient_struct, state_struct]
-            // Target outputs:   [updated_param_struct, state_struct, updated_optimizer_state?, loss]
+            // Target outputs:   [updated_param_struct, state_struct, updated_optimizer_state?, loss, scheduled_hyper...]
+            // Each scheduled hyperparameter's output is the key every optimizer replay read for it,
+            // so what a step reports is what it applied, not a second evaluation of the schedule.
+            // Baked and runtime values are known on the host and are not outputs.
             var lossOutputKey = fastTraining.Outputs[0];
             var stateStructOutputKey = fastTraining.Outputs[2];
 
@@ -2214,6 +2244,8 @@ namespace Shorokoo
             newOutputs.Add(stateStructOutputKey);
             if (updatedOptStateStructKey is FastTensorKey uosk) newOutputs.Add(uosk);
             newOutputs.Add(lossOutputKey);
+            foreach (var h in scheduledIndices) newOutputs.Add(hyperparamKeys[h]);
+            _scheduledHyperparameterOutputs = [.. scheduledIndices];
 
             fastTraining.SetInputs(newInputs);
             fastTraining.SetOutputs(newOutputs);
@@ -2240,6 +2272,23 @@ namespace Shorokoo
             UpdatedParamFieldCount = TrainableParamStructDef.Fields.Length;
             UpdatedStateFieldCount = ModelStateDef.Fields.Length;
             UpdatedOptimizerStateFieldCount = OptimizerStateDef.Fields.Length;
+
+            RequireStepOutputLayout(_trainingStepWorkGraph.Outputs.Count, "lowered");
+        }
+
+        /// <summary>
+        /// Fails the build when a training-step graph does not have the outputs <see cref="RunStep"/>
+        /// reads by position: the updated state fields, the loss, and one per scheduled
+        /// hyperparameter. Checked on the lowered graph and again on the graph that is compiled.
+        /// </summary>
+        private void RequireStepOutputLayout(int outputCount, string which)
+        {
+            var expected = UpdatedParamFieldCount + UpdatedStateFieldCount
+                + UpdatedOptimizerStateFieldCount + 1 + _scheduledHyperparameterOutputs.Length;
+            if (outputCount != expected)
+                throw new InvalidOperationException(
+                    $"The {which} training step has {outputCount} outputs where its layout calls for " +
+                    $"{expected}: the updated state fields, the loss and one per scheduled hyperparameter.");
         }
 
         /// <summary>
@@ -3038,6 +3087,16 @@ namespace Shorokoo
         internal static Action? StepFaultInjection;
 
         /// <summary>
+        /// Test hook: invoked with a step's outputs once it has executed, in the scope that reads
+        /// them into the new checkpoint and releases every one if that fails, so a test can fail a
+        /// step after it has consumed what it was fed and see what it leaves behind. Thread-scoped,
+        /// so a hook installed by one parallel test is invisible to every other thread; still reset
+        /// it in a <c>finally</c>.
+        /// </summary>
+        [ThreadStatic]
+        internal static Action<IReadOnlyList<NamedModelParam>>? StepOutputFaultInjection;
+
+        /// <summary>
         /// The tensor state a training step holds resident, by section — what the step path already
         /// knows and an allocation failure never said (Shorokoo/Shorokoo#330). Best-effort
         /// throughout: a field whose size is not derivable contributes an unknown size rather than
@@ -3111,8 +3170,17 @@ namespace Shorokoo
             // taken what it was fed as it is, the checkpoint among it.
             RequireBatchFits(inputStruct, targetStruct, nameof(trainingInput), nameof(trainingOutput));
             if (HyperparameterStructDef.Fields.Length > 0)
+            {
                 TrainingFeeds.RequireFits(
                     hyperStruct!, HyperparameterStructDef, nameof(hyperparams), "rig.MakeHyperparameters(...)");
+                // The step was built at each hyperparameter's shape, and a value of another one would
+                // broadcast rather than fail -- a [1] rate over a [4] one trains on, the wrong way.
+                // Read by place, as the step feeds it: RequireFits accepts fields named otherwise.
+                for (int i = 0; i < DynamicHyperparameterIndices.Count; i++)
+                    if (FedTensor(FedHyperparameter(hyperStruct!, i)) is { } fed)
+                        HyperparameterValues.AssertShape(
+                            fed, HyperparameterShapes[DynamicHyperparameterIndices[i]], DynamicHyperparameterNames[i]);
+            }
 
             // Execute the training step graph.
             // Graph inputs (after lowering): [param_fields..., state_fields..., opt_state_fields..., hyperparam_fields..., counter_inputs..., model_input_fields..., target_fields...]
@@ -3133,6 +3201,13 @@ namespace Shorokoo
             // names for the state inputs are internal identifiers.
             var hyperparameters = HyperparameterStructDef.Fields.Length > 0 ? hyperStruct! : null;
             var labels = StepLabels(checkpoint, hyperparameters, inputStruct, targetStruct);
+            // Read before the step runs: fed as they are, the runtime values are consumed by it.
+            var applied = new AppliedHyperparameter?[HyperparameterNames.Count];
+            Array.Copy(_bakedAppliedValues, applied, applied.Length);
+            if (hyperparameters is not null)
+                for (int i = 0; i < DynamicHyperparameterIndices.Count; i++)
+                    applied[DynamicHyperparameterIndices[i]] = AppliedHyperparameter.Of(
+                        FedTensor(FedHyperparameter(hyperparameters, i))!);
             var execInputs = new List<IData>(labels.Count);
             AddStruct(execInputs, checkpoint.TrainableParams, checkpoint.FeedMode);
             AddStruct(execInputs, checkpoint.ModelState, checkpoint.FeedMode);
@@ -3157,10 +3232,11 @@ namespace Shorokoo
                 StepFaultInjection?.Invoke();
                 if (retainStateOnDevice && compiled.HasDeviceMemory)
                 {
-                    // Every output but the trailing loss is state the next step feeds straight back.
-                    // Sized from the session's own outputs, not from the field counts: the release
-                    // loop below already allows more outputs than state plus loss, and Execute refuses
-                    // a retention array of any other length -- so deriving it twice would fail the GPU
+                    // The leading outputs are state the next step feeds straight back; the loss and
+                    // the scheduled hyperparameters' values after it are read on the host.
+                    // Sized from the session's own outputs, not from the field counts: the outputs
+                    // after the loss are the scheduled hyperparameters' values, and Execute refuses a
+                    // retention array of any other length -- so deriving it twice would fail the GPU
                     // path on a graph the CPU path runs fine.
                     var retain = new bool[compiled.OutputCount];
                     for (int i = 0; i < stateOutputCount; i++) retain[i] = true;
@@ -3221,44 +3297,69 @@ namespace Shorokoo
                 ReleaseReadCopies(targetStruct);
             }
 
-            // Graph outputs (after lowering): [updated_param_field_0, ..., updated_state_field_0, ..., updated_opt_state_field_0, ..., loss]
-            // Repack updated param fields into a TensorDataStruct
-            var updatedParamFields = new Dictionary<string, IData>();
-            for (int i = 0; i < UpdatedParamFieldCount; i++)
+            // Graph outputs (after lowering): [updated_param_field_0, ..., updated_state_field_0, ..., updated_opt_state_field_0, ..., loss, scheduled_hyper_0, ...]
+            // Until the new checkpoint holds them nothing owns the outputs, so a failure reading
+            // them releases every one rather than leaving them to a finalizer.
+            TensorDataStruct updatedParams, updatedModelState, updatedOptimizerState;
+            float lossValue;
+            try
             {
-                updatedParamFields[TrainableParamStructDef.Fields[i].Name] = results[i].ToTensorData();
-            }
-            var updatedParams = new TensorDataStruct(TrainableParamStructDef, updatedParamFields);
+                // Repack updated param fields into a TensorDataStruct
+                var updatedParamFields = new Dictionary<string, IData>();
+                for (int i = 0; i < UpdatedParamFieldCount; i++)
+                {
+                    updatedParamFields[TrainableParamStructDef.Fields[i].Name] = results[i].ToTensorData();
+                }
+                updatedParams = new TensorDataStruct(TrainableParamStructDef, updatedParamFields);
 
-            // Repack updated state fields into a TensorDataStruct
-            var updatedStateFields = new Dictionary<string, IData>();
-            for (int i = 0; i < UpdatedStateFieldCount; i++)
+                // Repack updated state fields into a TensorDataStruct
+                var updatedStateFields = new Dictionary<string, IData>();
+                for (int i = 0; i < UpdatedStateFieldCount; i++)
+                {
+                    updatedStateFields[ModelStateDef.Fields[i].Name] = results[UpdatedParamFieldCount + i].ToTensorData();
+                }
+                updatedModelState = new TensorDataStruct(ModelStateDef, updatedStateFields);
+
+                // Repack updated optimizer state fields into a TensorDataStruct
+                var updatedOptStateFields = new Dictionary<string, IData>();
+                for (int i = 0; i < UpdatedOptimizerStateFieldCount; i++)
+                {
+                    updatedOptStateFields[OptimizerStateDef.Fields[i].Name] =
+                        results[UpdatedParamFieldCount + UpdatedStateFieldCount + i].ToTensorData();
+                }
+                updatedOptimizerState = new TensorDataStruct(OptimizerStateDef, updatedOptStateFields);
+                StepOutputFaultInjection?.Invoke(results);
+
+                // The loss follows the state outputs. Read it through the rooted accessor, not a bare
+                // span; everything past the state outputs is released below: the state is the
+                // resident run's to own or the checkpoint's to carry, the rest is a step's worth of
+                // outputs nobody keeps.
+                var lossTensor = results[stateOutputCount].ToTensorData<float32>();
+                lossValue = lossTensor.ValueAt<float>(0);
+                // Graph outputs after the loss: one per scheduled hyperparameter, the value this step applied.
+                for (int j = 0; j < _scheduledHyperparameterOutputs.Length; j++)
+                    applied[_scheduledHyperparameterOutputs[j]] =
+                        AppliedHyperparameter.Of(results[stateOutputCount + 1 + j].ToTensorData());
+            }
+            catch
             {
-                updatedStateFields[ModelStateDef.Fields[i].Name] = results[UpdatedParamFieldCount + i].ToTensorData();
+                // Every output goes, whichever of them fails to, and what propagates is the failure
+                // that brought the step here.
+                foreach (var result in results)
+                    if (result is TensorDataModelParam output)
+                        try { output.ToTensorData().Dispose(); } catch { }
+                throw;
             }
-            var updatedModelState = new TensorDataStruct(ModelStateDef, updatedStateFields);
-
-            // Repack updated optimizer state fields into a TensorDataStruct
-            var updatedOptStateFields = new Dictionary<string, IData>();
-            for (int i = 0; i < UpdatedOptimizerStateFieldCount; i++)
-            {
-                updatedOptStateFields[OptimizerStateDef.Fields[i].Name] =
-                    results[UpdatedParamFieldCount + UpdatedStateFieldCount + i].ToTensorData();
-            }
-            var updatedOptimizerState = new TensorDataStruct(OptimizerStateDef, updatedOptStateFields);
-
-            // Loss is the last output
-            // Read the loss through the rooted accessor, not a bare span, and release everything
-            // past the state outputs here: the state is the resident run's to own or the
-            // checkpoint's to carry, the rest is a step's worth of outputs nobody keeps.
-            var lossTensor = results[stateOutputCount].ToTensorData<float32>();
-            var lossValue = lossTensor.ValueAt<float>(0);
             for (int i = stateOutputCount; i < results.Length; i++)
                 results[i].ToTensorData().Dispose();
+            // One immutable map, held both by the new checkpoint and by its history entry. Every slot
+            // is filled by now -- baked, runtime, then scheduled -- and the array is this step's alone.
+            var appliedByName = new AppliedHyperparameterMap(
+                _appliedLayout, System.Runtime.InteropServices.ImmutableCollectionsMarshal.AsImmutableArray<AppliedHyperparameter>(applied!));
 
             // Step is the graph-advanced counter (one training step per call). Epoch and batch
             // index are host-owned — the training loop advances them — so they carry through
-            // unchanged here.
+            // unchanged here. The history entry records the counters the step ran at.
             var newCheckpoint = new TrainingCheckpoint
             {
                 TrainableParams = updatedParams,
@@ -3269,6 +3370,15 @@ namespace Shorokoo
                 BatchIndex = checkpoint.BatchIndex,
                 Rig = this,
                 Loss = lossValue,
+                AppliedHyperparameters = appliedByName,
+                History = checkpoint.History.Append(new TrainingHistoryEntry
+                {
+                    Step = checkpoint.Step,
+                    Epoch = checkpoint.Epoch,
+                    BatchIndex = checkpoint.BatchIndex,
+                    Loss = lossValue,
+                    AppliedHyperparameters = appliedByName,
+                }),
             };
 
             // Only state this step superseded and left alive: what it consumed is released already.
@@ -3349,6 +3459,12 @@ namespace Shorokoo
             if (_ignoredTargetPlaceholder is not null) labels.Add("the rig's stand-in for the target its loss ignores");
             return [.. labels];
         }
+
+        /// <summary>The value <paramref name="fed"/> holds for the <paramref name="i"/>-th runtime
+        /// hyperparameter: its <paramref name="i"/>-th field, whatever it is called, as the step
+        /// feeds it.</summary>
+        private static IData FedHyperparameter(TensorDataStruct fed, int i) =>
+            fed.Fields[fed.Definition.Fields[i].Name];
 
         /// <summary>Whether <paramref name="fed"/>'s fields are named, in order, as
         /// <paramref name="own"/>'s are — which they are by reference for every struct the rig
@@ -3693,7 +3809,7 @@ namespace Shorokoo
 
             var checkpoint = initialCheckpoint ?? CreateInitialCheckpoint();
 
-            // Resume: point the loader at the next batch to train. A checkpoint's epoch / batch now names
+            // Resume: point the loader at the next batch to train. A checkpoint's epoch / batch names
             // the batch that was USED, so a resuming run advances one past it via RestoreAfter (the loader
             // does the epoch rollover). A fresh checkpoint — or one whose epoch / batch is unknown (null),
             // e.g. trained without a loader — starts at (epoch 0, batch 0) via RestoreFrom.
@@ -4409,7 +4525,7 @@ namespace Shorokoo
             // Initial optimizer state: run the optimizer's state initializers once per trainable
             // parameter, binding the optimizer's hyperparameter inputs to their value at the initial
             // counters (the single value route — baked constant, or scheduler graph evaluated via
-            // QEE at build; no more hardcoded 0f for scheduler modules), the parameter's initial
+            // QEE at build), the parameter's initial
             // value, and a zero gradient. The state-init graph carries the [StateInitializer]
             // functions split out of the optimizer graph by FastNormalizeOptimizerGraph.
             _initialOptStateFields = new Dictionary<string, IData>();
@@ -4605,6 +4721,7 @@ namespace Shorokoo
             // compiles through the wrappers, which copy). Two full walks of the lowered
             // training graph, so named rather than left inside the optimizer's report.
             Stage("FreezeTrainingStepGraph");
+            RequireStepOutputLayout(optResult.OptimizedGraph.Outputs.Count, "optimized");
             PreOptimizationGraph = new ComputationGraph(graph, GraphKind.ConcreteModel);
             TrainingStepPureGraph = new ComputationGraph(optResult.OptimizedGraph, GraphKind.ConcreteModel);
             _trainingStepWorkGraph = null;

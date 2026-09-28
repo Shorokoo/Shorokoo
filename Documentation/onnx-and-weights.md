@@ -297,7 +297,7 @@ magic "SRK\x01" | u16 headerLen (little-endian) | JSON header | payload
 
 The payload is the graph serialized as an ONNX `ModelProto` (Shorokoo's internal
 dialect allowed), wrapped in **exactly one** compression layer when the header says
-so. Header fields (add-only across minor revisions; unknown fields are ignored):
+so. Header fields (fields a reader does not interpret are ignored):
 
 ```jsonc
 {
@@ -565,7 +565,7 @@ Recognized formats and what is reported:
 |---|---|---|
 | `SrkGraph` | `.srk` container magic (a file that opens with it but has no readable container header and parses as SafeTensors is reported as `SafeTensors`) | the header — format version, lifecycle stage, compression, payload SHA-256, producer (`result.Srk.Header`, an `SrkHeader`) |
 | `SafeTensors` | 8-byte header-length prefix + valid JSON header | tensor listing (name, dtype, shape, byte size), total payload size, `__metadata__` (`result.SafeTensors`) |
-| `TrainingCheckpoint` | the `__shorokoo_checkpoint__` marker tensor in a SafeTensors header | checkpoint format version, the run counters (global step, epoch, batch index), and the per-section (`trainable` / `model_state` / `opt_state`) tensor listing (`result.TrainingCheckpoint`); `result.SafeTensors` is populated too |
+| `TrainingCheckpoint` | the `__shorokoo_checkpoint__` marker tensor in a SafeTensors header | checkpoint format version, the run counters (global step, epoch, batch index), and the per-section (`trainable` / `model_state` / `opt_state`, plus `history` when the file holds a [training history](training.md#the-training-history)) tensor listing (`result.TrainingCheckpoint`); `result.SafeTensors` is populated too |
 | `CompressedSafeTensors` | Zstd frame magic whose decompressed content starts with a valid SafeTensors length prefix + JSON header (`.zsafetensor`, written by `CompressedFormatUtils.SaveCompressedSafeTensors`) | the same details as `SafeTensors` (`result.SafeTensors`), read by stream-decompressing only the prefix and header — the tensor payload is never decompressed; sizes describe the decompressed content |
 | `SkptCheckpoint` | a zip archive — or a **directory** (the `.skpt` directory form) — with a root `config.json` manifest declaring format `"skpt"` (see [skpt-checkpoints.md](skpt-checkpoints.md)) | whole-archive metadata (`.skpt` version, created time, producer), the model registry (per model: entry path, format, stage, graph hash), the data registry (per entry: storage format, compression, declared size, recorded sha256 — reported **unverified**), and the mapping-set names (`result.Skpt`) |
 | `NotRecognized` | anything else — including a zip without a readable `skpt` manifest, and a directory with no root `config.json`, one whose `config.json` is too large to be a manifest, or one whose manifest declares another format | a structured result — **content problems never throw**; a missing file and I/O errors (permissions, disk) do |

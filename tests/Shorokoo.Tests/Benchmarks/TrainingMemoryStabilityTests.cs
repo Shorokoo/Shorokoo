@@ -65,12 +65,16 @@ public class TrainingMemoryStabilityTests
     private const int WarmupSteps = 1_000;
     private const int MeasuredSteps = 10_000;
 
-    // Budgets. The managed delta of a non-leaking loop is ~0 after a forced
-    // collection (the checkpoint is replaced, not accumulated); 16 MiB absorbs
-    // JIT / finalizer / fragmentation jitter while a real leak over 10k steps
-    // (even ~2 KiB/step) sails past it. The RSS ceiling is a loose
-    // pathological-leak backstop only.
+    // Budgets. Each step replaces the checkpoint's state and appends one entry to its training
+    // history, which the loop keeps: the history is the one thing a step is meant to leave behind.
+    // Its entries cost what Documentation/training.md states, roughly 200-300 bytes each for this
+    // rig, whose hyperparameters are all baked; HistoryEntryAllowanceBytes gives each measured step
+    // that with headroom, so an entry that kept anything more alive -- a tensor, the checkpoint --
+    // overruns it. Nothing else a non-leaking step leaves grows with the step count; 16 MiB
+    // absorbs JIT / finalizer / fragmentation jitter while a real leak over 10k steps (even
+    // ~2 KiB/step) sails past it. The RSS ceiling is a loose pathological-leak backstop only.
     private const long ManagedGrowthBudgetBytes = 16L * 1024 * 1024;
+    private const long HistoryEntryAllowanceBytes = 512;
     private const long RssGrowthCeilingBytes = 512L * 1024 * 1024;
 
     // Geometry for the native-growth half below. One [1024, 1024] trainable parameter, so a
@@ -114,11 +118,11 @@ public class TrainingMemoryStabilityTests
         long managedGrowth = managedAfter - managedBefore;
         long rssGrowth = rssAfter - rssBefore;
 
-        // Keep the checkpoint reachable past the final measurement so the loop's
-        // last result can't be collected before we read the heap.
-        Assert.NotNull(ckpt);
+        // Keep the checkpoint, and its history, reachable past the final measurement so the
+        // loop's last result can't be collected before we read the heap.
+        Assert.Equal(WarmupSteps + MeasuredSteps, ckpt.History.Count);
 
-        Assert.True(managedGrowth <= ManagedGrowthBudgetBytes);
+        Assert.True(managedGrowth <= ManagedGrowthBudgetBytes + MeasuredSteps * HistoryEntryAllowanceBytes);
         Assert.True(rssGrowth <= RssGrowthCeilingBytes);
     }
 

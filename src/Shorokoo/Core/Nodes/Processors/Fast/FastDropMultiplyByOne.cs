@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Linq;
+using Shorokoo.Core.Backends;
 using Shorokoo.Core.Graph;
 using Shorokoo.Core.Nodes.NodeDefinitions;
 using Shorokoo.Graph;
@@ -8,7 +9,7 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
 {
     /// <summary>
     /// Reads <c>x</c> where a lowered training step reads <c>Mul(x, 1)</c> by a rank-0 floating-point
-    /// constant one, and drops the Mul. Such a product is <c>x</c> to the bit, in shape and dtype, so
+    /// constant one of any width, and drops the Mul. Such a product is <c>x</c> to the bit, in shape and dtype, so
     /// nothing changes but a pass over <c>x</c>: an optimizer's decay factor <c>1 − lr·wd</c> folds to
     /// that constant when its weight decay is a baked zero, and the product it scales is then the
     /// whole parameter, every step. A factor fed at run time is not a constant and is left alone.
@@ -56,8 +57,11 @@ namespace Shorokoo.Core.Nodes.Processors.Fast
                 return false;
             var value = producer.Attributes.GetAttributeVal(OnnxOpAttributeNames.AttrValue);
             if (value is null || value.Shape.Dims.Length != 0) return false;
-            return value.DType == DType.Float32 ? value.Elements<float>()[0] == 1f
-                : value.DType == DType.Float64 && value.Elements<double>()[0] == 1d;
+            if (value.DType == DType.Float32) return value.Elements<float>()[0] == 1f;
+            if (value.DType == DType.Float64) return value.Elements<double>()[0] == 1d;
+            if (value.DType == DType.Float16) return value.Elements<Float16>()[0].Bits == Float16.One.Bits;
+            if (value.DType == DType.BFloat16) return value.Elements<BFloat16>()[0].Bits == BFloat16.One.Bits;
+            return false;
         }
     }
 }

@@ -19,6 +19,25 @@ public class FastProcessorsCoverageTests
     private static double[] Rep(double v, int n) => [.. Enumerable.Repeat(v, n)];
     private static TensorData Flag(bool v) => TensorData(DType.Bool, [], v);
 
+    private static int MulsLeftAfterDroppingOnes<T>(object oneValue) where T : IVarType
+    {
+        var x = InputTensor<T>("x", rank: 1);
+        var one = (Tensor<T>)OnnxOp.Constant(TensorData(OnnxUtils.GetDType<T>(), [], oneValue).MoveToAttribute());
+        var graph = new InternalComputationGraph([x], [(x * one) + x]);
+        FastDropMultiplyByOne.Process(graph);
+        return graph.Nodes.Count(n => n.OpCode == Shorokoo.Core.Nodes.NodeDefinitions.OpCodes.MUL);
+    }
+
+    [Fact]
+    public void TestAMultiplyByAConstantOneIsDroppedAtEveryFloatWidth()
+    {
+        Assert.Equal(0, MulsLeftAfterDroppingOnes<float32>(1f));
+        Assert.Equal(0, MulsLeftAfterDroppingOnes<float64>(1d));
+        Assert.Equal(0, MulsLeftAfterDroppingOnes<float16>(Shorokoo.Core.Backends.Float16.One));
+        Assert.Equal(0, MulsLeftAfterDroppingOnes<bfloat16>(Shorokoo.Core.Backends.BFloat16.One));
+        Assert.Equal(1, MulsLeftAfterDroppingOnes<float32>(-1f));
+    }
+
     /// <summary>Only a pruned parameter's shape is ever observed, so concretizing one must not
     /// cost its whole tensor in host memory: the gap between pruning a small bias and a large one
     /// stays far below the tensor itself.</summary>

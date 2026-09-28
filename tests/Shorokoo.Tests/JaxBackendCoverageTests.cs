@@ -104,6 +104,28 @@ public class JaxBackendCoverageTests
     public void TestWhereSelectsOnEveryIntegerTypeAndBoolOnJax() => WhereSelectsOnEveryIntegerTypeAndBool(new ComputeContext(Jax));
 
     [Fact]
+    public void TestAConstantPadFillsWithItsValueExactlyOnEveryTypeOnJax() => ConstantPadsFillWithTheirValueExactly(Jax);
+
+    [Fact]
+    public void TestAnInt64RangeCountsItsElementsExactlyOnJax()
+    {
+        Assert.Equal([0L, 1L << 61, 1L << 62], Ranged(0L, (1L << 62) + 1L, 1L << 61));
+        Assert.Equal([0L, -(1L << 61), -(1L << 62)], Ranged(0L, -(1L << 62) - 1L, -(1L << 61)));
+    }
+
+    private static long[] Ranged(long start, long limit, long delta)
+    {
+        var graph = PyTorchBackendCoverageTests.Graph([], ["y"],
+            Node("Constant", [], ["start"], attributes: Tensor("value", 7, [], [start])),
+            Node("Constant", [], ["limit"], attributes: Tensor("value", 7, [], [limit])),
+            Node("Constant", [], ["delta"], attributes: Tensor("value", 7, [], [delta])),
+            Node("Range", ["start", "limit", "delta"], ["y"]));
+        using var session = Jax.CreateSession(Serialize(graph), default, default, DeviceMemorySettings.Default);
+        using var y = session.Run(new Dictionary<string, IShorokooTensorValue>(), ["y"], RunSettings.Default)[0];
+        return y.GetTensorDataAsSpan<long>().ToArray();
+    }
+
+    [Fact]
     public void TestANegativeZeroInAConstantEqualToAnIotaLosesItsSignOnJaxAndKeepsItOnOnnxRuntime()
     {
         Assert.True(AutoTest.AdvancedTestGraph<NegativeZeroInAnIotaConstantReciprocalSigns>([], [QeeAudit.Bits([2L], true, true)],

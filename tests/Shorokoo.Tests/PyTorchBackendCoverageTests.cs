@@ -362,11 +362,56 @@ public class PyTorchBackendCoverageTests
         => AutoTest.AdvancedTestGraph<GenericReduceMaxMinCheck>([], [x, QeeAudit.I64([expected.Length], expected)], context: c,
             genericTypes: new() { ["T"] = t });
 
-    // #410: the PyTorch backend's Pad passes an int64 constant value through a Python float.
-    [Fact(Skip = "#410: the PyTorch backend's Pad passes an int64 constant value through a Python float, overflowing or rounding it")]
+    [Fact]
     public void TestAnInt64PadKeepsAConstantValueADoubleCannotHold()
         => Assert.True(AutoTest.AdvancedTestGraph<PadInt64WithWideValuesCheck>([], [QeeAudit.I64([2L], 1L, 2L)],
             context: new ComputeContext(Torch)));
+
+    [Fact]
+    public void TestAConstantPadFillsWithItsValueExactlyOnEveryTypeOnTorch() => ConstantPadsFillWithTheirValueExactly(Torch);
+
+    [Fact]
+    public void TestAnInt64RangeCountsItsElementsExactlyOnTorch() => Assert.True(Int64RangeCountsItsElementsExactly(new ComputeContext(Torch)));
+
+    internal static void ConstantPadsFillWithTheirValueExactly(IShorokooBackend backend)
+    {
+        Assert.True(PadsWith(backend, ShorokooTensorElementType.Int64, Raw(long.MaxValue)));
+        Assert.True(PadsWith(backend, ShorokooTensorElementType.Int64, Raw(9007199254740993L)));
+        Assert.True(PadsWith(backend, ShorokooTensorElementType.UInt64, Raw(ulong.MaxValue)));
+        Assert.True(PadsWith(backend, ShorokooTensorElementType.UInt64, Raw((1UL << 63) + 1UL)));
+        Assert.True(PadsWith(backend, ShorokooTensorElementType.Int32, Raw(int.MinValue)));
+        Assert.True(PadsWith(backend, ShorokooTensorElementType.UInt32, Raw(uint.MaxValue)));
+        Assert.True(PadsWith(backend, ShorokooTensorElementType.Int8, Raw(sbyte.MinValue)));
+        Assert.True(PadsWith(backend, ShorokooTensorElementType.Bool, Raw(true)));
+        Assert.True(PadsWith(backend, ShorokooTensorElementType.Float, Raw(-0f, float.NaN)));
+        Assert.True(PadsWith(backend, ShorokooTensorElementType.Double, Raw(double.NegativeInfinity)));
+        Assert.True(PadsWith(backend, ShorokooTensorElementType.Complex64, Raw(1.5f, -2f)));
+    }
+
+    internal static bool Int64RangeCountsItsElementsExactly(ComputeContext c)
+        => AutoTest.AdvancedTestGraph<Int64RangeOfACountADoubleCannotReachCheck>([],
+            [QeeAudit.I64([], 0L), QeeAudit.I64([], (1L << 62) + 1L), QeeAudit.I64([], 1L << 61)], context: c);
+
+    private static byte[] Raw<T>(params T[] values) where T : unmanaged => MemoryMarshal.AsBytes(values.AsSpan()).ToArray();
+
+    private static bool PadsWith(IShorokooBackend backend, ShorokooTensorElementType type, byte[] values)
+    {
+        var size = ElementSize(type);
+        return Enumerable.Range(0, values.Length / size).All(i => PadFills(backend, type, values[(i * size)..((i + 1) * size)]));
+    }
+
+    private static bool PadFills(IShorokooBackend backend, ShorokooTensorElementType type, byte[] value)
+    {
+        var fill = new AttributeProto { Name = "value", Type = AttributeProto.AttributeType.Tensor, T = new TensorProto { data_type = (int)type, RawData = value } };
+        var graph = Graph(["x0"], ["y"],
+            Node("Constant", [], ["pads"], attributes: Tensor("value", 7, [2], [1, 1])),
+            Node("Constant", [], ["fill"], attributes: fill),
+            Node("Pad", ["x0", "pads", "fill"], ["y"]));
+        using var session = backend.CreateSession(Serialize(graph), default, default, DeviceMemorySettings.Default);
+        using var x = backend.CreateTensorFromRawBytes(type, new byte[value.Length], [1]);
+        using var y = session.Run(Feeds(x), ["y"], RunSettings.Default)[0];
+        return backend.CopyTensorToHost(y).SequenceEqual([.. value, .. new byte[value.Length], .. value]);
+    }
 
     [Fact]
     public void TestBatchFirstRecurrentNetworksRunOnTorch()
@@ -1310,4 +1355,16 @@ public partial class NegativeInfinityWindowMaxPoolIndicesValues
 {
     public static Tensor<float32> Inline(Tensor<float32> x)
         => ((Tensor<int64>)OnnxOp.MaxPoolWithIndices(x, AutoPad.NotSet, false, null, [2L], [1L, 1L], 0L, null).indices).Cast<float32>();
+}
+
+[Module]
+public partial class Int64RangeOfACountADoubleCannotReachCheck
+{
+    public static Scalar<bit> Inline(Scalar<int64> start, Scalar<int64> limit, Scalar<int64> delta)
+        => Holds((Tensor<int64>)OnnxOp.Range(start, limit, delta), 3L << 61)
+            & Holds((Tensor<int64>)OnnxOp.Range(start, Scalar(0L) - limit, Scalar(0L) - delta), -(3L << 61));
+
+    private static Scalar<bit> Holds(Tensor<int64> range, long sum)
+        => (((Tensor<int64>)OnnxOp.Shape(range)).Reduce(ReduceKind.Sum).Scalar() == Scalar(3L))
+            & (range.Reduce(ReduceKind.Sum).Scalar() == Scalar(sum));
 }

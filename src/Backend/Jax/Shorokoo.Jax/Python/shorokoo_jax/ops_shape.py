@@ -105,8 +105,10 @@ def range_(start, limit, delta):
     s = _rt.number(start, "Range", "its start")
     l = _rt.number(limit, "Range", "its limit")
     d = _rt.number(delta, "Range", "its delta")
-    count = max(math.ceil((l - s) / d), 0)
     floating = _rt.is_floating(start)
+    # An integer count is an exact ceiling division; one through a double loses the count of a
+    # span beyond 2^53.
+    count = max(math.ceil((l - s) / d) if floating else -((s - l) // d), 0)
     steps = np.arange(count, dtype=np.float64 if floating else np.int64)
     return (np.asarray(s, dtype=steps.dtype) + steps * np.asarray(d, dtype=steps.dtype)).astype(start.dtype)
 

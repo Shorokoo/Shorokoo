@@ -161,8 +161,11 @@ Boolean/integer outputs are non-differentiable, hence N/A.
    bfloat16 or bool values. Its backend rewrites such a call when it builds a
    session: a bool one as `Or(And(c, x), And(Not(c), y))`, every other one as a
    `Where` over int32 (for int8, int16, uint16), int64 (for uint32, uint64) or
-   float32 (for bfloat16) with the result cast back, each exact. The graph and
-   its export keep the `Where` ([#423](https://github.com/Shorokoo/Shorokoo/issues/423)).
+   float32 (for bfloat16) with the result cast back. The graph and its export
+   keep the `Where` ([#423](https://github.com/Shorokoo/Shorokoo/issues/423)).
+   Every selected value comes out exact, with one exception: ONNX Runtime's
+   float32, float64 and float16 `Where` gives +0 where it selects −0 from `x`
+   (a −0 from `y` keeps its sign), and the float32 path of bfloat16 inherits it.
 3. The condition is non-differentiable; both branches get broadcast-aware
    gradients.
 
@@ -186,16 +189,17 @@ Boolean/integer outputs are non-differentiable, hence N/A.
 `noop_with_empty_axes` set with no axes, or an empty axes tensor, means no axis is
 reduced: each element is a group of its own, and the output, of the input's shape,
 holds the reduction of each one-element group. That is the element itself for
-`ReduceSum`, `ReduceMean`, `ReduceMax`, `ReduceMin` and `ReduceProd`; its absolute
-value for `ReduceL1` and `ReduceL2`; its square for `ReduceSumSquare`; its logarithm
-for `ReduceLogSum`; and `ReduceLogSumExp`'s log-sum-exp of the one element, which is
-the element when it is finite. This is the reading of the ONNX reference
-implementation and of the operators' function bodies, and every backend and QEE
-compute it; an empty input gives an empty output of its shape and type.
+`ReduceSum`, `ReduceMean`, `ReduceMax`, `ReduceMin`, `ReduceProd` and
+`ReduceLogSumExp`, ±inf included; its absolute value for `ReduceL1` and `ReduceL2`;
+its square for `ReduceSumSquare`; and its logarithm for `ReduceLogSum`. This is the
+reading of the ONNX reference implementation and of the operators' function bodies,
+and every backend and QEE compute it; an empty input gives an empty output of its
+shape and type.
 
 1. Integer index output: non-differentiable.
 2. Ties share the gradient equally.
-3. The gradient uses prod/x and is NaN when an element is exactly 0.
+3. The gradient uses prod/x and is NaN when an element of a group of two or more
+   is exactly 0; a one-element group's gradient is 1.
 4. Only when a **reduced axis has extent 0** (so each group is empty): QEE leaves
    the value uncomputed, because the empty-group result depends on dtype (-inf,
    +inf, 0, -inf, -inf for `float32`; the type's minimum/maximum for an integer
@@ -206,30 +210,38 @@ compute it; an empty input gives an empty output of its shape and type.
 5. ONNX Runtime's reduction kernels depart from the spec over an **empty input**,
    and its backend rewrites the affected calls when it builds a session, for built
    and imported graphs alike; the graph, its export, generated C# and `.srk` keep
-   the reduction as written. A call whose input is a nonempty `Constant` is left
-   alone. The rewrites, in the order they apply:
+   the reduction as written. A call whose input is a scalar or a nonempty
+   `Constant` is left alone. The rewrites, in the order they apply:
+   - Negative axes: ONNX Runtime ignores a negative axis of an empty input,
+     reducing only the non-negative ones. The axes are made non-negative — as a
+     constant when they are constant and the input's rank is known, in the graph
+     otherwise ([#422](https://github.com/Shorokoo/Shorokoo/issues/422)).
    - `noop_with_empty_axes` set with no axes, or an empty axes tensor: ONNX Runtime
      reduces every axis of an empty input where the output is that empty input.
      When the session's model states every input's dimensions, the call becomes an
-     `If` on the input and the axes being empty, which ONNX Runtime resolves when it
-     builds the session, keeping the plain call wherever the input is not empty.
-     Otherwise the call keeps one reduction of the same data and axes with
-     `keepdims` 0, the reduced axes put back by an `Unsqueeze`, and an empty input
-     with empty axes is viewed with a trailing axis of one that alone is reduced —
-     no branch and no copy ([#409](https://github.com/Shorokoo/Shorokoo/issues/409)).
-   - Negative axes: ONNX Runtime returns an empty input unreduced. The axes are
-     made non-negative — as a constant when they are constant and the input's rank
-     is known, in the graph otherwise ([#422](https://github.com/Shorokoo/Shorokoo/issues/422)).
+     `If` on the input and the axes being empty, each counted as the product of its
+     shape, keeping the plain call wherever the input is not empty. ONNX Runtime
+     folds the `If` away when it builds the session wherever those shapes follow
+     from the stated dimensions; where a shape depends on the data, the `If` runs
+     with the session. Otherwise the call keeps one reduction of the same data and
+     axes with `keepdims` 0, the reduced axes put back by an `Unsqueeze`, and an
+     empty input with empty axes is viewed with a trailing axis of one that alone
+     is reduced — no branch and no copy ([#409](https://github.com/Shorokoo/Shorokoo/issues/409)).
    - A float16 `ReduceSumSquare`, `ReduceL1` or `ReduceLogSum` with no axes input:
      ONNX Runtime's kernel crashes the process on an empty input. The call becomes
-     an `If` on the input's element count that reduces an empty input in float32
-     and casts the result back ([#411](https://github.com/Shorokoo/Shorokoo/issues/411)).
+     an `If` on the input's element count, the product of its shape, that reduces
+     an empty input in float32 and casts the result back; ONNX Runtime folds it as
+     above ([#411](https://github.com/Shorokoo/Shorokoo/issues/411)).
    - An integer or boolean `ReduceMax`/`ReduceMin`: ONNX Runtime gives an empty
-     group 0 for every integer type and fails on an empty `bool` input. The call
-     becomes an `If` on the input's element count being 0: the other branch is the
-     plain operator, and the empty branch fills its output shape with the identity
-     from note 4. An unsigned `ReduceMax`, whose identity is 0, and a reduction with
-     no axes and `noop_with_empty_axes` set are left alone ([#382](https://github.com/Shorokoo/Shorokoo/issues/382)).
+     group 0 for every integer type, and throws when a reduced axis of a `bool`
+     input has extent 0. A `bool` call becomes a uint8 `ReduceMax` of the input
+     cast back — over the negated input, negated back, for `ReduceMin` — whose
+     empty group gives 0, that is false: exact for every input, with no branch. An
+     integer call becomes an `If` on the input's element count being 0, folded as
+     above: the other branch is the plain operator, and the empty branch fills its
+     output shape with the identity from note 4. An unsigned `ReduceMax`, whose
+     identity is 0, and a reduction with no axes and `noop_with_empty_axes` set are
+     left alone ([#382](https://github.com/Shorokoo/Shorokoo/issues/382)).
 
 ## Shape & data movement
 

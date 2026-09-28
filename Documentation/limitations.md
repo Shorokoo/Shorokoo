@@ -363,7 +363,8 @@ The ONNX spec fixes it for four of them: the type's lowest value for `ReduceMax`
 (−inf, the integer minimum, false), its highest for `ReduceMin` (+inf, the integer
 maximum, true), and −inf for `ReduceLogSum` and `ReduceLogSumExp`; it leaves
 `ReduceMean` of an empty group undefined. Every backend gives those four the
-spec's value — the ONNX Runtime backend through the rewrites listed in
+spec's value for every dtype it has a kernel for — the ONNX Runtime backend
+through the rewrites listed in
 [operator-support.md](operator-support.md#reductions). `ReduceMean` of an empty
 group is what each backend's kernel gives; for a floating-point type the PyTorch
 and JAX backends give NaN. Use the ONNX Runtime backend (`OnnxEngine.Eval` /

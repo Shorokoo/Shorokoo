@@ -147,10 +147,10 @@ so the `Where`s the reduction and pool rewrites emit are covered by the last row
 
 | Operator | Scenario ONNX Runtime gets wrong | Rewrite | Issue |
 |---|---|---|---|
-| Every `Reduce*` | `noop_with_empty_axes` set with no axes or an empty axes tensor, on an empty input | With every input's dimensions stated, an `If` on the input and axes being empty, which ONNX Runtime folds when it builds the session; otherwise the same reduction with `keepdims` 0 and the reduced axes put back by `Unsqueeze`, an empty input viewed with a trailing axis of one that alone is reduced | [#409](https://github.com/Shorokoo/Shorokoo/issues/409) |
 | Every `Reduce*` | Negative axes on an empty input | Axes made non-negative, as a constant or in the graph | [#422](https://github.com/Shorokoo/Shorokoo/issues/422) |
+| Every `Reduce*` | `noop_with_empty_axes` set with no axes or an empty axes tensor, on an empty input | With every input's dimensions stated, an `If` on the input and axes being empty, which ONNX Runtime folds when it builds the session wherever their shapes follow from the stated dimensions; otherwise the same reduction with `keepdims` 0 and the reduced axes put back by `Unsqueeze`, an empty input viewed with a trailing axis of one that alone is reduced | [#409](https://github.com/Shorokoo/Shorokoo/issues/409) |
 | `ReduceSumSquare`, `ReduceL1`, `ReduceLogSum` | float16 with no axes input, on an empty input (the process crashes) | `If` on the element count; an empty input is reduced in float32 and cast back | [#411](https://github.com/Shorokoo/Shorokoo/issues/411) |
-| `ReduceMax`, `ReduceMin` | Integer or bool input with an empty group (0 for every integer type, a failure for bool) | `If` on the element count; the empty branch fills the output shape with the spec's identity | [#382](https://github.com/Shorokoo/Shorokoo/issues/382) |
+| `ReduceMax`, `ReduceMin` | An empty group of an integer input (0 for every integer type); a reduced axis of extent 0 of a bool input (the kernel throws) | Integer: `If` on the element count, the empty branch filling the output shape with the spec's identity; bool: a uint8 `ReduceMax` cast back, over the negated input and negated back for `ReduceMin`, with no branch | [#382](https://github.com/Shorokoo/Shorokoo/issues/382) |
 | `MaxPool` | `Indices` read over int8, uint8, float16, float32 or float64, with a window whose maximum is at or below the lowest finite value | int8/uint8 pooled as float32; a float pool's such windows taken from a second pool that finds their first maximum | [#420](https://github.com/Shorokoo/Shorokoo/issues/420) |
 | `AveragePool`, `LpPool`, `MaxPool` | `SAME_UPPER`/`SAME_LOWER` with a dilation above 1 or a stride above the kernel; explicit pads as large as the kernel | `Pad`, a pool with padding ONNX Runtime accepts, and `Slice` | [#379](https://github.com/Shorokoo/Shorokoo/issues/379), [#408](https://github.com/Shorokoo/Shorokoo/issues/408) |
 | `Col2Im` | One spatial axis | `Col2Im` over two axes, the second of extent 1, then `Squeeze` | [#381](https://github.com/Shorokoo/Shorokoo/issues/381) |
@@ -159,11 +159,19 @@ so the `Where`s the reduction and pool rewrites emit are covered by the last row
 | `Resize` | An `axes` attribute: the transpose optimizer misreads its per-axis operands, and the kernel refuses negative axes | Written out over every axis; a `not_larger`/`not_smaller` policy over a subset of the axes keeps its axes, counted from the front, behind an `OptionalGetElement(Optional(x))` the optimizer cannot move a `Transpose` through | [#429](https://github.com/Shorokoo/Shorokoo/issues/429) |
 | `Where` | int8, int16, uint16, uint32, uint64, bfloat16 or bool values (no kernel) | bool: `Or(And(c, x), And(Not(c), y))`; others: selected through int32, int64 or float32 and cast back | [#423](https://github.com/Shorokoo/Shorokoo/issues/423) |
 
-A call whose input is a nonempty `Constant` cannot hit the empty-input rows and is left alone. Where
-only the input's shape at run time decides whether a call is affected, the rewrite is an `If` that
-takes the plain call for every other input.
+A call whose input is a scalar or a nonempty `Constant` cannot hit the empty-input rows and is left
+alone. Where only the input's shape at run time decides whether a call is affected, the rewrite gives
+the plain call's result for every other input, in one of two forms. The `If`s count the input's
+elements as the product of its shape, and ONNX Runtime folds each away when it builds the session
+wherever that shape follows from the model's stated input dimensions; an `If` over a shape that
+depends on the data runs with the session. The other rewrites — `noop_with_empty_axes` without stated
+dimensions, negative axes, and a bool `ReduceMax`/`ReduceMin` — have no branch: one graph, built
+from the input's shape and axes, is right for every input.
 
-Two ONNX Runtime faults have no workaround, and a model that meets one gets ONNX Runtime's result:
+Three ONNX Runtime faults have no workaround, and a model that meets one gets ONNX Runtime's result:
+
+- A float32, float64 or float16 `Where` gives +0 where it selects −0 from `x`; a −0 it selects from
+  `y` keeps its sign. A bfloat16 `Where`, selected through float32, does the same.
 
 - `MaxPool` without an `Indices` output gives a window of only −inf the type's lowest finite value
   instead of −inf ([#426](https://github.com/Shorokoo/Shorokoo/issues/426)).

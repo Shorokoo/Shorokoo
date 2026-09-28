@@ -4061,6 +4061,47 @@ public class TrainingRigCheckpointCoverageTests
         Assert.Equal(scalar.CopyRawMemory(), read[1].Data.CopyRawMemory());
     }
 
+    private static long SaveAllocation(TrainingCheckpoint ckpt, Action<TrainingCheckpoint> save)
+    {
+        save(ckpt);
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        save(ckpt);
+        return GC.GetAllocatedBytesForCurrentThread() - before;
+    }
+
+    [Fact]
+    public void TestSavingASkptStreamsTheStateWithoutCopyingIt()
+    {
+        var rig = TrainingRig.FromScratch(
+            WideMultiplyModel.ComputationGraph, L2Loss.ComputationGraph, AdamOptimizer.ComputationGraph,
+            [new TensorDataModelParam("input", ModelParamType.InputParam, TensorData([1L], [1f]))],
+            new AdamOptimizerHyperparameters { LearningRate = 0.1f });
+        var wide = rig.CreateInitialCheckpoint();
+        var narrow = AdamRig().CreateInitialCheckpoint();
+        long stateBytes = 4L * (FlattenStruct(wide.TrainableParams).Length + FlattenStruct(wide.OptimizerState).Length);
+
+        var skpt = TempPath("skpt_streamed") + ".skpt";
+        var dir = TempPath("skpt_streamed_dir");
+        try
+        {
+            void Zip(TrainingCheckpoint c) => Persistence.SaveTrainingCheckpointToSkpt(c, skpt);
+            void Dir(TrainingCheckpoint c) => Persistence.ForTrainingCheckpoint(c).SaveAsDirectory(dir);
+
+            Assert.True(SaveAllocation(wide, Zip) - SaveAllocation(narrow, Zip) < stateBytes / 2);
+            Assert.True(SaveAllocation(wide, Dir) - SaveAllocation(narrow, Dir) < stateBytes / 2);
+
+            Zip(wide);
+            Dir(wide);
+            Assert.Equal(FlattenStruct(wide.OptimizerState), FlattenStruct(rig.LoadCheckpointFromSkpt(skpt).OptimizerState));
+            Assert.Equal(FlattenStruct(wide.TrainableParams), FlattenStruct(rig.LoadCheckpointFromSkpt(dir).TrainableParams));
+        }
+        finally
+        {
+            if (File.Exists(skpt)) File.Delete(skpt);
+            if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
+        }
+    }
+
     [Fact]
     public void TestCheckpointSaveAtomicityAndTruncatedLoadFailsLoudlyCoverage()
     {

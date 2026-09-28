@@ -956,27 +956,16 @@ namespace Shorokoo
                 };
             }
 
-            byte[] weightsBytes;
-            using (var buffer = new MemoryStream())
-            {
-                SafeTensorLoader.SaveSafeTensorsToStream(buffer, tensors);
-                weightsBytes = buffer.ToArray();
-            }
-
             var modelBytes = CompressedFormatUtils.SaveFastGraphToBinary(
                 StripWeights(source, weightNodes), GraphKind.ConcreteModel, compressed: true);
 
-            // Encodes one safetensors data-entry payload for storage: opt-in Zstd wraps the
-            // bytes in a single Zstd layer (the zip framing stays STORED, the manifest records
-            // compression "zstd" and a sha256 of the stored/compressed bytes, and the entry
-            // skips the 64-byte alignment a compressed entry cannot use); otherwise the bytes
-            // are STORED verbatim and aligned. Applied uniformly to every data-tree entry.
-            (byte[] Stored, string Compression, bool Align) EncodeDataEntry(byte[] rawBytes)
-                => _zstdDataCompressionLevel is int level
-                    ? (CompressedFormatUtils.Compress(rawBytes, level), SkptFileFormat.CompressionZstd, false)
-                    : (rawBytes, SkptFileFormat.CompressionNone, true);
-
-            var (weightsStoredBytes, weightsCompression, weightsAlign) = EncodeDataEntry(weightsBytes);
+            // Every safetensors data-tree entry is stored the same way (Persistence.SafeTensorsDataEntry):
+            // STORED verbatim and aligned, produced straight from the tensors as the archive is
+            // written; or, with opt-in Zstd, wrapped in a single Zstd layer (the zip framing stays
+            // STORED, the manifest records compression "zstd" and a sha256 of the stored bytes,
+            // and the entry skips the 64-byte alignment a compressed entry cannot use).
+            var (weightsStored, weightsCompression, weightsAlign) =
+                Persistence.SafeTensorsDataEntry(tensors, _zstdDataCompressionLevel);
 
             var dataEntries = new Dictionary<string, SkptDataEntry>(StringComparer.Ordinal)
             {
@@ -985,7 +974,7 @@ namespace Shorokoo
                     Entry = SkptFileFormat.WeightsEntryPath,
                     Format = SkptFileFormat.DataFormatSafeTensors,
                     Compression = weightsCompression,
-                    Sha256 = SkptFileFormat.Sha256Hex(weightsStoredBytes),
+                    Sha256 = weightsStored.Sha256,
                 },
             };
             var mappingSets = new Dictionary<string, SkptMappingSet>(StringComparer.Ordinal)
@@ -999,7 +988,7 @@ namespace Shorokoo
             var bodyEntries = new List<SkptFileFormat.ZipEntrySpec>
             {
                 new(SkptFileFormat.ModelEntryPath, modelBytes, Align: false),
-                new(SkptFileFormat.WeightsEntryPath, weightsStoredBytes, Align: weightsAlign),
+                new(SkptFileFormat.WeightsEntryPath, weightsStored, Align: weightsAlign),
             };
 
             // Content-addressed dedup index over the data already stored: an additional set's
@@ -1061,20 +1050,15 @@ namespace Shorokoo
                 // references the existing entries. Only its distinct tensors are written.
                 if (newTensors.Count > 0)
                 {
-                    byte[] setBytes;
-                    using (var buffer = new MemoryStream())
-                    {
-                        SafeTensorLoader.SaveSafeTensorsToStream(buffer, newTensors);
-                        setBytes = buffer.ToArray();
-                    }
-                    var (setStored, setCompression, setAlign) = EncodeDataEntry(setBytes);
+                    var (setStored, setCompression, setAlign) =
+                        Persistence.SafeTensorsDataEntry(newTensors, _zstdDataCompressionLevel);
                     var setEntryPath = $"data/{setName}.safetensors";
                     dataEntries[setName] = new SkptDataEntry
                     {
                         Entry = setEntryPath,
                         Format = SkptFileFormat.DataFormatSafeTensors,
                         Compression = setCompression,
-                        Sha256 = SkptFileFormat.Sha256Hex(setStored),
+                        Sha256 = setStored.Sha256,
                     };
                     bodyEntries.Add(new(setEntryPath, setStored, Align: setAlign));
                 }

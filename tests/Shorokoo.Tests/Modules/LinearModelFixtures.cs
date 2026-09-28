@@ -348,6 +348,19 @@ public partial class VectorMultiplyModel
     }
 }
 
+/// <summary><see cref="ScalarMultiplyModel"/> with a 4 MiB weight, so what a checkpoint save
+/// allocates is measured against a state far larger than its fixed overheads.</summary>
+[Module]
+public partial class WideMultiplyModel
+{
+    public static Tensor<float32> Inline(Tensor<float32> input)
+    {
+        Vector<int64> weightShape = Vector(1L << 20);
+        var weight = InitScalarWeight.Init(weightShape);
+        return input * weight;
+    }
+}
+
 /// <summary>Module-owned rank-0 state: a call counter, one float rather than a param-shaped buffer.</summary>
 [StateInitializer(Ownership = StateOwnership.ModuleOwned)]
 public static partial class InitScalarCallCount

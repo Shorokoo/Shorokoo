@@ -81,7 +81,9 @@ namespace Shorokoo.Core.Graph
             if (string.IsNullOrWhiteSpace(partString))
                 throw new ArgumentException("Part string cannot be null or whitespace.", nameof(partString));
 
-            var isLoop = partString.StartsWith("Loop#");
+            // A loop part carries its iteration after an unescaped ':' (Loop#0:3); a module or
+            // parameter merely named Loop has none, since EscapePartName escapes every ':'.
+            var isLoop = partString.StartsWith("Loop#") && partString.Contains(':');
             ModelParamIdentifierTemplatePartType type;
 
             if (isLastPart)

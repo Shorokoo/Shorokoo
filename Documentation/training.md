@@ -1173,7 +1173,7 @@ var more = rig.Fit(inputs, targets, numEpochs: 5, ckpt);  // continues where it 
   What is **not** checked is where a value came from: nothing records or compares the model that
   produced a checkpoint, so weights of the right shape deliberately still load into a model that
   computes something else. Values are matched to parameters by name, so a parameter named by its
-  local or by `.Named(...)` keeps its value however the code creating it moves
+  local or by `.Named(...)` keeps its value wherever in its scope the code creating it moves
   ([Parameter names](defining-models.md#parameter-names)). The limit is the parameters left to
   their class names: those are numbered in creation order, and two of the same shape whose
   creation order was swapped agree on every property checked here, and load into each other's

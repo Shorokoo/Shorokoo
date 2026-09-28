@@ -152,6 +152,7 @@ public class ParamNameDslCoverageTests
             pattern: "TrainableParam#0.{Mod}#0.weights#{p}",
             format:  "{Mod|lower}.init{p - 0}");
         Assert.Equal("looplayer.init0", lowerScheme.ToName(shorokooIds[0]));
+        Assert.Equal("looplayer.init1", lowerScheme.ToName("TrainableParam#0.LoopLayer#0.weights#1"));
 
         string[] acceptingRanges = ["0:9", ":9", "0:", "0::1"];
         foreach (var rangeExpr in acceptingRanges)
@@ -173,6 +174,7 @@ public class ParamNameDslCoverageTests
             format:  "wild.{p}");
         Assert.True(wildcard.Matches(shorokooIds[1]));
         Assert.Equal("wild.0", wildcard.ToName(shorokooIds[1]));
+        Assert.Equal("wild.1", wildcard.ToName("TrainableParam#0.LoopLayer#0.Loop#0:0.weights2#1"));
     }
 
     [Fact]

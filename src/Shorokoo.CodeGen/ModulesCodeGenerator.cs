@@ -861,7 +861,8 @@ public class ModuleSourceGenerator : IIncrementalGenerator
             defaultLiteral = FormatHyperDefaultLiteral(hyperAttr.ConstructorArguments[0].Value, elementType);
 
         return new ParamData(
-            p.Name, p.Type.ToDisplayString(), attributeKind, defaultLiteral, elementType, IsTensorShaped(p.Type));
+            p.Name, p.Type.ToDisplayString(), attributeKind, defaultLiteral, elementType, IsTensorShaped(p.Type),
+            p.Type.ToDisplayString(QualifiedFormat));
     }
 
     /// <summary>
@@ -949,12 +950,28 @@ public class ModuleSourceGenerator : IIncrementalGenerator
         if (fullModule is null) return null;
         if (methodName == "Init")
             return info.IsNewStyleInitializer && fullModule.Kind == ModuleKind.TrainableParamInitializer
-                ? (fullModule.ReturnParams[0].TypeDeclaration, fullModule.InputParams.Select(p => p.TypeDeclaration).ToArray())
+                ? (fullModule.ReturnParams[0].QualifiedTypeDeclaration, fullModule.InputParams.Select(p => p.QualifiedTypeDeclaration).ToArray())
                 : null;
         if (methodName == "Model" && !info.IsStaticClass)
             return ($"global::{(info.Namespace is null ? "" : info.Namespace + ".")}{info.ClassName}Model",
-                fullModule.Hyperparams.Select(CallerFacingType).ToArray());
+                fullModule.Hyperparams.Select(QualifiedCallerFacingType).ToArray());
         return null;
+    }
+
+    /// <summary>Fully qualified, keeping nullable annotations.</summary>
+    private static readonly SymbolDisplayFormat QualifiedFormat = SymbolDisplayFormat.FullyQualifiedFormat
+        .AddMiscellaneousOptions(SymbolDisplayMiscellaneousOptions.IncludeNullableReferenceTypeModifier);
+
+    /// <summary><see cref="CallerFacingType"/> spelled from <c>global::</c>.</summary>
+    private static string QualifiedCallerFacingType(ParamData p)
+    {
+        if (ParamIsOptionalTensor(p))
+        {
+            var q = p.QualifiedTypeDeclaration;
+            var inner = q.Substring(q.IndexOf("OptionalTensor<", System.StringComparison.Ordinal) + "OptionalTensor<".Length);
+            return $"global::Shorokoo.Tensor<{inner.Substring(0, inner.LastIndexOf('>'))}>?";
+        }
+        return ParamIsDefaultedScalarHyper(p) ? $"{p.QualifiedTypeDeclaration}?" : p.QualifiedTypeDeclaration;
     }
 
     /// <summary>True when the parameter is exposed as a nullable, omittable caller-facing parameter.</summary>
@@ -1022,9 +1039,11 @@ public class ModuleSourceGenerator : IIncrementalGenerator
     {
         // Handle tuple return types
         if (returnType is INamedTypeSymbol namedType && namedType.IsTupleType)
-            return [.. namedType.TupleElements.Select(p => new ParamData(p.Name, p.Type.ToDisplayString(), ParamKind.OutputParam))];
+            return [.. namedType.TupleElements.Select(p => new ParamData(p.Name, p.Type.ToDisplayString(), ParamKind.OutputParam,
+                qualifiedTypeDeclaration: p.Type.ToDisplayString(QualifiedFormat)))];
 
-        return [new ParamData("", returnType.ToDisplayString(), ParamKind.OutputParam)];
+        return [new ParamData("", returnType.ToDisplayString(), ParamKind.OutputParam,
+            qualifiedTypeDeclaration: returnType.ToDisplayString(QualifiedFormat))];
     }
 
     private static string GenerateCode(ModuleClassInfo classInfo)
@@ -1504,6 +1523,9 @@ public class ParamData
 {
     public string Name { get; }
     public string TypeDeclaration { get; }
+
+    /// <summary>The type spelled from <c>global::</c>, so it binds the same from any namespace.</summary>
+    public string QualifiedTypeDeclaration { get; }
     public ParamKind Kind { get; }
 
     /// <summary>
@@ -1525,10 +1547,11 @@ public class ParamData
     /// </summary>
     public bool IsTensorShaped { get; }
 
-    public ParamData(string name, string typeDeclaration, ParamKind kind, string? defaultLiteral = null, string? scalarElementType = null, bool isTensorShaped = false)
+    public ParamData(string name, string typeDeclaration, ParamKind kind, string? defaultLiteral = null, string? scalarElementType = null, bool isTensorShaped = false, string? qualifiedTypeDeclaration = null)
     {
         Name = name;
         TypeDeclaration = typeDeclaration;
+        QualifiedTypeDeclaration = qualifiedTypeDeclaration ?? typeDeclaration;
         Kind = kind;
         DefaultLiteral = defaultLiteral;
         ScalarElementType = scalarElementType;

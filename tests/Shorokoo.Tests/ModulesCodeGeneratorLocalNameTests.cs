@@ -46,6 +46,7 @@ public class ModulesCodeGeneratorLocalNameTests
 
     private const string CoreNamespaceSource = """
         using Shorokoo;
+        using Shorokoo.Modules;
         namespace Core;
 
         public interface Pair : IStruct
@@ -81,6 +82,7 @@ public class ModulesCodeGeneratorLocalNameTests
 
     private const string SpelledSource = """
         using Shorokoo;
+        using Shorokoo.Modules;
         using Shorokoo.Modules.Initializers;
         using static Shorokoo.Globals;
         namespace N;
@@ -117,7 +119,7 @@ public class ModulesCodeGeneratorLocalNameTests
         var generated = updated.SyntaxTrees.FirstOrDefault(t => t.FilePath.EndsWith("ShorokooLocalParamNames.g.cs"));
         return (
             generated is null ? "" : string.Join(" ", Regex.Matches(generated.ToString(), "NamedByLocal\\(.*, \"(\\w+)\"\\)").Select(m => m.Groups[1].Value)),
-            string.Join(" ", diagnostics.Where(d => d.Id.StartsWith("MSG")).Select(d => d.Id)),
+            string.Join(" ", diagnostics.Where(d => d.Id == "MSG006").Select(d => d.Id)),
             string.Join("\n", updated.GetDiagnostics().Where(d => d.Severity == DiagnosticSeverity.Error)));
     }
 

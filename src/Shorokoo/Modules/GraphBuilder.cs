@@ -325,8 +325,9 @@ namespace Shorokoo.Core
                     _ => null,
                 };
 
-                // A name resolves exactly as a pin does, and fails the build on the same grounds:
-                // a name the author believes is applied, and is not, silently renames nothing.
+                // A name resolves as a pin does. An item whose node is ambiguous (a cached function
+                // inlined more than once) fails the build for an explicit name; an item whose node
+                // is not in the graph at all names nothing (see the loop below), so it is skipped.
                 Shorokoo.Core.Graph.FastNodeKey ResolveItem(object item, string api, string verb, string accepted, string noun)
                 {
                     Variable itemVar = ItemVariable(item) ?? throw new ArgumentException(

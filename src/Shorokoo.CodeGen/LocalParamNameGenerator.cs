@@ -101,18 +101,25 @@ namespace Shorokoo.CodeGen
             => node is InvocationExpressionSyntax
             {
                 Expression: MemberAccessExpressionSyntax { Name: IdentifierNameSyntax { Identifier.Text: "Init" or "Model" } },
-                Parent: EqualsValueClauseSyntax
-                {
-                    Parent: VariableDeclaratorSyntax { Parent: VariableDeclarationSyntax { Parent: LocalDeclarationStatementSyntax } }
-                },
-            };
+            } && DeclaratorOf(node) is not null;
+
+        /// <summary>The local whose whole initializer is <paramref name="call"/>, parentheses aside.</summary>
+        private static VariableDeclaratorSyntax? DeclaratorOf(SyntaxNode call)
+        {
+            var node = call;
+            while (node.Parent is ParenthesizedExpressionSyntax) node = node.Parent;
+            return node.Parent is EqualsValueClauseSyntax
+            {
+                Parent: VariableDeclaratorSyntax { Parent: VariableDeclarationSyntax { Parent: LocalDeclarationStatementSyntax } } declarator
+            } ? declarator : null;
+        }
 
         private static Site? Analyze(GeneratorSyntaxContext ctx, CancellationToken ct)
         {
             var invocation = (InvocationExpressionSyntax)ctx.Node;
             var access = (MemberAccessExpressionSyntax)invocation.Expression;
             var methodName = access.Name.Identifier.Text;
-            var name = ((VariableDeclaratorSyntax)invocation.Parent!.Parent!).Identifier.Text;
+            var name = DeclaratorOf(invocation)!.Identifier.ValueText;
             if (name == "_") return null;
 
             var model = ctx.SemanticModel;
@@ -173,9 +180,11 @@ namespace Shorokoo.CodeGen
 
         private static bool IsEnabled(ParseOptions options)
         {
+            // An enabled namespace enables the namespaces nested in it too.
             foreach (var key in new[] { "InterceptorsNamespaces", "InterceptorsPreviewNamespaces" })
                 if (options.Features.TryGetValue(key, out var value) &&
-                    value.Split(';').Any(ns => ns.Trim() == InterceptorNamespace))
+                    value.Split(';').Select(ns => ns.Trim()).Any(ns =>
+                        ns == InterceptorNamespace || (ns.Length > 0 && InterceptorNamespace.StartsWith(ns + ".", StringComparison.Ordinal))))
                     return true;
             return false;
         }

@@ -38,8 +38,10 @@ public static class ParamNames
     public static T Named<T>(this T item, string name) where T : IModuleParam
     {
         ArgumentNullException.ThrowIfNull(item);
-        if (string.IsNullOrWhiteSpace(name))
-            throw new ArgumentException("A parameter or sub-model name must not be empty.", nameof(name));
+        if (string.IsNullOrWhiteSpace(name) || name != name.Trim())
+            throw new ArgumentException(
+                $"A parameter or sub-model name must be non-empty and neither start nor end with whitespace; got \"{name}\".",
+                nameof(name));
         var names = GraphTrace.ParamNames("Named");
         if (GraphTrace.Loopers.InCanonicalRecordingScope)
             names.Add(item, name, inferred: false);

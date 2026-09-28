@@ -579,13 +579,16 @@ specific first:
 3. **Otherwise the class name** of the initializer or module — `Normal02#0`, `Linear#1` —
    numbered in creation order among the same-named parts of its scope.
 
-The layers in `Shorokoo.Modules` name their own parameters as PyTorch does: a `Linear`
+The layers in `Shorokoo.Modules` give their parameters PyTorch-style names: a `Linear`
 held in `proj` contributes `proj#0.weight#0` and `proj#0.bias#0`, a `BatchNorm`
-`running_mean`, `running_var`, `weight` and `bias`.
+`running_mean`, `running_var`, `weight` and `bias`, a `MultiHeadAttention`
+`q_proj_weight`, …, `out_proj_bias`. Parameters created by the helper functions (the
+`Recurrent`, `Convolution` and `Embedding` helpers) keep their initializers' class names.
 
-A name survives moving the code that creates it: reordering two `var` lines, or pulling
-part of a body out into a sub-module that keeps its locals, leaves every name in place and
-every checkpoint loadable. A creation-order number does not survive that, which is why a
+A name survives moving the code that creates it within its scope: reordering two `var`
+lines, or moving them into a helper method of the same `[Module]` class, leaves every name in
+place and every checkpoint loadable. Moving them into a sub-module does not — the sub-model's
+own name becomes part of the path (`w#0` becomes `block#0.w#0`). A creation-order number does not survive that, which is why a
 parameter worth keeping should be named. Renaming a local renames its parameter; a
 checkpoint holding the parameter under another name is refused on load, naming the parameter
 it is missing (bind it through a [naming scheme](onnx-and-weights.md#naming) to carry it

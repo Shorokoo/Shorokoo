@@ -56,15 +56,22 @@ public class KernelWorkaroundPassTests
     }
 
     [Fact]
-    public void TestTheInt64RangeCountWorkaroundFiresOnlyWhereOnnxRuntimeCanMiscount()
+    public void TestTheIntegerRangeCountWorkaroundFiresOnlyWhereOnnxRuntimeCanMiscount()
     {
         var i = InputTensor<int64>("i", rank: 0);
         var n = InputTensor<int32>("n", rank: 0);
+        var h = InputTensor<int16>("h", rank: 0);
         Assert.False(AsWritten(Graph(i, OnnxOp.Range(Scalar(0L), Scalar(1L << 62), i))));
         Assert.False(AsWritten(new([], [OnnxOp.Range(Scalar(0L), Scalar((1L << 62) + 1L), Scalar(1L << 61))])));
         Assert.False(AsWritten(new([], [OnnxOp.Range(Scalar(1L << 54), Scalar(0L), Scalar(-2L))])));
         Assert.True(AsWritten(new([], [OnnxOp.Range(Scalar(1L - (1L << 53)), Scalar(0L), Scalar(1L << 50))])));
         Assert.True(AsWritten(Graph(n, OnnxOp.Range(Scalar(0), n, Scalar(1)))));
+        Assert.True(AsWritten(Graph(n, OnnxOp.Range(Scalar(0), n, Scalar(-1)))));
+        Assert.True(AsWritten(new([], [OnnxOp.Range(Scalar(int.MinValue), Scalar(-1), Scalar(1 << 30))])));
+        Assert.False(AsWritten(Graph(n, OnnxOp.Range(Scalar(2), n, Scalar(1)))));
+        Assert.False(AsWritten(Graph(n, OnnxOp.Range(Scalar(0), n, Scalar(2)))));
+        Assert.False(AsWritten(new([], [OnnxOp.Range(Scalar(int.MinValue), Scalar(int.MaxValue), Scalar(1 << 30))])));
+        Assert.True(AsWritten(Graph(h, OnnxOp.Range(Scalar((short)0), h, Scalar((short)3)))));
         Assert.True(AsWritten(Graph(i, OnnxOp.Range(Scalar(0L), i, Scalar(1L)))));
         Assert.True(AsWritten(Graph(i, OnnxOp.Range(Scalar(2L), i, Scalar(1L)))));
         Assert.True(AsWritten(Graph(i, OnnxOp.Range(Scalar(1L - (1L << 62)), i, Scalar(-1L)))));

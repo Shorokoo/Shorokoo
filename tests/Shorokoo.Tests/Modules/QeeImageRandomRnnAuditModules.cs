@@ -600,6 +600,25 @@ namespace Shorokoo.Tests.Modules
             => ((Tensor<bit>)OnnxOp.Not(actual == expected)).Cast<int64>().Reduce(ReduceKind.Sum).Scalar();
     }
 
+    /// <summary>An int32 Range of runtime start, limit and delta equals <c>expected</c>.</summary>
+    [Module]
+    public partial class Int32RangeCheck
+    {
+        public static Scalar<bit> Inline(Scalar<int32> start, Scalar<int32> limit, Scalar<int32> delta, Vector<int32> expected)
+            => Int64RangeCheck.Mismatches(((Tensor<int32>)OnnxOp.Range(start, limit, delta)).Cast<int64>(), expected.Cast<int64>()) < Scalar(1L);
+    }
+
+    /// <summary>Int32 Ranges of runtime start and limit, stepping by a constant 1 up to <c>limit</c>
+    /// and by a constant -1 back down to <c>start</c>.</summary>
+    [Module]
+    public partial class Int32UnitStepRangeCheck
+    {
+        public static Scalar<bit> Inline(Scalar<int32> start, Scalar<int32> limit, Vector<int32> up, Vector<int32> down)
+            => Int64RangeCheck.Mismatches(((Tensor<int32>)OnnxOp.Range(start, limit, Scalar(1))).Cast<int64>(), up.Cast<int64>())
+                + Int64RangeCheck.Mismatches(((Tensor<int32>)OnnxOp.Range(limit, start, Scalar(-1))).Cast<int64>(), down.Cast<int64>())
+                < Scalar(1L);
+    }
+
     /// <summary>Int64 Ranges of runtime start and limit, stepping by a constant 1 up to <c>limit</c>
     /// and by a constant -1 back down to <c>start</c>.</summary>
     [Module]
@@ -619,9 +638,10 @@ namespace Shorokoo.Tests.Modules
             => Int64RangeCheck.Mismatches((Tensor<int64>)OnnxOp.Range(Scalar(1L << 62), limit, Scalar(1L)), expected) < Scalar(1L);
     }
 
-    /// <summary>Int64 Ranges of constants, spanning beyond 2^53 and within it.</summary>
+    /// <summary>Int64 and int32 Ranges of constants, spanning beyond 2^53, beyond their type and
+    /// within both.</summary>
     [Module]
-    public partial class Int64RangeOfConstantsCheck
+    public partial class IntegerRangeOfConstantsCheck
     {
         public static Scalar<bit> Inline()
             => Int64RangeCheck.Mismatches((Tensor<int64>)OnnxOp.Range(Scalar(0L), Scalar((1L << 62) + 1L), Scalar(1L << 61)), Vector(0L, 1L << 61, 1L << 62))
@@ -630,6 +650,9 @@ namespace Shorokoo.Tests.Modules
                 + Int64RangeCheck.Mismatches((Tensor<int64>)OnnxOp.Range(Scalar(long.MaxValue - 2L), Scalar(long.MinValue + 2L), Scalar(1L)), EmptyVector<int64>())
                 + Int64RangeCheck.Mismatches((Tensor<int64>)OnnxOp.Range(Scalar(long.MaxValue), Scalar(long.MinValue), Scalar(1L)), EmptyVector<int64>())
                 + Int64RangeCheck.Mismatches((Tensor<int64>)OnnxOp.Range(Scalar(long.MinValue), Scalar(long.MaxValue), Scalar(-1L)), EmptyVector<int64>())
+                + Int64RangeCheck.Mismatches(((Tensor<int32>)OnnxOp.Range(Scalar(int.MinValue), Scalar(int.MaxValue), Scalar(1 << 30))).Cast<int64>(), Vector(int.MinValue, -(1L << 30), 0L, 1L << 30))
+                + Int64RangeCheck.Mismatches(((Tensor<int32>)OnnxOp.Range(Scalar(int.MaxValue), Scalar(int.MinValue), Scalar(1))).Cast<int64>(), EmptyVector<int64>())
+                + Int64RangeCheck.Mismatches(((Tensor<int32>)OnnxOp.Range(Scalar(0), Scalar(-7), Scalar(-2))).Cast<int64>(), Vector(0L, -2L, -4L, -6L))
                 < Scalar(1L);
     }
 

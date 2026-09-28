@@ -110,13 +110,13 @@ public class QeeImageRandomRnnAuditTests
     }
 
     [Fact]
-    public void TestAnInt64RangeCountsItsElementsExactly()
+    public void TestAnIntegerRangeCountsItsElementsExactly()
     {
-        Int64RangesCountTheirElementsExactly(ComputeContext.Default);
-        Assert.True(AutoTest.AdvancedTestGraph<Int64RangeOfConstantsCheck>([], []));
+        IntegerRangesCountTheirElementsExactly(ComputeContext.Default);
+        Assert.True(AutoTest.AdvancedTestGraph<IntegerRangeOfConstantsCheck>([], []));
     }
 
-    internal static void Int64RangesCountTheirElementsExactly(ComputeContext c)
+    internal static void IntegerRangesCountTheirElementsExactly(ComputeContext c)
     {
         Assert.True(Ranges(c, 0L, (1L << 62) + 1L, 1L << 61, 0L, 1L << 61, 1L << 62));
         Assert.True(Ranges(c, 0L, -(1L << 62) - 1L, -(1L << 61), 0L, -(1L << 61), -(1L << 62)));
@@ -133,7 +133,23 @@ public class QeeImageRandomRnnAuditTests
         Assert.True(FromAConstantStart(c, long.MinValue));
         Assert.True(FromAConstantStart(c, (1L << 62) + 2L, 1L << 62, (1L << 62) + 1L));
         Assert.ThrowsAny<Exception>(() => Ranges(c, long.MinValue, long.MaxValue, 1L));
+        Assert.True(Ranges32(c, int.MinValue, int.MaxValue, 1 << 30, int.MinValue, -(1 << 30), 0, 1 << 30));
+        Assert.True(Ranges32(c, int.MaxValue, int.MinValue, int.MinValue, int.MaxValue, -1));
+        Assert.True(Ranges32(c, int.MaxValue - 2, int.MinValue + 2, 1));
+        Assert.True(Ranges32(c, int.MinValue, int.MaxValue, -1));
+        Assert.True(Ranges32(c, 5, -5, -3, 5, 2, -1, -4));
+        Assert.True(UnitRanges32(c, int.MaxValue - 2, int.MinValue + 2, [], []));
+        Assert.True(UnitRanges32(c, int.MaxValue, int.MinValue, [], []));
+        Assert.True(UnitRanges32(c, -3, 2, [-3, -2, -1, 0, 1], [2, 1, 0, -1, -2]));
     }
+
+    private static bool Ranges32(ComputeContext c, int start, int limit, int delta, params int[] expected)
+        => AutoTest.AdvancedTestGraph<Int32RangeCheck>([],
+            [I32([], start), I32([], limit), I32([], delta), I32([expected.Length], expected)], context: c);
+
+    private static bool UnitRanges32(ComputeContext c, int start, int limit, int[] up, int[] down)
+        => AutoTest.AdvancedTestGraph<Int32UnitStepRangeCheck>([],
+            [I32([], start), I32([], limit), I32([up.Length], up), I32([down.Length], down)], context: c);
 
     private static bool UnitRanges(ComputeContext c, long start, long limit, long[] up, long[] down)
         => AutoTest.AdvancedTestGraph<Int64UnitStepRangeCheck>([],

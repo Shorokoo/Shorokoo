@@ -371,7 +371,7 @@ public class PyTorchBackendCoverageTests
     public void TestAConstantPadFillsWithItsValueExactlyOnEveryTypeOnTorch() => ConstantPadsFillWithTheirValueExactly(Torch);
 
     [Fact]
-    public void TestAnInt64RangeCountsItsElementsExactlyOnTorch() => QeeImageRandomRnnAuditTests.Int64RangesCountTheirElementsExactly(new ComputeContext(Torch));
+    public void TestAnIntegerRangeCountsItsElementsExactlyOnTorch() => QeeImageRandomRnnAuditTests.IntegerRangesCountTheirElementsExactly(new ComputeContext(Torch));
 
     internal static void ConstantPadsFillWithTheirValueExactly(IShorokooBackend backend)
     {

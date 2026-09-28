@@ -889,14 +889,14 @@ namespace Shorokoo
                     Rig = rigInfo,
                     Step = _checkpoint.Step,
                     // Epoch / batch index are host-owned run counters that may be genuinely unknown
-                    // (null — no loader / no explicit counter). Nullable and add-only: a null value is
+                    // (null — no loader / no explicit counter). Nullable: a null value is
                     // omitted by the manifest serializer (WhenWritingNull) and reads back null, never a
                     // sentinel 0.0 — the same presence-gated treatment as the loss below.
                     Epoch = _checkpoint.Epoch,
                     BatchIndex = _checkpoint.BatchIndex,
                     // Loss is a host-owned run-progress scalar, its own savable component (independent
                     // of the counters). The .skpt builder writes every available component, so the loss
-                    // is written iff the checkpoint carries one. Nullable and add-only: null (an
+                    // is written iff the checkpoint carries one. Nullable: null (an
                     // initial/bare checkpoint) is omitted by the manifest serializer (WhenWritingNull),
                     // so it reads back as null — never a sentinel 0.0. A dropped Loss component on LOAD
                     // (or a null value) reads back null.

@@ -16,7 +16,7 @@ namespace Shorokoo.Core.Utils
         [JsonPropertyName("shorokoo")]
         public string? Shorokoo { get; set; }
 
-        /// <summary>Round-trips producer fields added by newer minor revisions of the format.</summary>
+        /// <summary>Round-trips producer fields this reader does not interpret, unchanged.</summary>
         [JsonExtensionData]
         public Dictionary<string, JsonElement>? AdditionalFields { get; set; }
     }
@@ -42,7 +42,7 @@ namespace Shorokoo.Core.Utils
         [JsonPropertyName("sha256")]
         public string? Sha256 { get; set; }
 
-        /// <summary>Round-trips model fields added by newer minor revisions of the format.</summary>
+        /// <summary>Round-trips model fields this reader does not interpret, unchanged.</summary>
         [JsonExtensionData]
         public Dictionary<string, JsonElement>? AdditionalFields { get; set; }
     }
@@ -58,7 +58,7 @@ namespace Shorokoo.Core.Utils
         [JsonPropertyName("tensor")]
         public string? Tensor { get; set; }
 
-        /// <summary>Round-trips reference fields added by newer minor revisions of the format.</summary>
+        /// <summary>Round-trips reference fields this reader does not interpret, unchanged.</summary>
         [JsonExtensionData]
         public Dictionary<string, JsonElement>? AdditionalFields { get; set; }
     }
@@ -70,7 +70,7 @@ namespace Shorokoo.Core.Utils
         [JsonPropertyName("tensors")]
         public Dictionary<string, SkptTensorRef>? Tensors { get; set; }
 
-        /// <summary>Round-trips mapping-set fields added by newer minor revisions of the format.</summary>
+        /// <summary>Round-trips mapping-set fields this reader does not interpret, unchanged.</summary>
         [JsonExtensionData]
         public Dictionary<string, JsonElement>? AdditionalFields { get; set; }
     }
@@ -98,7 +98,7 @@ namespace Shorokoo.Core.Utils
         [JsonPropertyName("sha256")]
         public string? Sha256 { get; set; }
 
-        /// <summary>Round-trips data fields added by newer minor revisions of the format.</summary>
+        /// <summary>Round-trips data fields this reader does not interpret, unchanged.</summary>
         [JsonExtensionData]
         public Dictionary<string, JsonElement>? AdditionalFields { get; set; }
     }
@@ -112,8 +112,8 @@ namespace Shorokoo.Core.Utils
     /// inference model's <c>default</c> mapping (which thereby doubles as the training-state
     /// mapping, so no bytes are duplicated), the optimizer state by the optimizer constituent's
     /// <c>default</c> mapping under composite per-instance identifiers (see
-    /// <see cref="SkptFileFormat.MakeOptimizerStateId"/>). Like the rest of the manifest, its keys
-    /// are add-only across minor revisions.
+    /// <see cref="SkptFileFormat.MakeOptimizerStateId"/>). Like the rest of the manifest, keys a
+    /// reader does not interpret are ignored.
     /// </summary>
     public sealed class SkptTrainingInfo
     {
@@ -157,7 +157,7 @@ namespace Shorokoo.Core.Utils
         [JsonPropertyName("rig")]
         public SkptRigInfo? Rig { get; set; }
 
-        /// <summary>Round-trips training fields added by newer minor revisions of the format.</summary>
+        /// <summary>Round-trips training fields this reader does not interpret, unchanged.</summary>
         [JsonExtensionData]
         public Dictionary<string, JsonElement>? AdditionalFields { get; set; }
     }
@@ -208,7 +208,7 @@ namespace Shorokoo.Core.Utils
         [JsonPropertyName("value")]
         public string? Value { get; set; }
 
-        /// <summary>Round-trips fields added by newer minor revisions of the format.</summary>
+        /// <summary>Round-trips fields this reader does not interpret, unchanged.</summary>
         [JsonExtensionData]
         public Dictionary<string, JsonElement>? AdditionalFields { get; set; }
     }
@@ -228,7 +228,7 @@ namespace Shorokoo.Core.Utils
         [JsonPropertyName("seed")]
         public ulong Seed { get; set; }
 
-        /// <summary>Round-trips fields added by newer minor revisions of the format.</summary>
+        /// <summary>Round-trips fields this reader does not interpret, unchanged.</summary>
         [JsonExtensionData]
         public Dictionary<string, JsonElement>? AdditionalFields { get; set; }
     }
@@ -257,7 +257,7 @@ namespace Shorokoo.Core.Utils
         [JsonPropertyName("overrides")]
         public List<SkptRngOverride>? Overrides { get; set; }
 
-        /// <summary>Round-trips fields added by newer minor revisions of the format.</summary>
+        /// <summary>Round-trips fields this reader does not interpret, unchanged.</summary>
         [JsonExtensionData]
         public Dictionary<string, JsonElement>? AdditionalFields { get; set; }
     }
@@ -269,7 +269,7 @@ namespace Shorokoo.Core.Utils
     /// Model-input shapes are NOT recorded here: the arch's <c>MODEL_TENSOR_INPUT</c> nodes serialize as
     /// NodeProtos in the native <c>.srk</c> dialect and carry the shape themselves, so the arch is
     /// self-describing. Together with those <c>models/</c> entries this is enough to rebuild the rig from
-    /// the file alone. Keys are add-only across minor revisions.
+    /// the file alone. Keys a reader does not interpret are ignored.
     /// </summary>
     public sealed class SkptRigInfo
     {
@@ -304,7 +304,7 @@ namespace Shorokoo.Core.Utils
         [JsonPropertyName("rng")]
         public SkptRngConfigInfo? Rng { get; set; }
 
-        /// <summary>Round-trips fields added by newer minor revisions of the format.</summary>
+        /// <summary>Round-trips fields this reader does not interpret, unchanged.</summary>
         [JsonExtensionData]
         public Dictionary<string, JsonElement>? AdditionalFields { get; set; }
     }
@@ -313,9 +313,8 @@ namespace Shorokoo.Core.Utils
     /// The config.json manifest of a .skpt checkpoint — the single source of wiring: archive
     /// entries never reference each other directly; every mapping (model → serialization
     /// format, model tensor references → data items, data item → storage format) lives here.
-    /// Keys are add-only across minor revisions: a reader ignores unknown keys (they are
-    /// preserved in the extension-data bags); removing or re-typing a key is a major-version
-    /// event (a bump of <see cref="SkptVersion"/>).
+    /// A reader ignores keys it does not interpret; they are preserved in the extension-data
+    /// bags.
     /// </summary>
     public sealed class SkptManifest
     {
@@ -338,8 +337,7 @@ namespace Shorokoo.Core.Utils
         /// <summary>Optional, user-supplied provenance metadata (git commit, dataset id, run
         /// name, license, and arbitrary key/value pairs) recorded at save time. Purely
         /// informational — trusted only as far as its writer: it never affects manifest
-        /// identity checks or weight binding, and its keys are add-only like the rest of the
-        /// manifest. Absent (null, and omitted from the JSON) unless the saver supplied
+        /// identity checks or weight binding. Absent (null, and omitted from the JSON) unless the saver supplied
         /// it.</summary>
         [JsonPropertyName("userMetadata")]
         public Dictionary<string, string>? UserMetadata { get; set; }
@@ -366,7 +364,7 @@ namespace Shorokoo.Core.Utils
         [JsonPropertyName("training")]
         public SkptTrainingInfo? Training { get; set; }
 
-        /// <summary>Round-trips manifest fields added by newer minor revisions of the format.</summary>
+        /// <summary>Round-trips manifest fields this reader does not interpret, unchanged.</summary>
         [JsonExtensionData]
         public Dictionary<string, JsonElement>? AdditionalFields { get; set; }
     }

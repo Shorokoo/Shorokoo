@@ -98,8 +98,7 @@ namespace Shorokoo
         /// name fails loudly, listing the sets the file declares. A manifest referencing a
         /// missing entry, an entry failing its SHA-256 check, a manifest/stored compression
         /// mismatch, or a weight that does not match its parameter likewise fails loudly naming
-        /// the entry; unknown manifest keys are ignored (the format's keys are add-only across
-        /// minor revisions).
+        /// the entry; manifest keys the reader does not interpret are ignored.
         /// </summary>
         public static ComputationGraph Load(string filePath, string set)
         {

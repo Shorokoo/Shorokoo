@@ -756,8 +756,7 @@ model.skpt
 
 Rules:
 
-- **Keys are add-only.** A reader ignores unknown keys; removing or re-typing a key is
-  a major-version event (a bump of `skptVersion`). `skptVersion` is `1`, and a file declaring
+- **Keys a reader does not interpret are ignored.** `skptVersion` is `1`, and a file declaring
   any other value is refused with a clear message rather than half-read. Every format below
   is version 1.
 - **Integrity is checked on load.** Every entry the manifest references must exist and

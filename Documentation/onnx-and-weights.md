@@ -297,7 +297,7 @@ magic "SRK\x01" | u16 headerLen (little-endian) | JSON header | payload
 
 The payload is the graph serialized as an ONNX `ModelProto` (Shorokoo's internal
 dialect allowed), wrapped in **exactly one** compression layer when the header says
-so. Header fields (add-only across minor revisions; unknown fields are ignored):
+so. Header fields (fields a reader does not interpret are ignored):
 
 ```jsonc
 {

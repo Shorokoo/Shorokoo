@@ -1069,8 +1069,8 @@ namespace Shorokoo
                 observations.Add("the manifest declares no tensor mapping sets.");
 
             if (unknownKeys.Count > 0)
-                observations.Add("the manifest carries unknown key(s) — tolerated, keys are " +
-                    "add-only across minor revisions: " + string.Join(", ", unknownKeys.Take(8)) +
+                observations.Add("the manifest carries key(s) the reader does not interpret, which " +
+                    "it ignores: " + string.Join(", ", unknownKeys.Take(8)) +
                     (unknownKeys.Count > 8 ? $", … and {unknownKeys.Count - 8} more." : "."));
 
             int storedViolations = 0, unreferenced = 0;

@@ -535,6 +535,10 @@ namespace Shorokoo.Tests.Modules
                 Is(MaxMin(e203, Vector(1L)), [.. Enumerable.Repeat(long.MinValue, 6), .. Enumerable.Repeat(long.MaxValue, 6)]),
                 Is(MaxMin<int64>(EmptyVector<int64>(), null), long.MinValue, long.MaxValue),
                 Is(MaxMin(xf.Cast<int32>(), Vector(1L)), 3L, 6L, 1L, 4L),
+                Is(MaxMin<bit>(EmptyVector<bit>(), null), 0L, 1L),
+                Is(MaxMin<bit>(EmptyVector<bit>(), Vector(0L)), 0L, 1L),
+                Is(MaxMin<bit>(EmptyVector<float32>().Cast<bit>(), Vector(0L)), 0L, 1L),
+                Is(MaxMin<bit>(EmptyVector<float32>().Reshape(Vector(0L, 2L)).Cast<bit>(), Vector(0L)), 0L, 0L, 1L, 1L),
             ], 0);
         }
 
@@ -629,7 +633,8 @@ namespace Shorokoo.Tests.Modules
     /// <summary>Reductions with noop_with_empty_axes set over an input empty by its values: axes
     /// absent, constant empty and empty by their values pass the input through, axes [1] and [-1] by
     /// their values reduce, and a nonempty input passes through unchanged, with and without keepdims
-    /// and for the element-wise reductions too. Input xf = [[1,2,3],[4,5,6]].</summary>
+    /// and for the element-wise reductions too; an empty constant reduces over axes [0] by their
+    /// values. Input xf = [[1,2,3],[4,5,6]].</summary>
     [Module]
     public partial class NoopReduceAxesFormsCheck
     {
@@ -656,6 +661,7 @@ namespace Shorokoo.Tests.Modules
                 Is(Flat(ReduceKind.Max, xf, noAxes).Cast<int64>().Reshape(Vector(-1L)), 1L, 2L, 3L, 4L, 5L, 6L),
                 Is(Noop(ReduceKind.L2, e, noAxes).TShape, 2L, 0L),
                 Is(Flat(ReduceKind.SumSquare, xf, noAxes).Cast<int64>().Reshape(Vector(-1L)), 1L, 4L, 9L, 16L, 25L, 36L),
+                Is(Noop(ReduceKind.Sum, EmptyVector<float32>(), one - one).Cast<int64>(), 0L),
             ], 0);
         }
 

@@ -12,15 +12,17 @@ internal static class KernelWorkaroundRegistry
 {
     /// <summary>
     /// The rewrites around ONNX Runtime's kernels, in the order they apply: the reductions'
-    /// axis handling first, so the later reduction workarounds see normalised calls; the
+    /// axis handling first, so the later reduction workarounds see normalised calls, with the
+    /// negative axes made non-negative before a reduction of no axis is rewritten, since the axis
+    /// that rewrite reduces is never negative; the
     /// crop-and-resize roi before the cubic resize layout, and both before the resize axes, since
     /// the calls they build keep the call's <c>axes</c>; <c>Where</c> last, since earlier
     /// rewrites build <c>Where</c>s of their own.
     /// </summary>
     public static KernelWorkaroundSet OnnxRuntime { get; } = new(KernelWorkaroundSets.OnnxRuntime,
     [
-        new ReduceNoopEmptyAxesWorkaround(),
         new ReduceNegativeAxesWorkaround(),
+        new ReduceNoopEmptyAxesWorkaround(),
         new Float16EmptyReduceWorkaround(),
         new IntegerEmptyReduceExtremeWorkaround(),
         new MaxPoolLowestValueIndexWorkaround(),

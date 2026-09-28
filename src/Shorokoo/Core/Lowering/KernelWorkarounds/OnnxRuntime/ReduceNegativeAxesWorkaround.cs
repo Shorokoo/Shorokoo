@@ -10,7 +10,8 @@ using static OpCodes;
 /// A reduction over negative axes of an empty input, which ONNX Runtime's kernels do not
 /// normalise as the spec does. Rewritten with the axes made non-negative: as a constant when the
 /// axes are constant and the input's rank known, and in the graph otherwise. Constant axes with
-/// no negative entry, and a <c>Constant</c> input that is not empty, keep the call as it stands.
+/// no negative entry, a scalar input, and a <c>Constant</c> input that is not empty keep the call
+/// as it stands.
 /// (Shorokoo/Shorokoo#422)
 /// </summary>
 internal sealed class ReduceNegativeAxesWorkaround : KernelWorkaround
@@ -19,6 +20,7 @@ internal sealed class ReduceNegativeAxesWorkaround : KernelWorkaround
 
     public override bool Applies(WorkaroundSite site)
         => site.IsPresent(1)
+           && site.RankOf(0) != 0
            && (site.ConstantOf(1) is not { } axes || axes.Elements<long>().ToArray().Any(a => a < 0))
            && Reductions.InputMayBeEmpty(site);
 

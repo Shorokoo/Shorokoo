@@ -33,6 +33,27 @@ public class KernelWorkaroundPassTests
     }
 
     [Fact]
+    public void TestTheOnnxRuntimeReductionWorkaroundsLeaveAScalarInputAsWritten()
+    {
+        var i = InputTensor<int64>("i", rank: 0);
+        var h = InputTensor<float16>("h", rank: 0);
+        var f = InputTensor<float32>("f", rank: 0);
+        var axes = InputTensor<int64>("axes", rank: 1);
+        Assert.True(AsWritten(Graph(i, i.Reduce(ReduceKind.Max))));
+        Assert.True(AsWritten(Graph(i, i.Reduce(ReduceKind.Min, keepDims: true))));
+        Assert.True(AsWritten(Graph(h, h.Reduce(ReduceKind.SumSquare))));
+        Assert.True(AsWritten(new([f, axes], [OnnxOp.ReduceSum(f, axes, true, null)])));
+    }
+
+    [Fact]
+    public void TestTheUnitAxisANoopReductionIsViewedWithIsNotNormalisedAgain()
+    {
+        var x = InputTensor<float32>("x", rank: 2);
+        Assert.DoesNotContain(AllNodes(Session(Graph(x, NN.Reduce(ReduceKind.Sum, x, null, keepDims: true, noOp: true)), KernelWorkaroundRegistry.OnnxRuntime)), n => n.OpType == WHERE);
+        Assert.DoesNotContain(AllNodes(Session(Graph(x, NN.Reduce(ReduceKind.Max, x, null, keepDims: false, noOp: true)), KernelWorkaroundRegistry.OnnxRuntime)), n => n.OpType == WHERE);
+    }
+
+    [Fact]
     public void TestAWorkaroundRewritesTheSessionModelInsideIfLoopAndFunctionBodies()
     {
         var x = InputTensor<float32>("x", rank: 1);
@@ -122,6 +143,19 @@ public class KernelWorkaroundPassTests
     }
 
     [Fact]
+    public void TestOnnxRuntimeFoldsEveryIfOfTheReductionWorkaroundsWithConcreteShapes()
+    {
+        var x = InputTensor<float32>("x", rank: 2);
+        var axes = InputTensor<int64>("axes", rank: 1);
+        var g = new InternalComputationGraph([x, axes], [x.Cast<float16>().Reduce(ReduceKind.SumSquare), x.Cast<int64>().Reduce(ReduceKind.Max, Vector(1L)),
+            x.Cast<bit>().Reduce(ReduceKind.Min, Vector(0L)), NN.Reduce(ReduceKind.Sum, x, axes, keepDims: true, noOp: true)]);
+        List<long[]?> dims = [[2L, 3L], [1L]];
+        var built = FastOnnxModelBuilder.BuildInternalOnnxModel(g, prepForOnnx: true, inputDims: dims, workarounds: KernelWorkaroundRegistry.OnnxRuntime);
+        Assert.True(Ifs(built) >= 3);
+        Assert.Equal(0, Ifs(Optimized(built)));
+    }
+
+    [Fact]
     public void TestANoopReductionComputesItsGroupsOnOnnxRuntimeWithConcreteShapes()
     {
         var x = TensorData(DType.Float32, [2L, 3L], 1f, 2f, 3f, 4f, 5f, 6f);
@@ -131,6 +165,9 @@ public class KernelWorkaroundPassTests
     }
 
     private static InternalComputationGraph Graph(Variable input, Variable output) => new([input], [output]);
+
+    private static bool AsWritten(InternalComputationGraph g)
+        => Bytes(Session(g, null)).SequenceEqual(Bytes(Session(g, KernelWorkaroundRegistry.OnnxRuntime)));
 
     private static int Ifs(ModelProto model) => AllNodes(model).Count(n => n.OpType == IF);
 

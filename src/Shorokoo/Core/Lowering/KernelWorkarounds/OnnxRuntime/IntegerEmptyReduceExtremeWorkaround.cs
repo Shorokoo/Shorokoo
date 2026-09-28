@@ -11,16 +11,21 @@ using static OpCodes;
 /// empty group takes the spec's value: the type's minimum for ReduceMax and its maximum for
 /// ReduceMin (false and true for bool) (Shorokoo/Shorokoo#382).
 ///
-/// <para>ONNX Runtime's CPU kernels give such a group 0 for every integer type and throw on an
-/// empty boolean input; for a floating-point type they give -inf and +inf, as the spec does. Only
-/// an empty input holds an empty group, so the plain operator is right for every nonempty input,
-/// and 0 is already the identity of an unsigned ReduceMax. A call is left as it stands for a
-/// floating-point or unsigned-ReduceMax input, for a <c>Constant</c> input that is not empty, and
-/// when nothing is reduced (no axes with <c>noop_with_empty_axes</c> set). Every other call
-/// becomes an <c>If</c> on the input's element count being 0: the other side is the plain
-/// operator, and the empty side expands the identity to the shape the plain operator gives the
-/// input — the input cast to uint8 for bool, since the plain operator throws on the empty boolean
-/// input itself.</para>
+/// <para>ONNX Runtime's CPU kernels give such a group 0 for every integer type, and throw when a
+/// reduced axis of a boolean input has extent 0; for a floating-point type they give -inf and
+/// +inf, as the spec does. Only an empty input holds an empty group, so the plain operator is
+/// right for every nonempty input, and 0 is already the identity of an unsigned ReduceMax. A call
+/// is left as it stands for a floating-point or unsigned-ReduceMax input, for a scalar input or a
+/// <c>Constant</c> one that is not empty, and when nothing is reduced (no axes with
+/// <c>noop_with_empty_axes</c> set).</para>
+///
+/// <para>A boolean call never reaches the boolean kernel: ReduceMax becomes the uint8 ReduceMax of
+/// the input cast to uint8, cast back, and ReduceMin the negation of that over the negated input.
+/// An empty uint8 group gives 0, which casts to false, so both are exact on every input, with no
+/// branch. Every other call becomes an <c>If</c> on the input's element count being 0, counted as
+/// the product of its shape so that ONNX Runtime folds the <c>If</c> away when the model states
+/// the input's dimensions: the other side is the plain operator, and the empty side expands the
+/// identity to the shape the plain operator gives the input.</para>
 /// </summary>
 internal sealed class IntegerEmptyReduceExtremeWorkaround : KernelWorkaround
 {
@@ -30,10 +35,11 @@ internal sealed class IntegerEmptyReduceExtremeWorkaround : KernelWorkaround
     {
         var dtype = site.DTypeOf(0);
         bool max = site.OpCode == REDUCE_MAX;
+        if (site.RankOf(0) == 0) return false;
         if (!site.IsPresent(1) && site.Attributes.GetBoolVal(AttrNoopWithEmptyAxes) == true) return false;
         if (!dtype.IsSameElementTypeAs(DType.Bool) && ReductionIdentity(dtype, max) is null) return false;
         if (max && IsUnsigned(dtype)) return false;
-        return site.ConstantOf(0) is not { } constant || constant.Shape.Dims.Contains(0);
+        return Reductions.InputMayBeEmpty(site);
     }
 
     public override Variable?[] Rewrite(WorkaroundSite site, Variable?[] inputs)
@@ -45,17 +51,19 @@ internal sealed class IntegerEmptyReduceExtremeWorkaround : KernelWorkaround
         bool max = site.OpCode == REDUCE_MAX;
         var dtype = site.DTypeOf(0);
 
+        if (dtype.IsSameElementTypeAs(DType.Bool))
+        {
+            Variable Any(Variable bits)
+                => OnnxOp.Cast(OnnxOp.ReduceMax(OnnxOp.Cast(bits, null, DType.UInt8), axes, keepDims, noOp), null, DType.Bool);
+            return [max ? Any(input) : OnnxOp.Not(Any(OnnxOp.Not(input)))];
+        }
+
         Variable Plain(Variable data)
             => max ? OnnxOp.ReduceMax(data, axes, keepDims, noOp) : OnnxOp.ReduceMin(data, axes, keepDims, noOp);
 
         // The plain operator on the empty side gives the output's shape, over an input it runs on.
-        Variable Guarded(Variable identity, Variable shaped)
-            => Ops.IfElse((Scalar<bit>)OnnxOp.Equal(OnnxOp.Size(input), Globals.Scalar(0L)),
-                OnnxOp.Expand(identity, OnnxOp.Shape(Plain(shaped), null, null)), Plain(input));
-
-        return dtype.IsSameElementTypeAs(DType.Bool)
-            ? [Guarded(Globals.Scalar(!max), OnnxOp.Cast(input, null, DType.UInt8))]
-            : [Guarded(ReductionIdentity(dtype, max)!, input)];
+        return [Ops.IfElse(Reductions.IsEmpty(input),
+            OnnxOp.Expand(ReductionIdentity(dtype, max)!, OnnxOp.Shape(Plain(input), null, null)), Plain(input))];
     }
 
     private static bool IsUnsigned(DType dtype)

@@ -16,6 +16,16 @@ internal static class Reductions
             [(AttrKeepdims, site.Attributes.GetBoolVal(AttrKeepdims)),
              (AttrNoopWithEmptyAxes, noOp ?? site.Attributes.GetBoolVal(AttrNoopWithEmptyAxes))]);
 
+    /// <summary>Whether <paramref name="x"/> holds no element, as the product of its shape: ONNX
+    /// Runtime folds that to a constant when the model states the dimensions, and never folds
+    /// <c>Size</c>.</summary>
+    public static Scalar<bit> IsEmpty(Variable x)
+        => (Scalar<bit>)OnnxOp.Equal(ElementCount(x), Globals.Scalar(0L));
+
+    /// <summary>The number of elements of <paramref name="x"/>, as the product of its shape.</summary>
+    public static Variable ElementCount(Variable x)
+        => OnnxOp.ReduceProd(OnnxOp.Shape(x), keepdims: false);
+
     /// <summary>Whether input slot 0 may be empty: it is not a <c>Constant</c>, or it is an empty
     /// one.</summary>
     public static bool InputMayBeEmpty(WorkaroundSite site)
